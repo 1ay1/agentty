@@ -755,6 +755,41 @@ std::optional<a::ConfigOption> model_config_option(const std::string& current) {
     return opt;
 }
 
+// The permission profile (Ask / Write / Minimal) as a MODERN config option,
+// category "mode". This is the v2-preferred surface for what v1 modelled as
+// SessionModeState: emitting BOTH (the legacy `modes` field in the session
+// result AND this config option) is deliberate — v1 clients render the mode
+// picker from `modes`, config-option-aware clients render this, and neither
+// sees a gap. Kept in lockstep with mode_state()/mode_id_for() by sharing the
+// same three ids.
+[[nodiscard]] a::ConfigOption mode_config_option(const char* current_mode_id) {
+    auto mk = [](const char* value, const char* name, const char* desc) {
+        a::ConfigSelectOption o;
+        o.value       = value;
+        o.name        = name;
+        o.description = a::Just<std::string>(desc);
+        return o;
+    };
+    a::List<a::ConfigSelectOption> opts;
+    opts.push_back(mk("ask", "Ask",
+        "Prompt before edits, commands, and network access"));
+    opts.push_back(mk("write", "Write",
+        "Edit files and run commands without prompting; still prompt for risky ops"));
+    opts.push_back(mk("minimal", "Minimal",
+        "Prompt for everything, including file reads"));
+
+    a::ConfigOption opt;
+    opt.id           = "mode";
+    opt.name         = "Permission Mode";
+    opt.description  = a::Just<std::string>(
+        "How agentty asks before acting on your workspace");
+    opt.category     = a::Just<std::string>("mode");
+    opt.type         = "select";
+    opt.currentValue = current_mode_id ? current_mode_id : "ask";
+    opt.options      = a::ConfigSelectOptions{a::CSO_Ungrouped{std::move(opts)}};
+    return opt;
+}
+
 } // namespace
 
 AgentServer::AgentServer(a::FdTransport& transport,
@@ -889,13 +924,37 @@ void AgentServer::emit_session_config(const std::string& session_id,
         if (!ac.availableCommands.empty())
             send_update(session_id, std::move(ac));
     }
-    // Model dropdown (Zed's per-session model picker). Best-effort: if the
-    // catalog can't be built we simply don't advertise the option.
-    if (auto opt = model_config_option(model_id)) {
-        a::SU_ConfigOptions co;
-        co.configOptions.push_back(std::move(*opt));
-        send_update(session_id, std::move(co));
+    // Session config options, emitted as ONE complete-state notification (the
+    // v2 contract: a SU_ConfigOptions carries the FULL set, not a delta). We
+    // advertise the permission MODE and, when a catalog is available, the
+    // MODEL. A config-option-aware client renders these as native selectors
+    // (Zed's per-session dropdowns); it can flip them live via
+    // session/set_config_option with no restart. The permission mode is ALSO
+    // carried by the legacy `modes` field on the session result for v1
+    // clients — dual-surface, no gap either way.
+    emit_config_state(session_id, model_id);
+}
+
+// The current, COMPLETE config-option state for a session as a single
+// SU_ConfigOptions notification. Single source of truth for both the initial
+// advertisement (emit_session_config) and every post-change echo
+// (on_set_config_option) — the v2 spec requires each SU_ConfigOptions to carry
+// the full set so dependent options stay consistent. Reads live session state
+// (profile + model) so the echoed `currentValue`s always match reality.
+void AgentServer::emit_config_state(const std::string& session_id,
+                                    const std::string& fallback_model) {
+    Profile prof = profile_;
+    std::string model = fallback_model;
+    if (auto s = find_session(session_id)) {
+        util::RankedLock lk(session_mtx_);
+        prof  = s->profile;
+        if (!s->model.empty()) model = s->model;
     }
+    a::SU_ConfigOptions co;
+    co.configOptions.push_back(mode_config_option(mode_id_for(prof)));
+    if (auto opt = model_config_option(model))
+        co.configOptions.push_back(std::move(*opt));
+    send_update(session_id, std::move(co));
 }
 
 void AgentServer::replay_history(const std::string& session_id, const Thread& thread) {
@@ -1182,20 +1241,45 @@ void AgentServer::on_set_mode(const a::SetModeParams& p) {
 a::SetConfigOptionResult AgentServer::on_set_config_option(const a::SetConfigOptionParams& p) {
     auto s = find_session(p.sessionId.value);
     if (!s) throw std::runtime_error("session/set_config_option: unknown sessionId: " + p.sessionId.value);
+
     if (p.configId == "model") {
         // Guard the write: a detached worker turn reads sess.model
         // (stream_completion) under the same lock. Without this the
         // std::string write races a concurrent read — a torn read / UAF.
         util::RankedLock lk(session_mtx_);
         s->model = p.value;
+    } else if (p.configId == "mode") {
+        // Permission profile, shared with the legacy session/set_mode path.
+        // Validate against the known ids so a bad value is an error, not a
+        // silent Ask fallback that looks like success.
+        if (p.value != "ask" && p.value != "write" && p.value != "minimal")
+            throw std::runtime_error(
+                "session/set_config_option: mode must be ask|write|minimal, got '"
+                + p.value + "'");
+        Profile applied;
+        {
+            util::RankedLock lk(session_mtx_);
+            s->profile = profile_from_mode_id(p.value, s->profile);
+            applied = s->profile;
+        }
+        // Mirror to the v1 mode surface so clients that track SessionModeState
+        // (rather than config options) also see the change — same dual-surface
+        // contract as emit_session_config.
+        send_update(p.sessionId.value,
+            a::SU_CurrentMode{a::SessionModeId{mode_id_for(applied)}, json::object()});
     } else {
         // Surface an unknown config id rather than silently accepting and
         // dropping it — a client setting e.g. "temperatuer" deserves an error,
         // not a no-op that looks like success.
         throw std::runtime_error(
             "session/set_config_option: unknown configId '" + p.configId
-            + "' (supported: model)");
+            + "' (supported: mode, model)");
     }
+
+    // Echo the COMPLETE new config state (v2 contract) so the client's
+    // selectors reconcile atomically — including any option whose value or
+    // available set depends on the one that just changed.
+    emit_config_state(p.sessionId.value, model_id_);
     return a::SetConfigOptionResult{{}, json::object()};
 }
 
