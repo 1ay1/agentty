@@ -578,11 +578,8 @@ Step login_submit(Model m) {
         auth::AuthHeader new_auth = provider::resolve_auth_for(
             spec, anthropic_creds, /*cli_key=*/{}, saved_provider_key);
         m.ui.login = login::Closed{};
-        // Open the model picker immediately — it shows "Loading models…"
-        // while the fetch is in flight, then fills in when ModelsLoaded
-        // lands. This avoids the user seeing an empty picker and having
-        // to wait or manually open /model.
-        m.ui.model_picker = ui::pick::OpenAt{0};
+        // commit_provider_switch opens the model picker for us (one shared
+        // path), so no need to set it here.
         return commit_provider_switch(std::move(m), spec, std::move(new_auth),
                                       provider::provider_display_name(
                                           provider::parse_selection(spec)));
@@ -617,13 +614,10 @@ Step login_submit(Model m) {
             auth::AuthHeader new_auth = provider::resolve_auth_for(
                 provider, deps().auth, /*cli_key=*/{}, /*saved_key=*/key);
             m.ui.login = login::Closed{};
-            // Open the model picker immediately — it shows "Loading
-            // models…" while the fetch is in flight, then fills in
-            // when ModelsLoaded lands.
-            m.ui.model_picker = ui::pick::OpenAt{0};
             // The saved key persists across the helper's load-modify-save
             // (persist_settings preserves provider_keys), so the switch is
             // committed through the ONE shared path like every other entry.
+            // commit_provider_switch opens the model picker for us.
             return commit_provider_switch(std::move(m), provider,
                                           std::move(new_auth), provider_label);
         }

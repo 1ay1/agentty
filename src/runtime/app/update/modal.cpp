@@ -732,6 +732,17 @@ commit_provider_switch(Model m, std::string_view spec,
     m.d.available_models.clear();
     m.s.models_loading = true;
 
+    // Open the model picker immediately so the user sees "Loading models…"
+    // the instant they switch, instead of an empty thread until they think
+    // to hit /model. Done HERE, in the one shared switch helper, so EVERY
+    // entry point (provider picker, custom host, api-key/chatgpt/copilot
+    // login) gets it uniformly — not just the two login-modal paths the
+    // feature originally patched. External ACP agents drive their own model
+    // and expose no catalog (fetch_models returns empty), so opening the
+    // picker there would just show a permanent "no models" box — skip them.
+    if (provider::active().kind != provider::Kind::ExternalAcp)
+        m.ui.model_picker = ui::pick::OpenAt{0};
+
     auto toast = set_status_toast(
         m, "provider \xe2\x86\x92 " + std::string{label}, std::chrono::seconds{3});
     return {std::move(m),
