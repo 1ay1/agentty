@@ -1,4 +1,5 @@
 #include "agentty/tool/util/fs_helpers.hpp"
+#include "agentty/util/home_dir.hpp"
 
 #include <mcp/tools/util/fs_helpers.hpp>   // mirror the workspace root into mcp-cpp
 
@@ -279,8 +280,13 @@ fs::path normalize_path(std::string_view s) {
     // getpwnam_r for that and the model's never seen it work.)
     std::string expanded;
     if (!s.empty() && s.front() == '~' && (s.size() == 1 || s[1] == '/')) {
-        if (const char* home = std::getenv("HOME"); home && *home) {
-            expanded = home;
+        // Home root via the unified resolver ($HOME on POSIX/MSYS2,
+        // $USERPROFILE on native Windows) — a bare getenv("HOME") left `~/…`
+        // unexpanded on native Windows (HOME usually unset), turning the arg
+        // into `<project_root>/~/…` and failing the tool with NotFound.
+        const fs::path home = agentty::util::home_dir();
+        if (!home.empty()) {
+            expanded = home.string();
             expanded.append(s.data() + 1, s.size() - 1);
             s = expanded;
         }

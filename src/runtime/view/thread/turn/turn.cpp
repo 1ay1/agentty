@@ -4,6 +4,7 @@
 #include <cctype>
 #include <chrono>
 #include <cstdio>
+#include <filesystem>
 #include <cstdlib>
 #include <memory>
 #include <optional>
@@ -877,8 +878,15 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
     if (stream_prof) {
         const auto us = std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now() - prof_t0).count();
-        static std::FILE* out =
-            std::fopen("/tmp/agentty-stream-prof.log", "a");
+        static std::FILE* out = []() -> std::FILE* {
+            // Use the platform temp dir so the AGENTTY_STREAM_PROF knob
+            // works on Windows (no /tmp) too; computed once.
+            std::error_code ec;
+            auto p = std::filesystem::temp_directory_path(ec);
+            if (ec) return nullptr;
+            p /= "agentty-stream-prof.log";
+            return std::fopen(p.string().c_str(), "a");
+        }();
         if (out) {
             // Real reveal cursor (the byte the typewriter has reached) and
             // the per-call jump in it — the number that shows a BURST. A

@@ -42,6 +42,8 @@
 #  include <io.h>
 #  include <windows.h>
 #  include <shellapi.h>
+#  include <aclapi.h>          // SetNamedSecurityInfoW, SetEntriesInAclW
+#  include <sddl.h>            // (SID helpers)
 #else
 #  include <fcntl.h>
 #  include <sys/file.h>
@@ -268,7 +270,44 @@ void prewarm_anthropic() {
 
 static void restrict_perms(const fs::path& p) {
 #ifdef _WIN32
-    (void)p; // best-effort — Windows ACLs are out of scope here
+    // The credentials file is already AES-256-GCM sealed and bound to this
+    // (machine, user), so a copy is cryptographically useless elsewhere. This
+    // is the matching defence-in-depth for the POSIX 0600: replace the file's
+    // inherited DACL with one that grants FULL control to ONLY the current
+    // user's SID (the token owner), so another local account can't even read
+    // the ciphertext. Best-effort — any failure leaves the inherited ACL and
+    // the encryption remains the real barrier.
+    HANDLE token = nullptr;
+    if (!::OpenProcessToken(::GetCurrentProcess(), TOKEN_QUERY, &token)) return;
+    DWORD len = 0;
+    ::GetTokenInformation(token, TokenOwner, nullptr, 0, &len);
+    if (len == 0) { ::CloseHandle(token); return; }
+    std::vector<unsigned char> buf(len);
+    if (!::GetTokenInformation(token, TokenOwner, buf.data(), len, &len)) {
+        ::CloseHandle(token);
+        return;
+    }
+    ::CloseHandle(token);
+    PSID owner = reinterpret_cast<TOKEN_OWNER*>(buf.data())->Owner;
+    if (!owner) return;
+
+    EXPLICIT_ACCESSW ea{};
+    ea.grfAccessPermissions = GENERIC_ALL;
+    ea.grfAccessMode        = SET_ACCESS;
+    ea.grfInheritance       = NO_INHERITANCE;
+    ea.Trustee.TrusteeForm  = TRUSTEE_IS_SID;
+    ea.Trustee.TrusteeType  = TRUSTEE_IS_USER;
+    ea.Trustee.ptstrName    = reinterpret_cast<LPWSTR>(owner);
+
+    PACL dacl = nullptr;
+    if (::SetEntriesInAclW(1, &ea, nullptr, &dacl) != ERROR_SUCCESS) return;
+    // PROTECTED_DACL_SECURITY_INFORMATION strips inherited ACEs so ONLY our
+    // explicit owner-only entry applies.
+    ::SetNamedSecurityInfoW(
+        const_cast<LPWSTR>(p.wstring().c_str()), SE_FILE_OBJECT,
+        DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+        nullptr, nullptr, dacl, nullptr);
+    if (dacl) ::LocalFree(dacl);
 #else
     ::chmod(p.c_str(), S_IRUSR | S_IWUSR);
 #endif

@@ -366,7 +366,9 @@ if(WIN32)
     # gdi32    — DIB / BITMAPFILEHEADER consumers used in the same path
     # gdiplus  — DIB → PNG re-encoding for clipboard images
     # shlwapi  — SHCreateMemStream backing GDI+'s decode / encode
-    # advapi32 — CredWriteW/CredReadW/CredDeleteW (keystore.cpp)
+    # advapi32 — CredWriteW/CredReadW/CredDeleteW (keystore.cpp) +
+    #            SetNamedSecurityInfoW/SetEntriesInAclW/OpenProcessToken
+    #            (owner-only DACL on the credentials file, auth.cpp)
     target_link_libraries(agentty PRIVATE
         ws2_32 crypt32 shell32 winmm
         user32 gdi32 gdiplus shlwapi advapi32)
