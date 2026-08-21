@@ -100,6 +100,49 @@ namespace {
 #define AGENTTY_VERSION "0.0.0-dev"
 #endif
 
+// ── Debug crash handler ───────────────────────────────────────────────────
+// In debug builds, install a SIGSEGV/SIGABRT handler that prints a
+// backtrace to stdout BEFORE the process dies. This catches crashes that
+// ASAN cannot intercept (e.g. mimalloc internal segfaults) and gives
+// the user a stack trace without needing GDB.
+#ifndef NDEBUG
+#include <execinfo.h>
+#include <unistd.h>
+
+void crash_handler(int sig) {
+    // Use raw write() — fprintf/backtrace_symbols both allocate, which
+    // re-enters a corrupted allocator and crashes again. Even backtrace()
+    // can crash if the stack is corrupted, so we write a simple message
+    // and exit immediately.
+    if (sig == SIGSEGV) {
+        const char msg[] = "\n=== agentty: SIGSEGV (segmentation fault) ===\n";
+        write(STDOUT_FILENO, msg, sizeof(msg) - 1);
+    } else if (sig == SIGABRT) {
+        const char msg[] = "\n=== agentty: SIGABRT (abort) ===\n";
+        write(STDOUT_FILENO, msg, sizeof(msg) - 1);
+    }
+    // Try backtrace — it uses _Unwind_Backtrace which doesn't allocate,
+    // but it may still crash if the stack itself is corrupted. If it
+    // crashes, the default handler kicks in and we still get a core dump.
+    void* frames[32];
+    int n = backtrace(frames, 32);
+    if (n > 0) {
+        backtrace_symbols_fd(frames, n, STDOUT_FILENO);
+    }
+    const char end[] = "==================\n";
+    write(STDOUT_FILENO, end, sizeof(end) - 1);
+    // Use _exit (not exit) to avoid running atexit handlers that allocate.
+    _exit(sig);
+}
+
+void install_crash_handler() {
+    std::signal(SIGSEGV, crash_handler);
+    std::signal(SIGABRT, crash_handler);
+}
+#else
+void install_crash_handler() {}
+#endif
+
 void print_version() {
     std::printf("agentty %s\n", AGENTTY_VERSION);
 }
@@ -382,6 +425,8 @@ Utf8Argv recover_utf8_argv() {
 
 int main(int argc, char** argv) {
     using namespace agentty;
+
+    install_crash_handler();
 
 #if defined(_WIN32)
     Win32PerfTuning win32_perf;
