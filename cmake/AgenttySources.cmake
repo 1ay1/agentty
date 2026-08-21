@@ -157,6 +157,7 @@ set(AGENTTY_RUNTIME_NOMAIN_SOURCES
 
     src/runtime/view/cache.cpp
     src/runtime/view/helpers.cpp
+    src/runtime/view/host_escape.cpp
     src/runtime/view/thread/turn/agent_timeline/tool_args.cpp
     src/runtime/view/thread/turn/agent_timeline/tool_helpers.cpp
     src/runtime/view/thread/turn/agent_timeline/tool_body_common.cpp

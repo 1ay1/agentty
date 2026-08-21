@@ -35,7 +35,7 @@ set(_AGENTTY_CONSOLIDATED
     param_tag_repair_test sandbox_escape_test scope_test table_render_test
     plugin_config_test skills_engine_test slash_commands_test fuzzy_match_smoke
     provider_model_switch_test speculative_dispatch_test
-    oauth_proactive_refresh_test)
+    oauth_proactive_refresh_test maya_host_sequence_test)
 foreach(_t ${_AGENTTY_CONSOLIDATED})
     agentty_test(${_t} MODE consolidated)
 endforeach()
@@ -125,6 +125,13 @@ if(WIN32)
 endif()
 add_test(NAME keystore_test COMMAND keystore_test)
 set_tests_properties(keystore_test PROPERTIES TIMEOUT 60 LABELS sanitizer)
+
+agentty_test(host_escape_test MODE raw)
+add_executable(host_escape_test EXCLUDE_FROM_ALL
+    tests/host_escape_test.cpp src/runtime/view/host_escape.cpp)
+target_include_directories(host_escape_test PRIVATE include)
+add_test(NAME host_escape_test COMMAND host_escape_test)
+set_tests_properties(host_escape_test PROPERTIES TIMEOUT 30)
 
 # ── Finalize: build agentty_tests + derived aggregates ──────────────────────
 agentty_finalize_tests()
