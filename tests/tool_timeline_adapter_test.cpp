@@ -177,6 +177,42 @@ TEST_CASE("tool timeline adapter") {
               {{"path", "file.cpp"}, {"start_line", "wrong type"}})).empty(),
           "malformed integer argument cannot break rendering");
 
+    // Failure summary: a Failed tool surfaces a concise reason in its header
+    // detail so it doesn't look identical to a success. Structured
+    // "[kind] detail" errors show the KIND; bash exit trailers show "exit
+    // code N"; a bare error shows its first line. Rejected tools stay plain.
+    check(U::tool_timeline_detail(make_tool("edit", A::ToolUse::Failed{{}, {},
+              "[not found] old_text did not match"},
+              {{"path", "x.cpp"}})).find("not found") != std::string::npos,
+          "failed edit surfaces the error kind in the header");
+    check(U::tool_timeline_detail(make_tool("bash", A::ToolUse::Failed{{}, {},
+              "boom\n[exit code 1]"},
+              {{"command", "false"}})).find("exit code 1") != std::string::npos,
+          "failed bash surfaces the exit code in the header");
+    check(U::tool_timeline_detail(make_tool("read", A::ToolUse::Failed{{}, {},
+              "permission denied"},
+              {{"path", "x"}})).find("permission denied") != std::string::npos,
+          "failed read surfaces an unstructured reason");
+    {
+        // A Failed tool with no output still gets a 'failed' marker rather
+        // than looking successful.
+        const auto d = U::tool_timeline_detail(
+            make_tool("grep", A::ToolUse::Failed{}, {{"pattern", "x"}}));
+        check(d.find("failed") != std::string::npos,
+              "failed tool with empty output still marked failed");
+    }
+    {
+        // A successful tool never gets a failure suffix.
+        const auto d = U::tool_timeline_detail(make_tool("read",
+            A::ToolUse::Done{{}, {}, "ok"}, {{"path", "x.cpp"}}));
+        check(d.find("failed") == std::string::npos
+                  && d.find("[") == std::string::npos,
+              "successful tool has no failure suffix");
+    }
+    check(U::tool_timeline_detail(make_tool("read", A::ToolUse::Rejected{},
+              {{"path", "x.cpp"}})).find("failed") == std::string::npos,
+          "rejected tool is not labelled failed");
+
     const nlohmann::json malformed_edit_args = {{"edits", {
         {{"old_text", nlohmann::json::array()}, {"new_text", nullptr}}
     }}};
