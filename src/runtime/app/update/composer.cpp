@@ -18,6 +18,8 @@
 #include <maya/core/overload.hpp>
 
 #include "agentty/runtime/app/update/internal.hpp"
+#include "agentty/runtime/app/cmd_factory.hpp"   // cmd::refresh_oauth
+#include "agentty/auth/auth.hpp"                  // oauth_proactive_refresh_token
 #include "agentty/io/clipboard.hpp"
 #include "agentty/provider/selection.hpp"   // prewarm_active_provider
 #include "agentty/util/home_dir.hpp"
@@ -468,7 +470,32 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             provider::prewarm_active_provider();
         }
     }
-    return std::visit(overload{
+    // ── Proactive OAuth refresh ────────────────────────────────
+    // Sibling to the socket re-warm above. A token valid at launch can lapse
+    // WHILE the user reads output / composes; the first submit would then
+    // 401, park the stream, refresh, and retry — visible as first-message
+    // lag. Typing is the "a request is coming" signal: if the on-disk OAuth
+    // token is within ~5 min of expiry (or already past it) and carries a
+    // refresh_token, kick the SAME background refresh init() and the 401
+    // handler use, so a fresh bearer is in place before Enter. Gated on
+    // oauth_refresh_in_flight (no double-fire; TokenRefreshed clears it) and
+    // throttled so key-repeat can't spam the token endpoint.
+    maya::Cmd<Msg> proactive_refresh = maya::Cmd<Msg>::none();
+    {
+        static std::chrono::steady_clock::time_point last_refresh_probe{};
+        const auto now = std::chrono::steady_clock::now();
+        const bool probe_throttled =
+            last_refresh_probe.time_since_epoch().count() != 0
+            && now - last_refresh_probe < std::chrono::seconds(30);
+        if (!probe_throttled && !m.s.active() && !m.s.oauth_refresh_in_flight) {
+            last_refresh_probe = now;
+            if (auto tok = auth::oauth_proactive_refresh_token()) {
+                m.s.oauth_refresh_in_flight = true;
+                proactive_refresh = cmd::refresh_oauth(std::move(*tok));
+            }
+        }
+    }
+    Step step = std::visit(overload{
         [&](ComposerCharInput e) -> Step {
             // '/' opens the command palette when it's LINE-LEADING —
             // the cursor sits at the start of the buffer or right
@@ -1066,6 +1093,15 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             return done(std::move(m));
         },
     }, cm);
+
+    // Fold in the proactive OAuth refresh (if armed above) without
+    // disturbing whatever Cmd the matched arm produced. none() short-
+    // circuits the common case to zero overhead.
+    if (!proactive_refresh.is_none()) {
+        step.second = maya::Cmd<Msg>::batch(std::vector<maya::Cmd<Msg>>{
+            std::move(step.second), std::move(proactive_refresh)});
+    }
+    return step;
 }
 
 } // namespace agentty::app::detail

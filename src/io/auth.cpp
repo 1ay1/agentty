@@ -863,6 +863,29 @@ std::optional<std::string> take_pending_refresh() {
     return out;
 }
 
+std::optional<std::string>
+oauth_proactive_refresh_token(std::int64_t window_ms) {
+    // Env-injected OAuth token (CLAUDE_CODE_OAUTH_TOKEN) carries no expiry or
+    // refresh_token, and an env/CLI API key isn't refreshable at all — skip
+    // the disk read for those so we never touch the network for them.
+    using namespace agentty::util;
+    if (env::get_or_null<env::Var::AnthropicApiKey>()
+     || env::get_or_null<env::Var::ClaudeOAuthToken>())
+        return std::nullopt;
+
+    auto loaded = load_credentials();
+    if (!loaded) return std::nullopt;
+    auto* o = std::get_if<cred::OAuth>(&*loaded);
+    if (!o) return std::nullopt;                 // API-key / None: nothing to do
+    if (o->expires_at_ms == 0) return std::nullopt;   // no expiry info
+    if (o->refresh_token.empty()) return std::nullopt; // nothing to refresh with
+    // Within the proactive window (about to lapse) OR already lapsed. Already-
+    // expired is normally caught at launch / reactively, but returning it here
+    // too is harmless — the caller throttles and gates on in-flight state.
+    if (now_ms() < o->expires_at_ms - window_ms) return std::nullopt; // still fresh
+    return o->refresh_token;
+}
+
 Credentials resolve(const std::string& cli_api_key) {
     if (!cli_api_key.empty())
         return Credentials{cred::ApiKey{cli_api_key}};

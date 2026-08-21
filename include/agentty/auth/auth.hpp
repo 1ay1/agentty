@@ -237,6 +237,19 @@ void open_browser(const std::string& url);
 void set_pending_refresh(std::string refresh_token);
 [[nodiscard]] std::optional<std::string> take_pending_refresh();
 
+// Proactive-refresh probe (non-consuming). Reads the on-disk credential and,
+// if it's an OAuth token whose expiry is within `window_ms` (default 5 min) —
+// i.e. about to lapse or already lapsed — AND it carries a refresh_token,
+// returns that token so the caller can kick a background refresh BEFORE the
+// next request would 401. Returns nullopt for API-key / env / None creds,
+// for OAuth with no expiry info, for a token still comfortably fresh, and for
+// one with no refresh_token (nothing to refresh with). Unlike
+// take_pending_refresh this does not touch the one-shot mailbox — callers may
+// poll it and must gate their own in-flight/throttle state (the reducer keys
+// on m.s.oauth_refresh_in_flight).
+[[nodiscard]] std::optional<std::string>
+oauth_proactive_refresh_token(std::int64_t window_ms = 5 * 60 * 1000);
+
 // ── Cross-process advisory file lock (thundering-herd guard) ─────────────
 // RAII exclusive lock on `<path>.lock` (POSIX flock / Windows LockFileEx).
 // Blocking on construction; released on destruction. Best-effort: if the
