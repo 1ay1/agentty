@@ -201,15 +201,13 @@ Element panel_picking(std::string_view provider,
                          body_text("use your ChatGPT Plus / Pro (GPT-5 Codex)",
                                    fg_dim(muted))).build());
         rows.push_back(text(""));
-        // Other backends authenticate from their provider row. Keep this
-        // cross-hint out of the scoped Anthropic add-account continuation.
-        rows.push_back(body_text(
-            "Using OpenAI, Groq, OpenRouter or a local Ollama model instead? "
-            "Press Esc, then Ctrl-P to pick it — you can paste its key right there.",
-            fg_dim(muted)));
+        rows.push_back(h(text("4) ", fg_bold(highlight)),
+                         text("Custom OpenAI-compatible host", fg_bold(fg)),
+                         text("  \xe2\x80\x94 llama.cpp, vLLM, LM Studio, Ollama",
+                                   fg_dim(muted))).build());
         rows.push_back(text(""));
     }
-    rows.push_back(key_hints({{anthropic_only ? "1/2" : "1/2/3", "choose"},
+    rows.push_back(key_hints({{anthropic_only ? "1/2" : "1/2/3/4", "choose"},
                               {"Esc", "close"}}));
     return v(std::move(rows)).build();
 }
