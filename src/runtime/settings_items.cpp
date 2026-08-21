@@ -266,14 +266,53 @@ std::vector<std::string> split_ws(const std::string& s) {
     return out;
 }
 
-// A slug safe for a filename: keep [A-Za-z0-9_:-], collapse the rest.
+// A plugin/command NAME token: [A-Za-z0-9_:-], non-empty, length-capped.
+// `:` is allowed here because commands namespace with it (git:fixup) and
+// plugin names may too; create_starter() maps it to a subdirectory rather
+// than writing it into a single filename (which would be illegal on Windows).
+constexpr std::size_t kMaxNameLen = 96;   // whole spec
+constexpr std::size_t kMaxSegLen  = 64;   // one path segment between colons
+
 bool valid_name(const std::string& n) {
-    if (n.empty()) return false;
+    if (n.empty() || n.size() > kMaxNameLen) return false;
+    // A leading '-' is a flag the user misplaced (e.g. `--http url` with no
+    // name), not a real plugin name — reject rather than mint a plugin called
+    // "--http".
+    if (n.front() == '-') return false;
     for (char c : n)
         if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '_'
               || c == '-' || c == ':'))
             return false;
     return true;
+}
+
+// Validate a create_starter name AND split it into path segments on ':'.
+// Each segment must be a safe filename fragment: non-empty, length-capped,
+// no leading dot / dash (avoids hidden files and option-looking names), and
+// never "."/".." (path escape). Returns {} on any violation.
+std::vector<std::string> starter_segments(const std::string& name) {
+    if (name.empty() || name.size() > kMaxNameLen) return {};
+    std::vector<std::string> segs;
+    std::string cur;
+    auto flush = [&]() -> bool {
+        if (cur.empty() || cur.size() > kMaxSegLen) return false;
+        if (cur == "." || cur == "..") return false;
+        if (cur.front() == '.' || cur.front() == '-') return false;
+        for (char c : cur)
+            if (!(std::isalnum(static_cast<unsigned char>(c))
+                  || c == '_' || c == '-'))
+                return false;
+        segs.push_back(std::move(cur));
+        cur.clear();
+        return true;
+    };
+    for (char c : name) {
+        if (c == ':') { if (!flush()) return {}; }
+        else          cur.push_back(c);
+    }
+    if (!flush()) return {};
+    if (segs.size() > 3) return {};   // matches the loader's kMaxDepth nesting
+    return segs;
 }
 
 } // namespace
@@ -306,6 +345,11 @@ AddResult add_plugin_from_line(const std::string& line) {
         spec.command = "python3";
         std::error_code ec;
         fs::path abs = fs::absolute(rest[0], ec);
+        // Reject a non-existent script up front — otherwise the plugin is
+        // written to mcp.json and only fails opaquely at spawn time on the
+        // next reload, with no hint the path was a typo.
+        if (!ec && !fs::is_regular_file(abs, ec))
+            return {false, "no such script: " + abs.string()};
         if (!ec) rest[0] = abs.string();
         spec.args = std::move(rest);
     } else if (recipe == "--uvx") {
@@ -345,8 +389,14 @@ AddResult add_plugin_from_line(const std::string& line) {
 }
 
 AddResult create_starter(Category cat, const std::string& name) {
-    if (!valid_name(name))
-        return {false, "name may use letters, digits, _ - : only"};
+    // Validate AND split on ':' into safe path segments. The command/agent
+    // loaders map a `:`-namespaced name to a SUBDIRECTORY (git:fixup ->
+    // git/fixup.md), so writing the colon verbatim into one filename both
+    // fails on Windows (`:` is illegal there) and mismatches the loader.
+    const std::vector<std::string> segs = starter_segments(name);
+    if (segs.empty())
+        return {false, "name: letters/digits/_/- per segment, ':' to nest, "
+                       "≤3 levels, no leading dot or dash"};
     const fs::path home = home_dir_();
     if (home.empty()) return {false, "no HOME to write under"};
 
@@ -368,15 +418,22 @@ AddResult create_starter(Category cat, const std::string& name) {
         return {false, "create_starter only supports commands/agents"};
     }
 
-    const fs::path dir = home / ".agentty" / sub;
+    // Build <home>/.agentty/<sub>/<seg1>/<seg2>/<leaf>.md from the validated
+    // segments (all-but-last are directories). Segments are known-safe
+    // (no '.'/'..'/separators), so no path escape is possible.
+    fs::path dir = home / ".agentty" / sub;
+    for (std::size_t i = 0; i + 1 < segs.size(); ++i) dir /= segs[i];
+    const fs::path file = dir / (segs.back() + ".md");
+
     std::error_code ec;
     fs::create_directories(dir, ec);
-    const fs::path file = dir / (name + ".md");
+    if (ec) return {false, "could not create dir " + dir.string()};
     if (fs::exists(file, ec))
         return {false, "already exists: " + file.string()};
     std::ofstream f(file, std::ios::binary);
     if (!f) return {false, "could not create " + file.string()};
     f << tmpl;
+    f.flush();
     if (!f) return {false, "write failed: " + file.string()};
 
     // Force a rescan so the new entry shows on the next open.
