@@ -244,9 +244,22 @@ Step account_select(Model m) {
         return done(std::move(m));
     }
     // Re-install the live auth header from the now-swapped active store.
+    // If the account we're switching TO has an OAuth token that's expired or
+    // about to lapse (the "switched to the other, long-idle account and it
+    // doesn't work" bug), kick a background refresh the same way startup and
+    // the composer do — install the on-disk header now, then let the async
+    // refresh replace it via TokenRefreshed. Non-blocking: no UI-thread
+    // network round trip, and submit_message queues sends while the refresh
+    // is in flight (oauth_refresh_in_flight), so the first turn on the new
+    // account can't fire with the stale bearer.
+    maya::Cmd<Msg> refresh_cmd = maya::Cmd<Msg>::none();
     if (provider == "anthropic") {
         if (auto c = auth::load_credentials())
             agentty::app::update_auth(auth::make_auth_header(*c));
+        if (auto tok = auth::oauth_proactive_refresh_token()) {
+            m.s.oauth_refresh_in_flight = true;
+            refresh_cmd = cmd::refresh_oauth(std::move(*tok));
+        }
         // The 1M-context entitlement block was learned for the PREVIOUS
         // account; this one may be entitled. Re-arm discovery so the picker
         // offers `[1m]` variants again (a wrong guess self-heals via the
@@ -263,10 +276,13 @@ Step account_select(Model m) {
     }
     const std::string provider_label = al->provider_label;
     m.ui.login = login::Closed{};
-    m.s.status = "switched " + provider_label + " to " + label;
+    m.s.status = m.s.oauth_refresh_in_flight
+               ? "switched " + provider_label + " to " + label
+                     + " \xE2\x80\x94 refreshing token\xE2\x80\xA6"
+               : "switched " + provider_label + " to " + label;
     m.s.status_until = std::chrono::steady_clock::now()
                      + std::chrono::seconds{4};
-    return done(std::move(m));
+    return {std::move(m), std::move(refresh_cmd)};
 }
 
 Step account_remove(Model m) {
