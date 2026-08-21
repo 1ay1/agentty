@@ -163,6 +163,53 @@ std::string pretty_path(std::string p) {
     return got ? n : -1;
 }
 
+// True line count for a `read`. count_lines(tc.output()) is WRONG here: a read
+// output is decorated — an optional `display_description` line, an optional
+// symbol header, and a trailing `[showing lines A-B of N ...]` / `[... of N
+// ...]` hint the tool appends — so re-counting rows inflates the number and
+// disagrees with the file. The tool already reports the file's real length as
+// the `of N` in that hint (also `of N lines` in the outline/1-KiB fallbacks);
+// read it as the authoritative count. Returns -1 when there's no such marker
+// (a small file read whole, no truncation), so the caller falls back to a
+// plain content-line count.
+[[nodiscard]] int parse_read_total_lines(const std::string& out) {
+    // read reports the file's real length in two shapes:
+    //   • content / 1-KiB fallback: "[showing lines A-B of N ...]" — " of N"
+    //     followed by end-of-number + (" lines" | "]" | ";" | " more").
+    //   • symbol outline: "path — K definitions across N lines:" — the
+    //     count sits after "across ".
+    // Scan for both; the last plausible match wins (the marker is always in
+    // the trailing hint / header, never earlier prose). Returns -1 when
+    // neither shape is present (small file read whole).
+    auto num_after = [&](std::size_t i, int& n) -> std::size_t {
+        n = 0; bool got = false;
+        while (i < out.size() && out[i] >= '0' && out[i] <= '9') {
+            n = n * 10 + (out[i] - '0'); got = true; ++i;
+        }
+        return got ? i : std::string::npos;
+    };
+    int found = -1;
+    for (std::size_t p = out.find(" of "); p != std::string::npos;
+         p = out.find(" of ", p + 1)) {
+        int n = 0;
+        std::size_t e = num_after(p + 4, n);
+        if (e == std::string::npos) continue;
+        std::string_view rest{out.data() + e, out.size() - e};
+        if (rest.rfind(" lines", 0) == 0 || rest.rfind("]", 0) == 0
+         || rest.rfind(";", 0) == 0    || rest.rfind(" more", 0) == 0)
+            found = n;
+    }
+    for (std::size_t p = out.find("across "); p != std::string::npos;
+         p = out.find("across ", p + 1)) {
+        int n = 0;
+        std::size_t e = num_after(p + 7, n);
+        if (e == std::string::npos) continue;
+        std::string_view rest{out.data() + e, out.size() - e};
+        if (rest.rfind(" lines", 0) == 0) found = n;
+    }
+    return found;
+}
+
 } // namespace
 
 // One-line "what this tool is doing" for the timeline. Tool-specific
@@ -220,7 +267,11 @@ static std::string tool_timeline_detail_base(const ToolUse& tc) {
         if (auto off = safe_int_arg(tc.args, "offset", 0); off > 0)
             detail += " @" + std::to_string(off);
         if (tc.is_done()) {
-            int lines = count_lines(tc.output());
+            // Prefer the file's true length that read reports in its
+            // "[showing lines A-B of N]" footer; only re-count the (decorated)
+            // output when there's no such marker (small file read whole).
+            int lines = parse_read_total_lines(tc.output());
+            if (lines < 0) lines = count_lines(tc.output());
             if (lines > 1) detail += "  \xc2\xb7  " + std::to_string(lines) + " lines";
         }
         return detail;
@@ -321,7 +372,27 @@ static std::string tool_timeline_detail_base(const ToolUse& tc) {
     if (n == "list_dir") {
         std::string detail = path_pp.empty() ? std::string{"."} : path_pp;
         if (tc.is_done()) {
-            int entries = count_lines(tc.output());
+            // Count real entry rows only. list_dir output can carry a leading
+            // `display_description` line and trailing `[>1000 entries, …]` /
+            // `[… truncated …]` notices; counting those (as raw count_lines
+            // did) over-reports the entry total. Skip the description prepend
+            // and any bracketed notice line.
+            const std::string desc = safe_arg(tc.args, "display_description");
+            int entries = 0;
+            const std::string& out = tc.output();
+            std::size_t start = 0;
+            bool first = true;
+            while (start <= out.size()) {
+                std::size_t nl = out.find('\n', start);
+                std::string_view line{out.data() + start,
+                    (nl == std::string::npos ? out.size() : nl) - start};
+                const bool is_desc = first && !desc.empty() && line == desc;
+                const bool is_notice = !line.empty() && line.front() == '[';
+                if (!line.empty() && !is_desc && !is_notice) ++entries;
+                first = false;
+                if (nl == std::string::npos) break;
+                start = nl + 1;
+            }
             if (entries > 0) detail += "  \xc2\xb7  " + std::to_string(entries) + " entries";
         }
         return detail;
