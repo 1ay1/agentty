@@ -213,6 +213,51 @@ TEST_CASE("tool timeline adapter") {
               {{"path", "x.cpp"}})).find("failed") == std::string::npos,
           "rejected tool is not labelled failed");
 
+    // Line/entry counts must reflect the FILE/DIR, not the decorated output.
+    // read: the authoritative count is the "of N" the tool reports in its
+    // "[showing lines A-B of N]" footer — not a re-count of output rows
+    // (which includes the display_description prepend + the footer itself).
+    {
+        // A big-file read: 3 visible rows of body but the footer says 812.
+        std::string out = "describe this\n1: line one\n2: line two\n3: line "
+                          "three\n[showing lines 1-3 of 812; pass offset=4]";
+        const auto d = U::tool_timeline_detail(make_tool("read",
+            A::ToolUse::Done{{}, {}, out}, {{"path", "big.cpp"},
+            {"display_description", "describe this"}}));
+        check(d.find("812 lines") != std::string::npos,
+              "read reports the file's true line count, not decorated rows");
+        check(d.find("5 lines") == std::string::npos,
+              "read does not count the description + footer rows");
+    }
+    {
+        // Outline fallback shape: "path — N definitions across M lines:".
+        std::string out = "map it\nfoo.cpp \xe2\x80\x94 4 definitions across "
+                          "296 lines:\n\nL1 a\nL2 b";
+        const auto d = U::tool_timeline_detail(make_tool("read",
+            A::ToolUse::Done{{}, {}, out}, {{"path", "foo.cpp"}}));
+        check(d.find("296 lines") != std::string::npos,
+              "read outline reports the 'across N lines' count");
+    }
+    {
+        // Small file read whole (no footer): fall back to content lines.
+        std::string out = "a\nb\nc";
+        const auto d = U::tool_timeline_detail(make_tool("read",
+            A::ToolUse::Done{{}, {}, out}, {{"path", "tiny.txt"}}));
+        check(d.find("3 lines") != std::string::npos,
+              "small whole-file read falls back to a content line count");
+    }
+    {
+        // list_dir: description prepend + a truncation notice must NOT be
+        // counted as entries. 3 real rows here.
+        std::string out = "listing\nfile a.txt\ndir  sub/\nfile b.txt\n"
+                          "[>1000 entries, truncated]";
+        const auto d = U::tool_timeline_detail(make_tool("list_dir",
+            A::ToolUse::Done{{}, {}, out}, {{"path", "."},
+            {"display_description", "listing"}}));
+        check(d.find("3 entries") != std::string::npos,
+              "list_dir counts real entries, excluding desc + notice lines");
+    }
+
     const nlohmann::json malformed_edit_args = {{"edits", {
         {{"old_text", nlohmann::json::array()}, {"new_text", nullptr}}
     }}};
