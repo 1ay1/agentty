@@ -584,7 +584,8 @@ int cli(const std::vector<std::string>& argv) {
         case EditResult::Ok: {
             const std::string detail = spec.url.empty()
                 ? [&]{ std::string c = spec.command;
-                       for (const auto& a : spec.args) c += " " + a; return c; }()
+                       for (const auto& a : spec.args) c += " " + a;
+                       return c; }()
                 : spec.url;
             std::printf("added %-16s %s\n  → %s\n", spec.name.c_str(),
                         detail.c_str(), path.string().c_str());
