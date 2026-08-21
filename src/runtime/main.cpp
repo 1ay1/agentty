@@ -878,7 +878,21 @@ int main(int argc, char** argv) {
     // fps = 0 → pure event-driven: maya only renders on Msg / input / timer.
     // The spinner-tick subscription (gated on stream.active) supplies frames
     // while streaming; idle agentty costs zero CPU.
-    maya::run<app::AgenttyApp>({.title = "agentty", .fps = 0, .mode = maya::Mode::Inline});
+    //
+    // Grid backend: when hosted by a cooperating editor that paints cells
+    // natively (AGENTTY_HOST=emacs — the agentty-mode Emacs render module),
+    // emit binary grid frames instead of ANSI, skipping the terminal-emulator
+    // ANSI encode/reparse round trip.  Any other host falls back to ANSI.
+    maya::RenderBackend backend = maya::RenderBackend::Ansi;
+    if (const char* host = std::getenv("AGENTTY_HOST");
+        host && std::string_view{host} == "emacs") {
+        // Opt-out: AGENTTY_EMACS_GRID=0 keeps the plain-ANSI vterm path.
+        const char* g = std::getenv("AGENTTY_EMACS_GRID");
+        if (!(g && g[0] == '0'))
+            backend = maya::RenderBackend::Grid;
+    }
+    maya::run<app::AgenttyApp>({.title = "agentty", .fps = 0,
+                               .mode = maya::Mode::Inline, .backend = backend});
 
     // Tear down connected MCP plugin servers FIRST — before the blocking
     // flushes below. Closing each server's stdin (→ EOF) unblocks any
