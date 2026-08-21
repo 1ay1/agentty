@@ -306,6 +306,28 @@ TEST_CASE("tool timeline adapter") {
     check(U::pick_streaming_string(R"({"other":"x"})", "path").empty(),
           "pick_streaming_string returns empty when key absent");
 
+    // Every tool's header arg is streaming-live, not just the file path: a
+    // command/pattern/query shows the moment its bytes arrive, before the
+    // parsed-args reparse. (Same mechanism, applied uniformly via safe().)
+    {
+        auto tc = make_tool("bash", A::ToolUse::Pending{});
+        tc.args_streaming = R"({"command":"npm run build)";  // truncated
+        check(U::tool_timeline_detail(tc).find("npm run build") != std::string::npos,
+              "bash command shows while streaming");
+    }
+    {
+        auto tc = make_tool("grep", A::ToolUse::Pending{});
+        tc.args_streaming = R"({"pattern":"TODO","path":"src)";
+        check(U::tool_timeline_detail(tc).find("TODO") != std::string::npos,
+              "grep pattern shows while streaming");
+    }
+    {
+        auto tc = make_tool("search_code", A::ToolUse::Pending{});
+        tc.args_streaming = R"({"query":"retry backoff)";
+        check(U::tool_timeline_detail(tc).find("retry backoff") != std::string::npos,
+              "search query shows while streaming");
+    }
+
     const nlohmann::json malformed_edit_args = {{"edits", {
         {{"old_text", nlohmann::json::array()}, {"new_text", nullptr}}
     }}};
