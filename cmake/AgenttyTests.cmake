@@ -115,7 +115,9 @@ set_tests_properties(cred_crypt_test PROPERTIES TIMEOUT 60 LABELS sanitizer)
 agentty_test(keystore_test MODE raw LABELS sanitizer)
 add_executable(keystore_test EXCLUDE_FROM_ALL
     tests/keystore_test.cpp src/io/keystore.cpp src/tool/util/subprocess.cpp
-    src/tool/util/fs_helpers.cpp src/tool/util/utf8.cpp src/tool/progress.cpp)
+    src/tool/util/fs_helpers.cpp src/tool/util/utf8.cpp src/tool/progress.cpp
+    src/util/home_dir.cpp)   # fs_helpers.cpp → util::home_dir(); undefined ref
+                             # only surfaces in the -fno-lto sanitizer link
 target_include_directories(keystore_test PRIVATE include)
 target_link_libraries(keystore_test PRIVATE maya::maya nlohmann_json::nlohmann_json)
 if(TARGET mcp::tools)
