@@ -218,6 +218,15 @@ struct HookRun { int exit_code = 0; std::string output; };
     ::setenv("AGENTTY_HOOK_EVENT", std::string{event}.c_str(), 1);
     ::setenv("AGENTTY_HOOK_TOOL",  std::string{tool}.c_str(), 1);
     if (!pf.empty()) ::setenv("AGENTTY_HOOK_PAYLOAD_FILE", pf.c_str(), 1);
+#else
+    // Windows has no setenv/unsetenv — _putenv_s is the CRT equivalent and,
+    // like setenv, mutates the process environment the child inherits.
+    // Without this the hook script on Windows would run with NO context
+    // ($AGENTTY_HOOK_EVENT/TOOL/PAYLOAD_FILE all empty), unable to tell which
+    // event fired or find its payload. Clear with an empty value on unset.
+    ::_putenv_s("AGENTTY_HOOK_EVENT", std::string{event}.c_str());
+    ::_putenv_s("AGENTTY_HOOK_TOOL",  std::string{tool}.c_str());
+    if (!pf.empty()) ::_putenv_s("AGENTTY_HOOK_PAYLOAD_FILE", pf.c_str());
 #endif
     auto res = util::sandbox::run_shell_command(h.run, kMaxPayloadBytes,
                                                 kHookTimeout);
@@ -225,6 +234,10 @@ struct HookRun { int exit_code = 0; std::string output; };
     ::unsetenv("AGENTTY_HOOK_EVENT");
     ::unsetenv("AGENTTY_HOOK_TOOL");
     ::unsetenv("AGENTTY_HOOK_PAYLOAD_FILE");
+#else
+    ::_putenv_s("AGENTTY_HOOK_EVENT", "");
+    ::_putenv_s("AGENTTY_HOOK_TOOL",  "");
+    ::_putenv_s("AGENTTY_HOOK_PAYLOAD_FILE", "");
 #endif
     if (!pf.empty()) {
         std::error_code ec;

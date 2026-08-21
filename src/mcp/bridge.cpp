@@ -34,6 +34,7 @@
 #include "agentty/tool/util/fs_helpers.hpp"
 #include "agentty/tool/util/utf8.hpp"
 #include "agentty/util/dbglog.hpp"
+#include "agentty/util/home_dir.hpp"
 #include "agentty/util/isolated_thread.hpp"
 
 #include <mcp/cap/cap.hpp>
@@ -146,9 +147,12 @@ fs::path resolve_config(bool& out_project_local) {
         out_project_local = true;
         return local;
     }
-    if (const char* home = std::getenv("HOME"); home && home[0]) {
-        auto user = fs::path{home} / ".agentty" / "mcp.json";
-        if (fs::is_regular_file(user, ec)) return user;
+    // User-level config under the unified home root ($HOME on POSIX/MSYS2,
+    // $USERPROFILE on native Windows) so `~/.agentty/mcp.json` is found on
+    // Windows too, not silently skipped when only $USERPROFILE is set.
+    if (auto user = util::home_dir() / ".agentty" / "mcp.json";
+        fs::is_regular_file(user, ec)) {
+        return user;
     }
     return {};
 }

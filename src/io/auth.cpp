@@ -6,6 +6,7 @@
 #include "agentty/provider/chatgpt/codex_oauth.hpp"
 #include "agentty/provider/copilot/copilot_oauth.hpp"
 #include "agentty/util/dbglog.hpp"
+#include "agentty/util/home_dir.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -172,9 +173,10 @@ fs::path config_dir() {
     if (xdg && *xdg) {
         base = xdg;
     } else {
-        const char* home = std::getenv("HOME");
-        if (!home || !*home) home = std::getenv("USERPROFILE");
-        base = (home && *home) ? fs::path(home) / ".config" : fs::current_path() / ".config";
+        // Unified home resolution (see util::home_dir): $HOME first (MSYS2/
+        // POSIX) then $USERPROFILE (native Windows), so config and data roots
+        // agree under mintty instead of splitting across two filesystems.
+        base = util::home_dir() / ".config";
     }
     fs::path p = base / "agentty";
     std::error_code ec;

@@ -26,6 +26,7 @@
 #include "agentty/tool/util/utf8.hpp"
 #include "agentty/util/base64.hpp"
 #include "agentty/util/dbglog.hpp"
+#include "agentty/util/home_dir.hpp"
 
 namespace agentty::persistence {
 
@@ -83,9 +84,10 @@ bool write_json_atomic(const fs::path& target, const std::string& content) {
 }
 
 fs::path data_dir() {
-    const char* home = std::getenv("USERPROFILE");
-    if (!home) home = std::getenv("HOME");
-    fs::path p = home ? fs::path(home) : fs::current_path();
+    // Unified home resolution (see util::home_dir) so the data root and the
+    // config root never diverge under MSYS2/mintty, where $HOME and
+    // $USERPROFILE point at different filesystems.
+    fs::path p = util::home_dir();
     p /= ".agentty";
     std::error_code ec;
     fs::create_directories(p, ec);

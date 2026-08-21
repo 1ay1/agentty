@@ -7,6 +7,7 @@
 // an at-rest-encrypted per-server token store.
 
 #include "agentty/mcp/oauth.hpp"
+#include "agentty/util/home_dir.hpp"
 
 #include <atomic>
 #include <cctype>
@@ -548,16 +549,13 @@ fs::path resolve_mcp_config() {
         return fs::is_regular_file(p, ec) ? p : fs::path{};
     }
     if (auto local = fs::path{".agentty"} / "mcp.json"; fs::is_regular_file(local, ec)) return local;
-    if (const char* home = std::getenv("HOME"); home && home[0]) {
-        auto user = fs::path{home} / ".agentty" / "mcp.json";
-        if (fs::is_regular_file(user, ec)) return user;
+    // Unified home root ($HOME on POSIX/MSYS2, $USERPROFILE on native Windows)
+    // — matches config_dir()/data_dir() so the user config is looked up in the
+    // same place agentty writes it, on every platform.
+    if (auto user = util::home_dir() / ".agentty" / "mcp.json";
+        fs::is_regular_file(user, ec)) {
+        return user;
     }
-#if defined(_WIN32)
-    if (const char* up = std::getenv("USERPROFILE"); up && up[0]) {
-        auto user = fs::path{up} / ".agentty" / "mcp.json";
-        if (fs::is_regular_file(user, ec)) return user;
-    }
-#endif
     return {};
 }
 
