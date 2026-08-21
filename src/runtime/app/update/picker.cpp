@@ -253,7 +253,16 @@ Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
                 m.ui.effort_dirty = false;
             }
             m.ui.model_picker = pick::Closed{};
-            m.ui.smart_assign_slot = -1;   // abandon a slot-assign on Esc
+            // Slot-assign mode: Esc is BACK, not exit. Pop one level up the
+            // picker stack — re-open Smart Mode at the slot row we descended
+            // from — instead of closing every overlay. Navigating into a
+            // setting and hitting Esc should return you to the parent picker.
+            if (m.ui.smart_assign_slot >= 0) {
+                const int slot = m.ui.smart_assign_slot;
+                m.ui.smart_assign_slot = -1;
+                m.ui.smart_mode = ui::pick::OpenAt{8 + slot};   // rows 8..10
+                return done(std::move(m));
+            }
             return done(std::move(m));
         },
         [&](ModelPickerMove& e) -> Step {
@@ -349,10 +358,17 @@ Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
                             slot->set   = true;
                             m.d.smart.enabled = true;
                         }
+                        const int assigned = m.ui.smart_assign_slot;
                         m.ui.smart_assign_slot = -1;
                         persist_settings(m);
                         m.ui.effort_dirty = false;
                         m.ui.model_picker = pick::Closed{};
+                        // Pop back to the parent Smart Mode picker, cursor on
+                        // the slot we just set — not out to the thread. You
+                        // came from there and probably want to set the sibling
+                        // slots too; forcing a re-open of Smart Mode after
+                        // every slot is the exact tedium this fixes.
+                        m.ui.smart_mode = ui::pick::OpenAt{8 + assigned};
                         auto toast = set_status_toast(m,
                             "Smart Mode slot set");
                         return {std::move(m), std::move(toast)};
