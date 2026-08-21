@@ -31,4 +31,13 @@ namespace agentty::util {
 // falls back to the current working directory if nothing is set.
 std::filesystem::path home_dir();
 
+// Same $HOME → $USERPROFILE precedence, but returns an EMPTY path (not the
+// cwd) when neither is set. This is the contract for callers that treat "no
+// home" as "skip this optional feature" — e.g. loading ~/.agentty/hooks.json
+// or writing a user-level plugin config: falling back to the cwd there would
+// scatter dotfiles into whatever directory agentty happened to launch from.
+// Use home_dir() when you need a guaranteed-usable path; use this when empty
+// is a meaningful "unavailable" signal.
+std::filesystem::path home_dir_or_empty();
+
 } // namespace agentty::util

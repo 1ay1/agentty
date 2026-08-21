@@ -4,6 +4,7 @@
 // signature cache) so the two loaders stay conceptually one thing.
 
 #include "agentty/tool/commands.hpp"
+#include "agentty/util/home_dir.hpp"
 
 #include "agentty/scope/scope.hpp"
 
@@ -29,9 +30,7 @@ constexpr std::size_t kMaxBodyBytes = 64 * 1024;
 constexpr int         kMaxDepth     = 3;   // namespace nesting (a:b:c)
 
 [[nodiscard]] fs::path home_dir() noexcept {
-    if (auto* h = std::getenv("HOME"); h && *h) return fs::path{h};
-    if (auto* h = std::getenv("USERPROFILE"); h && *h) return fs::path{h};
-    return {};
+    return agentty::util::home_dir_or_empty();
 }
 
 [[nodiscard]] std::string trim(std::string_view v) {

@@ -2,6 +2,7 @@
 // See acp_agents.hpp for the format + resolution rules.
 
 #include "agentty/provider/acp_agents.hpp"
+#include "agentty/util/home_dir.hpp"
 
 #include <cstdio>
 #include <cstdlib>
@@ -21,11 +22,7 @@ using json = nlohmann::json;
 namespace {
 
 [[nodiscard]] fs::path home_dir() noexcept {
-    if (auto* h = std::getenv("HOME"); h && *h) return fs::path{h};
-#if defined(_WIN32)
-    if (auto* h = std::getenv("USERPROFILE"); h && *h) return fs::path{h};
-#endif
-    return {};
+    return util::home_dir_or_empty();
 }
 
 // External ACP agents are entirely config-driven (Zed's `agent_servers`

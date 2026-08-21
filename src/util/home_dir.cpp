@@ -8,15 +8,18 @@ namespace agentty::util {
 namespace fs = std::filesystem;
 
 fs::path home_dir() {
-    // $HOME first: it's set by MSYS2/mintty/Cygwin and by every POSIX shell,
-    // and is unset on native Windows (where $USERPROFILE is the home). This
-    // ordering keeps a mintty user's `~` and agentty's own roots pointing at
-    // the same place, and is a no-op change on Linux/macOS.
+    if (auto p = home_dir_or_empty(); !p.empty()) return p;
+    return fs::current_path();
+}
+
+fs::path home_dir_or_empty() {
+    // $HOME first (POSIX/MSYS2/mintty/Cygwin), then $USERPROFILE (native
+    // Windows). Empty when neither is set — the caller decides what that means.
     if (const char* home = std::getenv("HOME"); home && *home)
         return fs::path(home);
     if (const char* up = std::getenv("USERPROFILE"); up && *up)
         return fs::path(up);
-    return fs::current_path();
+    return {};
 }
 
 } // namespace agentty::util
