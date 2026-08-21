@@ -1,0 +1,39 @@
+{
+  "id": "agentty",
+  "name": "agentty",
+  "version": "0.3.0",
+  "description": "A fast, terminal-native coding agent with live tool cards, streaming reasoning, subagents, MCP plugins, skills, and hooks. Works standalone (TUI) or as an ACP agent in any editor.",
+  "repository": "https://github.com/1ay1/agentty",
+  "website": "https://github.com/1ay1/agentty",
+  "authors": ["1ay1"],
+  "license": "Apache-2.0",
+  "distribution": {
+    "binary": {
+      "darwin-aarch64": {
+        "archive": "https://github.com/1ay1/agentty/releases/download/v0.3.0/agentty-macos-arm64",
+        "cmd": "./agentty-macos-arm64",
+        "args": ["acp"]
+      },
+      "darwin-x86_64": {
+        "archive": "https://github.com/1ay1/agentty/releases/download/v0.3.0/agentty-macos-x86_64",
+        "cmd": "./agentty-macos-x86_64",
+        "args": ["acp"]
+      },
+      "linux-aarch64": {
+        "archive": "https://github.com/1ay1/agentty/releases/download/v0.3.0/agentty-linux-aarch64",
+        "cmd": "./agentty-linux-aarch64",
+        "args": ["acp"]
+      },
+      "linux-x86_64": {
+        "archive": "https://github.com/1ay1/agentty/releases/download/v0.3.0/agentty-linux-x86_64",
+        "cmd": "./agentty-linux-x86_64",
+        "args": ["acp"]
+      },
+      "windows-x86_64": {
+        "archive": "https://github.com/1ay1/agentty/releases/download/v0.3.0/agentty-windows-x86_64.exe",
+        "cmd": "agentty-windows-x86_64.exe",
+        "args": ["acp"]
+      }
+    }
+  }
+}
