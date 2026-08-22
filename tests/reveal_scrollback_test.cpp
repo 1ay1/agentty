@@ -1139,17 +1139,14 @@ static void run_submit_mid_reveal_scenario(int width, int term_h) {
     if (pty_master >= 0) close(pty_master);
 }
 
-// Code-block fold scenario — the screenshot shape: "Let me check the
+// Code-block scenario — the screenshot shape: "Let me check the
 // diagram source:" followed by a LONG fenced code block (a mermaid /
-// diagram source) that overflows the viewport. auto_fold_long_blocks
-// folds a >40-line code block to ~1 row THE MOMENT its closing fence
-// commits, WHILE LIVE (turn.cpp). That is a large mid-stream height
-// SHRINK over content that has already overflowed into native
-// scrollback. If maya re-emits the post-fold (short) canvas from the
-// top against the pre-fold (tall) prev_cells, the body lands a second
-// time below the committed copy — the visible duplicate. Reveal_fx is
-// ON, so the live edge is also animating colored SGR onto the rows that
-// scroll off. This is the closest reproduction of the reported bug.
+// diagram source) that overflows the viewport. Auto-fold is DISABLED, so
+// the block renders in FULL at every stage — live, settled and frozen
+// height all agree (no mid-stream fold shrink). This still stresses the
+// reveal/freeze scrollback path over content that has overflowed into
+// native scrollback with reveal_fx ON; the assertions verify no stranded
+// duplicate across the freeze handoff.
 static void run_codeblock_fold_scenario(int width, int term_h) {
     setenv("LINES", std::to_string(term_h).c_str(), 1);
     setenv("COLUMNS", std::to_string(width).c_str(), 1);

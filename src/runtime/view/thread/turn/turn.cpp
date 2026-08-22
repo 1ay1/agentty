@@ -413,41 +413,12 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
             }
         }
 
-        // Auto-fold code blocks longer than ~40 lines so a wall of code
-        // in a long conversation doesn't push every other turn
-        // off-screen. CRITICAL for scrollback safety: fold EVERY frame
-        // (live AND settled), not only inside the finish() gate below.
-        //
-        // auto_fold_long_blocks only touches COMMITTED blocks
-        // (prefix_->metas) — the still-streaming tail block is never
-        // folded, so the live edge keeps animating at full height. The
-        // moment a long code block's closing fence commits, it folds to
-        // ~1 row WHILE LIVE. If we only folded at finish() (the old
-        // behaviour) the block rendered full-height for the whole stream
-        // + the 200 ms finalize ramp, then collapsed ~N→1 rows in one
-        // frame at settle — a large height shrink that maya diffs against
-        // the prior full-height frame and re-emits the entire turn from
-        // the top (the "redraws the turn after streaming finishes"
-        // jump). Folding live makes the live height already equal the
-        // settled/frozen height, so finish() is a no-op shape-wise and
-        // the freeze handoff is seamless — exactly like agent_session,
-        // where live height == settled height because it has no fold.
-        // frozen.cpp's prose_rows mirrors this fold so the row estimate
-        // agrees across the freeze. Respects an explicit user unfold
-        // (entry stored as `false`) and won't re-fold.
-        //
-        // Skipped on a sizes-unchanged frame: no new bytes → no new
-        // committed block can have appeared → nothing to fold. The
-        // function would walk prefix_->metas (O(committed blocks),
-        // dozens to hundreds on a long body) and hit the
-        // `folds_.contains(source_offset)` early-out on every entry.
-        // Cheap absolutely, but pure waste on the dominant no-grow frame.
-        if (!sizes_unchanged) {
-            constexpr std::uint16_t kFoldLineThreshold = 40;
-            constexpr std::uint32_t kFoldKinds =
-                (1u << static_cast<unsigned>(maya::StreamingMarkdown::BlockKind::CodeBlock));
-            cache.streaming->auto_fold_long_blocks(kFoldLineThreshold, kFoldKinds);
-        }
+        // Auto-fold of long code blocks is DISABLED: code blocks always
+        // render in full, never collapsed to a "▸ N lines of code hidden —
+        // unfold" stub. Long fences stay expanded even in a long
+        // conversation. (If the fold is ever reinstated, prose_rows in
+        // frozen.cpp must mirror the same threshold/kinds or the mid-run
+        // keep-loop strands a scrollback ghost.)
 
         if (settled
             && cache.revealed_size == source.size()

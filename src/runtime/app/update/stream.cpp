@@ -141,11 +141,8 @@ void settle_message_md(Model& m, const Message& msg) {
         cache.streaming = std::make_shared<maya::StreamingMarkdown>();
     cache.streaming->set_content(msg.text);
     cache.streaming->finish();
-    // Same fold preset cached_markdown_for applies (40-line code blocks).
-    constexpr std::uint16_t kFoldLineThreshold = 40;
-    constexpr std::uint32_t kFoldKinds =
-        (1u << static_cast<unsigned>(maya::StreamingMarkdown::BlockKind::CodeBlock));
-    cache.streaming->auto_fold_long_blocks(kFoldLineThreshold, kFoldKinds);
+    // Auto-fold DISABLED (matches cached_markdown_for): long code blocks
+    // render in full, never collapsed to a "▸ N lines of code hidden" stub.
     // Stamp so cached_markdown_for's settled fast-path engages and returns
     // the cached build() unchanged on the freeze pass and every frame after.
     cache.last_settled_size = msg.text.size();
