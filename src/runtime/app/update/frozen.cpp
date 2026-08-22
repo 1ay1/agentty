@@ -296,11 +296,9 @@ std::size_t tool_output_render_cap(std::string_view name) {
 // height. Mirrors maya's fold (markdown.hpp auto_fold_long_blocks).
 std::size_t prose_rows(std::string_view body, int cols) {
     if (body.empty()) return 0;
-    constexpr std::size_t kFoldLineThreshold = 40;
     std::size_t rows = 0;
     std::size_t line_start = 0;
     bool in_fence = false;
-    std::size_t fence_lines = 0;
     std::size_t fence_wrapped = 0;
     std::size_t open_fence_rows = 0;
     const std::size_t w = static_cast<std::size_t>(cols < 1 ? 1 : cols);
@@ -320,21 +318,18 @@ std::size_t prose_rows(std::string_view body, int cols) {
         if (is_fence) {
             if (!in_fence) {
                 in_fence = true;
-                fence_lines = 0;
                 fence_wrapped = 0;
                 open_fence_rows = line_rows;
             } else {
                 in_fence = false;
-                // A folded block (body > threshold) collapses the WHOLE
-                // block — open fence + body + close fence — to a single
-                // "▸ N lines hidden" stub row (maya build.cpp). An
-                // unfolded block renders open + body + close.
-                rows += (fence_lines > kFoldLineThreshold)
-                            ? 1
-                            : open_fence_rows + fence_wrapped + line_rows;
+                // Auto-fold DISABLED: a code block ALWAYS renders in full
+                // — open fence + body + close fence — never collapsed to a
+                // "▸ N lines hidden" stub. Mirrors cached_markdown_for /
+                // settle_message_md, which no longer call
+                // auto_fold_long_blocks.
+                rows += open_fence_rows + fence_wrapped + line_rows;
             }
         } else if (in_fence) {
-            ++fence_lines;
             fence_wrapped += line_rows;
         } else {
             rows += line_rows;
