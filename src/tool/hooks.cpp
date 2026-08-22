@@ -38,7 +38,9 @@
 
 #ifndef _WIN32
 #include <sys/stat.h>   // chmod
-#include <unistd.h>
+#include <unistd.h>     // getpid
+#else
+#include <process.h>    // _getpid
 #endif
 
 namespace fs = std::filesystem;
@@ -51,6 +53,14 @@ namespace {
 constexpr std::size_t kMaxHooksFileBytes = 64 * 1024;
 constexpr std::size_t kMaxPayloadBytes   = 4 * 1024 * 1024;
 constexpr auto        kHookTimeout       = std::chrono::seconds{30};
+
+[[nodiscard]] inline std::uint64_t current_pid() {
+#ifdef _WIN32
+    return static_cast<std::uint64_t>(::_getpid());
+#else
+    return static_cast<std::uint64_t>(::getpid());
+#endif
+}
 
 struct HookEntry {
     std::string match;   // ERE on the tool name
@@ -188,7 +198,7 @@ void store_approval(const HooksFile& hf) {
     std::error_code ec;
     auto dir = fs::temp_directory_path(ec);
     if (ec) return {};
-    auto p = dir / ("agentty_hook_" + std::to_string(::getpid()) + "_" +
+    auto p = dir / ("agentty_hook_" + std::to_string(current_pid()) + "_" +
                     std::to_string(reinterpret_cast<std::uintptr_t>(&payload)));
     std::ofstream f(p, std::ios::binary | std::ios::trunc);
     if (!f) return {};
