@@ -26,6 +26,8 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 #include "agentty/auth/auth.hpp"   // OAuthError
 
@@ -91,5 +93,13 @@ void invalidate_cached_token();
 // missing. Exposed so the wire parsing is unit-testable without a network.
 [[nodiscard]] std::optional<KimiToken>
 parse_token_response(std::string_view json_body, std::int64_t now_ms);
+
+// ── Device identity headers ─────────────────────────────────────────────────
+// The X-Msh-* header block Kimi's servers expect from the kimi_code_cli client
+// on OAuth AND API (models / chat) requests: platform, version, device name /
+// model / os, and a stable per-machine device id. Kept in one place so the
+// login flow and the inference transport send an identical set. Returns
+// lowercase (name, value) pairs.
+[[nodiscard]] std::vector<std::pair<std::string, std::string>> device_headers();
 
 } // namespace agentty::provider::kimi

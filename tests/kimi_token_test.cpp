@@ -11,6 +11,7 @@
 #include "agtest.hpp"
 
 #include "agentty/provider/kimi/kimi_oauth.hpp"
+#include "agentty/provider/kimi/provider.hpp"
 
 using namespace agentty;
 using namespace agentty::provider::kimi;
@@ -80,4 +81,33 @@ TEST_CASE("kimi token response parse + expiry") {
         ok.access_token = "x";
         CHECK(ok.valid(), "non-empty access_token is valid");
     }
+}
+
+TEST_CASE("kimi device headers on the API endpoint") {
+    // The Kimi inference endpoint must carry the same X-Msh-* device-identity
+    // headers the OAuth flow sends — the official kimi_code_cli attaches them to
+    // chat + models requests, and without them the /models catalog comes back
+    // empty. One SSOT builder (device_headers) feeds both.
+    auto hdrs = device_headers();
+    CHECK(!hdrs.empty());
+    auto has = [&](const char* n) {
+        for (const auto& h : hdrs) if (h.first == n) return !h.second.empty();
+        return false;
+    };
+    CHECK(has("x-msh-platform"));
+    CHECK(has("x-msh-device-id"));
+    CHECK(has("x-msh-version"));
+    for (const auto& h : hdrs)
+        if (h.first == "x-msh-platform") CHECK(h.second == "kimi_code_cli");
+
+    // The endpoint builder splices them in so the shared openai transport sends
+    // them on every request.
+    auto ep = KimiProvider::make_endpoint();
+    CHECK(ep.host == "api.kimi.com");
+    CHECK(ep.path == "/coding/v1/chat/completions");
+    CHECK(!ep.extra_headers.empty());
+    bool ep_has_platform = false;
+    for (const auto& h : ep.extra_headers)
+        if (h.first == "x-msh-platform") ep_has_platform = true;
+    CHECK(ep_has_platform);
 }

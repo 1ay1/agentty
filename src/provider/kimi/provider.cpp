@@ -45,8 +45,8 @@ std::optional<std::string> quota_error_message(const std::string& access_token) 
     r.headers = {
         {"accept", "application/json"},
         {"authorization", "Bearer " + access_token},
-        {"x-msh-platform", "kimi_code_cli"},
     };
+    for (auto& h : device_headers()) r.headers.push_back({h.first, h.second});
     if (const auto& ov = http::agentty_api_host_override(); ov.active()) {
         r.dial_host = ov.host; r.dial_port = ov.port;
     }
@@ -83,6 +83,13 @@ provider::openai::Endpoint KimiProvider::make_endpoint() {
     ep.path        = std::string{kBasePath} + "/chat/completions";
     ep.models_path = std::string{kBasePath} + "/models";
     ep.label       = "kimi";
+    // Kimi's servers expect the same X-Msh-* device-identity headers on API
+    // requests (chat + models) that the OAuth flow sends — the official
+    // kimi_code_cli attaches them everywhere. Without them the /models catalog
+    // comes back empty and some requests are rejected. SSOT: one builder in
+    // kimi_oauth::device_headers(). Applied by openai transport's
+    // build_request_headers on both the chat and the models paths.
+    ep.extra_headers = device_headers();
     return ep;
 }
 
