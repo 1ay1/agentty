@@ -675,6 +675,44 @@ TEST_CASE("test_endpoint_presets") {
     }
 }
 
+// ── Bundled model seed: hosted API-key providers show models before a key ──
+// With an EMPTY auth header, openai::list_models short-circuits to empty for a
+// TLS endpoint (no network). list_models_for must then fall back to the
+// per-provider bundled seed so a freshly selected hosted provider shows models
+// in the picker before any key is set. The live fetch supersedes it later.
+TEST_CASE("bundled model seed when no key / fetch empty") {
+    namespace P = agentty::provider;
+    const auth::AuthHeader none{};
+
+    for (const char* id : {"xai", "mistral", "gemini", "fireworks",
+                           "deepseek", "groq", "cerebras", "together"}) {
+        auto models = P::list_models_for(P::parse_selection(id), none);
+        CHECK(!models.empty());
+        // The seed stamps the provider label so the picker groups it right.
+        if (!models.empty())
+            CHECK(models.front().provider == std::string{id});
+    }
+
+    // A couple of concrete slugs land where expected (newest first).
+    {
+        auto xai = P::list_models_for(P::parse_selection("xai"), none);
+        CHECK(!xai.empty());
+        if (!xai.empty()) CHECK(xai.front().id.value == "grok-4.6");
+    }
+    {
+        auto gem = P::list_models_for(P::parse_selection("gemini"), none);
+        CHECK(!gem.empty());
+        if (!gem.empty()) CHECK(gem.front().id.value == "gemini-2.5-pro");
+    }
+
+    // Providers WITHOUT a seed (openrouter, custom hosts, locals) legitimately
+    // stay empty with no key rather than showing guessed models.
+    {
+        auto orr = P::list_models_for(P::parse_selection("openrouter"), none);
+        CHECK(orr.empty());
+    }
+}
+
 // ── provider_display_name: URL-form labels collapse to host[:port] ──
 // A custom OpenAI-compatible host entered as "https://chat.example.org/api"
 // has Endpoint::label == the full URL (see Endpoint::from_spec, transport.cpp).
