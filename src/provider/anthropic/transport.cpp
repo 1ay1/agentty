@@ -189,9 +189,7 @@ http::Headers build_request_headers(const AuthHeader& auth,
     if (streaming) {
         // Corporate gateways commonly buffer/compress SSE until a large body
         // accumulates. These standard directives preserve incremental frames.
-        h.push_back({"cache-control",   "no-cache, no-transform"});
-        h.push_back({"pragma",          "no-cache"});
-        h.push_back({"accept-encoding", "identity"});
+        http::append_sse_no_buffer(h);
     }
     h.push_back({"user-agent",     headers::user_agent});
     h.push_back({"x-app",          headers::x_app});
