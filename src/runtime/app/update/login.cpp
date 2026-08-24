@@ -426,6 +426,29 @@ Step login_pick_method(Model m, char32_t key) {
         m.ui.login = login::CustomHostInput{};
         return done(std::move(m));
     }
+    if (key == U'5' && !anthropic_only) {
+        // Native GitHub Copilot OAuth (device flow) — same worker the
+        // provider picker launches. Shows a one-time code + opens the
+        // GitHub device page; polls in the background.
+        const auto attempt_id = cmd::next_codex_login_attempt_id();
+        auto cancel = std::make_shared<std::atomic_bool>(false);
+        m.ui.login = login::CopilotWaiting{
+            .attempt_id = attempt_id,
+            .cancel = cancel,
+        };
+        return {std::move(m), cmd::copilot_login_async(attempt_id, std::move(cancel))};
+    }
+    if (key == U'6' && !anthropic_only) {
+        // Native Kimi OAuth (device flow) — same worker the provider
+        // picker launches.
+        const auto attempt_id = cmd::next_codex_login_attempt_id();
+        auto cancel = std::make_shared<std::atomic_bool>(false);
+        m.ui.login = login::KimiWaiting{
+            .attempt_id = attempt_id,
+            .cancel = cancel,
+        };
+        return {std::move(m), cmd::kimi_login_async(attempt_id, std::move(cancel))};
+    }
     return done(std::move(m));
 }
 
