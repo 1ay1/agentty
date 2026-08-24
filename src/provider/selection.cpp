@@ -6,6 +6,7 @@
 #include <mutex>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "agentty/provider/registry.hpp"
 #include "agentty/provider/acp_agents.hpp"
@@ -29,6 +30,54 @@ std::string env_or_empty(std::string_view name) {
     if (name.empty()) return {};
     const char* v = std::getenv(std::string{name}.c_str());
     return (v && *v) ? std::string{v} : std::string{};
+}
+
+// Small per-provider seed catalog used ONLY when the live /models fetch comes
+// back empty (no API key set yet, network down, or a provider that gates its
+// list behind auth). Lets a freshly selected hosted provider show sensible
+// models in the picker immediately; the real catalog supersedes it the moment
+// the account is reachable. Keyed on the registry `id` (== endpoint label).
+// Deliberately short — a couple of current, agent-capable ids per provider,
+// newest first (front() becomes the default when the user gives no -m).
+std::vector<ModelInfo> bundled_models_for(std::string_view label) {
+    auto mk = [&](const char* id) {
+        return ModelInfo{ .id = ModelId{id}, .display_name = id,
+                          .provider = std::string{label} };
+    };
+    std::vector<ModelInfo> v;
+    if (label == "xai") {
+        v = { mk("grok-4.6"), mk("grok-4"), mk("grok-code-fast-1"),
+              mk("grok-3"), mk("grok-3-mini") };
+    } else if (label == "mistral") {
+        v = { mk("mistral-large-latest"), mk("magistral-medium-latest"),
+              mk("codestral-latest"), mk("mistral-medium-latest"),
+              mk("mistral-small-latest") };
+    } else if (label == "gemini") {
+        v = { mk("gemini-2.5-pro"), mk("gemini-2.5-flash"),
+              mk("gemini-2.5-flash-lite"), mk("gemini-2.0-flash") };
+    } else if (label == "fireworks") {
+        v = { mk("accounts/fireworks/models/kimi-k2-instruct"),
+              mk("accounts/fireworks/models/deepseek-v3"),
+              mk("accounts/fireworks/models/qwen3-235b-a22b"),
+              mk("accounts/fireworks/models/llama-v3p3-70b-instruct") };
+    } else if (label == "deepseek") {
+        v = { mk("deepseek-chat"), mk("deepseek-reasoner"),
+              mk("deepseek-v4-pro"), mk("deepseek-v4-flash") };
+    } else if (label == "groq") {
+        v = { mk("llama-3.3-70b-versatile"), mk("moonshotai/kimi-k2-instruct"),
+              mk("qwen/qwen3-32b"), mk("llama-3.1-8b-instant") };
+    } else if (label == "cerebras") {
+        v = { mk("llama-3.3-70b"), mk("qwen-3-235b-a22b-instruct-2507"),
+              mk("llama3.1-8b") };
+    } else if (label == "together") {
+        v = { mk("deepseek-ai/DeepSeek-V3"),
+              mk("meta-llama/Llama-3.3-70B-Instruct-Turbo"),
+              mk("Qwen/Qwen3-235B-A22B-Instruct-2507-tput") };
+    }
+    // openrouter, custom hosts, and locals have no seed — their catalogs are
+    // too large / user-defined to guess; they legitimately stay empty until
+    // the live fetch lands.
+    return v;
 }
 } // namespace
 
@@ -251,8 +300,18 @@ std::vector<ModelInfo> list_models_for(const Selection& sel,
     if (sel.is_copilot())              return copilot::list_models();
     if (sel.is_kimi())                 return kimi::list_models();
     if (sel.is_oauth_native())         return chatgpt::list_models();
-    if (sel.kind == Kind::OpenAI)
-        return openai::list_models(auth, sel.openai_endpoint);
+    if (sel.kind == Kind::OpenAI) {
+        auto models = openai::list_models(auth, sel.openai_endpoint);
+        // Hosted API-key providers return an EMPTY list when no key is set yet
+        // (or the /models fetch fails / the network is down). Seed the picker
+        // with a small bundled catalog keyed on the provider id so a freshly
+        // selected provider shows sensible models immediately — the live fetch
+        // supersedes this the moment the account can be reached. Local /
+        // custom-host endpoints have no seed and legitimately stay empty.
+        if (models.empty())
+            return bundled_models_for(sel.openai_endpoint.label);
+        return models;
+    }
     return anthropic::list_models(auth);
 }
 
