@@ -392,14 +392,18 @@ Element provider_picker(const Model& m) {
             note_color = info;
         } else if (p.kind() == provider::Kind::Anthropic) {
             // Reflect REAL auth state, not a hardcoded checkmark: creds come
-            // from `agentty login` (OAuth) or a pasted/​env x-api-key, resolved
-            // into deps().auth at startup + on every login. An empty header
-            // means the user hasn't signed in — say so instead of lying "✓".
-            if (!auth::is_empty(app::deps().auth)) {
-                note = active ? "✓ signed in · accounts" : "✓ signed in";
+            // from `agentty login` (OAuth) or a pasted/​env x-api-key, stored
+            // in credentials.json on disk. We must NOT check deps().auth here
+            // — that holds the ACTIVE provider's auth header, so after the
+            // user switches to an OpenAI-compatible host it contains the
+            // OpenAI key and would falsely show Anthropic as "signed in".
+            // Checking the on-disk Anthropic credential store is authoritative
+            // and independent of which provider is currently active.
+            if (auth::load_credentials()) {
+                note = active ? "\xe2\x9c\x93 signed in \xc2\xb7 accounts" : "\xe2\x9c\x93 signed in";
                 note_color = success;
             } else {
-                note = "⚠ sign in";
+                note = "\xe2\x9a\xa0 sign in";
                 note_color = warn;
             }
         } else {
@@ -443,6 +447,34 @@ Element provider_picker(const Model& m) {
         row.leading_style  = active ? fg_bold(fg) : fg_of(muted);
         row.trailing       = "\xe2\x97\x8f agent";   // ● agent
         row.trailing_style = fg_of(info);
+        row.selected = sel;
+        row.active   = active;
+        cfg.rows.push_back(std::move(row));
+        ++i;
+    }
+
+    // Saved custom OpenAI-compatible hosts from Settings.provider_keys
+    // that are NOT built-in presets (e.g. "my-server.com:8443"). These
+    // appear as their own rows so the user can switch back to a previously
+    // entered host without retyping it. Preset-matched keys ("openai",
+    // "groq", …) are already shown as built-in rows above and are skipped.
+    auto settings = app::deps().load_settings();
+    std::vector<std::string> saved_custom_hosts;
+    for (const auto& [spec, key] : settings.provider_keys) {
+        if (!provider::preset_for(spec))
+            saved_custom_hosts.push_back(spec);
+    }
+    // Stable ordering: alphabetical so the list doesn't reshuffle on every
+    // render (map iteration order is unspecified).
+    std::sort(saved_custom_hosts.begin(), saved_custom_hosts.end());
+    for (const auto& spec : saved_custom_hosts) {
+        const bool active = (spec == active_id);
+        const bool sel    = (i == picker->index);
+        Picker::Config::Row row;
+        row.leading        = spec + "  custom OpenAI-compatible host";
+        row.leading_style  = active ? fg_bold(fg) : fg_of(muted);
+        row.trailing       = "\xe2\x9c\x93 ready";   // ✓ ready
+        row.trailing_style = fg_of(success);
         row.selected = sel;
         row.active   = active;
         cfg.rows.push_back(std::move(row));
