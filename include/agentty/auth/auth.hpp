@@ -137,6 +137,12 @@ void prewarm_anthropic();
 bool save_credentials(const Credentials& c);     // writes with 0600 perms where supported
 bool clear_credentials();
 
+// Cheap, cached predicate: is there an Anthropic credential on disk? Safe to
+// call once per rendered frame (e.g. the provider picker) — it caches on the
+// credentials file's (mtime, size) and only re-reads/decrypts when that
+// changes. Prefer this over load_credentials() in hot render paths.
+[[nodiscard]] bool anthropic_signed_in();
+
 // ── PKCE helpers (exposed for tests) ─────────────────────────────────────
 [[nodiscard]] std::string random_urlsafe(std::size_t n);
 [[nodiscard]] std::string base64url_no_pad(const unsigned char* data, std::size_t len);

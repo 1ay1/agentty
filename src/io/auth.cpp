@@ -428,6 +428,39 @@ std::optional<Credentials> load_credentials() {
     }
 }
 
+// Cheap, cached "is there an Anthropic credential on disk?" for hot paths like
+// the provider-picker VIEW (rendered once per frame while open). The naive
+// approach — call load_credentials() → keystore/disk read + AES-unseal + JSON
+// parse — costs real work every frame; this caches the boolean keyed on the
+// credentials file's (mtime, size). A stat is ~1us and invalidates correctly on
+// login, logout (file removed), token refresh, and cross-process changes, since
+// save_credentials always (re)writes the encrypted file even when the keystore
+// is enabled. Mirrors provider::copilot::signed_in().
+bool anthropic_signed_in() {
+    static std::mutex mu;
+    std::scoped_lock lk(mu);
+    static bool cached = false;
+    static fs::file_time_type cached_mtime{};
+    static std::uintmax_t cached_size = static_cast<std::uintmax_t>(-1);
+
+    std::error_code ec;
+    const fs::path p = credentials_path();
+    const auto mtime = fs::last_write_time(p, ec);
+    const auto size  = ec ? 0 : fs::file_size(p, ec);
+    if (ec) {   // missing / unreadable → signed out; remember cheaply
+        cached = false;
+        cached_mtime = {};
+        cached_size = static_cast<std::uintmax_t>(-1);
+        return false;
+    }
+    if (mtime != cached_mtime || size != cached_size) {
+        cached = load_credentials().has_value();
+        cached_mtime = mtime;
+        cached_size  = size;
+    }
+    return cached;
+}
+
 bool save_credentials(const Credentials& c) {
     json j;
     j["method"] = std::string{persist_tag(c)};

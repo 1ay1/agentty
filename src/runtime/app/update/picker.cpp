@@ -485,11 +485,8 @@ Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
     // ACP agents and BEFORE the "Custom host…" sentinel, matching the
     // rendering order in pickers.cpp.
     auto settings = deps().load_settings();
-    std::vector<std::string> saved_custom_hosts;
-    for (const auto& [spec, key] : settings.provider_keys)
-        if (!provider::preset_for(spec))
-            saved_custom_hosts.push_back(spec);
-    std::sort(saved_custom_hosts.begin(), saved_custom_hosts.end());
+    std::vector<std::string> saved_custom_hosts =
+        provider::saved_custom_hosts(settings.provider_keys);
     const int n_custom = static_cast<int>(saved_custom_hosts.size());
 
     // Virtual rows after presets: [ACP agents…] [saved custom hosts…]

@@ -399,7 +399,7 @@ Element provider_picker(const Model& m) {
             // OpenAI key and would falsely show Anthropic as "signed in".
             // Checking the on-disk Anthropic credential store is authoritative
             // and independent of which provider is currently active.
-            if (auth::load_credentials()) {
+            if (auth::anthropic_signed_in()) {
                 note = active ? "\xe2\x9c\x93 signed in \xc2\xb7 accounts" : "\xe2\x9c\x93 signed in";
                 note_color = success;
             } else {
@@ -459,14 +459,8 @@ Element provider_picker(const Model& m) {
     // entered host without retyping it. Preset-matched keys ("openai",
     // "groq", …) are already shown as built-in rows above and are skipped.
     auto settings = app::deps().load_settings();
-    std::vector<std::string> saved_custom_hosts;
-    for (const auto& [spec, key] : settings.provider_keys) {
-        if (!provider::preset_for(spec))
-            saved_custom_hosts.push_back(spec);
-    }
-    // Stable ordering: alphabetical so the list doesn't reshuffle on every
-    // render (map iteration order is unspecified).
-    std::sort(saved_custom_hosts.begin(), saved_custom_hosts.end());
+    std::vector<std::string> saved_custom_hosts =
+        provider::saved_custom_hosts(settings.provider_keys);
     for (const auto& spec : saved_custom_hosts) {
         const bool active = (spec == active_id);
         const bool sel    = (i == picker->index);
