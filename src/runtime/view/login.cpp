@@ -319,16 +319,18 @@ Element panel_chatgpt_waiting(const login::ChatGptWaiting& s) {
     return v(std::move(rows)).build();
 }
 
-Element panel_copilot_waiting(const login::CopilotWaiting& s) {
+Element panel_device_waiting(const login::DeviceWaiting& s) {
+    const std::string label = s.provider_label.empty() ? "your provider"
+                                                       : s.provider_label;
     std::vector<Element> rows;
     rows.push_back(text(s.user_code.empty()
-                            ? "Requesting GitHub device code\xE2\x80\xA6"
-                            : "Sign in with GitHub Copilot",
+                            ? "Requesting device code\xE2\x80\xA6"
+                            : "Sign in with " + label,
                         fg_bold(fg)));
     rows.push_back(text(""));
     if (s.user_code.empty()) {
         rows.push_back(body_text(
-            "Waiting for GitHub to issue a one-time code\xE2\x80\xA6",
+            "Waiting for " + label + " to issue a one-time code\xE2\x80\xA6",
             fg_dim(muted)));
     } else {
         rows.push_back(body_text(
@@ -341,48 +343,12 @@ Element panel_copilot_waiting(const login::CopilotWaiting& s) {
         rows.push_back(text(s.user_code, fg_bold(fg)));
         rows.push_back(text(""));
         rows.push_back(body_text(
-            "The code expires in ~15 minutes. This uses your existing GitHub "
-            "Copilot subscription \xE2\x80\x94 no API key needed.", fg_dim(muted)));
+            "The code expires in ~15 minutes. This uses your existing " + label +
+            " subscription \xE2\x80\x94 no API key needed.", fg_dim(muted)));
         rows.push_back(text(""));
         rows.push_back(key_hints({
             {"c",   "copy code"},
-            {"o",   "open browser"},
-            {"Esc", "cancel"},
-        }));
-        return v(std::move(rows)).build();
-    }
-    rows.push_back(text(""));
-    rows.push_back(key_hints({{"Esc", "cancel"}}));
-    return v(std::move(rows)).build();
-}
-
-Element panel_kimi_waiting(const login::KimiWaiting& s) {
-    std::vector<Element> rows;
-    rows.push_back(text(s.user_code.empty()
-                            ? "Requesting Kimi device code\xE2\x80\xA6"
-                            : "Sign in with Kimi",
-                        fg_bold(fg)));
-    rows.push_back(text(""));
-    if (s.user_code.empty()) {
-        rows.push_back(body_text(
-            "Waiting for Kimi to issue a one-time code\xE2\x80\xA6",
-            fg_dim(muted)));
-    } else {
-        rows.push_back(body_text(
-            "Open this link in a browser on any device:", fg_dim(muted)));
-        rows.push_back(text(""));
-        rows.push_back(url_panel(s.authorize_url));
-        rows.push_back(text(""));
-        rows.push_back(body_text("Then enter this one-time code:",
-                                 fg_dim(muted)));
-        rows.push_back(text(s.user_code, fg_bold(fg)));
-        rows.push_back(text(""));
-        rows.push_back(body_text(
-            "The code expires in ~15 minutes. This uses your existing Kimi "
-            "subscription \xE2\x80\x94 no API key needed.", fg_dim(muted)));
-        rows.push_back(text(""));
-        rows.push_back(key_hints({
-            {"c",   "copy code"},
+            {"u",   "copy URL"},
             {"o",   "open browser"},
             {"Esc", "cancel"},
         }));
@@ -506,10 +472,8 @@ Element login_modal(const Model& m) {
             return panel_oauth_exchanging();
         } else if constexpr (std::same_as<T, login::ChatGptWaiting>) {
             return panel_chatgpt_waiting(s);
-        } else if constexpr (std::same_as<T, login::CopilotWaiting>) {
-            return panel_copilot_waiting(s);
-        } else if constexpr (std::same_as<T, login::KimiWaiting>) {
-            return panel_kimi_waiting(s);
+        } else if constexpr (std::same_as<T, login::DeviceWaiting>) {
+            return panel_device_waiting(s);
         } else if constexpr (std::same_as<T, login::ApiKeyInput>) {
             return panel_api_key(s);
         } else if constexpr (std::same_as<T, login::CustomHostInput>) {

@@ -68,6 +68,24 @@ void install_and_close(Model& m, auth::Credentials creds) {
 
 } // namespace
 
+// Start a native device-flow OAuth login for `provider` (registry id) with the
+// given display `label`. Sets the DeviceWaiting modal state and returns the
+// worker Cmd. One place so the picker, the login menu, and the account manager
+// all launch device login identically.
+Step launch_device_login(Model m, std::string provider, std::string label) {
+    const auto attempt_id = cmd::next_codex_login_attempt_id();
+    auto cancel = std::make_shared<std::atomic_bool>(false);
+    m.ui.login = login::DeviceWaiting{
+        .provider = provider,
+        .provider_label = label,
+        .attempt_id = attempt_id,
+        .cancel = cancel,
+    };
+    return {std::move(m),
+            cmd::device_login_async(std::move(provider), std::move(label),
+                                    attempt_id, std::move(cancel))};
+}
+
 Step open_login(Model m) {
     m.ui.login = login::Picking{};
     return done(std::move(m));
@@ -78,11 +96,7 @@ Step close_login(Model m) {
         waiting && waiting->cancel) {
         waiting->cancel->store(true, std::memory_order_release);
     }
-    if (auto* waiting = std::get_if<login::CopilotWaiting>(&m.ui.login);
-        waiting && waiting->cancel) {
-        waiting->cancel->store(true, std::memory_order_release);
-    }
-    if (auto* waiting = std::get_if<login::KimiWaiting>(&m.ui.login);
+    if (auto* waiting = std::get_if<login::DeviceWaiting>(&m.ui.login);
         waiting && waiting->cancel) {
         waiting->cancel->store(true, std::memory_order_release);
     }
@@ -226,22 +240,10 @@ Step account_select(Model m) {
             return {std::move(m), cmd::codex_login_async(attempt_id, std::move(cancel))};
         }
         if (provider == "copilot") {
-            const auto attempt_id = cmd::next_codex_login_attempt_id();
-            auto cancel = std::make_shared<std::atomic_bool>(false);
-            m.ui.login = login::CopilotWaiting{
-                .attempt_id = attempt_id,
-                .cancel = cancel,
-            };
-            return {std::move(m), cmd::copilot_login_async(attempt_id, std::move(cancel))};
+            return launch_device_login(std::move(m), "copilot", "GitHub Copilot");
         }
         if (provider == "kimi") {
-            const auto attempt_id = cmd::next_codex_login_attempt_id();
-            auto cancel = std::make_shared<std::atomic_bool>(false);
-            m.ui.login = login::KimiWaiting{
-                .attempt_id = attempt_id,
-                .cancel = cancel,
-            };
-            return {std::move(m), cmd::kimi_login_async(attempt_id, std::move(cancel))};
+            return launch_device_login(std::move(m), "kimi", "Kimi");
         }
         m.ui.login = login::Picking{.provider = provider};
         return done(std::move(m));
@@ -427,27 +429,12 @@ Step login_pick_method(Model m, char32_t key) {
         return done(std::move(m));
     }
     if (key == U'5' && !anthropic_only) {
-        // Native GitHub Copilot OAuth (device flow) — same worker the
-        // provider picker launches. Shows a one-time code + opens the
-        // GitHub device page; polls in the background.
-        const auto attempt_id = cmd::next_codex_login_attempt_id();
-        auto cancel = std::make_shared<std::atomic_bool>(false);
-        m.ui.login = login::CopilotWaiting{
-            .attempt_id = attempt_id,
-            .cancel = cancel,
-        };
-        return {std::move(m), cmd::copilot_login_async(attempt_id, std::move(cancel))};
+        // Native GitHub Copilot OAuth (device flow).
+        return launch_device_login(std::move(m), "copilot", "GitHub Copilot");
     }
     if (key == U'6' && !anthropic_only) {
-        // Native Kimi OAuth (device flow) — same worker the provider
-        // picker launches.
-        const auto attempt_id = cmd::next_codex_login_attempt_id();
-        auto cancel = std::make_shared<std::atomic_bool>(false);
-        m.ui.login = login::KimiWaiting{
-            .attempt_id = attempt_id,
-            .cancel = cancel,
-        };
-        return {std::move(m), cmd::kimi_login_async(attempt_id, std::move(cancel))};
+        // Native Kimi OAuth (device flow).
+        return launch_device_login(std::move(m), "kimi", "Kimi");
     }
     return done(std::move(m));
 }
@@ -686,44 +673,33 @@ Step login_submit(Model m) {
 }
 
 Step login_copy_auth_url(Model m) {
-    if (auto* oc = std::get_if<login::OAuthCode>(&m.ui.login)) {
-        if (oc->authorize_url.empty()) return done(std::move(m));
-        auto url = oc->authorize_url;
-        (void)write_clipboard_text(url);   // native pbcopy/wl-copy/xclip
-        auto write_cmd = Cmd<Msg>::write_clipboard(url);
-        auto toast = set_status_toast(m,
-            "authorize URL copied to clipboard",
-            std::chrono::seconds{3});
-        return {std::move(m),
-            Cmd<Msg>::batch(std::move(write_cmd), std::move(toast))};
-    }
-    // Copilot device flow: the CODE is what the user types into the browser,
-    // so copy THAT (not the URL). Terminal text-selection can't grab it — the
-    // modal re-renders on every poll tick, wiping any selection — so this
-    // keystroke is the reliable way to get the code onto the clipboard.
-    if (auto* cw = std::get_if<login::CopilotWaiting>(&m.ui.login)) {
-        if (cw->user_code.empty()) return done(std::move(m));
-        auto code = cw->user_code;
-        (void)write_clipboard_text(code);
-        auto write_cmd = Cmd<Msg>::write_clipboard(code);
-        auto toast = set_status_toast(m,
-            "code " + code + " copied to clipboard",
-            std::chrono::seconds{3});
-        return {std::move(m),
-            Cmd<Msg>::batch(std::move(write_cmd), std::move(toast))};
-    }
-    if (auto* kw = std::get_if<login::KimiWaiting>(&m.ui.login)) {
-        if (kw->user_code.empty()) return done(std::move(m));
-        auto code = kw->user_code;
-        (void)write_clipboard_text(code);
-        auto write_cmd = Cmd<Msg>::write_clipboard(code);
-        auto toast = set_status_toast(m,
-            "code " + code + " copied to clipboard",
-            std::chrono::seconds{3});
-        return {std::move(m),
-            Cmd<Msg>::batch(std::move(write_cmd), std::move(toast))};
-    }
-    return done(std::move(m));
+    // Copy the verification URL. Works from the OAuth-code screen and from any
+    // device-flow modal (Copilot/Kimi) — one path, so every provider behaves
+    // the same.
+    std::string url;
+    if (auto* oc = std::get_if<login::OAuthCode>(&m.ui.login)) url = oc->authorize_url;
+    else if (auto* dw = std::get_if<login::DeviceWaiting>(&m.ui.login)) url = dw->authorize_url;
+    if (url.empty()) return done(std::move(m));
+    (void)write_clipboard_text(url);   // native pbcopy/wl-copy/xclip
+    auto write_cmd = Cmd<Msg>::write_clipboard(url);
+    auto toast = set_status_toast(m, "authorize URL copied to clipboard",
+                                  std::chrono::seconds{3});
+    return {std::move(m), Cmd<Msg>::batch(std::move(write_cmd), std::move(toast))};
+}
+
+Step login_copy_code(Model m) {
+    // Copy the one-time CODE (what the user types into the browser). Device
+    // flow only — terminal text-selection can't grab it because the modal
+    // re-renders every poll tick, wiping any selection, so this keystroke is
+    // the reliable way onto the clipboard. One path for every device provider.
+    auto* dw = std::get_if<login::DeviceWaiting>(&m.ui.login);
+    if (!dw || dw->user_code.empty()) return done(std::move(m));
+    auto code = dw->user_code;
+    (void)write_clipboard_text(code);
+    auto write_cmd = Cmd<Msg>::write_clipboard(code);
+    auto toast = set_status_toast(m, "code " + code + " copied to clipboard",
+                                  std::chrono::seconds{3});
+    return {std::move(m), Cmd<Msg>::batch(std::move(write_cmd), std::move(toast))};
 }
 
 Step login_open_browser_again(Model m) {
@@ -796,11 +772,13 @@ Step login_codex_done(
                                   auth::AuthHeader{}, "ChatGPT");
 }
 
-Step login_copilot_device_code_ready(Model m, std::uint64_t attempt_id,
-                                     std::string verification_url,
-                                     std::string user_code) {
-    auto* waiting = std::get_if<login::CopilotWaiting>(&m.ui.login);
-    if (!waiting || waiting->attempt_id != attempt_id)
+Step login_device_code_ready(Model m, std::string provider,
+                             std::uint64_t attempt_id,
+                             std::string verification_url,
+                             std::string user_code) {
+    auto* waiting = std::get_if<login::DeviceWaiting>(&m.ui.login);
+    if (!waiting || waiting->provider != provider
+                 || waiting->attempt_id != attempt_id)
         return done(std::move(m));
     waiting->authorize_url = verification_url;
     waiting->user_code = std::move(user_code);
@@ -809,61 +787,26 @@ Step login_copilot_device_code_ready(Model m, std::uint64_t attempt_id,
     return {std::move(m), cmd::open_browser_async(std::move(verification_url))};
 }
 
-Step login_copilot_done(
-    Model m, std::uint64_t attempt_id,
-    std::expected<provider::copilot::GithubToken, auth::OAuthError> result)
-{
-    auto* waiting = std::get_if<login::CopilotWaiting>(&m.ui.login);
-    if (!waiting || waiting->attempt_id != attempt_id)
+Step login_device_done(Model m, std::string provider, std::string provider_label,
+                       std::uint64_t attempt_id,
+                       std::optional<std::string> error) {
+    auto* waiting = std::get_if<login::DeviceWaiting>(&m.ui.login);
+    if (!waiting || waiting->provider != provider
+                 || waiting->attempt_id != attempt_id)
         return done(std::move(m));
     if (waiting->cancel)
         waiting->cancel->store(true, std::memory_order_release);
-    if (!result) {
-        m.ui.login = login::Failed{result.error().render()};
+    if (error) {
+        m.ui.login = login::Failed{std::move(*error)};
         return done(std::move(m));
     }
-    // login() already persisted the GitHub token; the proxy token is
-    // exchanged lazily on the first turn. Switch the active provider now.
-    m.ui.login = login::Closed{};
-    m.s.status = "signed in to GitHub Copilot";
-    m.s.status_until = std::chrono::steady_clock::now() + std::chrono::seconds{4};
-    return commit_provider_switch(std::move(m), "copilot",
-                                  auth::AuthHeader{}, "GitHub Copilot");
-}
-
-Step login_kimi_device_code_ready(Model m, std::uint64_t attempt_id,
-                                  std::string verification_url,
-                                  std::string user_code) {
-    auto* waiting = std::get_if<login::KimiWaiting>(&m.ui.login);
-    if (!waiting || waiting->attempt_id != attempt_id)
-        return done(std::move(m));
-    waiting->authorize_url = verification_url;
-    waiting->user_code = std::move(user_code);
-    // Best-effort: also open the browser to the device page so the user
-    // doesn't have to type the URL. Harmless if it can't (SSH/headless).
-    return {std::move(m), cmd::open_browser_async(std::move(verification_url))};
-}
-
-Step login_kimi_done(
-    Model m, std::uint64_t attempt_id,
-    std::expected<provider::kimi::KimiToken, auth::OAuthError> result)
-{
-    auto* waiting = std::get_if<login::KimiWaiting>(&m.ui.login);
-    if (!waiting || waiting->attempt_id != attempt_id)
-        return done(std::move(m));
-    if (waiting->cancel)
-        waiting->cancel->store(true, std::memory_order_release);
-    if (!result) {
-        m.ui.login = login::Failed{result.error().render()};
-        return done(std::move(m));
-    }
-    // login() already persisted the token bundle; refresh happens lazily on
+    // The worker already persisted the token; the transport reads it lazily on
     // the first turn. Switch the active provider now.
     m.ui.login = login::Closed{};
-    m.s.status = "signed in to Kimi";
+    m.s.status = "signed in to " + provider_label;
     m.s.status_until = std::chrono::steady_clock::now() + std::chrono::seconds{4};
-    return commit_provider_switch(std::move(m), "kimi",
-                                  auth::AuthHeader{}, "Kimi");
+    return commit_provider_switch(std::move(m), std::move(provider),
+                                  auth::AuthHeader{}, std::move(provider_label));
 }
 
 Step token_refreshed(Model m, auth::TokenResult result) {
@@ -999,6 +942,7 @@ Step login_update(Model m, msg::LoginMsg lm) {
         [&](LoginCursorRight)       -> Step { return login_cursor_right(std::move(m)); },
         [&](LoginSubmit)            -> Step { return login_submit(std::move(m)); },
         [&](LoginCopyAuthUrl)       -> Step { return login_copy_auth_url(std::move(m)); },
+        [&](LoginCopyCode)          -> Step { return login_copy_code(std::move(m)); },
         [&](LoginOpenBrowserAgain)  -> Step { return login_open_browser_again(std::move(m)); },
         [&](LoginExchanged& e)      -> Step { return login_exchanged(std::move(m), std::move(e.result)); },
         [&](CodexDeviceCodeReady& e) -> Step {
@@ -1009,21 +953,13 @@ Step login_update(Model m, msg::LoginMsg lm) {
             return login_codex_done(std::move(m), e.attempt_id,
                                     std::move(e.result));
         },
-        [&](CopilotDeviceCodeReady& e) -> Step {
-            return login_copilot_device_code_ready(std::move(m), e.attempt_id,
-                std::move(e.verification_url), std::move(e.user_code));
+        [&](DeviceCodeReady& e) -> Step {
+            return login_device_code_ready(std::move(m), std::move(e.provider),
+                e.attempt_id, std::move(e.verification_url), std::move(e.user_code));
         },
-        [&](CopilotLoginDone& e)    -> Step {
-            return login_copilot_done(std::move(m), e.attempt_id,
-                                      std::move(e.result));
-        },
-        [&](KimiDeviceCodeReady& e) -> Step {
-            return login_kimi_device_code_ready(std::move(m), e.attempt_id,
-                std::move(e.verification_url), std::move(e.user_code));
-        },
-        [&](KimiLoginDone& e)       -> Step {
-            return login_kimi_done(std::move(m), e.attempt_id,
-                                   std::move(e.result));
+        [&](DeviceLoginDone& e)    -> Step {
+            return login_device_done(std::move(m), std::move(e.provider),
+                std::move(e.provider_label), e.attempt_id, std::move(e.error));
         },
         [&](TokenRefreshed& e)      -> Step { return token_refreshed(std::move(m), std::move(e.result)); },
     }, lm);
