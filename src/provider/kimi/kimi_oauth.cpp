@@ -3,7 +3,9 @@
 // The simpler sibling of copilot_oauth: Kimi's device-flow access_token is the
 // API bearer directly (no proxy exchange), and it refreshes via the standard
 // `refresh_token` grant. Three form-encoded POSTs to `auth.kimi.com`:
-//   /api/oauth/device_authorization, /api/oauth/token (device_code | refresh_token)
+//   /api/oauth/device_authorization,
+//   /api/oauth/token (grant_type=urn:ietf:params:oauth:grant-type:device_code),
+//   /api/oauth/token (grant_type=refresh_token)
 
 #include "agentty/provider/kimi/kimi_oauth.hpp"
 
@@ -212,7 +214,7 @@ poll_for_token(const std::string& device_code, int interval_s, int timeout_s,
                 return std::unexpected(OAuthError{OAuthErrorKind::Network, "login cancelled"});
         }
         auto r = post_form(kTokenPath,
-            form_encode({{"grant_type", "device_code"},
+            form_encode({{"grant_type", "urn:ietf:params:oauth:grant-type:device_code"},
                          {"client_id", kClientId},
                          {"device_code", device_code}}));
         if (!r.transport_error.empty())
@@ -233,8 +235,11 @@ poll_for_token(const std::string& device_code, int interval_s, int timeout_s,
             if (err == "access_denied")
                 return std::unexpected(OAuthError{OAuthErrorKind::ApiError,
                     "sign-in was denied"});
-            if (!err.empty())
-                return std::unexpected(OAuthError{OAuthErrorKind::ApiError, err});
+            if (!err.empty()) {
+                const std::string desc = j.value("error_description", std::string{});
+                return std::unexpected(OAuthError{OAuthErrorKind::ApiError,
+                    desc.empty() ? err : err + ": " + desc});
+            }
         } catch (...) { /* transient parse blip — keep polling */ }
     }
     return std::unexpected(OAuthError{OAuthErrorKind::Network,

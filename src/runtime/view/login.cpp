@@ -206,8 +206,20 @@ Element panel_picking(std::string_view provider,
                          text("  \xe2\x80\x94 llama.cpp, vLLM, LM Studio, Ollama",
                                    fg_dim(muted))).build());
         rows.push_back(text(""));
+        rows.push_back(h(text("5) ", fg_bold(highlight)),
+                         text("Sign in with GitHub Copilot", fg_bold(fg))).build());
+        rows.push_back(h(text("   ", fg_of(fg)),
+                         body_text("use your GitHub Copilot subscription",
+                                   fg_dim(muted))).build());
+        rows.push_back(text(""));
+        rows.push_back(h(text("6) ", fg_bold(highlight)),
+                         text("Sign in with Kimi", fg_bold(fg))).build());
+        rows.push_back(h(text("   ", fg_of(fg)),
+                         body_text("use your Kimi plan (K2 models)",
+                                   fg_dim(muted))).build());
+        rows.push_back(text(""));
     }
-    rows.push_back(key_hints({{anthropic_only ? "1/2" : "1/2/3/4", "choose"},
+    rows.push_back(key_hints({{anthropic_only ? "1/2" : "1\xe2\x80\x936", "choose"},
                               {"Esc", "close"}}));
     return v(std::move(rows)).build();
 }
