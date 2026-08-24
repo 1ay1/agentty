@@ -21,6 +21,7 @@
 #include "agentty/provider/chatgpt/oauth.hpp"
 #include "agentty/provider/stream_epilogue.hpp"
 #include "agentty/provider/usage.hpp"
+#include "agentty/provider/msg_shared.hpp"
 #include "agentty/provider/wire.hpp"
 #include "agentty/provider/wire_supersede.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
@@ -283,14 +284,13 @@ json build_tools(const provider::Request& req) {
     json tools = json::array();
     for (const auto& t : req.tools) {
         // Responses API function tool is FLAT (name/description/parameters at
-        // top level), unlike Chat Completions' nested {function:{...}}.
+        // top level), unlike Chat Completions' nested {function:{...}}. The
+        // null-schema guard is shared with the Chat/Ollama encoder (SSOT).
         tools.push_back({
             {"type", "function"},
             {"name", t.name},
             {"description", t.description},
-            {"parameters", t.input_schema.is_null()
-                ? json{{"type", "object"}, {"properties", json::object()}}
-                : t.input_schema},
+            {"parameters", wire::tool_schema_or_empty(t.input_schema)},
         });
     }
     return tools;

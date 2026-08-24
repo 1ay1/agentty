@@ -20,6 +20,7 @@
 #include "agtest.hpp"
 
 #include "agentty/provider/openai/transport.hpp"
+#include "agentty/provider/msg_shared.hpp"
 #include "agentty/provider/registry.hpp"
 #include "agentty/provider/selection.hpp"
 #include <cstdlib>
@@ -73,13 +74,21 @@ TEST_CASE("test_build_tools") {
                      nlohmann::json{{"type", "object"},
                                     {"properties", {{"path", {{"type", "string"}}}}}},
                      false});
-    auto j = oai::build_tools(tools);
+    auto j = agentty::provider::wire::openai_chat_tools(tools);
     CHECK(j.is_array());
     CHECK(j.size() == 1);
     CHECK(j[0]["type"] == "function");
     CHECK(j[0]["function"]["name"] == "read");
     CHECK(j[0]["function"]["description"] == "Read a file");
     CHECK(j[0]["function"]["parameters"]["type"] == "object");
+
+    // Null schema is guarded to a valid empty-object schema (SSOT guard shared
+    // with the Ollama + Responses encoders) — strict backends 400 on a bare null.
+    std::vector<provider::ToolSpec> noschema;
+    noschema.push_back({"ping", "no args", nlohmann::json(nullptr), false});
+    auto n = agentty::provider::wire::openai_chat_tools(noschema);
+    CHECK(n[0]["function"]["parameters"]["type"] == "object");
+    CHECK(n[0]["function"]["parameters"]["properties"].is_object());
 }
 
 TEST_CASE("test_build_messages_basic") {
@@ -216,6 +225,46 @@ TEST_CASE("test_sse_text_stream") {
     for (const auto& m : msgs)
         if (const auto* f = get_leaf<StreamFinished>(m))
             CHECK(f->stop_reason == StopReason::EndTurn);
+}
+
+TEST_CASE("test_sse_reasoning_stream") {
+    // Reasoning-capable models on the Chat wire stream chain-of-thought in a
+    // field PARALLEL to content: DeepSeek uses reasoning_content; some proxies
+    // use reasoning. Both must surface as StreamThinkingDelta (the SAME event
+    // the Anthropic wire emits) and NEVER leak into the visible text body.
+    std::string sse =
+        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"Let me \"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"think.\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"Answer: 42\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+        "data: [DONE]\n\n";
+    auto msgs = oai::parse_sse_for_test(sse);
+
+    // Thinking text captured, in order, via StreamThinkingDelta.
+    std::string think;
+    for (const auto& m : msgs)
+        if (const auto* t = get_leaf<StreamThinkingDelta>(m)) think += t->text;
+    CHECK(think == "Let me think.");
+
+    // Visible text is ONLY the content, not the reasoning.
+    CHECK(joined_text(msgs) == "Answer: 42");
+    CHECK(count_leaf<StreamFinished>(msgs) == 1);
+}
+
+TEST_CASE("test_sse_reasoning_alt_field") {
+    // The alternate `reasoning` field name (some OpenRouter passthroughs) is
+    // handled identically.
+    std::string sse =
+        "data: {\"choices\":[{\"delta\":{\"reasoning\":\"hmm\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+        "data: [DONE]\n\n";
+    auto msgs = oai::parse_sse_for_test(sse);
+    std::string think;
+    for (const auto& m : msgs)
+        if (const auto* t = get_leaf<StreamThinkingDelta>(m)) think += t->text;
+    CHECK(think == "hmm");
+    CHECK(joined_text(msgs) == "ok");
 }
 
 TEST_CASE("test_sse_tool_call_stream") {

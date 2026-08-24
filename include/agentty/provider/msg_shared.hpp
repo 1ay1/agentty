@@ -17,10 +17,46 @@
 #include <fstream>
 #include <iterator>
 #include <string>
+#include <vector>
+
+#include <nlohmann/json.hpp>
 
 #include "agentty/domain/conversation.hpp"
+#include "agentty/provider/provider.hpp"   // provider::ToolSpec
 
 namespace agentty::provider::wire {
+
+// A tool's JSON Schema for the `parameters`/`input_schema` slot, guarded: a
+// tool that declares no schema still needs a valid empty-object schema on the
+// wire, or strict backends (OpenAI Responses, some proxies) 400. One guard,
+// used by every OpenAI-family tool encoder so the behaviour can't drift.
+[[nodiscard]] inline nlohmann::json tool_schema_or_empty(const nlohmann::json& schema) {
+    if (schema.is_null())
+        return nlohmann::json{{"type", "object"}, {"properties", nlohmann::json::object()}};
+    return schema;
+}
+
+// The OpenAI *Chat Completions* `tools` array shape:
+//   [{"type":"function","function":{name,description,parameters}}]
+// Shared verbatim by the OpenAI-compat transport AND the Ollama native
+// transport (they were byte-identical copies). The Responses wire uses a
+// FLATTER shape and keeps its own encoder, but reuses tool_schema_or_empty()
+// above so the null-schema guard is single-source.
+[[nodiscard]] inline nlohmann::json openai_chat_tools(
+    const std::vector<provider::ToolSpec>& tools) {
+    nlohmann::json arr = nlohmann::json::array();
+    for (const auto& t : tools) {
+        arr.push_back({
+            {"type", "function"},
+            {"function", {
+                {"name", t.name},
+                {"description", t.description},
+                {"parameters", tool_schema_or_empty(t.input_schema)},
+            }},
+        });
+    }
+    return arr;
+}
 
 // True whenever an assistant message carries ANY tool_calls. Anthropic (and
 // the OpenAI-shaped wires) require every tool_use/tool_call be paired with a

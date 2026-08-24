@@ -1165,18 +1165,8 @@ json build_messages(const std::vector<Message>& msgs, bool json_protocol) {
 
 namespace {
 json build_tools(const std::vector<provider::ToolSpec>& tools) {
-    json arr = json::array();
-    for (const auto& t : tools) {
-        arr.push_back({
-            {"type", "function"},
-            {"function", {
-                {"name", t.name},
-                {"description", t.description},
-                {"parameters", t.input_schema},
-            }},
-        });
-    }
-    return arr;
+    // SSOT: shared with the OpenAI-compat transport — see wire::openai_chat_tools.
+    return wire::openai_chat_tools(tools);
 }
 
 // JSON-protocol addendum (agent-zero style) for very weak models. Appended to

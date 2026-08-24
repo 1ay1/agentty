@@ -15,8 +15,7 @@ class AnthropicProvider {
 public:
     provider::StreamResult stream(provider::Request req, provider::EventSink sink) {
         Request areq;
-        provider::lower_shared(areq, req);   // model/system/messages/tools/max_tokens/auth/retry
-        areq.effort = std::move(req.effort); // Anthropic-only: adaptive thinking
+        provider::lower_shared(areq, req);   // model/system/messages/tools/max_tokens/auth/retry/effort
         return run_stream_sync(std::move(areq), std::move(sink), std::move(req.cancel));
     }
 };

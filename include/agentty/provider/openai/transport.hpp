@@ -118,6 +118,13 @@ struct Request {
     // node (higher cache-hit rate on the shared system+tools+history prefix).
     // Empty / local (Ollama) endpoints omit it.
     std::string session_key;
+    // Reasoning effort wire value ("low"|"medium"|"high"|"xhigh"|"max"), or
+    // empty for no reasoning. Copied by provider::lower_shared. The OpenAI-Chat
+    // transport encodes it as top-level `reasoning_effort` when non-empty;
+    // already gated upstream (effort_wire_for returns "" for models without
+    // effort support), so the transport needs no capability re-check. Ollama
+    // ignores it (local models have no server-side effort knob).
+    std::string effort;
 };
 
 using EventSink = std::function<void(Msg)>;
