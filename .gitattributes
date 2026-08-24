@@ -1,0 +1,27 @@
+# Normalize line endings across the repo.
+#
+# `text=auto` lets git decide which files are text and stores them with LF
+# in the repository. `eol=lf` forces LF on checkout too, so the working tree
+# stays LF on every platform (including Windows / MSYS2) — this repo builds
+# under MinGW and clang64 where stray CRLF churned diffs before. Submodules
+# (maya, acp-cpp, mcp-cpp, rag-cpp) carry their own attributes and are
+# unaffected.
+* text=auto eol=lf
+
+# Windows batch scripts must keep CRLF or cmd.exe mis-parses them.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary assets: never touch.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+*.pdf binary
+*.zip binary
+*.gz binary
