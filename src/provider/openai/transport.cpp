@@ -637,6 +637,22 @@ void ensure_nonempty_turn(StreamCtx& ctx) {
 
 // Handle one choices[0].delta object.
 void handle_delta(StreamCtx& ctx, const json& delta) {
+    // Reasoning / chain-of-thought text. Reasoning-capable models on the Chat
+    // wire stream their thinking in a field PARALLEL to `content`: DeepSeek and
+    // most compat proxies use `reasoning_content`; a few (some OpenRouter
+    // passthroughs) use `reasoning`. Emit it as StreamThinkingDelta — the SAME
+    // event the Anthropic transport emits for thinking_delta — so the reducer /
+    // UI render it identically (no signature on this wire). Also a liveness
+    // signal during a long reasoning pause before any visible content.
+    for (const char* key : {"reasoning_content", "reasoning"}) {
+        auto it = delta.find(key);
+        if (it != delta.end() && it->is_string()) {
+            const auto& r = it->get_ref<const std::string&>();
+            if (!r.empty()) ctx.sink(StreamThinkingDelta{r, {}});
+            break;   // never double-count if a proxy sends both
+        }
+    }
+
     // Plain assistant text.
     if (delta.contains("content") && delta["content"].is_string()) {
         const auto& s = delta["content"].get_ref<const std::string&>();
@@ -763,7 +779,13 @@ FastData dispatch_data_fast(StreamCtx& ctx, std::string_view data, char* padded)
     if (data.find("\"usage\"") != std::string_view::npos
         || data.find("\"error\"") != std::string_view::npos
         || data.find("\"finish_reason\"") != std::string_view::npos
-        || data.find("\"tool_calls\"") != std::string_view::npos)
+        || data.find("\"tool_calls\"") != std::string_view::npos
+        // Reasoning text (reasoning_content / reasoning) rides PARALLEL to
+        // content and may precede it in the object; the forward-only fast path
+        // can't safely peek a field it hasn't reached, so hand any
+        // reasoning-bearing frame to handle_delta (random-access). The probe
+        // matches both field names via the common "reasoning prefix.
+        || data.find("\"reasoning") != std::string_view::npos)
         return FastData::Unparseable;
 
     const std::size_t cap = data.size() + simdjson::SIMDJSON_PADDING;
@@ -1352,22 +1374,6 @@ json build_messages(const Thread& t) {
     return arr;
 }
 
-// ── Tools array (OpenAI function shape) ──────────────────────────────────────
-json build_tools(const std::vector<provider::ToolSpec>& tools) {
-    json arr = json::array();
-    for (const auto& t : tools) {
-        arr.push_back({
-            {"type", "function"},
-            {"function", {
-                {"name", t.name},
-                {"description", t.description},
-                {"parameters", t.input_schema},
-            }},
-        });
-    }
-    return arr;
-}
-
 // ── Header builder ───────────────────────────────────────────────────────────
 http::Headers build_request_headers(const AuthHeader& auth,
                                     const Endpoint& endpoint) {
@@ -1463,7 +1469,7 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
         for (auto& m : build_native_messages(req.messages))
             messages.push_back(std::move(m));
         body["messages"] = std::move(messages);
-        if (!req.tools.empty()) body["tools"] = build_tools(req.tools);
+        if (!req.tools.empty()) body["tools"] = wire::openai_chat_tools(req.tools);
     } else {
         // max_tokens is `max_tokens` on the OpenAI chat endpoint (newer models
         // also accept max_completion_tokens; max_tokens stays accepted for the
@@ -1486,7 +1492,7 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
         body["messages"] = std::move(messages);
 
         if (!req.tools.empty())
-            body["tools"] = build_tools(req.tools);
+            body["tools"] = wire::openai_chat_tools(req.tools);
 
         // Prompt-cache routing. OpenAI auto-caches prefixes >=1024 tokens;
         // sending a stable prompt_cache_key pins a conversation's identical
@@ -1496,6 +1502,15 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
         // reject the field, and their KV cache is prefix-automatic anyway.
         if (req.endpoint.use_tls && !req.session_key.empty())
             body["prompt_cache_key"] = req.session_key;
+
+        // Reasoning effort. Chat Completions takes a top-level `reasoning_effort`
+        // (o-series, DeepSeek, xAI Grok, Groq, Mistral Magistral, Gemini via
+        // the compat shim). req.effort is the model-agnostic tier already gated
+        // to "" by effort_wire_for when the model can't reason — so this needs no
+        // capability re-check, exactly like the Responses transport's
+        // `reasoning.effort`. Hosted TLS only; local servers reject the field.
+        if (req.endpoint.use_tls && !req.effort.empty())
+            body["reasoning_effort"] = req.effort;
     }
 
     std::string body_str;

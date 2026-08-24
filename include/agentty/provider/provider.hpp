@@ -112,8 +112,15 @@ using EventSink = std::function<void(Msg)>;
 // `lower_shared` copies the fields EVERY transport shares, in one place, by
 // (member-of-dst = member-of-src) pairs guarded so a typo can't compile. An
 // adapter becomes: `lower_shared(treq, req);` then set the 1-2 fields unique
-// to that wire (endpoint, json_protocol, effort). Add a shared field here once
-// and every transport inherits it — no adapter can forget it.
+// to that wire (endpoint, json_protocol). Add a shared field here once and
+// every transport inherits it — no adapter can forget it.
+//
+// `effort` is shared too: it's the model-agnostic reasoning tier (already
+// gated to "" by effort_wire_for when the model can't reason). Each wire
+// merely ENCODES it differently (Anthropic thinking.budget_tokens, OpenAI-Chat
+// reasoning_effort, Responses reasoning.effort) — the VALUE is single-source.
+// (The Responses transport reads req.effort straight off the abstract Request
+// and never calls lower_shared, so it isn't listed as a consumer here.)
 //
 // Templated on the destination so it works for any transport Request that
 // exposes the same-named members; the requires-clause makes a missing member a
@@ -127,6 +134,7 @@ template <class TReq>
         t.max_tokens = r.max_tokens;
         t.auth = std::move(r.auth);
         t.retry_count = r.retry_count;
+        t.effort = std::move(r.effort);
     }
 void lower_shared(TReq& dst, Request& src) {
     dst.model         = std::move(src.model);
@@ -136,6 +144,7 @@ void lower_shared(TReq& dst, Request& src) {
     dst.max_tokens    = src.max_tokens;
     dst.auth          = std::move(src.auth);
     dst.retry_count   = src.retry_count;
+    dst.effort        = std::move(src.effort);
 }
 
 // How a streamed turn ended, as a value (defined in stream_epilogue.hpp, which
