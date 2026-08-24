@@ -20,6 +20,7 @@
 #include "agentty/auth/cred_crypt.hpp"
 #include "agentty/provider/chatgpt/codex_oauth.hpp"
 #include "agentty/provider/copilot/copilot_oauth.hpp"
+#include "agentty/provider/kimi/kimi_oauth.hpp"
 
 namespace agentty::auth::accounts {
 
@@ -30,6 +31,7 @@ namespace fs = std::filesystem;
 namespace crypt = agentty::auth::crypt;
 namespace chatgpt = agentty::provider::chatgpt;
 namespace copilot = agentty::provider::copilot;
+namespace kimi = agentty::provider::kimi;
 
 // The active-store file for a provider whose credential is a single file.
 // nullopt for providers whose accounts are handled elsewhere (OpenAI keys
@@ -41,6 +43,8 @@ std::optional<fs::path> active_store_file(const std::string& provider) {
         return chatgpt::codex_credentials_path();
     if (provider == "copilot")
         return copilot::credentials_path();
+    if (provider == "kimi")
+        return kimi::credentials_path();
     return std::nullopt;
 }
 
@@ -113,6 +117,7 @@ bool activate(const std::string& provider, const std::string& label) {
     // invalidate any cached proxy token so the switched-to account re-exchanges
     // against ITS GitHub credential, not the previous account's.
     if (provider == "copilot") copilot::invalidate_cached_token();
+    if (provider == "kimi") kimi::invalidate_cached_token();
     return set_active(provider, label);
 }
 
@@ -146,6 +151,14 @@ std::string derive_current_label(const std::string& provider) {
             std::string tag = gh.size() >= 8 ? gh.substr(gh.size() - 4) : "";
             std::string base = sku.empty() ? "Copilot" : "Copilot (" + sku + ")";
             return tag.empty() ? base : base + " …" + tag;
+        }
+        if (provider == "kimi") {
+            // The Kimi store is {access_token, refresh_token, …}. Label by a
+            // short suffix of the refresh token so distinct accounts differ.
+            std::string rt = j.value("refresh_token", std::string{});
+            if (rt.empty()) rt = j.value("access_token", std::string{});
+            std::string tag = rt.size() >= 4 ? rt.substr(rt.size() - 4) : "";
+            return tag.empty() ? std::string{"Kimi"} : "Kimi …" + tag;
         }
         std::string method = j.value("method", "");
         if (method == "api_key" || method == "apikey") return "API key";

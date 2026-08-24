@@ -1101,6 +1101,33 @@ Endpoint Endpoint::from_spec(std::string_view spec) {
         return Endpoint{"api.cerebras.ai", 443, "/v1/chat/completions",
                         "/v1/models", true, "cerebras"};
     }
+    if (eq(spec, "deepseek")) {
+        // DeepSeek's OpenAI-compatible endpoints live at the ROOT (no /v1
+        // prefix): https://api.deepseek.com/chat/completions and /models.
+        return Endpoint{"api.deepseek.com", 443, "/chat/completions",
+                        "/models", true, "deepseek"};
+    }
+    if (eq(spec, "xai")) {
+        // xAI (Grok): standard OpenAI-compat surface on /v1.
+        return Endpoint{"api.x.ai", 443, "/v1/chat/completions",
+                        "/v1/models", true, "xai"};
+    }
+    if (eq(spec, "mistral")) {
+        return Endpoint{"api.mistral.ai", 443, "/v1/chat/completions",
+                        "/v1/models", true, "mistral"};
+    }
+    if (eq(spec, "gemini")) {
+        // Google's OpenAI-compat shim lives under /v1beta/openai (chat +
+        // models), NOT the native generateContent surface.
+        return Endpoint{"generativelanguage.googleapis.com", 443,
+                        "/v1beta/openai/chat/completions",
+                        "/v1beta/openai/models", true, "gemini"};
+    }
+    if (eq(spec, "fireworks")) {
+        // Fireworks serves the OpenAI dialect under /inference/v1.
+        return Endpoint{"api.fireworks.ai", 443, "/inference/v1/chat/completions",
+                        "/inference/v1/models", true, "fireworks"};
+    }
     if (eq(spec, "ollama")) {
         Endpoint ep{"localhost", 11434, "/api/chat",
                     "/api/tags", false, "ollama"};

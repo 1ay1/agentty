@@ -59,6 +59,8 @@ set(AGENTTY_PROVIDER_SOURCES
     src/provider/chatgpt/responses.cpp
     src/provider/copilot/provider.cpp
     src/provider/copilot/copilot_oauth.cpp
+    src/provider/kimi/provider.cpp
+    src/provider/kimi/kimi_oauth.cpp
     src/provider/openai/transport.cpp
     src/provider/ollama/transport.cpp
     src/provider/selection.cpp

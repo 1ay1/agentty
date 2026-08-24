@@ -4,6 +4,10 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Four more built-in providers: xAI (Grok), Mistral, Google Gemini, and Fireworks** (`--provider xai|mistral|gemini|fireworks`, or pick in `^P`). All are API-key OpenAI-compat rows — set the provider's key (`XAI_API_KEY`, `MISTRAL_API_KEY`, `GEMINI_API_KEY`/`GOOGLE_API_KEY`, `FIREWORKS_API_KEY`), `-k`, or the in-app prompt. Each gets a dedicated `Endpoint::from_spec` arm for its host/path (Gemini's OpenAI shim nests under `/v1beta/openai`; Fireworks under `/inference/v1`); capability inference now recognizes the `grok`, `gemini`, and `magistral` families as native tool-callers. (`registry.hpp`, `openai/transport.cpp`, `catalog.hpp`; `openai_transport_test`.)
+- **DeepSeek as a built-in provider (`--provider deepseek`, or pick it in `^P`).** Point agentty at DeepSeek's OpenAI-compatible API (`api.deepseek.com`) with a `DEEPSEEK_API_KEY` (or `-k`) — no new login flow, since DeepSeek issues static API keys, not developer OAuth. Its endpoints live at the root (no `/v1` prefix), so it gets a dedicated `Endpoint::from_spec` arm; the V4 model family (`deepseek-v4-pro`/`-flash`, `deepseek-chat`/`-reasoner`) is recognized as native tool-callers by the capability inference. (`include/agentty/provider/registry.hpp`, `src/provider/openai/transport.cpp`, `include/agentty/domain/catalog.hpp`; `openai_transport_test`.)
+
 ## [0.3.1] - 2026-08-21
 
 ### Added

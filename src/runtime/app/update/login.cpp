@@ -82,6 +82,10 @@ Step close_login(Model m) {
         waiting && waiting->cancel) {
         waiting->cancel->store(true, std::memory_order_release);
     }
+    if (auto* waiting = std::get_if<login::KimiWaiting>(&m.ui.login);
+        waiting && waiting->cancel) {
+        waiting->cancel->store(true, std::memory_order_release);
+    }
     m.ui.login = login::Closed{};
     return done(std::move(m));
 }
@@ -97,6 +101,9 @@ Step sign_out(Model m) {
     if (sel.is_copilot()) {
         provider::copilot::clear_credentials();
         what = "GitHub Copilot";
+    } else if (sel.is_kimi()) {
+        provider::kimi::clear_credentials();
+        what = "Kimi";
     } else if (sel.is_oauth_native()) {
         provider::chatgpt::clear_codex_credentials();
         what = "ChatGPT";
@@ -137,6 +144,7 @@ namespace {
 // picker.
 std::string account_provider_id(const provider::Selection& sel) {
     if (sel.is_copilot())                 return "copilot";
+    if (sel.is_kimi())                    return "kimi";
     if (sel.is_chatgpt())                 return "chatgpt";
     if (sel.kind == provider::Kind::Anthropic) return "anthropic";
     return {};   // no account switching for this provider
@@ -226,6 +234,15 @@ Step account_select(Model m) {
             };
             return {std::move(m), cmd::copilot_login_async(attempt_id, std::move(cancel))};
         }
+        if (provider == "kimi") {
+            const auto attempt_id = cmd::next_codex_login_attempt_id();
+            auto cancel = std::make_shared<std::atomic_bool>(false);
+            m.ui.login = login::KimiWaiting{
+                .attempt_id = attempt_id,
+                .cancel = cancel,
+            };
+            return {std::move(m), cmd::kimi_login_async(attempt_id, std::move(cancel))};
+        }
         m.ui.login = login::Picking{.provider = provider};
         return done(std::move(m));
     }
@@ -269,9 +286,9 @@ Step account_select(Model m) {
             settings.context_1m_blocked = false;
             deps().save_settings(settings);
         }
-    } else if (provider == "chatgpt" || provider == "copilot") {
-        // The Codex / Copilot transports read their token from the store on
-        // each turn; clearing the cached header forces a fresh read next turn.
+    } else if (provider == "chatgpt" || provider == "copilot" || provider == "kimi") {
+        // The Codex / Copilot / Kimi transports read their token from the store
+        // on each turn; clearing the cached header forces a fresh read next turn.
         agentty::app::update_auth(auth::AuthHeader{});
     }
     const std::string provider_label = al->provider_label;
@@ -672,6 +689,17 @@ Step login_copy_auth_url(Model m) {
         return {std::move(m),
             Cmd<Msg>::batch(std::move(write_cmd), std::move(toast))};
     }
+    if (auto* kw = std::get_if<login::KimiWaiting>(&m.ui.login)) {
+        if (kw->user_code.empty()) return done(std::move(m));
+        auto code = kw->user_code;
+        (void)write_clipboard_text(code);
+        auto write_cmd = Cmd<Msg>::write_clipboard(code);
+        auto toast = set_status_toast(m,
+            "code " + code + " copied to clipboard",
+            std::chrono::seconds{3});
+        return {std::move(m),
+            Cmd<Msg>::batch(std::move(write_cmd), std::move(toast))};
+    }
     return done(std::move(m));
 }
 
@@ -778,6 +806,41 @@ Step login_copilot_done(
     m.s.status_until = std::chrono::steady_clock::now() + std::chrono::seconds{4};
     return commit_provider_switch(std::move(m), "copilot",
                                   auth::AuthHeader{}, "GitHub Copilot");
+}
+
+Step login_kimi_device_code_ready(Model m, std::uint64_t attempt_id,
+                                  std::string verification_url,
+                                  std::string user_code) {
+    auto* waiting = std::get_if<login::KimiWaiting>(&m.ui.login);
+    if (!waiting || waiting->attempt_id != attempt_id)
+        return done(std::move(m));
+    waiting->authorize_url = verification_url;
+    waiting->user_code = std::move(user_code);
+    // Best-effort: also open the browser to the device page so the user
+    // doesn't have to type the URL. Harmless if it can't (SSH/headless).
+    return {std::move(m), cmd::open_browser_async(std::move(verification_url))};
+}
+
+Step login_kimi_done(
+    Model m, std::uint64_t attempt_id,
+    std::expected<provider::kimi::KimiToken, auth::OAuthError> result)
+{
+    auto* waiting = std::get_if<login::KimiWaiting>(&m.ui.login);
+    if (!waiting || waiting->attempt_id != attempt_id)
+        return done(std::move(m));
+    if (waiting->cancel)
+        waiting->cancel->store(true, std::memory_order_release);
+    if (!result) {
+        m.ui.login = login::Failed{result.error().render()};
+        return done(std::move(m));
+    }
+    // login() already persisted the token bundle; refresh happens lazily on
+    // the first turn. Switch the active provider now.
+    m.ui.login = login::Closed{};
+    m.s.status = "signed in to Kimi";
+    m.s.status_until = std::chrono::steady_clock::now() + std::chrono::seconds{4};
+    return commit_provider_switch(std::move(m), "kimi",
+                                  auth::AuthHeader{}, "Kimi");
 }
 
 Step token_refreshed(Model m, auth::TokenResult result) {
@@ -930,6 +993,14 @@ Step login_update(Model m, msg::LoginMsg lm) {
         [&](CopilotLoginDone& e)    -> Step {
             return login_copilot_done(std::move(m), e.attempt_id,
                                       std::move(e.result));
+        },
+        [&](KimiDeviceCodeReady& e) -> Step {
+            return login_kimi_device_code_ready(std::move(m), e.attempt_id,
+                std::move(e.verification_url), std::move(e.user_code));
+        },
+        [&](KimiLoginDone& e)       -> Step {
+            return login_kimi_done(std::move(m), e.attempt_id,
+                                   std::move(e.result));
         },
         [&](TokenRefreshed& e)      -> Step { return token_refreshed(std::move(m), std::move(e.result)); },
     }, lm);

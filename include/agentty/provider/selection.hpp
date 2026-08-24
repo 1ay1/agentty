@@ -65,6 +65,13 @@ struct Selection {
     [[nodiscard]] bool is_copilot() const noexcept {
         return is_oauth_native() && openai_endpoint.label == "copilot";
     }
+
+    // The native Kimi Code OAuth backend — sibling of is_chatgpt/is_copilot.
+    // Also an oauth_native OpenAI-family row; the label routes to Kimi's
+    // dedicated long-lived transport + device-flow login.
+    [[nodiscard]] bool is_kimi() const noexcept {
+        return is_oauth_native() && openai_endpoint.label == "kimi";
+    }
 };
 
 // Parse a provider spec into a Selection. Accepts:

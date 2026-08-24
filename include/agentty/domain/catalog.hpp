@@ -392,7 +392,7 @@ private:
     //   - Local families with native/trained tool-calling: qwen3, llama3.1,
     //     llama3.3, mistral / mixtral / ministral, command-r, hermes,
     //     firefunction, functionary, devstral, codestral, gpt-oss, granite,
-    //     glm-4, deepseek (v3/r1).
+    //     glm-4, deepseek (v3/v4/r1/reasoner/chat), grok, gemini, magistral.
     //   - Any model >= ~14B parameters (large enough to follow tool schemas).
     //
     // Weak (treat with guards):
@@ -473,7 +473,10 @@ private:
             contains(id, "devstral")     || contains(id, "codestral")  ||
             contains(id, "gpt-oss")      || contains(id, "granite")    ||
             contains(id, "glm-4")        || contains(id, "deepseek-v3")||
-            contains(id, "deepseek-r1");
+            contains(id, "deepseek-v4")  || contains(id, "deepseek-r1")||
+            contains(id, "deepseek-reasoner") || contains(id, "deepseek-chat") ||
+            contains(id, "grok")         || contains(id, "gemini")      ||
+            contains(id, "magistral");
         // A strong family at >= ~7B is reliable; only flag it weak if it's
         // explicitly tiny (<= 3B), where even good families struggle.
         if (strong_family) return params_b != 0 && params_b <= 3;
