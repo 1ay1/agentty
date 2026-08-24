@@ -8,6 +8,7 @@
 #include "agentty/provider/selection.hpp"
 #include "agentty/provider/chatgpt/responses.hpp"
 #include "agentty/provider/copilot/copilot_oauth.hpp"
+#include "agentty/provider/kimi/kimi_oauth.hpp"
 #include "agentty/workspace/files.hpp"
 #include "agentty/workspace/symbols.hpp"
 
@@ -167,6 +168,8 @@ std::pair<Model, maya::Cmd<Msg>> init() {
         // failing on the first send.
         if (sel.is_copilot() && !provider::copilot::signed_in())
             m.ui.login = ui::login::Picking{.provider = "copilot"};
+        if (sel.is_kimi() && !provider::kimi::signed_in())
+            m.ui.login = ui::login::Picking{.provider = "kimi"};
     }
 
     std::vector<maya::Cmd<Msg>> cmds;

@@ -36,6 +36,7 @@
 #include "agentty/auth/auth.hpp"
 #include "agentty/provider/chatgpt/codex_oauth.hpp"
 #include "agentty/provider/copilot/copilot_oauth.hpp"
+#include "agentty/provider/kimi/kimi_oauth.hpp"
 #include "agentty/runtime/fork_picker.hpp"
 #include "agentty/runtime/settings_categories.hpp"
 #include "agentty/runtime/model.hpp"
@@ -607,6 +608,21 @@ struct CopilotLoginDone {
     std::expected<agentty::provider::copilot::GithubToken,
                   agentty::auth::OAuthError> result;
 };
+
+// Kimi Code device-flow login — the exact sibling of the Copilot pair. The
+// worker dispatches KimiDeviceCodeReady as soon as Kimi issues the one-time
+// code (so the modal can show it) and KimiLoginDone when the user approves
+// (or the flow fails/times out).
+struct KimiDeviceCodeReady {
+    std::uint64_t attempt_id = 0;
+    std::string verification_url;
+    std::string user_code;
+};
+struct KimiLoginDone {
+    std::uint64_t attempt_id = 0;
+    std::expected<agentty::provider::kimi::KimiToken,
+                  agentty::auth::OAuthError> result;
+};
 // Result of the background OAuth refresh kicked off from init() when
 // `auth::resolve()` returned an expired token paired with a refresh
 // token. Same TokenResult shape as LoginExchanged, handled in
@@ -865,7 +881,8 @@ using LoginMsg = std::variant<
     LoginPaste, LoginCursorLeft, LoginCursorRight, LoginSubmit,
     LoginCopyAuthUrl, LoginOpenBrowserAgain,
     LoginExchanged, CodexDeviceCodeReady, CodexLoginDone,
-    CopilotDeviceCodeReady, CopilotLoginDone, TokenRefreshed>;
+    CopilotDeviceCodeReady, CopilotLoginDone,
+    KimiDeviceCodeReady, KimiLoginDone, TokenRefreshed>;
 
 using DiffReviewMsg = std::variant<
     OpenDiffReview, CloseDiffReview, DiffReviewMove,

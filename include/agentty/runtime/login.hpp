@@ -72,6 +72,14 @@ struct CopilotWaiting {
     std::string                        user_code;
 };
 
+// Kimi Code device-flow waiting state — identical shape to CopilotWaiting.
+struct KimiWaiting {
+    std::uint64_t                      attempt_id = 0;
+    std::shared_ptr<std::atomic_bool> cancel;
+    std::string                        authorize_url;
+    std::string                        user_code;
+};
+
 struct ApiKeyInput {
     std::string key_input;
     int         cursor = 0;
@@ -120,7 +128,7 @@ struct AccountList {
 };
 
 using State = std::variant<Closed, Picking, OAuthCode, OAuthExchanging,
-                           ChatGptWaiting, CopilotWaiting, ApiKeyInput, CustomHostInput,
+                           ChatGptWaiting, CopilotWaiting, KimiWaiting, ApiKeyInput, CustomHostInput,
                            AccountList, Failed>;
 
 [[nodiscard]] inline bool is_open(const State& s) noexcept {

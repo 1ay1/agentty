@@ -167,6 +167,11 @@ struct LoopBreak {
 [[nodiscard]] maya::Cmd<Msg> copilot_login_async(
     std::uint64_t attempt_id, std::shared_ptr<std::atomic_bool> cancel);
 
+// Kick native Kimi Code device-flow OAuth off the UI thread — the sibling of
+// copilot_login_async. Shares next_codex_login_attempt_id() for correlation.
+[[nodiscard]] maya::Cmd<Msg> kimi_login_async(
+    std::uint64_t attempt_id, std::shared_ptr<std::atomic_bool> cancel);
+
 // Walk ~/.agentty/threads/ and parse every thread JSON off the UI thread.
 // Dispatches `ThreadsLoaded{vec}` on completion. The directory walk +
 // parse can take seconds with hundreds of multi-MB files in real-world

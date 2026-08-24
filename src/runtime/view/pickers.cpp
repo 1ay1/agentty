@@ -24,6 +24,7 @@
 #include "agentty/provider/registry.hpp"
 #include "agentty/provider/chatgpt/responses.hpp"
 #include "agentty/provider/copilot/copilot_oauth.hpp"
+#include "agentty/provider/kimi/kimi_oauth.hpp"
 #include "agentty/provider/acp_agents.hpp"
 #include "agentty/provider/selection.hpp"
 #include "agentty/runtime/app/deps.hpp"   // deps().auth for the live auth badge
@@ -387,6 +388,17 @@ Element provider_picker(const Model& m) {
                 note = "\xe2\x9a\xa0 sign in with GitHub";
                 note_color = warn;
             }
+        } else if (p.id == "kimi") {
+            // Native Kimi Code OAuth (device flow): reflect REAL sign-in state,
+            // like the Copilot row. Selecting it while signed out launches the
+            // device login (picker.cpp).
+            if (provider::kimi::signed_in()) {
+                note = active ? "\xe2\x9c\x93 signed in \xc2\xb7 accounts" : "Kimi (signed in)";
+                note_color = active ? success : muted;
+            } else {
+                note = "\xe2\x9a\xa0 sign in with Kimi";
+                note_color = warn;
+            }
         } else if (p.is_local || p.auth == provider::AuthStyle::None) {
             note = "● local";
             note_color = info;
@@ -497,6 +509,7 @@ Element provider_picker(const Model& m) {
         return highlighted.id == active_id
             && (highlighted.id == "chatgpt"
                 || highlighted.id == "copilot"
+                || highlighted.id == "kimi"
                 || highlighted.kind() == provider::Kind::Anthropic);
     }();
 

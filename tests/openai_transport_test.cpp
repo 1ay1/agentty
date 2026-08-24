@@ -492,6 +492,37 @@ TEST_CASE("test_endpoint_presets") {
     CHECK(cerebras.use_tls);
     CHECK(cerebras.path == "/v1/chat/completions");
 
+    auto deepseek = oai::Endpoint::from_spec("deepseek");
+    CHECK(deepseek.host == "api.deepseek.com");
+    CHECK(deepseek.use_tls);
+    // DeepSeek's OpenAI-compatible endpoints live at the ROOT (no /v1 prefix).
+    CHECK(deepseek.path == "/chat/completions");
+    CHECK(deepseek.models_path == "/models");
+
+    auto xai = oai::Endpoint::from_spec("xai");
+    CHECK(xai.host == "api.x.ai");
+    CHECK(xai.use_tls);
+    CHECK(xai.path == "/v1/chat/completions");
+    CHECK(xai.models_path == "/v1/models");
+
+    auto mistral = oai::Endpoint::from_spec("mistral");
+    CHECK(mistral.host == "api.mistral.ai");
+    CHECK(mistral.use_tls);
+    CHECK(mistral.path == "/v1/chat/completions");
+
+    auto gemini = oai::Endpoint::from_spec("gemini");
+    CHECK(gemini.host == "generativelanguage.googleapis.com");
+    CHECK(gemini.use_tls);
+    // Google's OpenAI-compat shim is nested under /v1beta/openai.
+    CHECK(gemini.path == "/v1beta/openai/chat/completions");
+    CHECK(gemini.models_path == "/v1beta/openai/models");
+
+    auto fireworks = oai::Endpoint::from_spec("fireworks");
+    CHECK(fireworks.host == "api.fireworks.ai");
+    CHECK(fireworks.use_tls);
+    CHECK(fireworks.path == "/inference/v1/chat/completions");
+    CHECK(fireworks.models_path == "/inference/v1/models");
+
     auto ollama = oai::Endpoint::from_spec("ollama");
     CHECK(ollama.host == "localhost");
     CHECK(ollama.port == 11434);

@@ -42,6 +42,11 @@ Even a 1M window eventually fills on a long session. When it does, you can [fork
 | `openrouter` | Any model via `openrouter.ai` | `OPENROUTER_API_KEY` |
 | `together` | Open models on `together.ai` | `TOGETHER_API_KEY` |
 | `cerebras` | Wafer-scale inference — very fast | `CEREBRAS_API_KEY` |
+| `deepseek` | DeepSeek V4 on `api.deepseek.com` | `DEEPSEEK_API_KEY` |
+| `xai` | xAI Grok models on `api.x.ai` | `XAI_API_KEY` |
+| `mistral` | Mistral / Codestral / Magistral on `api.mistral.ai` | `MISTRAL_API_KEY` |
+| `gemini` | Google Gemini via the OpenAI-compat API | `GEMINI_API_KEY` |
+| `fireworks` | Open models on `fireworks.ai` | `FIREWORKS_API_KEY` |
 | `ollama` | Local models at `localhost:11434` | None |
 | `host:port` | Any raw OpenAI-compatible endpoint | `OPENAI_API_KEY` |
 | `https://host[:port]/path` | Any OpenAI-compatible endpoint with a custom path prefix (e.g. a gateway serving on `/api` instead of `/v1`) | `OPENAI_API_KEY` |

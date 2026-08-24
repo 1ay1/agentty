@@ -22,6 +22,7 @@
 #include "agentty/util/update.hpp"
 #include "agentty/provider/chatgpt/provider.hpp"
 #include "agentty/provider/chatgpt/codex_oauth.hpp"
+#include "agentty/provider/kimi/kimi_oauth.hpp"
 #include "agentty/provider/prompt_policy.hpp"
 #include "agentty/provider/selection.hpp"
 #include "agentty/tool/registry.hpp"
@@ -1867,6 +1868,50 @@ Cmd<Msg> copilot_login_async(std::uint64_t attempt_id,
                 .attempt_id = attempt_id,
                 .result = std::unexpected(auth::OAuthError{
                     auth::OAuthErrorKind::Network, "copilot login threw"}),
+            });
+        }
+    });
+}
+
+Cmd<Msg> kimi_login_async(std::uint64_t attempt_id,
+                          std::shared_ptr<std::atomic_bool> cancel) {
+    // Kimi Code device flow: request a code (dispatched to the modal via
+    // KimiDeviceCodeReady), then block-poll until the user approves. Every
+    // message carries attempt_id so a stale worker can't complete a newer
+    // login; Esc trips `cancel` for cooperative shutdown.
+    return Cmd<Msg>::task_isolated(
+        [attempt_id, cancel = std::move(cancel)](std::function<void(Msg)> dispatch) {
+        const auto cancelled = [cancel] {
+            return cancel && cancel->load(std::memory_order_acquire);
+        };
+        try {
+            auto r = provider::kimi::login(
+                900, [attempt_id, &dispatch](
+                         const provider::kimi::DeviceCode& code) {
+                    dispatch(KimiDeviceCodeReady{
+                        .attempt_id = attempt_id,
+                        .verification_url = code.verification_uri_complete.empty()
+                                                ? code.verification_uri
+                                                : code.verification_uri_complete,
+                        .user_code = code.user_code,
+                    });
+                }, cancelled);
+            dispatch(KimiLoginDone{
+                .attempt_id = attempt_id,
+                .result = std::move(r),
+            });
+        } catch (const std::exception& e) {
+            dispatch(KimiLoginDone{
+                .attempt_id = attempt_id,
+                .result = std::unexpected(auth::OAuthError{
+                    auth::OAuthErrorKind::Network,
+                    std::string{"kimi login threw: "} + e.what()}),
+            });
+        } catch (...) {
+            dispatch(KimiLoginDone{
+                .attempt_id = attempt_id,
+                .result = std::unexpected(auth::OAuthError{
+                    auth::OAuthErrorKind::Network, "kimi login threw"}),
             });
         }
     });

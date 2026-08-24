@@ -144,7 +144,7 @@ using ProviderPreset = ProviderDescriptor;
 // To add a provider: append a row here, and — if it's OpenAI-compatible with
 // a non-default wire path — add the matching `Endpoint` arm in
 // openai/transport.cpp::from_spec keyed on the same `id`.
-inline constexpr std::array<ProviderDescriptor, 10> kProviders{{
+inline constexpr std::array<ProviderDescriptor, 16> kProviders{{
     {"anthropic",  "Anthropic",  "Claude — OAuth (Pro/Max) or API key",
      Wire::AnthropicMessages, Lifetime::LongLived, AuthStyle::OAuthOrKey, false, {"", "", ""}, "api.anthropic.com"},
     {"openai",     "OpenAI",     "GPT / Codex — api.openai.com",
@@ -153,6 +153,8 @@ inline constexpr std::array<ProviderDescriptor, 10> kProviders{{
      Wire::OpenAIResponses,   Lifetime::LongLived, AuthStyle::None,       true,  {"", "", ""}, "chatgpt.com", /*oauth_native=*/true},
     {"copilot",   "GitHub Copilot", "Sign in with GitHub — Copilot models, no API key",
      Wire::OpenAIChat,        Lifetime::LongLived, AuthStyle::None,       false, {"", "", ""}, "api.githubcopilot.com", /*oauth_native=*/true},
+    {"kimi",      "Kimi",       "Sign in with Kimi — Kimi K2 models, no API key",
+     Wire::OpenAIChat,        Lifetime::LongLived, AuthStyle::None,       false, {"", "", ""}, "api.kimi.com", /*oauth_native=*/true},
     {"groq",       "Groq",       "Llama/Mixtral on Groq LPUs — very fast",
      Wire::OpenAIChat,        Lifetime::PerCall,   AuthStyle::ApiKey,     false, {"GROQ_API_KEY", "OPENAI_API_KEY", ""}, ""},
     {"openrouter", "OpenRouter", "Any model via openrouter.ai",
@@ -161,6 +163,16 @@ inline constexpr std::array<ProviderDescriptor, 10> kProviders{{
      Wire::OpenAIChat,        Lifetime::PerCall,   AuthStyle::ApiKey,     false, {"TOGETHER_API_KEY", "OPENAI_API_KEY", ""}, ""},
     {"cerebras",   "Cerebras",   "Wafer-scale inference — very fast",
      Wire::OpenAIChat,        Lifetime::PerCall,   AuthStyle::ApiKey,     false, {"CEREBRAS_API_KEY", "OPENAI_API_KEY", ""}, ""},
+    {"deepseek",   "DeepSeek",   "DeepSeek V4 — api.deepseek.com",
+     Wire::OpenAIChat,        Lifetime::PerCall,   AuthStyle::ApiKey,     false, {"DEEPSEEK_API_KEY", "OPENAI_API_KEY", ""}, ""},
+    {"xai",        "xAI (Grok)", "Grok models — api.x.ai",
+     Wire::OpenAIChat,        Lifetime::PerCall,   AuthStyle::ApiKey,     false, {"XAI_API_KEY", "OPENAI_API_KEY", ""}, ""},
+    {"mistral",    "Mistral",    "Mistral / Codestral / Magistral — api.mistral.ai",
+     Wire::OpenAIChat,        Lifetime::PerCall,   AuthStyle::ApiKey,     false, {"MISTRAL_API_KEY", "OPENAI_API_KEY", ""}, ""},
+    {"gemini",     "Google Gemini", "Gemini models via the OpenAI-compat API",
+     Wire::OpenAIChat,        Lifetime::PerCall,   AuthStyle::ApiKey,     false, {"GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENAI_API_KEY"}, ""},
+    {"fireworks",  "Fireworks",  "Open models on fireworks.ai",
+     Wire::OpenAIChat,        Lifetime::PerCall,   AuthStyle::ApiKey,     false, {"FIREWORKS_API_KEY", "OPENAI_API_KEY", ""}, ""},
     {"ollama",     "Ollama",     "Local models at localhost:11434",
      Wire::OpenAIChat,        Lifetime::PerCall,   AuthStyle::None,       true,  {"", "", ""}, ""},
     {"llama.cpp",  "llama.cpp",  "Local llama.cpp server at localhost:8080",

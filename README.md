@@ -23,7 +23,7 @@ Most terminal coding agents ship as a Node or Python app and send big chunks of 
 
 - **It's one native binary.** 16.7 MB, ~3 ms cold start, zero runtime dependencies — no Node, no Python, no `npm install`, no `node_modules`. Download and run.
 - **It sends only the relevant code.** Built-in retrieval (hybrid BM25 + dense embeddings, code-aware chunking, GraphRAG) fetches just the slices that matter — often cutting context by 80%+ vs. whole-repo dumping.
-- **It's not locked to one vendor.** Sign in with your Claude Pro/Max, or point it at OpenAI, Groq, OpenRouter, Cerebras, or a fully local Ollama model. Switch live with `^P`.
+- **It's not locked to one vendor.** Sign in with your Claude Pro/Max, or point it at OpenAI, Groq, OpenRouter, Cerebras, DeepSeek, xAI (Grok), Mistral, Gemini, Fireworks, or a fully local Ollama model. Switch live with `^P`.
 - **It's safe by default.** Shell and build commands run in a sandbox; air-gap an entire session over SSH with one command.
 - **It's open source (MIT)** and runs inside Zed over ACP.
 
@@ -81,6 +81,9 @@ agentty --provider openai -m gpt-4o        # GPT
 agentty --provider groq -m llama-3.3-70b   # Groq
 agentty --provider ollama -m qwen2.5-coder # local model, no key
 agentty --provider openrouter              # any model via OpenRouter
+agentty --provider deepseek -m deepseek-v4-pro  # DeepSeek (DEEPSEEK_API_KEY)
+agentty --provider xai -m grok-4.6         # xAI Grok (XAI_API_KEY)
+agentty --provider gemini -m gemini-3.7-flash   # Google Gemini (GEMINI_API_KEY)
 agentty -m claude-opus-4-5                 # Claude (API key or Pro/Max OAuth)
 ```
 

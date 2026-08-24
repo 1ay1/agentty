@@ -607,6 +607,16 @@ std::optional<Msg> on_login(const ui::login::State& state, const KeyEvent& ev) {
         }
     }
 
+    // Kimi device-flow modal: same interaction model as Copilot.
+    if (std::holds_alternative<KimiWaiting>(state)) {
+        if (auto* ck = std::get_if<CharKey>(&ev.key)) {
+            char32_t c = ck->codepoint;
+            if (ev.mods.ctrl && c >= 0x01 && c <= 0x1A) c = U'a' + (c - 1);
+            if (c == U'c' || c == U'C') return LoginCopyAuthUrl{};   // copies the code
+            if (c == U'o' || c == U'O') return LoginOpenBrowserAgain{};
+        }
+    }
+
     // OAuthCode or ApiKeyInput — both accept free-text input.
     if (std::holds_alternative<SpecialKey>(ev.key)) {
         switch (std::get<SpecialKey>(ev.key)) {

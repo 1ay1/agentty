@@ -21,6 +21,7 @@
 #include "agentty/runtime/app/deps.hpp"
 #include "agentty/provider/chatgpt/responses.hpp"
 #include "agentty/provider/copilot/copilot_oauth.hpp"
+#include "agentty/provider/kimi/kimi_oauth.hpp"
 #include "agentty/provider/registry.hpp"
 #include "agentty/provider/acp_agents.hpp"
 #include "agentty/provider/selection.hpp"
@@ -611,6 +612,7 @@ Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
             const bool is_active_account_provider =
                 (preset.id == "chatgpt" && active.is_chatgpt())
                 || (preset.id == "copilot" && active.is_copilot())
+                || (preset.id == "kimi" && active.is_kimi())
                 || (preset.kind() == provider::Kind::Anthropic
                     && active.kind == provider::Kind::Anthropic);
             if (is_active_account_provider) {
@@ -687,6 +689,19 @@ Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
                 };
                 return {std::move(m),
                         cmd::copilot_login_async(attempt_id, std::move(cancel))};
+            }
+
+            // Kimi Code authenticates via native device-flow OAuth (RFC 8628),
+            // exactly like Copilot. Launch the device login if not signed in.
+            if (spec == "kimi" && !provider::kimi::signed_in()) {
+                const auto attempt_id = cmd::next_codex_login_attempt_id();
+                auto cancel = std::make_shared<std::atomic_bool>(false);
+                m.ui.login = ui::login::KimiWaiting{
+                    .attempt_id = attempt_id,
+                    .cancel = cancel,
+                };
+                return {std::move(m),
+                        cmd::kimi_login_async(attempt_id, std::move(cancel))};
             }
 
             // codex-cli authenticates via native ChatGPT OAuth, not an API

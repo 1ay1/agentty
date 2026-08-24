@@ -77,6 +77,7 @@
 #include "agentty/provider/anthropic/provider.hpp"
 #include "agentty/provider/chatgpt/provider.hpp"
 #include "agentty/provider/copilot/provider.hpp"
+#include "agentty/provider/kimi/provider.hpp"
 #include "agentty/provider/openai/provider.hpp"
 #include "agentty/provider/ollama/provider.hpp"
 #include "agentty/provider/acp_provider_adapter.hpp"
@@ -229,8 +230,9 @@ void print_usage() {
         "                             write   (never prompt reads).\n"
         "      --provider P    LLM backend. anthropic (default, OAuth/Pro/Max)\n"
         "                      or an OpenAI-compatible one: openai | codex | groq |\n"
-        "                      openrouter | together | cerebras | ollama |\n"
-        "                      llama.cpp, or a raw host[:port] for any other\n"
+        "                      openrouter | together | cerebras | deepseek | xai |\n"
+        "                      mistral | gemini | fireworks | ollama | llama.cpp,\n"
+        "                      or a raw host[:port] for any other\n"
         "                      OpenAI-compatible server. Reads OPENAI_API_KEY\n"
         "                      (or the provider-specific *_API_KEY) / -k for\n"
         "                      the key; local backends need no key. Persisted\n"
@@ -239,6 +241,9 @@ void print_usage() {
         "                      chatgpt talks to ChatGPT natively via the\n"
         "                      reverse-engineered OAuth login (`agentty login`\n"
         "                      \xe2\x86\x92 ChatGPT); no Codex binary is needed.\n"
+        "                      copilot and kimi sign in the same way via their\n"
+        "                      device-flow OAuth (`agentty login` \xe2\x86\x92 GitHub\n"
+        "                      Copilot / Kimi) \xe2\x80\x94 no API key needed.\n"
         "                      Note: hosted Claude output is watermarked per\n"
         "                      the EU AI Act (invisible, no opt-out, set\n"
         "                      server-side). Local/open-weight backends\n"
@@ -695,6 +700,7 @@ int main(int argc, char** argv) {
     provider::anthropic::AnthropicProvider anthropic_provider;
     provider::chatgpt::ChatGptProvider chatgpt_provider;
     provider::copilot::CopilotProvider copilot_provider;
+    provider::kimi::KimiProvider           kimi_provider;
     io::FsStore                            store;
 
     // The seam: a single std::function the runtime calls. It dispatches on
@@ -713,7 +719,7 @@ int main(int argc, char** argv) {
     // dispatch from the active endpoint.
     std::function<provider::StreamResult(provider::Request,
                                          provider::EventSink)> stream_fn =
-        [&anthropic_provider, &chatgpt_provider, &copilot_provider]
+        [&anthropic_provider, &chatgpt_provider, &copilot_provider, &kimi_provider]
         (provider::Request req, provider::EventSink sink) {
             provider::ProviderRouter router;
             router.set(provider::LongLived::Anthropic,
@@ -730,6 +736,11 @@ int main(int argc, char** argv) {
                        [&copilot_provider](provider::Request r,
                                            provider::EventSink s) {
                            return copilot_provider.stream(std::move(r), std::move(s));
+                       })
+                  .set(provider::LongLived::Kimi,
+                       [&kimi_provider](provider::Request r,
+                                        provider::EventSink s) {
+                           return kimi_provider.stream(std::move(r), std::move(s));
                        });
             router.external_acp = [](const std::string& agent_id,
                                      provider::Request r, provider::EventSink s) {
