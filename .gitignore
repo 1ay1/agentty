@@ -18,6 +18,10 @@ credentials.json
 # / CLAUDE.md for team-shared project context instead).
 .agentty/
 
+# Cross-client agent skills/commands the runtime reads from <cwd>/.agents/
+# — a local per-workspace convention, not a shipped project asset.
+.agents/
+
 # Release artifacts (uploaded to GitHub releases, not committed)
 agentty-linux-*
 SHA256SUMS
