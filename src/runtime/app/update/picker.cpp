@@ -480,13 +480,34 @@ Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
     const auto acp_agents = provider::enumerate_acp_agents();
     const int n_presets = static_cast<int>(presets.size());
     const int n_acp     = static_cast<int>(acp_agents.size());
-    // Virtual rows after presets: [ACP agents…] then "Custom host…".
-    const int n = n_presets + n_acp + 1;
+    // Saved custom OpenAI-compatible hosts from Settings.provider_keys
+    // that are NOT built-in presets — displayed as their own rows AFTER
+    // ACP agents and BEFORE the "Custom host…" sentinel, matching the
+    // rendering order in pickers.cpp.
+    auto settings = deps().load_settings();
+    std::vector<std::string> saved_custom_hosts;
+    for (const auto& [spec, key] : settings.provider_keys)
+        if (!provider::preset_for(spec))
+            saved_custom_hosts.push_back(spec);
+    std::sort(saved_custom_hosts.begin(), saved_custom_hosts.end());
+    const int n_custom = static_cast<int>(saved_custom_hosts.size());
+
+    // Virtual rows after presets: [ACP agents…] [saved custom hosts…]
+    // then "Custom host…" sentinel.
+    const int n = n_presets + n_acp + n_custom + 1;
     const int custom_row = n - 1;   // index of the sentinel row
     // ACP rows occupy [n_presets, n_presets + n_acp).
     auto acp_row_at = [&](int idx) -> const provider::AcpAgentSpec* {
         if (idx >= n_presets && idx < n_presets + n_acp)
             return &acp_agents[static_cast<std::size_t>(idx - n_presets)];
+        return nullptr;
+    };
+    // Saved custom host rows occupy [n_presets + n_acp,
+    // n_presets + n_acp + n_custom). Returns the spec string or nullptr.
+    auto custom_host_at = [&](int idx) -> const std::string* {
+        int base = n_presets + n_acp;
+        if (idx >= base && idx < base + n_custom)
+            return &saved_custom_hosts[static_cast<std::size_t>(idx - base)];
         return nullptr;
     };
     return std::visit(overload{
@@ -503,8 +524,17 @@ Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
                     sel.kind == provider::Kind::OpenAI
                         ? sel.openai_endpoint.label
                         : std::string{provider::default_provider_id()};
+                // Check built-in presets first.
                 for (int i = 0; i < n_presets; ++i)
                     if (presets[static_cast<std::size_t>(i)].id == active_label) idx = i;
+                // If no preset matched, check saved custom hosts (the
+                // active provider may be a custom host:port spec).
+                if (idx == 0 && sel.kind == provider::Kind::OpenAI) {
+                    int base = n_presets + n_acp;
+                    for (int i = 0; i < n_custom; ++i)
+                        if (saved_custom_hosts[static_cast<std::size_t>(i)] == active_label)
+                            idx = base + i;
+                }
             }
             m.ui.provider_picker = pick::OpenAt{idx};
             return done(std::move(m));
@@ -553,6 +583,30 @@ Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
             if (const provider::AcpAgentSpec* agent = acp_row_at(selected)) {
                 return commit_provider_switch(std::move(m), agent->id,
                                               auth::AuthHeader{}, agent->id);
+            }
+
+            // A saved custom OpenAI-compatible host row: the spec string
+            // (e.g. "my-server.com:8443") is the key into
+            // Settings.provider_keys. Resolve the saved key and commit the
+            // switch directly — no re-entry needed because the key is
+            // already on disk. This is what makes saved custom hosts
+            // switchable without retyping.
+            if (const std::string* spec_ptr = custom_host_at(selected)) {
+                const std::string spec = *spec_ptr;
+                std::string saved_key;
+                {
+                    auto s = deps().load_settings();
+                    if (auto it = s.provider_keys.find(spec);
+                        it != s.provider_keys.end())
+                        saved_key = it->second;
+                }
+                auth::AuthHeader anthropic_creds = deps().auth;
+                if (auto saved = auth::load_credentials())
+                    anthropic_creds = auth::make_auth_header(*saved);
+                auth::AuthHeader new_auth = provider::resolve_auth_for(
+                    spec, anthropic_creds, /*cli_key=*/{}, saved_key);
+                return commit_provider_switch(std::move(m), spec,
+                                              std::move(new_auth), spec);
             }
 
             const auto& preset = presets[static_cast<std::size_t>(selected)];
