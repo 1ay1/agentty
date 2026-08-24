@@ -6,7 +6,7 @@ nav_order: 15
 slug: vs-claude-code
 ---
 
-**Short version:** agentty is a drop-in [claude-code](https://github.com/anthropics/claude-code) alternative that targets the *same workflow* — a coding agent in your terminal — but ships as a single native **C++26** binary instead of a Node.js app, starts in **under a millisecond**, sandboxes every shell call by default, and is **bring-your-own-model**: run it with an API key, a local Ollama model, or your existing Claude Pro/Max OAuth. It works with **any model** (Claude, GPT, Groq, OpenRouter, Together, Cerebras, or local Ollama), not Claude only.
+**Short version:** agentty is a drop-in [claude-code](https://github.com/anthropics/claude-code) alternative that targets the *same workflow* — a coding agent in your terminal — but ships as a single native **C++26** binary instead of a Node.js app, starts in **under a millisecond**, sandboxes every shell call by default, and is **bring-your-own-model**: run it with an API key, a subscription sign-in (Claude Pro/Max, ChatGPT, GitHub Copilot, or Kimi), or a local Ollama model. It works with **any model** (Claude, GPT, DeepSeek, Kimi, Gemini, Grok, Mistral, Groq, OpenRouter, Together, Cerebras, Fireworks, or local Ollama), not Claude only.
 
 If you already like Claude Code's workflow but want it faster, dependency-free, model-agnostic, and sandboxed, agentty is built for you.
 
@@ -18,8 +18,8 @@ If you already like Claude Code's workflow but want it faster, dependency-free, 
 | **Cold start** | < 1 ms | ~hundreds of ms (Node boot) |
 | **Install size** | {{sizeMB}}, one file | Node runtime + `node_modules` |
 | **Dependencies** | None (no Node, Python, Electron, npm) | Node.js ≥ 18 |
-| **Models** | Claude, OpenAI, Groq, OpenRouter, Together, Cerebras, local Ollama, any OpenAI-compatible host | Claude only |
-| **Auth** | Any provider API key, local Ollama (no key), *or* Claude Pro/Max OAuth | Claude Pro/Max OAuth or API key |
+| **Models** | Claude, OpenAI, DeepSeek, Kimi, Gemini, Grok, Mistral, Groq, OpenRouter, Together, Cerebras, Fireworks, local Ollama, any OpenAI-compatible host | Claude only |
+| **Auth** | Any provider API key, local Ollama (no key), *or* subscription OAuth (Claude Pro/Max, ChatGPT, GitHub Copilot, Kimi) | Claude Pro/Max OAuth or API key |
 | **Shell sandbox** | On by default (`bwrap` / `sandbox-exec`) | Permission prompts, no OS sandbox |
 | **Editor integration** | Runs inside Zed over [ACP](/docs/acp) | Terminal + IDE extensions |
 | **Air-gapped hosts** | One-command [SSH air-gap](/docs/airgap) | — |
@@ -37,7 +37,7 @@ Claude Code is distributed as an npm package and boots a Node.js runtime on ever
 
 ### Any model, bring your own key
 
-agentty is model-agnostic — run it with an API key for **OpenAI, Groq, OpenRouter, Together, Cerebras, or Anthropic**, a fully local **Ollama** model (no key, no cloud), or your existing Claude Pro/Max OAuth. Switch backends live in-app with `^P`, or pass `--provider`. See [Providers & Models](/docs/providers). If you want Claude Code's ergonomics with a local, zero-API-cost model, that's a one-flag change.
+agentty is model-agnostic — run it with an API key for **OpenAI, DeepSeek, Google Gemini, xAI Grok, Mistral, Groq, OpenRouter, Together, Cerebras, Fireworks, or Anthropic**, a subscription sign-in (**Claude Pro/Max, ChatGPT, GitHub Copilot, or Kimi** — no key), or a fully local **Ollama** model (no key, no cloud). Switch backends live in-app with `^P`, or pass `--provider`. See [Providers & Models](/docs/providers). If you want Claude Code's ergonomics with a local, zero-API-cost model, that's a one-flag change.
 
 ### Sandboxed by default, not as an afterthought
 
@@ -69,7 +69,7 @@ Choose agentty if you want:
 
 - A **single-binary coding agent** with zero runtime dependencies.
 - **Sub-millisecond startup** and a TUI that never GC-pauses.
-- **Your choice of model** — Claude, GPT, or a local Ollama model — behind one client.
+- **Your choice of model** — Claude, GPT, DeepSeek, Kimi, or a local Ollama model — behind one client.
 - Shell calls **sandboxed by default**.
 - To drive an agent on an **air-gapped host** over SSH.
 - An **open-source (MIT)** tool you can read, fork, and ship.

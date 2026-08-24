@@ -15,6 +15,8 @@ agentty                                # run in the current directory
 agentty -w ~/code/project              # run against another workspace
 agentty -m claude-opus-4-5             # pick a model for the session
 agentty --provider openai -m gpt-4o    # run against a different backend
+agentty --provider kimi                # sign in with Kimi (no API key)
+agentty --provider deepseek -m deepseek-v4-pro   # DeepSeek (DEEPSEEK_API_KEY)
 agentty --provider ollama              # local model, no key, no cloud
 agentty -k sk-ant-…                     # single-session key, never written to disk
 agentty --sandbox on                   # require an OS sandbox for bash/diagnostics
@@ -62,7 +64,7 @@ These mirror `agentty --help` exactly.
 |---|---|
 | `-k`, `--key <key>` | API-key override for this session; never written to disk. |
 | `-m`, `--model <id>` | Model id for the session (e.g. `claude-opus-4-5`). |
-| `--provider <p>` | LLM backend: `anthropic` (default) or an OpenAI-compatible one — `openai` · `groq` · `openrouter` · `together` · `cerebras` · `ollama`, a raw `host:port`, or a full URL `https://host/path` for servers with a custom path prefix. Persisted like `-m`; switch live with `^P`. See [Providers & Models](/docs/providers). |
+| `--provider <p>` | LLM backend: `anthropic` (default) or an OpenAI-compatible one — `openai` · `chatgpt` · `copilot` · `kimi` · `deepseek` · `gemini` · `xai` · `mistral` · `groq` · `openrouter` · `together` · `cerebras` · `fireworks` · `ollama`, a raw `host:port`, or a full URL `https://host/path` for servers with a custom path prefix. Persisted like `-m`; switch live with `^P`. See [Providers & Models](/docs/providers). |
 | `-p`, `--profile <mode>` | ACP permission tier (Zed shows the prompts): `ask` (default) · `minimal` (also prompt reads) · `write` (never prompts — fully autonomous). |
 | `-w`, `--workspace <dir>` | Sandbox filesystem tools to this directory (default: cwd). Tools refuse paths outside it. Pass `--workspace /` to disable the gate. |
 | `--sandbox <mode>` | Wrap `bash`/`diagnostics` in an OS-native sandbox. `auto` (default) · `on` (require a backend) · `off` (disable). |

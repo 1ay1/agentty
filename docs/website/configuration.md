@@ -15,7 +15,7 @@ agentty is configured through flags, environment variables, and two on-disk path
 | `ANTHROPIC_API_KEY` | Claude API key used when no -k flag is passed. Second-highest priority in credential resolution. |
 | `CLAUDE_CODE_OAUTH_TOKEN` | OAuth token from the env (reuses Claude Code's token) — below API key but above on-disk creds. No refresh token. |
 | `OPENAI_API_KEY` | Key for --provider openai, and the fallback key for every other OpenAI-compatible provider. |
-| `GROQ_API_KEY / OPENROUTER_API_KEY / TOGETHER_API_KEY / CEREBRAS_API_KEY` | Provider-specific keys, checked before OPENAI_API_KEY for that provider. Ollama needs none. |
+| `GROQ_API_KEY / OPENROUTER_API_KEY / TOGETHER_API_KEY / CEREBRAS_API_KEY / DEEPSEEK_API_KEY / GEMINI_API_KEY / XAI_API_KEY / MISTRAL_API_KEY / FIREWORKS_API_KEY` | Provider-specific keys, checked before `OPENAI_API_KEY` for that provider. Gemini also accepts `GOOGLE_API_KEY`. Kimi/ChatGPT/Copilot use `agentty login` (OAuth), not a key. Ollama needs none. |
 | `AGENTTY_SOCKS_PROXY` | Route all TCP through this SOCKS5 proxy host:port (set automatically by airgap mode). |
 | `AGENTTY_API_HOST` | Override the API host (host[:port]) — dial a different upstream, keeping normal TLS chain verification (and any `AGENTTY_TLS_PINS` you set). |
 | `AGENTTY_OAUTH_HOST` | Override the OAuth host (host[:port]). |
