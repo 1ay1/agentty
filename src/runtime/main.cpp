@@ -115,7 +115,7 @@ namespace {
 // backtrace to stdout BEFORE the process dies. This catches crashes that
 // ASAN cannot intercept (e.g. mimalloc internal segfaults) and gives
 // the user a stack trace without needing GDB.
-#if !defined(NDEBUG) && !defined(_WIN32) && !defined(__MINGW32__) && !defined(__MINGW64__)
+#if !defined(NDEBUG) && !defined(_WIN32)
 #include <execinfo.h>
 #include <unistd.h>
 
@@ -936,7 +936,7 @@ int main(int argc, char** argv) {
         if (std::freopen(logpath.string().c_str(), "a", stderr)) {
             std::setvbuf(stderr, nullptr, _IOLBF, 0);   // line-buffered
             std::fprintf(stderr, "\n=== agentty session %ld ===\n",
-                          static_cast<long>(agentty_pid()));
+                         static_cast<long>(agentty_pid()));
         }
     }
 
