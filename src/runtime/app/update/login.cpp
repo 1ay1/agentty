@@ -678,7 +678,8 @@ Step login_copy_auth_url(Model m) {
     // the same.
     std::string url;
     if (auto* oc = std::get_if<login::OAuthCode>(&m.ui.login)) url = oc->authorize_url;
-    else if (auto* dw = std::get_if<login::DeviceWaiting>(&m.ui.login)) url = dw->authorize_url;
+    else if (auto* dw = std::get_if<login::DeviceWaiting>(&m.ui.login))
+        url = dw->browser_url.empty() ? dw->authorize_url : dw->browser_url;
     if (url.empty()) return done(std::move(m));
     (void)write_clipboard_text(url);   // native pbcopy/wl-copy/xclip
     auto write_cmd = Cmd<Msg>::write_clipboard(url);
@@ -703,9 +704,11 @@ Step login_copy_code(Model m) {
 }
 
 Step login_open_browser_again(Model m) {
-    auto* oc = std::get_if<login::OAuthCode>(&m.ui.login);
-    if (!oc || oc->authorize_url.empty()) return done(std::move(m));
-    auto url = oc->authorize_url;
+    std::string url;
+    if (auto* oc = std::get_if<login::OAuthCode>(&m.ui.login)) url = oc->authorize_url;
+    else if (auto* dw = std::get_if<login::DeviceWaiting>(&m.ui.login))
+        url = dw->browser_url.empty() ? dw->authorize_url : dw->browser_url;
+    if (url.empty()) return done(std::move(m));
     auto open_cmd = cmd::open_browser_async(std::move(url));
     auto toast = set_status_toast(m,
         "opening browser\xe2\x80\xa6",
@@ -775,16 +778,20 @@ Step login_codex_done(
 Step login_device_code_ready(Model m, std::string provider,
                              std::uint64_t attempt_id,
                              std::string verification_url,
+                             std::string browser_url,
                              std::string user_code) {
     auto* waiting = std::get_if<login::DeviceWaiting>(&m.ui.login);
     if (!waiting || waiting->provider != provider
                  || waiting->attempt_id != attempt_id)
         return done(std::move(m));
-    waiting->authorize_url = verification_url;
+    waiting->authorize_url = std::move(verification_url);   // bare (code field)
+    if (browser_url.empty()) browser_url = waiting->authorize_url;
+    waiting->browser_url = browser_url;
     waiting->user_code = std::move(user_code);
-    // Best-effort: also open the browser to the device page so the user
-    // doesn't have to type the URL. Harmless if it can't (SSH/headless).
-    return {std::move(m), cmd::open_browser_async(std::move(verification_url))};
+    // Best-effort: open the PRE-FILLED url so the user doesn't have to type the
+    // code. Harmless if it can't (SSH/headless) — the panel shows the bare url
+    // + code for manual entry.
+    return {std::move(m), cmd::open_browser_async(std::move(browser_url))};
 }
 
 Step login_device_done(Model m, std::string provider, std::string provider_label,
@@ -955,7 +962,8 @@ Step login_update(Model m, msg::LoginMsg lm) {
         },
         [&](DeviceCodeReady& e) -> Step {
             return login_device_code_ready(std::move(m), std::move(e.provider),
-                e.attempt_id, std::move(e.verification_url), std::move(e.user_code));
+                e.attempt_id, std::move(e.verification_url),
+                std::move(e.browser_url), std::move(e.user_code));
         },
         [&](DeviceLoginDone& e)    -> Step {
             return login_device_done(std::move(m), std::move(e.provider),

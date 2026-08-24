@@ -1845,11 +1845,13 @@ Cmd<Msg> device_login_async(std::string provider, std::string provider_label,
         const auto cancelled = [cancel] {
             return cancel && cancel->load(std::memory_order_acquire);
         };
-        auto emit_code = [&](std::string url, std::string user_code) {
+        auto emit_code = [&](std::string bare_url, std::string browser_url,
+                             std::string user_code) {
             dispatch(DeviceCodeReady{
                 .provider = provider,
                 .attempt_id = attempt_id,
-                .verification_url = std::move(url),
+                .verification_url = std::move(bare_url),
+                .browser_url = std::move(browser_url),
                 .user_code = std::move(user_code),
             });
         };
@@ -1870,16 +1872,20 @@ Cmd<Msg> device_login_async(std::string provider, std::string provider_label,
             if (provider == "copilot") {
                 auto r = provider::copilot::login(900,
                     [&](const provider::copilot::DeviceCode& c) {
-                        emit_code(c.verification_uri, c.user_code);
+                        // GitHub returns one URL (github.com/login/device); the
+                        // user types the code there.
+                        emit_code(c.verification_uri, c.verification_uri, c.user_code);
                     }, cancelled);
                 if (!r) err = r.error().render();
             } else if (provider == "kimi") {
                 auto r = provider::kimi::login(900,
                     [&](const provider::kimi::DeviceCode& c) {
-                        emit_code(c.verification_uri_complete.empty()
-                                      ? c.verification_uri
-                                      : c.verification_uri_complete,
-                                  c.user_code);
+                        // Show the BARE url (has a code-entry field) but open
+                        // the pre-filled _complete url in the browser.
+                        const std::string complete =
+                            c.verification_uri_complete.empty() ? c.verification_uri
+                                                                : c.verification_uri_complete;
+                        emit_code(c.verification_uri, complete, c.user_code);
                     }, cancelled);
                 if (!r) err = r.error().render();
             } else {

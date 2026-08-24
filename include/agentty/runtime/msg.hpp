@@ -614,7 +614,8 @@ struct CodexLoginDone {
 struct DeviceCodeReady {
     std::string   provider;
     std::uint64_t attempt_id = 0;
-    std::string   verification_url;
+    std::string   verification_url;   // BARE url (shown in the panel, has a code field)
+    std::string   browser_url;         // pre-filled url (auto-opened; copied by `u`)
     std::string   user_code;
 };
 struct DeviceLoginDone {

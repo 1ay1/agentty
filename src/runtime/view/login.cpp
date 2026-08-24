@@ -334,17 +334,20 @@ Element panel_device_waiting(const login::DeviceWaiting& s) {
             fg_dim(muted)));
     } else {
         rows.push_back(body_text(
-            "Open this link in a browser on any device:", fg_dim(muted)));
+            "A browser was opened to approve this device. If it didn't open, or",
+            fg_dim(muted)));
+        rows.push_back(body_text(
+            "it asks for a code, go to this URL and enter the code below:",
+            fg_dim(muted)));
         rows.push_back(text(""));
         rows.push_back(url_panel(s.authorize_url));
         rows.push_back(text(""));
-        rows.push_back(body_text("Then enter this one-time code:",
-                                 fg_dim(muted)));
-        rows.push_back(text(s.user_code, fg_bold(fg)));
+        rows.push_back(h(text("   code: ", fg_dim(muted)),
+                         text(s.user_code, fg_bold(highlight))).build());
         rows.push_back(text(""));
         rows.push_back(body_text(
-            "The code expires in ~15 minutes. This uses your existing " + label +
-            " subscription \xE2\x80\x94 no API key needed.", fg_dim(muted)));
+            "After signing in to " + label + ", approve the device. The code "
+            "expires in ~15 minutes; no API key is needed.", fg_dim(muted)));
         rows.push_back(text(""));
         rows.push_back(key_hints({
             {"c",   "copy code"},

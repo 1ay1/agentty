@@ -11,12 +11,21 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <fstream>
 #include <iterator>
 #include <mutex>
+#include <random>
 #include <thread>
 #include <utility>
 #include <vector>
+
+#if defined(_WIN32)
+#  include <windows.h>
+#else
+#  include <sys/utsname.h>
+#  include <unistd.h>
+#endif
 
 #include <nlohmann/json.hpp>
 
@@ -36,11 +45,104 @@ constexpr const char* kOAuthHost  = "auth.kimi.com";
 constexpr const char* kClientId   = "17e5f671-d194-4dfb-9706-5516cb48c098";
 constexpr const char* kDevicePath = "/api/oauth/device_authorization";
 constexpr const char* kTokenPath  = "/api/oauth/token";
-constexpr const char* kUserAgent  = "agentty/" AGENTTY_VERSION;
+constexpr const char* kUserAgent  = "kimi_code_cli/" AGENTTY_VERSION;
+// X-Msh-Platform: Kimi's server routes the device-flow (device-approval page,
+// not a bare login) on this identifier. Must be exactly "kimi_code_cli".
+constexpr const char* kMshPlatform = "kimi_code_cli";
 
 std::int64_t now_ms_impl() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
                std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
+// ASCII-clean a header value (Kimi rejects non-ASCII; drop it, fall back).
+std::string ascii_header(std::string_view v, const char* fallback = "unknown") {
+    std::string out;
+    for (unsigned char c : v) if (c >= 0x20 && c <= 0x7E) out.push_back(static_cast<char>(c));
+    // trim
+    while (!out.empty() && out.back() == ' ') out.pop_back();
+    std::size_t b = out.find_first_not_of(' ');
+    if (b != std::string::npos) out = out.substr(b);
+    return out.empty() ? std::string{fallback} : out;
+}
+
+std::string host_name() {
+    char buf[256] = {0};
+#if defined(_WIN32)
+    DWORD n = sizeof(buf);
+    if (::GetComputerNameA(buf, &n)) return ascii_header(buf);
+#else
+    if (::gethostname(buf, sizeof(buf) - 1) == 0) return ascii_header(buf);
+#endif
+    return "unknown";
+}
+
+std::string os_version() {
+#if defined(_WIN32)
+    return "Windows";
+#else
+    struct utsname u{};
+    if (::uname(&u) == 0) return ascii_header(u.release);
+    return "unknown";
+#endif
+}
+
+std::string device_model() {
+#if defined(_WIN32)
+    return "Windows";
+#else
+    struct utsname u{};
+    if (::uname(&u) == 0)
+        return ascii_header(std::string{u.sysname} + " " + u.release + " " + u.machine);
+    return "unknown";
+#endif
+}
+
+// A stable per-machine device id (RFC 4122 v4 UUID), minted once and persisted
+// next to the credentials so the same device is recognized across sessions.
+std::string device_id() {
+    const fs::path path = auth::config_dir() / "kimi_device_id";
+    {
+        std::ifstream ifs(path);
+        if (ifs) {
+            std::string id((std::istreambuf_iterator<char>(ifs)),
+                           std::istreambuf_iterator<char>());
+            while (!id.empty() && (id.back() == '\n' || id.back() == '\r' || id.back() == ' '))
+                id.pop_back();
+            if (!id.empty()) return id;
+        }
+    }
+    // Mint a v4 UUID.
+    std::random_device rd;
+    std::mt19937_64 gen(((std::uint64_t)rd() << 32) ^ rd() ^
+                        (std::uint64_t)now_ms_impl());
+    auto h = [&](int n) {
+        std::string s;
+        static const char* x = "0123456789abcdef";
+        for (int i = 0; i < n; ++i) s.push_back(x[gen() & 0xF]);
+        return s;
+    };
+    std::string id = h(8) + "-" + h(4) + "-4" + h(3) + "-" +
+                     std::string(1, "89ab"[gen() & 0x3]) + h(3) + "-" + h(12);
+    std::error_code ec;
+    fs::create_directories(path.parent_path(), ec);
+    std::ofstream ofs(path, std::ios::trunc);
+    if (ofs) ofs << id;
+    return id;
+}
+
+// The X-Msh-* device-identity header block Kimi requires on every OAuth (and
+// API) request. Without it the auth server treats the caller as a generic web
+// client and serves a plain login page instead of the device-approval flow.
+std::vector<std::pair<std::string, std::string>> device_headers() {
+    return {
+        {"x-msh-platform",     kMshPlatform},
+        {"x-msh-version",      AGENTTY_VERSION},
+        {"x-msh-device-name",  host_name()},
+        {"x-msh-device-model", device_model()},
+        {"x-msh-os-version",   os_version()},
+        {"x-msh-device-id",    device_id()},
+    };
 }
 
 std::string form_encode(const std::vector<std::pair<std::string, std::string>>& kv) {
@@ -84,6 +186,7 @@ HttpResult post_form(std::string_view path, std::string body) {
         {"content-type", "application/x-www-form-urlencoded"},
         {"user-agent",   kUserAgent},
     };
+    for (auto& h : device_headers()) req.headers.push_back({h.first, h.second});
     if (const auto& ov = http::agentty_oauth_host_override(); ov.active()) {
         req.dial_host = ov.host;
         req.dial_port = ov.port;

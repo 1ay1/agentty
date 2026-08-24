@@ -74,7 +74,8 @@ struct DeviceWaiting {
     std::string                        provider_label; // "GitHub Copilot" | "Kimi"
     std::uint64_t                      attempt_id = 0;
     std::shared_ptr<std::atomic_bool> cancel;
-    std::string                        authorize_url;
+    std::string                        authorize_url;  // BARE url shown in the panel (has a code field)
+    std::string                        browser_url;     // pre-filled url auto-opened + copied by `u`
     std::string                        user_code;
 };
 
