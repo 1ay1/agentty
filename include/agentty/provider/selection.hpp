@@ -11,6 +11,8 @@
 // from main(); `active()` is read wherever the out-of-band routing is needed.
 
 #include <cstdint>
+#include <algorithm>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -156,5 +158,19 @@ void prewarm_active_provider();
 // ChatGPT reads its own in-process OAuth creds and ignores it).
 [[nodiscard]] std::vector<ModelInfo> list_models_for(
     const Selection& sel, const auth::AuthHeader& auth);
+
+// The user's saved custom OpenAI-compatible hosts, sorted. These are the
+// Settings.provider_keys entries that are NOT built-in presets (e.g. a raw
+// "host:port" endpoint). Both the provider-picker VIEW and its reducer build
+// this list; keeping it here guarantees they render and index the SAME rows in
+// the SAME order (a drift here would map a selection to the wrong host).
+[[nodiscard]] inline std::vector<std::string> saved_custom_hosts(
+    const std::map<std::string, std::string>& provider_keys) {
+    std::vector<std::string> hosts;
+    for (const auto& [spec, key] : provider_keys)
+        if (!preset_for(spec)) hosts.push_back(spec);
+    std::sort(hosts.begin(), hosts.end());
+    return hosts;
+}
 
 } // namespace agentty::provider
