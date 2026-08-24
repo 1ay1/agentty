@@ -334,15 +334,15 @@ Element panel_device_waiting(const login::DeviceWaiting& s) {
             fg_dim(muted)));
     } else {
         rows.push_back(body_text(
-            "A browser was opened to approve this device. If it didn't open, or",
+            "Open this URL to approve the device (it already includes your",
             fg_dim(muted)));
         rows.push_back(body_text(
-            "it asks for a code, go to this URL and enter the code below:",
+            "code). On SSH, press [u] to copy it, or scan/type it on any device:",
             fg_dim(muted)));
         rows.push_back(text(""));
         rows.push_back(url_panel(s.authorize_url));
         rows.push_back(text(""));
-        rows.push_back(h(text("   code: ", fg_dim(muted)),
+        rows.push_back(h(text("   if the page asks for a code, enter: ", fg_dim(muted)),
                          text(s.user_code, fg_bold(highlight))).build());
         rows.push_back(text(""));
         rows.push_back(body_text(

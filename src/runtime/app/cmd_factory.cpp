@@ -1880,12 +1880,14 @@ Cmd<Msg> device_login_async(std::string provider, std::string provider_label,
             } else if (provider == "kimi") {
                 auto r = provider::kimi::login(900,
                     [&](const provider::kimi::DeviceCode& c) {
-                        // Show the BARE url (has a code-entry field) but open
-                        // the pre-filled _complete url in the browser.
+                        // Show + open the PRE-FILLED url (…?user_code=XXXX) so
+                        // that on SSH/headless, the url the user manually opens
+                        // already carries the code. kimi.ai's approval page
+                        // reads user_code from the query string.
                         const std::string complete =
                             c.verification_uri_complete.empty() ? c.verification_uri
                                                                 : c.verification_uri_complete;
-                        emit_code(c.verification_uri, complete, c.user_code);
+                        emit_code(complete, complete, c.user_code);
                     }, cancelled);
                 if (!r) err = r.error().render();
             } else {
