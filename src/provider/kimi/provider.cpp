@@ -10,12 +10,17 @@
 
 #include "agentty/provider/kimi/provider.hpp"
 
+#include <chrono>
 #include <mutex>
+#include <optional>
 #include <utility>
 #include <vector>
 
+#include <nlohmann/json.hpp>
+
 #include "agentty/provider/kimi/kimi_oauth.hpp"
 #include "agentty/provider/openai/transport.hpp"
+#include "agentty/io/http.hpp"
 
 namespace agentty::provider::kimi {
 
@@ -27,6 +32,47 @@ constexpr const char* kBasePath  = "/coding/v1";
 
 std::mutex& models_mu() { static std::mutex m; return m; }
 std::vector<ModelInfo>& models_cache() { static std::vector<ModelInfo> c; return c; }
+
+// Query /coding/v1/usages. Returns a human message when the account is out of
+// credits (Kimi reports 429 resource_exhausted here even though /chat 500s),
+// or nullopt when usage looks fine / the probe is inconclusive.
+std::optional<std::string> quota_error_message(const std::string& access_token) {
+    http::Request r;
+    r.method = http::HttpMethod::Get;
+    r.host   = kApiHost;
+    r.port   = 443;
+    r.path   = std::string{kBasePath} + "/usages";
+    r.headers = {
+        {"accept", "application/json"},
+        {"authorization", "Bearer " + access_token},
+        {"x-msh-platform", "kimi_code_cli"},
+    };
+    if (const auto& ov = http::agentty_api_host_override(); ov.active()) {
+        r.dial_host = ov.host; r.dial_port = ov.port;
+    }
+    http::Timeouts tos;
+    tos.connect = std::chrono::milliseconds(5000);
+    tos.total   = std::chrono::milliseconds(8000);
+    auto resp = http::default_client().send(r, tos);
+    if (!resp) return std::nullopt;
+    // A 402/429 or a resource_exhausted / quota body = out of credits.
+    const bool http_quota = resp->status == 402 || resp->status == 429;
+    bool body_quota = false;
+    try {
+        auto j = nlohmann::json::parse(resp->body);
+        std::string code = j.value("code", std::string{});
+        std::string msg  = j.value("message", std::string{});
+        if (code == "resource_exhausted" || msg.find("balance") != std::string::npos
+            || msg.find("Credits") != std::string::npos
+            || msg.find("quota") != std::string::npos)
+            body_quota = true;
+    } catch (...) {}
+    if (http_quota || body_quota)
+        return std::string{
+            "Kimi credits exhausted \xe2\x80\x94 your Kimi Code plan is out of "
+            "balance. Top up your plan at kimi.ai, or switch providers with ^P."};
+    return std::nullopt;
+}
 } // namespace
 
 provider::openai::Endpoint KimiProvider::make_endpoint() {
@@ -64,6 +110,16 @@ provider::StreamResult KimiProvider::stream(provider::Request req,
     if (!result.ok() && (result.http_status == 401 || result.http_status == 403)) {
         invalidate_cached_token();
         if (auto fresh = fresh_token()) result = run(*fresh);
+    }
+    // Kimi's coding API returns a bare HTTP 500 ("server had an error") when the
+    // account is out of credits — the /usages endpoint reports the real reason
+    // (429 resource_exhausted). On a 500/429, probe /usages and surface a clear
+    // "credits exhausted" message instead of the opaque server error.
+    if (!result.ok() && (result.http_status == 500 || result.http_status == 429)) {
+        if (auto q = quota_error_message(tok->access_token)) {
+            sink(StreamError{*q});
+            return provider::StreamResult::failed("kimi: " + *q);
+        }
     }
     return result;
 }
