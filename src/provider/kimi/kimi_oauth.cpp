@@ -285,11 +285,23 @@ request_device_code(std::string& out_device_code, int& out_interval) {
             "Kimi device-code request failed (HTTP " + std::to_string(r.status) + ")"});
     try {
         auto j = json::parse(r.body);
+        // The device-auth server still returns verification URLs on the
+        // DEPRECATED www.kimi.com host, which now shows only a "Kimi has been
+        // rebranded as Kimi.ai" dead-end page (no device-approval UI). The
+        // working device page lives on www.kimi.ai. Rewrite the host so the
+        // opened/displayed URL actually approves the device.
+        auto to_kimi_ai = [](std::string u) {
+            for (std::string_view from : {"https://www.kimi.com/", "https://kimi.com/"}) {
+                if (u.rfind(from, 0) == 0)
+                    return "https://www.kimi.ai/" + u.substr(from.size());
+            }
+            return u;
+        };
         DeviceCode dc;
-        dc.verification_uri = j.value("verification_uri",
-                                      std::string{"https://auth.kimi.com/device"});
+        dc.verification_uri = to_kimi_ai(j.value("verification_uri",
+                                      std::string{"https://www.kimi.ai/code/authorize_device"}));
         dc.verification_uri_complete =
-            j.value("verification_uri_complete", dc.verification_uri);
+            to_kimi_ai(j.value("verification_uri_complete", dc.verification_uri));
         dc.user_code    = j.value("user_code", std::string{});
         dc.expires_in   = j.value("expires_in", 900);
         out_device_code = j.value("device_code", std::string{});
