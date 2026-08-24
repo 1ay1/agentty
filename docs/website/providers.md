@@ -1,23 +1,30 @@
 ---
 title: Providers & Models
-description: Run agentty against Claude, OpenAI, Groq, OpenRouter, Together, Cerebras, Ollama, or any OpenAI-compatible endpoint.
+description: Run agentty against Claude, ChatGPT, GitHub Copilot, Kimi, DeepSeek, Gemini, Grok, Mistral, Groq, or any OpenAI-compatible endpoint.
 nav_section: Getting Started
 nav_order: 50
 slug: providers
 ---
 
-agentty is **bring-your-own-model**: it speaks to any OpenAI-compatible backend, plus Anthropic and local Ollama. Pick one with `--provider`, or switch live mid-thread with `^P` (provider) and `^/` (model).
+agentty is **bring-your-own-model**: it speaks to any OpenAI-compatible backend, plus Anthropic and local Ollama. Sign in with a subscription you already pay for — Claude Pro/Max, ChatGPT Plus/Pro, GitHub Copilot, or **Kimi** — or bring an API key for **DeepSeek, Google Gemini, xAI Grok, Mistral, Groq, OpenRouter, Together, Cerebras, Fireworks**, or any custom endpoint. Pick one with `--provider`, or switch live mid-thread with `^P` (provider) and `^/` (model).
 
 ## Pick a provider
 
-Run agentty with an API key for any hosted provider, or point it at a local Ollama model that needs no key at all. Anthropic works with an `sk-ant-…` key or your [Claude Pro/Max OAuth](/docs/authentication).
+Sign in with a subscription (no API key), bring a hosted provider's API key, or point agentty at a local Ollama model that needs no key at all.
 
 ```bash
-agentty --provider openai -m gpt-4o        # GPT
-agentty --provider groq -m llama-3.3-70b   # Groq
-agentty --provider ollama -m qwen2.5-coder # local model, no key
-agentty --provider openrouter              # any model via OpenRouter
-agentty -m claude-opus-4-5                 # Claude (API key or Pro/Max OAuth)
+# Sign in with a subscription — no API key (see the sections below)
+agentty login                              # 1) Claude  2) ChatGPT  3) Copilot  4) Kimi
+agentty --provider kimi                    # Kimi K2 via your Kimi plan
+
+# Bring an API key
+agentty --provider deepseek -m deepseek-v4-pro   # DeepSeek (DEEPSEEK_API_KEY)
+agentty --provider gemini -m gemini-2.5-pro      # Google Gemini (GEMINI_API_KEY)
+agentty --provider xai -m grok-4.6               # xAI Grok (XAI_API_KEY)
+agentty --provider groq -m llama-3.3-70b         # Groq
+agentty --provider openrouter                    # any model via OpenRouter
+agentty --provider ollama -m qwen2.5-coder       # local model, no key
+agentty -m claude-opus-4-5                        # Claude (API key or Pro/Max OAuth)
 ```
 
 `--provider` and `-m` are persisted between runs, so you only pass them when you want to change the backend.
@@ -34,19 +41,20 @@ Even a 1M window eventually fills on a long session. When it does, you can [fork
 
 | ID | Backend | Key |
 |---|---|---|
-| `anthropic` | Claude — API key or Pro/Max OAuth | `agentty login` |
-| `chatgpt` | Codex models — Sign in with ChatGPT (Plus/Pro) | `agentty login` → 3 |
-| `copilot` | GitHub Copilot models — Sign in with GitHub | `agentty login` → 4 |
+| `anthropic` | Claude — API key or Pro/Max OAuth | `agentty login` → Claude |
+| `chatgpt` | Codex models — Sign in with ChatGPT (Plus/Pro) | `agentty login` → ChatGPT |
+| `copilot` | GitHub Copilot models — Sign in with GitHub | `agentty login` → GitHub Copilot |
+| `kimi` | Kimi K2 models — Sign in with Kimi | `agentty login` → Kimi |
 | `openai` | GPT / o-series on `api.openai.com` | `OPENAI_API_KEY` |
-| `groq` | Llama / Mixtral on Groq LPUs — very fast | `GROQ_API_KEY` |
-| `openrouter` | Any model via `openrouter.ai` | `OPENROUTER_API_KEY` |
-| `together` | Open models on `together.ai` | `TOGETHER_API_KEY` |
-| `cerebras` | Wafer-scale inference — very fast | `CEREBRAS_API_KEY` |
-| `deepseek` | DeepSeek V4 on `api.deepseek.com` | `DEEPSEEK_API_KEY` |
+| `deepseek` | DeepSeek V4 (chat + reasoner) on `api.deepseek.com` | `DEEPSEEK_API_KEY` |
+| `gemini` | Google Gemini via the OpenAI-compat API | `GEMINI_API_KEY` |
 | `xai` | xAI Grok models on `api.x.ai` | `XAI_API_KEY` |
 | `mistral` | Mistral / Codestral / Magistral on `api.mistral.ai` | `MISTRAL_API_KEY` |
-| `gemini` | Google Gemini via the OpenAI-compat API | `GEMINI_API_KEY` |
+| `groq` | Llama / Mixtral / Kimi on Groq LPUs — very fast | `GROQ_API_KEY` |
+| `cerebras` | Wafer-scale inference — very fast | `CEREBRAS_API_KEY` |
+| `together` | Open models on `together.ai` | `TOGETHER_API_KEY` |
 | `fireworks` | Open models on `fireworks.ai` | `FIREWORKS_API_KEY` |
+| `openrouter` | Any model via `openrouter.ai` | `OPENROUTER_API_KEY` |
 | `ollama` | Local models at `localhost:11434` | None |
 | `host:port` | Any raw OpenAI-compatible endpoint | `OPENAI_API_KEY` |
 | `https://host[:port]/path` | Any OpenAI-compatible endpoint with a custom path prefix (e.g. a gateway serving on `/api` instead of `/v1`) | `OPENAI_API_KEY` |
@@ -80,7 +88,7 @@ A bare `host:port` (no `http://`/`https://`) keeps the default `/v1` prefix.
 If you have a GitHub Copilot subscription (Individual, Business, or Enterprise), you can use its models — GPT-4o, o-series, Claude, Gemini, and more — through your existing Copilot plan, **no API key required**.
 
 ```bash
-agentty login          # choose 4) GitHub Copilot
+agentty login          # choose "Sign in with GitHub Copilot"
 agentty --provider copilot
 ```
 
@@ -89,6 +97,35 @@ Sign-in uses GitHub's **device flow**: agentty shows a one-time code and opens `
 :::note
 Copilot routes to the right host automatically (Individual / Business / Enterprise each use a different endpoint) — there's nothing to configure. On the free Copilot tier, agentty surfaces a clear "chat quota exhausted" message rather than a raw error.
 :::
+
+## Sign in with Kimi
+
+If you have a [Kimi](https://www.kimi.com) plan, sign in with it and run agentty on Kimi's K2 models — **no API key required**.
+
+```bash
+agentty login          # choose "Sign in with Kimi"
+agentty --provider kimi
+```
+
+Sign-in uses Kimi's **OAuth device flow** (RFC 8628), the same in-terminal experience as Claude, ChatGPT, and Copilot: agentty shows a one-time code and opens the Kimi authorization page in your browser. It works over SSH — press [[c]] in the modal to copy the code (sent via OSC 52, so it lands on your local clipboard even through a remote session), then paste it in any browser. agentty polls in the background and switches the moment you approve.
+
+The token is stored encrypted at `~/.config/agentty/kimi_credentials.json` and refreshed automatically mid-session, so long agent runs never drop. The picker row reflects real sign-in state (`⚠ sign in with Kimi` / `✓ signed in`), and pressing [[Enter]] on the active Kimi row opens the **multi-account manager** (switch / add / remove Kimi accounts) — hold several Kimi accounts and switch entirely in-app. `agentty status` shows the active account; `agentty logout` → Kimi signs out.
+
+:::tip
+Kimi's inference runs on its OpenAI-compatible endpoint, so tool-calling, streaming, and reasoning all work exactly as they do on every other provider — nothing Kimi-specific to configure. Prefer a raw platform API key instead of the subscription? Use any OpenAI-compatible host: `agentty --provider https://api.moonshot.ai -k <key> -m kimi-k2-0905-preview`.
+:::
+
+## DeepSeek
+
+[DeepSeek](https://platform.deepseek.com) is a first-class built-in provider. It uses a **static API key** (DeepSeek doesn't offer developer OAuth), so set `DEEPSEEK_API_KEY` — or pass `-k`, or paste it into the in-app prompt once.
+
+```bash
+export DEEPSEEK_API_KEY=sk-…
+agentty --provider deepseek -m deepseek-v4-pro      # strong general/coding model
+agentty --provider deepseek -m deepseek-reasoner    # reasoning model (thinking)
+```
+
+DeepSeek's endpoints live at the API root (no `/v1` prefix) — agentty handles that automatically. Both the chat and reasoner families are recognized as native tool-callers, and **reasoning streams live**: on a reasoning model agentty renders DeepSeek's chain-of-thought exactly like Claude's thinking, and the effort control (cycle it in the model picker) maps straight to the wire. Selecting DeepSeek in `^P` before you've set a key still shows its models (a small bundled list) so you can pick one immediately; the live catalog replaces it once your key is set.
 
 ## Local models (Ollama)
 

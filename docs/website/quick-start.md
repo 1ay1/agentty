@@ -48,6 +48,6 @@ You start in **Write** (autonomous) — every tool runs without a prompt, kept i
 
 - [The Interface](/docs/interface) — what every part of the screen means.
 - [Keybindings](/docs/keybindings) — the full keymap.
-- [Providers & Models](/docs/providers) — Claude, GPT, Groq, or a local model.
+- [Providers & Models](/docs/providers) — Claude, GPT, Kimi, DeepSeek, Gemini, or a local model.
 - [Tools](/docs/tools) — what agentty can actually do.
 - [SSH Air-gap](/docs/airgap) — run on a box with no internet.

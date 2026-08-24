@@ -6,7 +6,7 @@ nav_order: 40
 slug: authentication
 ---
 
-agentty is **bring-your-own-model**: point it at any provider with an API key — Anthropic, OpenAI, Groq, OpenRouter, Together, Cerebras — or a fully local Ollama model that needs no key at all. It also supports signing in with existing Claude Pro/Max or ChatGPT Plus/Pro OAuth. Pick whichever fits; they all flow through the same login path.
+agentty is **bring-your-own-model**: point it at any provider with an API key — Anthropic, OpenAI, DeepSeek, Google Gemini, xAI Grok, Mistral, Groq, OpenRouter, Together, Cerebras, Fireworks — or a fully local Ollama model that needs no key at all. It also supports signing in with an existing subscription: Claude Pro/Max, ChatGPT Plus/Pro, GitHub Copilot, or **Kimi** — no API key needed. Pick whichever fits; they all flow through the same login path.
 
 ## API key (recommended, zero ambiguity)
 
@@ -22,6 +22,14 @@ Choose **Sign in with ChatGPT** to use a ChatGPT subscription through agentty's 
 
 Device login must be enabled in your personal ChatGPT security settings or by your workspace administrator. To force device auth in an unusual headless terminal, set `AGENTTY_CHATGPT_DEVICE_AUTH=1`; set it to `0` to retain loopback login (for example when using `ssh -L 1455:localhost:1455`).
 
+## OAuth (GitHub Copilot)
+
+Choose **Sign in with GitHub Copilot** to use your Copilot subscription's models with no API key. It's GitHub's device flow: `agentty login` → GitHub Copilot shows a one-time code and opens `github.com/login/device`. agentty routes to the correct inference host for your plan (Individual / Business / Enterprise) automatically and refreshes the token mid-session.
+
+## OAuth (Kimi)
+
+Have a [Kimi](https://www.kimi.com) plan? Sign in with it and run agentty on Kimi's K2 models with **no API key**. It's the OAuth **device flow** (RFC 8628): `agentty login` → Kimi shows a one-time code and opens the Kimi authorization page. Over SSH, press [[c]] to copy the code (OSC 52 → your local clipboard) and paste it in any browser; agentty polls and switches on approval. The token is stored encrypted and refreshed automatically mid-session, and you can hold multiple Kimi accounts and switch in-app. Full walkthrough on [Providers & Models](/docs/providers#sign-in-with-kimi).
+
 ## Override order
 
 Highest priority first:
@@ -33,12 +41,12 @@ Highest priority first:
 
 ## Other providers
 
-When you run with `--provider`, agentty reads that backend's key from its environment variable (e.g. `OPENAI_API_KEY`, `GROQ_API_KEY`), falling back to `OPENAI_API_KEY`, or an explicit `-k` for the session. Ollama needs no key. A key entered in-app is saved per-provider so you only paste it once. See [Providers & Models](/docs/providers).
+When you run with `--provider`, agentty reads that backend's key from its environment variable (e.g. `OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, `GEMINI_API_KEY`, `GROQ_API_KEY`), falling back to `OPENAI_API_KEY`, or an explicit `-k` for the session. Ollama needs no key. A key entered in-app is saved per-provider so you only paste it once. See [Providers & Models](/docs/providers).
 
 ## Non-interactive auth (over SSH)
 
 ```bash
-agentty login     # ChatGPT automatically prints a device URL + one-time code
+agentty login     # ChatGPT / Copilot / Kimi print a device URL + one-time code
 agentty logout    # clear stored credentials
 agentty status    # show which auth source will be used
 ```
