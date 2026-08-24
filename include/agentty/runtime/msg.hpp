@@ -389,6 +389,11 @@ struct CloseProviderPicker {};
 struct ProviderPickerMove { int delta; };
 struct ProviderPickerJump  { enum class Where { Home, End, PageUp, PageDown }; Where where; };
 struct ProviderPickerSelect {};
+// Live search-filter over the provider list (mirrors the model picker): a
+// typed character appends to the query, Backspace trims it. The row list
+// narrows to fuzzy/substring matches on the id + label + blurb.
+struct ProviderPickerFilterInput { char32_t codepoint; };
+struct ProviderPickerFilterBackspace {};
 
 // ── Thread list ──────────────────────────────────────────────────────────
 struct OpenThreadList {};
@@ -566,6 +571,10 @@ struct LoginSubmit      {};
 // the active authorize URL, then surfaces a brief status toast so
 // the user has visual confirmation the keystroke registered.
 struct LoginCopyAuthUrl {};
+// User pressed the copy-CODE key in a device-flow modal: copies the one-time
+// user_code (the thing typed into the browser) rather than the URL. Distinct
+// from LoginCopyAuthUrl so device modals can offer BOTH shortcuts.
+struct LoginCopyCode {};
 // User pressed the "open browser again" key. Re-issues the same
 // xdg-open / `open` invocation that fired when OAuth was first
 // selected, in case the original launch was missed (alt-tabbed away
@@ -594,34 +603,25 @@ struct CodexLoginDone {
                   agentty::auth::OAuthError> result;
 };
 
-// GitHub Copilot device-flow login — the exact sibling of the Codex pair. The
-// worker dispatches CopilotDeviceCodeReady as soon as GitHub issues the
-// one-time code (so the modal can show it) and CopilotLoginDone when the user
-// approves (or the flow fails/times out).
-struct CopilotDeviceCodeReady {
+// Native OAuth **device-flow** login (GitHub Copilot, Kimi, or any future
+// device-flow provider) — the sibling of the Codex pair, but PROVIDER-GENERIC.
+// The worker dispatches DeviceCodeReady as soon as the provider issues the
+// one-time code (so the modal can show it) and DeviceLoginDone when the user
+// approves (or the flow fails/times out). `provider` is the canonical registry
+// id ("copilot", "kimi"). The worker persists the token itself before
+// dispatching DeviceLoginDone, so the reducer only needs success-or-error —
+// hence `error` (nullopt = success) rather than a provider-specific token type.
+struct DeviceCodeReady {
+    std::string   provider;
     std::uint64_t attempt_id = 0;
-    std::string verification_url;
-    std::string user_code;
+    std::string   verification_url;
+    std::string   user_code;
 };
-struct CopilotLoginDone {
-    std::uint64_t attempt_id = 0;
-    std::expected<agentty::provider::copilot::GithubToken,
-                  agentty::auth::OAuthError> result;
-};
-
-// Kimi Code device-flow login — the exact sibling of the Copilot pair. The
-// worker dispatches KimiDeviceCodeReady as soon as Kimi issues the one-time
-// code (so the modal can show it) and KimiLoginDone when the user approves
-// (or the flow fails/times out).
-struct KimiDeviceCodeReady {
-    std::uint64_t attempt_id = 0;
-    std::string verification_url;
-    std::string user_code;
-};
-struct KimiLoginDone {
-    std::uint64_t attempt_id = 0;
-    std::expected<agentty::provider::kimi::KimiToken,
-                  agentty::auth::OAuthError> result;
+struct DeviceLoginDone {
+    std::string                 provider;
+    std::string                 provider_label;   // "GitHub Copilot" | "Kimi"
+    std::uint64_t               attempt_id = 0;
+    std::optional<std::string>  error;             // nullopt = signed in OK
 };
 // Result of the background OAuth refresh kicked off from init() when
 // `auth::resolve()` returned an expired token paired with a refresh
@@ -830,7 +830,8 @@ using ModelPickerMsg = std::variant<
 
 using ProviderPickerMsg = std::variant<
     OpenProviderPicker, CloseProviderPicker, ProviderPickerMove,
-    ProviderPickerJump, ProviderPickerSelect>;
+    ProviderPickerJump, ProviderPickerSelect,
+    ProviderPickerFilterInput, ProviderPickerFilterBackspace>;
 
 using ThreadListMsg = std::variant<
     OpenThreadList, CloseThreadList, ThreadListMove, ThreadListJump,
@@ -879,10 +880,9 @@ using LoginMsg = std::variant<
     OpenAccounts, AccountMove, AccountSelect, AccountRemove,
     LoginPickMethod, LoginCharInput, LoginBackspace,
     LoginPaste, LoginCursorLeft, LoginCursorRight, LoginSubmit,
-    LoginCopyAuthUrl, LoginOpenBrowserAgain,
+    LoginCopyAuthUrl, LoginCopyCode, LoginOpenBrowserAgain,
     LoginExchanged, CodexDeviceCodeReady, CodexLoginDone,
-    CopilotDeviceCodeReady, CopilotLoginDone,
-    KimiDeviceCodeReady, KimiLoginDone, TokenRefreshed>;
+    DeviceCodeReady, DeviceLoginDone, TokenRefreshed>;
 
 using DiffReviewMsg = std::variant<
     OpenDiffReview, CloseDiffReview, DiffReviewMove,

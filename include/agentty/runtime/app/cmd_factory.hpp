@@ -162,14 +162,12 @@ struct LoopBreak {
 [[nodiscard]] maya::Cmd<Msg> codex_login_async(
     std::uint64_t attempt_id, std::shared_ptr<std::atomic_bool> cancel);
 
-// Kick native GitHub Copilot device-flow OAuth off the UI thread — the sibling
-// of codex_login_async. Shares next_codex_login_attempt_id() for correlation.
-[[nodiscard]] maya::Cmd<Msg> copilot_login_async(
-    std::uint64_t attempt_id, std::shared_ptr<std::atomic_bool> cancel);
-
-// Kick native Kimi Code device-flow OAuth off the UI thread — the sibling of
-// copilot_login_async. Shares next_codex_login_attempt_id() for correlation.
-[[nodiscard]] maya::Cmd<Msg> kimi_login_async(
+// Kick a native OAuth device-flow login off the UI thread — provider-generic
+// (GitHub Copilot, Kimi, …). `provider` is the registry id, `provider_label`
+// the display name for the success toast. Shares next_codex_login_attempt_id()
+// for correlation; dispatches DeviceCodeReady then DeviceLoginDone.
+[[nodiscard]] maya::Cmd<Msg> device_login_async(
+    std::string provider, std::string provider_label,
     std::uint64_t attempt_id, std::shared_ptr<std::atomic_bool> cancel);
 
 // Walk ~/.agentty/threads/ and parse every thread JSON off the UI thread.

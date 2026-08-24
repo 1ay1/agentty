@@ -20,6 +20,7 @@
 
 #include "agentty/runtime/app/update.hpp"
 #include "agentty/runtime/app/deps.hpp"
+#include "agentty/runtime/provider_rows.hpp"
 #include "agentty/provider/selection.hpp"
 
 #include <optional>
@@ -118,5 +119,80 @@ TEST_CASE("provider model switch") {
         CHECK(m2.d.available_models.size() == 1,
               "unstamped payload accepted (back-compat)");
         CHECK(!m2.s.models_loading, "loading cleared");
+    }
+}
+
+TEST_CASE("provider filter: fuzzy narrows + ranks") {
+    namespace P = agentty::provider;
+
+    // Empty query = every provider, in registry order.
+    {
+        auto all = P::filter_provider_indices("");
+        CHECK(all.size() == P::providers().size());
+        for (int i = 0; i < static_cast<int>(all.size()); ++i)
+            CHECK(all[static_cast<std::size_t>(i)] == i);
+    }
+
+    // A specific id floats to the front.
+    {
+        auto r = P::filter_provider_indices("kimi");
+        CHECK(!r.empty());
+        const auto ps = P::providers();
+        CHECK(ps[static_cast<std::size_t>(r.front())].id == "kimi");
+    }
+    {
+        auto r = P::filter_provider_indices("deepseek");
+        CHECK(!r.empty());
+        CHECK(P::providers()[static_cast<std::size_t>(r.front())].id == "deepseek");
+    }
+
+    // A label word matches even when it's not the id ("grok" -> xai row).
+    {
+        auto r = P::filter_provider_indices("grok");
+        bool found_xai = false;
+        for (int i : r) if (P::providers()[static_cast<std::size_t>(i)].id == "xai") found_xai = true;
+        CHECK(found_xai);
+    }
+
+    // Gibberish matches nothing.
+    CHECK(P::filter_provider_indices("zzqzzq").empty());
+}
+
+TEST_CASE("provider rows: one ordered list, filter hides non-preset rows") {
+    namespace ui = agentty::ui;
+    const std::vector<std::string> hosts = {"my-host.example:8443"};
+
+    // Empty query: presets, then the custom host, then the sentinel LAST.
+    {
+        auto rows = ui::build_provider_rows(hosts, "");
+        CHECK(!rows.empty());
+        CHECK(rows.back().is_new_custom_host());
+        bool saw_host = false, saw_preset = false;
+        for (const auto& r : rows) {
+            if (r.preset()) saw_preset = true;
+            if (const auto* c = r.custom_host()) saw_host = *c == hosts[0];
+        }
+        CHECK(saw_preset);
+        CHECK(saw_host);
+    }
+
+    // Filtered: only matching presets + the always-present sentinel; the saved
+    // custom host is hidden (it isn't part of the provider text search).
+    {
+        auto rows = ui::build_provider_rows(hosts, "kimi");
+        CHECK(rows.size() >= 2);          // >=1 preset + sentinel
+        CHECK(rows.back().is_new_custom_host());
+        CHECK(rows.front().preset() != nullptr);
+        CHECK(rows.front().preset()->id == "kimi");
+        for (const auto& r : rows)
+            CHECK(r.custom_host() == nullptr);   // no saved host while filtering
+    }
+
+    // No preset matches: still exactly the sentinel, so the escape hatch
+    // (open the custom-host modal) is always reachable.
+    {
+        auto rows = ui::build_provider_rows(hosts, "zzqzzq");
+        CHECK(rows.size() == 1);
+        CHECK(rows.front().is_new_custom_host());
     }
 }

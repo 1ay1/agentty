@@ -61,19 +61,17 @@ struct ChatGptWaiting {
     std::string                        user_code;
 };
 
-// GitHub Copilot device-flow login is in flight. GitHub always issues a
-// one-time code (device flow only — no browser-callback variant), so the modal
-// shows the verification URL + code as soon as CopilotDeviceCodeReady lands.
-// Esc closes the modal; the bounded worker eventually exits.
-struct CopilotWaiting {
-    std::uint64_t                      attempt_id = 0;
-    std::shared_ptr<std::atomic_bool> cancel;
-    std::string                        authorize_url;
-    std::string                        user_code;
-};
-
-// Kimi Code device-flow waiting state — identical shape to CopilotWaiting.
-struct KimiWaiting {
+// A native OAuth **device-flow** login is in flight (GitHub Copilot, Kimi, or
+// any future device-flow provider). The provider always issues a one-time code
+// (device flow only), so the modal shows the verification URL + code as soon as
+// the DeviceCodeReady message lands. `provider` is the canonical registry id
+// ("copilot", "kimi") — it drives the panel title, the completion dispatch, and
+// the account label. One state for every device-flow provider so the panel,
+// key-handling, and copy shortcuts are written once. Esc closes the modal; the
+// bounded worker eventually exits.
+struct DeviceWaiting {
+    std::string                        provider;      // "copilot" | "kimi" | …
+    std::string                        provider_label; // "GitHub Copilot" | "Kimi"
     std::uint64_t                      attempt_id = 0;
     std::shared_ptr<std::atomic_bool> cancel;
     std::string                        authorize_url;
@@ -128,7 +126,7 @@ struct AccountList {
 };
 
 using State = std::variant<Closed, Picking, OAuthCode, OAuthExchanging,
-                           ChatGptWaiting, CopilotWaiting, KimiWaiting, ApiKeyInput, CustomHostInput,
+                           ChatGptWaiting, DeviceWaiting, ApiKeyInput, CustomHostInput,
                            AccountList, Failed>;
 
 [[nodiscard]] inline bool is_open(const State& s) noexcept {

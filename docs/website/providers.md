@@ -6,7 +6,7 @@ nav_order: 50
 slug: providers
 ---
 
-agentty is **bring-your-own-model**: it speaks to any OpenAI-compatible backend, plus Anthropic and local Ollama. Sign in with a subscription you already pay for — Claude Pro/Max, ChatGPT Plus/Pro, GitHub Copilot, or **Kimi** — or bring an API key for **DeepSeek, Google Gemini, xAI Grok, Mistral, Groq, OpenRouter, Together, Cerebras, Fireworks**, or any custom endpoint. Pick one with `--provider`, or switch live mid-thread with `^P` (provider) and `^/` (model).
+agentty is **bring-your-own-model**: it speaks to any OpenAI-compatible backend, plus Anthropic and local Ollama. Sign in with a subscription you already pay for — Claude Pro/Max, ChatGPT Plus/Pro, GitHub Copilot, or **Kimi** — or bring an API key for **DeepSeek, Google Gemini, xAI Grok, Mistral, Groq, OpenRouter, Together, Cerebras, Fireworks**, or any custom endpoint. Pick one with `--provider`, or switch live mid-thread with `^P` (provider) and `^/` (model) — both overlays have a **live search filter**, so just start typing (`kimi`, `grok`, `deepseek`…) to jump to a provider.
 
 ## Pick a provider
 
@@ -107,7 +107,7 @@ agentty login          # choose "Sign in with Kimi"
 agentty --provider kimi
 ```
 
-Sign-in uses Kimi's **OAuth device flow** (RFC 8628), the same in-terminal experience as Claude, ChatGPT, and Copilot: agentty shows a one-time code and opens the Kimi authorization page in your browser. It works over SSH — press [[c]] in the modal to copy the code (sent via OSC 52, so it lands on your local clipboard even through a remote session), then paste it in any browser. agentty polls in the background and switches the moment you approve.
+Sign-in uses Kimi's **OAuth device flow** (RFC 8628), the same in-terminal experience as Claude, ChatGPT, and Copilot: agentty shows a one-time code and opens the Kimi authorization page in your browser. It works over SSH — in the modal press [[c]] to copy the **code** and [[u]] to copy the **URL** (both sent via OSC 52, so they land on your local clipboard even through a remote session), then paste in any browser. [[o]] re-opens the browser. agentty polls in the background and switches the moment you approve.
 
 The token is stored encrypted at `~/.config/agentty/kimi_credentials.json` and refreshed automatically mid-session, so long agent runs never drop. The picker row reflects real sign-in state (`⚠ sign in with Kimi` / `✓ signed in`), and pressing [[Enter]] on the active Kimi row opens the **multi-account manager** (switch / add / remove Kimi accounts) — hold several Kimi accounts and switch entirely in-app. `agentty status` shows the active account; `agentty logout` → Kimi signs out.
 

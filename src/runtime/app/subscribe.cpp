@@ -367,12 +367,20 @@ std::optional<Msg> on_provider_picker(const KeyEvent& ev) {
             case SpecialKey::Enter:    return ProviderPickerSelect{};
             case SpecialKey::Up:       return ProviderPickerMove{-1};
             case SpecialKey::Down:     return ProviderPickerMove{+1};
+            // Backspace edits the live search query rather than paging.
+            case SpecialKey::Backspace: return ProviderPickerFilterBackspace{};
             case SpecialKey::Home:     return ProviderPickerJump{ProviderPickerJump::Where::Home};
             case SpecialKey::End:      return ProviderPickerJump{ProviderPickerJump::Where::End};
             case SpecialKey::PageUp:   return ProviderPickerJump{ProviderPickerJump::Where::PageUp};
             case SpecialKey::PageDown: return ProviderPickerJump{ProviderPickerJump::Where::PageDown};
             default: break;
         }
+    }
+    // A printable character types into the live search filter (mirrors the
+    // model picker). Ctrl-modified chars are reserved for other bindings.
+    if (auto* ck = std::get_if<CharKey>(&ev.key)) {
+        if (!ev.mods.ctrl && ck->codepoint >= 0x20)
+            return ProviderPickerFilterInput{ck->codepoint};
     }
     return std::nullopt;
 }
@@ -598,21 +606,15 @@ std::optional<Msg> on_login(const ui::login::State& state, const KeyEvent& ev) {
     // Copilot device-flow modal: there's no free-text field (the user types
     // the code into their BROWSER, not here), so `c` copies the code and `o`
     // reopens the browser — no modifier needed, and no `empty_code` gate.
-    if (std::holds_alternative<CopilotWaiting>(state)) {
+    if (std::holds_alternative<DeviceWaiting>(state)) {
+        // Device-flow modal (Copilot / Kimi / …): the user types the CODE into
+        // the BROWSER, so bare letters are safe here (no text field). `c`
+        // copies the code, `u` copies the URL, `o` reopens the browser.
         if (auto* ck = std::get_if<CharKey>(&ev.key)) {
             char32_t c = ck->codepoint;
             if (ev.mods.ctrl && c >= 0x01 && c <= 0x1A) c = U'a' + (c - 1);
-            if (c == U'c' || c == U'C') return LoginCopyAuthUrl{};   // copies the code
-            if (c == U'o' || c == U'O') return LoginOpenBrowserAgain{};
-        }
-    }
-
-    // Kimi device-flow modal: same interaction model as Copilot.
-    if (std::holds_alternative<KimiWaiting>(state)) {
-        if (auto* ck = std::get_if<CharKey>(&ev.key)) {
-            char32_t c = ck->codepoint;
-            if (ev.mods.ctrl && c >= 0x01 && c <= 0x1A) c = U'a' + (c - 1);
-            if (c == U'c' || c == U'C') return LoginCopyAuthUrl{};   // copies the code
+            if (c == U'c' || c == U'C') return LoginCopyCode{};
+            if (c == U'u' || c == U'U') return LoginCopyAuthUrl{};
             if (c == U'o' || c == U'O') return LoginOpenBrowserAgain{};
         }
     }

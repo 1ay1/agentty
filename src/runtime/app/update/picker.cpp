@@ -29,6 +29,7 @@
 #include "agentty/runtime/login.hpp"
 #include "agentty/runtime/mem.hpp"
 #include "agentty/runtime/picker.hpp"
+#include "agentty/runtime/provider_rows.hpp"
 #include "agentty/runtime/view/cache.hpp"
 #include "agentty/runtime/view/helpers.hpp"
 #include "agentty/tool/skills.hpp"
@@ -474,65 +475,36 @@ Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
 // Deps auth to the new provider's resolved credentials, and kick a fresh
 // model fetch so the model list reflects the new backend. No restart.
 Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
-    const auto presets = provider::providers();
-    // Config-driven ACP agents (Zed's `agent_servers` model): the built-in
-    // reference agent + any acp-agents.json entries, listed as their own rows
-    // AFTER the presets. There are no hardcoded per-agent registry rows.
-    const auto acp_agents = provider::enumerate_acp_agents();
-    const int n_presets = static_cast<int>(presets.size());
-    const int n_acp     = static_cast<int>(acp_agents.size());
-    // Saved custom OpenAI-compatible hosts from Settings.provider_keys
-    // that are NOT built-in presets — displayed as their own rows AFTER
-    // ACP agents and BEFORE the "Custom host…" sentinel, matching the
-    // rendering order in pickers.cpp.
+    // The picker's rows are ONE ordered list (presets + ACP agents + saved
+    // custom hosts + "Custom host…" sentinel), built once from the current
+    // search query. The cursor is an index into THIS list — no offset math,
+    // and the same list the view renders (see build_provider_rows).
+    const std::string query = [&] {
+        const auto* p = pick::opened(m.ui.provider_picker);
+        return p ? p->query : std::string{};
+    }();
     auto settings = deps().load_settings();
-    std::vector<std::string> saved_custom_hosts =
+    const std::vector<std::string> saved_custom_hosts =
         provider::saved_custom_hosts(settings.provider_keys);
-    const int n_custom = static_cast<int>(saved_custom_hosts.size());
+    const auto rows = ui::build_provider_rows(saved_custom_hosts, query);
+    const int n = static_cast<int>(rows.size());
 
-    // Virtual rows after presets: [ACP agents…] [saved custom hosts…]
-    // then "Custom host…" sentinel.
-    const int n = n_presets + n_acp + n_custom + 1;
-    const int custom_row = n - 1;   // index of the sentinel row
-    // ACP rows occupy [n_presets, n_presets + n_acp).
-    auto acp_row_at = [&](int idx) -> const provider::AcpAgentSpec* {
-        if (idx >= n_presets && idx < n_presets + n_acp)
-            return &acp_agents[static_cast<std::size_t>(idx - n_presets)];
-        return nullptr;
-    };
-    // Saved custom host rows occupy [n_presets + n_acp,
-    // n_presets + n_acp + n_custom). Returns the spec string or nullptr.
-    auto custom_host_at = [&](int idx) -> const std::string* {
-        int base = n_presets + n_acp;
-        if (idx >= base && idx < base + n_custom)
-            return &saved_custom_hosts[static_cast<std::size_t>(idx - base)];
-        return nullptr;
-    };
     return std::visit(overload{
         [&](OpenProviderPicker) -> Step {
-            // Open at the row matching the currently-active provider.
-            int idx = 0;
+            // Open at the row matching the currently-active provider. Fresh
+            // rows with an empty query (so every provider is present to match).
+            const auto fresh = ui::build_provider_rows(saved_custom_hosts, "");
             const auto& sel = provider::active();
-            if (sel.kind == provider::Kind::ExternalAcp) {
-                for (int i = 0; i < n_acp; ++i)
-                    if (acp_agents[static_cast<std::size_t>(i)].id == sel.acp_agent_id)
-                        idx = n_presets + i;
-            } else {
-                const std::string active_label =
-                    sel.kind == provider::Kind::OpenAI
-                        ? sel.openai_endpoint.label
-                        : std::string{provider::default_provider_id()};
-                // Check built-in presets first.
-                for (int i = 0; i < n_presets; ++i)
-                    if (presets[static_cast<std::size_t>(i)].id == active_label) idx = i;
-                // If no preset matched, check saved custom hosts (the
-                // active provider may be a custom host:port spec).
-                if (idx == 0 && sel.kind == provider::Kind::OpenAI) {
-                    int base = n_presets + n_acp;
-                    for (int i = 0; i < n_custom; ++i)
-                        if (saved_custom_hosts[static_cast<std::size_t>(i)] == active_label)
-                            idx = base + i;
-                }
+            const std::string active_label =
+                sel.kind == provider::Kind::ExternalAcp ? sel.acp_agent_id
+                : sel.kind == provider::Kind::OpenAI    ? sel.openai_endpoint.label
+                : std::string{provider::default_provider_id()};
+            int idx = 0;
+            for (int i = 0; i < static_cast<int>(fresh.size()); ++i) {
+                const auto& row = fresh[static_cast<std::size_t>(i)];
+                if (const auto* pr = row.preset(); pr && pr->id == active_label) { idx = i; break; }
+                if (const auto* ag = row.acp();    ag && ag->id == active_label) { idx = i; break; }
+                if (const auto* ch = row.custom_host(); ch && *ch == active_label) { idx = i; break; }
             }
             m.ui.provider_picker = pick::OpenAt{idx};
             return done(std::move(m));
@@ -560,6 +532,44 @@ Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
             }
             return done(std::move(m));
         },
+        [&](ProviderPickerFilterInput& e) -> Step {
+            auto* p = pick::opened(m.ui.provider_picker);
+            if (!p) return done(std::move(m));
+            // Append the typed codepoint (UTF-8) and reset the cursor to the
+            // top of the freshly-narrowed list.
+            char32_t cp = e.codepoint;
+            if (cp < 0x80) { p->query.push_back(static_cast<char>(cp)); }
+            else {
+                // Minimal UTF-8 encode for multibyte input (rare in provider
+                // names, but never corrupt the buffer).
+                if (cp < 0x800) {
+                    p->query.push_back(static_cast<char>(0xC0 | (cp >> 6)));
+                    p->query.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+                } else if (cp < 0x10000) {
+                    p->query.push_back(static_cast<char>(0xE0 | (cp >> 12)));
+                    p->query.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+                    p->query.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+                } else {
+                    p->query.push_back(static_cast<char>(0xF0 | (cp >> 18)));
+                    p->query.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
+                    p->query.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+                    p->query.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+                }
+            }
+            p->index = 0;
+            return done(std::move(m));
+        },
+        [&](ProviderPickerFilterBackspace) -> Step {
+            auto* p = pick::opened(m.ui.provider_picker);
+            if (!p || p->query.empty()) return done(std::move(m));
+            // Pop one UTF-8 codepoint (trim continuation bytes then the lead).
+            while (!p->query.empty()
+                   && (static_cast<unsigned char>(p->query.back()) & 0xC0) == 0x80)
+                p->query.pop_back();
+            if (!p->query.empty()) p->query.pop_back();
+            p->index = 0;
+            return done(std::move(m));
+        },
         [&](ProviderPickerSelect) -> Step {
             // Capture the cursor before closing: assigning Closed destroys the
             // OpenAt alternative, so keeping a pointer into it would dangle.
@@ -567,29 +577,25 @@ Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
             const int selected = p ? p->index : -1;
             m.ui.provider_picker = pick::Closed{};
             if (selected < 0 || selected >= n) return done(std::move(m));
+            const ui::ProviderRow& chosen = rows[static_cast<std::size_t>(selected)];
 
-            // "Custom host…" row: hand off to the free-text endpoint modal
-            // instead of selecting a preset.
-            if (selected == custom_row) {
+            // "Custom host…" sentinel: hand off to the free-text endpoint modal.
+            if (chosen.is_new_custom_host()) {
                 m.ui.login = ui::login::CustomHostInput{};
                 return done(std::move(m));
             }
 
             // An external ACP agent row: agentty drives the agent subprocess,
-            // which does its OWN auth — no key resolution here. commit routes
-            // the id through parse_selection → Kind::ExternalAcp.
-            if (const provider::AcpAgentSpec* agent = acp_row_at(selected)) {
+            // which does its OWN auth — no key resolution here.
+            if (const provider::AcpAgentSpec* agent = chosen.acp()) {
                 return commit_provider_switch(std::move(m), agent->id,
                                               auth::AuthHeader{}, agent->id);
             }
 
-            // A saved custom OpenAI-compatible host row: the spec string
-            // (e.g. "my-server.com:8443") is the key into
-            // Settings.provider_keys. Resolve the saved key and commit the
-            // switch directly — no re-entry needed because the key is
-            // already on disk. This is what makes saved custom hosts
-            // switchable without retyping.
-            if (const std::string* spec_ptr = custom_host_at(selected)) {
+            // A saved custom OpenAI-compatible host row: the spec string is the
+            // key into Settings.provider_keys. Resolve the saved key and commit
+            // directly — no re-entry, because the key is already on disk.
+            if (const std::string* spec_ptr = chosen.custom_host()) {
                 const std::string spec = *spec_ptr;
                 std::string saved_key;
                 {
@@ -607,7 +613,7 @@ Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
                                               std::move(new_auth), spec);
             }
 
-            const auto& preset = presets[static_cast<std::size_t>(selected)];
+            const auto& preset = *chosen.preset();
             const auto& active = provider::active();
             const bool is_active_account_provider =
                 (preset.id == "chatgpt" && active.is_chatgpt())
@@ -617,38 +623,23 @@ Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
                     && active.kind == provider::Kind::Anthropic);
             if (is_active_account_provider) {
                 // Enter on the active OAuth provider drills into its accounts.
-                // Account switching belongs to this provider-centric overlay,
-                // not the global command palette.
                 return agentty::app::update(std::move(m), Msg{OpenAccounts{}});
             }
 
             const std::string spec{preset.id};
 
-            // Resolve the new backend's credentials BEFORE committing the
-            // switch so we can refuse a switch that would land the user in a
-            // silently-broken state (every request 401s with no key). For
-            // Anthropic we reuse the session creds; for OpenAI-family we
-            // resolve from the registry's env-var chain; local needs none.
-            //
-            // CRITICAL: pass the Anthropic creds loaded FRESH from disk, NOT
-            // deps().auth. deps().auth holds whatever provider is currently
-            // active — if the user is on Ollama (empty key) and switches BACK
-            // to Anthropic, resolve_auth_for would echo that empty key as the
-            // "anthropic creds" and every Anthropic request (incl. the model
-            // list fetch) would see is_empty(auth) and silently no-op. The
-            // real login creds live on disk and survive provider hops.
+            // Resolve the new backend's credentials BEFORE committing so we can
+            // refuse a switch that would land the user in a silently-broken
+            // state. Pass Anthropic creds loaded FRESH from disk, not
+            // deps().auth (which holds the currently-active provider's key).
             auth::AuthHeader anthropic_creds = deps().auth;
             if (auto saved = auth::load_credentials())
                 anthropic_creds = auth::make_auth_header(*saved);
-            // Consult the in-app key store (Settings.provider_keys) so a key
-            // the user pasted on a PRIOR switch to this provider is reused —
-            // otherwise resolve_auth_for only sees env vars and re-prompts on
-            // every switch even though the key is persisted on disk.
             std::string saved_provider_key;
             {
-                auto settings = deps().load_settings();
-                if (auto it = settings.provider_keys.find(spec);
-                    it != settings.provider_keys.end())
+                auto s = deps().load_settings();
+                if (auto it = s.provider_keys.find(spec);
+                    it != s.provider_keys.end())
                     saved_provider_key = it->second;
             }
             auth::AuthHeader new_auth =
@@ -656,11 +647,9 @@ Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
                                            /*cli_key=*/{}, saved_provider_key);
 
             // A hosted (non-local) OpenAI-family provider with no resolvable
-            // key can't stream. Instead of a dead-end error, open the in-app
-            // key-entry modal targeted at THIS provider: the user pastes a
-            // key, it's saved to Settings.provider_keys, and login_submit
-            // commits the switch (see login.cpp). The selection isn't
-            // installed until the key lands.
+            // key can't stream. Open the in-app key-entry modal for THIS
+            // provider instead of a dead-end error; login_submit commits the
+            // switch once the key lands.
             const bool needs_key =
                 preset.kind() == provider::Kind::OpenAI && !preset.is_local
                 && preset.auth != provider::AuthStyle::None;
@@ -674,42 +663,35 @@ Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
                 return done(std::move(m));
             }
 
-            // GitHub Copilot authenticates via native device-flow OAuth, not
-            // an API key. If no GitHub credential is saved yet, launch the same
-            // device login the modal runs instead of switching to a provider
-            // that would show "not signed in" on the first turn — first-class
-            // parity with the ChatGPT/Anthropic OAuth prompts. login_copilot_done
-            // commits the switch to copilot on success.
+            // Native device-flow OAuth providers (Copilot, Kimi): if not signed
+            // in, launch the device login instead of switching to a backend
+            // that would show "not signed in" on the first turn. One helper
+            // path for both — see launch_device_login in login.cpp.
             if (spec == "copilot" && !provider::copilot::signed_in()) {
                 const auto attempt_id = cmd::next_codex_login_attempt_id();
                 auto cancel = std::make_shared<std::atomic_bool>(false);
-                m.ui.login = ui::login::CopilotWaiting{
-                    .attempt_id = attempt_id,
-                    .cancel = cancel,
+                m.ui.login = ui::login::DeviceWaiting{
+                    .provider = "copilot", .provider_label = "GitHub Copilot",
+                    .attempt_id = attempt_id, .cancel = cancel,
                 };
                 return {std::move(m),
-                        cmd::copilot_login_async(attempt_id, std::move(cancel))};
+                        cmd::device_login_async("copilot", "GitHub Copilot",
+                                                attempt_id, std::move(cancel))};
             }
-
-            // Kimi Code authenticates via native device-flow OAuth (RFC 8628),
-            // exactly like Copilot. Launch the device login if not signed in.
             if (spec == "kimi" && !provider::kimi::signed_in()) {
                 const auto attempt_id = cmd::next_codex_login_attempt_id();
                 auto cancel = std::make_shared<std::atomic_bool>(false);
-                m.ui.login = ui::login::KimiWaiting{
-                    .attempt_id = attempt_id,
-                    .cancel = cancel,
+                m.ui.login = ui::login::DeviceWaiting{
+                    .provider = "kimi", .provider_label = "Kimi",
+                    .attempt_id = attempt_id, .cancel = cancel,
                 };
                 return {std::move(m),
-                        cmd::kimi_login_async(attempt_id, std::move(cancel))};
+                        cmd::device_login_async("kimi", "Kimi",
+                                                attempt_id, std::move(cancel))};
             }
 
-            // codex-cli authenticates via native ChatGPT OAuth, not an API
-            // key. If no ChatGPT credential is saved yet, launch the same
-            // loopback login the modal's option 3 runs instead of switching
-            // to a provider that would 401 on the first turn — first-class
-            // parity with the Anthropic OAuth prompt. codex_login_done then
-            // commits the switch to codex-cli on success.
+            // codex-cli / chatgpt authenticates via native ChatGPT OAuth
+            // (loopback or device). Launch it if not signed in.
             if ((spec == "chatgpt" || spec == "codex-cli")
                 && !provider::chatgpt::responses_available()) {
                 const auto attempt_id = cmd::next_codex_login_attempt_id();

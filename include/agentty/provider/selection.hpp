@@ -166,6 +166,14 @@ void prewarm_active_provider();
 [[nodiscard]] std::vector<ModelInfo> list_models_for(
     const Selection& sel, const auth::AuthHeader& auth);
 
+// ── Provider-picker search filter (shared by the reducer + the view) ────────
+// Returns the indices into `providers()` whose id/label/blurb match `query`
+// (empty query = all, in registry order). Fuzzy-scored and ranked so "kimi"
+// or "ds" floats the right row up. Used by BOTH picker.cpp (index ↔ preset
+// resolution on select/move) and pickers.cpp (row rendering) so the filtered
+// list can never disagree between them. Defined in selection.cpp.
+[[nodiscard]] std::vector<int> filter_provider_indices(std::string_view query);
+
 // The user's saved custom OpenAI-compatible hosts, sorted. These are the
 // Settings.provider_keys entries that are NOT built-in presets (e.g. a raw
 // "host:port" endpoint). Both the provider-picker VIEW and its reducer build

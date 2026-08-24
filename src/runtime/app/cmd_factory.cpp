@@ -1831,88 +1831,65 @@ std::uint64_t next_codex_login_attempt_id() noexcept {
     return next.fetch_add(1, std::memory_order_relaxed) + 1;
 }
 
-Cmd<Msg> copilot_login_async(std::uint64_t attempt_id,
-                             std::shared_ptr<std::atomic_bool> cancel) {
-    // GitHub device flow: request a code (dispatched to the modal via
-    // CopilotDeviceCodeReady), then block-poll until the user approves. Every
-    // message carries attempt_id so a stale worker can't complete a newer
-    // login; Esc trips `cancel` for cooperative shutdown.
+Cmd<Msg> device_login_async(std::string provider, std::string provider_label,
+                            std::uint64_t attempt_id,
+                            std::shared_ptr<std::atomic_bool> cancel) {
+    // Native OAuth device flow, provider-generic. Requests a one-time code
+    // (dispatched to the modal via DeviceCodeReady), then block-polls until the
+    // user approves. Every message carries provider + attempt_id so a stale
+    // worker can't complete a newer login; Esc trips `cancel` for cooperative
+    // shutdown. Runs isolated because login() blocks while the user signs in.
     return Cmd<Msg>::task_isolated(
-        [attempt_id, cancel = std::move(cancel)](std::function<void(Msg)> dispatch) {
+        [provider = std::move(provider), provider_label = std::move(provider_label),
+         attempt_id, cancel = std::move(cancel)](std::function<void(Msg)> dispatch) {
         const auto cancelled = [cancel] {
             return cancel && cancel->load(std::memory_order_acquire);
         };
-        try {
-            auto r = provider::copilot::login(
-                900, [attempt_id, &dispatch](
-                         const provider::copilot::DeviceCode& code) {
-                    dispatch(CopilotDeviceCodeReady{
-                        .attempt_id = attempt_id,
-                        .verification_url = code.verification_uri,
-                        .user_code = code.user_code,
-                    });
-                }, cancelled);
-            dispatch(CopilotLoginDone{
+        auto emit_code = [&](std::string url, std::string user_code) {
+            dispatch(DeviceCodeReady{
+                .provider = provider,
                 .attempt_id = attempt_id,
-                .result = std::move(r),
+                .verification_url = std::move(url),
+                .user_code = std::move(user_code),
             });
-        } catch (const std::exception& e) {
-            dispatch(CopilotLoginDone{
+        };
+        auto done = [&](std::optional<std::string> error) {
+            dispatch(DeviceLoginDone{
+                .provider = provider,
+                .provider_label = provider_label,
                 .attempt_id = attempt_id,
-                .result = std::unexpected(auth::OAuthError{
-                    auth::OAuthErrorKind::Network,
-                    std::string{"copilot login threw: "} + e.what()}),
+                .error = std::move(error),
             });
-        } catch (...) {
-            dispatch(CopilotLoginDone{
-                .attempt_id = attempt_id,
-                .result = std::unexpected(auth::OAuthError{
-                    auth::OAuthErrorKind::Network, "copilot login threw"}),
-            });
-        }
-    });
-}
-
-Cmd<Msg> kimi_login_async(std::uint64_t attempt_id,
-                          std::shared_ptr<std::atomic_bool> cancel) {
-    // Kimi Code device flow: request a code (dispatched to the modal via
-    // KimiDeviceCodeReady), then block-poll until the user approves. Every
-    // message carries attempt_id so a stale worker can't complete a newer
-    // login; Esc trips `cancel` for cooperative shutdown.
-    return Cmd<Msg>::task_isolated(
-        [attempt_id, cancel = std::move(cancel)](std::function<void(Msg)> dispatch) {
-        const auto cancelled = [cancel] {
-            return cancel && cancel->load(std::memory_order_acquire);
         };
         try {
-            auto r = provider::kimi::login(
-                900, [attempt_id, &dispatch](
-                         const provider::kimi::DeviceCode& code) {
-                    dispatch(KimiDeviceCodeReady{
-                        .attempt_id = attempt_id,
-                        .verification_url = code.verification_uri_complete.empty()
-                                                ? code.verification_uri
-                                                : code.verification_uri_complete,
-                        .user_code = code.user_code,
-                    });
-                }, cancelled);
-            dispatch(KimiLoginDone{
-                .attempt_id = attempt_id,
-                .result = std::move(r),
-            });
+            // Each provider's login() shares the same shape (timeout,
+            // device-code sink, cancel-probe) but its own DeviceCode type;
+            // map it to the generic dispatch. login() persists the token on
+            // success, so we only forward success-or-error to the reducer.
+            std::optional<std::string> err;
+            if (provider == "copilot") {
+                auto r = provider::copilot::login(900,
+                    [&](const provider::copilot::DeviceCode& c) {
+                        emit_code(c.verification_uri, c.user_code);
+                    }, cancelled);
+                if (!r) err = r.error().render();
+            } else if (provider == "kimi") {
+                auto r = provider::kimi::login(900,
+                    [&](const provider::kimi::DeviceCode& c) {
+                        emit_code(c.verification_uri_complete.empty()
+                                      ? c.verification_uri
+                                      : c.verification_uri_complete,
+                                  c.user_code);
+                    }, cancelled);
+                if (!r) err = r.error().render();
+            } else {
+                err = "unknown device-login provider: " + provider;
+            }
+            done(std::move(err));
         } catch (const std::exception& e) {
-            dispatch(KimiLoginDone{
-                .attempt_id = attempt_id,
-                .result = std::unexpected(auth::OAuthError{
-                    auth::OAuthErrorKind::Network,
-                    std::string{"kimi login threw: "} + e.what()}),
-            });
+            done(provider + " login threw: " + e.what());
         } catch (...) {
-            dispatch(KimiLoginDone{
-                .attempt_id = attempt_id,
-                .result = std::unexpected(auth::OAuthError{
-                    auth::OAuthErrorKind::Network, "kimi login threw"}),
-            });
+            done(provider + " login threw");
         }
     });
 }

@@ -25,8 +25,8 @@
 #include "agentty/provider/chatgpt/responses.hpp"
 #include "agentty/provider/copilot/copilot_oauth.hpp"
 #include "agentty/provider/kimi/kimi_oauth.hpp"
-#include "agentty/provider/acp_agents.hpp"
-#include "agentty/provider/selection.hpp"
+#include "agentty/runtime/provider_rows.hpp"
+#include "agentty/provider/registry.hpp"
 #include "agentty/runtime/app/deps.hpp"   // deps().auth for the live auth badge
 #include "agentty/auth/auth.hpp"          // auth::is_empty
 #include "agentty/workspace/files.hpp"
@@ -349,7 +349,6 @@ Element provider_picker(const Model& m) {
     cfg.selected   = picker->index;
 
     const std::string active_id = active_provider_id();
-    const auto presets = provider::providers();
 
     auto env_has = [](std::string_view name) -> bool {
         if (name.empty()) return false;
@@ -357,169 +356,119 @@ Element provider_picker(const Model& m) {
         return v && *v;
     };
 
-    cfg.rows.reserve(presets.size());
-    int i = 0;
-    for (const auto& p : presets) {
-        const bool active = (p.id == active_id);
-        const bool sel    = (i == picker->index);
-
-        // Auth status for the trailing column.
-        std::string note;
-        maya::Color note_color = muted;
-        if (p.id == "chatgpt") {
-            // Native ChatGPT OAuth: reflect REAL sign-in state, consistent with
-            // the Copilot row. Selecting it while signed out launches the
-            // device/loopback login (picker.cpp).
-            if (provider::chatgpt::responses_available()) {
-                note = active ? "\xe2\x9c\x93 signed in \xc2\xb7 accounts" : "ChatGPT (signed in)";
-                note_color = active ? success : muted;
-            } else {
-                note = "\xe2\x9a\xa0 sign in with ChatGPT";
-                note_color = warn;
-            }
-        } else if (p.id == "copilot") {
-            // Native GitHub OAuth: reflect REAL sign-in state, not a hardcoded
-            // checkmark. Selecting it while signed out launches the device
-            // login (picker.cpp), so "sign in" is an actionable hint.
-            if (provider::copilot::signed_in()) {
-                note = active ? "\xe2\x9c\x93 signed in \xc2\xb7 accounts" : "GitHub Copilot (signed in)";
-                note_color = active ? success : muted;
-            } else {
-                note = "\xe2\x9a\xa0 sign in with GitHub";
-                note_color = warn;
-            }
-        } else if (p.id == "kimi") {
-            // Native Kimi Code OAuth (device flow): reflect REAL sign-in state,
-            // like the Copilot row. Selecting it while signed out launches the
-            // device login (picker.cpp).
-            if (provider::kimi::signed_in()) {
-                note = active ? "\xe2\x9c\x93 signed in \xc2\xb7 accounts" : "Kimi (signed in)";
-                note_color = active ? success : muted;
-            } else {
-                note = "\xe2\x9a\xa0 sign in with Kimi";
-                note_color = warn;
-            }
-        } else if (p.is_local || p.auth == provider::AuthStyle::None) {
-            note = "● local";
-            note_color = info;
-        } else if (p.kind() == provider::Kind::Anthropic) {
-            // Reflect REAL auth state, not a hardcoded checkmark: creds come
-            // from `agentty login` (OAuth) or a pasted/​env x-api-key, stored
-            // in credentials.json on disk. We must NOT check deps().auth here
-            // — that holds the ACTIVE provider's auth header, so after the
-            // user switches to an OpenAI-compatible host it contains the
-            // OpenAI key and would falsely show Anthropic as "signed in".
-            // Checking the on-disk Anthropic credential store is authoritative
-            // and independent of which provider is currently active.
-            if (auth::anthropic_signed_in()) {
-                note = active ? "\xe2\x9c\x93 signed in \xc2\xb7 accounts" : "\xe2\x9c\x93 signed in";
-                note_color = success;
-            } else {
-                note = "\xe2\x9a\xa0 sign in";
-                note_color = warn;
-            }
-        } else {
-            bool have = false;
-            std::string_view via;
-            for (auto env : p.auth_env) {
-                if (env_has(env)) { have = true; via = env; break; }
-            }
-            if (have) { note = "✓ " + std::string{via}; note_color = success; }
-            else {
-                // Name the first (provider-specific) env var the user should set.
-                std::string_view want = p.auth_env.front();
-                note = want.empty() ? "⚠ no key"
-                                    : "⚠ " + std::string{want};
-                note_color = warn;
-            }
-        }
-
-        Picker::Config::Row row;
-        row.leading        = std::string{p.label} + "  "
-                           + std::string{p.blurb};
-        row.leading_style  = active ? fg_bold(fg) : fg_of(muted);
-        row.trailing       = note;
-        row.trailing_style = fg_of(note_color);
-        row.selected = sel;
-        row.active   = active;
-        cfg.rows.push_back(std::move(row));
-        ++i;
-    }
-
-    // Config-driven external ACP agents (Zed's `agent_servers` model): the
-    // built-in reference agent + any acp-agents.json entries. Listed as their
-    // own rows after the presets — there are no hardcoded per-agent registry
-    // rows. Each drives an external agent subprocess that does its own auth.
-    for (const auto& agent : provider::enumerate_acp_agents()) {
-        const bool active = (agent.id == active_id);
-        const bool sel    = (i == picker->index);
-        Picker::Config::Row row;
-        row.leading        = agent.id + "  external ACP agent ("
-                           + agent.command + ")";
-        row.leading_style  = active ? fg_bold(fg) : fg_of(muted);
-        row.trailing       = "\xe2\x97\x8f agent";   // ● agent
-        row.trailing_style = fg_of(info);
-        row.selected = sel;
-        row.active   = active;
-        cfg.rows.push_back(std::move(row));
-        ++i;
-    }
-
-    // Saved custom OpenAI-compatible hosts from Settings.provider_keys
-    // that are NOT built-in presets (e.g. "my-server.com:8443"). These
-    // appear as their own rows so the user can switch back to a previously
-    // entered host without retyping it. Preset-matched keys ("openai",
-    // "groq", …) are already shown as built-in rows above and are skipped.
+    // The one ordered, query-filtered row list — the SAME list the reducer
+    // resolves a selection against (see build_provider_rows). The cursor is a
+    // plain index into it; there is no offset math on either side.
     auto settings = app::deps().load_settings();
-    std::vector<std::string> saved_custom_hosts =
+    const std::vector<std::string> saved_custom_hosts =
         provider::saved_custom_hosts(settings.provider_keys);
-    for (const auto& spec : saved_custom_hosts) {
-        const bool active = (spec == active_id);
-        const bool sel    = (i == picker->index);
+    const auto rows = ui::build_provider_rows(saved_custom_hosts, picker->query);
+
+    // Live search header (mirrors the model picker). Backspace trims; typing
+    // narrows. Hidden ACP/custom rows return the moment the query is cleared.
+    cfg.header.push_back(h(text("\xf0\x9f\x94\x8d ", fg_of(muted)),
+        text(picker->query.empty() ? "type to filter providers\xe2\x80\xa6"
+                                   : picker->query,
+             picker->query.empty() ? fg_italic(muted) : fg_of(fg))
+    ).build());
+    cfg.header.push_back(sep);
+
+    // Trailing auth-status column for a built-in preset. One place, so every
+    // provider's badge stays consistent.
+    auto preset_note = [&](const provider::ProviderPreset& p, bool active)
+        -> std::pair<std::string, maya::Color> {
+        auto signed_badge = [&](const char* signed_label) {
+            return std::pair<std::string, maya::Color>{
+                active ? "\xe2\x9c\x93 signed in \xc2\xb7 accounts" : signed_label,
+                active ? success : muted};
+        };
+        if (p.id == "chatgpt") {
+            if (provider::chatgpt::responses_available()) return signed_badge("ChatGPT (signed in)");
+            return {"\xe2\x9a\xa0 sign in with ChatGPT", warn};
+        }
+        if (p.id == "copilot") {
+            if (provider::copilot::signed_in()) return signed_badge("GitHub Copilot (signed in)");
+            return {"\xe2\x9a\xa0 sign in with GitHub", warn};
+        }
+        if (p.id == "kimi") {
+            if (provider::kimi::signed_in()) return signed_badge("Kimi (signed in)");
+            return {"\xe2\x9a\xa0 sign in with Kimi", warn};
+        }
+        if (p.is_local || p.auth == provider::AuthStyle::None)
+            return {"\xe2\x97\x8f local", info};
+        if (p.kind() == provider::Kind::Anthropic) {
+            // On-disk credential store is authoritative and independent of the
+            // currently-active provider (do NOT read deps().auth here).
+            if (auth::anthropic_signed_in())
+                return {active ? "\xe2\x9c\x93 signed in \xc2\xb7 accounts" : "\xe2\x9c\x93 signed in", success};
+            return {"\xe2\x9a\xa0 sign in", warn};
+        }
+        // Hosted API-key provider: show which env var supplies (or is missing) the key.
+        for (auto env : p.auth_env)
+            if (env_has(env)) return {"\xe2\x9c\x93 " + std::string{env}, success};
+        std::string_view want = p.auth_env.front();
+        return {want.empty() ? "\xe2\x9a\xa0 no key" : "\xe2\x9a\xa0 " + std::string{want}, warn};
+    };
+
+    cfg.rows.reserve(rows.size());
+    int i = 0;
+    for (const auto& r : rows) {
+        const bool sel = (i == picker->index);
         Picker::Config::Row row;
-        row.leading        = spec + "  custom OpenAI-compatible host";
-        row.leading_style  = active ? fg_bold(fg) : fg_of(muted);
-        row.trailing       = "\xe2\x9c\x93 ready";   // ✓ ready
-        row.trailing_style = fg_of(success);
+
+        if (const auto* p = r.preset()) {
+            const bool active = (p->id == active_id);
+            auto [note, note_color] = preset_note(*p, active);
+            row.leading        = std::string{p->label} + "  " + std::string{p->blurb};
+            row.leading_style  = active ? fg_bold(fg) : fg_of(muted);
+            row.trailing       = note;
+            row.trailing_style = fg_of(note_color);
+            row.active         = active;
+        } else if (const auto* agent = r.acp()) {
+            const bool active = (agent->id == active_id);
+            row.leading        = agent->id + "  external ACP agent (" + agent->command + ")";
+            row.leading_style  = active ? fg_bold(fg) : fg_of(muted);
+            row.trailing       = "\xe2\x97\x8f agent";
+            row.trailing_style = fg_of(info);
+            row.active         = active;
+        } else if (const auto* spec = r.custom_host()) {
+            const bool active = (*spec == active_id);
+            row.leading        = *spec + "  custom OpenAI-compatible host";
+            row.leading_style  = active ? fg_bold(fg) : fg_of(muted);
+            row.trailing       = "\xe2\x9c\x93 ready";
+            row.trailing_style = fg_of(success);
+            row.active         = active;
+        } else {   // NewCustomHost sentinel
+            row.leading        = std::string{"Custom host\xe2\x80\xa6  "}
+                               + "any OpenAI-compatible server (host:port)";
+            row.leading_style  = fg_of(muted);
+            row.trailing       = "\xe2\x9c\x8e edit";
+            row.trailing_style = fg_of(info);
+        }
         row.selected = sel;
-        row.active   = active;
         cfg.rows.push_back(std::move(row));
         ++i;
     }
 
-    // Virtual trailing row: "Custom host…" — opens a free-text endpoint
-    // entry for any OpenAI-compatible server (llama.cpp, vLLM, a remote
-    // host:port). Kept out of the registry so preset_for / from_spec stay
-    // clean; the reducer maps this row index to the CustomHostInput modal.
-    {
-        Picker::Config::Row row;
-        row.leading        = std::string{"Custom host\xe2\x80\xa6  "}
-                           + "any OpenAI-compatible server (host:port)";
-        row.leading_style  = fg_of(muted);
-        row.trailing       = "\xe2\x9c\x8e edit";   // ✎ edit
-        row.trailing_style = fg_of(info);
-        row.selected       = (i == picker->index);
-        cfg.rows.push_back(std::move(row));
-    }
-
+    // Enter drills into accounts only when the highlighted row is the active
+    // OAuth provider — read straight off the highlighted row (no index math).
     const bool enter_opens_accounts = [&] {
-        if (picker->index < 0
-            || picker->index >= static_cast<int>(presets.size())) return false;
-        const auto& highlighted = presets[static_cast<std::size_t>(picker->index)];
-        return highlighted.id == active_id
-            && (highlighted.id == "chatgpt"
-                || highlighted.id == "copilot"
-                || highlighted.id == "kimi"
-                || highlighted.kind() == provider::Kind::Anthropic);
+        if (picker->index < 0 || picker->index >= static_cast<int>(rows.size()))
+            return false;
+        const auto* p = rows[static_cast<std::size_t>(picker->index)].preset();
+        if (!p || p->id != active_id) return false;
+        return p->id == "chatgpt" || p->id == "copilot" || p->id == "kimi"
+            || p->kind() == provider::Kind::Anthropic;
     }();
 
     cfg.footer.push_back(text(""));
     cfg.footer.push_back(h(
-        text("✓", fg_of(success)), text(" ready  ", fg_dim(muted)),
-        text("⚠", fg_of(warn)),    text(" set the named key first  ", fg_dim(muted))
+        text("\xe2\x9c\x93", fg_of(success)), text(" ready  ", fg_dim(muted)),
+        text("\xe2\x9a\xa0", fg_of(warn)),    text(" set the named key first  ", fg_dim(muted))
     ).build());
     cfg.footer.push_back(key_hints({
         {"\xe2\x86\x91\xe2\x86\x93", "move", 5},        // ↑↓
+        {"type", "filter", 4},
         {"Enter", enter_opens_accounts ? "accounts" : "switch", 5},
         {"^/", "models", 3},                       // cross-hint: model picker
         {"Esc", "close", 4},

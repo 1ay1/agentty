@@ -2,6 +2,7 @@
 
 #include "agentty/provider/selection.hpp"
 
+#include <algorithm>
 #include <cstdlib>
 #include <mutex>
 #include <string>
@@ -15,6 +16,7 @@
 #include "agentty/provider/copilot/provider.hpp"
 #include "agentty/provider/kimi/provider.hpp"
 #include "agentty/provider/openai/transport.hpp"
+#include "agentty/runtime/fuzzy.hpp"
 #include "agentty/io/http.hpp"
 
 namespace agentty::provider {
@@ -313,6 +315,36 @@ std::vector<ModelInfo> list_models_for(const Selection& sel,
         return models;
     }
     return anthropic::list_models(auth);
+}
+
+std::vector<int> filter_provider_indices(std::string_view query) {
+    const auto ps = providers();
+    const int n = static_cast<int>(ps.size());
+    std::vector<int> out;
+    out.reserve(static_cast<std::size_t>(n));
+    if (query.empty()) {
+        for (int i = 0; i < n; ++i) out.push_back(i);
+        return out;
+    }
+    // Fuzzy-score against id, label, and blurb; keep the best of the three so
+    // "kimi" matches the id, "grok" matches the label, "wafer" matches the
+    // Cerebras blurb. Rank by score (stable, so ties keep registry order).
+    struct Scored { int idx; int score; };
+    std::vector<Scored> scored;
+    scored.reserve(static_cast<std::size_t>(n));
+    for (int i = 0; i < n; ++i) {
+        const auto& p = ps[static_cast<std::size_t>(i)];
+        int best = -1;
+        for (std::string_view field : {p.id, p.label, p.blurb}) {
+            auto m = fuzzy::score(field, query);
+            if (m.matched() && m.score > best) best = m.score;
+        }
+        if (best >= 0) scored.push_back({i, best});
+    }
+    std::stable_sort(scored.begin(), scored.end(),
+        [](const Scored& a, const Scored& b) { return a.score > b.score; });
+    for (const auto& s : scored) out.push_back(s.idx);
+    return out;
 }
 
 } // namespace agentty::provider
