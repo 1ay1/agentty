@@ -20,6 +20,7 @@
 #include "agtest.hpp"
 
 #include "agentty/provider/openai/transport.hpp"
+#include "agentty/io/http.hpp"
 #include "agentty/provider/msg_shared.hpp"
 #include "agentty/provider/registry.hpp"
 #include "agentty/provider/selection.hpp"
@@ -67,6 +68,27 @@ static std::string joined_tool_args(const std::vector<Msg>& msgs) {
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
+
+TEST_CASE("sse anti-buffering headers are the shared SSOT trio") {
+    // The three directives that keep gateways from buffering/compressing an
+    // event stream. Pinned so a future edit can't silently drop or change one
+    // for a single wire — every streaming transport routes through this helper.
+    auto trio = agentty::http::sse_no_buffer_headers();
+    CHECK(trio.size() == 3);
+    auto has = [&](const char* n, const char* v) {
+        for (const auto& h : trio) if (h.name == n) return h.value == v;
+        return false;
+    };
+    CHECK(has("cache-control", "no-cache, no-transform"));
+    CHECK(has("pragma", "no-cache"));
+    CHECK(has("accept-encoding", "identity"));
+
+    // append_sse_no_buffer splices the same trio onto an existing list.
+    agentty::http::Headers h;
+    h.push_back({"content-type", "application/json"});
+    agentty::http::append_sse_no_buffer(h);
+    CHECK(h.size() == 4);
+}
 
 TEST_CASE("test_build_tools") {
     std::vector<provider::ToolSpec> tools;

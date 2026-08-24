@@ -57,6 +57,27 @@ struct Header {
 };
 using Headers = std::vector<Header>;
 
+// The SSE anti-buffering directive trio. Corporate/endpoint-security gateways
+// commonly buffer or compress an event stream until a large body accumulates,
+// so short replies arrive in one burst and long turns trip the stall watchdog
+// ("no events for 120s"). These three headers ask every hop to pass frames
+// through incrementally and uncompressed. Every streaming transport (Anthropic,
+// OpenAI-Chat, Codex/Responses) needs the exact same trio — hoisted here so the
+// set can't drift between wires. See docs/website/proxies.md.
+[[nodiscard]] inline Headers sse_no_buffer_headers() {
+    return {
+        {"cache-control",   "no-cache, no-transform"},
+        {"pragma",          "no-cache"},
+        {"accept-encoding", "identity"},
+    };
+}
+
+// Append the trio to an existing header list (for transports that build headers
+// incrementally with push_back).
+inline void append_sse_no_buffer(Headers& h) {
+    for (auto& kv : sse_no_buffer_headers()) h.push_back(std::move(kv));
+}
+
 // Strongly-typed HTTP method. The wire spelling lives in one place
 // (`wire_name`) and the runtime never sees a free-form string at this
 // seam — "GET" vs "Get" vs "get" can't diverge between call sites.

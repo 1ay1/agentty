@@ -611,14 +611,12 @@ provider::StreamResult stream_responses(provider::Request req, provider::EventSi
         {"authorization",     "Bearer " + creds->access_token},
         {"content-type",      "application/json"},
         {"accept",            "text/event-stream"},
-        {"cache-control",     "no-cache, no-transform"},
-        {"pragma",            "no-cache"},
-        {"accept-encoding",   "identity"},
         {"openai-beta",       "responses=experimental"},
         {"originator",        OAuthConfig::originator},
         {"session_id",        session_id_for(req.session_key)},
         {"user-agent",        std::string("codex_cli_rs/") + OAuthConfig::codex_client_version},
     };
+    http::append_sse_no_buffer(hr.headers);   // shared SSE anti-buffering trio
     if (!creds->account_id.empty())
         hr.headers.push_back({"chatgpt-account-id", creds->account_id});
 

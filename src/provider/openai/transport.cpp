@@ -1535,9 +1535,7 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
         hreq.dial_port = ov.port;
     }
     hreq.headers = build_request_headers(req.auth, req.endpoint);
-    hreq.headers.push_back({"cache-control", "no-cache, no-transform"});
-    hreq.headers.push_back({"pragma", "no-cache"});
-    hreq.headers.push_back({"accept-encoding", "identity"});
+    http::append_sse_no_buffer(hreq.headers);
     hreq.body    = std::move(body_str);
 
     int  http_status = 0;
