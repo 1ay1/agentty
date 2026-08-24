@@ -134,7 +134,7 @@ std::string device_id() {
 // The X-Msh-* device-identity header block Kimi requires on every OAuth (and
 // API) request. Without it the auth server treats the caller as a generic web
 // client and serves a plain login page instead of the device-approval flow.
-std::vector<std::pair<std::string, std::string>> device_headers() {
+std::vector<std::pair<std::string, std::string>> device_headers_impl() {
     return {
         {"x-msh-platform",     kMshPlatform},
         {"x-msh-version",      AGENTTY_VERSION},
@@ -186,7 +186,7 @@ HttpResult post_form(std::string_view path, std::string body) {
         {"content-type", "application/x-www-form-urlencoded"},
         {"user-agent",   kUserAgent},
     };
-    for (auto& h : device_headers()) req.headers.push_back({h.first, h.second});
+    for (auto& h : device_headers_impl()) req.headers.push_back({h.first, h.second});
     if (const auto& ov = http::agentty_oauth_host_override(); ov.active()) {
         req.dial_host = ov.host;
         req.dial_port = ov.port;
@@ -390,8 +390,12 @@ std::expected<KimiToken, OAuthError> refresh(const KimiToken& cur) {
 
 } // namespace
 
-// ── Public API ──────────────────────────────────────────────────────────────
+// ── Public API ────────────────────────────────────────────────────────
 std::int64_t KimiToken::now_ms() noexcept { return now_ms_impl(); }
+
+std::vector<std::pair<std::string, std::string>> device_headers() {
+    return device_headers_impl();
+}
 
 fs::path credentials_path() { return creds_path(); }
 
