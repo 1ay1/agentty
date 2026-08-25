@@ -314,6 +314,14 @@ int main() {
         check(has(tested, "PASS") && has(tested, "native-test-ok"),
               "test: runs an explicit focused command with pass status");
 
+        // A failing run surfaces WHICH test failed as a leading digest so the
+        // model doesn't have to scan the whole runner log.
+        auto failed = run("test", {{"command",
+            "printf '[  FAILED  ] Suite.CaseX\\n'; exit 1"}});
+        check(has(failed, "FAIL"), "test: failing run reports FAIL status");
+        check(has(failed, "Failing test") && has(failed, "Suite.CaseX"),
+              "test: failing run digests the failing test name");
+
         auto started = run("process_start", {{"command", "printf 'process-first\\n'; sleep 1; printf 'process-second\\n'; sleep 5"},
                                               {"cwd", root.string()}});
         check(started.has_value() && has(started, "proc-"), "process_start: returns session id");
