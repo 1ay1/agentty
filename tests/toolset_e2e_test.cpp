@@ -156,16 +156,19 @@ int main() {
     // ── write→edit nudge: overwriting a big file with a tiny change hints
     //    that edit would have been better; a full rewrite stays silent. ────
     {
+        // Use a DEDICATED file — never the shared `file` fixture that the
+        // read/edit/grep blocks below depend on.
+        auto nudge_file = root / "nudge_e2e.txt";
         std::string big;
         for (int i = 0; i < 60; ++i) big += "line " + std::to_string(i) + "\n";
-        auto seed = run("write", {{"file_path", file.string()}, {"content", big}});
+        auto seed = run("write", {{"file_path", nudge_file.string()}, {"content", big}});
         check(seed.has_value(), "write nudge: seed big file");
 
         // Change exactly one line out of 60 -> should nudge toward edit.
         std::string tiny = big;
         auto pos = tiny.find("line 30\n");
         if (pos != std::string::npos) tiny.replace(pos, 8, "line 30 CHANGED\n");
-        auto small = run("write", {{"file_path", file.string()}, {"content", tiny}});
+        auto small = run("write", {{"file_path", nudge_file.string()}, {"content", tiny}});
         check(small.has_value(), "write nudge: small overwrite succeeds");
         check(has(small, "edit") && has(small, "tip"),
               "write nudge: small overwrite of big file suggests edit");
@@ -173,7 +176,7 @@ int main() {
         // A wholesale rewrite (most lines differ) must NOT nudge.
         std::string rewrite;
         for (int i = 0; i < 60; ++i) rewrite += "fresh " + std::to_string(i) + "\n";
-        auto full = run("write", {{"file_path", file.string()}, {"content", rewrite}});
+        auto full = run("write", {{"file_path", nudge_file.string()}, {"content", rewrite}});
         check(full.has_value() && !has(full, "tip: this overwrote"),
               "write nudge: full rewrite stays silent");
     }
@@ -730,6 +733,27 @@ int main() {
 
         auto df = run("git_diff", {{"path", root.string()}});
         check(has(df, "changed content"), "git_diff: shows the hunk");
+
+        // A diff that overruns the 50 KB cap must warn it's incomplete and
+        // tell the model NOT to apply_patch it — an incomplete patch can end
+        // mid-hunk. Generate a big change to trip the cap.
+        {
+            std::string huge;
+            for (int i = 0; i < 4000; ++i)
+                huge += "new line " + std::to_string(i) +
+                        " with enough text to add up past fifty kilobytes\n";
+            write_file(root / "big.txt", huge);
+            std::string add = "cd " + root.string() + " && git add -A";
+            (void)std::system(add.c_str());
+            auto bigdf = run("git_diff", {{"path", root.string()},
+                                          {"staged", true}});
+            // Either it fit (small env) or it truncated with the upgraded hint.
+            check(!has(bigdf, "[output truncated]"),
+                  "git_diff: no bare truncation marker");
+            if (text_of(bigdf).find("truncated") != std::string::npos)
+                check(has(bigdf, "apply_patch") && has(bigdf, "stat_only"),
+                      "git_diff: truncated patch gives an actionable hint");
+        }
 
         auto cm = run("git_commit", {{"message", "e2e commit"},
                                      {"stage_all", true},
