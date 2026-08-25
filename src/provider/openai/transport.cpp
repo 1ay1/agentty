@@ -715,8 +715,17 @@ void handle_delta(StreamCtx& ctx, const json& delta) {
         for (const auto& tc : delta["tool_calls"]) {
             const int index = tc.value("index", 0);
             if (index < 0) continue;
+            // `index` is server-controlled. A hostile or buggy endpoint
+            // (or a compat proxy) can send an absurd index; resize(index+1)
+            // would then allocate index * sizeof(ToolCallSlot) bytes and
+            // OOM-kill the process mid-stream (and index+1 on INT_MAX
+            // overflows to a negative -> huge size_t). Real streams never
+            // carry more than a handful of parallel tool calls, so cap the
+            // slot table far below any legitimate use.
+            constexpr int kMaxToolSlots = 1024;
+            if (index >= kMaxToolSlots) continue;
             if (static_cast<std::size_t>(index) >= ctx.tool_slots.size())
-                ctx.tool_slots.resize(index + 1);
+                ctx.tool_slots.resize(static_cast<std::size_t>(index) + 1);
             auto& slot = ctx.tool_slots[index];
 
             if (tc.contains("id") && tc["id"].is_string())
