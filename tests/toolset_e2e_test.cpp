@@ -261,6 +261,24 @@ int main() {
                               {"cd", root.string()}});
         check(has(r, "e2e-bash-ok"), "bash: runs and captures stdout");
     }
+    // ── bash failure feedback: exit-code decode + error-line digest ──────────
+    {
+        // 127 = command not found — the decode hint must appear.
+        auto r = run("bash", {{"command", "this_binary_does_not_exist_e2e"},
+                              {"cd", root.string()}});
+        check(has(r, "127"), "bash: reports the numeric exit code");
+        check(has(r, "not found"), "bash: decodes exit 127 as command-not-found");
+    }
+    {
+        // A failing command whose output contains an error: line should get a
+        // leading digest so the model sees the cause before the full dump.
+        auto r = run("bash", {{"command",
+                               "echo 'warming up'; echo 'error: something broke'; exit 2"},
+                              {"cd", root.string()}});
+        check(has(r, "exit code 2"), "bash: reports non-zero exit");
+        check(has(r, "Key error line"), "bash: surfaces an error digest on failure");
+        check(has(r, "something broke"), "bash: digest carries the error text");
+    }
 
     // ── bash: terminal line-discipline at the capture boundary ────────
     // A child that emits CSI/OSC escapes (SGR colors, a DECSTBM region
