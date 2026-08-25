@@ -23,6 +23,7 @@
 #if defined(_WIN32)
 #  include <windows.h>
 #else
+#  include <sys/stat.h>    // chmod
 #  include <sys/utsname.h>
 #  include <unistd.h>
 #endif
@@ -245,12 +246,27 @@ bool save_unlocked(const KimiToken& t) {
     std::string to_write = payload;
     if (auto sealed = auth::crypt::seal(payload)) to_write = std::move(*sealed);
 
+    // Write atomically to a sibling temp file, tighten to owner-only 0600
+    // BEFORE it becomes the live credentials file, then rename into place.
+    // This matches the Copilot/Codex/auth stores: without the chmod the file
+    // inherits the umask (typically world-readable 0644), and on any seal()
+    // failure the fallback plaintext token would otherwise rest 0644 on disk.
     std::error_code ec;
     fs::create_directories(creds_path().parent_path(), ec);
-    std::ofstream ofs(creds_path(), std::ios::binary | std::ios::trunc);
-    if (!ofs) return false;
-    ofs.write(to_write.data(), static_cast<std::streamsize>(to_write.size()));
-    return static_cast<bool>(ofs);
+    fs::path tmp = creds_path();
+    tmp += ".tmp";
+    {
+        std::ofstream ofs(tmp, std::ios::binary | std::ios::trunc);
+        if (!ofs) return false;
+        ofs.write(to_write.data(), static_cast<std::streamsize>(to_write.size()));
+        if (!ofs) return false;
+    }
+#ifndef _WIN32
+    ::chmod(tmp.c_str(), 0600);
+#endif
+    fs::rename(tmp, creds_path(), ec);
+    if (ec) { fs::remove(tmp, ec); return false; }
+    return true;
 }
 
 std::atomic<bool> g_force_refresh{false};

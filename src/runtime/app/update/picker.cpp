@@ -815,7 +815,11 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
             Cmd<Msg> cmd = Cmd<Msg>::none();
             if (p) p->confirm_remove.clear();   // selecting disarms a pending `d`
             if (p && !m.d.threads.empty() && !m.s.thread_loading) {
-                const Thread& meta = m.d.threads[p->index];
+                // Re-clamp: p->index can be stale if an async refresh shrank
+                // the list since the last navigation (see ThreadListDelete).
+                p->index = std::clamp(p->index, 0,
+                                      static_cast<int>(m.d.threads.size()) - 1);
+                const Thread& meta = m.d.threads[static_cast<std::size_t>(p->index)];
                 // Same-thread re-select — closing the picker is the
                 // only useful action. No async load: would just
                 // reparse the same bytes and flash.
@@ -842,7 +846,16 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
             // Any move/jump/select/new/close disarms the pending state.
             auto* p = pick::opened(m.ui.thread_list);
             if (!p || m.d.threads.empty()) return done(std::move(m));
-            const int idx = p->index;
+            // Bounds-guard the cursor before indexing. Navigation handlers
+            // clamp p->index on every move, but the thread list can be
+            // mutated out from under the picker by an async refresh (or a
+            // prior delete) that shrinks it, leaving a stale index that
+            // points past the new end. Reading m.d.threads[idx] then is an
+            // out-of-bounds access; the erase(begin()+idx) below would
+            // compound it. Re-clamp into range instead of trusting p->index.
+            const int sz_now = static_cast<int>(m.d.threads.size());
+            const int idx = std::clamp(p->index, 0, sz_now - 1);
+            p->index = idx;
             const Thread& target = m.d.threads[static_cast<std::size_t>(idx)];
             // Use the thread id as the confirm key — stable across title edits.
             const std::string key = target.id.value;
@@ -964,6 +977,13 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
         [&](ThreadsLoaded& e) -> Step {
             m.d.threads = std::move(e.threads);
             m.s.threads_loading = false;
+            // If the thread picker is open, its cursor may now point past the
+            // end of the freshly-loaded (possibly shorter) list. Re-clamp so
+            // the view and every ThreadList* handler index safely.
+            if (auto* p = pick::opened(m.ui.thread_list)) {
+                const int sz = static_cast<int>(m.d.threads.size());
+                p->index = sz > 0 ? std::clamp(p->index, 0, sz - 1) : 0;
+            }
             return done(std::move(m));
         },
         [&](ThreadLoaded& e) -> Step {
