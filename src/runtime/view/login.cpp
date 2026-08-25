@@ -219,7 +219,7 @@ Element panel_picking(std::string_view provider,
                                    fg_dim(muted))).build());
         rows.push_back(text(""));
     }
-    rows.push_back(key_hints({{anthropic_only ? "1/2" : "1\xe2\x80\x936", "choose"},
+    rows.push_back(key_hints({{anthropic_only ? "1/2" : "1\xe2\x80\x93" "6", "choose"},
                               {"Esc", "close"}}));
     return v(std::move(rows)).build();
 }
