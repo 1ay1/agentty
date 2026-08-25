@@ -209,6 +209,74 @@ int main() {
         check(body.find("BETA-EDITED") != std::string::npos,
               "edit: change landed on disk");
     }
+    // ── edit line locator is CORRECT and LIVE ─────────────────────────
+    {
+        // Known layout: the edited line is line 3.
+        auto lf = root / "locator_e2e.txt";
+        write_file(lf, "one\ntwo\nthree\nfour\nfive\n");
+        auto r = run("edit", {{"path", lf.string()},
+            {"edits", json::array({{{"old_text", "three"},
+                                    {"new_text", "THREE-X"}}})}});
+        check(has(r, "at line 3"),
+              "edit: locator names the changed line (3), not the hunk-context start");
+        // And the change really is on line 3 (THREE-X replaces `three`).
+        check(has(r, "+THREE-X"), "edit: the diff shows the change");
+    }
+    {
+        // LIVE across a line shift: edit #1 inserts 2 lines above the target,
+        // so edit #2's target moves from line 5 to line 7. The reported line
+        // must reflect the SHIFTED (final) position, proving it's computed
+        // against the evolving buffer, not the original.
+        auto lf = root / "locator_shift_e2e.txt";
+        write_file(lf, "a\nb\nc\nd\nTARGET\nf\n");   // TARGET is line 5
+        auto r = run("edit", {{"path", lf.string()}, {"edits", json::array({
+            {{"old_text", "a\nb"}, {"new_text", "a\nINS1\nINS2\nb"}},  // +2 lines
+            {{"old_text", "TARGET"}, {"new_text", "HIT"}},
+        })}});
+        check(r.has_value(), "edit: multi-edit with line shift applies");
+        // Both edits coalesce into one hunk; the locator names its first
+        // change (line 2, the INS1 insertion). Liveness is proven by the diff:
+        // TARGET->HIT lands AFTER the +2 shift, i.e. at new-side line 7.
+        check(has(r, " at line 2"),
+              "edit: locator names the first changed line of the merged hunk");
+        // The unified diff's new side must show HIT at line 7 (a INS1 INS2 b
+        // c d HIT) — confirming the second edit was applied against the
+        // shifted, live buffer, not the original line 5.
+        {
+            auto t = text_of(r);
+            auto hit = t.find("+HIT");
+            auto ins = t.find("+INS1");
+            check(hit != std::string::npos && ins != std::string::npos
+                  && hit > ins,
+                  "edit: second edit applied live after the first shifted lines");
+        }
+    }
+    {
+        // DEFINITIVE liveness: two edits FAR apart stay separate hunks. Edit #1
+        // adds 3 lines near the top; edit #2's target (originally line 20) must
+        // be reported at line 23 — proving the second locator is computed on the
+        // buffer AS SHIFTED by the first edit, not the original.
+        auto lf = root / "locator_far_e2e.txt";
+        std::string body;
+        for (int i = 1; i <= 25; ++i) body += "row" + std::to_string(i) + "\n";
+        write_file(lf, body);
+        auto r = run("edit", {{"path", lf.string()}, {"edits", json::array({
+            {{"old_text", "row2"}, {"new_text", "row2\nADD_A\nADD_B\nADD_C"}}, // +3
+            {{"old_text", "row20"}, {"new_text", "ROW20-HIT"}},
+        })}});
+        check(r.has_value(), "edit: far-apart multi-edit applies");
+        // row20 sat at line 20; after +3 lines above it lands at line 23.
+        // The locator line (first line of the message, before the diff fence)
+        // must contain 23 — check only that prefix so we don't match "row23"
+        // in the diff body.
+        {
+            auto t = text_of(r);
+            auto fence = t.find("```");
+            auto head = t.substr(0, fence == std::string::npos ? t.size() : fence);
+            check(head.find("23") != std::string::npos,
+                  "edit: far hunk's locator reflects the live +3 shift (20 -> 23)");
+        }
+    }
 
     // ── move / remove: safe shell-free filesystem mutations ─────────────
     {
