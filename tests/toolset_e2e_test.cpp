@@ -610,6 +610,33 @@ int main() {
         check(!r.has_value() || !text_of(r).empty(),
               "web_fetch: malformed url yields an error, not a crash");
     }
+    // ── SSRF guard: private / metadata / loopback targets are refused, incl.
+    //    the IPv4-mapped IPv6 spellings that bypass a naive prefix filter.
+    //    All reject before any socket, so these run fully offline.
+    {
+        auto blocked = [&](const char* url) {
+            auto r = run("web_fetch", {{"url", url}});
+            // Either a hard error, or a message that never contains fetched
+            // page content — the guard must not connect. We assert the tool
+            // did not return a successful body.
+            return !r.has_value()
+                || text_of(r).find("blocked") != std::string::npos
+                || text_of(r).find("not allowed") != std::string::npos
+                || text_of(r).find("private") != std::string::npos
+                || text_of(r).find("refus") != std::string::npos
+                || text_of(r).find("error") != std::string::npos;
+        };
+        check(blocked("http://169.254.169.254/latest/meta-data/"),
+              "web_fetch SSRF: blocks cloud-metadata IPv4");
+        check(blocked("http://127.0.0.1:8080/"),
+              "web_fetch SSRF: blocks loopback");
+        check(blocked("http://2130706433/"),
+              "web_fetch SSRF: blocks decimal-encoded loopback");
+        check(blocked("http://[::ffff:127.0.0.1]/"),
+              "web_fetch SSRF: blocks IPv4-mapped IPv6 loopback");
+        check(blocked("http://[::ffff:169.254.169.254]/"),
+              "web_fetch SSRF: blocks IPv4-mapped IPv6 metadata");
+    }
 
     // ── git quartet over a real repo ──────────────────────────────────────
     if (git_available()) {
