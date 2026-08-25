@@ -153,6 +153,31 @@ int main() {
         check(r && r->change && r->change->added == 3, "write: 3 lines added");
     }
 
+    // ── write→edit nudge: overwriting a big file with a tiny change hints
+    //    that edit would have been better; a full rewrite stays silent. ────
+    {
+        std::string big;
+        for (int i = 0; i < 60; ++i) big += "line " + std::to_string(i) + "\n";
+        auto seed = run("write", {{"file_path", file.string()}, {"content", big}});
+        check(seed.has_value(), "write nudge: seed big file");
+
+        // Change exactly one line out of 60 -> should nudge toward edit.
+        std::string tiny = big;
+        auto pos = tiny.find("line 30\n");
+        if (pos != std::string::npos) tiny.replace(pos, 8, "line 30 CHANGED\n");
+        auto small = run("write", {{"file_path", file.string()}, {"content", tiny}});
+        check(small.has_value(), "write nudge: small overwrite succeeds");
+        check(has(small, "edit") && has(small, "tip"),
+              "write nudge: small overwrite of big file suggests edit");
+
+        // A wholesale rewrite (most lines differ) must NOT nudge.
+        std::string rewrite;
+        for (int i = 0; i < 60; ++i) rewrite += "fresh " + std::to_string(i) + "\n";
+        auto full = run("write", {{"file_path", file.string()}, {"content", rewrite}});
+        check(full.has_value() && !has(full, "tip: this overwrote"),
+              "write nudge: full rewrite stays silent");
+    }
+
     // ── read ─────────────────────────────────────────────────────────────
     {
         auto r = run("read", {{"path", file.string()}});
