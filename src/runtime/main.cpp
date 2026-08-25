@@ -956,16 +956,22 @@ int main(int argc, char** argv) {
     // while streaming; idle agentty costs zero CPU.
     //
     // Grid backend: when hosted by a cooperating editor that paints cells
-    // natively (AGENTTY_HOST=emacs — the agentty-mode Emacs render module),
+    // natively (AGENTTY_HOST=emacs — the agentty-mode Emacs render module —
+    // or AGENTTY_HOST=vscode — the agentty-vscode webview grid renderer),
     // emit binary grid frames instead of ANSI, skipping the terminal-emulator
     // ANSI encode/reparse round trip.  Any other host falls back to ANSI.
     maya::RenderBackend backend = maya::RenderBackend::Ansi;
-    if (const char* host = std::getenv("AGENTTY_HOST");
-        host && std::string_view{host} == "emacs") {
-        // Opt-out: AGENTTY_EMACS_GRID=0 keeps the plain-ANSI vterm path.
-        const char* g = std::getenv("AGENTTY_EMACS_GRID");
-        if (!(g && g[0] == '0'))
-            backend = maya::RenderBackend::Grid;
+    if (const char* host = std::getenv("AGENTTY_HOST")) {
+        const std::string_view h{host};
+        if (h == "emacs" || h == "vscode") {
+            // Opt-out: AGENTTY_GRID=0 (or the legacy AGENTTY_EMACS_GRID=0)
+            // keeps the plain-ANSI path.
+            const char* g  = std::getenv("AGENTTY_GRID");
+            const char* ge = std::getenv("AGENTTY_EMACS_GRID");
+            const bool off = (g && g[0] == '0') || (ge && ge[0] == '0');
+            if (!off)
+                backend = maya::RenderBackend::Grid;
+        }
     }
     maya::run<app::AgenttyApp>({.title = "agentty", .fps = 0,
                                .mode = maya::Mode::Inline, .backend = backend});
