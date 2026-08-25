@@ -178,10 +178,18 @@ int main() {
               "write nudge: full rewrite stays silent");
     }
 
-    // ── read ─────────────────────────────────────────────────────────────
+    // ── read ─────────────────────────────────────────────────────────
     {
         auto r = run("read", {{"path", file.string()}});
         check(has(r, "beta"), "read: returns content");
+    }
+    {
+        // Reading a 0-byte file gives an explicit heads-up, not a blank result
+        // the model could mistake for a failed read.
+        auto empty = root / "empty_e2e.txt";
+        run("write", {{"file_path", empty.string()}, {"content", ""}});
+        auto r = run("read", {{"path", empty.string()}});
+        check(has(r, "empty"), "read: 0-byte file is flagged as empty");
     }
 
     // ── edit → fuzzy splice + FileChange with hunks ──────────────────────
@@ -223,6 +231,15 @@ int main() {
     {
         auto r = run("grep", {{"pattern", "BETA-EDITED"}, {"path", root.string()}});
         check(has(r, "hello.txt"), "grep: finds the edited line");
+    }
+    {
+        // A zero-match search returns a tailored, actionable hint (not a bare
+        // "No matches found.") so the model knows what to try next.
+        auto r = run("grep", {{"pattern", "zzz_definitely_absent_token_qwerty"},
+                              {"path", root.string()}});
+        check(has(r, "No matches"), "grep: reports zero matches");
+        check(has(r, "search_code") || has(r, "Try:"),
+              "grep: zero-match output suggests next steps");
     }
     {
         auto r = run("glob", {{"pattern", "*.cpp"}, {"path", root.string()}});
