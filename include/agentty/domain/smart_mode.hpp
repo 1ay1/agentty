@@ -263,7 +263,7 @@ namespace detail {
     const std::string parent_wire = wire_model_id(parent_model);
     RoleProfile pass{parent_wire,
                      clamp_effort(parent_effort,
-                                  ModelCapabilities::from_id(parent_wire))};
+                                  resolved_caps(parent_wire))};
     if (!cfg.enabled) return pass;
 
     // 1. Explicit user override for this slot wins outright.
@@ -271,7 +271,7 @@ namespace detail {
         const std::string wire = wire_model_id(std::string_view{ov.model});
         return RoleProfile{wire,
                            clamp_effort(ov.effort,
-                                        ModelCapabilities::from_id(wire))};
+                                        resolved_caps(wire))};
     }
 
     // 2. Zero-config auto-fill from the catalog.
@@ -283,7 +283,7 @@ namespace detail {
         case ModelRole::Implementation: {
             std::string mid = detail::strongest_mid(candidates);
             if (mid.empty()) return pass;   // no distinct mid tier → parent
-            const auto caps = ModelCapabilities::from_id(mid);
+            const auto caps = resolved_caps(mid);
             return RoleProfile{std::move(mid),
                                detail::effort_step_down(parent_effort, caps)};
         }
