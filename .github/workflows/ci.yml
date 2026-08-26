@@ -69,7 +69,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            g++-14 cmake ninja-build pkg-config \
+            g++-14 cmake ninja-build pkg-config ripgrep \
             libssl-dev libnghttp2-dev zlib1g-dev
 
       - name: ccache
@@ -150,7 +150,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            g++-14 cmake ninja-build pkg-config \
+            g++-14 cmake ninja-build pkg-config ripgrep \
             libssl-dev libnghttp2-dev zlib1g-dev
       - name: ccache
         uses: hendrikmuhs/ccache-action@v1.2
