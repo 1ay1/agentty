@@ -360,6 +360,12 @@ struct ModelPickerFilterBackspace {};
 // within the active model's supported efforts (wrapping); the new tier is
 // persisted immediately. No-op when the model doesn't support effort.
 struct ModelPickerCycleEffort { int delta; };
+// Toggle the per-model reasoning-effort capability override for the
+// highlighted model (^E). Cycles inference → force-on → force-off → inference
+// for compat models the catalog doesn't gate; persisted immediately and
+// pushed into the catalog override registry. No-op for Claude/GPT (family-
+// gated) — their effort isn't user-overridable.
+struct ModelPickerToggleReasoning {};
 // Result of a background model-catalog fetch. `provider_id` is the canonical
 // id of the provider the fetch was FOR (captured when the fetch launched):
 // the reducer drops the payload if the active provider has changed since —
@@ -826,6 +832,7 @@ using ToolMsg = std::variant<
 using ModelPickerMsg = std::variant<
     OpenModelPicker, CloseModelPicker, ModelPickerMove, ModelPickerJump,
     ModelPickerSelect, ModelPickerToggleFavorite, ModelPickerCycleEffort,
+    ModelPickerToggleReasoning,
     ModelPickerFilterInput, ModelPickerFilterBackspace,
     ModelsLoaded>;
 

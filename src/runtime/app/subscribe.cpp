@@ -351,6 +351,9 @@ std::optional<Msg> on_model_picker(const KeyEvent& ev) {
         if (ev.mods.ctrl) {
             if (c >= 0x01 && c <= 0x1A) c = U'a' + (c - 1);
             if (c == U'f') return ModelPickerToggleFavorite{};
+            // Ctrl+E toggles the per-model reasoning-effort override for the
+            // highlighted model (inference → force-on → force-off → inference).
+            if (c == U'e') return ModelPickerToggleReasoning{};
             return std::nullopt;
         }
         // Any other printable codepoint types into the filter query.

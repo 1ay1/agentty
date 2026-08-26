@@ -720,7 +720,7 @@ commit_provider_switch(Model m, std::string_view spec,
     const bool chatgpt = provider::active().is_chatgpt();
     if (!chatgpt) {
         m.d.effort = clamp_effort(
-            m.d.effort, ModelCapabilities::from_id(m.d.model_id.value));
+            m.d.effort, resolved_caps(m.d.model_id.value));
     }
 
     // (5) Persist the FULL settings shape (provider + per-provider model +

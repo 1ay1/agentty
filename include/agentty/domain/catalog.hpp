@@ -4,6 +4,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <map>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -107,6 +109,18 @@ struct ModelCapabilities {
     // Inference lives entirely in from_id (no network probe exists).
     bool weak_tool_use = false;
 
+    // This is an OpenAI-Chat-wire model that exposes configurable reasoning
+    // via the top-level `reasoning_effort` enum (low|medium|high) — it is NOT
+    // in the Claude/GPT `Family` ladder but still supports effort control.
+    // Covers Mistral Magistral, DeepSeek-Reasoner/R1, xAI Grok reasoning, and
+    // Gemini `*-thinking`. Decoded in from_id; consulted by supports_effort().
+    // Kept ORTHOGONAL to `family` so tier/context/output ceilings (which key
+    // off family+generation) are completely unaffected — only the effort
+    // gates read this flag. These models take low/medium/high only (no
+    // `max`/`xhigh`, which are Claude/GPT extensions), so the ladder gates
+    // below deliberately do NOT open for reasoning_compat.
+    bool reasoning_compat = false;
+
     [[nodiscard]] constexpr bool is_haiku()  const noexcept { return family == Family::Haiku; }
     [[nodiscard]] constexpr bool is_sonnet() const noexcept { return family == Family::Sonnet; }
     [[nodiscard]] constexpr bool is_opus()   const noexcept { return family == Family::Opus; }
@@ -148,10 +162,20 @@ struct ModelCapabilities {
         // Responses backend expects an effort on every turn, so expose it.
         if (family == Family::Gpt)
             return generation >= 5;
+        // OpenAI-Chat-wire reasoning models (Magistral, DeepSeek-Reasoner,
+        // Grok reasoning, Gemini thinking): top-level `reasoning_effort`
+        // low|medium|high. Not in the family ladder, gated purely by the
+        // decoded flag (or a user override) — see reasoning_compat above.
+        if (reasoning_compat)
+            return true;
         return false;
     }
     [[nodiscard]] constexpr bool supports_effort_max() const noexcept {
         if (!supports_effort()) return false;
+        // Compat reasoning models expose a 3-level enum (low|medium|high) only;
+        // `max`/`xhigh` are Claude/GPT-lane extensions. Cap here so a stale Max
+        // pick degrades to `high` in effort_wire_for rather than being sent.
+        if (reasoning_compat) return false;
         if (family == Family::Fable || family == Family::Mythos)
             return true;  // flagship lane takes every level incl. max
         if (family == Family::Opus)
@@ -164,6 +188,7 @@ struct ModelCapabilities {
     }
     [[nodiscard]] constexpr bool supports_effort_xhigh() const noexcept {
         if (!supports_effort()) return false;
+        if (reasoning_compat) return false;  // 3-level enum only — see above
         if (family == Family::Fable || family == Family::Mythos)
             return true;  // flagship lane exposes the full ladder
         // Every current gpt-5.x model supports xhigh.
@@ -380,7 +405,8 @@ struct ModelCapabilities {
             }
             start = i + 1;
         }
-        caps.weak_tool_use = infer_weak_tool_use(id, caps);
+        caps.weak_tool_use     = infer_weak_tool_use(id, caps);
+        caps.reasoning_compat  = infer_reasoning_compat(id, caps);
         return caps;
     }
 
@@ -500,13 +526,152 @@ private:
         if (params_b != 0 && params_b <= 8) return true;
         return false;
     }
+
+    // Decide whether an OpenAI-Chat-wire model exposes configurable reasoning
+    // via the top-level `reasoning_effort` enum (low|medium|high), so the
+    // effort chip and `reasoning_effort` payload should light up for it.
+    //
+    // This is deliberately id-string inference (no network probe), mirroring
+    // infer_weak_tool_use. Claude/GPT are handled by the `family` ladder and
+    // must NOT set this flag (their effort is family-gated). We recognise the
+    // hosted reasoning lines:
+    //   • Mistral  "magistral*" — Mistral's reasoning models. Mistral's plain
+    //     `mistral-*-latest` chat/instruct models do NOT accept
+    //     reasoning_effort, so they are intentionally excluded (a stray value
+    //     400s). Users wanting to force it can set AGENTTY_FORCE_EFFORT=1.
+    //   • DeepSeek "deepseek-reasoner" / "deepseek-r1" (r1 distills too).
+    //   • xAI Grok reasoning lines: "grok-4*", "grok-3-mini" (grok-3-mini
+    //     reasons; grok-code-fast is a non-reasoning coder → excluded).
+    //   • Google Gemini "*-thinking" via the OpenAI compat shim.
+    //   • OpenAI o-series proxied over the Chat wire ("o1", "o3", "o4-mini").
+    //
+    // A user override (AGENTTY_FORCE_EFFORT, read at runtime) is applied
+    // separately by effort_capable() at the effort chokepoints — it is
+    // intentionally NOT consulted here so from_id() stays a pure constexpr
+    // decode (no getenv on the hot path, usable in constant expressions).
+    [[nodiscard]] static constexpr bool infer_reasoning_compat(
+            std::string_view id, const ModelCapabilities& caps) noexcept {
+        // Claude/GPT are family-gated; never route them through this flag.
+        if (caps.is_known_family() || caps.family == Family::Gpt) return false;
+
+        auto contains = [](std::string_view hay, std::string_view needle) {
+            if (needle.size() > hay.size()) return false;
+            for (std::size_t i = 0; i + needle.size() <= hay.size(); ++i) {
+                bool eq = true;
+                for (std::size_t j = 0; j < needle.size(); ++j) {
+                    char a = hay[i + j], b = needle[j];
+                    if (a >= 'A' && a <= 'Z') a = static_cast<char>(a + 32);
+                    if (b >= 'A' && b <= 'Z') b = static_cast<char>(b + 32);
+                    if (a != b) { eq = false; break; }
+                }
+                if (eq) return true;
+            }
+            return false;
+        };
+
+        // Non-reasoning coder lines that share a prefix with a reasoning
+        // family — exclude first so the family match below doesn't grab them.
+        if (contains(id, "grok-code")) return false;
+
+        return contains(id, "magistral")
+            || contains(id, "deepseek-reasoner")
+            || contains(id, "deepseek-r1")
+            || contains(id, "grok-4")
+            || contains(id, "grok-3-mini")
+            || contains(id, "-thinking")
+            || contains(id, "o1")
+            || contains(id, "o3")
+            || contains(id, "o4-mini");
+    }
 };
+
+// ── Per-model reasoning-effort override registry ─────────────────────────
+// The "configure it myself" seam (issue #20). The constexpr from_id() decode
+// only INFERS whether a compat model reasons; users can override that per
+// model — persisted in Settings.reasoning_effort_overrides and pushed here at
+// startup (and on every in-app toggle), mirroring provider::set_custom_auth
+// _header. Resolution precedence, applied by resolved_caps():
+//     per-model override  >  AGENTTY_FORCE_EFFORT env  >  from_id inference.
+// Claude/GPT stay family-gated — an override only opens/closes the COMPAT
+// lane (low|medium|high); it never fabricates the max/xhigh ladder.
+namespace reasoning_override_detail {
+inline std::mutex&                          reasoning_override_mu() {
+    static std::mutex m; return m;
+}
+inline std::map<std::string, bool>&         reasoning_override_map() {
+    static std::map<std::string, bool> m; return m;
+}
+} // namespace reasoning_override_detail
+
+// Set/clear a single model's override (true = force effort on, false = off).
+inline void set_reasoning_override(std::string model_id, bool on) {
+    std::lock_guard lk(reasoning_override_detail::reasoning_override_mu());
+    reasoning_override_detail::reasoning_override_map()[std::move(model_id)] = on;
+}
+inline void clear_reasoning_override(const std::string& model_id) {
+    std::lock_guard lk(reasoning_override_detail::reasoning_override_mu());
+    reasoning_override_detail::reasoning_override_map().erase(model_id);
+}
+inline void clear_reasoning_overrides() {
+    std::lock_guard lk(reasoning_override_detail::reasoning_override_mu());
+    reasoning_override_detail::reasoning_override_map().clear();
+}
+inline void set_reasoning_overrides(std::map<std::string, bool> all) {
+    std::lock_guard lk(reasoning_override_detail::reasoning_override_mu());
+    reasoning_override_detail::reasoning_override_map() = std::move(all);
+}
+// Tri-state lookup: 1 (force on), 0 (force off), -1 (no override for this id).
+[[nodiscard]] inline int reasoning_override_for(std::string_view model_id) {
+    std::lock_guard lk(reasoning_override_detail::reasoning_override_mu());
+    auto& m = reasoning_override_detail::reasoning_override_map();
+    auto it = m.find(std::string{model_id});
+    if (it == m.end()) return -1;
+    return it->second ? 1 : 0;
+}
+
+// AGENTTY_FORCE_EFFORT env override, read once. Returns 1 (force on),
+// 0 (force off), or -1 (unset). Global fallback below the per-model override.
+[[nodiscard]] inline int effort_force_override() noexcept {
+    static const int v = [] {
+        const char* e = std::getenv("AGENTTY_FORCE_EFFORT");
+        if (!e || !*e) return -1;
+        if (e[0] == '0' && e[1] == '\0') return 0;
+        const char c = (e[0] >= 'A' && e[0] <= 'Z')
+                           ? static_cast<char>(e[0] + 32) : e[0];
+        // "1", "true", "yes", "on" → force on; anything else → unset.
+        if (e[0] == '1' || c == 't' || c == 'y' || c == 'o') return 1;
+        return -1;
+    }();
+    return v;
+}
+
+// Decode a model id AND fold in the runtime reasoning-effort override (per
+// model, then AGENTTY_FORCE_EFFORT env). This is the id-aware sibling of the
+// pure constexpr from_id(): effort call sites use THIS so a user's override
+// reaches supports_effort()/effort_wire_for()/the picker uniformly — every
+// consumer already funnels through the returned caps.
+[[nodiscard]] inline ModelCapabilities resolved_caps(std::string_view model_id) {
+    ModelCapabilities caps = ModelCapabilities::from_id(model_id);
+    // Claude/GPT are family-gated; overrides only touch the compat lane so we
+    // never fabricate their max/xhigh ladder or disturb tier/context logic.
+    if (caps.is_known_family() || caps.family == ModelCapabilities::Family::Gpt)
+        return caps;
+    // Precedence: explicit per-model override > global env > from_id inference.
+    const int per_model = reasoning_override_for(model_id);
+    if (per_model >= 0) {
+        caps.reasoning_compat = (per_model == 1);
+    } else if (const int env = effort_force_override(); env >= 0) {
+        caps.reasoning_compat = (env == 1);
+    }
+    return caps;
+}
 
 // Convenience: infer weak-tool-use straight from a model id string.
 // Used by the provider/runtime paths that only hold the id, not the caps.
 [[nodiscard]] inline bool is_weak_model(std::string_view model_id) noexcept {
     return ModelCapabilities::from_id(model_id).is_weak_tool_user();
 }
+
 
 // Is this id a chat/completions model an agent can actually DRIVE (stream text
 // + call tools), as opposed to an embedding / image / audio / moderation /
@@ -691,13 +856,24 @@ enum class Effort : std::uint8_t { None, Low, Medium, High, Xhigh, Max };
     return Effort::None;
 }
 
+// AGENTTY_FORCE_EFFORT override is defined earlier (before resolved_caps),
+// which folds it into the per-model resolution. See effort_force_override().
+
+// True when the model should expose effort control. `caps` is expected to be
+// the RESOLVED caps (from resolved_caps(id)), which has already folded in the
+// per-model + env override; this is a thin, readable alias for supports_effort
+// used by the picker view and the effort free functions below.
+[[nodiscard]] inline bool effort_capable(const ModelCapabilities& caps) noexcept {
+    return caps.supports_effort();
+}
+
 // Clamp an Effort to what a model actually supports and return its wire
 // value. "" when the model can't take effort at all (or e == None). The
 // provider calls this so a stale high pick (e.g. Xhigh chosen, then a swap
 // to a model without xhigh) silently degrades to `high` instead of 400ing.
 [[nodiscard]] inline std::string_view effort_wire_for(
         Effort e, const ModelCapabilities& caps) noexcept {
-    if (e == Effort::None || !caps.supports_effort()) return "";
+    if (e == Effort::None || !effort_capable(caps)) return "";
     if (e == Effort::Max   && !caps.supports_effort_max())   e = Effort::High;
     if (e == Effort::Xhigh && !caps.supports_effort_xhigh()) e = Effort::High;
     return effort_wire(e);
@@ -710,7 +886,7 @@ enum class Effort : std::uint8_t { None, Low, Medium, High, Xhigh, Max };
 // becomes High here, and effort on a non-reasoning model collapses to None.
 [[nodiscard]] inline Effort clamp_effort(
         Effort e, const ModelCapabilities& caps) noexcept {
-    if (e == Effort::None || !caps.supports_effort()) return Effort::None;
+    if (e == Effort::None || !effort_capable(caps)) return Effort::None;
     if (e == Effort::Max   && !caps.supports_effort_max())   e = Effort::High;
     if (e == Effort::Xhigh && !caps.supports_effort_xhigh()) e = Effort::High;
     return e;
@@ -732,7 +908,7 @@ enum class Effort : std::uint8_t { None, Low, Medium, High, Xhigh, Max };
 // Returns None when the model doesn't support effort at all.
 [[nodiscard]] inline Effort cycle_effort(
         Effort cur, int delta, const ModelCapabilities& caps) {
-    if (!caps.supports_effort()) return Effort::None;
+    if (!effort_capable(caps)) return Effort::None;
     const auto list = available_efforts(caps);
     const int n = static_cast<int>(list.size());
     int idx = 0;

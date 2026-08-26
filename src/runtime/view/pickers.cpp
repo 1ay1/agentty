@@ -237,7 +237,7 @@ Element model_picker(const Model& m) {
                 static_cast<std::size_t>(vis[static_cast<std::size_t>(vi)])];
             const bool sel    = vi == picker->index;
             const bool active = mi.id == m.d.model_id;
-            const auto caps   = ModelCapabilities::from_id(mi.id.value);
+            const auto caps   = resolved_caps(mi.id.value);
             Picker::Config::Row row;
             // Anthropic/Copilot catalogs carry a server-provided display name
             // ("Claude Sonnet 4.5"); OpenAI-compat and Ollama set
@@ -279,7 +279,7 @@ Element model_picker(const Model& m) {
                 if (!trailing.empty()) trailing += "  ";
                 trailing += "\xe2\x98\x85";
             }
-            if (sel && caps.supports_effort() && m.d.effort != Effort::None) {
+            if (sel && effort_capable(caps) && m.d.effort != Effort::None) {
                 if (!trailing.empty()) trailing += "  ";
                 trailing += "\xe2\x97\x87 " + std::string{effort_label(m.d.effort)};
             }
@@ -297,15 +297,36 @@ Element model_picker(const Model& m) {
     if (!vis.empty()) {
         const int hi = std::clamp(picker->index, 0,
             static_cast<int>(vis.size()) - 1);
-        const auto caps = ModelCapabilities::from_id(
+        const auto caps = resolved_caps(
             m.d.available_models[
                 static_cast<std::size_t>(vis[static_cast<std::size_t>(hi)])].id.value);
-        if (caps.supports_effort())
+        if (effort_capable(caps))
             cfg.footer.push_back(h(
                 text("\xe2\x86\x90\xe2\x86\x92", fg_of(fg)),
                 text(" reasoning effort: ", fg_dim(muted)),
                 text(std::string{effort_label(m.d.effort)}, fg_bold(accent))
             ).build());
+        // Per-model reasoning override hint (^E) — only for the compat lane
+        // (Claude/GPT are family-gated and not user-overridable). Names the
+        // current override state so the toggle is discoverable.
+        {
+            const std::string& hi_id =
+                m.d.available_models[
+                    static_cast<std::size_t>(vis[static_cast<std::size_t>(hi)])].id.value;
+            const auto base = ModelCapabilities::from_id(hi_id);
+            if (!base.is_known_family()
+                && base.family != ModelCapabilities::Family::Gpt) {
+                const int ov = reasoning_override_for(hi_id);
+                const char* state = ov == 1 ? "forced on"
+                                  : ov == 0 ? "forced off"
+                                            : "auto";
+                cfg.footer.push_back(h(
+                    text("^E", fg_of(fg)),
+                    text(" effort override: ", fg_dim(muted)),
+                    text(state, fg_bold(accent))
+                ).build());
+            }
+        }
     }
     cfg.footer.push_back(key_hints({
         {"\xe2\x86\x91\xe2\x86\x93", "move", 5},        // ↑↓

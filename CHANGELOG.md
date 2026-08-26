@@ -4,6 +4,11 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **Reasoning effort now works for hosted OpenAI-Chat reasoning models, and is user-configurable per model** (issue #20). The effort chip (`←/→` in the model picker) and the top-level `reasoning_effort` payload were gated on the Claude/GPT `Family` ladder only, so every compat reasoning model decoded to `Family::Unknown` and silently dropped effort — even though the Chat transport already emits `reasoning_effort`. Two layers now fix this:
+  - **Inference (zero-config default):** a new orthogonal `ModelCapabilities::reasoning_compat` flag (decoded in `from_id`, kept independent of `family` so tier/context/output ceilings are untouched) recognizes **Mistral Magistral, DeepSeek-Reasoner/R1, xAI Grok (grok-4\*, grok-3-mini), Gemini `*-thinking`, and o-series** and opens `supports_effort()` for them. These expose the 3-level `low|medium|high` enum, so a stale `max`/`xhigh` pick degrades to `high` instead of 400ing. Non-reasoning siblings (`grok-code-fast`, plain `mistral-*-latest`, `deepseek-chat`) are excluded.
+  - **Per-model override ("configure it myself"):** press **`^E`** in the model picker to cycle the highlighted model's override `auto → forced on → forced off → auto`. It persists to `Settings.reasoning_effort_overrides` (`settings.json`), is pushed into the catalog at startup, and resolves via `resolved_caps(id)` with precedence **per-model override > `AGENTTY_FORCE_EFFORT` env > catalog inference**. Claude/GPT stay family-gated (the override only opens/closes the compat lane; it never fabricates `max`/`xhigh`). The picker footer names the current override state. (`catalog.hpp`, `store.hpp`, `io/persistence.cpp`, `runtime/app/init.cpp`, `runtime/app/update/picker.cpp`, `runtime/app/subscribe.cpp`, `runtime/msg.hpp`, `runtime/view/pickers.cpp`; `model_caps_test` — "compat reasoning effort (chat wire)" + "per-model reasoning override registry".)
+
 ## [0.4.0] - 2026-08-25
 
 ### Added
