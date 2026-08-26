@@ -486,8 +486,9 @@ Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
             const auto base = ModelCapabilities::from_id(id);
             if (base.is_known_family()
                 || base.family == ModelCapabilities::Family::Gpt) {
-                return {std::move(m), set_status_toast(m,
-                    "reasoning effort is model-managed here (←/→ to set the tier)")};
+                auto toast = set_status_toast(m,
+                    "reasoning effort is model-managed here (←/→ to set the tier)");
+                return {std::move(m), std::move(toast)};
             }
             // Determine the next state from the CURRENT override (tri-state).
             const int cur = reasoning_override_for(id);   // -1 none, 0 off, 1 on
@@ -510,7 +511,8 @@ Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
             // If the model just lost effort capability, drop any live tier so
             // the chip doesn't linger; re-clamp against the new caps.
             m.d.effort = clamp_effort(m.d.effort, resolved_caps(id));
-            return {std::move(m), set_status_toast(m, label)};
+            auto toast = set_status_toast(m, label);
+            return {std::move(m), std::move(toast)};
         },
     }, pm);
 }

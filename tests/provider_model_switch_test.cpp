@@ -122,6 +122,83 @@ TEST_CASE("provider model switch") {
     }
 }
 
+// ^E in the model picker toggles a per-model reasoning-effort override and
+// MUST give feedback: flip the catalog registry, persist to Settings, and set
+// a status toast (regression guard for a use-after-move that silently dropped
+// the toast). Driven through the REAL reducer via app::update.
+TEST_CASE("model picker ^E toggles reasoning override + feedback") {
+    namespace pick = agentty::ui::pick;
+    install_stub_deps();
+    g_settings = store::Settings{};
+    agentty::clear_reasoning_overrides();
+
+    // A non-chatgpt provider with a plain (non-reasoning-inferred) Mistral
+    // chat model highlighted in an open picker.
+    Model m;
+    m.d.available_models = { mi("mistral-medium-latest", "mistral") };
+    m.d.model_id = ModelId{"mistral-medium-latest"};
+    m.ui.model_picker = pick::OpenAt{0};
+
+    // Baseline: inference says NOT a reasoner, so no override, no effort.
+    CHECK(agentty::reasoning_override_for("mistral-medium-latest") == -1);
+    CHECK(!agentty::resolved_caps("mistral-medium-latest").supports_effort());
+
+    // 1st ^E: auto -> force ON.
+    auto [m1, c1] = app::update(std::move(m), Msg{ModelPickerToggleReasoning{}});
+    CHECK(agentty::reasoning_override_for("mistral-medium-latest") == 1,
+          "^E forces the override on");
+    CHECK(agentty::resolved_caps("mistral-medium-latest").supports_effort(),
+          "effort capability now open for the model");
+    CHECK(g_settings.reasoning_effort_overrides.count("mistral-medium-latest") == 1,
+          "override persisted to Settings");
+    CHECK(g_settings.reasoning_effort_overrides.at("mistral-medium-latest"),
+          "persisted value is ON");
+    CHECK(!m1.s.status.empty(), "a status toast is set as feedback");
+
+    // 2nd ^E: ON -> force OFF.
+    auto [m2, c2] = app::update(std::move(m1), Msg{ModelPickerToggleReasoning{}});
+    CHECK(agentty::reasoning_override_for("mistral-medium-latest") == 0,
+          "^E again forces the override off");
+    CHECK(!agentty::resolved_caps("mistral-medium-latest").supports_effort(),
+          "effort suppressed under force-off");
+    CHECK(!m2.s.status.empty(), "force-off also gives feedback");
+
+    // 3rd ^E: OFF -> back to inference (cleared).
+    auto [m3, c3] = app::update(std::move(m2), Msg{ModelPickerToggleReasoning{}});
+    CHECK(agentty::reasoning_override_for("mistral-medium-latest") == -1,
+          "^E a third time clears the override (auto)");
+    CHECK(g_settings.reasoning_effort_overrides.count("mistral-medium-latest") == 0,
+          "cleared override removed from Settings");
+    CHECK(!m3.s.status.empty(), "clear-to-auto also gives feedback");
+
+    agentty::clear_reasoning_overrides();   // keep global state clean
+}
+
+// ^E on a FAMILY-GATED model (Claude) is a no-op for the override but still
+// gives feedback (a hint), and never writes an override.
+TEST_CASE("model picker ^E on family-gated model is a hinted no-op") {
+    namespace pick = agentty::ui::pick;
+    install_stub_deps();
+    g_settings = store::Settings{};
+    agentty::clear_reasoning_overrides();
+
+    Model m;
+    m.d.available_models = { mi("claude-opus-4-5", "anthropic") };
+    m.d.model_id = ModelId{"claude-opus-4-5"};
+    m.ui.model_picker = pick::OpenAt{0};
+
+    auto [m1, c1] = app::update(std::move(m), Msg{ModelPickerToggleReasoning{}});
+    CHECK(agentty::reasoning_override_for("claude-opus-4-5") == -1,
+          "family-gated model gets no override");
+    CHECK(g_settings.reasoning_effort_overrides.empty(),
+          "nothing persisted for a family-gated model");
+    CHECK(!m1.s.status.empty(), "still shows a hint toast");
+    CHECK(agentty::resolved_caps("claude-opus-4-5").supports_effort(),
+          "Claude keeps its own family-gated effort");
+
+    agentty::clear_reasoning_overrides();
+}
+
 TEST_CASE("provider filter: fuzzy narrows + ranks") {
     namespace P = agentty::provider;
 
