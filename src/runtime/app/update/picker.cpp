@@ -217,7 +217,7 @@ Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
                 // this yet: the model id was empty until this refetch landed).
                 if (!is_chatgpt_active()) {
                     m.d.effort = clamp_effort(
-                        m.d.effort, ModelCapabilities::from_id(m.d.model_id.value));
+                        m.d.effort, resolved_caps(m.d.model_id.value));
                 }
                 tools::subagent::set_model(m.d.model_id.value);
                 persist_settings(m);
@@ -396,7 +396,7 @@ Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
                     // the wire silently drops.
                     if (!is_chatgpt_active()) {
                         m.d.effort = clamp_effort(
-                            m.d.effort, ModelCapabilities::from_id(m.d.model_id.value));
+                            m.d.effort, resolved_caps(m.d.model_id.value));
                     }
                     // Keep subagents on the live model: the startup config
                     // captured whatever was saved at launch, which can be a
