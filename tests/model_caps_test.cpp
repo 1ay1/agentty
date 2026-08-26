@@ -208,7 +208,8 @@ TEST_CASE("compat reasoning effort (chat wire)") {
 
     // OpenAI-Chat-wire reasoning models are NOT in the Claude/GPT family
     // ladder, but expose the top-level reasoning_effort enum (low|med|high).
-    for (const char* id : {"magistral-medium-latest", "magistral-small-latest",
+    for (const char* id : {"mistral-small-latest", "mistral-medium-latest",
+                           "mistral-small-3-2", "mistral-medium-3-5",
                            "deepseek-reasoner", "deepseek-r1",
                            "grok-4", "grok-4-fast", "grok-3-mini",
                            "gemini-2.5-flash-thinking",
@@ -229,9 +230,12 @@ TEST_CASE("compat reasoning effort (chat wire)") {
         CHECK(cycle_effort(Effort::None, +1, c) != Effort::None);
     }
 
-    // Non-reasoning coder / chat lines that share a prefix must NOT light up.
-    for (const char* id : {"grok-code-fast-1", "mistral-medium-latest",
-                           "mistral-small-latest", "codestral-latest",
+    // Non-reasoning / native-reasoning lines that share a prefix must NOT light
+    // up: grok-code-fast (coder), deepseek-chat, gemini-2.5-pro (no thinking
+    // suffix), and — crucially — magistral-*, which reasons NATIVELY and
+    // REJECTS reasoning_effort (422). codestral is a code model, no reasoning.
+    for (const char* id : {"grok-code-fast-1", "magistral-medium-latest",
+                           "magistral-small-latest", "codestral-latest",
                            "deepseek-chat", "gemini-2.5-pro"}) {
         const auto c = ModelCapabilities::from_id(id);
         CHECK(!c.reasoning_compat);
@@ -259,25 +263,27 @@ TEST_CASE("per-model reasoning override registry") {
     clear_reasoning_overrides();
 
     // No override → resolved_caps matches pure inference.
-    CHECK(!resolved_caps("mistral-medium-latest").reasoning_compat);
-    CHECK(resolved_caps("magistral-medium-latest").reasoning_compat);
-    CHECK(reasoning_override_for("mistral-medium-latest") == -1);
+    //   codestral-latest: a code model, NOT a reasoner → no compat.
+    //   mistral-small-latest: Mistral Small 4, adjustable reasoning → compat.
+    CHECK(!resolved_caps("codestral-latest").reasoning_compat);
+    CHECK(resolved_caps("mistral-small-latest").reasoning_compat);
+    CHECK(reasoning_override_for("codestral-latest") == -1);
 
     // Force ON a model the catalog does NOT recognize as a reasoner.
-    set_reasoning_override("mistral-medium-latest", true);
-    CHECK(reasoning_override_for("mistral-medium-latest") == 1);
+    set_reasoning_override("codestral-latest", true);
+    CHECK(reasoning_override_for("codestral-latest") == 1);
     {
-        const auto c = resolved_caps("mistral-medium-latest");
+        const auto c = resolved_caps("codestral-latest");
         CHECK(c.reasoning_compat);
         CHECK(c.supports_effort());
         CHECK(!c.supports_effort_max());   // still a 3-level enum
     }
 
-    // Force OFF a model inference WOULD light up.
-    set_reasoning_override("magistral-medium-latest", false);
-    CHECK(reasoning_override_for("magistral-medium-latest") == 0);
+    // Force OFF a model inference WOULD light up (Mistral Small 4).
+    set_reasoning_override("mistral-small-latest", false);
+    CHECK(reasoning_override_for("mistral-small-latest") == 0);
     {
-        const auto c = resolved_caps("magistral-medium-latest");
+        const auto c = resolved_caps("mistral-small-latest");
         CHECK(!c.reasoning_compat);
         CHECK(!c.supports_effort());
     }
@@ -291,14 +297,14 @@ TEST_CASE("per-model reasoning override registry") {
     }
 
     // Clearing one restores inference for that id only.
-    clear_reasoning_override("magistral-medium-latest");
-    CHECK(reasoning_override_for("magistral-medium-latest") == -1);
-    CHECK(resolved_caps("magistral-medium-latest").reasoning_compat);
-    // The other override still stands.
-    CHECK(resolved_caps("mistral-medium-latest").reasoning_compat);
+    clear_reasoning_override("mistral-small-latest");
+    CHECK(reasoning_override_for("mistral-small-latest") == -1);
+    CHECK(resolved_caps("mistral-small-latest").reasoning_compat);
+    // The other override still stands (codestral forced on).
+    CHECK(resolved_caps("codestral-latest").reasoning_compat);
 
     clear_reasoning_overrides();   // leave global state clean for other tests
-    CHECK(reasoning_override_for("mistral-medium-latest") == -1);
+    CHECK(reasoning_override_for("codestral-latest") == -1);
 }
 
 TEST_CASE("capability tiers") {

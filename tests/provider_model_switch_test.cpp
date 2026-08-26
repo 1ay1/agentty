@@ -132,42 +132,43 @@ TEST_CASE("model picker ^E toggles reasoning override + feedback") {
     g_settings = store::Settings{};
     agentty::clear_reasoning_overrides();
 
-    // A non-chatgpt provider with a plain (non-reasoning-inferred) Mistral
-    // chat model highlighted in an open picker.
+    // A non-chatgpt provider with a genuinely non-reasoning model (codestral,
+    // a code model) highlighted in an open picker — inference does NOT light
+    // it up, so ^E force-on has something to prove.
     Model m;
-    m.d.available_models = { mi("mistral-medium-latest", "mistral") };
-    m.d.model_id = ModelId{"mistral-medium-latest"};
+    m.d.available_models = { mi("codestral-latest", "mistral") };
+    m.d.model_id = ModelId{"codestral-latest"};
     m.ui.model_picker = pick::OpenAt{0};
 
     // Baseline: inference says NOT a reasoner, so no override, no effort.
-    CHECK(agentty::reasoning_override_for("mistral-medium-latest") == -1);
-    CHECK(!agentty::resolved_caps("mistral-medium-latest").supports_effort());
+    CHECK(agentty::reasoning_override_for("codestral-latest") == -1);
+    CHECK(!agentty::resolved_caps("codestral-latest").supports_effort());
 
     // 1st ^E: auto -> force ON.
     auto [m1, c1] = app::update(std::move(m), Msg{ModelPickerToggleReasoning{}});
-    CHECK(agentty::reasoning_override_for("mistral-medium-latest") == 1,
+    CHECK(agentty::reasoning_override_for("codestral-latest") == 1,
           "^E forces the override on");
-    CHECK(agentty::resolved_caps("mistral-medium-latest").supports_effort(),
+    CHECK(agentty::resolved_caps("codestral-latest").supports_effort(),
           "effort capability now open for the model");
-    CHECK(g_settings.reasoning_effort_overrides.count("mistral-medium-latest") == 1,
+    CHECK(g_settings.reasoning_effort_overrides.count("codestral-latest") == 1,
           "override persisted to Settings");
-    CHECK(g_settings.reasoning_effort_overrides.at("mistral-medium-latest"),
+    CHECK(g_settings.reasoning_effort_overrides.at("codestral-latest"),
           "persisted value is ON");
     CHECK(!m1.s.status.empty(), "a status toast is set as feedback");
 
     // 2nd ^E: ON -> force OFF.
     auto [m2, c2] = app::update(std::move(m1), Msg{ModelPickerToggleReasoning{}});
-    CHECK(agentty::reasoning_override_for("mistral-medium-latest") == 0,
+    CHECK(agentty::reasoning_override_for("codestral-latest") == 0,
           "^E again forces the override off");
-    CHECK(!agentty::resolved_caps("mistral-medium-latest").supports_effort(),
+    CHECK(!agentty::resolved_caps("codestral-latest").supports_effort(),
           "effort suppressed under force-off");
     CHECK(!m2.s.status.empty(), "force-off also gives feedback");
 
     // 3rd ^E: OFF -> back to inference (cleared).
     auto [m3, c3] = app::update(std::move(m2), Msg{ModelPickerToggleReasoning{}});
-    CHECK(agentty::reasoning_override_for("mistral-medium-latest") == -1,
+    CHECK(agentty::reasoning_override_for("codestral-latest") == -1,
           "^E a third time clears the override (auto)");
-    CHECK(g_settings.reasoning_effort_overrides.count("mistral-medium-latest") == 0,
+    CHECK(g_settings.reasoning_effort_overrides.count("codestral-latest") == 0,
           "cleared override removed from Settings");
     CHECK(!m3.s.status.empty(), "clear-to-auto also gives feedback");
 

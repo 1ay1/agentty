@@ -112,8 +112,10 @@ struct ModelCapabilities {
     // This is an OpenAI-Chat-wire model that exposes configurable reasoning
     // via the top-level `reasoning_effort` enum (low|medium|high) — it is NOT
     // in the Claude/GPT `Family` ladder but still supports effort control.
-    // Covers Mistral Magistral, DeepSeek-Reasoner/R1, xAI Grok reasoning, and
-    // Gemini `*-thinking`. Decoded in from_id; consulted by supports_effort().
+    // Covers Mistral (Small 4 / Medium 3.5 — adjustable reasoning),
+    // DeepSeek-Reasoner/R1, xAI Grok reasoning, and Gemini `*-thinking`.
+    // Decoded in from_id; consulted by supports_effort(). (Mistral's Magistral
+    // reasons natively and REJECTS reasoning_effort, so it is NOT included.)
     // Kept ORTHOGONAL to `family` so tier/context/output ceilings (which key
     // off family+generation) are completely unaffected — only the effort
     // gates read this flag. These models take low/medium/high only (no
@@ -162,10 +164,10 @@ struct ModelCapabilities {
         // Responses backend expects an effort on every turn, so expose it.
         if (family == Family::Gpt)
             return generation >= 5;
-        // OpenAI-Chat-wire reasoning models (Magistral, DeepSeek-Reasoner,
-        // Grok reasoning, Gemini thinking): top-level `reasoning_effort`
-        // low|medium|high. Not in the family ladder, gated purely by the
-        // decoded flag (or a user override) — see reasoning_compat above.
+        // OpenAI-Chat-wire reasoning models (Mistral Small/Medium, DeepSeek-
+        // Reasoner, Grok reasoning, Gemini thinking): top-level `reasoning_
+        // effort` low|medium|high. Not in the family ladder, gated purely by
+        // the decoded flag (or a user override) — see reasoning_compat above.
         if (reasoning_compat)
             return true;
         return false;
@@ -534,11 +536,15 @@ private:
     // This is deliberately id-string inference (no network probe), mirroring
     // infer_weak_tool_use. Claude/GPT are handled by the `family` ladder and
     // must NOT set this flag (their effort is family-gated). We recognise the
-    // hosted reasoning lines:
-    //   • Mistral  "magistral*" — Mistral's reasoning models. Mistral's plain
-    //     `mistral-*-latest` chat/instruct models do NOT accept
-    //     reasoning_effort, so they are intentionally excluded (a stray value
-    //     400s). Users wanting to force it can set AGENTTY_FORCE_EFFORT=1.
+    // hosted reasoning lines that accept the top-level `reasoning_effort`:
+    //   • Mistral — the ADJUSTABLE-reasoning models take reasoning_effort:
+    //       - "mistral-medium" (Medium 3.5, i.e. mistral-medium-latest /
+    //         mistral-medium-3-5 …)
+    //       - "mistral-small"  (Small 4, i.e. mistral-small-latest /
+    //         mistral-small-3-* …)
+    //     Mistral's "magistral-*" models reason NATIVELY and REJECT the
+    //     parameter with HTTP 422 — so they are explicitly EXCLUDED below.
+    //     (Verified against Mistral's reasoning docs, issue #20.)
     //   • DeepSeek "deepseek-reasoner" / "deepseek-r1" (r1 distills too).
     //   • xAI Grok reasoning lines: "grok-4*", "grok-3-mini" (grok-3-mini
     //     reasons; grok-code-fast is a non-reasoning coder → excluded).
@@ -569,11 +575,19 @@ private:
             return false;
         };
 
-        // Non-reasoning coder lines that share a prefix with a reasoning
-        // family — exclude first so the family match below doesn't grab them.
+        // Exclusions FIRST — non-reasoning coder lines and native-reasoning
+        // models that share a prefix with a reasoning family. These must lose
+        // to nothing below, so return early.
+        //   • grok-code-fast: a non-reasoning coder (shares "grok").
+        //   • magistral-*: reasons NATIVELY and REJECTS reasoning_effort (422),
+        //     even though it shares the "mistral"… no — "magistral" is a
+        //     distinct token, but guard explicitly so a future substring match
+        //     can't grab it.
         if (contains(id, "grok-code")) return false;
+        if (contains(id, "magistral")) return false;
 
-        return contains(id, "magistral")
+        return contains(id, "mistral-small")     // Mistral Small 4 (adjustable)
+            || contains(id, "mistral-medium")    // Mistral Medium 3.5 (adjustable)
             || contains(id, "deepseek-reasoner")
             || contains(id, "deepseek-r1")
             || contains(id, "grok-4")
