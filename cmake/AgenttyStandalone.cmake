@@ -153,6 +153,34 @@ elseif(NOT AGENTTY_IPO_OK)
     set(CMAKE_INTERPROCEDURAL_OPTIMIZATION FALSE)
 endif()
 
+# ── LTO + PIE relocation fix (issue #20) ──────────────────────────
+# GCC's LTO (enabled above) can emit a 32-bit ABSOLUTE relocation against a
+# hidden static-local guard variable (e.g. tls.cpp's sni_ex_index
+# `static int idx`). GNU ld.bfd — the default linker on most distros — REJECTS
+# that when producing a PIE:
+#     relocation R_X86_64_32 against hidden symbol `...' can not be used
+#     when making a PIE object
+#     failed to set dynamic section sizes: bad value
+# This broke the default dynamic (-pie) release build for users on Fedora /
+# Arch (reported on issue #20). Root cause: with only -fPIE, GCC assumes the
+# symbol lands in the main executable and uses a direct 32-bit reloc; under
+# LTO that assumption leaks to a hidden guard that ld.bfd then can't place in
+# a PIE. Compiling the whole program -fPIC (not just -fPIE) forces GCC to emit
+# PIC-safe (GOT/PC-relative) relocations for every symbol, which ld.bfd
+# accepts in a PIE. Negligible cost for a TUI, and it's the portable fix: no
+# dependency on mold/lld/gold being installed, and it doesn't perturb the LTO
+# entry-symbol handling the way swapping linkers does.
+# Only needed on the ELF PIE path: the fully-static build links -no-pie
+# (ET_EXEC) and is unaffected; Apple/MSVC handle PIC/PIE their own way.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux"
+        AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU"
+        AND CMAKE_INTERPROCEDURAL_OPTIMIZATION
+        AND NOT (AGENTTY_FULLY_STATIC AND NOT AGENTTY_STATIC_PIE))
+    message(STATUS "agentty: compiling -fPIC so GCC LTO stays PIE-safe under "
+                   "ld.bfd (fixes R_X86_64_32 PIE reloc, issue #20)")
+    add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-fPIC>)
+endif()
+
 include(FetchContent)
 
 set(MAYA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
