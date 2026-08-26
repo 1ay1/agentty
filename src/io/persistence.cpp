@@ -1196,6 +1196,11 @@ store::Settings load_settings() {
                 if (v.is_string()) s.provider_models[k] = v.get<std::string>();
         }
         s.effort = j.value("effort", "");
+        if (j.contains("reasoning_effort_overrides")
+            && j["reasoning_effort_overrides"].is_object()) {
+            for (auto& [k, v] : j["reasoning_effort_overrides"].items())
+                if (v.is_boolean()) s.reasoning_effort_overrides[k] = v.get<bool>();
+        }
         auto grants = j.value("always_allow_tools", std::vector<std::string>{});
         s.always_allow_tools = std::move(grants);
         s.context_1m_blocked = j.value("context_1m_blocked", false);
@@ -1272,6 +1277,11 @@ void save_settings(const store::Settings& s) {
         j["provider_models"] = std::move(pm);
     }
     if (!s.effort.empty()) j["effort"] = s.effort;
+    if (!s.reasoning_effort_overrides.empty()) {
+        json ro = json::object();
+        for (const auto& [k, v] : s.reasoning_effort_overrides) ro[k] = v;
+        j["reasoning_effort_overrides"] = std::move(ro);
+    }
     if (!s.always_allow_tools.empty())
         j["always_allow_tools"] = s.always_allow_tools;
     if (s.context_1m_blocked) j["context_1m_blocked"] = true;

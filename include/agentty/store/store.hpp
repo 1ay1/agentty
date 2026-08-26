@@ -116,6 +116,13 @@ struct Settings {
     // Reasoning effort tier (output_config.effort wire value, e.g. "high";
     // empty = off, the default). Reloaded into Model::effort at startup.
     std::string          effort;
+    // Per-model reasoning-effort capability overrides (issue #20). Keyed by
+    // model id; true = force the effort knob ON for a compat model the
+    // catalog doesn't recognize as a reasoner, false = force it OFF for one
+    // that 400s on `reasoning_effort`. Absent id = use catalog inference.
+    // Pushed into the catalog's override registry at startup and on every
+    // in-app toggle (^E in the model picker). Claude/GPT stay family-gated.
+    std::map<std::string, bool> reasoning_effort_overrides;
     // Tool names the user granted "always allow" (PermissionApproveAlways).
     // Persisted so the grant survives restarts — Zed's always_allow rules.
     // Loaded into Model::session_grants at init; note CycleProfile still

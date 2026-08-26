@@ -609,7 +609,7 @@ std::optional<Message> build_smart_routing_card(const Model& m) {
         }
     const smart::ComplexityScore cx =
         smart::classify_score_with_context(newest_user, m.s.smart_turn_complexity);
-    const auto caps = ModelCapabilities::from_id(prof.model);
+    const auto caps = resolved_caps(prof.model);
     const int learned = m.d.smart.routing_learning()
         ? smart::RoutingMemory::instance().prior_bias(
               smart::turn_signature(cx.tier, newest_user))
@@ -709,7 +709,7 @@ Cmd<Msg> launch_stream(Model& m) {
     // ladder, gpt-5.4/5.5 top out at xhigh, and a stale `max` pick on a model
     // that only reaches xhigh degrades instead of being sent verbatim.
     std::string effort = std::string{
-        effort_wire_for(m.d.effort, ModelCapabilities::from_id(model_id))};
+        effort_wire_for(m.d.effort, resolved_caps(model_id))};
 
     // Look up the selected model's supports_tools from available_models.
     // Ollama models have this set via /api/show probe at list time. If
@@ -779,7 +779,7 @@ Cmd<Msg> launch_stream(Model& m) {
         const smart::ComplexityScore turn_cx =
             smart::classify_score_with_context(newest_user, m.s.smart_turn_complexity);
         turn_complexity = turn_cx.tier;
-        const auto caps = ModelCapabilities::from_id(strategic_profile.model);
+        const auto caps = resolved_caps(strategic_profile.model);
         // Innovation 1 — LEARNED ROUTING: fold in the per-workspace prior this
         // repo has taught us for this class of turn (persisted cascade). The
         // live session bias (smart_effort_bias) and this persisted prior encode

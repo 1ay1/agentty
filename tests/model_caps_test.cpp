@@ -200,6 +200,107 @@ TEST_CASE("gpt5 codex caps") {
     }
 }
 
+TEST_CASE("compat reasoning effort (chat wire)") {
+    using agentty::ModelCapabilities;
+    using agentty::Effort;
+    using agentty::effort_wire_for;
+    using agentty::cycle_effort;
+
+    // OpenAI-Chat-wire reasoning models are NOT in the Claude/GPT family
+    // ladder, but expose the top-level reasoning_effort enum (low|med|high).
+    for (const char* id : {"magistral-medium-latest", "magistral-small-latest",
+                           "deepseek-reasoner", "deepseek-r1",
+                           "grok-4", "grok-4-fast", "grok-3-mini",
+                           "gemini-2.5-flash-thinking",
+                           "o1", "o3", "o4-mini"}) {
+        const auto c = ModelCapabilities::from_id(id);
+        CHECK(c.reasoning_compat);
+        CHECK(c.supports_effort());
+        // 3-level enum only — no max / xhigh on this wire.
+        CHECK(!c.supports_effort_max());
+        CHECK(!c.supports_effort_xhigh());
+        CHECK(!c.is_known_family());   // stays orthogonal to the family ladder
+        // A stale Max/Xhigh pick degrades to `high` instead of 400ing.
+        CHECK(effort_wire_for(Effort::Max, c)    == "high");
+        CHECK(effort_wire_for(Effort::Xhigh, c)  == "high");
+        CHECK(effort_wire_for(Effort::Medium, c) == "medium");
+        CHECK(effort_wire_for(Effort::None, c)   == "");
+        // The picker can cycle effort on these models.
+        CHECK(cycle_effort(Effort::None, +1, c) != Effort::None);
+    }
+
+    // Non-reasoning coder / chat lines that share a prefix must NOT light up.
+    for (const char* id : {"grok-code-fast-1", "mistral-medium-latest",
+                           "mistral-small-latest", "codestral-latest",
+                           "deepseek-chat", "gemini-2.5-pro"}) {
+        const auto c = ModelCapabilities::from_id(id);
+        CHECK(!c.reasoning_compat);
+        CHECK(!c.supports_effort());
+        CHECK(effort_wire_for(Effort::High, c) == "");
+    }
+
+    // Claude / GPT are family-gated — the compat flag must stay OFF for them
+    // even though they DO support effort through their own ladder.
+    for (const char* id : {"claude-opus-4-5", "gpt-5.6-sol"}) {
+        const auto c = ModelCapabilities::from_id(id);
+        CHECK(!c.reasoning_compat);
+        CHECK(c.supports_effort());   // via family, not the compat flag
+    }
+}
+
+TEST_CASE("per-model reasoning override registry") {
+    using agentty::ModelCapabilities;
+    using agentty::resolved_caps;
+    using agentty::set_reasoning_override;
+    using agentty::clear_reasoning_override;
+    using agentty::clear_reasoning_overrides;
+    using agentty::reasoning_override_for;
+
+    clear_reasoning_overrides();
+
+    // No override → resolved_caps matches pure inference.
+    CHECK(!resolved_caps("mistral-medium-latest").reasoning_compat);
+    CHECK(resolved_caps("magistral-medium-latest").reasoning_compat);
+    CHECK(reasoning_override_for("mistral-medium-latest") == -1);
+
+    // Force ON a model the catalog does NOT recognize as a reasoner.
+    set_reasoning_override("mistral-medium-latest", true);
+    CHECK(reasoning_override_for("mistral-medium-latest") == 1);
+    {
+        const auto c = resolved_caps("mistral-medium-latest");
+        CHECK(c.reasoning_compat);
+        CHECK(c.supports_effort());
+        CHECK(!c.supports_effort_max());   // still a 3-level enum
+    }
+
+    // Force OFF a model inference WOULD light up.
+    set_reasoning_override("magistral-medium-latest", false);
+    CHECK(reasoning_override_for("magistral-medium-latest") == 0);
+    {
+        const auto c = resolved_caps("magistral-medium-latest");
+        CHECK(!c.reasoning_compat);
+        CHECK(!c.supports_effort());
+    }
+
+    // An override must NOT leak onto the family-gated Claude/GPT lane.
+    set_reasoning_override("claude-opus-4-5", false);
+    {
+        const auto c = resolved_caps("claude-opus-4-5");
+        CHECK(!c.reasoning_compat);
+        CHECK(c.supports_effort());   // family ladder wins; override ignored
+    }
+
+    // Clearing one restores inference for that id only.
+    clear_reasoning_override("magistral-medium-latest");
+    CHECK(reasoning_override_for("magistral-medium-latest") == -1);
+    CHECK(resolved_caps("magistral-medium-latest").reasoning_compat);
+    // The other override still stands.
+    CHECK(resolved_caps("mistral-medium-latest").reasoning_compat);
+
+    clear_reasoning_overrides();   // leave global state clean for other tests
+    CHECK(reasoning_override_for("mistral-medium-latest") == -1);
+}
+
 TEST_CASE("capability tiers") {
     using T = ModelCapabilities::Tier;
     auto tier = [](std::string_view id) { return ModelCapabilities::tier_for(id); };

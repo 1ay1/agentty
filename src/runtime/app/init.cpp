@@ -102,6 +102,10 @@ std::pair<Model, maya::Cmd<Msg>> init() {
     m.s.context_max = ui::context_max_for_model(m.d.model_id.value);
     m.d.profile = settings.profile;
     m.d.effort  = effort_from_wire(settings.effort);
+    // Publish the user's per-model reasoning-effort overrides into the catalog
+    // registry so resolved_caps() (and thus supports_effort / the picker /
+    // the wire) honor them from frame 1. Mirrors set_custom_auth_header.
+    set_reasoning_overrides(settings.reasoning_effort_overrides);
 
     // Smart Mode: rehydrate role config from settings. A slot counts as
     // "set" once the user pinned a model for it.

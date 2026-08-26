@@ -455,7 +455,7 @@ Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
                     if (is_chatgpt_active()) {
                         m.d.effort = cycle_codex_effort(m.d.effort, e.delta);
                     } else {
-                        const auto caps = ModelCapabilities::from_id(
+                        const auto caps = resolved_caps(
                             m.d.available_models[
                                 static_cast<std::size_t>(vis[static_cast<std::size_t>(p->index)])]
                                 .id.value);
@@ -465,6 +465,52 @@ Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
                 }
             }
             return done(std::move(m));
+        },
+        [&](ModelPickerToggleReasoning&) -> Step {
+            // Cycle the highlighted model's per-model reasoning-effort
+            // override: inference → force-on → force-off → inference. Claude/
+            // GPT are family-gated (their effort ladder isn't user-editable),
+            // so this is a no-op with a hint for them. Persisted immediately
+            // (an explicit config action, not a hot keystroke) and pushed to
+            // the catalog registry so resolved_caps() honors it live.
+            auto* p = pick::opened(m.ui.model_picker);
+            if (!p) return done(std::move(m));
+            const auto vis = model_filtered(m.d.available_models, p->query);
+            if (vis.empty() || p->index < 0
+                || p->index >= static_cast<int>(vis.size()))
+                return done(std::move(m));
+            const std::string id =
+                m.d.available_models[
+                    static_cast<std::size_t>(vis[static_cast<std::size_t>(p->index)])]
+                    .id.value;
+            const auto base = ModelCapabilities::from_id(id);
+            if (base.is_known_family()
+                || base.family == ModelCapabilities::Family::Gpt) {
+                return {std::move(m), set_status_toast(m,
+                    "reasoning effort is model-managed here (←/→ to set the tier)")};
+            }
+            // Determine the next state from the CURRENT override (tri-state).
+            const int cur = reasoning_override_for(id);   // -1 none, 0 off, 1 on
+            auto s = deps().load_settings();
+            const char* label = nullptr;
+            if (cur < 0) {                 // inference → force ON
+                s.reasoning_effort_overrides[id] = true;
+                set_reasoning_override(id, true);
+                label = "reasoning effort: forced ON for this model";
+            } else if (cur == 1) {         // ON → force OFF
+                s.reasoning_effort_overrides[id] = false;
+                set_reasoning_override(id, false);
+                label = "reasoning effort: forced OFF for this model";
+            } else {                       // OFF → back to inference (clear)
+                s.reasoning_effort_overrides.erase(id);
+                clear_reasoning_override(id);
+                label = "reasoning effort: auto (catalog default)";
+            }
+            deps().save_settings(s);
+            // If the model just lost effort capability, drop any live tier so
+            // the chip doesn't linger; re-clamp against the new caps.
+            m.d.effort = clamp_effort(m.d.effort, resolved_caps(id));
+            return {std::move(m), set_status_toast(m, label)};
         },
     }, pm);
 }

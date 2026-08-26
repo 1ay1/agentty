@@ -804,7 +804,7 @@ provider::StreamResult run_one_completion(Thread& thread,
         // Effort through the resolved model's capabilities (None → "", i.e.
         // effort off — which is the case today since parent_effort is None).
         req.effort = std::string(effort_wire_for(
-            role_prof.effort, ModelCapabilities::from_id(role_prof.model)));
+            role_prof.effort, resolved_caps(role_prof.model)));
     } else {
         req.model = type.read_only
                       ? agentty::cheapest_capable_model(cfg.model, cfg.candidates)
