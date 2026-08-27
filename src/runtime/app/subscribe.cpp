@@ -78,7 +78,14 @@ bool tail_has_live_bytes(const Model& m) noexcept {
 
 std::optional<Msg> on_permission(const KeyEvent& ev) {
     if (auto* ck = std::get_if<CharKey>(&ev.key)) {
-        switch (ck->codepoint) {
+        char32_t c = ck->codepoint;
+        // ^C must stay quittable while a prompt is up — this handler's
+        // result is returned unconditionally (never falls through to
+        // on_global), so swallow-by-nullopt would make the app unquittable
+        // until the prompt is answered. Legacy terminals send raw 0x03.
+        if (c == 0x03 || (ev.mods.ctrl && (c == U'c' || c == U'C')))
+            return Quit{};
+        switch (c) {
             case 'y': case 'Y': return PermissionApprove{};
             case 'n': case 'N': return PermissionReject{};
             case 'a': case 'A': return PermissionApproveAlways{};

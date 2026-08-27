@@ -608,9 +608,10 @@ Step tool_update(Model m, msg::ToolMsg tm) {
                     deps().save_settings(s);
                 }
             }
-            m.s.status = name.value + ": always allowed";
+            m.s.status = name.value + ": always allowed (persists \xc2\xb7 "
+                         "Shift+Tab profile cycle resets)";
             m.s.status_until = std::chrono::steady_clock::now()
-                             + std::chrono::seconds{3};
+                             + std::chrono::seconds{4};
             with_live_tool(m, id, [&](ToolUse& tc) {
                 tc.status = ToolUse::Approved{tc.started_at()};
             });
