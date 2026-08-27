@@ -30,10 +30,24 @@
 //      No arg → run all scenarios.
 //      Arg    → run only scenarios whose name contains the substring.
 //
-// Env:
-//   BENCH_ITERS=N  override per-phase iteration count (default 5).
-//   BENCH_JSON=1   emit a JSON line per scenario instead of the table
-//                  (for automation / CI regression tracking).
+// Env knobs:
+//   BENCH_ASSERT=1  → fail (non-zero exit) if any hot path exceeds its
+//                     ceiling — the CI perf-regression gate.
+//   BENCH_PHASES=1  → print a per-scenario cold-render breakdown
+//                     (build / layout / paint nanoseconds + inner
+//                     component render() count) to stderr. This is how
+//                     the cold-render cost was characterised: for a tall
+//                     body it's ~70% layout / ~30% paint, and the render
+//                     count scales LINEARLY with content (one inner
+//                     component per markdown block, each rendered exactly
+//                     once — the measure and paint passes share the
+//                     within-frame result cache, so there is no
+//                     double-render to eliminate). Keep this when probing
+//                     the render path so the next person doesn't re-derive
+//                     that the cold frame is already single-pass.
+//   BENCH_ITERS=N   → override per-phase iteration count (default 5).
+//   BENCH_JSON=1    → emit a JSON line per scenario instead of the table
+//                     (for automation / CI regression tracking).
 
 #include <algorithm>
 #include <chrono>
@@ -472,11 +486,24 @@ struct RenderStats { Stats cold; Stats warm; };
         maya::Canvas canvas(kCanvasW, kCanvasH, &pool);
         canvas.clear();
 
+        const std::uint64_t b0 = maya::render_detail::rt_build_ns();
+        const std::uint64_t l0 = maya::render_detail::rt_layout_ns();
+        const std::uint64_t p0 = maya::render_detail::rt_paint_ns();
+        const std::uint64_t rc0 = maya::render_detail::component_render_calls();
         auto t0 = Clock::now();
         maya::render_tree(root, canvas, pool, maya::theme::dark,
                           /*auto_height=*/true);
         auto t1 = Clock::now();
         cold_samples.push_back(ms(t1 - t0));
+        if (std::getenv("BENCH_PHASES")) {
+            std::fprintf(stderr,
+                "    [phases] %-30s total=%.2f build=%.2f layout=%.2f paint=%.2f renders=%llu (ms)\n",
+                sh.name.c_str(), ms(t1 - t0),
+                double(maya::render_detail::rt_build_ns()  - b0) / 1e6,
+                double(maya::render_detail::rt_layout_ns() - l0) / 1e6,
+                double(maya::render_detail::rt_paint_ns()  - p0) / 1e6,
+                (unsigned long long)(maya::render_detail::component_render_calls() - rc0));
+        }
 
         // Warm: same canvas + pool, same root → cache should blit.
         canvas.clear();
