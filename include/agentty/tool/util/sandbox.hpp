@@ -107,4 +107,11 @@ enum class Backend : std::uint8_t {
 // rules (kept cross-platform so the test compiles everywhere).
 [[nodiscard]] std::string sbpl_escape(std::string_view path);
 
+// Testing hook: the bwrap argv this build would wrap `shell_cmd` in, WITHOUT
+// running it (so tests can assert the hardening flags + read-only toolchain
+// binds + workspace RW bind are present on any host, even one without bwrap or
+// user namespaces). Empty on non-Linux builds. Exposed for the unit test only;
+// production code calls run_shell_command / run_argv.
+[[nodiscard]] std::vector<std::string> bwrap_argv_for_test(std::string_view shell_cmd);
+
 } // namespace agentty::tools::util::sandbox

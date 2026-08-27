@@ -65,8 +65,41 @@ std::atomic<Backend> g_backend{Backend::None};
 
 #if defined(__linux__)
 
+// A GENUINE minimal-sandbox probe. `bwrap --version` (the old check via
+// can_invoke) only proved the BINARY EXISTS — it never creates a namespace, so
+// it passed on hosts where bwrap is installed but unprivileged user namespaces
+// are BLOCKED: Ubuntu 24.04's AppArmor `userns` restriction, RHEL/hardened
+// `kernel.unprivileged_userns_clone=0` or `user.max_user_namespaces=0`, and
+// many container/CI hosts. There every REAL command then died with
+//     bwrap: setting up uid map: Permission denied
+// while agentty happily reported "sandbox: active (bwrap)" — GitHub issue #21.
+//
+// So we run the SAME namespace unshares a real command uses against a trivial
+// /bin/true and require it to actually start AND exit 0. This makes the probe
+// a faithful predictor of run_wrapped(): if it can't build the namespace here,
+// it can't build it for the shell either, and we report no backend so Auto
+// degrades to unsandboxed and On surfaces a clear, actionable error instead of
+// letting every command fail.
+[[nodiscard]] bool bwrap_can_sandbox() {
+    if (!can_invoke("bwrap")) return false;
+    const std::vector<std::string> argv = {
+        "bwrap",
+        "--unshare-user", "--unshare-pid",
+        "--ro-bind", "/usr", "/usr",
+        "--ro-bind-try", "/bin", "/bin",
+        "--ro-bind-try", "/lib", "/lib",
+        "--ro-bind-try", "/lib64", "/lib64",
+        "--proc", "/proc",
+        "--dev", "/dev",
+        "--die-with-parent",
+        "--", "/bin/true",
+    };
+    auto r = run_argv_s(argv, /*max_bytes=*/4096, std::chrono::seconds{5});
+    return r.started && !r.timed_out && r.exit_code == 0;
+}
+
 [[nodiscard]] Backend probe() {
-    return can_invoke("bwrap") ? Backend::Bwrap : Backend::None;
+    return bwrap_can_sandbox() ? Backend::Bwrap : Backend::None;
 }
 
 // Build the bwrap argv prefix. Workspace gets read-write bound to
@@ -146,6 +179,37 @@ std::atomic<Backend> g_backend{Backend::None};
     argv.emplace_back("--ro-bind-try");
     argv.emplace_back("/opt"); argv.emplace_back("/opt");
 
+    // User-local toolchains (GitHub issue #21). Many toolchains install OUTSIDE
+    // /usr — webinstall.dev drops go/gofmt/node under ~/.local/opt and links
+    // them into ~/.local/bin; rustup/cargo, go, nvm, pyenv, rbenv, asdf, bun,
+    // and deno all live under $HOME. Without these binds an "approved" bash
+    // call couldn't find the very tools the user asked the agent to run. Bind
+    // them READ-ONLY (execute yes, mutate no) via --ro-bind-try so a missing
+    // dir is skipped. Deliberately narrow (named tool roots), NOT all of $HOME
+    // — that would re-expose ~/.ssh / ~/.aws / ~/.config secrets the sandbox
+    // exists to protect.
+    if (const char* home = std::getenv("HOME"); home && *home) {
+        const std::string h = home;
+        // Narrow, tool-only roots. Deliberately EXCLUDES broad dirs that mix in
+        // secrets/app-data: ~/.local/share (app data), ~/.npm (may cache an
+        // _auth token), ~/.config (creds), ~/.local/state (logs/history).
+        static constexpr const char* kToolSubdirs[] = {
+            "/.local/bin", "/.local/opt", "/.local/lib", // webinstall.dev etc.
+            "/.cargo/bin", "/.rustup",   // Rust (bin only from .cargo)
+            "/go/bin", "/.go",           // Go (GOPATH bin + webinstall)
+            "/.nvm",                     // Node version manager
+            "/.pyenv", "/.rbenv", "/.asdf", // version managers
+            "/.bun/bin", "/.deno/bin",   // Bun / Deno
+            "/.dotnet", "/.sdkman/candidates", // .NET / JVM
+        };
+        for (const char* sub : kToolSubdirs) {
+            std::string p = h + sub;
+            argv.emplace_back("--ro-bind-try");
+            argv.emplace_back(p);
+            argv.emplace_back(std::move(p));
+        }
+    }
+
     // Pseudo-fs
     push_pair("--proc", "/proc");
     push_pair("--dev",  "/dev");
@@ -172,8 +236,30 @@ std::atomic<Backend> g_backend{Backend::None};
     // installs / curl — flows users explicitly want to work.
     push("--share-net");
 
-    // Process / session hardening
+    // Process / namespace / privilege hardening. Each --unshare severs a
+    // kernel namespace so a command inside the sandbox can't observe or touch
+    // the host's view of it:
+    //   --unshare-user   own user namespace (uid/gid map) — the root of the
+    //                    whole sandbox; requested explicitly so the posture
+    //                    matches bwrap_can_sandbox()'s probe.
+    //   --unshare-pid    clean PID namespace (kills stay contained; the host
+    //                    process table is invisible).
+    //   --unshare-ipc    own SysV/POSIX IPC namespace (no shared shm with host
+    //                    processes).
+    //   --unshare-uts    own hostname/domainname (can't rewrite the host's).
+    //   --unshare-cgroup-try  own cgroup view where the kernel allows it.
+    //   --new-session    detach the controlling tty so the child can't inject
+    //                    into agentty's terminal via TIOCSTI.
+    //   --die-with-parent  no detached zombies if agentty exits.
+    // bwrap already runs the payload with no ambient capabilities and
+    // no_new_privs SET inside the userns, so a setuid binary can't escalate.
+    // Network is deliberately KEPT (--share-net) so git/npm/curl work; that is
+    // the accepted residual (see the sandboxing doc's threat model).
+    push("--unshare-user");
     push("--unshare-pid");
+    push("--unshare-ipc");
+    push("--unshare-uts");
+    push("--unshare-cgroup-try");
     push("--new-session");
     push("--die-with-parent");
 
@@ -372,16 +458,24 @@ std::string describe_state() {
     if (m == Mode::On)
         return "sandbox: requested but no backend "
 #if defined(__linux__)
-               "(install bubblewrap)";
+               + std::string{can_invoke("bwrap")
+                   ? "(bubblewrap present but unprivileged user namespaces are "
+                     "blocked \xe2\x80\x94 e.g. Ubuntu 24.04 AppArmor userns "
+                     "restriction or kernel.unprivileged_userns_clone=0; "
+                     "allow userns or run with --sandbox off)"
+                   : "(install bubblewrap)"};
 #elif defined(__APPLE__)
-               "(sandbox-exec missing — system integrity issue)";
+               "(sandbox-exec missing \xe2\x80\x94 system integrity issue)";
 #else
                "(unsupported on this platform)";
 #endif
     // Mode::Auto + no backend → falling through unsandboxed
     return "sandbox: unavailable, running unsandboxed "
 #if defined(__linux__)
-           "(install bubblewrap to enable)";
+           + std::string{can_invoke("bwrap")
+               ? "(bubblewrap present but user namespaces are blocked \xe2\x80\x94 "
+                 "allow unprivileged userns to enable containment)"
+               : "(install bubblewrap to enable)"};
 #elif defined(__APPLE__)
            "(sandbox-exec missing)";
 #else
@@ -403,6 +497,14 @@ SubprocessResult run_argv(const std::vector<std::string>& argv,
     if (!is_active())
         return run_argv_s(argv, max_bytes, timeout);
     return run_wrapped_argv(argv, max_bytes, timeout);
+}
+
+std::vector<std::string> bwrap_argv_for_test([[maybe_unused]] std::string_view shell_cmd) {
+#if defined(__linux__)
+    return build_bwrap_argv(shell_cmd);
+#else
+    return {};
+#endif
 }
 
 } // namespace agentty::tools::util::sandbox
