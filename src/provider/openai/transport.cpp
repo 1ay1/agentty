@@ -73,6 +73,14 @@ struct ToolCallSlot {
 struct StreamCtx {
     EventSink sink;
 
+    // Mirrors req.show_reasoning. When the user has reasoning HIDDEN we
+    // convert reasoning text deltas into heartbeats: the wire streams
+    // reasoning_content unconditionally on this dialect, and capturing it
+    // invisibly just bloats Message::thinking + the persisted session for
+    // bytes never displayed and never replayed on this wire. Defaults true
+    // so the test harnesses keep capture semantics.
+    bool show_reasoning = true;
+
     // Byte-level stream framing lives in the shared wire helpers (see
     // include/agentty/provider/wire.hpp). Exactly one is driven per request:
     // `sse` for the /v1/chat/completions compat path, `ndjson` for Ollama's
@@ -648,8 +656,17 @@ void handle_delta(StreamCtx& ctx, const json& delta) {
         auto it = delta.find(key);
         if (it != delta.end() && it->is_string()) {
             const auto& r = it->get_ref<const std::string&>();
-            if (!r.empty()) ctx.sink(StreamThinkingDelta{r, {}});
-            break;   // never double-count if a proxy sends both
+            // Only stop once a NON-empty value was taken: some proxies
+            // (OpenRouter normalisation) send an empty reasoning_content
+            // alongside a populated reasoning — breaking on the empty first
+            // key would silently drop all reasoning.
+            if (!r.empty()) {
+                if (ctx.show_reasoning)
+                    ctx.sink(StreamThinkingDelta{r, {}});
+                else
+                    ctx.sink(StreamHeartbeat{});  // liveness only, no capture
+                break;   // never double-count if a proxy sends both
+            }
         }
     }
 
@@ -1454,6 +1471,7 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
 
     StreamCtx ctx;
     ctx.sink = std::move(sink);
+    ctx.show_reasoning = req.show_reasoning;
     set_memory_salvage_intent(ctx, req);
     // Tools we advertised this turn — the salvage path only converts a
     // leaked-JSON "tool call" into a real one when it names one of these.

@@ -375,9 +375,24 @@ void dispatch(StreamCtx& ctx, std::string_view data) {
         ctx.sink(StreamThinkingDelta{j.value("delta", std::string{}), {}});
         return;
     }
+    // Summary PART boundary: the Responses API splits a reasoning summary
+    // into parts (one per paragraph) and emits several reasoning ITEMS per
+    // response (one before each tool call). Their text deltas would
+    // otherwise concatenate with no separator ("…thought one.Start of
+    // thought two…"). Emit a block boundary so the reducer inserts the
+    // paragraph break — same event Anthropic uses for a new thinking block.
+    if (type == "response.reasoning_summary_part.added") {
+        ctx.sink(StreamThinkingDelta{{}, {}, /*block_boundary=*/true});
+        return;
+    }
     if (type == "response.output_item.added") {
         const auto& item = j.value("item", json::object());
         const auto itype  = item.value("type", std::string{});
+        if (itype == "reasoning") {
+            // New reasoning item — paragraph boundary for its summary text
+            // (see above). Harmless if the item produces no visible text.
+            ctx.sink(StreamThinkingDelta{{}, {}, /*block_boundary=*/true});
+        }
         if (itype == "function_call") {
             // A new tool call opens. Close any prior text block first so the
             // reveal cursor snaps before the card (matches Anthropic seam).

@@ -1255,8 +1255,18 @@ std::optional<maya::Element> reasoning_slot(const Message& msg, const Model& m) 
     const bool produced_output =
         !msg.text.empty() || !msg.streaming_text.empty()
         || !msg.tool_calls.empty() || msg.text_block_closed;
+    // Interleaved thinking (Anthropic beta) and multi-item Responses streams
+    // legitimately deliver MORE reasoning after the first answer/tool output.
+    // If the header flipped to "Reasoned" purely on produced_output, those
+    // late bytes would snap into a settled block. Stay live while the #r
+    // reveal is still gliding — const peek, no touch/reorder.
+    const auto* rslot = m.ui.view_cache.peek(
+        m.d.current.id, MessageId{msg.id.value + "#r"});
+    const bool reveal_animating =
+        rslot && rslot->streaming && rslot->streaming->is_animating();
     const bool active =
-        is_live_tail && m.s.is_streaming() && !produced_output;
+        is_live_tail && m.s.is_streaming()
+        && (!produced_output || reveal_animating);
 
     // The reasoning body streams through the CENTRAL streaming-markdown path
     // (own "#r" cache slot, cross-frame-persistent) so it reveals smoothly

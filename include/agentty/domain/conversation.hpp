@@ -311,6 +311,23 @@ struct Message {
     // the first content block of the assistant message on the wire, and
     // persist them so a reloaded thread can still be continued. Empty for
     // User turns and for Assistant turns produced without thinking.
+    //
+    // MULTI-BLOCK: with the interleaved-thinking beta (and on any wire that
+    // emits several thinking blocks per response) ONE assistant message can
+    // carry SEVERAL independently-signed blocks. Each signature covers its
+    // own block's exact text, so merging them (concat texts + keep last
+    // signature) corrupts every block and 400s the replay. `thinking_blocks`
+    // keeps the (text, signature) pairs separate and IN ORDER — the
+    // authoritative replay source. `thinking` remains the concatenated
+    // DISPLAY text (blocks joined \n\n) and `thinking_signature` mirrors the
+    // last block's signature for backward compat with older persisted
+    // threads (wire replay falls back to the legacy pair when the vector is
+    // empty).
+    struct ThinkingBlock {
+        std::string text;
+        std::string signature;
+    };
+    std::vector<ThinkingBlock> thinking_blocks;
     std::string thinking;
     std::string thinking_signature;
     // ── Codex/Responses reasoning replay (Assistant turns only) ─────────

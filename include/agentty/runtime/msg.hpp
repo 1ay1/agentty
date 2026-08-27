@@ -173,7 +173,19 @@ struct StreamObservedToolResult {
 // block can be replayed verbatim on the next turn (Anthropic requires it
 // when the turn also carries tool_use). Doubles as a liveness heartbeat —
 // the handler bumps last_event_at like StreamHeartbeat does.
-struct StreamThinkingDelta { std::string text; std::string signature; };
+//
+// `block_boundary` marks the START of a NEW reasoning block/paragraph:
+// Anthropic emits it on each thinking content_block_start (interleaved
+// thinking produces several signed blocks per response — merging them
+// corrupts the signature replay), and Codex/Responses emits it on each new
+// reasoning summary part / reasoning item (paragraph boundaries that would
+// otherwise concatenate into run-together prose). The reducer seals the
+// previous block and inserts a display separator.
+struct StreamThinkingDelta {
+    std::string text;
+    std::string signature;
+    bool block_boundary = false;
+};
 // Codex/Responses reasoning-item capture. Unlike StreamThinkingDelta (which
 // carries visible summary text for the thinking block), this carries the
 // OPAQUE `encrypted_content` blob from a completed reasoning output item.
