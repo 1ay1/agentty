@@ -369,6 +369,8 @@ jobs:
           ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: |
-          # Edge cases + a bounded random burst; a crash/UB aborts non-zero.
+          # Edge cases + a bounded random burst per harness; a crash/UB aborts
+          # the job non-zero.
           ./fuzzbuild/fuzz/fuzz_fuzzy_match 5000
+          ./fuzzbuild/fuzz/fuzz_apply_patch 20000
 
