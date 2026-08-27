@@ -322,19 +322,34 @@ Element diff_review(const Model& m) {
     rows.push_back(rule(muted));
 
     // ── Footer: phone-friendly keys, destructive actions tinted ──
-    std::vector<Hint> hints = {
-        {"j/k", "hunk", 6},
-        {"h/l", "file", 5, m.d.pending_changes.size() > 1 ? fg : muted},
-        {"Y", "accept", 7, success},
-        {"N", "reject", 7, danger},
-        {"^A", "all",  4, success},
-        {"^X", "none", 3, danger},
-    };
-    if (focused_overflows)
-        hints.push_back({"^D/^U", "scroll", 2});
-    hints.push_back({"Esc", all_done ? "apply" : "close", 8,
-                     all_done ? success : fg});
-    rows.push_back(key_hints(std::move(hints)));
+    // ARMED ^X: replace the whole hint strip with an unmissable warning — the
+    // next ^X reverts everything; any other key cancels.
+    if (cursor->confirm_reject_all) {
+        rows.push_back(h(
+            text("  \xe2\x9a\xa0 ", fg_bold(danger)),
+            text("^X again reverts ALL changes on disk ", fg_bold(danger)),
+            text("\xc2\xb7 any other key cancels", fg_dim(muted))
+        ).build());
+    } else {
+        std::vector<Hint> hints = {
+            {"j/k", "hunk", 6},
+            {"h/l", "file", 5, m.d.pending_changes.size() > 1 ? fg : muted},
+            {"Y", "accept", 7, success},
+            {"N", "reject", 7, danger},
+            {"^A", "all",  4, success},
+            {"^X", "none", 3, danger},
+        };
+        if (focused_overflows)
+            hints.push_back({"^D/^U", "scroll", 2});
+        // Esc COMMITS: undecided hunks are kept (already live on disk), not
+        // discarded. "keep rest" says that; a bare "close" reads like cancel.
+        hints.push_back({"Esc",
+                         all_done          ? "apply"
+                         : decided == 0    ? "keep all"
+                                           : "keep rest",
+                         8, all_done ? success : fg});
+        rows.push_back(key_hints(std::move(hints)));
+    }
 
     auto content = (v(std::move(rows)) | padding(1, 2));
     return (v(content.build())
