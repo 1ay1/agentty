@@ -19,10 +19,20 @@ namespace agentty::app {
 
 namespace {
 std::vector<ModelInfo> seed_models() {
+    // Base rows + their `[1m]` companions, so the 1M-context variants are in
+    // the picker IMMEDIATELY on launch — not only after the first picker-
+    // triggered /models fetch (which the live catalog supersedes anyway). The
+    // suffix-capable models (Opus/Sonnet/Haiku gen 4+) each get a 1M row right
+    // after the base, mirroring anthropic::list_models' add_1m_variants so the
+    // seed and the live catalog agree. Entitlement is handled downstream
+    // (context_1m_blocked self-heals if the account can't stream 1M).
     return {
-        {ModelId{"claude-opus-4-5"},   "Claude Opus 4.5",   "anthropic", 200000, true},
-        {ModelId{"claude-sonnet-4-5"}, "Claude Sonnet 4.5", "anthropic", 200000, true},
-        {ModelId{"claude-haiku-4-5"},  "Claude Haiku 4.5",  "anthropic", 200000, false},
+        {ModelId{"claude-opus-4-5"},        "Claude Opus 4.5",              "anthropic",  200000, true},
+        {ModelId{"claude-opus-4-5[1m]"},   "Claude Opus 4.5 (1M context)", "anthropic", 1000000, false},
+        {ModelId{"claude-sonnet-4-5"},      "Claude Sonnet 4.5",              "anthropic",  200000, true},
+        {ModelId{"claude-sonnet-4-5[1m]"}, "Claude Sonnet 4.5 (1M context)", "anthropic", 1000000, false},
+        {ModelId{"claude-haiku-4-5"},       "Claude Haiku 4.5",              "anthropic",  200000, false},
+        {ModelId{"claude-haiku-4-5[1m]"},  "Claude Haiku 4.5 (1M context)", "anthropic", 1000000, false},
     };
 }
 } // namespace
@@ -130,6 +140,7 @@ std::pair<Model, maya::Cmd<Msg>> init() {
     load_slot(m.d.smart.utility,        settings.smart_utility_model,   settings.smart_utility_effort);
     // Review UI: whether the persistent changes strip renders after edits.
     m.d.show_changes_strip = settings.show_changes_strip;
+    m.d.show_reasoning     = settings.show_reasoning;
     // Rehydrate persisted "always allow" tool grants (Zed's always_allow
     // rules). PermissionApproveAlways appends to this list; loading it here
     // means a grant given last week still suppresses the prompt today.
