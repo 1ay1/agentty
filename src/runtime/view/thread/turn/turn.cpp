@@ -169,6 +169,20 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m,
         // hosted one won't lag. 45/0.40 above is the cold-start seed until
         // the estimate warms up; drain_secs (the lag buffer) still applies.
         cache.streaming->set_reveal_adaptive(true, /*min*/25.0, /*max*/180.0);
+
+        // REASONING is paced DIFFERENTLY. Providers deliver reasoning as a
+        // summary that often lands in one/two big deltas at the end of the
+        // thinking window, so the adaptive estimator sees a huge instantaneous
+        // "wire rate" and races the cursor to the edge — the block appears all
+        // at once. Reasoning is also secondary content, so a calmer, DELIBERATE
+        // typewriter reads better and clearly signals "the model is thinking".
+        // Fixed, gentle pace (no fast adaptive ceiling) so it visibly types out
+        // regardless of how the bytes arrive.
+        if (reasoning_view) {
+            cache.streaming->set_reveal_pacing(/*floor_cps=*/32.0,
+                                               /*lead_secs=*/0.25);
+            cache.streaming->set_reveal_adaptive(false);
+        }
     }
 
     // Pick the source bytes for THIS frame. The reveal cursor must see
