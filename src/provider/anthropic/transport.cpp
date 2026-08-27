@@ -395,13 +395,22 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
     // model's capability by launch_stream; non-empty means the user picked a
     // thinking tier in the model picker. Pair output_config.effort with
     // adaptive thinking — the GA way to turn reasoning on for Opus 4.6+/4.7/
-    // 4.8 (budget_tokens is removed on 4.7/4.8). Omitted entirely when effort
-    // is off, preserving the default no-thinking, dead-air-free wire. The
-    // assistant thinking blocks the model emits in response are captured and
-    // replayed by messages_json_string (see below) so tool_use turns don't
-    // 400 for a dropped thinking block.
+    // 4.8 (budget_tokens is removed on 4.7/4.8; type:"enabled" 400s there).
+    // Omitted entirely when effort is off, preserving the default no-thinking,
+    // dead-air-free wire. The assistant thinking blocks the model emits in
+    // response are captured and replayed by messages_json_string (see below)
+    // so tool_use turns don't 400 for a dropped thinking block.
     if (!req.effort.empty()) {
-        body["thinking"]       = json{{"type", "adaptive"}};
+        json thinking = json{{"type", "adaptive"}};
+        // VISIBLE reasoning: adaptive thinking REDACTS its text on the wire by
+        // default (thinking_delta.thinking arrives empty), which is why the
+        // reasoning block had nothing to render. When the user turned on
+        // "show reasoning" (^R), ask for the summarized thinking stream so the
+        // model's actual reasoning deltas reach us. Paired with the
+        // interleaved-thinking beta added by select_betas().
+        if (req.show_reasoning)
+            thinking["display"] = "summarized";
+        body["thinking"]       = std::move(thinking);
         body["output_config"]  = json{{"effort", req.effort}};
     }
     // Splice marker for the messages array. nlohmann gives the dumped

@@ -97,9 +97,11 @@ FastDelta dispatch_content_block_delta_fast(StreamCtx& ctx, std::string_view dat
     // error even though the wire is healthy and the model is producing
     // thinking tokens we've chosen not to render.
     if (delta_type == "thinking_delta") {
-        // Capture the reasoning text (usually empty under display:omitted)
-        // so the block can be replayed next turn. Doubles as a liveness
-        // heartbeat — the reducer bumps last_event_at on this Msg too.
+        // Capture the reasoning text. Empty under the default (redacted)
+        // adaptive thinking; NON-empty once the request asks for
+        // display:"summarized" (the ^R show-reasoning path), which is what
+        // feeds the visible reasoning block. Doubles as a liveness heartbeat
+        // — the reducer bumps last_event_at on this Msg too.
         std::string_view text;
         if (delta["thinking"].get_string().get(text)) return FastDelta::Recognized;
         ++ctx.thinking_deltas;
