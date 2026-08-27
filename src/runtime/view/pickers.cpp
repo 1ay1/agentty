@@ -308,6 +308,20 @@ Element model_picker(const Model& m) {
         const auto base = ModelCapabilities::from_id(hi_id);
         const bool overridable = !base.is_known_family()
                               && base.family != ModelCapabilities::Family::Gpt;
+
+        // ── Show-reasoning toggle: a pill BUTTON (^R), shown for every model
+        // because it's the global display switch. Rendered as an on/off pill so
+        // the current state reads at a glance, next to the effort control it
+        // relates to. ✦ sigil + accented state when on, dim when off.
+        auto show_reasoning_pill = [&] {
+            const bool on = m.d.show_reasoning;
+            return h(
+                text("^R ", fg_of(fg)),
+                text(on ? "\xe2\x9c\xa6 reasoning shown" : "reasoning hidden",
+                     on ? fg_bold(accent) : fg_dim(muted))
+            ).build();
+        };
+
         if (effort_capable(caps)) {
             // Build the pieces into one hstack: the ladder (current tier
             // bracketed ‹like this› and accented) + the ←/→ and (compat-only)
@@ -346,6 +360,9 @@ Element model_picker(const Model& m) {
                 text("enable", fg_bold(accent))
             ).build());
         }
+        // The show/hide pill always follows the effort line (or stands alone
+        // for models with no effort control) — it's global, not per-model.
+        cfg.footer.push_back(show_reasoning_pill());
     }
     cfg.footer.push_back(key_hints({
         {"\xe2\x86\x91\xe2\x86\x93", "move", 5},        // ↑↓
@@ -353,9 +370,6 @@ Element model_picker(const Model& m) {
         {"Enter", "select", 5},
         {"F", "favorite", 1},
         {"^P", "providers", 3},                    // cross-hint: provider picker
-        // ^R toggles whether reasoning/thinking is shown (all providers). The
-        // hint carries the live on/off state so the current mode is visible.
-        {"^R", m.d.show_reasoning ? "reasoning on" : "reasoning off", 1},
         {"Esc", "close", 4},
     }));
 
