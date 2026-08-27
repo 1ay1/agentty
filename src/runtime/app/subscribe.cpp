@@ -346,13 +346,20 @@ std::optional<Msg> on_model_picker(const KeyEvent& ev) {
     }
     if (auto* ck = std::get_if<CharKey>(&ev.key)) {
         char32_t c = ck->codepoint;
-        // Re-pressing the open key (^/) closes the picker — open/close
-        // symmetry, and it stops the key being swallowed here (the dispatcher
+        // Re-pressing the open key (^/) closes the picker (open/close
+        // symmetry). ^/ arrives as the raw 0x1F control code (no ctrl flag)
+        // or as '/' with mods.ctrl — accept both, before the filter/remap
+        // paths. Without this the key is swallowed here (the dispatcher
         // returns this handler's result unconditionally, so a nullopt never
-        // falls through to on_global's ^/ binding). ^/ can arrive as the raw
-        // 0x1F control code (no ctrl flag) or as '/' with mods.ctrl — accept
-        // both, checked before the filter/remap paths.
+        // falls through to on_global's ^/ binding).
         if (c == 0x1F || (ev.mods.ctrl && c == U'/')) return CloseModelPicker{};
+        // ^P cross-hops to the PROVIDER picker — the footer advertises it
+        // ("^P providers"). on_global binds ^P → OpenProviderPicker, but this
+        // handler's result is returned unconditionally so it would never
+        // reach it; dispatch it here. OpenProviderPicker closes this picker.
+        // Legacy terminals send Ctrl-P as raw 0x10 (no ctrl flag).
+        if (c == 0x10 || (ev.mods.ctrl && (c == U'p' || c == U'P')))
+            return OpenProviderPicker{};
         // Ctrl+F toggles the highlighted model as a favourite — moved off
         // the bare `f` key now that plain letters feed the search box.
         if (ev.mods.ctrl) {
@@ -396,15 +403,16 @@ std::optional<Msg> on_provider_picker(const KeyEvent& ev) {
     // A printable character types into the live search filter (mirrors the
     // model picker). Ctrl-modified chars are reserved for other bindings.
     if (auto* ck = std::get_if<CharKey>(&ev.key)) {
-        // Re-pressing the open key (^P) toggles the picker shut, matching
-        // every other modal's open/close symmetry. Without this the key is
-        // swallowed here (the dispatcher returns this handler's result
-        // unconditionally, so it never falls through to on_global where ^P
-        // is bound) — the "^P does nothing in the picker" bug. Normalise
-        // the legacy raw control byte (Ctrl-P = 0x10, no ctrl flag) the same
-        // way on_global does before comparing.
+        // Cross-navigation + toggle-close. The footer advertises "^/ models":
+        // ^/ hops to the MODEL picker (OpenModelPicker closes this one), and a
+        // re-press of the open key ^P closes this picker. on_global binds
+        // both, but this handler's result is returned unconditionally so
+        // neither would reach it — dispatch them here. Normalise the legacy
+        // raw control byte (Ctrl-P = 0x10 / Ctrl-/ = 0x1F, no ctrl flag)
+        // exactly as on_global does before comparing.
         char32_t c = ck->codepoint;
         const bool raw_ctrl = (c >= 0x01 && c <= 0x1A);
+        if (c == 0x1F || (ev.mods.ctrl && c == U'/')) return OpenModelPicker{};
         if (raw_ctrl) c = U'a' + (c - 1);
         const bool ctrl = ev.mods.ctrl || raw_ctrl;
         if (ctrl && (c == U'p' || c == U'P')) return CloseProviderPicker{};
