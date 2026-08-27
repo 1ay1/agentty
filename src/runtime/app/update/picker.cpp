@@ -60,22 +60,6 @@ std::vector<int> model_filtered(const std::vector<ModelInfo>& models,
 [[nodiscard]] bool is_chatgpt_active() {
     return provider::active().is_chatgpt();
 }
-
-// Codex exposes a reasoning ladder through its live model catalogue. Agentty
-// currently has no `Ultra` enum value, so `max` is the highest selectable
-// level; all other CLI-supported levels map one-for-one.
-[[nodiscard]] Effort cycle_codex_effort(Effort current, int delta) {
-    static constexpr std::array<Effort, 6> levels{
-        Effort::None, Effort::Low, Effort::Medium,
-        Effort::High, Effort::Xhigh, Effort::Max,
-    };
-    int index = 0;
-    for (int i = 0; i < static_cast<int>(levels.size()); ++i)
-        if (levels[static_cast<std::size_t>(i)] == current) { index = i; break; }
-    const int n = static_cast<int>(levels.size());
-    index = ((index + delta) % n + n) % n;
-    return levels[static_cast<std::size_t>(index)];
-}
 } // namespace
 using maya::Cmd;
 
@@ -440,27 +424,27 @@ Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
         },
         [&](ModelPickerCycleEffort& e) -> Step {
             // Step the reasoning-effort tier within what the highlighted
-            // model supports (cycle_effort wraps and returns None for a
-            // model that can't reason). The new tier takes effect in live
-            // state immediately; the DISK persist is deferred to picker
-            // close/select (effort_dirty) — persisting here meant a
-            // synchronous load+fsync+rename (~5ms on btrfs) per arrow
-            // keystroke, which is UI-thread jank under key repeat. The
-            // request path re-clamps at send time.
+            // model supports. The ladder is ONE thing: cycle_effort walks the
+            // model's catalog-declared levels (resolved_caps → supports_effort
+            // / _xhigh / _max), wrapping and returning None for a model that
+            // can't reason. This is uniform across EVERY provider — including
+            // ChatGPT/Codex, whose gpt-5* models decode to Family::Gpt with the
+            // correct low..xhigh(..max) ladder — so the picker never offers a
+            // level the model won't accept, and the chip/footer/wire all read
+            // the same source. The new tier takes effect in live state
+            // immediately; the DISK persist is deferred to picker close/select
+            // (effort_dirty) — persisting per keystroke was UI-thread jank under
+            // key repeat. The request path re-clamps at send time.
             auto* p = pick::opened(m.ui.model_picker);
             if (p) {
                 const auto vis = model_filtered(m.d.available_models, p->query);
                 if (!vis.empty() && p->index >= 0
                     && p->index < static_cast<int>(vis.size())) {
-                    if (is_chatgpt_active()) {
-                        m.d.effort = cycle_codex_effort(m.d.effort, e.delta);
-                    } else {
-                        const auto caps = resolved_caps(
-                            m.d.available_models[
-                                static_cast<std::size_t>(vis[static_cast<std::size_t>(p->index)])]
-                                .id.value);
-                        m.d.effort = cycle_effort(m.d.effort, e.delta, caps);
-                    }
+                    const auto caps = resolved_caps(
+                        m.d.available_models[
+                            static_cast<std::size_t>(vis[static_cast<std::size_t>(p->index)])]
+                            .id.value);
+                    m.d.effort = cycle_effort(m.d.effort, e.delta, caps);
                     m.ui.effort_dirty = true;
                 }
             }

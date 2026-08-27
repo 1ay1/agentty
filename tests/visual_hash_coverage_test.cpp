@@ -113,6 +113,12 @@ const std::vector<Axis>& visual_axes() {
             m.d.profile = (m.d.profile == agentty::Profile::Write)
                         ? agentty::Profile::Ask : agentty::Profile::Write;
         }},
+        {"reasoning effort tier", [](Model& m) {
+            // The effort tier renders in the model badge (and picker line);
+            // ←/→ must repaint. High → Low is a visible change.
+            m.d.effort = (m.d.effort == agentty::Effort::High)
+                       ? agentty::Effort::Low : agentty::Effort::High;
+        }},
         {"model_id swap", [](Model& m) {
             m.d.model_id = agentty::ModelId{std::string{"claude-haiku-4-5"}};
         }},
