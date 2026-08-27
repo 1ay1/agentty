@@ -364,7 +364,7 @@ Element model_picker(const Model& m) {
         {"\xe2\x86\x91\xe2\x86\x93", "move", 5},        // ↑↓
         {"type", "filter", 2},
         {"Enter", "select", 5},
-        {"F", "favorite", 1},
+        {"^F", "favorite", 1},
         {"^P", "providers", 3},                    // cross-hint: provider picker
         {"Esc", "close", 4},
     }));

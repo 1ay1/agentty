@@ -37,7 +37,7 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             if (!m.s.is_idle() || m.s.compacting)
                 return {std::move(m),
                         set_status_toast(m,
-                            "can't compact while the agent is working")};
+                            "cannot compact while the agent is working")};
             if (m.d.current.messages.empty())
                 return {std::move(m),
                         set_status_toast(m, "nothing to compact yet")};

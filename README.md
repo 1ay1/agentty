@@ -217,9 +217,12 @@ Full write-up: [`docs/website/smart-mode.md`](docs/website/smart-mode.md).
 |-----|--------|-----|--------|
 | `Enter` | Send / queue | `^K` | Command palette |
 | `Esc` | Cancel / reject | `^J` | Thread list |
-| `S-Tab` | Cycle profile | `^P` | Model picker |
-| `Alt+Enter` | Newline | `^N` | New thread |
-| `^G` | Run code block | `^←/→` or `Alt+←/→` | Cycle threads |
+| `S-Tab` | Cycle profile | `^P` | Provider picker |
+| `Alt+Enter` | Newline | `^/` | Model picker |
+| `^G` | Run code block | `^N` | New thread |
+| `^R` | Review changes | `^S` | Smart Mode |
+| `^O` | Inspect tool outputs | `^T` | Plan / todo |
+| `^←/→` or `Alt+←/→` | Cycle threads | | |
 
 The composer is a full readline-style editor:
 
