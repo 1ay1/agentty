@@ -15,6 +15,7 @@
 // are NOT here — they link a deliberately minimal source subset to stay
 // asan-clean, which folding into the full object set would defeat.
 #include <cstdio>
+#include <cstdlib>
 #include <string_view>
 
 // Declarations — arity per the original main().
@@ -25,6 +26,16 @@
 #undef FOLD_ARGS
 
 int main(int argc, char** argv) {
+    // These tests drive the real app reducers, some of which fire a network
+    // prewarm (a detached background TLS handshake). A standalone test never
+    // calls join_prewarm(), so that thread would outlive main() and race
+    // libcrypto/allocator atexit teardown — an intermittent shutdown SIGSEGV
+    // (e.g. fork_test's ForkThread reducer). Tests don't need the latency win.
+#if defined(_WIN32)
+    _putenv_s("AGENTTY_NO_PREWARM", "1");
+#else
+    ::setenv("AGENTTY_NO_PREWARM", "1", 1);
+#endif
     if (argc < 2) {
         std::fprintf(stderr,
             "usage: %s <test-name> [args…]\n\nAvailable tests:\n", argv[0]);
