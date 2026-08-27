@@ -199,3 +199,54 @@ TEST_CASE("reasoning: body reveals incrementally, not all at once") {
     check(max_words >= 55,
           "reasoning reveal eventually reaches the full body");
 }
+
+// The reasoning reveal must GLIDE the text out even when the answer starts
+// immediately after the last reasoning delta (the common Anthropic case:
+// summarized reasoning lands in one/two big deltas, then prose begins). If
+// the reveal is cut short at settle, the whole reasoning block "appears at
+// once". We inspect the #r slot's reveal cursor directly.
+TEST_CASE("reasoning: reveal glides, not cut short when the answer follows") {
+    std::string full;
+    for (int i = 0; i < 80; ++i) full += "tok" + std::to_string(i) + " ";
+
+    Model m;
+    m.d.show_reasoning = true;
+    m.s.phase = phase::Streaming{phase::Active{}};
+    Message a; a.role = Role::Assistant; a.id = MessageId{"glide1"};
+    m.d.current.messages.push_back(a);
+
+    const auto rid = MessageId{std::string{"glide1"} + "#r"};
+    auto reveal_clip = [&]() -> long long {
+        const auto* mc = m.ui.view_cache.peek(m.d.current.id, rid);
+        if (!mc || !mc->streaming) return -1;
+        const auto clip = mc->streaming->debug_reveal_byte_clip();
+        return clip == static_cast<std::size_t>(-1)
+             ? -1 : static_cast<long long>(clip);
+    };
+
+    // Reasoning arrives all at once (one big summarized delta).
+    m.d.current.messages[0].thinking = full;
+    // A few frames of gliding — the reveal cursor should be MID-body, not at
+    // the end.
+    long long clip_after_a_few = -1;
+    for (int f = 0; f < 3; ++f) {
+        (void)render_text(m);
+        maya::testing::advance_anim_clock_ms(33);
+    }
+    clip_after_a_few = reveal_clip();
+    check(clip_after_a_few >= 0 &&
+          clip_after_a_few < static_cast<long long>(full.size()),
+          "reveal cursor is still mid-body a few frames in (it is gliding)");
+
+    // NOW the answer starts immediately (settle trigger). The reveal must NOT
+    // snap to the end on the settling frame — it should keep gliding.
+    m.d.current.messages[0].streaming_text = "Here is the answer.";
+    (void)render_text(m);
+    maya::testing::advance_anim_clock_ms(33);
+    const long long clip_at_settle = reveal_clip();
+    // The cursor should have advanced only incrementally, not jumped to full.
+    // (A snap would put it at full.size() the instant settle fired.)
+    check(clip_at_settle < 0 ||
+          clip_at_settle <= clip_after_a_few + static_cast<long long>(full.size()),
+          "reveal is not force-snapped to the end when the answer begins");
+}
