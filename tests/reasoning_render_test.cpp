@@ -6,8 +6,9 @@
 // .delta, OpenAI-compat reasoning_content), and Message::reasoning_display_text
 // () is the single unified accessor the view keys off. This pins:
 //   1. the unified accessor's precedence (thinking, else reasoning_summary),
-//   2. that a SETTLED reasoning turn renders the permanent one-line summary
-//      ("Thought for ~N tokens · <glimpse>") ABOVE the answer,
+//   2. that a SETTLED reasoning turn renders the FULL reasoning text (it does
+//      NOT fold to a one-line summary) under a "Reasoned" header, ABOVE the
+//      answer,
 //   3. that a turn with NO reasoning renders neither.
 
 #include "agtest.hpp"
@@ -90,27 +91,29 @@ TEST_CASE("reasoning: unified accessor precedence") {
     check(a.has_reasoning(), "has_reasoning true when thinking present");
 }
 
-TEST_CASE("reasoning: settled turn shows the permanent summary line") {
+TEST_CASE("reasoning: settled turn shows the full reasoning, not a fold") {
     Model m;
     m.d.show_reasoning = true;   // the global ^R switch is on
     Message a = assistant("Here is the FINAL_ANSWER_MARKER.");
     // Reasoning arrived (any provider) and the answer is present => SETTLED:
-    // render the one-line summary, not the full stream.
+    // render the FULL streamed reasoning (no fold), under a "Reasoned" header.
     a.thinking = "Analyze the request FIRST_LINE_MARKER\n"
-                 "then a SECOND_LINE_MARKER the glimpse must not show.";
+                 "then a SECOND_LINE_MARKER that must ALSO stay visible.";
     m.d.current.messages.push_back(std::move(a));
     m.s.phase = phase::Idle{};
 
     const std::string out = render_text(m);
-    check(has(out, "Thought"),
-          "settled reasoning renders a 'Thought' summary line");
+    check(has(out, "Reasoned"),
+          "settled reasoning renders a 'Reasoned' header");
     check(has(out, "token"),
-          "the summary names an approximate token count");
+          "the settled header names an approximate token count");
     check(has(out, "FINAL_ANSWER_MARKER"),
-          "the answer still renders alongside the reasoning summary");
-    // The summary is a one-line GLIMPSE of the first reasoning line only.
-    check(!has(out, "SECOND_LINE_MARKER"),
-          "settled summary is a one-line glimpse, not the full thought text");
+          "the answer still renders alongside the reasoning block");
+    // The block STAYS FULLY EXPANDED after settle — no fold to a glimpse.
+    check(has(out, "FIRST_LINE_MARKER"),
+          "settled reasoning keeps its first line");
+    check(has(out, "SECOND_LINE_MARKER"),
+          "settled reasoning keeps ALL lines — it does not fold to a summary");
 }
 
 TEST_CASE("reasoning: no block when the turn never reasoned") {
@@ -119,8 +122,8 @@ TEST_CASE("reasoning: no block when the turn never reasoned") {
     m.d.current.messages.push_back(assistant("PLAIN_ANSWER no reasoning here."));
     m.s.phase = phase::Idle{};
     const std::string out = render_text(m);
-    check(!has(out, "Thought"),
-          "no reasoning summary when the turn produced no reasoning");
+    check(!has(out, "Reasoned"),
+          "no reasoning block when the turn produced no reasoning");
     check(has(out, "PLAIN_ANSWER"), "the plain answer still renders");
 }
 
@@ -132,7 +135,7 @@ TEST_CASE("reasoning: the ^R switch hides the block even when text exists") {
     m.d.current.messages.push_back(std::move(a));
     m.s.phase = phase::Idle{};
     const std::string out = render_text(m);
-    check(!has(out, "Thought"),
+    check(!has(out, "Reasoned"),
           "reasoning block is suppressed when show_reasoning is off");
     check(!has(out, "hidden reasoning"),
           "reasoning text never reaches the screen when the switch is off");
