@@ -162,6 +162,14 @@ struct Settings {
     // quietly; turn it on (Ctrl+K → "Changes strip") for the always-on review
     // banner. Ctrl+R / "Review changes" opens the review pane either way.
     bool                 show_changes_strip = false;
+    // Show the model's reasoning/thinking. When on: the transcript renders a
+    // reasoning block (live thought stream, then a one-line "Thought for N
+    // tokens" summary), AND Anthropic requests VISIBLE thinking (the
+    // interleaved-thinking beta) so its deltas aren't redacted. Off by default
+    // — keeps the wire lean and the transcript focused on the answer. Uniform
+    // across every provider (Anthropic / Codex / OpenAI-compat reasoners).
+    // Toggle: Ctrl+K → "Reasoning".
+    bool                 show_reasoning = false;
 };
 
 template <class S>

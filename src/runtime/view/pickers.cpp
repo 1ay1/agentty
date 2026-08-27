@@ -353,6 +353,9 @@ Element model_picker(const Model& m) {
         {"Enter", "select", 5},
         {"F", "favorite", 1},
         {"^P", "providers", 3},                    // cross-hint: provider picker
+        // ^R toggles whether reasoning/thinking is shown (all providers). The
+        // hint carries the live on/off state so the current mode is visible.
+        {"^R", m.d.show_reasoning ? "reasoning on" : "reasoning off", 1},
         {"Esc", "close", 4},
     }));
 

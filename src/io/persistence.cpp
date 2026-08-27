@@ -1205,6 +1205,7 @@ store::Settings load_settings() {
         s.always_allow_tools = std::move(grants);
         s.context_1m_blocked = j.value("context_1m_blocked", false);
         s.show_changes_strip = j.value("show_changes_strip", false);
+        s.show_reasoning     = j.value("show_reasoning", false);
         if (j.contains("rag") && j["rag"].is_object()) {
             const auto& r = j["rag"];
             auto& c = s.rag;
@@ -1287,6 +1288,7 @@ void save_settings(const store::Settings& s) {
     if (s.context_1m_blocked) j["context_1m_blocked"] = true;
     // Only persisted when turned ON (default is off), keeping fresh configs clean.
     if (s.show_changes_strip) j["show_changes_strip"] = true;
+    if (s.show_reasoning)     j["show_reasoning"] = true;
     if (s.rag.configured) {
         const auto& c = s.rag;
         // The picker only sets `mode`; the rest are internal defaults, still

@@ -91,6 +91,15 @@ struct Request {
     // additionally enables adaptive thinking. Other transports ignore it.
     std::string effort;
 
+    // Whether the user wants the model's reasoning/thinking SHOWN (the global
+    // Settings.show_reasoning, ^R in the model picker). When true the Anthropic
+    // transport requests VISIBLE thinking (adds the interleaved-thinking beta,
+    // WITHOUT redact-thinking) so its thinking deltas reach the wire instead of
+    // being redacted. Other transports already stream their reasoning text
+    // unconditionally; this flag doesn't change their request — it only gates
+    // the DISPLAY, which the view handles. Off by default (dead-air-free wire).
+    bool show_reasoning = false;
+
     // Stable host-conversation identity. Providers with native server-side
     // threads (notably Codex app-server) use this to retain the provider
     // thread instead of serialising the entire transcript into every prompt.
@@ -145,6 +154,13 @@ void lower_shared(TReq& dst, Request& src) {
     dst.auth          = std::move(src.auth);
     dst.retry_count   = src.retry_count;
     dst.effort        = std::move(src.effort);
+    // Optional field: only the Anthropic transport needs show_reasoning (to
+    // request VISIBLE thinking); other transports stream reasoning text
+    // unconditionally and don't declare it. Copy iff the destination has it,
+    // so this stays the ONE lowering site without forcing every wire's local
+    // Request to grow a field it ignores.
+    if constexpr (requires { dst.show_reasoning = src.show_reasoning; })
+        dst.show_reasoning = src.show_reasoning;
 }
 
 // How a streamed turn ended, as a value (defined in stream_epilogue.hpp, which

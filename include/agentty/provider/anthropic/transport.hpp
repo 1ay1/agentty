@@ -66,6 +66,10 @@ struct Request {
     // Empty = no thinking (default). Non-empty makes run_stream_sync send
     // adaptive thinking + output_config.effort and replay thinking blocks.
     std::string effort;
+    // Copied from provider::Request: when true AND effort is on, request
+    // VISIBLE thinking (interleaved-thinking beta) so thinking deltas reach
+    // the wire instead of being redacted. See beta_values_for.
+    bool show_reasoning = false;
 };
 
 using EventSink = std::function<void(Msg)>;

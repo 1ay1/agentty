@@ -711,6 +711,11 @@ Cmd<Msg> launch_stream(Model& m) {
     std::string effort = std::string{
         effort_wire_for(m.d.effort, resolved_caps(model_id))};
 
+    // Whether the user wants reasoning shown (global toggle, ^R in the model
+    // picker). Captured for the worker; the Anthropic transport uses it to
+    // request VISIBLE thinking so the reasoning block has text to render.
+    const bool show_reasoning = m.d.show_reasoning;
+
     // Look up the selected model's supports_tools from available_models.
     // Ollama models have this set via /api/show probe at list time. If
     // the model reports supports_tools=false, we skip advertising tools
@@ -835,6 +840,7 @@ Cmd<Msg> launch_stream(Model& m) {
          model_id = std::move(model_id),
          compaction_model = std::move(compaction_model),
          effort = std::move(effort),
+         show_reasoning,
          model_supports_tools,
          model_context_window,
          auth = std::move(auth),
@@ -963,6 +969,10 @@ Cmd<Msg> launch_stream(Model& m) {
         req.effort        = compacting ? std::string{}
                           : (orchestrate ? std::string{effort_wire(strategic_profile.effort)}
                                          : std::move(effort));
+        // Reasoning display: never for compaction (a mechanical summarise);
+        // otherwise carry the user's global "show reasoning" preference so the
+        // Anthropic transport can request VISIBLE thinking.
+        req.show_reasoning = !compacting && show_reasoning;
         req.session_key   = std::move(session_key);
 
         // Ollama capability gate: if /api/show reported the model does NOT

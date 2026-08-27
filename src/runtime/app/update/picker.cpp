@@ -498,6 +498,20 @@ Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
             auto toast = set_status_toast(m, label);
             return {std::move(m), std::move(toast)};
         },
+        [&](ModelPickerToggleShowReasoning&) -> Step {
+            // Flip whether the model's reasoning/thinking is SHOWN. Global (all
+            // providers): renders the transcript reasoning block AND makes the
+            // Anthropic transport request VISIBLE thinking. Persisted so it
+            // survives restarts. Mirrors the ToggleChangesStrip pattern.
+            m.d.show_reasoning = !m.d.show_reasoning;
+            auto s = deps().load_settings();
+            s.show_reasoning = m.d.show_reasoning;
+            deps().save_settings(s);
+            auto toast = set_status_toast(m, m.d.show_reasoning
+                ? "reasoning: shown (live thinking + \xe2\x9c\xa6 summary)"
+                : "reasoning: hidden");
+            return {std::move(m), std::move(toast)};
+        },
     }, pm);
 }
 

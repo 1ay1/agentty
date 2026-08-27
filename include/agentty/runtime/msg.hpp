@@ -366,6 +366,13 @@ struct ModelPickerCycleEffort { int delta; };
 // pushed into the catalog override registry. No-op for Claude/GPT (family-
 // gated) — their effort isn't user-overridable.
 struct ModelPickerToggleReasoning {};
+// Toggle whether the model's reasoning/thinking is SHOWN (^R in the model
+// picker). Flips the persisted Settings.show_reasoning / Model.show_reasoning:
+// renders the reasoning block in the transcript for every provider AND asks
+// Anthropic for visible thinking (interleaved-thinking beta). Distinct from
+// ModelPickerToggleReasoning above, which flips a single model's effort
+// CAPABILITY override.
+struct ModelPickerToggleShowReasoning {};
 // Result of a background model-catalog fetch. `provider_id` is the canonical
 // id of the provider the fetch was FOR (captured when the fetch launched):
 // the reducer drops the payload if the active provider has changed since —
@@ -760,6 +767,12 @@ struct ToggleToolExpanded { ToolCallId id; };
 // Carries the target message id so the reducer mutates exactly that card
 // (mirrors ToggleToolExpanded's id-addressed mutation + render-key bump).
 struct ToggleRetrievedExpanded { MessageId id; };
+// Ctrl+T on the transcript — fold/unfold the newest assistant turn's reasoning
+// ("Thinking") block. Carries the target message id so the reducer flips
+// exactly that turn's Message::reasoning_expanded and bumps its render key
+// (mirrors ToggleRetrievedExpanded). Provider-agnostic: the block is shown
+// for any turn whose unified reasoning text is non-empty.
+struct ToggleReasoning { MessageId id; };
 
 struct Tick {};
 struct Quit {};
@@ -832,7 +845,7 @@ using ToolMsg = std::variant<
 using ModelPickerMsg = std::variant<
     OpenModelPicker, CloseModelPicker, ModelPickerMove, ModelPickerJump,
     ModelPickerSelect, ModelPickerToggleFavorite, ModelPickerCycleEffort,
-    ModelPickerToggleReasoning,
+    ModelPickerToggleReasoning, ModelPickerToggleShowReasoning,
     ModelPickerFilterInput, ModelPickerFilterBackspace,
     ModelsLoaded>;
 

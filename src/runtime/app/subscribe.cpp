@@ -354,6 +354,9 @@ std::optional<Msg> on_model_picker(const KeyEvent& ev) {
             // Ctrl+E toggles the per-model reasoning-effort override for the
             // highlighted model (inference → force-on → force-off → inference).
             if (c == U'e') return ModelPickerToggleReasoning{};
+            // Ctrl+R toggles whether reasoning/thinking is SHOWN (transcript
+            // block + Anthropic visible-thinking beta). Global, all providers.
+            if (c == U'r') return ModelPickerToggleShowReasoning{};
             return std::nullopt;
         }
         // Any other printable codepoint types into the filter query.
