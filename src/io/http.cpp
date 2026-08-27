@@ -3,6 +3,24 @@
 #include "agentty/io/tls.hpp"
 #include "agentty/util/env.hpp"
 
+// A prewarm dial can be DETACHED at shutdown (see join_prewarm()) when it is
+// wedged in a blocking getaddrinfo(). But the more common race is a prewarm
+// TLS handshake still running keygen in a background thread when the process
+// exits: main() drains it via join_prewarm(), but a standalone binary (e.g. a
+// test) that triggers a prewarm and never drains lets that thread outlive
+// main() and race the C-runtime atexit handlers — mimalloc's mi_process_detach
+// (frees the heap the thread allocates from) and OpenSSL's OPENSSL_cleanup
+// (destroys the CRYPTO rwlocks EVP_PKEY_generate reads). Either fault is a
+// shutdown SIGSEGV. Two mitigations:
+//   1. mi_option_destroy_on_exit=0 (load-time ctor below) — mimalloc leaves
+//      the heap for the OS rather than freeing it under a live detached dial.
+//   2. AGENTTY_NO_PREWARM=1 (checked in Client::prewarm) — the test harness
+//      opts out of the dial entirely, so no undrained network thread is ever
+//      spawned. Tests don't need the latency win; the app still prewarms.
+#if defined(AGENTTY_USE_MIMALLOC)
+#  include <mimalloc.h>
+#endif
+
 #include <algorithm>
 #include <atomic>
 #include <cctype>
@@ -93,6 +111,20 @@ namespace agentty::http {
 
 using clock_t_ = std::chrono::steady_clock;
 using ms_t     = std::chrono::milliseconds;
+
+#if defined(AGENTTY_USE_MIMALLOC)
+namespace {
+// Runs once when this TU loads. A prewarm dial detached at shutdown — or one
+// in a standalone binary that never calls join_prewarm() — keeps allocating
+// from the heap while mimalloc's atexit handler (mi_process_detach) frees it,
+// faulting on freed metadata. Leave the heap for the OS to reclaim at true
+// process exit instead, which is what the detach path already assumes.
+const bool mimalloc_no_destroy_on_exit = [] {
+    mi_option_set(mi_option_destroy_on_exit, 0);
+    return true;
+}();
+} // namespace
+#endif
 
 // ---------------------------------------------------------------------------
 // HttpError implementations. The static factories are inline in the header;
@@ -2921,6 +2953,14 @@ Client::stream(const Request& req, StreamHandler handler, Timeouts tos,
 
 void Client::prewarm(std::string host, uint16_t port,
                      std::string dial_host, uint16_t dial_port) {
+    // AGENTTY_NO_PREWARM suppresses the latency-hiding dial entirely. Set by
+    // the test harness: a prewarm is a detached background TLS handshake to a
+    // real host, and a standalone binary that never calls join_prewarm() lets
+    // it outlive main() and race libcrypto/allocator atexit teardown
+    // (shutdown SIGSEGV). Tests don't need the latency win, so opt out.
+    if (const char* e = util::env::get_or_null<util::env::Var::NoPrewarm>();
+        e && *e == '1')
+        return;
     // A prewarm dial races process exit: on a fast teardown (immediate
     // pipe-stdin EOF) main() can return while this thread is mid-SSL_connect,
     // and the CRT/OpenSSL static state gets freed under it — heap corruption.
