@@ -225,6 +225,21 @@ TEST_CASE("anthropic thinking mode: adaptive vs enabled by revision") {
     CHECK(adaptive("claude-opus-5"));
     CHECK(adaptive("claude-fable-5"));
     CHECK(adaptive("claude-mythos-5"));
+
+    // COMPOSITION INVARIANT: Opus 4.5 is the one extended-thinking-only
+    // (enabled-mode) model that ALSO supports output_config.effort — the
+    // transport composes effort WITH budget_tokens on its enabled path. Pin
+    // both facts so a caps refactor can't silently drop the effort tier.
+    {
+        const auto c45 = ModelCapabilities::from_id("claude-opus-4-5");
+        CHECK(!c45.uses_adaptive_thinking());  // enabled + budget_tokens
+        CHECK(c45.supports_effort());          // AND effort composes
+        // Sonnet 4.5 is enabled-mode but does NOT support effort — so the
+        // transport must send budget_tokens WITHOUT output_config.effort.
+        const auto s45 = ModelCapabilities::from_id("claude-sonnet-4-5");
+        CHECK(!s45.uses_adaptive_thinking());
+        CHECK(!s45.supports_effort());
+    }
 }
 
 TEST_CASE("compat reasoning effort (chat wire)") {
