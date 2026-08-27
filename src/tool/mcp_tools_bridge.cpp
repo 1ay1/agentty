@@ -236,6 +236,12 @@ struct AgenttyHttpClient final : mt::HttpClient {
             req.port = p.port;
             req.path = p.path;
             req.body = in.body;
+            // Defense in depth: host_blocked() above rejects obvious internal
+            // NAMES/literals fast, but a public hostname can DNS-rebind to an
+            // internal IP that the name check can't see. ssrf_guard re-checks
+            // the RESOLVED sockaddr at dial time and refuses loopback/private/
+            // link-local/metadata targets — the authoritative backstop.
+            req.ssrf_guard = true;
             for (const auto& [k, v] : in.headers) req.headers.push_back({k, v});
 
             http::Timeouts tos{

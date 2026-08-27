@@ -196,6 +196,12 @@ struct Endpoint {
     uint16_t    port = 443;
     std::string dial_host;  // TCP target override; empty = use host
     uint16_t    dial_port = 0; // TCP port override; 0 = use port
+    // Re-validate every resolved IP against the SSRF blocklist before
+    // connect(). Carried from Request::ssrf_guard. NOT part of the pool
+    // identity below (a guarded and unguarded request to the same host would
+    // resolve to the same address anyway; the guard only ever tightens, and
+    // web-tool endpoints don't share the pool with provider traffic).
+    bool        ssrf_guard = false;
 
     [[nodiscard]] std::string_view tcp_host() const noexcept {
         return dial_host.empty() ? std::string_view{host} : std::string_view{dial_host};
@@ -738,6 +744,56 @@ socks5_negotiate(socket_t fd, std::string_view dest_host, uint16_t dest_port,
         return r;
     return {};
 }
+
+// SSRF guard: is this RESOLVED address one an untrusted (model-supplied) URL
+// must never reach? Covers loopback, RFC1918 private, link-local (incl. the
+// 169.254.169.254 cloud-metadata endpoint), CGNAT, and the v6 equivalents
+// (incl. IPv4-mapped ::ffff:a.b.c.d, which is re-checked as its v4 address so
+// ::ffff:127.0.0.1 can't sneak a loopback past the v6 arm). This runs AFTER
+// getaddrinfo(), on the exact sockaddr we are about to connect() to — so a
+// public hostname that DNS-rebinds to an internal IP is caught at the socket,
+// where the target is authoritative. Only consulted when Endpoint::ssrf_guard
+// is set (web tools); provider + local-model traffic is never gated.
+[[nodiscard]] bool blocked_sockaddr(const sockaddr* sa) noexcept {
+    auto v4_blocked = [](uint32_t h /*host order*/) noexcept {
+        const uint8_t a = (h >> 24) & 0xFF, b = (h >> 16) & 0xFF;
+        if (a == 0)   return true;                       // 0.0.0.0/8 "this host"
+        if (a == 127) return true;                       // loopback
+        if (a == 10)  return true;                       // RFC1918
+        if (a == 172 && (b & 0xF0) == 16) return true;    // 172.16/12
+        if (a == 192 && b == 168) return true;            // 192.168/16
+        if (a == 169 && b == 254) return true;            // link-local + metadata
+        if (a == 100 && (b & 0xC0) == 64) return true;    // 100.64/10 CGNAT
+        if (a >= 224) return true;                        // multicast / reserved
+        return false;
+    };
+    if (!sa) return true;                                 // unknown = refuse
+    if (sa->sa_family == AF_INET) {
+        const auto* s = reinterpret_cast<const sockaddr_in*>(sa);
+        return v4_blocked(ntohl(s->sin_addr.s_addr));
+    }
+    if (sa->sa_family == AF_INET6) {
+        const auto* s = reinterpret_cast<const sockaddr_in6*>(sa);
+        const uint8_t* b = s->sin6_addr.s6_addr;
+        // IPv4-mapped ::ffff:a.b.c.d — re-check as the v4 address.
+        static const uint8_t mapped[12] =
+            {0,0,0,0, 0,0,0,0, 0,0,0xFF,0xFF};
+        if (std::memcmp(b, mapped, 12) == 0) {
+            uint32_t h = (uint32_t(b[12]) << 24) | (uint32_t(b[13]) << 16)
+                       | (uint32_t(b[14]) << 8) | uint32_t(b[15]);
+            return v4_blocked(h);
+        }
+        if (b[0] == 0xFE && (b[1] & 0xC0) == 0x80) return true;  // fe80::/10 link-local
+        if ((b[0] & 0xFE) == 0xFC) return true;                  // fc00::/7 ULA
+        if (b[0] == 0xFF) return true;                           // ff00::/8 multicast
+        // ::1 loopback and :: unspecified.
+        bool all_zero = true;
+        for (int i = 0; i < 15; ++i) if (b[i]) { all_zero = false; break; }
+        if (all_zero && (b[15] == 0 || b[15] == 1)) return true;
+        return false;
+    }
+    return true;   // non-IP family (AF_UNIX etc.) — never for a web dial
+}
 } // namespace
 
 std::expected<socket_t, HttpError>
@@ -787,8 +843,21 @@ dial_tcp(const Endpoint& ep, Timeouts tos, CancelToken* cancel) {
         return fd;
     };
 
+    // SSRF guard is meaningless through a SOCKS proxy: there we dial the
+    // (trusted, user-configured) proxy and it resolves the upstream remotely,
+    // so the addresses in `res` are the PROXY's, not the target's. Only apply
+    // the resolved-IP blocklist on a direct dial.
+    const bool ssrf_check = ep.ssrf_guard && !sx.active();
+
     std::string last_err;
     for (addrinfo* p = res; p; p = p->ai_next) {
+        // Post-resolution SSRF gate: refuse an internal/loopback/link-local/
+        // metadata address the model-supplied hostname resolved to (DNS
+        // rebinding). Checked here, on the exact sockaddr we'd connect() to.
+        if (ssrf_check && blocked_sockaddr(p->ai_addr)) {
+            last_err = "blocked address (SSRF guard)";
+            continue;
+        }
         socket_t fd = ::socket(p->ai_family, p->ai_socktype, p->ai_protocol);
         if (fd == kBadSocket) { last_err = "socket() failed"; continue; }
 #if !defined(_WIN32)
@@ -2647,7 +2716,7 @@ static bool backoff_sleep(int attempt, const CancelTokenPtr& cancel) {
 
 HttpResult
 Client::send(const Request& req, Timeouts tos, CancelTokenPtr cancel) {
-    Endpoint ep{ req.host, req.port, req.dial_host, req.dial_port };
+    Endpoint ep{ req.host, req.port, req.dial_host, req.dial_port, req.ssrf_guard };
     HttpError last_err = HttpError::unknown("send: no attempts made");
 
     // Cleartext local server (Ollama / llama.cpp) — no TLS, no h2, no pool.
@@ -2705,7 +2774,7 @@ Client::send(const Request& req, Timeouts tos, CancelTokenPtr cancel) {
 HttpStreamResult
 Client::stream(const Request& req, StreamHandler handler, Timeouts tos,
                CancelTokenPtr cancel) {
-    Endpoint ep{ req.host, req.port, req.dial_host, req.dial_port };
+    Endpoint ep{ req.host, req.port, req.dial_host, req.dial_port, req.ssrf_guard };
     std::optional<clock_t_::time_point> operation_deadline;
     if (tos.total.count() > 0)
         operation_deadline = clock_t_::now() + tos.total;
@@ -2988,6 +3057,55 @@ DialOverride parse_dial_env(const char* var_name) {
                          static_cast<uint16_t>(port_val) };
 }
 } // namespace
+
+// Exported, testable SSRF range check on a numeric IP LITERAL. Mirrors the
+// anonymous-namespace blocked_sockaddr() used by the dialer on each RESOLVED
+// address (both are pinned by ssrf_guard_test, so they can't drift): loopback,
+// RFC1918 private, link-local incl. 169.254.169.254 metadata, CGNAT, ULA,
+// multicast, and IPv4-mapped IPv6 re-checked as its v4 address. Fails closed
+// on anything that isn't a parseable numeric IP.
+bool ssrf_ip_blocked(std::string_view ip_literal) noexcept {
+    auto v4_blocked = [](uint32_t h /*host order*/) noexcept {
+        const uint8_t a = (h >> 24) & 0xFF, b = (h >> 16) & 0xFF;
+        if (a == 0)   return true;                        // 0.0.0.0/8
+        if (a == 127) return true;                        // loopback
+        if (a == 10)  return true;                        // RFC1918
+        if (a == 172 && (b & 0xF0) == 16) return true;     // 172.16/12
+        if (a == 192 && b == 168) return true;             // 192.168/16
+        if (a == 169 && b == 254) return true;             // link-local + metadata
+        if (a == 100 && (b & 0xC0) == 64) return true;     // 100.64/10 CGNAT
+        if (a >= 224) return true;                         // multicast / reserved
+        return false;
+    };
+
+    std::string s{ip_literal};
+    if (s.size() >= 2 && s.front() == '[' && s.back() == ']')
+        s = s.substr(1, s.size() - 2);
+    if (s.empty()) return true;
+
+    in_addr a4{};
+    if (::inet_pton(AF_INET, s.c_str(), &a4) == 1)
+        return v4_blocked(ntohl(a4.s_addr));
+
+    in6_addr a6{};
+    if (::inet_pton(AF_INET6, s.c_str(), &a6) == 1) {
+        const uint8_t* b = a6.s6_addr;
+        static const uint8_t mapped[12] = {0,0,0,0, 0,0,0,0, 0,0,0xFF,0xFF};
+        if (std::memcmp(b, mapped, 12) == 0) {
+            uint32_t h = (uint32_t(b[12]) << 24) | (uint32_t(b[13]) << 16)
+                       | (uint32_t(b[14]) << 8) | uint32_t(b[15]);
+            return v4_blocked(h);
+        }
+        if (b[0] == 0xFE && (b[1] & 0xC0) == 0x80) return true;  // fe80::/10
+        if ((b[0] & 0xFE) == 0xFC) return true;                  // fc00::/7 ULA
+        if (b[0] == 0xFF) return true;                           // ff00::/8
+        bool all_zero = true;
+        for (int i = 0; i < 15; ++i) if (b[i]) { all_zero = false; break; }
+        if (all_zero && (b[15] == 0 || b[15] == 1)) return true; // :: / ::1
+        return false;
+    }
+    return true;   // not a numeric IP — fail closed
+}
 
 // The three overrides below parse their env var EXACTLY ONCE, into a
 // function-local static, and cache the result for the process lifetime.

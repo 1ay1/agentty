@@ -130,6 +130,19 @@ struct Request {
     // Streaming responses (Client::stream) bypass this entirely — each
     // SSE chunk flows through the on_chunk callback without buffering.
     std::size_t max_body_bytes = 16ull * 1024 * 1024;
+
+    // SSRF guard on the RESOLVED address. When true, the dialer re-checks
+    // every IP getaddrinfo() returns against the private/loopback/link-local/
+    // cloud-metadata ranges and REFUSES to connect to any of them (typed
+    // HttpError::connect "blocked address (SSRF guard)"). This closes DNS
+    // rebinding: a public hostname that passed a name-based filter but
+    // resolves to 169.254.169.254 / 127.0.0.1 / an RFC1918 host is caught at
+    // the socket, where the target is authoritative and unspoofable.
+    //
+    // Default false so provider traffic and LOCAL model servers (Ollama /
+    // llama.cpp on 127.0.0.1) are untouched — only the web tools (web_fetch /
+    // web_search), which dial arbitrary model-supplied URLs, set it true.
+    bool ssrf_guard = false;
 };
 
 // Parsed env-var-driven dial override.  Format: "host" or "host:port" —
@@ -145,6 +158,16 @@ struct DialOverride {
     uint16_t    port = 0;
     [[nodiscard]] bool active() const noexcept { return !host.empty(); }
 };
+
+// SSRF range check on a numeric IP LITERAL (dotted-quad "127.0.0.1" or a v6
+// literal, optionally bracketed). Returns true if the address is loopback /
+// RFC1918 private / link-local (incl. 169.254.169.254 metadata) / CGNAT /
+// ULA / multicast — i.e. a target an untrusted web URL must not reach. A
+// non-numeric or unparseable input returns true (fail closed). This is the
+// same predicate the dialer applies to each RESOLVED address when
+// Request::ssrf_guard is set; exported so the ranges are unit-testable
+// without a live DNS resolve.
+[[nodiscard]] bool ssrf_ip_blocked(std::string_view ip_literal) noexcept;
 
 // Override for requests to `api.anthropic.com` (chat completions, model
 // listing).  Driven by `AGENTTY_API_HOST`.

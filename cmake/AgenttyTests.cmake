@@ -33,6 +33,7 @@ set(_AGENTTY_CONSOLIDATED
     ollama_transport_test openai_transport_test code_block_extract_test
     command_palette_test compaction_threshold_test fsm_test model_caps_test
     param_tag_repair_test sandbox_escape_test scope_test table_render_test
+    ssrf_guard_test
     plugin_config_test skills_engine_test slash_commands_test fuzzy_match_smoke
     provider_model_switch_test speculative_dispatch_test
     oauth_proactive_refresh_test maya_host_sequence_test
