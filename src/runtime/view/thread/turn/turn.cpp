@@ -99,11 +99,16 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m,
     // is settled and staged (dropped at freeze). The predicate is
     // deliberately the same shape as turn.cpp's `subturn_stably_keyable`
     // negation — liveness has ONE definition in this view.
-    // Reasoning is "live" while the stream is active and no answer body has
-    // begun (reasoning bytes may still arrive). Answer liveness is the
-    // classic streaming/pending signal.
+    // Reasoning is "live" while the stream is running AND this message hasn't
+    // produced output yet (no answer prose, no tool calls, text block open) —
+    // once it acts (tool_calls) or answers, no more reasoning bytes arrive, so
+    // the reveal must finish and the header flip to "Reasoned". Mirrors
+    // reasoning_slot's `active`.
+    const bool reasoning_produced_output =
+        !msg.text.empty() || !msg.streaming_text.empty()
+        || !msg.tool_calls.empty() || msg.text_block_closed;
     const bool reasoning_active =
-        m.s.is_streaming() && msg.text.empty() && msg.streaming_text.empty();
+        m.s.is_streaming() && !reasoning_produced_output;
     const bool has_live_bytes = reasoning_view
         ? (!msg.streaming_text.empty() || !msg.pending_stream.empty()
            || reasoning_active)
@@ -1224,12 +1229,20 @@ std::optional<maya::Element> reasoning_slot(const Message& msg, const Model& m) 
     if (!m.d.show_reasoning) return std::nullopt;
     if (msg.reasoning_display_text().empty()) return std::nullopt;
 
-    // "Actively reasoning" = stream is active AND no answer body has
-    // arrived. Drives the header spinner + rail hue; the body streams
-    // either way.
-    const bool answer_started =
-        !msg.text.empty() || !msg.streaming_text.empty();
-    const bool active = m.s.is_streaming() && !answer_started;
+    // "Actively reasoning" = this message is the LIVE tail AND it hasn't
+    // produced any output yet (no answer prose, no tool calls, text block not
+    // closed) AND the stream is running. Intermediate sub-turns that already
+    // reasoned and then ACTED (tool calls) are done thinking — they must read
+    // "Reasoned", not stay stuck on "Thinking". A message that isn't the last
+    // one has, by definition, been followed by more, so it too is settled.
+    const auto& msgs = m.d.current.messages;
+    const bool is_live_tail =
+        !msgs.empty() && msgs.back().id == msg.id;
+    const bool produced_output =
+        !msg.text.empty() || !msg.streaming_text.empty()
+        || !msg.tool_calls.empty() || msg.text_block_closed;
+    const bool active =
+        is_live_tail && m.s.is_streaming() && !produced_output;
 
     // The reasoning body streams through the CENTRAL streaming-markdown path
     // (own "#r" cache slot, cross-frame-persistent) so it reveals smoothly
@@ -2071,6 +2084,17 @@ maya::Turn::Config turn_config_for_assistant_run(
         // settled text prefix with the widget still live_ during the
         // finalize ramp, so DON'T gate this on text being non-empty.
         if (mc && mc->streaming && mc->streaming->is_animating())
+            return false;
+        // SAME hazard for the sibling REASONING slot (mj.id + "#r"): reasoning
+        // streams through its own StreamingMarkdown whose reveal animates
+        // BETWEEN thinking deltas with no answer-channel size change. If we
+        // key the turn off content while the reasoning reveal is mid-glide,
+        // the reasoning widget's builder stops re-running and the reasoning
+        // typewriter FREEZES ("reasoning shows up fully, not streaming"). Must
+        // stay inline while the reasoning reveal is live/animating too.
+        const auto* rc =
+            m.ui.view_cache.peek(m.d.current.id, MessageId{mj.id.value + "#r"});
+        if (rc && rc->streaming && rc->streaming->is_animating())
             return false;
         return true;
     };
