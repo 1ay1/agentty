@@ -29,6 +29,24 @@ maya::Element model_badge_config(const Model& m) {
     // WHICH backend the model runs on, without stealing the model's colour.
     const std::string prov = provider::provider_display_name(provider::active());
 
+    // Reasoning-effort chip: when a tier is active AND the model can reason,
+    // ride a compact "· ◇high" so the current effort is visible at a glance
+    // without opening the picker — the same tier you set there (←/→). Uses
+    // resolved_caps so it never shows on a model that can't take effort (or
+    // where a stale pick would be dropped at send time).
+    Element effort_chip = text("");
+    bool has_effort_chip = false;
+    if (m.d.effort != Effort::None && !model.empty()) {
+        const auto caps = resolved_caps(model);
+        if (effort_capable(caps)) {
+            effort_chip = h(text(" \xc2\xb7 ", fg_dim(muted)),
+                            text("\xe2\x97\x87" +
+                                 std::string{effort_label(m.d.effort)},
+                                 fg_dim(muted))).build();
+            has_effort_chip = true;
+        }
+    }
+
     if (model.empty()) {
         // No model yet (e.g. an ACP agent that picks its own): show just the
         // provider so the slot is never blank.
@@ -43,12 +61,14 @@ maya::Element model_badge_config(const Model& m) {
         return h(mb.build(),
                  text(" · ", fg_dim(muted)),
                  text(prov, fg_dim(muted)),
+                 has_effort_chip ? effort_chip : text(""),
                  text("  ⬆ v" + m.s.update_latest,
                       fg_of(maya::Color::green()))).build();
     }
     return h(mb.build(),
              text(" · ", fg_dim(muted)),
-             text(prov, fg_dim(muted))).build();
+             text(prov, fg_dim(muted)),
+             has_effort_chip ? effort_chip : text("")).build();
 }
 
 } // namespace agentty::ui

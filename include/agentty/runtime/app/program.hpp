@@ -97,6 +97,10 @@ struct AgenttyApp {
             mix(m.d.current.messages[i].compute_render_key());
         }
         mix(static_cast<std::uint64_t>(m.d.profile));
+        // Reasoning effort is rendered in the model badge (status bar), so a
+        // tier change (←/→ in the picker) must move the hash or the gate would
+        // skip the repaint. Also affects the picker's reasoning line.
+        mix(static_cast<std::uint64_t>(m.d.effort));
         mix_str(m.d.model_id.value);
         mix(m.d.pending_permission ? 1ULL : 0ULL);
 

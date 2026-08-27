@@ -292,40 +292,59 @@ Element model_picker(const Model& m) {
     }
 
     cfg.footer.push_back(text(""));
-    // Reasoning-effort line: shown only when the highlighted model supports
-    // effort. Names the current tier and the ←/→ binding that cycles it.
+    // Reasoning-effort line — ONE unified control for the highlighted model.
+    // Renders the whole available ladder (so the ceiling is visible), brackets
+    // the current tier, and names both bindings inline: ←/→ cycles the tier,
+    // ^E flips the per-model capability override (compat lane only). This is
+    // uniform across every provider incl. ChatGPT/Codex — the ladder and the
+    // chip and the wire all come from resolved_caps() + available_efforts().
     if (!vis.empty()) {
         const int hi = std::clamp(picker->index, 0,
             static_cast<int>(vis.size()) - 1);
-        const auto caps = resolved_caps(
+        const std::string& hi_id =
             m.d.available_models[
-                static_cast<std::size_t>(vis[static_cast<std::size_t>(hi)])].id.value);
-        if (effort_capable(caps))
-            cfg.footer.push_back(h(
-                text("\xe2\x86\x90\xe2\x86\x92", fg_of(fg)),
-                text(" reasoning effort: ", fg_dim(muted)),
-                text(std::string{effort_label(m.d.effort)}, fg_bold(accent))
-            ).build());
-        // Per-model reasoning override hint (^E) — only for the compat lane
-        // (Claude/GPT are family-gated and not user-overridable). Names the
-        // current override state so the toggle is discoverable.
-        {
-            const std::string& hi_id =
-                m.d.available_models[
-                    static_cast<std::size_t>(vis[static_cast<std::size_t>(hi)])].id.value;
-            const auto base = ModelCapabilities::from_id(hi_id);
-            if (!base.is_known_family()
-                && base.family != ModelCapabilities::Family::Gpt) {
-                const int ov = reasoning_override_for(hi_id);
-                const char* state = ov == 1 ? "forced on"
-                                  : ov == 0 ? "forced off"
-                                            : "auto";
-                cfg.footer.push_back(h(
-                    text("^E", fg_of(fg)),
-                    text(" effort override: ", fg_dim(muted)),
-                    text(state, fg_bold(accent))
-                ).build());
+                static_cast<std::size_t>(vis[static_cast<std::size_t>(hi)])].id.value;
+        const auto caps = resolved_caps(hi_id);
+        const auto base = ModelCapabilities::from_id(hi_id);
+        const bool overridable = !base.is_known_family()
+                              && base.family != ModelCapabilities::Family::Gpt;
+        if (effort_capable(caps)) {
+            // Build the pieces into one hstack: the ladder (current tier
+            // bracketed ‹like this› and accented) + the ←/→ and (compat-only)
+            // ^E bindings inline.
+            std::vector<Element> parts;
+            parts.push_back(text("reasoning ", fg_dim(muted)));
+            for (Effort lvl : available_efforts(caps)) {
+                const std::string lbl{effort_label(lvl)};
+                if (lvl == m.d.effort) {
+                    parts.push_back(text("\xe2\x80\xb9", fg_of(accent)));       // ‹
+                    parts.push_back(text(lbl, fg_bold(accent)));
+                    parts.push_back(text("\xe2\x80\xba ", fg_of(accent)));    // ›
+                } else {
+                    parts.push_back(text(lbl + " ", fg_dim(muted)));
+                }
             }
+            parts.push_back(text("  ", fg_dim(muted)));
+            parts.push_back(text("\xe2\x86\x90\xe2\x86\x92", fg_of(fg)));
+            parts.push_back(text(" cycle", fg_dim(muted)));
+            if (overridable) {
+                const int ov = reasoning_override_for(hi_id);
+                const char* state = ov == 1 ? "on" : ov == 0 ? "off" : "auto";
+                parts.push_back(text(" \xc2\xb7 ", fg_dim(muted)));            // ·
+                parts.push_back(text("^E ", fg_of(fg)));
+                parts.push_back(text(state, fg_bold(accent)));
+            }
+            cfg.footer.push_back(h(std::move(parts)).build());
+        } else if (overridable) {
+            // Model can't reason on its own, but the user CAN force it on for
+            // the compat lane — surface just the ^E affordance so the override
+            // is discoverable even before it's enabled.
+            cfg.footer.push_back(h(
+                text("reasoning ", fg_dim(muted)),
+                text("off", fg_dim(muted)),
+                text("  ^E ", fg_of(fg)),
+                text("enable", fg_bold(accent))
+            ).build());
         }
     }
     cfg.footer.push_back(key_hints({
