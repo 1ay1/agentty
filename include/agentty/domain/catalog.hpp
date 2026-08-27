@@ -6,6 +6,8 @@
 #include <cstdlib>
 #include <map>
 #include <mutex>
+#include <atomic>
+#include <shared_mutex>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -609,34 +611,60 @@ private:
 // Claude/GPT stay family-gated — an override only opens/closes the COMPAT
 // lane (low|medium|high); it never fabricates the max/xhigh ladder.
 namespace reasoning_override_detail {
-inline std::mutex&                          reasoning_override_mu() {
-    static std::mutex m; return m;
+inline std::shared_mutex&                    reasoning_override_mu() {
+    static std::shared_mutex m; return m;
 }
 inline std::map<std::string, bool>&         reasoning_override_map() {
     static std::map<std::string, bool> m; return m;
+}
+// Lock-free "is the map non-empty?" flag. The override map is empty for the
+// vast majority of users (nobody set a ^E override), yet reasoning_override_for
+// is called on the PER-FRAME UI render path (model_badge, the picker). Reading
+// this atomic first lets the common case return without touching the mutex at
+// all — which matters because the mutex is also taken by BACKGROUND threads
+// (launch_stream, subagent) via resolved_caps, and blocking the render thread
+// on that contention was a source of intermittent input lag.
+inline std::atomic<bool>&                    reasoning_override_any() {
+    static std::atomic<bool> any{false}; return any;
 }
 } // namespace reasoning_override_detail
 
 // Set/clear a single model's override (true = force effort on, false = off).
 inline void set_reasoning_override(std::string model_id, bool on) {
-    std::lock_guard lk(reasoning_override_detail::reasoning_override_mu());
+    std::unique_lock lk(reasoning_override_detail::reasoning_override_mu());
     reasoning_override_detail::reasoning_override_map()[std::move(model_id)] = on;
+    reasoning_override_detail::reasoning_override_any().store(
+        !reasoning_override_detail::reasoning_override_map().empty(),
+        std::memory_order_relaxed);
 }
 inline void clear_reasoning_override(const std::string& model_id) {
-    std::lock_guard lk(reasoning_override_detail::reasoning_override_mu());
+    std::unique_lock lk(reasoning_override_detail::reasoning_override_mu());
     reasoning_override_detail::reasoning_override_map().erase(model_id);
+    reasoning_override_detail::reasoning_override_any().store(
+        !reasoning_override_detail::reasoning_override_map().empty(),
+        std::memory_order_relaxed);
 }
 inline void clear_reasoning_overrides() {
-    std::lock_guard lk(reasoning_override_detail::reasoning_override_mu());
+    std::unique_lock lk(reasoning_override_detail::reasoning_override_mu());
     reasoning_override_detail::reasoning_override_map().clear();
+    reasoning_override_detail::reasoning_override_any().store(false,
+        std::memory_order_relaxed);
 }
 inline void set_reasoning_overrides(std::map<std::string, bool> all) {
-    std::lock_guard lk(reasoning_override_detail::reasoning_override_mu());
+    std::unique_lock lk(reasoning_override_detail::reasoning_override_mu());
+    reasoning_override_detail::reasoning_override_any().store(!all.empty(),
+        std::memory_order_relaxed);
     reasoning_override_detail::reasoning_override_map() = std::move(all);
 }
 // Tri-state lookup: 1 (force on), 0 (force off), -1 (no override for this id).
+// Lock-free when no overrides exist (the common case). Otherwise a SHARED lock
+// — concurrent per-frame readers never block each other; only the rare write
+// (init / ^E toggle) is exclusive.
 [[nodiscard]] inline int reasoning_override_for(std::string_view model_id) {
-    std::lock_guard lk(reasoning_override_detail::reasoning_override_mu());
+    if (!reasoning_override_detail::reasoning_override_any().load(
+            std::memory_order_relaxed))
+        return -1;
+    std::shared_lock lk(reasoning_override_detail::reasoning_override_mu());
     auto& m = reasoning_override_detail::reasoning_override_map();
     auto it = m.find(std::string{model_id});
     if (it == m.end()) return -1;

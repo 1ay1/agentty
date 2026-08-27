@@ -237,7 +237,6 @@ Element model_picker(const Model& m) {
                 static_cast<std::size_t>(vis[static_cast<std::size_t>(vi)])];
             const bool sel    = vi == picker->index;
             const bool active = mi.id == m.d.model_id;
-            const auto caps   = resolved_caps(mi.id.value);
             Picker::Config::Row row;
             // Anthropic/Copilot catalogs carry a server-provided display name
             // ("Claude Sonnet 4.5"); OpenAI-compat and Ollama set
@@ -279,7 +278,8 @@ Element model_picker(const Model& m) {
                 if (!trailing.empty()) trailing += "  ";
                 trailing += "\xe2\x98\x85";
             }
-            if (sel && effort_capable(caps) && m.d.effort != Effort::None) {
+            if (sel && effort_capable(resolved_caps(mi.id.value))
+                    && m.d.effort != Effort::None) {
                 if (!trailing.empty()) trailing += "  ";
                 trailing += "\xe2\x97\x87 " + std::string{effort_label(m.d.effort)};
             }
