@@ -476,6 +476,11 @@ std::optional<Msg> on_diff_review(const KeyEvent& ev) {
             case SpecialKey::Enter:  return AcceptHunk{};
             case SpecialKey::Tab:      return DiffReviewNextFile{};
             case SpecialKey::BackTab:  return DiffReviewPrevFile{};
+            // Page INSIDE the focused hunk's capped body (a monster hunk
+            // can exceed the 24-row window; without this rows 25+ were
+            // unreachable — you decided blind).
+            case SpecialKey::PageDown: return DiffReviewScroll{+12};
+            case SpecialKey::PageUp:   return DiffReviewScroll{-12};
             default: break;
         }
     }
@@ -496,6 +501,9 @@ std::optional<Msg> on_diff_review(const KeyEvent& ev) {
             switch (c) {
                 case U'a': case U'A': return AcceptAllChanges{};
                 case U'x': case U'X': return RejectAllChanges{};
+                // vim half-page scroll inside the focused hunk's body.
+                case U'd': case U'D': return DiffReviewScroll{+12};
+                case U'u': case U'U': return DiffReviewScroll{-12};
                 default: break;
             }
             return std::nullopt;   // don't let a ctrl-chord fall through to a per-hunk key

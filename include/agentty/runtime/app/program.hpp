@@ -156,6 +156,10 @@ struct AgenttyApp {
         if (auto* c = ui::pick::opened(m.ui.diff_review)) {
             mix(static_cast<std::uint64_t>(c->file_index));
             mix(static_cast<std::uint64_t>(c->hunk_index));
+            // Hunk-body scroll (^D/^U) changes which diff rows are visible;
+            // without this mix the frame gate would skip the repaint and the
+            // scroll would be invisible until the next unrelated event.
+            mix(static_cast<std::uint64_t>(c->body_scroll));
         }
         mix(static_cast<std::uint64_t>(m.ui.command_palette.index()));
         if (auto* o = opened(m.ui.command_palette)) {
