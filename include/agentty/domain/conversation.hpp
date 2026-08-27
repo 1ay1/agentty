@@ -326,6 +326,13 @@ struct Message {
     struct ThinkingBlock {
         std::string text;
         std::string signature;
+        // Non-empty = this is a REDACTED thinking block: Anthropic's safety
+        // system encrypted the whole block into an opaque `data` payload
+        // (arrives complete in content_block_start). It must be replayed as
+        // {"type":"redacted_thinking","data":…} before the tool_use it
+        // precedes, or the follow-up 400s ("Expected thinking or
+        // redacted_thinking but found tool_use"). Never rendered.
+        std::string redacted_data;
     };
     std::vector<ThinkingBlock> thinking_blocks;
     std::string thinking;

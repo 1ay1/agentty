@@ -412,7 +412,8 @@ void write_tool_result_block(std::string& out, const ToolUse& tc,
         int signed_blocks = 0;
         if (include_thinking && m.role == Role::Assistant) {
             for (const auto& tb : m.thinking_blocks)
-                if (!tb.signature.empty()) ++signed_blocks;
+                if (!tb.signature.empty() || !tb.redacted_data.empty())
+                    ++signed_blocks;
             if (signed_blocks == 0 && !m.thinking_signature.empty())
                 signed_blocks = 1;  // legacy single-pair fallback
         }
@@ -460,11 +461,20 @@ void write_tool_result_block(std::string& out, const ToolUse& tc,
                     out.push_back('}');
                 };
                 bool any_vec = false;
-                for (const auto& tb : m.thinking_blocks)
-                    if (!tb.signature.empty()) {
+                for (const auto& tb : m.thinking_blocks) {
+                    if (!tb.redacted_data.empty()) {
+                        // Safety-redacted block: opaque, replayed verbatim as
+                        // its own content type (thinking-shaped replay 400s).
+                        if (block_emitted++ > 0) out.push_back(',');
+                        out.append(R"({"type":"redacted_thinking","data":)");
+                        out.append(json(tb.redacted_data).dump());
+                        out.push_back('}');
+                        any_vec = true;
+                    } else if (!tb.signature.empty()) {
                         write_thinking(tb.text, tb.signature);
                         any_vec = true;
                     }
+                }
                 if (!any_vec)  // legacy single-pair fallback
                     write_thinking(m.thinking, m.thinking_signature);
             }
