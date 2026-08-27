@@ -255,6 +255,7 @@ TEST_CASE("compat reasoning effort (chat wire)") {
                            "deepseek-reasoner", "deepseek-r1",
                            "grok-4", "grok-4-fast", "grok-3-mini",
                            "gemini-2.5-flash-thinking",
+                           "gpt-oss-120b", "gpt-oss:20b",
                            "o1", "o3", "o4-mini"}) {
         const auto c = ModelCapabilities::from_id(id);
         CHECK(c.reasoning_compat);

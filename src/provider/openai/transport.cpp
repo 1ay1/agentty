@@ -1513,11 +1513,15 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
             body["prompt_cache_key"] = req.session_key;
 
         // Reasoning effort. Chat Completions takes a top-level `reasoning_effort`
-        // (o-series, DeepSeek, xAI Grok, Groq, Mistral Magistral, Gemini via
-        // the compat shim). req.effort is the model-agnostic tier already gated
-        // to "" by effort_wire_for when the model can't reason — so this needs no
-        // capability re-check, exactly like the Responses transport's
-        // `reasoning.effort`. Hosted TLS only; local servers reject the field.
+        // (o-series, DeepSeek-Reasoner/R1, xAI Grok reasoning, Mistral
+        // Small/Medium, Gemini *-thinking via the compat shim). req.effort is
+        // the model-agnostic tier already gated to "" by effort_wire_for when
+        // the model can't (or must not) take it — e.g. Mistral MAGISTRAL reasons
+        // natively and REJECTS reasoning_effort (422), so the catalog excludes
+        // it and effort arrives empty here. So this needs no capability
+        // re-check. Hosted TLS only; local servers reject the field. NOTE:
+        // reasoning TEXT still streams for excluded models — the response-side
+        // reasoning_content handler is unconditional (see handle_delta).
         if (req.endpoint.use_tls && !req.effort.empty())
             body["reasoning_effort"] = req.effort;
     }
