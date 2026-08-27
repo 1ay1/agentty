@@ -160,6 +160,8 @@ struct AgenttyApp {
             // without this mix the frame gate would skip the repaint and the
             // scroll would be invisible until the next unrelated event.
             mix(static_cast<std::uint64_t>(c->body_scroll));
+            // Armed two-press ^X swaps the footer for a warning row.
+            mix(c->confirm_reject_all ? 1ULL : 0ULL);
         }
         mix(static_cast<std::uint64_t>(m.ui.command_palette.index()));
         if (auto* o = opened(m.ui.command_palette)) {

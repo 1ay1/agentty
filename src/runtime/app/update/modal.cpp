@@ -64,8 +64,18 @@ Step submit_message(Model m) {
     // seen them, carry on" (implicit accept). Clear the queue so the strip
     // doesn't linger across turns. Explicit review (Ctrl+R → reject) still runs
     // BEFORE you'd send a new message; this only fires when you move on without
-    // rejecting.
-    m.d.pending_changes.clear();
+    // rejecting. ANNOUNCE it — a silent implicit accept of N files is exactly
+    // the kind of decision a user should get to see happen (and learn the
+    // review affordance from), even if they never act on it.
+    if (!m.d.pending_changes.empty()) {
+        const int files = static_cast<int>(m.d.pending_changes.size());
+        m.s.status = "kept " + std::to_string(files)
+                   + (files == 1 ? " edited file" : " edited files")
+                   + " from last turn";
+        m.s.status_until = std::chrono::steady_clock::now()
+                         + std::chrono::seconds{3};
+        m.d.pending_changes.clear();
+    }
 
     // ── Slash-command expansion ──────────────────────────────────
     // `/name args` → the command's template body with $ARGUMENTS/$1..$9

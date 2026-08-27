@@ -937,6 +937,22 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
                     std::chrono::seconds{6});
             }
         }
+        // Review nudge. The turn's edits are ALREADY LIVE on disk and the
+        // review window closes silently on the next submit (implicit
+        // accept). With the changes strip OFF by default, nothing tells the
+        // user edits await review — surface the ^R affordance at the same
+        // reading moment as the code-block nudge. The code-block toast wins
+        // when both apply (running code is the rarer, more deliberate act);
+        // the changes strip / palette still covers the review path then.
+        if (block_toast.is_none()
+            && !m.d.pending_changes.empty() && !m.d.show_changes_strip) {
+            int files = static_cast<int>(m.d.pending_changes.size());
+            block_toast = set_status_toast(m,
+                "\xe2\x9c\x8e edited " + std::to_string(files)
+                    + (files == 1 ? " file" : " files")
+                    + " \xe2\x80\x94 Ctrl+R to review",
+                std::chrono::seconds{6});
+        }
     }
 
     // Post-turn idle auto-compaction.

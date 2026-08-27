@@ -75,6 +75,13 @@ Step diff_review_update(Model m, msg::DiffReviewMsg dm) {
         return &fc;
     };
 
+    // Disarm the two-press ^X guard on ANY diff-review action other than the
+    // confirming second ^X — a stray first press must not leave a live
+    // "next ^X nukes everything" trap behind a j/k or scroll.
+    if (!std::holds_alternative<RejectAllChanges>(dm))
+        if (auto* c = pick::opened(m.ui.diff_review))
+            c->confirm_reject_all = false;
+
     return std::visit(overload{
         [&](OpenDiffReview) -> Step {
             // Tell the user when there's nothing to review instead of
@@ -90,11 +97,26 @@ Step diff_review_update(Model m, msg::DiffReviewMsg dm) {
         },
         [&](CloseDiffReview) -> Step {
             // Persist every file's decision on the way out, then clear the
-            // queue — closing the pane commits the review.
-            for (const auto& fc : m.d.pending_changes) persist(fc);
+            // queue — closing the pane commits the review. Say WHAT closing
+            // meant: undecided hunks are kept (the change is already live on
+            // disk), which is invisible unless we announce it.
+            int reverted = 0, kept = 0;
+            for (const auto& fc : m.d.pending_changes) {
+                for (const auto& hk : fc.hunks) {
+                    if (hk.status == Hunk::Status::Rejected) ++reverted;
+                    else ++kept;   // accepted OR pending — both stay live
+                }
+                persist(fc);
+            }
             m.d.pending_changes.clear();
             m.ui.diff_review = pick::Closed{};
-            return done(std::move(m));
+            auto cmd = set_status_toast(m,
+                reverted == 0
+                    ? "review closed — all " + std::to_string(kept)
+                        + (kept == 1 ? " change" : " changes") + " kept"
+                    : "review closed — " + std::to_string(reverted)
+                        + " reverted, " + std::to_string(kept) + " kept");
+            return {std::move(m), std::move(cmd)};
         },
         [&](DiffReviewMove& e) -> Step {
             auto* c = pick::opened(m.ui.diff_review);
@@ -178,6 +200,17 @@ Step diff_review_update(Model m, msg::DiffReviewMsg dm) {
         [&](RejectAllChanges) -> Step {
             if (m.d.pending_changes.empty()) {
                 auto cmd = set_status_toast(m, "no pending changes to reject");
+                return {std::move(m), std::move(cmd)};
+            }
+            // TWO-PRESS guard when driven from the open pane (^X): the first
+            // press arms, the second executes. A palette "Reject all" (pane
+            // closed) is already a deliberate multi-step action — execute
+            // immediately. Mirrors the thread picker's two-press delete.
+            if (auto* c = pick::opened(m.ui.diff_review);
+                c && !c->confirm_reject_all) {
+                c->confirm_reject_all = true;
+                auto cmd = set_status_toast(m,
+                    "press ^X again to revert ALL changes — any other key cancels");
                 return {std::move(m), std::move(cmd)};
             }
             // Reject ALL = revert every touched file to its original contents
