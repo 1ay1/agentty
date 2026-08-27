@@ -71,6 +71,13 @@ bool is_assistant_with_results(const Message& m) {
 // ── Stream state ─────────────────────────────────────────────────────────────
 struct StreamCtx {
     EventSink   sink;
+    // Mirrors req.show_reasoning — gates whether swallowed <think>…</think>
+    // text is surfaced as StreamThinkingDelta (visible reasoning) or reduced
+    // to a StreamHeartbeat (liveness only; no hidden capture bloating the
+    // message + session file). The native `thinking` field is already gated
+    // request-side (`think:true` only sent when show_reasoning). Defaults
+    // true so the test harnesses keep capture semantics.
+    bool        show_reasoning = true;
     // NDJSON line framing (buffer + read cursor + compaction) lives in the
     // shared wire::LineFramer — see include/agentty/provider/wire.hpp. Ollama
     // uses a larger compaction threshold than the SSE default because its
@@ -115,6 +122,11 @@ struct StreamCtx {
     // hold/classify on whatever follows.
     bool        in_think        = false;
     bool        think_seen      = false;  // ever entered a think block this turn
+    // Partial-tag hold: a <think>/</think> tag can split across NDJSON
+    // frames ("<thi" + "nk>"). filter_think holds back a chunk-final byte
+    // run that is a proper prefix of a tag and re-prepends it to the next
+    // chunk; flushed as literal content at `done` if the tag never completes.
+    std::string think_carry;
 
     // ── Progressive `response` streaming (JSON-protocol chat replies) ───
     // In json_protocol mode a plain chat reply arrives as a grammar-forced
@@ -639,12 +651,33 @@ void flush_unhandled_content(StreamCtx& ctx) {
         ctx.stop_reason = StopReason::EndTurn;
 }
 
+// Surface swallowed reasoning text: visible StreamThinkingDelta when the
+// user shows reasoning, otherwise a liveness-only StreamHeartbeat (no hidden
+// capture — see StreamCtx::show_reasoning).
+void emit_reasoning(StreamCtx& ctx, const std::string& text) {
+    if (text.empty()) return;
+    if (ctx.show_reasoning) ctx.sink(StreamThinkingDelta{text, {}});
+    else                    ctx.sink(StreamHeartbeat{});
+}
+
 // Filter reasoning-model <think>…</think> out of a streamed content chunk,
 // tracking open/close state across frames in ctx. Returns only the visible
 // (non-think) text. The native `thinking` field is the clean path; this is the
 // fallback for models that inline their CoT into `content`. We also accept
 // <thinking>…</thinking> (some templates use the long form).
-[[nodiscard]] std::string filter_think(StreamCtx& ctx, std::string_view s) {
+[[nodiscard]] std::string filter_think(StreamCtx& ctx, std::string_view chunk) {
+    // Re-prepend any held-back partial tag from the previous chunk — tags
+    // split across token-sized NDJSON frames ("<thi" + "nk>") and a plain
+    // per-chunk find() would leak the fragment as visible prose (or swallow
+    // the answer, on a split close tag).
+    std::string joined;
+    std::string_view s = chunk;
+    if (!ctx.think_carry.empty()) {
+        joined = std::move(ctx.think_carry);
+        ctx.think_carry.clear();
+        joined.append(chunk);
+        s = joined;
+    }
     std::string out;
     out.reserve(s.size());
     // Reasoning swallowed from inside <think>…</think> this chunk — surfaced
@@ -652,6 +685,24 @@ void flush_unhandled_content(StreamCtx& ctx) {
     // field and every other provider use) instead of being discarded, so
     // inline-CoT local models render reasoning in the shared block too.
     std::string reasoning;
+    // Longest chunk-final suffix that is a PROPER prefix of an open/close
+    // tag — held back into think_carry instead of emitted. npos = none.
+    auto partial_tag_at = [](std::string_view text, bool closing) {
+        const std::size_t max_tag = closing ? 11 : 10;  // </thinking> / <thinking>
+        const std::size_t lo = text.size() > max_tag ? text.size() - max_tag + 1 : 0;
+        for (std::size_t p = lo; p < text.size(); ++p) {
+            if (text[p] != '<') continue;
+            std::string_view suf = text.substr(p);
+            auto is_pref = [&](std::string_view tag) {
+                return suf.size() < tag.size()
+                    && tag.substr(0, suf.size()) == suf;
+            };
+            if (closing ? (is_pref("</think>") || is_pref("</thinking>"))
+                        : (is_pref("<think>")  || is_pref("<thinking>")))
+                return p;
+        }
+        return std::string_view::npos;
+    };
     std::size_t i = 0;
     while (i < s.size()) {
         if (ctx.in_think) {
@@ -660,9 +711,16 @@ void flush_unhandled_content(StreamCtx& ctx) {
             std::size_t close2 = s.find("</thinking>", i);
             std::size_t c = std::min(close, close2);
             if (c == std::string_view::npos) {
-                // Still inside think — the whole remainder is reasoning.
-                reasoning.append(s.substr(i));
-                if (!reasoning.empty()) ctx.sink(StreamThinkingDelta{reasoning, {}});
+                // Still inside think — the remainder is reasoning, minus a
+                // possible partial close tag held for the next chunk.
+                std::string_view rem = s.substr(i);
+                if (auto p = partial_tag_at(rem, /*closing=*/true);
+                    p != std::string_view::npos) {
+                    ctx.think_carry.assign(rem.substr(p));
+                    rem = rem.substr(0, p);
+                }
+                reasoning.append(rem);
+                emit_reasoning(ctx, reasoning);
                 return out;
             }
             reasoning.append(s.substr(i, c - i));
@@ -672,14 +730,25 @@ void flush_unhandled_content(StreamCtx& ctx) {
             std::size_t open = s.find("<think>", i);
             std::size_t open2 = s.find("<thinking>", i);
             std::size_t o = std::min(open, open2);
-            if (o == std::string_view::npos) { out.append(s.substr(i)); break; }
+            if (o == std::string_view::npos) {
+                // No open tag — the remainder is prose, minus a possible
+                // partial open tag held for the next chunk.
+                std::string_view rem = s.substr(i);
+                if (auto p = partial_tag_at(rem, /*closing=*/false);
+                    p != std::string_view::npos) {
+                    ctx.think_carry.assign(rem.substr(p));
+                    rem = rem.substr(0, p);
+                }
+                out.append(rem);
+                break;
+            }
             out.append(s.substr(i, o - i));
             ctx.in_think   = true;
             ctx.think_seen = true;
             i = o + (o == open ? 7 : 10);
         }
     }
-    if (!reasoning.empty()) ctx.sink(StreamThinkingDelta{reasoning, {}});
+    emit_reasoning(ctx, reasoning);
     return out;
 }
 
@@ -876,7 +945,7 @@ void handle_message(StreamCtx& ctx, const json& message) {
     if (auto it = message.find("thinking");
         it != message.end() && it->is_string()) {
         const auto& think = it->get_ref<const std::string&>();
-        if (!think.empty()) ctx.sink(StreamThinkingDelta{think, {}});
+        emit_reasoning(ctx, think);
     }
     // Structured tool calls. Ollama returns them fully-formed in one frame
     // (not streamed char-by-char), so emit Start+Delta+End back to back.
@@ -981,6 +1050,21 @@ void dispatch_line(StreamCtx& ctx, std::string_view line) {
         handle_message(ctx, j["message"]);
 
     if (j.value("done", false)) {
+        // Flush any held-back partial <think>-tag bytes — the tag never
+        // completed, so they are literal content: reasoning if we're still
+        // inside a think block, otherwise prose.
+        if (!ctx.think_carry.empty()) {
+            std::string tail = std::move(ctx.think_carry);
+            ctx.think_carry.clear();
+            if (ctx.in_think) {
+                emit_reasoning(ctx, tail);
+            } else if (ctx.holding) {
+                ctx.text_hold += tail;
+            } else if (!(ctx.resp_active && ctx.resp_done)) {
+                ctx.sink(StreamTextDelta{tail});
+                ctx.any_text_flushed = true;
+            }
+        }
         // If the progressive-response streamer already took ownership of this
         // turn's reply (json_protocol chat reply streamed incrementally), the
         // text is already emitted. Don't let rescue_json_protocol re-emit it
@@ -1472,6 +1556,7 @@ void set_memory_salvage_intent(StreamCtx& ctx, const Request& req) {
 provider::StreamResult run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
     StreamCtx ctx;
     ctx.sink = std::move(sink);
+    ctx.show_reasoning = req.show_reasoning;
     set_memory_salvage_intent(ctx, req);
     // Salvage may only synthesise calls to tools we actually advertised.
     ctx.known_tools.reserve(req.tools.size());

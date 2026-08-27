@@ -282,6 +282,13 @@ void dispatch_event(StreamCtx& ctx, std::string_view name, std::string_view data
                 // Mark the text block open so its matching
                 // content_block_stop emits StreamTextBlockClosed.
                 ctx.text_block_open = true;
+            } else if (type == "thinking") {
+                // A NEW thinking block is starting. Interleaved thinking
+                // produces several independently-signed blocks per response;
+                // the reducer must seal the previous (text, signature) pair
+                // before this block's deltas arrive, or the signatures get
+                // cross-wired and the replay 400s.
+                ctx.sink(StreamThinkingDelta{{}, {}, /*block_boundary=*/true});
             }
             break;
         }

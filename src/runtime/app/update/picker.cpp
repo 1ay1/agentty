@@ -507,9 +507,22 @@ Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
             auto s = deps().load_settings();
             s.show_reasoning = m.d.show_reasoning;
             deps().save_settings(s);
-            auto toast = set_status_toast(m, m.d.show_reasoning
-                ? "reasoning: shown (live thinking + \xe2\x9c\xa6 summary)"
-                : "reasoning: hidden");
+            // Anthropic caveat: visible thinking is only REQUESTED when an
+            // effort tier is active (the transport gates thinking mode on
+            // req.effort). With effort off, ^R would silently show nothing —
+            // tell the user what to flip instead of leaving a dead toggle.
+            const auto caps = resolved_caps(m.d.model_id.value);
+            const bool claude_no_effort =
+                caps.family != ModelCapabilities::Family::Unknown
+                && caps.family != ModelCapabilities::Family::Gpt
+                && !caps.reasoning_compat
+                && m.d.effort == Effort::None;
+            auto toast = set_status_toast(m, !m.d.show_reasoning
+                ? "reasoning: hidden (existing blocks fold away too)"
+                : claude_no_effort
+                    ? "reasoning: shown — needs an effort tier on this model "
+                      "(\xe2\x86\x90/\xe2\x86\x92 in the picker)"
+                    : "reasoning: shown (live thinking + \xe2\x9c\xa6 summary)");
             return {std::move(m), std::move(toast)};
         },
     }, pm);

@@ -399,16 +399,24 @@ void write_tool_result_block(std::string& out, const ToolUse& tc,
         const bool has_text   = !m.text.empty();
         const bool has_images = (m.role == Role::User && has_wire_image(m));
         const bool has_tools  = (m.role == Role::Assistant && !m.tool_calls.empty());
-        // Replay a captured thinking block on assistant turns that also
+        // Replay captured thinking block(s) on assistant turns that also
         // carry real content (text or tool_use). Anthropic requires the
-        // block be present and verbatim on the turn whose tool_use it
-        // precedes, or the request 400s. Gated on a present signature (an
-        // unsigned thinking block is rejected) and on the request enabling
+        // blocks be present and verbatim on the turn whose tool_use they
+        // precede, or the request 400s. Interleaved thinking can produce
+        // SEVERAL signed blocks per message — `thinking_blocks` is the
+        // authoritative in-order capture; the legacy (thinking,
+        // thinking_signature) pair covers threads persisted before the
+        // multi-block split. Only SIGNED blocks are replayed (an unsigned
+        // thinking block is rejected), gated on the request enabling
         // thinking (include_thinking).
-        const bool has_thinking = include_thinking
-                               && m.role == Role::Assistant
-                               && !m.thinking_signature.empty()
-                               && (has_text || has_tools);
+        int signed_blocks = 0;
+        if (include_thinking && m.role == Role::Assistant) {
+            for (const auto& tb : m.thinking_blocks)
+                if (!tb.signature.empty()) ++signed_blocks;
+            if (signed_blocks == 0 && !m.thinking_signature.empty())
+                signed_blocks = 1;  // legacy single-pair fallback
+        }
+        const bool has_thinking = signed_blocks > 0 && (has_text || has_tools);
         if (has_text || has_images || has_tools) {
             const int my_idx   = emitted;
             const CachePin do_pin = pinning_for(my_idx);
@@ -431,23 +439,34 @@ void write_tool_result_block(std::string& out, const ToolUse& tc,
             if (has_images)
                 for (const auto& img : m.images)
                     if (!img.bytes.empty()) ++wire_images;
-            int blocks = (has_thinking ? 1 : 0)
+            int blocks = (has_thinking ? signed_blocks : 0)
                        + wire_images
                        + (has_text ? 1 : 0)
                        + (has_tools ? static_cast<int>(m.tool_calls.size()) : 0);
             int block_emitted = 0;
-            // Thinking block goes FIRST — the model emits it before its
-            // text/tool_use, and the replay order must match. It is never
-            // the cache pin (content always follows it). json(...).dump()
+            // Thinking blocks go FIRST — the model emits them before its
+            // text/tool_use, and the replay order must match. They are never
+            // the cache pin (content always follows them). json(...).dump()
             // JSON-encodes the (possibly empty) thinking text + opaque
             // signature; no cache_control on a thinking block.
             if (has_thinking) {
-                if (block_emitted++ > 0) out.push_back(',');
-                out.append(R"({"type":"thinking","thinking":)");
-                out.append(json(scrub_utf8(m.thinking)).dump());
-                out.append(R"(,"signature":)");
-                out.append(json(m.thinking_signature).dump());
-                out.push_back('}');
+                auto write_thinking = [&](const std::string& txt,
+                                          const std::string& sig) {
+                    if (block_emitted++ > 0) out.push_back(',');
+                    out.append(R"({"type":"thinking","thinking":)");
+                    out.append(json(scrub_utf8(txt)).dump());
+                    out.append(R"(,"signature":)");
+                    out.append(json(sig).dump());
+                    out.push_back('}');
+                };
+                bool any_vec = false;
+                for (const auto& tb : m.thinking_blocks)
+                    if (!tb.signature.empty()) {
+                        write_thinking(tb.text, tb.signature);
+                        any_vec = true;
+                    }
+                if (!any_vec)  // legacy single-pair fallback
+                    write_thinking(m.thinking, m.thinking_signature);
             }
             if (has_images) {
                 for (const auto& img : m.images) {

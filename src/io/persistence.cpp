@@ -341,6 +341,23 @@ static json message_to_json(const Message& m) {
         j["thinking"] = tools::util::to_valid_utf8(m.thinking);
     if (!m.thinking_signature.empty())
         j["thinking_signature"] = m.thinking_signature;
+    // Per-block (text, signature) pairs — the authoritative replay source
+    // when interleaved thinking produced several signed blocks. The legacy
+    // pair above stays for older-binary compat.
+    if (!m.thinking_blocks.empty()) {
+        json blocks = json::array();
+        for (const auto& tb : m.thinking_blocks)
+            blocks.push_back(json{
+                {"text", tools::util::to_valid_utf8(tb.text)},
+                {"signature", tb.signature},
+            });
+        j["thinking_blocks"] = std::move(blocks);
+    }
+    // Legacy visible-reasoning fallback (paths that populate
+    // reasoning_summary directly, e.g. external ACP backends). Without this
+    // the reasoning block vanishes from a reloaded thread.
+    if (!m.reasoning_summary.empty())
+        j["reasoning_summary"] = tools::util::to_valid_utf8(m.reasoning_summary);
     // Codex/Responses encrypted reasoning blob(s). Persisted so a reloaded
     // thread can still replay chain-of-thought across tool rounds. Opaque
     // base64-ish ciphertext (ASCII), so no UTF-8 scrub needed.
@@ -449,6 +466,12 @@ static std::expected<Message, DeserializeError> parse_message(const json& j) {
     m.text = j.value("text", "");
     m.thinking = j.value("thinking", "");
     m.thinking_signature = j.value("thinking_signature", "");
+    if (auto it = j.find("thinking_blocks"); it != j.end() && it->is_array())
+        for (const auto& tb : *it)
+            if (tb.is_object())
+                m.thinking_blocks.push_back(Message::ThinkingBlock{
+                    tb.value("text", ""), tb.value("signature", "")});
+    m.reasoning_summary = j.value("reasoning_summary", "");
     m.reasoning_encrypted = j.value("reasoning_encrypted", "");
     if (auto it = j.find("error"); it != j.end() && it->is_string()
         && !it->get<std::string>().empty())

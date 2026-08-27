@@ -649,6 +649,12 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
             });
         if (!has_committed_work) {
             ++a->truncation_retries;
+            // Free both cache slots (primary + "#r" reasoning) before the
+            // pop so the retry's fresh placeholder doesn't inherit a stale
+            // reveal widget.
+            m.ui.view_cache.drop(m.d.current.id, last.id);
+            m.ui.view_cache.drop(m.d.current.id,
+                                 MessageId{last.id.value + "#r"});
             m.d.current.messages.pop_back();
             Message placeholder;
             placeholder.role = Role::Assistant;
@@ -1456,8 +1462,35 @@ Step stream_update(Model m, msg::StreamMsg sm) {
             if (!m.d.current.messages.empty()
                 && m.d.current.messages.back().role == Role::Assistant) {
                 auto& msg = m.d.current.messages.back();
-                if (!e.text.empty())      msg.thinking          += e.text;
-                if (!e.signature.empty()) msg.thinking_signature = e.signature;
+                // Per-BLOCK capture: one response can carry several signed
+                // thinking blocks (interleaved thinking) — each signature
+                // covers its own block's exact text, so they must never be
+                // merged. A boundary seals the current block; text/signature
+                // deltas append to the OPEN (last) block. Signature deltas
+                // APPEND (chunk-safe) rather than overwrite.
+                auto open_block = [&]() -> Message::ThinkingBlock& {
+                    if (msg.thinking_blocks.empty())
+                        msg.thinking_blocks.emplace_back();
+                    return msg.thinking_blocks.back();
+                };
+                if (e.block_boundary && !msg.thinking_blocks.empty()
+                    && (!msg.thinking_blocks.back().text.empty()
+                        || !msg.thinking_blocks.back().signature.empty())) {
+                    msg.thinking_blocks.emplace_back();
+                    // Display separator between blocks/paragraphs — without
+                    // it consecutive summaries run together mid-sentence.
+                    if (!msg.thinking.empty()) msg.thinking += "\n\n";
+                }
+                if (!e.text.empty()) {
+                    open_block().text += e.text;
+                    msg.thinking      += e.text;
+                }
+                if (!e.signature.empty()) {
+                    auto& blk = open_block();
+                    blk.signature += e.signature;
+                    // Legacy mirror (persistence back-compat + old gates).
+                    msg.thinking_signature = blk.signature;
+                }
             }
             return done(std::move(m));
         },
@@ -1982,8 +2015,13 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                         // Drop before pop — an uncommitted (textless)
                         // placeholder may hold a cache entry (pinned or
                         // staged); free it so the pop doesn't orphan it
-                        // (see the CancelStream pop for rationale).
+                        // (see the CancelStream pop for rationale). The
+                        // sibling "#r" reasoning slot is dropped too — a
+                        // stale reveal there would replay the OLD attempt's
+                        // reasoning over the retry's fresh block.
                         m.ui.view_cache.drop(m.d.current.id, last->id);
+                        m.ui.view_cache.drop(m.d.current.id,
+                                             MessageId{last->id.value + "#r"});
                         m.d.current.messages.pop_back();
                     }
                     Message placeholder;
@@ -2077,8 +2115,11 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                     }))
                     return done(std::move(m));
                 if (last) {
-                    // Drop before pop — see the auth-retry pop above.
+                    // Drop before pop — see the auth-retry pop above (both
+                    // the primary and the "#r" reasoning slot).
                     m.ui.view_cache.drop(m.d.current.id, last->id);
+                    m.ui.view_cache.drop(m.d.current.id,
+                                         MessageId{last->id.value + "#r"});
                     m.d.current.messages.pop_back();
                 }
                 Message placeholder;
@@ -2228,8 +2269,10 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                     // The message carried nothing but a (possibly cached)
                     // reveal widget from its brief streaming life. Drop its
                     // cache entry BEFORE the pop so a removed message can't
-                    // orphan an entry in either home.
+                    // orphan an entry in either home (primary + "#r").
                     m.ui.view_cache.drop(m.d.current.id, last.id);
+                    m.ui.view_cache.drop(m.d.current.id,
+                                         MessageId{last.id.value + "#r"});
                     m.d.current.messages.pop_back();
                 }
             }
