@@ -109,8 +109,22 @@ std::optional<Msg> on_command_palette(const KeyEvent& ev) {
             default: break;
         }
     }
-    if (auto* ck = std::get_if<CharKey>(&ev.key))
-        return CommandPaletteInput{ck->codepoint};
+    if (auto* ck = std::get_if<CharKey>(&ev.key)) {
+        char32_t c = ck->codepoint;
+        const bool raw_ctrl = (c >= 0x01 && c <= 0x1A);
+        if (raw_ctrl) c = U'a' + (c - 1);
+        const bool ctrl = ev.mods.ctrl || raw_ctrl;
+        // Re-pressing the open key (^K) toggles the palette shut — the
+        // dispatcher returns this handler's result unconditionally, so
+        // without an explicit arm the key would previously TYPE into the
+        // query (a literal 'k', or a raw 0x0B control byte that passed the
+        // reducer's <0x80 filter and corrupted the search string).
+        if (ctrl && (c == U'k' || c == U'K')) return CloseCommandPalette{};
+        // Ctrl chords are never query text; printable chars only.
+        if (!ctrl && ck->codepoint >= 0x20)
+            return CommandPaletteInput{ck->codepoint};
+        return std::nullopt;
+    }
     return std::nullopt;
 }
 
@@ -164,7 +178,13 @@ std::optional<Msg> on_code_block_picker(const KeyEvent& ev) {
     }
     if (auto* ck = std::get_if<CharKey>(&ev.key)) {
         char32_t c = ck->codepoint;
-        if (c >= U'1' && c <= U'9')
+        const bool raw_ctrl = (c >= 0x01 && c <= 0x1A);
+        if (raw_ctrl) c = U'a' + (c - 1);
+        // ^G re-press closes the picker (open/close symmetry; raw 0x07 on
+        // legacy terminals).
+        if ((ev.mods.ctrl || raw_ctrl) && (c == U'g' || c == U'G'))
+            return CloseCodeBlockPicker{};
+        if (c >= U'1' && c <= U'9' && !ev.mods.ctrl && !raw_ctrl)
             return CodeBlockPickerSelect{static_cast<int>(c - U'1')};
         switch (c) {
             case U'e': case U'E': return CodeBlockPickerEdit{};
@@ -444,10 +464,18 @@ std::optional<Msg> on_thread_list(const KeyEvent& ev) {
             default: break;
         }
     }
-    if (auto* ck = std::get_if<CharKey>(&ev.key))
-        if (ck->codepoint == 'n' || ck->codepoint == 'N') return NewThread{};
-    if (auto* ck = std::get_if<CharKey>(&ev.key))
-        if (ck->codepoint == 'd' || ck->codepoint == 'D') return ThreadListDelete{};
+    if (auto* ck = std::get_if<CharKey>(&ev.key)) {
+        char32_t c = ck->codepoint;
+        const bool raw_ctrl = (c >= 0x01 && c <= 0x1A);
+        if (raw_ctrl) c = U'a' + (c - 1);
+        const bool ctrl = ev.mods.ctrl || raw_ctrl;
+        // ^J re-press closes the list (open/close symmetry). NOTE: raw 0x0A
+        // is Enter on legacy terminals and maya maps it to SpecialKey::Enter
+        // before we see it, so only the flagged form arrives here.
+        if (ctrl && (c == U'j' || c == U'J')) return CloseThreadList{};
+        if (!ctrl && (c == U'n' || c == U'N')) return NewThread{};
+        if (!ctrl && (c == U'd' || c == U'D')) return ThreadListDelete{};
+    }
     return std::nullopt;
 }
 
@@ -515,6 +543,9 @@ std::optional<Msg> on_diff_review(const KeyEvent& ev) {
             switch (c) {
                 case U'a': case U'A': return AcceptAllChanges{};
                 case U'x': case U'X': return RejectAllChanges{};
+                // ^R re-press closes the pane (same commit semantics as Esc
+                // — decisions persist, undecided hunks stay live).
+                case U'r': case U'R': return CloseDiffReview{};
                 // vim half-page scroll inside the focused hunk's body.
                 case U'd': case U'D': return DiffReviewScroll{+12};
                 case U'u': case U'U': return DiffReviewScroll{-12};
@@ -543,6 +574,16 @@ std::optional<Msg> on_todo_modal(const KeyEvent& ev) {
     if (std::holds_alternative<SpecialKey>(ev.key)
         && std::get<SpecialKey>(ev.key) == SpecialKey::Escape)
         return CloseTodoModal{};
+    // ^T re-press toggles the modal shut (open/close symmetry; raw 0x14 on
+    // legacy terminals). Other keys fall through to on_global via the
+    // dispatcher's todo-specific fall-through arm.
+    if (auto* ck = std::get_if<CharKey>(&ev.key)) {
+        char32_t c = ck->codepoint;
+        const bool raw_ctrl = (c >= 0x01 && c <= 0x1A);
+        if (raw_ctrl) c = U'a' + (c - 1);
+        if ((ev.mods.ctrl || raw_ctrl) && (c == U't' || c == U'T'))
+            return CloseTodoModal{};
+    }
     return std::nullopt;
 }
 
@@ -568,7 +609,15 @@ std::optional<Msg> on_tool_viewer(const KeyEvent& ev) {
         }
     }
     if (auto* ck = std::get_if<CharKey>(&ev.key)) {
-        switch (ck->codepoint) {
+        char32_t c = ck->codepoint;
+        const bool raw_ctrl = (c >= 0x01 && c <= 0x1A);
+        if (raw_ctrl) c = U'a' + (c - 1);
+        // ^O re-press closes the viewer (open/close symmetry; raw 0x0F on
+        // legacy terminals) — the dispatcher never falls through to
+        // on_global from an open modal.
+        if ((ev.mods.ctrl || raw_ctrl) && (c == U'o' || c == U'O'))
+            return CloseToolOutputViewer{};
+        switch (c) {
             case U'k': case U'K': return ToolViewerMove{-1};
             case U'j': case U'J': return ToolViewerMove{+1};
             case U'h': case U'H': return ToolViewerStep{-1};
