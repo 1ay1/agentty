@@ -53,6 +53,15 @@ static std::string joined_text(const std::vector<Msg>& msgs) {
     return s;
 }
 
+// Concatenated reasoning text (the unified StreamThinkingDelta event every
+// provider emits). Used to assert Ollama surfaces native + inline reasoning.
+static std::string joined_thinking(const std::vector<Msg>& msgs) {
+    std::string s;
+    for (const auto& m : msgs)
+        if (const auto* d = get_leaf<StreamThinkingDelta>(m)) s += d->text;
+    return s;
+}
+
 static std::string joined_tool_args(const std::vector<Msg>& msgs);
 
 // ── 1. build_messages ────────────────────────────────────────────────────────
@@ -192,6 +201,42 @@ TEST_CASE("ndjson plain text") {
     CHECK(count_leaf<StreamUsage>(msgs) == 1);
     // No tool calls leaked.
     CHECK(count_leaf<StreamToolUseStart>(msgs) == 0);
+}
+
+// Native reasoning: Ollama's `message.thinking` field (populated when we send
+// think:true) must surface as the unified StreamThinkingDelta event — the SAME
+// event Anthropic/OpenAI-compat/ChatGPT emit — and must NOT leak into visible
+// prose.
+TEST_CASE("ndjson native thinking field") {
+    const std::string nd =
+        "{\"message\":{\"role\":\"assistant\",\"thinking\":\"Let me plan. \","
+        "\"content\":\"\"}}\n"
+        "{\"message\":{\"role\":\"assistant\",\"thinking\":\"Step two.\","
+        "\"content\":\"\"}}\n"
+        "{\"message\":{\"role\":\"assistant\",\"content\":\"The answer.\"},"
+        "\"done\":true,\"done_reason\":\"stop\"}\n";
+    auto msgs = oll::parse_ndjson_for_test(nd);
+    CHECK(joined_thinking(msgs) == "Let me plan. Step two.");
+    CHECK(joined_text(msgs) == "The answer.");
+    // Reasoning never appears as prose.
+    CHECK(joined_text(msgs).find("plan") == std::string::npos);
+}
+
+// Inline reasoning fallback: models that dump chain-of-thought into
+// <think>…</think> in `content` (deepseek-r1, qwen3 without the native field)
+// must have it STRIPPED from prose AND surfaced as reasoning.
+TEST_CASE("ndjson inline think block surfaced as reasoning") {
+    const std::string nd =
+        "{\"message\":{\"role\":\"assistant\","
+        "\"content\":\"<think>weigh options</think>Final answer.\"},"
+        "\"done\":true,\"done_reason\":\"stop\"}\n";
+    auto msgs = oll::parse_ndjson_for_test(nd);
+    CHECK(joined_text(msgs) == "Final answer.");
+    // The reasoning is surfaced (unified event), not discarded.
+    CHECK(joined_thinking(msgs).find("weigh options") != std::string::npos);
+    // And never leaks into prose.
+    CHECK(joined_text(msgs).find("weigh") == std::string::npos);
+    CHECK(joined_text(msgs).find("<think>") == std::string::npos);
 }
 
 TEST_CASE("ndjson structured tool call") {

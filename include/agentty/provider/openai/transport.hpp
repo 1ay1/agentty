@@ -125,6 +125,14 @@ struct Request {
     // effort support), so the transport needs no capability re-check. Ollama
     // ignores it (local models have no server-side effort knob).
     std::string effort;
+    // Whether the user wants the model's reasoning SHOWN (global ^R toggle).
+    // Mirrors provider::Request.show_reasoning and anthropic::Request.
+    // show_reasoning so every transport reads the same intent. On the OpenAI-
+    // Chat wire reasoning text streams unconditionally (reasoning_content), so
+    // this only gates the DISPLAY (handled by the view). The Ollama transport
+    // uses it to decide whether to send `think:true` (enable the native
+    // reasoning field). Off by default keeps the dead-air-free wire unchanged.
+    bool show_reasoning = false;
 };
 
 using EventSink = std::function<void(Msg)>;
