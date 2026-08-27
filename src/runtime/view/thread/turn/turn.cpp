@@ -13,6 +13,7 @@
 
 #include <maya/widget/agent_timeline.hpp>
 #include <maya/widget/markdown.hpp>
+#include <maya/widget/thinking.hpp>  // reasoning/thinking block
 #include <maya/core/render_context.hpp> // available_height (resize-shrink detect)
 #include <maya/core/anim_clock.hpp>     // maya::anim_now_ms (deterministic under a test clock)
 #include <maya/render/cache_id.hpp>
@@ -1144,6 +1145,89 @@ void append_assistant_tool_panel(maya::Turn::Config& cfg,
         tool_calls, frame, style.color));
 }
 
+// Reasoning/thinking block for one assistant message, or nullopt when the
+// message carries no reasoning text. This is the SINGLE place reasoning is
+// turned into a renderable slot; both the single-message path
+// (append_assistant_body_slots) and the run-merged live/frozen path
+// (emit_subturn) call it, so live and frozen transcripts render identically
+// and every provider funnels through one implementation (DRY). The unified
+// Message::reasoning_display_text() means Anthropic thinking, Codex reasoning
+// summaries, and OpenAI-compat reasoning_content all render the same block.
+//
+// UX (no interaction, correct with immutable scrollback — nothing to toggle):
+//   • LIVE (reasoning streaming, answer not yet begun): a dim, left-gutter-
+//     bordered thought stream with a breathing spinner, auto-expanded and
+//     height-capped — you watch the model think in real time.
+//   • SETTLED (answer started / turn done): it collapses PERMANENTLY to one
+//     quiet line — "✦ Thought for ~N tokens · <first line glimpse>" — a subtle
+//     footnote above the answer. Baked at freeze; never changes, never needs a
+//     keystroke, so it stays correct once the turn scrolls into history.
+std::optional<maya::Element> reasoning_slot(const Message& msg, const Model& m) {
+    const std::string_view reasoning = msg.reasoning_display_text();
+    if (reasoning.empty()) return std::nullopt;
+
+    // "Actively reasoning" = the wire is streaming AND no answer body has
+    // arrived yet. That's the window where showing the live thought stream is
+    // most useful. Once prose starts (or the turn settles), reasoning becomes
+    // a quiet, PERMANENT one-line summary — no fold state, nothing to toggle,
+    // so it's correct even once the turn freezes into immutable scrollback.
+    const bool answer_started =
+        !msg.text.empty() || !msg.streaming_text.empty();
+    const bool active = m.s.is_streaming() && !answer_started;
+
+    if (active) {
+        // LIVE: maya's ThinkingBlock — dim gutter-bordered thought stream with
+        // a breathing spinner, auto-expanded, height-capped so a long chain of
+        // thought can't shove the (imminent) answer off-screen.
+        maya::ThinkingBlock tb;
+        tb.set_content(reasoning);
+        tb.set_active(true);
+        tb.set_expanded(true);
+        tb.set_max_visible_lines(8);
+        tb.advance(static_cast<float>(::maya::anim_now_ms() % 100000) / 1000.0f);
+        return maya::Element{tb.build()};
+    }
+
+    // SETTLED: one quiet line that stays put forever — a ✦ sigil, a dim
+    // "Thought for ~N tokens" (token estimate is always available and needs
+    // no timing plumbing), and a short glimpse of the reasoning's first line
+    // so it's a peek, not just a counter. Reads as a subtle footnote above
+    // the answer; never dominates, never needs interaction.
+    const std::size_t approx_tokens = (reasoning.size() + 3) / 4;
+    std::string_view first_line = reasoning.substr(0, reasoning.find('\n'));
+    // Trim leading whitespace and clip the glimpse so the line can't wrap.
+    while (!first_line.empty() && (first_line.front() == ' ' ||
+                                   first_line.front() == '\t'))
+        first_line.remove_prefix(1);
+    constexpr std::size_t kGlimpse = 56;
+    const bool clipped = first_line.size() > kGlimpse;
+    if (clipped) first_line = first_line.substr(0, kGlimpse);
+
+    std::string content;
+    std::vector<maya::StyledRun> runs;
+    auto push = [&](std::string_view part, maya::Style st) {
+        const std::size_t s = content.size();
+        content.append(part);
+        runs.push_back(maya::StyledRun{s, content.size() - s, st});
+    };
+    push("\xe2\x9c\xa6 ", maya::Style{}.with_fg(status_info));        // ✦
+    push("Thought", maya::Style{}.with_fg(muted).with_dim());
+    push(" for ~" + std::to_string(approx_tokens) + " tokens",
+         maya::Style{}.with_fg(muted).with_dim());
+    if (!first_line.empty()) {
+        push("  \xc2\xb7  ", maya::Style{}.with_fg(muted));            // ·
+        std::string glimpse{first_line};
+        if (clipped) glimpse += "\xe2\x80\xa6";                      // …
+        push(glimpse, maya::Style{}.with_fg(muted).with_italic());
+    }
+    return maya::Element{maya::TextElement{
+        .content = std::move(content),
+        .style   = {},
+        .wrap    = maya::TextWrap::TruncateEnd,   // one row, never wraps
+        .runs    = std::move(runs),
+    }};
+}
+
 // Single-message body slot append: text (if any) then this message's
 // tool panel (if any). Used by `turn_config` for non-run-merged
 // renders (User turns delegate to a different branch; this is hit by
@@ -1154,6 +1238,11 @@ void append_assistant_body_slots(maya::Turn::Config& cfg,
                                  const Model& m,
                                  const SpeakerStyle& style)
 {
+    // Reasoning block first — it renders ABOVE the answer (chain-of-thought
+    // precedes the conclusion). Single shared helper; see reasoning_slot.
+    if (auto rs = reasoning_slot(msg, m))
+        cfg.body.emplace_back(std::move(*rs));
+
     const bool has_body = !msg.text.empty() || !msg.streaming_text.empty();
     if (has_body) {
         cfg.body.emplace_back(cached_markdown_for(msg, m));
@@ -1821,6 +1910,10 @@ maya::Turn::Config turn_config_for_assistant_run(
     //    nested Turn.
     auto emit_subturn = [&](std::size_t idx, maya::Turn::Config& into) {
         const Message& m_i = msgs[idx];
+        // Reasoning block first — above this sub-turn's answer text. Same DRY
+        // helper as the single-message path so live and frozen match.
+        if (auto rs = reasoning_slot(m_i, m))
+            into.body.emplace_back(std::move(*rs));
         const bool has_text = !m_i.text.empty() || !m_i.streaming_text.empty();
         bool defer_panel = false;
         if (has_text) {

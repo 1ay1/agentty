@@ -329,6 +329,22 @@ struct Message {
     // one turn are joined newline-separated in order.
     std::string reasoning_encrypted;
     std::string reasoning_summary;
+
+    // Unified reasoning text for DISPLAY, across every provider. All three
+    // reasoning wires funnel their VISIBLE text into `thinking` via
+    // StreamThinkingDelta: Anthropic `thinking_delta`, Codex
+    // `reasoning_summary_text.delta`, and OpenAI-compat `reasoning_content`
+    // (DeepSeek / Grok / o-series). `reasoning_summary` is a legacy fallback
+    // for any path that populated it directly. One accessor keeps the view,
+    // the render key, and the toggle logic provider-agnostic (DRY): the UI
+    // shows a reasoning block iff this is non-empty.
+    [[nodiscard]] std::string_view reasoning_display_text() const noexcept {
+        if (!thinking.empty())          return thinking;
+        return reasoning_summary;
+    }
+    [[nodiscard]] bool has_reasoning() const noexcept {
+        return !reasoning_display_text().empty();
+    }
     // Smoothing buffer. Anthropic's SSE batches deltas at the server's
     // tokenizer rate — a single content_block_delta can carry 50+ chars,
     // and several can arrive in one TCP read. If we appended each
@@ -485,6 +501,12 @@ struct Message {
         mix(is_compact_summary ? 1ULL : 0ULL);
         mix(proactive_context ? 2ULL : 0ULL);
         mix(proactive_expanded ? 4ULL : 0ULL);
+        // Reasoning block: its text grows during streaming, and the block
+        // switches from the live thought stream to a settled one-line summary
+        // once the answer starts. Mixing the length + a "has answer body"
+        // bit re-renders the cached Element across that transition. Uses the
+        // unified accessor so all providers key identically.
+        mix(reasoning_display_text().size());
         if (smart_routing) {
             mix(8ULL);
             mix(smart_route_model.size());

@@ -90,6 +90,12 @@ const std::vector<Axis>& render_axes() {
         {"proactive_expanded toggles", [](Message& m) {
             m.proactive_expanded = !m.proactive_expanded;
         }},
+        {"reasoning text (thinking) changes length", [](Message& m) {
+            // Drives Message::reasoning_display_text(), which the reasoning
+            // block renders. Must be in the render key or the cached Element
+            // serves a stale (or missing) "Thought for N tokens" summary.
+            m.thinking += "chain of thought step";
+        }},
         {"smart_routing toggles", [](Message& m) {
             m.smart_routing = !m.smart_routing;
         }},
