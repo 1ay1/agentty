@@ -647,6 +647,11 @@ void flush_unhandled_content(StreamCtx& ctx) {
 [[nodiscard]] std::string filter_think(StreamCtx& ctx, std::string_view s) {
     std::string out;
     out.reserve(s.size());
+    // Reasoning swallowed from inside <think>…</think> this chunk — surfaced
+    // via StreamThinkingDelta (the SAME unified event the native `thinking`
+    // field and every other provider use) instead of being discarded, so
+    // inline-CoT local models render reasoning in the shared block too.
+    std::string reasoning;
     std::size_t i = 0;
     while (i < s.size()) {
         if (ctx.in_think) {
@@ -654,7 +659,13 @@ void flush_unhandled_content(StreamCtx& ctx) {
             std::size_t close = s.find("</think>", i);
             std::size_t close2 = s.find("</thinking>", i);
             std::size_t c = std::min(close, close2);
-            if (c == std::string_view::npos) return out;  // still inside think
+            if (c == std::string_view::npos) {
+                // Still inside think — the whole remainder is reasoning.
+                reasoning.append(s.substr(i));
+                if (!reasoning.empty()) ctx.sink(StreamThinkingDelta{reasoning, {}});
+                return out;
+            }
+            reasoning.append(s.substr(i, c - i));
             ctx.in_think = false;
             i = c + (c == close ? 8 : 11);
         } else {
@@ -668,6 +679,7 @@ void flush_unhandled_content(StreamCtx& ctx) {
             i = o + (o == open ? 7 : 10);
         }
     }
+    if (!reasoning.empty()) ctx.sink(StreamThinkingDelta{reasoning, {}});
     return out;
 }
 
@@ -854,6 +866,18 @@ done_decode:
 
 // Handle one native `message` object from an NDJSON frame.
 void handle_message(StreamCtx& ctx, const json& message) {
+    // Native reasoning: Ollama routes the model's chain-of-thought into a
+    // structured `thinking` field (streamed like content) when we send
+    // think:true. Emit it as StreamThinkingDelta — the SAME unified event the
+    // Anthropic (thinking_delta), OpenAI-compat (reasoning_content), and
+    // ChatGPT/Codex (reasoning_summary) transports emit — so local reasoning
+    // renders in the same block as every other provider. No signature on this
+    // wire. Doubles as a liveness heartbeat during a long reasoning pause.
+    if (auto it = message.find("thinking");
+        it != message.end() && it->is_string()) {
+        const auto& think = it->get_ref<const std::string&>();
+        if (!think.empty()) ctx.sink(StreamThinkingDelta{think, {}});
+    }
     // Structured tool calls. Ollama returns them fully-formed in one frame
     // (not streamed char-by-char), so emit Start+Delta+End back to back.
     if (message.contains("tool_calls") && message["tool_calls"].is_array()
@@ -1466,6 +1490,18 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
     // Keep the model resident between turns so the next prompt is instant.
     body["keep_alive"] = "10m";
     body["options"] = build_options(req);
+
+    // Native reasoning: ask Ollama to route the model's chain-of-thought into
+    // the structured `message.thinking` field (instead of inline
+    // <think>…</think> in content) when the user opted into visible reasoning
+    // (^R) AND we're not in JSON-protocol mode (weak models can't reason and
+    // the grammar would fight the think field). Ollama ignores `think` on
+    // models that don't support it, so this is safe to send broadly. The
+    // stream handler emits message.thinking as StreamThinkingDelta — the SAME
+    // unified event every other provider uses — so local reasoning renders in
+    // the same block. Off by default keeps the dead-air-free wire unchanged.
+    if (req.show_reasoning && !ctx.json_protocol)
+        body["think"] = true;
 
     json messages = json::array();
     std::string sys = req.system_prompt;
