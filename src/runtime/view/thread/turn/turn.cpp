@@ -1240,6 +1240,7 @@ std::optional<maya::Element> reasoning_slot(const Message& msg, const Model& m) 
 
     maya::ReasoningStream rs;
     rs.set_live(active);
+    rs.set_char_hint(msg.reasoning_display_text().size());
     return rs.build_with_body(std::move(body));
 }
 
