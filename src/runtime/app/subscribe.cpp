@@ -346,6 +346,13 @@ std::optional<Msg> on_model_picker(const KeyEvent& ev) {
     }
     if (auto* ck = std::get_if<CharKey>(&ev.key)) {
         char32_t c = ck->codepoint;
+        // Re-pressing the open key (^/) closes the picker — open/close
+        // symmetry, and it stops the key being swallowed here (the dispatcher
+        // returns this handler's result unconditionally, so a nullopt never
+        // falls through to on_global's ^/ binding). ^/ can arrive as the raw
+        // 0x1F control code (no ctrl flag) or as '/' with mods.ctrl — accept
+        // both, checked before the filter/remap paths.
+        if (c == 0x1F || (ev.mods.ctrl && c == U'/')) return CloseModelPicker{};
         // Ctrl+F toggles the highlighted model as a favourite — moved off
         // the bare `f` key now that plain letters feed the search box.
         if (ev.mods.ctrl) {
@@ -389,8 +396,20 @@ std::optional<Msg> on_provider_picker(const KeyEvent& ev) {
     // A printable character types into the live search filter (mirrors the
     // model picker). Ctrl-modified chars are reserved for other bindings.
     if (auto* ck = std::get_if<CharKey>(&ev.key)) {
-        if (!ev.mods.ctrl && ck->codepoint >= 0x20)
-            return ProviderPickerFilterInput{ck->codepoint};
+        // Re-pressing the open key (^P) toggles the picker shut, matching
+        // every other modal's open/close symmetry. Without this the key is
+        // swallowed here (the dispatcher returns this handler's result
+        // unconditionally, so it never falls through to on_global where ^P
+        // is bound) — the "^P does nothing in the picker" bug. Normalise
+        // the legacy raw control byte (Ctrl-P = 0x10, no ctrl flag) the same
+        // way on_global does before comparing.
+        char32_t c = ck->codepoint;
+        const bool raw_ctrl = (c >= 0x01 && c <= 0x1A);
+        if (raw_ctrl) c = U'a' + (c - 1);
+        const bool ctrl = ev.mods.ctrl || raw_ctrl;
+        if (ctrl && (c == U'p' || c == U'P')) return CloseProviderPicker{};
+        if (!ctrl && c >= 0x20)
+            return ProviderPickerFilterInput{c};
     }
     return std::nullopt;
 }
