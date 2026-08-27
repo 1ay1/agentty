@@ -7,6 +7,7 @@
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/runtime/app/update.hpp"
 
+#include <algorithm>
 #include <utility>
 
 #include <maya/core/overload.hpp>
@@ -47,7 +48,9 @@ Step diff_review_update(Model m, msg::DiffReviewMsg dm) {
             for (int ho = 0; ho < static_cast<int>(hunks.size()); ++ho) {
                 int hi = (start + ho) % static_cast<int>(hunks.size());
                 if (hunks[static_cast<std::size_t>(hi)].status == Hunk::Status::Pending) {
-                    c->file_index = fi; c->hunk_index = hi; return;
+                    c->file_index = fi; c->hunk_index = hi;
+                    c->body_scroll = 0;   // fresh hunk → top
+                    return;
                 }
             }
         }
@@ -100,6 +103,22 @@ Step diff_review_update(Model m, msg::DiffReviewMsg dm) {
             int sz = static_cast<int>(fc->hunks.size());
             if (sz == 0) return done(std::move(m));
             c->hunk_index = (c->hunk_index + e.delta + sz) % sz;
+            c->body_scroll = 0;   // a newly-focused hunk starts at its top
+            return done(std::move(m));
+        },
+        [&](DiffReviewScroll& e) -> Step {
+            auto* c = pick::opened(m.ui.diff_review);
+            auto* fc = clamp_cursor(c);
+            if (!fc || fc->hunks.empty()) return done(std::move(m));
+            const auto& hk =
+                fc->hunks[static_cast<std::size_t>(c->hunk_index)];
+            // Upper bound on the hunk's body rows: its patch line count.
+            // The view clamps precisely against the parsed row count; this
+            // just keeps the offset from running away unboundedly.
+            const int max_rows = static_cast<int>(
+                std::count(hk.patch.begin(), hk.patch.end(), '\n')) + 1;
+            c->body_scroll = std::clamp(c->body_scroll + e.delta,
+                                        0, std::max(0, max_rows - 1));
             return done(std::move(m));
         },
         [&](DiffReviewNextFile) -> Step {
@@ -108,6 +127,7 @@ Step diff_review_update(Model m, msg::DiffReviewMsg dm) {
             int sz = static_cast<int>(m.d.pending_changes.size());
             c->file_index = (c->file_index + 1) % sz;
             c->hunk_index = 0;
+            c->body_scroll = 0;
             return done(std::move(m));
         },
         [&](DiffReviewPrevFile) -> Step {
@@ -116,6 +136,7 @@ Step diff_review_update(Model m, msg::DiffReviewMsg dm) {
             int sz = static_cast<int>(m.d.pending_changes.size());
             c->file_index = (c->file_index - 1 + sz) % sz;
             c->hunk_index = 0;
+            c->body_scroll = 0;
             return done(std::move(m));
         },
         [&](AcceptHunk) -> Step {

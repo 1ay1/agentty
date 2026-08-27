@@ -726,6 +726,9 @@ struct ForkThread      {};
 struct OpenDiffReview {};
 struct CloseDiffReview {};
 struct DiffReviewMove { int delta; };
+// Page the FOCUSED hunk's body window by `delta` diff lines (^D/^U,
+// PgDn/PgUp). Clamped in the reducer against the hunk's real line count.
+struct DiffReviewScroll { int delta; };
 struct DiffReviewNextFile {};
 struct DiffReviewPrevFile {};
 struct AcceptHunk {};
@@ -928,7 +931,7 @@ using LoginMsg = std::variant<
     DeviceCodeReady, DeviceLoginDone, TokenRefreshed>;
 
 using DiffReviewMsg = std::variant<
-    OpenDiffReview, CloseDiffReview, DiffReviewMove,
+    OpenDiffReview, CloseDiffReview, DiffReviewMove, DiffReviewScroll,
     DiffReviewNextFile, DiffReviewPrevFile,
     AcceptHunk, RejectHunk, AcceptAllChanges, RejectAllChanges>;
 

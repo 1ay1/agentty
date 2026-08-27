@@ -257,6 +257,10 @@ Element diff_review(const Model& m) {
         max_ln = std::max(max_ln, hk.new_start + hk.new_len);
     const int gut_w = std::max(2, static_cast<int>(std::to_string(max_ln).size()));
 
+    // Set inside the hunk loop when the FOCUSED hunk overflows its window —
+    // gates the ^D/^U footer hint so it only appears when scrolling exists.
+    bool focused_overflows = false;
+
     for (int hi = 0; hi < static_cast<int>(fc.hunks.size()); ++hi) {
         const auto& hk = fc.hunks[static_cast<std::size_t>(hi)];
         const bool sel = hi == cursor->hunk_index;
@@ -289,34 +293,48 @@ Element diff_review(const Model& m) {
         // j/k walks the list.
         if (!sel) continue;
 
-        // Cap a single huge hunk's height so it can't blow past the viewport;
-        // show a "+N more lines" tail so nothing is silently hidden.
+        // Cap a single huge hunk's height so it can't blow past the viewport.
+        // The window slides by the cursor's body_scroll (^D/^U, PgDn/PgUp);
+        // "↑ N lines above" / "… N more" bracket it so nothing is silently
+        // hidden and the user knows both directions exist.
         constexpr int kMaxHunkRows = 24;
         auto lines = parse_hunk(hk.patch);
-        int shown = 0;
-        for (const auto& dl : lines) {
-            if (shown >= kMaxHunkRows) break;
-            rows.push_back((diff_code_line(dl, lang, gut_w) | padding(0, 0, 0, 4)).build());
-            ++shown;
-        }
-        if (static_cast<int>(lines.size()) > kMaxHunkRows)
+        const int nlines = static_cast<int>(lines.size());
+        // Clamp the offset precisely against the parsed rows (the reducer
+        // clamps loosely against the raw patch's newline count).
+        const int max_off = std::max(0, nlines - kMaxHunkRows);
+        const int off = std::clamp(cursor->body_scroll, 0, max_off);
+        focused_overflows = nlines > kMaxHunkRows;
+        if (off > 0)
             rows.push_back(text(std::format(
-                "      \xe2\x80\xa6 {} more lines in this hunk",
-                static_cast<int>(lines.size()) - kMaxHunkRows), fg_dim(muted)));
+                "      \xe2\x86\x91 {} lines above (^U)", off), fg_dim(muted)));
+        int shown = 0;
+        for (int li = off; li < nlines && shown < kMaxHunkRows; ++li, ++shown)
+            rows.push_back((diff_code_line(lines[static_cast<std::size_t>(li)],
+                                           lang, gut_w)
+                            | padding(0, 0, 0, 4)).build());
+        if (off + shown < nlines)
+            rows.push_back(text(std::format(
+                "      \xe2\x80\xa6 {} more lines in this hunk (^D)",
+                nlines - off - shown), fg_dim(muted)));
         rows.push_back(text(""));
     }
     rows.push_back(rule(muted));
 
     // ── Footer: phone-friendly keys, destructive actions tinted ──
-    rows.push_back(key_hints({
+    std::vector<Hint> hints = {
         {"j/k", "hunk", 6},
         {"h/l", "file", 5, m.d.pending_changes.size() > 1 ? fg : muted},
         {"Y", "accept", 7, success},
         {"N", "reject", 7, danger},
         {"^A", "all",  4, success},
         {"^X", "none", 3, danger},
-        {"Esc", all_done ? "apply" : "close", 8, all_done ? success : fg},
-    }));
+    };
+    if (focused_overflows)
+        hints.push_back({"^D/^U", "scroll", 2});
+    hints.push_back({"Esc", all_done ? "apply" : "close", 8,
+                     all_done ? success : fg});
+    rows.push_back(key_hints(std::move(hints)));
 
     auto content = (v(std::move(rows)) | padding(1, 2));
     return (v(content.build())
