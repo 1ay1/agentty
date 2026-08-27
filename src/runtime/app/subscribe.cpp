@@ -462,9 +462,16 @@ std::optional<Msg> on_smart_mode(const KeyEvent& ev) {
         }
     }
     if (auto* ck = std::get_if<CharKey>(&ev.key)) {
-        // 'x' resets the selected slot to auto; space/'t' toggles the row.
-        if (ck->codepoint == 'x' || ck->codepoint == 'X') return SmartModeClearSlot{};
-        if (ck->codepoint == ' ') return SmartModeSelect{};
+        char32_t c = ck->codepoint;
+        // Re-pressing the open key (^S) toggles the overlay shut — the
+        // dispatcher returns this handler's result unconditionally, so
+        // without this the key is swallowed (same class as the ^P/^/ picker
+        // bug). Legacy terminals send Ctrl-S as raw 0x13.
+        if (c == 0x13 || (ev.mods.ctrl && (c == U's' || c == U'S')))
+            return CloseSmartMode{};
+        // 'x' resets the selected slot to auto; space toggles the row.
+        if (c == 'x' || c == 'X') return SmartModeClearSlot{};
+        if (c == ' ') return SmartModeSelect{};
     }
     return std::nullopt;
 }

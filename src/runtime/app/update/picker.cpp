@@ -108,6 +108,16 @@ using maya::Cmd;
     // hand the kernel back so a mid-stream swap can't leave the wire running
     // against a thread that no longer exists.
     m.s.phase = phase::Idle{};
+    // Smart-Mode per-THREAD routing state must not leak into the new thread:
+    // complexity momentum (classify_score_with_context inherits a tier from
+    // the PREVIOUS turn), the session cascade bias, and the last turn's
+    // signature (outcome feedback would otherwise attribute the new thread's
+    // first reply to the OLD thread's route). The learned per-workspace
+    // priors (RoutingMemory) survive by design — they are cross-thread.
+    m.s.smart_turn_complexity  = smart::Complexity::Standard;
+    m.s.smart_effort_bias      = 0;
+    m.s.smart_turn_signature.clear();
+    m.s.smart_turn_had_failure = false;
     release_to_kernel();
     // Re-warm the active provider's TLS socket. The launch-time prewarm in
     // main() has usually aged out of the pool by now — a user reads a reply,
@@ -565,6 +575,11 @@ Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
                 persist_settings(m);
                 m.ui.effort_dirty = false;
             }
+            // Abandon a pending Smart-Mode slot assignment: hopping away from
+            // the model picker mid-assign must not leave the armed slot
+            // behind, or the NEXT regular model pick silently lands in the
+            // smart slot instead of switching the model.
+            m.ui.smart_assign_slot = -1;
             m.ui.model_picker = pick::Closed{};
             // Open at the row matching the currently-active provider. Fresh
             // rows with an empty query (so every provider is present to match).
@@ -1109,6 +1124,15 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
             if (e.thread.id.value.empty()) return done(std::move(m));
             // Old thread's skill activations leave context with it.
             tools::skills::reset_activations();
+            // Smart-Mode per-thread routing state belongs to the departing
+            // thread too — same reset as reset_to_fresh_thread (momentum,
+            // cascade bias, outcome-feedback signature). Without it the
+            // loaded thread's first turn inherits the OLD thread's tier
+            // momentum and its first follow-up trains the old signature.
+            m.s.smart_turn_complexity  = smart::Complexity::Standard;
+            m.s.smart_effort_bias      = 0;
+            m.s.smart_turn_signature.clear();
+            m.s.smart_turn_had_failure = false;
             // Optional timing probe. AGENTTY_LOAD_PROF=1 keeps surfacing
             // the synchronous portion of the load (rehydrate +
             // release_to_kernel) that still lives on the UI thread.

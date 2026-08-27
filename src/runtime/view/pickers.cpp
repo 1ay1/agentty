@@ -642,16 +642,32 @@ Element smart_mode_overlay(const Model& m) {
                                  : "  "} + std::string{lbl},
                  on ? (active ? "on" : "off") : std::string{"\xe2\x80\x94"} };
     };
+    // The four learning layers additionally require ORCHESTRATION (see the
+    // smart_mode.hpp accessors: routing_learning() = orchestration() && flag).
+    // Render their EFFECTIVE state, not the raw flag — a filled "on" dot on a
+    // layer that is actually inert (flag set, orchestration off) is a lie the
+    // user can't detect. Half-filled glyph + "needs orchestration" says both
+    // "your preference is remembered" and "it isn't running".
+    auto tog_dep = [&](bool flag, std::string_view lbl) -> Row {
+        if (!on) return { "  " + std::string{lbl}, "\xe2\x80\x94" };
+        const bool effective = flag && sm.orchestrate;
+        if (flag && !effective)
+            return { "\xe2\x97\x8d " + std::string{lbl},   // ◍ half-filled
+                     "needs orchestration" };
+        return { std::string{effective ? "\xe2\x97\x8f " : "\xe2\x97\x8b "}
+                     + std::string{lbl},
+                 effective ? "on" : "off" };
+    };
     std::vector<Row> rows = {
         {std::string{on ? "\xe2\x97\x8f Enabled" : "\xe2\x97\x8b Enabled"},
          on ? "on" : "off"},
         tog(sm.route_internal,  "  Internal routing"),
         tog(sm.orchestrate,     "  Orchestration"),
         tog(sm.route_subagents, "  Subagent routing"),
-        tog(sm.learn_routing,    "  Learned routing"),
-        tog(sm.outcome_feedback, "  Outcome feedback"),
-        tog(sm.speculative,      "  Speculative"),
-        tog(sm.recall_plans,     "  Plan recall"),
+        tog_dep(sm.learn_routing,    "  Learned routing"),
+        tog_dep(sm.outcome_feedback, "  Outcome feedback"),
+        tog_dep(sm.speculative,      "  Speculative"),
+        tog_dep(sm.recall_plans,     "  Plan recall"),
         {"  Strategic",      on ? shown(smart::ModelRole::Strategic)      + slot_suffix(sm.strategic)      : std::string{"\xe2\x80\x94"}},
         {"  Implementation", on ? shown(smart::ModelRole::Implementation) + slot_suffix(sm.implementation) : std::string{"\xe2\x80\x94"}},
         {"  Utility",        on ? shown(smart::ModelRole::Utility)        + slot_suffix(sm.utility)        : std::string{"\xe2\x80\x94"}},
@@ -678,13 +694,39 @@ Element smart_mode_overlay(const Model& m) {
             "  Learned " + std::to_string(rp) + " routing pattern"
             + (rp == 1 ? "" : "s") + " \xc2\xb7 " + std::to_string(dp)
             + " plan" + (dp == 1 ? "" : "s") + " in this repo", fg_dim(muted)));
+        // Live SESSION state — the two adaptive inputs that move the next
+        // turn's route (cascade bias + tier momentum). Without this line the
+        // "learning" is a black box: a route that shifted from a session
+        // regret is indistinguishable from classifier noise. Only shown when
+        // either is non-neutral (neutral state = no noise).
+        if (sm.enabled
+            && (m.s.smart_effort_bias != 0
+                || m.s.smart_turn_complexity != smart::Complexity::Standard)) {
+            std::string live = "  This session: ";
+            if (m.s.smart_effort_bias != 0) {
+                live += "effort bias ";
+                live += (m.s.smart_effort_bias > 0 ? "+" : "");
+                live += std::to_string(m.s.smart_effort_bias);
+            }
+            if (m.s.smart_turn_complexity != smart::Complexity::Standard) {
+                if (m.s.smart_effort_bias != 0) live += " \xc2\xb7 ";
+                live += "momentum ";
+                live += smart::to_string(m.s.smart_turn_complexity);
+            }
+            cfg.footer.push_back(text(std::move(live), fg_dim(muted)));
+        }
     }
-    cfg.footer.push_back(key_hints({
-        {"\xe2\x86\x91\xe2\x86\x93", "move", 5},        // ↑↓
-        {"Enter", o->index < 8 ? "toggle" : "set model", 4},
-        {"x", "auto", 3},
-        {"Esc", "close", 4},
-    }));
+    {
+        std::vector<Hint> hints = {
+            {"\xe2\x86\x91\xe2\x86\x93", "move", 5},        // ↑↓
+            {"Enter", o->index < 8 ? "toggle" : "set model", 4},
+        };
+        // `x` only acts on the three model-slot rows (8-10) — advertising it
+        // on a toggle row promises a key that silently does nothing.
+        if (o->index >= 8) hints.push_back({"x", "auto", 3});
+        hints.push_back({"Esc", "close", 4});
+        cfg.footer.push_back(key_hints(std::move(hints)));
+    }
     return Picker{std::move(cfg)}.build();
 }
 
