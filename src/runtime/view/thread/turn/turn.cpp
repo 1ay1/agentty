@@ -1163,6 +1163,10 @@ void append_assistant_tool_panel(maya::Turn::Config& cfg,
 //     footnote above the answer. Baked at freeze; never changes, never needs a
 //     keystroke, so it stays correct once the turn scrolls into history.
 std::optional<maya::Element> reasoning_slot(const Message& msg, const Model& m) {
+    // Global display switch (^R in the model picker). Off => no reasoning block
+    // at all, for every provider. This is also what makes the Anthropic
+    // transport request visible thinking, so "off" is a clean, cheap default.
+    if (!m.d.show_reasoning) return std::nullopt;
     const std::string_view reasoning = msg.reasoning_display_text();
     if (reasoning.empty()) return std::nullopt;
 
@@ -1176,14 +1180,40 @@ std::optional<maya::Element> reasoning_slot(const Message& msg, const Model& m) 
     const bool active = m.s.is_streaming() && !answer_started;
 
     if (active) {
-        // LIVE: maya's ThinkingBlock — dim gutter-bordered thought stream with
-        // a breathing spinner, auto-expanded, height-capped so a long chain of
-        // thought can't shove the (imminent) answer off-screen.
+        // LIVE: a dim, gutter-bordered thought stream that reads like a live
+        // log — it shows the TAIL (most recent lines), so it always appears to
+        // move as new reasoning arrives instead of freezing on the first few
+        // lines while text piles up unseen below. A breathing spinner + a
+        // "thinking" header make the live state unmistakable.
+        //
+        // We tail the content OURSELVES (ThinkingBlock caps from the head) so
+        // the newest thought is always on screen. Keep a generous window so
+        // there's a sense of flow, but bounded so it can't shove the imminent
+        // answer off-screen.
+        constexpr std::size_t kTailLines = 10;
+        std::string_view tail = reasoning;
+        // Walk back kTailLines newlines from the end.
+        std::size_t shown = 0;
+        std::size_t pos = tail.size();
+        while (pos > 0) {
+            const std::size_t nl = tail.rfind('\n', pos - 1);
+            if (nl == std::string_view::npos) break;
+            if (++shown >= kTailLines) { tail = tail.substr(nl + 1); break; }
+            pos = nl;
+        }
+        // Drop a trailing empty line so the caret sits on the live text, not a
+        // blank row below it.
+        while (!tail.empty() && (tail.back() == '\n' || tail.back() == '\r'))
+            tail.remove_suffix(1);
+
         maya::ThinkingBlock tb;
-        tb.set_content(reasoning);
-        tb.set_active(true);
+        tb.set_content(tail);
+        tb.set_active(true);        // header spinner + "thinking…"
         tb.set_expanded(true);
-        tb.set_max_visible_lines(8);
+        // Already tailed — don't let the widget re-cap from the head.
+        tb.set_max_visible_lines(0);
+        // Advance the spinner off the shared animation clock so it breathes in
+        // lockstep with the rest of the live chrome (deterministic in tests).
         tb.advance(static_cast<float>(::maya::anim_now_ms() % 100000) / 1000.0f);
         return maya::Element{tb.build()};
     }

@@ -185,6 +185,11 @@ struct Model {
         // default — edits still queue in pending_changes (Ctrl+R opens the
         // pane), just without the always-on banner.
         bool                             show_changes_strip = false;
+        // Show the model's reasoning/thinking block in the transcript AND ask
+        // Anthropic for visible thinking (interleaved-thinking beta). Loaded
+        // from Settings at startup; toggled live via the palette (Ctrl+K →
+        // "Reasoning"). Off by default. Provider-agnostic.
+        bool                             show_reasoning = false;
         std::optional<PendingPermission> pending_permission;
 
         // Session-scoped "always allow" grants, keyed by tool name
