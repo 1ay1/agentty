@@ -201,6 +201,27 @@ struct ModelCapabilities {
             && (generation > 4 || (generation == 4 && revision >= 7));
     }
 
+    // Anthropic thinking-mode selection (the interface changed at the 4.6
+    // boundary). TRUE => send thinking:{type:"adaptive"} + output_config.effort;
+    // FALSE => send the legacy thinking:{type:"enabled", budget_tokens:N}.
+    //
+    //   • Opus/Sonnet 4.5 and earlier: ONLY "enabled" — "adaptive" 400s
+    //     ("adaptive thinking is not supported on this model").
+    //   • Opus 4.6: both accepted; we prefer adaptive (the forward path).
+    //   • Opus 4.7 / 4.8, Sonnet 4.6+, and the flagship 5+ lane: ONLY
+    //     "adaptive" ("enabled"/budget_tokens 400s).
+    // Unknown ids default to adaptive (every current flagship is 4.6+; a
+    // stale-guess 400 self-heals — but see transport.cpp for the exact wire).
+    [[nodiscard]] constexpr bool uses_adaptive_thinking() const noexcept {
+        if (family == Family::Fable || family == Family::Mythos)
+            return generation >= 5;
+        if (family == Family::Opus || family == Family::Sonnet)
+            return generation > 4 || (generation == 4 && revision >= 6);
+        // Non-Claude families don't use this interface at all; the caller
+        // only consults this on the Anthropic wire.
+        return generation >= 5;
+    }
+
     // ── Context-window detection (the 1M-window question) ────────────────
     // Verified against the Claude Code binary's model catalog (each entry
     // carries `context: {window:200000, supports_1m_beta, supports_1m_suffix}`).

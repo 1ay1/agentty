@@ -401,17 +401,45 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
     // response are captured and replayed by messages_json_string (see below)
     // so tool_use turns don't 400 for a dropped thinking block.
     if (!req.effort.empty()) {
-        json thinking = json{{"type", "adaptive"}};
-        // VISIBLE reasoning: adaptive thinking REDACTS its text on the wire by
-        // default (thinking_delta.thinking arrives empty), which is why the
-        // reasoning block had nothing to render. When the user turned on
-        // "show reasoning" (^R), ask for the summarized thinking stream so the
-        // model's actual reasoning deltas reach us. Paired with the
-        // interleaved-thinking beta added by select_betas().
-        if (req.show_reasoning)
-            thinking["display"] = "summarized";
-        body["thinking"]       = std::move(thinking);
-        body["output_config"]  = json{{"effort", req.effort}};
+        // Thinking MODE is revision-gated (Anthropic changed the interface at
+        // the 4.6/4.7 boundary):
+        //   • Opus/Sonnet 4.5 and EARLIER (revision <= 5): only
+        //     thinking:{type:"enabled", budget_tokens:N} is accepted;
+        //     type:"adaptive" 400s ("adaptive thinking is not supported on
+        //     this model").
+        //   • 4.6: both work.
+        //   • 4.7 / 4.8 / Claude 5+: only type:"adaptive" + output_config.effort
+        //     (budget_tokens removed; type:"enabled" 400s).
+        // We decode the revision from the wire model id and pick accordingly.
+        const auto tcaps = ModelCapabilities::from_id(wire_model_id(req.model));
+        const bool legacy_enabled = !tcaps.uses_adaptive_thinking();
+
+        if (legacy_enabled) {
+            // Map the effort tier to a thinking token budget (>= 1024 min).
+            // Scales with tier; capped well under max_tokens so the answer
+            // still has room.
+            int budget = 8000;
+            if      (req.effort == "low")    budget = 4000;
+            else if (req.effort == "medium") budget = 8000;
+            else if (req.effort == "high")   budget = 16000;
+            else if (req.effort == "xhigh")  budget = 24000;
+            else if (req.effort == "max")    budget = 32000;
+            body["thinking"] = json{{"type", "enabled"},
+                                    {"budget_tokens", budget}};
+            // On the enabled path the visible thinking arrives natively via
+            // thinking_delta — no display field. (display:"summarized" is an
+            // adaptive-mode concept.)
+        } else {
+            json thinking = json{{"type", "adaptive"}};
+            // VISIBLE reasoning: adaptive thinking REDACTS its text on the
+            // wire by default (thinking_delta.thinking arrives empty). When
+            // the user turned on "show reasoning" (^R), ask for the summarized
+            // thinking stream so the model's actual reasoning deltas reach us.
+            if (req.show_reasoning)
+                thinking["display"] = "summarized";
+            body["thinking"]      = std::move(thinking);
+            body["output_config"] = json{{"effort", req.effort}};
+        }
     }
     // Splice marker for the messages array. nlohmann gives the dumped
     // form `"messages":<unique-string>"`; we string-replace the
