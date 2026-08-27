@@ -656,9 +656,14 @@ void freeze_range(Model& m, std::size_t from, std::size_t to) {
         // before its drain frame). This is what makes the settled map
         // self-emptying and its cap unnecessary. Idempotent no-op for the
         // common case where the message had no cache entry.
-        for (std::size_t k = i; k < run_end; ++k)
-            m.ui.view_cache.drop(m.d.current.id,
-                                 m.d.current.messages[k].id);
+        for (std::size_t k = i; k < run_end; ++k) {
+            const auto& mid = m.d.current.messages[k].id;
+            m.ui.view_cache.drop(m.d.current.id, mid);
+            // Sibling reasoning slot (turn.cpp's MdView::Reasoning keys the
+            // reasoning StreamingMarkdown under mid + "#r"). Drop it too so
+            // the reasoning reveal widget doesn't leak past freeze.
+            m.ui.view_cache.drop(m.d.current.id, MessageId{mid.value + "#r"});
+        }
 
         i = run_end;
     }

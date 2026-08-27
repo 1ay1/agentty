@@ -14,6 +14,7 @@
 #include <maya/widget/agent_timeline.hpp>
 #include <maya/widget/markdown.hpp>
 #include <maya/widget/thinking.hpp>  // reasoning/thinking block
+#include <maya/widget/reasoning.hpp>  // ReasoningStream (streaming reasoning block)
 #include <maya/core/render_context.hpp> // available_height (resize-shrink detect)
 #include <maya/core/anim_clock.hpp>     // maya::anim_now_ms (deterministic under a test clock)
 #include <maya/render/cache_id.hpp>
@@ -59,7 +60,28 @@ namespace {
 //    has dirtied, so the per-frame cost is the same as the finalized
 //    path. The tail re-parses on each frame for finalized messages too,
 //    but that's a single inline parse on the last few bytes — cheap.
-maya::Element cached_markdown_for(const Message& msg, const Model& m) {
+// Which body of a message a StreamingMarkdown slot renders. The ANSWER
+// path (default) streams msg.text + streaming_text + pending_stream through
+// the message's own cache slot. The REASONING path streams
+// msg.reasoning_display_text() through a SEPARATE, sibling cache slot
+// (MessageId suffixed with "#r") so reasoning gets the identical smooth
+// reveal + settle machinery as normal text — it streams like normal text,
+// caches like normal text, and stays fully rendered after settle (never
+// folds). The two slots are independent widgets so the answer body and the
+// reasoning block don't fight over one reveal cursor.
+enum class MdView : std::uint8_t { Answer, Reasoning };
+
+// MessageId of the cache slot for `view` on message `mid`. Answer uses the
+// message id verbatim; Reasoning appends "#r" so it lives in its own slot
+// (dropped alongside the answer slot at freeze — see frozen.cpp).
+inline MessageId md_slot_id(const MessageId& mid, MdView view) {
+    return view == MdView::Reasoning ? MessageId{mid.value + "#r"} : mid;
+}
+
+maya::Element cached_markdown_for(const Message& msg, const Model& m,
+                                  MdView view = MdView::Answer) {
+    const MessageId slot_id = md_slot_id(msg.id, view);
+    const bool reasoning_view = view == MdView::Reasoning;
     // Lifecycle-aware cache access (see cache.hpp's partition rationale).
     // A message's md slot holds LOAD-BEARING animation state — the
     // StreamingMarkdown reveal widget + defer bookkeeping — exactly while
@@ -77,21 +99,28 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
     // is settled and staged (dropped at freeze). The predicate is
     // deliberately the same shape as turn.cpp's `subturn_stably_keyable`
     // negation — liveness has ONE definition in this view.
-    const bool has_live_bytes = !msg.streaming_text.empty()
-                             || !msg.pending_stream.empty();
+    // Reasoning is "live" while the stream is active and no answer body has
+    // begun (reasoning bytes may still arrive). Answer liveness is the
+    // classic streaming/pending signal.
+    const bool reasoning_active =
+        m.s.is_streaming() && msg.text.empty() && msg.streaming_text.empty();
+    const bool has_live_bytes = reasoning_view
+        ? (!msg.streaming_text.empty() || !msg.pending_stream.empty()
+           || reasoning_active)
+        : (!msg.streaming_text.empty() || !msg.pending_stream.empty());
     const auto& probe = m.ui.view_cache; // const peek, no touch/reorder
     const bool widget_animating = [&] {
         // is_pinned is a cheap const lookup; if the slot is already
         // pinned from last frame we keep pinning until it drains (checked
         // post-update below via the same accessor). If it's settled or
         // absent we only pin when the message carries live bytes.
-        return probe.is_pinned(m.d.current.id, msg.id);
+        return probe.is_pinned(m.d.current.id, slot_id);
     }();
     const bool want_pin = has_live_bytes || widget_animating;
 
     auto& cache = want_pin
-        ? m.ui.view_cache.message_md_live(m.d.current.id, msg.id)
-        : m.ui.view_cache.message_md    (m.d.current.id, msg.id);
+        ? m.ui.view_cache.message_md_live(m.d.current.id, slot_id)
+        : m.ui.view_cache.message_md    (m.d.current.id, slot_id);
 
     if (!cache.streaming) {
         cache.streaming = std::make_shared<maya::StreamingMarkdown>();
@@ -175,14 +204,28 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
     // frame just to discover nothing changed. Compare the three sizes
     // instead: if none grew, the source bytes are byte-identical and we
     // can skip straight to build().
-    const bool sizes_unchanged =
-        cache.last_text_size      == msg.text.size()
-     && cache.last_streaming_size == msg.streaming_text.size()
-     && cache.last_pending_size   == msg.pending_stream.size();
+    // In REASONING mode the body is a single growing string
+    // (reasoning_display_text): no text/streaming/pending triple-buffer.
+    // Stash it in the persistent combined_source buffer (NOT a local) so
+    // set_content_async's string_view stays valid across frames, and diff
+    // on its size like the answer path.
+    if (reasoning_view) {
+        std::string_view rsrc = msg.reasoning_display_text();
+        if (rsrc != cache.combined_source)
+            cache.combined_source.assign(rsrc.begin(), rsrc.end());
+    }
 
-    const std::string* source_ptr = &msg.text;
-    const bool has_live = !msg.streaming_text.empty()
-                       || !msg.pending_stream.empty();
+    const bool sizes_unchanged = reasoning_view
+      ? (cache.last_text_size == cache.combined_source.size())
+      : (cache.last_text_size      == msg.text.size()
+     && cache.last_streaming_size == msg.streaming_text.size()
+     && cache.last_pending_size   == msg.pending_stream.size());
+
+    const std::string* source_ptr =
+        reasoning_view ? &cache.combined_source : &msg.text;
+    const bool has_live = reasoning_view
+      ? false // reasoning has one buffer; source_ptr already points at it
+      : (!msg.streaming_text.empty() || !msg.pending_stream.empty());
     if (has_live) {
         if (msg.text.empty() && msg.pending_stream.empty()) {
             // Streaming-text only, nothing buffered — reference it
@@ -206,16 +249,22 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
     const std::string& source = *source_ptr;
 
     // Remember the component sizes for next frame's no-op check.
-    cache.last_text_size      = msg.text.size();
+    cache.last_text_size      = reasoning_view ? source.size() : msg.text.size();
     cache.last_streaming_size = msg.streaming_text.size();
     cache.last_pending_size   = msg.pending_stream.size();
 
-    const bool settled = !msg.text.empty()
-                       && msg.streaming_text.empty()
-                       && msg.pending_stream.empty();
-    if (settled && !cache.combined_source.empty()) {
+    // A reasoning slot settles when the stream stops OR its answer body has
+    // begun (bytes will no longer arrive on the reasoning channel). The
+    // answer slot settles the classic way.
+    const bool settled = reasoning_view
+      ? (!reasoning_active && !source.empty())
+      : (!msg.text.empty()
+         && msg.streaming_text.empty()
+         && msg.pending_stream.empty());
+    if (!reasoning_view && settled && !cache.combined_source.empty()) {
         // Reclaim the scratch buffer the moment streaming_text
         // drains — next freeze takes the snapshot off msg.text.
+        // (Reasoning keeps its snapshot HERE, so it is exempt.)
         std::string{}.swap(cache.combined_source);
     }
 
@@ -237,7 +286,7 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
         // (not a reference into the slot), so the migrate that follows
         // can safely move the Entry. Idempotent: no-op once settled.
         if (want_pin)
-            (void)m.ui.view_cache.message_md(m.d.current.id, msg.id);
+            (void)m.ui.view_cache.message_md(m.d.current.id, slot_id);
         return built;
     }
 
@@ -1154,108 +1203,44 @@ void append_assistant_tool_panel(maya::Turn::Config& cfg,
 // Message::reasoning_display_text() means Anthropic thinking, Codex reasoning
 // summaries, and OpenAI-compat reasoning_content all render the same block.
 //
-// UX (no interaction, correct with immutable scrollback — nothing to toggle):
-//   • LIVE (reasoning streaming, answer not yet begun): a dim, left-gutter-
-//     bordered thought stream with a breathing spinner, auto-expanded and
-//     height-capped — you watch the model think in real time.
-//   • SETTLED (answer started / turn done): it collapses PERMANENTLY to one
-//     quiet line — "✦ Thought for ~N tokens · <first line glimpse>" — a subtle
-//     footnote above the answer. Baked at freeze; never changes, never needs a
-//     keystroke, so it stays correct once the turn scrolls into history.
+// CENTRAL STREAMING: reasoning text flows through the SAME StreamingMarkdown
+// reveal + cache machinery as normal answer text (cached_markdown_for with
+// MdView::Reasoning, a sibling "#r" cache slot). So it streams smoothly and
+// fast — incremental parse, rate-smoothed reveal cursor, component cache —
+// exactly like the answer body, instead of re-parsing a tail window every
+// frame.
+//
+// UX (no interaction, correct with immutable scrollback):
+//   • LIVE: a dim, left-gutter-bordered thought stream with a breathing
+//     "Reasoning" header, streaming the FULL text via the reveal cursor.
+//   • SETTLED: the SAME block stays fully rendered — it does NOT fold to a
+//     one-line summary. The header loses its spinner and reads "✦ Reasoned
+//     (~N tokens)"; the complete reasoning remains below it, dim, above the
+//     answer. Baked at freeze; never changes, never needs a keystroke.
 std::optional<maya::Element> reasoning_slot(const Message& msg, const Model& m) {
     // Global display switch (^R in the model picker). Off => no reasoning block
     // at all, for every provider. This is also what makes the Anthropic
     // transport request visible thinking, so "off" is a clean, cheap default.
     if (!m.d.show_reasoning) return std::nullopt;
-    const std::string_view reasoning = msg.reasoning_display_text();
-    if (reasoning.empty()) return std::nullopt;
+    if (msg.reasoning_display_text().empty()) return std::nullopt;
 
-    // "Actively reasoning" = the wire is streaming AND no answer body has
-    // arrived yet. That's the window where showing the live thought stream is
-    // most useful. Once prose starts (or the turn settles), reasoning becomes
-    // a quiet, PERMANENT one-line summary — no fold state, nothing to toggle,
-    // so it's correct even once the turn freezes into immutable scrollback.
+    // "Actively reasoning" = stream is active AND no answer body has
+    // arrived. Drives the header spinner + rail hue; the body streams
+    // either way.
     const bool answer_started =
         !msg.text.empty() || !msg.streaming_text.empty();
     const bool active = m.s.is_streaming() && !answer_started;
 
-    if (active) {
-        // LIVE: a dim, gutter-bordered thought stream that reads like a live
-        // log — it shows the TAIL (most recent lines), so it always appears to
-        // move as new reasoning arrives instead of freezing on the first few
-        // lines while text piles up unseen below. A breathing spinner + a
-        // "thinking" header make the live state unmistakable.
-        //
-        // We tail the content OURSELVES (ThinkingBlock caps from the head) so
-        // the newest thought is always on screen. Keep a generous window so
-        // there's a sense of flow, but bounded so it can't shove the imminent
-        // answer off-screen.
-        constexpr std::size_t kTailLines = 10;
-        std::string_view tail = reasoning;
-        // Walk back kTailLines newlines from the end.
-        std::size_t shown = 0;
-        std::size_t pos = tail.size();
-        while (pos > 0) {
-            const std::size_t nl = tail.rfind('\n', pos - 1);
-            if (nl == std::string_view::npos) break;
-            if (++shown >= kTailLines) { tail = tail.substr(nl + 1); break; }
-            pos = nl;
-        }
-        // Drop a trailing empty line so the caret sits on the live text, not a
-        // blank row below it.
-        while (!tail.empty() && (tail.back() == '\n' || tail.back() == '\r'))
-            tail.remove_suffix(1);
+    // The reasoning body streams through the CENTRAL streaming-markdown path
+    // (own "#r" cache slot, cross-frame-persistent) so it reveals smoothly
+    // like normal text and stays fully rendered after settle — no fold. The
+    // maya::ReasoningStream widget owns the polished chrome (animated header
+    // + left rail) and we hand it the cached body.
+    maya::Element body = cached_markdown_for(msg, m, MdView::Reasoning);
 
-        maya::ThinkingBlock tb;
-        tb.set_content(tail);
-        tb.set_active(true);        // header spinner + "thinking…"
-        tb.set_expanded(true);
-        // Already tailed — don't let the widget re-cap from the head.
-        tb.set_max_visible_lines(0);
-        // Advance the spinner off the shared animation clock so it breathes in
-        // lockstep with the rest of the live chrome (deterministic in tests).
-        tb.advance(static_cast<float>(::maya::anim_now_ms() % 100000) / 1000.0f);
-        return maya::Element{tb.build()};
-    }
-
-    // SETTLED: one quiet line that stays put forever — a ✦ sigil, a dim
-    // "Thought for ~N tokens" (token estimate is always available and needs
-    // no timing plumbing), and a short glimpse of the reasoning's first line
-    // so it's a peek, not just a counter. Reads as a subtle footnote above
-    // the answer; never dominates, never needs interaction.
-    const std::size_t approx_tokens = (reasoning.size() + 3) / 4;
-    std::string_view first_line = reasoning.substr(0, reasoning.find('\n'));
-    // Trim leading whitespace and clip the glimpse so the line can't wrap.
-    while (!first_line.empty() && (first_line.front() == ' ' ||
-                                   first_line.front() == '\t'))
-        first_line.remove_prefix(1);
-    constexpr std::size_t kGlimpse = 56;
-    const bool clipped = first_line.size() > kGlimpse;
-    if (clipped) first_line = first_line.substr(0, kGlimpse);
-
-    std::string content;
-    std::vector<maya::StyledRun> runs;
-    auto push = [&](std::string_view part, maya::Style st) {
-        const std::size_t s = content.size();
-        content.append(part);
-        runs.push_back(maya::StyledRun{s, content.size() - s, st});
-    };
-    push("\xe2\x9c\xa6 ", maya::Style{}.with_fg(status_info));        // ✦
-    push("Thought", maya::Style{}.with_fg(muted).with_dim());
-    push(" for ~" + std::to_string(approx_tokens) + " tokens",
-         maya::Style{}.with_fg(muted).with_dim());
-    if (!first_line.empty()) {
-        push("  \xc2\xb7  ", maya::Style{}.with_fg(muted));            // ·
-        std::string glimpse{first_line};
-        if (clipped) glimpse += "\xe2\x80\xa6";                      // …
-        push(glimpse, maya::Style{}.with_fg(muted).with_italic());
-    }
-    return maya::Element{maya::TextElement{
-        .content = std::move(content),
-        .style   = {},
-        .wrap    = maya::TextWrap::TruncateEnd,   // one row, never wraps
-        .runs    = std::move(runs),
-    }};
+    maya::ReasoningStream rs;
+    rs.set_live(active);
+    return rs.build_with_body(std::move(body));
 }
 
 // Single-message body slot append: text (if any) then this message's
