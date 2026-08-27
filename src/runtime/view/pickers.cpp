@@ -486,10 +486,16 @@ Element provider_picker(const Model& m) {
             row.active         = active;
         } else if (const auto* spec = r.custom_host()) {
             const bool active = (*spec == active_id);
+            const bool confirming = (picker->confirm_remove == *spec);
             row.leading        = *spec + "  custom OpenAI-compatible host";
             row.leading_style  = active ? fg_bold(fg) : fg_of(muted);
-            row.trailing       = "\xe2\x9c\x93 ready";
-            row.trailing_style = fg_of(success);
+            if (confirming) {
+                row.trailing       = "\xe2\x9c\x97 press Del again to remove";
+                row.trailing_style = fg_of(warn);
+            } else {
+                row.trailing       = "\xe2\x9c\x93 ready";
+                row.trailing_style = fg_of(success);
+            }
             row.active         = active;
         } else {   // NewCustomHost sentinel
             row.leading        = std::string{"Custom host\xe2\x80\xa6  "}
@@ -523,6 +529,7 @@ Element provider_picker(const Model& m) {
         {"\xe2\x86\x91\xe2\x86\x93", "move", 5},        // ↑↓
         {"type", "filter", 4},
         {"Enter", enter_opens_accounts ? "accounts" : "switch", 5},
+        {"Del", picker->confirm_remove.empty() ? "remove host" : "confirm", 2},
         {"^/", "models", 3},                       // cross-hint: model picker
         {"Esc", "close", 4},
     }));

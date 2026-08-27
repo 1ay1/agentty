@@ -407,6 +407,11 @@ struct ProviderPickerSelect {};
 // narrows to fuzzy/substring matches on the id + label + blurb.
 struct ProviderPickerFilterInput { char32_t codepoint; };
 struct ProviderPickerFilterBackspace {};
+// Del/d on a SAVED CUSTOM HOST row — two-press delete (confirm_remove) that
+// removes the host from Settings.provider_keys + provider_models. Mirrors
+// ThreadListDelete / AccountRemove. No-op on preset / ACP / sentinel rows
+// (those aren't user-created and can't be removed).
+struct ProviderPickerDelete {};
 
 // ── Thread list ──────────────────────────────────────────────────────────
 struct OpenThreadList {};
@@ -852,7 +857,8 @@ using ModelPickerMsg = std::variant<
 using ProviderPickerMsg = std::variant<
     OpenProviderPicker, CloseProviderPicker, ProviderPickerMove,
     ProviderPickerJump, ProviderPickerSelect,
-    ProviderPickerFilterInput, ProviderPickerFilterBackspace>;
+    ProviderPickerFilterInput, ProviderPickerFilterBackspace,
+    ProviderPickerDelete>;
 
 using ThreadListMsg = std::variant<
     OpenThreadList, CloseThreadList, ThreadListMove, ThreadListJump,

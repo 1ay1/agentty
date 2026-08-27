@@ -41,6 +41,23 @@ Step submit_message(Model m) {
     if (m.ui.composer.text.empty() && m.ui.composer.attachments.empty())
         return done(std::move(m));
 
+    // No model resolved yet — don't start a turn. Sending `"model": ""` to a
+    // local OpenAI-compatible server (llama.cpp / vLLM) is rejected, and the
+    // rejection feeds the turn's retry machine, which re-fires forever: the
+    // "dead loop when prompted" a freshly-selected local preset shows before
+    // its /models fetch has landed and auto-selected a model. Refuse cleanly
+    // and tell the user, keeping their text in the composer so nothing is
+    // lost. (Hosted providers always have a model id, so this only bites the
+    // local-preset-before-models-loaded window it's meant to cover.)
+    if (m.d.model_id.value.empty()) {
+        m.s.status = m.s.models_loading
+            ? "loading models\xe2\x80\xa6 pick one (^/) before sending"
+            : "no model selected \xe2\x80\x94 open the model picker (^/) first";
+        m.s.status_until = std::chrono::steady_clock::now()
+                         + std::chrono::seconds{4};
+        return done(std::move(m));
+    }
+
     // The pending-changes review strip covers ONE window: between the agent
     // finishing its edits and the user's next message. Sending a new turn ends
     // that window — the edits are already on disk, so submitting means "I've

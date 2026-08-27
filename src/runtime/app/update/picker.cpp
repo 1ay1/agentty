@@ -562,12 +562,14 @@ Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
         [&](ProviderPickerMove& e) -> Step {
             auto* p = pick::opened(m.ui.provider_picker);
             if (!p || n == 0) return done(std::move(m));
+            p->confirm_remove.clear();   // navigating disarms a pending delete
             p->index = (p->index + e.delta + n) % n;
             return done(std::move(m));
         },
         [&](ProviderPickerJump& e) -> Step {
             auto* p = pick::opened(m.ui.provider_picker);
             if (!p || n == 0) return done(std::move(m));
+            p->confirm_remove.clear();   // navigating disarms a pending delete
             using W = ProviderPickerJump::Where;
             constexpr int kPage = 14;  // matches kViewportH in pickers.cpp
             switch (e.where) {
@@ -615,6 +617,43 @@ Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
             if (!p->query.empty()) p->query.pop_back();
             p->index = 0;
             return done(std::move(m));
+        },
+        [&](ProviderPickerDelete) -> Step {
+            auto* p = pick::opened(m.ui.provider_picker);
+            if (!p || p->index < 0 || p->index >= n)
+                return done(std::move(m));
+            const ui::ProviderRow& row =
+                rows[static_cast<std::size_t>(p->index)];
+            // Only SAVED CUSTOM HOSTS are user-created and removable. Presets,
+            // ACP agents, and the "Custom host…" sentinel are not.
+            const std::string* spec = row.custom_host();
+            if (!spec) {
+                p->confirm_remove.clear();
+                return done(std::move(m));
+            }
+            // Two-press: first press ARMS (marks confirm_remove on this spec),
+            // second press on the SAME row COMMITS. Mirrors ThreadListDelete /
+            // AccountRemove.
+            if (p->confirm_remove != *spec) {
+                p->confirm_remove = *spec;
+                return done(std::move(m));
+            }
+            const std::string removed = *spec;
+            {
+                auto s = deps().load_settings();
+                s.provider_keys.erase(removed);    // the saved host lives here
+                s.provider_models.erase(removed);  // its remembered model
+                deps().save_settings(s);
+            }
+            p->confirm_remove.clear();
+            // Rebuild the row list so the removed host is gone; clamp cursor.
+            auto s2 = deps().load_settings();
+            const auto fresh = ui::build_provider_rows(
+                provider::saved_custom_hosts(s2.provider_keys), p->query);
+            if (!fresh.empty() && p->index >= static_cast<int>(fresh.size()))
+                p->index = static_cast<int>(fresh.size()) - 1;
+            auto toast = set_status_toast(m, "removed custom host: " + removed);
+            return {std::move(m), std::move(toast)};
         },
         [&](ProviderPickerSelect) -> Step {
             // Capture the cursor before closing: assigning Closed destroys the

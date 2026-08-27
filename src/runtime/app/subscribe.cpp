@@ -375,6 +375,10 @@ std::optional<Msg> on_provider_picker(const KeyEvent& ev) {
             case SpecialKey::Down:     return ProviderPickerMove{+1};
             // Backspace edits the live search query rather than paging.
             case SpecialKey::Backspace: return ProviderPickerFilterBackspace{};
+            // Del removes a saved custom host (two-press). Mirrors the account
+            // list's Del/d; here `d` is reserved for the search filter, so
+            // only the dedicated Delete key drives it.
+            case SpecialKey::Delete:   return ProviderPickerDelete{};
             case SpecialKey::Home:     return ProviderPickerJump{ProviderPickerJump::Where::Home};
             case SpecialKey::End:      return ProviderPickerJump{ProviderPickerJump::Where::End};
             case SpecialKey::PageUp:   return ProviderPickerJump{ProviderPickerJump::Where::PageUp};
