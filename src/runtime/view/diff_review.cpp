@@ -158,14 +158,16 @@ Element diff_review(const Model& m) {
 
     // ── File rail: every file, its net status + diffstat, current one lit ──
     // Shows the WHOLE changeset at a glance (SOTA: you never lose the forest).
-    // Built as ONE styled TextElement (TruncateEnd) so with many files it clips
-    // cleanly at the pane edge instead of squeezing every name.
+    // HORIZONTALLY SCROLLED: when the changeset is wider than the pane, the
+    // strip slides so the CURRENT file is always in view — leading files
+    // collapse into a "…" chip and the tail clips via TruncateEnd. Without
+    // this, h/l could move focus to a file rendered entirely off-screen.
     {
-        std::string content = "  ";
-        std::vector<StyledRun> runs;
-        auto seg = [&](const std::string& s, Style st) {
-            runs.push_back({content.size(), s.size(), st}); content += s;
-        };
+        // Build per-file segment lists first (text + style pieces), so the
+        // width-aware component below can start the strip at any file.
+        struct RailChunk { std::vector<std::pair<std::string, Style>> pieces; int width = 0; };
+        std::vector<RailChunk> chunks;
+        chunks.reserve(m.d.pending_changes.size());
         for (int i = 0; i < static_cast<int>(m.d.pending_changes.size()); ++i) {
             const auto& f = m.d.pending_changes[static_cast<std::size_t>(i)];
             bool anyrej = false, anypend = false;
@@ -179,15 +181,50 @@ Element diff_review(const Model& m) {
             const bool cur = (i == fidx);
             std::string name = f.path;
             if (auto sl = name.rfind('/'); sl != std::string::npos) name = name.substr(sl + 1);
-            if (i > 0) seg("   ", Style{});
-            seg(std::string(status_dot(roll)) + " ", Style{}.with_fg(status_color(roll)));
-            seg(name, cur ? Style{}.with_fg(fg).with_bold() : Style{}.with_fg(muted));
-            seg(std::format(" +{}", f.added), Style{}.with_fg(success).with_dim());
-            seg(std::format(" -{}", f.removed), Style{}.with_fg(danger).with_dim());
+            RailChunk ck;
+            auto piece = [&](std::string s, Style st) {
+                ck.width += string_width(s);
+                ck.pieces.emplace_back(std::move(s), st);
+            };
+            piece(std::string(status_dot(roll)) + " ", Style{}.with_fg(status_color(roll)));
+            piece(std::move(name), cur ? Style{}.with_fg(fg).with_bold() : Style{}.with_fg(muted));
+            piece(std::format(" +{}", f.added), Style{}.with_fg(success).with_dim());
+            piece(std::format(" -{}", f.removed), Style{}.with_fg(danger).with_dim());
+            chunks.push_back(std::move(ck));
         }
-        rows.push_back(Element{TextElement{.content = std::move(content),
-                                           .wrap = TextWrap::TruncateEnd,
-                                           .runs = std::move(runs)}});
+        rows.push_back(component(
+            [chunks = std::move(chunks), fidx](int w, int) -> Element {
+                constexpr int kSepW = 3;      // "   " between files
+                constexpr const char* kSep = "   ";
+                const int avail = std::max(0, w - 2);   // "  " lead-in
+            // First rail slot that keeps the CURRENT file's right edge
+            // inside the pane: slide the window right until it fits.
+            int start = 0;
+            auto span = [&](int lo, int hi) {  // width of chunks [lo, hi]
+                int t = 0;
+                for (int i = lo; i <= hi; ++i)
+                    t += chunks[static_cast<std::size_t>(i)].width
+                       + (i > lo ? kSepW : 0);
+                return t;
+            };
+            // 2 cols for the "… " chip once scrolled.
+            while (start < fidx && span(start, fidx) > avail - (start > 0 ? 2 : 0))
+                ++start;
+            std::string content = "  ";
+            std::vector<StyledRun> runs;
+            auto seg = [&](const std::string& s, Style st) {
+                runs.push_back({content.size(), s.size(), st}); content += s;
+            };
+            if (start > 0) seg("\xe2\x80\xa6 ", Style{}.with_fg(muted).with_dim());
+            for (int i = start; i < static_cast<int>(chunks.size()); ++i) {
+                if (i > start) seg(kSep, Style{});
+                for (const auto& [s, st] : chunks[static_cast<std::size_t>(i)].pieces)
+                    seg(s, st);
+            }
+            return Element{TextElement{.content = std::move(content),
+                                       .wrap = TextWrap::TruncateEnd,
+                                       .runs = std::move(runs)}};
+        }));
     }
 
     // ── Progress bar + counts ──
