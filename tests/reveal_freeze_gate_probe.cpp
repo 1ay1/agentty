@@ -246,6 +246,70 @@ static void test_settled_turn_is_hash_stable() {
 
 }  // namespace (fold)
 
+static Model reasoning_window_model() {
+    Model m;
+    m.d.show_reasoning = true;
+
+    Message a; a.role = Role::Assistant;
+    a.id = agentty::MessageId{"reason1"};
+    // PURE-REASONING window: the answer body has NOT started (text +
+    // streaming_text + pending_stream all empty), but the reasoning channel
+    // (msg.thinking) is streaming. This is the exact state the user hit where
+    // the "Thinking" typewriter froze mid-stream.
+    a.thinking =
+        "Let me work through this. First I'll pull a ranked map of the repo, "
+        "then check the directory structure, then read the key files like the "
+        "README so I understand how the whole thing fits together before I act.";
+    m.d.current.messages.push_back(std::move(a));
+
+    // Phase STREAMING (reasoning arrives during the streaming phase in
+    // agentty — there is no separate Thinking phase).
+    m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
+
+    // Prime the sibling REASONING slot (id + "#r") with a widget mid-reveal,
+    // exactly as cached_markdown_for(MdView::Reasoning) does.
+    const auto rid = agentty::MessageId{
+        m.d.current.messages.back().id.value + "#r"};
+    auto& cache = m.ui.view_cache.message_md_live(m.d.current.id, rid);
+    cache.streaming = std::make_shared<maya::StreamingMarkdown>();
+    cache.streaming->set_reveal_fx(true);
+    cache.streaming->set_reveal_pacing(/*floor_cps=*/45.0, /*drain_secs=*/0.40);
+    cache.streaming->set_content(m.d.current.messages.back().thinking);
+    cache.streaming->set_live(true);
+    (void)cache.streaming->build();          // seat the reveal cursor at 0
+    (void)cache.streaming->build();          // one frame; still mid-glide
+    return m;
+}
+
+static void test_reasoning_reveal_drives_the_hash() {
+    std::printf("reasoning window: pure-thinking reveal must advance the hash\n");
+    Model m = reasoning_window_model();
+
+    // Precondition: the reasoning reveal is genuinely mid-glide, so the frame
+    // is NOT settled. If this trips, the widget priming above is wrong.
+    CHECK(!agentty::app::detail::live_tail_reveal_settled(m),
+          "precondition: reasoning reveal in progress (live_tail_reveal_settled "
+          "must be false while the #r slot is animating)");
+
+    // THE FIX: while the model is only reasoning (no answer bytes), the
+    // reasoning reveal must still advance visual_hash so armed frames paint
+    // and the typewriter glides. Before the fix, revealing_text/draining were
+    // both keyed off the ANSWER channel only, the hash fell to the 265 ms
+    // caret bucket, and the reasoning froze until a keypress.
+    const std::uint64_t h0 = AgenttyApp::visual_hash(m);
+    bool advanced = false;
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+    while (std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(8));
+        if (AgenttyApp::visual_hash(m) != h0) { advanced = true; break; }
+    }
+    CHECK(advanced,
+          "FIX BROKEN: visual_hash did NOT advance while reasoning was "
+          "streaming with no answer body yet — the reasoning typewriter "
+          "freezes until a caret flip / keypress");
+}
+
 int main() {
     // Pin the sync-output classification so the reveal render bucket is the
     // deterministic 16 ms (60 fps) cadence this probe's ±16 ms step
@@ -262,6 +326,7 @@ int main() {
     std::printf("reveal_freeze_gate_probe\n");
     test_freeze_window_exists_and_is_now_driven();
     test_settled_turn_is_hash_stable();
+    test_reasoning_reveal_drives_the_hash();
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     if (g_failures == 0) { std::printf("PASSED\n"); return 0; }
     std::printf("FAILED\n");

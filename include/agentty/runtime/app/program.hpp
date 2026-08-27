@@ -371,7 +371,16 @@ struct AgenttyApp {
             && !m.d.current.messages.empty()
             && m.d.current.messages.back().role == Role::Assistant
             && (!m.d.current.messages.back().streaming_text.empty()
-                || !m.d.current.messages.back().pending_stream.empty());
+                || !m.d.current.messages.back().pending_stream.empty()
+                // Pure-reasoning phase: no answer bytes yet, but the reasoning
+                // channel (msg.thinking) is streaming through its own reveal.
+                // Without this the fast reveal bucket doesn't engage while the
+                // model is only thinking, the hash falls to the 265 ms caret
+                // parity bucket, armed RAF frames are gated away, and the
+                // reasoning typewriter FREEZES until a keypress (the "Thinking
+                // gets stuck" symptom).
+                || (m.d.show_reasoning
+                    && !m.d.current.messages.back().reasoning_display_text().empty()));
         // Reveal render cadence.
         //
         // On a SYNC-output terminal (DEC mode 2026: kitty / ghostty /

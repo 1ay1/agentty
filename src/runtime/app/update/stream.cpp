@@ -165,6 +165,16 @@ bool live_tail_reveal_settled(const Model& m) {
         // Still has uncommitted wire bytes — not done arriving, let it ride.
         if (!mm.streaming_text.empty() || !mm.pending_stream.empty())
             return false;
+        // Sibling REASONING slot (mm.id + "#r"): reasoning reveals through its
+        // own StreamingMarkdown even when the answer body is still empty (the
+        // pure-thinking phase). If its reveal is mid-glide the live frame is
+        // NOT settled — keep the Tick armed so the reasoning typewriter keeps
+        // advancing (else it FREEZES until a keypress). Checked FIRST and
+        // unconditionally, before the mm.text.empty() skip below.
+        if (const auto* rc = m.ui.view_cache.peek(
+                m.d.current.id, MessageId{mm.id.value + "#r"});
+            rc && rc->streaming && rc->streaming->is_animating())
+            return false;
         if (mm.text.empty()) continue;   // no prose body to reveal
         // Non-migrating read-only probe: mm may be the PINNED live edge,
         // and message_md() would migrate it into the evictable LRU from

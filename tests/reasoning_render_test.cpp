@@ -22,6 +22,7 @@
 #include <maya/widget/app_layout.hpp>
 #include <maya/render/canvas.hpp>
 #include <maya/render/renderer.hpp>
+#include <maya/core/anim_clock.hpp>
 #include <maya/style/theme.hpp>
 
 #include <print>
@@ -141,4 +142,60 @@ TEST_CASE("reasoning: the ^R switch hides the block even when text exists") {
           "reasoning text never reaches the screen when the switch is off");
     check(has(out, "ANSWER_STILL_SHOWN"),
           "the answer renders normally regardless of the reasoning switch");
+}
+
+// The reasoning body must REVEAL incrementally like normal streamed text —
+// not appear all at once. We grow msg.thinking frame by frame (as the wire
+// would), advance the shared animation clock, and assert the visible reasoning
+// text grows GRADUALLY rather than jumping straight to full on the frame the
+// bytes arrive. This pins the streaming-reveal path (turn.cpp MdView::Reasoning
+// + subturn_stably_keyable's reasoning-slot animation check).
+TEST_CASE("reasoning: body reveals incrementally, not all at once") {
+    // A long, single-paragraph body so the reveal cursor has many chars to
+    // walk through (word-boundary markers we can count as they appear).
+    std::string full;
+    for (int i = 0; i < 60; ++i)
+        full += "word" + std::to_string(i) + " ";
+
+    Model m;
+    m.d.show_reasoning = true;
+    m.s.phase = phase::Streaming{phase::Active{}};
+
+    Message a;
+    a.role = Role::Assistant;
+    a.id   = MessageId{"stream1"};
+    // No answer text yet: pure-reasoning phase (the case the user hit).
+    m.d.current.messages.push_back(a);
+
+    auto visible_words = [&](const std::string& out) {
+        int n = 0;
+        for (int i = 0; i < 60; ++i)
+            if (has(out, "word" + std::to_string(i) + " ")) ++n;
+        return n;
+    };
+
+    // Feed the ENTIRE reasoning body at once (as a big summarized delta would
+    // arrive), then render across many animation frames. If the reveal works,
+    // the visible word count climbs frame over frame instead of hitting 60
+    // immediately.
+    m.d.current.messages[0].thinking = full;
+
+    int first_frame_words = -1;
+    int max_words = 0;
+    for (int frame = 0; frame < 40; ++frame) {
+        const std::string out = render_text(m);
+        const int w = visible_words(out);
+        if (first_frame_words < 0) first_frame_words = w;
+        max_words = std::max(max_words, w);
+        maya::testing::advance_anim_clock_ms(33); // ~30fps
+    }
+
+    // The reveal cursor should NOT dump the whole body on the first frame.
+    check(first_frame_words < 60,
+          "reasoning does not appear fully on the first frame (it reveals)");
+    check(first_frame_words < max_words,
+          "reasoning reveals MORE text over subsequent frames (it animates)");
+    // And it eventually reveals (nearly) everything.
+    check(max_words >= 55,
+          "reasoning reveal eventually reaches the full body");
 }

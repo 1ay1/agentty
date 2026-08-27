@@ -260,7 +260,17 @@ void build_live_tail(const Model& m, int& running_turn,
             const bool reveal_settled = [&] {
                 for (std::size_t j = i; j < run_end && j < m.d.current.messages.size(); ++j) {
                     const auto& mj = m.d.current.messages[j];
-                    if (mj.role != Role::Assistant || mj.text.empty()) continue;
+                    if (mj.role != Role::Assistant) continue;
+                    // Sibling REASONING slot (mj.id + "#r"): reasoning streams
+                    // through its own reveal even when the answer body is
+                    // still empty (pure-thinking phase). Check it FIRST and
+                    // unconditionally — skipping it when mj.text is empty is
+                    // exactly what froze the "Thinking" typewriter.
+                    if (const auto* rc = m.ui.view_cache.peek(
+                            m.d.current.id, MessageId{mj.id.value + "#r"});
+                        rc && rc->streaming && rc->streaming->is_animating())
+                        return false;
+                    if (mj.text.empty()) continue;
                     // Non-migrating read-only probe: mj may be the PINNED
                     // live edge, and message_md() would migrate it out of
                     // the pinned set. peek() reads from either home.
