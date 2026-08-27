@@ -96,6 +96,12 @@ namespace headers {
     // edge requires this header — sending it on 4.6+ is a no-op so we always
     // include it when any tool in the request opts in.
     inline constexpr const char* beta_fine_grained_streaming = "fine-grained-tool-streaming-2025-05-14";
+    // Interleaved (visible) thinking. Lets the model plan between content
+    // blocks AND — crucially, when we do NOT also send redact-thinking —
+    // surfaces the thinking deltas on the wire instead of redacting them.
+    // Added ONLY when the user opted into "show reasoning" (^R) with an effort
+    // tier on; the default keeps thinking off entirely (no dead-air).
+    inline constexpr const char* beta_interleaved_thinking   = "interleaved-thinking-2025-05-14";
 } // namespace headers
 
 namespace {
@@ -135,7 +141,8 @@ json tool_spec_to_json(const ToolSpec& s) {
 // immediately. If you ever want to render thinking blocks, drop only the
 // redact one and surface the visible thinking deltas in the UI.
 std::string select_betas(std::string_view model, bool is_oauth,
-                         bool any_eager_streaming = false) {
+                         bool any_eager_streaming = false,
+                         bool show_reasoning = false) {
     // Single decode site for all model-id introspection — see
     // ModelCapabilities::from_id for why we tokenise rather than
     // substring-match. Adding a new beta gated on a new family /
@@ -155,6 +162,12 @@ std::string select_betas(std::string_view model, bool is_oauth,
     // uses the long TTL (the edge just ignores an unused capability).
     b.emplace_back(headers::beta_extended_cache_ttl);
     if (any_eager_streaming)           b.emplace_back(headers::beta_fine_grained_streaming);
+    // Visible thinking: opt-in only. When the user turned on "show reasoning"
+    // (^R), add interleaved-thinking and DO NOT add redact-thinking, so the
+    // model's thinking deltas reach the wire and the transcript's reasoning
+    // block has real text to render. Off by default → no thinking betas → the
+    // dead-air-free default wire is unchanged.
+    if (show_reasoning)                b.emplace_back(headers::beta_interleaved_thinking);
 
     std::string out;
     for (size_t i = 0; i < b.size(); ++i) {
@@ -453,7 +466,8 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
     const bool any_eager = std::ranges::any_of(req.tools,
         [](const auto& t){ return t.eager_input_streaming; });
     hreq.headers = build_request_headers(req.auth,
-                                         select_betas(req.model, is_oauth, any_eager),
+                                         select_betas(req.model, is_oauth, any_eager,
+                                                      req.show_reasoning),
                                          /*timeout_seconds=*/300,
                                          /*streaming=*/true,
                                          /*retry_count=*/req.retry_count);
@@ -624,8 +638,18 @@ std::vector<ModelInfo> list_models(const AuthHeader& auth) {
     // The `[1m]` companion is inserted immediately AFTER its base model so the
     // picker reads "Opus 4.8" / "Opus 4.8 (1M context)" adjacently instead of
     // clumping every 1M row at the bottom.
-    auto add_1m_variants = [is_oauth](std::vector<ModelInfo>& v) {
-        if (!is_oauth) return;
+    auto add_1m_variants = [](std::vector<ModelInfo>& v) {
+        // Offer the `[1m]` companion for EVERY suffix-capable model, on any
+        // auth kind. It used to early-return unless is_oauth (BearerHeader),
+        // but that was both fragile and wrong: (1) it broke silently whenever
+        // the auth representation shifted (e.g. an account stored as an API
+        // key resolves to ApiKeyHeader, not BearerHeader) — the 1M rows would
+        // vanish for a user who genuinely has the entitlement; (2) Tier 3/4
+        // API keys have 1M access too. The account may still lack the
+        // entitlement, but that is handled downstream and self-heals: a 1M
+        // request that 400s with the long-context-beta rejection sets
+        // Settings.context_1m_blocked, and the ModelsLoaded reducer then
+        // strips the `[1m]` rows. So the offer is safe to make broadly.
         std::vector<ModelInfo> out;
         out.reserve(v.size() * 2);
         for (auto& mi : v) {

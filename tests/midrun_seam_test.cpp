@@ -800,10 +800,13 @@ TEST_CASE("tall card live to frozen seam") {
     // And the diff body must appear EXACTLY once across the whole render
     // (no second copy stranded). The settled edit shows its FULL body, so
     // any body line appears exactly once — count a line from the last
-    // hunk; >1 copy means a stranded scrollback duplicate.
+    // hunk; >1 copy means a stranded scrollback duplicate. NB: the edit card
+    // caps its rendered diff at kMaxDiffLines (200) — pick a probe line well
+    // inside that window (compute(90) ≈ body row 186) so the assertion tracks
+    // the seam, not the cap elision.
     int copies = 0;
     for (const auto& row : frozen)
-        if (row.find("compute(119) + offset") != std::string::npos) ++copies;
+        if (row.find("compute(90) + offset") != std::string::npos) ++copies;
     CHECK(copies == 1,
           "edit diff body rendered more than once after freeze (duplicate)");
 }
@@ -932,7 +935,7 @@ TEST_CASE("compaction boundary live to frozen seam") {
     // And the tall edit body appears exactly once (no stranded copy).
     int body_copies = 0;
     for (const auto& row : frozen)
-        if (row.find("compute(119) + offset") != std::string::npos)
+        if (row.find("compute(90) + offset") != std::string::npos)
             ++body_copies;
     CHECK(body_copies == 1,
           "post-compaction edit body rendered more than once (duplicate)");
@@ -1071,7 +1074,7 @@ TEST_CASE("compaction submit freezes divider") {
 
     int body_copies = 0;
     for (const auto& row : frozen)
-        if (row.find("compute(119) + offset") != std::string::npos)
+        if (row.find("compute(90) + offset") != std::string::npos)
             ++body_copies;
     CHECK(body_copies == 1,
           "post-compaction edit body rendered more than once (duplicate)");
