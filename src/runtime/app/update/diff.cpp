@@ -54,6 +54,24 @@ Step diff_review_update(Model m, msg::DiffReviewMsg dm) {
         // Nothing pending anywhere — leave the cursor where it is.
     };
 
+    // Clamp a possibly-stale cursor against the CURRENT changeset. Hunk
+    // counts can shrink while the pane is open: a new tool edit to the same
+    // path collapses into its existing review entry (*it = diff::compute(
+    // original, latest)), which may yield fewer hunks than the cursor's
+    // index. The view clamps defensively for render; the reducer must too or
+    // fc.hunks[c->hunk_index] is out-of-bounds UB on the next y/n/Enter.
+    auto clamp_cursor = [&](pick::OpenAtCell* c) -> FileChange* {
+        if (!c || m.d.pending_changes.empty()) return nullptr;
+        const int nfiles = static_cast<int>(m.d.pending_changes.size());
+        if (c->file_index >= nfiles) c->file_index = nfiles - 1;
+        if (c->file_index < 0)       c->file_index = 0;
+        auto& fc = m.d.pending_changes[static_cast<std::size_t>(c->file_index)];
+        const int nh = static_cast<int>(fc.hunks.size());
+        if (c->hunk_index >= nh) c->hunk_index = nh > 0 ? nh - 1 : 0;
+        if (c->hunk_index < 0)   c->hunk_index = 0;
+        return &fc;
+    };
+
     return std::visit(overload{
         [&](OpenDiffReview) -> Step {
             // Tell the user when there's nothing to review instead of
@@ -77,9 +95,9 @@ Step diff_review_update(Model m, msg::DiffReviewMsg dm) {
         },
         [&](DiffReviewMove& e) -> Step {
             auto* c = pick::opened(m.ui.diff_review);
-            if (!c || m.d.pending_changes.empty()) return done(std::move(m));
-            auto& fc = m.d.pending_changes[c->file_index];
-            int sz = static_cast<int>(fc.hunks.size());
+            auto* fc = clamp_cursor(c);
+            if (!fc) return done(std::move(m));
+            int sz = static_cast<int>(fc->hunks.size());
             if (sz == 0) return done(std::move(m));
             c->hunk_index = (c->hunk_index + e.delta + sz) % sz;
             return done(std::move(m));
@@ -102,20 +120,20 @@ Step diff_review_update(Model m, msg::DiffReviewMsg dm) {
         },
         [&](AcceptHunk) -> Step {
             auto* c = pick::opened(m.ui.diff_review);
-            if (c && !m.d.pending_changes.empty()) {
-                auto& fc = m.d.pending_changes[c->file_index];
-                if (!fc.hunks.empty())
-                    fc.hunks[c->hunk_index].status = Hunk::Status::Accepted;
+            if (auto* fc = clamp_cursor(c)) {
+                if (!fc->hunks.empty())
+                    fc->hunks[static_cast<std::size_t>(c->hunk_index)].status =
+                        Hunk::Status::Accepted;
                 advance(c);
             }
             return done(std::move(m));
         },
         [&](RejectHunk) -> Step {
             auto* c = pick::opened(m.ui.diff_review);
-            if (c && !m.d.pending_changes.empty()) {
-                auto& fc = m.d.pending_changes[c->file_index];
-                if (!fc.hunks.empty())
-                    fc.hunks[c->hunk_index].status = Hunk::Status::Rejected;
+            if (auto* fc = clamp_cursor(c)) {
+                if (!fc->hunks.empty())
+                    fc->hunks[static_cast<std::size_t>(c->hunk_index)].status =
+                        Hunk::Status::Rejected;
                 advance(c);
             }
             return done(std::move(m));
