@@ -153,32 +153,44 @@ elseif(NOT AGENTTY_IPO_OK)
     set(CMAKE_INTERPROCEDURAL_OPTIMIZATION FALSE)
 endif()
 
-# ── LTO + PIE relocation fix (issue #20) ──────────────────────────
-# GCC's LTO (enabled above) can emit a 32-bit ABSOLUTE relocation against a
-# hidden static-local guard variable (e.g. tls.cpp's sni_ex_index
-# `static int idx`). GNU ld.bfd — the default linker on most distros — REJECTS
-# that when producing a PIE:
-#     relocation R_X86_64_32 against hidden symbol `...' can not be used
-#     when making a PIE object
-#     failed to set dynamic section sizes: bad value
-# This broke the default dynamic (-pie) release build for users on Fedora /
-# Arch (reported on issue #20). Root cause: with only -fPIE, GCC assumes the
-# symbol lands in the main executable and uses a direct 32-bit reloc; under
-# LTO that assumption leaks to a hidden guard that ld.bfd then can't place in
-# a PIE. Compiling the whole program -fPIC (not just -fPIE) forces GCC to emit
-# PIC-safe (GOT/PC-relative) relocations for every symbol, which ld.bfd
-# accepts in a PIE. Negligible cost for a TUI, and it's the portable fix: no
-# dependency on mold/lld/gold being installed, and it doesn't perturb the LTO
-# entry-symbol handling the way swapping linkers does.
-# Only needed on the ELF PIE path: the fully-static build links -no-pie
-# (ET_EXEC) and is unaffected; Apple/MSVC handle PIC/PIE their own way.
+# ── PIE relocation fix (issue #20 + the mold/objlib R_X86_64_32 failure) ──
+# On modern Linux distros (Fedora, Arch, …) the compiler DRIVER defaults to
+# building a PIE executable. agentty compiles its shared TUs once into OBJECT
+# libraries and links those objects into the PIE exe AND every test. If those
+# objects are not position-independent, linking the PIE fails with:
+#     relocation R_X86_64_32 against `<sym>' can not be used when making a PIE
+#     object; recompile with -fPIC
+# This bites in several independent ways, so gating it narrowly (as we did for
+# just GNU+LTO) left real toolchains broken:
+#   • GCC LTO leaks a 32-bit abs reloc against a hidden static-local guard that
+#     ld.bfd can't place in a PIE (the original issue #20).
+#   • NON-LTO GCC/Clang + `mold` (which is STRICTER than ld.bfd about abs
+#     relocs) rejects the objlib objects outright — the failure reported by a
+#     Fedora 44 / GCC 16 / clang 22 contributor building the default dynamic
+#     tree with mold.
+#   • -fPIE alone is NOT enough: GCC/Clang emit a direct 32-bit reloc for
+#     symbols they assume live in the main exe, which breaks the moment an
+#     object is reused in a different link (test exes) or the linker is picky.
+# Compiling the WHOLE program -fPIC (not just -fPIE) forces PIC-safe
+# (GOT/PC-relative) relocations for every symbol, which every linker
+# (ld.bfd / gold / lld / mold) accepts in a PIE. It's the portable fix: no
+# dependency on which linker is installed, works identically on GCC and Clang,
+# and costs a TUI nothing measurable. So apply it to the ENTIRE Linux dynamic
+# (PIE) path — every compiler, LTO or not.
+#
+# Scope guard: the fully-static release build links -no-pie (ET_EXEC) and must
+# stay non-PIC (that's what keeps the GitHub-release standalone bins a true
+# static ET_EXEC), so it is EXCLUDED here. Apple/MSVC handle PIC/PIE their own
+# way and are excluded too. Belt-and-suspenders: also set the CMake property so
+# targets defined without agentty's helpers (imported/fetched deps that we
+# link) inherit PIC on this path.
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux"
-        AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU"
-        AND CMAKE_INTERPROCEDURAL_OPTIMIZATION
         AND NOT (AGENTTY_FULLY_STATIC AND NOT AGENTTY_STATIC_PIE))
-    message(STATUS "agentty: compiling -fPIC so GCC LTO stays PIE-safe under "
-                   "ld.bfd (fixes R_X86_64_32 PIE reloc, issue #20)")
+    message(STATUS "agentty: compiling -fPIC for the Linux dynamic (PIE) build "
+                   "so OBJECT-lib objects link into the PIE exe + tests under "
+                   "any linker incl. mold (fixes R_X86_64_32 PIE reloc, issue #20)")
     add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-fPIC>)
+    set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 endif()
 
 include(FetchContent)
