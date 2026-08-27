@@ -41,11 +41,25 @@ std::string timestamp() {
 #else
     localtime_r(&secs, &tm);
 #endif
-    char buf[32];
-    std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d.%03lld",
-                  tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
-                  tm.tm_hour, tm.tm_min, tm.tm_sec,
-                  static_cast<long long>(ms));
+    // Clamp every field to a bounded range before formatting. This is both a
+    // correctness guard (a corrupt std::tm from a bad clock can't produce a
+    // wild value) AND what lets GCC prove the output fits: without bounds it
+    // assumes %04d could emit an arbitrarily wide int and warns the 32-byte
+    // buffer might truncate (-Wformat-truncation). Bounded, the worst case is
+    // "9999-12-31 23:59:59.999" = 23 bytes, comfortably under 40.
+    auto clamp = [](int v, int lo, int hi) {
+        return v < lo ? lo : (v > hi ? hi : v);
+    };
+    const int year = clamp(tm.tm_year + 1900, 0, 9999);
+    const int mon  = clamp(tm.tm_mon + 1, 1, 12);
+    const int mday = clamp(tm.tm_mday, 1, 31);
+    const int hour = clamp(tm.tm_hour, 0, 23);
+    const int min  = clamp(tm.tm_min, 0, 59);
+    const int sec  = clamp(tm.tm_sec, 0, 60);        // 60 = leap second
+    const int msec = clamp(static_cast<int>(ms), 0, 999);
+    char buf[40];
+    std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d.%03d",
+                  year, mon, mday, hour, min, sec, msec);
     return buf;
 }
 
