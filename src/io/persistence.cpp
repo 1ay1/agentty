@@ -346,11 +346,12 @@ static json message_to_json(const Message& m) {
     // pair above stays for older-binary compat.
     if (!m.thinking_blocks.empty()) {
         json blocks = json::array();
-        for (const auto& tb : m.thinking_blocks)
-            blocks.push_back(json{
-                {"text", tools::util::to_valid_utf8(tb.text)},
-                {"signature", tb.signature},
-            });
+        for (const auto& tb : m.thinking_blocks) {
+            json b{{"text", tools::util::to_valid_utf8(tb.text)},
+                   {"signature", tb.signature}};
+            if (!tb.redacted_data.empty()) b["redacted_data"] = tb.redacted_data;
+            blocks.push_back(std::move(b));
+        }
         j["thinking_blocks"] = std::move(blocks);
     }
     // Legacy visible-reasoning fallback (paths that populate
@@ -470,7 +471,8 @@ static std::expected<Message, DeserializeError> parse_message(const json& j) {
         for (const auto& tb : *it)
             if (tb.is_object())
                 m.thinking_blocks.push_back(Message::ThinkingBlock{
-                    tb.value("text", ""), tb.value("signature", "")});
+                    tb.value("text", ""), tb.value("signature", ""),
+                    tb.value("redacted_data", "")});
     m.reasoning_summary = j.value("reasoning_summary", "");
     m.reasoning_encrypted = j.value("reasoning_encrypted", "");
     if (auto it = j.find("error"); it != j.end() && it->is_string()

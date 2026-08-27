@@ -289,6 +289,17 @@ void dispatch_event(StreamCtx& ctx, std::string_view name, std::string_view data
                 // before this block's deltas arrive, or the signatures get
                 // cross-wired and the replay 400s.
                 ctx.sink(StreamThinkingDelta{{}, {}, /*block_boundary=*/true});
+            } else if (type == "redacted_thinking") {
+                // Safety-redacted thinking: the whole block arrives HERE as
+                // an opaque `data` payload (no deltas follow). It must be
+                // replayed verbatim before this turn's tool_use or the
+                // follow-up 400s ("Expected thinking or redacted_thinking
+                // but found tool_use"). Also a liveness proof.
+                ++ctx.thinking_deltas;
+                StreamThinkingDelta e;
+                e.block_boundary = true;
+                e.redacted_data  = block.value("data", "");
+                ctx.sink(std::move(e));
             }
             break;
         }

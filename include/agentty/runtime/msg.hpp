@@ -185,6 +185,10 @@ struct StreamThinkingDelta {
     std::string text;
     std::string signature;
     bool block_boundary = false;
+    // Non-empty = a complete REDACTED thinking block (Anthropic safety
+    // encryption; opaque). The reducer stores it as its own ThinkingBlock so
+    // the wire replays it verbatim — required before tool_use. Not rendered.
+    std::string redacted_data;
 };
 // Codex/Responses reasoning-item capture. Unlike StreamThinkingDelta (which
 // carries visible summary text for the thinking block), this carries the

@@ -1475,11 +1475,17 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                 };
                 if (e.block_boundary && !msg.thinking_blocks.empty()
                     && (!msg.thinking_blocks.back().text.empty()
-                        || !msg.thinking_blocks.back().signature.empty())) {
+                        || !msg.thinking_blocks.back().signature.empty()
+                        || !msg.thinking_blocks.back().redacted_data.empty())) {
                     msg.thinking_blocks.emplace_back();
                     // Display separator between blocks/paragraphs — without
                     // it consecutive summaries run together mid-sentence.
                     if (!msg.thinking.empty()) msg.thinking += "\n\n";
+                }
+                if (!e.redacted_data.empty()) {
+                    // Redacted block: opaque payload, replayed verbatim,
+                    // never rendered (no msg.thinking append).
+                    open_block().redacted_data = std::move(e.redacted_data);
                 }
                 if (!e.text.empty()) {
                     open_block().text += e.text;

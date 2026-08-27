@@ -565,6 +565,15 @@ bool rescue_json_protocol(StreamCtx& ctx) {
     return false;
 }
 
+// Surface swallowed reasoning text: visible StreamThinkingDelta when the
+// user shows reasoning, otherwise a liveness-only StreamHeartbeat (no hidden
+// capture — see StreamCtx::show_reasoning).
+void emit_reasoning(StreamCtx& ctx, const std::string& text) {
+    if (text.empty()) return;
+    if (ctx.show_reasoning) ctx.sink(StreamThinkingDelta{text, {}});
+    else                    ctx.sink(StreamHeartbeat{});
+}
+
 // Final safety net — NEVER let an assistant turn render blank (Aider's
 // `if not received_content` discipline). Called at every terminal path after
 // salvage/flush. If the turn produced NO text and NO tool call, surface
@@ -576,6 +585,16 @@ bool rescue_json_protocol(StreamCtx& ctx) {
 //   • if even that is empty, a clear `(empty response)` marker (Aider's
 //     exact placeholder) so the turn isn't a silent void.
 void flush_unhandled_content(StreamCtx& ctx) {
+    // A partial <think>-tag hold that never completed is literal content —
+    // fold it back before the salvage/flush decisions below. (The done-frame
+    // path flushes it eagerly; this covers a wire cut before `done`.)
+    if (!ctx.think_carry.empty()) {
+        std::string tail = std::move(ctx.think_carry);
+        ctx.think_carry.clear();
+        if (ctx.in_think)      emit_reasoning(ctx, tail);
+        else if (ctx.holding)  ctx.text_hold += tail;
+        else                   ctx.full_content += tail;
+    }
     if (ctx.any_text_flushed) return;
     if (ctx.any_structured_tool) return;
     if (ctx.stop_reason == StopReason::ToolUse) return;
@@ -649,15 +668,6 @@ void flush_unhandled_content(StreamCtx& ctx) {
     ctx.any_text_flushed = true;
     if (ctx.stop_reason != StopReason::ToolUse)
         ctx.stop_reason = StopReason::EndTurn;
-}
-
-// Surface swallowed reasoning text: visible StreamThinkingDelta when the
-// user shows reasoning, otherwise a liveness-only StreamHeartbeat (no hidden
-// capture — see StreamCtx::show_reasoning).
-void emit_reasoning(StreamCtx& ctx, const std::string& text) {
-    if (text.empty()) return;
-    if (ctx.show_reasoning) ctx.sink(StreamThinkingDelta{text, {}});
-    else                    ctx.sink(StreamHeartbeat{});
 }
 
 // Filter reasoning-model <think>…</think> out of a streamed content chunk,
