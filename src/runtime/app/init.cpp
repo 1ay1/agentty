@@ -56,6 +56,15 @@ std::pair<Model, maya::Cmd<Msg>> init() {
 
     auto settings = deps().load_settings();
     // DISCOVERED entitlement: this account 400'd on the context-1m beta in a
+    // prior session. Strip the seeded `[1m]` rows up front so the picker
+    // doesn't briefly offer them before the first live ModelsLoaded fetch
+    // (which also filters) — selecting one would just re-trigger the fallback.
+    if (settings.context_1m_blocked) {
+        std::erase_if(m.d.available_models, [](const ModelInfo& mi) {
+            return mi.id.value.find("[1m]") != std::string::npos;
+        });
+    }
+    // DISCOVERED entitlement: this account 400'd on the context-1m beta in a
     // prior session. A persisted `[1m]` model id would re-send the beta on
     // the very first turn and dead-end again — strip the marker up front.
     if (settings.context_1m_blocked

@@ -1909,6 +1909,14 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                     auto s = deps().load_settings();
                     s.context_1m_blocked = true;
                     s.model_id = m.d.model_id;
+                    // Also strip `[1m]` from the per-provider recall so a
+                    // later switch away-and-back to this provider doesn't
+                    // restore the stale `[1m]` id and re-trigger the identical
+                    // 400 loop. Without this, provider_models[anthropic] keeps
+                    // the 1M variant and the entitlement discovery repeats
+                    // every session.
+                    s.provider_models[active_provider_id()] =
+                        m.d.model_id.value;
                     deps().save_settings(s);
                 }
                 // Drop `[1m]` rows from the live catalog so the picker
