@@ -529,3 +529,61 @@ TEST_CASE("tool timeline adapter") {
     else unsetenv("LINES");
 #endif
 }
+
+// A settled `edit` renders its ```diff fence as a GitDiff review card. Two
+// pathological cases must be handled so the card stays a clean review surface:
+//   1. The edit tool truncates its OUTPUT to the model's char budget and
+//      appends a "[... N chars elided — output exceeded tool's budget; refine
+//      your request ...]" marker. That marker addresses the MODEL; it must
+//      never render inside the user's diff card.
+//   2. A huge deletion/rewrite must not dump hundreds of red rows unbounded
+//      — it windows to the head with maya's elision (show_all=false).
+TEST_CASE("edit diff card strips model budget marker + caps huge diffs") {
+    // (1) Budget marker leaking into the fence must be stripped.
+    {
+        std::string out;
+        out += "```diff\n";
+        out += "@@ -1,3 +1,3 @@\n";
+        out += "-old line\n";
+        out += "+new line\n";
+        out += " context\n";
+        out += "\n[... 4096 chars elided — output exceeded tool's budget; "
+               "refine your request to see more ...]\n";
+        out += "```";
+        auto tc = make_tool("edit", A::ToolUse::Done{{}, {}, out},
+                            {{"path", "x.cpp"}});
+        const auto body = U::tool_body_preview_config(tc);
+        check(body.kind == Kind::GitDiff, "settled edit is a GitDiff card");
+        check(body.text.find("chars elided") == std::string::npos
+                  && body.text.find("refine your request") == std::string::npos,
+              "the model-facing budget marker is stripped from the diff card");
+        check(body.text.find("new line") != std::string::npos,
+              "the actual diff content is preserved");
+    }
+
+    // (2) A normal small diff renders in full (show_all).
+    {
+        std::string out = "```diff\n@@ -1 +1 @@\n-a\n+b\n```";
+        auto tc = make_tool("edit", A::ToolUse::Done{{}, {}, out},
+                            {{"path", "x.cpp"}});
+        const auto body = U::tool_body_preview_config(tc);
+        check(body.kind == Kind::GitDiff && body.show_all,
+              "a small diff still renders in full");
+    }
+
+    // (3) A very tall diff is windowed to the head, not dumped whole.
+    {
+        std::string out = "```diff\n@@ -1,400 +1,0 @@\n";
+        for (int i = 0; i < 400; ++i)
+            out += "-deleted line " + std::to_string(i) + "\n";
+        out += "```";
+        auto tc = make_tool("edit", A::ToolUse::Done{{}, {}, out},
+                            {{"path", "big.cpp"}});
+        const auto body = U::tool_body_preview_config(tc);
+        check(body.kind == Kind::GitDiff, "huge edit is still a GitDiff card");
+        check(!body.show_all,
+              "a >200-line diff windows via elision instead of show_all");
+        check(body.code_head > 0 && body.code_head <= 200,
+              "the windowed diff keeps a bounded head");
+    }
+}

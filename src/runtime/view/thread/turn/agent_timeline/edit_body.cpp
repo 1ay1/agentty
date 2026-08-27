@@ -50,17 +50,45 @@ bool edit_body(const ToolUse& tc, maya::ToolBodyPreview::Config& out) {
             auto b = body.find(kClose, a);
             if (b == std::string::npos) b = body.size();
             out.kind = Kind::GitDiff;
-            // Settled edit ALWAYS renders the full diff (show_all) — in the
-            // live tail AND the frozen snapshot, byte-identical. The user
-            // reviews exactly what changed; the per-event hash_id
-            // cell-cache (agent_timeline.cpp) makes the tall card a
-            // paint-once blit even while it sits in the live tail, so a
-            // full body costs nothing per frame after the first. Live ==
-            // frozen body => the freeze handoff is a pure cache hit (no
-            // committed-row shift).
-            out.text       = std::string{body.substr(a, b - a)};
-            out.show_all   = true;
+            // Settled edit renders the full diff (show_all) — the per-event
+            // hash_id cell-cache makes the tall card a paint-once blit, so a
+            // full body costs nothing per frame after the first. BUT cap
+            // pathologically large diffs: a huge deletion/rewrite would dump
+            // hundreds of red rows AND (when the edit tool truncated its
+            // output to the model's char budget) drag the model-facing
+            // "[... N chars elided — refine your request ...]" marker onto
+            // the user's screen. Neither belongs in a review card.
+            std::string diff{body.substr(a, b - a)};
+            // Strip the dispatcher's model-facing output-budget marker if the
+            // edit output was truncated on the wire — it addresses the model
+            // ("refine your request"), never the user reviewing the diff.
+            if (auto m = diff.find("[... ");
+                m != std::string::npos &&
+                diff.find("chars elided", m) != std::string::npos) {
+                // Drop from the marker to end (it's always a trailing Head cut
+                // for edit). Trim a trailing blank line left behind.
+                while (m > 0 && (diff[m - 1] == '\n' || diff[m - 1] == ' '))
+                    --m;
+                diff.resize(m);
+            }
+            out.text = std::move(diff);
+            // If the diff is still very tall, fall back to maya's head/tail
+            // elision (show_all=false) so the card shows a bounded window with
+            // a proper "⋯ N more" marker instead of an unbounded wall. The
+            // threshold is generous: normal edits (a handful of hunks) render
+            // in full; only genuinely large rewrites get windowed.
+            constexpr int kMaxDiffLines = 200;
+            const int nlines = 1 + static_cast<int>(std::count(
+                out.text.begin(), out.text.end(), '\n'));
+            const bool oversized = nlines > kMaxDiffLines;
+            out.show_all   = !oversized;
             out.tail_only  = false;
+            if (oversized) {
+                // Head-heavy window: the top of a diff (the @@ hunk header +
+                // first changed lines) carries the most review signal.
+                out.code_head = kMaxDiffLines;
+                out.code_tail = 0;
+            }
             out.text_color = text_tertiary;
             return true;
         }
