@@ -78,8 +78,20 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                                                        : Profile::Write;
             // A profile switch re-establishes the trust baseline; drop
             // session "always allow" grants so tightening to Minimal
-            // actually re-arms the prompts the user expects.
+            // actually re-arms the prompts the user expects. Clear the
+            // PERSISTED grants too — otherwise they resurrect at next
+            // launch (init re-seeds session_grants from settings) and the
+            // re-arm silently un-does itself. This is also the ONLY
+            // user-facing way to revoke a stale always-allow.
+            const bool had_grants = !m.d.session_grants.empty();
             m.d.session_grants.clear();
+            {
+                auto s = deps().load_settings();
+                if (!s.always_allow_tools.empty()) {
+                    s.always_allow_tools.clear();
+                    deps().save_settings(s);
+                }
+            }
             persist_settings(m);
             // Confirm the switch — a profile change is invisible otherwise
             // (the composer chip updates, but a keyboard-driven cycle needs a
@@ -90,7 +102,8 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                                                   : "asks before every tool";
             auto toast = set_status_toast(
                 m, "profile: " + std::string{ui::profile_label(m.d.profile)}
-                     + " \xc2\xb7 " + gist,
+                     + " \xc2\xb7 " + gist
+                     + (had_grants ? " \xc2\xb7 always-allow grants reset" : ""),
                 std::chrono::seconds{4});
             return {std::move(m), std::move(toast)};
         },
