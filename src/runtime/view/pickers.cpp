@@ -309,23 +309,22 @@ Element model_picker(const Model& m) {
         const bool overridable = !base.is_known_family()
                               && base.family != ModelCapabilities::Family::Gpt;
 
-        // ── Show-reasoning toggle: a pill BUTTON (^R), shown for every model
-        // because it's the global display switch. Rendered as an on/off pill so
-        // the current state reads at a glance, next to the effort control it
-        // relates to. ✦ sigil + accented state when on, dim when off.
-        auto show_reasoning_pill = [&] {
+        // ── Show-reasoning toggle piece (^R), a global on/off display switch.
+        // Appended inline to the reasoning line so effort + show/hide live in
+        // ONE place. ✦ + accented when on, dim when off.
+        auto append_show_reasoning = [&](std::vector<Element>& parts) {
             const bool on = m.d.show_reasoning;
-            return h(
-                text("^R ", fg_of(fg)),
-                text(on ? "\xe2\x9c\xa6 reasoning shown" : "reasoning hidden",
-                     on ? fg_bold(accent) : fg_dim(muted))
-            ).build();
+            parts.push_back(text("  ", fg_dim(muted)));
+            parts.push_back(text("^R ", fg_of(fg)));
+            parts.push_back(text(on ? "\xe2\x9c\xa6 shown" : "hidden",
+                                 on ? fg_bold(accent) : fg_dim(muted)));
         };
 
         if (effort_capable(caps)) {
-            // Build the pieces into one hstack: the ladder (current tier
-            // bracketed ‹like this› and accented) + the ←/→ and (compat-only)
-            // ^E bindings inline.
+            // One line: the effort ladder (current tier bracketed ‹like this›
+            // and accented), then the compat-only ^E override, then the global
+            // ^R show/hide toggle. ←/→ cycles the tier (the ‹› brackets already
+            // signal it's steppable, so no separate "←→ cycle" label).
             std::vector<Element> parts;
             parts.push_back(text("reasoning ", fg_dim(muted)));
             for (Effort lvl : available_efforts(caps)) {
@@ -338,9 +337,6 @@ Element model_picker(const Model& m) {
                     parts.push_back(text(lbl + " ", fg_dim(muted)));
                 }
             }
-            parts.push_back(text("  ", fg_dim(muted)));
-            parts.push_back(text("\xe2\x86\x90\xe2\x86\x92", fg_of(fg)));
-            parts.push_back(text(" cycle", fg_dim(muted)));
             if (overridable) {
                 const int ov = reasoning_override_for(hi_id);
                 const char* state = ov == 1 ? "on" : ov == 0 ? "off" : "auto";
@@ -348,21 +344,21 @@ Element model_picker(const Model& m) {
                 parts.push_back(text("^E ", fg_of(fg)));
                 parts.push_back(text(state, fg_bold(accent)));
             }
+            append_show_reasoning(parts);
             cfg.footer.push_back(h(std::move(parts)).build());
-        } else if (overridable) {
-            // Model can't reason on its own, but the user CAN force it on for
-            // the compat lane — surface just the ^E affordance so the override
-            // is discoverable even before it's enabled.
-            cfg.footer.push_back(h(
-                text("reasoning ", fg_dim(muted)),
-                text("off", fg_dim(muted)),
-                text("  ^E ", fg_of(fg)),
-                text("enable", fg_bold(accent))
-            ).build());
+        } else {
+            // No effort control on this model — still show the global ^R
+            // toggle (and, for the compat lane, the ^E enable affordance).
+            std::vector<Element> parts;
+            parts.push_back(text("reasoning ", fg_dim(muted)));
+            parts.push_back(text("off", fg_dim(muted)));
+            if (overridable) {
+                parts.push_back(text("  ^E ", fg_of(fg)));
+                parts.push_back(text("enable", fg_bold(accent)));
+            }
+            append_show_reasoning(parts);
+            cfg.footer.push_back(h(std::move(parts)).build());
         }
-        // The show/hide pill always follows the effort line (or stands alone
-        // for models with no effort control) — it's global, not per-model.
-        cfg.footer.push_back(show_reasoning_pill());
     }
     cfg.footer.push_back(key_hints({
         {"\xe2\x86\x91\xe2\x86\x93", "move", 5},        // ↑↓
