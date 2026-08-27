@@ -200,6 +200,33 @@ TEST_CASE("gpt5 codex caps") {
     }
 }
 
+// Anthropic thinking-mode selection: 4.5-and-earlier need the legacy
+// enabled+budget_tokens body; 4.6+/4.7/4.8 + flagship 5 need adaptive.
+// Sending adaptive to 4.5 400s ("adaptive thinking is not supported on this
+// model") — the exact bug this pins.
+TEST_CASE("anthropic thinking mode: adaptive vs enabled by revision") {
+    using agentty::ModelCapabilities;
+    auto adaptive = [](const char* id) {
+        return ModelCapabilities::from_id(id).uses_adaptive_thinking();
+    };
+    // LEGACY enabled+budget_tokens (adaptive would 400):
+    CHECK(!adaptive("claude-opus-4-5"));
+    CHECK(!adaptive("claude-opus-4-5[1m]"));
+    CHECK(!adaptive("claude-sonnet-4-5"));
+    CHECK(!adaptive("claude-opus-4-1"));
+    CHECK(!adaptive("claude-sonnet-4-0"));
+    // ADAPTIVE (enabled/budget_tokens would 400):
+    CHECK(adaptive("claude-opus-4-6"));
+    CHECK(adaptive("claude-opus-4-7"));
+    CHECK(adaptive("claude-opus-4-8"));
+    CHECK(adaptive("claude-opus-4-8[1m]"));
+    CHECK(adaptive("claude-sonnet-4-6"));
+    // Flagship 5 lane is adaptive.
+    CHECK(adaptive("claude-opus-5"));
+    CHECK(adaptive("claude-fable-5"));
+    CHECK(adaptive("claude-mythos-5"));
+}
+
 TEST_CASE("compat reasoning effort (chat wire)") {
     using agentty::ModelCapabilities;
     using agentty::Effort;
