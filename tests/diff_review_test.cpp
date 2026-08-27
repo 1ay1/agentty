@@ -190,10 +190,30 @@ int main() {
             std::expected<std::string, tools::ToolError>{"ok"},
             make_change("z.txt", before, after));
         check(!m.d.pending_changes.empty(), "queued before submit");
+        m.d.model_id = ModelId{"claude-sonnet-4-5"};  // submit needs a model
         m.ui.composer.text = "next question";
         auto s = detail::submit_message(std::move(m));
         check(s.first.d.pending_changes.empty(),
               "submitting a new message clears the pending-changes queue");
+    }
+
+    // ── empty model id: submit must NOT start a turn ────────────────────
+    // Regression for the local-preset "dead loop when prompted": a freshly
+    // selected llama.cpp/Ollama has model_id="" until its /models fetch lands.
+    // Sending "model":"" is rejected by the server and re-fires the retry
+    // machine forever. submit_message must refuse cleanly, keep the composer
+    // text, and NOT push a user message / assistant placeholder.
+    {
+        install_stub_deps();
+        Model m;
+        m.d.model_id = ModelId{""};             // no model resolved yet
+        m.ui.composer.text = "hello local model";
+        const std::size_t before_n = m.d.current.messages.size();
+        auto s = detail::submit_message(std::move(m));
+        check(s.first.d.current.messages.size() == before_n,
+              "empty-model submit pushes NO message (no dead-loop turn)");
+        check(s.first.ui.composer.text == "hello local model",
+              "empty-model submit keeps the composer text (nothing lost)");
     }
 
     // ── the FULL reducer path: ToolExecOutput → tool_update → pending_changes

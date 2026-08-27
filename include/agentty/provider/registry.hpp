@@ -144,7 +144,7 @@ using ProviderPreset = ProviderDescriptor;
 // To add a provider: append a row here, and — if it's OpenAI-compatible with
 // a non-default wire path — add the matching `Endpoint` arm in
 // openai/transport.cpp::from_spec keyed on the same `id`.
-inline constexpr std::array<ProviderDescriptor, 16> kProviders{{
+inline constexpr std::array<ProviderDescriptor, 15> kProviders{{
     {"anthropic",  "Anthropic",  "Claude — OAuth (Pro/Max) or API key",
      Wire::AnthropicMessages, Lifetime::LongLived, AuthStyle::OAuthOrKey, false, {"", "", ""}, "api.anthropic.com"},
     {"openai",     "OpenAI",     "GPT / Codex — api.openai.com",
@@ -175,8 +175,15 @@ inline constexpr std::array<ProviderDescriptor, 16> kProviders{{
      Wire::OpenAIChat,        Lifetime::PerCall,   AuthStyle::ApiKey,     false, {"FIREWORKS_API_KEY", "OPENAI_API_KEY", ""}, ""},
     {"ollama",     "Ollama",     "Local models at localhost:11434",
      Wire::OpenAIChat,        Lifetime::PerCall,   AuthStyle::None,       true,  {"", "", ""}, ""},
-    {"llama.cpp",  "llama.cpp",  "Local llama.cpp server at localhost:8080",
-     Wire::OpenAIChat,        Lifetime::PerCall,   AuthStyle::None,       true,  {"", "", ""}, ""},
+    // NOTE: no "llama.cpp" preset row. A llama.cpp / vLLM / LM Studio server is
+    // just a generic OpenAI-compatible host — use "Custom host…" (which the
+    // picker offers, saves, and can delete). The from_spec("llama.cpp") alias in
+    // openai/transport.cpp is kept so `--provider llama.cpp` on the CLI still
+    // resolves to localhost:8080. Having BOTH a preset row and the custom-host
+    // flow was the confusing duplicate behind the "dead loops when prompted"
+    // report (the preset switched async and could be prompted before its
+    // /models fetch landed; the empty-model guard in submit_message now stops
+    // that dead-loop regardless).
 }};
 
 // All presets, for the picker / iteration.
