@@ -334,6 +334,36 @@ ExecResult decode_result(const std::string& tool_name, ::mcp::cap::Result r) {
     ToolOutput out;
     out.text = std::move(r.text);
 
+    // Strip mcp-cpp's output-budget truncation marker before it reaches the
+    // UI — but ONLY for file-mutating tools, where it's both noise and safe to
+    // drop. The dispatcher (apply_output_budget) appends a line like
+    //   "[... N chars elided — output exceeded tool's budget; refine your
+    //    request to see more ...]"
+    // to bound the WIRE payload. For edit/write/apply_patch/replace the text
+    // is a human-readable diff/confirmation AND the COMPLETE change is carried
+    // structurally (read_changes below, before/after), so the marker is
+    // redundant for the model and actively wrong in the review card (it was
+    // rendering a grey "refine your request" line under the diff). For
+    // read/grep/bash the marker is left intact — there the model genuinely
+    // needs to know output was clipped so it can page/refine.
+    {
+        const bool mutating =
+            tool_name == "edit" || tool_name == "write" ||
+            tool_name == "apply_patch" || tool_name == "replace";
+        if (mutating) {
+            if (auto m = out.text.rfind("[... "); m != std::string::npos) {
+                const auto tail = std::string_view{out.text}.substr(m);
+                if (tail.find("chars elided") != std::string_view::npos &&
+                    tail.find("...]") != std::string_view::npos) {
+                    while (m > 0 &&
+                           (out.text[m - 1] == '\n' || out.text[m - 1] == ' '))
+                        --m;
+                    out.text.resize(m);
+                }
+            }
+        }
+    }
+
     // Decode EVERY file the tool changed — the single-file `change` (edit /
     // write / apply_patch) and the multi-file `changes` array (replace). Each
     // carries path/before/after but no hunks; rebuild the structured hunks the
