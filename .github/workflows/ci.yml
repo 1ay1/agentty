@@ -326,3 +326,49 @@ jobs:
           }
           Write-Host 'smoke test passed: launched and exited cleanly under a native pipe'
 
+  # Bounded fuzz smoke of the mcp-cpp harnesses (fuzz/). libFuzzer needs Clang,
+  # which ubuntu-latest doesn't ship by default; the harnesses double as a
+  # deterministic GCC + ASan/UBSan driver (fuzz_<name>_driver.cpp), so we run
+  # that here — same crash coverage on the reachable-from-a-tool locators
+  # (edit/apply_patch fuzzy match) without a Clang toolchain. Fast: a few k
+  # iterations + the hand-picked edge cases, seconds of runtime. Satisfies the
+  # "fuzz harness smoke" required status check.
+  fuzz-smoke:
+    name: fuzz harness smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Init submodules (HTTPS, race-tolerant)
+        run: |
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          for attempt in 1 2 3 4 5; do
+            if git submodule update --init --recursive --force; then break; fi
+            sleep $((attempt * 10))
+          done
+          git submodule update --init --recursive --force
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends g++-14 cmake ninja-build
+      - name: Configure fuzz harnesses (GCC asan+ubsan driver)
+        env:
+          CC: gcc-14
+          CXX: g++-14
+        run: |
+          cmake -S mcp-cpp -B fuzzbuild -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DMCP_BUILD_FUZZERS=ON \
+            -DMCP_BUILD_TESTS=OFF \
+            -DMCP_BUILD_EXAMPLES=OFF
+      - name: Build fuzz harnesses
+        run: cmake --build fuzzbuild -j"$(nproc)"
+      - name: Run bounded fuzz smoke
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: |
+          # Edge cases + a bounded random burst; a crash/UB aborts non-zero.
+          ./fuzzbuild/fuzz/fuzz_fuzzy_match 5000
+
