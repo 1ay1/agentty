@@ -996,6 +996,20 @@ int main(int argc, char** argv) {
     }
 
     int failures = 0;
+    // Perf-regression gate. Opt in with BENCH_ASSERT=1 (the CI perf job does).
+    // Ceilings are ~5-8× the observed values on a fast dev box — generous
+    // enough not to flake on a loaded/slow CI runner, tight enough to catch a
+    // genuine order-of-magnitude regression (an accidental O(n) reintroduced
+    // into the per-frame path, a lost cache, etc.). We gate the two metrics
+    // that actually bound interactivity:
+    //   • MIDRUN per-frame p99 — the REAL steady-state streaming cost the user
+    //     feels; observed ≤0.9ms, must stay far under the 16ms frame budget.
+    //   • render_key p99 — the per-frame visual_hash walk; observed sub-µs.
+    const bool assert_perf = std::getenv("BENCH_ASSERT") != nullptr;
+    constexpr double kMidrunFrameCeilMs = 5.0;   // 16ms budget, ~6× slack
+    constexpr double kRenderKeyCeilMs   = 1.0;   // observed 0.00; huge slack
+    int perf_violations = 0;
+
     for (const auto& sh : shapes) {
         if (*filter && sh.name.find(filter) == std::string::npos) continue;
 
@@ -1015,6 +1029,32 @@ int main(int argc, char** argv) {
             print_row(r);
             print_footnote(r);
         }
+
+        if (assert_perf) {
+            if (r.midrun_frame.p99 > kMidrunFrameCeilMs) {
+                ++perf_violations;
+                std::fprintf(stderr,
+                    "PERF REGRESSION [%s]: MIDRUN per-frame p99 %.2f ms > %.2f ms ceiling\n",
+                    r.shape.name.c_str(), r.midrun_frame.p99, kMidrunFrameCeilMs);
+            }
+            if (r.render_key.p99 > kRenderKeyCeilMs) {
+                ++perf_violations;
+                std::fprintf(stderr,
+                    "PERF REGRESSION [%s]: render_key p99 %.4f ms > %.2f ms ceiling\n",
+                    r.shape.name.c_str(), r.render_key.p99, kRenderKeyCeilMs);
+            }
+        }
+    }
+
+    if (assert_perf) {
+        if (perf_violations == 0)
+            std::printf("\nBENCH_ASSERT: all %zu scenarios within perf ceilings.\n",
+                        shapes.size());
+        else
+            std::fprintf(stderr,
+                "\nBENCH_ASSERT: %d perf ceiling violation(s) — FAIL.\n",
+                perf_violations);
+        failures += perf_violations;
     }
 
     if (!emit_json_lines) {

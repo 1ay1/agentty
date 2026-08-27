@@ -116,6 +116,18 @@ jobs:
         # that tests_gating deliberately didn't build.
         run: ctest --test-dir build --output-on-failure -j"$(nproc)" -LE perf
 
+      - name: Perf regression gate
+        # The long_session_bench is labelled `perf` (excluded from the gating
+        # suite because timing on a shared runner is noisy). Build + run it
+        # here in BENCH_ASSERT mode: it prints the numbers AND fails the job if
+        # any scenario blows a generous ceiling (~6× the observed values). This
+        # catches an order-of-magnitude regression — e.g. an O(n) accidentally
+        # reintroduced into the per-frame path, or a lost render cache — while
+        # tolerating the runner's timing jitter. Not a hard microbenchmark.
+        run: |
+          cmake --build build -j"$(nproc)" --target agentty_standalone_tests
+          BENCH_ASSERT=1 ./build/agentty_standalone_tests long_session_bench
+
   # Rust-grade memory-safety gate. Builds agentty's OWN-logic test set under
   # -fsanitize=address,undefined and runs it: proves those paths are free of
   # use-after-free / buffer overflow / leaks / UB at RUNTIME, complementing the

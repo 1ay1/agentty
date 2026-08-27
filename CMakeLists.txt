@@ -98,6 +98,12 @@ else()
         target_compile_options(${tgt} PRIVATE -Wno-maybe-uninitialized)
     endif()
 
+    # NOTE: -ffunction-sections/-fdata-sections + --gc-sections were measured
+    # here and gave ZERO size win — the whole-program LTO link (default on)
+    # already performs cross-module dead-code elimination before a section GC
+    # would ever run, so the section split is pure redundant compile cost.
+    # Left out deliberately; if LTO is ever disabled, revisit.
+
     # macOS SDK + GCC: <mach/port.h> uses `_Static_assert` (C keyword) in
     # arm64 macros that fire from any TU pulling in mach headers (e.g.
     # subprocess.cpp via <spawn.h>). Alias the C spelling to its C++
