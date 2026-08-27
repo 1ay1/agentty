@@ -389,16 +389,22 @@ std::optional<Msg> on_model_picker(const KeyEvent& ev) {
             return OpenProviderPicker{};
         // Ctrl+F toggles the highlighted model as a favourite — moved off
         // the bare `f` key now that plain letters feed the search box.
-        if (ev.mods.ctrl) {
-            if (c >= 0x01 && c <= 0x1A) c = U'a' + (c - 1);
-            if (c == U'f') return ModelPickerToggleFavorite{};
-            // Ctrl+E toggles the per-model reasoning-effort override for the
-            // highlighted model (inference → force-on → force-off → inference).
-            if (c == U'e') return ModelPickerToggleReasoning{};
-            // Ctrl+R toggles whether reasoning/thinking is SHOWN (transcript
-            // block + Anthropic visible-thinking beta). Global, all providers.
-            if (c == U'r') return ModelPickerToggleShowReasoning{};
-            return std::nullopt;
+        // Accept BOTH the flagged form (KKP terminals: 'f' + ctrl mod) and
+        // the legacy raw control byte (0x01..0x1A, no ctrl flag) — without
+        // the raw path ^F/^E/^R were dead on plain xterm/tmux-without-KKP.
+        {
+            const bool raw_ctrl = (c >= 0x01 && c <= 0x1A);
+            if (ev.mods.ctrl || raw_ctrl) {
+                if (raw_ctrl) c = U'a' + (c - 1);
+                if (c == U'f') return ModelPickerToggleFavorite{};
+                // Ctrl+E toggles the per-model reasoning-effort override for the
+                // highlighted model (inference → force-on → force-off → inference).
+                if (c == U'e') return ModelPickerToggleReasoning{};
+                // Ctrl+R toggles whether reasoning/thinking is SHOWN (transcript
+                // block + Anthropic visible-thinking beta). Global, all providers.
+                if (c == U'r') return ModelPickerToggleShowReasoning{};
+                return std::nullopt;
+            }
         }
         // Any other printable codepoint types into the filter query.
         if (c >= 0x20) return ModelPickerFilterInput{c};
@@ -473,6 +479,9 @@ std::optional<Msg> on_thread_list(const KeyEvent& ev) {
         // is Enter on legacy terminals and maya maps it to SpecialKey::Enter
         // before we see it, so only the flagged form arrives here.
         if (ctrl && (c == U'j' || c == U'J')) return CloseThreadList{};
+        // Plain j/k vim nav — every other list picker has it.
+        if (!ctrl && (c == U'k' || c == U'K')) return ThreadListMove{-1};
+        if (!ctrl && (c == U'j' || c == U'J')) return ThreadListMove{+1};
         if (!ctrl && (c == U'n' || c == U'N')) return NewThread{};
         if (!ctrl && (c == U'd' || c == U'D')) return ThreadListDelete{};
     }
@@ -497,6 +506,9 @@ std::optional<Msg> on_smart_mode(const KeyEvent& ev) {
         // bug). Legacy terminals send Ctrl-S as raw 0x13.
         if (c == 0x13 || (ev.mods.ctrl && (c == U's' || c == U'S')))
             return CloseSmartMode{};
+        // Plain j/k vim nav — every other list picker has it.
+        if (!ev.mods.ctrl && (c == 'k' || c == 'K')) return SmartModeMove{-1};
+        if (!ev.mods.ctrl && (c == 'j' || c == 'J')) return SmartModeMove{+1};
         // 'x' resets the selected slot to auto; space toggles the row.
         if (c == 'x' || c == 'X') return SmartModeClearSlot{};
         if (c == ' ') return SmartModeSelect{};
