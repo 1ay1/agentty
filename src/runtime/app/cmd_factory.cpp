@@ -597,6 +597,8 @@ std::optional<Message> build_smart_routing_card(const Model& m) {
     // Classify the newest real user turn (same logic launch_stream uses) so
     // the card's effort matches what the wire will actually carry.
     std::string_view newest_user;
+    std::size_t nu_attach_bytes = 0;
+    int         nu_images = 0;
     for (auto it = m.d.current.messages.rbegin();
          it != m.d.current.messages.rend(); ++it)
         // !smart_routing: never classify a prior turn's zero-text 🧠 card —
@@ -605,10 +607,15 @@ std::optional<Message> build_smart_routing_card(const Model& m) {
         // provenance card is not the user's prompt either.
         if (it->role == Role::User && !it->proactive_context
             && !it->smart_routing && !it->fork_note) {
-            newest_user = it->text; break;
+            newest_user = it->text;
+            for (const auto& a : it->attachments) nu_attach_bytes += a.body.size();
+            nu_images = static_cast<int>(it->images.size());
+            break;
         }
-    const smart::ComplexityScore cx =
+    const smart::ComplexityScore cx_text =
         smart::classify_score_with_context(newest_user, m.s.smart_turn_complexity);
+    const smart::ComplexityScore cx = smart::refine_with_payload(
+        cx_text, nu_attach_bytes, nu_images);
     const auto caps = resolved_caps(prof.model);
     const int learned = m.d.smart.routing_learning()
         ? smart::RoutingMemory::instance().prior_bias(
@@ -624,6 +631,10 @@ std::optional<Message> build_smart_routing_card(const Model& m) {
     std::string note{effort_label(prof.effort)};
     note += " \xe2\x86\x92 ";                       // →
     note += smart::to_string(cx.tier);
+    // Payload lift: the tier came (partly) from an attached paste/log/image,
+    // not the prompt text — say so, or a "fix this" that routes Standard
+    // looks like classifier noise.
+    if (cx.tier != cx_text.tier) note += " (payload)";
     if (bias != 0) {
         const bool from_learned = (bias == learned && learned != 0);
         note += from_learned ? " \xc2\xb7 learned " : " \xc2\xb7 session ";
@@ -767,6 +778,8 @@ Cmd<Msg> launch_stream(Model& m) {
     smart::Complexity turn_complexity = smart::Complexity::Standard;
     if (orchestrate) {
         std::string_view newest_user;
+        std::size_t nu_attach_bytes = 0;
+        int         nu_images = 0;
         for (auto it = m.d.current.messages.rbegin();
              it != m.d.current.messages.rend(); ++it)
             // Skip the zero-text 🧠 routing card (Role::User, smart_routing):
@@ -776,13 +789,21 @@ Cmd<Msg> launch_stream(Model& m) {
             // turn's learned prior, and a card that disagrees with the wire.
             if (it->role == Role::User && !it->proactive_context
                 && !it->smart_routing && !it->fork_note) {
-                newest_user = it->text; break;
+                newest_user = it->text;
+                for (const auto& a : it->attachments)
+                    nu_attach_bytes += a.body.size();
+                nu_images = static_cast<int>(it->images.size());
+                break;
             }
         // Context-aware: a short follow-up to a Complex turn keeps some of
         // that weight instead of collapsing to Simple. m.s.smart_turn_complexity
         // still holds the PREVIOUS turn's tier here (overwritten below at 776).
-        const smart::ComplexityScore turn_cx =
-            smart::classify_score_with_context(newest_user, m.s.smart_turn_complexity);
+        // Payload-aware: a chip-placeholder text with a big paste/log/image
+        // payload must not classify off the placeholder alone ("fix this" +
+        // 500-line paste is not Simple).
+        const smart::ComplexityScore turn_cx = smart::refine_with_payload(
+            smart::classify_score_with_context(newest_user, m.s.smart_turn_complexity),
+            nu_attach_bytes, nu_images);
         turn_complexity = turn_cx.tier;
         const auto caps = resolved_caps(strategic_profile.model);
         // Innovation 1 — LEARNED ROUTING: fold in the per-workspace prior this

@@ -126,10 +126,24 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             auto* o = ui::pick::opened(m.ui.smart_mode);
             if (!o) return done(std::move(m));
             // Rows 0-7 are boolean toggles; 8-10 are model slots.
-            auto toggled = [&](const char* label, bool on) -> Step {
+            auto toggled = [&](const char* label, bool flag_on,
+                               bool needs_orchestration = false) -> Step {
                 persist_settings(m);
-                return {std::move(m), set_status_toast(m,
-                    std::string{label} + (on ? " on" : " off"))};
+                // Honest toast: a sub-layer flag flipped while the MASTER is
+                // off (or, for the learning layers, while orchestration is
+                // off) doesn't change behaviour — say "will be on when …"
+                // instead of a bare "on" that implies it's running.
+                std::string msg{label};
+                if (!flag_on) {
+                    msg += " off";
+                } else if (!m.d.smart.enabled) {
+                    msg += " on (inactive until Smart Mode is enabled)";
+                } else if (needs_orchestration && !m.d.smart.orchestrate) {
+                    msg += " on (inactive until Orchestration is on)";
+                } else {
+                    msg += " on";
+                }
+                return {std::move(m), set_status_toast(m, std::move(msg))};
             };
             switch (o->index) {
                 case 0:
@@ -146,16 +160,20 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                     return toggled("subagent routing", m.d.smart.route_subagents);
                 case 4:
                     m.d.smart.learn_routing = !m.d.smart.learn_routing;
-                    return toggled("learned routing", m.d.smart.learn_routing);
+                    return toggled("learned routing", m.d.smart.learn_routing,
+                                   /*needs_orchestration=*/true);
                 case 5:
                     m.d.smart.outcome_feedback = !m.d.smart.outcome_feedback;
-                    return toggled("outcome feedback", m.d.smart.outcome_feedback);
+                    return toggled("outcome feedback", m.d.smart.outcome_feedback,
+                                   /*needs_orchestration=*/true);
                 case 6:
                     m.d.smart.speculative = !m.d.smart.speculative;
-                    return toggled("speculative", m.d.smart.speculative);
+                    return toggled("speculative", m.d.smart.speculative,
+                                   /*needs_orchestration=*/true);
                 case 7:
                     m.d.smart.recall_plans = !m.d.smart.recall_plans;
-                    return toggled("plan recall", m.d.smart.recall_plans);
+                    return toggled("plan recall", m.d.smart.recall_plans,
+                                   /*needs_orchestration=*/true);
                 default: break;
             }
             // A slot row → open the model picker in slot-assign mode.
