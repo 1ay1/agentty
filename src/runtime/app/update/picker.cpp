@@ -129,6 +129,11 @@ using maya::Cmd;
 Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
     return std::visit(overload{
         [&](OpenModelPicker) -> Step {
+            // Close the provider picker if the user cross-hopped here from it
+            // (^/ in the provider picker). pick_overlay + the key dispatcher
+            // both check model_picker BEFORE provider_picker, so a lingering
+            // open provider_picker would render/eat keys under this one.
+            m.ui.provider_picker = pick::Closed{};
             int idx = 0;
             for (int i = 0; i < static_cast<int>(m.d.available_models.size()); ++i)
                 if (m.d.available_models[i].id == m.d.model_id) idx = i;
@@ -550,6 +555,17 @@ Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
 
     return std::visit(overload{
         [&](OpenProviderPicker) -> Step {
+            // Close the model picker if the user cross-hopped here from it
+            // (^P in the model picker). Without this the model picker stays
+            // open and wins pick_overlay's priority order (checked first), so
+            // the hop would render nothing new. Flush any pending effort-tier
+            // change first — the same persist CloseModelPicker does on Esc,
+            // so a hop doesn't silently drop it.
+            if (m.ui.effort_dirty) {
+                persist_settings(m);
+                m.ui.effort_dirty = false;
+            }
+            m.ui.model_picker = pick::Closed{};
             // Open at the row matching the currently-active provider. Fresh
             // rows with an empty query (so every provider is present to match).
             const auto fresh = ui::build_provider_rows(saved_custom_hosts, "");
