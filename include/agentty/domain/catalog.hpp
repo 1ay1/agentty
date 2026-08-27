@@ -615,6 +615,7 @@ private:
             || contains(id, "deepseek-r1")
             || contains(id, "grok-4")
             || contains(id, "grok-3-mini")
+            || contains(id, "gpt-oss")           // OpenAI open-weight reasoner
             || contains(id, "-thinking")
             || contains(id, "o1")
             || contains(id, "o3")
