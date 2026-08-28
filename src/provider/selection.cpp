@@ -28,6 +28,13 @@ std::mutex g_active_mu;   // guards g_active across the UI/worker thread split
 std::string g_auth_header;         // --auth-header override, "" = Bearer
 std::mutex  g_auth_header_mu;      // same UI/worker split as g_active
 
+// Persist-on-success: the CLI custom-host spec awaiting proof (empty =
+// none). Written once at startup (main thread, pre-UI), consumed on the
+// UI thread by the ModelsLoaded reducer — the mutex covers the overlap.
+std::string g_unproven_spec;
+std::string g_unproven_model;
+std::mutex  g_unproven_mu;
+
 std::string env_or_empty(std::string_view name) {
     if (name.empty()) return {};
     const char* v = std::getenv(std::string{name}.c_str());
@@ -82,6 +89,24 @@ std::vector<ModelInfo> bundled_models_for(std::string_view label) {
     return v;
 }
 } // namespace
+
+void set_unproven_spec(std::string spec, std::string model_recall) {
+    std::lock_guard<std::mutex> lk(g_unproven_mu);
+    g_unproven_spec  = std::move(spec);
+    g_unproven_model = std::move(model_recall);
+}
+
+std::optional<std::pair<std::string, std::string>>
+take_unproven_spec(std::string_view spec_now) {
+    std::lock_guard<std::mutex> lk(g_unproven_mu);
+    if (g_unproven_spec.empty() || g_unproven_spec != spec_now)
+        return std::nullopt;
+    auto out = std::make_pair(std::move(g_unproven_spec),
+                              std::move(g_unproven_model));
+    g_unproven_spec.clear();
+    g_unproven_model.clear();
+    return out;
+}
 
 void set_custom_auth_header(std::string name) {
     std::lock_guard lk(g_auth_header_mu);

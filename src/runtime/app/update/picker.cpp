@@ -175,6 +175,18 @@ Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
             }
             if (e.models.empty()) return done(std::move(m));
             auto settings = deps().load_settings();
+            // PERSIST-ON-SUCCESS: a custom --provider spec registered at
+            // startup as unproven becomes sticky NOW — the host answered a
+            // non-empty model fetch, so it's a real endpoint, not a typo.
+            // Presets persisted at parse time as always; this only fires
+            // for raw host/URL specs, at most once per process.
+            if (auto proven = provider::take_unproven_spec(
+                    active_provider_id())) {
+                settings.provider = proven->first;
+                if (!proven->second.empty())
+                    settings.provider_models[proven->first] = proven->second;
+                deps().save_settings(settings);
+            }
             m.d.available_models.clear();
             for (auto& mi : e.models) {
                 // DISCOVERED entitlement: this account already 400'd on the
