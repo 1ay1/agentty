@@ -223,11 +223,25 @@ Element model_picker(const Model& m) {
     for (const auto& v : vscored) vis.push_back(v.idx);
 
     if (m.d.available_models.empty()) {
-        cfg.items.push_back(text(
-            m.s.models_loading
-                ? "  Loading models\xe2\x80\xa6"
-                : "  No models available \xe2\x80\x94 check the provider/key, then Esc.",
-            fg_italic(muted)));
+        std::string empty_msg;
+        if (m.s.models_loading) {
+            empty_msg = "  Loading models\xe2\x80\xa6";
+        } else {
+            // Name the LIKELY fix per provider kind instead of one generic
+            // line. For a local host the cause is almost always "server not
+            // running / wrong port" — telling a llama.cpp user to "check the
+            // key" sent them down the wrong path entirely.
+            const auto& sel = provider::active();
+            const bool local = sel.kind == provider::Kind::OpenAI
+                            && !sel.openai_endpoint.use_tls;
+            empty_msg = local
+                ? "  No models \xe2\x80\x94 is the server running on "
+                    + sel.openai_endpoint.host + ":"
+                    + std::to_string(sel.openai_endpoint.port)
+                    + "? Start it, or fix the host (^P), then reopen."
+                : "  No models available \xe2\x80\x94 check the provider/key, then Esc.";
+        }
+        cfg.items.push_back(text(std::move(empty_msg), fg_italic(muted)));
     } else if (vis.empty()) {
         cfg.items.push_back(text("  no models match", fg_italic(muted)));
     } else {
