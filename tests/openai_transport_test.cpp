@@ -671,6 +671,31 @@ TEST_CASE("test_endpoint_presets") {
         CHECK(url.models_path == "/v1/models");
     }
     {
+        // "#name" fragment: a LOCAL multi-account tag. Two specs that differ
+        // only in fragment dial the IDENTICAL endpoint (host/port/path) but
+        // keep distinct labels — distinct settings keys → separate API keys
+        // and saved models per account on the same server.
+        auto a = oai::Endpoint::from_spec("https://ollama.com/v1#work");
+        auto b = oai::Endpoint::from_spec("https://ollama.com/v1#personal");
+        CHECK(a.host == "ollama.com");
+        CHECK(a.port == 443);
+        CHECK(a.use_tls);
+        CHECK(a.path == "/v1/chat/completions");
+        CHECK(a.models_path == "/v1/models");
+        CHECK(b.host == a.host);
+        CHECK(b.path == a.path);
+        CHECK(a.label == "https://ollama.com/v1#work");
+        CHECK(b.label == "https://ollama.com/v1#personal");
+    }
+    {
+        // Fragment on a raw host:port spec — stripped BEFORE the port split.
+        auto url = oai::Endpoint::from_spec("my-box.lan:8080#lab");
+        CHECK(url.host == "my-box.lan");
+        CHECK(url.port == 8080);
+        CHECK(!url.use_tls);
+        CHECK(url.label == "my-box.lan:8080#lab");
+    }
+    {
         // Invalid port (non-numeric) → falls back to scheme default.
         auto url = oai::Endpoint::from_spec("https://host:abc/path");
         CHECK(url.host == "host");

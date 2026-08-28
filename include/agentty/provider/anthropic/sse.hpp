@@ -17,6 +17,7 @@
 #include <simdjson.h>
 
 #include "agentty/domain/catalog.hpp"        // StopReason
+#include "agentty/provider/debug.hpp"        // shared AGENTTY_DEBUG_API logger
 #include "agentty/provider/provider.hpp"     // EventSink
 #include "agentty/provider/wire.hpp"         // wire::SseFramer
 #include "agentty/runtime/msg.hpp"
@@ -28,42 +29,12 @@ namespace agentty::provider::anthropic {
 // $AGENTTY_DEBUG_FILE (or ./agentty-api.log). Appends, never truncates.
 // Shared by the parser (per-event trace) and run_stream_sync (request +
 // status trace) — inline so both TUs see one definition.
-inline FILE* debug_log() {
-    // Initialised exactly once (C++ guarantees thread-safe init of a
-    // function-local static), then every subsequent call is a plain load
-    // of the cached pointer — no mutex. dispatch_event() calls this once
-    // per SSE event (i.e. per output token on a hot stream), so the old
-    // per-call std::lock_guard was a full acquire/release barrier on the
-    // wire's hottest path purely to re-check a write-once flag. The magic
-    // static collapses that to a guard-byte test the compiler hoists to a
-    // single load once initialisation has run.
-    static FILE* fp = [] () -> FILE* {
-        const char* on = util::env::get_or_null<util::env::Var::DebugApi>();
-        if (!on || *on == '0') return nullptr;
-        const char* path = util::env::get_or_null<util::env::Var::DebugFile>();
-        std::string p = (path && *path) ? std::string{path}
-                                        : std::string{"agentty-api.log"};
-        return std::fopen(p.c_str(), "ab");
-    }();
-    return fp;
-}
-
-inline void dbg(const char* fmt, ...) {
-    FILE* fp = debug_log();
-    if (!fp) return;
-    // Monotonic ms-since-first-call so SSE event timing can be measured
-    // without parsing wall-clock timestamps. Compares cheap, scoped to the
-    // process lifetime, and unambiguous when grepping the log.
-    using clock = std::chrono::steady_clock;
-    static const auto t0 = clock::now();
-    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                  clock::now() - t0).count();
-    std::fprintf(fp, "[+%6lldms] ", static_cast<long long>(ms));
-    va_list ap; va_start(ap, fmt);
-    std::vfprintf(fp, fmt, ap);
-    va_end(ap);
-    std::fflush(fp);
-}
+// Env-var-gated request/SSE dump. Set AGENTTY_DEBUG_API=1 to write to
+// $AGENTTY_DEBUG_FILE (or ./agentty-api.log). Appends, never truncates.
+// Now delegates to the SHARED provider/debug.hpp logger (one file, every
+// transport); these aliases keep the existing anthropic:: call sites.
+using provider::debug_log;
+using provider::dbg;
 
 // Per-stream parse state. One instance lives for the duration of a single
 // /v1/messages stream; every SSE frame mutates it via dispatch_event (in

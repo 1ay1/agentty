@@ -36,6 +36,7 @@
 #include <nlohmann/json.hpp>
 #include <simdjson.h>
 
+#include "agentty/provider/debug.hpp"   // shared AGENTTY_DEBUG_API logger
 #include "agentty/provider/stream_epilogue.hpp"
 #include "agentty/provider/usage.hpp"
 #include "agentty/provider/msg_shared.hpp"
@@ -1257,6 +1258,14 @@ Endpoint Endpoint::from_spec(std::string_view spec) {
         Endpoint ep;
         ep.label = std::string{spec};
         std::string_view s{spec};
+        // Optional "#name" FRAGMENT: names this entry so several accounts on
+        // the SAME endpoint stay distinct ("https://ollama.com/v1#work" and
+        // "…/v1#personal" are two settings keys → two API keys, two saved
+        // models, two picker rows). The fragment is a pure local tag —
+        // stripped here so it never reaches the wire; kept in `label` so
+        // rows/badges display it.
+        if (auto hash = s.rfind('#'); hash != std::string_view::npos)
+            s = s.substr(0, hash);
         const bool tls = spec.starts_with("https://");
         ep.use_tls = tls;
         s.remove_prefix(tls ? 8 : 7);   // "https://" = 8, "http://" = 7
@@ -1335,6 +1344,11 @@ Endpoint Endpoint::from_spec(std::string_view spec) {
     Endpoint ep;
     ep.label = std::string{spec};
     std::string s{spec};
+    // "#name" fragment: local multi-account tag, never dialed (see the URL
+    // branch above). Strip BEFORE the port split so "host:8080#work" parses
+    // the port, not "8080#work".
+    if (auto hash = s.rfind('#'); hash != std::string::npos)
+        s.resize(hash);
     if (auto colon = s.rfind(':'); colon != std::string::npos) {
         ep.host = s.substr(0, colon);
         try {
@@ -1637,6 +1651,23 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
     http::append_sse_no_buffer(hreq.headers);
     hreq.body    = std::move(body_str);
 
+    // AGENTTY_DEBUG_API trace — same logger/file as the Anthropic wire
+    // (provider/debug.hpp). The custom-host/llama.cpp report specifically
+    // asked for this: the env vars produced a dump ONLY on the Anthropic
+    // path, so local-endpoint failures were untraceable.
+    if (provider::debug_log()) {
+        provider::dbg(">> openai POST %s://%s:%u%s model=%s native=%d body=%zuB\n",
+                      req.endpoint.use_tls ? "https" : "http",
+                      req.endpoint.host.c_str(),
+                      static_cast<unsigned>(req.endpoint.port),
+                      req.endpoint.path.c_str(),
+                      req.model.c_str(), native ? 1 : 0, hreq.body.size());
+        provider::dbg(">> body: %.*s%s\n",
+                      static_cast<int>(std::min<std::size_t>(hreq.body.size(), 4096)),
+                      hreq.body.c_str(),
+                      hreq.body.size() > 4096 ? " …[truncated]" : "");
+    }
+
     int  http_status = 0;
     bool is_success  = false;
     std::string error_body;
@@ -1646,6 +1677,8 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
     handler.on_headers = [&](int status, const http::Headers& hh) {
         http_status = status;
         is_success  = (status >= 200 && status < 300);
+        if (provider::debug_log())
+            provider::dbg("<< openai status=%d\n", status);
         if (is_success) return;
         retry_after_hint = provider::parse_retry_after(hh);
     };
@@ -1654,6 +1687,11 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
     };
     handler.on_buffered_wait = [&] { ctx.sink(StreamBufferedWait{}); };
     handler.on_chunk = [&](std::string_view chunk) -> bool {
+        if (provider::debug_log())
+            provider::dbg("<< chunk %zuB: %.*s%s\n", chunk.size(),
+                          static_cast<int>(std::min<std::size_t>(chunk.size(), 2048)),
+                          chunk.data(),
+                          chunk.size() > 2048 ? " …[truncated]" : "");
         if (is_success) {
             if (native) feed_ndjson(ctx, chunk.data(), chunk.size());
             else        feed_sse(ctx, chunk.data(), chunk.size());
