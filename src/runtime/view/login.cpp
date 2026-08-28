@@ -386,7 +386,9 @@ Element panel_api_key(const login::ApiKeyInput& s) {
                                  /*placeholder=*/"paste API key…"));
     }
     rows.push_back(text(""));
-    rows.push_back(key_hints({{"Enter", "submit"}, {"Esc", "cancel"}}));
+    rows.push_back(key_hints({{"Enter", "submit"},
+                              {"Esc", s.back != login::Back::Close
+                                          ? "back" : "cancel"}}));
     return v(std::move(rows)).build();
 }
 
@@ -413,7 +415,9 @@ Element panel_custom_host(const login::CustomHostInput& s) {
         "\xc2\xb7  inference.example.com  \xc2\xb7  https://inference.example.com/api",
         fg_dim(muted)));
     rows.push_back(text(""));
-    rows.push_back(key_hints({{"Enter", "connect"}, {"Esc", "cancel"}}));
+    rows.push_back(key_hints({{"Enter", "connect"},
+                              {"Esc", s.back != login::Back::Close
+                                          ? "back" : "cancel"}}));
     return v(std::move(rows)).build();
 }
 

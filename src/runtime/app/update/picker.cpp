@@ -710,7 +710,9 @@ Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
 
             // "Custom host…" sentinel: hand off to the free-text endpoint modal.
             if (chosen.is_new_custom_host()) {
-                m.ui.login = ui::login::CustomHostInput{};
+                ui::login::CustomHostInput ch;
+                ch.back = ui::login::Back::ProviderPicker;  // Esc = one step back
+                m.ui.login = std::move(ch);
                 return done(std::move(m));
             }
 
@@ -788,6 +790,7 @@ Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
                     .cursor         = 0,
                     .provider       = spec,
                     .provider_label = std::string{preset.label},
+                    .back           = ui::login::Back::ProviderPicker,
                 };
                 return done(std::move(m));
             }
