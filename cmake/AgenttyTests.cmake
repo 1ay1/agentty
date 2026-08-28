@@ -113,6 +113,16 @@ target_link_libraries(cred_crypt_test PRIVATE
 add_test(NAME cred_crypt_test COMMAND cred_crypt_test)
 set_tests_properties(cred_crypt_test PROPERTIES TIMEOUT 60 LABELS sanitizer)
 
+# logx: standalone binary ON PURPOSE — the log system latches its env config
+# on first use (magic static), so the test must own its process to set
+# AGENTTY_LOG/_FILE before anything logs.
+agentty_test(logx_test MODE raw)
+add_executable(logx_test EXCLUDE_FROM_ALL
+    tests/logx_test.cpp src/util/logx.cpp src/util/dbglog.cpp)
+target_include_directories(logx_test PRIVATE include)
+add_test(NAME logx_test COMMAND logx_test)
+set_tests_properties(logx_test PROPERTIES TIMEOUT 30)
+
 agentty_test(keystore_test MODE raw LABELS sanitizer)
 add_executable(keystore_test EXCLUDE_FROM_ALL
     tests/keystore_test.cpp src/io/keystore.cpp src/tool/util/subprocess.cpp
