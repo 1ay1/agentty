@@ -157,6 +157,13 @@ struct LoopBreak {
 // newer login modal.
 [[nodiscard]] std::uint64_t next_codex_login_attempt_id() noexcept;
 
+// Connect-probe a custom host off the UI thread: dial its model list
+// (configured path → /v1/models → Ollama /api/tags), detect the dialect,
+// dispatch HostProbed. Shares next_codex_login_attempt_id() so a stale
+// probe result (user Esc'd / resubmitted) is dropped by the reducer.
+[[nodiscard]] maya::Cmd<Msg> probe_host_async(
+    std::string spec, std::uint64_t attempt_id, auth::AuthHeader auth);
+
 // Kick native ChatGPT OAuth off the UI thread. The attempt id correlates all
 // async messages; `cancel` is tripped when Esc closes that exact modal.
 [[nodiscard]] maya::Cmd<Msg> codex_login_async(

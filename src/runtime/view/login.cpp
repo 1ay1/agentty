@@ -392,6 +392,22 @@ Element panel_api_key(const login::ApiKeyInput& s) {
     return v(std::move(rows)).build();
 }
 
+// Connect probe in flight: name the host and what's being tried so the
+// short wait reads as WORK, not a hang. Esc cancels back to the input.
+Element panel_host_probing(const login::HostProbing& s) {
+    std::vector<Element> rows;
+    rows.push_back(text("Checking " + s.spec + "\xe2\x80\xa6", fg_bold(fg)));
+    rows.push_back(text(""));
+    rows.push_back(body_text(
+        "Dialing the server's model list \xe2\x80\x94 the configured path, "
+        "then /v1/models, then Ollama's /api/tags \xe2\x80\x94 to detect what "
+        "it speaks and confirm it's alive before switching.",
+        fg_dim(muted)));
+    rows.push_back(text(""));
+    rows.push_back(key_hints({{"Esc", "cancel"}}));
+    return v(std::move(rows)).build();
+}
+
 Element panel_custom_host(const login::CustomHostInput& s) {
     std::vector<Element> rows;
     rows.push_back(text("Custom OpenAI-compatible host", fg_bold(fg)));
@@ -488,6 +504,8 @@ Element login_modal(const Model& m) {
             return panel_api_key(s);
         } else if constexpr (std::same_as<T, login::CustomHostInput>) {
             return panel_custom_host(s);
+        } else if constexpr (std::same_as<T, login::HostProbing>) {
+            return panel_host_probing(s);
         } else if constexpr (std::same_as<T, login::AccountList>) {
             return panel_account_list(s);
         } else if constexpr (std::same_as<T, login::Failed>) {

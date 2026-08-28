@@ -666,9 +666,10 @@ std::optional<Msg> on_login(const ui::login::State& state, const KeyEvent& ev) {
     }
 
     if (std::holds_alternative<OAuthExchanging>(state)
-        || std::holds_alternative<ChatGptWaiting>(state)) {
-        // Awaiting an async result (HTTP exchange / the loopback callback).
-        // No keys accepted besides Esc (handled above).
+        || std::holds_alternative<ChatGptWaiting>(state)
+        || std::holds_alternative<HostProbing>(state)) {
+        // Awaiting an async result (HTTP exchange / loopback callback /
+        // host probe). No keys accepted besides Esc (handled above).
         return NoOp{};
     }
 

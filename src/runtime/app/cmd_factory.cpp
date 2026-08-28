@@ -1884,6 +1884,48 @@ std::uint64_t next_codex_login_attempt_id() noexcept {
     return next.fetch_add(1, std::memory_order_relaxed) + 1;
 }
 
+Cmd<Msg> probe_host_async(std::string spec, std::uint64_t attempt_id,
+                          auth::AuthHeader auth) {
+    // Connect-probe a custom host on a worker: dial its model list
+    // (configured path → /v1/models → Ollama /api/tags) and report the
+    // DETECTED dialect. Bounded by probe_host's own 3s/6s timeouts, so the
+    // modal's "probing…" state resolves quickly either way.
+    return Cmd<Msg>::task([spec = std::move(spec), attempt_id,
+                           auth = std::move(auth)]
+                          (std::function<void(Msg)> dispatch) {
+        HostProbed r;
+        r.attempt_id = attempt_id;
+        r.spec       = spec;
+        try {
+            const auto sel = provider::parse_selection(spec);
+            const auto probe =
+                provider::openai::probe_host(auth, sel.openai_endpoint);
+            using D = provider::openai::HostProbe::Dialect;
+            if (probe.dialect != D::None) {
+                r.ok          = true;
+                r.models_path = probe.models_path;
+                r.native_api  = probe.dialect == D::OllamaNative;
+                r.model_count = probe.model_count;
+                r.latency_ms  = probe.latency_ms;
+            } else if (probe.http_status == 401 || probe.http_status == 403) {
+                r.error = "HTTP " + std::to_string(probe.http_status)
+                        + " \xe2\x80\x94 this host needs an API key";
+            } else if (probe.http_status != 0) {
+                r.error = "HTTP " + std::to_string(probe.http_status)
+                        + " \xe2\x80\x94 no model list at any known path";
+            } else {
+                r.error = "nothing listening \xe2\x80\x94 is the server "
+                          "running on that host:port?";
+            }
+        } catch (const std::exception& e) {
+            r.error = e.what();
+        } catch (...) {
+            r.error = "probe failed";
+        }
+        dispatch(std::move(r));
+    });
+}
+
 Cmd<Msg> device_login_async(std::string provider, std::string provider_label,
                             std::uint64_t attempt_id,
                             std::shared_ptr<std::atomic_bool> cancel) {

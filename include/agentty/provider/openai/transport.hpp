@@ -155,6 +155,32 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink,
 [[nodiscard]] std::vector<ModelInfo> list_models(const AuthHeader& auth,
                                                  const Endpoint& endpoint);
 
+// ── Custom-host dialect probe ───────────────────────────────────
+// One call answers "what is actually running at this endpoint?" before a
+// custom host is committed. Tries, in order:
+//   1. the endpoint's configured models_path      (explicit prefix honoured)
+//   2. /v1/models                                 (the OpenAI-dialect default)
+//   3. /api/tags                                  (Ollama's native protocol)
+// and reports which one answered, how many models it listed, and the round
+// trip time. The connect flow uses it for instant modal feedback ("✓ 12
+// models · openai · 45ms" vs "✗ nothing listening") and to auto-correct the
+// endpoint (adopt the answering prefix; flip native_api for a bare Ollama
+// daemon) — the SOTA onboarding move: detect, don't interrogate the user.
+struct HostProbe {
+    enum class Dialect : std::uint8_t {
+        None,          // nothing answered — host down / wrong port
+        OpenAiCompat,  // an OpenAI-shape /models answered
+        OllamaNative,  // /api/tags answered (bare Ollama daemon)
+    };
+    Dialect     dialect      = Dialect::None;
+    std::string models_path;     // the path that answered ("" when None)
+    int         model_count  = 0;
+    int         http_status  = 0;   // last status seen (0 = connect failure)
+    long        latency_ms   = 0;   // round trip of the answering request
+};
+[[nodiscard]] HostProbe probe_host(const AuthHeader& auth,
+                                   const Endpoint& endpoint);
+
 // Common request headers (accept/content-type/user-agent + auth). The auth
 // header is `authorization: Bearer <key>` unless `endpoint.auth_header_name`
 // is set, in which case the key goes out raw under that name. Exposed for

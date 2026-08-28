@@ -571,6 +571,21 @@ struct CloseLogin {};
 // input → provider picker → closed) instead of collapsing everything.
 // The reducer reads the sub-state's `back` origin field.
 struct LoginBack {};
+// Async custom-host probe result (worker → reducer). `ok` means a model
+// list answered somewhere; `models_path`/`native_api` carry the DETECTED
+// dialect so the commit adopts what the server actually speaks. On failure
+// `error` is the human reason ("nothing listening", "HTTP 401", …).
+// attempt_id matches HostProbing so a stale result is dropped.
+struct HostProbed {
+    std::uint64_t attempt_id = 0;
+    std::string   spec;
+    bool          ok = false;
+    std::string   models_path;   // the path that answered
+    bool          native_api = false;
+    int           model_count = 0;
+    long          latency_ms = 0;
+    std::string   error;
+};
 // Sign out of the ACTIVE provider: clear its on-disk credentials (Anthropic
 // credentials.json, or the Codex/ChatGPT token store), zero the live auth
 // header via update_auth, and re-open the sign-in modal so the user lands
@@ -932,7 +947,7 @@ using LoginMsg = std::variant<
     LoginPaste, LoginCursorLeft, LoginCursorRight, LoginSubmit,
     LoginCopyAuthUrl, LoginCopyCode, LoginOpenBrowserAgain,
     LoginExchanged, CodexDeviceCodeReady, CodexLoginDone,
-    DeviceCodeReady, DeviceLoginDone, TokenRefreshed>;
+    DeviceCodeReady, DeviceLoginDone, TokenRefreshed, HostProbed>;
 
 using DiffReviewMsg = std::variant<
     OpenDiffReview, CloseDiffReview, DiffReviewMove, DiffReviewScroll,

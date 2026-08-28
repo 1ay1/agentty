@@ -108,43 +108,77 @@ TEST_CASE("custom host key prompt transitions") {
         (void)cmd;
     }
 
-    // ── Case 3: Non-TLS bare host:port → commit immediately, no key prompt ──
+    // ── Case 3: Non-TLS bare host:port → PROBE first (HostProbing), commit
+    //    only on HostProbed{ok} ──
     {
         agentty::store::Settings s;
         install_stub_deps(s);
         agentty::Model m;
-        // Seed available_models so we can detect it being cleared by commit.
         m.d.available_models.push_back(agentty::ModelInfo{
             .id = agentty::ModelId{"old-model"}, .display_name = "old"});
         m.ui.login = login::CustomHostInput{.host_input = "localhost:8080"};
         auto [m2, cmd] = app::detail::login_update(
             std::move(m), msg::LoginMsg{agentty::LoginSubmit{}});
-        check(std::holds_alternative<login::Closed>(m2.ui.login),
-              "3: non-TLS host commits (modal closes, not ApiKeyInput)");
-        check(m2.s.models_loading,
+        auto* hp = std::get_if<login::HostProbing>(&m2.ui.login);
+        check(hp != nullptr,
+              "3: non-TLS host enters HostProbing (probe before commit)");
+        check(hp && hp->spec == "localhost:8080",
+              "3: probing the canonical spec");
+        check(!m2.s.models_loading,
+              "3: not committed while probing");
+        // Successful probe result → commit (models_loading flips, modal closes).
+        agentty::HostProbed ok;
+        ok.attempt_id = hp->attempt_id;
+        ok.spec = "localhost:8080";
+        ok.ok = true;
+        ok.models_path = "/v1/models";
+        ok.model_count = 2;
+        auto [m3, cmd3] = app::detail::login_update(
+            std::move(m2), msg::LoginMsg{std::move(ok)});
+        check(std::holds_alternative<login::Closed>(m3.ui.login),
+              "3: probe success commits (modal closes)");
+        check(m3.s.models_loading,
               "3: commit_provider_switch ran (models_loading true)");
-        check(m2.d.available_models.empty(),
+        check(m3.d.available_models.empty(),
               "3: commit_provider_switch cleared available_models");
-        (void)cmd;
+        // The keyless host was persisted as a saved row (empty key).
+        check(s.provider_keys.count("localhost:8080") == 1,
+              "3: keyless host persisted into provider_keys");
+        (void)cmd; (void)cmd3;
     }
 
-    // ── Case 4: Non-TLS http://host:port/path → commit, no key prompt ──
+    // ── Case 4: probe FAILURE returns to the input with the spec restored ──
     {
         agentty::store::Settings s;
         install_stub_deps(s);
         agentty::Model m;
-        m.d.available_models.push_back(agentty::ModelInfo{
-            .id = agentty::ModelId{"old-model"}, .display_name = "old"});
         m.ui.login = login::CustomHostInput{.host_input = "http://10.0.0.5:5000/custom"};
-        auto [m2, cmd] = app::detail::login_update(
+        auto [m1, cmd1] = app::detail::login_update(
             std::move(m), msg::LoginMsg{agentty::LoginSubmit{}});
-        check(std::holds_alternative<login::Closed>(m2.ui.login),
-              "4: http:// host commits (modal closes)");
-        check(m2.s.models_loading,
-              "4: commit_provider_switch ran (models_loading true)");
-        check(m2.d.available_models.empty(),
-              "4: commit_provider_switch cleared available_models");
-        (void)cmd;
+        auto* hp = std::get_if<login::HostProbing>(&m1.ui.login);
+        check(hp != nullptr, "4: http:// host enters HostProbing");
+        agentty::HostProbed bad;
+        bad.attempt_id = hp ? hp->attempt_id : 0;
+        bad.spec = "http://10.0.0.5:5000/custom";
+        bad.ok = false;
+        bad.error = "nothing listening";
+        auto [m2, cmd2] = app::detail::login_update(
+            std::move(m1), msg::LoginMsg{std::move(bad)});
+        auto* ch = std::get_if<login::CustomHostInput>(&m2.ui.login);
+        check(ch != nullptr,
+              "4: probe failure returns to the host input");
+        check(ch && ch->host_input == "http://10.0.0.5:5000/custom",
+              "4: typed spec restored for re-editing");
+        check(!m2.s.models_loading, "4: no commit on failure");
+        // A STALE probe result (wrong attempt id) is dropped.
+        agentty::HostProbed stale;
+        stale.attempt_id = 9999;
+        stale.ok = true;
+        auto [m3, cmd3] = app::detail::login_update(
+            std::move(m2), msg::LoginMsg{std::move(stale)});
+        check(std::holds_alternative<login::CustomHostInput>(m3.ui.login),
+              "4: stale probe result is a no-op");
+        (void)cmd1; (void)cmd2; (void)cmd3;
     }
 
     // ── Case 5: Esc at the key prompt → cancel the whole switch ──
