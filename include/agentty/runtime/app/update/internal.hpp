@@ -111,9 +111,14 @@ std::string    model_for_provider(std::string_view spec);
 //   5. swaps the Deps auth, clears the stale model list, and returns the
 //      Cmd batch (status toast + model refetch) for the caller to return.
 // `label` is the human name for the confirmation toast.
+// `desired_model` (optional): when non-empty, the exact wire model id to make
+// active on the new provider, taking priority over the per-provider recall —
+// this is what the fused cross-provider picker passes so an Enter is an ATOMIC
+// provider+model switch. Empty (every existing caller) keeps the recall path.
 [[nodiscard]] std::pair<Model, maya::Cmd<Msg>>
 commit_provider_switch(Model m, std::string_view spec,
-                       auth::AuthHeader new_auth, std::string_view label);
+                       auth::AuthHeader new_auth, std::string_view label,
+                       std::string_view desired_model = {});
 
 // ── Frozen-scrollback prefix helpers (frozen.cpp) ────────────────────────
 //
