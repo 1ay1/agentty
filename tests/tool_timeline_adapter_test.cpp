@@ -142,6 +142,77 @@ TEST_CASE("tool timeline adapter") {
     check(U::tool_body_preview_config(read).kind == Kind::FileRead,
           "read keeps structured file body");
 
+    // Real line numbers: the pagination footer is stripped from the body
+    // and mined for the TRUE first line (authoritative over the args echo).
+    {
+        auto tc = make_tool("read",
+            A::ToolUse::Done{{}, {},
+                "alpha\nbeta\n\n[showing lines 40-41 of 90; 49 more \xe2\x80\x94 "
+                "pass offset=42 for the next chunk]"},
+            {{"path", "sample.cpp"}});
+        const auto body = U::tool_body_preview_config(tc);
+        check(body.kind == Kind::FileRead && body.start_line == 40,
+              "read footer anchors gutter at true start line");
+        check(body.text.find("[showing lines") == std::string::npos,
+              "read footer stripped from numbered body");
+    }
+    // Symbol reads: the SUCCESS header is stripped and its `(lines A\u2013B)`
+    // range anchors the gutter even though no offset arg exists.
+    {
+        auto tc = make_tool("read",
+            A::ToolUse::Done{{}, {},
+                "SUCCESS: `foo` defined at f.cpp:12 (lines 12\xe2\x80\x93 14).\n\n"
+                "int foo() {\n  return 1;\n}\n"},
+            {{"path", "f.cpp"}, {"symbol", "foo"}});
+        const auto body = U::tool_body_preview_config(tc);
+        check(body.kind == Kind::FileRead && body.start_line == 12,
+              "symbol read anchors gutter at definition line");
+        check(body.text.rfind("int foo", 0) == 0,
+              "symbol header stripped from numbered body");
+        check(U::tool_timeline_detail(tc).find("foo()") != std::string::npos,
+              "read header names the symbol read");
+    }
+
+    // grep markdown is re-synthesized into path:line:text for the
+    // structured GrepMatches table, with line numbers derived from the
+    // `### L<s>-<e>` block tags.
+    {
+        auto tc = make_tool("grep",
+            A::ToolUse::Done{{}, {},
+                "Found 2 matches across 1 file.\n\n"
+                "## Matches in src/a.cpp\n\n"
+                "### fn foo \xe2\x80\xba L41-43\n```\n"
+                "int x = 1;\nint y = 2;\nint z = 3;\n```\n\n"
+                "Showing all 2 matches."},
+            {{"pattern", "int"}});
+        const auto body = U::tool_body_preview_config(tc);
+        check(body.kind == Kind::GrepMatches,
+              "grep renders the structured match table");
+        check(body.text.find("src/a.cpp:41:int x = 1;") != std::string::npos
+                  && body.text.find("src/a.cpp:43:int z = 3;") != std::string::npos,
+              "grep rows carry true derived line numbers");
+        check(body.text.find("Showing all") == std::string::npos
+                  && body.text.find("Found 2") == std::string::npos,
+              "grep headline/pagination chatter dropped from body");
+    }
+    // Unparsable grep output (no fences) stays readable as a CodeBlock.
+    {
+        auto tc = make_tool("grep",
+            A::ToolUse::Done{{}, {}, "No matches for 'zzz'. Try: loosen"},
+            {{"pattern", "zzz"}});
+        check(U::tool_body_preview_config(tc).kind == Kind::CodeBlock,
+              "fenceless grep output falls back to code block");
+    }
+
+    // process_* share bash's terminal-output body (tail window, structured
+    // extraction) instead of the generic head-anchored fallback.
+    {
+        auto tc = make_tool("process_poll",
+            A::ToolUse::Done{{}, {}, "server listening on :8080\n"});
+        check(U::tool_body_preview_config(tc).kind == Kind::BashOutput,
+              "process_poll output renders as terminal output");
+    }
+
     auto todo = make_tool("todo", A::ToolUse::Running{},
         {{"todos", {{{"content", "Audit cards"}, {"status", "in_progress"}}}}});
     check(U::tool_body_preview_config(todo).kind == Kind::TodoList,

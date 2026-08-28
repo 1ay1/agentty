@@ -27,18 +27,53 @@ bool read_body(const ToolUse& tc,
     using Kind = maya::ToolBodyPreview::Kind;
     if (!tc.is_done()) return false;   // failed → shared Failure fallback
 
-    const auto& body = tc.output();
-    if (!body.empty()) {
+    const auto& raw = tc.output();
+    if (!raw.empty()) {
+        // The read tool decorates its output: a leading "SUCCESS: `sym`
+        // defined at path:N (lines A–B).\n\n" header for symbol reads and a
+        // trailing "\n[showing lines A-B of N …]" pagination footer. Both
+        // would be NUMBERED AS FILE CONTENT by the FileRead gutter, skewing
+        // every line number below them. Strip them here and mine them for
+        // the TRUE first line — authoritative over the args echo (which is
+        // absent for symbol reads and negative for tail reads).
+        std::string_view body{raw};
+        int true_start = 0;
+
+        auto parse_int_at = [](std::string_view s, std::size_t i) -> int {
+            int v = 0; bool got = false;
+            while (i < s.size() && s[i] >= '0' && s[i] <= '9') {
+                v = v * 10 + (s[i] - '0'); ++i; got = true;
+            }
+            return got ? v : 0;
+        };
+
+        // Footer: authoritative for offset/limit and tail (-N) reads.
+        constexpr std::string_view kFooterTag = "\n[showing lines ";
+        if (auto fp = body.rfind(kFooterTag); fp != std::string_view::npos) {
+            true_start = parse_int_at(body, fp + kFooterTag.size());
+            body = body.substr(0, fp);
+        }
+        // Symbol header: "SUCCESS: `x` defined at f:N (lines A–B).\n\n".
+        constexpr std::string_view kSymTag = "SUCCESS: `";
+        if (body.starts_with(kSymTag)) {
+            if (auto he = body.find("\n\n"); he != std::string_view::npos) {
+                constexpr std::string_view kLines = "(lines ";
+                if (auto lp = body.find(kLines); lp < he)
+                    true_start = parse_int_at(body, lp + kLines.size());
+                body = body.substr(he + 2);
+            }
+        }
+
         out.kind = Kind::FileRead;
         out.text = std::string{body};
         out.text_color = text_tertiary;    // bright cyan — file content rendered as code
-        // Anchor the gutter to the real source line numbers the tool
-        // returned, not 1. The read tool accepts both `offset` and the
-        // Zed-style alias `start_line` (see tools/read.cpp parse_args);
-        // either lands in the args JSON verbatim. When neither is set the
-        // file was read from the top, so the default start_line=1 in the
-        // widget Config is already right.
-        if (tc.args.is_object()) {
+        // Anchor the gutter to the real source line numbers. Priority:
+        // the number mined from the tool's own footer / symbol header
+        // (ground truth — covers symbol reads and tail reads), then the
+        // `offset` / `start_line` arg echo, then the default 1.
+        if (true_start >= 1) {
+            out.start_line = true_start;
+        } else if (tc.args.is_object()) {
             for (auto k : {"start_line", "offset"}) {
                 const int v = safe_int_arg(tc.args, k, 0);
                 if (v >= 1) { out.start_line = v; break; }

@@ -74,6 +74,19 @@ bool write_body(const ToolUse& tc, maya::ToolBodyPreview::Config& out) {
             out.show_all = false;
             out.code_tail = std::clamp(stream_body_budget(), 3, 12);
             out.text = tail_window(content, kStreamTailLines);
+            // Anchor the gutter at the slice's TRUE first line in the file
+            // being written — without this the tail window renders "1, 2,
+            // 3…" every frame while the file is already hundreds of lines
+            // deep. dropped = lines of content above the slice.
+            {
+                std::size_t total = 1, kept = 1;
+                for (char c : content)  if (c == '\n') ++total;
+                for (char c : out.text) if (c == '\n') ++kept;
+                if (!content.empty()  && content.back()  == '\n') --total;
+                if (!out.text.empty() && out.text.back() == '\n') --kept;
+                if (total > kept)
+                    out.start_line = static_cast<int>(total - kept) + 1;
+            }
             out.show_footer_stats = false;
         } else {
             // Terminal: the FULL body, live and frozen alike.

@@ -93,6 +93,8 @@ bool write_body(const ToolUse& tc,
                              maya::ToolBodyPreview::Config& out);
 [[nodiscard]] bool web_fetch_body(const ToolUse& tc,
                                   maya::ToolBodyPreview::Config& out);
+[[nodiscard]] bool grep_body(const ToolUse& tc,
+                             maya::ToolBodyPreview::Config& out);
 [[nodiscard]] bool generic_list_body(const ToolUse& tc,
                                      maya::ToolBodyPreview::Config& out);
 bool task_body(const ToolUse& tc,
