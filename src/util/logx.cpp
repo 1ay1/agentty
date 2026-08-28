@@ -18,6 +18,7 @@
   #include <io.h>
   #include <fcntl.h>
   #include <sys/stat.h>
+  #include <direct.h>     // _mkdir
   #define AGT_WRITE  ::_write
   #define AGT_OPEN   ::_open
   #define AGT_LSEEK  ::_lseeki64

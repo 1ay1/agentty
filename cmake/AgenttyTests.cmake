@@ -99,7 +99,7 @@ agentty_test(checkpoint_test         MODE standalone TIMEOUT 60)
 # pulling maya's un-instrumented renderer. Registered raw + marked sanitizer.
 agentty_test(concurrency_primitives_test MODE raw LABELS sanitizer)
 add_executable(concurrency_primitives_test EXCLUDE_FROM_ALL
-    tests/concurrency_primitives_test.cpp src/util/dbglog.cpp)
+    tests/concurrency_primitives_test.cpp src/util/dbglog.cpp src/util/logx.cpp)
 target_include_directories(concurrency_primitives_test PRIVATE include)
 add_test(NAME concurrency_primitives_test COMMAND concurrency_primitives_test)
 set_tests_properties(concurrency_primitives_test PROPERTIES TIMEOUT 30 LABELS sanitizer)
