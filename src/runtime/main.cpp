@@ -685,23 +685,36 @@ int main(int argc, char** argv) {
         // split provider_keys / provider_models / picker rows. Same
         // normalisation as the TUI custom-host modal — CLI/TUI parity.
         provider_spec = provider::canonical_spec(provider_spec);
-        // Persist the --provider choice (except in ACP mode, where it's an
-        // ephemeral per-subprocess override like -m). When no -m was given,
-        // also restore the model last used on THIS provider so `--provider X`
-        // boots straight onto X's model instead of carrying a model id that
-        // belongs to a different backend (and 400s on the first prompt).
-        auto s = persistence::load_settings();
-        s.provider = provider_spec;
-        if (args.cli_model.empty()) {
-            if (auto it = s.provider_models.find(provider_spec);
-                it != s.provider_models.end() && !it->second.empty())
-                s.model_id = ModelId{it->second};
+        // PERSIST-ON-SUCCESS for custom hosts. A KNOWN PRESET ("groq",
+        // "ollama", …) can't be mistyped into a broken endpoint — persist it
+        // immediately, exactly as before. A CUSTOM spec (raw host:port /
+        // URL) is raw INTENT: persisting it at parse time let a typo'd
+        // --provider poison settings.json so every future bare launch
+        // inherited the mistake (the "skeptical of settings.json" report).
+        // The session still runs on it NOW (flags are commands, never
+        // blocked); the ModelsLoaded reducer persists it the moment the
+        // host proves itself by answering the model fetch. -m recall gets
+        // the same treatment (filed with the spec on proof).
+        const bool is_preset = provider::preset_for(provider_spec) != nullptr;
+        if (is_preset) {
+            auto s = persistence::load_settings();
+            s.provider = provider_spec;
+            if (args.cli_model.empty()) {
+                if (auto it = s.provider_models.find(provider_spec);
+                    it != s.provider_models.end() && !it->second.empty())
+                    s.model_id = ModelId{it->second};
+            } else {
+                // -m given alongside --provider: file the model as this
+                // provider's recall so a later bare relaunch restores it.
+                s.provider_models[provider_spec] = args.cli_model;
+            }
+            persistence::save_settings(s);
         } else {
-            // -m given alongside --provider: file the model as this
-            // provider's recall so a later bare relaunch restores it.
-            s.provider_models[provider_spec] = args.cli_model;
+            // Register for persist-on-success: the ModelsLoaded reducer
+            // writes settings the moment this host answers a non-empty
+            // model fetch. The -m recall (if any) is filed with it.
+            provider::set_unproven_spec(provider_spec, args.cli_model);
         }
-        persistence::save_settings(s);
     }
     // Session-scoped --auth-header override; must be installed BEFORE
     // parse_selection so the initial Selection (and every live-switch

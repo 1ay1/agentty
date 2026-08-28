@@ -13,7 +13,9 @@
 #include <cstdint>
 #include <algorithm>
 #include <map>
+#include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "agentty/auth/auth.hpp"
@@ -104,6 +106,22 @@ struct Selection {
         s.pop_back();
     return s;
 }
+
+// ── Persist-on-success for CLI custom hosts ───────────────────────
+// A custom --provider spec is raw INTENT until the host answers something;
+// persisting it at parse time let a typo poison settings.json for every
+// future bare launch. main.cpp registers the spec (and the -m recall to
+// file with it) here instead of writing settings; the ModelsLoaded reducer
+// calls take_unproven_spec() when a NON-EMPTY catalog lands for the active
+// provider and persists then — proof-gated stickiness. Known presets never
+// register (they persist at parse, as always). Thread-safe: set once on
+// the main thread before the UI starts; consumed on the UI thread.
+void set_unproven_spec(std::string spec, std::string model_recall);
+// Returns the registered (spec, model_recall) if `spec_now` matches the
+// pending one, clearing it; nullopt otherwise (nothing pending / different
+// provider active by the time models landed).
+[[nodiscard]] std::optional<std::pair<std::string, std::string>>
+take_unproven_spec(std::string_view spec_now);
 
 // Session-wide custom auth header NAME (--auth-header) for OpenAI-family
 // backends whose gateway doesn't accept `Authorization: Bearer` (e.g.
