@@ -567,6 +567,10 @@ struct SmartModeClearSlot {};     // 'x' on a slot row: reset it to auto
 // on a worker thread (Cmd::task) and reports back via LoginExchanged.
 struct OpenLogin {};
 struct CloseLogin {};
+// Esc in a login sub-modal: pop ONE level of the flow (key prompt → host
+// input → provider picker → closed) instead of collapsing everything.
+// The reducer reads the sub-state's `back` origin field.
+struct LoginBack {};
 // Sign out of the ACTIVE provider: clear its on-disk credentials (Anthropic
 // credentials.json, or the Codex/ChatGPT token store), zero the live auth
 // header via update_auth, and re-open the sign-in modal so the user lands
@@ -922,7 +926,7 @@ using TodoMsg = std::variant<
     OpenTodoModal, CloseTodoModal, UpdateTodos>;
 
 using LoginMsg = std::variant<
-    OpenLogin, CloseLogin, SignOut,
+    OpenLogin, CloseLogin, LoginBack, SignOut,
     OpenAccounts, AccountMove, AccountSelect, AccountRemove,
     LoginPickMethod, LoginCharInput, LoginBackspace,
     LoginPaste, LoginCursorLeft, LoginCursorRight, LoginSubmit,

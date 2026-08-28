@@ -650,10 +650,13 @@ std::optional<Msg> on_tool_viewer(const KeyEvent& ev) {
 std::optional<Msg> on_login(const ui::login::State& state, const KeyEvent& ev) {
     using namespace agentty::ui::login;
 
-    // Esc always closes — gives the user an out from any sub-state.
+    // Esc pops ONE level of the flow (key prompt → host input → provider
+    // picker → closed) — stepwise back-out, not a full collapse. The
+    // reducer reads each sub-state's `back` origin; states with no parent
+    // still close outright.
     if (std::holds_alternative<SpecialKey>(ev.key)
         && std::get<SpecialKey>(ev.key) == SpecialKey::Escape)
-        return CloseLogin{};
+        return LoginBack{};
 
     if (std::holds_alternative<Picking>(state)
         || std::holds_alternative<Failed>(state)) {

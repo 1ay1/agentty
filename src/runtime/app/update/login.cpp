@@ -10,6 +10,7 @@
 // fields from an ApiKeyInput modal, etc.
 
 #include "agentty/runtime/app/update/internal.hpp"
+#include "agentty/runtime/app/update.hpp"   // app::update (LoginBack re-entry)
 
 #include <chrono>
 #include <utility>
@@ -102,6 +103,50 @@ Step close_login(Model m) {
     }
     m.ui.login = login::Closed{};
     return done(std::move(m));
+}
+
+// Esc in a login sub-modal: pop ONE level using the sub-state's recorded
+// origin. Falls back to a full close for states with no parent (first-run
+// flows) and for async-waiting states (where Esc means CANCEL, which close
+// handles via the cancel latch).
+Step login_back(Model m) {
+    using login::Back;
+    auto pop_to = [&](Back back, std::string spec_for_host) -> Step {
+        switch (back) {
+            case Back::ProviderPicker:
+                m.ui.login = login::Closed{};
+                return agentty::app::update(std::move(m),
+                                            Msg{OpenProviderPicker{}});
+            case Back::PickMethod:
+                m.ui.login = login::Picking{};
+                return done(std::move(m));
+            case Back::AccountList:
+                m.ui.login = login::Closed{};
+                return agentty::app::update(std::move(m), Msg{OpenAccounts{}});
+            case Back::CustomHost: {
+                // Restore the typed spec so backing out of the key prompt
+                // doesn't discard the host the user just entered.
+                login::CustomHostInput ch;
+                ch.host_input = std::move(spec_for_host);
+                ch.cursor     = static_cast<int>(ch.host_input.size());
+                ch.back       = Back::ProviderPicker;
+                m.ui.login    = std::move(ch);
+                return done(std::move(m));
+            }
+            case Back::Close:
+            default:
+                return close_login(std::move(m));
+        }
+    };
+    if (auto* ch = std::get_if<login::CustomHostInput>(&m.ui.login))
+        return pop_to(ch->back, {});
+    if (auto* api = std::get_if<login::ApiKeyInput>(&m.ui.login))
+        return pop_to(api->back, api->provider);
+    if (auto* p = std::get_if<login::Picking>(&m.ui.login))
+        return pop_to(p->back, {});
+    // Every other sub-state (OAuth waits, account list, failures): Esc
+    // keeps its original meaning — cancel/close outright.
+    return close_login(std::move(m));
 }
 
 Step sign_out(Model m) {
@@ -245,7 +290,8 @@ Step account_select(Model m) {
         if (provider == "kimi") {
             return launch_device_login(std::move(m), "kimi", "Kimi");
         }
-        m.ui.login = login::Picking{.provider = provider};
+        m.ui.login = login::Picking{.provider = provider,
+                                    .back = login::Back::AccountList};
         return done(std::move(m));
     }
 
@@ -402,7 +448,9 @@ Step login_pick_method(Model m, char32_t key) {
         }
     }
     if (key == U'1') {
-        m.ui.login = login::ApiKeyInput{};
+        login::ApiKeyInput api;
+        api.back = login::Back::PickMethod;   // Esc = back to the menu
+        m.ui.login = std::move(api);
         return done(std::move(m));
     }
     if (key == U'3' && !anthropic_only) {
@@ -425,7 +473,11 @@ Step login_pick_method(Model m, char32_t key) {
         // user types a host[:port], TLS hosts prompt for an API key,
         // local hosts commit keylessly. The model picker opens
         // automatically when the provider switch commits.
-        m.ui.login = login::CustomHostInput{};
+        {
+            login::CustomHostInput ch;
+            ch.back = login::Back::PickMethod;   // Esc = back to this menu
+            m.ui.login = std::move(ch);
+        }
         return done(std::move(m));
     }
     if (key == U'5' && !anthropic_only) {
@@ -590,6 +642,7 @@ Step login_submit(Model m) {
                 .cursor         = key_len,
                 .provider       = spec,
                 .provider_label = std::move(label),
+                .back           = login::Back::CustomHost,  // Esc = re-edit host
             };
             return done(std::move(m));
         }
@@ -956,6 +1009,7 @@ Step login_update(Model m, msg::LoginMsg lm) {
     return std::visit(overload{
         [&](OpenLogin)              -> Step { return open_login(std::move(m)); },
         [&](CloseLogin)             -> Step { return close_login(std::move(m)); },
+        [&](LoginBack)              -> Step { return login_back(std::move(m)); },
         [&](SignOut)                -> Step { return sign_out(std::move(m)); },
         [&](OpenAccounts)           -> Step { return open_accounts(std::move(m)); },
         [&](AccountMove& e)         -> Step { return account_move(std::move(m), e.delta); },

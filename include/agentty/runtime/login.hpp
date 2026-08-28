@@ -33,10 +33,26 @@ namespace agentty::ui::login {
 
 struct Closed {};
 
+// Where Esc should land from a sub-modal — the ONE-LEVEL back target. The
+// login flow is a stack the user walks INTO (provider picker → custom-host
+// input → API-key prompt); Esc must walk back OUT one step at a time, not
+// collapse everything to the composer (which also discarded a typed host
+// when backing out of the key prompt). Each enterable sub-state records its
+// origin; the LoginBack reducer pops accordingly. Close = legacy behaviour
+// (first-run flows that have no parent).
+enum class Back : std::uint8_t {
+    Close,           // no parent — dismiss the login UI entirely
+    ProviderPicker,  // re-open the provider picker
+    PickMethod,      // back to the sign-in method menu (Picking)
+    AccountList,     // back to the account switcher
+    CustomHost,      // back to the custom-host input (spec restored)
+};
+
 // Optional provider context keeps an "add another account" flow scoped to
 // the provider it came from. Empty means the general first-run/sign-in menu.
 struct Picking {
     std::string provider;
+    Back back = Back::Close;
 };
 
 struct OAuthCode {
@@ -89,6 +105,7 @@ struct ApiKeyInput {
     // lookup.
     std::string provider;        // canonical id; empty = Anthropic
     std::string provider_label;  // display name for the panel title
+    Back back = Back::Close;     // Esc target (one level up)
 };
 
 // Free-text entry of a raw OpenAI-compatible endpoint ("host" or
@@ -99,6 +116,7 @@ struct ApiKeyInput {
 struct CustomHostInput {
     std::string host_input;
     int         cursor = 0;
+    Back back = Back::Close;     // Esc target (one level up)
 };
 
 struct Failed {
