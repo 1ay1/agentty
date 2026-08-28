@@ -80,6 +80,8 @@ agentty --provider localhost:8080 -m my-model          # local, no key
 agentty --provider https://chat.example.org/api -k sk-… -m GLM-5.2
 ```
 
+**Connect-time probe.** When you press Enter on a local host, agentty **checks it before switching**: it dials the server's model list (your configured path, then `/v1/models`, then Ollama's native `/api/tags`) and only commits on an answer — with a toast naming what it found (`✓ 12 models · openai-compatible · 45ms · /v1/models`). A dead or mis-specced host returns you to the input with the reason ("nothing listening — is the server running?") and your typed spec intact. The probe also **detects the dialect** — a bare Ollama daemon is recognised by `/api/tags` — so you don't have to know what your server speaks.
+
 **The `/v1` default.** The OpenAI dialect lives under `/v1` on every real server — `api.openai.com/v1`, llama.cpp, vLLM, LM Studio, Ollama's compat shim. A bare host or `host:port` (and a bare URL like `http://localhost:8080/`) therefore defaults to the `/v1` prefix, so agentty chats at `…/v1/chat/completions` and lists models at `…/v1/models`. This is the single most common local-server mistake: a spec without `/v1` used to 404 every request.
 
 **Explicit paths are honoured verbatim.** If your gateway serves on a different prefix, put it in the URL and agentty keeps it exactly:
