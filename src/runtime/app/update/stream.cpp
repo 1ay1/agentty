@@ -1734,7 +1734,13 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                     && (klass == provider::ErrorClass::Transient
                         || klass == provider::ErrorClass::RateLimit)
                     && !e.non_replayable
-                    && prior < provider::kMaxRetries;
+                    && prior < provider::kMaxRetries
+                    // Same no-progress latch as the normal path: the decay
+                    // window resets `prior` during backoff waits, so without
+                    // this a compaction against a broken endpoint would
+                    // retry forever (the compaction face of the dead loop).
+                    && cctx->no_progress_failures
+                           < provider::kMaxNoProgressFailures;
 
                 if (can_retry_compact) {
                     std::chrono::milliseconds delay;
@@ -1763,6 +1769,7 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                     if (!reschedule_streaming(m.s.phase, [&](phase::Active& c) {
                             c.transient_retries = prior + 1;
                             c.last_failure_at   = std::chrono::steady_clock::now();
+                            ++c.no_progress_failures;   // see the latch above
                             c.retry             = retry::Scheduled{};
                         }))
                         return done(std::move(m));

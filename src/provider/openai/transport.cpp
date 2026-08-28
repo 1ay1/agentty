@@ -878,7 +878,11 @@ void dispatch_data(StreamCtx& ctx, std::string_view data) {
     // emits this WITHOUT an "error" wrapper on some versions. A frame with
     // no choices, a numeric error code ≥400 and a message is a failure, not
     // a delta; dropping it silently was part of the local-model dead loop.
-    if (!j.contains("choices") && j.contains("message")
+    // Guard: real OpenAI-dialect frames always carry "object" (e.g.
+    // "chat.completion.chunk") — its presence means content, not an error,
+    // however error-shaped the other keys look.
+    if (!j.contains("choices") && !j.contains("object")
+        && j.contains("message")
         && j["message"].is_string() && j.contains("code")
         && j["code"].is_number_integer()
         && j["code"].get<int>() >= 400) {

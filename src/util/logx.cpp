@@ -226,14 +226,15 @@ void emit(Channel ch, Level lv, std::string_view site,
             std::hash<std::thread::id>{}(std::this_thread::get_id()) & 0xffff);
 
         const std::size_t ci = static_cast<std::size_t>(ch);
+        const auto& cn = kChannelNames[ci];   // literal-backed, %.*s — no alloc
         int w = std::snprintf(
             line, sizeof(line),
-            "%04d-%02d-%02dT%02d:%02d:%02d.%03d +%07lldms %04x %c %-7s %.*s: ",
+            "%04d-%02d-%02dT%02d:%02d:%02d.%03d +%07lldms %04x %c %-7.*s %.*s: ",
             tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
             tm.tm_hour, tm.tm_min, tm.tm_sec, ms,
             mono_ms, tid_hash,
             kLevelChar[static_cast<std::size_t>(lv)],
-            std::string{kChannelNames[ci]}.c_str(),
+            static_cast<int>(cn.size()), cn.data(),
             static_cast<int>(std::min(site.size(), std::size_t{48})),
             site.data());
         if (w < 0) return;
