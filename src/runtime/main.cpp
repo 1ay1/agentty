@@ -168,7 +168,28 @@ void install_crash_handler() {
     (void)std::signal(SIGABRT, crash_handler);
 }
 #else
-void install_crash_handler() {}
+// Release / Windows: a MINIMAL handler that only dumps the flight recorder.
+// The debug handler's backtrace() can allocate (unsafe in a corrupted
+// process), but logx::dump_flight_recorder is async-signal-safe by
+// construction (preformatted bytes, raw write) — so even release users get
+// "the last ~256 events" on a crash, which is exactly when it matters most.
+// Windows: std::signal(SIGSEGV/SIGABRT) is supported by the CRT; write()
+// maps via io.h in logx.cpp.
+extern "C" void agentty_release_crash_handler(int sig) {
+    static const char hdr[] = "\n=== agentty crash ===\n";
+#if defined(_WIN32)
+    (void)agentty::logx::dump_flight_recorder(2);
+#else
+    (void)!write(2, hdr, sizeof(hdr) - 1);
+    (void)agentty::logx::dump_flight_recorder(2);
+#endif
+    std::signal(sig, SIG_DFL);
+    std::raise(sig);   // re-raise for the default disposition (core dump etc.)
+}
+void install_crash_handler() {
+    (void)std::signal(SIGSEGV, agentty_release_crash_handler);
+    (void)std::signal(SIGABRT, agentty_release_crash_handler);
+}
 #endif
 
 void print_version() {
@@ -659,6 +680,11 @@ int main(int argc, char** argv) {
         auto s = persistence::load_settings();
         provider_spec = s.provider;          // empty → anthropic
     } else if (args.subcommand != "acp") {
+        // Canonicalise BEFORE the spec becomes a settings key: two spellings
+        // of the same endpoint (trailing slash, stray whitespace) must not
+        // split provider_keys / provider_models / picker rows. Same
+        // normalisation as the TUI custom-host modal — CLI/TUI parity.
+        provider_spec = provider::canonical_spec(provider_spec);
         // Persist the --provider choice (except in ACP mode, where it's an
         // ephemeral per-subprocess override like -m). When no -m was given,
         // also restore the model last used on THIS provider so `--provider X`

@@ -82,6 +82,29 @@ struct Selection {
 //   "host[:port]" → OpenAI-compatible against a custom base URL
 [[nodiscard]] Selection parse_selection(std::string_view spec);
 
+// CANONICALISE a user-typed provider spec before it becomes an IDENTITY.
+// The raw string is used as (1) the wire spec, (2) the settings key for
+// provider_keys / provider_models, (3) the picker row identity, and (4) the
+// display label — so two spellings of the same endpoint ("http://h:8080" vs
+// "http://h:8080/") would otherwise split keys, models, and rows. This was
+// the root cause behind the whole custom-host PR series (#8/#10/#11/#17/#19
+// each patched one downstream site): normalisation must happen ONCE, at
+// every entry point (CLI --provider, the TUI custom-host modal), before the
+// spec is persisted or compared. Rules: trim whitespace; strip trailing
+// '/' (but never the scheme's "//"); presets and ACP ids pass through
+// untouched. The "#name" account fragment is PRESERVED — it is part of the
+// identity by design.
+[[nodiscard]] inline std::string canonical_spec(std::string_view spec) {
+    std::size_t b = 0, e = spec.size();
+    while (b < e && (spec[b] == ' ' || spec[b] == '\t')) ++b;
+    while (e > b && (spec[e - 1] == ' ' || spec[e - 1] == '\t'
+                     || spec[e - 1] == '\r' || spec[e - 1] == '\n')) --e;
+    std::string s{spec.substr(b, e - b)};
+    while (s.size() > 1 && s.back() == '/' && s[s.size() - 2] != '/')
+        s.pop_back();
+    return s;
+}
+
 // Session-wide custom auth header NAME (--auth-header) for OpenAI-family
 // backends whose gateway doesn't accept `Authorization: Bearer` (e.g.
 // `X-API-Key`). Stored process-globally so every parse_selection — startup
