@@ -65,6 +65,7 @@ set(AGENTTY_PROVIDER_SOURCES
     src/provider/openai/transport.cpp
     src/provider/ollama/transport.cpp
     src/provider/selection.cpp
+    src/provider/auth_state.cpp
     src/provider/prompt_policy.cpp
     # The ONE provider-routing seam — dispatch_stream(). Provider-agnostic
     # (type-erased Routes, incl. the ACP arm), so it has no acp-TU dependency

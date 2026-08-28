@@ -30,6 +30,58 @@ struct ModelInfo {
     std::optional<bool> supports_tools;
 };
 
+// A (provider, model) pair — the identity a cross-provider switch targets and
+// the MRU/recents unit. Small, value-typed, and comparable so it can key the
+// fused picker's selection and dedup the recents list.
+struct ModelRef {
+    std::string provider_id;   // "anthropic", "openai", "kimi", a host spec…
+    std::string model_id;      // ModelId::value on the wire
+
+    [[nodiscard]] bool operator==(const ModelRef& o) const noexcept {
+        return provider_id == o.provider_id && model_id == o.model_id;
+    }
+    [[nodiscard]] bool empty() const noexcept {
+        return provider_id.empty() && model_id.empty();
+    }
+};
+
+// One authenticated provider's model catalog, held in the fused picker's
+// merged view. `state` drives the per-provider group header (loading… /
+// ready / failed); `models` is the list_models_for() result (which is
+// non-empty even without auth thanks to the bundled seed, so a freshly
+// added provider still shows rows immediately).
+struct ProviderCatalog {
+    std::string provider_id;
+    std::string label;                    // provider display name
+    enum class State : std::uint8_t { Idle, Loading, Ready, Failed };
+    State state = State::Idle;
+    std::vector<ModelInfo> models;
+    std::string account_label;            // active account on this provider
+};
+
+// A single rendered row in the FUSED cross-provider picker: a concrete
+// (provider, model) the user can switch to atomically, OR — when
+// `model.id` is empty and `authed` is false — a "sign in to <provider>"
+// offer that routes into the login flow. Pure value type: the reducer
+// builds a vector of these and the view renders it; selection is keyed by
+// (provider_id, model.id) identity so async catalog merges never move the
+// cursor's logical target.
+struct FusedRow {
+    std::string provider_id;
+    std::string label;                    // provider display name
+    ModelInfo   model;                    // empty id ⇒ "sign in" offer
+    bool        authed = true;
+    bool        active = false;           // == current provider + model
+    bool        recent = false;           // belongs in the RECENT section
+
+    [[nodiscard]] bool is_signin_offer() const noexcept {
+        return !authed && model.id.value.empty();
+    }
+    [[nodiscard]] ModelRef ref() const {
+        return ModelRef{provider_id, model.id.value};
+    }
+};
+
 // Canonical wire id: strip agentty's internal extended-context markers
 // (`[1m]` / `[2m]`) so the raw provider id goes on the wire. The suffix is a
 // PICKER-ONLY marker (it selects the 1M/2M window + the context beta); the
