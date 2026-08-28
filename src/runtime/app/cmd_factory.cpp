@@ -614,8 +614,9 @@ std::optional<Message> build_smart_routing_card(const Model& m) {
         }
     const smart::ComplexityScore cx_text =
         smart::classify_score_with_context(newest_user, m.s.smart_turn_complexity);
-    const smart::ComplexityScore cx = smart::refine_with_payload(
-        cx_text, nu_attach_bytes, nu_images);
+    // THE composed classifier — same call as launch_stream so card == wire.
+    const smart::ComplexityScore cx = smart::classify_turn(
+        newest_user, m.s.smart_turn_complexity, nu_attach_bytes, nu_images);
     const auto caps = resolved_caps(prof.model);
     const int learned = m.d.smart.routing_learning()
         ? smart::RoutingMemory::instance().prior_bias(
@@ -631,10 +632,15 @@ std::optional<Message> build_smart_routing_card(const Model& m) {
     std::string note{effort_label(prof.effort)};
     note += " \xe2\x86\x92 ";                       // →
     note += smart::to_string(cx.tier);
-    // Payload lift: the tier came (partly) from an attached paste/log/image,
-    // not the prompt text — say so, or a "fix this" that routes Standard
-    // looks like classifier noise.
-    if (cx.tier != cx_text.tier) note += " (payload)";
+    // Lift provenance: the tier moved past the raw text score — an attached
+    // payload, a continuation cue ("continue" resuming hard work), or a
+    // correction floor ("still broken" never routes below Standard). Name it
+    // so a heavy route on a 3-word prompt doesn't read as classifier noise.
+    if (cx.tier != cx_text.tier) {
+        if (smart::is_routing_correction(newest_user)) note += " (correction)";
+        else if (smart::is_continuation_cue(newest_user)) note += " (continuation)";
+        else note += " (payload)";
+    }
     if (bias != 0) {
         const bool from_learned = (bias == learned && learned != 0);
         note += from_learned ? " \xc2\xb7 learned " : " \xc2\xb7 session ";
@@ -798,12 +804,11 @@ Cmd<Msg> launch_stream(Model& m) {
         // Context-aware: a short follow-up to a Complex turn keeps some of
         // that weight instead of collapsing to Simple. m.s.smart_turn_complexity
         // still holds the PREVIOUS turn's tier here (overwritten below at 776).
-        // Payload-aware: a chip-placeholder text with a big paste/log/image
-        // payload must not classify off the placeholder alone ("fix this" +
-        // 500-line paste is not Simple).
-        const smart::ComplexityScore turn_cx = smart::refine_with_payload(
-            smart::classify_score_with_context(newest_user, m.s.smart_turn_complexity),
-            nu_attach_bytes, nu_images);
+        // Payload-aware + continuation-aware + correction-floored — the ONE
+        // composed classifier, shared with build_smart_routing_card so the
+        // 🧠 card can never disagree with the wire.
+        const smart::ComplexityScore turn_cx = smart::classify_turn(
+            newest_user, m.s.smart_turn_complexity, nu_attach_bytes, nu_images);
         turn_complexity = turn_cx.tier;
         const auto caps = resolved_caps(strategic_profile.model);
         // Innovation 1 — LEARNED ROUTING: fold in the per-workspace prior this
