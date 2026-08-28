@@ -63,6 +63,7 @@
 
 #include "agentty/acp/server.hpp"
 #include "agentty/airgap/airgap.hpp"
+#include "agentty/util/logx.hpp"   // flight recorder dump in crash handler
 #include "agentty/domain/profile.hpp"
 #include "agentty/runtime/app/deps.hpp"
 #include "agentty/runtime/app/program.hpp"
@@ -144,6 +145,12 @@ void crash_handler(int sig) {
     if (n > 0) {
         backtrace_symbols_fd(frames, n, STDERR_FILENO);
     }
+    // Flight recorder: the last ~256 recorded events (Warn+ always, more
+    // when AGENTTY_LOG enables channels), preformatted at emit time — the
+    // dump is raw write(2)s of ready bytes, async-signal-safe. This ships
+    // "what was happening right before the crash" with every report even
+    // when file logging was off.
+    (void)agentty::logx::dump_flight_recorder(STDERR_FILENO);
     const char end[] = "==================\n";
     (void)!write(STDERR_FILENO, end, sizeof(end) - 1);
     // _exit (not exit) so no atexit handler runs in a corrupted process. Note
