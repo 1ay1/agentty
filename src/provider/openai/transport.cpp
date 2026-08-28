@@ -1669,7 +1669,17 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
     tos.connect = std::chrono::milliseconds(10'000);
     tos.total   = std::chrono::minutes(30); // tolerate buffering, never wedge forever
     tos.ping    = std::chrono::milliseconds(15'000);
-    tos.idle    = std::chrono::milliseconds(90'000);
+    // Idle gap between wire bytes. Hosted APIs stream keepalives, so 90 s of
+    // silence means a wedged proxy. LOCAL servers are different: llama.cpp
+    // sends NOTHING during prompt processing, and a 20-30B model on consumer
+    // hardware can grind for minutes on agentty's system prompt before the
+    // first token. A 90 s idle cut mid-processing forced a retry that
+    // re-processed the same prompt from scratch — another face of the local
+    // dead loop (each attempt dies at 90 s forever). 10 min for plaintext
+    // (local) endpoints; the stall watchdog still shows elapsed time and Esc
+    // still cancels instantly.
+    tos.idle    = req.endpoint.use_tls ? std::chrono::milliseconds(90'000)
+                                       : std::chrono::milliseconds(600'000);
 
     // Keep a copy of the cancel token: moved into the stream call, but
     // finish_stream needs it to distinguish a user cancel from a transport

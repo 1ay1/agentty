@@ -544,6 +544,14 @@ Step login_submit(Model m) {
         while (!spec.empty() && (spec.back() == '\r' || spec.back() == '\n'
                                || spec.back() == ' ' || spec.back() == '\t'))
             spec.pop_back();
+        // Normalise: strip trailing '/'. "http://host:8080/" and
+        // "http://host:8080" parse to the SAME endpoint (from_spec clears a
+        // bare "/"), but as SETTINGS KEYS they'd be different provider rows
+        // with separate saved models — the split-recall confusion from the
+        // custom-host report. One canonical spelling per endpoint.
+        while (spec.size() > 1 && spec.back() == '/'
+               && spec[spec.size() - 2] != '/')   // keep "http://" intact
+            spec.pop_back();
         if (spec.empty()) {
             m.ui.login = login::Failed{"no host entered"};
             return done(std::move(m));
@@ -601,6 +609,18 @@ Step login_submit(Model m) {
             if (auto it = settings.provider_keys.find(spec);
                 it != settings.provider_keys.end())
                 saved_provider_key = it->second;
+            else {
+                // PERSIST the keyless host as a saved custom host (empty
+                // key). saved_custom_hosts() derives the picker's rows from
+                // provider_keys entries — without this record a local host
+                // VANISHED from the picker after any provider switch or
+                // restart, forcing the user to re-type it every session
+                // (the "manually inserting provider" grind in the custom-
+                // host report). An empty value is harmless: local requests
+                // send no auth header anyway.
+                settings.provider_keys[spec] = "";
+                deps().save_settings(settings);
+            }
         }
         auth::AuthHeader new_auth = provider::resolve_auth_for(
             spec, anthropic_creds, /*cli_key=*/{}, saved_provider_key);
