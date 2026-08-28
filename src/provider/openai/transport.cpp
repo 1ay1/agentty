@@ -873,6 +873,18 @@ void dispatch_data(StreamCtx& ctx, std::string_view data) {
         ctx.terminated = true;
         return;
     }
+    // Bare error shape ({"code":500,"message":"…","type":"…"}) — llama.cpp
+    // emits this WITHOUT an "error" wrapper on some versions. A frame with
+    // no choices, a numeric error code ≥400 and a message is a failure, not
+    // a delta; dropping it silently was part of the local-model dead loop.
+    if (!j.contains("choices") && j.contains("message")
+        && j["message"].is_string() && j.contains("code")
+        && j["code"].is_number_integer()
+        && j["code"].get<int>() >= 400) {
+        ctx.sink(StreamError{j["message"].get<std::string>(), std::nullopt});
+        ctx.terminated = true;
+        return;
+    }
 
     // Usage can arrive on a final frame (when stream_options.include_usage
     // is set) OR be attached to the last choices frame. Shared extractor — see
@@ -912,8 +924,34 @@ void dispatch_data(StreamCtx& ctx, std::string_view data) {
 // lines, dispatch on the blank-line terminator. The framing itself is the
 // shared wire::SseFramer; OpenAI just ignores the (always-empty) event name.
 void feed_sse(StreamCtx& ctx, const char* data, size_t len) {
-    ctx.sse.feed(data, len, [&](std::string_view /*event*/, std::string_view payload,
+    ctx.sse.feed(data, len, [&](std::string_view event, std::string_view payload,
                                 char* padded) {
+        // llama.cpp (and some proxies) deliver mid-stream failures as a
+        // NAMED SSE event — `event: error` + a JSON body — under HTTP 200.
+        // OpenAI itself never names events, so the old parser ignored the
+        // name entirely: the error frame fell through to dispatch_data,
+        // whose j.contains("error") check only catches the {"error":…}
+        // TOP-LEVEL shape — llama.cpp's named-event body is the bare error
+        // object ({"code":500,"message":…,"type":…}), so it was silently
+        // DROPPED: the stream then closed clean, the turn fabricated
+        // "(empty response)", and the retry machinery re-fired forever —
+        // the local-model dead loop. Surface it as a real StreamError.
+        if (event == "error" && !ctx.terminated) {
+            std::string msg{payload.empty() ? std::string_view{"stream error"}
+                                            : payload};
+            try {
+                auto j = json::parse(payload);
+                if (j.is_object()) {
+                    if (j.contains("message") && j["message"].is_string())
+                        msg = j["message"].get<std::string>();
+                    else if (j.contains("error") && j["error"].is_object())
+                        msg = j["error"].value("message", msg);
+                }
+            } catch (...) { /* keep raw payload as the message */ }
+            ctx.sink(StreamError{std::move(msg), std::nullopt});
+            ctx.terminated = true;
+            return;
+        }
         // [DONE] and empty frames go straight to the full path (terminal
         // handling lives there). Otherwise try the content-delta fast path;
         // it returns Unparseable — leaving `payload` pristine — for anything
@@ -1217,6 +1255,17 @@ Endpoint Endpoint::from_spec(std::string_view spec) {
                 prefix.pop_back();
             if (prefix == "/") prefix.clear();
         }
+        // BARE URL → /v1 DEFAULT. This endpoint speaks the OpenAI dialect,
+        // and that dialect lives under /v1 everywhere — api.openai.com/v1,
+        // llama.cpp, vLLM, LM Studio, Ollama's compat shim all serve
+        // /v1/chat/completions; the OpenAI SDK convention is that base_url
+        // CONTAINS /v1. Deriving a bare "/chat/completions" from
+        // "http://host:8080/" produced a path almost no server answers —
+        // the user got a 404 on every request (or worse, a streamed error
+        // the old parser dropped) and reported it as "the model locks".
+        // An EXPLICIT path ("/api", "/openai/v1") is always kept verbatim,
+        // so unusual gateways stay expressible.
+        if (prefix.empty()) prefix = "/v1";
 
         // Split host from port. IPv6 literals are bracketed — "[::1]" or
         // "[::1]:8080" — so the port colon is the one AFTER "]", never a colon
@@ -1638,21 +1687,32 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
             }
             if (http_status == 401 || http_status == 403)
                 msg += "  (check the provider API key)";
-            // A 404 on a local OpenAI-compatible server (Ollama/llama.cpp)
-            // almost always means the model id isn't loaded.
+            // A 404 on a local OpenAI-compatible server is one of TWO things:
+            // the chat path doesn't exist on this server (custom-host spec
+            // missing its /v1 prefix — llama.cpp only serves /v1/…), or the
+            // model id isn't loaded/known. Name both, server-neutrally — the
+            // old hint said 'ollama pull' to llama.cpp/vLLM users.
             if (http_status == 404 && !req.endpoint.use_tls)
-                msg += "  (model not loaded — run 'ollama pull " + req.model
-                     + "', or pick an available one with Ctrl-P)";
+                msg += "  (404 from " + req.endpoint.host + ": either the "
+                       "path '" + req.endpoint.path + "' doesn't exist on "
+                       "this server \xe2\x80\x94 most need the spec to end in /v1 \xe2\x80\x94 "
+                       "or the model '" + req.model + "' isn't loaded. "
+                       "Check with Ctrl-P \xe2\x86\x92 Custom host, or pick a listed "
+                       "model with ^/)";
             return msg;
         },
         .retry_after = retry_after_hint,
         .transport_error_message = [&]() -> std::string {
             std::string msg = std::string{"http: "} + result.error().render();
             // Local backend unreachable — the daemon almost certainly isn't
-            // running. Name the concrete fix.
+            // running. Name the concrete fix, without assuming WHICH server
+            // (ollama serve / llama-server / vllm serve all apply).
             if (!req.endpoint.use_tls)
-                msg += "  (is the server running? start it with 'ollama serve', "
-                       "or check the --provider host:port)";
+                msg += "  (is the local server running on "
+                     + req.endpoint.host + ":"
+                     + std::to_string(req.endpoint.port)
+                     + "? start it, or fix the host with Ctrl-P \xe2\x86\x92 "
+                       "Custom host)";
             return msg;
         },
         .before_finish = [&ctx]() {
@@ -1855,6 +1915,24 @@ std::vector<ModelInfo> list_models(const AuthHeader& auth, const Endpoint& endpo
     tos.total   = std::chrono::milliseconds(10'000);
 
     auto resp = http::default_client().send(hreq, tos);
+    // PATH-PREFIX PROBE (custom hosts): a spec like http://host:8080/ derives
+    // models_path "/models", but most local OpenAI-compatible servers
+    // (llama.cpp, vLLM, LM Studio) only serve under "/v1". A 404 here — with
+    // the server plainly reachable — is almost always that missing prefix,
+    // and it was the root of the "custom host dead loop": the picker showed
+    // no models, the user prompted anyway, and every turn 404'd. Retry once
+    // with /v1 prepended; on success adopt the corrected paths for THIS
+    // process (Endpoint::from_spec output is rebuilt per selection, so the
+    // correction also has to happen at request time — see run_stream_sync's
+    // matching fallback note).
+    if (resp && resp->status == 404
+        && !endpoint.models_path.starts_with("/v1/")
+        && !endpoint.native_api) {
+        http::Request retry = hreq;
+        retry.path = "/v1/models";
+        auto second = http::default_client().send(retry, tos);
+        if (second && second->status == 200) resp = std::move(second);
+    }
     if (!resp || resp->status != 200) return result;
 
     try {

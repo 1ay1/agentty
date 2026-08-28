@@ -118,6 +118,19 @@ struct Active {
     // brown-out failures into a permanent budget exhaustion.
     std::chrono::steady_clock::time_point last_failure_at{};
 
+    // HARD upper bound on retries with ZERO model progress. The decay
+    // window above has a blind spot: the retry BACKOFF WAIT itself counts
+    // toward the 90 s window, so a server that accepts the connect but
+    // fails every request (local llama.cpp with a bad path/model) can
+    // alternate failure → long backoff → decay-reset → failure forever —
+    // the reported "dead loop". This counter increments on EVERY scheduled
+    // retry and is reset ONLY by real model output (a non-empty content
+    // delta or a structured tool call) — never by heartbeats, never by the
+    // decay window. When it crosses kMaxNoProgressFailures the failure is
+    // treated as terminal regardless of class: N straight attempts without
+    // a single content byte is a broken endpoint, not a brown-out.
+    int no_progress_failures = 0;
+
     // Live tok/s speedometer — bytes of text/json delta, not the rare
     // usage field. first_delta_at excludes TTFT from the rate divisor.
     // Reset at every StreamStarted (sub-turn) but accumulated across
