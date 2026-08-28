@@ -32,6 +32,26 @@ Remember the override order: `--key` > `ANTHROPIC_API_KEY` > `CLAUDE_CODE_OAUTH_
 - Make sure agentty is on the remote PATH, or pass `--remote-agentty PATH`.
 - Run `--setup` once so credentials are copied to the remote.
 
+## A local model (llama.cpp / vLLM) won't respond
+
+agentty now diagnoses this instead of looping. The usual causes:
+
+- **The spec is missing `/v1`.** Most local servers only serve under `/v1`. A bare `localhost:8080` gets the `/v1` prefix automatically, but a partial path like `localhost:8080/api` is honoured verbatim and will 404. Use the picker (`^P` → Custom host) so the derived path shows in the connect toast, or check with `AGENTTY_LOG=wire=trace`.
+- **The model id doesn't match the server.** `llama-server` serves exactly what its `/v1/models` reports (often the GGUF filename). If a recalled id isn't listed, agentty refuses with *“model X isn't served by this host — pick one (^/)”* — open `^/` and pick a listed model.
+- **A chat-template rejection.** Some models (gemma, gpt-oss) reject agentty's system prompt/tools with a streamed error. agentty surfaces the server's actual message; run `AGENTTY_DEBUG_API=1` to see the exact request and rejection.
+- **Slow, not stuck.** A big model can process the prompt silently for minutes; the phase chip reads *“processing…”* and the timeout is 10 minutes for local endpoints. That's expected — `Esc` cancels if you don't want to wait.
+
+See [Providers › Custom hosts](/docs/providers#custom-hosts) for the full model.
+
+## Turning on logs for a bug report
+
+```bash
+AGENTTY_LOG=debug AGENTTY_LOG_FILE=/tmp/agentty.log agentty
+# reproduce, then attach /tmp/agentty.log
+```
+
+For a provider/wire problem add `AGENTTY_DEBUG_API=1` to capture the raw request/response bytes. If agentty crashed, the stderr output already includes a backtrace and the last ~256 events (the flight recorder). Full details: **[Logging & diagnostics](/docs/logging)**.
+
 ## Garbled rendering
 
 Some terminals lag on DEC 2026 synchronized output. File a bug with your `$TERM`, the terminal emulator name, and a screenshot.
