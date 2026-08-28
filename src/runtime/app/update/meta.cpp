@@ -326,26 +326,10 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             m.ui.thread_scroll = std::max(0, m.ui.thread_scroll + e.delta);
             return done(std::move(m));
         },
-        [&](ToggleToolExpanded& e) -> Step {
-            // Frozen-prefix gate: a tool whose enclosing message has
-            // already settled into m.ui.frozen has its expanded
-            // state baked into the snapshotted Element — flipping
-            // tc.expanded on a frozen Message would change model
-            // state without ever reaching the canvas (the Element's
-            // hash_id is stamped at freeze time and never
-            // recomputed). with_live_tool refuses the mutation; the
-            // expand key simply no-ops on scrollback turns, which
-            // matches the user's reasonable expectation that
-            // "scrollback is archaeology".
-            with_live_tool(m, e.id, [](ToolUse& tc) {
-                tc.expanded = !tc.expanded;
-            });
-            return done(std::move(m));
-        },
         [&](ToggleRetrievedExpanded& e) -> Step {
             // Flip the addressed retrieved-context card between its compact
             // snippet form and full-passage expansion. Frozen-prefix gate,
-            // same reasoning as ToggleToolExpanded: a card already settled
+            // same frozen-prefix gate as every id-addressed mutation: a card
             // into m.ui.frozen has its expanded state baked into the
             // snapshotted Element (hash_id stamped at freeze, never
             // recomputed), so mutating proactive_expanded there would change

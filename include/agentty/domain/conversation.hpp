@@ -144,7 +144,6 @@ struct ToolUse {
     // load is correct.
     bool           stream_mid_string_truncated = false;
     Status         status   = Pending{};
-    bool           expanded = true;
 
     // ── State predicates ─────────────────────────────────────────────────
     [[nodiscard]] bool is_pending()  const noexcept { return std::holds_alternative<Pending>(status);  }
@@ -252,7 +251,6 @@ struct ToolUse {
         mix(progress_text().size());
         mix(args_streaming.size());
         mix(static_cast<std::uint64_t>(status.index()));
-        mix(expanded ? 1ULL : 0ULL);
         return k;
     }
 };

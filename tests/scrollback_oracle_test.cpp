@@ -801,7 +801,6 @@ static bool tool_turn(Ctx& cx, int t, int H) {
                 auto sa = std::get<ToolUse::Running>(ta.status).started_at;
                 ta.status = ToolUse::Done{
                     sa, std::chrono::steady_clock::now(), "ok: A done"};
-                ta.expanded = false;
                 auto& run = std::get<ToolUse::Running>(tb.status);
                 for (int k = 0; k < 4; ++k)
                     run.progress_text += "[par tail " + std::to_string(k) + "]\n";
@@ -813,7 +812,6 @@ static bool tool_turn(Ctx& cx, int t, int H) {
                 auto sb = std::get<ToolUse::Running>(tb.status).started_at;
                 tb.status = ToolUse::Done{
                     sb, std::chrono::steady_clock::now(), "ok: B done"};
-                tb.expanded = false;
                 tick(); if (cx.frame(rt_tag + "-bdone")) return true;
             }
             {
@@ -887,7 +885,6 @@ static bool tool_turn(Ctx& cx, int t, int H) {
             tc.status = ToolUse::Done{
                 started, std::chrono::steady_clock::now(),
                 "ok: 42 tests passed (round " + std::to_string(r) + ")"};
-            tc.expanded = false;
             if (r != 1) {
                 tick(); if (cx.frame(rt_tag + "-done")) return true;
                 tick(); if (cx.frame(rt_tag + "-fold")) return true;
@@ -1014,7 +1011,6 @@ static bool write_edit_turn(Ctx& cx, int t, int H) {
                 started, std::chrono::steady_clock::now(),
                 "Wrote " + std::to_string(content.size()) + " bytes to src/gen_"
                     + st + ".cpp"};
-            wt.expanded = false;
             tick(); if (cx.frame("t" + st + "-w-done")) return true;
             tick(); if (cx.frame("t" + st + "-w-fold")) return true;
         }
@@ -1087,7 +1083,6 @@ static bool write_edit_turn(Ctx& cx, int t, int H) {
                 started, std::chrono::steady_clock::now(),
                 "Edited src/gen_" + st + ".cpp (" + std::to_string(kHunks)
                     + " edits):\n```diff\n" + diff_body + "\n```"};
-            et.expanded = false;
             // NO render here — the Done flip rides the same frame as the
             // continuation prose below.
         }
@@ -1185,7 +1180,6 @@ static bool deep_run_turn(Ctx& cx, int t, int H) {
         auto now = std::chrono::steady_clock::now();
         tc.status = ToolUse::Done{now - std::chrono::milliseconds{5}, now,
                                   "edited uniq-" + et + "-done"};
-        tc.expanded = false;
         a.tool_calls.push_back(std::move(tc));
         m.d.current.messages.push_back(std::move(a));
         // First half: render every sub-turn. Second half: burst 3.
@@ -1231,7 +1225,6 @@ static bool deep_run_turn(Ctx& cx, int t, int H) {
         tcr.status = ToolUse::Done{
             started, std::chrono::steady_clock::now(),
             "ok: deep run uniq-" + st + "-run-done"};
-        tcr.expanded = false;
     }
 
     // Continuation prose on a NEW message (the reply after the run).

@@ -250,7 +250,6 @@ int s_id_counter = 0;
         .finished_at = now,
         .output      = std::move(output),
     };
-    t.expanded = true;
     return t;
 }
 
