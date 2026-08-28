@@ -108,6 +108,12 @@ void generic_lifecycle_body(const ToolUse& tc,
     if (generic_text && tc.is_done() && text_is_visible(tc.output())) {
         out.kind = Kind::CodeBlock;
         out.text = tc.output();
+        // Settled output for the tools that land here (repo_map, outline,
+        // read_filter, search_*, extract, json_query, MCP tools…) is
+        // HEAD-heavy: the answer is at the top, the tail is pagination /
+        // truncation chatter. tail_only stays true only for LIVE progress
+        // above (newest lines pinned bottom, terminal-like).
+        out.tail_only = false;
     }
     // Empty success/failure/rejection is already explicit in the event header.
     // Inventing a body row only at settle would shift committed transcript
@@ -157,7 +163,13 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
         generic_lifecycle_body(tc, out);
         return out;
     }
-    if (n == "bash" || n == "diagnostics" || n == "test") {
+    if (n == "bash" || n == "diagnostics" || n == "test"
+        || n == "process_start" || n == "process_poll"
+        || n == "process_stop") {
+        // The process_* trio IS terminal output — tail-heavy, ANSI-laden,
+        // same reading question as bash ("what did it print / did it
+        // fail?"), so it shares BashOutput's structured-extraction chain
+        // (test summaries, compiler diagnostics) and tail window.
         detail::bash_body(tc, out);
         generic_lifecycle_body(tc, out);
         return out;
@@ -186,7 +198,13 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
             return out;
         }
     }
-    if (n == "grep" || n == "glob" || n == "list_dir"
+    if (n == "grep") {
+        if (detail::grep_body(tc, out)) {
+            generic_lifecycle_body(tc, out);
+            return out;
+        }
+    }
+    if (n == "glob" || n == "list_dir"
         || n == "web_search"
         || n == "git_status" || n == "git_log" || n == "git_commit") {
         if (detail::generic_list_body(tc, out)) {

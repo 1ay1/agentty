@@ -281,8 +281,14 @@ static std::string tool_timeline_detail_base(const ToolUse& tc) {
 
     if (n == "read") {
         auto detail = path_pp.empty() ? std::string{"\xe2\x80\xa6"} : path_pp;
-        if (auto off = safe_int_arg(tc.args, "offset", 0); off > 0)
-            detail += " @" + std::to_string(off);
+        // Symbol reads are the encouraged idiom — say WHAT was read, not
+        // just where. Streaming-live like every other arg via safe().
+        if (auto sym = safe("symbol"); !sym.empty())
+            detail += " \xc2\xb7 " + sym + "()";
+        // Both spellings of the range start (offset / Zed-style start_line).
+        int off = safe_int_arg(tc.args, "offset", 0);
+        if (off == 0) off = safe_int_arg(tc.args, "start_line", 0);
+        if (off > 0) detail += " @" + std::to_string(off);
         if (tc.is_done()) {
             // Prefer the file's true length that read reports in its
             // "[showing lines A-B of N]" footer; only re-count the (decorated)
