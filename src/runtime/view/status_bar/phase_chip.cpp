@@ -6,6 +6,7 @@
 
 #include "agentty/runtime/view/helpers.hpp"
 #include "agentty/runtime/view/palette.hpp"
+#include "agentty/provider/selection.hpp"   // provider::active (local-host verb)
 
 namespace agentty::ui {
 
@@ -127,10 +128,22 @@ maya::PhaseChip::Config phase_chip_config(const Model& m) {
         breathing = true;
         elapsed   = phase_elapsed;
     }
-    // ── 6. Streaming — model is composing ────────────────────────────
+    // ── 6. Streaming — model is composing ────────────────────────────────
     else if (is_streaming) {
         glyph     = spinner;
-        verb      = "Streaming";
+        // LOCAL providers process the prompt in complete silence before the
+        // first token — on a 20-30B model that can be minutes. "Streaming"
+        // while nothing streams reads like a hang and drove users to kill
+        // healthy sessions (part of the "model locks" report). Say what is
+        // actually happening until the first byte lands.
+        verb = "Streaming";
+        if (const auto* a = active_ctx(m.s.phase);
+            a && a->first_delta_at.time_since_epoch().count() == 0) {
+            const auto& sel = provider::active();
+            if (sel.kind == provider::Kind::OpenAI
+                && !sel.openai_endpoint.use_tls)
+                verb = "processing\xe2\x80\xa6";
+        }
         color     = maya::Color::bright_cyan();
         breathing = true;
         elapsed   = phase_elapsed;

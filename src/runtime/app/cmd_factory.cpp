@@ -1731,7 +1731,24 @@ Cmd<Msg> fetch_models() {
             // and a bare read races the UI thread's auth swap mid-switch.
             auto models = provider::list_models_for(provider::active(),
                                                     auth_snapshot());
-            dispatch(ModelsLoaded{std::move(models), for_provider});
+            // EMPTY catalog on a LOCAL host = the server didn't answer (down,
+            // wrong port, wrong path) — list_models returns {} on any HTTP
+            // failure rather than throwing. Attach the reason so the reducer
+            // toasts it IMMEDIATELY on connect, instead of the picker sitting
+            // in a silent "no models" that the user discovers later. This is
+            // the probe-on-connect: the switch always fetches, so a broken
+            // host is called out within seconds of Enter.
+            std::string err;
+            if (models.empty()) {
+                const auto& sel = provider::active();
+                if (sel.kind == provider::Kind::OpenAI
+                    && !sel.openai_endpoint.use_tls)
+                    err = "no response from " + sel.openai_endpoint.host + ":"
+                        + std::to_string(sel.openai_endpoint.port)
+                        + " \xe2\x80\x94 is the server running?";
+            }
+            dispatch(ModelsLoaded{std::move(models), for_provider,
+                                  std::move(err)});
         } catch (const std::exception& e) {
             // Dispatch an EMPTY ModelsLoaded carrying the reason (NOT a
             // StreamError) so the reducer always clears `models_loading`
