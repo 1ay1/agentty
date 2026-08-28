@@ -122,6 +122,10 @@ struct LoopBreak {
 
 [[nodiscard]] maya::Cmd<Msg> fetch_models();
 
+// Fetch a SPECIFIC provider's catalog without switching to it (fused picker
+// fan-out). Dispatches FusedCatalogLoaded{spec, models, ok}.
+[[nodiscard]] maya::Cmd<Msg> fetch_models_for(std::string spec);
+
 // ── Self-update ─────────────────────────────────────────────
 // Background release check (24h-cached, never blocks a frame): dispatches
 // UpdateCheckDone. check_for_update() is safe to fire on every launch.

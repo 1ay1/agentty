@@ -409,6 +409,30 @@ struct ModelsLoaded {
     std::string            error;
 };
 
+// ── Fused cross-provider model picker ────────────────────────────────────
+// The unified list spanning EVERY authenticated provider (docs/design/
+// unified-model-picker.md). Each row is a concrete (provider, model) the
+// user switches to atomically, or a "sign in to X" offer that routes to
+// login. Opened with `^/` and the `/model` slash command.
+struct OpenFusedPicker {};
+struct CloseFusedPicker {};
+struct FusedPickerMove { int delta; };
+struct FusedPickerJump { enum class Where { Home, End, PageUp, PageDown }; Where where; };
+struct FusedPickerSelect {};        // atomic switch to the highlighted row
+struct FusedPickerToggleFavorite {};
+struct FusedPickerFilterInput { char32_t ch; };
+struct FusedPickerFilterBackspace {};
+// One authed provider's catalog resolved (async, one per provider on open).
+// `provider_id` guards against a provider signed out mid-fetch; `ok=false`
+// marks the group Failed. Merges into Model::d.provider_catalogs in place.
+struct FusedCatalogLoaded {
+    std::string            provider_id;
+    std::vector<ModelInfo> models;
+    bool                   ok = true;
+};
+// ^Tab quick-swap: jump straight to the previous (provider,model) in the MRU,
+// no overlay. Reuses the same atomic-switch resolution as FusedPickerSelect.
+struct SwitchToPreviousModel {};
 // ── Provider picker ──────────────────────────────────────────────────────
 // Mirrors the model picker. Selecting a provider live-switches the active
 // backend (provider::select + a deps() seam swap), persists the choice, and
@@ -897,6 +921,12 @@ using ProviderPickerMsg = std::variant<
     ProviderPickerFilterInput, ProviderPickerFilterBackspace,
     ProviderPickerDelete>;
 
+using FusedPickerMsg = std::variant<
+    OpenFusedPicker, CloseFusedPicker, FusedPickerMove, FusedPickerJump,
+    FusedPickerSelect, FusedPickerToggleFavorite,
+    FusedPickerFilterInput, FusedPickerFilterBackspace,
+    FusedCatalogLoaded, SwitchToPreviousModel>;
+
 using ThreadListMsg = std::variant<
     OpenThreadList, CloseThreadList, ThreadListMove, ThreadListJump,
     ThreadListSelect, ThreadListDelete, ThreadCycle, NewThread, ThreadsLoaded, ThreadLoaded>;
@@ -980,6 +1010,7 @@ using Msg = std::variant<
     msg::ToolMsg,
     msg::ModelPickerMsg,
     msg::ProviderPickerMsg,
+    msg::FusedPickerMsg,
     msg::ThreadListMsg,
     msg::CommandPaletteMsg,
     msg::MentionPaletteMsg,
@@ -1084,7 +1115,7 @@ static_assert(leaf_domain_count<Tick>()                      == 1,
 // they must also update the kDomains array used by the dispatcher in
 // update.cpp, which currently exhausts on 12 arms. Mismatch → dispatch
 // switch loses a domain silently.
-static_assert(std::variant_size_v<Msg> == 18,
+static_assert(std::variant_size_v<Msg> == 19,
               "Msg domain count changed — update the dispatcher in "
               "src/runtime/app/update.cpp and this proof to match");
 

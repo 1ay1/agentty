@@ -226,6 +226,10 @@ struct Model {
         // sets this and CloseModelPicker/Select flush once.
         bool                effort_dirty = false;
         ui::pick::OneAxis   provider_picker;  // Closed | OpenAt{index}
+        // Fused cross-provider model picker (docs/design/unified-model-picker.md):
+        // one list over every authed provider. OpenAt{index} into the
+        // build_fused_rows() output; the query lives in OpenAt::query.
+        ui::pick::OneAxis   fused_picker;     // Closed | OpenAt{index, query}
         ui::pick::OneAxis   thread_list;      // Closed | OpenAt{index}
         ui::pick::OneAxis   smart_mode;        // Closed | OpenAt{row} — Smart Mode config overlay
         CommandPaletteState command_palette;

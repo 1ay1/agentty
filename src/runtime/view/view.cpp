@@ -28,6 +28,7 @@ namespace {
 std::optional<maya::Element> pick_overlay(const Model& m) {
     if (login::is_open(m.ui.login))        return login_modal(m);
     if (pick::is_open(m.ui.model_picker))  return model_picker(m);
+    if (pick::is_open(m.ui.fused_picker))   return fused_picker(m);
     if (pick::is_open(m.ui.provider_picker)) return provider_picker(m);
     if (pick::is_open(m.ui.thread_list))   return thread_list(m);
     if (pick::is_open(m.ui.smart_mode))    return smart_mode_overlay(m);

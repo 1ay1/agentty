@@ -150,6 +150,18 @@ struct AgenttyApp {
             mix_str(mp->query);   // live search buffer
         mix(static_cast<std::uint64_t>(m.ui.provider_picker.index()));
         mix(static_cast<std::uint64_t>(ui::pick::index_or(m.ui.provider_picker)));
+        mix(static_cast<std::uint64_t>(m.ui.fused_picker.index()));
+        mix(static_cast<std::uint64_t>(ui::pick::index_or(m.ui.fused_picker)));
+        if (auto* fp = ui::pick::opened(m.ui.fused_picker))
+            mix_str(fp->query);   // live search buffer
+        // The fused list also changes as async provider catalogs resolve
+        // (each FusedCatalogLoaded grows/updates provider_catalogs), so mix a
+        // coarse fingerprint of the merged catalogs' sizes + states.
+        for (const auto& c : m.d.provider_catalogs) {
+            mix_str(c.provider_id);
+            mix(static_cast<std::uint64_t>(c.models.size()));
+            mix(static_cast<std::uint64_t>(c.state));
+        }
         mix(static_cast<std::uint64_t>(m.ui.thread_list.index()));
         mix(static_cast<std::uint64_t>(ui::pick::index_or(m.ui.thread_list)));
         mix(static_cast<std::uint64_t>(m.ui.diff_review.index()));

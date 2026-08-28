@@ -46,6 +46,7 @@ enum class Back : std::uint8_t {
     PickMethod,      // back to the sign-in method menu (Picking)
     AccountList,     // back to the account switcher
     CustomHost,      // back to the custom-host input (spec restored)
+    FusedPicker,     // re-open the fused cross-provider model picker
 };
 
 // Optional provider context keeps an "add another account" flow scoped to

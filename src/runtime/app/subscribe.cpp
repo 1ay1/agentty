@@ -351,6 +351,43 @@ std::optional<Msg> on_fork_picker(const KeyEvent& ev) {
     return std::nullopt;
 }
 
+std::optional<Msg> on_fused_picker(const KeyEvent& ev) {
+    using namespace agentty::msg;
+    if (std::holds_alternative<SpecialKey>(ev.key)) {
+        auto sk = std::get<SpecialKey>(ev.key);
+        switch (sk) {
+            case SpecialKey::Escape:   return CloseFusedPicker{};
+            case SpecialKey::Enter:    return FusedPickerSelect{};
+            case SpecialKey::Up:       return FusedPickerMove{-1};
+            case SpecialKey::Down:     return FusedPickerMove{+1};
+            case SpecialKey::Backspace: return FusedPickerFilterBackspace{};
+            case SpecialKey::Home:     return FusedPickerJump{FusedPickerJump::Where::Home};
+            case SpecialKey::End:      return FusedPickerJump{FusedPickerJump::Where::End};
+            case SpecialKey::PageUp:   return FusedPickerJump{FusedPickerJump::Where::PageUp};
+            case SpecialKey::PageDown: return FusedPickerJump{FusedPickerJump::Where::PageDown};
+            default: break;
+        }
+    }
+    if (auto* ck = std::get_if<CharKey>(&ev.key)) {
+        char32_t c = ck->codepoint;
+        // Re-pressing ^/ closes (open/close symmetry): raw 0x1F or '/'+ctrl.
+        if (c == 0x1F || (ev.mods.ctrl && c == U'/')) return CloseFusedPicker{};
+        // ^P cross-hops to the provider picker (manage backends/hosts).
+        if (c == 0x10 || (ev.mods.ctrl && (c == U'p' || c == U'P')))
+            return OpenProviderPicker{};
+        // ^F favourites the highlighted model (raw ctrl byte or flagged).
+        const bool raw_ctrl = (c >= 0x01 && c <= 0x1A);
+        if (ev.mods.ctrl || raw_ctrl) {
+            if (raw_ctrl) c = U'a' + (c - 1);
+            if (c == U'f') return FusedPickerToggleFavorite{};
+            return std::nullopt;
+        }
+        // Any other printable codepoint types into the filter query.
+        if (c >= 0x20) return FusedPickerFilterInput{c};
+    }
+    return std::nullopt;
+}
+
 std::optional<Msg> on_model_picker(const KeyEvent& ev) {
     if (std::holds_alternative<SpecialKey>(ev.key)) {
         auto sk = std::get<SpecialKey>(ev.key);
@@ -810,7 +847,7 @@ std::optional<Msg> on_global(const KeyEvent& ev) {
         if (ctrl) {
             switch (c) {
                 case U'c': case U'C': return Quit{};
-                case U'/':           return OpenModelPicker{};
+                case U'/':           return OpenFusedPicker{};
                 case U'j': case U'J': return OpenThreadList{};
                 case U'k': case U'K': return OpenCommandPalette{};
                 case U'p': case U'P': return OpenProviderPicker{};
@@ -825,6 +862,11 @@ std::optional<Msg> on_global(const KeyEvent& ev) {
                 default: break;
             }
         }
+    }
+    if (ev.mods.ctrl && std::holds_alternative<SpecialKey>(ev.key)) {
+        auto sk = std::get<SpecialKey>(ev.key);
+        // ^Tab — quick-swap to the previous (provider,model) in the MRU.
+        if (sk == SpecialKey::Tab) return SwitchToPreviousModel{};
     }
     if (ev.mods.shift && std::holds_alternative<SpecialKey>(ev.key)) {
         auto sk = std::get<SpecialKey>(ev.key);
@@ -1017,6 +1059,7 @@ Sub<Msg> subscribe(const Model& m) {
     const bool in_fork = fork_picker_is_open(m.ui.fork_picker);
     const bool in_models  = pick::is_open(m.ui.model_picker);
     const bool in_providers = pick::is_open(m.ui.provider_picker);
+    const bool in_fused   = pick::is_open(m.ui.fused_picker);
     const bool in_threads = pick::is_open(m.ui.thread_list);
     const bool in_smart   = pick::is_open(m.ui.smart_mode);
     const bool in_diff    = pick::is_open(m.ui.diff_review);
@@ -1071,6 +1114,7 @@ Sub<Msg> subscribe(const Model& m) {
                 return on_settings_list(ev, settings_list_adding);
             if (in_fork) return on_fork_picker(ev);
             if (in_models)  return on_model_picker(ev);
+            if (in_fused)   return on_fused_picker(ev);
             if (in_providers) return on_provider_picker(ev);
             if (in_threads) return on_thread_list(ev);
             if (in_smart)   return on_smart_mode(ev);

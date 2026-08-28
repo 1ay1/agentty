@@ -4,6 +4,9 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Cross-provider model switching is now first-class: one picker spanning every provider you're signed into.** [[Ctrl+/]] opens a single fuzzy list where each row is `provider · model` — type `son` for every Sonnet across Anthropic/Copilot/…, `gpt` for every GPT — and Enter switches **provider, model, and account atomically** in one step (no more "pick provider, wait, pick model"). A **recent** section (the models you actually toggle between) sits on top with the active model pinned and marked; providers you're *not* signed into appear as dim **sign in to …** rows that drop straight into that provider's login and return you to the picker. **[[Ctrl+Tab]]** quick-swaps to your previous model without opening anything. The switch is atomic by construction: `commit_provider_switch` gained a `desired_model` so the exact chosen model is installed instead of a per-provider recall/default. Catalogs for every authed provider load lazily and concurrently on open (the active provider is seeded instantly from the live list; each other resolves in place), and the recents MRU persists across restarts. [[Ctrl+P]] stays the surface for *managing* backends (custom hosts, accounts). Design: `docs/design/unified-model-picker.md`. (`domain/catalog.hpp` types, `provider/auth_state.*`, `runtime/fused_models.hpp` pure ranking core, `FusedPickerMsg` domain + `fused_picker_update` reducer, `cmd::fetch_models_for`, `ui::fused_picker` view; `fused_models_test` + fused reducer cases in `provider_model_switch_test`.)
+
 ## [0.5.0] - 2026-08-28
 
 ### Added

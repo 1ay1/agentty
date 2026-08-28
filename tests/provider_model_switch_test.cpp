@@ -19,6 +19,7 @@
 #include "agtest.hpp"
 
 #include "agentty/runtime/app/update.hpp"
+#include "agentty/runtime/app/update/internal.hpp"  // app::detail::fused_rows_for_model
 #include "agentty/runtime/app/deps.hpp"
 #include "agentty/runtime/provider_rows.hpp"
 #include "agentty/provider/selection.hpp"
@@ -273,4 +274,86 @@ TEST_CASE("provider rows: one ordered list, filter hides non-preset rows") {
         CHECK(rows.size() == 1);
         CHECK(rows.front().is_new_custom_host());
     }
+}
+
+// Fused cross-provider picker, driven through the REAL reducer:
+// open seeds catalogs + fires fetches; a same-provider Select changes the
+// model in place and records the MRU; a FusedCatalogLoaded merges by id.
+TEST_CASE("fused picker open, merge, same-provider switch, MRU") {
+    using namespace agentty::msg;
+    install_stub_deps();
+    g_settings = store::Settings{};
+    provider::select(provider::parse_selection("anthropic"));
+
+    Model m;
+    m.d.model_id = ModelId{"claude-sonnet-4-6"};
+    m.d.available_models = {mi("claude-sonnet-4-6", "anthropic"),
+                            mi("claude-opus-4", "anthropic")};
+
+    // Open: picker opens, active provider's catalog is seeded from
+    // available_models (Ready), other authed providers get Loading + a fetch.
+    auto [m1, c1] = app::update(std::move(m), Msg{OpenFusedPicker{}});
+    CHECK(ui::pick::is_open(m1.ui.fused_picker));
+    bool anthropic_seeded = false;
+    for (const auto& c : m1.d.provider_catalogs)
+        if (c.provider_id == "anthropic") {
+            anthropic_seeded = (c.state == ProviderCatalog::State::Ready
+                                && c.models.size() == 2);
+        }
+    CHECK(anthropic_seeded);
+
+    // The fused rows include both Anthropic models (active pinned first).
+    auto rows = app::detail::fused_rows_for_model(m1);
+    CHECK(rows.size() >= 2);
+    CHECK(rows[0].active);
+    CHECK(rows[0].model.id.value == "claude-sonnet-4-6");
+
+    // Move to the opus row and Select: same-provider model change, no hop.
+    // Find opus's index in the fused list.
+    int opus_idx = -1;
+    for (int i = 0; i < static_cast<int>(rows.size()); ++i)
+        if (rows[static_cast<std::size_t>(i)].model.id.value == "claude-opus-4") {
+            opus_idx = i; break;
+        }
+    REQUIRE(opus_idx >= 0);
+    if (auto* c = ui::pick::opened(m1.ui.fused_picker)) c->index = opus_idx;
+
+    auto [m2, c2] = app::update(std::move(m1), Msg{FusedPickerSelect{}});
+    CHECK(m2.d.model_id.value == "claude-opus-4");
+    CHECK(!ui::pick::is_open(m2.ui.fused_picker));       // picker closed
+    // MRU recorded the switch (front = the model just selected).
+    REQUIRE(!m2.d.recent_models.empty());
+    CHECK(m2.d.recent_models.front().provider_id == "anthropic");
+    CHECK(m2.d.recent_models.front().model_id == "claude-opus-4");
+    // Persisted to settings.
+    CHECK(!g_settings.recent_models.empty());
+}
+
+// A FusedCatalogLoaded for a provider merges into provider_catalogs by id and
+// flips its state to Ready.
+TEST_CASE("fused catalog loaded merges by provider id") {
+    using namespace agentty::msg;
+    install_stub_deps();
+    g_settings = store::Settings{};
+    g_settings.provider_keys["openai"] = "sk-test";   // openai authed → catalog
+    provider::select(provider::parse_selection("anthropic"));
+
+    Model m;
+    m.d.model_id = ModelId{"claude-sonnet-4-6"};
+    m.d.available_models = {mi("claude-sonnet-4-6", "anthropic")};
+    auto [m1, c1] = app::update(std::move(m), Msg{OpenFusedPicker{}});
+
+    // Simulate openai's catalog resolving.
+    FusedCatalogLoaded loaded;
+    loaded.provider_id = "openai";
+    loaded.models = {mi("gpt-5-codex", "openai"), mi("gpt-4o", "openai")};
+    loaded.ok = true;
+    auto [m2, c2] = app::update(std::move(m1), Msg{std::move(loaded)});
+
+    bool openai_ready = false;
+    for (const auto& c : m2.d.provider_catalogs)
+        if (c.provider_id == "openai")
+            openai_ready = (c.state == ProviderCatalog::State::Ready
+                            && c.models.size() == 2);
+    CHECK(openai_ready);
 }
