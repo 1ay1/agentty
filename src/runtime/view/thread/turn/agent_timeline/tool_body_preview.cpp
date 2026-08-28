@@ -149,7 +149,10 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
     // ── Structured renderers get first refusal. Every return passes through
     //    the generic lifecycle fallback so even silent/empty tools explain
     //    what they are waiting for or how they settled. ───────────────────
-    if (n == "edit") {
+    if (n == "edit" || n == "apply_patch") {
+        // apply_patch emits the SAME diff-fenced output shape as edit (both
+        // route through diff::render_unified); the fence-parse path gives it
+        // the colored −/+ diff card instead of a dim generic code block.
         detail::edit_body(tc, out);
         generic_lifecycle_body(tc, out);
         return out;
