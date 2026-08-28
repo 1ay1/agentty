@@ -38,6 +38,14 @@ std::string tool_display_name(const std::string& n) {
     if (n == "web_search")      return "Search";
     if (n == "find_definition") return "Definition";
     if (n == "search_structural") return "Structural";
+    if (n == "extract")         return "Extract";
+    if (n == "aggregate")       return "Aggregate";
+    if (n == "read_filter")     return "Read Filter";
+    if (n == "json_query")      return "JSON Query";
+    if (n == "outline")         return "Outline";
+    if (n == "apply_patch")     return "Patch";
+    if (n == "replace")         return "Replace";
+    if (n == "rewrite_structural") return "Rewrite";
     if (n == "diagnostics")     return "Diagnostics";
     if (n == "test")            return "Test";
     if (n == "git_status")      return "Git Status";
@@ -377,6 +385,61 @@ static std::string tool_timeline_detail_base(const ToolUse& tc) {
             else if (hits > 0) detail += "  \xc2\xb7  " + std::to_string(hits)
                                        + (hits == 1 ? " hit" : " hits");
         }
+        return detail;
+    }
+    if (n == "extract" || n == "aggregate") {
+        // Pattern-projection tools: the regex is the story; add the path
+        // scope when present. (These previously fell to display_description
+        // — BLANK whenever the model omitted it.)
+        auto pat = safe("pattern");
+        if (pat.empty()) return "\xe2\x80\xa6";
+        if (pat.size() > 48) {
+            pat.resize(tools::util::safe_utf8_cut(pat, 47));
+            pat += "\xe2\x80\xa6";
+        }
+        return path_pp.empty() ? pat : pat + "  in  " + path_pp;
+    }
+    if (n == "read_filter") {
+        auto pat = safe("pattern");
+        std::string detail = path_pp.empty() ? std::string{"\xe2\x80\xa6"} : path_pp;
+        if (!pat.empty()) detail += "  \xc2\xb7  " + pat;
+        return detail;
+    }
+    if (n == "json_query") {
+        auto q = safe("query");
+        if (q.empty()) q = "\xe2\x80\xa6";
+        return path_pp.empty() ? q : path_pp + "  \xc2\xb7  " + q;
+    }
+    if (n == "outline")
+        return path_pp.empty() ? std::string{"\xe2\x80\xa6"} : path_pp;
+    if (n == "apply_patch") {
+        // Mirror edit: the path is the identity; hunk count from the patch.
+        std::string detail = path_pp.empty() ? std::string{"\xe2\x80\xa6"} : path_pp;
+        auto patch = safe("patch");
+        if (!patch.empty()) {
+            int hunks = 0;
+            for (std::size_t p = 0;
+                 (p = patch.find("@@", p)) != std::string::npos; p += 2)
+                ++hunks;
+            hunks /= 2;   // each hunk header carries a pair of @@
+            if (hunks > 0)
+                detail += "  \xc2\xb7  " + std::to_string(hunks)
+                        + (hunks == 1 ? " hunk" : " hunks");
+        }
+        return detail;
+    }
+    if (n == "replace") {
+        // find → replacement across a glob; the dry-run/apply mode matters.
+        auto find_s = safe("find");
+        if (find_s.empty()) return "\xe2\x80\xa6";
+        if (find_s.size() > 32) {
+            find_s.resize(tools::util::safe_utf8_cut(find_s, 31));
+            find_s += "\xe2\x80\xa6";
+        }
+        std::string detail = find_s;
+        if (auto g = safe("glob"); !g.empty()) detail += "  in  " + g;
+        if (!safe_bool_arg(tc.args, "apply"))
+            detail += "  \xc2\xb7  dry-run";
         return detail;
     }
     if (n == "list_dir") {
