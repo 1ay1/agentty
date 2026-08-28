@@ -140,6 +140,16 @@ Step login_back(Model m) {
     };
     if (auto* ch = std::get_if<login::CustomHostInput>(&m.ui.login))
         return pop_to(ch->back, {});
+    if (auto* hp = std::get_if<login::HostProbing>(&m.ui.login)) {
+        // Esc during a probe: abandon it (the attempt id makes any late
+        // HostProbed a no-op) and put the typed spec back in the input.
+        login::CustomHostInput ch;
+        ch.host_input = hp->spec;
+        ch.cursor     = static_cast<int>(ch.host_input.size());
+        ch.back       = hp->back;
+        m.ui.login    = std::move(ch);
+        return done(std::move(m));
+    }
     if (auto* api = std::get_if<login::ApiKeyInput>(&m.ui.login))
         return pop_to(api->back, api->provider);
     if (auto* p = std::get_if<login::Picking>(&m.ui.login))
@@ -147,6 +157,61 @@ Step login_back(Model m) {
     // Every other sub-state (OAuth waits, account list, failures): Esc
     // keeps its original meaning — cancel/close outright.
     return close_login(std::move(m));
+}
+
+// Async probe result for a keyless custom host. Success: persist the host
+// (empty key — the picker's saved-row store) and commit the switch with the
+// DETECTED dialect. Failure: back to the input with the spec restored and
+// the reason in the status line. Stale results (Esc'd / resubmitted probes)
+// are dropped by attempt-id mismatch.
+Step host_probed(Model m, HostProbed r) {
+    auto* hp = std::get_if<login::HostProbing>(&m.ui.login);
+    if (!hp || hp->attempt_id != r.attempt_id) return done(std::move(m));
+    const auto back = hp->back;
+    if (!r.ok) {
+        login::CustomHostInput ch;
+        ch.host_input = std::move(r.spec);
+        ch.cursor     = static_cast<int>(ch.host_input.size());
+        ch.back       = back;
+        m.ui.login    = std::move(ch);
+        auto toast = set_status_toast(m, "host check failed: " + r.error,
+                                      std::chrono::seconds{6});
+        return {std::move(m), std::move(toast)};
+    }
+
+    const std::string spec = std::move(r.spec);
+    // PERSIST the keyless host (empty key) so it has a picker row next
+    // session — saved_custom_hosts() derives rows from provider_keys.
+    auth::AuthHeader anthropic_creds = deps().auth;
+    if (auto saved = auth::load_credentials())
+        anthropic_creds = auth::make_auth_header(*saved);
+    std::string saved_provider_key;
+    {
+        auto settings = deps().load_settings();
+        if (auto it = settings.provider_keys.find(spec);
+            it != settings.provider_keys.end())
+            saved_provider_key = it->second;
+        else {
+            settings.provider_keys[spec] = "";
+            deps().save_settings(settings);
+        }
+    }
+    auth::AuthHeader new_auth = provider::resolve_auth_for(
+        spec, anthropic_creds, /*cli_key=*/{}, saved_provider_key);
+    m.ui.login = login::Closed{};
+    auto step = commit_provider_switch(std::move(m), spec, std::move(new_auth),
+                                       provider::provider_display_name(
+                                           provider::parse_selection(spec)));
+    // Enrich the switch toast with what the probe FOUND — the "it just
+    // works" moment: dialect, model count, latency.
+    auto found = set_status_toast(step.first,
+        std::string{"\xe2\x9c\x93 "} + std::to_string(r.model_count)
+        + (r.model_count == 1 ? " model" : " models") + " \xc2\xb7 "
+        + (r.native_api ? "ollama native" : "openai-compatible") + " \xc2\xb7 "
+        + std::to_string(r.latency_ms) + "ms \xc2\xb7 " + r.models_path,
+        std::chrono::seconds{5});
+    return {std::move(step.first),
+            maya::Cmd<Msg>::batch(std::move(step.second), std::move(found))};
 }
 
 Step sign_out(Model m) {
@@ -640,42 +705,33 @@ Step login_submit(Model m) {
             return done(std::move(m));
         }
 
-        // Non-TLS (local) host: no key needed. Resolve auth (will be empty
-        // for local servers, which is correct — list_models only short-
-        // circuits on use_tls && is_empty(auth)) and commit immediately.
-        // Reuse provider_keys[spec] if present (a keyed local proxy the
-        // user previously configured); otherwise the OPENAI_API_KEY chain
-        // is consulted as a fallback.
-        auth::AuthHeader anthropic_creds = deps().auth;
-        if (auto saved = auth::load_credentials())
-            anthropic_creds = auth::make_auth_header(*saved);
-        std::string saved_provider_key;
+        // Non-TLS (local) host: no key needed. PROBE before committing —
+        // dial the model list on a worker (configured path → /v1/models →
+        // Ollama /api/tags) and only commit on an answer, with the DETECTED
+        // dialect. The modal shows "probing…"; failure returns here with
+        // the spec restored and the reason named. No more committing blind
+        // to a dead endpoint and discovering it at the first prompt.
         {
-            auto settings = deps().load_settings();
-            if (auto it = settings.provider_keys.find(spec);
-                it != settings.provider_keys.end())
-                saved_provider_key = it->second;
-            else {
-                // PERSIST the keyless host as a saved custom host (empty
-                // key). saved_custom_hosts() derives the picker's rows from
-                // provider_keys entries — without this record a local host
-                // VANISHED from the picker after any provider switch or
-                // restart, forcing the user to re-type it every session
-                // (the "manually inserting provider" grind in the custom-
-                // host report). An empty value is harmless: local requests
-                // send no auth header anyway.
-                settings.provider_keys[spec] = "";
-                deps().save_settings(settings);
+            auth::AuthHeader anthropic_creds = deps().auth;
+            if (auto saved = auth::load_credentials())
+                anthropic_creds = auth::make_auth_header(*saved);
+            std::string saved_provider_key;
+            {
+                auto settings = deps().load_settings();
+                if (auto it = settings.provider_keys.find(spec);
+                    it != settings.provider_keys.end())
+                    saved_provider_key = it->second;
             }
+            auth::AuthHeader probe_auth = provider::resolve_auth_for(
+                spec, anthropic_creds, /*cli_key=*/{}, saved_provider_key);
+            const auto attempt_id = cmd::next_codex_login_attempt_id();
+            const auto back = ch->back;
+            m.ui.login = login::HostProbing{
+                .spec = spec, .attempt_id = attempt_id, .back = back};
+            return {std::move(m),
+                    cmd::probe_host_async(spec, attempt_id,
+                                          std::move(probe_auth))};
         }
-        auth::AuthHeader new_auth = provider::resolve_auth_for(
-            spec, anthropic_creds, /*cli_key=*/{}, saved_provider_key);
-        m.ui.login = login::Closed{};
-        // commit_provider_switch opens the model picker for us (one shared
-        // path), so no need to set it here.
-        return commit_provider_switch(std::move(m), spec, std::move(new_auth),
-                                      provider::provider_display_name(
-                                          provider::parse_selection(spec)));
     }
     if (auto* api = std::get_if<login::ApiKeyInput>(&m.ui.login)) {
         std::string key = std::move(api->key_input);
@@ -1003,6 +1059,7 @@ Step login_update(Model m, msg::LoginMsg lm) {
         [&](OpenLogin)              -> Step { return open_login(std::move(m)); },
         [&](CloseLogin)             -> Step { return close_login(std::move(m)); },
         [&](LoginBack)              -> Step { return login_back(std::move(m)); },
+        [&](HostProbed& e)          -> Step { return host_probed(std::move(m), std::move(e)); },
         [&](SignOut)                -> Step { return sign_out(std::move(m)); },
         [&](OpenAccounts)           -> Step { return open_accounts(std::move(m)); },
         [&](AccountMove& e)         -> Step { return account_move(std::move(m), e.delta); },

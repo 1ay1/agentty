@@ -1964,6 +1964,60 @@ OllamaProbe probe_ollama_model(const AuthHeader& auth,
 } // namespace
 
 // ── Model listing ────────────────────────────────────────────────────────────
+HostProbe probe_host(const AuthHeader& auth, const Endpoint& endpoint) {
+    HostProbe out;
+    http::Timeouts tos;
+    tos.connect = std::chrono::milliseconds(3'000);
+    tos.total   = std::chrono::milliseconds(6'000);
+
+    auto attempt = [&](const std::string& path) -> bool {
+        http::Request r;
+        r.method    = http::HttpMethod::Get;
+        r.host      = endpoint.host;
+        r.port      = endpoint.port;
+        r.path      = path;
+        r.plaintext = !endpoint.use_tls;
+        if (const auto& ov = http::agentty_api_host_override(); ov.active()) {
+            r.dial_host = ov.host;
+            r.dial_port = ov.port;
+        }
+        r.headers        = build_request_headers(auth, endpoint);
+        r.max_body_bytes = 2ull * 1024 * 1024;
+        const auto t0   = std::chrono::steady_clock::now();
+        auto resp       = http::default_client().send(r, tos);
+        const auto ms   = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - t0).count();
+        if (!resp) return false;                 // connect failure — keep 0
+        out.http_status = resp->status;
+        if (resp->status != 200) return false;
+        // Count models from either shape. {"data":[…]} = OpenAI dialect;
+        // {"models":[…]} = Ollama /api/tags.
+        try {
+            auto j = json::parse(resp->body);
+            if (j.contains("data") && j["data"].is_array()) {
+                out.dialect     = HostProbe::Dialect::OpenAiCompat;
+                out.model_count = static_cast<int>(j["data"].size());
+            } else if (j.contains("models") && j["models"].is_array()) {
+                out.dialect     = HostProbe::Dialect::OllamaNative;
+                out.model_count = static_cast<int>(j["models"].size());
+            } else {
+                return false;                    // 200 but not a model list
+            }
+        } catch (...) { return false; }
+        out.models_path = path;
+        out.latency_ms  = static_cast<long>(ms);
+        return true;
+    };
+
+    // 1. The configured path (explicit prefix honoured). 2. The /v1 default.
+    // 3. Ollama's native /api/tags — a bare daemon on 11434 or a proxy.
+    if (attempt(endpoint.models_path)) return out;
+    if (endpoint.models_path != "/v1/models" && attempt("/v1/models"))
+        return out;
+    if (attempt("/api/tags")) return out;
+    return out;   // dialect None; http_status carries the last error seen
+}
+
 std::vector<ModelInfo> list_models(const AuthHeader& auth, const Endpoint& endpoint) {
     std::vector<ModelInfo> result;
     if (endpoint.use_tls && is_empty(auth)) return result;

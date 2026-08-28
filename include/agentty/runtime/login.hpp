@@ -119,6 +119,20 @@ struct CustomHostInput {
     Back back = Back::Close;     // Esc target (one level up)
 };
 
+// Async connect-probe of a just-entered custom host: the modal shows
+// "probing host…" while a background worker dials the endpoint's model
+// list (configured path → /v1/models → Ollama /api/tags). HostProbed
+// resolves it: success commits the switch with the DETECTED dialect;
+// failure returns to CustomHostInput with the typed spec restored and the
+// reason shown — the user never commits to a dead endpoint blind.
+// `attempt_id` guards against a stale probe result landing after the user
+// Esc'd or resubmitted (same pattern as the OAuth attempt ids).
+struct HostProbing {
+    std::string   spec;          // canonical spec being probed
+    std::uint64_t attempt_id = 0;
+    Back back = Back::Close;     // where failure/Esc returns to
+};
+
 struct Failed {
     std::string message;
 };
@@ -146,7 +160,7 @@ struct AccountList {
 
 using State = std::variant<Closed, Picking, OAuthCode, OAuthExchanging,
                            ChatGptWaiting, DeviceWaiting, ApiKeyInput, CustomHostInput,
-                           AccountList, Failed>;
+                           HostProbing, AccountList, Failed>;
 
 [[nodiscard]] inline bool is_open(const State& s) noexcept {
     return !std::holds_alternative<Closed>(s);
