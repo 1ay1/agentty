@@ -308,6 +308,15 @@ inline constexpr int kMaxRetries = 6;
 // converges to terminal, while transient blips minutes apart never do.
 inline constexpr std::chrono::seconds kRetryDecayWindow{90};
 
+// Hard cap on consecutive scheduled retries with ZERO model progress (no
+// content delta, no structured tool call — heartbeats do NOT count). The
+// decay window above resets transient_retries after 90 s of "healthy wire",
+// but the backoff wait itself ticks that window — so an endpoint that
+// accepts connections and fails every request (local server, wrong path or
+// model) could loop failure→backoff→reset→failure forever. After this many
+// no-progress attempts the failure latches Terminal regardless of class.
+inline constexpr int kMaxNoProgressFailures = 6;
+
 [[nodiscard]] constexpr std::string_view to_string(ErrorClass k) noexcept {
     switch (k) {
         case ErrorClass::Transient: return "transient";

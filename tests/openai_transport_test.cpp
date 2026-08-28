@@ -642,13 +642,15 @@ TEST_CASE("test_endpoint_presets") {
         CHECK(url.models_path == "/custom/models");
     }
     {
-        // No path after scheme://authority → empty prefix → /chat/completions
+        // No path after scheme://authority → /v1 DEFAULT (the OpenAI dialect
+        // lives under /v1 on every real server — api.openai.com, llama.cpp,
+        // vLLM, LM Studio; a bare "/chat/completions" 404s on all of them).
         auto url = oai::Endpoint::from_spec("https://my-gateway.com");
         CHECK(url.host == "my-gateway.com");
         CHECK(url.port == 443);
         CHECK(url.use_tls);
-        CHECK(url.path == "/chat/completions");
-        CHECK(url.models_path == "/models");
+        CHECK(url.path == "/v1/chat/completions");
+        CHECK(url.models_path == "/v1/models");
     }
     {
         // Trailing slash on the prefix is stripped before appending.
@@ -660,13 +662,13 @@ TEST_CASE("test_endpoint_presets") {
         CHECK(url.models_path == "/prefix/models");
     }
     {
-        // http:// with explicit port and no path.
+        // http:// with explicit port and no path → /v1 default (see above).
         auto url = oai::Endpoint::from_spec("http://10.0.0.5:5000");
         CHECK(url.host == "10.0.0.5");
         CHECK(url.port == 5000);
         CHECK(!url.use_tls);
-        CHECK(url.path == "/chat/completions");
-        CHECK(url.models_path == "/models");
+        CHECK(url.path == "/v1/chat/completions");
+        CHECK(url.models_path == "/v1/models");
     }
     {
         // Invalid port (non-numeric) → falls back to scheme default.
@@ -883,13 +885,14 @@ TEST_CASE("test_tui_custom_host_specs") {
         CHECK(sel.openai_endpoint.path == "/custom/chat/completions");
         CHECK(sel.openai_endpoint.models_path == "/custom/models");
     }
-    // https:// with no path → empty prefix → /chat/completions (not /v1/...).
+    // https:// with no path → /v1 default (OpenAI dialect lives under /v1
+    // on every real server; a bare /chat/completions 404s everywhere).
     {
         auto sel = P::parse_selection("https://my-gateway.com");
         CHECK(sel.kind == P::Kind::OpenAI);
         CHECK(sel.openai_endpoint.host == "my-gateway.com");
-        CHECK(sel.openai_endpoint.path == "/chat/completions");
-        CHECK(sel.openai_endpoint.models_path == "/models");
+        CHECK(sel.openai_endpoint.path == "/v1/chat/completions");
+        CHECK(sel.openai_endpoint.models_path == "/v1/models");
     }
     // Bare host[:port] (legacy TUI behaviour) → /v1 default, unchanged.
     {

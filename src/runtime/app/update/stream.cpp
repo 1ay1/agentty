@@ -1138,6 +1138,10 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                         // terminal — even though the wire-level
                         // health was perfect for 90 s of streaming.
                         a->transient_retries = 0;
+                        // Real model output ends the no-progress ladder — the
+                        // endpoint demonstrably works. (Heartbeats and the
+                        // decay window deliberately do NOT reset this.)
+                        a->no_progress_failures = 0;
                     }
                     a->live_delta_bytes += e.text.size();
                 }
@@ -1225,7 +1229,12 @@ Step stream_update(Model m, msg::StreamMsg sm) {
         },
         [&](StreamToolUseStart& e) -> Step {
             auto now = std::chrono::steady_clock::now();
-            if (auto* a = active_ctx(m.s.phase)) a->last_event_at = now;
+            if (auto* a = active_ctx(m.s.phase)) {
+                a->last_event_at = now;
+                // A structured tool call is real model output — ends the
+                // no-progress retry ladder (see no_progress_failures).
+                a->no_progress_failures = 0;
+            }
             if (!m.d.current.messages.empty()
                 && m.d.current.messages.back().role == Role::Assistant) {
                 ToolUse tc;
@@ -2102,6 +2111,18 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                           && !has_committed
                           && err_ctx;   // can't retry from Idle (no ctx)
 
+            // NO-PROGRESS latch: the decay window resets prior_transient
+            // after 90 s of "healthy" wire, but a backoff wait ticks that
+            // window too — so an endpoint that connects fine and fails every
+            // request (local server with a wrong path/model) can loop
+            // forever. no_progress_failures is monotonic per turn, reset
+            // ONLY by real model output; past the hard cap the failure is
+            // terminal regardless of class.
+            if (can_retry && err_ctx
+                && err_ctx->no_progress_failures
+                       >= provider::kMaxNoProgressFailures)
+                can_retry = false;
+
             if (can_retry) {
                 int attempt = prior_transient;
                 std::chrono::milliseconds delay;
@@ -2133,6 +2154,9 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                         c.transient_retries = attempt + 1;
                         if (mid_stream) c.mid_stream_failures = mid_prior + 1;
                         c.last_failure_at   = std::chrono::steady_clock::now();
+                        // Monotonic no-progress count — reset only by real
+                        // model output (see StreamTextDelta / ToolUseStart).
+                        ++c.no_progress_failures;
                         c.retry             = retry::Scheduled{};
                     }))
                     return done(std::move(m));

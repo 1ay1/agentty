@@ -57,6 +57,32 @@ Step submit_message(Model m) {
                          + std::chrono::seconds{4};
         return done(std::move(m));
     }
+    // STALE-model guard for LOCAL providers. settings.json's per-provider
+    // model map recalls the last-picked id PER SPEC STRING — so switching
+    // between spellings of the same server (localhost:8080 vs 127.0.0.1:8080/v1)
+    // can resurrect an id the running server doesn't serve. Local catalogs
+    // are AUTHORITATIVE (llama-server serves exactly what /v1/models lists;
+    // Ollama 404s an unpulled tag), so a recalled id absent from a non-empty
+    // loaded list will fail every request — refuse cleanly instead. Hosted
+    // TLS providers are exempt: their catalogs are advisory (aliases, dated
+    // variants and gateway rewrites legitimately stream fine unlisted).
+    {
+        const auto& sel = provider::active();
+        const bool local_openai = sel.kind == provider::Kind::OpenAI
+                               && !sel.openai_endpoint.use_tls;
+        if (local_openai && !m.d.available_models.empty()) {
+            bool listed = false;
+            for (const auto& mi : m.d.available_models)
+                if (mi.id == m.d.model_id) { listed = true; break; }
+            if (!listed) {
+                m.s.status = "model '" + m.d.model_id.value
+                           + "' isn't served by this host \xe2\x80\x94 pick one (^/)";
+                m.s.status_until = std::chrono::steady_clock::now()
+                                 + std::chrono::seconds{5};
+                return done(std::move(m));
+            }
+        }
+    }
 
     // The pending-changes review strip covers ONE window: between the agent
     // finishing its edits and the user's next message. Sending a new turn ends
