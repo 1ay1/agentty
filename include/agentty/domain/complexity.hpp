@@ -155,4 +155,43 @@ struct ComplexityScore {
 // outcome-learning loop can be unit-tested. Only the opening ~48 chars matter.
 [[nodiscard]] bool is_routing_correction(std::string_view text) noexcept;
 
+// Is this short turn a CONTINUATION COMMAND ("continue", "retry", "go
+// ahead", "do it") rather than a terminal ack ("thanks", "lgtm")? The
+// distinction matters for momentum: an ack ends the exchange (Trivial is
+// right), but a continuation RESUMES the previous turn's work — pinning it
+// to Trivial/Effort::None makes the model continue a Complex task with zero
+// reasoning budget. Pure; defined in complexity.cpp next to the ack table.
+[[nodiscard]] bool is_continuation_cue(std::string_view text) noexcept;
+
+// ── THE composed turn classifier ────────────────────────────────────
+// The single entry point both routing sites (launch_stream and the 🧠 card
+// builder) MUST use, so the shown route can never disagree with the wire.
+// Composes, in order:
+//   1. text score + tier momentum  (classify_score_with_context),
+//   2. CONTINUATION lift: a bare "continue"/"retry" after Standard/Complex
+//      work inherits one tier below the previous turn instead of pinning to
+//      Trivial — resuming hard work is not an ack,
+//   3. payload lift               (refine_with_payload),
+//   4. CORRECTION floor: a turn that says "it's still broken" never routes
+//      BELOW Standard — stepping effort down on the retry of a failure is
+//      the one direction that's always wrong.
+[[nodiscard]] inline ComplexityScore classify_turn(
+        std::string_view text, Complexity prev,
+        std::size_t attachment_bytes, int images) noexcept {
+    ComplexityScore s = classify_score_with_context(text, prev);
+    if (s.tier == Complexity::Trivial
+        && static_cast<int>(prev) >= static_cast<int>(Complexity::Standard)
+        && is_continuation_cue(text)) {
+        s.tier   = static_cast<Complexity>(static_cast<int>(prev) - 1);
+        s.margin = 0;   // inherited — barely in, not deep
+    }
+    s = refine_with_payload(s, attachment_bytes, images);
+    if (is_routing_correction(text)
+        && static_cast<int>(s.tier) < static_cast<int>(Complexity::Standard)) {
+        s.tier   = Complexity::Standard;
+        s.margin = 0;
+    }
+    return s;
+}
+
 } // namespace agentty::smart

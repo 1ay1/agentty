@@ -330,4 +330,30 @@ bool is_routing_correction(std::string_view text) noexcept {
     return soft_opener && soft_negative_cue;
 }
 
+bool is_continuation_cue(std::string_view text) noexcept {
+    // Trim + lowercase the (short) turn. Only ack-length turns qualify —
+    // anything longer carries its own signal and classify_score handles it.
+    std::size_t b = 0, e = text.size();
+    while (b < e && std::isspace((unsigned char)text[b])) ++b;
+    while (e > b && std::isspace((unsigned char)text[e - 1])) --e;
+    std::string_view t = text.substr(b, e - b);
+    if (t.empty() || t.size() > 24) return false;
+    std::string low;
+    low.reserve(t.size());
+    for (char c : t) low.push_back(lower(c));
+    // Commands that RESUME work (vs terminal acks like "thanks"/"lgtm").
+    // "commit"/"push" are deliberately absent: they end a task with a cheap
+    // mechanical action, which Trivial routes correctly.
+    for (std::string_view cue : {
+             std::string_view{"continue"}, std::string_view{"go on"},
+             std::string_view{"keep going"}, std::string_view{"go ahead"},
+             std::string_view{"do it"}, std::string_view{"proceed"},
+             std::string_view{"retry"}, std::string_view{"try again"},
+             std::string_view{"again"}, std::string_view{"next"},
+             std::string_view{"run it"}, std::string_view{"finish it"},
+             std::string_view{"keep at it"}})
+        if (low == cue) return true;
+    return false;
+}
+
 } // namespace agentty::smart

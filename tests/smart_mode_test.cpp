@@ -204,6 +204,40 @@ TEST_CASE("smart_mode") {
         CHECK(sm::blend_bias(-1, -1) == -1, "blend: negative same-sign → no double-down");
     }
 
+    // ── classify_turn: the ONE composed classifier ──────────────────
+    {
+        using C = sm::Complexity;
+        // Continuation lift: "continue" after Complex work must NOT pin to
+        // Trivial (that routed the resumed hard task at Effort::None).
+        auto cont = sm::classify_turn("continue", C::Complex, 0, 0);
+        CHECK(cont.tier == C::Standard,
+              "classify_turn: 'continue' after Complex inherits Standard");
+        // …but a terminal ack stays Trivial — an ack is an ack.
+        auto ack = sm::classify_turn("thanks", C::Complex, 0, 0);
+        CHECK(ack.tier == C::Trivial,
+              "classify_turn: 'thanks' after Complex stays Trivial");
+        // …and a continuation with NO hard context stays Trivial too.
+        auto cold = sm::classify_turn("continue", C::Simple, 0, 0);
+        CHECK(cold.tier == C::Trivial,
+              "classify_turn: 'continue' after Simple stays Trivial");
+        // Correction floor: "no, still broken" never routes below Standard.
+        auto corr = sm::classify_turn("no, still broken", C::Simple, 0, 0);
+        CHECK(static_cast<int>(corr.tier) >= static_cast<int>(C::Standard),
+              "classify_turn: a correction floors at Standard");
+        // Payload lift composes: "fix this" + 40KB paste → Complex-ish.
+        auto pay = sm::classify_turn("fix this", C::Standard, 40 * 1024, 0);
+        CHECK(static_cast<int>(pay.tier) >= static_cast<int>(C::Standard),
+              "classify_turn: big payload lifts a chip-text turn");
+        // is_continuation_cue: resume commands yes, terminal acks no.
+        CHECK(sm::is_continuation_cue("retry"), "cue: retry resumes");
+        CHECK(sm::is_continuation_cue("go ahead"), "cue: go ahead resumes");
+        CHECK(!sm::is_continuation_cue("thanks"), "cue: thanks is terminal");
+        CHECK(!sm::is_continuation_cue("commit"), "cue: commit is terminal");
+        CHECK(!sm::is_continuation_cue(
+                  "continue refactoring the parser and add tests"),
+              "cue: long turns carry their own signal");
+    }
+
     // ── AGENTTY_SMART_MODE / AGENTTY_SMART_ENABLED session pin ────────
     {
         auto reset = [] {
