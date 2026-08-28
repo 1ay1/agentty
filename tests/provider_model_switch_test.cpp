@@ -283,6 +283,9 @@ TEST_CASE("fused picker open, merge, same-provider switch, MRU") {
     using namespace agentty::msg;
     install_stub_deps();
     g_settings = store::Settings{};
+    // Hermetic auth: don't depend on real on-disk Anthropic creds (absent on
+    // CI). A provider_keys entry makes provider_is_authed("anthropic") true.
+    g_settings.provider_keys["anthropic"] = "sk-test";
     provider::select(provider::parse_selection("anthropic"));
 
     Model m;
@@ -335,6 +338,7 @@ TEST_CASE("fused catalog loaded merges by provider id") {
     using namespace agentty::msg;
     install_stub_deps();
     g_settings = store::Settings{};
+    g_settings.provider_keys["anthropic"] = "sk-test";  // hermetic auth
     g_settings.provider_keys["openai"] = "sk-test";   // openai authed → catalog
     provider::select(provider::parse_selection("anthropic"));
 
