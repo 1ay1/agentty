@@ -129,7 +129,16 @@ int main() {
             std::expected<std::string, tools::ToolError>{"ok"},
             make_change("a.txt", before, after));
         m.ui.diff_review = pick::TwoAxis{pick::OpenAtCell{0, 0}};
-        auto s = detail::diff_review_update(std::move(m), RejectAllChanges{});
+        // Two-press guard (commit 7498bf3f): from the OPEN pane the first
+        // ^X arms (no write), the second executes. Palette-driven reject
+        // (pane closed) executes on the first press.
+        auto armed = detail::diff_review_update(std::move(m), RejectAllChanges{});
+        check(g_writes.count("a.txt") == 0,
+              "first reject-all press only arms, no write yet");
+        check(pick::opened(armed.first.ui.diff_review)
+                  && pick::opened(armed.first.ui.diff_review)->confirm_reject_all,
+              "first reject-all press arms the confirm flag");
+        auto s = detail::diff_review_update(std::move(armed.first), RejectAllChanges{});
         check(g_writes.count("a.txt") == 1, "reject-all wrote the file");
         check(g_writes["a.txt"] == before,
               "reject-all reverted the file to ORIGINAL contents");
