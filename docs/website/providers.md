@@ -71,18 +71,39 @@ agentty --provider groq -m llama-3.3-70b
 agentty --provider openai -k sk-… -m gpt-4o
 ```
 
-### Custom path prefix
+### Custom hosts
 
-Some gateways or self-hosted servers don't serve on the standard `/v1` path. Specify a full URL and agentty will use its path as a prefix, appending `/chat/completions` and `/models`:
+Point agentty at **any** server that speaks the OpenAI chat API — llama.cpp, vLLM, LM Studio, a gateway, or a remote box. Add one from the picker (`^P` → **Custom host…**) or with `--provider`:
 
 ```bash
+agentty --provider localhost:8080 -m my-model          # local, no key
 agentty --provider https://chat.example.org/api -k sk-… -m GLM-5.2
-# chats at  https://chat.example.org/api/chat/completions
-# models at https://chat.example.org/api/models
 ```
 
-A bare `host:port` (no `http://`/`https://`) keeps the default `/v1` prefix.
+**The `/v1` default.** The OpenAI dialect lives under `/v1` on every real server — `api.openai.com/v1`, llama.cpp, vLLM, LM Studio, Ollama's compat shim. A bare host or `host:port` (and a bare URL like `http://localhost:8080/`) therefore defaults to the `/v1` prefix, so agentty chats at `…/v1/chat/completions` and lists models at `…/v1/models`. This is the single most common local-server mistake: a spec without `/v1` used to 404 every request.
 
+**Explicit paths are honoured verbatim.** If your gateway serves on a different prefix, put it in the URL and agentty keeps it exactly:
+
+```bash
+agentty --provider https://chat.example.org/api -k sk-…    # → /api/chat/completions, /api/models
+```
+
+**Scheme / port heuristics.** `https://` (or a bare host on 443) uses TLS; `http://` or any non-443 port uses plain HTTP (the local-server convention). A TLS host prompts for an API key; a local host commits keyless.
+
+**Multiple accounts on the same endpoint.** Append `#name` to keep several logins to the *same* server distinct — each keeps its own API key, saved model, and picker row:
+
+```bash
+agentty --provider https://ollama.com/v1#work
+agentty --provider https://ollama.com/v1#personal
+```
+
+The `#name` is a local tag only — it never reaches the wire — but it shows on the picker row so you can tell the accounts apart. (Native-OAuth providers — Claude, ChatGPT, Copilot, Kimi — have their own in-app multi-account manager; `#name` is for API-key custom hosts.)
+
+Custom hosts you add are **saved** — they reappear in the `^P` picker every session (`Del` on a row removes one, two-press). A local host committed without a key is saved too, so you never re-type it.
+
+:::tip Debugging a custom host
+Set `AGENTTY_LOG=wire=trace` (or the full-fidelity `AGENTTY_DEBUG_API=1`) to see the exact request path, status, and response your server returned — see **[Logging & diagnostics](/docs/logging)**. The most common issues are a missing `/v1` (→ 404) and a model id that doesn't match what `/v1/models` reports.
+:::
 ## Sign in with GitHub Copilot
 
 If you have a GitHub Copilot subscription (Individual, Business, or Enterprise), you can use its models — GPT-4o, o-series, Claude, Gemini, and more — through your existing Copilot plan, **no API key required**.
@@ -139,3 +160,18 @@ agentty --provider ollama -m qwen2.5-coder
 :::note
 `--provider` and `-m` persist between sessions. Run `agentty --provider anthropic` to switch to Claude, or just press `^P` in-app.
 :::
+
+### Slow first token is normal
+
+A large local model (20-30B on consumer hardware) processes the prompt in **complete silence** before its first token — that can take minutes on a long prompt. agentty knows this: on a local provider the phase chip reads **“processing…”** (not “Streaming”) until the first byte arrives, and the idle/stall timeouts are stretched to 10 minutes for plaintext endpoints (vs 90 s for hosted APIs), so a slow model is never mistaken for a hang. `Esc` still cancels instantly.
+
+### When a local model won't respond
+
+If prompts fail immediately (rather than after a long think), agentty now tells you *why* instead of retrying forever:
+
+- **404 on every request** — the spec is missing its `/v1` prefix, or the model id isn't loaded. agentty's error names both, and a custom host added without `/v1` is probed against `/v1/models` automatically.
+- **Streamed errors** — llama.cpp reports failures as a mid-stream `event: error` under HTTP 200. agentty surfaces the server's actual message (a chat-template rejection, a bad alias) instead of silently looping.
+- **A retry ladder that can't make progress** — after 6 attempts with no model output, agentty stops with *“giving up after 6 failed attempts with no model output — check the server/model”* rather than hammering a broken endpoint.
+- **A stale saved model** — if the model id recalled for a local host isn't in its live `/v1/models` list, agentty refuses cleanly (*“model X isn't served by this host — pick one (^/)”*) instead of 400-ing every prompt.
+
+When in doubt, `AGENTTY_LOG=wire=trace agentty` (or `AGENTTY_DEBUG_API=1`) shows the exact request and response — see **[Logging & diagnostics](/docs/logging)**.

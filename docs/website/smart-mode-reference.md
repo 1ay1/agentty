@@ -73,6 +73,17 @@ The overlay controls *which* layers run. Four numeric **policy** knobs — for p
 | `AGENTTY_SMART_PRIOR_EVIDENCE` | how much evidence before the learned prior is trusted (learn-speed vs. stability) |
 | `AGENTTY_SMART_BIAS_CLAMP` | how far the session cascade can drift effort from baseline |
 
+### Force the master switch for one session
+
+`AGENTTY_SMART_MODE=1` (or its alias `AGENTTY_SMART_ENABLED=1`) forces Smart Mode **on** for that process; `=0` forces it **off**. `1`/`true`/`yes`/`on` count as on, `0`/`false`/`no`/`off` as off; unset means your saved setting governs, as before.
+
+```bash
+AGENTTY_SMART_MODE=1 agentty   # deterministic routing for a scripted run
+AGENTTY_SMART_MODE=0 agentty   # force it off without touching your config
+```
+
+The pin is **session-scoped and non-destructive**: agentty never persists it, so a benchmark, CI run, or bisect can't overwrite the preference you use interactively. While a pin is active the `^S` overlay's Enabled row shows `on (env pin)` / `off (env pin)`, and toggling it in-app is a hinted no-op (unset the variable to toggle again). Ideal for reproducible experiments.
+
 The signature hash space, storage compaction thresholds, and individual classifier weights are deliberately *not* exposed — changing them would invalidate stored learning or break invariants. The tier **threshold** is the right control surface, not fifteen fiddly weights.
 
 ## Constraints

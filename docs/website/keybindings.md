@@ -23,12 +23,25 @@ Everything you can do without leaving the home row.
 | [[Ctrl+T]] | Todo / plan view |
 | [[Ctrl+/]] | Model picker |
 | [[Ctrl+P]] | Provider picker (switch LLM backend live) |
+| [[Ctrl+S]] | Smart Mode overlay (routing + learning) |
 | [[Ctrl+G]] | Run a code block from the newest reply on your real terminal |
 | [[Ctrl+R]] | Review pending diffs |
 | [[Ctrl+O]] | Browse the full text of a frozen retrieved-context card |
 | [[Ctrl+U]] | Expand / collapse the newest retrieved-context card (empty composer) |
 | [[Ctrl+L]] | Redraw the screen |
 | [[Ctrl+C]] | Quit (the only quit key) |
+
+> **Every open key toggles.** Pressing a modal's own open key again while
+> it's up closes it — [[Ctrl+P]] shuts the provider picker, [[Ctrl+K]] the
+> command palette, [[Ctrl+S]] the Smart Mode overlay, and so on. The model
+> and provider pickers also **cross-hop**: [[Ctrl+P]] from the model picker
+> jumps to the provider picker, [[Ctrl+/]] does the reverse.
+
+> **Esc steps back one level.** In a multi-step flow — provider picker →
+> **Custom host…** → host input → API-key prompt — [[Esc]] pops one level
+> at a time (and restores what you typed) rather than collapsing the whole
+> stack. The footer shows `Esc back` when there's a parent, `Esc cancel`
+> when there isn't.
 
 ## Composer
 
@@ -108,6 +121,26 @@ There are two ways to work with the queue:
 
 The composer placeholder hints `press ↑ to edit queued — type to queue
 another…` when relevant.
+
+## Review pane ([[Ctrl+R]])
+
+When the agent has edited files, [[Ctrl+R]] opens the review pane. Edits are already on disk — the pane is a keep/undo gate.
+
+| Key | Action |
+|-----|--------|
+| [[j]] / [[k]] or [[↑]] / [[↓]] | Move between hunks |
+| [[h]] / [[l]] or [[Tab]] | Previous / next file |
+| [[y]] / [[Enter]] | Accept the current hunk (keep it) |
+| [[n]] | Reject the current hunk (revert it) |
+| [[Ctrl+D]] / [[Ctrl+U]] or [[PgDn]] / [[PgUp]] | Scroll inside a hunk taller than the viewport |
+| [[Ctrl+A]] | Accept all — keep every change |
+| [[Ctrl+X]] | Reject all — revert every file (two-press to confirm) |
+| [[Esc]] / [[q]] | Close — keeps accepted + undecided hunks, reverts rejected ones |
+
+> **[[Esc]] commits, it does not cancel.** Closing keeps every undecided
+> hunk (the edit is already live). The footer says `Esc keep all` /
+> `keep rest` / `apply` so the outcome is never a surprise. To throw away
+> *everything*, use [[Ctrl+X]] (Reject all).
 
 ## Palette-only actions
 
