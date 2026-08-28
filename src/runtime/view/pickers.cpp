@@ -674,7 +674,9 @@ Element smart_mode_overlay(const Model& m) {
     };
     std::vector<Row> rows = {
         {std::string{on ? "\xe2\x97\x8f Enabled" : "\xe2\x97\x8b Enabled"},
-         on ? "on" : "off"},
+         smart::tuning::enabled_override()
+             ? std::string{on ? "on (env pin)" : "off (env pin)"}
+             : std::string{on ? "on" : "off"}},
         tog(sm.route_internal,  "  Internal routing"),
         tog(sm.orchestrate,     "  Orchestration"),
         tog(sm.route_subagents, "  Subagent routing"),

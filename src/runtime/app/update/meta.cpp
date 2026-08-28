@@ -148,6 +148,14 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             };
             switch (o->index) {
                 case 0:
+                    // Session pin (AGENTTY_SMART_MODE/_ENABLED) owns the
+                    // master switch: a toggle would be silently overridden
+                    // at next launch and never persisted (see
+                    // persist_settings). Hinted no-op beats a lying toggle.
+                    if (smart::tuning::enabled_override())
+                        return {std::move(m), set_status_toast(m,
+                            "Smart Mode is pinned by AGENTTY_SMART_MODE — "
+                            "unset the env var to toggle")};
                     m.d.smart.enabled = !m.d.smart.enabled;
                     return toggled("Smart Mode", m.d.smart.enabled);
                 case 1:

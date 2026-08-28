@@ -698,7 +698,11 @@ void persist_settings(const Model& m) {
         s.provider_models[active_provider_id()] = m.d.model_id.value;
     s.effort = std::string{effort_wire(m.d.effort)};
     // Smart Mode: enabled flag + any pinned slots (empty model = auto).
-    s.smart_enabled          = m.d.smart.enabled;
+    // While the AGENTTY_SMART_MODE/_ENABLED session pin is active, the
+    // in-memory flag is the ENV's value, not the user's choice — keep the
+    // persisted preference untouched so the pin never leaks into config.
+    if (!smart::tuning::enabled_override())
+        s.smart_enabled      = m.d.smart.enabled;
     s.smart_route_internal   = m.d.smart.route_internal;
     s.smart_orchestrate      = m.d.smart.orchestrate;
     s.smart_route_subagents  = m.d.smart.route_subagents;

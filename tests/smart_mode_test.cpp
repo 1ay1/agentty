@@ -203,4 +203,32 @@ TEST_CASE("smart_mode") {
               "sessions must not discard the learned relax-effort signal");
         CHECK(sm::blend_bias(-1, -1) == -1, "blend: negative same-sign → no double-down");
     }
+
+    // ── AGENTTY_SMART_MODE / AGENTTY_SMART_ENABLED session pin ────────
+    {
+        auto reset = [] {
+            unsetenv("AGENTTY_SMART_MODE");
+            unsetenv("AGENTTY_SMART_ENABLED");
+        };
+        reset();
+        CHECK(!sm::tuning::enabled_override().has_value(),
+              "env pin: unset → no override (settings govern)");
+        setenv("AGENTTY_SMART_MODE", "1", 1);
+        CHECK(sm::tuning::enabled_override() == std::optional<bool>{true},
+              "env pin: AGENTTY_SMART_MODE=1 → forced on");
+        setenv("AGENTTY_SMART_MODE", "0", 1);
+        CHECK(sm::tuning::enabled_override() == std::optional<bool>{false},
+              "env pin: AGENTTY_SMART_MODE=0 → forced off");
+        setenv("AGENTTY_SMART_MODE", "false", 1);
+        CHECK(sm::tuning::enabled_override() == std::optional<bool>{false},
+              "env pin: 'false' → off");
+        reset();
+        setenv("AGENTTY_SMART_ENABLED", "1", 1);
+        CHECK(sm::tuning::enabled_override() == std::optional<bool>{true},
+              "env pin: AGENTTY_SMART_ENABLED alias works");
+        setenv("AGENTTY_SMART_MODE", "0", 1);
+        CHECK(sm::tuning::enabled_override() == std::optional<bool>{false},
+              "env pin: AGENTTY_SMART_MODE wins over the alias");
+        reset();
+    }
 }

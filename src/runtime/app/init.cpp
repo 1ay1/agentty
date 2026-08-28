@@ -129,6 +129,12 @@ std::pair<Model, maya::Cmd<Msg>> init() {
     // Smart Mode: rehydrate role config from settings. A slot counts as
     // "set" once the user pinned a model for it.
     m.d.smart.enabled = settings.smart_enabled;
+    // Session pin: AGENTTY_SMART_MODE / AGENTTY_SMART_ENABLED overrides the
+    // persisted master switch for THIS process (scripted runs, benchmarks,
+    // bisecting). persist_settings skips the field while pinned, so the
+    // user's saved preference survives the session untouched.
+    if (auto ov = smart::tuning::enabled_override())
+        m.d.smart.enabled = *ov;
     m.d.smart.route_internal  = settings.smart_route_internal;
     m.d.smart.orchestrate     = settings.smart_orchestrate;
     m.d.smart.route_subagents = settings.smart_route_subagents;
