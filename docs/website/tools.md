@@ -6,7 +6,7 @@ nav_order: 10
 slug: tools
 ---
 
-Each tool gets a purpose-built widget: diffs render as diffs, search results group by file with line numbers, bash shows exit codes, todos become checklists.
+Each tool gets a purpose-built widget: diffs render as diffs with a real line-number gutter, search results group by file into a line-numbered table, file reads keep their true line numbers, bash and long-running processes show exit codes, todos become checklists.
 
 | Tool | Effect class | Description |
 |---|---|---|
@@ -16,8 +16,8 @@ Each tool gets a purpose-built widget: diffs render as diffs, search results gro
 | `move` | Write | Move or rename a file/directory without a shell. |
 | `remove` | Write | Delete a file or directory (recursive requires an explicit flag). |
 | `bash` | Shell | Run a shell command inside the sandbox; shows exit code + output. |
-| `process_start` / `process_poll` / `process_stop` | Shell | Start, poll, and stop a long-running background process (dev servers, watchers) without blocking the turn. |
-| `grep` | Read | Regex search across files, grouped by file with line numbers. Prefers ripgrep when installed; both backends skip generated trees (`build*`, `_deps`, `node_modules`, `vendor`, `.git`, …) so build artifacts never pollute the hits. **`word=true`** matches whole identifiers only (no `foo` inside `foobar`); **`context:"block"`** returns each hit's whole enclosing function/block so you rarely need a follow-up `read`. |
+| `process_start` / `process_poll` / `process_stop` | Shell | Start, poll, and stop a long-running background process (dev servers, watchers) without blocking the turn. Rendered as terminal output — tail-anchored, exit codes and test/compiler summaries lifted out. |
+| `grep` | Read | Regex search across files, rendered as a per-file table with true line numbers. Prefers ripgrep when installed; both backends skip generated trees (`build*`, `_deps`, `node_modules`, `vendor`, `.git`, …) so build artifacts never pollute the hits. **`word=true`** matches whole identifiers only (no `foo` inside `foobar`); **`context:"block"`** returns each hit's whole enclosing function/block so you rarely need a follow-up `read`. |
 | `glob` | Read | Find files by glob pattern. |
 | `list_dir` | Read | List a directory with type, size, and name. |
 | `repo_map` | Read | Token-budgeted, PageRank-ranked skeleton of the codebase — top files with definition signatures, personalizable with `focus`. The walk stops at any nested repo/submodule boundary and never leaves the workspace, so sibling projects can't leak into the map. THE tool to call first in a large or unfamiliar repo. |

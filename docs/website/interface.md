@@ -40,10 +40,12 @@ A single row at the bottom edge shows the active profile, provider, and model, p
 
 Each tool gets a purpose-built widget — agentty doesn't just print raw JSON:
 
-- **Diffs render as diffs** — additions and deletions, color-coded.
-- **Search results group by file**, with line numbers.
-- **bash shows exit codes** and streamed output.
+- **Diffs render as diffs** — additions and deletions color-coded, with a **real line-number gutter** parsed from the diff's `@@` hunk headers. An `edit`'s rows carry the same source line numbers you'd see in the file, so you can cross-reference a change without opening it. The numbers are shown only where they're provably correct (they blank out across an elided gap and resume at the next hunk).
+- **Search results group by file**, each match on its own row with a right-aligned line number — a `grep` card reads as a table, not a wall of text. The line numbers are the file's true positions, derived from the match blocks.
+- **File reads keep true line numbers** — a `read` with an `offset`, a `start_line`, or a `symbol=` starts its gutter at the real line the slice begins on, not at 1, and the tool's own footer/header decorations are stripped from the numbered body. The card header names the symbol you read (`file.cpp · foo()`).
+- **Terminal output stays terminal-shaped** — `bash`, `test`, `diagnostics`, and the `process_start`/`poll`/`stop` trio share a tail-anchored view that surfaces the newest lines, shows **exit codes**, and lifts a one-line verdict out of test-runner summaries and compiler diagnostics when it can.
 - **todos become checklists** you can watch tick off.
+- **Head-heavy tools show their head** — `repo_map`, `outline`, `list_dir`, and the search tools front-load their answer, so their preview shows the top of the output instead of the pagination footer.
 
 ## Smooth streaming
 
