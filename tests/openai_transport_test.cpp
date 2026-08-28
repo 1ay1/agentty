@@ -1436,3 +1436,56 @@ TEST_CASE("test_wire_body_golden") {
         CHECK(got == kGolden);
 }
 
+TEST_CASE("test_sse_named_error_event_llamacpp") {
+    // llama.cpp streams failures as a NAMED SSE event under HTTP 200:
+    //   event: error
+    //   data: {"code":500,"message":"...","type":"server_error"}
+    // The old parser ignored event names entirely and only recognised the
+    // {"error":...} wrapper — the frame was silently dropped, the stream
+    // "closed clean", ensure_nonempty_turn fabricated "(empty response)",
+    // and the retry machinery looped: the reported custom-host dead loop.
+    std::string sse =
+        "event: error\n"
+        "data: {\"code\":500,\"message\":\"failed to apply chat template\","
+        "\"type\":\"server_error\"}\n\n";
+    auto msgs = oai::parse_sse_for_test(sse);
+
+    // Exactly one StreamError, carrying the message AND the numeric code as
+    // http_status so the reducer classifies via the typed path (500 →
+    // Transient with a real budget — not string-sniffed).
+    int errors = 0;
+    for (const auto& m : msgs)
+        if (const auto* e = get_leaf<StreamError>(m)) {
+            ++errors;
+            CHECK(e->message == "failed to apply chat template");
+            CHECK(e->http_status == 500);
+        }
+    CHECK(errors == 1);
+    // No fabricated "(empty response)" text and no StreamFinished — the
+    // error is the terminal event.
+    CHECK(joined_text(msgs).empty());
+    CHECK(count_leaf<StreamFinished>(msgs) == 0);
+}
+
+TEST_CASE("test_sse_bare_error_object_llamacpp") {
+    // Same failure, but as an UNNAMED data frame with the bare error shape
+    // ({"code":..,"message":..} — no {"error":...} wrapper). Some llama.cpp
+    // versions emit this; it must surface as StreamError too, not be
+    // mistaken for an empty delta.
+    std::string sse =
+        "data: {\"code\":400,\"message\":\"unknown model alias\","
+        "\"type\":\"invalid_request_error\"}\n\n"
+        "data: [DONE]\n\n";
+    auto msgs = oai::parse_sse_for_test(sse);
+
+    int errors = 0;
+    for (const auto& m : msgs)
+        if (const auto* e = get_leaf<StreamError>(m)) {
+            ++errors;
+            CHECK(e->message == "unknown model alias");
+            CHECK(e->http_status == 400);   // → typed Terminal, never retried
+        }
+    CHECK(errors == 1);
+    CHECK(joined_text(msgs).empty());
+}
+

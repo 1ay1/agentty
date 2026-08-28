@@ -796,8 +796,21 @@ commit_provider_switch(Model m, std::string_view spec,
     if (provider::active().kind != provider::Kind::ExternalAcp)
         m.ui.model_picker = ui::pick::OpenAt{0};
 
-    auto toast = set_status_toast(
-        m, "provider \xe2\x86\x92 " + std::string{label}, std::chrono::seconds{3});
+    // Name the DERIVED wire endpoint for OpenAI-dialect hosts so the /v1
+    // defaulting is visible, not magic — the custom-host dead-loop report
+    // came from users unable to see which path their spec actually dialed
+    // ("host:8080/" → 404 forever with no clue). Hosted presets keep the
+    // short label (their endpoint is not in question).
+    std::string toast_text = "provider \xe2\x86\x92 " + std::string{label};
+    {
+        const auto& sel = provider::active();
+        if (sel.kind == provider::Kind::OpenAI && !sel.openai_endpoint.use_tls)
+            toast_text += "  (" + sel.openai_endpoint.host + ":"
+                        + std::to_string(sel.openai_endpoint.port)
+                        + sel.openai_endpoint.path + ")";
+    }
+    auto toast = set_status_toast(m, std::move(toast_text),
+                                  std::chrono::seconds{4});
     return {std::move(m),
             Cmd<Msg>::batch(std::move(toast), cmd::fetch_models())};
 }
