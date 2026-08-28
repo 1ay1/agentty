@@ -15,6 +15,7 @@
 
 #include "agentty/runtime/app/cmd_factory.hpp"
 #include "agentty/runtime/app/deps.hpp"
+#include "agentty/provider/selection.hpp"   // provider::active (stall watchdog)
 #include "agentty/runtime/composer_attachment.hpp"
 #include "agentty/runtime/mem.hpp"
 #include "agentty/runtime/view/helpers.hpp"   // ui::profile_label
@@ -587,11 +588,24 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                 a->last_event_at += tick_gap;
             }
             constexpr auto kStallSecs = std::chrono::seconds(120);
+            // LOCAL providers process the prompt in silence — no SSE bytes,
+            // no keepalives — and a 20-30B model on consumer hardware can
+            // grind for minutes on a long prompt before its first token.
+            // 120 s would cut it mid-processing and the retry would start
+            // the same grind over (another face of the local dead loop).
+            // Match the transport's local idle allowance; Esc still cancels.
+            const bool local_provider = [&] {
+                const auto& sel = provider::active();
+                return sel.kind == provider::Kind::OpenAI
+                    && !sel.openai_endpoint.use_tls;
+            }();
+            const auto stall_after =
+                local_provider ? std::chrono::seconds(600) : kStallSecs;
             if (auto* a = active_ctx(m.s.phase);
                 a && m.s.is_streaming()
                 && std::holds_alternative<retry::Fresh>(a->retry)
                 && a->last_event_at.time_since_epoch().count() != 0
-                && now - a->last_event_at >= kStallSecs) {
+                && now - a->last_event_at >= stall_after) {
                 a->retry = retry::StallFired{};
                 if (a->cancel) a->cancel->cancel();
                 auto since = std::chrono::duration_cast<std::chrono::seconds>(
