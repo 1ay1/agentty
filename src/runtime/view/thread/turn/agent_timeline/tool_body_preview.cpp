@@ -204,6 +204,12 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
             return out;
         }
     }
+    if (n == "replace" || n == "rewrite_structural") {
+        if (detail::diff_preview_body(tc, out)) {
+            generic_lifecycle_body(tc, out);
+            return out;
+        }
+    }
     if (n == "glob" || n == "list_dir"
         || n == "web_search"
         || n == "git_status" || n == "git_log" || n == "git_commit") {

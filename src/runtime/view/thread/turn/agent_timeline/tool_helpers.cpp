@@ -409,6 +409,21 @@ static std::string tool_timeline_detail_base(const ToolUse& tc) {
         auto pat = safe("pattern");
         std::string detail = path_pp.empty() ? std::string{"\xe2\x80\xa6"} : path_pp;
         if (!pat.empty()) detail += "  \xc2\xb7  " + pat;
+        if (tc.is_done()) {
+            // Count the emitted content rows (each is `N\t…`); the collapsed
+            // gap markers `⋯ N lines ⋯` don't start with a digit, so they're
+            // naturally excluded.
+            const auto& out = tc.output();
+            int kept = 0;
+            bool at_line_start = true;
+            for (char c : out) {
+                if (at_line_start && c >= '0' && c <= '9') ++kept;
+                at_line_start = (c == '\n');
+            }
+            if (kept > 0)
+                detail += "  \xc2\xb7  " + std::to_string(kept)
+                        + (kept == 1 ? " line" : " lines");
+        }
         return detail;
     }
     if (n == "json_query") {

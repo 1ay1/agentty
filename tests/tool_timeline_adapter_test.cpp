@@ -213,6 +213,53 @@ TEST_CASE("tool timeline adapter") {
               "process_poll output renders as terminal output");
     }
 
+    // replace dry-run preview reshapes into a colored GitDiff card.
+    {
+        auto tc = make_tool("replace",
+            A::ToolUse::Done{{}, {},
+                "DRY RUN \xe2\x80\x94 would replace 1 occurrence of `foo` \xe2\x86\x92 `bar` "
+                "across 1 file.\n\n"
+                "src/a.cpp:12  (1 hit)\n"
+                "  - int foo = 1;\n"
+                "  + int bar = 1;\n\n"
+                "Re-run with apply:true to write these changes."},
+            {{"find", "foo"}, {"replacement", "bar"}});
+        const auto body = U::tool_body_preview_config(tc);
+        check(body.kind == Kind::GitDiff, "replace preview renders as a diff");
+        check(body.text.find("-int foo = 1;") != std::string::npos
+                  && body.text.find("+int bar = 1;") != std::string::npos,
+              "replace preview keeps the -/+ lines line-leading for GitDiff");
+        check(body.text.find("DRY RUN") == std::string::npos,
+              "replace summary line dropped from the diff body");
+    }
+    // rewrite_structural preview: per-line L<n>: anchors become @@ L<n> @@.
+    {
+        auto tc = make_tool("rewrite_structural",
+            A::ToolUse::Done{{}, {},
+                "DRY RUN \xe2\x80\x94 would rewrite 1 occurrence across 1 file.\n"
+                "src/b.cpp:\n"
+                "  L42: - assertEquals(a, b)\n"
+                "  L42: + assertEqual(b, a)\n"},
+            {{"pattern", "assertEquals($A, $B)"}});
+        const auto body = U::tool_body_preview_config(tc);
+        check(body.kind == Kind::GitDiff,
+              "rewrite_structural preview renders as a diff");
+        check(body.text.find("@@ L42 @@") != std::string::npos,
+              "rewrite_structural line number becomes a hunk anchor");
+        check(body.text.find("-assertEquals(a, b)") != std::string::npos
+                  && body.text.find("+assertEqual(b, a)") != std::string::npos,
+              "rewrite_structural -/+ lines are line-leading");
+    }
+    // A 'no matches' replace message has no -/+ preview → stays a code block.
+    {
+        auto tc = make_tool("replace",
+            A::ToolUse::Done{{}, {},
+                "no structural matches \xe2\x80\x94 nothing to rewrite."},
+            {{"find", "zzz"}, {"replacement", "q"}});
+        check(U::tool_body_preview_config(tc).kind == Kind::CodeBlock,
+              "replace with no preview falls back to code block");
+    }
+
     auto todo = make_tool("todo", A::ToolUse::Running{},
         {{"todos", {{{"content", "Audit cards"}, {"status", "in_progress"}}}}});
     check(U::tool_body_preview_config(todo).kind == Kind::TodoList,

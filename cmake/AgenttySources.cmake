@@ -168,6 +168,7 @@ set(AGENTTY_RUNTIME_NOMAIN_SOURCES
     src/runtime/view/thread/turn/agent_timeline/bash_body.cpp
     src/runtime/view/thread/turn/agent_timeline/write_body.cpp
     src/runtime/view/thread/turn/agent_timeline/git_diff_body.cpp
+    src/runtime/view/thread/turn/agent_timeline/diff_preview_body.cpp
     src/runtime/view/thread/turn/agent_timeline/read_body.cpp
     src/runtime/view/thread/turn/agent_timeline/web_fetch_body.cpp
     src/runtime/view/thread/turn/agent_timeline/list_body.cpp
