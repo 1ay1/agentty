@@ -724,7 +724,8 @@ void persist_settings(const Model& m) {
 
 std::pair<Model, maya::Cmd<Msg>>
 commit_provider_switch(Model m, std::string_view spec,
-                       auth::AuthHeader new_auth, std::string_view label) {
+                       auth::AuthHeader new_auth, std::string_view label,
+                       std::string_view desired_model) {
     using maya::Cmd;
     const std::string spec_s{spec};
 
@@ -751,9 +752,16 @@ commit_provider_switch(Model m, std::string_view spec,
         deps().save_settings(settings);
     }
 
-    // (3) Make a valid model active for the NEW backend: recall → built-in
+    // (3) Make a valid model active for the NEW backend. Priority:
+    //     an EXPLICIT desired_model (the fused cross-provider picker
+    //     pre-chose the exact target) → per-provider recall → built-in
     //     default → empty (ModelsLoaded auto-selects the first available).
-    if (auto next = model_for_provider(spec_s); !next.empty()) {
+    //     The explicit path is what makes a fused `Enter` an ATOMIC
+    //     provider+model switch instead of "switch provider, then land on
+    //     whatever the recall/default was."
+    std::string next{desired_model};
+    if (next.empty()) next = model_for_provider(spec_s);
+    if (!next.empty()) {
         m.d.model_id    = ModelId{next};
         m.s.context_max = ui::context_max_for_model(m.d.model_id.value);
         tools::subagent::set_model(m.d.model_id.value);

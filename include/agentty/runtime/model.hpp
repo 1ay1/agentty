@@ -167,6 +167,17 @@ struct Model {
         std::vector<ModelInfo> available_models;
         ModelId                model_id{std::string{"claude-opus-4-5"}};
 
+        // Fused cross-provider model picker (docs/design/unified-model-picker.md).
+        // `provider_catalogs` is the MERGED, multi-provider catalog view built
+        // lazily when the fused picker opens (one entry per authed provider);
+        // it sits BESIDE available_models (which stays the active provider's
+        // catalog the wire path + context math read). `recent_models` is the
+        // MRU (provider,model) the user toggles between, newest first, capped;
+        // it drives the RECENT section and ^Tab quick-swap and persists to
+        // Settings.recent_models.
+        std::vector<ProviderCatalog> provider_catalogs;
+        std::vector<ModelRef>        recent_models;
+
         // Reasoning effort tier, selected live in the model picker (←/→).
         // None = the default no-thinking wire; any other level makes the
         // Claude provider send adaptive thinking + output_config.effort.

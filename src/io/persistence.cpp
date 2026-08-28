@@ -1220,6 +1220,10 @@ store::Settings load_settings() {
             for (auto& [k, v] : j["provider_models"].items())
                 if (v.is_string()) s.provider_models[k] = v.get<std::string>();
         }
+        if (j.contains("recent_models") && j["recent_models"].is_array()) {
+            for (auto& v : j["recent_models"])
+                if (v.is_string()) s.recent_models.push_back(v.get<std::string>());
+        }
         s.effort = j.value("effort", "");
         if (j.contains("reasoning_effort_overrides")
             && j["reasoning_effort_overrides"].is_object()) {
@@ -1301,6 +1305,11 @@ void save_settings(const store::Settings& s) {
         json pm = json::object();
         for (const auto& [k, v] : s.provider_models) pm[k] = v;
         j["provider_models"] = std::move(pm);
+    }
+    if (!s.recent_models.empty()) {
+        json rm = json::array();
+        for (const auto& e : s.recent_models) rm.push_back(e);
+        j["recent_models"] = std::move(rm);
     }
     if (!s.effort.empty()) j["effort"] = s.effort;
     if (!s.reasoning_effort_overrides.empty()) {

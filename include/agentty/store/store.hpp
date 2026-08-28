@@ -113,6 +113,13 @@ struct Settings {
     // model id that doesn't exist on the new provider. The global `model_id`
     // above stays the active model; this map is just the per-provider recall.
     std::map<std::string, std::string> provider_models;
+    // MRU of recently-active (provider,model) pairs, MOST-RECENT-FIRST and
+    // bounded. Drives the fused model picker's RECENT section and the ^Tab
+    // quick-swap (jump to the previous provider+model). Each entry is
+    // "<provider_id>\t<model_id>" on disk. Distinct from provider_models
+    // (which is a per-provider recall MAP); this is an ordered cross-provider
+    // history the user actually toggles between.
+    std::vector<std::string> recent_models;
     // Reasoning effort tier (output_config.effort wire value, e.g. "high";
     // empty = off, the default). Reloaded into Model::effort at startup.
     std::string          effort;
