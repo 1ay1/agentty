@@ -238,8 +238,8 @@ void mark_tool_rejected(Model& m, const ToolCallId& id,
 // `m.ui.frozen` is an append-only vector of fully-built Element
 // snapshots; their `hash_id` is stamped at freeze time and never
 // recomputed, so any post-freeze mutation of the underlying ToolUse
-// is invisible until thread switch / rehydrate. The five mutation
-// sites that locate a tool by ToolCallId (ToggleToolExpanded,
+// is invisible until thread switch / rehydrate. The mutation
+// sites that locate a tool by ToolCallId (
 // ToolExecOutput / apply_tool_output, ToolExecProgress, ToolTimeoutCheck,
 // PermissionReject / mark_tool_rejected) must therefore refuse to touch
 // any tool whose enclosing message has index < frozen_through.
@@ -261,8 +261,7 @@ void mark_tool_rejected(Model& m, const ToolCallId& id,
 // wedge net failed it. So prefer the first NON-terminal match and only
 // fall back to a terminal one when no live call carries the id. Every
 // caller wants this: the four exec/permission sites bail on terminal
-// anyway, and ToggleToolExpanded flipping the running card is the
-// better guess of the two.
+// anyway, so the first NON-terminal match is always the better guess.
 // The callback is invoked as `f(ToolUse&)`. `ToolMutator` pins that shape so a
 // wrong-signature lambda is a clean concept error at the call site, not a
 // template-depth error inside the loop.

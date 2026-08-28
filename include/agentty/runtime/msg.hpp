@@ -757,7 +757,7 @@ struct RejectAllChanges {};
 
 // ── Meta / session-level ─────────────────────────────────────────────────
 // CompactContext, Tick, Quit, NoOp, ClearStatus, CycleProfile,
-// RestoreCheckpoint, ScrollThread, ToggleToolExpanded — all events that
+// RestoreCheckpoint, ScrollThread — all events that
 // are conceptually "above" any single domain (the session itself, the
 // tick clock, profile mode, etc.).
 
@@ -804,11 +804,10 @@ struct CheckpointDiffLoaded {
     int  deletions      = 0;
 };
 struct ScrollThread { int delta; };
-struct ToggleToolExpanded { ToolCallId id; };
 // Ctrl+U on the transcript — flip the newest retrieved-context card between
 // its compact one-line-per-source form and a full-passage-text expansion.
 // Carries the target message id so the reducer mutates exactly that card
-// (mirrors ToggleToolExpanded's id-addressed mutation + render-key bump).
+// (id-addressed mutation + render-key bump).
 struct ToggleRetrievedExpanded { MessageId id; };
 // Ctrl+T on the transcript — fold/unfold the newest assistant turn's reasoning
 // ("Thinking") block. Carries the target message id so the reducer flips
@@ -956,7 +955,7 @@ using DiffReviewMsg = std::variant<
 
 using MetaMsg = std::variant<
     CompactContext, CycleProfile, RestoreCheckpoint, CheckpointRestored,
-    ScrollThread, ToggleToolExpanded, ToggleRetrievedExpanded,
+    ScrollThread, ToggleRetrievedExpanded,
     OpenSmartMode, CloseSmartMode, SmartModeMove, SmartModeSelect,
     SmartModeClearSlot,
     Tick, Quit, NoOp, ClearStatus, RedrawScreen,
