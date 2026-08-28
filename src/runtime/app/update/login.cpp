@@ -592,18 +592,11 @@ Step login_cursor_right(Model m) {
 
 Step login_submit(Model m) {
     if (auto* ch = std::get_if<login::CustomHostInput>(&m.ui.login)) {
-        std::string spec = std::move(ch->host_input);
-        while (!spec.empty() && (spec.back() == '\r' || spec.back() == '\n'
-                               || spec.back() == ' ' || spec.back() == '\t'))
-            spec.pop_back();
-        // Normalise: strip trailing '/'. "http://host:8080/" and
-        // "http://host:8080" parse to the SAME endpoint (from_spec clears a
-        // bare "/"), but as SETTINGS KEYS they'd be different provider rows
-        // with separate saved models — the split-recall confusion from the
-        // custom-host report. One canonical spelling per endpoint.
-        while (spec.size() > 1 && spec.back() == '/'
-               && spec[spec.size() - 2] != '/')   // keep "http://" intact
-            spec.pop_back();
+        // Canonicalise (trim + strip trailing '/') via the ONE shared helper
+        // — the same normalisation the CLI --provider path applies, so the
+        // two entry points can never mint different settings keys for the
+        // same endpoint (the root cause behind the custom-host PR series).
+        std::string spec = provider::canonical_spec(ch->host_input);
         if (spec.empty()) {
             m.ui.login = login::Failed{"no host entered"};
             return done(std::move(m));
