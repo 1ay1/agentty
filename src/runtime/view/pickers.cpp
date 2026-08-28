@@ -26,8 +26,11 @@
 #include "agentty/provider/copilot/copilot_oauth.hpp"
 #include "agentty/provider/kimi/kimi_oauth.hpp"
 #include "agentty/runtime/provider_rows.hpp"
-#include "agentty/provider/registry.hpp"
+#include "agentty/runtime/fused_models.hpp"
+#include "agentty/provider/auth_state.hpp"
+#include "agentty/provider/selection.hpp"
 #include "agentty/runtime/app/deps.hpp"   // deps().auth for the live auth badge
+#include "agentty/runtime/app/update/internal.hpp"  // app::detail::fused_rows_for_model
 #include "agentty/auth/auth.hpp"          // auth::is_empty
 #include "agentty/workspace/files.hpp"
 #include "agentty/workspace/symbols.hpp"
@@ -383,6 +386,97 @@ Element model_picker(const Model& m) {
         {"Esc", "close", 4},
     }));
 
+    return Picker{std::move(cfg)}.build();
+}
+
+// ── Fused cross-provider model picker ────────────────────────────────────
+// One list over EVERY authed provider (docs/design/unified-model-picker.md).
+// Rows are `provider · model` with a context-window trailing cell; sections
+// (recent / all providers / sign in) render as is_header dividers. Selecting
+// switches provider+model atomically; a dim "sign in to X" row routes to login.
+Element fused_picker(const Model& m) {
+    auto* picker = pick::opened(m.ui.fused_picker);
+    if (!picker) return text("");
+
+    const auto rows = app::detail::fused_rows_for_model(m);
+
+    Picker::Config cfg;
+    cfg.title    = " Models \xc2\xb7 all providers ";
+    cfg.accent   = accent;
+
+    cfg.header.push_back(h(text("\xf0\x9f\x94\x8d ", fg_of(muted)),
+        text(picker->query.empty() ? std::string{"type to filter across providers"}
+                                   : picker->query,
+             picker->query.empty() ? fg_italic(muted) : fg_of(fg))));
+
+    if (rows.empty()) {
+        Picker::Config::Row nr;
+        nr.leading = "  no models match";
+        nr.leading_style = fg_italic(muted);
+        cfg.rows.push_back(std::move(nr));
+        cfg.selected = 0;
+        return Picker{std::move(cfg)}.build();
+    }
+
+    enum class Section { Recent, All, Signin };
+    auto section_of = [](const FusedRow& r) {
+        if (r.recent) return Section::Recent;
+        if (r.is_signin_offer()) return Section::Signin;
+        return Section::All;
+    };
+    std::optional<Section> cur;
+    int visual_selected = 0;
+    for (int i = 0; i < static_cast<int>(rows.size()); ++i) {
+        const auto& r = rows[static_cast<std::size_t>(i)];
+        const Section sec = section_of(r);
+        if (!cur || *cur != sec) {
+            cur = sec;
+            Picker::Config::Row hdr;
+            hdr.is_header = true;
+            hdr.leading = sec == Section::Recent ? "recent"
+                        : sec == Section::Signin ? "sign in"
+                                                 : "all providers";
+            cfg.rows.push_back(std::move(hdr));
+        }
+        if (i == picker->index)
+            visual_selected = static_cast<int>(cfg.rows.size());
+
+        Picker::Config::Row row;
+        const bool active = r.active;
+        if (r.is_signin_offer()) {
+            row.leading        = "+ Sign in to " + r.label;
+            row.leading_style  = fg_dim(muted);
+            row.trailing       = "not authed";
+            row.trailing_style = fg_italic(muted);
+            cfg.rows.push_back(std::move(row));
+            continue;
+        }
+        row.badge         = r.label;
+        row.badge_style   = fg_dim(active ? accent : muted);
+        row.leading       = (active ? std::string{"\xe2\x97\x8f "}   // ●
+                                    : std::string{"  "})
+                          + (r.model.display_name.empty()
+                                 ? r.model.id.value : r.model.display_name);
+        row.leading_style = active ? fg_bold(fg) : fg_of(fg);
+        std::string trailing;
+        if (r.model.favorite) trailing = "\xe2\x98\x85  ";              // ★
+        if (r.model.context_window > 0)
+            trailing += std::to_string(r.model.context_window / 1000) + "k";
+        row.trailing       = std::move(trailing);
+        row.trailing_style = fg_dim(muted);
+        cfg.rows.push_back(std::move(row));
+    }
+    cfg.selected = visual_selected;
+
+    cfg.footer.push_back(key_hints({
+        {"\xe2\x86\x91\xe2\x86\x93", "move", 5},
+        {"type", "filter", 2},
+        {"Enter", "switch", 5},
+        {"^F", "favorite", 1},
+        {"^P", "providers", 3},
+        {"^Tab", "prev", 2},
+        {"Esc", "close", 4},
+    }));
     return Picker{std::move(cfg)}.build();
 }
 

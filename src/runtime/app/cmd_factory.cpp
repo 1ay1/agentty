@@ -1774,6 +1774,26 @@ Cmd<Msg> fetch_models() {
     });
 }
 
+Cmd<Msg> fetch_models_for(std::string spec) {
+    // Fetch ANY provider's catalog WITHOUT switching to it — the fused
+    // cross-provider picker fans one of these out per authed provider on
+    // open. Builds a Selection from `spec` (not active()), so the router
+    // returns that backend's list; dispatches FusedCatalogLoaded, which the
+    // reducer merges into Model::d.provider_catalogs (guarded by provider_id
+    // against a provider signed out mid-fetch). list_models_for falls back to
+    // the bundled seed on empty auth / unreachable host, so this is fast and
+    // non-empty for hosted providers even before a live fetch succeeds.
+    return Cmd<Msg>::task([spec = std::move(spec)](std::function<void(Msg)> dispatch) {
+        try {
+            auto sel = provider::parse_selection(spec);
+            auto models = provider::list_models_for(sel, auth_snapshot());
+            dispatch(FusedCatalogLoaded{spec, std::move(models), true});
+        } catch (...) {
+            dispatch(FusedCatalogLoaded{spec, std::vector<ModelInfo>{}, false});
+        }
+    });
+}
+
 Cmd<Msg> open_browser_async(std::string url) {
     // task_isolated rather than task: posix_spawn / ShellExecute can
     // wedge on a hung WindowServer or a bizarre default-opener.

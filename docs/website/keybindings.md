@@ -21,8 +21,9 @@ Everything you can do without leaving the home row.
 | [[Alt+←/→]] | Quick-cycle to the adjacent thread (← newer, → older) |
 | [[Ctrl+←/→]] | Quick-cycle threads (empty composer, idle session) |
 | [[Ctrl+T]] | Todo / plan view |
-| [[Ctrl+/]] | Model picker |
-| [[Ctrl+P]] | Provider picker (switch LLM backend live) |
+| [[Ctrl+/]] | Model picker — **one list across every provider you're signed into** (fuzzy-search, `Enter` switches provider+model atomically) |
+| [[Ctrl+Tab]] | Quick-swap to the previous model you used (jumps across providers) |
+| [[Ctrl+P]] | Provider picker (manage/switch LLM backends, hosts, accounts) |
 | [[Ctrl+S]] | Smart Mode overlay (routing + learning) |
 | [[Ctrl+G]] | Run a code block from the newest reply on your real terminal |
 | [[Ctrl+R]] | Review pending diffs |
@@ -36,6 +37,15 @@ Everything you can do without leaving the home row.
 > command palette, [[Ctrl+S]] the Smart Mode overlay, and so on. The model
 > and provider pickers also **cross-hop**: [[Ctrl+P]] from the model picker
 > jumps to the provider picker, [[Ctrl+/]] does the reverse.
+
+> **The model picker spans every provider.** [[Ctrl+/]] opens one fuzzy list
+> of every model on every backend you're signed into — type `son` for every
+> Sonnet, `gpt` for every GPT — and [[Enter]] switches provider **and** model
+> in a single step. A **recent** section (the models you toggle between) sits
+> up top, and providers you're *not* signed into appear as dim **sign in to …**
+> rows that drop straight into login. [[Ctrl+Tab]] jumps to your previous
+> model without opening anything. Use [[Ctrl+P]] when you want to *manage*
+> backends (add a custom host, switch accounts) rather than pick a model.
 
 > **Esc steps back one level.** In a multi-step flow — provider picker →
 > **Custom host…** → host input → API-key prompt — [[Esc]] pops one level

@@ -123,6 +123,10 @@ Step login_back(Model m) {
             case Back::AccountList:
                 m.ui.login = login::Closed{};
                 return agentty::app::update(std::move(m), Msg{OpenAccounts{}});
+            case Back::FusedPicker:
+                m.ui.login = login::Closed{};
+                return agentty::app::update(std::move(m),
+                                            Msg{OpenFusedPicker{}});
             case Back::CustomHost: {
                 // Restore the typed spec so backing out of the key prompt
                 // doesn't discard the host the user just entered.

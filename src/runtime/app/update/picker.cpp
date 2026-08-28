@@ -23,10 +23,12 @@
 #include "agentty/provider/copilot/copilot_oauth.hpp"
 #include "agentty/provider/kimi/kimi_oauth.hpp"
 #include "agentty/provider/registry.hpp"
+#include "agentty/provider/auth_state.hpp"
 #include "agentty/provider/acp_agents.hpp"
 #include "agentty/provider/selection.hpp"
 #include "agentty/auth/auth.hpp"
 #include "agentty/runtime/login.hpp"
+#include "agentty/runtime/fused_models.hpp"
 #include "agentty/runtime/mem.hpp"
 #include "agentty/runtime/picker.hpp"
 #include "agentty/runtime/provider_rows.hpp"
@@ -854,6 +856,324 @@ Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
             // auth swap + refetch can never drift between call sites.
             return commit_provider_switch(std::move(m), spec, std::move(new_auth),
                                           std::string{preset.label});
+        },
+    }, pm);
+}
+
+// ── Fused cross-provider model picker ────────────────────────────────────
+namespace {
+
+constexpr int kRecentCap = 6;
+
+// Record (provider,model) at the FRONT of the MRU, deduped, capped. Persists
+// to Settings.recent_models so RECENT + ^Tab survive restart. Mirrors into
+// m.d.recent_models for the live picker build.
+void record_recent(Model& m, const std::string& provider_id,
+                   const std::string& model_id) {
+    if (provider_id.empty() || model_id.empty()) return;
+    ModelRef ref{provider_id, model_id};
+    auto& mru = m.d.recent_models;
+    std::erase(mru, ref);
+    mru.insert(mru.begin(), ref);
+    if (static_cast<int>(mru.size()) > kRecentCap) mru.resize(kRecentCap);
+
+    auto s = deps().load_settings();
+    s.recent_models.clear();
+    for (const auto& r : mru)
+        s.recent_models.push_back(r.provider_id + "\t" + r.model_id);
+    deps().save_settings(s);
+}
+
+// Hydrate m.d.recent_models from Settings ("<provider>\t<model>" per entry).
+void hydrate_recents(Model& m) {
+    if (!m.d.recent_models.empty()) return;
+    auto s = deps().load_settings();
+    for (const auto& e : s.recent_models) {
+        auto tab = e.find('\t');
+        if (tab == std::string::npos) continue;
+        m.d.recent_models.push_back(
+            ModelRef{e.substr(0, tab), e.substr(tab + 1)});
+    }
+}
+
+// Build the fused inputs from the current Model: authed providers become
+// catalogs, un-authed registry providers become sign-in offers. The active
+// provider's live catalog (available_models) seeds its entry so the picker is
+// never empty on open.
+ui::FusedInputs fused_inputs(const Model& m,
+                             std::vector<ProviderCatalog>& catalogs_out,
+                             std::vector<ui::SigninOffer>& offers_out) {
+    const auto settings = deps().load_settings();
+    const std::string active_pid = active_provider_id();
+
+    // Start from whatever catalogs we've already merged this session.
+    catalogs_out = m.d.provider_catalogs;
+    auto find_cat = [&](std::string_view id) -> ProviderCatalog* {
+        for (auto& c : catalogs_out) if (c.provider_id == id) return &c;
+        return nullptr;
+    };
+
+    for (const auto& p : provider::providers()) {
+        const std::string id{p.id};
+        if (provider::provider_is_authed(p, settings)) {
+            ProviderCatalog* c = find_cat(id);
+            if (!c) {
+                catalogs_out.push_back(ProviderCatalog{
+                    id, std::string{p.label},
+                    ProviderCatalog::State::Idle, {}, {}});
+                c = &catalogs_out.back();
+            }
+            // Seed the ACTIVE provider from the live list immediately.
+            if (id == active_pid && c->models.empty()
+                && !m.d.available_models.empty()) {
+                c->models = m.d.available_models;
+                c->state  = ProviderCatalog::State::Ready;
+            }
+        } else {
+            offers_out.push_back(ui::SigninOffer{id, std::string{p.label}});
+        }
+    }
+
+    ui::FusedInputs in;
+    in.catalogs   = &catalogs_out;
+    in.offers     = &offers_out;
+    in.recents    = &m.d.recent_models;
+    in.active     = ModelRef{active_pid, m.d.model_id.value};
+    in.recent_cap = kRecentCap;
+    return in;
+}
+
+} // namespace
+
+// Shared builder used by BOTH this reducer and the fused_picker view, so the
+// row list they act on can never disagree (SSOT). Declared in internal.hpp.
+std::vector<FusedRow> fused_rows_for_model(const Model& m) {
+    std::vector<ProviderCatalog> cats;
+    std::vector<ui::SigninOffer>  offers;
+    auto in = fused_inputs(m, cats, offers);
+    if (auto* c = pick::opened(m.ui.fused_picker)) in.query = c->query;
+    return ui::build_fused_rows(in);
+}
+
+namespace {
+
+// Resolve the AuthHeader for switching to `spec` (an ALREADY-AUTHED provider,
+// since the fused picker only surfaces authed rows). Delegates to the same
+// resolver the provider picker uses: Anthropic OAuth/key from disk, hosted
+// key from env or saved provider_keys; oauth-native providers ignore it.
+auth::AuthHeader resolve_switch_auth(const std::string& spec) {
+    auth::AuthHeader anthropic_creds = deps().auth;
+    if (auto saved = auth::load_credentials())
+        anthropic_creds = auth::make_auth_header(*saved);
+    std::string saved_key;
+    {
+        auto s = deps().load_settings();
+        if (auto it = s.provider_keys.find(spec); it != s.provider_keys.end())
+            saved_key = it->second;
+    }
+    return provider::resolve_auth_for(spec, anthropic_creds,
+                                      /*cli_key=*/{}, saved_key);
+}
+
+// THE atomic switch: make (provider, model) active.
+//   • same provider  → change the model in place (effort re-clamp, persist,
+//     refetch), no provider hop.
+//   • cross provider  → commit_provider_switch with the model PRE-STASHED so
+//     the funnel installs exactly it (atomic provider+model+auth).
+// Records the target in the MRU either way, and fires the switch toast.
+Step switch_to_model_ref(Model m, const ModelRef& ref) {
+    const std::string cur_pid = active_provider_id();
+
+    if (ref.provider_id == cur_pid) {
+        // Same provider — pure model change.
+        m.d.model_id    = ModelId{ref.model_id};
+        m.s.context_max = ui::context_max_for_model(m.d.model_id.value);
+        for (const auto& mi : m.d.available_models)
+            if (mi.id == m.d.model_id && mi.context_window > 0) {
+                m.s.context_max = mi.context_window; break;
+            }
+        if (!is_chatgpt_active())
+            m.d.effort = clamp_effort(m.d.effort,
+                                      resolved_caps(m.d.model_id.value));
+        tools::subagent::set_model(m.d.model_id.value);
+        persist_settings(m);
+        record_recent(m, ref.provider_id, ref.model_id);
+        auto toast = set_status_toast(m,
+            ui::pretty_model_label(m.d.model_id.value) + " \xc2\xb7 "
+                + provider::provider_display_name(provider::active()),
+            std::chrono::seconds{3});
+        return {std::move(m), std::move(toast)};
+    }
+
+    // Cross-provider — atomic switch through the ONE funnel, model pre-stashed.
+    const provider::ProviderPreset* p = provider::preset_for(ref.provider_id);
+    const std::string label = p ? std::string{p->label} : ref.provider_id;
+    auth::AuthHeader auth = resolve_switch_auth(ref.provider_id);
+    record_recent(m, ref.provider_id, ref.model_id);
+    return commit_provider_switch(std::move(m), ref.provider_id,
+                                  std::move(auth), label, ref.model_id);
+}
+
+// Route to the login flow for `provider_id`, returning to `back` after auth.
+// Used by a fused sign-in offer (un-authed provider row). Mirrors the entry
+// points ProviderPickerSelect uses for each auth style.
+Step open_login_for(Model m, const std::string& provider_id,
+                    const std::string& label, ui::login::Back back) {
+    const provider::ProviderPreset* p = provider::preset_for(provider_id);
+    if (p && p->oauth_native) {
+        // ChatGPT/Copilot/Kimi: OAuth device/browser flow via the method menu
+        // scoped to this provider.
+        ui::login::Picking pk;
+        pk.provider = provider_id;
+        pk.back = back;
+        m.ui.login = std::move(pk);
+        return {std::move(m), maya::Cmd<Msg>::none()};
+    }
+    // Hosted API-key (or Anthropic key): the API-key input, returning to the
+    // fused picker on success.
+    m.ui.login = ui::login::ApiKeyInput{
+        .provider       = provider_id,
+        .provider_label = label,
+        .back           = back,
+    };
+    return {std::move(m), maya::Cmd<Msg>::none()};
+}
+
+} // namespace
+
+Step fused_picker_update(Model m, msg::FusedPickerMsg pm) {
+    using namespace agentty::msg;
+    auto done = [](Model mm) -> Step { return {std::move(mm), maya::Cmd<Msg>::none()}; };
+
+    // Clamp the cursor to the current row count after any list change.
+    auto clamp_cursor = [](Model& mm) {
+        if (auto* c = pick::opened(mm.ui.fused_picker)) {
+            const int n = static_cast<int>(fused_rows_for_model(mm).size());
+            if (n == 0) { c->index = 0; return; }
+            if (c->index < 0)  c->index = 0;
+            if (c->index >= n) c->index = n - 1;
+        }
+    };
+
+    return std::visit(overload{
+        [&](OpenFusedPicker) -> Step {
+            hydrate_recents(m);
+            m.ui.fused_picker = pick::OpenAt{0, ""};
+            // Fan out a catalog fetch for every authed provider whose catalog
+            // isn't Ready yet — lazy, concurrent, non-blocking. The active
+            // provider is already seeded from available_models.
+            std::vector<ProviderCatalog> cats;
+            std::vector<ui::SigninOffer>  offers;
+            fused_inputs(m, cats, offers);
+            m.d.provider_catalogs = cats;   // persist the seeded/idle set
+            std::vector<maya::Cmd<Msg>> fetches;
+            for (auto& c : m.d.provider_catalogs) {
+                if (c.state == ProviderCatalog::State::Ready) continue;
+                c.state = ProviderCatalog::State::Loading;
+                fetches.push_back(cmd::fetch_models_for(c.provider_id));
+            }
+            return {std::move(m), maya::Cmd<Msg>::batch(std::move(fetches))};
+        },
+        [&](CloseFusedPicker) -> Step {
+            m.ui.fused_picker = pick::Closed{};
+            return done(std::move(m));
+        },
+        [&](FusedPickerMove e) -> Step {
+            if (auto* c = pick::opened(m.ui.fused_picker)) {
+                c->index += e.delta;
+                clamp_cursor(m);
+            }
+            return done(std::move(m));
+        },
+        [&](FusedPickerJump e) -> Step {
+            if (auto* c = pick::opened(m.ui.fused_picker)) {
+                const int n = static_cast<int>(fused_rows_for_model(m).size());
+                using W = FusedPickerJump::Where;
+                switch (e.where) {
+                    case W::Home:     c->index = 0; break;
+                    case W::End:      c->index = n - 1; break;
+                    case W::PageUp:   c->index -= 10; break;
+                    case W::PageDown: c->index += 10; break;
+                }
+                clamp_cursor(m);
+            }
+            return done(std::move(m));
+        },
+        [&](FusedPickerFilterInput e) -> Step {
+            if (auto* c = pick::opened(m.ui.fused_picker)) {
+                // ASCII only — model/provider ids are ASCII in practice.
+                if (e.ch >= 0x20 && e.ch < 0x7f) {
+                    c->query.push_back(static_cast<char>(e.ch));
+                    c->index = 0;
+                }
+            }
+            return done(std::move(m));
+        },
+        [&](FusedPickerFilterBackspace) -> Step {
+            if (auto* c = pick::opened(m.ui.fused_picker); c && !c->query.empty()) {
+                c->query.pop_back();
+                c->index = 0;
+            }
+            return done(std::move(m));
+        },
+        [&](FusedCatalogLoaded e) -> Step {
+            // Merge in place, guarded by provider_id (a provider signed out
+            // mid-fetch is simply not in the list anymore).
+            for (auto& c : m.d.provider_catalogs) {
+                if (c.provider_id != e.provider_id) continue;
+                if (e.ok && !e.models.empty()) {
+                    c.models = std::move(e.models);
+                    c.state  = ProviderCatalog::State::Ready;
+                } else {
+                    c.state  = e.ok ? ProviderCatalog::State::Ready
+                                    : ProviderCatalog::State::Failed;
+                }
+                break;
+            }
+            clamp_cursor(m);   // selection is index-based; keep it in range
+            return done(std::move(m));
+        },
+        [&](FusedPickerToggleFavorite) -> Step {
+            auto rows = fused_rows_for_model(m);
+            auto* c = pick::opened(m.ui.fused_picker);
+            if (!c || c->index < 0 || c->index >= static_cast<int>(rows.size()))
+                return done(std::move(m));
+            const auto& row = rows[static_cast<std::size_t>(c->index)];
+            if (row.is_signin_offer()) return done(std::move(m));
+            auto s = deps().load_settings();
+            ModelId mid = row.model.id;
+            auto it = std::find(s.favorite_models.begin(),
+                                s.favorite_models.end(), mid);
+            if (it != s.favorite_models.end()) s.favorite_models.erase(it);
+            else                               s.favorite_models.push_back(mid);
+            deps().save_settings(s);
+            return done(std::move(m));
+        },
+        [&](SwitchToPreviousModel) -> Step {
+            // ^Tab quick-swap: jump to the previous distinct (provider,model).
+            hydrate_recents(m);
+            const std::string cur_pid = active_provider_id();
+            const ModelRef active{cur_pid, m.d.model_id.value};
+            ModelRef target;
+            for (const auto& r : m.d.recent_models)
+                if (!(r == active)) { target = r; break; }
+            if (target.empty()) return done(std::move(m));
+            return switch_to_model_ref(std::move(m), target);
+        },
+        [&](FusedPickerSelect) -> Step {
+            auto rows = fused_rows_for_model(m);
+            auto* c = pick::opened(m.ui.fused_picker);
+            if (!c || c->index < 0 || c->index >= static_cast<int>(rows.size()))
+                return done(std::move(m));
+            const FusedRow row = rows[static_cast<std::size_t>(c->index)];
+            m.ui.fused_picker = pick::Closed{};
+
+            if (row.is_signin_offer()) {
+                // Route to login for that provider, returning here after.
+                return open_login_for(std::move(m), row.provider_id,
+                                      row.label, ui::login::Back::FusedPicker);
+            }
+            return switch_to_model_ref(std::move(m), row.ref());
         },
     }, pm);
 }

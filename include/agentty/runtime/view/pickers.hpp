@@ -5,6 +5,7 @@
 namespace agentty::ui {
 
 [[nodiscard]] maya::Element model_picker(const Model& m);
+[[nodiscard]] maya::Element fused_picker(const Model& m);
 [[nodiscard]] maya::Element provider_picker(const Model& m);
 [[nodiscard]] maya::Element thread_list(const Model& m);
 [[nodiscard]] maya::Element smart_mode_overlay(const Model& m);

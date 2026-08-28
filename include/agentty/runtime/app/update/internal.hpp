@@ -305,6 +305,12 @@ Step stream_update        (Model m, msg::StreamMsg         sm);
 Step tool_update          (Model m, msg::ToolMsg           tm);
 Step model_picker_update  (Model m, msg::ModelPickerMsg    pm);
 Step provider_picker_update(Model m, msg::ProviderPickerMsg pm);
+Step fused_picker_update  (Model m, msg::FusedPickerMsg     pm);
+// Shared fused-row builder (SSOT for reducer + view): enumerates authed
+// providers into catalogs (+ un-authed sign-in offers), applies the current
+// fused_picker query, and returns the ordered/sectioned FusedRow list. The
+// view renders it and derives the visual cursor; the reducer selects from it.
+[[nodiscard]] std::vector<FusedRow> fused_rows_for_model(const Model& m);
 Step thread_list_update   (Model m, msg::ThreadListMsg     tm);
 Step palette_update       (Model m, msg::CommandPaletteMsg pm);
 Step mention_update       (Model m, msg::MentionPaletteMsg mm);
