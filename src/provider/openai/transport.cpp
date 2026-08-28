@@ -881,7 +881,10 @@ void dispatch_data(StreamCtx& ctx, std::string_view data) {
         && j["message"].is_string() && j.contains("code")
         && j["code"].is_number_integer()
         && j["code"].get<int>() >= 400) {
-        ctx.sink(StreamError{j["message"].get<std::string>(), std::nullopt});
+        StreamError err{j["message"].get<std::string>(), std::nullopt};
+        const int code = j["code"].get<int>();
+        if (code <= 599) err.http_status = code;   // typed classification
+        ctx.sink(std::move(err));
         ctx.terminated = true;
         return;
     }
@@ -939,6 +942,7 @@ void feed_sse(StreamCtx& ctx, const char* data, size_t len) {
         if (event == "error" && !ctx.terminated) {
             std::string msg{payload.empty() ? std::string_view{"stream error"}
                                             : payload};
+            int code = 0;   // numeric error code → typed classification
             try {
                 auto j = json::parse(payload);
                 if (j.is_object()) {
@@ -946,9 +950,24 @@ void feed_sse(StreamCtx& ctx, const char* data, size_t len) {
                         msg = j["message"].get<std::string>();
                     else if (j.contains("error") && j["error"].is_object())
                         msg = j["error"].value("message", msg);
+                    // llama.cpp stamps the would-be HTTP status in `code`
+                    // (500 template failure, 400 bad request, 503 busy).
+                    // Carrying it into StreamError.http_status routes the
+                    // reducer through the TYPED classifier — without it the
+                    // string sniff can misfile a deterministic per-request
+                    // failure ("failed to read connection") as Transient
+                    // and re-loop.
+                    if (j.contains("code") && j["code"].is_number_integer())
+                        code = j["code"].get<int>();
+                    else if (j.contains("error") && j["error"].is_object()
+                             && j["error"].contains("code")
+                             && j["error"]["code"].is_number_integer())
+                        code = j["error"]["code"].get<int>();
                 }
             } catch (...) { /* keep raw payload as the message */ }
-            ctx.sink(StreamError{std::move(msg), std::nullopt});
+            StreamError err{std::move(msg), std::nullopt};
+            if (code >= 400 && code <= 599) err.http_status = code;
+            ctx.sink(std::move(err));
             ctx.terminated = true;
             return;
         }

@@ -2118,10 +2118,13 @@ Step stream_update(Model m, msg::StreamMsg sm) {
             // forever. no_progress_failures is monotonic per turn, reset
             // ONLY by real model output; past the hard cap the failure is
             // terminal regardless of class.
+            bool no_progress_latched = false;
             if (can_retry && err_ctx
                 && err_ctx->no_progress_failures
-                       >= provider::kMaxNoProgressFailures)
+                       >= provider::kMaxNoProgressFailures) {
                 can_retry = false;
+                no_progress_latched = true;
+            }
 
             if (can_retry) {
                 int attempt = prior_transient;
@@ -2184,6 +2187,16 @@ Step stream_update(Model m, msg::StreamMsg sm) {
             m.s.phase = phase::Idle{};
             if (klass == provider::ErrorClass::Cancelled) {
                 m.s.status = "cancelled";
+            } else if (no_progress_latched) {
+                // The ladder burned its whole no-progress budget: every
+                // attempt failed before a single content byte. Repeating the
+                // raw server error a 7th time isn't actionable — say what
+                // happened and where to fix it.
+                m.s.status = "giving up after "
+                    + std::to_string(provider::kMaxNoProgressFailures)
+                    + " failed attempts with no model output \xe2\x80\x94 "
+                      "check the server/model (^P \xe2\x86\x92 Custom host, "
+                      "^/ \xe2\x86\x92 models). Last error: " + e.message;
             } else {
                 m.s.status = "error: " + e.message;
             }
