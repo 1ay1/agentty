@@ -485,6 +485,26 @@ Element fused_picker(const Model& m) {
     }
     cfg.selected = visual_selected;
 
+    // Reasoning-effort chip for the highlighted model (when it supports
+    // effort): shows the active tier and the ←/→ · ^E controls, so the fused
+    // picker fully replaces the old one for tuning — not just switching.
+    if (picker->index >= 0 && picker->index < static_cast<int>(rows.size())) {
+        const auto& hl = rows[static_cast<std::size_t>(picker->index)];
+        if (!hl.is_signin_offer()) {
+            const auto caps = resolved_caps(hl.model.id.value);
+            if (effort_capable(caps)) {
+                std::vector<Element> parts;
+                parts.push_back(text("reasoning ", fg_dim(muted)));
+                parts.push_back(text("\xe2\x97\x87 ", fg_of(accent)));   // ◇
+                parts.push_back(text(std::string{effort_label(m.d.effort)},
+                                     fg_bold(accent)));
+                parts.push_back(text("   \xe2\x86\x90/\xe2\x86\x92 tier \xc2\xb7 ^E toggle",
+                                     fg_dim(muted)));
+                cfg.footer.push_back(h(std::move(parts)));
+            }
+        }
+    }
+
     cfg.footer.push_back(key_hints({
         {"\xe2\x86\x91\xe2\x86\x93", "move", 5},
         {"type", "filter", 2},
