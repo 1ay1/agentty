@@ -30,7 +30,6 @@
 #include "agentty/provider/auth_state.hpp"
 #include "agentty/provider/selection.hpp"
 #include "agentty/runtime/app/deps.hpp"   // deps().auth for the live auth badge
-#include "agentty/runtime/app/update/internal.hpp"  // app::detail::fused_rows_for_model
 #include "agentty/auth/auth.hpp"          // auth::is_empty
 #include "agentty/workspace/files.hpp"
 #include "agentty/workspace/symbols.hpp"
@@ -398,11 +397,14 @@ Element fused_picker(const Model& m) {
     auto* picker = pick::opened(m.ui.fused_picker);
     if (!picker) return text("");
 
-    const auto rows = app::detail::fused_rows_for_model(m);
+    // Read the reducer-maintained cache — never rebuild per frame.
+    const auto& rows = m.d.fused_rows;
 
     Picker::Config cfg;
     cfg.title    = " Models \xc2\xb7 all providers ";
     cfg.accent   = accent;
+    cfg.viewport_h = picker_viewport_h();
+    cfg.scroll     = &m.ui.fused_picker_scroll;
 
     cfg.header.push_back(h(text("\xf0\x9f\x94\x8d ", fg_of(muted)),
         text(picker->query.empty() ? std::string{"type to filter across providers"}

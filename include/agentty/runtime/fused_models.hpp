@@ -32,12 +32,7 @@
 
 namespace agentty::ui {
 
-// A provider the user is NOT signed into — rendered as a single "sign in to
-// <label>" offer at the bottom of the fused list.
-struct SigninOffer {
-    std::string provider_id;
-    std::string label;
-};
+using agentty::SigninOffer;   // moved to domain (catalog.hpp); alias for callers
 
 struct FusedInputs {
     const std::vector<ProviderCatalog>* catalogs = nullptr;  // authed providers

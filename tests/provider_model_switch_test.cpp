@@ -361,3 +361,39 @@ TEST_CASE("fused catalog loaded merges by provider id") {
                             && c.models.size() == 2);
     CHECK(openai_ready);
 }
+
+// The fused picker caches its rows (m.d.fused_rows) for cheap per-frame /
+// per-keystroke rendering: populated on open, cleared on close/select.
+TEST_CASE("fused picker caches rows and clears them on close") {
+    using namespace agentty::msg;
+    install_stub_deps();
+    g_settings = store::Settings{};
+    g_settings.provider_keys["anthropic"] = "sk-test";
+    g_settings.provider_keys["xai"]       = "sk-test";
+    provider::select(provider::parse_selection("anthropic"));
+
+    Model m;
+    m.d.model_id = ModelId{"claude-sonnet-4-6"};
+    m.d.available_models = {mi("claude-sonnet-4-6", "anthropic")};
+
+    // Open: cache is populated, and xai was seeded synchronously from its
+    // bundled list (opens instantly full — no waiting on the async fetch;
+    // providers that fetch live, like openai, fill in a frame later).
+    auto [m1, c1] = app::update(std::move(m), Msg{OpenFusedPicker{}});
+    CHECK(!m1.d.fused_rows.empty());
+    bool xai_seeded = false;
+    for (const auto& c : m1.d.provider_catalogs)
+        if (c.provider_id == "xai") xai_seeded = !c.models.empty();
+    CHECK(xai_seeded);
+
+    // Filtering rebuilds the cache in place (still non-empty for a matching
+    // query, and the cursor is clamped).
+    auto [m2, c2] = app::update(std::move(m1),
+                                Msg{FusedPickerFilterInput{U'c'}});
+    CHECK(ui::pick::is_open(m2.ui.fused_picker));
+
+    // Close releases the cache.
+    auto [m3, c3] = app::update(std::move(m2), Msg{CloseFusedPicker{}});
+    CHECK(!ui::pick::is_open(m3.ui.fused_picker));
+    CHECK(m3.d.fused_rows.empty());
+}
