@@ -1136,7 +1136,6 @@ Step fused_picker_update(Model m, msg::FusedPickerMsg pm) {
         [&](FusedPickerMove e) -> Step {
             if (auto* c = pick::opened(m.ui.fused_picker)) {
                 c->index += e.delta;
-                c->staged_effort = -1;   // staged tier belonged to the old row
                 clamp_cursor(m);
             }
             return done(std::move(m));
@@ -1155,7 +1154,6 @@ Step fused_picker_update(Model m, msg::FusedPickerMsg pm) {
                     case W::PageUp:   c->index -= page; break;
                     case W::PageDown: c->index += page; break;
                 }
-                c->staged_effort = -1;
                 clamp_cursor(m);
             }
             return done(std::move(m));
@@ -1172,7 +1170,6 @@ Step fused_picker_update(Model m, msg::FusedPickerMsg pm) {
                     const int want = e.ch - '1';
                     if (want < n) {
                         c->index = want;
-                        c->staged_effort = -1;
                         clamp_cursor(m);
                     }
                     return done(std::move(m));
@@ -1181,7 +1178,6 @@ Step fused_picker_update(Model m, msg::FusedPickerMsg pm) {
                 if (e.ch >= 0x20 && e.ch < 0x7f) {
                     c->query.push_back(static_cast<char>(e.ch));
                     c->index = 0;
-                    c->staged_effort = -1;
                     rebuild_fused_rows(m);   // query changed → rows changed
                     clamp_cursor(m);
                 }
@@ -1192,7 +1188,6 @@ Step fused_picker_update(Model m, msg::FusedPickerMsg pm) {
             if (auto* c = pick::opened(m.ui.fused_picker); c && !c->query.empty()) {
                 c->query.pop_back();
                 c->index = 0;
-                c->staged_effort = -1;
                 rebuild_fused_rows(m);
                 clamp_cursor(m);
             }
@@ -1244,12 +1239,11 @@ Step fused_picker_update(Model m, msg::FusedPickerMsg pm) {
         },
         [&](FusedPickerCycleEffort e) -> Step {
             // ←/→ walks the reasoning-effort ladder of the HIGHLIGHTED model
-            // (off → low → medium → high … within what its caps allow). The
-            // edit is STAGED on the picker row (c->staged_effort), NOT written
-            // to the global m.d.effort — mutating the global mid-browse leaks
-            // onto the currently-active model (a different provider/model you
-            // never selected) and reverts nothing on Esc. The staged tier is
-            // applied to m.d.effort only on select (FusedPickerSelect).
+            // (off → low → medium → high … within its caps), mutating the
+            // GLOBAL m.d.effort LIVE — exactly like the classic model picker's
+            // ModelPickerCycleEffort. Both surfaces share m.d.effort, so a
+            // change here shows in the old picker too (no staging split, no
+            // "off in one, on in the other"). Persisted lazily via effort_dirty.
             auto* c = pick::opened(m.ui.fused_picker);
             if (!c || c->index < 0
                 || c->index >= static_cast<int>(m.d.fused_rows.size()))
@@ -1258,14 +1252,9 @@ Step fused_picker_update(Model m, msg::FusedPickerMsg pm) {
             if (row.is_signin_offer()) return done(std::move(m));
             const auto caps = resolved_caps(row.model.id.value);
             if (!effort_capable(caps)) return done(std::move(m));
-            // Base = the tier already staged for this row, else the highlighted
-            // model's EFFECTIVE tier (global, clamped to its caps) — so the
-            // first ←/→ steps from what the chip currently shows.
-            const Effort base = c->staged_effort >= 0
-                ? static_cast<Effort>(c->staged_effort)
-                : clamp_effort(m.d.effort, caps);
-            c->staged_effort =
-                static_cast<int>(cycle_effort(base, e.delta, caps));
+            m.d.effort = cycle_effort(clamp_effort(m.d.effort, caps),
+                                      e.delta, caps);
+            m.ui.effort_dirty = true;
             return done(std::move(m));
         },
         [&](FusedPickerToggleReasoning) -> Step {
@@ -1326,22 +1315,16 @@ Step fused_picker_update(Model m, msg::FusedPickerMsg pm) {
                 || c->index >= static_cast<int>(m.d.fused_rows.size()))
                 return done(std::move(m));
             const FusedRow row = m.d.fused_rows[static_cast<std::size_t>(c->index)];
-            const int staged = c->staged_effort;   // capture before the reset
             m.ui.fused_picker = pick::Closed{};
             m.d.fused_rows.clear();
-            m.ui.effort_dirty = false;   // the switch below persists settings
+            // ←/→ already mutated m.d.effort live (shared with the old picker);
+            // the switch below persists settings, so no separate apply needed.
+            m.ui.effort_dirty = false;
 
             if (row.is_signin_offer()) {
                 // Route to login for that provider, returning here after.
                 return open_login_for(std::move(m), row.provider_id,
                                       row.label, ui::login::Back::FusedPicker);
-            }
-            // Commit the row's STAGED effort (←/→) now, clamped to the target
-            // model's caps. Staging kept it off the active model during
-            // browse; the switch below persists settings, so it sticks.
-            if (staged >= 0) {
-                m.d.effort = clamp_effort(static_cast<Effort>(staged),
-                                          resolved_caps(row.model.id.value));
             }
             return switch_to_model_ref(std::move(m), row.ref());
         },

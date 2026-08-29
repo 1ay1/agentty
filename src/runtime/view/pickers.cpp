@@ -144,6 +144,61 @@ constexpr int kPickerChromeRows = 7;
 // narrow to show them all (higher = kept longer).
 // (moved to agentty/runtime/view/hints.hpp — shared with diff-review)
 
+// The reasoning-effort control footer, shared by the classic model picker AND
+// the fused picker so both surfaces render IDENTICALLY and read/write the SAME
+// state (m.d.effort, the per-model reasoning_override, m.d.show_reasoning).
+// `model_id` is the highlighted row's model. Returns the rows to append to a
+// picker's footer (may be empty). Kept in ONE place so the two pickers can
+// never diverge (the "off in one, on in the other" bug).
+inline std::vector<Element> reasoning_effort_footer(const Model& m,
+                                                    std::string_view model_id) {
+    std::vector<Element> out;
+    if (model_id.empty()) return out;
+
+    const std::string hi_id{model_id};
+    const auto caps = resolved_caps(hi_id);
+
+    // ── Show-reasoning toggle piece (^R), a global on/off display switch.
+    // Appended inline to the reasoning line so effort + show/hide live in
+    // ONE place. ✦ + accented when on, dim when off.
+    auto append_show_reasoning = [&](std::vector<Element>& parts) {
+        const bool on = m.d.show_reasoning;
+        parts.push_back(text("  ", fg_dim(muted)));
+        parts.push_back(text("^R ", fg_of(fg)));
+        parts.push_back(text(on ? "\xe2\x9c\xa6 shown" : "hidden",
+                             on ? fg_bold(accent) : fg_dim(muted)));
+    };
+
+    if (effort_capable(caps)) {
+        // One line: the effort ladder (current tier bracketed ‹like this›
+        // and accented), then the global ^R show/hide toggle. ←/→ cycles the
+        // tier. (The per-model override state is already conveyed by the row's
+        // own reasoning badge, so no separate ^E affordance here.)
+        std::vector<Element> parts;
+        parts.push_back(text("reasoning ", fg_dim(muted)));
+        for (Effort lvl : available_efforts(caps)) {
+            const std::string lbl{effort_label(lvl)};
+            if (lvl == m.d.effort) {
+                parts.push_back(text("\xe2\x80\xb9", fg_of(accent)));       // ‹
+                parts.push_back(text(lbl, fg_bold(accent)));
+                parts.push_back(text("\xe2\x80\xba ", fg_of(accent)));    // ›
+            } else {
+                parts.push_back(text(lbl + " ", fg_dim(muted)));
+            }
+        }
+        append_show_reasoning(parts);
+        out.push_back(h(std::move(parts)).build());
+    } else {
+        // No effort control on this model — still show the global ^R toggle.
+        std::vector<Element> parts;
+        parts.push_back(text("reasoning ", fg_dim(muted)));
+        parts.push_back(text("off", fg_dim(muted)));
+        append_show_reasoning(parts);
+        out.push_back(h(std::move(parts)).build());
+    }
+    return out;
+}
+
 } // namespace
 
 Element model_picker(const Model& m) {
@@ -309,72 +364,17 @@ Element model_picker(const Model& m) {
 
     cfg.footer.push_back(text(""));
     // Reasoning-effort line — ONE unified control for the highlighted model.
-    // Renders the whole available ladder (so the ceiling is visible), brackets
-    // the current tier, and names both bindings inline: ←/→ cycles the tier,
-    // ^E flips the per-model capability override (compat lane only). This is
-    // uniform across every provider incl. ChatGPT/Codex — the ladder and the
-    // chip and the wire all come from resolved_caps() + available_efforts().
+    // Reasoning-effort line — ONE unified control for the highlighted model,
+    // now shared verbatim with the fused picker (reasoning_effort_footer) so
+    // the two surfaces render identically and can't drift.
     if (!vis.empty()) {
         const int hi = std::clamp(picker->index, 0,
             static_cast<int>(vis.size()) - 1);
         const std::string& hi_id =
             m.d.available_models[
                 static_cast<std::size_t>(vis[static_cast<std::size_t>(hi)])].id.value;
-        const auto caps = resolved_caps(hi_id);
-        const auto base = ModelCapabilities::from_id(hi_id);
-        const bool overridable = !base.is_known_family()
-                              && base.family != ModelCapabilities::Family::Gpt;
-
-        // ── Show-reasoning toggle piece (^R), a global on/off display switch.
-        // Appended inline to the reasoning line so effort + show/hide live in
-        // ONE place. ✦ + accented when on, dim when off.
-        auto append_show_reasoning = [&](std::vector<Element>& parts) {
-            const bool on = m.d.show_reasoning;
-            parts.push_back(text("  ", fg_dim(muted)));
-            parts.push_back(text("^R ", fg_of(fg)));
-            parts.push_back(text(on ? "\xe2\x9c\xa6 shown" : "hidden",
-                                 on ? fg_bold(accent) : fg_dim(muted)));
-        };
-
-        if (effort_capable(caps)) {
-            // One line: the effort ladder (current tier bracketed ‹like this›
-            // and accented), then the compat-only ^E override, then the global
-            // ^R show/hide toggle. ←/→ cycles the tier (the ‹› brackets already
-            // signal it's steppable, so no separate "←→ cycle" label).
-            std::vector<Element> parts;
-            parts.push_back(text("reasoning ", fg_dim(muted)));
-            for (Effort lvl : available_efforts(caps)) {
-                const std::string lbl{effort_label(lvl)};
-                if (lvl == m.d.effort) {
-                    parts.push_back(text("\xe2\x80\xb9", fg_of(accent)));       // ‹
-                    parts.push_back(text(lbl, fg_bold(accent)));
-                    parts.push_back(text("\xe2\x80\xba ", fg_of(accent)));    // ›
-                } else {
-                    parts.push_back(text(lbl + " ", fg_dim(muted)));
-                }
-            }
-            if (overridable) {
-                const int ov = reasoning_override_for(hi_id);
-                const char* state = ov == 1 ? "on" : ov == 0 ? "off" : "auto";
-                parts.push_back(text(" \xc2\xb7 ", fg_dim(muted)));            // ·
-                parts.push_back(text("^E ", fg_of(fg)));
-                parts.push_back(text(state, fg_bold(accent)));
-            }
-            append_show_reasoning(parts);
-            cfg.footer.push_back(h(std::move(parts)).build());
-        } else {
-            // No effort control on this model — still show the global ^R
-            // toggle (and, for the compat lane, the ^E enable affordance).
-            std::vector<Element> parts;
-            parts.push_back(text("reasoning ", fg_dim(muted)));
-            parts.push_back(text("off", fg_dim(muted)));
-            if (overridable) {
-                parts.push_back(text("  ^E ", fg_of(fg)));
-                parts.push_back(text("enable", fg_bold(accent)));
-            }
-            append_show_reasoning(parts);
-            cfg.footer.push_back(h(std::move(parts)).build());
-        }
+        for (auto& row : reasoning_effort_footer(m, hi_id))
+            cfg.footer.push_back(std::move(row));
     }
     cfg.footer.push_back(key_hints({
         {"\xe2\x86\x91\xe2\x86\x93", "move", 5},        // ↑↓
@@ -513,31 +513,16 @@ Element fused_picker(const Model& m) {
     }
     cfg.selected = visual_selected;
 
-    // Reasoning-effort chip for the highlighted model (when it supports
-    // effort): shows the active tier and the ←/→ · ^E controls, so the fused
-    // picker fully replaces the old one for tuning — not just switching.
+    // Reasoning-effort control for the highlighted model — the SAME shared
+    // footer the classic picker renders (reasoning_effort_footer), so the two
+    // surfaces look identical and read/write the same state. No staged tier:
+    // ←/→ mutates the global m.d.effort live (like the old picker), so the two
+    // can't disagree ("off in one, on in the other").
     if (picker->index >= 0 && picker->index < static_cast<int>(rows.size())) {
         const auto& hl = rows[static_cast<std::size_t>(picker->index)];
-        if (!hl.is_signin_offer()) {
-            const auto caps = resolved_caps(hl.model.id.value);
-            if (effort_capable(caps)) {
-                // Show the tier THIS row would use: the staged ←/→ edit if the
-                // user has one in flight, else the global effort clamped to
-                // this model's caps. Never the raw global tier — that would
-                // lie about a highlighted model whose caps cap it lower.
-                const Effort chip_effort = picker->staged_effort >= 0
-                    ? static_cast<Effort>(picker->staged_effort)
-                    : clamp_effort(m.d.effort, caps);
-                std::vector<Element> parts;
-                parts.push_back(text("reasoning ", fg_dim(muted)));
-                parts.push_back(text("\xe2\x97\x87 ", fg_of(accent)));   // ◇
-                parts.push_back(text(std::string{effort_label(chip_effort)},
-                                     fg_bold(accent)));
-                parts.push_back(text("   \xe2\x86\x90/\xe2\x86\x92 tier \xc2\xb7 ^E toggle",
-                                     fg_dim(muted)));
-                cfg.footer.push_back(h(std::move(parts)));
-            }
-        }
+        if (!hl.is_signin_offer())
+            for (auto& row : reasoning_effort_footer(m, hl.model.id.value))
+                cfg.footer.push_back(std::move(row));
     }
 
     cfg.footer.push_back(key_hints({

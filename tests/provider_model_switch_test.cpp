@@ -609,30 +609,23 @@ TEST_CASE("fused picker cycles reasoning effort") {
     if (auto* cur = ui::pick::opened(m1.ui.fused_picker)) cur->index = 0;
     const Effort before = m1.d.effort;
     auto [m2, c2] = app::update(std::move(m1), Msg{FusedPickerCycleEffort{+1}});
-    // ←/→ STAGES the tier on the picker row — it must NOT leak onto the
-    // global/active-model effort mid-browse (that would retune a model the
-    // user never selected, and Esc would revert nothing).
-    CHECK(m2.d.effort == before);
-    CHECK(!m2.ui.effort_dirty);
-    const auto* staged = ui::pick::opened(m2.ui.fused_picker);
-    REQUIRE(staged != nullptr);
-    CHECK(staged->staged_effort >= 0);
-    CHECK(static_cast<Effort>(staged->staged_effort) != before);
-    const Effort staged_tier = static_cast<Effort>(staged->staged_effort);
+    // ←/→ mutates the GLOBAL m.d.effort LIVE — identical to the classic model
+    // picker, so the two surfaces share one state and can't disagree.
+    CHECK(m2.d.effort != before);
+    CHECK(m2.ui.effort_dirty);
+    const Effort after = m2.d.effort;
 
-    // Select commits the staged tier to the active model's effort.
+    // The change is already global; select just persists + switches.
     auto [m3, c3] = app::update(std::move(m2), Msg{FusedPickerSelect{}});
-    CHECK(m3.d.effort == staged_tier);
+    CHECK(m3.d.effort == after);
     CHECK(!ui::pick::opened(m3.ui.fused_picker));  // picker closed on select
 
-    // Moving to a different row (or Esc) discards a staged edit — no leak.
+    // Closing flushes a dirty effort edit (parity with the classic picker).
     auto [m4, c4] = app::update(std::move(m3), Msg{OpenFusedPicker{}});
     if (auto* cur = ui::pick::opened(m4.ui.fused_picker)) cur->index = 0;
-    const Effort before4 = m4.d.effort;
     auto [m5, c5] = app::update(std::move(m4), Msg{FusedPickerCycleEffort{+1}});
     auto [m6, c6] = app::update(std::move(m5), Msg{CloseFusedPicker{}});
-    CHECK(m6.d.effort == before4);        // Esc discarded the staged edit
-    CHECK(!m6.ui.effort_dirty);
+    CHECK(!m6.ui.effort_dirty);            // persisted on close
 }
 
 // ^/ toggles between the fused (all-providers) picker and the classic
