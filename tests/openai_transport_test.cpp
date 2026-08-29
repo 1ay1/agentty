@@ -289,6 +289,41 @@ TEST_CASE("test_sse_reasoning_alt_field") {
     CHECK(joined_text(msgs) == "ok");
 }
 
+// Mistral / Magistral inline reasoning as [THINK]…[/THINK] INSIDE content
+// (no reasoning_content field). It must surface as StreamThinkingDelta, the
+// tags must be stripped, and the visible answer must NOT lose its first char
+// (the leading `[` used to trip the tool-call salvage).
+TEST_CASE("test_sse_think_tags_in_content") {
+    std::string sse =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"[THINK]let me think[/THINK]\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"Answer: 42\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+        "data: [DONE]\n\n";
+    auto msgs = oai::parse_sse_for_test(sse);
+    std::string think;
+    for (const auto& m : msgs)
+        if (const auto* t = get_leaf<StreamThinkingDelta>(m)) think += t->text;
+    CHECK(think == "let me think");          // reasoning captured
+    CHECK(joined_text(msgs) == "Answer: 42"); // tags stripped, first char kept
+}
+
+// A THINK tag SPLIT across two SSE deltas ("[TH" | "INK]let me…") must still be
+// recognised — the partial tag is carried, not emitted as prose.
+TEST_CASE("test_sse_think_tags_split_across_deltas") {
+    std::string sse =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"[TH\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"INK]deep[/TH\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"INK]hi\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+        "data: [DONE]\n\n";
+    auto msgs = oai::parse_sse_for_test(sse);
+    std::string think;
+    for (const auto& m : msgs)
+        if (const auto* t = get_leaf<StreamThinkingDelta>(m)) think += t->text;
+    CHECK(think == "deep");
+    CHECK(joined_text(msgs) == "hi");   // no stray "[TH" / "[/TH" leaked
+}
+
 TEST_CASE("test_sse_tool_call_stream") {
     // OpenAI tool-call streaming: opening frame carries id+name, subsequent
     // frames carry arguments fragments; finish_reason "tool_calls".

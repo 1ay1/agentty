@@ -129,6 +129,17 @@ struct StreamCtx {
     bool allow_forget_salvage = false;
     bool allow_wipe_salvage = false;
 
+    // Mistral / Magistral (and some vLLM reasoning parsers) don't send a
+    // separate reasoning_content field — they wrap the model's thinking in
+    // [THINK]…[/THINK] tags INSIDE `content`. We strip those inline and
+    // re-route the enclosed text as reasoning (StreamThinkingDelta), so it
+    // renders in the reasoning block instead of leaking into the answer (and
+    // so the leading `[` never trips the tool-call salvage). `in_think` tracks
+    // whether we're currently inside a THINK span across delta boundaries;
+    // `think_carry` holds a partial tag split across two content deltas.
+    bool        in_think = false;
+    std::string think_carry;   // partial "[THINK]"/"[/THINK]" tag across deltas
+
     // Incremental JSON parse state for salvage.
     int  brace_depth = 0;           // nested {} depth in current JSON object
     int  bracket_depth = 0;         // nested [] depth (for arrays of calls)
@@ -288,6 +299,52 @@ void flush_text_slice(StreamCtx& ctx, std::size_t len) {
 // then re-leaks the same call next turn — the stuck "upstream cut off"
 // re-invocation. A COMPLETE object (even one naming an unadvertised tool) is
 // kept and surfaced so the user sees the model's intent.
+
+// Split a content delta on Mistral/Magistral [THINK]…[/THINK] tags: the text
+// INSIDE the tags is emitted as reasoning (StreamThinkingDelta, honoring the
+// hidden-reasoning heartbeat like reasoning_content does), the text OUTSIDE is
+// returned as the prose the caller should feed into the tool-call salvage.
+// State (in_think / think_carry) persists across deltas so a tag split over two
+// SSE chunks ("[TH" | "INK]") is handled. Returns the non-think prose.
+std::string extract_think_spans(StreamCtx& ctx, std::string_view in) {
+    static constexpr std::string_view kOpen  = "[THINK]";
+    static constexpr std::string_view kClose = "[/THINK]";
+    std::string prose;
+    std::string buf = ctx.think_carry + std::string{in};   // prepend carried partial
+    ctx.think_carry.clear();
+    std::size_t i = 0;
+    auto emit_reason = [&](std::string_view r) {
+        if (r.empty()) return;
+        if (ctx.show_reasoning) ctx.sink(StreamThinkingDelta{std::string{r}, ""});
+        else                    ctx.sink(StreamThinkingDelta{"", ""});  // heartbeat
+    };
+    while (i < buf.size()) {
+        const std::string_view tag = ctx.in_think ? kClose : kOpen;
+        const std::size_t pos = buf.find(tag, i);
+        if (pos == std::string::npos) {
+            // No complete tag ahead. Emit up to a possible PARTIAL tag at the
+            // tail (so "[/TH" split across deltas isn't shown) and carry it.
+            std::size_t keep = buf.size();
+            for (std::size_t back = 1;
+                 back < tag.size() && back <= buf.size() - i; ++back) {
+                if (std::string_view{buf}.substr(buf.size() - back)
+                        == tag.substr(0, back)) {
+                    keep = buf.size() - back; break;
+                }
+            }
+            std::string_view chunk{buf.data() + i, keep - i};
+            if (ctx.in_think) emit_reason(chunk); else prose += chunk;
+            ctx.think_carry.assign(buf, keep, std::string::npos);
+            return prose;
+        }
+        std::string_view chunk{buf.data() + i, pos - i};   // text before tag
+        if (ctx.in_think) emit_reason(chunk); else prose += chunk;
+        ctx.in_think = !ctx.in_think;    // cross the tag
+        i = pos + tag.size();
+    }
+    return prose;
+}
+
 void flush_text_hold(StreamCtx& ctx) {
     ctx.holding = false;
     if (ctx.text_hold.empty()) return;
@@ -673,7 +730,13 @@ void handle_delta(StreamCtx& ctx, const json& delta) {
 
     // Plain assistant text.
     if (delta.contains("content") && delta["content"].is_string()) {
-        const auto& s = delta["content"].get_ref<const std::string&>();
+        const auto& raw = delta["content"].get_ref<const std::string&>();
+        // Mistral/Magistral inline their reasoning as [THINK]…[/THINK] inside
+        // `content`. Peel those spans off as reasoning FIRST; `s` is only the
+        // non-think prose. (If the model never emits THINK tags this is a
+        // cheap identity pass — no tag found, prose == raw.) Doing it here also
+        // stops a leading `[` of `[THINK]` from tripping the tool-call salvage.
+        const std::string s = extract_think_spans(ctx, raw);
         if (!s.empty()) {
             // SIMPLE LOGIC:
             // 1. If we're already holding, append and check if it's still valid
