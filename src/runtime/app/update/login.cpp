@@ -421,6 +421,21 @@ Step account_select(Model m) {
         // The Codex / Copilot / Kimi transports read their token from the store
         // on each turn; clearing the cached header forces a fresh read next turn.
         agentty::app::update_auth(auth::AuthHeader{});
+    } else {
+        // CUSTOM HOST: activate() wrote the switched-to key into
+        // provider_keys[spec], but the LIVE auth header still holds the old
+        // account's key — without this the next request uses the wrong
+        // credential. Re-resolve the header from the freshly-activated key so
+        // the switch takes effect immediately.
+        auto s = deps().load_settings();
+        std::string saved_key;
+        if (auto it = s.provider_keys.find(provider); it != s.provider_keys.end())
+            saved_key = it->second;
+        auth::AuthHeader anthropic_creds = deps().auth;
+        if (auto c = auth::load_credentials())
+            anthropic_creds = auth::make_auth_header(*c);
+        agentty::app::update_auth(provider::resolve_auth_for(
+            provider, anthropic_creds, /*cli_key=*/{}, saved_key));
     }
     const std::string provider_label = al->provider_label;
     m.ui.login = login::Closed{};
@@ -462,17 +477,41 @@ Step account_remove(Model m) {
             if (row.provider == "anthropic") {
                 if (auto c = auth::load_credentials())
                     agentty::app::update_auth(auth::make_auth_header(*c));
-            } else {
+            } else if (row.provider == "copilot" || row.provider == "chatgpt"
+                       || row.provider == "kimi") {
                 agentty::app::update_auth(auth::AuthHeader{});
+            } else {
+                // CUSTOM HOST: activate() wrote the promoted key into
+                // provider_keys[spec]; re-resolve the live header from it so
+                // the promoted account is actually used next turn.
+                auto s = deps().load_settings();
+                std::string saved_key;
+                if (auto it = s.provider_keys.find(row.provider);
+                    it != s.provider_keys.end())
+                    saved_key = it->second;
+                auth::AuthHeader anth = deps().auth;
+                if (auto c = auth::load_credentials())
+                    anth = auth::make_auth_header(*c);
+                agentty::app::update_auth(provider::resolve_auth_for(
+                    row.provider, anth, /*cli_key=*/{}, saved_key));
             }
-            m.s.status = "removed " + row.label + " · switched to " + next->label;
+            m.s.status = "removed " + row.label + " \xc2\xb7 switched to " + next->label;
         } else {
             // The registry is empty. Clear the underlying live credential
             // file too; otherwise build_account_list() would rediscover and
             // silently resurrect the account the user just removed.
             if (row.provider == "anthropic")      auth::clear_credentials();
             else if (row.provider == "copilot")   provider::copilot::clear_credentials();
-            else                                  provider::chatgpt::clear_codex_credentials();
+            else if (row.provider == "chatgpt")   provider::chatgpt::clear_codex_credentials();
+            else if (row.provider == "kimi")      provider::kimi::clear_credentials();
+            else {
+                // CUSTOM HOST: its credential is the provider_keys[spec] entry,
+                // not a file — erase it so build_account_list can't resurrect it.
+                auto s = deps().load_settings();
+                s.provider_keys.erase(row.provider);
+                s.provider_models.erase(row.provider);
+                deps().save_settings(s);
+            }
             agentty::app::update_auth(auth::AuthHeader{});
 
             login::AccountList empty;
