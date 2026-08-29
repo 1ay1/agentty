@@ -373,6 +373,19 @@ Step account_select(Model m) {
         if (provider == "kimi") {
             return launch_device_login(std::move(m), "kimi", "Kimi");
         }
+        // A CUSTOM HOST (non-preset spec) adds an account by entering a new
+        // API key for that same endpoint — route straight to the key input
+        // (not the provider-selection modal, which is for picking a provider).
+        // The ApiKeyInput submit snapshots the current key first, so this
+        // ADDS rather than replaces.
+        if (!provider::preset_for(provider)) {
+            m.ui.login = login::ApiKeyInput{
+                .provider       = provider,
+                .provider_label = al->provider_label,
+                .back           = login::Back::AccountList,
+            };
+            return done(std::move(m));
+        }
         m.ui.login = login::Picking{.provider = provider,
                                     .back = login::Back::AccountList};
         return done(std::move(m));

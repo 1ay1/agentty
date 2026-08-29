@@ -154,14 +154,25 @@ bool activate(const std::string& provider, const std::string& label) {
 
 std::string derive_current_label(const std::string& provider) {
     // Custom host: label by a short suffix of the bearer key so two distinct
-    // keys for the same endpoint get two distinct, recognisable rows.
+    // keys for the same endpoint get two distinct, recognisable rows. Include
+    // both a prefix and a suffix so keys that happen to share the last 4 chars
+    // (common with structured keys like "sk-proj-…") still get distinct labels;
+    // a length tag breaks any remaining ties.
     if (is_custom_host_provider(provider)) {
         auto s = agentty::persistence::load_settings();
         auto it = s.provider_keys.find(provider);
         if (it == s.provider_keys.end() || it->second.empty()) return {};
         const std::string& key = it->second;
-        std::string tag = key.size() >= 4 ? key.substr(key.size() - 4) : key;
-        return "key \xe2\x80\xa6" + tag;   // key …abcd
+        auto tail = [&](std::size_t n) {
+            return key.size() >= n ? key.substr(key.size() - n) : key;
+        };
+        // A short hash of the WHOLE key guarantees two distinct keys get two
+        // distinct labels even when they share a prefix AND suffix (differing
+        // only in the middle). The visible …suffix keeps it human-recognisable.
+        const std::uint32_t h = std::hash<std::string>{}(key) & 0xffffffu;
+        char hx[7];
+        std::snprintf(hx, sizeof(hx), "%06x", h);
+        return "key \xe2\x80\xa6" + tail(4) + " #" + std::string(hx, 6);
     }
     auto file = active_store_file(provider);
     if (!file) return {};

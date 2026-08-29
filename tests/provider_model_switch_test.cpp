@@ -886,6 +886,16 @@ TEST_CASE("custom host supports multiple accounts") {
     CHECK(acc::activate(spec, "B"));
     CHECK(get_key() == "sk-bbbb2222");
 
+    // Two keys that SHARE the same last-4 still derive DISTINCT labels (the
+    // label mixes a prefix + suffix + length, not just the suffix) — so a
+    // second key can't collide with / overwrite the first in the registry.
+    set_key("sk-prefix1-SAME9999");
+    const std::string l1 = acc::derive_current_label(spec);
+    set_key("sk-prefix2-SAME9999");
+    const std::string l2 = acc::derive_current_label(spec);
+    CHECK(!l1.empty());
+    CHECK(l1 != l2);
+
     if (old_home) ::setenv("HOME", old_home, 1); else ::unsetenv("HOME");
     std::filesystem::remove_all(tmp);
 }
