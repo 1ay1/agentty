@@ -107,7 +107,7 @@ template <class T, class V>
         add(Command::RunCodeBlock,     emit<OpenCodeBlockPicker>());
         // ── Config ──
         add(Command::CycleProfile,     emit<CycleProfile>());
-        add(Command::OpenModels,       emit<OpenModelPicker>());
+        add(Command::OpenModels,       emit<OpenFusedPicker>());
         add(Command::OpenProviders,    emit<OpenProviderPicker>());
         add(Command::SmartMode,        emit<OpenSmartMode>());
         add(Command::OpenRagSettings,  emit<OpenRagSettings>());

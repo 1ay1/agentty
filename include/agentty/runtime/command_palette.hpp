@@ -99,7 +99,7 @@ inline constexpr std::array kCommands = std::array{
     CommandDef{Command::RunCodeBlock,  "Run code block",     "Run a fenced block from the last reply", "Ctrl+G", Category::Navigate},
     // ── Config ──────────────────────────────────────────────────────────
     CommandDef{Command::CycleProfile,  "Cycle profile",      "Write → Ask → Minimal", "Shift+Tab", Category::Config},
-    CommandDef{Command::OpenModels,    "Switch model",       "Switch the active model", "Ctrl+/", Category::Config},
+    CommandDef{Command::OpenModels,    "Switch model",       "Switch model across every signed-in provider", "Ctrl+/", Category::Config},
     CommandDef{Command::OpenProviders, "Switch provider",    "Choose the LLM backend (Anthropic, OpenAI, …)", "Ctrl+P", Category::Config},
     CommandDef{Command::SmartMode,     "Smart Mode",         "Configure role-based routing — send cheap grunt work to a cheaper model", "Ctrl+S", Category::Config},
     CommandDef{Command::ResetSmartLearning, "Reset Smart Mode learning", "Forget this repo's learned routing priors + captured decompositions", "", Category::Config, /*danger=*/true},
