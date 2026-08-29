@@ -415,17 +415,27 @@ Element fused_picker(const Model& m) {
 
     // Lazy-load hint: while any provider's catalog is still streaming in,
     // show a dim spinner-ish note so the (initially active-provider-only)
-    // list visibly reads as "more coming", not "that's all".
+    // list visibly reads as "more coming", not "that's all". Failed providers
+    // are surfaced separately so a network blip doesn't look like "that's all".
     {
-        int loading = 0;
-        for (const auto& c : m.d.provider_catalogs)
+        int loading = 0, failed = 0;
+        for (const auto& c : m.d.provider_catalogs) {
             if (c.state == ProviderCatalog::State::Loading) ++loading;
+            else if (c.state == ProviderCatalog::State::Failed) ++failed;
+        }
         if (loading > 0)
             cfg.header.push_back(text(
                 "  \xe2\x8b\xaf loading " + std::to_string(loading)
                     + (loading == 1 ? " more provider\xe2\x80\xa6"
                                     : " more providers\xe2\x80\xa6"),
                 fg_italic(muted)));
+        if (failed > 0)
+            cfg.header.push_back(text(
+                "  \xe2\x9a\xa0 " + std::to_string(failed)
+                    + (failed == 1 ? " provider failed to refresh"
+                                   : " providers failed to refresh")
+                    + " \xc2\xb7 reopen to retry",
+                fg_of(warn)));
     }
 
     if (rows.empty()) {

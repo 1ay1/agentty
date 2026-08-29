@@ -61,6 +61,11 @@ struct ProviderCatalog {
     State state = State::Idle;
     std::vector<ModelInfo> models;
     std::string account_label;            // active account on this provider
+    // Steady-clock ms when this catalog's LIVE fetch last completed (0 = never
+    // fetched live; still showing the bundled seed). Drives the on-open
+    // freshness check: a catalog older than the TTL (or Failed) is refetched
+    // so the fused list stays current instead of freezing after its first load.
+    std::int64_t loaded_at_ms = 0;
     // Derived per-model fuzzy haystacks, already lowercased, one per entry in
     // `models` (same order). Rebuilt once when `models` changes (size guard in
     // rebuild_fused_rows), so the per-KEYSTROKE filter never re-allocates or

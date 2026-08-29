@@ -15,6 +15,7 @@
 #include <utility>
 
 #include <maya/core/overload.hpp>
+#include <maya/core/anim_clock.hpp>   // anim_now_ms (catalog freshness clock)
 #include <maya/platform/io.hpp>
 
 #include "agentty/runtime/app/cmd_factory.hpp"
@@ -63,6 +64,18 @@ std::vector<int> model_filtered(const std::vector<ModelInfo>& models,
 [[nodiscard]] bool is_chatgpt_active() {
     return provider::active().is_chatgpt();
 }
+
+// Monotonic ms from maya's animation clock — test-controllable via
+// maya::testing::advance_anim_clock_ms, so catalog freshness (loaded_at_ms) is
+// reproducible / advanceable in tests.
+[[nodiscard]] std::int64_t now_ms() {
+    return ::maya::anim_now_ms();
+}
+
+// A fused-picker catalog older than this is refetched on the next open. Long
+// enough that rapid re-opens don't re-hammer providers, short enough that a
+// model added upstream shows up within a normal session.
+constexpr std::int64_t kCatalogTtlMs = 60'000;   // 60s
 
 // A provider that supports multiple switchable accounts (the OAuth lane).
 // These offer the ^A "manage accounts" action in the provider picker; every
@@ -286,6 +299,12 @@ Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
             // (e.g. one the live /v1/models fetch just added) appears without
             // reopening the picker. Clamp the cursor to the new row count.
             if (auto* c = pick::opened(m.ui.fused_picker)) {
+                // The active provider's live catalog just completed — mark its
+                // catalog fresh so the TTL refresh doesn't immediately refetch
+                // it, then rebuild the open rows.
+                const std::string apid = active_provider_id();
+                for (auto& cat : m.d.provider_catalogs)
+                    if (cat.provider_id == apid) { cat.loaded_at_ms = now_ms(); break; }
                 rebuild_fused_rows(m);
                 const int n = static_cast<int>(m.d.fused_rows.size());
                 if (n == 0) c->index = 0;
@@ -1286,22 +1305,41 @@ Step fused_picker_update(Model m, msg::FusedPickerMsg pm) {
             // the active result isn't queued behind slower providers on the
             // bounded worker pool. Mark the others Loading only when that
             // deferred pass fires — here they keep showing their bundled seed.
-            return {std::move(m), maya::Cmd<Msg>::batch({
-                cmd::fetch_models(),
-                maya::Cmd<Msg>::after(std::chrono::milliseconds{120},
-                                      Msg{FusedRefreshOthers{}}),
-            })};
+            // Skip the active refetch if its catalog is still fresh (rapid
+            // re-open), but always schedule the lazy wave for the others.
+            const std::string apid0 = active_provider_id();
+            bool active_fresh = false;
+            for (const auto& cat : m.d.provider_catalogs)
+                if (cat.provider_id == apid0) {
+                    active_fresh = cat.loaded_at_ms != 0
+                                && (now_ms() - cat.loaded_at_ms) <= kCatalogTtlMs;
+                    break;
+                }
+            std::vector<maya::Cmd<Msg>> boot;
+            if (!active_fresh) boot.push_back(cmd::fetch_models());
+            boot.push_back(maya::Cmd<Msg>::after(std::chrono::milliseconds{120},
+                                                 Msg{FusedRefreshOthers{}}));
+            return {std::move(m), maya::Cmd<Msg>::batch(std::move(boot))};
         },
         [&](FusedRefreshOthers) -> Step {
-            // Lazy second wave: refresh every OTHER authed provider's live
-            // catalog (the active one was already refetched on open). No-op
-            // if the picker closed in the meantime.
+            // Lazy second wave: refresh every OTHER authed provider whose live
+            // catalog is STALE (older than the TTL), FAILED, or never fetched.
+            // A recently-fetched Ready catalog is left alone so re-opening the
+            // picker rapidly doesn't re-hammer every provider — but a catalog
+            // that's been Ready a while IS refetched, so the list stays current
+            // instead of freezing after its first load. No-op if closed.
             if (!pick::opened(m.ui.fused_picker)) return done(std::move(m));
             const std::string active_pid = active_provider_id();
+            const std::int64_t t = now_ms();
             std::vector<maya::Cmd<Msg>> fetches;
             for (auto& c : m.d.provider_catalogs) {
                 if (c.provider_id == active_pid) continue;   // done on open
                 if (c.state == ProviderCatalog::State::Loading) continue;
+                const bool never = c.loaded_at_ms == 0;
+                const bool failed = c.state == ProviderCatalog::State::Failed;
+                const bool stale = c.loaded_at_ms != 0
+                                && (t - c.loaded_at_ms) > kCatalogTtlMs;
+                if (!never && !failed && !stale) continue;   // still fresh
                 c.state = ProviderCatalog::State::Loading;
                 fetches.push_back(cmd::fetch_models_for(c.provider_id));
             }
@@ -1383,9 +1421,11 @@ Step fused_picker_update(Model m, msg::FusedPickerMsg pm) {
                     c.models = std::move(e.models);
                     c.search_keys.clear();   // stale — rebuilt on next filter
                     c.state  = ProviderCatalog::State::Ready;
+                    c.loaded_at_ms = now_ms();   // mark fresh
                 } else {
                     c.state  = e.ok ? ProviderCatalog::State::Ready
                                     : ProviderCatalog::State::Failed;
+                    if (e.ok) c.loaded_at_ms = now_ms();
                 }
                 break;
             }

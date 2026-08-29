@@ -689,6 +689,47 @@ TEST_CASE("fused open prioritizes active provider, defers others") {
     }
 }
 
+// The fused list stays CURRENT: a provider catalog older than the TTL (or
+// Failed) is refetched on the next open; a freshly-loaded one is left alone so
+// rapid re-opens don't re-hammer providers. This is the "always updated but
+// fast" contract.
+TEST_CASE("fused refetches stale/failed catalogs, skips fresh") {
+    using namespace agentty::msg;
+    maya::testing::freeze_anim_clock(1'000'000);   // non-zero base (0 = "never loaded")
+    install_stub_deps();
+    g_settings = store::Settings{};
+    g_settings.provider_keys["anthropic"] = "sk-a";
+    g_settings.provider_keys["openai"]    = "sk-o";
+    provider::select(provider::parse_selection("anthropic"));
+
+    Model m;
+    m.d.model_id = ModelId{"claude-sonnet-4-5"};
+    m.d.available_models = {mi("claude-sonnet-4-5", "anthropic")};
+    auto [m1, c1] = app::update(std::move(m), Msg{OpenFusedPicker{}});
+    // openai loads live now (t=0).
+    FusedCatalogLoaded oa; oa.provider_id = "openai";
+    oa.models = {mi("gpt-5", "openai")}; oa.ok = true;
+    auto [m2, c2] = app::update(std::move(m1), Msg{std::move(oa)});
+
+    auto openai_state = [](const Model& mm) {
+        for (const auto& c : mm.d.provider_catalogs)
+            if (c.provider_id == "openai") return c.state;
+        return ProviderCatalog::State::Idle;
+    };
+    CHECK(openai_state(m2) == ProviderCatalog::State::Ready);
+
+    // FRESH (just loaded): the deferred wave must NOT refetch it.
+    auto [m3, c3] = app::update(std::move(m2), Msg{FusedRefreshOthers{}});
+    CHECK(openai_state(m3) == ProviderCatalog::State::Ready);   // not Loading
+
+    // Advance past the TTL → now STALE → the deferred wave refetches it.
+    maya::testing::advance_anim_clock_ms(61'000);
+    auto [m4, c4] = app::update(std::move(m3), Msg{FusedRefreshOthers{}});
+    CHECK(openai_state(m4) == ProviderCatalog::State::Loading);  // refetching
+
+    maya::testing::unfreeze_anim_clock();
+}
+
 // The fused MODEL picker never shows "sign in to X" rows for un-authed
 // providers — signing in belongs to the provider picker (^P). Only authed
 // providers' models appear.
