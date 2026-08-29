@@ -1275,12 +1275,16 @@ std::optional<maya::Element> reasoning_slot(const Message& msg, const Model& m) 
     // + left rail) and we hand it the cached body.
     maya::Element body = cached_markdown_for(msg, m, MdView::Reasoning);
 
-    // Live reasoning fades vertically — older thoughts recede, the newest
-    // line glows — so the eye rides the live edge as the model thinks. The
-    // fade is LIVE-only (the widget flattens to a uniform muted aside on
-    // settle), so frozen scrollback stays stable.
+    // Live reasoning as a "thought ticker": the body fades vertically (older
+    // lines recede, newest glow), the newest edge gently BREATHES with the
+    // animation clock, and only the last ~10 line-nodes show while streaming
+    // so a long chain-of-thought stays compact. All three are LIVE-only — the
+    // settled block flattens to the full uniform muted aside, so frozen
+    // scrollback is unchanged.
     maya::ReasoningStream::Config rcfg;
-    rcfg.gradient_body = true;
+    rcfg.gradient_body   = true;
+    rcfg.pulse           = true;
+    rcfg.live_tail_lines = 10;
     maya::ReasoningStream rs{rcfg};
     rs.set_live(active);
     rs.set_char_hint(msg.reasoning_display_text().size());
