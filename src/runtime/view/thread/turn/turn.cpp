@@ -1276,10 +1276,13 @@ std::optional<maya::Element> reasoning_slot(const Message& msg, const Model& m) 
     // the cached body.
     maya::Element body = cached_markdown_for(msg, m, MdView::Reasoning);
 
-    // No dimming — the reasoning renders in its natural full color (markdown
-    // colors preserved), just framed by the chrome (animated header + rail).
+    // Set the reasoning apart from the answer by a soft COOL TINT (+ the rail
+    // and ✦ header), not by washing it out: a readable light lavender that
+    // reads as "reasoning" while staying easy on the eyes — not the dark gray
+    // dim it used to be.
     maya::ReasoningStream::Config rcfg;
-    rcfg.dim_body = false;
+    rcfg.dim_body = true;
+    rcfg.body_fg  = maya::Color::rgb(0xa6, 0xa2, 0xc4); // light lavender-gray
     maya::ReasoningStream rs{rcfg};
     rs.set_live(active);
     rs.set_char_hint(msg.reasoning_display_text().size());
