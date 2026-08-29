@@ -1279,12 +1279,13 @@ std::optional<maya::Element> reasoning_slot(const Message& msg, const Model& m) 
     rs.set_char_hint(msg.reasoning_display_text().size());
 
     if (active) {
-        // WHILE THINKING: a fixed-height window that fades away at the top in
-        // high resolution (per rendered row), so the stream never grows/jumps
-        // and old thoughts dissolve smoothly toward the background while the
-        // newest lines stay readable at the bottom. Pre-styled (own per-row
-        // colors), so the chrome doesn't flatten the fade.
-        constexpr int kFixedRows = 16;
+        // WHILE THINKING: the reasoning GROWS with the stream up to a cap of
+        // ~16 rows; past that it pins and the top fades away in high
+        // resolution (per rendered row) so old thoughts dissolve toward the
+        // background while the newest stay readable at the bottom. Short
+        // reasoning stays short — no big empty container. Pre-styled (owns
+        // its per-row colors) so the chrome doesn't flatten the fade.
+        constexpr int kMaxRows = 16;
         const maya::Color faded = maya::Color::rgb(0x1c, 0x1c, 0x24); // → bg
         const maya::Color full  = maya::Color::rgb(0xb2, 0xb2, 0xbe); // newest
         rcfg.body_prestyled = true;
@@ -1292,7 +1293,7 @@ std::optional<maya::Element> reasoning_slot(const Message& msg, const Model& m) 
         rs.set_live(true);
         rs.set_char_hint(msg.reasoning_display_text().size());
         auto body = maya::ReasoningStream::faded_tail(
-            std::string{msg.reasoning_display_text()}, kFixedRows, faded, full);
+            std::string{msg.reasoning_display_text()}, kMaxRows, faded, full);
         return rs.build_with_body(std::move(body));
     }
 
