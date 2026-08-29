@@ -24,6 +24,7 @@
 #include "agentty/provider/chatgpt/codex_oauth.hpp"
 #include "agentty/provider/registry.hpp"
 #include "agentty/provider/selection.hpp"
+#include "agentty/provider/credentials.hpp"
 #include "agentty/runtime/app/cmd_factory.hpp"
 #include "agentty/runtime/app/deps.hpp"
 #include "agentty/runtime/view/helpers.hpp"
@@ -191,22 +192,14 @@ Step host_probed(Model m, HostProbed r) {
     const std::string spec = std::move(r.spec);
     // PERSIST the keyless host (empty key) so it has a picker row next
     // session — saved_custom_hosts() derives rows from provider_keys.
-    auth::AuthHeader anthropic_creds = deps().auth;
-    if (auto saved = auth::load_credentials())
-        anthropic_creds = auth::make_auth_header(*saved);
-    std::string saved_provider_key;
     {
         auto settings = deps().load_settings();
-        if (auto it = settings.provider_keys.find(spec);
-            it != settings.provider_keys.end())
-            saved_provider_key = it->second;
-        else {
+        if (settings.provider_keys.find(spec) == settings.provider_keys.end()) {
             settings.provider_keys[spec] = "";
             deps().save_settings(settings);
         }
     }
-    auth::AuthHeader new_auth = provider::resolve_auth_for(
-        spec, anthropic_creds, /*cli_key=*/{}, saved_provider_key);
+    auth::AuthHeader new_auth = provider::credentials::resolve(spec);
     m.ui.login = login::Closed{};
     auto step = commit_provider_switch(std::move(m), spec, std::move(new_auth),
                                        provider::provider_display_name(
@@ -436,19 +429,9 @@ Step account_select(Model m) {
         agentty::app::update_auth(auth::AuthHeader{});
     } else {
         // CUSTOM HOST: activate() wrote the switched-to key into
-        // provider_keys[spec], but the LIVE auth header still holds the old
-        // account's key — without this the next request uses the wrong
-        // credential. Re-resolve the header from the freshly-activated key so
-        // the switch takes effect immediately.
-        auto s = deps().load_settings();
-        std::string saved_key;
-        if (auto it = s.provider_keys.find(provider); it != s.provider_keys.end())
-            saved_key = it->second;
-        auth::AuthHeader anthropic_creds = deps().auth;
-        if (auto c = auth::load_credentials())
-            anthropic_creds = auth::make_auth_header(*c);
-        agentty::app::update_auth(provider::resolve_auth_for(
-            provider, anthropic_creds, /*cli_key=*/{}, saved_key));
+        // provider_keys[spec]; re-resolve the LIVE header through the central
+        // resolver so the switch takes effect immediately.
+        agentty::app::update_auth(provider::credentials::resolve(provider));
     }
     const std::string provider_label = al->provider_label;
     m.ui.login = login::Closed{};
@@ -495,18 +478,10 @@ Step account_remove(Model m) {
                 agentty::app::update_auth(auth::AuthHeader{});
             } else {
                 // CUSTOM HOST: activate() wrote the promoted key into
-                // provider_keys[spec]; re-resolve the live header from it so
-                // the promoted account is actually used next turn.
-                auto s = deps().load_settings();
-                std::string saved_key;
-                if (auto it = s.provider_keys.find(row.provider);
-                    it != s.provider_keys.end())
-                    saved_key = it->second;
-                auth::AuthHeader anth = deps().auth;
-                if (auto c = auth::load_credentials())
-                    anth = auth::make_auth_header(*c);
-                agentty::app::update_auth(provider::resolve_auth_for(
-                    row.provider, anth, /*cli_key=*/{}, saved_key));
+                // provider_keys[spec]; re-resolve the live header through the
+                // central resolver so the promoted account is used next turn.
+                agentty::app::update_auth(
+                    provider::credentials::resolve(row.provider));
             }
             m.s.status = "removed " + row.label + " \xc2\xb7 switched to " + next->label;
         } else {
@@ -782,18 +757,7 @@ Step login_submit(Model m) {
         // the spec restored and the reason named. No more committing blind
         // to a dead endpoint and discovering it at the first prompt.
         {
-            auth::AuthHeader anthropic_creds = deps().auth;
-            if (auto saved = auth::load_credentials())
-                anthropic_creds = auth::make_auth_header(*saved);
-            std::string saved_provider_key;
-            {
-                auto settings = deps().load_settings();
-                if (auto it = settings.provider_keys.find(spec);
-                    it != settings.provider_keys.end())
-                    saved_provider_key = it->second;
-            }
-            auth::AuthHeader probe_auth = provider::resolve_auth_for(
-                spec, anthropic_creds, /*cli_key=*/{}, saved_provider_key);
+            auth::AuthHeader probe_auth = provider::credentials::resolve(spec);
             const auto attempt_id = cmd::next_codex_login_attempt_id();
             const auto back = ch->back;
             m.ui.login = login::HostProbing{
@@ -821,32 +785,19 @@ Step login_submit(Model m) {
         // commit the live provider switch the picker deferred. The Anthropic
         // path (empty provider) keeps using credentials.json below.
         if (!provider.empty()) {
+            // Persist the pasted key as this provider's active account (snapshots
+            // any prior key first, so it ADDS, not replaces), and mark the
+            // provider active. add_key is the single implementation of the
+            // "paste a key" flow, shared with credentials::.
+            provider::credentials::add_key(provider, key);
             {
                 auto settings = deps().load_settings();
-                // If a key is ALREADY saved for this provider, preserve it as a
-                // switchable account BEFORE overwriting — otherwise "add
-                // another account" clobbers the current one. snapshot_active
-                // reads the current provider_keys[provider], so do it first.
-                if (auto it = settings.provider_keys.find(provider);
-                    it != settings.provider_keys.end() && !it->second.empty()
-                    && it->second != key) {
-                    if (auto lbl = auth::accounts::derive_current_label(provider);
-                        !lbl.empty())
-                        auth::accounts::snapshot_active(provider, lbl);
-                }
-                settings.provider_keys[provider] = key;
                 settings.provider = provider;
                 deps().save_settings(settings);
             }
-            // Build the new backend's auth from the just-pasted key (it isn't
-            // in deps().load_settings()'s in-memory copy used elsewhere; pass
-            // it as the saved_key so the resolver picks it without a reload).
-            auth::AuthHeader new_auth = provider::resolve_auth_for(
-                provider, deps().auth, /*cli_key=*/{}, /*saved_key=*/key);
+            auth::AuthHeader new_auth = provider::credentials::resolve(provider);
             m.ui.login = login::Closed{};
-            // The saved key persists across the helper's load-modify-save
-            // (persist_settings preserves provider_keys), so the switch is
-            // committed through the ONE shared path like every other entry.
+            // Commit through the ONE shared switch path like every other entry;
             // commit_provider_switch opens the model picker for us.
             return commit_provider_switch(std::move(m), provider,
                                           std::move(new_auth), provider_label);

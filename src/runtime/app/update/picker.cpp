@@ -27,6 +27,7 @@
 #include "agentty/provider/auth_state.hpp"
 #include "agentty/provider/acp_agents.hpp"
 #include "agentty/provider/selection.hpp"
+#include "agentty/provider/credentials.hpp"
 #include "agentty/auth/auth.hpp"
 #include "agentty/auth/accounts.hpp"
 #include "agentty/runtime/login.hpp"
@@ -843,20 +844,9 @@ Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
                 if (is_active)
                     return agentty::app::update(std::move(m), Msg{OpenAccounts{}});
 
-                // Not active — switch to it. Resolve the saved key and commit
-                // directly (no re-entry; the key is already on disk).
-                std::string saved_key;
-                {
-                    auto s = deps().load_settings();
-                    if (auto it = s.provider_keys.find(spec);
-                        it != s.provider_keys.end())
-                        saved_key = it->second;
-                }
-                auth::AuthHeader anthropic_creds = deps().auth;
-                if (auto saved = auth::load_credentials())
-                    anthropic_creds = auth::make_auth_header(*saved);
-                auth::AuthHeader new_auth = provider::resolve_auth_for(
-                    spec, anthropic_creds, /*cli_key=*/{}, saved_key);
+                // Not active — switch to it via the central resolver (the key
+                // is already on disk; resolve reads provider_keys[spec]).
+                auth::AuthHeader new_auth = provider::credentials::resolve(spec);
                 return commit_provider_switch(std::move(m), spec,
                                               std::move(new_auth), spec);
             }
@@ -889,23 +879,11 @@ Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
 
             const std::string spec{preset.id};
 
-            // Resolve the new backend's credentials BEFORE committing so we can
-            // refuse a switch that would land the user in a silently-broken
-            // state. Pass Anthropic creds loaded FRESH from disk, not
-            // deps().auth (which holds the currently-active provider's key).
-            auth::AuthHeader anthropic_creds = deps().auth;
-            if (auto saved = auth::load_credentials())
-                anthropic_creds = auth::make_auth_header(*saved);
-            std::string saved_provider_key;
-            {
-                auto s = deps().load_settings();
-                if (auto it = s.provider_keys.find(spec);
-                    it != s.provider_keys.end())
-                    saved_provider_key = it->second;
-            }
-            auth::AuthHeader new_auth =
-                provider::resolve_auth_for(spec, anthropic_creds,
-                                           /*cli_key=*/{}, saved_provider_key);
+            // Resolve the new backend's credentials BEFORE committing through
+            // the ONE central resolver, so we can refuse a switch that would
+            // land in a silently-broken state — same credential model as every
+            // other switch site.
+            auth::AuthHeader new_auth = provider::credentials::resolve(spec);
 
             // A hosted (non-local) OpenAI-family provider with no resolvable
             // key can't stream. Open the in-app key-entry modal for THIS
@@ -1192,19 +1170,12 @@ void rebuild_fused_rows(Model& m, bool sync_sources) {
 // Resolve the AuthHeader for switching to `spec` (an ALREADY-AUTHED provider,
 // since the fused picker only surfaces authed rows). Delegates to the same
 // resolver the provider picker uses: Anthropic OAuth/key from disk, hosted
-// key from env or saved provider_keys; oauth-native providers ignore it.
+// Resolve auth for switching to `spec` through the ONE central resolver, so
+// the picker uses the same credential model as everything else (no local
+// re-implementation, no anthropic side-channel). oauth-native / local resolve
+// empty here and their transports supply the token.
 auth::AuthHeader resolve_switch_auth(const std::string& spec) {
-    auth::AuthHeader anthropic_creds = deps().auth;
-    if (auto saved = auth::load_credentials())
-        anthropic_creds = auth::make_auth_header(*saved);
-    std::string saved_key;
-    {
-        auto s = deps().load_settings();
-        if (auto it = s.provider_keys.find(spec); it != s.provider_keys.end())
-            saved_key = it->second;
-    }
-    return provider::resolve_auth_for(spec, anthropic_creds,
-                                      /*cli_key=*/{}, saved_key);
+    return provider::credentials::resolve(spec);
 }
 
 // THE atomic switch: make (provider, model) active.
