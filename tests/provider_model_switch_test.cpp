@@ -413,3 +413,31 @@ TEST_CASE("fused picker caches rows and clears them on close") {
     CHECK(!ui::pick::is_open(m3.ui.fused_picker));
     CHECK(m3.d.fused_rows.empty());
 }
+
+// The fused picker tunes reasoning effort (←/→) on the highlighted model,
+// ported from the old model picker so the fused surface is complete.
+TEST_CASE("fused picker cycles reasoning effort") {
+    using namespace agentty::msg;
+    install_stub_deps();
+    g_settings = store::Settings{};
+    g_settings.provider_keys["anthropic"] = "sk-test";
+    provider::select(provider::parse_selection("anthropic"));
+
+    Model m;
+    // An effort-capable model (Claude Opus supports the reasoning ladder).
+    m.d.model_id = ModelId{"claude-opus-4-5"};
+    m.d.effort = Effort::None;
+    m.d.available_models = {mi("claude-opus-4-5", "anthropic")};
+
+    auto [m1, c1] = app::update(std::move(m), Msg{OpenFusedPicker{}});
+    // Cursor on the active (only) model row.
+    if (auto* cur = ui::pick::opened(m1.ui.fused_picker)) cur->index = 0;
+    const Effort before = m1.d.effort;
+    auto [m2, c2] = app::update(std::move(m1), Msg{FusedPickerCycleEffort{+1}});
+    // Effort advanced up the ladder and is marked dirty for persist-on-close.
+    CHECK(m2.d.effort != before);
+    CHECK(m2.ui.effort_dirty);
+    // Closing flushes it (dirty flag cleared).
+    auto [m3, c3] = app::update(std::move(m2), Msg{CloseFusedPicker{}});
+    CHECK(!m3.ui.effort_dirty);
+}

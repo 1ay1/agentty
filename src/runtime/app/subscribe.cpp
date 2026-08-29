@@ -365,6 +365,9 @@ std::optional<Msg> on_fused_picker(const KeyEvent& ev) {
             case SpecialKey::End:      return FusedPickerJump{FusedPickerJump::Where::End};
             case SpecialKey::PageUp:   return FusedPickerJump{FusedPickerJump::Where::PageUp};
             case SpecialKey::PageDown: return FusedPickerJump{FusedPickerJump::Where::PageDown};
+            // ←/→ cycle the highlighted model's reasoning-effort tier.
+            case SpecialKey::Left:     return FusedPickerCycleEffort{-1};
+            case SpecialKey::Right:    return FusedPickerCycleEffort{+1};
             default: break;
         }
     }
@@ -380,6 +383,7 @@ std::optional<Msg> on_fused_picker(const KeyEvent& ev) {
         if (ev.mods.ctrl || raw_ctrl) {
             if (raw_ctrl) c = U'a' + (c - 1);
             if (c == U'f') return FusedPickerToggleFavorite{};
+            if (c == U'e') return FusedPickerToggleReasoning{};
             return std::nullopt;
         }
         // Any other printable codepoint types into the filter query.
@@ -474,7 +478,7 @@ std::optional<Msg> on_provider_picker(const KeyEvent& ev) {
     // model picker). Ctrl-modified chars are reserved for other bindings.
     if (auto* ck = std::get_if<CharKey>(&ev.key)) {
         // Cross-navigation + toggle-close. The footer advertises "^/ models":
-        // ^/ hops to the MODEL picker (OpenModelPicker closes this one), and a
+        // ^/ hops to the fused MODEL picker (spans every provider); a
         // re-press of the open key ^P closes this picker. on_global binds
         // both, but this handler's result is returned unconditionally so
         // neither would reach it — dispatch them here. Normalise the legacy
@@ -482,7 +486,7 @@ std::optional<Msg> on_provider_picker(const KeyEvent& ev) {
         // exactly as on_global does before comparing.
         char32_t c = ck->codepoint;
         const bool raw_ctrl = (c >= 0x01 && c <= 0x1A);
-        if (c == 0x1F || (ev.mods.ctrl && c == U'/')) return OpenModelPicker{};
+        if (c == 0x1F || (ev.mods.ctrl && c == U'/')) return OpenFusedPicker{};
         if (raw_ctrl) c = U'a' + (c - 1);
         const bool ctrl = ev.mods.ctrl || raw_ctrl;
         if (ctrl && (c == U'p' || c == U'P')) return CloseProviderPicker{};

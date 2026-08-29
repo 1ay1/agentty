@@ -420,6 +420,12 @@ struct FusedPickerMove { int delta; };
 struct FusedPickerJump { enum class Where { Home, End, PageUp, PageDown }; Where where; };
 struct FusedPickerSelect {};        // atomic switch to the highlighted row
 struct FusedPickerToggleFavorite {};
+// ←/→ cycles the reasoning-effort tier of the highlighted model; ^E toggles
+// thinking on/off. Ported from the model picker so the fused picker is the
+// COMPLETE "pick + tune your model" surface (the old picker is now only the
+// Smart Mode slot-assignment picker).
+struct FusedPickerCycleEffort { int delta; };
+struct FusedPickerToggleReasoning {};
 struct FusedPickerFilterInput { char32_t ch; };
 struct FusedPickerFilterBackspace {};
 // One authed provider's catalog resolved (async, one per provider on open).
@@ -924,6 +930,7 @@ using ProviderPickerMsg = std::variant<
 using FusedPickerMsg = std::variant<
     OpenFusedPicker, CloseFusedPicker, FusedPickerMove, FusedPickerJump,
     FusedPickerSelect, FusedPickerToggleFavorite,
+    FusedPickerCycleEffort, FusedPickerToggleReasoning,
     FusedPickerFilterInput, FusedPickerFilterBackspace,
     FusedCatalogLoaded, SwitchToPreviousModel>;
 

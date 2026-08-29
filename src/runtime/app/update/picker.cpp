@@ -1086,6 +1086,7 @@ Step fused_picker_update(Model m, msg::FusedPickerMsg pm) {
         [&](CloseFusedPicker) -> Step {
             m.ui.fused_picker = pick::Closed{};
             m.d.fused_rows.clear();       // release the cache while closed
+            if (m.ui.effort_dirty) { persist_settings(m); m.ui.effort_dirty = false; }
             return done(std::move(m));
         },
         [&](FusedPickerMove e) -> Step {
@@ -1173,6 +1174,56 @@ Step fused_picker_update(Model m, msg::FusedPickerMsg pm) {
                 if (r.model.id == mid) r.model.favorite = now_fav;
             return done(std::move(m));
         },
+        [&](FusedPickerCycleEffort e) -> Step {
+            // ←/→ walks the reasoning-effort ladder of the HIGHLIGHTED model
+            // (off → low → medium → high … within what its caps allow). Sets
+            // the global tier applied on the wire; persisted lazily on
+            // close/select via effort_dirty (no per-key disk jank).
+            auto* c = pick::opened(m.ui.fused_picker);
+            if (!c || c->index < 0
+                || c->index >= static_cast<int>(m.d.fused_rows.size()))
+                return done(std::move(m));
+            const auto& row = m.d.fused_rows[static_cast<std::size_t>(c->index)];
+            if (row.is_signin_offer()) return done(std::move(m));
+            const std::string id = row.model.id.value;
+            const auto caps = resolved_caps(id);
+            if (!effort_capable(caps)) return done(std::move(m));
+            m.d.effort = cycle_effort(m.d.effort, e.delta, caps);
+            m.ui.effort_dirty = true;
+            return done(std::move(m));
+        },
+        [&](FusedPickerToggleReasoning) -> Step {
+            // ^E flips the highlighted model's per-model reasoning OVERRIDE
+            // through its tri-state (auto → ON → OFF → auto). Mirrors the
+            // model picker so tuning survives the move to the fused surface.
+            auto* c = pick::opened(m.ui.fused_picker);
+            if (!c || c->index < 0
+                || c->index >= static_cast<int>(m.d.fused_rows.size()))
+                return done(std::move(m));
+            const auto& row = m.d.fused_rows[static_cast<std::size_t>(c->index)];
+            if (row.is_signin_offer()) return done(std::move(m));
+            const std::string id = row.model.id.value;
+            const int cur = reasoning_override_for(id);   // -1 auto, 0 off, 1 on
+            auto s = deps().load_settings();
+            const char* label = nullptr;
+            if (cur < 0) {
+                s.reasoning_effort_overrides[id] = true;
+                set_reasoning_override(id, true);
+                label = "reasoning: forced ON for this model";
+            } else if (cur == 1) {
+                s.reasoning_effort_overrides[id] = false;
+                set_reasoning_override(id, false);
+                label = "reasoning: forced OFF for this model";
+            } else {
+                s.reasoning_effort_overrides.erase(id);
+                clear_reasoning_override(id);
+                label = "reasoning: auto (catalog default)";
+            }
+            deps().save_settings(s);
+            m.d.effort = clamp_effort(m.d.effort, resolved_caps(id));
+            auto toast = set_status_toast(m, label);
+            return {std::move(m), std::move(toast)};
+        },
         [&](SwitchToPreviousModel) -> Step {
             // ^Tab quick-swap: jump to the previous distinct (provider,model).
             hydrate_recents(m);
@@ -1192,6 +1243,7 @@ Step fused_picker_update(Model m, msg::FusedPickerMsg pm) {
             const FusedRow row = m.d.fused_rows[static_cast<std::size_t>(c->index)];
             m.ui.fused_picker = pick::Closed{};
             m.d.fused_rows.clear();
+            m.ui.effort_dirty = false;   // the switch below persists settings
 
             if (row.is_signin_offer()) {
                 // Route to login for that provider, returning here after.
