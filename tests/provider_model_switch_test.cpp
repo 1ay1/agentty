@@ -623,6 +623,43 @@ TEST_CASE("fused active catalog re-seeds when available_models grows") {
     CHECK(fable_row);
 }
 
+// A live catalog landing (ModelsLoaded) while the fused picker is OPEN must
+// refresh its rows in place — the active provider's models arrive via
+// ModelsLoaded (not FusedCatalogLoaded), and the picker was showing a stale
+// snapshot until it was reopened. This is the "fused pane doesn't update" bug.
+TEST_CASE("ModelsLoaded refreshes the open fused picker") {
+    using namespace agentty::msg;
+    install_stub_deps();
+    g_settings = store::Settings{};
+    g_settings.provider_keys["anthropic"] = "sk-test";
+    provider::select(provider::parse_selection("anthropic"));
+
+    Model m;
+    m.d.model_id = ModelId{"claude-opus-4-5"};
+    m.d.available_models = {mi("claude-opus-4-5", "anthropic")};
+    auto [m1, c1] = app::update(std::move(m), Msg{OpenFusedPicker{}});
+
+    // A newer model isn't in the open picker yet.
+    bool before = false;
+    for (const auto& r : m1.d.fused_rows)
+        if (r.model.id.value == "claude-fable-5") before = true;
+    CHECK(!before);
+
+    // The active provider's live /v1/models fetch lands a new flagship.
+    ModelsLoaded ml;
+    ml.provider_id = "anthropic";
+    ml.models = {mi("claude-opus-4-5", "anthropic"),
+                 mi("claude-fable-5", "anthropic")};
+    auto [m2, c2] = app::update(std::move(m1), Msg{std::move(ml)});
+
+    // The OPEN picker's rows refreshed in place — no reopen needed.
+    CHECK(ui::pick::opened(m2.ui.fused_picker));
+    bool after = false;
+    for (const auto& r : m2.d.fused_rows)
+        if (r.model.id.value == "claude-fable-5") after = true;
+    CHECK(after);
+}
+
 // The provider picker's ^D (Mac-reachable stand-in for forward-Delete)
 // signs out of a preset that has a saved key: first ^D arms, second commits
 // (clears the key). openrouter is the reported case.

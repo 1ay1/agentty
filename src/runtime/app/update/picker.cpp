@@ -77,6 +77,7 @@ std::vector<int> model_filtered(const std::vector<ModelInfo>& models,
 void record_recent(Model& m, const std::string& provider_id,
                    const std::string& model_id);
 void hydrate_recents(Model& m);
+void rebuild_fused_rows(Model& m);
 } // namespace
 using maya::Cmd;
 
@@ -277,6 +278,19 @@ Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
                 for (int i = 0; i < static_cast<int>(vis.size()); ++i)
                     if (m.d.available_models[static_cast<std::size_t>(vis[static_cast<std::size_t>(i)])].id
                         == m.d.model_id) { p->index = i; break; }
+            }
+            // If the FUSED picker is open, the active provider's catalog just
+            // changed (available_models is its source), so its rows are stale
+            // — rebuild them. rebuild_fused_rows re-mirrors available_models
+            // into the active catalog and re-ranks, so a newly-listed model
+            // (e.g. one the live /v1/models fetch just added) appears without
+            // reopening the picker. Clamp the cursor to the new row count.
+            if (auto* c = pick::opened(m.ui.fused_picker)) {
+                rebuild_fused_rows(m);
+                const int n = static_cast<int>(m.d.fused_rows.size());
+                if (n == 0) c->index = 0;
+                else if (c->index >= n) c->index = n - 1;
+                else if (c->index < 0) c->index = 0;
             }
             return done(std::move(m));
         },
@@ -1066,6 +1080,12 @@ namespace {
 // so the view + cursor math never re-enumerate providers or re-read
 // settings.json per frame or per keystroke.
 void rebuild_fused_rows(Model& m) {
+    // Re-sync the sources FIRST: mirror the active provider's live
+    // available_models into its catalog + pick up any newly-authed provider.
+    // Without this a rebuild re-ranks the STALE catalog, so a model the live
+    // /v1/models fetch just added (ModelsLoaded) never reaches the open
+    // picker — the "fused pane doesn't update" bug.
+    refresh_fused_sources(m);
     // Keep each catalog's precomputed, lowercased fuzzy keys in sync with its
     // model set. This is the SINGLE place the filter consumes catalogs, so
     // keys built here are reused across every keystroke — the per-key filter
@@ -1211,6 +1231,12 @@ Step fused_picker_update(Model m, msg::FusedPickerMsg pm) {
                 c.state = ProviderCatalog::State::Loading;
                 fetches.push_back(cmd::fetch_models_for(c.provider_id));
             }
+            // The ACTIVE provider's catalog was seeded Ready from
+            // available_models above, so the loop skips it — but that snapshot
+            // can be stale (bundled floor, or a catalog that grew upstream).
+            // Refetch it via fetch_models() (→ ModelsLoaded, which rebuilds the
+            // open fused rows) so its live models refresh without reopening.
+            fetches.push_back(cmd::fetch_models());
             rebuild_fused_rows(m);       // seed the cache the view reads
             return {std::move(m), maya::Cmd<Msg>::batch(std::move(fetches))};
         },
