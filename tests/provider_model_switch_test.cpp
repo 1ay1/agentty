@@ -434,12 +434,30 @@ TEST_CASE("fused picker cycles reasoning effort") {
     if (auto* cur = ui::pick::opened(m1.ui.fused_picker)) cur->index = 0;
     const Effort before = m1.d.effort;
     auto [m2, c2] = app::update(std::move(m1), Msg{FusedPickerCycleEffort{+1}});
-    // Effort advanced up the ladder and is marked dirty for persist-on-close.
-    CHECK(m2.d.effort != before);
-    CHECK(m2.ui.effort_dirty);
-    // Closing flushes it (dirty flag cleared).
-    auto [m3, c3] = app::update(std::move(m2), Msg{CloseFusedPicker{}});
-    CHECK(!m3.ui.effort_dirty);
+    // ←/→ STAGES the tier on the picker row — it must NOT leak onto the
+    // global/active-model effort mid-browse (that would retune a model the
+    // user never selected, and Esc would revert nothing).
+    CHECK(m2.d.effort == before);
+    CHECK(!m2.ui.effort_dirty);
+    const auto* staged = ui::pick::opened(m2.ui.fused_picker);
+    REQUIRE(staged != nullptr);
+    CHECK(staged->staged_effort >= 0);
+    CHECK(static_cast<Effort>(staged->staged_effort) != before);
+    const Effort staged_tier = static_cast<Effort>(staged->staged_effort);
+
+    // Select commits the staged tier to the active model's effort.
+    auto [m3, c3] = app::update(std::move(m2), Msg{FusedPickerSelect{}});
+    CHECK(m3.d.effort == staged_tier);
+    CHECK(!ui::pick::opened(m3.ui.fused_picker));  // picker closed on select
+
+    // Moving to a different row (or Esc) discards a staged edit — no leak.
+    auto [m4, c4] = app::update(std::move(m3), Msg{OpenFusedPicker{}});
+    if (auto* cur = ui::pick::opened(m4.ui.fused_picker)) cur->index = 0;
+    const Effort before4 = m4.d.effort;
+    auto [m5, c5] = app::update(std::move(m4), Msg{FusedPickerCycleEffort{+1}});
+    auto [m6, c6] = app::update(std::move(m5), Msg{CloseFusedPicker{}});
+    CHECK(m6.d.effort == before4);        // Esc discarded the staged edit
+    CHECK(!m6.ui.effort_dirty);
 }
 
 // ^/ toggles between the fused (all-providers) picker and the classic

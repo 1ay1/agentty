@@ -506,10 +506,17 @@ Element fused_picker(const Model& m) {
         if (!hl.is_signin_offer()) {
             const auto caps = resolved_caps(hl.model.id.value);
             if (effort_capable(caps)) {
+                // Show the tier THIS row would use: the staged ←/→ edit if the
+                // user has one in flight, else the global effort clamped to
+                // this model's caps. Never the raw global tier — that would
+                // lie about a highlighted model whose caps cap it lower.
+                const Effort chip_effort = picker->staged_effort >= 0
+                    ? static_cast<Effort>(picker->staged_effort)
+                    : clamp_effort(m.d.effort, caps);
                 std::vector<Element> parts;
                 parts.push_back(text("reasoning ", fg_dim(muted)));
                 parts.push_back(text("\xe2\x97\x87 ", fg_of(accent)));   // ◇
-                parts.push_back(text(std::string{effort_label(m.d.effort)},
+                parts.push_back(text(std::string{effort_label(chip_effort)},
                                      fg_bold(accent)));
                 parts.push_back(text("   \xe2\x86\x90/\xe2\x86\x92 tier \xc2\xb7 ^E toggle",
                                      fg_dim(muted)));
