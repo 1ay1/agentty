@@ -177,7 +177,16 @@ struct Model {
         // Settings.recent_models.
         std::vector<ProviderCatalog> provider_catalogs;
         std::vector<ModelRef>        recent_models;
-
+        // Cached fused-picker row list, rebuilt by the reducer ONLY when its
+        // inputs change (open / filter / catalog-loaded / favorite) so the
+        // view and cursor math read a ready vector every frame instead of
+        // re-enumerating providers + re-reading settings.json + re-scoring
+        // every model per keystroke. Empty while the picker is closed.
+        std::vector<FusedRow>        fused_rows;
+        // Sign-in offers (un-authed providers) computed ONCE when the fused
+        // picker opens, so per-keystroke row rebuilds never re-derive auth
+        // from disk. Paired with provider_catalogs as the picker's sources.
+        std::vector<SigninOffer>     fused_offers;
         // Reasoning effort tier, selected live in the model picker (←/→).
         // None = the default no-thinking wire; any other level makes the
         // Claude provider send adaptive thinking + output_config.effort.
@@ -431,6 +440,7 @@ struct Model {
         }
         mutable maya::ScrollState model_picker_scroll     = routed_scroll();
         mutable maya::ScrollState provider_picker_scroll  = routed_scroll();
+        mutable maya::ScrollState fused_picker_scroll     = routed_scroll();
         mutable maya::ScrollState thread_list_scroll      = routed_scroll();
         mutable maya::ScrollState command_palette_scroll  = routed_scroll();
         mutable maya::ScrollState mention_palette_scroll  = routed_scroll();

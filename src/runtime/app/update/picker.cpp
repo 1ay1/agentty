@@ -896,66 +896,78 @@ void hydrate_recents(Model& m) {
     }
 }
 
-// Build the fused inputs from the current Model: authed providers become
-// catalogs, un-authed registry providers become sign-in offers. The active
-// provider's live catalog (available_models) seeds its entry so the picker is
-// never empty on open.
-ui::FusedInputs fused_inputs(const Model& m,
-                             std::vector<ProviderCatalog>& catalogs_out,
-                             std::vector<ui::SigninOffer>& offers_out) {
+// Refresh the picker's SOURCES into the Model — the expensive pass (one
+// settings read + provider enumeration + auth checks), run ONCE when the
+// picker opens (and after a provider signs in), never per keystroke. Seeds
+// every authed provider's catalog from its bundled list immediately (empty
+// auth ⇒ no network) so the picker opens instantly FULL; the async fetch then
+// refreshes with live data. Un-authed providers become sign-in offers.
+void refresh_fused_sources(Model& m) {
     const auto settings = deps().load_settings();
     const std::string active_pid = active_provider_id();
 
-    // Start from whatever catalogs we've already merged this session.
-    catalogs_out = m.d.provider_catalogs;
     auto find_cat = [&](std::string_view id) -> ProviderCatalog* {
-        for (auto& c : catalogs_out) if (c.provider_id == id) return &c;
+        for (auto& c : m.d.provider_catalogs)
+            if (c.provider_id == id) return &c;
         return nullptr;
     };
+    m.d.fused_offers.clear();
 
     for (const auto& p : provider::providers()) {
         const std::string id{p.id};
-        if (provider::provider_is_authed(p, settings)) {
-            ProviderCatalog* c = find_cat(id);
-            if (!c) {
-                catalogs_out.push_back(ProviderCatalog{
-                    id, std::string{p.label},
-                    ProviderCatalog::State::Idle, {}, {}});
-                c = &catalogs_out.back();
-            }
-            // Seed the ACTIVE provider from the live list immediately.
-            if (id == active_pid && c->models.empty()
-                && !m.d.available_models.empty()) {
-                c->models = m.d.available_models;
-                c->state  = ProviderCatalog::State::Ready;
-            }
+        if (!provider::provider_is_authed(p, settings)) {
+            m.d.fused_offers.push_back(SigninOffer{id, std::string{p.label}});
+            continue;
+        }
+        ProviderCatalog* c = find_cat(id);
+        if (!c) {
+            m.d.provider_catalogs.push_back(ProviderCatalog{
+                id, std::string{p.label}, ProviderCatalog::State::Idle, {}, {}});
+            c = &m.d.provider_catalogs.back();
+        }
+        if (!c->models.empty()) continue;         // already have a list
+        if (id == active_pid && !m.d.available_models.empty()) {
+            // Active provider: use the live catalog already in hand.
+            c->models = m.d.available_models;
+            c->state  = ProviderCatalog::State::Ready;
         } else {
-            offers_out.push_back(ui::SigninOffer{id, std::string{p.label}});
+            // Others: bundled seed (empty auth ⇒ no I/O) for an instant, full
+            // list. State stays Idle so Open still fires a background refresh.
+            try {
+                c->models = provider::list_models_for(
+                    provider::parse_selection(id), {});
+            } catch (...) { /* leave empty; fetch will fill */ }
         }
     }
-
-    ui::FusedInputs in;
-    in.catalogs   = &catalogs_out;
-    in.offers     = &offers_out;
-    in.recents    = &m.d.recent_models;
-    in.active     = ModelRef{active_pid, m.d.model_id.value};
-    in.recent_cap = kRecentCap;
-    return in;
 }
 
 } // namespace
 
 // Shared builder used by BOTH this reducer and the fused_picker view, so the
 // row list they act on can never disagree (SSOT). Declared in internal.hpp.
+// PURE: builds only from the already-refreshed sources (provider_catalogs +
+// fused_offers) + the live query — no disk, no enumeration, so it is cheap
+// enough to run on every keystroke.
 std::vector<FusedRow> fused_rows_for_model(const Model& m) {
-    std::vector<ProviderCatalog> cats;
-    std::vector<ui::SigninOffer>  offers;
-    auto in = fused_inputs(m, cats, offers);
+    ui::FusedInputs in;
+    in.catalogs   = &m.d.provider_catalogs;
+    in.offers     = &m.d.fused_offers;
+    in.recents    = &m.d.recent_models;
+    in.active     = ModelRef{active_provider_id(), m.d.model_id.value};
+    in.recent_cap = kRecentCap;
     if (auto* c = pick::opened(m.ui.fused_picker)) in.query = c->query;
     return ui::build_fused_rows(in);
 }
 
 namespace {
+
+// Rebuild the cached row list into m.d.fused_rows. Called by the reducer ONLY
+// at the points its inputs change (open / filter / catalog-loaded / favorite)
+// so the view + cursor math never re-enumerate providers or re-read
+// settings.json per frame or per keystroke.
+void rebuild_fused_rows(Model& m) {
+    m.d.fused_rows = fused_rows_for_model(m);
+}
 
 // Resolve the AuthHeader for switching to `spec` (an ALREADY-AUTHED provider,
 // since the fused picker only surfaces authed rows). Delegates to the same
@@ -1048,7 +1060,7 @@ Step fused_picker_update(Model m, msg::FusedPickerMsg pm) {
     // Clamp the cursor to the current row count after any list change.
     auto clamp_cursor = [](Model& mm) {
         if (auto* c = pick::opened(mm.ui.fused_picker)) {
-            const int n = static_cast<int>(fused_rows_for_model(mm).size());
+            const int n = static_cast<int>(mm.d.fused_rows.size());
             if (n == 0) { c->index = 0; return; }
             if (c->index < 0)  c->index = 0;
             if (c->index >= n) c->index = n - 1;
@@ -1059,23 +1071,24 @@ Step fused_picker_update(Model m, msg::FusedPickerMsg pm) {
         [&](OpenFusedPicker) -> Step {
             hydrate_recents(m);
             m.ui.fused_picker = pick::OpenAt{0, ""};
-            // Fan out a catalog fetch for every authed provider whose catalog
-            // isn't Ready yet — lazy, concurrent, non-blocking. The active
-            // provider is already seeded from available_models.
-            std::vector<ProviderCatalog> cats;
-            std::vector<ui::SigninOffer>  offers;
-            fused_inputs(m, cats, offers);
-            m.d.provider_catalogs = cats;   // persist the seeded/idle set
+            // ONE expensive pass: enumerate providers, read settings, seed
+            // every authed provider's catalog from its bundled list so the
+            // picker opens instantly full.
+            refresh_fused_sources(m);
+            // Background-refresh each authed provider with its LIVE catalog
+            // (concurrent, non-blocking); the seeded list shows meanwhile.
             std::vector<maya::Cmd<Msg>> fetches;
             for (auto& c : m.d.provider_catalogs) {
                 if (c.state == ProviderCatalog::State::Ready) continue;
                 c.state = ProviderCatalog::State::Loading;
                 fetches.push_back(cmd::fetch_models_for(c.provider_id));
             }
+            rebuild_fused_rows(m);       // seed the cache the view reads
             return {std::move(m), maya::Cmd<Msg>::batch(std::move(fetches))};
         },
         [&](CloseFusedPicker) -> Step {
             m.ui.fused_picker = pick::Closed{};
+            m.d.fused_rows.clear();       // release the cache while closed
             return done(std::move(m));
         },
         [&](FusedPickerMove e) -> Step {
@@ -1087,7 +1100,7 @@ Step fused_picker_update(Model m, msg::FusedPickerMsg pm) {
         },
         [&](FusedPickerJump e) -> Step {
             if (auto* c = pick::opened(m.ui.fused_picker)) {
-                const int n = static_cast<int>(fused_rows_for_model(m).size());
+                const int n = static_cast<int>(m.d.fused_rows.size());
                 using W = FusedPickerJump::Where;
                 switch (e.where) {
                     case W::Home:     c->index = 0; break;
@@ -1105,6 +1118,8 @@ Step fused_picker_update(Model m, msg::FusedPickerMsg pm) {
                 if (e.ch >= 0x20 && e.ch < 0x7f) {
                     c->query.push_back(static_cast<char>(e.ch));
                     c->index = 0;
+                    rebuild_fused_rows(m);   // query changed → rows changed
+                    clamp_cursor(m);
                 }
             }
             return done(std::move(m));
@@ -1113,6 +1128,8 @@ Step fused_picker_update(Model m, msg::FusedPickerMsg pm) {
             if (auto* c = pick::opened(m.ui.fused_picker); c && !c->query.empty()) {
                 c->query.pop_back();
                 c->index = 0;
+                rebuild_fused_rows(m);
+                clamp_cursor(m);
             }
             return done(std::move(m));
         },
@@ -1130,23 +1147,33 @@ Step fused_picker_update(Model m, msg::FusedPickerMsg pm) {
                 }
                 break;
             }
-            clamp_cursor(m);   // selection is index-based; keep it in range
+            // Only the fused picker's own list depends on the merged catalogs;
+            // rebuild it (cheap, once per resolving provider) if it's open.
+            if (pick::is_open(m.ui.fused_picker)) {
+                rebuild_fused_rows(m);
+                clamp_cursor(m);
+            }
             return done(std::move(m));
         },
         [&](FusedPickerToggleFavorite) -> Step {
-            auto rows = fused_rows_for_model(m);
             auto* c = pick::opened(m.ui.fused_picker);
-            if (!c || c->index < 0 || c->index >= static_cast<int>(rows.size()))
+            if (!c || c->index < 0
+                || c->index >= static_cast<int>(m.d.fused_rows.size()))
                 return done(std::move(m));
-            const auto& row = rows[static_cast<std::size_t>(c->index)];
+            const auto& row = m.d.fused_rows[static_cast<std::size_t>(c->index)];
             if (row.is_signin_offer()) return done(std::move(m));
             auto s = deps().load_settings();
             ModelId mid = row.model.id;
             auto it = std::find(s.favorite_models.begin(),
                                 s.favorite_models.end(), mid);
-            if (it != s.favorite_models.end()) s.favorite_models.erase(it);
-            else                               s.favorite_models.push_back(mid);
+            const bool now_fav = (it == s.favorite_models.end());
+            if (now_fav) s.favorite_models.push_back(mid);
+            else         s.favorite_models.erase(it);
             deps().save_settings(s);
+            // Live feedback: flip the star on every cached row for this model
+            // (no re-sort — keep the cursor where it is).
+            for (auto& r : m.d.fused_rows)
+                if (r.model.id == mid) r.model.favorite = now_fav;
             return done(std::move(m));
         },
         [&](SwitchToPreviousModel) -> Step {
@@ -1161,12 +1188,13 @@ Step fused_picker_update(Model m, msg::FusedPickerMsg pm) {
             return switch_to_model_ref(std::move(m), target);
         },
         [&](FusedPickerSelect) -> Step {
-            auto rows = fused_rows_for_model(m);
             auto* c = pick::opened(m.ui.fused_picker);
-            if (!c || c->index < 0 || c->index >= static_cast<int>(rows.size()))
+            if (!c || c->index < 0
+                || c->index >= static_cast<int>(m.d.fused_rows.size()))
                 return done(std::move(m));
-            const FusedRow row = rows[static_cast<std::size_t>(c->index)];
+            const FusedRow row = m.d.fused_rows[static_cast<std::size_t>(c->index)];
             m.ui.fused_picker = pick::Closed{};
+            m.d.fused_rows.clear();
 
             if (row.is_signin_offer()) {
                 // Route to login for that provider, returning here after.

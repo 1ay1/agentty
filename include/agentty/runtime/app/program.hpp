@@ -162,6 +162,14 @@ struct AgenttyApp {
             mix(static_cast<std::uint64_t>(c.models.size()));
             mix(static_cast<std::uint64_t>(c.state));
         }
+        // The fused row cache itself: fold its size + each row's favorite /
+        // active bit so a ^F favourite-toggle (which mutates rows without
+        // touching catalogs or the query) still re-renders. Only populated
+        // while the picker is open, so this is bounded and cheap.
+        mix(static_cast<std::uint64_t>(m.d.fused_rows.size()));
+        for (const auto& r : m.d.fused_rows)
+            mix(static_cast<std::uint64_t>((r.model.favorite ? 1u : 0u)
+                                         | (r.active ? 2u : 0u)));
         mix(static_cast<std::uint64_t>(m.ui.thread_list.index()));
         mix(static_cast<std::uint64_t>(ui::pick::index_or(m.ui.thread_list)));
         mix(static_cast<std::uint64_t>(m.ui.diff_review.index()));

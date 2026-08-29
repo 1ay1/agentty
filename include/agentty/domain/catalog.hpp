@@ -59,6 +59,14 @@ struct ProviderCatalog {
     std::string account_label;            // active account on this provider
 };
 
+// A provider the user is NOT signed into — rendered as a single "sign in to
+// <label>" offer at the bottom of the fused list. Stored on the Model so the
+// per-keystroke rebuild never re-derives auth from disk.
+struct SigninOffer {
+    std::string provider_id;
+    std::string label;
+};
+
 // A single rendered row in the FUSED cross-provider picker: a concrete
 // (provider, model) the user can switch to atomically, OR — when
 // `model.id` is empty and `authed` is false — a "sign in to <provider>"
