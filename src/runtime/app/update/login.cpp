@@ -275,6 +275,15 @@ std::string account_provider_id(const provider::Selection& sel) {
     if (sel.is_kimi())                    return "kimi";
     if (sel.is_chatgpt())                 return "chatgpt";
     if (sel.kind == provider::Kind::Anthropic) return "anthropic";
+    // Custom OpenAI-compatible host (user-added endpoint that isn't a built-in
+    // preset): its account provider id IS the endpoint spec == the key under
+    // which its bearer key lives in Settings.provider_keys. This lets a custom
+    // host hold MULTIPLE keys (accounts) switchable through the same list as
+    // the OAuth providers. Hosted API-key presets (openrouter/groq/…) have a
+    // registry preset and stay single-account.
+    if (sel.kind == provider::Kind::OpenAI
+        && !provider::preset_for(sel.openai_endpoint.label))
+        return sel.openai_endpoint.label;
     return {};   // no account switching for this provider
 }
 

@@ -18,6 +18,8 @@
 
 #include "agentty/auth/auth.hpp"
 #include "agentty/auth/cred_crypt.hpp"
+#include "agentty/io/persistence.hpp"       // load/save_settings (custom hosts)
+#include "agentty/provider/registry.hpp"      // preset_for (custom-host detect)
 #include "agentty/provider/chatgpt/codex_oauth.hpp"
 #include "agentty/provider/copilot/copilot_oauth.hpp"
 #include "agentty/provider/kimi/kimi_oauth.hpp"
@@ -84,9 +86,29 @@ std::optional<std::string> body_of(const std::string& blob) {
     return blob;
 }
 
+// A CUSTOM HOST's account provider id IS its endpoint spec (the key under
+// which its bearer key lives in Settings.provider_keys). Custom hosts have no
+// credential FILE — their "active credential" is that provider_keys[spec]
+// entry — so the four file-backed providers (and empty→anthropic) are NOT
+// custom hosts; everything else non-empty is treated as a spec. (preset_for
+// would reject built-in preset ids too, but those never reach here as an
+// account provider id — account_provider_id only returns a spec for a
+// non-preset OpenAI endpoint.)
+bool is_custom_host_provider(const std::string& p) {
+    return !p.empty() && p != "anthropic" && p != "chatgpt"
+        && p != "copilot" && p != "kimi";
+}
+
 } // namespace
 
 bool snapshot_active(const std::string& provider, const std::string& label) {
+    // Custom host: capture the bearer key from Settings.provider_keys[spec].
+    if (is_custom_host_provider(provider)) {
+        auto s = agentty::persistence::load_settings();
+        auto it = s.provider_keys.find(provider);
+        if (it == s.provider_keys.end() || it->second.empty()) return false;
+        return upsert(provider, label, it->second);
+    }
     auto file = active_store_file(provider);
     if (!file) return false;
     auto blob = read_all(*file);
@@ -97,6 +119,15 @@ bool snapshot_active(const std::string& provider, const std::string& label) {
 bool activate(const std::string& provider, const std::string& label) {
     auto slot = get(provider, label);
     if (!slot) return false;
+    // Custom host: the account's secret IS its bearer key. Write it back to
+    // Settings.provider_keys[spec] (the endpoint the resolver reads), then
+    // mark it active. No credential file / keystore round-trip involved.
+    if (is_custom_host_provider(provider)) {
+        auto s = agentty::persistence::load_settings();
+        s.provider_keys[provider] = slot->secret;
+        agentty::persistence::save_settings(s);
+        return set_active(provider, label);
+    }
     auto file = active_store_file(provider);
     if (!file) return false;
     if (!write_store(*file, slot->secret)) return false;
@@ -122,6 +153,16 @@ bool activate(const std::string& provider, const std::string& label) {
 }
 
 std::string derive_current_label(const std::string& provider) {
+    // Custom host: label by a short suffix of the bearer key so two distinct
+    // keys for the same endpoint get two distinct, recognisable rows.
+    if (is_custom_host_provider(provider)) {
+        auto s = agentty::persistence::load_settings();
+        auto it = s.provider_keys.find(provider);
+        if (it == s.provider_keys.end() || it->second.empty()) return {};
+        const std::string& key = it->second;
+        std::string tag = key.size() >= 4 ? key.substr(key.size() - 4) : key;
+        return "key \xe2\x80\xa6" + tag;   // key …abcd
+    }
     auto file = active_store_file(provider);
     if (!file) return {};
     auto blob = read_all(*file);

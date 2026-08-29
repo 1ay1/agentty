@@ -689,7 +689,10 @@ Element provider_picker(const Model& m) {
     const bool row_has_accounts = [&] {
         if (picker->index < 0 || picker->index >= static_cast<int>(rows.size()))
             return false;
-        const auto* p = rows[static_cast<std::size_t>(picker->index)].preset();
+        const auto& row = rows[static_cast<std::size_t>(picker->index)];
+        // Custom hosts hold multiple keys (accounts) too — Enter drills in.
+        if (row.custom_host()) return true;
+        const auto* p = row.preset();
         if (!p) return false;
         return p->id == "chatgpt" || p->id == "copilot" || p->id == "kimi"
             || p->kind() == provider::Kind::Anthropic;

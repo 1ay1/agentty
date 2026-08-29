@@ -24,6 +24,11 @@
 #include "agentty/runtime/provider_rows.hpp"
 #include "agentty/provider/selection.hpp"
 #include "agentty/domain/bundled_catalog.hpp"
+#include "agentty/auth/accounts.hpp"
+#include "agentty/io/persistence.hpp"
+
+#include <cstdlib>
+#include <unistd.h>
 
 #include <optional>
 #include <string>
@@ -659,6 +664,55 @@ TEST_CASE("provider picker: Enter opens accounts on active OAuth provider") {
     auto [m2, c2] = app::update(std::move(m1), Msg{ProviderPickerSelect{}});
     CHECK(std::holds_alternative<ui::login::AccountList>(m2.ui.login));
     CHECK(!ui::pick::opened(m2.ui.provider_picker));  // picker closed
+}
+
+// A custom host can hold MULTIPLE saved keys (accounts): the accounts layer
+// keys on the endpoint spec, storing each key as the account secret. Snapshot
+// then activate must round-trip the bearer key through provider_keys[spec].
+TEST_CASE("custom host supports multiple accounts") {
+    using namespace agentty::msg;
+    namespace acc = agentty::auth::accounts;
+    // account_switch reads/writes the REAL settings + accounts.json (via
+    // config_dir()/data_dir() → home_dir()), not the deps stub. Point HOME at
+    // a throwaway dir so this test never touches the user's real config.
+    const auto tmp = std::filesystem::temp_directory_path()
+                   / ("agentty_acct_test_" + std::to_string(::getpid()));
+    std::filesystem::remove_all(tmp);
+    std::filesystem::create_directories(tmp);
+    const char* old_home = ::getenv("HOME");
+    ::setenv("HOME", tmp.c_str(), 1);
+
+    install_stub_deps();
+    const std::string spec = "my-host:8080/v1";   // not a preset ⇒ custom host
+
+    auto set_key = [&](const std::string& k) {
+        auto s = agentty::persistence::load_settings();
+        s.provider_keys[spec] = k;
+        agentty::persistence::save_settings(s);
+    };
+    auto get_key = [&]() {
+        return agentty::persistence::load_settings().provider_keys[spec];
+    };
+
+    // Account A active: snapshot it into the registry.
+    set_key("sk-aaaa1111");
+    CHECK(acc::snapshot_active(spec, "A"));
+
+    // Switch the active key to B and snapshot that too.
+    set_key("sk-bbbb2222");
+    CHECK(acc::snapshot_active(spec, "B"));
+
+    // Both accounts are listed for this host.
+    CHECK(acc::list_for(spec).size() == 2);
+
+    // Activating A restores its key into provider_keys[spec]; then B.
+    CHECK(acc::activate(spec, "A"));
+    CHECK(get_key() == "sk-aaaa1111");
+    CHECK(acc::activate(spec, "B"));
+    CHECK(get_key() == "sk-bbbb2222");
+
+    if (old_home) ::setenv("HOME", old_home, 1); else ::unsetenv("HOME");
+    std::filesystem::remove_all(tmp);
 }
 
 // The fused picker tunes reasoning effort (←/→) on the highlighted model,

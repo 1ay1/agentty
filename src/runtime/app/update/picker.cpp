@@ -782,6 +782,20 @@ Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
             // directly — no re-entry, because the key is already on disk.
             if (const std::string* spec_ptr = chosen.custom_host()) {
                 const std::string spec = *spec_ptr;
+                // If this custom host is ALREADY the active provider, Enter
+                // opens its accounts drill-down (a custom host can hold
+                // multiple saved keys, switchable like the OAuth providers —
+                // account_provider_id returns the spec for a custom OpenAI
+                // endpoint). Esc from that list closes the whole picker.
+                const auto& active = provider::active();
+                const bool is_active =
+                    active.kind == provider::Kind::OpenAI
+                    && active.openai_endpoint.label == spec;
+                if (is_active)
+                    return agentty::app::update(std::move(m), Msg{OpenAccounts{}});
+
+                // Not active — switch to it. Resolve the saved key and commit
+                // directly (no re-entry; the key is already on disk).
                 std::string saved_key;
                 {
                     auto s = deps().load_settings();
