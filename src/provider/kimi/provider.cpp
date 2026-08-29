@@ -9,6 +9,7 @@
 // On a 401 (token revoked early) we invalidate + refresh once and retry.
 
 #include "agentty/provider/kimi/provider.hpp"
+#include "agentty/domain/bundled_catalog.hpp"
 
 #include <chrono>
 #include <mutex>
@@ -133,13 +134,9 @@ provider::StreamResult KimiProvider::stream(provider::Request req,
 
 // ── Model listing ────────────────────────────────────────────────────────────
 static std::vector<ModelInfo> bundled_models() {
-    // Conservative fallback when offline / not signed in. The live catalog
-    // supersedes this the moment the account can be reached.
-    auto mk = [](const char* id) {
-        return ModelInfo{ .id = ModelId{id}, .display_name = id, .provider = "kimi" };
-    };
-    return { mk("kimi-k2-turbo-preview"), mk("kimi-k2-0905-preview"),
-             mk("kimi-k2-0711-preview") };
+    // Single bundled catalog; the live catalog supersedes it the moment the
+    // account can be reached.
+    return catalog::bundled("kimi");
 }
 
 std::vector<ModelInfo> list_models() {

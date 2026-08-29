@@ -20,6 +20,7 @@
 #include <nlohmann/json.hpp>
 
 #include "agentty/domain/catalog.hpp"
+#include "agentty/domain/bundled_catalog.hpp"
 #include "agentty/io/http.hpp"
 #include "agentty/provider/stream_epilogue.hpp"
 #include "agentty/provider/wire.hpp"
@@ -684,66 +685,18 @@ std::vector<Msg> parse_sse_for_test(
 std::vector<ModelInfo> list_models(const AuthHeader& auth) {
     const bool is_oauth = std::holds_alternative<BearerHeader>(auth);
 
-    // Claude Code's model catalog offers a 1M-context window as a distinct
-    // picker VARIANT: for every model whose catalog entry has
-    // `supports_1m_suffix:true`, it surfaces a second `<id>[1m]` row (labelled
-    // "(1M context)") gated by the account's `context_1m_entitlement`. The
-    // base id stays 200k; the `[1m]` id is 1M. We mirror that: after building
-    // the base catalog, append a `[1m]` companion for each suffix-capable
-    // model. We use OAuth (Pro/Max) as the entitlement proxy — a raw API key
-    // on a lower usage tier can be capped at 200k and would 400 on a >200k
-    // request, so we don't surface the 1M variant there. The `[1m]` id both
-    // widens context_window() to 1M and makes the transport send the
-    // context-1m-2025-08-07 beta (via ModelCapabilities::extended_context_1m).
-    // The `[1m]` companion is inserted immediately AFTER its base model so the
-    // picker reads "Opus 4.8" / "Opus 4.8 (1M context)" adjacently instead of
-    // clumping every 1M row at the bottom.
-    auto add_1m_variants = [](std::vector<ModelInfo>& v) {
-        // Offer the `[1m]` companion for EVERY suffix-capable model, on any
-        // auth kind. It used to early-return unless is_oauth (BearerHeader),
-        // but that was both fragile and wrong: (1) it broke silently whenever
-        // the auth representation shifted (e.g. an account stored as an API
-        // key resolves to ApiKeyHeader, not BearerHeader) — the 1M rows would
-        // vanish for a user who genuinely has the entitlement; (2) Tier 3/4
-        // API keys have 1M access too. The account may still lack the
-        // entitlement, but that is handled downstream and self-heals: a 1M
-        // request that 400s with the long-context-beta rejection sets
-        // Settings.context_1m_blocked, and the ModelsLoaded reducer then
-        // strips the `[1m]` rows. So the offer is safe to make broadly.
-        std::vector<ModelInfo> out;
-        out.reserve(v.size() * 2);
-        for (auto& mi : v) {
-            const auto caps = ModelCapabilities::from_id(mi.id.value);
-            const bool eligible = caps.supports_1m_suffix()
-                && mi.id.value.find("[1m]") == std::string::npos;
-            ModelInfo one_m;
-            if (eligible) {
-                one_m = mi;
-                one_m.id = ModelId{mi.id.value + "[1m]"};
-                one_m.display_name = mi.display_name + " (1M context)";
-                one_m.context_window = 1'000'000;
-            }
-            out.push_back(std::move(mi));
-            if (eligible) out.push_back(std::move(one_m));
-        }
-        v = std::move(out);
-    };
+    // Claude Code surfaces a 1M-context `[1m]` VARIANT per suffix-capable
+    // model. We mirror that via catalog::add_1m_variants (the single shared
+    // impl — same one the bundled floor uses), applied to the live catalog
+    // below. Entitlement self-heals downstream (context_1m_blocked strips the
+    // rows if a 1M request 400s), so the offer is safe to make broadly.
 
-    // Built-in catalog. Anthropic's ids are stable and few, so unlike the
-    // OpenAI/Ollama path we always have a trustworthy fallback. Returned
-    // only when the network probe genuinely yields nothing (offline, or a
-    // transient non-200) so the picker is never stranded empty. With valid
-    // creds the real /v1/models below returns the full upstream catalog —
-    // the seed is just the floor, not the ceiling.
-    auto seed = [&] {
-        std::vector<ModelInfo> v{
-            ModelInfo{ModelId{"claude-opus-4-5"},   "Claude Opus 4.5",   "anthropic", 200000, true},
-            ModelInfo{ModelId{"claude-sonnet-4-5"}, "Claude Sonnet 4.5", "anthropic", 200000, true},
-            ModelInfo{ModelId{"claude-haiku-4-5"},  "Claude Haiku 4.5",  "anthropic", 200000, false},
-        };
-        add_1m_variants(v);
-        return v;
-    };
+    // Built-in floor = the single bundled catalog (base rows + their `[1m]`
+    // companions). One source shared with seed_models(), so the seed and the
+    // live /v1/models catalog below can never drift. Returned only when the
+    // network probe genuinely yields nothing (offline / transient non-200) so
+    // the picker is never stranded empty; the live list is the ceiling.
+    auto seed = [] { return catalog::bundled("anthropic"); };
 
     std::vector<ModelInfo> result;
     if (is_empty(auth)) return seed();
@@ -793,9 +746,9 @@ std::vector<ModelInfo> list_models(const AuthHeader& auth) {
         // fixed family bucket, so Fable/Mythos never sinks below Opus/Sonnet/
         // Haiku just because of alphabetical/positional bad luck).
         std::stable_sort(result.begin(), result.end(), model_picker_less);
-        // Surface a `[1m]` companion for every suffix-capable model (OAuth),
-        // inserted right after its base model so the pairing is adjacent.
-        add_1m_variants(result);
+        // Surface a `[1m]` companion for every suffix-capable model, inserted
+        // right after its base model so the pairing is adjacent (shared impl).
+        catalog::add_1m_variants(result);
     } catch (const std::exception& e) {
         util::dbglog("anthropic.list_models.parse", e.what());
     } catch (...) {

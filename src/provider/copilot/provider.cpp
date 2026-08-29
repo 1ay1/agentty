@@ -8,6 +8,7 @@
 // On a 401 (proxy token revoked early) we invalidate + refresh once and retry.
 
 #include "agentty/provider/copilot/provider.hpp"
+#include "agentty/domain/bundled_catalog.hpp"
 
 #include <algorithm>
 #include <mutex>
@@ -206,13 +207,9 @@ provider::StreamResult CopilotProvider::stream(provider::Request req,
 
 // ── Model listing ────────────────────────────────────────────────────────────
 static std::vector<ModelInfo> bundled_models() {
-    // Conservative fallback when offline / not signed in. The live catalog
-    // (list_models) supersedes this the moment the account can be reached.
-    auto mk = [](const char* id) {
-        return ModelInfo{ .id = ModelId{id}, .display_name = id, .provider = "copilot" };
-    };
-    return { mk("gpt-4o"), mk("gpt-4.1"), mk("o4-mini"),
-             mk("claude-sonnet-4"), mk("gemini-2.5-pro") };
+    // Single bundled catalog; the live catalog (list_models) supersedes it the
+    // moment the account can be reached.
+    return catalog::bundled("copilot");
 }
 
 std::vector<ModelInfo> list_models() {

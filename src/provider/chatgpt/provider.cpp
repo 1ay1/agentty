@@ -1,4 +1,5 @@
 #include "agentty/provider/chatgpt/provider.hpp"
+#include "agentty/domain/bundled_catalog.hpp"
 #include "agentty/provider/chatgpt/responses.hpp"
 #include "agentty/provider/stream_epilogue.hpp"
 
@@ -47,16 +48,9 @@ provider::StreamResult ChatGptProvider::stream(provider::Request req, provider::
 namespace {
 
 std::vector<ModelInfo> bundled_models() {
-    // Conservative fallback only — used when the live catalog is unavailable.
-    // Kept intentionally short; the live catalog is the real source of truth.
-    // MUST contain only slugs the ChatGPT account still accepts on /responses.
-    // `gpt-5.1-codex` was removed: the server now rejects it ("model is not
-    // supported when using Codex with a ChatGPT account"), so offering it as a
-    // fallback default made the very first turn fail. `gpt-5` is the stable
-    // slug that every Codex-enabled account accepts, so it leads.
-    return {
-        {ModelId{"gpt-5"}, "GPT-5", "chatgpt", 272000, false, true},
-    };
+    // Single bundled catalog. MUST contain only slugs a Codex-enabled ChatGPT
+    // account accepts on /responses; the live catalog is the real ceiling.
+    return catalog::bundled("chatgpt");
 }
 
 std::mutex           g_models_mu;
