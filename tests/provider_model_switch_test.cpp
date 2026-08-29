@@ -664,6 +664,12 @@ TEST_CASE("provider picker: Enter opens accounts on active OAuth provider") {
     auto [m2, c2] = app::update(std::move(m1), Msg{ProviderPickerSelect{}});
     CHECK(std::holds_alternative<ui::login::AccountList>(m2.ui.login));
     CHECK(!ui::pick::opened(m2.ui.provider_picker));  // picker closed
+
+    // Esc from the accounts list steps BACK to the provider picker (not a
+    // full close), keeping the hierarchy accounts → providers → chat.
+    auto [m3, c3] = app::update(std::move(m2), Msg{LoginBack{}});
+    CHECK(std::holds_alternative<ui::login::Closed>(m3.ui.login));  // accounts gone
+    CHECK(ui::pick::opened(m3.ui.provider_picker));                 // back at providers
 }
 
 // A custom host can hold MULTIPLE saved keys (accounts): the accounts layer

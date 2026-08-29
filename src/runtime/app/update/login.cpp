@@ -158,8 +158,13 @@ Step login_back(Model m) {
         return pop_to(api->back, api->provider);
     if (auto* p = std::get_if<login::Picking>(&m.ui.login))
         return pop_to(p->back, {});
-    // Every other sub-state (OAuth waits, account list, failures): Esc
-    // keeps its original meaning — cancel/close outright.
+    // The account list is always reached FROM the provider picker (Enter on a
+    // provider row), so Esc steps BACK there — not a full close. This keeps
+    // the navigation hierarchical (accounts → providers → chat).
+    if (std::holds_alternative<login::AccountList>(m.ui.login))
+        return pop_to(login::Back::ProviderPicker, {});
+    // Every other sub-state (OAuth waits, failures): Esc keeps its original
+    // meaning — cancel/close outright.
     return close_login(std::move(m));
 }
 
