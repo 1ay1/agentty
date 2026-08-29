@@ -146,6 +146,14 @@ Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
             // both check model_picker BEFORE provider_picker, so a lingering
             // open provider_picker would render/eat keys under this one.
             m.ui.provider_picker = pick::Closed{};
+            // Same for the fused picker: ^/ cycles fused → this classic
+            // (single-provider) picker, so tear the fused one down cleanly
+            // — release its row cache and flush any pending effort edit.
+            if (pick::is_open(m.ui.fused_picker)) {
+                m.ui.fused_picker = pick::Closed{};
+                m.d.fused_rows.clear();
+                if (m.ui.effort_dirty) { persist_settings(m); m.ui.effort_dirty = false; }
+            }
             int idx = 0;
             for (int i = 0; i < static_cast<int>(m.d.available_models.size()); ++i)
                 if (m.d.available_models[i].id == m.d.model_id) idx = i;
@@ -1067,6 +1075,15 @@ Step fused_picker_update(Model m, msg::FusedPickerMsg pm) {
     return std::visit(overload{
         [&](OpenFusedPicker) -> Step {
             hydrate_recents(m);
+            // ^/ TOGGLES from the classic single-provider picker back to this
+            // one. Tear the classic picker down cleanly — flush a pending
+            // effort edit and abandon any Smart Mode slot-assign arming (the
+            // fused picker doesn't assign slots).
+            if (pick::is_open(m.ui.model_picker)) {
+                m.ui.model_picker = pick::Closed{};
+                m.ui.smart_assign_slot = -1;
+                if (m.ui.effort_dirty) { persist_settings(m); m.ui.effort_dirty = false; }
+            }
             m.ui.fused_picker = pick::OpenAt{0, ""};
             // ONE expensive pass: enumerate providers, read settings, seed
             // every authed provider's catalog from its bundled list so the

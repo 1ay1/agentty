@@ -378,10 +378,10 @@ Element model_picker(const Model& m) {
     }
     cfg.footer.push_back(key_hints({
         {"\xe2\x86\x91\xe2\x86\x93", "move", 5},        // ↑↓
-        {"type", "filter", 2},
         {"Enter", "select", 5},
+        {"^/", "all providers", 3},               // toggle: fused picker
         {"^F", "favorite", 1},
-        {"^P", "providers", 3},                    // cross-hint: provider picker
+        {"^P", "providers", 2},                    // cross-hint: provider picker
         {"Esc", "close", 4},
     }));
 
@@ -507,16 +507,17 @@ Element fused_picker(const Model& m) {
 
     cfg.footer.push_back(key_hints({
         {"\xe2\x86\x91\xe2\x86\x93", "move", 5},
-        {"type", "filter", 2},
         {"Enter", "switch", 5},
+        {"^/", "this provider", 3},
         {"^F", "favorite", 1},
-        {"^P", "providers", 3},
+        {"^P", "providers", 2},
         {"^Tab", "prev", 2},
         {"Esc", "close", 4},
     }));
     return Picker{std::move(cfg)}.build();
 }
 
+// ── Provider picker helpers ──
 namespace {
 
 // Resolve the currently-active provider id so the picker can mark the

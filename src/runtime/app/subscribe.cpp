@@ -373,8 +373,9 @@ std::optional<Msg> on_fused_picker(const KeyEvent& ev) {
     }
     if (auto* ck = std::get_if<CharKey>(&ev.key)) {
         char32_t c = ck->codepoint;
-        // Re-pressing ^/ closes (open/close symmetry): raw 0x1F or '/'+ctrl.
-        if (c == 0x1F || (ev.mods.ctrl && c == U'/')) return CloseFusedPicker{};
+        // ^/ TOGGLES the two model surfaces: fused (this, all providers)
+        // ⇄ the classic single-provider picker. Esc closes either.
+        if (c == 0x1F || (ev.mods.ctrl && c == U'/')) return OpenModelPicker{};
         // ^P cross-hops to the provider picker (manage backends/hosts).
         if (c == 0x10 || (ev.mods.ctrl && (c == U'p' || c == U'P')))
             return OpenProviderPicker{};
@@ -414,13 +415,10 @@ std::optional<Msg> on_model_picker(const KeyEvent& ev) {
     }
     if (auto* ck = std::get_if<CharKey>(&ev.key)) {
         char32_t c = ck->codepoint;
-        // Re-pressing the open key (^/) closes the picker (open/close
-        // symmetry). ^/ arrives as the raw 0x1F control code (no ctrl flag)
-        // or as '/' with mods.ctrl — accept both, before the filter/remap
-        // paths. Without this the key is swallowed here (the dispatcher
-        // returns this handler's result unconditionally, so a nullopt never
-        // falls through to on_global's ^/ binding).
-        if (c == 0x1F || (ev.mods.ctrl && c == U'/')) return CloseModelPicker{};
+        // ^/ TOGGLES back to the fused (all-providers) picker — the mirror
+        // of the fused picker's ^/ → this classic one. Esc closes either.
+        // ^/ arrives as raw 0x1F (no ctrl flag) or '/' with mods.ctrl.
+        if (c == 0x1F || (ev.mods.ctrl && c == U'/')) return OpenFusedPicker{};
         // ^P cross-hops to the PROVIDER picker — the footer advertises it
         // ("^P providers"). on_global binds ^P → OpenProviderPicker, but this
         // handler's result is returned unconditionally so it would never
