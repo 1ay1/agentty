@@ -466,39 +466,44 @@ Element fused_picker(const Model& m) {
                                     : std::string{"  "})
                           + (r.model.display_name.empty()
                                  ? r.model.id.value : r.model.display_name);
-        row.leading_style = active ? fg_bold(fg) : fg_of(fg);
+        row.leading_style = active ? fg_bold(fg) : fg_of(muted);
         // fzf-style match highlight: paint the query's matched chars in the
-        // name (bright cyan bold) so a big filtered list shows WHY each row is
-        // here. match_positions are offsets into the NAME; shift them past the
-        // "● " (4 bytes) / "  " (2 bytes) leading prefix.
+        // name so a big filtered list shows WHY each row is here. Use the same
+        // `highlight` theme hue as the classic model picker (not `info`) so
+        // the two pickers read identically. match_positions are offsets into
+        // the NAME; shift them past the "● " (4 bytes) / "  " (2 bytes) prefix.
         if (!r.match_positions.empty()) {
             const int prefix = active ? 4 : 2;
             row.highlight.reserve(r.match_positions.size());
             for (int p : r.match_positions) row.highlight.push_back(prefix + p);
-            row.highlight_fg = info;   // theme cyan/info hue
+            row.highlight_fg = highlight;   // same hue as the classic picker
         }
+        // Trailing cell mirrors the classic model picker exactly: context
+        // window first, then a ★ favorite mark, then a ✦ reasoning badge — all
+        // one warm chip style (fg_of(warn)) so the two pickers look identical.
         std::string trailing;
-        if (r.model.favorite) trailing = "\xe2\x98\x85  ";              // ★
-        // Reasoning badge (precomputed in build_fused_rows — no per-frame
-        // caps decode): mark models that can think so "which of these reason"
-        // is legible at a glance across providers.
-        if (r.reasons)
-            trailing += "\xe2\x9c\xa6  ";                                // ✦
-        if (r.model.context_window > 0) {
-            const int w = r.model.context_window;
-            if (w >= 1'000'000) {
-                // 1M / 2M — the extended-context Claude variants. Showing
-                // "1000k" here is why the 1M model looked missing.
-                const int m_ = w / 1'000'000;
-                const int frac = (w % 1'000'000) / 100'000;   // one decimal
-                trailing += std::to_string(m_)
-                          + (frac ? "." + std::to_string(frac) : "") + "M";
+        if (const int win = r.model.context_window; win > 0) {
+            if (win >= 1'000'000) {
+                trailing += std::to_string(win / 1'000'000) + "M";
+                if (win % 1'000'000 != 0) trailing += "+";   // 1.x M → "1M+"
+            } else if (win >= 1000) {
+                trailing += std::to_string(win / 1'000) + "k";
             } else {
-                trailing += std::to_string(w / 1000) + "k";
+                trailing += std::to_string(win);
             }
         }
+        if (r.model.favorite) {
+            if (!trailing.empty()) trailing += "  ";
+            trailing += "\xe2\x98\x85";                                   // ★
+        }
+        // Reasoning badge (precomputed in build_fused_rows) — marks models that
+        // can think, so "which of these reason" is legible across providers.
+        if (r.reasons) {
+            if (!trailing.empty()) trailing += "  ";
+            trailing += "\xe2\x9c\xa6";                                   // ✦
+        }
         row.trailing       = std::move(trailing);
-        row.trailing_style = fg_dim(muted);
+        row.trailing_style = fg_of(warn);
         cfg.rows.push_back(std::move(row));
     }
     cfg.selected = visual_selected;
