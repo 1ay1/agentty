@@ -57,6 +57,12 @@ struct ProviderCatalog {
     State state = State::Idle;
     std::vector<ModelInfo> models;
     std::string account_label;            // active account on this provider
+    // Derived per-model fuzzy haystacks, already lowercased, one per entry in
+    // `models` (same order). Rebuilt once when `models` changes (size guard in
+    // rebuild_fused_rows), so the per-KEYSTROKE filter never re-allocates or
+    // re-lowercases a haystack for every model. Empty ⇒ not yet built (the
+    // build falls back to composing the haystack inline).
+    std::vector<std::string> search_keys;
 };
 
 // A provider the user is NOT signed into — rendered as a single "sign in to

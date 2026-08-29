@@ -140,12 +140,27 @@ find_catalog(const std::vector<ProviderCatalog>& cats, std::string_view pid) {
     std::vector<Scored> scored;
     int prov_ord = 0;
     for (const auto& c : catalogs) {
-        for (const auto& mi : c.models) {
+        const std::size_t nkeys = c.search_keys.size();
+        for (std::size_t i = 0; i < c.models.size(); ++i) {
+            const auto& mi = c.models[i];
             ModelRef r{c.provider_id, mi.id.value};
             if (already(r)) continue;                // already in RECENT
-            const auto h = fused_haystack(c.label, mi);
-            const auto sc = fuzzy::score(h, q);
-            if (!no_query && !sc.matched()) continue;
+            int mscore = 0;
+            if (!no_query) {
+                // Prefer the catalog's PRECOMPUTED lowercased haystack (built
+                // once per catalog change), so a keystroke never re-allocates
+                // or re-lowercases a haystack per model. Fall back to composing
+                // it inline only when the cache isn't populated (e.g. unit
+                // tests that call build_fused_rows directly). No query ⇒ no
+                // scoring and no haystack at all.
+                std::string tmp;
+                std::string_view h = i < nkeys
+                    ? std::string_view{c.search_keys[i]}
+                    : std::string_view{(tmp = fused_haystack(c.label, mi))};
+                const auto sc = fuzzy::score(h, q);
+                if (!sc.matched()) continue;
+                mscore = sc.score;
+            }
             FusedRow row;
             row.provider_id = c.provider_id;
             row.label       = c.label;
@@ -154,7 +169,7 @@ find_catalog(const std::vector<ProviderCatalog>& cats, std::string_view pid) {
             row.active      = (r == in.active);
             row.recent      = false;
             row.reasons     = effort_capable(ModelCapabilities::from_id(mi.id.value));
-            scored.push_back({std::move(row), sc.score, prov_ord});
+            scored.push_back({std::move(row), mscore, prov_ord});
         }
         ++prov_ord;
     }
