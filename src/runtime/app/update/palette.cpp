@@ -108,6 +108,7 @@ template <class T, class V>
         // ── Config ──
         add(Command::CycleProfile,     emit<CycleProfile>());
         add(Command::OpenModels,       emit<OpenFusedPicker>());
+        add(Command::SwapModel,        emit<SwitchToPreviousModel>());
         add(Command::OpenProviders,    emit<OpenProviderPicker>());
         add(Command::SmartMode,        emit<OpenSmartMode>());
         add(Command::OpenRagSettings,  emit<OpenRagSettings>());

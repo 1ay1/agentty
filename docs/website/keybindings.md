@@ -47,6 +47,18 @@ Everything you can do without leaving the home row.
 > model without opening anything. Use [[Ctrl+P]] when you want to *manage*
 > backends (add a custom host, switch accounts) rather than pick a model.
 
+> **If [[Ctrl+/]] or [[Ctrl+Tab]] do nothing, your terminal can't encode them.**
+> `Ctrl`+`/` and `Ctrl`+`Tab` are among the few chords legacy terminals
+> literally cannot send (on most, `Ctrl`+`Tab` is byte-identical to `Tab`).
+> agentty negotiates the **kitty keyboard protocol** on startup, so the keys
+> work on terminals that support it — kitty, Ghostty, WezTerm, foot, Konsole,
+> recent xterm/Alacritty, iTerm2 3.5+, and **Blink Shell** on iOS. On a
+> terminal that can't (notably **mosh** sessions, some minimal iOS SSH apps),
+> use the always-portable routes instead: type **`/model`** (or `/swap`) in
+> the composer, or open the command palette with [[Ctrl+K]] and pick
+> **"Switch model"** / **"Swap to previous model"**. Both work on every
+> terminal. (Set `MAYA_NO_KITTY_KEYBOARD=1` to disable the protocol.)
+
 > **Esc steps back one level.** In a multi-step flow — provider picker →
 > **Custom host…** → host input → API-key prompt — [[Esc]] pops one level
 > at a time (and restores what you typed) rather than collapsing the whole
