@@ -5,6 +5,7 @@
 #include "agentty/runtime/view/helpers.hpp"
 #include "agentty/auth/auth.hpp"
 #include "agentty/domain/catalog.hpp"
+#include "agentty/domain/bundled_catalog.hpp"
 #include "agentty/provider/selection.hpp"
 #include "agentty/provider/chatgpt/responses.hpp"
 #include "agentty/provider/copilot/copilot_oauth.hpp"
@@ -19,21 +20,13 @@ namespace agentty::app {
 
 namespace {
 std::vector<ModelInfo> seed_models() {
-    // Base rows + their `[1m]` companions, so the 1M-context variants are in
-    // the picker IMMEDIATELY on launch — not only after the first picker-
-    // triggered /models fetch (which the live catalog supersedes anyway). The
-    // suffix-capable models (Opus/Sonnet/Haiku gen 4+) each get a 1M row right
-    // after the base, mirroring anthropic::list_models' add_1m_variants so the
-    // seed and the live catalog agree. Entitlement is handled downstream
-    // (context_1m_blocked self-heals if the account can't stream 1M).
-    return {
-        {ModelId{"claude-opus-4-5"},        "Claude Opus 4.5",              "anthropic",  200000, true},
-        {ModelId{"claude-opus-4-5[1m]"},   "Claude Opus 4.5 (1M context)", "anthropic", 1000000, false},
-        {ModelId{"claude-sonnet-4-5"},      "Claude Sonnet 4.5",              "anthropic",  200000, true},
-        {ModelId{"claude-sonnet-4-5[1m]"}, "Claude Sonnet 4.5 (1M context)", "anthropic", 1000000, false},
-        {ModelId{"claude-haiku-4-5"},       "Claude Haiku 4.5",              "anthropic",  200000, false},
-        {ModelId{"claude-haiku-4-5[1m]"},  "Claude Haiku 4.5 (1M context)", "anthropic", 1000000, false},
-    };
+    // The launch floor is the single bundled catalog (base rows + their `[1m]`
+    // companions), so the picker is full IMMEDIATELY on launch — not only
+    // after the first /models fetch (which the live catalog supersedes
+    // anyway). One source shared with the transport fallback, so seed and
+    // live catalog can't drift. Entitlement self-heals downstream
+    // (context_1m_blocked strips the [1m] rows if the account can't stream 1M).
+    return catalog::bundled("anthropic");
 }
 } // namespace
 

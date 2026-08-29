@@ -23,6 +23,7 @@
 #include "agentty/runtime/app/deps.hpp"
 #include "agentty/runtime/provider_rows.hpp"
 #include "agentty/provider/selection.hpp"
+#include "agentty/domain/bundled_catalog.hpp"
 
 #include <optional>
 #include <string>
@@ -487,6 +488,34 @@ TEST_CASE("^Tab cycles the MRU ring without reordering") {
     CHECK(m.d.recent_models[0].model_id == "claude-a");
     CHECK(m.d.recent_models[1].model_id == "claude-b");
     CHECK(m.d.recent_models[2].model_id == "claude-c");
+}
+
+// The single bundled catalog is THE offline floor for every provider — one
+// source, no per-site drift. Sanity-check its shape + that the Anthropic
+// flagship (Fable) and its [1m] companion are present.
+TEST_CASE("bundled catalog is the single provider floor") {
+    using agentty::catalog::bundled;
+
+    const auto anth = bundled("anthropic");
+    bool fable = false, fable_1m = false, opus = false;
+    for (const auto& mi : anth) {
+        if (mi.id.value == "claude-fable-5")     fable = true;
+        if (mi.id.value == "claude-fable-5[1m]") fable_1m = true;
+        if (mi.id.value == "claude-opus-4-5")    opus = true;
+        CHECK(mi.provider == "anthropic");
+    }
+    CHECK(fable);        // the flagship the fused picker was missing
+    CHECK(fable_1m);     // add_1m_variants companion
+    CHECK(opus);
+
+    // Other providers resolve through the SAME function (no separate tables).
+    CHECK(!bundled("xai").empty());
+    CHECK(!bundled("chatgpt").empty());
+    CHECK(!bundled("copilot").empty());
+    CHECK(!bundled("kimi").empty());
+    // Unknown / user-defined catalogs have no floor.
+    CHECK(bundled("openrouter").empty());
+    CHECK(bundled("some-custom-host").empty());
 }
 
 // The active provider's fused catalog MIRRORS available_models on every open,
