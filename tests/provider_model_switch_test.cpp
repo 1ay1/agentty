@@ -452,6 +452,39 @@ TEST_CASE("fused picker number quick-select") {
     CHECK(c2p->query == "g3");        // digit appended, not a jump
 }
 
+// A filtered fused list carries per-row fuzzy-match byte offsets into the
+// model NAME, so the view can highlight WHY each row matched (fzf-style).
+TEST_CASE("fused rows expose name match positions for highlight") {
+    using namespace agentty::msg;
+    install_stub_deps();
+    g_settings = store::Settings{};
+    g_settings.provider_keys["anthropic"] = "sk-test";
+    provider::select(provider::parse_selection("anthropic"));
+
+    Model m;
+    m.d.model_id = ModelId{"claude-sonnet-4-5"};
+    m.d.available_models = {mi("claude-sonnet-4-5", "anthropic"),
+                            mi("claude-opus-4-5", "anthropic")};
+    auto [m1, c1] = app::update(std::move(m), Msg{OpenFusedPicker{}});
+
+    // No query → no highlight offsets.
+    for (const auto& r : m1.d.fused_rows)
+        CHECK(r.match_positions.empty());
+
+    // Type "son" → the sonnet row gains match offsets into its name.
+    Model m2 = std::move(m1);
+    for (char ch : std::string{"son"}) {
+        auto [n, c] = app::update(std::move(m2),
+                                  Msg{FusedPickerFilterInput{static_cast<char32_t>(ch)}});
+        m2 = std::move(n);
+    }
+    bool sonnet_has_hl = false;
+    for (const auto& r : m2.d.fused_rows)
+        if (r.model.id.value == "claude-sonnet-4-5" && !r.match_positions.empty())
+            sonnet_has_hl = true;
+    CHECK(sonnet_has_hl);
+}
+
 // ^Tab walks the WHOLE MRU ring (A→B→C→A), progressively older, without
 // reordering the ring — not a single A↔B toggle.
 TEST_CASE("^Tab cycles the MRU ring without reordering") {
