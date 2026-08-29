@@ -528,6 +528,35 @@ TEST_CASE("^Tab cycles the MRU ring without reordering") {
     CHECK(m.d.recent_models[2].model_id == "claude-c");
 }
 
+// Selecting a model in the CLASSIC model picker feeds the MRU ring, so ^Tab
+// has more than one entry to cycle (the reported "recents only has one model,
+// ^Tab does nothing" bug — previously only the fused picker recorded).
+TEST_CASE("classic model picker feeds the MRU ring") {
+    using namespace agentty::msg;
+    install_stub_deps();
+    g_settings = store::Settings{};
+    g_settings.provider_keys["anthropic"] = "sk-test";
+    provider::select(provider::parse_selection("anthropic"));
+
+    Model m;
+    m.d.model_id = ModelId{"claude-a"};
+    m.d.available_models = {mi("claude-a", "anthropic"),
+                            mi("claude-b", "anthropic")};
+
+    // Open the classic picker, move to claude-b, select it.
+    auto [m1, c1] = app::update(std::move(m), Msg{OpenModelPicker{}});
+    if (auto* p = ui::pick::opened(m1.ui.model_picker)) p->index = 1;
+    auto [m2, c2] = app::update(std::move(m1), Msg{ModelPickerSelect{}});
+    CHECK(m2.d.model_id.value == "claude-b");
+    // The pick landed in the ring (front = newest).
+    REQUIRE(!m2.d.recent_models.empty());
+    CHECK(m2.d.recent_models.front().model_id == "claude-b");
+
+    // Now ^Tab has 2 entries to cycle — it moves off the active model.
+    auto [m3, c3] = app::update(std::move(m2), Msg{SwitchToPreviousModel{}});
+    CHECK(m3.d.model_id.value != "claude-b");   // cycled, not a no-op
+}
+
 // The single bundled catalog is THE offline floor for every provider — one
 // source, no per-site drift. Sanity-check its shape + that the Anthropic
 // flagship (Fable) and its [1m] companion are present.

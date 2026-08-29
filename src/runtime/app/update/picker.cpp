@@ -71,6 +71,12 @@ std::vector<int> model_filtered(const std::vector<ModelInfo>& models,
     return p.id == "chatgpt" || p.id == "copilot" || p.id == "kimi"
         || p.kind() == provider::Kind::Anthropic;
 }
+
+// Defined further down (with the fused-picker MRU helpers); forward-declared
+// here so the classic model-picker reducer above can feed the same ring.
+void record_recent(Model& m, const std::string& provider_id,
+                   const std::string& model_id);
+void hydrate_recents(Model& m);
 } // namespace
 using maya::Cmd;
 
@@ -406,6 +412,10 @@ Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
                         return {std::move(m), std::move(toast)};
                     }
 
+                    // Seed the MRU with the model we're LEAVING (before we
+                    // overwrite m.d.model_id), so A→B leaves the ring [B, A]
+                    // and ^Tab has a prior entry to cycle back to.
+                    hydrate_recents(m);
                     m.d.model_id = m.d.available_models[static_cast<std::size_t>(real)].id;
                     // Update the per-model context cap so the status-bar ctx
                     // % bar (and the auto-compaction threshold) uses the right
@@ -433,6 +443,12 @@ Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
                     // stale/invalid id (every subagent request 400s and the
                     // tool returns no report). Track the picker selection.
                     tools::subagent::set_model(m.d.model_id.value);
+                    // Record the pick in the MRU so RECENT + ^Tab reflect it —
+                    // the classic picker is a real switch site too, not just
+                    // the fused picker. The pre-switch model was already seeded
+                    // into the ring above; this pushes the new pick to the
+                    // front, so the ring becomes [new, old, …] — a real cycle.
+                    record_recent(m, active_provider_id(), m.d.model_id.value);
                     persist_settings(m);
                     m.ui.effort_dirty = false;
                     // Confirmation toast naming model AND provider — the
@@ -953,13 +969,25 @@ void record_recent(Model& m, const std::string& provider_id,
 
 // Hydrate m.d.recent_models from Settings ("<provider>\t<model>" per entry).
 void hydrate_recents(Model& m) {
-    if (!m.d.recent_models.empty()) return;
-    auto s = deps().load_settings();
-    for (const auto& e : s.recent_models) {
-        auto tab = e.find('\t');
-        if (tab == std::string::npos) continue;
-        m.d.recent_models.push_back(
-            ModelRef{e.substr(0, tab), e.substr(tab + 1)});
+    if (m.d.recent_models.empty()) {
+        auto s = deps().load_settings();
+        for (const auto& e : s.recent_models) {
+            auto tab = e.find('\t');
+            if (tab == std::string::npos) continue;
+            m.d.recent_models.push_back(
+                ModelRef{e.substr(0, tab), e.substr(tab + 1)});
+        }
+    }
+    // Always ensure the ACTIVE (provider, model) is present so ^Tab has a
+    // home to return to and the ring is never a lone stale entry. Persisted
+    // history may predate the current model (e.g. a fresh switch that hasn't
+    // been recorded yet, or a first-ever session), so append it if missing.
+    if (!m.d.model_id.value.empty()) {
+        const ModelRef active{active_provider_id(), m.d.model_id.value};
+        bool present = false;
+        for (const auto& r : m.d.recent_models)
+            if (r == active) { present = true; break; }
+        if (!present) m.d.recent_models.push_back(active);
     }
 }
 
