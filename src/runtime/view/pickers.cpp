@@ -479,8 +479,19 @@ Element fused_picker(const Model& m) {
         row.leading_style = active ? fg_bold(fg) : fg_of(fg);
         std::string trailing;
         if (r.model.favorite) trailing = "\xe2\x98\x85  ";              // ★
-        if (r.model.context_window > 0)
-            trailing += std::to_string(r.model.context_window / 1000) + "k";
+        if (r.model.context_window > 0) {
+            const int w = r.model.context_window;
+            if (w >= 1'000'000) {
+                // 1M / 2M — the extended-context Claude variants. Showing
+                // "1000k" here is why the 1M model looked missing.
+                const int m_ = w / 1'000'000;
+                const int frac = (w % 1'000'000) / 100'000;   // one decimal
+                trailing += std::to_string(m_)
+                          + (frac ? "." + std::to_string(frac) : "") + "M";
+            } else {
+                trailing += std::to_string(w / 1000) + "k";
+            }
+        }
         row.trailing       = std::move(trailing);
         row.trailing_style = fg_dim(muted);
         cfg.rows.push_back(std::move(row));
