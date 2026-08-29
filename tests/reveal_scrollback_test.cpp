@@ -856,6 +856,28 @@ static void run_reasoning_scenario(int width, int term_h) {
     // Stream a long reasoning body that overflows the viewport so the header
     // + early thoughts scroll off the top and commit to scrollback.
     auto& back = m.d.current.messages.back();
+
+    // CLIPPING ORACLE (distinct from the R1-R6 duplication oracle): the R
+    // checks prove no row is ever REWRITTEN, but they are blind to a row
+    // that is never emitted at all — the original "reasoning hides rows"
+    // symptom (a fixed-height reasoning window capping the block). Guard it
+    // directly: every one of the 60 thought markers MUST appear literally in
+    // the terminal transcript (native scrollback ++ on-screen) at some frame.
+    // A height cap would render only a trailing window, so the middle markers
+    // would never reach the terminal and `seen[d]` would stay false.
+    std::vector<bool> seen(60, false);
+    auto scan_terminal = [&]() {
+        const auto tr = h.emu.transcript();
+        for (int d = 0; d < 60; ++d) {
+            if (seen[d]) continue;
+            const std::string marker =
+                "Thought " + std::to_string(d)
+                + " (#" + std::to_string(d * 7 + 3) + ")";
+            for (const auto& row : tr)
+                if (row.find(marker) != std::string::npos) { seen[d] = true; break; }
+        }
+    };
+
     for (int d = 0; d < 60; ++d) {
         back.thinking +=
             "\n\nThought " + std::to_string(d)
@@ -864,6 +886,7 @@ static void run_reasoning_scenario(int width, int term_h) {
             + " and revise plan-" + std::to_string(d * 3) + ".";
         tick(); h.frame(m, "rdelta" + std::to_string(d));
         tick(); h.frame(m, "ranim" + std::to_string(d));
+        scan_terminal();
         if (h.dead) { if (pty_master >= 0) close(pty_master); return; }
     }
 
@@ -878,12 +901,23 @@ static void run_reasoning_scenario(int width, int term_h) {
         do {
             tick();
             h.frame(m, "rsettle" + std::to_string(guard));
+            scan_terminal();
         } while (!agentty::app::detail::live_tail_reveal_settled(m)
                  && ++guard < 200 && !h.dead);
         agentty::app::detail::freeze_through(m, m.d.current.messages.size());
         auto trim = agentty::app::detail::trim_frozen_if_oversized(m);
         h.apply_trim(trim);
         h.frame(m, "rfreeze");
+        scan_terminal();
+
+        // No thought row may have been hidden by a height cap.
+        int hidden = 0;
+        for (int d = 0; d < 60; ++d) if (!seen[d]) ++hidden;
+        CHK(hidden == 0,
+            "reasoning CLIPPED: " + std::to_string(hidden)
+            + " of 60 thought rows never reached the terminal (height cap hid"
+            " them) [" + std::to_string(width) + "x"
+            + std::to_string(term_h) + "]");
     }
     if (pty_master >= 0) close(pty_master);
 }
