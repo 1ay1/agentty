@@ -28,6 +28,7 @@
 #include "agentty/runtime/provider_rows.hpp"
 #include "agentty/runtime/fused_models.hpp"
 #include "agentty/provider/auth_state.hpp"
+#include "agentty/provider/credentials.hpp"
 #include "agentty/provider/selection.hpp"
 #include "agentty/runtime/app/deps.hpp"   // deps().auth for the live auth badge
 #include "agentty/auth/auth.hpp"          // auth::is_empty
@@ -697,12 +698,16 @@ Element provider_picker(const Model& m) {
         if (picker->index < 0 || picker->index >= static_cast<int>(rows.size()))
             return false;
         const auto& row = rows[static_cast<std::size_t>(picker->index)];
-        // Custom hosts hold multiple keys (accounts) too — Enter drills in.
-        if (row.custom_host()) return true;
+        // Custom hosts hold multiple keys (accounts) — Enter drills in.
+        if (const auto* spec = row.custom_host())
+            return provider::credentials::add_method(*spec)
+                   != provider::credentials::AddMethod::None;
         const auto* p = row.preset();
         if (!p) return false;
-        return p->id == "chatgpt" || p->id == "copilot" || p->id == "kimi"
-            || p->kind() == provider::Kind::Anthropic;
+        // Every account-capable provider (OAuth + hosted API key) shows the
+        // account drill-down on Enter; only keyless local servers don't.
+        return provider::credentials::add_method(p->id)
+               != provider::credentials::AddMethod::None;
     }();
 
     cfg.footer.push_back(text(""));

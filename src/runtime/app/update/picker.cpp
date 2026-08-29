@@ -852,23 +852,26 @@ Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
             }
 
             const auto& preset = *chosen.preset();
-            // Enter on an ACCOUNT-CAPABLE provider (the OAuth lane: Anthropic /
-            // ChatGPT / Copilot / Kimi) opens its accounts drill-down — the
-            // primary thing you do with those providers is pick/add an
-            // account. Esc from that accounts list steps BACK to the provider
-            // picker (login_back → Back::ProviderPicker), keeping the
-            // hierarchy accounts → providers → chat. Non-account providers
-            // (API-key presets, custom hosts) just switch. The accounts list
-            // operates on the ACTIVE session, so switch to this provider first
-            // when it isn't active yet.
-            if (preset_is_account_capable(preset)) {
+            // Enter on an ACCOUNT-CAPABLE provider that is ALREADY active
+            // opens its account manager — UNIFORM across every provider that
+            // has accounts (OAuth: Anthropic/ChatGPT/Copilot/Kimi; hosted API
+            // key: Mistral/Groq/…; custom hosts). Only keyless local servers
+            // (add_method == None) have nothing to manage and just switch.
+            // Esc from the account list steps back to the provider picker.
+            if (provider::credentials::add_method(preset.id)
+                    != provider::credentials::AddMethod::None) {
                 const auto& active = provider::active();
                 const bool is_active =
                     (preset.id == "chatgpt" && active.is_chatgpt())
                     || (preset.id == "copilot" && active.is_copilot())
                     || (preset.id == "kimi" && active.is_kimi())
                     || (preset.kind() == provider::Kind::Anthropic
-                        && active.kind == provider::Kind::Anthropic);
+                        && active.kind == provider::Kind::Anthropic)
+                    // Hosted OpenAI-family key providers (Mistral/Groq/…): the
+                    // active OpenAI endpoint label IS the provider id.
+                    || (preset.kind() == provider::Kind::OpenAI
+                        && active.kind == provider::Kind::OpenAI
+                        && active.openai_endpoint.label == preset.id);
                 if (is_active) {
                     m.ui.provider_picker = pick::Closed{};
                     return agentty::app::update(std::move(m), Msg{OpenAccounts{}});
