@@ -376,19 +376,35 @@ TEST_CASE("fused picker caches rows and clears them on close") {
     m.d.model_id = ModelId{"claude-sonnet-4-6"};
     m.d.available_models = {mi("claude-sonnet-4-6", "anthropic")};
 
-    // Open: cache is populated, and xai was seeded synchronously from its
-    // bundled list (opens instantly full — no waiting on the async fetch;
-    // providers that fetch live, like openai, fill in a frame later).
+    // Open is INSTANT: only the active provider (seeded from available_models)
+    // has models; every other authed provider is empty + Loading and streams
+    // in via the async fetch. The cache reflects exactly that on open.
     auto [m1, c1] = app::update(std::move(m), Msg{OpenFusedPicker{}});
-    CHECK(!m1.d.fused_rows.empty());
-    bool xai_seeded = false;
-    for (const auto& c : m1.d.provider_catalogs)
-        if (c.provider_id == "xai") xai_seeded = !c.models.empty();
-    CHECK(xai_seeded);
+    CHECK(!m1.d.fused_rows.empty());                 // active provider shows now
+    bool anthropic_ready = false, xai_pending = false;
+    for (const auto& c : m1.d.provider_catalogs) {
+        if (c.provider_id == "anthropic")
+            anthropic_ready = (c.state == ProviderCatalog::State::Ready
+                               && !c.models.empty());
+        if (c.provider_id == "xai")
+            xai_pending = c.models.empty();          // not seeded synchronously
+    }
+    CHECK(anthropic_ready);
+    CHECK(xai_pending);
 
-    // Filtering rebuilds the cache in place (still non-empty for a matching
-    // query, and the cursor is clamped).
-    auto [m2, c2] = app::update(std::move(m1),
+    // xai's catalog streams in → rows rebuild to include it.
+    FusedCatalogLoaded xai;
+    xai.provider_id = "xai";
+    xai.models = {mi("grok-4", "xai"), mi("grok-3", "xai")};
+    xai.ok = true;
+    auto [m1b, c1b] = app::update(std::move(m1), Msg{std::move(xai)});
+    bool xai_now = false;
+    for (const auto& c : m1b.d.provider_catalogs)
+        if (c.provider_id == "xai") xai_now = (c.models.size() == 2);
+    CHECK(xai_now);
+
+    // Filtering rebuilds the cache in place (cursor clamped, still open).
+    auto [m2, c2] = app::update(std::move(m1b),
                                 Msg{FusedPickerFilterInput{U'c'}});
     CHECK(ui::pick::is_open(m2.ui.fused_picker));
 
