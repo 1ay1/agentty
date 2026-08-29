@@ -896,12 +896,14 @@ void hydrate_recents(Model& m) {
     }
 }
 
-// Refresh the picker's SOURCES into the Model — the expensive pass (one
-// settings read + provider enumeration + auth checks), run ONCE when the
-// picker opens (and after a provider signs in), never per keystroke. Seeds
-// every authed provider's catalog from its bundled list immediately (empty
-// auth ⇒ no network) so the picker opens instantly FULL; the async fetch then
-// refreshes with live data. Un-authed providers become sign-in offers.
+// Refresh the picker's SOURCES into the Model — a CHEAP, in-memory-only pass
+// (one settings read + provider enumeration + stat-cached auth checks), run
+// when the picker opens. It does NOT touch the network or build any provider's
+// model list: the active provider is seeded from the catalog already in hand
+// (available_models), every other authed provider gets an empty Loading entry
+// that the async fetch (fetch_models_for) fills in a frame or two later. This
+// is what keeps open INSTANT even with slow backends (Ollama / custom hosts
+// whose list probe would otherwise block the UI thread for seconds).
 void refresh_fused_sources(Model& m) {
     const auto settings = deps().load_settings();
     const std::string active_pid = active_provider_id();
@@ -925,18 +927,13 @@ void refresh_fused_sources(Model& m) {
                 id, std::string{p.label}, ProviderCatalog::State::Idle, {}, {}});
             c = &m.d.provider_catalogs.back();
         }
-        if (!c->models.empty()) continue;         // already have a list
-        if (id == active_pid && !m.d.available_models.empty()) {
-            // Active provider: use the live catalog already in hand.
+        // Active provider: reuse the live catalog we already hold — instant,
+        // no fetch needed. Everyone else stays empty + Idle so Open fires a
+        // background fetch; the row list simply grows as each resolves.
+        if (id == active_pid && c->models.empty()
+            && !m.d.available_models.empty()) {
             c->models = m.d.available_models;
             c->state  = ProviderCatalog::State::Ready;
-        } else {
-            // Others: bundled seed (empty auth ⇒ no I/O) for an instant, full
-            // list. State stays Idle so Open still fires a background refresh.
-            try {
-                c->models = provider::list_models_for(
-                    provider::parse_selection(id), {});
-            } catch (...) { /* leave empty; fetch will fill */ }
         }
     }
 }
