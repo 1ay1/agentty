@@ -638,11 +638,19 @@ Element provider_picker(const Model& m) {
 
         if (const auto* p = r.preset()) {
             const bool active = (p->id == active_id);
+            const bool confirming = (picker->confirm_remove == std::string{p->id});
             auto [note, note_color] = preset_note(*p, active);
             row.leading        = std::string{p->label} + "  " + std::string{p->blurb};
             row.leading_style  = active ? fg_bold(fg) : fg_of(muted);
-            row.trailing       = note;
-            row.trailing_style = fg_of(note_color);
+            if (confirming) {
+                // Del/d armed on a preset that has a saved key — second press
+                // signs out (clears the key), the preset itself stays.
+                row.trailing       = "\xe2\x9c\x97 press again to sign out";
+                row.trailing_style = fg_of(warn);
+            } else {
+                row.trailing       = note;
+                row.trailing_style = fg_of(note_color);
+            }
             row.active         = active;
         } else if (const auto* agent = r.acp()) {
             const bool active = (agent->id == active_id);
@@ -657,7 +665,7 @@ Element provider_picker(const Model& m) {
             row.leading        = *spec + "  custom OpenAI-compatible host";
             row.leading_style  = active ? fg_bold(fg) : fg_of(muted);
             if (confirming) {
-                row.trailing       = "\xe2\x9c\x97 press Del again to remove";
+                row.trailing       = "\xe2\x9c\x97 press again to remove";
                 row.trailing_style = fg_of(warn);
             } else {
                 row.trailing       = "\xe2\x9c\x93 ready";
@@ -696,7 +704,7 @@ Element provider_picker(const Model& m) {
         {"\xe2\x86\x91\xe2\x86\x93", "move", 5},        // ↑↓
         {"type", "filter", 4},
         {"Enter", enter_opens_accounts ? "accounts" : "switch", 5},
-        {"Del", picker->confirm_remove.empty() ? "remove host" : "confirm", 2},
+        {"Del/d", picker->confirm_remove.empty() ? "remove" : "confirm", 2},
         {"^/", "models", 3},                       // cross-hint: model picker
         {"Esc", "close", 4},
     }));

@@ -461,9 +461,12 @@ std::optional<Msg> on_provider_picker(const KeyEvent& ev) {
             case SpecialKey::Down:     return ProviderPickerMove{+1};
             // Backspace edits the live search query rather than paging.
             case SpecialKey::Backspace: return ProviderPickerFilterBackspace{};
-            // Del removes a saved custom host (two-press). Mirrors the account
-            // list's Del/d; here `d` is reserved for the search filter, so
-            // only the dedicated Delete key drives it.
+            // Del removes a saved custom host (two-press). On a Mac laptop
+            // the key LABELLED "delete" sends Backspace, not forward-Delete
+            // (that needs Fn+Delete), so relying on Delete alone means Mac
+            // users can't remove a provider at all. Bare `d`/`D` on an EMPTY
+            // query is also accepted below (mirrors the thread picker), so
+            // there's always a reachable delete key.
             case SpecialKey::Delete:   return ProviderPickerDelete{};
             case SpecialKey::Home:     return ProviderPickerJump{ProviderPickerJump::Where::Home};
             case SpecialKey::End:      return ProviderPickerJump{ProviderPickerJump::Where::End};
@@ -488,6 +491,10 @@ std::optional<Msg> on_provider_picker(const KeyEvent& ev) {
         if (raw_ctrl) c = U'a' + (c - 1);
         const bool ctrl = ev.mods.ctrl || raw_ctrl;
         if (ctrl && (c == U'p' || c == U'P')) return CloseProviderPicker{};
+        // Bare `d`/`D` is routed as normal filter input; the reducer turns it
+        // into a delete when the query is EMPTY (the reachable-on-Mac stand-in
+        // for forward-Delete, which Mac laptops send as Backspace). Once a
+        // query exists, `d` stays a search char so filtering "deepseek" works.
         if (!ctrl && c >= 0x20)
             return ProviderPickerFilterInput{c};
     }

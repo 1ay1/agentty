@@ -589,6 +589,48 @@ TEST_CASE("fused active catalog re-seeds when available_models grows") {
     CHECK(fable_row);
 }
 
+// The provider picker's `d` (Mac-reachable stand-in for forward-Delete)
+// signs out of a preset that has a saved key: first `d` arms, second commits
+// (clears the key). openrouter is the reported case.
+TEST_CASE("provider picker: d signs out of a keyed preset (two-press)") {
+    using namespace agentty::msg;
+    install_stub_deps();
+    g_settings = store::Settings{};
+    g_settings.provider_keys["anthropic"]  = "sk-a";
+    g_settings.provider_keys["openrouter"] = "sk-or";   // keyed preset
+    provider::select(provider::parse_selection("anthropic"));
+
+    Model m;
+    m.d.model_id = ModelId{"claude-sonnet-4-5"};
+    auto [m1, c1] = app::update(std::move(m), Msg{OpenProviderPicker{}});
+
+    // Point the cursor at the openrouter row deterministically by locating
+    // it in the built row list, then set the picker index.
+    auto* p = ui::pick::opened(m1.ui.provider_picker);
+    REQUIRE(p != nullptr);
+    const auto rows = ui::build_provider_rows(
+        agentty::provider::saved_custom_hosts(g_settings.provider_keys), "");
+    int or_idx = -1;
+    for (int i = 0; i < static_cast<int>(rows.size()); ++i)
+        if (const auto* pr = rows[static_cast<std::size_t>(i)].preset();
+            pr && std::string{pr->id} == "openrouter") { or_idx = i; break; }
+    REQUIRE(or_idx >= 0);
+    p->index = or_idx;
+    p->query.clear();
+    Model m2 = std::move(m1);
+
+    // First `d` (empty query) arms the sign-out; the key is still present.
+    auto [m3, c3] = app::update(std::move(m2),
+                                Msg{ProviderPickerFilterInput{U'd'}});
+    CHECK(g_settings.provider_keys.count("openrouter") == 1);
+
+    // Second `d` on the same row commits the sign-out.
+    auto [m4, c4] = app::update(std::move(m3),
+                                Msg{ProviderPickerFilterInput{U'd'}});
+    CHECK(g_settings.provider_keys.count("openrouter") == 0);  // signed out
+    CHECK(g_settings.provider_keys.count("anthropic") == 1);   // others intact
+}
+
 // The fused picker tunes reasoning effort (←/→) on the highlighted model,
 // ported from the old model picker so the fused surface is complete.
 TEST_CASE("fused picker cycles reasoning effort") {
