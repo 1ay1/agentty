@@ -709,6 +709,60 @@ TEST_CASE("fused list has no sign-in offer rows") {
         CHECK(!r.is_signin_offer());    // and none rendered
 }
 
+// Signing out of a provider while the fused picker is open prunes its catalog,
+// so its models stop appearing (no stale rows until restart).
+TEST_CASE("fused prunes a signed-out provider's catalog") {
+    using namespace agentty::msg;
+    install_stub_deps();
+    g_settings = store::Settings{};
+    g_settings.provider_keys["anthropic"] = "sk-a";
+    g_settings.provider_keys["openai"]    = "sk-o";
+    provider::select(provider::parse_selection("anthropic"));
+
+    Model m;
+    m.d.model_id = ModelId{"claude-sonnet-4-5"};
+    m.d.available_models = {mi("claude-sonnet-4-5", "anthropic")};
+    auto [m1, c1] = app::update(std::move(m), Msg{OpenFusedPicker{}});
+    FusedCatalogLoaded oa; oa.provider_id = "openai";
+    oa.models = {mi("gpt-5", "openai")}; oa.ok = true;
+    auto [m2, c2] = app::update(std::move(m1), Msg{std::move(oa)});
+    bool had_openai = false;
+    for (const auto& c : m2.d.provider_catalogs)
+        if (c.provider_id == "openai") had_openai = true;
+    CHECK(had_openai);
+
+    // Sign out of openai, then rebuild the sources (as any refresh would).
+    g_settings.provider_keys.erase("openai");
+    auto [m3, c3] = app::update(std::move(m2), Msg{OpenFusedPicker{}});  // re-open re-syncs
+    for (const auto& c : m3.d.provider_catalogs)
+        CHECK(c.provider_id != "openai");            // catalog pruned
+    for (const auto& r : m3.d.fused_rows)
+        CHECK(r.provider_id != "openai");            // no stale rows
+}
+
+// ^Tab skips a dead MRU entry (provider signed out, or model delisted) rather
+// than switching to an id that would 400 on the next request.
+TEST_CASE("^Tab skips a dead MRU entry") {
+    using namespace agentty::msg;
+    install_stub_deps();
+    g_settings = store::Settings{};
+    g_settings.provider_keys["anthropic"] = "sk-a";   // xai NOT authed
+    provider::select(provider::parse_selection("anthropic"));
+
+    Model m;
+    m.d.model_id = ModelId{"claude-a"};
+    m.d.available_models = {mi("claude-a", "anthropic"),
+                            mi("claude-c", "anthropic")};
+    // Ring: active claude-a, then a DEAD xai entry (not authed), then claude-c.
+    m.d.recent_models = {ModelRef{"anthropic", "claude-a"},
+                         ModelRef{"xai", "grok-4"},          // dead
+                         ModelRef{"anthropic", "claude-c"}};
+
+    auto [m1, c1] = app::update(std::move(m), Msg{SwitchToPreviousModel{}});
+    // Must skip the dead xai entry and land on claude-c.
+    CHECK(m1.d.model_id.value == "claude-c");
+}
+
 // The provider picker's ^D (Mac-reachable stand-in for forward-Delete)
 // signs out of a preset that has a saved key: first ^D arms, second commits
 // (clears the key). openrouter is the reported case.

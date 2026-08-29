@@ -1005,6 +1005,25 @@ void hydrate_recents(Model& m) {
     }
 }
 
+// Is an MRU (provider, model) ref still switchable? True when its provider is
+// authed AND — if we hold that provider's catalog — the model id is still
+// listed. If no catalog is loaded yet we can't disprove it, so we optimistically
+// allow it (the switch's own refetch + stale-model guard self-heal). Used to
+// skip dead ring entries on ^Tab so a delisted / signed-out model is never the
+// switch target.
+[[nodiscard]] bool mru_ref_is_live(const Model& m, const ModelRef& ref,
+                                   const store::Settings& settings) {
+    if (!provider::provider_is_authed(ref.provider_id, settings)) return false;
+    for (const auto& c : m.d.provider_catalogs) {
+        if (c.provider_id != ref.provider_id) continue;
+        if (c.models.empty()) return true;          // catalog not loaded yet
+        for (const auto& mi : c.models)
+            if (mi.id.value == ref.model_id) return true;
+        return false;                                // provider known, model gone
+    }
+    return true;   // no catalog for this provider yet — don't disprove
+}
+
 // Refresh the picker's SOURCES into the Model — a CHEAP, in-memory-only pass
 // (one settings read + provider enumeration + stat-cached auth checks), run
 // when the picker opens. It does NOT touch the network or build any provider's
@@ -1016,6 +1035,14 @@ void hydrate_recents(Model& m) {
 void refresh_fused_sources(Model& m) {
     const auto settings = deps().load_settings();
     const std::string active_pid = active_provider_id();
+
+    // Prune catalogs whose provider is no longer authed (e.g. signed out via
+    // ^D while the picker is open). Without this a stale catalog lingers and
+    // its models keep showing in the fused list until restart. The id overload
+    // handles custom hosts too (authed iff their saved key still exists).
+    std::erase_if(m.d.provider_catalogs, [&](const ProviderCatalog& c) {
+        return !provider::provider_is_authed(c.provider_id, settings);
+    });
 
     auto find_cat = [&](std::string_view id) -> ProviderCatalog* {
         for (auto& c : m.d.provider_catalogs)
@@ -1084,6 +1111,9 @@ namespace {
 // so the view + cursor math never re-enumerate providers or re-read
 // settings.json per frame or per keystroke.
 void rebuild_fused_rows(Model& m) {
+    // Snapshot the current rows so we can re-anchor the cursor to the same
+    // model after the rebuild (see the tail of this function).
+    std::vector<FusedRow> prev_rows = m.d.fused_rows;
     // Re-sync the sources FIRST: mirror the active provider's live
     // available_models into its catalog + pick up any newly-authed provider.
     // Without this a rebuild re-ranks the STALE catalog, so a model the live
@@ -1108,6 +1138,27 @@ void rebuild_fused_rows(Model& m) {
         }
     }
     m.d.fused_rows = fused_rows_for_model(m);
+
+    // Keep the CURSOR on the SAME model across a rebuild. A rebuild can re-rank
+    // the rows (an async catalog landed, or the query changed), so the row at
+    // the old index may now be a DIFFERENT model — a subsequent ^E/^F/effort
+    // edit would hit the wrong one. Snapshot the highlighted model id before
+    // the rebuild and re-find it after; fall back to a clamped index.
+    if (auto* c = pick::opened(m.ui.fused_picker)) {
+        const int n = static_cast<int>(m.d.fused_rows.size());
+        if (n == 0) { c->index = 0; return; }
+        std::string want;
+        if (c->index >= 0 && c->index < static_cast<int>(prev_rows.size()))
+            want = prev_rows[static_cast<std::size_t>(c->index)].model.id.value;
+        if (!want.empty()) {
+            for (int i = 0; i < n; ++i)
+                if (m.d.fused_rows[static_cast<std::size_t>(i)].model.id.value == want) {
+                    c->index = i; return;
+                }
+        }
+        if (c->index >= n) c->index = n - 1;
+        if (c->index < 0)  c->index = 0;
+    }
 }
 
 // Resolve the AuthHeader for switching to `spec` (an ALREADY-AUTHED provider,
@@ -1431,12 +1482,24 @@ Step fused_picker_update(Model m, msg::FusedPickerMsg pm) {
             const auto& ring = m.d.recent_models;
             if (ring.size() < 2) return done(std::move(m));  // nothing to cycle
             const ModelRef active{active_provider_id(), m.d.model_id.value};
+            const int n = static_cast<int>(ring.size());
             int cur = 0;
-            for (int i = 0; i < static_cast<int>(ring.size()); ++i)
+            for (int i = 0; i < n; ++i)
                 if (ring[static_cast<std::size_t>(i)] == active) { cur = i; break; }
-            const ModelRef target =
-                ring[static_cast<std::size_t>((cur + 1) % static_cast<int>(ring.size()))];
-            if (target.empty() || target == active) return done(std::move(m));
+            // Walk forward to the next LIVE entry — skip a ring member whose
+            // provider is no longer authed or whose model was delisted, so
+            // ^Tab never switches to a dead id (which every request 400s).
+            // At most one full lap; stop if we come back to the active row.
+            const auto settings = deps().load_settings();
+            ModelRef target;
+            for (int step = 1; step <= n; ++step) {
+                const ModelRef& cand =
+                    ring[static_cast<std::size_t>((cur + step) % n)];
+                if (cand == active) break;                 // lapped, none live
+                if (cand.empty()) continue;
+                if (mru_ref_is_live(m, cand, settings)) { target = cand; break; }
+            }
+            if (target.empty()) return done(std::move(m));
             return switch_to_model_ref(std::move(m), target, /*record=*/false);
         },
         [&](FusedPickerSelect) -> Step {

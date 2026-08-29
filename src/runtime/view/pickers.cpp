@@ -435,11 +435,11 @@ Element fused_picker(const Model& m) {
         return Picker{std::move(cfg)}.build();
     }
 
-    enum class Section { Recent, All, Signin };
+    // Section dividers. Sign-in offers are never emitted into the fused list
+    // (they live in the provider picker), so only RECENT vs ALL PROVIDERS.
+    enum class Section { Recent, All };
     auto section_of = [](const FusedRow& r) {
-        if (r.recent) return Section::Recent;
-        if (r.is_signin_offer()) return Section::Signin;
-        return Section::All;
+        return r.recent ? Section::Recent : Section::All;
     };
     std::optional<Section> cur;
     int visual_selected = 0;
@@ -450,9 +450,7 @@ Element fused_picker(const Model& m) {
             cur = sec;
             Picker::Config::Row hdr;
             hdr.is_header = true;
-            hdr.leading = sec == Section::Recent ? "recent"
-                        : sec == Section::Signin ? "sign in"
-                                                 : "all providers";
+            hdr.leading = sec == Section::Recent ? "recent" : "all providers";
             cfg.rows.push_back(std::move(hdr));
         }
         if (i == picker->index)
@@ -462,14 +460,6 @@ Element fused_picker(const Model& m) {
         Picker::Config::Row row;
         row.selected = selected;   // drives the highlight bar + selected bg
         const bool active = r.active;
-        if (r.is_signin_offer()) {
-            row.leading        = "+ Sign in to " + r.label;
-            row.leading_style  = fg_dim(muted);
-            row.trailing       = "not authed";
-            row.trailing_style = fg_italic(muted);
-            cfg.rows.push_back(std::move(row));
-            continue;
-        }
         row.badge         = r.label;
         row.badge_style   = fg_dim(active ? accent : muted);
         row.leading       = (active ? std::string{"\xe2\x97\x8f "}   // ●
