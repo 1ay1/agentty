@@ -124,6 +124,7 @@ find_catalog(const std::vector<ProviderCatalog>& cats, std::string_view pid) {
         row.authed      = true;
         row.active      = (r == in.active);
         row.recent      = true;
+        row.reasons     = effort_capable(ModelCapabilities::from_id(mi->id.value));
         out.push_back(std::move(row));
         seen.push_back(r);
     };
@@ -152,6 +153,7 @@ find_catalog(const std::vector<ProviderCatalog>& cats, std::string_view pid) {
             row.authed      = true;
             row.active      = (r == in.active);
             row.recent      = false;
+            row.reasons     = effort_capable(ModelCapabilities::from_id(mi.id.value));
             scored.push_back({std::move(row), sc.score, prov_ord});
         }
         ++prov_ord;
