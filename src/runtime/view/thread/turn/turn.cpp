@@ -1285,6 +1285,7 @@ std::optional<maya::Element> reasoning_slot(const Message& msg, const Model& m) 
     rcfg.gradient_body   = true;
     rcfg.pulse           = true;
     rcfg.live_tail_lines = 10;
+    rcfg.structured      = true;   // decision markers + emphasis = bright beats
     maya::ReasoningStream rs{rcfg};
     rs.set_live(active);
     rs.set_char_hint(msg.reasoning_display_text().size());
