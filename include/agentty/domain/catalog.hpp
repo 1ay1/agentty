@@ -94,6 +94,11 @@ struct FusedRow {
     bool        reasons = false;          // model can reason (precomputed at
                                           // build so the view never decodes
                                           // caps per row per frame)
+    // Fuzzy-match byte offsets into the model NAME (display_name, else id) for
+    // the current query — the chars the view highlights (fzf-style) so a big
+    // filtered list shows WHY each row matched. Empty when no query / matched
+    // only on the provider name. Computed once per keystroke in build.
+    std::vector<int> match_positions;
 
     [[nodiscard]] bool is_signin_offer() const noexcept {
         return !authed && model.id.value.empty();

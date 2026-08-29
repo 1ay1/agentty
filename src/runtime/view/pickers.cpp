@@ -477,6 +477,16 @@ Element fused_picker(const Model& m) {
                           + (r.model.display_name.empty()
                                  ? r.model.id.value : r.model.display_name);
         row.leading_style = active ? fg_bold(fg) : fg_of(fg);
+        // fzf-style match highlight: paint the query's matched chars in the
+        // name (bright cyan bold) so a big filtered list shows WHY each row is
+        // here. match_positions are offsets into the NAME; shift them past the
+        // "● " (4 bytes) / "  " (2 bytes) leading prefix.
+        if (!r.match_positions.empty()) {
+            const int prefix = active ? 4 : 2;
+            row.highlight.reserve(r.match_positions.size());
+            for (int p : r.match_positions) row.highlight.push_back(prefix + p);
+            row.highlight_fg = info;   // theme cyan/info hue
+        }
         std::string trailing;
         if (r.model.favorite) trailing = "\xe2\x98\x85  ";              // ★
         // Reasoning badge (precomputed in build_fused_rows — no per-frame

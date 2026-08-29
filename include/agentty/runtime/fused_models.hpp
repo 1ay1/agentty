@@ -102,6 +102,18 @@ find_catalog(const std::vector<ProviderCatalog>& cats, std::string_view pid) {
         return no_query || fuzzy::matches(fused_haystack(label, mi), q);
     };
 
+    // The visible model NAME (what the view puts in the row's leading cell).
+    auto name_of = [](const ModelInfo& mi) -> std::string_view {
+        return mi.display_name.empty() ? std::string_view{mi.id.value}
+                                       : std::string_view{mi.display_name};
+    };
+    // Byte offsets of the query within the NAME, for fzf-style highlighting.
+    // Empty when no query, or when the row matched only on the provider name.
+    auto name_positions = [&](const ModelInfo& mi) -> std::vector<int> {
+        if (no_query) return {};
+        return fuzzy::score(name_of(mi), q).positions;
+    };
+
     // ── Section 1: RECENT (MRU) ──────────────────────────────────────────
     // The active row is pinned first even if not literally the newest MRU
     // entry, so `●` always leads. De-dup against what we emit here so the
@@ -125,6 +137,7 @@ find_catalog(const std::vector<ProviderCatalog>& cats, std::string_view pid) {
         row.active      = (r == in.active);
         row.recent      = true;
         row.reasons     = effort_capable(ModelCapabilities::from_id(mi->id.value));
+        row.match_positions = name_positions(*mi);
         out.push_back(std::move(row));
         seen.push_back(r);
     };
@@ -169,6 +182,7 @@ find_catalog(const std::vector<ProviderCatalog>& cats, std::string_view pid) {
             row.active      = (r == in.active);
             row.recent      = false;
             row.reasons     = effort_capable(ModelCapabilities::from_id(mi.id.value));
+            row.match_positions = name_positions(mi);
             scored.push_back({std::move(row), mscore, prov_ord});
         }
         ++prov_ord;
