@@ -24,6 +24,7 @@ static constexpr std::array kAll = {
     Command::NewThread, Command::ReviewChanges, Command::ToggleChangesStrip,
     Command::AcceptAll,
     Command::RejectAll, Command::CycleProfile, Command::OpenModels,
+    Command::SwapModel,
     Command::OpenProviders, Command::OpenThreads, Command::OpenPlan,
     Command::RunCodeBlock, Command::InspectToolOutputs, Command::CompactContext,
     Command::SmartMode,
