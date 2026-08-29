@@ -81,6 +81,9 @@ struct FusedRow {
     bool        authed = true;
     bool        active = false;           // == current provider + model
     bool        recent = false;           // belongs in the RECENT section
+    bool        reasons = false;          // model can reason (precomputed at
+                                          // build so the view never decodes
+                                          // caps per row per frame)
 
     [[nodiscard]] bool is_signin_offer() const noexcept {
         return !authed && model.id.value.empty();

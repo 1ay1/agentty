@@ -479,10 +479,10 @@ Element fused_picker(const Model& m) {
         row.leading_style = active ? fg_bold(fg) : fg_of(fg);
         std::string trailing;
         if (r.model.favorite) trailing = "\xe2\x98\x85  ";              // ★
-        // Reasoning badge: mark models that can think so the tier chip / ^E
-        // aren't a surprise, and "which of these reason" is legible at a
-        // glance across providers.
-        if (effort_capable(resolved_caps(r.model.id.value)))
+        // Reasoning badge (precomputed in build_fused_rows — no per-frame
+        // caps decode): mark models that can think so "which of these reason"
+        // is legible at a glance across providers.
+        if (r.reasons)
             trailing += "\xe2\x9c\xa6  ";                                // ✦
         if (r.model.context_window > 0) {
             const int w = r.model.context_window;
