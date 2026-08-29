@@ -457,8 +457,10 @@ Element fused_picker(const Model& m) {
         }
         if (i == picker->index)
             visual_selected = static_cast<int>(cfg.rows.size());
+        const bool selected = (i == picker->index);
 
         Picker::Config::Row row;
+        row.selected = selected;   // drives the highlight bar + selected bg
         const bool active = r.active;
         if (r.is_signin_offer()) {
             row.leading        = "+ Sign in to " + r.label;
