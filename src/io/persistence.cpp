@@ -341,6 +341,9 @@ static json message_to_json(const Message& m) {
         j["thinking"] = tools::util::to_valid_utf8(m.thinking);
     if (!m.thinking_signature.empty())
         j["thinking_signature"] = m.thinking_signature;
+    // Reasoning duration (ms) for the settled "· 3.2s" header meter.
+    if (m.reasoning_ms > 0)
+        j["reasoning_ms"] = m.reasoning_ms;
     // Per-block (text, signature) pairs — the authoritative replay source
     // when interleaved thinking produced several signed blocks. The legacy
     // pair above stays for older-binary compat.
@@ -467,6 +470,7 @@ static std::expected<Message, DeserializeError> parse_message(const json& j) {
     m.text = j.value("text", "");
     m.thinking = j.value("thinking", "");
     m.thinking_signature = j.value("thinking_signature", "");
+    m.reasoning_ms = j.value("reasoning_ms", static_cast<std::int64_t>(0));
     if (auto it = j.find("thinking_blocks"); it != j.end() && it->is_array())
         for (const auto& tb : *it)
             if (tb.is_object())

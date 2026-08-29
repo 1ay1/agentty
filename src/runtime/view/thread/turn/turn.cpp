@@ -1319,6 +1319,17 @@ std::optional<maya::Element> reasoning_slot(const Message& msg, const Model& m) 
     maya::ReasoningStream rs{rcfg};
     rs.set_live(active);
     rs.set_char_hint(msg.reasoning_display_text().size());
+    // Reasoning duration for the "· 3.2s" header meter. Once sealed (answer/
+    // tool arrived) show the final reasoning_ms; while still thinking, tick a
+    // live elapsed off the steady-clock start stamp.
+    std::int64_t elapsed = msg.reasoning_ms;
+    if (elapsed == 0 && active && msg.reasoning_started_ms > 0) {
+        const std::int64_t now_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+        elapsed = std::max<std::int64_t>(0, now_ms - msg.reasoning_started_ms);
+    }
+    rs.set_elapsed_ms(elapsed);
     return rs.build_with_body(std::move(body));
 }
 
