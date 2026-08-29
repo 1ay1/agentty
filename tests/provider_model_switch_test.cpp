@@ -730,6 +730,41 @@ TEST_CASE("fused refetches stale/failed catalogs, skips fresh") {
     maya::testing::unfreeze_anim_clock();
 }
 
+// ^L (FusedPickerRefresh) forces a full live refresh regardless of TTL: it
+// resets every catalog's freshness and refetches the non-active providers now.
+TEST_CASE("fused ^L forces a full refresh") {
+    using namespace agentty::msg;
+    maya::testing::freeze_anim_clock(1'000'000);
+    install_stub_deps();
+    g_settings = store::Settings{};
+    g_settings.provider_keys["anthropic"] = "sk-a";
+    g_settings.provider_keys["openai"]    = "sk-o";
+    provider::select(provider::parse_selection("anthropic"));
+
+    Model m;
+    m.d.model_id = ModelId{"claude-sonnet-4-5"};
+    m.d.available_models = {mi("claude-sonnet-4-5", "anthropic")};
+    auto [m1, c1] = app::update(std::move(m), Msg{OpenFusedPicker{}});
+    FusedCatalogLoaded oa; oa.provider_id = "openai";
+    oa.models = {mi("gpt-5", "openai")}; oa.ok = true;
+    auto [m2, c2] = app::update(std::move(m1), Msg{std::move(oa)});
+
+    auto openai_state = [](const Model& mm) {
+        for (const auto& c : mm.d.provider_catalogs)
+            if (c.provider_id == "openai") return c.state;
+        return ProviderCatalog::State::Idle;
+    };
+    REQUIRE(openai_state(m2) == ProviderCatalog::State::Ready);   // fresh
+
+    // ^L refetches even a FRESH catalog (no TTL wait).
+    auto [m3, c3] = app::update(std::move(m2), Msg{FusedPickerRefresh{}});
+    CHECK(openai_state(m3) == ProviderCatalog::State::Loading);
+    for (const auto& c : m3.d.provider_catalogs)
+        CHECK(c.loaded_at_ms == 0);   // freshness reset for all
+
+    maya::testing::unfreeze_anim_clock();
+}
+
 // The fused MODEL picker never shows "sign in to X" rows for un-authed
 // providers — signing in belongs to the provider picker (^P). Only authed
 // providers' models appear.

@@ -538,7 +538,7 @@ Element fused_picker(const Model& m) {
         {"Enter", "switch", 5},
         {"^/", "this provider", 3},
         {"^F", "favorite", 1},
-        {"^P", "providers", 2},
+        {"^L", "refresh", 2},
         {"^Tab", "prev", 2},
         {"Esc", "close", 4},
     }));

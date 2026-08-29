@@ -421,6 +421,11 @@ struct OpenFusedPicker {};
 // active provider's result isn't queued behind slower providers on the bounded
 // worker pool — the selected models refresh first, the rest trickle in.
 struct FusedRefreshOthers {};
+// ^L — force a full live refresh: mark EVERY authed provider's catalog stale
+// and refetch (active immediately, others deferred). The manual escape hatch
+// when a catalog is stale/failed and the user doesn't want to wait for the TTL
+// or reopen. Shows the loading hint while fetches are in flight.
+struct FusedPickerRefresh {};
 struct CloseFusedPicker {};
 struct FusedPickerMove { int delta; };
 struct FusedPickerJump { enum class Where { Home, End, PageUp, PageDown }; Where where; };
@@ -940,7 +945,8 @@ using FusedPickerMsg = std::variant<
     FusedPickerSelect, FusedPickerToggleFavorite,
     FusedPickerCycleEffort, FusedPickerToggleReasoning,
     FusedPickerFilterInput, FusedPickerFilterBackspace,
-    FusedCatalogLoaded, SwitchToPreviousModel, FusedRefreshOthers>;
+    FusedCatalogLoaded, SwitchToPreviousModel, FusedRefreshOthers,
+    FusedPickerRefresh>;
 
 using ThreadListMsg = std::variant<
     OpenThreadList, CloseThreadList, ThreadListMove, ThreadListJump,

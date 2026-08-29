@@ -384,6 +384,8 @@ std::optional<Msg> on_fused_picker(const KeyEvent& ev) {
         if (ev.mods.ctrl || raw_ctrl) {
             if (raw_ctrl) c = U'a' + (c - 1);
             if (c == U'f') return FusedPickerToggleFavorite{};
+            // ^L — force a full live refresh of every provider's catalog.
+            if (c == U'l') return FusedPickerRefresh{};
             // ^E (per-model reasoning override) removed — ←/→ already cycles the
             // effort tier through 'off', so it was redundant / a no-op on
             // Claude/GPT. ^E now uniformly means "expand composer".

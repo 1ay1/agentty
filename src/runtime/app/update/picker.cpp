@@ -90,7 +90,7 @@ constexpr std::int64_t kCatalogTtlMs = 60'000;   // 60s
 void record_recent(Model& m, const std::string& provider_id,
                    const std::string& model_id);
 void hydrate_recents(Model& m);
-void rebuild_fused_rows(Model& m);
+void rebuild_fused_rows(Model& m, bool sync_sources = true);
 } // namespace
 using maya::Cmd;
 
@@ -1129,7 +1129,16 @@ namespace {
 // at the points its inputs change (open / filter / catalog-loaded / favorite)
 // so the view + cursor math never re-enumerate providers or re-read
 // settings.json per frame or per keystroke.
-void rebuild_fused_rows(Model& m) {
+//
+// `sync_sources` controls the EXPENSIVE preamble (settings read + provider
+// enumeration + per-provider auth stat + prune + active-catalog mirror). It is
+// only needed when AUTH or available_models may have changed — on open, on a
+// ModelsLoaded (active provider), or a favorite toggle. A plain async
+// catalog-arrival (FusedCatalogLoaded) for a NON-active provider changed only
+// that catalog's models; passing sync_sources=false there re-ranks + rebuilds
+// keys without the auth-stat churn, so a burst of providers resolving doesn't
+// re-enumerate + re-stat auth N times.
+void rebuild_fused_rows(Model& m, bool sync_sources) {
     // Snapshot the current rows so we can re-anchor the cursor to the same
     // model after the rebuild (see the tail of this function).
     std::vector<FusedRow> prev_rows = m.d.fused_rows;
@@ -1138,7 +1147,7 @@ void rebuild_fused_rows(Model& m) {
     // Without this a rebuild re-ranks the STALE catalog, so a model the live
     // /v1/models fetch just added (ModelsLoaded) never reaches the open
     // picker — the "fused pane doesn't update" bug.
-    refresh_fused_sources(m);
+    if (sync_sources) refresh_fused_sources(m);
     // Keep each catalog's precomputed, lowercased fuzzy keys in sync with its
     // model set. This is the SINGLE place the filter consumes catalogs, so
     // keys built here are reused across every keystroke — the per-key filter
@@ -1321,6 +1330,25 @@ Step fused_picker_update(Model m, msg::FusedPickerMsg pm) {
                                                  Msg{FusedRefreshOthers{}}));
             return {std::move(m), maya::Cmd<Msg>::batch(std::move(boot))};
         },
+        [&](FusedPickerRefresh) -> Step {
+            // ^L — force a full live refresh: reset every catalog's freshness so
+            // the active + deferred waves all refetch, regardless of TTL. The
+            // manual escape hatch when the user wants the very latest now.
+            if (!pick::opened(m.ui.fused_picker)) return done(std::move(m));
+            for (auto& c : m.d.provider_catalogs) c.loaded_at_ms = 0;
+            const std::string apid = active_provider_id();
+            std::vector<maya::Cmd<Msg>> boot;
+            boot.push_back(cmd::fetch_models());   // active now
+            for (auto& c : m.d.provider_catalogs) {
+                if (c.provider_id == apid) continue;
+                c.state = ProviderCatalog::State::Loading;
+                boot.push_back(cmd::fetch_models_for(c.provider_id));
+            }
+            auto toast = set_status_toast(m, "refreshing models\xe2\x80\xa6",
+                                          std::chrono::seconds{2});
+            boot.push_back(std::move(toast));
+            return {std::move(m), maya::Cmd<Msg>::batch(std::move(boot))};
+        },
         [&](FusedRefreshOthers) -> Step {
             // Lazy second wave: refresh every OTHER authed provider whose live
             // catalog is STALE (older than the TTL), FAILED, or never fetched.
@@ -1397,7 +1425,9 @@ Step fused_picker_update(Model m, msg::FusedPickerMsg pm) {
                 if (e.ch >= 0x20 && e.ch < 0x7f) {
                     c->query.push_back(static_cast<char>(e.ch));
                     c->index = 0;
-                    rebuild_fused_rows(m);   // query changed → rows changed
+                    // Query changed — re-rank only; auth is unchanged so skip
+                    // the source re-sync (prune + per-provider auth stat).
+                    rebuild_fused_rows(m, /*sync_sources=*/false);
                     clamp_cursor(m);
                 }
             }
@@ -1407,7 +1437,7 @@ Step fused_picker_update(Model m, msg::FusedPickerMsg pm) {
             if (auto* c = pick::opened(m.ui.fused_picker); c && !c->query.empty()) {
                 c->query.pop_back();
                 c->index = 0;
-                rebuild_fused_rows(m);
+                rebuild_fused_rows(m, /*sync_sources=*/false);   // re-rank only
                 clamp_cursor(m);
             }
             return done(std::move(m));
@@ -1430,9 +1460,11 @@ Step fused_picker_update(Model m, msg::FusedPickerMsg pm) {
                 break;
             }
             // Only the fused picker's own list depends on the merged catalogs;
-            // rebuild it (cheap, once per resolving provider) if it's open.
+            // rebuild it (cheap, once per resolving provider) if it's open. A
+            // catalog arrival didn't change AUTH, so skip the source re-sync
+            // (prune + per-provider auth stat) — just re-rank + rebuild keys.
             if (pick::is_open(m.ui.fused_picker)) {
-                rebuild_fused_rows(m);
+                rebuild_fused_rows(m, /*sync_sources=*/false);
                 clamp_cursor(m);
             }
             return done(std::move(m));
