@@ -409,7 +409,9 @@ Element fused_picker(const Model& m) {
     cfg.header.push_back(h(text("\xf0\x9f\x94\x8d ", fg_of(muted)),
         text(picker->query.empty() ? std::string{"type to filter across providers"}
                                    : picker->query,
-             picker->query.empty() ? fg_italic(muted) : fg_of(fg))));
+             picker->query.empty() ? fg_italic(muted) : fg_of(fg))
+    ).build());
+    cfg.header.push_back(sep);   // rule under the filter (matches classic picker)
 
     // Lazy-load hint: while any provider's catalog is still streaming in,
     // show a dim spinner-ish note so the (initially active-provider-only)
