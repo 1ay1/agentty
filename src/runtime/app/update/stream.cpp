@@ -1169,6 +1169,15 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                 // Cap is on the COMBINED visible + buffered size so
                 // smoothing can't push past the per-message budget.
                 auto& msg = m.d.current.messages.back();
+                // Seal the reasoning timer: the first answer byte marks the
+                // end of the thinking phase.
+                if (msg.reasoning_started_ms != 0 && msg.reasoning_ms == 0) {
+                    const std::int64_t now_ms =
+                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                            now.time_since_epoch()).count();
+                    msg.reasoning_ms =
+                        std::max<std::int64_t>(0, now_ms - msg.reasoning_started_ms);
+                }
                 const std::size_t in_flight =
                     msg.streaming_text.size() + msg.pending_stream.size();
                 if (in_flight < kMaxStreamingBytes) {
@@ -1237,6 +1246,16 @@ Step stream_update(Model m, msg::StreamMsg sm) {
             }
             if (!m.d.current.messages.empty()
                 && m.d.current.messages.back().role == Role::Assistant) {
+                auto& amsg = m.d.current.messages.back();
+                // A tool call ends the thinking phase too (reasoning→tool
+                // turns) — seal before the tool's own timer starts.
+                if (amsg.reasoning_started_ms != 0 && amsg.reasoning_ms == 0) {
+                    const std::int64_t now_ms =
+                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                            now.time_since_epoch()).count();
+                    amsg.reasoning_ms =
+                        std::max<std::int64_t>(0, now_ms - amsg.reasoning_started_ms);
+                }
                 ToolUse tc;
                 tc.id   = e.id;
                 tc.name = e.name;
@@ -1515,6 +1534,13 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                 if (!e.text.empty()) {
                     open_block().text += e.text;
                     msg.thinking      += e.text;
+                    // Start the reasoning timer on the first thinking text
+                    // (steady clock; finalized when the answer/tool arrives).
+                    if (msg.reasoning_started_ms == 0)
+                        msg.reasoning_started_ms =
+                            std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now().time_since_epoch())
+                                .count();
                 }
                 if (!e.signature.empty()) {
                     auto& blk = open_block();

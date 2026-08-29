@@ -335,6 +335,14 @@ struct Message {
     std::vector<ThinkingBlock> thinking_blocks;
     std::string thinking;
     std::string thinking_signature;
+    // Wall-clock reasoning duration for the "Reasoned · ~N tokens · 3.2s"
+    // header meter. `reasoning_started_ms` is a transient steady-clock stamp
+    // set on the first thinking delta (0 = not started, NOT persisted);
+    // `reasoning_ms` is the finalized duration in milliseconds, sealed when
+    // the first answer/tool output arrives or the stream ends, and IS
+    // persisted so a reloaded thread still shows how long the turn thought.
+    std::int64_t reasoning_started_ms = 0;
+    std::int64_t reasoning_ms = 0;
     // ── Codex/Responses reasoning replay (Assistant turns only) ─────────
     // The Responses API is the OpenAI analogue of Anthropic's thinking
     // block. When we request `include:["reasoning.encrypted_content"]`, each
