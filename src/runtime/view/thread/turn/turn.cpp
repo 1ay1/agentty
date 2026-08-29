@@ -170,18 +170,24 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m,
         // the estimate warms up; drain_secs (the lag buffer) still applies.
         cache.streaming->set_reveal_adaptive(true, /*min*/25.0, /*max*/180.0);
 
-        // REASONING is paced DIFFERENTLY. Providers deliver reasoning as a
-        // summary that often lands in one/two big deltas at the end of the
-        // thinking window, so the adaptive estimator sees a huge instantaneous
-        // "wire rate" and races the cursor to the edge — the block appears all
-        // at once. Reasoning is also secondary content, so a calmer, DELIBERATE
-        // typewriter reads better and clearly signals "the model is thinking".
-        // Fixed, gentle pace (no fast adaptive ceiling) so it visibly types out
-        // regardless of how the bytes arrive.
+        // REASONING is paced for SPEED while keeping the animated slide.
+        // Providers deliver reasoning as a summary that often lands in one/two
+        // big deltas at the end of the thinking window, so the cursor sees a
+        // large backlog at once. The reveal engine has NO cruise-speed cap:
+        // it moves at backlog/drain_secs clamped to [min,max], and the
+        // animation quality (fast scramble/ghost SLIDE, never a paste) comes
+        // from the rate_tau low-pass — which is INDEPENDENT of the speed band.
+        // So we lift the CEILING well above the answer path (reasoning is
+        // bulk, skimmable content the user reads faster than prose) to drain a
+        // big block quickly, keep the floor brisk so short reasoning types
+        // promptly, and hold a tight-ish lag so the cursor tracks the wire and
+        // never hoards a backlog to dump at the reasoning→answer settle. The
+        // earlier 95 cps ceiling was the bottleneck that made it feel slow.
         if (reasoning_view) {
-            cache.streaming->set_reveal_pacing(/*floor_cps=*/32.0,
-                                               /*lead_secs=*/0.25);
-            cache.streaming->set_reveal_adaptive(false);
+            cache.streaming->set_reveal_pacing(/*floor_cps=*/60.0,
+                                               /*lead_secs=*/0.28);
+            cache.streaming->set_reveal_adaptive(true, /*min*/45.0,
+                                                 /*max*/280.0);
         }
     }
 
@@ -229,23 +235,12 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m,
     // set_content_async's string_view stays valid across frames, and diff
     // on its size like the answer path.
     if (reasoning_view) {
+        // Reasoning body is the raw reasoning text (the ReasoningStream chrome
+        // supplies the ┃ rail + dim). Stash it in the persistent buffer so
+        // set_content_async's string_view stays valid across frames.
         std::string_view rsrc = msg.reasoning_display_text();
-        // Render reasoning as a markdown BLOCKQUOTE: prefix every line with
-        // "> " so the engine draws its │ gutter. Unlike a bordered box, the
-        // blockquote is a plain vstack of │-prefixed rows — it scrolls off the
-        // viewport top / commits to scrollback row-by-row like prose, so a
-        // long reasoning is never clipped. This is the rail, made splittable.
-        std::string quoted;
-        if (!rsrc.empty()) {
-            quoted.reserve(rsrc.size() + rsrc.size() / 32 + 4);
-            quoted += "> ";
-            for (char c : rsrc) {
-                quoted += c;
-                if (c == '\n') quoted += "> ";
-            }
-        }
-        if (quoted != cache.combined_source)
-            cache.combined_source = std::move(quoted);
+        if (rsrc != cache.combined_source)
+            cache.combined_source.assign(rsrc);
     }
 
     const bool sizes_unchanged = reasoning_view
@@ -1290,14 +1285,34 @@ std::optional<maya::Element> reasoning_slot(const Message& msg, const Model& m) 
     // the cached body.
     maya::Element body = cached_markdown_for(msg, m, MdView::Reasoning);
 
-    // The reasoning renders as a markdown BLOCKQUOTE (see cached_markdown_for):
-    // its │ gutter is the rail, and because the blockquote is a plain vstack of
-    // │-prefixed rows it scrolls off the viewport top / commits to scrollback
-    // like prose — a long reasoning is never clipped (the old bordered box was
-    // atomic and clipped). So: whole body, smooth reveal, rail, no clipping.
+    // Reasoning renders like a nested Turn: a real bold ┃ left rail (the same
+    // atomic bordered box a Turn uses for its rail — turns don't corrupt
+    // scrollback because the live edge streams through the shared reveal /
+    // scrollback-safety machinery, and reasoning shares that machinery via
+    // cached_markdown_for) plus a dimmed body so the answer below always wins
+    // the eye. Whole body, smooth reveal, full rail, dim — distinct aside.
     maya::ReasoningStream::Config rcfg;
-    rcfg.boxed    = false;   // blockquote provides the rail; no atomic box
-    rcfg.dim_body = false;   // keep the blockquote's own │ + muted-italic style
+    rcfg.boxed    = true;    // real ┃ rail (like a Turn), not a per-line prefix
+    rcfg.dim_body = true;    // recede the body by color so the answer wins
+    // Colors MUST come from the named-ANSI palette, not the widget's hardcoded
+    // truecolor defaults (0x8a gray body / indigo rail). agentty's rule is
+    // "the terminal theme wins": named ANSI adapts to the user's palette, so
+    // "recede" means the same thing on a light OR dark background. The
+    // hardcoded gray was low-contrast-to-invisible on light terminals.
+    //   body  → a fixed MID-gray (0x9a9a9a). A true mid-gray is the one color
+    //           that stays visible on ANY background — it has real contrast
+    //           against both a black and a white terminal, so "dimmed" never
+    //           collapses to invisible. Named ANSI can't guarantee this (the
+    //           theme may map bright_black to near-black, or white to near-bg);
+    //           a fixed mid-gray does. Still clearly recedes below the bright-
+    //           white answer prose.
+    //   header→ muted (bright_black): the "Reasoned" label is chrome.
+    //   rail  → role_brand (magenta): the agent's own identity hue, matching
+    //           the surrounding assistant turn rail so the reasoning reads as
+    //           a nested aside of the same speaker.
+    rcfg.accent      = ui::role_brand;               // ┃ rail + sigil
+    rcfg.header_word = ui::muted;                    // "Reasoned" header (chrome)
+    rcfg.body_fg     = maya::Color::rgb(0x9a, 0x9a, 0x9a);  // always-visible dim
     maya::ReasoningStream rs{rcfg};
     rs.set_live(active);
     rs.set_char_hint(msg.reasoning_display_text().size());
