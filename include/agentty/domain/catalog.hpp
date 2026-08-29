@@ -28,6 +28,10 @@ struct ModelInfo {
     // the model can only be used for plain chat. Set by list_models() via
     // Ollama's /api/show probe. std::optional so unknown = std::nullopt.
     std::optional<bool> supports_tools;
+
+    // Value equality (used to detect when the active provider's fused catalog
+    // has drifted from available_models and needs a re-seed).
+    [[nodiscard]] bool operator==(const ModelInfo&) const = default;
 };
 
 // A (provider, model) pair — the identity a cross-provider switch targets and

@@ -489,6 +489,44 @@ TEST_CASE("^Tab cycles the MRU ring without reordering") {
     CHECK(m.d.recent_models[2].model_id == "claude-c");
 }
 
+// The active provider's fused catalog MIRRORS available_models on every open,
+// so a model that appears in available_models later (e.g. the live /v1/models
+// fetch lands a new flagship after the first open seeded the bundled list)
+// also shows in the fused picker — it must not freeze on the first snapshot.
+TEST_CASE("fused active catalog re-seeds when available_models grows") {
+    using namespace agentty::msg;
+    install_stub_deps();
+    g_settings = store::Settings{};
+    g_settings.provider_keys["anthropic"] = "sk-test";
+    provider::select(provider::parse_selection("anthropic"));
+
+    Model m;
+    m.d.model_id = ModelId{"claude-opus-4-5"};
+    m.d.available_models = {mi("claude-opus-4-5", "anthropic"),
+                            mi("claude-sonnet-4-5", "anthropic")};
+
+    // First open seeds the fused catalog from the current (Fable-less) list.
+    auto [m1, c1] = app::update(std::move(m), Msg{OpenFusedPicker{}});
+    auto [m2, c2] = app::update(std::move(m1), Msg{CloseFusedPicker{}});
+
+    // The live fetch lands a newly-listed flagship into available_models.
+    m2.d.available_models.push_back(mi("claude-fable-5", "anthropic"));
+
+    // Re-open: the active catalog must MIRROR the grown available_models.
+    auto [m3, c3] = app::update(std::move(m2), Msg{OpenFusedPicker{}});
+    bool fable_listed = false;
+    for (const auto& cat : m3.d.provider_catalogs)
+        if (cat.provider_id == "anthropic")
+            for (const auto& mo : cat.models)
+                if (mo.id.value == "claude-fable-5") fable_listed = true;
+    CHECK(fable_listed);
+
+    bool fable_row = false;
+    for (const auto& r : m3.d.fused_rows)
+        if (r.model.id.value == "claude-fable-5") fable_row = true;
+    CHECK(fable_row);
+}
+
 // The fused picker tunes reasoning effort (←/→) on the highlighted model,
 // ported from the old model picker so the fused surface is complete.
 TEST_CASE("fused picker cycles reasoning effort") {
