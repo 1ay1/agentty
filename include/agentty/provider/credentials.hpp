@@ -72,6 +72,11 @@ bool activate(std::string_view provider_id, std::string_view label);
 // clears the live credential if none remain).
 bool remove(std::string_view provider_id, std::string_view label);
 
+// Wipe the provider's LIVE active credential entirely (its file, or its
+// provider_keys[spec] entry) — a full sign-out. Used when the last account is
+// removed so build_account_list can't rediscover and resurrect it.
+void clear_active(std::string_view provider_id);
+
 // Persist a freshly-obtained API key as this provider's active account
 // (snapshots any prior active account first, so it ADDS, not replaces).
 bool add_key(std::string_view provider_id, std::string_view key);

@@ -14,6 +14,9 @@
 
 #include "agentty/provider/registry.hpp"
 #include "agentty/provider/selection.hpp"
+#include "agentty/provider/chatgpt/codex_oauth.hpp"
+#include "agentty/provider/copilot/copilot_oauth.hpp"
+#include "agentty/provider/kimi/kimi_oauth.hpp"
 #include "agentty/io/persistence.hpp"
 
 namespace agentty::provider::credentials {
@@ -55,9 +58,12 @@ auth::AuthHeader resolve(std::string_view provider_id) {
             return auth::make_auth_header(*c);
         return auth::AuthHeader{};   // not signed in
     }
-    // oauth_native (ChatGPT/Copilot/Kimi) and local servers: the transport
-    // reads the live token / needs none — no AuthHeader from here.
-    if (is_oauth_native(provider_id) || is_local(provider_id))
+    // oauth_native (ChatGPT/Copilot/Kimi): the transport reads the live token /
+    // needs no header from here. Checked BEFORE is_local because those rows
+    // carry is_local=true (no network key) yet are OAuth, not local servers.
+    if (is_oauth_native(provider_id))
+        return auth::AuthHeader{auth::ApiKeyHeader{std::string{}}};
+    if (is_local(provider_id))
         return auth::AuthHeader{auth::ApiKeyHeader{std::string{}}};
 
     // Hosted OpenAI-family key OR custom host: bearer key, precedence
@@ -90,9 +96,11 @@ bool needs_login(std::string_view provider_id) {
 }
 
 AddMethod add_method(std::string_view provider_id) {
-    if (is_local(provider_id)) return AddMethod::None;
+    // oauth_native FIRST: ChatGPT/Copilot/Kimi carry is_local=true (they need
+    // no network API key) but are OAuth providers, not keyless local servers.
     if (is_anthropic(provider_id) || is_oauth_native(provider_id))
         return AddMethod::OAuthDevice;
+    if (is_local(provider_id)) return AddMethod::None;
     return AddMethod::ApiKey;   // hosted key + custom host
 }
 
@@ -113,6 +121,19 @@ bool activate(std::string_view provider_id, std::string_view label) {
 
 bool remove(std::string_view provider_id, std::string_view label) {
     return auth::accounts::remove(std::string{provider_id}, std::string{label});
+}
+
+void clear_active(std::string_view provider_id) {
+    const std::string id{provider_id};
+    if (is_anthropic(id))          { auth::clear_credentials(); return; }
+    if (id == "chatgpt")           { chatgpt::clear_codex_credentials(); return; }
+    if (id == "copilot")           { copilot::clear_credentials(); return; }
+    if (id == "kimi")              { kimi::clear_credentials(); return; }
+    // Hosted key / custom host: the credential IS provider_keys[id].
+    auto s = persistence::load_settings();
+    s.provider_keys.erase(id);
+    s.provider_models.erase(id);
+    persistence::save_settings(s);
 }
 
 bool add_key(std::string_view provider_id, std::string_view key) {

@@ -350,6 +350,27 @@ Step account_select(Model m) {
     // one native OAuth method, while Anthropic offers its API-key/OAuth choices.
     if (al->cursor >= add_row) {
         const std::string provider = al->provider;
+        // UNIFORM add-account routing: the credential layer says HOW this
+        // provider takes a new account (API key vs OAuth device vs none).
+        switch (provider::credentials::add_method(provider)) {
+        case provider::credentials::AddMethod::ApiKey:
+            // Paste a key for this endpoint (hosted key preset OR custom host).
+            // The ApiKeyInput submit snapshots the current key first, so this
+            // ADDS rather than replaces.
+            m.ui.login = login::ApiKeyInput{
+                .provider       = provider,
+                .provider_label = al->provider_label,
+                .back           = login::Back::AccountList,
+            };
+            return done(std::move(m));
+        case provider::credentials::AddMethod::None:
+            // Local server — no account to add; stay put.
+            return done(std::move(m));
+        case provider::credentials::AddMethod::OAuthDevice:
+            break;   // handled below (provider-specific launch)
+        }
+        // OAuth device login. ChatGPT uses the Codex device/browser flow; the
+        // other OAuth providers share launch_device_login.
         if (provider == "chatgpt") {
             const auto attempt_id = cmd::next_codex_login_attempt_id();
             auto cancel = std::make_shared<std::atomic_bool>(false);
@@ -360,25 +381,12 @@ Step account_select(Model m) {
             };
             return {std::move(m), cmd::codex_login_async(attempt_id, std::move(cancel))};
         }
-        if (provider == "copilot") {
+        if (provider == "copilot")
             return launch_device_login(std::move(m), "copilot", "GitHub Copilot");
-        }
-        if (provider == "kimi") {
+        if (provider == "kimi")
             return launch_device_login(std::move(m), "kimi", "Kimi");
-        }
-        // A CUSTOM HOST (non-preset spec) adds an account by entering a new
-        // API key for that same endpoint — route straight to the key input
-        // (not the provider-selection modal, which is for picking a provider).
-        // The ApiKeyInput submit snapshots the current key first, so this
-        // ADDS rather than replaces.
-        if (!provider::preset_for(provider)) {
-            m.ui.login = login::ApiKeyInput{
-                .provider       = provider,
-                .provider_label = al->provider_label,
-                .back           = login::Back::AccountList,
-            };
-            return done(std::move(m));
-        }
+        // Anthropic (or any other OAuth provider): the provider-selection
+        // method menu, which offers OAuth-vs-key.
         m.ui.login = login::Picking{.provider = provider,
                                     .back = login::Back::AccountList};
         return done(std::move(m));
@@ -407,31 +415,29 @@ Step account_select(Model m) {
     // is in flight (oauth_refresh_in_flight), so the first turn on the new
     // account can't fire with the stale bearer.
     maya::Cmd<Msg> refresh_cmd = maya::Cmd<Msg>::none();
+    // UNIFORM: install the live header for the now-active account through the
+    // central resolver. Anthropic/custom-host resolve a real header; the
+    // oauth-native transports (ChatGPT/Copilot/Kimi) read their token from the
+    // just-swapped store on the next turn, so resolve() returns empty and that
+    // empty CLEARS the cached header — exactly the "force a fresh read" the old
+    // per-provider branch did.
+    agentty::app::update_auth(provider::credentials::resolve(provider));
+
+    // Anthropic-SPECIFIC extras (legitimately not uniform): a long-idle OAuth
+    // token may be stale — kick a background proactive refresh so the first
+    // turn on the switched-to account can't fire with a lapsed bearer; and
+    // re-arm 1M-context discovery (the block was learned for the PREVIOUS
+    // account; this one may be entitled).
     if (provider == "anthropic") {
-        if (auto c = auth::load_credentials())
-            agentty::app::update_auth(auth::make_auth_header(*c));
         if (auto tok = auth::oauth_proactive_refresh_token()) {
             m.s.oauth_refresh_in_flight = true;
             refresh_cmd = cmd::refresh_oauth(std::move(*tok));
         }
-        // The 1M-context entitlement block was learned for the PREVIOUS
-        // account; this one may be entitled. Re-arm discovery so the picker
-        // offers `[1m]` variants again (a wrong guess self-heals via the
-        // StreamError fallback, which re-learns the block for this account).
         auto settings = deps().load_settings();
         if (settings.context_1m_blocked) {
             settings.context_1m_blocked = false;
             deps().save_settings(settings);
         }
-    } else if (provider == "chatgpt" || provider == "copilot" || provider == "kimi") {
-        // The Codex / Copilot / Kimi transports read their token from the store
-        // on each turn; clearing the cached header forces a fresh read next turn.
-        agentty::app::update_auth(auth::AuthHeader{});
-    } else {
-        // CUSTOM HOST: activate() wrote the switched-to key into
-        // provider_keys[spec]; re-resolve the LIVE header through the central
-        // resolver so the switch takes effect immediately.
-        agentty::app::update_auth(provider::credentials::resolve(provider));
     }
     const std::string provider_label = al->provider_label;
     m.ui.login = login::Closed{};
@@ -485,21 +491,11 @@ Step account_remove(Model m) {
             }
             m.s.status = "removed " + row.label + " \xc2\xb7 switched to " + next->label;
         } else {
-            // The registry is empty. Clear the underlying live credential
-            // file too; otherwise build_account_list() would rediscover and
-            // silently resurrect the account the user just removed.
-            if (row.provider == "anthropic")      auth::clear_credentials();
-            else if (row.provider == "copilot")   provider::copilot::clear_credentials();
-            else if (row.provider == "chatgpt")   provider::chatgpt::clear_codex_credentials();
-            else if (row.provider == "kimi")      provider::kimi::clear_credentials();
-            else {
-                // CUSTOM HOST: its credential is the provider_keys[spec] entry,
-                // not a file — erase it so build_account_list can't resurrect it.
-                auto s = deps().load_settings();
-                s.provider_keys.erase(row.provider);
-                s.provider_models.erase(row.provider);
-                deps().save_settings(s);
-            }
+            // The registry is empty. Clear the underlying live credential too
+            // (file OR provider_keys[spec]) through the ONE central sign-out;
+            // otherwise build_account_list() would rediscover and silently
+            // resurrect the account the user just removed.
+            provider::credentials::clear_active(row.provider);
             agentty::app::update_auth(auth::AuthHeader{});
 
             login::AccountList empty;
