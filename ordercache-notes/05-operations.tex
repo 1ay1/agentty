@@ -1,0 +1,278 @@
+\section{The six operations, one at a time}
+
+Now we turn the design (\S5) into the six methods. The recurring move: \emph{look
+at what the method is handed, and that tells you which structure it starts from}.
+The names below match the delivered code exactly (\code{insertOrderInternal},
+\code{removeOrderInternal}, \code{securityTotals\_}, \code{companies}).
+
+\subsection{First, the two helpers everything routes through}
+
+From \S5, invariants live in exactly two places. Write them first; the six methods
+become thin wrappers.
+
+\begin{lstlisting}
+// INSERT a validated, non-duplicate order into all four structures.
+void OrderCache::insertOrderInternal(const Order& o) {
+    auto side = parseSide(o.side());                       // Buy / Sell (validated)
+    ordersByUser_[o.user()].insert(o.orderId());
+    ordersBySecurity_[o.securityId()].insert(o.orderId());
+    SecurityTotals& agg = securityTotals_[o.securityId()];
+    CompanyTotals&  co  = agg.companies[o.company()];
+    if (*side == Side::Buy) { agg.totalBuy  += o.qty(); co.buy  += o.qty(); }
+    else                    { agg.totalSell += o.qty(); co.sell += o.qty(); }
+}
+
+// REMOVE an order by id from all four; false if the id is unknown.
+bool OrderCache::removeOrderInternal(const std::string& id) {
+    auto it = orders_.find(id);
+    if (it == orders_.end()) return false;                 // graceful no-op
+    const Order o = it->second;                            // copy BEFORE erasing
+    // ... erase id from ordersByUser_ / ordersBySecurity_ (drop empty buckets) ...
+    // ... subtract o.qty() from securityTotals_ (drop entries that hit 0) ...
+    orders_.erase(it);                                     // source of truth LAST
+    return true;
+}
+\end{lstlisting}
+
+\begin{intu}
+Mirror images: one adds a contribution, one subtracts it. Both prune empty
+buckets so the maps never bloat, and \code{removeOrderInternal} copies the order
+\emph{before} erasing the map entry that owns its strings. Get these two right and
+the rest is bookkeeping.
+\end{intu}
+
+\subsection{\texttt{addOrder} --- handed an \texttt{Order}}
+
+\textbf{What it's handed:} a whole order. \textbf{What that forces:} validate it,
+reject a duplicate id, then insert everywhere.
+
+\begin{center}
+\begin{tikzpicture}[font=\footnotesize,>=Latex,node distance=4mm,every node/.style={align=center}]
+  \node[draw,rounded corners,fill=Soft] (v) {validate\\(id, sec, qty>0, side)};
+  \node[draw,rounded corners,fill=Soft,right=of v] (d) {dup id?\\ignore if so};
+  \node[draw,rounded corners,fill=Gold!12,right=of d] (i) {\ttfamily insertOrderInternal};
+  \node[draw,rounded corners,fill=Buy!10,right=of i] (s) {\ttfamily orders\_.emplace};
+  \draw[->](v)--(d);\draw[->](d)--(i);\draw[->](i)--(s);
+\end{tikzpicture}
+\end{center}
+
+\begin{lstlisting}
+void OrderCache::addOrder(Order order) {
+    if (!isValidOrder(order)) return;                      // reject garbage, no throw
+    std::unique_lock<std::shared_mutex> lock(mutex_);      // WRITE lock
+    if (orders_.count(order.orderId())) return;            // duplicate id: ignore
+    insertOrderInternal(order);
+    orders_.emplace(order.orderId(), std::move(order));    // truth updated last
+}
+\end{lstlisting}
+
+\begin{pitfall}
+State your policies: invalid orders and duplicate ids are \emph{silently ignored}
+(not thrown). Trading systems prefer ``drop and continue'' to crashing. Both are
+graded under ``robust error handling''.
+\end{pitfall}
+
+\subsection{\texttt{cancelOrder} --- handed an id}
+
+\textbf{Handed:} just an id. \textbf{Forces:} nothing but a call to the helper ---
+which already looks up by id and no-ops if absent.
+
+\begin{lstlisting}
+void OrderCache::cancelOrder(const std::string& orderId) {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    removeOrderInternal(orderId);                          // unknown id -> no-op
+}
+\end{lstlisting}
+
+\subsection{\texttt{cancelOrdersForUser} --- handed a user}
+
+\textbf{Handed:} a user. \textbf{Forces:} start from the \emph{user index} to get
+just that user's ids --- never scan all orders.
+
+\begin{center}
+\begin{tikzpicture}[font=\footnotesize,>=Latex,every node/.style={align=center}]
+  \node[draw,rounded corners,fill=Buy!8] (u) {\ttfamily ordersByUser\_["U2"]};
+  \node[draw,rounded corners,fill=Soft,right=1.5cm of u] (list) {snapshot\\\{O2, O7\}};
+  \node[draw,rounded corners,fill=Sell!8,right=1.5cm of list] (er) {for each id:\\removeOrderInternal};
+  \draw[->](u)--(list);\draw[->](list)--(er);
+\end{tikzpicture}
+\end{center}
+
+\begin{lstlisting}
+void OrderCache::cancelOrdersForUser(const std::string& user) {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    auto it = ordersByUser_.find(user);
+    if (it == ordersByUser_.end()) return;
+    // SNAPSHOT first: removeOrderInternal mutates ordersByUser_ as we go.
+    const std::vector<std::string> ids(it->second.begin(), it->second.end());
+    for (const std::string& id : ids) removeOrderInternal(id);
+}
+\end{lstlisting}
+
+\begin{pitfall}
+\textbf{Iterator invalidation.} \code{removeOrderInternal} erases from the very set
+you'd loop over (and may erase the whole bucket). Iterating a container while
+mutating it is undefined behavior. Copy the ids into a \code{vector} first, then
+delete.
+\end{pitfall}
+
+\subsection{\texttt{cancelOrdersForSecIdWithMinimumQty} --- handed a security + threshold}
+
+\textbf{Handed:} a security and a \code{minQty}. \textbf{Forces:} start from the
+\emph{security index}, keep only ids with \code{qty >= minQty}, snapshot, delete.
+
+\begin{lstlisting}
+void OrderCache::cancelOrdersForSecIdWithMinimumQty(
+        const std::string& securityId, unsigned int minQty) {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    auto it = ordersBySecurity_.find(securityId);
+    if (it == ordersBySecurity_.end()) return;
+    std::vector<std::string> victims;                      // snapshot the matches
+    for (const std::string& id : it->second) {
+        auto o = orders_.find(id);
+        if (o != orders_.end() && o->second.qty() >= minQty) victims.push_back(id);
+    }
+    for (const std::string& id : victims) removeOrderInternal(id);
+}
+\end{lstlisting}
+
+\begin{pitfall}
+The threshold is inclusive: \code{qty >= minQty}. An order whose qty \emph{equals}
+\code{minQty} must be removed. Your test should assert \emph{which ids survive},
+not just the count --- a \code{>} vs \code{>=} slip passes a count-only test.
+\end{pitfall}
+
+\subsection{\texttt{getMatchingSizeForSecurity} --- handed a security}
+
+\textbf{Handed:} a security. \textbf{Forces:} read the maintained aggregate and
+fold the \S3 formula over its companies. No order scan.
+
+\begin{lstlisting}
+unsigned int OrderCache::getMatchingSizeForSecurity(const std::string& securityId) {
+    std::shared_lock<std::shared_mutex> lock(mutex_);      // READ lock (shared)
+    auto it = securityTotals_.find(securityId);
+    if (it == securityTotals_.end()) return 0;
+    const SecurityTotals& agg = it->second;
+    std::uint64_t reach = 0;                               // 64-bit: no overflow
+    for (const auto& [company, ct] : agg.companies)
+        reach += std::min<std::uint64_t>(ct.buy, agg.totalSell - ct.sell);
+    std::uint64_t capped = std::min(reach, std::min(agg.totalBuy, agg.totalSell));
+    return static_cast<unsigned int>(capped);              // header wants unsigned int
+}
+\end{lstlisting}
+
+\subsection*{Aside --- what is a ``fold''? (for the layman)}
+\addcontentsline{toc}{subsection}{\quad Aside: what is a fold}
+
+I keep calling this method \emph{the fold}. Here is what that word means, because
+it names the shape of the operation exactly.
+
+A \textbf{fold} (also called \emph{reduce} or \emph{accumulate}) is the pattern of
+\textbf{collapsing a whole collection down to a single value} by walking through it
+and carrying a running result. The name is literal: like folding a long strip of
+paper over and over until it is one small square, you take many items and fold
+them into one.
+\[
+\text{fold:}\qquad [\,x_1,\ x_2,\ x_3,\ \dots,\ x_n\,]\ \longmapsto\ \text{one value}.
+\]
+Every fold has exactly three ingredients:
+
+\begin{center}
+\begin{tikzpicture}[font=\footnotesize,>=Latex,node distance=6mm,every node/.style={align=center}]
+  \node[draw,rounded corners,fill=Gold!12] (seed) {\textbf{1. seed}\\\ttfamily reach = 0};
+  \node[draw,rounded corners,fill=Soft,right=1.2cm of seed] (coll) {\textbf{3. collection}\\the companies};
+  \node[draw,rounded corners,fill=Accent!12,right=1.2cm of coll] (comb) {\textbf{2. combine}\\\ttfamily reach += min(\dots)};
+  \node[draw,rounded corners,fill=Buy!10,right=1.2cm of comb] (out) {\textbf{result}\\one number};
+  \draw[->](seed)--(coll);\draw[->](coll)--(comb);\draw[->](comb)--(out);
+  \draw[->,dashed,Accent] (comb.south) to[out=-120,in=-60] node[below,font=\tiny]{repeat per company} (coll.south);
+\end{tikzpicture}
+\end{center}
+
+Now map those onto the loop above:
+
+\begin{center}
+\renewcommand{\arraystretch}{1.3}\footnotesize
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Ingredient} & \textbf{In the code} & \\
+\midrule
+seed (starting value) & \ttfamily std::uint64\_t reach = 0; & \\
+collection to walk & \ttfamily for (\dots : agg.companies) & \\
+combine step & \ttfamily reach += min(ct.buy, totalSell - ct.sell); & \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+That is precisely a fold: start at $0$, walk every company, accumulate each one's
+contribution into the running \code{reach}. Many companies collapse into one
+quantity.
+
+\begin{intu}
+In a language with folds built in you would write the \emph{same} operation as
+\code{sum(min(c.buy, totalSell - c.sell) for c in companies)} (Python) or
+\code{foldl' (\textbackslash acc c -> \dots) 0 companies} (Haskell). The C++
+\code{for}-loop with a \code{+=} accumulator, the Python \code{sum}, and the
+Haskell \code{foldl'} are all the \emph{same thing}. C++ even ships it by name:
+\code{std::accumulate} \emph{is} the fold function --- our loop is just its
+hand-written form.
+\end{intu}
+
+Why the word earns its place: it names the whole shape in one syllable, and it ties
+back to the type-driven view (\S2) where matching's type is
+$\ty{SecId}\to\ty{Qty}$ --- \emph{many in, one out}. A function that reduces a
+structure to a summary value \emph{is} a fold (the fancy name is a
+\emph{catamorphism}). It also sharply separates this method from its siblings:
+
+\begin{center}
+\renewcommand{\arraystretch}{1.25}\footnotesize
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Method} & \textbf{Shape} & \textbf{Name} \\
+\midrule
+\code{cancelOrder(id)} & key $\to$ find one thing & a \textbf{lookup} \\
+\code{getAllOrders()} & structure $\to$ list of all & a \textbf{map / copy} \\
+\code{getMatchingSizeForSecurity} & many companies $\to$ one number & a \textbf{fold} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Only the matching query \emph{collapses many into one} --- which is why it, and
+only it, is the fold.
+
+\begin{pitfall}
+Two traps. \textbf{(1)} Accumulate in \code{uint64\_t} and cast down only at the
+end --- a million large-qty orders overflow 32 bits. \textbf{(2)}
+\code{totalSell - ct.sell} can't underflow: a company's sells are always a subset
+of the security's total sells (a maintained invariant).
+\end{pitfall}
+
+\subsection{\texttt{getAllOrders} --- handed nothing}
+
+\textbf{Handed:} nothing. \textbf{Forces:} copy every value out of \code{orders\_}.
+$O(n)$, and unavoidable --- you're returning all of it.
+
+\begin{lstlisting}
+std::vector<Order> OrderCache::getAllOrders() const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    std::vector<Order> out;
+    out.reserve(orders_.size());
+    for (const auto& [id, o] : orders_) out.push_back(o);
+    return out;
+}
+\end{lstlisting}
+
+\subsection{Locking, in one breath}
+
+One \code{std::shared\_mutex}: the two \emph{reads} take a \code{shared\_lock}
+(they run concurrently); the four \emph{writes} take a \code{unique\_lock}. The
+aggregate is always consistent with \code{orders\_} because both change under the
+same write lock. Mention it; don't over-build it.
+
+\begin{say}
+``Each method starts from the structure keyed by what it's handed --- id, user,
+security, or nothing. The three cancels all funnel into one
+\code{removeOrderInternal}, so the four structures stay in sync from a single
+place, and bulk cancels snapshot ids first to dodge iterator invalidation.
+Matching reads the aggregate as an $O(\#\text{companies})$ 64-bit fold. Reads take
+a shared lock, writes a unique lock.''
+\end{say}

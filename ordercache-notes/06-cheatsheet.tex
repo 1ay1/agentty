@@ -1,0 +1,94 @@
+\section{Interview cheat sheet}
+
+Everything above compressed to what you'd want in your head walking in.
+
+\subsection{The 30-second pitch}
+
+\begin{keybox}[If you say only one thing]
+``It's a tiny in-memory database: one hash map as source of truth, secondary
+indexes by user and by security for targeted cancels, and a per-security
+aggregate I maintain on every write so the matching query is a closed-form fold in
+$O(\#\text{companies})$. The matching itself is a max-flow / transportation
+problem with a closed form:
+$\min\!\big(\sum_c \min(b_c,\,S-s_c),\ \min(B,S)\big)$.''
+\end{keybox}
+
+\subsection{The formula, one more time}
+
+\textbf{Form A} (from the per-company aggregate you maintain):
+\[
+M=\min\!\Big(\sum_{c}\min(b_c,\;S-s_c),\ \ \min(B,S)\Big)
+\]
+\textbf{Form B} (the min-cut form --- prettier, quote this to show depth):
+\[
+M=\min\!\Big(B,\ \ S,\ \ B+S-\max_c(b_c+s_c)\Big)
+\]
+$B,S$ = total buy/sell; $b_c,s_c$ = company $c$'s buy/sell; $S-s_c$ = sell qty
+company $c$ is \emph{allowed} to touch; $b_c+s_c$ = company $c$'s total mass. Both
+forms are provably equal and equal the true max-flow (see \S6). One company
+$\Rightarrow 0$; two companies $\Rightarrow \min(b_X,s_Y)+\min(b_Y,s_X)$.
+
+\subsection{Gotcha checklist (each one is a graded point)}
+
+\begin{itemize}[leftmargin=1.6em,label=\textcolor{Sell}{\faBug}]
+  \item \textbf{Company rule} $\Rightarrow$ answer is \emph{not} $\min(\text{buy},\text{sell})$. Reason per company.
+  \item \textbf{64-bit sums} --- a million large quantities overflow \code{int}.
+  \item \textbf{Iterator invalidation} --- snapshot ids before bulk cancels; don't mutate while iterating.
+  \item \textbf{Keep all 4 structures in sync} --- funnel through \code{indexInsert}/\code{indexErase}.
+  \item \textbf{Graceful no-ops} --- unknown id, unknown user, empty cache: return quietly, never crash.
+  \item \textbf{Validation} --- reject empty ids, \code{qty==0}, bad side; decide duplicate-id policy and state it.
+  \item \textbf{Drop empty buckets} --- when a user/security/company hits zero orders, erase the entry so maps don't grow forever.
+  \item \textbf{C++17 only} --- no C++20/23, no Boost; structured bindings are fine.
+  \item \textbf{Thread-safety} --- \code{shared\_lock} on reads, \code{unique\_lock} on writes, one \code{shared\_mutex}.
+\end{itemize}
+
+\subsection{Complexity, memorized}
+
+\begin{center}
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}ll@{}}
+\toprule
+add / cancelOrder & $O(1)$ average \\
+cancelForUser / cancelForSecMinQty & $O(k)$, $k$ = affected orders \\
+getMatchingSizeForSecurity & $O(c)$, $c$ = companies in security \\
+getAllOrders & $O(n)$ \\
+memory & $O(n)$ orders $+$ $O(n)$ index entries $+$ $O(\text{sec}\times\text{co})$ aggregate \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Test cases to bring up unprompted}
+
+\begin{enumerate}[leftmargin=1.6em]
+  \item \textbf{Self-trade blocked:} \Buy{}100(A), \Sell{}100(A) $\Rightarrow$ \textbf{0}.
+  \item \textbf{One cross-company match:} \Buy{}100(A), \Sell{}100(A), \Sell{}100(B) $\Rightarrow$ \textbf{100}.
+  \item \textbf{README Example 1:} the $2700$ security --- the canonical check.
+  \item \textbf{No sells / no buys:} $\Rightarrow$ 0.
+  \item \textbf{Cancel then re-query:} matching updates correctly after \code{cancelOrder}.
+  \item \textbf{cancelForUser} removes across multiple securities, indexes stay clean.
+  \item \textbf{minQty boundary:} \code{>=} vs \code{>} --- test an order exactly equal to \code{minQty}.
+  \item \textbf{Unknown id / user:} no-op, no throw.
+  \item \textbf{Big qty overflow:} quantities near \code{UINT\_MAX} summed --- proves 64-bit.
+\end{enumerate}
+
+\subsection{If they push for more}
+
+\begin{itemize}[leftmargin=1.6em,label=\textcolor{Accent}{\faArrowRight}]
+  \item ``What if matching must return the actual pairings, not just the total?''
+        $\to$ now you genuinely need the flow/greedy \emph{assignment}; discuss
+        Northwest-corner rule or min-cost flow.
+  \item ``Concurrency at scale?'' $\to$ shard by \code{securityId}; each shard its
+        own lock; matching is per-security so shards are independent.
+  \item ``Persistence / crash recovery?'' $\to$ write-ahead log of add/cancel;
+        rebuild indexes on load from \code{orders\_}.
+  \item ``Why \code{unordered\_map} not \code{map}?'' $\to$ $O(1)$ vs $O(\log n)$;
+        we never need sorted iteration.
+\end{itemize}
+
+\begin{say}[\faFlagCheckered~Closing line]
+``The design is one source of truth plus derived indexes and a materialized
+aggregate, so writes stay $O(1)$ and the matching read is a closed-form fold. The
+one subtlety --- the different-company rule --- turns naive $\min$ into a
+transportation problem, which I handle with the per-company formula and verify
+against the provided examples.''
+\end{say}

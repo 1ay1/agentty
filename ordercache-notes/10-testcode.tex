@@ -1,0 +1,208 @@
+\section{The test suite, taught as code}
+
+\S8 gave the \emph{theory} of testing this problem. Here is the concrete GoogleTest
+code for the layers that matter most, ready to adapt. Keep tests small, named like
+sentences, and each targeting one idea.
+
+\subsection{Fixture and a tiny scenario helper}
+
+\begin{lstlisting}
+#include "OrderCache.h"
+#include <gtest/gtest.h>
+#include <random>
+#include <unordered_set>
+
+class OrderCacheTest : public ::testing::Test {
+ protected:
+    OrderCache cache;
+};
+
+// README Example 1, security "Sec2" -- the canonical 2700 scenario.
+static void seedExample1Sec2(OrderCache& c) {
+    c.addOrder({"o1", "Sec2", "Sell", 3000, "u1", "CompB"});
+    c.addOrder({"o2", "Sec2", "Buy",   600, "u2", "CompC"});
+    c.addOrder({"o3", "Sec2", "Buy",   100, "u3", "CompB"});
+    c.addOrder({"o4", "Sec2", "Buy",  2000, "u4", "CompE"});
+    c.addOrder({"o5", "Sec2", "Sell", 5000, "u5", "CompE"});
+}
+\end{lstlisting}
+
+\subsection{Layer 1 --- the canonical example}
+
+\begin{lstlisting}
+TEST_F(OrderCacheTest, ReadmeExample1_Is2700) {
+    seedExample1Sec2(cache);
+    EXPECT_EQ(cache.getMatchingSizeForSecurity("Sec2"), 2700u);
+}
+\end{lstlisting}
+
+\subsection{Layer 2 --- edges that kill specific bugs}
+
+\begin{lstlisting}
+TEST_F(OrderCacheTest, SameCompanyCannotMatch) {
+    cache.addOrder({"a", "S", "Buy",  500, "u1", "A"});
+    cache.addOrder({"b", "S", "Sell", 500, "u2", "A"});   // same company!
+    EXPECT_EQ(cache.getMatchingSizeForSecurity("S"), 0u);
+}
+
+TEST_F(OrderCacheTest, OneCrossCompanyMatch) {
+    cache.addOrder({"a", "S", "Buy",  100, "u1", "A"});
+    cache.addOrder({"b", "S", "Sell", 100, "u2", "A"});   // blocked
+    cache.addOrder({"c", "S", "Sell", 100, "u3", "B"});   // allowed
+    EXPECT_EQ(cache.getMatchingSizeForSecurity("S"), 100u);
+}
+
+// THE star test: naive min(totalBuy, totalSell) = 950, correct answer = 150.
+TEST_F(OrderCacheTest, DominantCompany_NotNaiveMin) {
+    cache.addOrder({"a", "S", "Buy",  1000, "u1", "A"});
+    cache.addOrder({"b", "S", "Sell",  900, "u2", "A"});
+    cache.addOrder({"c", "S", "Buy",   100, "u3", "B"});
+    cache.addOrder({"d", "S", "Sell",   50, "u4", "C"});
+    EXPECT_EQ(cache.getMatchingSizeForSecurity("S"), 150u);
+}
+
+TEST_F(OrderCacheTest, OnlyBuysOrOnlySells_Zero) {
+    cache.addOrder({"a", "S", "Buy", 100, "u1", "A"});
+    cache.addOrder({"b", "S", "Buy", 200, "u2", "B"});
+    EXPECT_EQ(cache.getMatchingSizeForSecurity("S"), 0u);
+}
+
+TEST_F(OrderCacheTest, UnknownSecurityAndCancels_AreGracefulNoOps) {
+    EXPECT_EQ(cache.getMatchingSizeForSecurity("nope"), 0u);
+    cache.cancelOrder("ghost");                       // must not throw
+    cache.cancelOrdersForUser("nobody");              // must not throw
+    SUCCEED();
+}
+
+TEST_F(OrderCacheTest, InvalidOrdersAreIgnored) {
+    cache.addOrder({"",   "S", "Buy", 100, "u", "A"});  // empty id
+    cache.addOrder({"x",  "S", "Buy",   0, "u", "A"});  // zero qty
+    cache.addOrder({"y",  "S", "xyz", 100, "u", "A"});  // bad side
+    EXPECT_TRUE(cache.getAllOrders().empty());
+}
+\end{lstlisting}
+
+\subsection{The \texttt{minQty} boundary (assert \emph{which} ids survive)}
+
+\begin{lstlisting}
+TEST_F(OrderCacheTest, CancelForSecMinQty_BoundaryIsInclusive) {
+    cache.addOrder({"keepLow",  "S", "Buy",   99, "u1", "A"});
+    cache.addOrder({"killEq",   "S", "Buy",  100, "u2", "A"});  // == minQty -> removed
+    cache.addOrder({"killHigh", "S", "Sell", 300, "u3", "B"});
+    cache.cancelOrdersForSecIdWithMinimumQty("S", 100);         // qty >= 100 removed
+
+    std::unordered_set<std::string> ids;
+    for (const auto& o : cache.getAllOrders()) ids.insert(o.orderId());
+    EXPECT_EQ(ids.size(), 1u);
+    EXPECT_TRUE(ids.count("keepLow"));      // exactly the < minQty order remains
+    EXPECT_FALSE(ids.count("killEq"));      // ">=" must include the boundary
+}
+\end{lstlisting}
+
+\begin{pitfall}
+Assert the \emph{surviving identities}, not just \code{size()}. A bug that removes
+the wrong orders keeps the count right but fails this test.
+\end{pitfall}
+
+\subsection{Layer 3 --- consistency (the desync catchers)}
+
+\begin{lstlisting}
+TEST_F(OrderCacheTest, AddCancelRoundTrip_RestoresMatching) {
+    seedExample1Sec2(cache);
+    auto before = cache.getMatchingSizeForSecurity("Sec2");
+    cache.addOrder({"tmp", "Sec2", "Sell", 123, "ux", "CompZ"});
+    cache.cancelOrder("tmp");
+    EXPECT_EQ(cache.getMatchingSizeForSecurity("Sec2"), before);  // aggregate healed
+}
+
+TEST_F(OrderCacheTest, CancelForUser_LeavesNoTrace) {
+    cache.addOrder({"a", "S1", "Buy",  100, "victim", "A"});
+    cache.addOrder({"b", "S2", "Sell", 200, "victim", "A"});
+    cache.addOrder({"c", "S1", "Sell", 100, "other",  "B"});
+    cache.cancelOrdersForUser("victim");
+    for (const auto& o : cache.getAllOrders())
+        EXPECT_NE(o.user(), "victim");                // none of victim's remain
+    cache.cancelOrdersForUser("victim");              // idempotent no-op
+    EXPECT_EQ(cache.getAllOrders().size(), 1u);
+}
+\end{lstlisting}
+
+\subsection{Layer 4 --- property-based test against a brute oracle}
+
+The oracle is written a \emph{different way} (direct pairwise simulation over the
+raw orders) so it shares no code --- hence no shared bug --- with the aggregate
+implementation.
+
+\begin{lstlisting}
+// Independent, obviously-correct O(n^2) reference for small inputs only.
+static unsigned int bruteMatch(const std::vector<Order>& all, const std::string& sec) {
+    struct P { std::uint64_t qty; std::string co; };
+    std::vector<P> buys, sells;
+    for (const auto& o : all) if (o.securityId() == sec) {
+        if (o.side()[0]=='B'||o.side()[0]=='b') buys.push_back({o.qty(), o.company()});
+        else                                    sells.push_back({o.qty(), o.company()});
+    }
+    // Optimal for this structure via the per-company formula on the raw lists:
+    std::uint64_t B=0,S=0; std::unordered_map<std::string,std::array<std::uint64_t,2>> m;
+    for (auto& b: buys ){ B+=b.qty; m[b.co][0]+=b.qty; }
+    for (auto& s: sells){ S+=s.qty; m[s.co][1]+=s.qty; }
+    std::uint64_t reach=0;
+    for (auto& [c,bs]: m) reach += std::min<std::uint64_t>(bs[0], S - bs[1]);
+    return static_cast<unsigned int>(std::min(reach, std::min(B,S)));
+}
+
+TEST_F(OrderCacheTest, RandomizedMatchesOracle) {
+    std::mt19937 rng(1234567);                        // FIXED seed = reproducible
+    std::uniform_int_distribution<int> nOrders(0, 8), qty(1, 9), pick(0, 2);
+    const char* co[] = {"A","B","C"};
+    for (int iter = 0; iter < 3000; ++iter) {
+        OrderCache c;
+        std::vector<Order> all;
+        int n = nOrders(rng);
+        for (int i = 0; i < n; ++i) {
+            Order o{"id"+std::to_string(iter)+"_"+std::to_string(i), "S",
+                    pick(rng)?"Buy":"Sell", (unsigned)qty(rng), "u", co[pick(rng)]};
+            all.push_back(o);
+            c.addOrder(o);
+        }
+        EXPECT_EQ(c.getMatchingSizeForSecurity("S"), bruteMatch(all, "S"))
+            << "failed at iter=" << iter;             // print the counter-example
+    }
+}
+\end{lstlisting}
+
+\begin{intu}
+For a \emph{truly} independent oracle you'd write the $O(n^2)$ greedy-with-residual
+(max-flow) reference --- but note greedy alone is \emph{not} optimal (\S6), so a
+naive $n^2$ pairing is a wrong oracle. The safe, simple oracle is the same
+per-company formula computed over the \emph{raw order lists} instead of the
+maintained aggregate: it re-derives the answer from scratch, catching any bug in
+how the aggregate is \emph{maintained} (the likeliest place to go wrong).
+\end{intu}
+
+\subsection{Performance smoke test}
+
+\begin{lstlisting}
+TEST_F(OrderCacheTest, MillionOrders_QueryIsFast) {
+    OrderCache c;
+    for (int i = 0; i < 1'000'000; ++i)
+        c.addOrder({"id"+std::to_string(i), "HOT",
+                    (i&1)?"Buy":"Sell", 1000u, "u", (i%3)?"A":"B"});
+    auto t0 = std::chrono::steady_clock::now();
+    volatile auto m = c.getMatchingSizeForSecurity("HOT");
+    (void)m;
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                  std::chrono::steady_clock::now() - t0).count();
+    EXPECT_LT(ms, 50);      // O(#companies) query, not O(n) scan
+}
+\end{lstlisting}
+
+\begin{say}
+``I test in four layers: README examples; edge cases each aimed at a bug --- the
+key one a dominant-company case where naive $\min$ over-counts; consistency tests
+like add/cancel round-trips and \emph{cancel-for-user leaves no trace}; and a
+property-based test running thousands of fixed-seed random scenarios against an
+independent oracle that re-derives matching from the raw orders. Plus a
+million-order timing test to prove the query is $O(\#\text{companies})$. I build the
+suite under ASan/UBSan so overflow and iterator bugs fail loudly.''
+\end{say}

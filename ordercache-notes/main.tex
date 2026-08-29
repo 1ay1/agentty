@@ -1,0 +1,157 @@
+\documentclass[11pt]{article}
+
+% ---------- packages ----------
+\usepackage[a4paper,margin=2.2cm]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,fit,backgrounds,calc,shapes.geometric,decorations.pathreplacing,matrix}
+\usepackage[most]{tcolorbox}
+\usepackage{listings}
+\usepackage{enumitem}
+\usepackage{booktabs}
+\usepackage{fontawesome5}
+\usepackage{pifont}
+\usepackage{microtype}
+% allow \texttt / \ttfamily runs to break across lines so long identifiers
+% like unordered_map<Company,(buy,sell)> don't overflow the margin.
+\usepackage[htt]{hyphenat}
+\newcommand{\allowttbreak}{\spaceskip=\fontdimen2\font plus \fontdimen3\font minus \fontdimen4\font}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true,linkcolor=NavyBlue,urlcolor=teal,citecolor=teal,
+  bookmarks=true,bookmarksopen=true,bookmarksopenlevel=1,
+  pdftitle={The OrderCache Problem --- a playbook},pdfauthor={}}
+
+% ---------- colors ----------
+\definecolor{NavyBlue}{HTML}{1F3A93}
+\definecolor{Accent}{HTML}{2E86DE}
+\definecolor{Buy}{HTML}{27AE60}
+\definecolor{Sell}{HTML}{C0392B}
+\definecolor{Soft}{HTML}{F4F6F8}
+\definecolor{Ink}{HTML}{22303C}
+\definecolor{Gold}{HTML}{B8860B}
+\definecolor{Codebg}{HTML}{F7F7FB}
+
+% ---------- listings ----------
+\lstdefinestyle{cpp}{
+  language=C++, basicstyle=\ttfamily\small, keywordstyle=\color{NavyBlue}\bfseries,
+  commentstyle=\color{gray!80}\itshape, stringstyle=\color{Sell},
+  numbers=left, numberstyle=\tiny\color{gray}, numbersep=8pt,
+  backgroundcolor=\color{Codebg}, frame=single, framesep=5pt, rulecolor=\color{gray!30},
+  breaklines=true, showstringspaces=false, tabsize=2, columns=fullflexible,
+  morekeywords={uint64_t,size_t,override,nullptr,constexpr,noexcept}
+}
+\lstset{style=cpp}
+
+% ---------- theorem-ish boxes ----------
+\newtcolorbox{keybox}[1][]{colback=Soft,colframe=Accent,boxrule=1pt,arc=3pt,
+  left=8pt,right=8pt,top=6pt,bottom=6pt,title={#1},fonttitle=\bfseries\color{white},
+  coltitle=white,colbacktitle=Accent}
+\newtcolorbox{pitfall}[1][\faExclamationTriangle~Interview pitfall]{colback=red!4,colframe=Sell,
+  boxrule=1pt,arc=3pt,left=8pt,right=8pt,top=6pt,bottom=6pt,title={#1},
+  fonttitle=\bfseries\color{white},coltitle=white,colbacktitle=Sell}
+\newtcolorbox{intu}[1][\faLightbulb~Intuition]{colback=Gold!8,colframe=Gold,
+  boxrule=1pt,arc=3pt,left=8pt,right=8pt,top=6pt,bottom=6pt,title={#1},
+  fonttitle=\bfseries\color{white},coltitle=white,colbacktitle=Gold}
+\newtcolorbox{say}[1][\faComments~Say this out loud]{colback=Buy!6,colframe=Buy,
+  boxrule=1pt,arc=3pt,left=8pt,right=8pt,top=6pt,bottom=6pt,title={#1},
+  fonttitle=\bfseries\color{white},coltitle=white,colbacktitle=Buy}
+
+\newcommand{\ty}[1]{\textsf{\textbf{#1}}}          % a type name
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\Buy}{\textcolor{Buy}{\textbf{Buy}}}
+\newcommand{\Sell}{\textcolor{Sell}{\textbf{Sell}}}
+
+\title{\vspace{-1.2cm}\Huge\bfseries The \textsf{OrderCache} Problem\\[4pt]
+  \large\mdseries A type-driven, visual, from-scratch playbook\\
+  \normalsize\itshape everything you need to internalize to nail the take-home}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+\vspace{-1.4cm}
+\begin{center}\rule{0.9\linewidth}{0.6pt}\end{center}
+
+\begin{abstract}\noindent
+This document teaches the \textsf{OrderCache} take-home from the ground up. We will
+(1) build the \emph{domain} in plain language, (2) model it with \emph{types}
+(so the shape of the problem becomes obvious), (3) \emph{derive} the matching
+formula from first principles and prove it is optimal, (4) pick \emph{data
+structures} to make every operation fast, (5) walk through all six methods with
+diagrams, and (6) hand you a one-page \emph{cheat sheet} of talking points and
+gotchas. Read it once slowly; you will be able to reconstruct the whole solution
+on a whiteboard from memory.
+\end{abstract}
+
+\tableofcontents
+\clearpage
+
+% ============ QUICK REFERENCE CARD (so you rarely need to flip) ============
+\thispagestyle{empty}
+\begin{tcolorbox}[colback=NavyBlue!4,colframe=NavyBlue,boxrule=1.2pt,arc=4pt,
+  title={\bfseries Quick reference --- everything at a glance},fonttitle=\large\bfseries\color{white},coltitle=white,colbacktitle=NavyBlue]
+
+\textbf{\color{NavyBlue}The matching formula} \hfill \emph{(hook + drills: \S6)}
+\[
+M=\min\!\Big(\underbrace{\textstyle\sum_c\min(b_c,\ S-s_c)}_{\text{each firm shops the market minus itself}},\ \ \underbrace{\min(B,S)}_{\text{never beat the smaller pile}}\Big)
+\]
+Equivalent (min-cut): $M=\min\big(B,\ S,\ B+S-\max_c(b_c+s_c)\big)$. \quad One firm $\Rightarrow 0$.
+
+\medskip
+\textbf{\color{NavyBlue}The four data structures} \hfill \emph{(derived: \S7)}
+\begin{itemize}[leftmargin=1.3em,nosep]
+  \item \code{orders\_}: \code{id$\to$Order} --- source of truth
+  \item \code{ordersByUser\_}, \code{ordersBySecurity\_}: \code{key$\to$\{ids\}} --- indexes
+  \item \code{securityTotals\_}: \code{secId$\to$\{B,\,S,\,per-company b/s\}} --- the aggregate
+\end{itemize}
+
+\medskip
+\textbf{\color{NavyBlue}Complexity} \hfill \emph{(scorecard: \S7)}\\
+add/cancel $O(1)$ \ $\vert$\ bulk cancels $O(k)$ \ $\vert$\ matching $O(\#\text{companies})$ \ $\vert$\ getAll $O(n)$
+
+\medskip
+\textbf{\color{NavyBlue}The gotchas that lose points} \hfill \emph{(full list: \S12)}\\
+$\bullet$ not $\min(B,S)$ (company rule) \ $\bullet$ 64-bit sums \ $\bullet$ snapshot ids before bulk cancel \ $\bullet$ funnel writes through 2 helpers \ $\bullet$ graceful no-ops \ $\bullet$ \code{minQty} is \code{>=}
+
+\medskip
+\textbf{\color{NavyBlue}The four test layers} \hfill \emph{(thinking: \S8, drill: \S8)}\\
+1.\ examples \ $\to$\ 2.\ edges (dominant company!) \ $\to$\ 3.\ relationships (add/cancel round-trip) \ $\to$\ 4.\ oracle + perf
+
+\medskip
+\hrule\smallskip
+\footnotesize\emph{This PDF has clickable links and a bookmarks sidebar --- use your viewer's
+outline panel to jump between sections instead of scrolling. Section numbers above
+point you straight to the depth.}
+\end{tcolorbox}
+\clearpage
+
+\input{01-intro}
+\clearpage
+\input{02-types}
+\clearpage
+\input{12-mathfoundations}
+\clearpage
+\input{03-invariants}
+\clearpage
+\input{13-internalize}
+\clearpage
+\input{07-mathematics}
+\clearpage
+\input{11-duality}
+\clearpage
+\input{04-datastructures}
+\clearpage
+\input{05-operations}
+\clearpage
+\input{09-implementation}
+\clearpage
+\input{14-testthinking}
+\clearpage
+\input{08-testing}
+\clearpage
+\input{10-testcode}
+\clearpage
+\input{06-cheatsheet}
+
+\end{document}

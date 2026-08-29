@@ -1,0 +1,126 @@
+\section{The domain, from absolute scratch}
+
+Forget code for a minute. A \textbf{financial exchange} is a place where people
+say ``I want to buy 100 shares of X'' or ``I want to sell 500 shares of X''.
+Each such statement is an \textbf{order}. Our job is to build the little
+in-memory database (a ``cache'') that stores these orders and can answer one
+interesting question quickly: \emph{how much trading can actually happen?}
+
+\subsection{What is an order?}
+
+An order is just six facts bundled together:
+
+\begin{center}
+\begin{tikzpicture}[font=\small,node distance=0pt]
+  \tikzstyle{cell}=[draw,minimum height=1.05cm,minimum width=2.35cm,align=center,fill=Soft]
+  \node[cell] (id)   {\textbf{orderId}\\\ttfamily "OrdId1"};
+  \node[cell,right=of id] (sec) {\textbf{securityId}\\\ttfamily "SecId1"};
+  \node[cell,right=of sec] (side){\textbf{side}\\\ttfamily "Buy"/"Sell"};
+  \node[cell,right=of side] (qty){\textbf{qty}\\\ttfamily 1000};
+  \node[cell,right=of qty] (usr) {\textbf{user}\\\ttfamily "User1"};
+  \node[cell,right=of usr] (co)  {\textbf{company}\\\ttfamily "CompanyA"};
+  \begin{scope}[on background layer]
+    \node[draw=Accent,thick,rounded corners,fit=(id)(co),inner sep=6pt,label=above:{\bfseries\color{NavyBlue}one \texttt{Order}}]{};
+  \end{scope}
+\end{tikzpicture}
+\end{center}
+
+\begin{itemize}[leftmargin=1.4em]
+  \item \textbf{orderId} --- a unique name for \emph{this} order. Like a receipt number. No two orders share it.
+  \item \textbf{securityId} --- \emph{what} is being traded (a stock, a bond\dots). Two orders ``match'' only if they are about the same security.
+  \item \textbf{side} --- \Buy{} or \Sell. That is the only two possibilities.
+  \item \textbf{qty} --- how many units. A positive whole number.
+  \item \textbf{user} --- the person who placed the order.
+  \item \textbf{company} --- which firm that person works for. \emph{This field is the twist of the whole problem}, as we will see.
+\end{itemize}
+
+\subsection{What does ``matching'' mean?}
+
+Two orders can trade against each other --- \emph{match} --- when \textbf{all
+three} of these hold:
+
+\begin{center}
+\begin{tikzpicture}[font=\small]
+  \node[draw,fill=Buy!12,rounded corners,minimum width=3.3cm,minimum height=1cm,align=center] (b) {a \Buy{} order};
+  \node[draw,fill=Sell!12,rounded corners,minimum width=3.3cm,minimum height=1cm,align=center,right=4.2cm of b] (s) {a \Sell{} order};
+  \draw[<->,very thick,Accent] (b) -- node[above,align=center,font=\footnotesize]{can trade if\dots} (s);
+  \node[below=1.1cm of $(b)!0.5!(s)$,align=center,draw=NavyBlue,rounded corners,fill=Soft,inner sep=6pt] (rule)
+    {\ding{182}~\textbf{same} securityId\quad\ding{183}~\textbf{opposite} side\quad\ding{184}~\textbf{different} company};
+  \draw[->,NavyBlue] ($(b)!0.5!(s)+(0,-0.55)$) -- (rule.north);
+\end{tikzpicture}
+\end{center}
+
+Rules \ding{182} and \ding{183} are obvious (you can only trade the same thing, and
+a buy needs a sell). Rule \ding{184} is the interesting one: \textbf{a company is
+not allowed to trade with itself}. If CompanyA has both a buy and a sell for the
+same security, those two \emph{cannot} cancel each other out --- presumably
+because that would be a sham trade inside one firm.
+
+\begin{intu}
+Think of it as a dinner party where you may only shake hands with people from a
+\emph{different} household. Your own family members don't count, no matter how
+many of them are in the room.
+\end{intu}
+
+\subsection{The one hard question: \texttt{getMatchingSizeForSecurity}}
+
+Given all the orders for one security, \textbf{how many total units can be
+matched?} Matching consumes quantity: if a buy of 300 meets a sell of 500, then
+300 units trade and the sell has 200 left over to match against \emph{someone
+else}. We want the grand total of units that find a partner.
+
+\begin{keybox}[Worked micro-example]
+One security. Three orders:\\[2pt]
+\Buy{} 100 (CompanyA)\qquad \Sell{} 100 (CompanyA)\qquad \Sell{} 100 (CompanyB)\\[4pt]
+The buy is from A. It \emph{cannot} use A's sell (same company!). It \emph{can}
+use B's sell. So $100$ units match. The answer is \textbf{100}, not 200 --- even
+though there are 100 buy and 200 sell units sitting there.
+\end{keybox}
+
+\subsection{The six operations we must support}
+
+\begin{center}
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Method} & \textbf{Plain English} \\
+\midrule
+\code{addOrder(order)} & remember a new order \\
+\code{cancelOrder(id)} & forget one order by its id \\
+\code{cancelOrdersForUser(user)} & forget \emph{every} order a person placed \\
+\code{cancelOrdersForSecIdWithMinimumQty(sec,\,q)} & forget orders of a security with \code{qty}\,$\ge q$ \\
+\code{getMatchingSizeForSecurity(sec)} & the hard question above \\
+\code{getAllOrders()} & dump everything we're holding \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent The whole game is: pick storage so that \emph{all six} are fast, even
+with a million orders. Everything that follows is in service of that.
+
+\subsection{How this document is built (the roadmap)}
+
+Every section builds on the last, always from scratch:
+
+\begin{center}
+\renewcommand{\arraystretch}{1.25}\footnotesize
+\begin{tabular}{@{}rl@{}}
+\toprule
+\S & \textbf{builds} \\
+\midrule
+1 & the domain (you are here) \\
+2 & the \emph{types} --- how thinking in types shapes the design \\
+2\textonehalf & \emph{math foundations from zero} --- sets, sums, optimization, graphs, flow, duality \\
+3 & the matching \emph{formula}, discovered by hand then generalized \\
+4 & the full \emph{mathematics} (flows, cuts, inclusion--exclusion) --- optional depth \\
+4\textonehalf & \emph{LP duality} --- \emph{why} a min equals the max (the deepest ``why'') \\
+5 & the \emph{design}, derived from a plain vector up to the four structures \\
+6 & the six \emph{operations}, each derived from what it is handed \\
+7 & the real \emph{implementation}, taught line by line (verified, compiles) \\
+8--9 & \emph{testing} --- how to \emph{think} about tests, the theory, then real GoogleTest code \\
+10 & a one-page \emph{cheat sheet} to rehearse from \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent Read it once slowly and you can reconstruct the entire solution --- code
+and tests --- on a whiteboard from understanding, not memory.

@@ -1,0 +1,105 @@
+\documentclass[10pt]{article}
+\usepackage[a4paper,margin=1.4cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{xcolor}
+\usepackage[most]{tcolorbox}
+\usepackage{enumitem}
+\usepackage{multicol}
+\usepackage{booktabs}
+
+\definecolor{NavyBlue}{HTML}{1F3A93}
+\definecolor{Accent}{HTML}{2E86DE}
+\definecolor{Buy}{HTML}{27AE60}
+\definecolor{Sell}{HTML}{C0392B}
+\definecolor{Soft}{HTML}{F4F6F8}
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\Buy}{\textcolor{Buy}{\textbf{Buy}}}
+\newcommand{\Sell}{\textcolor{Sell}{\textbf{Sell}}}
+\setlength{\parindent}{0pt}
+\pagestyle{empty}
+
+\begin{document}
+
+% ===================== PAGE 1: THE TEST (blank recall) =====================
+\begin{center}
+{\LARGE\bfseries\color{NavyBlue} OrderCache --- Exam Sheet}\\[2pt]
+{\small Cover this, reproduce on a blank page, then check page 2. Re-do tomorrow.}
+\end{center}
+\vspace{2mm}
+
+\begin{tcolorbox}[colback=Soft,colframe=Accent,title={\bfseries Drill A --- the matching formula},fonttitle=\bfseries\color{white},coltitle=white,colbacktitle=Accent]
+Write, from memory:
+\begin{enumerate}[leftmargin=1.5em,nosep]
+  \item The \textbf{one-sentence hook}.
+  \item The \textbf{formula in symbols}.
+  \item The \textbf{four-line code loop}.
+  \item Why the \textbf{$-s_c$} term is there (one sentence).
+  \item For \Buy{}200(A), \Sell{}150(A), \Buy{}40(B), \Sell{}90(C): the answer, and \emph{why it's that and not $\min(B,S)$}.
+\end{enumerate}
+\end{tcolorbox}
+
+\vspace{2mm}
+\begin{tcolorbox}[colback=Soft,colframe=Sell,title={\bfseries Drill B --- the test suite},fonttitle=\bfseries\color{white},coltitle=white,colbacktitle=Sell]
+For each of the six methods, list every test you'd write \textbf{and the one-line bug it traps}. Aim for the four layers:
+\begin{multicols}{2}
+\begin{itemize}[leftmargin=1.3em,nosep]
+  \item[1.] examples (the spec's case)
+  \item[2.] edges --- one trap per bug
+  \item[3.] relationships (round trips, order)
+  \item[4.] oracle (random vs.\ reference) + perf
+\end{itemize}
+\end{multicols}
+\emph{Target: 14+ tests, each with its bug named.}
+\end{tcolorbox}
+
+\vspace{2mm}
+\begin{tcolorbox}[colback=Soft,colframe=NavyBlue,title={\bfseries Drill C --- the design (say it in 30s)},fonttitle=\bfseries\color{white},coltitle=white,colbacktitle=NavyBlue]
+From memory: name the \textbf{four data structures}, what each makes fast, the \textbf{complexity} of all six methods, and \textbf{why the two helpers} exist.
+\end{tcolorbox}
+
+\clearpage
+
+% ===================== PAGE 2: THE ANSWERS =====================
+\begin{center}{\LARGE\bfseries\color{NavyBlue} Answer Key}\end{center}
+\vspace{1mm}
+
+\begin{tcolorbox}[colback=Soft,colframe=Accent,title={\bfseries Drill A answers},fonttitle=\bfseries\color{white},coltitle=white,colbacktitle=Accent]
+\textbf{1. Hook:} ``Everyone shops the market \emph{minus themselves}; add up what they grab; never beat the smaller pile.''\\[3pt]
+\textbf{2. Formula:} $\displaystyle M=\min\!\Big(\sum_c\min(b_c,\ S-s_c),\ \min(B,S)\Big)$\\[3pt]
+\textbf{3. Loop:} \code{reach=0; for c: reach += min(c.buy, totalSell - c.sell); return min(reach, min(B,S));}\\[3pt]
+\textbf{4. $-s_c$:} a firm may not use its \emph{own} sells, so its allowed pool is all sells minus its own --- that enforces the different-company rule.\\[3pt]
+\textbf{5. Answer $=130$.} $B{=}240$, $S{=}240$. A: $\min(200,240{-}150){=}90$; B: $\min(40,240){=}40$; C: $0$. Sum $=130 \le \min(B,S){=}240$, so the \emph{reach} binds. It's not $240$ because A's big buy may only reach the $90$ of sells that aren't A's own.
+\end{tcolorbox}
+
+\vspace{1.5mm}
+\begin{tcolorbox}[colback=Soft,colframe=Sell,title={\bfseries Drill B answers --- test / bug it traps},fonttitle=\bfseries\color{white},coltitle=white,colbacktitle=Sell]
+\footnotesize
+\begin{tabular}{@{}p{4.9cm}p{11.4cm}@{}}
+\textit{\color{Accent}L1} README example ($2700$) & formula plain wrong \\
+\textit{\color{Accent}L2} self-only $\to0$ & firm matches itself \\
+\quad one cross match & counting own-company sells \\
+\quad \textbf{dominant company} $\to150$ & using naive $\min(B,S)$ \\
+\quad only-one-side $\to0$ & missing empty-side guard \\
+\quad invalid ignored & no validation (empty id, qty 0, bad side) \\
+\quad duplicate id ignored & second add corrupts \\
+\quad unknown lookup/cancel no-op & missing graceful guard (throws) \\
+\quad \code{minQty} boundary ($=$) & \code{>} vs \code{>=} off-by-one \\
+\quad overflow near \code{UINT\_MAX} & 32-bit accumulator \\
+\textit{\color{Accent}L3} add$\to$cancel restores match & aggregate not decremented on cancel \\
+\quad cancel-for-user no trace & index desync / ghosts \\
+\quad insertion order irrelevant & hidden order-dependent state \\
+\textit{\color{Accent}L4} random vs.\ oracle (seed) & any matching bug, unseen cases \\
+\quad random churn vs.\ oracle & maintenance bug under add/cancel \\
+\quad million-order timing & an $O(n)$ scan in the query \\
+\end{tabular}
+\end{tcolorbox}
+
+\vspace{1.5mm}
+\begin{tcolorbox}[colback=Soft,colframe=NavyBlue,title={\bfseries Drill C answers},fonttitle=\bfseries\color{white},coltitle=white,colbacktitle=NavyBlue]
+\footnotesize
+\textbf{Structures:} \code{orders\_} (id$\to$Order, source of truth; makes cancelById/getAll fast) $\cdot$ \code{ordersByUser\_} (user$\to$ids; cancelForUser) $\cdot$ \code{ordersBySecurity\_} (sec$\to$ids; the per-sec cancel) $\cdot$ \code{securityTotals\_} (sec$\to$\{B,S,per-company b/s\}; matching).\\[3pt]
+\textbf{Complexity:} add/cancel $O(1)$; bulk cancels $O(k)$; matching $O(\#\text{companies})$; getAll $O(n)$.\\[3pt]
+\textbf{Why two helpers} (\code{insertOrderInternal}/\code{removeOrderInternal}): every write funnels through them, so the four structures update in \emph{one place} and can't desync.
+\end{tcolorbox}
+
+\end{document}

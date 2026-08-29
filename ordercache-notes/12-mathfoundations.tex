@@ -1,0 +1,242 @@
+\section{Mathematical foundations, from zero}
+
+This section assumes you know \emph{nothing} and builds every mathematical idea the
+rest of the document leans on --- sets, sums, functions, $\min/\max$, optimization,
+bounds, counting, graphs, matching, and flow. Each idea is introduced in plain
+language, with a picture, and then connected to the \textsf{OrderCache} problem so
+you see \emph{why} it's here. Read it once and the ``mathy'' sections will feel
+obvious.
+
+\subsection{Numbers, and the only two operations we really need}
+
+Almost everything here is built from two humble operations on whole numbers:
+
+\begin{itemize}[leftmargin=1.5em]
+  \item $\min(a,b)$ --- the \textbf{smaller} of two numbers. $\min(3,7)=3$.
+  \item $\max(a,b)$ --- the \textbf{larger}. $\max(3,7)=7$.
+\end{itemize}
+
+They generalize to many arguments: $\min(4,1,9,2)=1$. That's it. When you see a
+scary formula later, it is almost always ``take the smaller/larger of a few
+sensible quantities''. $\min$ shows up whenever something is \textbf{limited by its
+tightest constraint} (a chain is as strong as its weakest link); $\max$ whenever we
+hunt for the \textbf{worst bottleneck}.
+
+\subsection{Sets and multisets --- bags of things}
+
+A \textbf{set} is a collection of distinct things, written in braces:
+$\{A, B, C\}$. Order doesn't matter and duplicates don't count:
+$\{A,A,B\}=\{A,B\}$.
+
+A \textbf{multiset} (or ``bag'') is like a set but duplicates \emph{do} count:
+the bag $[\![A,A,B]\!]$ has two $A$'s. Our orders are really a \textbf{bag}: two
+different orders can be identical in every field except their id.
+
+\begin{intu}
+Why care? Because the matching answer depends only on the \emph{bag} of orders,
+not the order you inserted them. That single fact is why ``insertion order doesn't
+change the answer'' is a law we can test (\S on testing). Recognizing something as
+a set vs.\ a bag tells you what may and may not matter.
+\end{intu}
+
+\subsection{Functions --- machines that turn an input into an output}
+
+A \textbf{function} is a rule: give it an input, get exactly one output. We write
+$f : X \to Y$ to mean ``$f$ takes an $X$ and returns a $Y$''. The arrow is the
+whole idea: \emph{in-type} on the left, \emph{out-type} on the right.
+
+\begin{center}
+\begin{tikzpicture}[font=\small,>=Latex]
+  \node (x) {input $x$};
+  \node[draw,rounded corners,fill=Accent!12,right=8mm of x] (f) {$f$};
+  \node[right=8mm of f] (y) {output $f(x)$};
+  \draw[->](x)--(f); \draw[->](f)--(y);
+\end{tikzpicture}
+\end{center}
+
+Every operation in the cache is a function, and its arrow tells you its job:
+\code{getMatchingSizeForSecurity} is $\ty{SecId}\to\ty{Number}$ --- one security in,
+one number out. Because it turns a \emph{whole collection} (all the security's
+orders) into \emph{one} number, it is a special kind of function called a
+\textbf{fold} (or aggregate); we meet folds properly in the operations section.
+
+\subsection{Sigma notation --- a compact way to say ``add these up''}
+
+The symbol $\sum$ (Greek capital sigma, ``S'' for \emph{sum}) just means ``add up
+a list''. Read
+\[
+\sum_{c} g(c)
+\]
+as: ``for each item $c$, compute $g(c)$, and add all those results together.''
+For example, if the companies are $A,B,C$ and $g$ is ``that company's buys'', then
+$\sum_c g(c) = g(A)+g(B)+g(C)$ = total buys.
+
+\begin{intu}
+$\sum$ is a \code{for}-loop with a running total, written in one symbol. When you
+see $\sum_c \min(b_c, S - s_c)$ later, mentally unroll it: ``loop over companies,
+add up each one's $\min(\dots)$.'' Nothing more.
+\end{intu}
+
+\subsection{Optimization --- ``the best you can do, subject to limits''}
+
+An \textbf{optimization problem} has two parts:
+\begin{enumerate}[leftmargin=1.6em,nosep]
+  \item an \textbf{objective}: a number you want to make as big (or small) as
+        possible --- e.g.\ ``total quantity matched'';
+  \item \textbf{constraints}: rules you may not break --- e.g.\ ``no company
+        trades more than it has'', ``no self-trading''.
+\end{enumerate}
+``Maximize the objective without breaking any constraint'' is the entire game.
+Matching is exactly this: \emph{maximize matched quantity, subject to per-company
+limits and the different-company rule.}
+
+\subsection{Upper bounds --- proving you \emph{can't} do better}
+
+A subtle but powerful idea. Suppose you've matched $150$ units and wonder: is that
+the best possible, or could a cleverer arrangement do more? An \textbf{upper bound}
+is a number you can \emph{prove} the answer never exceeds. If you find a matched
+value that \emph{equals} an upper bound, you're done --- it's optimal, no cleverness
+left to find.
+
+\begin{center}
+\begin{tikzpicture}[font=\footnotesize,>=Latex]
+  \draw[->] (0,0) -- (8.4,0) node[right]{value};
+  \foreach \x/\l in {1/0,3/100,5.5/150,7.5/200} \draw (\x,0.1)--(\x,-0.1) node[below]{\l};
+  \draw[Buy,very thick,->] (1,0.45)--(5.5,0.45) node[midway,above,font=\tiny]{things we achieved (floor rises)};
+  \draw[Sell,very thick,->] (7.5,-0.5)--(5.5,-0.5) node[midway,below,font=\tiny]{bounds we proved (ceiling drops)};
+  \filldraw[NavyBlue] (5.5,0) circle (2.4pt) node[above=8pt,font=\bfseries]{they meet = optimal};
+\end{tikzpicture}
+\end{center}
+
+\begin{intu}
+Optimization is a squeeze: you push a \emph{floor} up (``I achieved this'') and a
+\emph{ceiling} down (``you can't beat this''). When floor meets ceiling, that
+number is the answer. This ``floor meets ceiling'' is the soul of \emph{duality},
+which we reach shortly.
+\end{intu}
+
+\subsection{Counting and the bottleneck principle}
+
+Two counting ideas power the whole matching result.
+
+\textbf{The smaller-pile rule.} If you pair items from a red pile and a blue pile,
+you can make at most $\min(\text{red},\text{blue})$ pairs --- the smaller pile runs
+out first. This is why $\min(B,S)$ (total buy vs.\ total sell) is always a ceiling
+on matching.
+
+\textbf{Inclusion--exclusion.} To count a combined quantity without double-counting
+or wrongly-counting, you \emph{include} everything, then \emph{exclude} the part
+that shouldn't be there:
+\[
+\text{count} = (\text{everything}) - (\text{the forbidden part}).
+\]
+Concretely, if two overlapping groups have sizes $|X|$ and $|Y|$ and share $|X\cap
+Y|$, the union is $|X|+|Y|-|X\cap Y|$ --- add both, subtract the overlap you
+counted twice. In matching, the ``forbidden part'' we subtract is the quantity
+trapped inside a single company (which may not trade with itself). That subtraction
+is exactly the $-\,\max_c(b_c+s_c)$ you'll see in the closed form.
+
+\subsection{Graphs --- dots and lines}
+
+A \textbf{graph} is just \textbf{dots} (called \emph{nodes} or \emph{vertices})
+connected by \textbf{lines} (\emph{edges}). That's the entire definition. Edges can
+carry a number, a \textbf{capacity} (``at most this much may pass'').
+
+A \textbf{bipartite} graph is one where the dots split into two teams, and edges
+only go \emph{between} teams, never within. Buyers on the left, sellers on the
+right, an edge for each allowed trade --- that's bipartite, and it's a picture of
+our whole problem.
+
+\begin{center}
+\begin{tikzpicture}[font=\footnotesize,>=Latex,node distance=6mm]
+  \node[draw,circle,fill=Buy!15] (b1){$b_1$};
+  \node[draw,circle,fill=Buy!15,below=of b1] (b2){$b_2$};
+  \node[draw,circle,fill=Sell!15,right=2.4cm of b1] (s1){$s_1$};
+  \node[draw,circle,fill=Sell!15,below=of s1] (s2){$s_2$};
+  \draw (b1)--(s2); \draw (b2)--(s1); \draw (b1)--(s1);
+  \node[above=1mm of b1,font=\bfseries\color{Buy}]{buyers};
+  \node[above=1mm of s1,font=\bfseries\color{Sell}]{sellers};
+\end{tikzpicture}
+\end{center}
+
+\subsection{Flow --- pushing stuff through a network}
+
+Add a \textbf{source} (call it $s$, where stuff originates) and a \textbf{sink}
+($t$, where it drains), and let quantity \emph{flow} along edges without ever
+exceeding a capacity. The \textbf{max-flow} question is: \emph{what is the most we
+can push from $s$ to $t$?}
+
+\begin{center}
+\begin{tikzpicture}[font=\footnotesize,>=Latex,node distance=7mm]
+  \node[draw,circle,fill=NavyBlue!12] (s){$s$};
+  \node[draw,circle,fill=Buy!15,right=1.5cm of s,yshift=6mm] (a){$b_1$};
+  \node[draw,circle,fill=Buy!15,right=1.5cm of s,yshift=-6mm] (b){$b_2$};
+  \node[draw,circle,fill=Sell!15,right=1.5cm of a] (c){$s_1$};
+  \node[draw,circle,fill=Sell!15,right=1.5cm of b] (d){$s_2$};
+  \node[draw,circle,fill=NavyBlue!12,right=1.5cm of $(c)!0.5!(d)$] (t){$t$};
+  \draw[->](s)--(a);\draw[->](s)--(b);
+  \draw[->](a)--(d);\draw[->](b)--(c);\draw[->](a)--(c);
+  \draw[->](c)--(t);\draw[->](d)--(t);
+\end{tikzpicture}
+\end{center}
+
+Matching \emph{is} a max-flow: push matched quantity from a source, through
+buyers, across allowed (different-company) edges, into sellers, out to a sink.
+The most you can push is the most you can match.
+
+\subsection{Cuts, and the theorem that turns flow into a formula}
+
+A \textbf{cut} is any way to slice the network into an $s$-side and a $t$-side; its
+\textbf{cost} is the total capacity of edges pointing from the $s$-side to the
+$t$-side --- a ``bottleneck.'' The celebrated \textbf{max-flow min-cut theorem}
+says:
+\[
+\boxed{\ \text{maximum flow} \;=\; \text{minimum cut}\ .}
+\]
+The most you can push equals the \emph{cheapest} bottleneck. This is the bridge
+from a hard ``arrange all the trades'' problem to an easy ``take the smallest of a
+few numbers'' formula --- because finding the cheapest cut is just a $\min$.
+
+\begin{intu}
+Water pipes: the most water from tap to drain is capped by the narrowest section
+of pipe the water must all squeeze through. ``Max-flow $=$ min-cut'' is the precise
+version of that everyday fact. And ``min of a few bottlenecks'' is exactly the
+shape of our closed-form answer.
+\end{intu}
+
+\subsection{Duality, in one paragraph}
+
+The deepest idea, previewed here and expanded in its own section. Every ``maximize''
+problem has a shadow ``minimize'' problem, and for these \emph{linear} problems the
+two give the \emph{same number}. Maximizing matched quantity (hard, combinatorial)
+equals minimizing over bottlenecks (easy, a $\min$). That equality is
+\textbf{strong duality}, and ``max-flow $=$ min-cut'' is its most famous instance.
+It's \emph{why} a minimum of three numbers can equal a maximum matching --- not an
+approximation, an exact equality.
+
+\subsection{The map --- how each idea lands on \textsf{OrderCache}}
+
+\begin{center}
+\renewcommand{\arraystretch}{1.3}\footnotesize
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Foundation} & \textbf{Where it shows up} \\
+\midrule
+$\min$ / smaller-pile rule & the $\min(B,S)$ cap on matching \\
+$\max$ / worst bottleneck & the $\max_c(b_c+s_c)$ dominant-company term \\
+bag (multiset), not set & why insertion order can't change the answer \\
+function arrow $X\to Y$ & each method's signature; matching is $\ty{SecId}\to\ty{Number}$ \\
+$\sum$ notation & the per-company reach $\sum_c\min(b_c,S-s_c)$ \\
+optimization & ``maximize matched qty subject to the rules'' \\
+upper bound / squeeze & why the formula is provably optimal, not a guess \\
+inclusion--exclusion & subtracting the trapped, self-conflicted company \\
+bipartite graph + flow & the model of buyers/sellers and legal trades \\
+max-flow min-cut & turns the model into a closed-form $\min$ \\
+duality & the reason that $\min$ equals the true maximum \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent With these in hand, the next sections --- the formula, the full
+mathematics, and LP duality --- are just these ideas applied to one concrete
+problem.

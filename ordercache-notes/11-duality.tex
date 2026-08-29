@@ -1,0 +1,169 @@
+\section{LP duality, from scratch}
+
+The previous section \emph{used} max-flow/min-cut to get the formula. This one
+explains the deeper theorem underneath it --- \textbf{linear-programming duality}
+--- because it is the real reason a \emph{minimum} of three numbers equals a
+\emph{maximum} matched quantity. If an interviewer asks ``why is the closed form
+exactly optimal and not just an upper bound?'', this is the answer. We build it
+with no prerequisites.
+
+\subsection{Two people looking at the same problem}
+
+Picture two characters staring at one security's orders.
+
+\begin{center}
+\begin{tikzpicture}[font=\small,>=Latex]
+  \node[draw=Buy,thick,rounded corners,fill=Buy!8,align=left,inner sep=8pt,text width=6.1cm] (opt)
+    {\textbf{\color{Buy}The Optimist} (the \emph{primal})\\[3pt]
+     ``Let me \emph{arrange trades} to match as \textbf{much} quantity as
+     possible.'' Works bottom-up, pushing the total \textbf{up}.};
+  \node[draw=Sell,thick,rounded corners,fill=Sell!8,align=left,inner sep=8pt,text width=6.1cm,right=1.1cm of opt] (skep)
+    {\textbf{\color{Sell}The Skeptic} (the \emph{dual})\\[3pt]
+     ``Let me find the tightest \emph{bottleneck} that \textbf{proves} you can't
+     match more than $X$.'' Works top-down, pushing a ceiling \textbf{down}.};
+\end{tikzpicture}
+\end{center}
+
+They attack the \emph{same} number from opposite sides: the Optimist raises a
+floor (``I achieved this much''), the Skeptic lowers a ceiling (``you can't beat
+this''). Duality is the story of these two meeting.
+
+\subsection{The Optimist's problem (primal), written out}
+
+This is the LP from \S4, restated. For each ordered company pair $(i,j)$ with
+$i\neq j$, let $x_{ij}\ge0$ be quantity matched between buyer $i$ and seller $j$:
+\[
+\textbf{(P)}\qquad
+\max \sum_{i\neq j} x_{ij}
+\quad\text{s.t.}\quad
+\underbrace{\sum_{j\neq i}x_{ij}\le b_i}_{\text{buyer }i\text{'s limit}}\ \ (\forall i),\qquad
+\underbrace{\sum_{i\neq j}x_{ij}\le s_j}_{\text{seller }j\text{'s limit}}\ \ (\forall j),\qquad
+x_{ij}\ge0.
+\]
+
+\subsection{Building the Skeptic's problem (dual), step by step}
+
+The Skeptic wants a \emph{provable ceiling}. Here is the trick that generates one,
+built up slowly:
+
+\begin{enumerate}[leftmargin=1.5em]
+  \item \textbf{Put a price on each limit.} Give buyer $i$'s constraint a price
+        $u_i\ge0$ and seller $j$'s a price $v_j\ge0$. Think of $u_i$ as ``how much
+        one unit of buyer $i$'s capacity is worth'' as a bottleneck.
+  \item \textbf{Charge every possible trade.} A trade on edge $(i,j)$ uses one
+        unit of buyer $i$'s limit \emph{and} one unit of seller $j$'s limit, so we
+        say it ``costs'' $u_i+v_j$ in prices. Demand this covers the trade's value
+        of $1$:
+        \[
+        u_i+v_j \ \ge\ 1 \qquad\text{for every allowed pair } i\neq j.
+        \]
+  \item \textbf{Minimize the total price of all capacity.} The ceiling the Skeptic
+        can prove is the cheapest such pricing:
+        \[
+        \textbf{(D)}\qquad
+        \min \Big(\sum_i b_i\,u_i + \sum_j s_j\,v_j\Big)
+        \quad\text{s.t.}\quad u_i+v_j\ge1\ (\forall i\neq j),\ \ u,v\ge0.
+        \]
+\end{enumerate}
+
+\begin{intu}
+The dual is a \emph{recipe for an alibi}. If the Skeptic can hand you prices where
+every legal trade is already ``paid for'' ($u_i+v_j\ge1$), then the total value of
+all capacity, $\sum b_i u_i+\sum s_j v_j$, is an airtight upper bound on how much
+you could ever match. Minimizing it makes the alibi as tight as possible.
+\end{intu}
+
+\subsection{Weak duality --- the easy half (a two-line proof)}
+
+For \emph{any} feasible Optimist plan $x$ and \emph{any} feasible Skeptic prices
+$(u,v)$:
+\[
+\sum_{i\neq j} x_{ij}
+\ \le\ \sum_{i\neq j} x_{ij}\,(u_i+v_j)
+\ \le\ \sum_i b_i u_i + \sum_j s_j v_j.
+\]
+The first ``$\le$'' uses $u_i+v_j\ge1$ (each term only grows). The second regroups
+the sum and uses the primal limits ($\sum_j x_{ij}\le b_i$, etc.). So
+\textbf{every achievable match $\le$ every provable ceiling.} You can never match
+more than any alibi allows --- obvious once written, and it holds for all LPs.
+
+\subsection{Strong duality --- the deep half}
+
+\begin{keybox}[The theorem]
+For a linear program, the two problems don't just bound each other --- they
+\textbf{meet exactly}:
+\[
+\boxed{\ \max(\textbf{P}) \;=\; \min(\textbf{D})\ }
+\]
+The Optimist's best achievable match equals the Skeptic's tightest ceiling. There
+is \textbf{no gap}.
+\end{keybox}
+
+Proving strong duality in general is a course in optimization (it follows from the
+separating-hyperplane / Farkas lemma). You don't need the proof --- you need to
+know it \emph{holds} and what it buys you: a maximization can be computed by
+solving its minimization instead. Which is exactly what our formula does.
+
+\subsection{Why the dual's answer is a \emph{cut} (and hence our formula)}
+
+Our dual has a beautiful property: its optimum is always achieved with prices that
+are $0$ or $1$. A $0/1$ pricing is just a \textbf{yes/no label} on each company's
+buy-side and sell-side --- which is precisely a \textbf{cut} of the flow network
+from \S4. Reading off the cost of those $0/1$ solutions gives back exactly the
+three bottlenecks:
+\[
+\min(\textbf{D})\ \in\ \Big\{\ B,\quad S,\quad B+S-\max_c(b_c+s_c)\ \Big\}.
+\]
+
+\begin{keybox}[Verified end to end]
+I checked the whole chain numerically: \textbf{primal max-flow} $=$ \textbf{dual
+minimum over $0/1$ prices} $=$ \textbf{Form B}, on \textbf{4{,}000} random
+securities --- \textbf{0} disagreements. So the closed form isn't an approximation
+or a lucky pattern; it is the \emph{provable} dual optimum.
+\end{keybox}
+
+\subsection{Max-flow / min-cut is just LP duality in a costume}
+
+This is the punchline. The ``max-flow $=$ min-cut'' theorem you already used is
+\emph{literally} a special case of strong LP duality:
+
+\begin{center}
+\renewcommand{\arraystretch}{1.4}
+\begin{tabular}{@{}lll@{}}
+\toprule
+ & \textbf{Optimist (primal, max)} & \textbf{Skeptic (dual, min)} \\
+\midrule
+General LP & maximize an objective & minimize the priced constraints \\
+Flow networks & \textbf{max-flow} & \textbf{min-cut} \\
+Our matching problem & max quantity matched & $\min\big(B,\ S,\ B+S-\max_c(b_c+s_c)\big)$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+So you were doing LP duality all along --- the playbook just called it by its
+graph name. Flow (push as much as possible) and cut (cheapest bottleneck) being
+equal \emph{is} the primal and dual meeting.
+
+\subsection{A tiny worked instance}
+
+Two companies. $A$ wants to buy $100$; $B$ sells $60$ (and nothing else).
+\begin{itemize}[leftmargin=1.5em,nosep]
+  \item \textbf{Optimist:} matches all $60$ of $B$'s sells against $A$'s buys.
+        Can't do better --- $B$ has no more to sell. Floor $=60$.
+  \item \textbf{Skeptic:} prices $v_B=1$ (everything else $0$). Check: every
+        allowed pair is covered ($u_A+v_B=0+1\ge1$). Total priced capacity
+        $=s_B\cdot v_B=60$. Ceiling $=60$.
+  \item They meet at $\mathbf{60}$. Strong duality, live. And the binding cut is
+        ``total selling'', i.e.\ $S=60$.
+\end{itemize}
+
+\begin{say}
+``The matching formula is the \emph{dual} of the max-flow problem. Weak duality
+says any feasible pricing is an upper bound on the match; strong duality --- the
+core LP theorem, and exactly what max-flow/min-cut is a special case of --- says
+the best match \emph{equals} the tightest bound. Because the dual optimum is a
+$0/1$ pricing, that tightest bound is a cut, giving
+$\min(B,\,S,\,B+S-\max_c(b_c+s_c))$. That's why the closed form is provably the
+maximum, not an approximation --- and I verified primal $=$ dual $=$ formula on
+thousands of cases.''
+\end{say}

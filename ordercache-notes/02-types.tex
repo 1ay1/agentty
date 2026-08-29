@@ -1,0 +1,123 @@
+\section{Modeling with types (the type-driven lens)}
+
+Here is the core idea in one sentence: \textbf{a type is the set of all values
+something can possibly be}, and if we describe each piece of the problem by its
+type, the correct data structures and algorithms almost fall out for free.
+
+\begin{keybox}[A note on honesty --- ``type-driven'', not ``type theory'']
+What follows is \emph{type-driven design} (the practical school: strong types,
+enums, \code{std::optional}, ``make illegal states unrepresentable''). It is
+\emph{not} formal type theory (Curry--Howard, dependent/refinement types, proofs).
+That distinction matters: in a systems take-home the pragmatic version is exactly
+right, and over-claiming ``type-theoretic'' to a reviewer who knows the difference
+is a needless risk. Use the vocabulary below to \emph{reason}, then implement in
+plain C++17. The three ways to build types --- and this problem uses all three:
+\end{keybox}
+
+\subsection{The three atoms}
+
+\begin{center}
+\begin{tikzpicture}[font=\small,every node/.style={align=center}]
+  % product
+  \node[draw,rounded corners,fill=Soft,minimum width=4.6cm,minimum height=2.1cm] (p) {};
+  \node[above=1pt of p.north] {\bfseries\color{NavyBlue}Product type ($A\times B$)};
+  \node at (p) {``\textbf{and}''\\a value has an $A$ \emph{and} a $B$\\\footnotesize e.g.\ a \ty{Pair}, a \ty{struct}, a record};
+  % sum
+  \node[draw,rounded corners,fill=Soft,minimum width=4.6cm,minimum height=2.1cm,right=1.6cm of p] (s) {};
+  \node[above=1pt of s.north] {\bfseries\color{Sell}Sum type ($A+B$)};
+  \node at (s) {``\textbf{or}''\\a value is \emph{either} an $A$ \emph{or} a $B$\\\footnotesize e.g.\ \Buy{} \emph{or} \Sell};
+  % function
+  \node[draw,rounded corners,fill=Soft,minimum width=4.6cm,minimum height=2.1cm,below=1.1cm of $(p)!0.5!(s)$] (f) {};
+  \node[above=1pt of f.north] {\bfseries\color{Buy}Function type ($A\to B$)};
+  \node at (f) {``\textbf{turns into}''\\give it an $A$, get back a $B$\\\footnotesize e.g.\ a query, a method};
+\end{tikzpicture}
+\end{center}
+
+\begin{intu}
+Why the names \emph{product} and \emph{sum}? Count the values! If $A$ has 3
+possible values and $B$ has 4, then a pair $A\times B$ has $3\times4=12$
+possibilities (a product), while a choice $A+B$ has $3+4=7$ (a sum). The
+arithmetic is literally why they're named that. This ``counting values'' habit
+is the single most useful trick type theory gives an interviewer.
+\end{intu}
+
+\subsection{Typing the \texttt{Order}}
+
+An \code{Order} is a \textbf{product type} --- it bundles several fields with
+``and''. In type-theory notation:
+\[
+\ty{Order} \;=\; \ty{OrderId}\;\times\;\ty{SecId}\;\times\;\ty{Side}\;\times\;\ty{Qty}\;\times\;\ty{User}\;\times\;\ty{Company}
+\]
+and \ty{Side} is a \textbf{sum type} with exactly two inhabitants:
+\[
+\ty{Side} \;=\; \Buy \;+\; \Sell.
+\]
+
+\begin{pitfall}
+The starter code stores \code{side} as a \code{std::string}. Type-theoretically
+that is \emph{wrong}: a string has billions of possible values (\code{"Buy"},
+\code{"buy"}, \code{"BUY"}, \code{"xyz"}\dots), but \ty{Side} has only
+\textbf{two}. The gap between ``what the type allows'' and ``what is actually
+valid'' is exactly where bugs live. In the interview, \emph{say} you would
+normalize it to a 2-value \code{enum} internally (\code{Buy}/\code{Sell}) --- that
+turns a whole class of invalid states into \emph{unrepresentable} states. This is
+the famous principle: \emph{make illegal states unrepresentable}.
+\end{pitfall}
+
+\subsection{Typing the operations --- their signatures tell you the plan}
+
+Read each method as a function type. The \emph{shape} of the arrow tells you what
+data structure you need to make it fast.
+
+\begin{center}
+\renewcommand{\arraystretch}{1.5}
+\begin{tabular}{@{}p{5.9cm}p{8.3cm}@{}}
+\toprule
+\textbf{Type signature} & \textbf{What the shape demands} \\
+\midrule
+$\code{add}:\ \ty{Order}\to\ty{Unit}$ &
+returns nothing (\ty{Unit} = the 1-value type, ``void''); it's a \emph{mutation}. Must update every index. \\
+$\code{cancel}:\ \ty{OrderId}\to\ty{Unit}$ &
+we're handed only an \emph{id}. So we need a map \ty{OrderId}$\to$\ty{Order} to find the rest. \\
+$\code{cancelForUser}:\ \ty{User}\to\ty{Unit}$ &
+handed a \emph{user}. So we need \ty{User}$\to$\ty{Set of OrderId} to avoid scanning everything. \\
+$\code{cancelForSecMinQty}:\ \ty{SecId}\times\ty{Qty}\to\ty{Unit}$ &
+handed a \emph{security}. So we need \ty{SecId}$\to$\ty{Set of OrderId} too. \\
+$\code{matchSize}:\ \ty{SecId}\to\ty{Qty}$ &
+the money method: a \ty{SecId} in, a single number out. This is a \emph{fold} (aggregate) --- see \S3. \\
+$\code{getAll}:\ \ty{Unit}\to\ty{List}\,\ty{Order}$ &
+dump: needs a way to enumerate every live order. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{keybox}[The punchline of this section]
+Every method that takes a key of type \ty{K} and must act on all orders with that
+key is screaming for a map \ty{K}$\to$\ty{Set of OrderId}. Three different keys
+(\ty{OrderId}, \ty{User}, \ty{SecId}) appear as inputs, so we will keep
+\textbf{three indexes}. \emph{The type signatures alone told us how many indexes
+to build.}
+\end{keybox}
+
+\subsection{The cache itself as a type}
+
+The whole cache is a product of one \emph{source of truth} plus several
+\emph{derived indexes} plus \emph{pre-computed aggregates}:
+\[
+\ty{OrderCache} \;=\;
+\underbrace{(\ty{OrderId}\!\to\!\ty{Order})}_{\text{truth}}\;\times\;
+\underbrace{(\ty{User}\!\to\!\mathcal{P}\ty{OrderId})}_{\text{index}}\;\times\;
+\underbrace{(\ty{SecId}\!\to\!\mathcal{P}\ty{OrderId})}_{\text{index}}\;\times\;
+\underbrace{(\ty{SecId}\!\to\!\ty{Aggregate})}_{\text{pre-sum}}
+\]
+where $\mathcal{P}$ means ``powerset'' = ``a set of''. The last factor is the
+clever one that makes \code{matchSize} fast; we derive its exact contents next.
+
+\begin{say}
+``I'd model \code{Order} as a product type and \code{Side} as a two-value sum,
+normalizing the string to an enum so illegal sides are unrepresentable. Each
+operation's signature is a function type, and the key it takes tells me which
+index it needs --- that's why I keep one map from each of orderId, user, and
+securityId. The matching query is a fold over a per-security aggregate I maintain
+incrementally.''
+\end{say}

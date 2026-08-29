@@ -1,0 +1,165 @@
+\section{Internalizing the formula (drill it until it's yours)}
+
+Understanding a formula once and \emph{owning} it are different. This section is
+built for ownership: one memorable mental hook, the formula seen from four angles,
+three worked drills of rising subtlety, and a blank-page recall test. Work through
+it actively --- cover the answers, try first, then check.
+
+\subsection{The one hook to remember everything}
+
+If you remember \emph{one} sentence, remember this:
+
+\begin{keybox}[The hook]
+\centering\Large
+\textbf{``Everyone shops the market \emph{minus themselves}; \\ add up what they
+grab; never beat the smaller pile.''}
+\end{keybox}
+
+Every symbol in the formula is one clause of that sentence:
+\[
+M=\min\!\Big(\underbrace{\sum_{c}}_{\text{add up}}\ \underbrace{\min\big(b_c,}_{\text{what they'd grab}}\ \underbrace{S-s_c\big)}_{\text{market minus themselves}},\ \ \underbrace{\min(B,S)}_{\text{never beat the smaller pile}}\Big)
+\]
+
+Say the sentence out loud three times. Now the formula is just its transcription.
+
+\subsection{The four angles (same truth, four viewpoints)}
+
+Deep memory comes from seeing one thing many ways. Here is the formula as:
+
+\begin{center}
+\renewcommand{\arraystretch}{1.5}\footnotesize
+\begin{tabular}{@{}p{2.4cm}p{11.4cm}@{}}
+\toprule
+\textbf{Angle} & \textbf{The formula in that language} \\
+\midrule
+\textbf{Words} & each firm buys from everyone but itself; total those; cap by the smaller side. \\
+\textbf{Symbols} & $M=\min\big(\sum_c\min(b_c,\,S-s_c),\ \min(B,S)\big)$. \\
+\textbf{Picture} & buyers on the left shake hands with \emph{other} firms' sellers on the right; count the hands. \\
+\textbf{Code} & \code{reach=0; for c: reach += min(c.buy, totalSell - c.sell); return min(reach, min(B,S));} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{intu}
+When one angle slips in the interview, another catches you. Forget the symbols?
+Recite the sentence. Forget the sentence? Draw two columns and connect them.
+Forget both? Write the four-line loop --- it \emph{is} the formula.
+\end{intu}
+
+\subsection{Why each piece \emph{must} be there (delete-it test)}
+
+You truly own a formula when you know what breaks if you remove a piece.
+
+\begin{center}
+\renewcommand{\arraystretch}{1.35}\footnotesize
+\begin{tabular}{@{}p{3.3cm}p{4.2cm}p{6.0cm}@{}}
+\toprule
+\textbf{Piece} & \textbf{If you drop it} & \textbf{The bug} \\
+\midrule
+the $-\,s_c$ & $\min(b_c,S)$ & a firm trades with \emph{itself}; self-only case wrongly $>0$ \\
+the $\sum_c$ (per company) & $\min(B,S)$ & the naive answer; over-counts when one firm dominates \\
+the outer $\min(B,S)$ & just $\sum_c\min(\dots)$ & overlapping reaches claim more trades than a side has \\
+the inner $\min$ & $\sum_c b_c=B$ & a firm ``buys'' more than the market can sell it \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{intu}
+Each term is load-bearing. $-s_c$ enforces \emph{different company}. The
+per-company sum enforces \emph{fairness across firms}. The two $\min$s enforce
+\emph{you can't exceed what's available} --- once locally (per firm), once globally
+(the smaller pile).
+\end{intu}
+
+\subsection{Drill 1 --- warm-up (cover the answer, compute first)}
+
+\[
+\Buy{}50(A),\qquad \Sell{}50(B).
+\]
+\emph{Your turn: totals? each firm's reach? answer?}
+
+\smallskip
+\noindent\textbf{Answer.} $B{=}50$, $S{=}50$. A wants $50$, allowed $S-s_A=50-0=50$,
+reach $=50$. B has no buys. Sum $=50$; cap $\min(50,50)=50$. \textbf{$M=50$.} A
+clean cross-company trade --- nothing blocks it.
+
+\subsection{Drill 2 --- self-block plus a partial cross}
+
+\[
+\Buy{}80(A),\qquad \Sell{}80(A),\qquad \Sell{}30(B).
+\]
+\emph{Your turn before reading on.}
+
+\smallskip
+\noindent\textbf{Answer.} $B{=}80$, $S{=}80+30{=}110$.
+\begin{itemize}[leftmargin=1.4em,nosep]
+  \item A wants $80$; allowed $=S-s_A=110-80=30$; reach $=\min(80,30)=\mathbf{30}$.
+  \item B has no buys; reach $0$.
+\end{itemize}
+Sum $=30$; cap $\min(80,110)=80$. \textbf{$M=30$.} A's own $80$ sells are off-limits
+to it, so A can only reach B's $30$. \emph{This is the whole problem in one line:
+the $-s_A$ chopped A's giant sell pile out of its own reach.}
+
+\subsection{Drill 3 --- three firms, subtle}
+
+\[
+\Buy{}200(A),\ \Sell{}150(A),\ \Buy{}40(B),\ \Sell{}90(C).
+\]
+\emph{Try it. Tabulate first, then reach per firm, then cap.}
+
+\smallskip
+\noindent\textbf{Answer.} Totals: $B=200+40=240$, $S=150+90=240$.
+\begin{center}\footnotesize
+\begin{tabular}{@{}lllll@{}}
+\toprule
+firm & wants $b_c$ & own sells $s_c$ & allowed $S-s_c$ & reach $\min$ \\
+\midrule
+A & $200$ & $150$ & $240-150=90$ & $\mathbf{90}$ \\
+B & $40$  & $0$   & $240-0=240$  & $\mathbf{40}$ \\
+C & $0$   & $90$  & $240-90=150$ & $0$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+Sum of reaches $=90+40+0=\mathbf{130}$. Cap $=\min(240,240)=240$, which does
+\emph{not} bite. \textbf{$M=130$.}
+
+\begin{intu}
+Note what happened: total buy equals total sell ($240=240$), so a naive reader
+would guess $240$. The truth is $130$, because A's big $200$ buy is throttled ---
+it may only reach the $90$ of sells that aren't A's own. \emph{The reach term bound
+the answer, not the cap.} If you can explain \emph{why 130 and not 240}, you own
+the formula.
+\end{intu}
+
+\subsection{Blank-page recall test}
+
+Close the document. On a blank page, in under a minute, produce:
+\begin{enumerate}[leftmargin=1.6em,nosep]
+  \item the one-sentence hook;
+  \item the formula in symbols;
+  \item the four-line code loop;
+  \item why the $-s_c$ is there (one sentence);
+  \item Drill 3's answer and \emph{why it's 130 not 240}.
+\end{enumerate}
+If all five come out, the formula is internalized. If one stalls, that's exactly
+the piece to re-read --- then blank-page it again tomorrow. Spacing the recall by a
+day is what moves it from short-term to permanent.
+
+\subsection{The 20-second whiteboard routine}
+
+Under interview pressure, don't recall --- \emph{reconstruct}. Always in this order:
+
+\begin{enumerate}[leftmargin=1.6em,nosep]
+  \item Draw the per-company table: firm, $b_c$, $s_c$.
+  \item Compute $S$ (total sells) once.
+  \item Per firm write $\min(b_c,\ S-s_c)$ --- ``wants vs.\ allowed''.
+  \item Sum them; then $\min$ with $\min(B,S)$.
+\end{enumerate}
+
+\begin{say}
+``Let me tabulate per company. Total sells is $S$. Each firm can buy at most what
+it wants, $b_c$, and at most the sells that aren't its own, $S-s_c$ --- so its
+reach is the smaller. I sum the reaches and cap by $\min(B,S)$ so I never exceed a
+side. That handles the different-company rule exactly, and it reduces to naive
+$\min$ when no firm dominates.''
+\end{say}

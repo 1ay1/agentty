@@ -1,0 +1,239 @@
+\section{How to think about testing (from zero)}
+
+Most people write tests by listing cases they happen to think of. That is layer-1
+thinking and it gives false confidence. This section teaches the \emph{mental
+models} that let you \emph{generate} tests systematically --- so you could build a
+convincing suite for \emph{any} problem, and defend every test you wrote. The
+concrete GoogleTest code follows in the next two sections; here we build the
+\emph{judgment}.
+
+\subsection{The core idea: a test is a trap for a specific bug}
+
+A good test is not ``check it works.'' It is \textbf{a trap set for one particular
+way the code could be wrong.} Before writing a test, finish this sentence:
+\emph{``This test fails if the code \dots''}. If you can't name the bug, the test
+isn't earning its place.
+
+\begin{keybox}[The proof that weak tests lie]
+Take a \emph{wrong} matching implementation --- the naive $\min(\text{buy},\text{sell})$
+that ignores the company rule. Run it against ``obvious'' tests:
+\begin{center}\footnotesize
+\begin{tabular}{@{}lccc@{}}
+\toprule
+test & correct & naive-wrong & naive passes? \\
+\midrule
+partial (Buy 100 A, Sell 300 B) & $100$ & $100$ & \textcolor{Sell}{\textbf{yes}} \\
+only buys & $0$ & $0$ & \textcolor{Sell}{\textbf{yes}} \\
+simple cross & $100$ & $100$ & \textcolor{Sell}{\textbf{yes}} \\
+self-only (Buy 100 A, Sell 100 A) & $0$ & $100$ & \textcolor{Buy}{no} \\
+\textbf{dominant company} & $150$ & $950$ & \textcolor{Buy}{no} \\
+\bottomrule
+\end{tabular}
+\end{center}
+The broken code \textbf{passes three of five ``obvious'' tests.} Only the two tests
+\emph{designed to discriminate} catch it. \emph{A suite that doesn't distinguish
+right from a plausible wrong is theatre.}
+\end{keybox}
+
+\subsection{Mental model 1 --- read the tests off the formula}
+
+Every term in a formula is a place the code can go wrong, so every term suggests a
+test. Look at $M=\min(B,\ S,\ B+S-\max_c(b_c+s_c))$:
+
+\begin{center}
+\renewcommand{\arraystretch}{1.3}\footnotesize
+\begin{tabular}{@{}p{3.2cm}p{5.3cm}p{5.0cm}@{}}
+\toprule
+\textbf{Term} & \textbf{Test that pins it} & \textbf{Fails if\dots} \\
+\midrule
+the $B$ (buy cap) & buys $<$ sells, cross-company & you cap by the wrong side \\
+the $S$ (sell cap) & sells $<$ buys, cross-company & same, other side \\
+the $-\max_c(\dots)$ term & \textbf{dominant company} & you used naive $\min$ \\
+the different-company rule & self-only $\to 0$ & you match a firm with itself \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{intu}
+This is why the dominant-company test is \emph{the} test: it is the only one that
+exercises the third, non-obvious term. If your suite has no test where one company
+holds a big chunk of both sides, you have not tested the actual hard part.
+\end{intu}
+
+\subsection{Mental model 2 --- test at the boundaries, not the middle}
+
+Bugs hide at edges, not in the comfortable interior. For every quantity, ask
+``what are its extremes?'' and test each:
+
+\begin{itemize}[leftmargin=1.5em,nosep]
+  \item \textbf{Empty} --- no orders, unknown security/user/id. (Does it crash or
+        return $0$/empty gracefully?)
+  \item \textbf{One} --- a single order, a single company. (One company $\to$ always $0$.)
+  \item \textbf{The threshold itself} --- \code{minQty} exactly equal to an order's
+        qty. (\code{>} vs \code{>=} off-by-one.)
+  \item \textbf{Huge} --- quantities near the type's max. (32-bit overflow.)
+  \item \textbf{Duplicate} --- same id added twice. (Which policy fires?)
+\end{itemize}
+
+\begin{intu}
+``Off-by-one'' and ``forgot the empty case'' are the two most common bugs in all
+of software. Boundary tests are how you catch them on purpose instead of in
+production. When you see \code{>=} in the code, you should reflexively write the
+$=$ case.
+\end{intu}
+
+\subsection{Mental model 3 --- test relationships, not just values}
+
+Fixed-value tests (``input $X$ gives $42$'') only cover cases you computed by hand.
+\textbf{Metamorphic} tests check a \emph{relationship} that must hold for
+\emph{every} input --- so they cover infinitely many cases you never enumerated.
+
+\begin{center}
+\renewcommand{\arraystretch}{1.3}\footnotesize
+\begin{tabular}{@{}p{5.0cm}p{8.3cm}@{}}
+\toprule
+\textbf{Relationship (must always hold)} & \textbf{The bug it catches} \\
+\midrule
+add $X$ then cancel $X$ $\Rightarrow$ back to start & aggregate updated on add but not on cancel \\
+insertion order doesn't change matching & hidden order-dependent state \\
+cancel-for-user $\Rightarrow$ none of that user's orders remain & index desync / leftover ghosts \\
+matching $\le \min(B,S)$ always & the cap logic is wrong \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{intu}
+The \emph{add-then-cancel round trip} is the single most valuable consistency test
+here, because the \#1 bug in this design is ``I decrement the aggregate wrong on
+cancel.'' If add-then-cancel returns you to the exact starting numbers, your two
+sync helpers are mirror images --- which is the whole correctness argument.
+\end{intu}
+
+\subsection{Mental model 4 --- the oracle (test against a second brain)}
+
+The most powerful idea in testing: compute the answer \textbf{two different ways}
+and demand they agree. The second way --- the \textbf{oracle} --- must be written
+\emph{differently} so it can't share a bug with the first.
+
+\begin{center}
+\begin{tikzpicture}[font=\footnotesize,>=Latex,node distance=8mm,every node/.style={align=center}]
+  \node[draw,rounded corners,fill=Soft] (g) {random\\orders};
+  \node[draw,rounded corners,fill=Buy!10,right=1.3cm of g] (i) {your cache\\(fast, maintained aggregate)};
+  \node[draw,rounded corners,fill=Accent!12,below=8mm of i] (o) {oracle\\(slow, from raw orders)};
+  \node[draw,rounded corners,fill=Gold!14,right=1.6cm of i] (c) {ASSERT\\equal};
+  \draw[->](g)--(i); \draw[->](g)|-(o); \draw[->](i)--(c); \draw[->](o)-|(c);
+\end{tikzpicture}
+\end{center}
+
+\begin{intu}
+Why does this work? A bug in your fast code is unlikely to be \emph{the same} bug
+in a slow, independently-written reference. So when they disagree on some random
+input, one of them is wrong --- and you've found a case you'd never have dreamed up
+by hand. Run it on thousands of random inputs (with a \textbf{fixed seed} so
+failures reproduce) and you've effectively tested the space, not a handful of
+points.
+\end{intu}
+
+\begin{pitfall}
+The oracle must be \emph{obviously correct} and \emph{independent}. A subtle trap
+here: a naive $O(n^2)$ greedy pairing is \emph{not} a correct oracle (greedy
+under-counts, \S on math). The safe oracle is the per-company formula recomputed
+from the \emph{raw order list} --- it re-derives the answer without reusing the
+cache's maintained aggregate, so it catches maintenance bugs, which are the likely
+ones.
+\end{pitfall}
+
+\subsection{Mental model 5 --- test the \emph{promise}, not just correctness}
+
+The spec promised efficiency at a million orders. That is a claim your tests should
+\emph{enforce}, because a correct-but-slow implementation (one that scans all orders
+per query) passes every correctness test and still fails the real requirement.
+
+\begin{intu}
+A performance test is a correctness test for your \emph{design}. Insert a million
+orders, time one \code{getMatchingSizeForSecurity}, assert it's under a few
+milliseconds. A scanning implementation blows the budget; your aggregate
+implementation sails through. The test is what proves the design paid off.
+\end{intu}
+
+\subsection{Putting the layers together (the pyramid)}
+
+\begin{center}
+\begin{tikzpicture}[font=\footnotesize]
+  \node[draw,fill=Buy!10,minimum width=11.5cm,minimum height=0.8cm] (l1){\textbf{1. Examples} --- the spec's cases (ground truth)};
+  \node[draw,fill=Accent!12,minimum width=9cm,minimum height=0.8cm,below=1mm of l1] (l2){\textbf{2. Edges} --- one trap per bug (esp.\ dominant company)};
+  \node[draw,fill=Gold!14,minimum width=6.5cm,minimum height=0.8cm,below=1mm of l2] (l3){\textbf{3. Relationships} --- round trips, order-independence};
+  \node[draw,fill=Sell!12,minimum width=4cm,minimum height=0.8cm,below=1mm of l3] (l4){\textbf{4. Oracle} + \textbf{perf}};
+\end{tikzpicture}
+\end{center}
+
+\noindent Bottom-up: examples prove it works on known cases; edges catch the
+specific bugs; relationships cover the unenumerated cases; the oracle covers the
+\emph{space}; the perf test enforces the promise. A suite with all four reads as
+\emph{engineering}, not homework --- which is exactly what a take-home grades.
+
+\begin{say}
+``I think of each test as a trap for one bug. I read the edge cases off the
+formula --- the dominant-company case is the one that separates correct from naive.
+I add relationship tests like add/cancel round-trips that catch aggregate-desync,
+and a property test against an independent oracle on thousands of fixed-seed random
+inputs so I'm testing the space, not points. Finally a million-order timing test
+enforces the efficiency promise. I run it all under sanitizers so overflow and
+iterator bugs fail loudly.''
+\end{say}
+
+\subsection{Blank-page drill --- generate the whole suite cold}
+
+The real skill is producing the suite from \emph{nothing}. Close the document. On
+a blank page, for each of the six methods, write every test you'd add \textbf{and
+the one-line bug it traps}. Then uncover the checklist below and score yourself.
+
+\begin{keybox}[Target: name the test \emph{and} the bug it catches]
+\footnotesize
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}p{5.6cm}p{7.4cm}@{}}
+\toprule
+\textbf{Test you should recall} & \textbf{Bug it traps (say this too)} \\
+\midrule
+\multicolumn{2}{@{}l}{\textit{\color{Accent}Layer 1 --- examples}}\\
+README example ($2700$) & baseline: the formula is plain wrong \\[2pt]
+\multicolumn{2}{@{}l}{\textit{\color{Accent}Layer 2 --- edges (one trap each)}}\\
+self-only $\to 0$ & a firm matches with itself \\
+one cross-company match & counting own-company sells \\
+\textbf{dominant company} $\to 150$ & using naive $\min(B,S)$ \\
+only-one-side $\to 0$ & missing the empty-side guard \\
+invalid orders ignored & no validation (empty id, qty 0, bad side) \\
+duplicate id ignored & second add overwrites / corrupts \\
+unknown lookup/cancel = no-op & missing graceful guard (throws) \\
+\code{minQty} boundary ($=$) survives-check & \code{>} vs \code{>=} off-by-one \\
+overflow (near \code{UINT\_MAX}) & 32-bit accumulator \\[2pt]
+\multicolumn{2}{@{}l}{\textit{\color{Accent}Layer 3 --- relationships}}\\
+add $\to$ cancel restores matching & aggregate not decremented on cancel \\
+cancel-for-user leaves no trace & index desync / ghost ids \\
+insertion order irrelevant & hidden order-dependent state \\[2pt]
+\multicolumn{2}{@{}l}{\textit{\color{Accent}Layer 4 --- oracle + promise}}\\
+random vs.\ oracle (fixed seed) & any matching bug, on cases you'd never dream up \\
+random add/cancel vs.\ oracle & maintenance bug under churn \\
+million-order timing & an $O(n)$ scan sneaking into the query \\
+\bottomrule
+\end{tabular}
+\end{keybox}
+
+\textbf{Score yourself:}
+\begin{itemize}[leftmargin=1.5em,nosep]
+  \item \textbf{$<8$ recalled} --- you're listing cases, not thinking in layers.
+        Re-read the five mental models; the goal is to \emph{derive} these, not
+        memorize them.
+  \item \textbf{8--13} --- solid. Note \emph{which layer} you dropped (usually 3
+        or 4 --- everyone remembers examples and edges).
+  \item \textbf{14+} with the bug named for each --- you can defend a suite in the
+        interview. Re-blank-page it tomorrow to make it permanent.
+\end{itemize}
+
+\begin{intu}
+The trick to never blanking: don't memorize the 16 rows --- memorize the
+\textbf{four layers} and the \textbf{five mental models}, then regenerate the rows
+from them. ``Read tests off the formula'' alone gives you the whole edge layer;
+``test relationships'' gives you layer 3; ``oracle + promise'' gives you layer 4.
+The list is downstream of the thinking.
+\end{intu}
