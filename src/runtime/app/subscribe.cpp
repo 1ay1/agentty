@@ -384,7 +384,9 @@ std::optional<Msg> on_fused_picker(const KeyEvent& ev) {
         if (ev.mods.ctrl || raw_ctrl) {
             if (raw_ctrl) c = U'a' + (c - 1);
             if (c == U'f') return FusedPickerToggleFavorite{};
-            if (c == U'e') return FusedPickerToggleReasoning{};
+            // ^E (per-model reasoning override) removed — ←/→ already cycles the
+            // effort tier through 'off', so it was redundant / a no-op on
+            // Claude/GPT. ^E now uniformly means "expand composer".
             return std::nullopt;
         }
         // Any other printable codepoint types into the filter query.
@@ -436,9 +438,11 @@ std::optional<Msg> on_model_picker(const KeyEvent& ev) {
             if (ev.mods.ctrl || raw_ctrl) {
                 if (raw_ctrl) c = U'a' + (c - 1);
                 if (c == U'f') return ModelPickerToggleFavorite{};
-                // Ctrl+E toggles the per-model reasoning-effort override for the
-                // highlighted model (inference → force-on → force-off → inference).
-                if (c == U'e') return ModelPickerToggleReasoning{};
+                // NOTE: ^E (per-model reasoning-effort override) was removed —
+                // ←/→ already cycles the effort tier through 'off', so the
+                // override was redundant AND a no-op on Claude/GPT (their
+                // reasoning is auto-detected). Dropping it frees ^E to mean
+                // "expand composer" everywhere, one key one meaning.
                 // Ctrl+R toggles whether reasoning/thinking is SHOWN (transcript
                 // block + Anthropic visible-thinking beta). Global, all providers.
                 if (c == U'r') return ModelPickerToggleShowReasoning{};
