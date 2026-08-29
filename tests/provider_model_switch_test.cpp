@@ -629,11 +629,10 @@ TEST_CASE("provider picker: ^D signs out of a keyed preset (two-press)") {
     CHECK(g_settings.provider_keys.count("anthropic") == 1);   // others intact
 }
 
-// Enter on the provider picker UNIFORMLY switches — it must NOT open the
-// accounts sub-page even when the highlighted row is the active OAuth
-// provider (the reported "Enter on Anthropic opens the model/accounts page"
-// surprise). Accounts are a separate action (^A / ProviderPickerManageAccounts).
-TEST_CASE("provider picker: Enter switches, never opens accounts") {
+// Enter on an ACCOUNT-CAPABLE provider that is already active opens its
+// accounts drill-down (Esc from there closes the whole picker — handled by
+// login_back → close_login for AccountList). Non-account providers switch.
+TEST_CASE("provider picker: Enter opens accounts on active OAuth provider") {
     using namespace agentty::msg;
     install_stub_deps();
     g_settings = store::Settings{};
@@ -656,11 +655,10 @@ TEST_CASE("provider picker: Enter switches, never opens accounts") {
     REQUIRE(a_idx >= 0);
     p->index = a_idx;
 
-    // Enter: must NOT leave an accounts list open in m.ui.login.
+    // Enter opens the accounts list (and closes the provider picker).
     auto [m2, c2] = app::update(std::move(m1), Msg{ProviderPickerSelect{}});
-    const bool accounts_open =
-        std::holds_alternative<ui::login::AccountList>(m2.ui.login);
-    CHECK(!accounts_open);   // Enter switched, did not drill into accounts
+    CHECK(std::holds_alternative<ui::login::AccountList>(m2.ui.login));
+    CHECK(!ui::pick::opened(m2.ui.provider_picker));  // picker closed
 }
 
 // The fused picker tunes reasoning effort (←/→) on the highlighted model,

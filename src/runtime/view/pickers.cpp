@@ -684,8 +684,8 @@ Element provider_picker(const Model& m) {
         ++i;
     }
 
-    // Enter UNIFORMLY switches on every row. ^A manages accounts, offered
-    // only when the highlighted row is an account-capable OAuth provider.
+    // Enter opens the accounts drill-down on an account-capable OAuth
+    // provider, otherwise it switches. Read straight off the highlighted row.
     const bool row_has_accounts = [&] {
         if (picker->index < 0 || picker->index >= static_cast<int>(rows.size()))
             return false;
@@ -700,17 +700,14 @@ Element provider_picker(const Model& m) {
         text("\xe2\x9c\x93", fg_of(success)), text(" ready  ", fg_dim(muted)),
         text("\xe2\x9a\xa0", fg_of(warn)),    text(" set the named key first  ", fg_dim(muted))
     ).build());
-    std::vector<agentty::ui::Hint> hints{
+    cfg.footer.push_back(key_hints({
         {"\xe2\x86\x91\xe2\x86\x93", "move", 5},        // ↑↓
         {"type", "filter", 4},
-        {"Enter", "switch", 5},
-    };
-    if (row_has_accounts)
-        hints.push_back({"^A", "accounts", 3});
-    hints.push_back({"^D", picker->confirm_remove.empty() ? "remove" : "confirm", 2});
-    hints.push_back({"^/", "models", 3});          // cross-hint: model picker
-    hints.push_back({"Esc", "close", 4});
-    cfg.footer.push_back(key_hints(std::move(hints)));
+        {"Enter", row_has_accounts ? "accounts" : "switch", 5},
+        {"^D", picker->confirm_remove.empty() ? "remove" : "confirm", 2},
+        {"^/", "models", 3},                       // cross-hint: model picker
+        {"Esc", "close", 4},
+    }));
 
     return Picker{std::move(cfg)}.build();
 }

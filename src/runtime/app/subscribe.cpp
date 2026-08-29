@@ -491,9 +491,6 @@ std::optional<Msg> on_provider_picker(const KeyEvent& ev) {
         if (raw_ctrl) c = U'a' + (c - 1);
         const bool ctrl = ev.mods.ctrl || raw_ctrl;
         if (ctrl && (c == U'p' || c == U'P')) return CloseProviderPicker{};
-        // ^A — manage accounts of the highlighted provider (OAuth lane).
-        // Separate from Enter, which uniformly SWITCHES on every row.
-        if (ctrl && (c == U'a' || c == U'A')) return ProviderPickerManageAccounts{};
         // ^D removes a saved custom host / signs out of a keyed preset — the
         // Mac-reachable stand-in for forward-Delete (Mac laptops send
         // Backspace for the key labelled "delete"). Ctrl-D so it never
