@@ -441,3 +441,33 @@ TEST_CASE("fused picker cycles reasoning effort") {
     auto [m3, c3] = app::update(std::move(m2), Msg{CloseFusedPicker{}});
     CHECK(!m3.ui.effort_dirty);
 }
+
+// ^/ toggles between the fused (all-providers) picker and the classic
+// single-provider picker: opening one tears the other down cleanly.
+TEST_CASE("fused and classic model pickers toggle, not stack") {
+    using namespace agentty::msg;
+    install_stub_deps();
+    g_settings = store::Settings{};
+    g_settings.provider_keys["anthropic"] = "sk-test";
+    provider::select(provider::parse_selection("anthropic"));
+
+    Model m;
+    m.d.model_id = ModelId{"claude-sonnet-4-6"};
+    m.d.available_models = {mi("claude-sonnet-4-6", "anthropic")};
+
+    // ^/ once: fused open.
+    auto [m1, c1] = app::update(std::move(m), Msg{OpenFusedPicker{}});
+    CHECK(ui::pick::is_open(m1.ui.fused_picker));
+    CHECK(!ui::pick::is_open(m1.ui.model_picker));
+
+    // ^/ twice: classic opens, fused closes (+ its cache released).
+    auto [m2, c2] = app::update(std::move(m1), Msg{OpenModelPicker{}});
+    CHECK(ui::pick::is_open(m2.ui.model_picker));
+    CHECK(!ui::pick::is_open(m2.ui.fused_picker));
+    CHECK(m2.d.fused_rows.empty());
+
+    // ^/ again: back to fused, classic closes.
+    auto [m3, c3] = app::update(std::move(m2), Msg{OpenFusedPicker{}});
+    CHECK(ui::pick::is_open(m3.ui.fused_picker));
+    CHECK(!ui::pick::is_open(m3.ui.model_picker));
+}
