@@ -27,6 +27,7 @@
 #include "agentty/provider/acp_agents.hpp"
 #include "agentty/provider/selection.hpp"
 #include "agentty/auth/auth.hpp"
+#include "agentty/auth/accounts.hpp"
 #include "agentty/runtime/login.hpp"
 #include "agentty/runtime/fused_models.hpp"
 #include "agentty/runtime/mem.hpp"
@@ -649,6 +650,15 @@ Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
         [&](ProviderPickerFilterInput& e) -> Step {
             auto* p = pick::opened(m.ui.provider_picker);
             if (!p) return done(std::move(m));
+            // Bare `d`/`D` on an EMPTY query is a DELETE, not a search char —
+            // the reachable-on-Mac stand-in for forward-Delete (Mac laptops
+            // send Backspace for the key labelled "delete"). Redirect to the
+            // same two-press delete the Del key drives. Once the user has
+            // started typing, `d` is a normal filter char.
+            if (p->query.empty() && (e.codepoint == U'd' || e.codepoint == U'D'))
+                return provider_picker_update(std::move(m),
+                                              ProviderPickerDelete{});
+            p->confirm_remove.clear();   // any other key disarms a pending delete
             // Append the typed codepoint (UTF-8) and reset the cursor to the
             // top of the freshly-narrowed list.
             char32_t cp = e.codepoint;
@@ -690,35 +700,57 @@ Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
                 return done(std::move(m));
             const ui::ProviderRow& row =
                 rows[static_cast<std::size_t>(p->index)];
-            // Only SAVED CUSTOM HOSTS are user-created and removable. Presets,
-            // ACP agents, and the "Custom host…" sentinel are not.
-            const std::string* spec = row.custom_host();
-            if (!spec) {
+
+            // Two removable things share the Del key:
+            //  (a) a SAVED CUSTOM HOST — remove the host entirely.
+            //  (b) a PRESET with a SAVED API KEY (e.g. openrouter) — the
+            //      preset itself is built-in and stays, but Del clears its
+            //      saved key (a sign-out), which is what "delete openrouter"
+            //      means in practice. Presets with no saved key, ACP agents,
+            //      and the "Custom host…" sentinel are not removable.
+            std::string target;          // settings key to erase
+            bool is_custom_host = false;
+            if (const std::string* spec = row.custom_host()) {
+                target = *spec;
+                is_custom_host = true;
+            } else if (const auto* pr = row.preset()) {
+                auto s = deps().load_settings();
+                const std::string pid{pr->id};
+                if (s.provider_keys.count(pid)) target = pid;  // has a saved key
+            }
+            if (target.empty()) {        // nothing removable on this row
                 p->confirm_remove.clear();
                 return done(std::move(m));
             }
-            // Two-press: first press ARMS (marks confirm_remove on this spec),
-            // second press on the SAME row COMMITS. Mirrors ThreadListDelete /
-            // AccountRemove.
-            if (p->confirm_remove != *spec) {
-                p->confirm_remove = *spec;
+            // Two-press: first press ARMS (marks confirm_remove on this
+            // target), second press on the SAME row COMMITS. Mirrors
+            // ThreadListDelete / AccountRemove.
+            if (p->confirm_remove != target) {
+                p->confirm_remove = target;
                 return done(std::move(m));
             }
-            const std::string removed = *spec;
+            const std::string removed = target;
             {
                 auto s = deps().load_settings();
-                s.provider_keys.erase(removed);    // the saved host lives here
-                s.provider_models.erase(removed);  // its remembered model
+                s.provider_keys.erase(removed);
+                if (is_custom_host) s.provider_models.erase(removed);
                 deps().save_settings(s);
             }
+            // Also drop any stored account credentials for a preset sign-out
+            // (custom hosts keep everything in provider_keys, handled above).
+            if (!is_custom_host)
+                for (const auto& acc : auth::accounts::list_for(removed))
+                    auth::accounts::remove(removed, acc.label);
             p->confirm_remove.clear();
-            // Rebuild the row list so the removed host is gone; clamp cursor.
+            // Rebuild the row list so a removed custom host is gone; clamp.
             auto s2 = deps().load_settings();
             const auto fresh = ui::build_provider_rows(
                 provider::saved_custom_hosts(s2.provider_keys), p->query);
             if (!fresh.empty() && p->index >= static_cast<int>(fresh.size()))
                 p->index = static_cast<int>(fresh.size()) - 1;
-            auto toast = set_status_toast(m, "removed custom host: " + removed);
+            auto toast = set_status_toast(m,
+                (is_custom_host ? "removed custom host: "
+                                : "signed out of ") + removed);
             return {std::move(m), std::move(toast)};
         },
         [&](ProviderPickerSelect) -> Step {
