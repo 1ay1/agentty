@@ -935,13 +935,21 @@ void refresh_fused_sources(Model& m) {
                 id, std::string{p.label}, ProviderCatalog::State::Idle, {}, {}});
             c = &m.d.provider_catalogs.back();
         }
-        // Active provider: reuse the live catalog we already hold — instant,
-        // no fetch needed. Everyone else stays empty + Idle so Open fires a
-        // background fetch; the row list simply grows as each resolves.
-        if (id == active_pid && c->models.empty()
-            && !m.d.available_models.empty()) {
-            c->models = m.d.available_models;
-            c->state  = ProviderCatalog::State::Ready;
+        // Active provider: MIRROR the live catalog we already hold
+        // (available_models is the SSOT for the active provider). Re-seed on
+        // EVERY refresh, not just when empty — otherwise the fused catalog
+        // freezes on whatever available_models was at the FIRST open (often
+        // the bundled seed, before the live /v1/models fetch landed), and
+        // then diverges from the old model picker as available_models grows
+        // (e.g. a newly-listed flagship never appears in the fused list).
+        // Everyone else stays empty + Idle so Open fires a background fetch;
+        // the row list simply grows as each resolves.
+        if (id == active_pid && !m.d.available_models.empty()) {
+            if (c->models != m.d.available_models) {
+                c->models = m.d.available_models;
+                c->search_keys.clear();     // model set changed — keys stale
+            }
+            c->state = ProviderCatalog::State::Ready;
         }
     }
 }
