@@ -1306,12 +1306,15 @@ std::optional<maya::Element> reasoning_slot(const Message& msg, const Model& m) 
     //           theme may map bright_black to near-black, or white to near-bg);
     //           a fixed mid-gray does. Still clearly recedes below the bright-
     //           white answer prose.
-    //   header→ muted (bright_black): the "Reasoned" label is chrome.
-    //   rail  → role_brand (magenta): the agent's own identity hue, matching
-    //           the surrounding assistant turn rail so the reasoning reads as
-    //           a nested aside of the same speaker.
-    rcfg.accent      = ui::role_brand;               // ┃ rail + sigil
-    rcfg.header_word = ui::muted;                    // "Reasoned" header (chrome)
+    //   header→ a fixed gray (0x9a9a9a), same always-visible reasoning as the
+    //           body: ui::muted (bright_black) collapsed to near-invisible on
+    //           true-black themes, hiding the live "Thinking" word and the
+    //           settled "Reasoned · ~N tokens" meter. NOTE: the widget's
+    //           settled-rail dim(accent)=accent.darken() is a no-op on a named
+    //           ANSI color, so the magenta rail stays constant (fine — a
+    //           steady rail reads as one continuous aside).
+    rcfg.accent      = ui::role_brand;                     // ┃ rail + sigil
+    rcfg.header_word = maya::Color::rgb(0x9a, 0x9a, 0x9a);  // visible header/meter
     rcfg.body_fg     = maya::Color::rgb(0x9a, 0x9a, 0x9a);  // always-visible dim
     maya::ReasoningStream rs{rcfg};
     rs.set_live(active);
