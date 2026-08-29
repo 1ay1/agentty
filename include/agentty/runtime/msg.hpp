@@ -436,8 +436,10 @@ struct FusedCatalogLoaded {
     std::vector<ModelInfo> models;
     bool                   ok = true;
 };
-// ^Tab quick-swap: jump straight to the previous (provider,model) in the MRU,
-// no overlay. Reuses the same atomic-switch resolution as FusedPickerSelect.
+// ^Tab MRU cycle: walk the recent (provider,model) ring to progressively
+// older models (A → B → C → D → A), no overlay. Reuses the atomic-switch
+// resolution but does NOT reorder the MRU, so repeated presses cycle the
+// whole ring instead of toggling the last two.
 struct SwitchToPreviousModel {};
 // ── Provider picker ──────────────────────────────────────────────────────
 // Mirrors the model picker. Selecting a provider live-switches the active

@@ -451,6 +451,44 @@ TEST_CASE("fused picker number quick-select") {
     CHECK(c2p->query == "g3");        // digit appended, not a jump
 }
 
+// ^Tab walks the WHOLE MRU ring (A→B→C→A), progressively older, without
+// reordering the ring — not a single A↔B toggle.
+TEST_CASE("^Tab cycles the MRU ring without reordering") {
+    using namespace agentty::msg;
+    install_stub_deps();
+    g_settings = store::Settings{};
+    g_settings.provider_keys["anthropic"] = "sk-test";
+    provider::select(provider::parse_selection("anthropic"));
+
+    Model m;
+    m.d.model_id = ModelId{"claude-a"};
+    m.d.available_models = {mi("claude-a", "anthropic"),
+                            mi("claude-b", "anthropic"),
+                            mi("claude-c", "anthropic")};
+    // MRU ring: active at front, then progressively older.
+    m.d.recent_models = {ModelRef{"anthropic", "claude-a"},
+                         ModelRef{"anthropic", "claude-b"},
+                         ModelRef{"anthropic", "claude-c"}};
+
+    auto step = [](Model mm) {
+        auto [n, c] = app::update(std::move(mm), Msg{SwitchToPreviousModel{}});
+        return std::move(n);
+    };
+
+    m = step(std::move(m));
+    CHECK(m.d.model_id.value == "claude-b");            // A → B
+    m = step(std::move(m));
+    CHECK(m.d.model_id.value == "claude-c");            // B → C
+    m = step(std::move(m));
+    CHECK(m.d.model_id.value == "claude-a");            // C → A (wrap)
+
+    // The ring itself never reordered — that's what makes the walk stable.
+    REQUIRE(m.d.recent_models.size() == 3);
+    CHECK(m.d.recent_models[0].model_id == "claude-a");
+    CHECK(m.d.recent_models[1].model_id == "claude-b");
+    CHECK(m.d.recent_models[2].model_id == "claude-c");
+}
+
 // The fused picker tunes reasoning effort (←/→) on the highlighted model,
 // ported from the old model picker so the fused surface is complete.
 TEST_CASE("fused picker cycles reasoning effort") {

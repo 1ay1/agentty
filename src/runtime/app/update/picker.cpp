@@ -1014,8 +1014,10 @@ auth::AuthHeader resolve_switch_auth(const std::string& spec) {
 //     refetch), no provider hop.
 //   • cross provider  → commit_provider_switch with the model PRE-STASHED so
 //     the funnel installs exactly it (atomic provider+model+auth).
-// Records the target in the MRU either way, and fires the switch toast.
-Step switch_to_model_ref(Model m, const ModelRef& ref) {
+// Records the target in the MRU either way (unless `record` is false, e.g. a
+// ^Tab ring-walk which must not reorder the MRU mid-cycle), and fires the
+// switch toast.
+Step switch_to_model_ref(Model m, const ModelRef& ref, bool record = true) {
     const std::string cur_pid = active_provider_id();
 
     if (ref.provider_id == cur_pid) {
@@ -1031,7 +1033,7 @@ Step switch_to_model_ref(Model m, const ModelRef& ref) {
                                       resolved_caps(m.d.model_id.value));
         tools::subagent::set_model(m.d.model_id.value);
         persist_settings(m);
-        record_recent(m, ref.provider_id, ref.model_id);
+        if (record) record_recent(m, ref.provider_id, ref.model_id);
         auto toast = set_status_toast(m,
             ui::pretty_model_label(m.d.model_id.value) + " \xc2\xb7 "
                 + provider::provider_display_name(provider::active()),
@@ -1043,7 +1045,7 @@ Step switch_to_model_ref(Model m, const ModelRef& ref) {
     const provider::ProviderPreset* p = provider::preset_for(ref.provider_id);
     const std::string label = p ? std::string{p->label} : ref.provider_id;
     auth::AuthHeader auth = resolve_switch_auth(ref.provider_id);
-    record_recent(m, ref.provider_id, ref.model_id);
+    if (record) record_recent(m, ref.provider_id, ref.model_id);
     return commit_provider_switch(std::move(m), ref.provider_id,
                                   std::move(auth), label, ref.model_id);
 }
@@ -1291,15 +1293,24 @@ Step fused_picker_update(Model m, msg::FusedPickerMsg pm) {
             return {std::move(m), std::move(toast)};
         },
         [&](SwitchToPreviousModel) -> Step {
-            // ^Tab quick-swap: jump to the previous distinct (provider,model).
+            // ^Tab MRU cycle: walk the recent ring to progressively OLDER
+            // models — A → B → C → D → A — not a single A↔B toggle. The switch
+            // does NOT reorder the ring (record=false), so finding the active
+            // model's index each press naturally advances the walk one step;
+            // a full lap returns you home. (A TUI can't see Ctrl release, and
+            // there's no idle tick, so a stable no-reorder walk is the robust
+            // way to do Alt-Tab semantics here — no commit deadline needed.)
             hydrate_recents(m);
-            const std::string cur_pid = active_provider_id();
-            const ModelRef active{cur_pid, m.d.model_id.value};
-            ModelRef target;
-            for (const auto& r : m.d.recent_models)
-                if (!(r == active)) { target = r; break; }
-            if (target.empty()) return done(std::move(m));
-            return switch_to_model_ref(std::move(m), target);
+            const auto& ring = m.d.recent_models;
+            if (ring.size() < 2) return done(std::move(m));  // nothing to cycle
+            const ModelRef active{active_provider_id(), m.d.model_id.value};
+            int cur = 0;
+            for (int i = 0; i < static_cast<int>(ring.size()); ++i)
+                if (ring[static_cast<std::size_t>(i)] == active) { cur = i; break; }
+            const ModelRef target =
+                ring[static_cast<std::size_t>((cur + 1) % static_cast<int>(ring.size()))];
+            if (target.empty() || target == active) return done(std::move(m));
+            return switch_to_model_ref(std::move(m), target, /*record=*/false);
         },
         [&](FusedPickerSelect) -> Step {
             auto* c = pick::opened(m.ui.fused_picker);
