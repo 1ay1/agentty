@@ -786,7 +786,7 @@ Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
                 // opens its accounts drill-down (a custom host can hold
                 // multiple saved keys, switchable like the OAuth providers —
                 // account_provider_id returns the spec for a custom OpenAI
-                // endpoint). Esc from that list closes the whole picker.
+                // endpoint). Esc from that list steps back to this picker.
                 const auto& active = provider::active();
                 const bool is_active =
                     active.kind == provider::Kind::OpenAI
@@ -816,11 +816,12 @@ Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
             // Enter on an ACCOUNT-CAPABLE provider (the OAuth lane: Anthropic /
             // ChatGPT / Copilot / Kimi) opens its accounts drill-down — the
             // primary thing you do with those providers is pick/add an
-            // account. Esc from that accounts list closes the whole picker
-            // (login_back → close_login for AccountList), so it doesn't bounce
-            // back here. Non-account providers (API-key presets, custom hosts)
-            // just switch. The accounts list operates on the ACTIVE session,
-            // so switch to this provider first when it isn't active yet.
+            // account. Esc from that accounts list steps BACK to the provider
+            // picker (login_back → Back::ProviderPicker), keeping the
+            // hierarchy accounts → providers → chat. Non-account providers
+            // (API-key presets, custom hosts) just switch. The accounts list
+            // operates on the ACTIVE session, so switch to this provider first
+            // when it isn't active yet.
             if (preset_is_account_capable(preset)) {
                 const auto& active = provider::active();
                 const bool is_active =
