@@ -12,6 +12,9 @@
 
 #include <filesystem>
 #include <fstream>
+#include <functional>
+#include <cstdint>
+#include <cstdio>
 #include <iterator>
 
 #include <nlohmann/json.hpp>
@@ -34,21 +37,6 @@ namespace crypt = agentty::auth::crypt;
 namespace chatgpt = agentty::provider::chatgpt;
 namespace copilot = agentty::provider::copilot;
 namespace kimi = agentty::provider::kimi;
-
-// The active-store file for a provider whose credential is a single file.
-// nullopt for providers whose accounts are handled elsewhere (OpenAI keys
-// already switch per-endpoint through Settings.provider_keys).
-std::optional<fs::path> active_store_file(const std::string& provider) {
-    if (provider == "anthropic" || provider.empty())
-        return agentty::auth::credentials_path();
-    if (provider == "chatgpt")
-        return chatgpt::codex_credentials_path();
-    if (provider == "copilot")
-        return copilot::credentials_path();
-    if (provider == "kimi")
-        return kimi::credentials_path();
-    return std::nullopt;
-}
 
 // Read a file whole; nullopt when missing/empty.
 std::optional<std::string> read_all(const fs::path& p) {
@@ -90,28 +78,116 @@ std::optional<std::string> body_of(const std::string& blob) {
 // which its bearer key lives in Settings.provider_keys). Custom hosts have no
 // credential FILE — their "active credential" is that provider_keys[spec]
 // entry — so the four file-backed providers (and empty→anthropic) are NOT
-// custom hosts; everything else non-empty is treated as a spec. (preset_for
-// would reject built-in preset ids too, but those never reach here as an
-// account provider id — account_provider_id only returns a spec for a
-// non-preset OpenAI endpoint.)
+// custom hosts; everything else non-empty is treated as a spec.
 bool is_custom_host_provider(const std::string& p) {
     return !p.empty() && p != "anthropic" && p != "chatgpt"
         && p != "copilot" && p != "kimi";
 }
 
+// ── One backend per provider ────────────────────────────────────────────────
+// The ONLY thing that differs between providers is (a) WHERE the active
+// credential lives — a file, or Settings.provider_keys[spec] — and (b) how to
+// re-seal it into a keystore + label it. Capture that once so snapshot_active /
+// activate / derive_current_label share a single, uniform body.
+enum class Store : std::uint8_t { File, SettingsKey };
+
+struct Backend {
+    Store           store;
+    fs::path        file;                 // when store == File
+    std::function<std::string(const json&)> label_body;   // File: label from JSON body
+    std::function<void()> after_activate;  // File: keystore re-seal / cache bust
+};
+
+// Read the SettingsKey (custom-host) secret, or empty.
+std::string settings_key(const std::string& provider) {
+    auto s = agentty::persistence::load_settings();
+    auto it = s.provider_keys.find(provider);
+    return it != s.provider_keys.end() ? it->second : std::string{};
+}
+void set_settings_key(const std::string& provider, const std::string& v) {
+    auto s = agentty::persistence::load_settings();
+    s.provider_keys[provider] = v;
+    agentty::persistence::save_settings(s);
+}
+
+// Resolve the backend for a provider id.
+Backend backend_for(const std::string& provider) {
+    Backend b;
+    if (is_custom_host_provider(provider)) {
+        b.store = Store::SettingsKey;
+        return b;
+    }
+    b.store = Store::File;
+    if (provider == "anthropic" || provider.empty()) {
+        b.file = agentty::auth::credentials_path();
+        b.label_body = [](const json& j) -> std::string {
+            std::string method = j.value("method", "");
+            if (method == "api_key" || method == "apikey") return "API key";
+            if (method == "oauth")   return "OAuth login";
+            if (!method.empty())     return method;
+            return "signed in";
+        };
+        b.after_activate = [] {
+            if (auto c = agentty::auth::load_credentials())
+                agentty::auth::save_credentials(*c);   // re-seal to keystore
+        };
+    } else if (provider == "chatgpt") {
+        b.file = chatgpt::codex_credentials_path();
+        b.label_body = [](const json& j) -> std::string {
+            std::string acct = j.value("account_id", "");
+            return acct.empty() ? "ChatGPT" : "ChatGPT " + acct.substr(0, 8);
+        };
+        b.after_activate = [] {
+            if (auto c = chatgpt::load_codex_credentials())
+                chatgpt::save_codex_credentials(*c);
+        };
+    } else if (provider == "copilot") {
+        b.file = copilot::credentials_path();
+        b.label_body = [](const json& j) -> std::string {
+            std::string sku;
+            if (j.contains("proxy") && j["proxy"].is_object())
+                sku = j["proxy"].value("sku", "");
+            std::string gh = j.value("github_token", "");
+            std::string tag = gh.size() >= 8 ? gh.substr(gh.size() - 4) : "";
+            std::string base = sku.empty() ? "Copilot" : "Copilot (" + sku + ")";
+            return tag.empty() ? base : base + " \xe2\x80\xa6" + tag;
+        };
+        b.after_activate = [] { copilot::invalidate_cached_token(); };
+    } else if (provider == "kimi") {
+        b.file = kimi::credentials_path();
+        b.label_body = [](const json& j) -> std::string {
+            std::string rt = j.value("refresh_token", std::string{});
+            if (rt.empty()) rt = j.value("access_token", std::string{});
+            std::string tag = rt.size() >= 4 ? rt.substr(rt.size() - 4) : "";
+            return tag.empty() ? std::string{"Kimi"} : "Kimi \xe2\x80\xa6" + tag;
+        };
+        b.after_activate = [] { kimi::invalidate_cached_token(); };
+    }
+    return b;
+}
+
+// A stable, human-recognisable label for a SettingsKey (custom-host) bearer
+// key — prefix…suffix isn't unique enough, so a 6-hex hash of the WHOLE key
+// guarantees distinct keys get distinct labels.
+std::string settings_key_label(const std::string& key) {
+    if (key.empty()) return {};
+    std::string tail = key.size() >= 4 ? key.substr(key.size() - 4) : key;
+    const std::uint32_t h = std::hash<std::string>{}(key) & 0xffffffu;
+    char hx[7];
+    std::snprintf(hx, sizeof(hx), "%06x", h);
+    return "key \xe2\x80\xa6" + tail + " #" + std::string(hx, 6);
+}
+
 } // namespace
 
 bool snapshot_active(const std::string& provider, const std::string& label) {
-    // Custom host: capture the bearer key from Settings.provider_keys[spec].
-    if (is_custom_host_provider(provider)) {
-        auto s = agentty::persistence::load_settings();
-        auto it = s.provider_keys.find(provider);
-        if (it == s.provider_keys.end() || it->second.empty()) return false;
-        return upsert(provider, label, it->second);
+    const Backend b = backend_for(provider);
+    if (b.store == Store::SettingsKey) {
+        const std::string key = settings_key(provider);
+        if (key.empty()) return false;
+        return upsert(provider, label, key);
     }
-    auto file = active_store_file(provider);
-    if (!file) return false;
-    auto blob = read_all(*file);
+    auto blob = read_all(b.file);
     if (!blob) return false;                 // nothing signed in to capture
     return upsert(provider, label, *blob);
 }
@@ -119,103 +195,29 @@ bool snapshot_active(const std::string& provider, const std::string& label) {
 bool activate(const std::string& provider, const std::string& label) {
     auto slot = get(provider, label);
     if (!slot) return false;
-    // Custom host: the account's secret IS its bearer key. Write it back to
-    // Settings.provider_keys[spec] (the endpoint the resolver reads), then
-    // mark it active. No credential file / keystore round-trip involved.
-    if (is_custom_host_provider(provider)) {
-        auto s = agentty::persistence::load_settings();
-        s.provider_keys[provider] = slot->secret;
-        agentty::persistence::save_settings(s);
+    const Backend b = backend_for(provider);
+    if (b.store == Store::SettingsKey) {
+        set_settings_key(provider, slot->secret);   // the endpoint resolve() reads
         return set_active(provider, label);
     }
-    auto file = active_store_file(provider);
-    if (!file) return false;
-    if (!write_store(*file, slot->secret)) return false;
-    // Mirror it into the OS keystore when that's the primary store, so the
-    // next resolve() reads the switched-to account and not a stale keychain
-    // entry. save_credentials/save_codex handle the keystore on their own
-    // paths, but here we wrote the file directly — re-run the provider's
-    // loader→saver round-trip to re-seal into the keystore.
-    if (provider == "anthropic" || provider.empty()) {
-        if (auto c = agentty::auth::load_credentials())
-            agentty::auth::save_credentials(*c);
-    } else if (provider == "chatgpt") {
-        if (auto c = chatgpt::load_codex_credentials())
-            chatgpt::save_codex_credentials(*c);
-    }
-    // Copilot writes a plain 0600 file (no keystore mirror), so the direct
-    // write_store above is already authoritative — no round-trip needed. But
-    // invalidate any cached proxy token so the switched-to account re-exchanges
-    // against ITS GitHub credential, not the previous account's.
-    if (provider == "copilot") copilot::invalidate_cached_token();
-    if (provider == "kimi") kimi::invalidate_cached_token();
+    if (!write_store(b.file, slot->secret)) return false;
+    // Re-seal into the keystore / bust cached tokens so the next resolve()
+    // reads the switched-to account, not a stale entry.
+    if (b.after_activate) b.after_activate();
     return set_active(provider, label);
 }
 
 std::string derive_current_label(const std::string& provider) {
-    // Custom host: label by a short suffix of the bearer key so two distinct
-    // keys for the same endpoint get two distinct, recognisable rows. Include
-    // both a prefix and a suffix so keys that happen to share the last 4 chars
-    // (common with structured keys like "sk-proj-…") still get distinct labels;
-    // a length tag breaks any remaining ties.
-    if (is_custom_host_provider(provider)) {
-        auto s = agentty::persistence::load_settings();
-        auto it = s.provider_keys.find(provider);
-        if (it == s.provider_keys.end() || it->second.empty()) return {};
-        const std::string& key = it->second;
-        auto tail = [&](std::size_t n) {
-            return key.size() >= n ? key.substr(key.size() - n) : key;
-        };
-        // A short hash of the WHOLE key guarantees two distinct keys get two
-        // distinct labels even when they share a prefix AND suffix (differing
-        // only in the middle). The visible …suffix keeps it human-recognisable.
-        const std::uint32_t h = std::hash<std::string>{}(key) & 0xffffffu;
-        char hx[7];
-        std::snprintf(hx, sizeof(hx), "%06x", h);
-        return "key \xe2\x80\xa6" + tail(4) + " #" + std::string(hx, 6);
-    }
-    auto file = active_store_file(provider);
-    if (!file) return {};
-    auto blob = read_all(*file);
+    const Backend b = backend_for(provider);
+    if (b.store == Store::SettingsKey)
+        return settings_key_label(settings_key(provider));
+    auto blob = read_all(b.file);
     if (!blob) return {};
     auto body = body_of(*blob);
     if (!body) return "signed in";           // sealed for another machine
-
-    // Try to pull a human-recognisable identifier out of the credential.
-    // We deliberately avoid JWT-decoding the id_token (no base64url decoder
-    // in the crypt layer, and the payload is unverified) — the account_id
-    // and method fields are plain JSON and enough to disambiguate slots.
     try {
         json j = json::parse(*body);
-        if (provider == "chatgpt") {
-            std::string acct = j.value("account_id", "");
-            if (!acct.empty()) return "ChatGPT " + acct.substr(0, 8);
-            return "ChatGPT";
-        }
-        if (provider == "copilot") {
-            // The Copilot store is {github_token, proxy:{sku,…}}. The token
-            // itself isn't a stable human id, so label by plan + a short hash
-            // of the github token so distinct accounts get distinct labels.
-            std::string sku;
-            if (j.contains("proxy") && j["proxy"].is_object())
-                sku = j["proxy"].value("sku", "");
-            std::string gh = j.value("github_token", "");
-            std::string tag = gh.size() >= 8 ? gh.substr(gh.size() - 4) : "";
-            std::string base = sku.empty() ? "Copilot" : "Copilot (" + sku + ")";
-            return tag.empty() ? base : base + " …" + tag;
-        }
-        if (provider == "kimi") {
-            // The Kimi store is {access_token, refresh_token, …}. Label by a
-            // short suffix of the refresh token so distinct accounts differ.
-            std::string rt = j.value("refresh_token", std::string{});
-            if (rt.empty()) rt = j.value("access_token", std::string{});
-            std::string tag = rt.size() >= 4 ? rt.substr(rt.size() - 4) : "";
-            return tag.empty() ? std::string{"Kimi"} : "Kimi …" + tag;
-        }
-        std::string method = j.value("method", "");
-        if (method == "api_key" || method == "apikey") return "API key";
-        if (method == "oauth")   return "OAuth login";
-        if (!method.empty())     return method;
+        if (b.label_body) return b.label_body(j);
     } catch (...) {}
     return "signed in";
 }
