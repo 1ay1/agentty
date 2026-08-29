@@ -810,6 +810,17 @@ Step login_submit(Model m) {
         if (!provider.empty()) {
             {
                 auto settings = deps().load_settings();
+                // If a key is ALREADY saved for this provider, preserve it as a
+                // switchable account BEFORE overwriting — otherwise "add
+                // another account" clobbers the current one. snapshot_active
+                // reads the current provider_keys[provider], so do it first.
+                if (auto it = settings.provider_keys.find(provider);
+                    it != settings.provider_keys.end() && !it->second.empty()
+                    && it->second != key) {
+                    if (auto lbl = auth::accounts::derive_current_label(provider);
+                        !lbl.empty())
+                        auth::accounts::snapshot_active(provider, lbl);
+                }
                 settings.provider_keys[provider] = key;
                 settings.provider = provider;
                 deps().save_settings(settings);
