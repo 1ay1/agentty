@@ -455,11 +455,16 @@ struct ProviderPickerSelect {};
 // narrows to fuzzy/substring matches on the id + label + blurb.
 struct ProviderPickerFilterInput { char32_t codepoint; };
 struct ProviderPickerFilterBackspace {};
-// Del/d on a SAVED CUSTOM HOST row — two-press delete (confirm_remove) that
-// removes the host from Settings.provider_keys + provider_models. Mirrors
-// ThreadListDelete / AccountRemove. No-op on preset / ACP / sentinel rows
-// (those aren't user-created and can't be removed).
+// ^D on a row — two-press delete (confirm_remove): removes a SAVED CUSTOM
+// HOST from Settings entirely, OR signs out of a PRESET that has a saved key
+// (clears the key; the built-in preset stays). Mirrors ThreadListDelete /
+// AccountRemove. No-op on presets with no saved key, ACP, and the sentinel.
 struct ProviderPickerDelete {};
+// ^A on a row — manage the accounts of THAT provider (multi-account OAuth
+// providers only). Switches to the provider first so the accounts drill-down
+// operates on it, then opens the accounts list. Separate from Enter, which
+// UNIFORMLY switches (never opens a sub-page) on every row.
+struct ProviderPickerManageAccounts {};
 
 // ── Thread list ──────────────────────────────────────────────────────────
 struct OpenThreadList {};
@@ -927,7 +932,7 @@ using ProviderPickerMsg = std::variant<
     OpenProviderPicker, CloseProviderPicker, ProviderPickerMove,
     ProviderPickerJump, ProviderPickerSelect,
     ProviderPickerFilterInput, ProviderPickerFilterBackspace,
-    ProviderPickerDelete>;
+    ProviderPickerDelete, ProviderPickerManageAccounts>;
 
 using FusedPickerMsg = std::variant<
     OpenFusedPicker, CloseFusedPicker, FusedPickerMove, FusedPickerJump,

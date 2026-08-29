@@ -684,13 +684,13 @@ Element provider_picker(const Model& m) {
         ++i;
     }
 
-    // Enter drills into accounts only when the highlighted row is the active
-    // OAuth provider — read straight off the highlighted row (no index math).
-    const bool enter_opens_accounts = [&] {
+    // Enter UNIFORMLY switches on every row. ^A manages accounts, offered
+    // only when the highlighted row is an account-capable OAuth provider.
+    const bool row_has_accounts = [&] {
         if (picker->index < 0 || picker->index >= static_cast<int>(rows.size()))
             return false;
         const auto* p = rows[static_cast<std::size_t>(picker->index)].preset();
-        if (!p || p->id != active_id) return false;
+        if (!p) return false;
         return p->id == "chatgpt" || p->id == "copilot" || p->id == "kimi"
             || p->kind() == provider::Kind::Anthropic;
     }();
@@ -700,14 +700,17 @@ Element provider_picker(const Model& m) {
         text("\xe2\x9c\x93", fg_of(success)), text(" ready  ", fg_dim(muted)),
         text("\xe2\x9a\xa0", fg_of(warn)),    text(" set the named key first  ", fg_dim(muted))
     ).build());
-    cfg.footer.push_back(key_hints({
+    std::vector<agentty::ui::Hint> hints{
         {"\xe2\x86\x91\xe2\x86\x93", "move", 5},        // ↑↓
         {"type", "filter", 4},
-        {"Enter", enter_opens_accounts ? "accounts" : "switch", 5},
-        {"Del/d", picker->confirm_remove.empty() ? "remove" : "confirm", 2},
-        {"^/", "models", 3},                       // cross-hint: model picker
-        {"Esc", "close", 4},
-    }));
+        {"Enter", "switch", 5},
+    };
+    if (row_has_accounts)
+        hints.push_back({"^A", "accounts", 3});
+    hints.push_back({"^D", picker->confirm_remove.empty() ? "remove" : "confirm", 2});
+    hints.push_back({"^/", "models", 3});          // cross-hint: model picker
+    hints.push_back({"Esc", "close", 4});
+    cfg.footer.push_back(key_hints(std::move(hints)));
 
     return Picker{std::move(cfg)}.build();
 }
