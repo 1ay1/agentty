@@ -42,8 +42,13 @@ struct Match {
     Match m;
     if (needle.empty()) { m.score = 0; return m; }
     if (needle.size() > hay.size()) return m;
-    auto lc = [](char c) noexcept {
-        return static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    // ASCII fast-path lowercase. The candidates are model ids / provider
+    // labels / paths — ASCII — so a branch beats std::tolower, which drags in
+    // locale machinery on every char and dominated the per-keystroke cost of
+    // ranking a large list. Non-ASCII bytes pass through unchanged (they were
+    // never lowercased meaningfully by the C-locale tolower here either).
+    auto lc = [](char c) noexcept -> char {
+        return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
     };
 
     int s = 0, skipped = 0;

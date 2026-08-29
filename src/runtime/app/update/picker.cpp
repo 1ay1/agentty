@@ -971,6 +971,23 @@ namespace {
 // so the view + cursor math never re-enumerate providers or re-read
 // settings.json per frame or per keystroke.
 void rebuild_fused_rows(Model& m) {
+    // Keep each catalog's precomputed, lowercased fuzzy keys in sync with its
+    // model set. This is the SINGLE place the filter consumes catalogs, so
+    // keys built here are reused across every keystroke — the per-key filter
+    // never re-allocates or re-lowercases a haystack per model. A model-set
+    // change clears search_keys at the mutation site (size mismatch here), so
+    // this rebuild runs O(models) only when a catalog actually changed.
+    for (auto& c : m.d.provider_catalogs) {
+        if (c.search_keys.size() == c.models.size()) continue;
+        c.search_keys.clear();
+        c.search_keys.reserve(c.models.size());
+        for (const auto& mi : c.models) {
+            std::string key = ui::detail::fused_haystack(c.label, mi);
+            for (char& ch : key)
+                if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch - 'A' + 'a');
+            c.search_keys.push_back(std::move(key));
+        }
+    }
     m.d.fused_rows = fused_rows_for_model(m);
 }
 
@@ -1178,6 +1195,7 @@ Step fused_picker_update(Model m, msg::FusedPickerMsg pm) {
                 if (c.provider_id != e.provider_id) continue;
                 if (e.ok && !e.models.empty()) {
                     c.models = std::move(e.models);
+                    c.search_keys.clear();   // stale — rebuilt on next filter
                     c.state  = ProviderCatalog::State::Ready;
                 } else {
                     c.state  = e.ok ? ProviderCatalog::State::Ready
