@@ -150,12 +150,14 @@ TEST_CASE("reasoning: the ^R switch hides the block even when text exists") {
 // text grows GRADUALLY rather than jumping straight to full on the frame the
 // bytes arrive. This pins the streaming-reveal path (turn.cpp MdView::Reasoning
 // + subturn_stably_keyable's reasoning-slot animation check).
-TEST_CASE("reasoning: body reveals incrementally, not all at once") {
-    // A long, single-paragraph body so the reveal cursor has many chars to
-    // walk through (word-boundary markers we can count as they appear).
+TEST_CASE("reasoning: live body is a bounded, fixed-height faded window") {
+    // Live reasoning renders as a fixed-height tail that fades away at the
+    // top: a long chain-of-thought shows only its NEWEST lines, so a big
+    // summarized delta can never dump an unbounded wall (the case the user
+    // hit) — it lands as a bounded window with the latest lines at the bottom.
     std::string full;
     for (int i = 0; i < 60; ++i)
-        full += "word" + std::to_string(i) + " ";
+        full += "line" + std::to_string(i) + "\n";
 
     Model m;
     m.d.show_reasoning = true;
@@ -164,50 +166,29 @@ TEST_CASE("reasoning: body reveals incrementally, not all at once") {
     Message a;
     a.role = Role::Assistant;
     a.id   = MessageId{"stream1"};
-    // No answer text yet: pure-reasoning phase (the case the user hit).
     m.d.current.messages.push_back(a);
-
-    auto visible_words = [&](const std::string& out) {
-        int n = 0;
-        for (int i = 0; i < 60; ++i)
-            if (has(out, "word" + std::to_string(i) + " ")) ++n;
-        return n;
-    };
-
-    // Feed the ENTIRE reasoning body at once (as a big summarized delta would
-    // arrive), then render across many animation frames. If the reveal works,
-    // the visible word count climbs frame over frame instead of hitting 60
-    // immediately.
+    // The ENTIRE reasoning body arrives at once (a big summarized delta).
     m.d.current.messages[0].thinking = full;
 
-    int first_frame_words = -1;
-    int max_words = 0;
-    for (int frame = 0; frame < 40; ++frame) {
-        const std::string out = render_text(m);
-        const int w = visible_words(out);
-        if (first_frame_words < 0) first_frame_words = w;
-        max_words = std::max(max_words, w);
-        maya::testing::advance_anim_clock_ms(33); // ~30fps
-    }
+    const std::string out = render_text(m);
 
-    // The reveal cursor should NOT dump the whole body on the first frame.
-    check(first_frame_words < 60,
-          "reasoning does not appear fully on the first frame (it reveals)");
-    check(first_frame_words < max_words,
-          "reasoning reveals MORE text over subsequent frames (it animates)");
-    // And it eventually reveals (nearly) everything.
-    check(max_words >= 55,
-          "reasoning reveal eventually reaches the full body");
+    // The newest lines are visible at the bottom of the window…
+    check(has(out, "line59"),
+          "live reasoning shows the newest lines");
+    check(has(out, "line50"),
+          "live reasoning shows a window of recent lines");
+    // …while the oldest are pushed off the top (fixed-height, not a full dump).
+    check(!has(out, "line0\n") && !has(out, "line3 ") && !has(out, "line5\n"),
+          "live reasoning does NOT dump the whole body (bounded window)");
 }
 
-// The reasoning reveal must GLIDE the text out even when the answer starts
-// immediately after the last reasoning delta (the common Anthropic case:
-// summarized reasoning lands in one/two big deltas, then prose begins). If
-// the reveal is cut short at settle, the whole reasoning block "appears at
-// once". We inspect the #r slot's reveal cursor directly.
-TEST_CASE("reasoning: reveal glides, not cut short when the answer follows") {
+// When the answer starts immediately after the last reasoning delta (the
+// common Anthropic case: summarized reasoning lands in one/two big deltas,
+// then prose begins), the reasoning block must stay a bounded faded window
+// and the transition to the answer must render cleanly — no unbounded dump.
+TEST_CASE("reasoning: bounded window survives the answer transition") {
     std::string full;
-    for (int i = 0; i < 80; ++i) full += "tok" + std::to_string(i) + " ";
+    for (int i = 0; i < 80; ++i) full += "tok" + std::to_string(i) + "\n";
 
     Model m;
     m.d.show_reasoning = true;
@@ -215,38 +196,20 @@ TEST_CASE("reasoning: reveal glides, not cut short when the answer follows") {
     Message a; a.role = Role::Assistant; a.id = MessageId{"glide1"};
     m.d.current.messages.push_back(a);
 
-    const auto rid = MessageId{std::string{"glide1"} + "#r"};
-    auto reveal_clip = [&]() -> long long {
-        const auto* mc = m.ui.view_cache.peek(m.d.current.id, rid);
-        if (!mc || !mc->streaming) return -1;
-        const auto clip = mc->streaming->debug_reveal_byte_clip();
-        return clip == static_cast<std::size_t>(-1)
-             ? -1 : static_cast<long long>(clip);
-    };
-
     // Reasoning arrives all at once (one big summarized delta).
     m.d.current.messages[0].thinking = full;
-    // A few frames of gliding — the reveal cursor should be MID-body, not at
-    // the end.
-    long long clip_after_a_few = -1;
-    for (int f = 0; f < 3; ++f) {
-        (void)render_text(m);
-        maya::testing::advance_anim_clock_ms(33);
+    {
+        const std::string out = render_text(m);
+        check(has(out, "tok79"), "newest reasoning line shows");
+        check(!has(out, "tok0\n"),
+              "oldest reasoning line is off the top (bounded window)");
     }
-    clip_after_a_few = reveal_clip();
-    check(clip_after_a_few >= 0 &&
-          clip_after_a_few < static_cast<long long>(full.size()),
-          "reveal cursor is still mid-body a few frames in (it is gliding)");
 
-    // NOW the answer starts immediately (settle trigger). The reveal must NOT
-    // snap to the end on the settling frame — it should keep gliding.
+    // NOW the answer starts. The reasoning must stay a bounded window through
+    // the transition — it doesn't suddenly dump the whole reasoning body.
     m.d.current.messages[0].streaming_text = "Here is the answer.";
-    (void)render_text(m);
-    maya::testing::advance_anim_clock_ms(33);
-    const long long clip_at_settle = reveal_clip();
-    // The cursor should have advanced only incrementally, not jumped to full.
-    // (A snap would put it at full.size() the instant settle fired.)
-    check(clip_at_settle < 0 ||
-          clip_at_settle <= clip_after_a_few + static_cast<long long>(full.size()),
-          "reveal is not force-snapped to the end when the answer begins");
+    const std::string out2 = render_text(m);
+    check(has(out2, "tok79"), "reasoning still shows its newest line");
+    check(!has(out2, "tok0\n"),
+          "reasoning stays a bounded window through the answer transition");
 }
