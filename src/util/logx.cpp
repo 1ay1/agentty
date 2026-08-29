@@ -263,8 +263,11 @@ void emit(Channel ch, Level lv, std::string_view site,
     // ── File sink: one write(2) on an O_APPEND fd — atomic append ─────
     if (g_fd >= 0 && enabled(ch, lv)) {
         // Best-effort; short writes / EINTR are dropped rather than looped —
-        // diagnostics must never stall the caller.
-        (void)AGT_WRITE(g_fd, line, static_cast<unsigned>(n));
+        // diagnostics must never stall the caller. The `!` (not a bare
+        // (void)) marks the result used: glibc declares write() __wur under
+        // _FORTIFY_SOURCE, and GCC ignores a plain void-cast for
+        // warn_unused_result functions.
+        (void)!AGT_WRITE(g_fd, line, static_cast<unsigned>(n));
     }
 }
 
