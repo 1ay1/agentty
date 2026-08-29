@@ -230,8 +230,22 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m,
     // on its size like the answer path.
     if (reasoning_view) {
         std::string_view rsrc = msg.reasoning_display_text();
-        if (rsrc != cache.combined_source)
-            cache.combined_source.assign(rsrc.begin(), rsrc.end());
+        // Render reasoning as a markdown BLOCKQUOTE: prefix every line with
+        // "> " so the engine draws its │ gutter. Unlike a bordered box, the
+        // blockquote is a plain vstack of │-prefixed rows — it scrolls off the
+        // viewport top / commits to scrollback row-by-row like prose, so a
+        // long reasoning is never clipped. This is the rail, made splittable.
+        std::string quoted;
+        if (!rsrc.empty()) {
+            quoted.reserve(rsrc.size() + rsrc.size() / 32 + 4);
+            quoted += "> ";
+            for (char c : rsrc) {
+                quoted += c;
+                if (c == '\n') quoted += "> ";
+            }
+        }
+        if (quoted != cache.combined_source)
+            cache.combined_source = std::move(quoted);
     }
 
     const bool sizes_unchanged = reasoning_view
@@ -1276,15 +1290,14 @@ std::optional<maya::Element> reasoning_slot(const Message& msg, const Model& m) 
     // the cached body.
     maya::Element body = cached_markdown_for(msg, m, MdView::Reasoning);
 
-    // The reasoning renders as a PLAIN FLOW (not a bordered box) so it scrolls
-    // off the viewport top / commits to scrollback row-by-row exactly like the
-    // answer prose — a bordered box is atomic and would be CLIPPED (rows
-    // vanish) once a long reasoning reaches the viewport top. Set apart from
-    // the answer by the ✦ header + a soft cool body TINT (not a wash-out).
+    // The reasoning renders as a markdown BLOCKQUOTE (see cached_markdown_for):
+    // its │ gutter is the rail, and because the blockquote is a plain vstack of
+    // │-prefixed rows it scrolls off the viewport top / commits to scrollback
+    // like prose — a long reasoning is never clipped (the old bordered box was
+    // atomic and clipped). So: whole body, smooth reveal, rail, no clipping.
     maya::ReasoningStream::Config rcfg;
-    rcfg.boxed    = false;
-    rcfg.dim_body = true;
-    rcfg.body_fg  = maya::Color::rgb(0xa6, 0xa2, 0xc4); // light lavender-gray
+    rcfg.boxed    = false;   // blockquote provides the rail; no atomic box
+    rcfg.dim_body = false;   // keep the blockquote's own │ + muted-italic style
     maya::ReasoningStream rs{rcfg};
     rs.set_live(active);
     rs.set_char_hint(msg.reasoning_display_text().size());
