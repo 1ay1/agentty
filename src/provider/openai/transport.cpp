@@ -1688,6 +1688,13 @@ http::Headers build_request_headers(const AuthHeader& auth,
     // token (or a custom raw header). See auth::bearer_token — the single
     // source of truth for OpenAI-family token extraction.
     std::string key = auth::bearer_token(auth);
+    // Diagnostic: which credential is going out (length + last-4 only, never
+    // the full key). Enable with AGENTTY_LOG=debug,chan=openai.auth to debug a
+    // 401 — an empty/short key means the provider switch didn't install this
+    // host's credential (wrong active auth header).
+    util::dbglog("openai.auth",
+        "host=" + endpoint.host + " key_len=" + std::to_string(key.size())
+        + (key.size() >= 4 ? " tail=" + key.substr(key.size() - 4) : ""));
     if (key.empty()) return h;
     if (!endpoint.auth_header_name.empty()) {
         // Custom header name (--auth-header): key goes out raw, no "Bearer "

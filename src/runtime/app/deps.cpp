@@ -1,9 +1,12 @@
 #include "agentty/runtime/app/deps.hpp"
-
 #include "agentty/tool/subagent.hpp"
+#include "agentty/provider/credentials.hpp"
+#include "agentty/provider/selection.hpp"
+#include "agentty/provider/registry.hpp"
 
 #include <mutex>
 #include <stdexcept>
+#include <variant>
 
 namespace agentty::app {
 
@@ -27,6 +30,27 @@ void install_deps(Deps d) {
 }
 
 auth::AuthHeader auth_snapshot() {
+    // Resolve from the CURRENTLY-ACTIVE provider through the central credential
+    // layer, so the credential can never drift from provider::active(). This is
+    // the single source of truth for "what auth goes on the wire": if a switch
+    // changed the active provider/model but a code path forgot to reinstall the
+    // header, this still returns the RIGHT provider's credential (the class of
+    // bug behind Anthropic's OAuth token being sent to Mistral → 401).
+    //
+    // Anthropic and hosted-key/custom-host providers resolve a real header
+    // here; oauth_native (ChatGPT/Copilot/Kimi) and local resolve empty and
+    // their transports supply the token — identical to update_auth's cache,
+    // which we keep as a fast/fallback path for those.
+    const auto sel = provider::active();
+    const std::string pid =
+        sel.kind == provider::Kind::OpenAI ? sel.openai_endpoint.label
+                                           : std::string{provider::default_provider_id()};
+    auto resolved = provider::credentials::resolve(pid);
+    if (!auth::bearer_token(resolved).empty()
+        || std::holds_alternative<auth::BearerHeader>(resolved))
+        return resolved;
+    // Empty resolve (oauth_native / local) — fall back to the cached header the
+    // login/switch flow installed (used by those providers' transports).
     std::lock_guard lk(g_auth_mu);
     return g_deps ? g_deps->auth : auth::AuthHeader{};
 }
