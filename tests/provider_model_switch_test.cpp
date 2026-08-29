@@ -689,6 +689,26 @@ TEST_CASE("fused open prioritizes active provider, defers others") {
     }
 }
 
+// The fused MODEL picker never shows "sign in to X" rows for un-authed
+// providers — signing in belongs to the provider picker (^P). Only authed
+// providers' models appear.
+TEST_CASE("fused list has no sign-in offer rows") {
+    using namespace agentty::msg;
+    install_stub_deps();
+    g_settings = store::Settings{};
+    g_settings.provider_keys["anthropic"] = "sk-a";   // only ONE provider authed
+    provider::select(provider::parse_selection("anthropic"));
+
+    Model m;
+    m.d.model_id = ModelId{"claude-sonnet-4-5"};
+    m.d.available_models = {mi("claude-sonnet-4-5", "anthropic")};
+    auto [m1, c1] = app::update(std::move(m), Msg{OpenFusedPicker{}});
+
+    CHECK(m1.d.fused_offers.empty());   // no offers seeded
+    for (const auto& r : m1.d.fused_rows)
+        CHECK(!r.is_signin_offer());    // and none rendered
+}
+
 // The provider picker's ^D (Mac-reachable stand-in for forward-Delete)
 // signs out of a preset that has a saved key: first ^D arms, second commits
 // (clears the key). openrouter is the reported case.

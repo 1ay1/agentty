@@ -1027,7 +1027,11 @@ void refresh_fused_sources(Model& m) {
     for (const auto& p : provider::providers()) {
         const std::string id{p.id};
         if (!provider::provider_is_authed(p, settings)) {
-            m.d.fused_offers.push_back(SigninOffer{id, std::string{p.label}});
+            // Un-authed providers are NOT offered in the fused MODEL picker —
+            // it's for switching models across providers you're already signed
+            // into. Signing in lives in the PROVIDER picker (^P), so the fused
+            // list stays clean (no "sign in to X" rows). fused_offers is left
+            // empty; build_fused_rows renders no sign-in section.
             continue;
         }
         ProviderCatalog* c = find_cat(id);
