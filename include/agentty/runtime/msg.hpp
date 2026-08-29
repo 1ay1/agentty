@@ -460,11 +460,6 @@ struct ProviderPickerFilterBackspace {};
 // (clears the key; the built-in preset stays). Mirrors ThreadListDelete /
 // AccountRemove. No-op on presets with no saved key, ACP, and the sentinel.
 struct ProviderPickerDelete {};
-// ^A on a row — manage the accounts of THAT provider (multi-account OAuth
-// providers only). Switches to the provider first so the accounts drill-down
-// operates on it, then opens the accounts list. Separate from Enter, which
-// UNIFORMLY switches (never opens a sub-page) on every row.
-struct ProviderPickerManageAccounts {};
 
 // ── Thread list ──────────────────────────────────────────────────────────
 struct OpenThreadList {};
@@ -932,7 +927,7 @@ using ProviderPickerMsg = std::variant<
     OpenProviderPicker, CloseProviderPicker, ProviderPickerMove,
     ProviderPickerJump, ProviderPickerSelect,
     ProviderPickerFilterInput, ProviderPickerFilterBackspace,
-    ProviderPickerDelete, ProviderPickerManageAccounts>;
+    ProviderPickerDelete>;
 
 using FusedPickerMsg = std::variant<
     OpenFusedPicker, CloseFusedPicker, FusedPickerMove, FusedPickerJump,

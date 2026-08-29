@@ -799,13 +799,30 @@ Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
             }
 
             const auto& preset = *chosen.preset();
-            // Enter UNIFORMLY switches to the provider (never opens a
-            // sub-page). Managing accounts is a separate action (^A /
-            // ProviderPickerManageAccounts) so the same key never means two
-            // things depending on whether the row is already active — that
-            // overload was the "Enter on Anthropic opens the accounts page"
-            // surprise. Switching to the already-active provider is a
-            // harmless no-op re-confirm.
+            // Enter on an ACCOUNT-CAPABLE provider (the OAuth lane: Anthropic /
+            // ChatGPT / Copilot / Kimi) opens its accounts drill-down — the
+            // primary thing you do with those providers is pick/add an
+            // account. Esc from that accounts list closes the whole picker
+            // (login_back → close_login for AccountList), so it doesn't bounce
+            // back here. Non-account providers (API-key presets, custom hosts)
+            // just switch. The accounts list operates on the ACTIVE session,
+            // so switch to this provider first when it isn't active yet.
+            if (preset_is_account_capable(preset)) {
+                const auto& active = provider::active();
+                const bool is_active =
+                    (preset.id == "chatgpt" && active.is_chatgpt())
+                    || (preset.id == "copilot" && active.is_copilot())
+                    || (preset.id == "kimi" && active.is_kimi())
+                    || (preset.kind() == provider::Kind::Anthropic
+                        && active.kind == provider::Kind::Anthropic);
+                if (is_active) {
+                    m.ui.provider_picker = pick::Closed{};
+                    return agentty::app::update(std::move(m), Msg{OpenAccounts{}});
+                }
+                // Not active — fall through to the switch below; the account
+                // list opens on a follow-up Enter once it's active.
+            }
+
             const std::string spec{preset.id};
 
             // Resolve the new backend's credentials BEFORE committing so we can
@@ -891,33 +908,6 @@ Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
             // auth swap + refetch can never drift between call sites.
             return commit_provider_switch(std::move(m), spec, std::move(new_auth),
                                           std::string{preset.label});
-        },
-        [&](ProviderPickerManageAccounts) -> Step {
-            // ^A — manage the highlighted provider's accounts. Uniform on
-            // every account-capable OAuth provider (Anthropic / ChatGPT /
-            // Copilot / Kimi). If it's already the ACTIVE provider we open the
-            // accounts list straight away; otherwise the accounts drill-down
-            // (which operates on the active session) doesn't apply yet, so we
-            // SWITCH to it first — the user presses ^A again once it's active.
-            auto* p = pick::opened(m.ui.provider_picker);
-            if (!p || p->index < 0 || p->index >= n) return done(std::move(m));
-            const auto& row = rows[static_cast<std::size_t>(p->index)];
-            const auto* pr = row.preset();
-            if (!pr || !preset_is_account_capable(*pr))
-                return done(std::move(m));   // not an accounts provider
-            const auto& active = provider::active();
-            const bool is_active =
-                (pr->id == "chatgpt" && active.is_chatgpt())
-                || (pr->id == "copilot" && active.is_copilot())
-                || (pr->id == "kimi" && active.is_kimi())
-                || (pr->kind() == provider::Kind::Anthropic
-                    && active.kind == provider::Kind::Anthropic);
-            if (is_active) {
-                m.ui.provider_picker = pick::Closed{};
-                return agentty::app::update(std::move(m), Msg{OpenAccounts{}});
-            }
-            // Not active yet — switch to it (Enter's exact path).
-            return provider_picker_update(std::move(m), ProviderPickerSelect{});
         },
     }, pm);
 }
