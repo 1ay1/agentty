@@ -415,6 +415,12 @@ struct ModelsLoaded {
 // user switches to atomically, or a "sign in to X" offer that routes to
 // login. Opened with `^/` and the `/model` slash command.
 struct OpenFusedPicker {};
+// Deferred lazy refresh: after the ACTIVE provider's fast refetch is issued on
+// open, this fires (via a short After delay) to background-refresh every OTHER
+// authed provider's live catalog. Keeping them off the initial batch means the
+// active provider's result isn't queued behind slower providers on the bounded
+// worker pool — the selected models refresh first, the rest trickle in.
+struct FusedRefreshOthers {};
 struct CloseFusedPicker {};
 struct FusedPickerMove { int delta; };
 struct FusedPickerJump { enum class Where { Home, End, PageUp, PageDown }; Where where; };
@@ -934,7 +940,7 @@ using FusedPickerMsg = std::variant<
     FusedPickerSelect, FusedPickerToggleFavorite,
     FusedPickerCycleEffort, FusedPickerToggleReasoning,
     FusedPickerFilterInput, FusedPickerFilterBackspace,
-    FusedCatalogLoaded, SwitchToPreviousModel>;
+    FusedCatalogLoaded, SwitchToPreviousModel, FusedRefreshOthers>;
 
 using ThreadListMsg = std::variant<
     OpenThreadList, CloseThreadList, ThreadListMove, ThreadListJump,

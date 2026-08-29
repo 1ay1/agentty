@@ -1223,21 +1223,34 @@ Step fused_picker_update(Model m, msg::FusedPickerMsg pm) {
             // every authed provider's catalog from its bundled list so the
             // picker opens instantly full.
             refresh_fused_sources(m);
-            // Background-refresh each authed provider with its LIVE catalog
-            // (concurrent, non-blocking); the seeded list shows meanwhile.
+            rebuild_fused_rows(m);       // seed the cache the view reads
+            // PRIORITIZE the ACTIVE provider: refetch ITS live catalog now,
+            // alone, so the models you're most likely to pick refresh fast
+            // (→ ModelsLoaded rebuilds the open rows). The other authed
+            // providers refresh LAZILY a beat later (FusedRefreshOthers), so
+            // the active result isn't queued behind slower providers on the
+            // bounded worker pool. Mark the others Loading only when that
+            // deferred pass fires — here they keep showing their bundled seed.
+            return {std::move(m), maya::Cmd<Msg>::batch({
+                cmd::fetch_models(),
+                maya::Cmd<Msg>::after(std::chrono::milliseconds{120},
+                                      Msg{FusedRefreshOthers{}}),
+            })};
+        },
+        [&](FusedRefreshOthers) -> Step {
+            // Lazy second wave: refresh every OTHER authed provider's live
+            // catalog (the active one was already refetched on open). No-op
+            // if the picker closed in the meantime.
+            if (!pick::opened(m.ui.fused_picker)) return done(std::move(m));
+            const std::string active_pid = active_provider_id();
             std::vector<maya::Cmd<Msg>> fetches;
             for (auto& c : m.d.provider_catalogs) {
-                if (c.state == ProviderCatalog::State::Ready) continue;
+                if (c.provider_id == active_pid) continue;   // done on open
+                if (c.state == ProviderCatalog::State::Loading) continue;
                 c.state = ProviderCatalog::State::Loading;
                 fetches.push_back(cmd::fetch_models_for(c.provider_id));
             }
-            // The ACTIVE provider's catalog was seeded Ready from
-            // available_models above, so the loop skips it — but that snapshot
-            // can be stale (bundled floor, or a catalog that grew upstream).
-            // Refetch it via fetch_models() (→ ModelsLoaded, which rebuilds the
-            // open fused rows) so its live models refresh without reopening.
-            fetches.push_back(cmd::fetch_models());
-            rebuild_fused_rows(m);       // seed the cache the view reads
+            if (fetches.empty()) return done(std::move(m));
             return {std::move(m), maya::Cmd<Msg>::batch(std::move(fetches))};
         },
         [&](CloseFusedPicker) -> Step {

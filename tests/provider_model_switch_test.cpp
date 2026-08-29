@@ -660,6 +660,35 @@ TEST_CASE("ModelsLoaded refreshes the open fused picker") {
     CHECK(after);
 }
 
+// OpenFusedPicker refreshes the ACTIVE provider immediately and defers the
+// OTHER providers (FusedRefreshOthers) so the active result isn't queued
+// behind slower providers. The deferred pass marks the others Loading.
+TEST_CASE("fused open prioritizes active provider, defers others") {
+    using namespace agentty::msg;
+    install_stub_deps();
+    g_settings = store::Settings{};
+    g_settings.provider_keys["anthropic"] = "sk-a";
+    g_settings.provider_keys["openai"]    = "sk-o";   // a second authed provider
+    provider::select(provider::parse_selection("anthropic"));
+
+    Model m;
+    m.d.model_id = ModelId{"claude-sonnet-4-5"};
+    m.d.available_models = {mi("claude-sonnet-4-5", "anthropic")};
+    auto [m1, c1] = app::update(std::move(m), Msg{OpenFusedPicker{}});
+
+    // On open the non-active provider is NOT yet Loading (deferred).
+    for (const auto& c : m1.d.provider_catalogs)
+        if (c.provider_id == "openai")
+            CHECK(c.state != ProviderCatalog::State::Loading);
+
+    // The deferred wave marks the OTHER providers Loading, not the active one.
+    auto [m2, c2] = app::update(std::move(m1), Msg{FusedRefreshOthers{}});
+    for (const auto& c : m2.d.provider_catalogs) {
+        if (c.provider_id == "openai")
+            CHECK(c.state == ProviderCatalog::State::Loading);
+    }
+}
+
 // The provider picker's ^D (Mac-reachable stand-in for forward-Delete)
 // signs out of a preset that has a saved key: first ^D arms, second commits
 // (clears the key). openrouter is the reported case.
