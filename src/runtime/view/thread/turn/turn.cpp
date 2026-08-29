@@ -1276,11 +1276,13 @@ std::optional<maya::Element> reasoning_slot(const Message& msg, const Model& m) 
     // the cached body.
     maya::Element body = cached_markdown_for(msg, m, MdView::Reasoning);
 
-    // Set the reasoning apart from the answer by a soft COOL TINT (+ the rail
-    // and ✦ header), not by washing it out: a readable light lavender that
-    // reads as "reasoning" while staying easy on the eyes — not the dark gray
-    // dim it used to be.
+    // The reasoning renders as a PLAIN FLOW (not a bordered box) so it scrolls
+    // off the viewport top / commits to scrollback row-by-row exactly like the
+    // answer prose — a bordered box is atomic and would be CLIPPED (rows
+    // vanish) once a long reasoning reaches the viewport top. Set apart from
+    // the answer by the ✦ header + a soft cool body TINT (not a wash-out).
     maya::ReasoningStream::Config rcfg;
+    rcfg.boxed    = false;
     rcfg.dim_body = true;
     rcfg.body_fg  = maya::Color::rgb(0xa6, 0xa2, 0xc4); // light lavender-gray
     maya::ReasoningStream rs{rcfg};

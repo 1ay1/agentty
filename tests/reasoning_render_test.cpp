@@ -14,6 +14,7 @@
 #include "agtest.hpp"
 
 #include "agentty/runtime/model.hpp"
+#include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/runtime/view/thread/thread.hpp"
 #include "agentty/runtime/view/changes_strip.hpp"
 #include "agentty/runtime/view/composer.hpp"
