@@ -210,7 +210,8 @@ struct HostProbe {
 [[nodiscard]] std::vector<Msg> parse_sse_for_test(
     std::string_view sse_bytes,
     std::vector<std::string> known_tools = {},
-    bool allow_memory_salvage = false);
+    bool allow_memory_salvage = false,
+    bool reason_by_default = false);
 
 // Same, for the native Ollama /api/chat NDJSON path (feed_ndjson).
 [[nodiscard]] std::vector<Msg> parse_ndjson_for_test(

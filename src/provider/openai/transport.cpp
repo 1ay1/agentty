@@ -131,14 +131,33 @@ struct StreamCtx {
 
     // Mistral / Magistral (and some vLLM reasoning parsers) don't send a
     // separate reasoning_content field — they wrap the model's thinking in
-    // [THINK]…[/THINK] tags INSIDE `content`. We strip those inline and
-    // re-route the enclosed text as reasoning (StreamThinkingDelta), so it
+    // [THINK]…[/THINK] (Mistral) or <think>…</think> (DeepSeek-R1 / Qwen /
+    // QwQ / most local models) tags INSIDE `content`. We strip those inline
+    // and re-route the enclosed text as reasoning (StreamThinkingDelta), so it
     // renders in the reasoning block instead of leaking into the answer (and
-    // so the leading `[` never trips the tool-call salvage). `in_think` tracks
-    // whether we're currently inside a THINK span across delta boundaries;
-    // `think_carry` holds a partial tag split across two content deltas.
+    // so the leading `[`/`<` never trips the tool-call salvage). Mirrors
+    // vLLM's BaseThinkingReasoningParser contract:
+    //   • in_think: currently inside a reasoning span (across deltas).
+    //   • think_carry: a tag split across two content deltas ("[TH"|"INK]").
+    //   • think_closed: the FIRST close tag was seen — everything after is
+    //     content, even a later stray open tag (no re-entry).
+    //   • think_seen_open: an OPEN tag was seen. Many models (Magistral) begin
+    //     in reasoning with NO open tag — handled by reason_by_default below.
+    //   • think_probing: still deciding whether the stream opens with a tag /
+    //     starts in reasoning (buffers the very first bytes until sure).
     bool        in_think = false;
-    std::string think_carry;   // partial "[THINK]"/"[/THINK]" tag across deltas
+    bool        think_closed = false;
+    bool        think_seen_open = false;
+    bool        think_emitted_content = false;   // any non-think prose committed
+    bool        think_probing = true;            // still deciding open-vs-default
+    // Whether THIS model is known to begin reasoning with NO open tag
+    // (Magistral, and DeepSeek-R1 which prepends <think> only sometimes). When
+    // false, we NEVER treat leading text as implicit reasoning — a stray
+    // "</think>"/"[/THINK]" in ordinary answer prose is kept verbatim. Set from
+    // the model id. Explicit open+close tags are always honored regardless.
+    bool        reason_by_default = false;
+    std::string think_carry;   // partial open/close tag across deltas
+    std::string think_probe;   // leading bytes buffered until reason-by-default decided
 
     // Incremental JSON parse state for salvage.
     int  brace_depth = 0;           // nested {} depth in current JSON object
@@ -300,48 +319,157 @@ void flush_text_slice(StreamCtx& ctx, std::size_t len) {
 // re-invocation. A COMPLETE object (even one naming an unadvertised tool) is
 // kept and surfaced so the user sees the model's intent.
 
-// Split a content delta on Mistral/Magistral [THINK]…[/THINK] tags: the text
-// INSIDE the tags is emitted as reasoning (StreamThinkingDelta, honoring the
-// hidden-reasoning heartbeat like reasoning_content does), the text OUTSIDE is
-// returned as the prose the caller should feed into the tool-call salvage.
-// State (in_think / think_carry) persists across deltas so a tag split over two
-// SSE chunks ("[TH" | "INK]") is handled. Returns the non-think prose.
+// Split a content delta on inline reasoning tags and route the interior to the
+// reasoning block. Handles BOTH delimiter families — Mistral [THINK]…[/THINK]
+// and DeepSeek-R1/Qwen <think>…</think> — and the three real-world shapes
+// vLLM's BaseThinkingReasoningParser handles:
+//   1. explicit open+close:      "[THINK]…[/THINK]answer"
+//   2. NO open tag (reason-by-default, common on Magistral): the stream begins
+//      in reasoning and the FIRST close tag ends it — "…thoughts…[/THINK]answer"
+//   3. no tags at all: pure content.
+// After the first close tag EVERYTHING is content (a later stray open never
+// re-enters reasoning). Tags split across deltas are carried in think_carry.
+// The interior is emitted as StreamThinkingDelta (heartbeat when reasoning is
+// hidden, matching the reasoning_content path); the returned string is the
+// content prose the caller feeds into the tool-call salvage.
 std::string extract_think_spans(StreamCtx& ctx, std::string_view in) {
-    static constexpr std::string_view kOpen  = "[THINK]";
-    static constexpr std::string_view kClose = "[/THINK]";
+    // Once reasoning is closed, everything is plain content — fast path.
+    if (ctx.think_closed) {
+        std::string s{in};
+        if (!s.empty()) ctx.think_emitted_content = true;
+        return s;
+    }
+
+    static constexpr std::string_view kOpens[]  = {"[THINK]", "<think>"};
+    static constexpr std::string_view kCloses[] = {"[/THINK]", "</think>"};
+
     std::string prose;
     std::string buf = ctx.think_carry + std::string{in};   // prepend carried partial
     ctx.think_carry.clear();
-    std::size_t i = 0;
+
     auto emit_reason = [&](std::string_view r) {
         if (r.empty()) return;
         if (ctx.show_reasoning) ctx.sink(StreamThinkingDelta{std::string{r}, ""});
-        else                    ctx.sink(StreamThinkingDelta{"", ""});  // heartbeat
+        else                    ctx.sink(StreamThinkingDelta{"", ""});   // heartbeat
     };
-    while (i < buf.size()) {
-        const std::string_view tag = ctx.in_think ? kClose : kOpen;
-        const std::size_t pos = buf.find(tag, i);
-        if (pos == std::string::npos) {
-            // No complete tag ahead. Emit up to a possible PARTIAL tag at the
-            // tail (so "[/TH" split across deltas isn't shown) and carry it.
-            std::size_t keep = buf.size();
-            for (std::size_t back = 1;
-                 back < tag.size() && back <= buf.size() - i; ++back) {
-                if (std::string_view{buf}.substr(buf.size() - back)
-                        == tag.substr(0, back)) {
-                    keep = buf.size() - back; break;
-                }
-            }
-            std::string_view chunk{buf.data() + i, keep - i};
-            if (ctx.in_think) emit_reason(chunk); else prose += chunk;
-            ctx.think_carry.assign(buf, keep, std::string::npos);
-            return prose;
+    auto find_any = [&](const std::string_view (&set)[2], std::size_t from,
+                        int& which) -> std::size_t {
+        std::size_t best = std::string::npos; which = -1;
+        for (int t = 0; t < 2; ++t) {
+            std::size_t p = buf.find(set[t], from);
+            if (p < best) { best = p; which = t; }
         }
-        std::string_view chunk{buf.data() + i, pos - i};   // text before tag
-        if (ctx.in_think) emit_reason(chunk); else prose += chunk;
-        ctx.in_think = !ctx.in_think;    // cross the tag
-        i = pos + tag.size();
-    }
+        return best;
+    };
+    auto tail_is_partial = [&](const std::string_view (&set)[2],
+                               std::size_t from) -> std::size_t {
+        // Longest suffix of buf[from:] that is a proper prefix of a tag.
+        std::size_t keep = buf.size();
+        for (int t = 0; t < 2; ++t) {
+            const auto& tag = set[t];
+            for (std::size_t back = 1;
+                 back < tag.size() && back <= buf.size() - from; ++back) {
+                if (std::string_view{buf}.substr(buf.size() - back)
+                        == tag.substr(0, back))
+                    keep = std::min(keep, buf.size() - back);
+            }
+        }
+        return keep;
+    };
+
+    // The core split is an inner lambda so EVERY exit flows through the
+    // think_emitted_content update below (the probe must only fire at start).
+    auto run = [&]() {
+        std::size_t i = 0;
+        while (i < buf.size()) {
+            if (ctx.in_think) {
+                int w = -1;
+                const std::size_t pos = find_any(kCloses, i, w);   // CLOSE tag
+                if (pos == std::string::npos) {
+                    const std::size_t keep = tail_is_partial(kCloses, i);
+                    emit_reason(std::string_view{buf.data() + i, keep - i});
+                    ctx.think_carry.assign(buf, keep, std::string::npos);
+                    return;
+                }
+                emit_reason(std::string_view{buf.data() + i, pos - i});
+                ctx.in_think = false;
+                ctx.think_closed = true;          // latch: no re-entry
+                i = pos + kCloses[w].size();
+                prose += std::string_view{buf.data() + i, buf.size() - i};
+                return;
+            }
+
+            // REASON-BY-DEFAULT probe. At the very start we don't yet know if
+            // this model opens with a tag, starts in reasoning with no tag
+            // (Magistral), or has no reasoning at all. Buffer the leading bytes
+            // in think_probe until the decision is forced by:
+            //   • a CLOSE before any OPEN  → the buffer was implicit reasoning;
+            //   • an OPEN                  → buffer (up to it) was content;
+            //   • the buffer exceeding a cap → assume plain content (flush).
+            // A bounded cap keeps a non-reasoning model from stalling.
+            if (ctx.think_probing) {
+                // Models NOT known to reason-by-default never treat leading
+                // text as implicit reasoning — skip straight to explicit-tag
+                // mode (no buffering, no stray-close false positives).
+                if (!ctx.reason_by_default) { ctx.think_probing = false; continue; }
+                int ow = -1, cw = -1;
+                const std::size_t open  = find_any(kOpens, i, ow);
+                const std::size_t close = find_any(kCloses, i, cw);
+                if (close != std::string::npos
+                    && (open == std::string::npos || close < open)) {
+                    // Implicit reasoning: probe buffer + text up to close.
+                    ctx.think_probing = false;
+                    ctx.think_closed = true;
+                    emit_reason(ctx.think_probe);
+                    emit_reason(std::string_view{buf.data() + i, close - i});
+                    ctx.think_probe.clear();
+                    i = close + kCloses[cw].size();
+                    prose += std::string_view{buf.data() + i, buf.size() - i};
+                    return;
+                }
+                if (open != std::string::npos) {
+                    // Explicit open: probe buffer + text before it was content.
+                    ctx.think_probing = false;
+                    prose += ctx.think_probe; ctx.think_probe.clear();
+                    prose += std::string_view{buf.data() + i, open - i};
+                    ctx.in_think = true;
+                    ctx.think_seen_open = true;
+                    i = open + kOpens[ow].size();
+                    continue;
+                }
+                // Neither tag yet. Buffer, minus a possible partial tag tail.
+                constexpr std::size_t kProbeCap = 256;
+                const std::size_t keep = std::min(tail_is_partial(kOpens, i),
+                                                  tail_is_partial(kCloses, i));
+                ctx.think_probe.append(buf, i, keep - i);
+                ctx.think_carry.assign(buf, keep, std::string::npos);
+                if (ctx.think_probe.size() > kProbeCap) {
+                    // Long leading run with no tag → this model isn't wrapping
+                    // reasoning; commit the buffer as content and stop probing.
+                    ctx.think_probing = false;
+                    prose += ctx.think_probe; ctx.think_probe.clear();
+                }
+                return;
+            }
+
+            // Past the probe: explicit-tag mode only (open re-enters reasoning
+            // until the first close latches think_closed).
+            int w = -1;
+            const std::size_t open = find_any(kOpens, i, w);
+            if (open == std::string::npos) {
+                const std::size_t keep = tail_is_partial(kOpens, i);
+                prose += std::string_view{buf.data() + i, keep - i};
+                ctx.think_carry.assign(buf, keep, std::string::npos);
+                return;
+            }
+            prose += std::string_view{buf.data() + i, open - i};
+            ctx.in_think = true;
+            ctx.think_seen_open = true;
+            i = open + kOpens[w].size();
+        }
+    };
+    run();
+    if (!prose.empty()) ctx.think_emitted_content = true;
     return prose;
 }
 
@@ -1621,6 +1749,19 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
     StreamCtx ctx;
     ctx.sink = std::move(sink);
     ctx.show_reasoning = req.show_reasoning;
+    // Models that BEGIN in reasoning with no open tag: Magistral (Mistral's
+    // reasoning line) and the DeepSeek-R1 family. For these, leading content
+    // before the first close tag is implicit reasoning. Other models only get
+    // EXPLICIT [THINK]/<think> spans routed — never leading text — so a stray
+    // close tag in ordinary prose is kept verbatim.
+    {
+        std::string ml = req.model;
+        for (char& ch : ml) ch = static_cast<char>(std::tolower((unsigned char)ch));
+        ctx.reason_by_default =
+            ml.find("magistral") != std::string::npos
+            || ml.find("deepseek-r1") != std::string::npos
+            || ml.find("deepseek-reasoner") != std::string::npos;
+    }
     set_memory_salvage_intent(ctx, req);
     // Tools we advertised this turn — the salvage path only converts a
     // leaked-JSON "tool call" into a real one when it names one of these.
@@ -2179,13 +2320,15 @@ std::vector<ModelInfo> list_models(const AuthHeader& auth, const Endpoint& endpo
 // ── Test harness ─────────────────────────────────────────────────────────────
 std::vector<Msg> parse_sse_for_test(std::string_view sse_bytes,
                                    std::vector<std::string> known_tools,
-                                   bool allow_memory_salvage) {
+                                   bool allow_memory_salvage,
+                                   bool reason_by_default) {
     std::vector<Msg> out;
     StreamCtx ctx;
     ctx.known_tools = std::move(known_tools);
     ctx.allow_remember_salvage = allow_memory_salvage;
     ctx.allow_forget_salvage = allow_memory_salvage;
     ctx.allow_wipe_salvage = allow_memory_salvage;
+    ctx.reason_by_default = reason_by_default;
     ctx.sink = [&out](Msg m) { out.push_back(std::move(m)); };
     feed_sse(ctx, sse_bytes.data(), sse_bytes.size());
     // Mirror run_stream_sync's terminal guarantee: if [DONE] never arrived,

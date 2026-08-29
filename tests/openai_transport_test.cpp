@@ -324,6 +324,54 @@ TEST_CASE("test_sse_think_tags_split_across_deltas") {
     CHECK(joined_text(msgs) == "hi");   // no stray "[TH" / "[/TH" leaked
 }
 
+// REASON-BY-DEFAULT (Magistral): the stream begins in reasoning with NO open
+// tag — everything up to the first [/THINK] is reasoning, the rest is content.
+TEST_CASE("test_sse_reason_by_default_no_open_tag") {
+    std::string sse =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"working it out\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\" carefully[/THINK]Done.\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+        "data: [DONE]\n\n";
+    // reason_by_default=true (as for magistral/deepseek-r1).
+    auto msgs = oai::parse_sse_for_test(sse, {}, false, /*reason_by_default=*/true);
+    std::string think;
+    for (const auto& m : msgs)
+        if (const auto* t = get_leaf<StreamThinkingDelta>(m)) think += t->text;
+    CHECK(think == "working it out carefully");   // leading text = reasoning
+    CHECK(joined_text(msgs) == "Done.");          // after close = content
+}
+
+// DeepSeek-R1 / Qwen / QwQ / most local models use <think>…</think> instead of
+// Mistral's [THINK]. Same extraction, same guarantees.
+TEST_CASE("test_sse_angle_think_tags") {
+    std::string sse =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"<think>hmm</think>Yes\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+        "data: [DONE]\n\n";
+    auto msgs = oai::parse_sse_for_test(sse);
+    std::string think;
+    for (const auto& m : msgs)
+        if (const auto* t = get_leaf<StreamThinkingDelta>(m)) think += t->text;
+    CHECK(think == "hmm");
+    CHECK(joined_text(msgs) == "Yes");
+}
+
+// A literal "</think>" appearing in genuine answer prose (no reasoning at the
+// start) must NOT retro-hide the answer — the reason-by-default probe only
+// fires at the very stream start.
+TEST_CASE("test_sse_stray_close_tag_in_prose_is_kept") {
+    std::string sse =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"The tag \"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"</think> ends reasoning.\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+        "data: [DONE]\n\n";
+    auto msgs = oai::parse_sse_for_test(sse);
+    // First delta commits "The tag " as content → probe disarmed → the later
+    // </think> is kept verbatim in the answer, not treated as a reasoning end.
+    CHECK(joined_text(msgs).find("The tag") != std::string::npos);
+    CHECK(joined_text(msgs).find("ends reasoning") != std::string::npos);
+}
+
 TEST_CASE("test_sse_tool_call_stream") {
     // OpenAI tool-call streaming: opening frame carries id+name, subsequent
     // frames carry arguments fragments; finish_reason "tool_calls".
