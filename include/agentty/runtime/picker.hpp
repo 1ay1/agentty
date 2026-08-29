@@ -37,18 +37,10 @@ struct Closed {};
 // delete (thread picker only, mirroring SettingsListRemove / AccountRemove).
 // Any move/select/new/close clears it, so a stray `d` can never delete
 // a thread with no way back.
-//
-// `staged_effort` is the FUSED picker's select-scoped reasoning-effort edit
-// (−1 = unset). ←/→ stage a tier for the HIGHLIGHTED row here instead of
-// mutating the global m.d.effort mid-browse (which would leak onto the
-// currently-active model, and revert nothing on Esc). It is applied to
-// m.d.effort only on select, and reset to −1 whenever the cursor moves to a
-// different row (a staged tier belongs to one row).
 struct OpenAt {
     int index = 0;
     std::string query;
     std::string confirm_remove;
-    int staged_effort = -1;
 };
 using OneAxis = std::variant<Closed, OpenAt>;
 
