@@ -1270,36 +1270,19 @@ std::optional<maya::Element> reasoning_slot(const Message& msg, const Model& m) 
 
     // The reasoning body streams through the CENTRAL streaming-markdown path
     // (own "#r" cache slot, cross-frame-persistent) so it reveals smoothly
-    // like normal text and stays fully rendered after settle — no fold. The
-    // maya::ReasoningStream widget owns the polished chrome (animated header
-    // + left rail) and we hand it the cached body.
+    // like normal text and stays fully rendered after settle — no fold, no
+    // height cap. The maya::ReasoningStream widget owns the polished chrome
+    // (animated header with the live token meter + left rail) and we hand it
+    // the cached body.
+    maya::Element body = cached_markdown_for(msg, m, MdView::Reasoning);
+
+    // No dimming — the reasoning renders in its natural full color (markdown
+    // colors preserved), just framed by the chrome (animated header + rail).
     maya::ReasoningStream::Config rcfg;
+    rcfg.dim_body = false;
     maya::ReasoningStream rs{rcfg};
     rs.set_live(active);
     rs.set_char_hint(msg.reasoning_display_text().size());
-
-    if (active) {
-        // WHILE THINKING: the reasoning GROWS with the stream up to a cap of
-        // ~16 rows; past that it pins and the top fades away in high
-        // resolution (per rendered row) so old thoughts dissolve toward the
-        // background while the newest stay readable at the bottom. Short
-        // reasoning stays short — no big empty container. Pre-styled (owns
-        // its per-row colors) so the chrome doesn't flatten the fade.
-        constexpr int kMaxRows = 16;
-        const maya::Color faded = maya::Color::rgb(0x1c, 0x1c, 0x24); // → bg
-        const maya::Color full  = maya::Color::rgb(0xb2, 0xb2, 0xbe); // newest
-        rcfg.body_prestyled = true;
-        rs = maya::ReasoningStream{rcfg};
-        rs.set_live(true);
-        rs.set_char_hint(msg.reasoning_display_text().size());
-        auto body = maya::ReasoningStream::faded_tail(
-            std::string{msg.reasoning_display_text()}, kMaxRows, faded, full);
-        return rs.build_with_body(std::move(body));
-    }
-
-    // SETTLED: the full reasoning stays readable inline (flat muted aside),
-    // streamed through the central markdown cache like before.
-    maya::Element body = cached_markdown_for(msg, m, MdView::Reasoning);
     return rs.build_with_body(std::move(body));
 }
 
