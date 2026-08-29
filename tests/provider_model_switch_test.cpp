@@ -589,10 +589,10 @@ TEST_CASE("fused active catalog re-seeds when available_models grows") {
     CHECK(fable_row);
 }
 
-// The provider picker's `d` (Mac-reachable stand-in for forward-Delete)
-// signs out of a preset that has a saved key: first `d` arms, second commits
+// The provider picker's ^D (Mac-reachable stand-in for forward-Delete)
+// signs out of a preset that has a saved key: first ^D arms, second commits
 // (clears the key). openrouter is the reported case.
-TEST_CASE("provider picker: d signs out of a keyed preset (two-press)") {
+TEST_CASE("provider picker: ^D signs out of a keyed preset (two-press)") {
     using namespace agentty::msg;
     install_stub_deps();
     g_settings = store::Settings{};
@@ -619,16 +619,48 @@ TEST_CASE("provider picker: d signs out of a keyed preset (two-press)") {
     p->query.clear();
     Model m2 = std::move(m1);
 
-    // First `d` (empty query) arms the sign-out; the key is still present.
-    auto [m3, c3] = app::update(std::move(m2),
-                                Msg{ProviderPickerFilterInput{U'd'}});
+    // First ^D arms the sign-out; the key is still present.
+    auto [m3, c3] = app::update(std::move(m2), Msg{ProviderPickerDelete{}});
     CHECK(g_settings.provider_keys.count("openrouter") == 1);
 
-    // Second `d` on the same row commits the sign-out.
-    auto [m4, c4] = app::update(std::move(m3),
-                                Msg{ProviderPickerFilterInput{U'd'}});
+    // Second ^D on the same row commits the sign-out.
+    auto [m4, c4] = app::update(std::move(m3), Msg{ProviderPickerDelete{}});
     CHECK(g_settings.provider_keys.count("openrouter") == 0);  // signed out
     CHECK(g_settings.provider_keys.count("anthropic") == 1);   // others intact
+}
+
+// Enter on the provider picker UNIFORMLY switches — it must NOT open the
+// accounts sub-page even when the highlighted row is the active OAuth
+// provider (the reported "Enter on Anthropic opens the model/accounts page"
+// surprise). Accounts are a separate action (^A / ProviderPickerManageAccounts).
+TEST_CASE("provider picker: Enter switches, never opens accounts") {
+    using namespace agentty::msg;
+    install_stub_deps();
+    g_settings = store::Settings{};
+    g_settings.provider_keys["anthropic"] = "sk-a";
+    provider::select(provider::parse_selection("anthropic"));
+
+    Model m;
+    m.d.model_id = ModelId{"claude-sonnet-4-5"};
+    auto [m1, c1] = app::update(std::move(m), Msg{OpenProviderPicker{}});
+
+    // Land the cursor on the (active) anthropic row.
+    auto* p = ui::pick::opened(m1.ui.provider_picker);
+    REQUIRE(p != nullptr);
+    const auto rows = ui::build_provider_rows(
+        agentty::provider::saved_custom_hosts(g_settings.provider_keys), "");
+    int a_idx = -1;
+    for (int i = 0; i < static_cast<int>(rows.size()); ++i)
+        if (const auto* pr = rows[static_cast<std::size_t>(i)].preset();
+            pr && std::string{pr->id} == "anthropic") { a_idx = i; break; }
+    REQUIRE(a_idx >= 0);
+    p->index = a_idx;
+
+    // Enter: must NOT leave an accounts list open in m.ui.login.
+    auto [m2, c2] = app::update(std::move(m1), Msg{ProviderPickerSelect{}});
+    const bool accounts_open =
+        std::holds_alternative<ui::login::AccountList>(m2.ui.login);
+    CHECK(!accounts_open);   // Enter switched, did not drill into accounts
 }
 
 // The fused picker tunes reasoning effort (←/→) on the highlighted model,
