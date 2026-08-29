@@ -414,6 +414,43 @@ TEST_CASE("fused picker caches rows and clears them on close") {
     CHECK(m3.d.fused_rows.empty());
 }
 
+// A digit 1-9 on the UNFILTERED fused list jumps to the Nth row; once a
+// query is being typed, digits are search text (so "gpt5" still works).
+TEST_CASE("fused picker number quick-select") {
+    using namespace agentty::msg;
+    install_stub_deps();
+    g_settings = store::Settings{};
+    g_settings.provider_keys["anthropic"] = "sk-test";
+    g_settings.provider_keys["xai"]       = "sk-test";
+    provider::select(provider::parse_selection("anthropic"));
+
+    Model m;
+    m.d.model_id = ModelId{"claude-sonnet-4-6"};
+    m.d.available_models = {mi("claude-sonnet-4-6", "anthropic")};
+    auto [m1, c1] = app::update(std::move(m), Msg{OpenFusedPicker{}});
+
+    FusedCatalogLoaded xai;
+    xai.provider_id = "xai";
+    xai.models = {mi("grok-4", "xai"), mi("grok-3", "xai")};
+    xai.ok = true;
+    auto [m2, c2] = app::update(std::move(m1), Msg{std::move(xai)});
+    REQUIRE(m2.d.fused_rows.size() >= 3);
+
+    // '3' on the empty query jumps to the 3rd row (index 2), not into search.
+    auto [m3, c3] = app::update(std::move(m2), Msg{FusedPickerFilterInput{U'3'}});
+    const auto* c = ui::pick::opened(m3.ui.fused_picker);
+    REQUIRE(c != nullptr);
+    CHECK(c->index == 2);
+    CHECK(c->query.empty());          // digit did NOT enter the query
+
+    // Once a query exists, a digit is search text (jump is disabled).
+    auto [m4, c4] = app::update(std::move(m3), Msg{FusedPickerFilterInput{U'g'}});
+    auto [m5, c5] = app::update(std::move(m4), Msg{FusedPickerFilterInput{U'3'}});
+    const auto* c2p = ui::pick::opened(m5.ui.fused_picker);
+    REQUIRE(c2p != nullptr);
+    CHECK(c2p->query == "g3");        // digit appended, not a jump
+}
+
 // The fused picker tunes reasoning effort (←/→) on the highlighted model,
 // ported from the old model picker so the fused surface is complete.
 TEST_CASE("fused picker cycles reasoning effort") {

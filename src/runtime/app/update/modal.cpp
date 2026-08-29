@@ -805,7 +805,14 @@ commit_provider_switch(Model m, std::string_view spec,
     // feature originally patched. External ACP agents drive their own model
     // and expose no catalog (fetch_models returns empty), so opening the
     // picker there would just show a permanent "no models" box — skip them.
-    if (provider::active().kind != provider::Kind::ExternalAcp)
+    //
+    // BUT when the caller already pre-stashed a SPECIFIC model (the fused
+    // picker: the user picked provider+model in one shot), popping the classic
+    // "Loading models…" picker on top would be a jarring second picker for a
+    // choice already made. Skip it — the desired model installs on ModelsLoaded
+    // — and give a "Switching to X…" toast instead.
+    const bool have_desired = !desired_model.empty();
+    if (provider::active().kind != provider::Kind::ExternalAcp && !have_desired)
         m.ui.model_picker = ui::pick::OpenAt{0};
 
     // Name the DERIVED wire endpoint for OpenAI-dialect hosts so the /v1
@@ -813,10 +820,14 @@ commit_provider_switch(Model m, std::string_view spec,
     // came from users unable to see which path their spec actually dialed
     // ("host:8080/" → 404 forever with no clue). Hosted presets keep the
     // short label (their endpoint is not in question).
-    std::string toast_text = "provider \xe2\x86\x92 " + std::string{label};
+    std::string toast_text = have_desired
+        ? "switching to " + ui::pretty_model_label(std::string{desired_model})
+              + "  \xc2\xb7  " + std::string{label} + "\xe2\x80\xa6"
+        : "provider \xe2\x86\x92 " + std::string{label};
     {
         const auto& sel = provider::active();
-        if (sel.kind == provider::Kind::OpenAI && !sel.openai_endpoint.use_tls)
+        if (!have_desired && sel.kind == provider::Kind::OpenAI
+            && !sel.openai_endpoint.use_tls)
             toast_text += "  (" + sel.openai_endpoint.host + ":"
                         + std::to_string(sel.openai_endpoint.port)
                         + sel.openai_endpoint.path + ")";
