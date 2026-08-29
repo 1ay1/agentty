@@ -1135,6 +1135,21 @@ Step fused_picker_update(Model m, msg::FusedPickerMsg pm) {
         },
         [&](FusedPickerFilterInput e) -> Step {
             if (auto* c = pick::opened(m.ui.fused_picker)) {
+                // Quick-select: on the UNFILTERED list (empty query), a digit
+                // 1-9 jumps straight to the Nth row — the top rows are RECENT,
+                // so "2" hits the 2nd model you alternate with, no arrowing.
+                // Gated on an empty query so typing an id with digits ("o3",
+                // "gpt5") still searches normally.
+                if (c->query.empty() && e.ch >= '1' && e.ch <= '9') {
+                    const int n = static_cast<int>(m.d.fused_rows.size());
+                    const int want = e.ch - '1';
+                    if (want < n) {
+                        c->index = want;
+                        c->staged_effort = -1;
+                        clamp_cursor(m);
+                    }
+                    return done(std::move(m));
+                }
                 // ASCII only — model/provider ids are ASCII in practice.
                 if (e.ch >= 0x20 && e.ch < 0x7f) {
                     c->query.push_back(static_cast<char>(e.ch));
