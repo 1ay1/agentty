@@ -819,6 +819,75 @@ static void run_scenario(int width, int term_h) {
     if (pty_master >= 0) close(pty_master);
 }
 
+// Reasoning (thinking) scenario — the block whose HEADER changes at settle
+// ("✦ Thinking ⠻ · N tok" → "✦ Reasoned · N tokens") and whose spinner
+// animates every frame. A long reasoning overflows the viewport so the
+// header + early thought rows scroll off and COMMIT to native scrollback
+// while live; at settle the block must not rewrite any committed row.
+static void run_reasoning_scenario(int width, int term_h) {
+    setenv("LINES", std::to_string(term_h).c_str(), 1);
+    setenv("COLUMNS", std::to_string(width).c_str(), 1);
+    const int pty_master = install_pty_stdout(width, term_h);
+
+    Model m;
+    m.d.current.id = agentty::ThreadId{"reason"};
+    m.d.available_models.push_back({});
+    m.d.available_models.back().id = agentty::ModelId{"claude-opus-4-1"};
+    m.d.show_reasoning = true;
+    agentty::app::detail::clear_frozen(m);
+
+    Harness h(width, term_h);
+    h.frame(m, "rwelcome");
+
+    {
+        Message u; u.role = Role::User;
+        u.text = "Think hard, then answer: uniq-R-Q.";
+        m.d.current.messages.push_back(std::move(u));
+        agentty::app::detail::freeze_through(m, m.d.current.messages.size());
+        h.frame(m, "rsubmit");
+    }
+
+    // Assistant enters the PURE-REASONING phase (no answer text yet).
+    Message a; a.role = Role::Assistant;
+    m.d.current.messages.push_back(std::move(a));
+    m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
+    for (int f = 0; f < 6; ++f) { tick(); h.frame(m, "ropen" + std::to_string(f)); }
+
+    // Stream a long reasoning body that overflows the viewport so the header
+    // + early thoughts scroll off the top and commit to scrollback.
+    auto& back = m.d.current.messages.back();
+    for (int d = 0; d < 60; ++d) {
+        back.thinking +=
+            "\n\nThought " + std::to_string(d)
+            + " (#" + std::to_string(d * 7 + 3) + "): weigh option "
+            + std::to_string(d) + " against constraint-" + std::to_string(d * 2)
+            + " and revise plan-" + std::to_string(d * 3) + ".";
+        tick(); h.frame(m, "rdelta" + std::to_string(d));
+        tick(); h.frame(m, "ranim" + std::to_string(d));
+        if (h.dead) { if (pty_master >= 0) close(pty_master); return; }
+    }
+
+    // Settle: the answer arrives (flips reasoning live→settled), then idle +
+    // wait for the reveal to drain + freeze — the production gate.
+    {
+        auto& b = m.d.current.messages.back();
+        b.text = "Answer: uniq-R-A.";
+        agentty::app::detail::settle_message_md(m, b);
+        m.s.phase = agentty::phase::Idle{};
+        int guard = 0;
+        do {
+            tick();
+            h.frame(m, "rsettle" + std::to_string(guard));
+        } while (!agentty::app::detail::live_tail_reveal_settled(m)
+                 && ++guard < 200 && !h.dead);
+        agentty::app::detail::freeze_through(m, m.d.current.messages.size());
+        auto trim = agentty::app::detail::trim_frozen_if_oversized(m);
+        h.apply_trim(trim);
+        h.frame(m, "rfreeze");
+    }
+    if (pty_master >= 0) close(pty_master);
+}
+
 // Multi-sub-turn scenario — the screenshot shape: text → ACTIONS panel →
 // continuation text → ACTIONS panel … all inside ONE live (un-frozen)
 // assistant run. When a tool sub-turn lands, the prior text message's
@@ -1503,6 +1572,18 @@ int main() {
     for (auto s : tall_shapes) {
         if (g_failures) break;
         run_trimstorm_scenario(s.w, s.th);
+    }
+    // Long REASONING that overflows: the ✦ Thinking/Reasoned header + spinner
+    // scroll off + commit while live, then the header flips at settle — must
+    // not rewrite any committed row. Small shapes force the overflow; tall
+    // shapes exercise the no-overflow path.
+    for (auto s : shapes) {
+        if (g_failures) break;
+        run_reasoning_scenario(s.w, s.th);
+    }
+    for (auto s : tall_shapes) {
+        if (g_failures) break;
+        run_reasoning_scenario(s.w, s.th);
     }
     if (saved_stdout >= 0) { dup2(saved_stdout, STDOUT_FILENO); close(saved_stdout); }
     std::fprintf(stderr, "%d checks, %d failures\n", g_checks, g_failures);
