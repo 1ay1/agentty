@@ -164,13 +164,6 @@ using maya::Cmd;
 Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
     return std::visit(overload{
         [&](OpenModelPicker) -> Step {
-            // First-ever open retires the status-bar "^/" teaser.
-            if (!m.ui.model_picker_used) {
-                m.ui.model_picker_used = true;
-                auto s = deps().load_settings();
-                s.model_picker_used = true;
-                deps().save_settings(s);
-            }
             // Close the provider picker if the user cross-hopped here from it
             // (^/ in the provider picker). pick_overlay + the key dispatcher
             // both check model_picker BEFORE provider_picker, so a lingering
@@ -1269,14 +1262,6 @@ Step fused_picker_update(Model m, msg::FusedPickerMsg pm) {
     return std::visit(overload{
         [&](OpenFusedPicker) -> Step {
             hydrate_recents(m);
-            // First-ever open retires the status-bar "^/" teaser (persisted
-            // once, on the transition only — not per open).
-            if (!m.ui.model_picker_used) {
-                m.ui.model_picker_used = true;
-                auto s = deps().load_settings();
-                s.model_picker_used = true;
-                deps().save_settings(s);
-            }
             // ^/ TOGGLES from the classic single-provider picker back to this
             // one. Tear the classic picker down cleanly — flush a pending
             // effort edit and abandon any Smart Mode slot-assign arming (the

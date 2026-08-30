@@ -125,7 +125,6 @@ std::pair<Model, maya::Cmd<Msg>> init() {
     // ladder / clamps / wire are correct from frame 1 — the reject→learn→
     // retry loop only ever pays its one-time cost once per model, ever.
     set_learned_effort_sets(settings.learned_effort_sets);
-    m.ui.model_picker_used = settings.model_picker_used;
 
     // Smart Mode: rehydrate role config from settings. A slot counts as
     // "set" once the user pinned a model for it.

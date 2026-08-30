@@ -234,11 +234,6 @@ struct Model {
         // load+fsync+rename on the UI thread; instead the CycleEffort arm
         // sets this and CloseModelPicker/Select flush once.
         bool                effort_dirty = false;
-        // Mirror of Settings.model_picker_used (hydrated at init): once the
-        // user has EVER opened a model picker, the badge's dim "^/" teaser
-        // disappears forever. Kept in-model so the per-frame badge render
-        // never touches disk.
-        bool                model_picker_used = false;
         ui::pick::OneAxis   provider_picker;  // Closed | OpenAt{index}
         // Fused cross-provider model picker (docs/design/unified-model-picker.md):
         // one list over every authed provider. OpenAt{index} into the
