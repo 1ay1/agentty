@@ -760,6 +760,36 @@ private:
     }
 };
 
+// ── Provider scope for capability keys ───────────────────────────────
+// The SAME bare model id can live on several providers with DIFFERENT
+// contracts (gpt-oss-120b on Groq vs Cerebras vs local Ollama). Capability
+// facts are therefore recorded under a scoped key "provider/model" and
+// looked up scoped-first, bare-second. The provider layer pushes the active
+// provider id here on every switch (provider::select), so resolved_caps —
+// which only receives a model id — can consult the scoped fact without the
+// domain layer depending on provider state.
+namespace caps_scope_detail {
+inline std::mutex& mu() { static std::mutex m; return m; }
+inline std::string& val() { static std::string s; return s; }
+} // namespace caps_scope_detail
+
+inline void set_caps_provider_scope(std::string provider_id) {
+    std::lock_guard lk(caps_scope_detail::mu());
+    caps_scope_detail::val() = std::move(provider_id);
+}
+[[nodiscard]] inline std::string caps_provider_scope() {
+    std::lock_guard lk(caps_scope_detail::mu());
+    return caps_scope_detail::val();
+}
+// "provider/model" when a scope is set; "" when not (callers then use bare).
+[[nodiscard]] inline std::string scoped_caps_key(std::string_view model_id) {
+    auto p = caps_provider_scope();
+    if (p.empty()) return {};
+    p += '/';
+    p += model_id;
+    return p;
+}
+
 // ── Live-catalog reasoning registry ──────────────────────────────────────────
 // Some providers DECLARE per-model reasoning support in their /v1/models
 // payload (Mistral: capabilities.reasoning true|false). That live flag beats
@@ -785,11 +815,15 @@ inline void set_catalog_reasoning(std::string model_id, bool reasons) {
     catalog_reasoning_detail::any().store(true, std::memory_order_relaxed);
 }
 // Tri-state: 1 (catalog says reasons), 0 (catalog says not), -1 (no info).
+// Scoped-first ("provider/model"), bare fallback — see scoped_caps_key.
 [[nodiscard]] inline int catalog_reasoning_for(std::string_view model_id) {
     if (!catalog_reasoning_detail::any().load(std::memory_order_relaxed))
         return -1;
     std::shared_lock lk(catalog_reasoning_detail::mu());
     auto& m = catalog_reasoning_detail::map_();
+    if (auto scoped = scoped_caps_key(model_id); !scoped.empty())
+        if (auto it = m.find(scoped); it != m.end())
+            return it->second ? 1 : 0;
     auto it = m.find(std::string{model_id});
     if (it == m.end()) return -1;
     return it->second ? 1 : 0;
@@ -815,11 +849,15 @@ inline void set_catalog_effort_set(std::string model_id, std::uint8_t set) {
     catalog_effort_detail::any().store(true, std::memory_order_relaxed);
 }
 // -1 = no declaration; else the bitmask of declared ON levels.
+// Scoped-first ("provider/model"), bare fallback — see scoped_caps_key.
 [[nodiscard]] inline int catalog_effort_set_for(std::string_view model_id) {
     if (!catalog_effort_detail::any().load(std::memory_order_relaxed))
         return -1;
     std::shared_lock lk(catalog_effort_detail::mu());
     auto& m = catalog_effort_detail::map_();
+    if (auto scoped = scoped_caps_key(model_id); !scoped.empty())
+        if (auto it = m.find(scoped); it != m.end())
+            return static_cast<int>(it->second);
     auto it = m.find(std::string{model_id});
     if (it == m.end()) return -1;
     return static_cast<int>(it->second);
@@ -946,11 +984,17 @@ learned_effort_sets_snapshot() {
     return learned_effort_detail::map_();
 }
 // -1 = nothing learned for this id; else the bitmask (may be 0 = param off).
+// Scoped-first lookup: a fact learned while Groq was active is keyed
+// "groq/gpt-oss-120b" and does NOT leak to the same id on Cerebras; a bare
+// entry (legacy, or explicitly unscoped) still matches everywhere.
 [[nodiscard]] inline int learned_effort_set_for(std::string_view model_id) {
     if (!learned_effort_detail::any().load(std::memory_order_relaxed))
         return -1;
     std::shared_lock lk(learned_effort_detail::mu());
     auto& m = learned_effort_detail::map_();
+    if (auto scoped = scoped_caps_key(model_id); !scoped.empty())
+        if (auto it = m.find(scoped); it != m.end())
+            return static_cast<int>(it->second);
     auto it = m.find(std::string{model_id});
     if (it == m.end()) return -1;
     return static_cast<int>(it->second);

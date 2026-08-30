@@ -2365,8 +2365,13 @@ std::vector<ModelInfo> list_models(const AuthHeader& auth, const Endpoint& endpo
                 if (auto ci = m.find("capabilities");
                     ci != m.end() && ci->is_object()
                     && ci->contains("reasoning")
-                    && (*ci)["reasoning"].is_boolean())
-                    set_catalog_reasoning(id, (*ci)["reasoning"].get<bool>());
+                    && (*ci)["reasoning"].is_boolean()) {
+                    // Provider-scoped key: the same bare id on another host
+                    // (gpt-oss on Groq vs Cerebras) may have a different
+                    // contract, so never let one host's declaration bleed.
+                    set_catalog_reasoning(endpoint.label + "/" + id,
+                                          (*ci)["reasoning"].get<bool>());
+                }
                 result.push_back(ModelInfo{
                     .id           = ModelId{id},
                     .display_name = id,

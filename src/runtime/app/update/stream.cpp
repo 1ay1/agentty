@@ -2001,14 +2001,18 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                 && prior_transient < provider::kMaxRetries) {
                 if (auto learned = provider::parse_effort_rejection(
                         e.message, e.http_status)) {
-                    const std::string mid = m.d.model_id.value;
-                    set_learned_effort_set(mid, *learned);
+                    // Provider-scoped key ("mistral/mistral-small-latest"):
+                    // the fact belongs to THIS host's dispatch table — the
+                    // same bare id elsewhere may accept a different enum.
+                    std::string key = scoped_caps_key(m.d.model_id.value);
+                    if (key.empty()) key = m.d.model_id.value;
+                    set_learned_effort_set(key, *learned);
                     {   // Persist — tomorrow's session starts correct.
                         auto s = deps().load_settings();
-                        s.learned_effort_sets[mid] = *learned;
+                        s.learned_effort_sets[key] = *learned;
                         deps().save_settings(s);
                     }
-                    const auto caps = resolved_caps(mid);
+                    const auto caps = resolved_caps(m.d.model_id.value);
                     const Effort before = m.d.effort;
                     m.d.effort = clamp_effort(m.d.effort, caps);
                     if (!reschedule_streaming(m.s.phase, [&](phase::Active& c) {

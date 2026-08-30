@@ -155,6 +155,12 @@ auth::AuthHeader resolve_auth_for(std::string_view spec,
 }
 
 void select(Selection s) {
+    // Publish the provider id as the capability-key scope BEFORE swapping the
+    // selection in, so a resolved_caps() racing the switch sees, at worst,
+    // the OLD scope with the OLD selection — never a mismatched pair.
+    set_caps_provider_scope(
+        s.kind == Kind::OpenAI ? s.openai_endpoint.label
+                               : std::string{default_provider_id()});
     std::lock_guard lk(g_active_mu);
     g_active = std::move(s);
 }
