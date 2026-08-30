@@ -25,6 +25,7 @@
 #include "agentty/provider/kimi/kimi_oauth.hpp"
 #include "agentty/provider/prompt_policy.hpp"
 #include "agentty/provider/selection.hpp"
+#include "agentty/provider/credentials.hpp"
 #include "agentty/tool/registry.hpp"
 #include "agentty/mcp/client.hpp"   // plugin_model(), reload_mcp_plugins via registry
 #include "agentty/tool/hooks.hpp"
@@ -717,7 +718,15 @@ Cmd<Msg> launch_stream(Model& m) {
     const int  compaction_ceiling = m.s.compaction_ceiling;
     const int  context_max = m.s.context_max;
     std::string model_id   = m.d.model_id.value;
-    auth::AuthHeader auth  = deps().auth;
+    // auth_snapshot(), NOT deps().auth: the cached header is overwritten by
+    // background OAuth refreshes (token_refreshed → update_auth installs the
+    // ANTHROPIC bearer unconditionally), so reading the cache while e.g.
+    // Mistral is active ships Anthropic's OAuth token to api.mistral.ai →
+    // 401 "Invalid API Key". auth_snapshot resolves from the CURRENTLY-ACTIVE
+    // provider through the central credential layer (falling back to the
+    // cache only for oauth_native/local, whose transports own their tokens),
+    // so the wire credential can never drift from provider::active().
+    auth::AuthHeader auth  = auth_snapshot();
     // Reasoning effort, resolved + clamped to this model's capability here on
     // the UI thread (where the live Model is readable). Empty = off; an
     // unsupported tier degrades (Xhigh/Max → high) instead of 400ing.
@@ -1786,7 +1795,16 @@ Cmd<Msg> fetch_models_for(std::string spec) {
     return Cmd<Msg>::task([spec = std::move(spec)](std::function<void(Msg)> dispatch) {
         try {
             auto sel = provider::parse_selection(spec);
-            auto models = provider::list_models_for(sel, auth_snapshot());
+            // Resolve credentials for THIS spec — not auth_snapshot(), which
+            // resolves for the ACTIVE provider. The fused picker fans these
+            // out for every OTHER authed provider, so the snapshot would ship
+            // e.g. Anthropic's OAuth bearer to api.mistral.ai → 401.
+            const std::string pid =
+                sel.kind == provider::Kind::OpenAI
+                    ? sel.openai_endpoint.label
+                    : std::string{provider::default_provider_id()};
+            auto models = provider::list_models_for(
+                sel, provider::credentials::resolve(pid));
             dispatch(FusedCatalogLoaded{spec, std::move(models), true});
         } catch (...) {
             dispatch(FusedCatalogLoaded{spec, std::vector<ModelInfo>{}, false});

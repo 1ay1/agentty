@@ -27,6 +27,7 @@
 #include "agentty/domain/decomposition_memory.hpp"
 #include "agentty/domain/smart_tuning.hpp"
 #include "agentty/provider/error_class.hpp"
+#include "agentty/provider/selection.hpp"
 #include "agentty/runtime/app/cmd_factory.hpp"
 #include "agentty/runtime/app/deps.hpp"
 #include "agentty/runtime/code_block_picker.hpp"
@@ -2059,7 +2060,14 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                 && err_ctx
                 && !has_committed
                 && !m.s.oauth_refresh_in_flight
-                && prior_transient < provider::kMaxRetries) {
+                && prior_transient < provider::kMaxRetries
+                // Anthropic only: credentials.json holds ANTHROPIC's OAuth
+                // pair. A 401 from an OpenAI-family provider (bad Mistral
+                // key, revoked Groq key, …) must NOT trigger an Anthropic
+                // refresh — the refresh succeeds, update_auth() installs the
+                // Anthropic bearer as the cached header, and the retry ships
+                // it to the wrong host → an unbreakable 401 loop.
+                && provider::active().kind == provider::Kind::Anthropic) {
                 std::string refresh_token;
                 if (auto loaded = auth::load_credentials()) {
                     if (auto* o = std::get_if<auth::cred::OAuth>(&*loaded))
