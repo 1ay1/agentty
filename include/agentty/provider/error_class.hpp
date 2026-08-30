@@ -25,6 +25,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <optional>
 #include <random>
 #include <string>
 #include <string_view>
@@ -196,6 +197,95 @@ enum class ErrorClass {
     };
     return lower_contains("long context beta is not")
         || lower_contains("context-1m");   // future error-shape drift
+}
+
+// ── reasoning_effort rejection → learned capability ──────────────────────
+// Parse a 4xx body that REJECTS the reasoning_effort parameter and extract
+// what the provider says it accepts — this is capability DISCOVERY, not a
+// real failure: the identical request with a supported (or no) effort value
+// succeeds. Observed shapes:
+//   Mistral (400):  "reasoning_effort low is not supported for this model,
+//                    supported values: [<ReasoningEffort.high: 'high'>,
+//                    <ReasoningEffort.none: 'none'>]"
+//   Mistral (400):  "reasoning_effort is not enabled for this model"
+//   generic compat: "Unrecognized request argument: reasoning_effort" /
+//                   "unknown field: reasoning_effort" / …
+// Returns nullopt when the error is NOT an effort rejection; otherwise the
+// bitmask of accepted ON levels (0 = the model takes no effort parameter at
+// all). The reducer records it via set_learned_effort_set and retries with
+// the clamped value — reject → learn → clamp → retry → remember.
+[[nodiscard]] inline std::optional<std::uint8_t> parse_effort_rejection(
+        std::string_view message, int http_status) noexcept {
+    if (http_status != 0 && http_status != 400 && http_status != 422)
+        return std::nullopt;
+    // Case-insensitive substring search, returning the position (npos-like
+    // -1 when absent) so we can slice the tail after the match.
+    auto ifind = [&](std::string_view hay, std::string_view needle,
+                     std::size_t from) noexcept -> std::size_t {
+        if (needle.empty() || needle.size() > hay.size())
+            return std::string_view::npos;
+        for (std::size_t i = from; i + needle.size() <= hay.size(); ++i) {
+            bool ok = true;
+            for (std::size_t j = 0; j < needle.size(); ++j) {
+                char a = hay[i + j], b = needle[j];
+                if (a >= 'A' && a <= 'Z') a = static_cast<char>(a + 32);
+                if (b >= 'A' && b <= 'Z') b = static_cast<char>(b + 32);
+                if (a != b) { ok = false; break; }
+            }
+            if (ok) return i;
+        }
+        return std::string_view::npos;
+    };
+    const std::size_t at = ifind(message, "reasoning_effort", 0);
+    if (at == std::string_view::npos) return std::nullopt;
+    // Must look like a rejection of the parameter, not an incidental mention.
+    const bool rejected =
+        ifind(message, "not supported", 0)   != std::string_view::npos
+     || ifind(message, "not enabled", 0)     != std::string_view::npos
+     || ifind(message, "unrecognized", 0)    != std::string_view::npos
+     || ifind(message, "unknown field", 0)   != std::string_view::npos
+     || ifind(message, "unexpected", 0)      != std::string_view::npos
+     || ifind(message, "invalid", 0)         != std::string_view::npos
+     || ifind(message, "unsupported", 0)     != std::string_view::npos
+     || ifind(message, "should be", 0)       != std::string_view::npos
+     || ifind(message, "must be one of", 0)  != std::string_view::npos;
+    if (!rejected) return std::nullopt;
+
+    // Harvest accepted values from the tail after "supported values" /
+    // "must be one of" / "should be" when present, else scan the whole body.
+    std::size_t tail = 0;
+    for (std::string_view marker : {"supported values", "must be one of",
+                                    "should be", "expected"}) {
+        if (auto p = ifind(message, marker, 0); p != std::string_view::npos) {
+            tail = p; break;
+        }
+    }
+    std::uint8_t set = 0;
+    bool any_named = false;
+    struct { std::string_view name; std::uint8_t bit; } levels[] = {
+        {"minimal", 0},                       // not in our ladder → ignore
+        {"'low'", 1u << 0},   {".low", 1u << 0},   {"[low", 1u << 0},   {" low", 1u << 0},
+        {"'medium'", 1u << 1},{".medium", 1u << 1},{"[medium", 1u << 1},{" medium", 1u << 1},
+        {"'high'", 1u << 2},  {".high", 1u << 2},  {"[high", 1u << 2},  {" high", 1u << 2},
+        {"'xhigh'", 1u << 3}, {".xhigh", 1u << 3},
+        {"'max'", 1u << 4},   {".max", 1u << 4},
+    };
+    // "xhigh" contains "high": scan xhigh spellings FIRST and blank them out
+    // conceptually by requiring exact quoted/dotted forms for the short names
+    // where ambiguity exists. The bracketed/space forms only apply to low/
+    // medium/high which do not collide once xhigh's quoted forms are checked.
+    for (const auto& lv : levels) {
+        if (lv.bit == 0) continue;
+        if (ifind(message, lv.name, tail) != std::string_view::npos) {
+            set |= lv.bit;
+            any_named = true;
+        }
+    }
+    // "xhigh" also matched " high"/".high"/"[high" scans — that's fine (a
+    // provider naming xhigh in its accepted list accepts high-ish tiers; the
+    // nearest_effort clamp keeps requests inside the set either way).
+    if (!any_named) return std::uint8_t{0};   // param rejected outright
+    return set;
 }
 
 // Backoff duration for the Nth retry attempt (0-indexed). Caps at 6

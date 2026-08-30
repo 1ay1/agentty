@@ -130,6 +130,13 @@ struct Settings {
     // Pushed into the catalog's override registry at startup and on every
     // in-app toggle (^E in the model picker). Claude/GPT stay family-gated.
     std::map<std::string, bool> reasoning_effort_overrides;
+    // LEARNED capability facts: model id → the exact set of reasoning_effort
+    // ON-levels its API accepts, as an effort_bit bitmask (0 = rejects the
+    // parameter entirely). Written when a provider 4xxes an effort value and
+    // names its contract in the error body (the reject→learn→clamp→retry
+    // arm in stream.cpp); hydrated into the catalog's learned-effort registry
+    // at init so every later session's ladder/clamps/wire start correct.
+    std::map<std::string, std::uint8_t> learned_effort_sets;
     // Tool names the user granted "always allow" (PermissionApproveAlways).
     // Persisted so the grant survives restarts — Zed's always_allow rules.
     // Loaded into Model::session_grants at init; note CycleProfile still

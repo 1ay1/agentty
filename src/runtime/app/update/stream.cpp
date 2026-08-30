@@ -1983,6 +1983,55 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                 }
             }
 
+            // ── reasoning_effort rejection 4xx: learn, clamp, retry ─────
+            // The provider rejected the effort value we sent — and usually
+            // NAMES its accepted set in the body (Mistral: "supported
+            // values: [high, none]"). Capability DISCOVERY, not a failure:
+            // record the exact accepted set (persisted, so the ladder/clamps
+            // are correct forever after — even across restarts and for
+            // providers no database knows), fix up m.d.effort to the nearest
+            // supported tier, and relaunch the SAME turn immediately.
+            // launch_stream re-derives the wire value through resolved_caps,
+            // which now folds in the learned set — so the retry cannot 400
+            // on the same axis. Guarded on effort actually being ON so a
+            // rewording drift can never loop us; one attempt per turn via
+            // transient_retries like every other discovery retry.
+            if (err_ctx && !has_committed
+                && m.d.effort != Effort::None
+                && prior_transient < provider::kMaxRetries) {
+                if (auto learned = provider::parse_effort_rejection(
+                        e.message, e.http_status)) {
+                    const std::string mid = m.d.model_id.value;
+                    set_learned_effort_set(mid, *learned);
+                    {   // Persist — tomorrow's session starts correct.
+                        auto s = deps().load_settings();
+                        s.learned_effort_sets[mid] = *learned;
+                        deps().save_settings(s);
+                    }
+                    const auto caps = resolved_caps(mid);
+                    const Effort before = m.d.effort;
+                    m.d.effort = clamp_effort(m.d.effort, caps);
+                    if (!reschedule_streaming(m.s.phase, [&](phase::Active& c) {
+                            c.transient_retries = prior_transient + 1;
+                            c.last_failure_at   = std::chrono::steady_clock::now();
+                            c.retry             = retry::Scheduled{};
+                        }))
+                        return done(std::move(m));
+                    // A quiet, informative one-liner — the turn still runs.
+                    const std::string note = m.d.effort == Effort::None
+                        ? "this model takes no reasoning effort — sent without it"
+                        : "reasoning " + std::string{effort_label(before)}
+                            + " → " + std::string{effort_label(m.d.effort)}
+                            + " (all this model supports)";
+                    auto toast = set_status_toast(m, note,
+                                                  std::chrono::seconds{6});
+                    return {std::move(m), Cmd<Msg>::batch(
+                        std::move(toast),
+                        Cmd<Msg>::after(std::chrono::milliseconds{50},
+                                        Msg{RetryStream{}}))};
+                }
+            }
+
             // ── Long-context entitlement 400: self-heal, don't dead-end ──
             // The account's subscription rejected the context-1m beta the
             // `[1m]` picker variant makes us send. This is a CAPABILITY

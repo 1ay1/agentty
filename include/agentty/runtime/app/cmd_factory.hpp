@@ -130,6 +130,10 @@ struct LoopBreak {
 // Background release check (24h-cached, never blocks a frame): dispatches
 // UpdateCheckDone. check_for_update() is safe to fire on every launch.
 [[nodiscard]] maya::Cmd<Msg> check_for_update();
+// Background models.dev capability-snapshot refresh (24h disk cache); pushes
+// declared reasoning + exact effort enums into the catalog registries. Fire
+// and forget — dispatches no Msg (registries are read at render/wire time).
+[[nodiscard]] maya::Cmd<Msg> refresh_modelsdev();
 // Download + atomically install the given version; dispatches UpdateApplied.
 [[nodiscard]] maya::Cmd<Msg> perform_self_update(std::string version);
 

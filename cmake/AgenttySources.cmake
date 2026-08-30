@@ -35,6 +35,7 @@ set(AGENTTY_IO_SOURCES
     src/util/logx.cpp
     src/util/home_dir.cpp
     src/util/update.cpp
+    src/util/modelsdev.cpp
     src/domain/complexity.cpp
     src/domain/routing_memory.cpp
     src/domain/decomposition_memory.cpp

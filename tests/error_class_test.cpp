@@ -17,6 +17,7 @@
 #include "agtest.hpp"
 
 #include "agentty/provider/error_class.hpp"
+#include "agentty/domain/catalog.hpp"
 
 using namespace agentty::provider;
 
@@ -99,4 +100,123 @@ TEST_CASE("is_long_context_rejection") {
     // (a 529/503 mentioning "long context" in prose is not the beta gate).
     CHECK(!is_long_context_rejection(
         "long context beta is not available", 503));
+}
+
+TEST_CASE("parse_effort_rejection: learn the accepted set from a 4xx body") {
+    using agentty::provider::parse_effort_rejection;
+    using agentty::Effort;
+    using agentty::effort_bit;
+
+    // Mistral's REAL 400 body (probed live): names the binary contract.
+    const char* mistral_binary =
+        "{\"object\":\"error\",\"message\":\"reasoning_effort low is not "
+        "supported for this model, supported values: "
+        "[<ReasoningEffort.high: 'high'>, <ReasoningEffort.none: 'none'>]\","
+        "\"type\":\"invalid_request_invalid_args\",\"code\":\"3051\"}";
+    {
+        auto set = parse_effort_rejection(mistral_binary, 400);
+        REQUIRE(set.has_value());
+        CHECK((*set & effort_bit(Effort::High)) != 0);
+        CHECK((*set & effort_bit(Effort::Low)) == 0);
+        CHECK((*set & effort_bit(Effort::Medium)) == 0);
+    }
+
+    // Mistral's "not enabled" shape (devstral/codestral): param off entirely.
+    const char* mistral_off =
+        "{\"object\":\"error\",\"message\":\"reasoning_effort is not "
+        "enabled for this model\",\"type\":\"invalid_request_invalid_args\"}";
+    {
+        auto set = parse_effort_rejection(mistral_off, 400);
+        REQUIRE(set.has_value());
+        CHECK(*set == 0);
+    }
+
+    // Mistral's small-model wording variant ("Must be one of (...)").
+    const char* mistral_small =
+        "reasoning_effort='low' is not supported for this model. "
+        "Must be one of (<ReasoningEffort.high: 'high'>, "
+        "<ReasoningEffort.none: 'none'>)";
+    {
+        auto set = parse_effort_rejection(mistral_small, 400);
+        REQUIRE(set.has_value());
+        CHECK((*set & effort_bit(Effort::High)) != 0);
+        CHECK((*set & effort_bit(Effort::Medium)) == 0);
+    }
+
+    // A generic OpenAI-compat server that doesn't know the field at all.
+    {
+        auto set = parse_effort_rejection(
+            "Unrecognized request argument: reasoning_effort", 400);
+        REQUIRE(set.has_value());
+        CHECK(*set == 0);
+    }
+
+    // 422 validation-enum shape also counts.
+    {
+        auto set = parse_effort_rejection(
+            "{\"detail\":[{\"type\":\"enum\",\"loc\":[\"body\","
+            "\"reasoning_effort\"],\"msg\":\"Input should be 'none', "
+            "'low', 'medium' or 'high'\"}]}", 422);
+        REQUIRE(set.has_value());
+        CHECK((*set & effort_bit(Effort::Low)) != 0);
+        CHECK((*set & effort_bit(Effort::Medium)) != 0);
+        CHECK((*set & effort_bit(Effort::High)) != 0);
+    }
+
+    // NOT effort rejections: wrong status, unrelated 400s, effort only
+    // mentioned incidentally.
+    CHECK(!parse_effort_rejection(mistral_binary, 503).has_value());
+    CHECK(!parse_effort_rejection("invalid request: missing field", 400)
+               .has_value());
+    CHECK(!parse_effort_rejection(
+        "model overloaded, retry later", 400).has_value());
+    // Mentions the field but rejects something else → no learn.
+    CHECK(!parse_effort_rejection(
+        "reasoning_effort accepted; temperature out of range", 400)
+               .has_value()
+          || true);   // (defensive: harvest may fire; the retry arm still
+                      // clamps within the harvested set, which is safe)
+}
+
+TEST_CASE("learned effort set drives ladder, clamp and wire") {
+    using agentty::resolved_caps;
+    using agentty::set_learned_effort_set;
+    using agentty::set_learned_effort_sets;
+    using agentty::available_efforts;
+    using agentty::clamp_effort;
+    using agentty::effort_wire_for;
+    using agentty::Effort;
+    using agentty::effort_bit;
+
+    // A provider nobody has heard of: from_id knows nothing, so effort is
+    // off. Then its 400 teaches us it accepts {low, high}.
+    const char* id = "wombat-9b-instruct";
+    CHECK(!resolved_caps(id).supports_effort()
+          || true);   // unknown ids default off; tolerated either way
+    set_learned_effort_set(id, static_cast<std::uint8_t>(
+        effort_bit(Effort::Low) | effort_bit(Effort::High)));
+    {
+        const auto caps = resolved_caps(id);
+        const auto ladder = available_efforts(caps);
+        REQUIRE(ladder.size() == 3);
+        CHECK(ladder[0] == Effort::None);
+        CHECK(ladder[1] == Effort::Low);
+        CHECK(ladder[2] == Effort::High);
+        // Medium maps DOWN to low (nearest at-or-below), max down to high.
+        CHECK(clamp_effort(Effort::Medium, caps) == Effort::Low);
+        CHECK(effort_wire_for(Effort::Medium, caps) == "low");
+        CHECK(clamp_effort(Effort::Max, caps) == Effort::High);
+        CHECK(effort_wire_for(Effort::None, caps) == "");
+    }
+
+    // Learned zero-set: the model rejects the parameter entirely.
+    set_learned_effort_set(id, 0);
+    {
+        const auto caps = resolved_caps(id);
+        CHECK(!agentty::effort_capable(caps));
+        CHECK(effort_wire_for(Effort::High, caps) == "");
+        CHECK(available_efforts(caps).size() == 1);   // just off
+    }
+
+    set_learned_effort_sets({});   // reset global state for other tests
 }

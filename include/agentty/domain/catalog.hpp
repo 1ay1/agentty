@@ -220,6 +220,19 @@ struct ModelCapabilities {
     // reasoning_compat (+ catalog/overrides) decides IF effort exists.
     bool effort_high_only = false;
 
+    // ── Exact effort-value SET (the models.dev / learned-caps shape) ─────
+    // When effort_set_known, `effort_set` is the EXACT set of ON levels this
+    // model's API accepts, one bit per Effort (see effort_bit). 0 + known =
+    // the model rejects reasoning_effort entirely. This is the ground-truth
+    // representation every other effort field approximates: family gates,
+    // reasoning_compat and effort_high_only are all just DERIVATIONS used
+    // when no exact set is known. Populated by resolved_caps() from (in
+    // precedence order) the learned-from-rejection registry (the provider
+    // TOLD us via a 400 what it accepts) and the models.dev snapshot.
+    // Never set by the constexpr from_id — static inference only guesses.
+    std::uint8_t effort_set       = 0;
+    bool         effort_set_known = false;
+
     [[nodiscard]] constexpr bool is_haiku()  const noexcept { return family == Family::Haiku; }
     [[nodiscard]] constexpr bool is_sonnet() const noexcept { return family == Family::Sonnet; }
     [[nodiscard]] constexpr bool is_opus()   const noexcept { return family == Family::Opus; }
@@ -782,6 +795,36 @@ inline void set_catalog_reasoning(std::string model_id, bool reasons) {
     return it->second ? 1 : 0;
 }
 
+// DECLARED effort-value sets: a metadata source (models.dev snapshot, or a
+// provider that publishes its effort enum) names the exact ON levels a model
+// accepts. Sits BELOW the learned-from-rejection registry (ground truth from
+// the provider's own 400 beats third-party metadata) and below user
+// overrides, but ABOVE from_id derivation. Same keying and lock discipline
+// as the reasoning declarations above.
+namespace catalog_effort_detail {
+inline std::shared_mutex& mu() { static std::shared_mutex m; return m; }
+inline std::map<std::string, std::uint8_t>& map_() {
+    static std::map<std::string, std::uint8_t> m; return m;
+}
+inline std::atomic<bool>& any() { static std::atomic<bool> a{false}; return a; }
+} // namespace catalog_effort_detail
+
+inline void set_catalog_effort_set(std::string model_id, std::uint8_t set) {
+    std::unique_lock lk(catalog_effort_detail::mu());
+    catalog_effort_detail::map_()[std::move(model_id)] = set;
+    catalog_effort_detail::any().store(true, std::memory_order_relaxed);
+}
+// -1 = no declaration; else the bitmask of declared ON levels.
+[[nodiscard]] inline int catalog_effort_set_for(std::string_view model_id) {
+    if (!catalog_effort_detail::any().load(std::memory_order_relaxed))
+        return -1;
+    std::shared_lock lk(catalog_effort_detail::mu());
+    auto& m = catalog_effort_detail::map_();
+    auto it = m.find(std::string{model_id});
+    if (it == m.end()) return -1;
+    return static_cast<int>(it->second);
+}
+
 // ── Per-model reasoning-effort override registry ─────────────────────────
 // The "configure it myself" seam (issue #20). The constexpr from_id() decode
 // only INFERS whether a compat model reasons; users can override that per
@@ -868,6 +911,51 @@ inline void set_reasoning_overrides(std::map<std::string, bool> all) {
     return v;
 }
 
+// ── Learned effort-set registry (feature DETECTION, not enumeration) ──────
+// When a provider rejects a reasoning_effort value it usually names the
+// contract in the error body — Mistral: "supported values: [high, none]";
+// generic OpenAI-compat: "reasoning_effort is not enabled for this model".
+// The stream reducer parses that (provider::parse_effort_rejection), records
+// the EXACT accepted set here, persists it (Settings.learned_effort_sets),
+// and silently retries with the clamped value. From then on the ladder, the
+// clamps and the wire are all correct for that model — across restarts,
+// without a release, for providers no database has ever heard of. Same lock
+// discipline as the other registries (render-path readers).
+namespace learned_effort_detail {
+inline std::shared_mutex& mu() { static std::shared_mutex m; return m; }
+// model id → effort_set bitmask (0 = rejects the parameter entirely).
+inline std::map<std::string, std::uint8_t>& map_() {
+    static std::map<std::string, std::uint8_t> m; return m;
+}
+inline std::atomic<bool>& any() { static std::atomic<bool> a{false}; return a; }
+} // namespace learned_effort_detail
+
+inline void set_learned_effort_set(std::string model_id, std::uint8_t set) {
+    std::unique_lock lk(learned_effort_detail::mu());
+    learned_effort_detail::map_()[std::move(model_id)] = set;
+    learned_effort_detail::any().store(true, std::memory_order_relaxed);
+}
+inline void set_learned_effort_sets(std::map<std::string, std::uint8_t> all) {
+    std::unique_lock lk(learned_effort_detail::mu());
+    learned_effort_detail::any().store(!all.empty(), std::memory_order_relaxed);
+    learned_effort_detail::map_() = std::move(all);
+}
+[[nodiscard]] inline std::map<std::string, std::uint8_t>
+learned_effort_sets_snapshot() {
+    std::shared_lock lk(learned_effort_detail::mu());
+    return learned_effort_detail::map_();
+}
+// -1 = nothing learned for this id; else the bitmask (may be 0 = param off).
+[[nodiscard]] inline int learned_effort_set_for(std::string_view model_id) {
+    if (!learned_effort_detail::any().load(std::memory_order_relaxed))
+        return -1;
+    std::shared_lock lk(learned_effort_detail::mu());
+    auto& m = learned_effort_detail::map_();
+    auto it = m.find(std::string{model_id});
+    if (it == m.end()) return -1;
+    return static_cast<int>(it->second);
+}
+
 // Decode a model id AND fold in the runtime reasoning-effort override (per
 // model, then AGENTTY_FORCE_EFFORT env). This is the id-aware sibling of the
 // pure constexpr from_id(): effort call sites use THIS so a user's override
@@ -875,10 +963,27 @@ inline void set_reasoning_overrides(std::map<std::string, bool> all) {
 // consumer already funnels through the returned caps.
 [[nodiscard]] inline ModelCapabilities resolved_caps(std::string_view model_id) {
     ModelCapabilities caps = ModelCapabilities::from_id(model_id);
+    // The LEARNED set applies to every lane — even Claude/GPT — because it is
+    // ground truth straight from the provider's own rejection. (In practice
+    // Claude/GPT never land here; the guard exists for aggregator hosts that
+    // serve claude-* ids over the OpenAI wire with different contracts.)
+    if (const int learned = learned_effort_set_for(model_id); learned >= 0) {
+        caps.effort_set       = static_cast<std::uint8_t>(learned);
+        caps.effort_set_known = true;
+    }
     // Claude/GPT are family-gated; overrides only touch the compat lane so we
     // never fabricate their max/xhigh ladder or disturb tier/context logic.
     if (caps.is_known_family() || caps.family == ModelCapabilities::Family::Gpt)
         return caps;
+    // Declared (models.dev / publishing provider) effort enums — compat lane
+    // only: family ladders are already exact, and third-party metadata for
+    // Claude/GPT expresses different wire semantics (adaptive thinking).
+    if (!caps.effort_set_known)
+        if (const int declared = catalog_effort_set_for(model_id);
+            declared >= 0) {
+            caps.effort_set       = static_cast<std::uint8_t>(declared);
+            caps.effort_set_known = true;
+        }
     // Precedence: explicit per-model override > global env > the provider's
     // OWN catalog declaration (capabilities.reasoning, recorded by
     // list_models) > from_id inference. The catalog layer is what absorbs
@@ -888,8 +993,15 @@ inline void set_reasoning_overrides(std::map<std::string, bool> all) {
     const int per_model = reasoning_override_for(model_id);
     if (per_model >= 0) {
         caps.reasoning_compat = (per_model == 1);
+        // An explicit user override beats even the learned set: force-on
+        // reopens the derived ladder, force-off kills it.
+        if (caps.effort_set_known) {
+            if (per_model == 0) { caps.effort_set = 0; }
+            else if (caps.effort_set == 0) { caps.effort_set_known = false; }
+        }
     } else if (const int env = effort_force_override(); env >= 0) {
         caps.reasoning_compat = (env == 1);
+        if (env == 0 && caps.effort_set_known) caps.effort_set = 0;
     } else if (const int live = catalog_reasoning_for(model_id); live >= 0) {
         caps.reasoning_compat = (live == 1);
     }
@@ -1089,27 +1201,71 @@ enum class Effort : std::uint8_t { None, Low, Medium, High, Xhigh, Max };
 // AGENTTY_FORCE_EFFORT override is defined earlier (before resolved_caps),
 // which folds it into the per-model resolution. See effort_force_override().
 
+// Bit for an ON effort level in ModelCapabilities::effort_set. None has no
+// bit — "off" (omit the field) is always available and never learned away.
+[[nodiscard]] constexpr std::uint8_t effort_bit(Effort e) noexcept {
+    switch (e) {
+        case Effort::Low:    return 1u << 0;
+        case Effort::Medium: return 1u << 1;
+        case Effort::High:   return 1u << 2;
+        case Effort::Xhigh:  return 1u << 3;
+        case Effort::Max:    return 1u << 4;
+        case Effort::None:   return 0;
+    }
+    return 0;
+}
+
+// The model's ON-level set as a bitmask, from the best information we have:
+// the exact set when known (learned/models.dev), else DERIVED from the
+// family/compat gates. This is THE single source every ladder/clamp/wire
+// helper below reads — heterogeneity is data, not code paths.
+[[nodiscard]] constexpr std::uint8_t effort_set_of(
+        const ModelCapabilities& caps) noexcept {
+    if (caps.effort_set_known) return caps.effort_set;
+    if (!caps.supports_effort()) return 0;
+    if (caps.effort_high_only) return effort_bit(Effort::High);
+    std::uint8_t s = static_cast<std::uint8_t>(
+        effort_bit(Effort::Low) | effort_bit(Effort::Medium)
+        | effort_bit(Effort::High));
+    if (caps.supports_effort_xhigh()) s |= effort_bit(Effort::Xhigh);
+    if (caps.supports_effort_max())   s |= effort_bit(Effort::Max);
+    return s;
+}
+
 // True when the model should expose effort control. `caps` is expected to be
 // the RESOLVED caps (from resolved_caps(id)), which has already folded in the
 // per-model + env override; this is a thin, readable alias for supports_effort
 // used by the picker view and the effort free functions below.
 [[nodiscard]] inline bool effort_capable(const ModelCapabilities& caps) noexcept {
-    return caps.supports_effort();
+    return effort_set_of(caps) != 0;
+}
+
+// Nearest supported ON level to a requested one: prefer the closest level AT
+// OR BELOW the request (don't think harder than asked), else the lowest level
+// above it. The "map intent to nearest wire value" primitive — with a binary
+// {high} set, every request maps to high; with {low,high}, medium maps low.
+[[nodiscard]] constexpr Effort nearest_effort(
+        Effort e, std::uint8_t set) noexcept {
+    if (set == 0 || e == Effort::None) return Effort::None;
+    constexpr Effort ladder[] = {Effort::Low, Effort::Medium, Effort::High,
+                                 Effort::Xhigh, Effort::Max};
+    int want = 0;
+    for (int i = 0; i < 5; ++i) if (ladder[i] == e) { want = i; break; }
+    for (int i = want; i >= 0; --i)          // at-or-below first
+        if (set & effort_bit(ladder[i])) return ladder[i];
+    for (int i = want + 1; i < 5; ++i)       // else lowest above
+        if (set & effort_bit(ladder[i])) return ladder[i];
+    return Effort::None;   // unreachable while set != 0
 }
 
 // Clamp an Effort to what a model actually supports and return its wire
 // value. "" when the model can't take effort at all (or e == None). The
-// provider calls this so a stale high pick (e.g. Xhigh chosen, then a swap
-// to a model without xhigh) silently degrades to `high` instead of 400ing.
+// provider calls this so a stale pick (e.g. Xhigh chosen, then a swap to a
+// model without xhigh; or medium on a binary-enum Mistral model) silently
+// degrades to the nearest supported level instead of 400ing.
 [[nodiscard]] inline std::string_view effort_wire_for(
         Effort e, const ModelCapabilities& caps) noexcept {
-    if (e == Effort::None || !effort_capable(caps)) return "";
-    // Binary-enum models (Mistral platform): any active tier collapses to
-    // `high` — the only ON value the API accepts; low/medium would 400.
-    if (caps.effort_high_only) return effort_wire(Effort::High);
-    if (e == Effort::Max   && !caps.supports_effort_max())   e = Effort::High;
-    if (e == Effort::Xhigh && !caps.supports_effort_xhigh()) e = Effort::High;
-    return effort_wire(e);
+    return effort_wire(nearest_effort(e, effort_set_of(caps)));
 }
 
 // Typed sibling of effort_wire_for: degrade a stored Effort to what `caps`
@@ -1119,26 +1275,20 @@ enum class Effort : std::uint8_t { None, Low, Medium, High, Xhigh, Max };
 // becomes High here, and effort on a non-reasoning model collapses to None.
 [[nodiscard]] inline Effort clamp_effort(
         Effort e, const ModelCapabilities& caps) noexcept {
-    if (e == Effort::None || !effort_capable(caps)) return Effort::None;
-    // Binary-enum models: any non-off tier becomes High (the only ON level).
-    if (caps.effort_high_only) return Effort::High;
-    if (e == Effort::Max   && !caps.supports_effort_max())   e = Effort::High;
-    if (e == Effort::Xhigh && !caps.supports_effort_xhigh()) e = Effort::High;
-    return e;
+    return nearest_effort(e, effort_set_of(caps));
 }
 
-// Ordered efforts the user may cycle for a given model: always
-// {None, Low, Medium, High}, plus Xhigh / Max where supported. Binary-enum
-// models (effort_high_only) collapse to {None, High} — the only two values
-// their API accepts — so the picker ladder shows exactly what won't 400.
+// Ordered efforts the user may cycle for a given model: off + exactly the ON
+// levels the model's API accepts, in ladder order. The picker renders THIS,
+// so the user can never land on a level that would 400 — a binary-enum model
+// shows off·high, a full-ladder flagship shows off·low·medium·high·xhigh·max.
 [[nodiscard]] inline std::vector<Effort> available_efforts(
         const ModelCapabilities& caps) {
-    if (caps.effort_high_only)
-        return {Effort::None, Effort::High};
-    std::vector<Effort> out{Effort::None, Effort::Low,
-                            Effort::Medium, Effort::High};
-    if (caps.supports_effort_xhigh()) out.push_back(Effort::Xhigh);
-    if (caps.supports_effort_max())   out.push_back(Effort::Max);
+    const std::uint8_t set = effort_set_of(caps);
+    std::vector<Effort> out{Effort::None};
+    for (Effort e : {Effort::Low, Effort::Medium, Effort::High,
+                     Effort::Xhigh, Effort::Max})
+        if (set & effort_bit(e)) out.push_back(e);
     return out;
 }
 

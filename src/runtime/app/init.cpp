@@ -12,6 +12,7 @@
 #include "agentty/provider/kimi/kimi_oauth.hpp"
 #include "agentty/workspace/files.hpp"
 #include "agentty/workspace/symbols.hpp"
+#include "agentty/util/modelsdev.hpp"
 
 #include <cstdlib>
 #include <vector>
@@ -118,6 +119,11 @@ std::pair<Model, maya::Cmd<Msg>> init() {
     // registry so resolved_caps() (and thus supports_effort / the picker /
     // the wire) honor them from frame 1. Mirrors set_custom_auth_header.
     set_reasoning_overrides(settings.reasoning_effort_overrides);
+    // Hydrate the LEARNED effort sets (exact per-model reasoning_effort
+    // contracts discovered from provider rejections in past sessions) so the
+    // ladder / clamps / wire are correct from frame 1 — the reject→learn→
+    // retry loop only ever pays its one-time cost once per model, ever.
+    set_learned_effort_sets(settings.learned_effort_sets);
 
     // Smart Mode: rehydrate role config from settings. A slot counts as
     // "set" once the user pinned a model for it.
@@ -240,6 +246,17 @@ std::pair<Model, maya::Cmd<Msg>> init() {
     // AGENTTY_NO_UPDATE_CHECK=1 (or airgap mode) disables it entirely.
     if (!std::getenv("AGENTTY_NO_UPDATE_CHECK"))
         cmds.push_back(cmd::check_for_update());
+
+    // models.dev capability snapshot: load the cached copy NOW (one small
+    // file read — declared reasoning + exact effort enums reach the ladder
+    // from frame 1), then refresh in the background (24h-cached fetch of
+    // https://models.dev/api.json). Community-maintained metadata absorbs
+    // provider drift between releases; the learned-from-rejection registry
+    // still outranks it for anything the provider itself corrected. Same
+    // opt-outs as the release check (airgap installs must not dial out).
+    agentty::modelsdev::load_cached();
+    if (!std::getenv("AGENTTY_NO_UPDATE_CHECK"))
+        cmds.push_back(cmd::refresh_modelsdev());
 
     // Prewarm the composer's `@` (files) and `#` (symbols) indices on
     // background threads NOW, so by the time the user types either trigger

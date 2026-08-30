@@ -173,8 +173,9 @@ TEST_CASE("gpt5 codex caps") {
         CHECK(c.supports_effort());
         CHECK(c.supports_effort_xhigh());
         CHECK(!c.supports_effort_max());
-        // A stale `max` pick degrades to `high` rather than 400ing.
-        CHECK(effort_wire_for(Effort::Max, c) == "high");
+        // A stale `max` pick degrades to the NEAREST supported tier —
+        // xhigh here — rather than 400ing (or over-shooting down to high).
+        CHECK(effort_wire_for(Effort::Max, c) == "xhigh");
         CHECK(effort_wire_for(Effort::Xhigh, c) == "xhigh");
     }
     // Plain `gpt-5` (no revision) still gets effort.

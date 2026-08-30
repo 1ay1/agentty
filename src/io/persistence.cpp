@@ -1234,6 +1234,13 @@ store::Settings load_settings() {
             for (auto& [k, v] : j["reasoning_effort_overrides"].items())
                 if (v.is_boolean()) s.reasoning_effort_overrides[k] = v.get<bool>();
         }
+        if (j.contains("learned_effort_sets")
+            && j["learned_effort_sets"].is_object()) {
+            for (auto& [k, v] : j["learned_effort_sets"].items())
+                if (v.is_number_unsigned())
+                    s.learned_effort_sets[k] =
+                        static_cast<std::uint8_t>(v.get<unsigned>() & 0xFFu);
+        }
         auto grants = j.value("always_allow_tools", std::vector<std::string>{});
         s.always_allow_tools = std::move(grants);
         s.context_1m_blocked = j.value("context_1m_blocked", false);
@@ -1320,6 +1327,12 @@ void save_settings(const store::Settings& s) {
         json ro = json::object();
         for (const auto& [k, v] : s.reasoning_effort_overrides) ro[k] = v;
         j["reasoning_effort_overrides"] = std::move(ro);
+    }
+    if (!s.learned_effort_sets.empty()) {
+        json le = json::object();
+        for (const auto& [k, v] : s.learned_effort_sets)
+            le[k] = static_cast<unsigned>(v);
+        j["learned_effort_sets"] = std::move(le);
     }
     if (!s.always_allow_tools.empty())
         j["always_allow_tools"] = s.always_allow_tools;

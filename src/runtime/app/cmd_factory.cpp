@@ -26,6 +26,7 @@
 #include "agentty/provider/prompt_policy.hpp"
 #include "agentty/provider/selection.hpp"
 #include "agentty/provider/credentials.hpp"
+#include "agentty/util/modelsdev.hpp"
 #include "agentty/tool/registry.hpp"
 #include "agentty/mcp/client.hpp"   // plugin_model(), reload_mcp_plugins via registry
 #include "agentty/tool/hooks.hpp"
@@ -1710,6 +1711,16 @@ Cmd<Msg> check_for_update() {
             }
         } catch (...) {}
         dispatch(Msg{UpdateCheckDone{}});
+    });
+}
+
+Cmd<Msg> refresh_modelsdev() {
+    return Cmd<Msg>::task_isolated([](std::function<void(Msg)>) {
+        // Fire-and-forget: registries are consulted at render/wire time, so
+        // there is no Msg to dispatch — the moment the fetch lands, the next
+        // frame's ladder/badges and the next request's clamp see it. Errors
+        // are swallowed; a metadata refresh must never surface as a failure.
+        try { (void)agentty::modelsdev::refresh(); } catch (...) {}
     });
 }
 
