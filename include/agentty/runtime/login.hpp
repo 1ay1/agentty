@@ -33,27 +33,41 @@ namespace agentty::ui::login {
 
 struct Closed {};
 
-// Where Esc should land from a sub-modal — the ONE-LEVEL back target. The
-// login flow is a stack the user walks INTO (provider picker → custom-host
-// input → API-key prompt); Esc must walk back OUT one step at a time, not
-// collapse everything to the composer (which also discarded a typed host
-// when backing out of the key prompt). Each enterable sub-state records its
-// origin; the LoginBack reducer pops accordingly. Close = legacy behaviour
-// (first-run flows that have no parent).
-enum class Back : std::uint8_t {
-    Close,           // no parent — dismiss the login UI entirely
-    ProviderPicker,  // re-open the provider picker
-    PickMethod,      // back to the sign-in method menu (Picking)
-    AccountList,     // back to the account switcher
-    CustomHost,      // back to the custom-host input (spec restored)
-    FusedPicker,     // re-open the fused cross-provider model picker
-};
+// Where Esc lands from a sub-modal — the ONE-LEVEL parent, modelled as a
+// FIRST-CLASS FRAME that carries its OWN context, not a lossy tag.
+//
+// The login flow is a stack the user walks INTO (provider picker → account
+// list → key input); Esc walks back OUT one step, rebuilding the parent with
+// its FULL context. The old `Back` enum could only name a KIND of parent
+// ("AccountList") — it lost WHICH provider's list, so Esc from Mistral's key
+// input wrongly reopened the ACTIVE provider's accounts. By making each parent
+// carry its data, "return to the wrong provider" becomes UNREPRESENTABLE:
+// the frame that opened Mistral's key input holds `Accounts{"mistral"}`, so
+// Esc provably returns there.
+namespace origin {
+    struct Nowhere {};                            // no parent — close the modal.
+    struct ProviderPicker {};                     // reopen the provider picker.
+    struct FusedPicker {};                         // reopen the fused model picker.
+    struct Accounts { std::string provider; };     // reopen THIS provider's accounts.
+    struct Method   { std::string provider; };     // the sign-in method menu (Picking).
+    struct HostInput { std::string spec; };        // restore the typed custom host.
+}
+// A self-contained "where I came from". Every enterable sub-state stores one;
+// LoginBack std::visits it — no side-channel params, no active-provider guess.
+using Origin = std::variant<origin::Nowhere, origin::ProviderPicker,
+                            origin::FusedPicker, origin::Accounts,
+                            origin::Method, origin::HostInput>;
+
+// True when Esc should read "back" (has a parent) rather than "cancel".
+[[nodiscard]] inline bool has_parent(const Origin& o) noexcept {
+    return !std::holds_alternative<origin::Nowhere>(o);
+}
 
 // Optional provider context keeps an "add another account" flow scoped to
 // the provider it came from. Empty means the general first-run/sign-in menu.
 struct Picking {
     std::string provider;
-    Back back = Back::Close;
+    Origin origin = origin::Nowhere{};
 };
 
 struct OAuthCode {
@@ -106,7 +120,7 @@ struct ApiKeyInput {
     // lookup.
     std::string provider;        // canonical id; empty = Anthropic
     std::string provider_label;  // display name for the panel title
-    Back back = Back::Close;     // Esc target (one level up)
+    Origin origin = origin::Nowhere{};     // Esc target (one level up)
 };
 
 // Free-text entry of a raw OpenAI-compatible endpoint ("host" or
@@ -117,7 +131,7 @@ struct ApiKeyInput {
 struct CustomHostInput {
     std::string host_input;
     int         cursor = 0;
-    Back back = Back::Close;     // Esc target (one level up)
+    Origin origin = origin::Nowhere{};     // Esc target (one level up)
 };
 
 // Async connect-probe of a just-entered custom host: the modal shows
@@ -131,7 +145,7 @@ struct CustomHostInput {
 struct HostProbing {
     std::string   spec;          // canonical spec being probed
     std::uint64_t attempt_id = 0;
-    Back back = Back::Close;     // where failure/Esc returns to
+    Origin origin = origin::Nowhere{};     // where failure/Esc returns to
 };
 
 struct Failed {

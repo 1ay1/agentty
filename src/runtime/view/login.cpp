@@ -387,7 +387,7 @@ Element panel_api_key(const login::ApiKeyInput& s) {
     }
     rows.push_back(text(""));
     rows.push_back(key_hints({{"Enter", "submit"},
-                              {"Esc", s.back != login::Back::Close
+                              {"Esc", login::has_parent(s.origin)
                                           ? "back" : "cancel"}}));
     return v(std::move(rows)).build();
 }
@@ -432,7 +432,7 @@ Element panel_custom_host(const login::CustomHostInput& s) {
         fg_dim(muted)));
     rows.push_back(text(""));
     rows.push_back(key_hints({{"Enter", "connect"},
-                              {"Esc", s.back != login::Back::Close
+                              {"Esc", login::has_parent(s.origin)
                                           ? "back" : "cancel"}}));
     return v(std::move(rows)).build();
 }

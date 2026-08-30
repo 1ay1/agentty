@@ -154,8 +154,8 @@ struct FusedPickerMsg {                 // opened with `/model` (default) and ^/
   the recalled default. One code path, one toast, one atomic transition.
 * If `!row.authed` → this is a "sign in to X" offer: open the existing login
   flow for that provider (`ApiKeyInput` / device / ChatGPT OAuth), with
-  `Back::FusedPicker` so completing auth returns to the fused picker with the
-  provider now authed and its catalog loading. Un-authed → authed is one
+  `origin::FusedPicker{}` so completing auth returns to the fused picker with
+  the provider now authed and its catalog loading. Un-authed → authed is one
   continuous flow, not a separate journey.
 
 To pre-stash the target model without widening `commit_provider_switch`'s

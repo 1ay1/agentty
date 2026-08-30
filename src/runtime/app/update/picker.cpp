@@ -808,7 +808,7 @@ Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
             // "Custom host…" sentinel: hand off to the free-text endpoint modal.
             if (chosen.is_new_custom_host()) {
                 ui::login::CustomHostInput ch;
-                ch.back = ui::login::Back::ProviderPicker;  // Esc = one step back
+                ch.origin = ui::login::origin::ProviderPicker{};  // Esc = one step back
                 m.ui.login = std::move(ch);
                 return done(std::move(m));
             }
@@ -881,7 +881,7 @@ Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
                     .cursor         = 0,
                     .provider       = spec,
                     .provider_label = std::string{preset.label},
-                    .back           = ui::login::Back::ProviderPicker,
+                    .origin         = ui::login::origin::ProviderPicker{},
                 };
                 return done(std::move(m));
             }
@@ -1202,18 +1202,18 @@ Step switch_to_model_ref(Model m, const ModelRef& ref, bool record = true) {
                                   std::move(auth), label, ref.model_id);
 }
 
-// Route to the login flow for `provider_id`, returning to `back` after auth.
+// Route to the login flow for `provider_id`, popping to `origin` on Esc.
 // Used by a fused sign-in offer (un-authed provider row). Mirrors the entry
 // points ProviderPickerSelect uses for each auth style.
 Step open_login_for(Model m, const std::string& provider_id,
-                    const std::string& label, ui::login::Back back) {
+                    const std::string& label, ui::login::Origin origin) {
     const provider::ProviderPreset* p = provider::preset_for(provider_id);
     if (p && p->oauth_native) {
         // ChatGPT/Copilot/Kimi: OAuth device/browser flow via the method menu
         // scoped to this provider.
         ui::login::Picking pk;
         pk.provider = provider_id;
-        pk.back = back;
+        pk.origin   = std::move(origin);
         m.ui.login = std::move(pk);
         return {std::move(m), maya::Cmd<Msg>::none()};
     }
@@ -1222,7 +1222,7 @@ Step open_login_for(Model m, const std::string& provider_id,
     m.ui.login = ui::login::ApiKeyInput{
         .provider       = provider_id,
         .provider_label = label,
-        .back           = back,
+        .origin         = std::move(origin),
     };
     return {std::move(m), maya::Cmd<Msg>::none()};
 }
@@ -1543,7 +1543,8 @@ Step fused_picker_update(Model m, msg::FusedPickerMsg pm) {
             if (row.is_signin_offer()) {
                 // Route to login for that provider, returning here after.
                 return open_login_for(std::move(m), row.provider_id,
-                                      row.label, ui::login::Back::FusedPicker);
+                                      row.label,
+                                      ui::login::origin::FusedPicker{});
             }
             return switch_to_model_ref(std::move(m), row.ref());
         },

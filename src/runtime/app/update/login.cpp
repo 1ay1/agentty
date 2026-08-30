@@ -106,64 +106,79 @@ Step close_login(Model m) {
     return done(std::move(m));
 }
 
-// Esc in a login sub-modal: pop ONE level using the sub-state's recorded
-// origin. Falls back to a full close for states with no parent (first-run
-// flows) and for async-waiting states (where Esc means CANCEL, which close
-// handles via the cancel latch).
+// Esc from a login sub-modal: pop ONE level using the sub-state's recorded
+// Origin — a first-class parent frame, so each pop rebuilds the parent with
+// its FULL context (which provider's accounts, which typed host). One visit,
+// no side-channels. States with no parent (Nowhere) or async-waiting states
+// (Esc = cancel) fall through to close_login.
 Step login_back(Model m) {
-    using login::Back;
-    auto pop_to = [&](Back back, std::string spec_for_host) -> Step {
-        switch (back) {
-            case Back::ProviderPicker:
+    // Reconstruct the recorded parent. `pop` OWNS the origin, so it can move a
+    // provider/spec out of it into the rebuilt state.
+    auto pop = [&](login::Origin origin) -> Step {
+        return std::visit([&](auto&& o) -> Step {
+            using T = std::decay_t<decltype(o)>;
+            namespace og = login::origin;
+            if constexpr (std::is_same_v<T, og::ProviderPicker>) {
                 m.ui.login = login::Closed{};
-                return agentty::app::update(std::move(m),
-                                            Msg{OpenProviderPicker{}});
-            case Back::PickMethod:
-                m.ui.login = login::Picking{};
+                return agentty::app::update(std::move(m), Msg{OpenProviderPicker{}});
+            } else if constexpr (std::is_same_v<T, og::FusedPicker>) {
+                m.ui.login = login::Closed{};
+                return agentty::app::update(std::move(m), Msg{OpenFusedPicker{}});
+            } else if constexpr (std::is_same_v<T, og::Accounts>) {
+                // Return to the SPECIFIC provider's account list — the frame
+                // carries the provider, so this can't drift to the active one.
+                m.ui.login = login::Closed{};
+                return agentty::app::update(
+                    std::move(m), Msg{OpenAccounts{std::move(o.provider)}});
+            } else if constexpr (std::is_same_v<T, og::Method>) {
+                login::Picking p;
+                p.provider = std::move(o.provider);
+                // A provider-scoped method menu is only ever entered from that
+                // provider's account list, so restore that as ITS parent — the
+                // next Esc keeps walking the same stack instead of closing.
+                if (!p.provider.empty())
+                    p.origin = login::origin::Accounts{p.provider};
+                m.ui.login = std::move(p);
                 return done(std::move(m));
-            case Back::AccountList:
-                m.ui.login = login::Closed{};
-                return agentty::app::update(std::move(m), Msg{OpenAccounts{}});
-            case Back::FusedPicker:
-                m.ui.login = login::Closed{};
-                return agentty::app::update(std::move(m),
-                                            Msg{OpenFusedPicker{}});
-            case Back::CustomHost: {
-                // Restore the typed spec so backing out of the key prompt
+            } else if constexpr (std::is_same_v<T, og::HostInput>) {
+                // Restore the typed spec so backing out of the key/probe prompt
                 // doesn't discard the host the user just entered.
                 login::CustomHostInput ch;
-                ch.host_input = std::move(spec_for_host);
+                ch.host_input = std::move(o.spec);
                 ch.cursor     = static_cast<int>(ch.host_input.size());
-                ch.back       = Back::ProviderPicker;
+                ch.origin     = login::origin::ProviderPicker{};
                 m.ui.login    = std::move(ch);
                 return done(std::move(m));
-            }
-            case Back::Close:
-            default:
+            } else {   // og::Nowhere
                 return close_login(std::move(m));
-        }
+            }
+        }, std::move(origin));
     };
+
     if (auto* ch = std::get_if<login::CustomHostInput>(&m.ui.login))
-        return pop_to(ch->back, {});
+        return pop(std::move(ch->origin));
     if (auto* hp = std::get_if<login::HostProbing>(&m.ui.login)) {
         // Esc during a probe: abandon it (the attempt id makes any late
-        // HostProbed a no-op) and put the typed spec back in the input.
+        // HostProbed a no-op) and put the typed spec back in the input,
+        // keeping the probe's own parent frame for the NEXT Esc.
+        auto spec   = std::move(hp->spec);
+        auto origin = std::move(hp->origin);
         login::CustomHostInput ch;
-        ch.host_input = hp->spec;
+        ch.host_input = std::move(spec);
         ch.cursor     = static_cast<int>(ch.host_input.size());
-        ch.back       = hp->back;
+        ch.origin     = std::move(origin);
         m.ui.login    = std::move(ch);
         return done(std::move(m));
     }
     if (auto* api = std::get_if<login::ApiKeyInput>(&m.ui.login))
-        return pop_to(api->back, api->provider);
+        return pop(std::move(api->origin));
     if (auto* p = std::get_if<login::Picking>(&m.ui.login))
-        return pop_to(p->back, {});
+        return pop(std::move(p->origin));
     // The account list is always reached FROM the provider picker (Enter on a
-    // provider row), so Esc steps BACK there — not a full close. This keeps
-    // the navigation hierarchical (accounts → providers → chat).
+    // provider row), so Esc steps BACK there — keeping accounts → providers →
+    // chat hierarchical.
     if (std::holds_alternative<login::AccountList>(m.ui.login))
-        return pop_to(login::Back::ProviderPicker, {});
+        return pop(login::origin::ProviderPicker{});
     // Every other sub-state (OAuth waits, failures): Esc keeps its original
     // meaning — cancel/close outright.
     return close_login(std::move(m));
@@ -177,12 +192,12 @@ Step login_back(Model m) {
 Step host_probed(Model m, HostProbed r) {
     auto* hp = std::get_if<login::HostProbing>(&m.ui.login);
     if (!hp || hp->attempt_id != r.attempt_id) return done(std::move(m));
-    const auto back = hp->back;
+    auto origin = std::move(hp->origin);
     if (!r.ok) {
         login::CustomHostInput ch;
         ch.host_input = std::move(r.spec);
         ch.cursor     = static_cast<int>(ch.host_input.size());
-        ch.back       = back;
+        ch.origin     = std::move(origin);
         m.ui.login    = std::move(ch);
         auto toast = set_status_toast(m, "host check failed: " + r.error,
                                       std::chrono::seconds{6});
@@ -367,7 +382,9 @@ Step account_select(Model m) {
             m.ui.login = login::ApiKeyInput{
                 .provider       = provider,
                 .provider_label = al->provider_label,
-                .back           = login::Back::AccountList,
+                // Frame carries THIS provider — Esc provably returns to ITS
+                // account list, never the active provider's.
+                .origin         = login::origin::Accounts{provider},
             };
             return done(std::move(m));
         case provider::credentials::AddMethod::None:
@@ -394,8 +411,9 @@ Step account_select(Model m) {
             return launch_device_login(std::move(m), "kimi", "Kimi");
         // Anthropic (or any other OAuth provider): the provider-selection
         // method menu, which offers OAuth-vs-key.
-        m.ui.login = login::Picking{.provider = provider,
-                                    .back = login::Back::AccountList};
+        m.ui.login = login::Picking{
+            .provider = provider,
+            .origin   = login::origin::Accounts{provider}};
         return done(std::move(m));
     }
 
@@ -589,7 +607,9 @@ Step login_pick_method(Model m, char32_t key) {
     }
     if (key == U'1') {
         login::ApiKeyInput api;
-        api.back = login::Back::PickMethod;   // Esc = back to the menu
+        // Esc = back to THIS method menu, scoped to the same provider.
+        api.origin = login::origin::Method{
+            picking ? picking->provider : std::string{}};
         m.ui.login = std::move(api);
         return done(std::move(m));
     }
@@ -615,7 +635,9 @@ Step login_pick_method(Model m, char32_t key) {
         // automatically when the provider switch commits.
         {
             login::CustomHostInput ch;
-            ch.back = login::Back::PickMethod;   // Esc = back to this menu
+            // Esc = back to THIS method menu, scoped to the same provider.
+            ch.origin = login::origin::Method{
+                picking ? picking->provider : std::string{}};
             m.ui.login = std::move(ch);
         }
         return done(std::move(m));
@@ -775,7 +797,9 @@ Step login_submit(Model m) {
                 .cursor         = key_len,
                 .provider       = spec,
                 .provider_label = std::move(label),
-                .back           = login::Back::CustomHost,  // Esc = re-edit host
+                // Esc = re-edit the host; the frame carries the TYPED spec so
+                // nothing the user entered is lost.
+                .origin         = login::origin::HostInput{spec},
             };
             return done(std::move(m));
         }
@@ -789,9 +813,10 @@ Step login_submit(Model m) {
         {
             auth::AuthHeader probe_auth = provider::credentials::resolve(spec);
             const auto attempt_id = cmd::next_codex_login_attempt_id();
-            const auto back = ch->back;
+            auto origin = std::move(ch->origin);
             m.ui.login = login::HostProbing{
-                .spec = spec, .attempt_id = attempt_id, .back = back};
+                .spec = spec, .attempt_id = attempt_id,
+                .origin = std::move(origin)};
             return {std::move(m),
                     cmd::probe_host_async(spec, attempt_id,
                                           std::move(probe_auth))};
