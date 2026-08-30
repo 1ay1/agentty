@@ -267,10 +267,38 @@ TEST_CASE("compat reasoning effort (chat wire)") {
         // A stale Max/Xhigh pick degrades to `high` instead of 400ing.
         CHECK(effort_wire_for(Effort::Max, c)    == "high");
         CHECK(effort_wire_for(Effort::Xhigh, c)  == "high");
-        CHECK(effort_wire_for(Effort::Medium, c) == "medium");
         CHECK(effort_wire_for(Effort::None, c)   == "");
         // The picker can cycle effort on these models.
         CHECK(cycle_effort(Effort::None, +1, c) != Effort::None);
+    }
+
+    // Non-Mistral compat models keep the full low|medium|high enum.
+    for (const char* id : {"deepseek-reasoner", "grok-3-mini", "o3",
+                           "gemini-2.5-flash-thinking", "gpt-oss-120b"}) {
+        const auto c = ModelCapabilities::from_id(id);
+        CHECK(!c.effort_high_only);
+        CHECK(effort_wire_for(Effort::Medium, c) == "medium");
+        CHECK(effort_wire_for(Effort::Low, c)    == "low");
+    }
+
+    // Mistral-platform models take a BINARY enum — {none, high} only; the
+    // API 400s on low/medium ("supported values: [high, none]"). Any active
+    // tier must collapse to `high`, the ladder to off→high, and clamp to High.
+    for (const char* id : {"mistral-small-latest", "mistral-medium-latest",
+                           "mistral-medium-3-5", "mistral-small-3-2"}) {
+        const auto c = ModelCapabilities::from_id(id);
+        CHECK(c.effort_high_only);
+        CHECK(effort_wire_for(Effort::Low, c)    == "high");
+        CHECK(effort_wire_for(Effort::Medium, c) == "high");
+        CHECK(effort_wire_for(Effort::High, c)   == "high");
+        CHECK(effort_wire_for(Effort::Max, c)    == "high");
+        CHECK(effort_wire_for(Effort::None, c)   == "");
+        CHECK(agentty::clamp_effort(Effort::Medium, c) == Effort::High);
+        CHECK(agentty::clamp_effort(Effort::None, c)   == Effort::None);
+        const auto ladder = agentty::available_efforts(c);
+        REQUIRE(ladder.size() == 2);
+        CHECK(ladder[0] == Effort::None);
+        CHECK(ladder[1] == Effort::High);
     }
 
     // Non-reasoning / native-reasoning lines that share a prefix must NOT light
@@ -348,6 +376,46 @@ TEST_CASE("per-model reasoning override registry") {
 
     clear_reasoning_overrides();   // leave global state clean for other tests
     CHECK(reasoning_override_for("codestral-latest") == -1);
+}
+
+TEST_CASE("live-catalog reasoning declaration") {
+    using agentty::resolved_caps;
+    using agentty::set_catalog_reasoning;
+    using agentty::catalog_reasoning_for;
+    using agentty::set_reasoning_override;
+    using agentty::clear_reasoning_overrides;
+    using agentty::Effort;
+
+    clear_reasoning_overrides();
+
+    // Mistral's live catalog says the dated mistral-medium-2505 does NOT
+    // reason (it 400s on reasoning_effort) even though the id substring
+    // matches from_id's "mistral-medium" rule — the catalog must win.
+    set_catalog_reasoning("mistral-medium-2505", false);
+    CHECK(catalog_reasoning_for("mistral-medium-2505") == 0);
+    CHECK(!resolved_caps("mistral-medium-2505").supports_effort());
+
+    // …and magistral-medium-latest DOES accept it now, though from_id
+    // excludes magistral — again the catalog wins.
+    set_catalog_reasoning("magistral-medium-latest", true);
+    CHECK(catalog_reasoning_for("magistral-medium-latest") == 1);
+    {
+        const auto c = resolved_caps("magistral-medium-latest");
+        CHECK(c.supports_effort());
+        // Still a Mistral-platform id → binary {none, high} ladder.
+        CHECK(c.effort_high_only);
+        CHECK(agentty::effort_wire_for(Effort::Medium, c) == "high");
+    }
+
+    // The user's explicit per-model override outranks the catalog.
+    set_reasoning_override("magistral-medium-latest", false);
+    CHECK(!resolved_caps("magistral-medium-latest").supports_effort());
+    clear_reasoning_overrides();
+    CHECK(resolved_caps("magistral-medium-latest").supports_effort());
+
+    // Reset the catalog entries so other tests see inference behaviour.
+    set_catalog_reasoning("mistral-medium-2505", true);
+    set_catalog_reasoning("magistral-medium-latest", false);
 }
 
 TEST_CASE("capability tiers") {

@@ -2308,6 +2308,18 @@ std::vector<ModelInfo> list_models(const AuthHeader& auth, const Endpoint& endpo
                 // none of which an agent can drive. Drop them so they never
                 // pollute the picker OR get chosen by the subagent router.
                 if (!is_dispatchable_model(id)) continue;
+                // Providers that DECLARE per-model reasoning support in the
+                // catalog (Mistral: capabilities.reasoning) get that truth
+                // recorded — resolved_caps() folds it in over id inference,
+                // so the effort ladder tracks the provider's live dispatch
+                // table instead of our static guesses (which drift: dated
+                // mistral-medium revisions reject reasoning_effort while
+                // magistral now accepts it).
+                if (auto ci = m.find("capabilities");
+                    ci != m.end() && ci->is_object()
+                    && ci->contains("reasoning")
+                    && (*ci)["reasoning"].is_boolean())
+                    set_catalog_reasoning(id, (*ci)["reasoning"].get<bool>());
                 result.push_back(ModelInfo{
                     .id           = ModelId{id},
                     .display_name = id,

@@ -208,6 +208,18 @@ struct ModelCapabilities {
     // below deliberately do NOT open for reasoning_compat.
     bool reasoning_compat = false;
 
+    // The model's effort enum is BINARY: it accepts only {none, high} and
+    // 400s on low/medium (and every Claude/GPT extension). This is Mistral's
+    // platform-wide contract — probing api.mistral.ai shows every reasoning
+    // model there (mistral-medium 3.5+, mistral-small 4, magistral) rejects
+    // low|medium|minimal|xhigh|max with "supported values: [high, none]".
+    // Decoded from the id's "stral" house naming (mistral/magistral/devstral/
+    // ministral/leanstral …) so the picker ladder collapses to off→high and
+    // clamp/wire promote any stale low/medium pick to high instead of 400ing.
+    // Orthogonal to reasoning_compat: this only shapes WHICH levels exist,
+    // reasoning_compat (+ catalog/overrides) decides IF effort exists.
+    bool effort_high_only = false;
+
     [[nodiscard]] constexpr bool is_haiku()  const noexcept { return family == Family::Haiku; }
     [[nodiscard]] constexpr bool is_sonnet() const noexcept { return family == Family::Sonnet; }
     [[nodiscard]] constexpr bool is_opus()   const noexcept { return family == Family::Opus; }
@@ -515,6 +527,7 @@ struct ModelCapabilities {
         }
         caps.weak_tool_use     = infer_weak_tool_use(id, caps);
         caps.reasoning_compat  = infer_reasoning_compat(id, caps);
+        caps.effort_high_only  = infer_effort_high_only(id);
         return caps;
     }
 
@@ -704,7 +717,70 @@ private:
             || contains(id, "o3")
             || contains(id, "o4-mini");
     }
+
+    // Mistral-platform models: the reasoning_effort enum is BINARY. Probing
+    // api.mistral.ai (Nov 2026): every model that takes the parameter accepts
+    // ONLY {none, high} and 400s on low/medium/minimal/xhigh/max with
+    // "supported values: [high, none]". Recognised by the house "-stral"
+    // naming (mistral / magistral / ministral / devstral / codestral /
+    // voxtral / leanstral) — non-reasoning lines in that family have effort
+    // OFF anyway, so an over-match here is harmless (the flag only shapes the
+    // ladder when effort is on). Pure id decode: correct from frame 1, before
+    // any catalog fetch lands.
+    [[nodiscard]] static constexpr bool infer_effort_high_only(
+            std::string_view id) noexcept {
+        auto contains = [](std::string_view hay, std::string_view needle) {
+            if (needle.size() > hay.size()) return false;
+            for (std::size_t i = 0; i + needle.size() <= hay.size(); ++i) {
+                bool eq = true;
+                for (std::size_t j = 0; j < needle.size(); ++j) {
+                    char a = hay[i + j], b = needle[j];
+                    if (a >= 'A' && a <= 'Z') a = static_cast<char>(a + 32);
+                    if (b >= 'A' && b <= 'Z') b = static_cast<char>(b + 32);
+                    if (a != b) { eq = false; break; }
+                }
+                if (eq) return true;
+            }
+            return false;
+        };
+        return contains(id, "stral");
+    }
 };
+
+// ── Live-catalog reasoning registry ──────────────────────────────────────────
+// Some providers DECLARE per-model reasoning support in their /v1/models
+// payload (Mistral: capabilities.reasoning true|false). That live flag beats
+// id inference — it tracks the provider's actual dispatch table, which drifts
+// under our static heuristics in BOTH directions (magistral-* now ACCEPTS
+// reasoning_effort though from_id excludes it; dated mistral-medium-2505/2508
+// REJECT it though the substring matches). list_models() records the flag
+// here; resolved_caps() folds it in UNDER the user's explicit override but
+// OVER the from_id guess. Same lock discipline as the override registry
+// (atomic emptiness probe → shared lock), since this too sits on the render
+// path.
+namespace catalog_reasoning_detail {
+inline std::shared_mutex& mu() { static std::shared_mutex m; return m; }
+inline std::map<std::string, bool>& map_() {
+    static std::map<std::string, bool> m; return m;
+}
+inline std::atomic<bool>& any() { static std::atomic<bool> a{false}; return a; }
+} // namespace catalog_reasoning_detail
+
+inline void set_catalog_reasoning(std::string model_id, bool reasons) {
+    std::unique_lock lk(catalog_reasoning_detail::mu());
+    catalog_reasoning_detail::map_()[std::move(model_id)] = reasons;
+    catalog_reasoning_detail::any().store(true, std::memory_order_relaxed);
+}
+// Tri-state: 1 (catalog says reasons), 0 (catalog says not), -1 (no info).
+[[nodiscard]] inline int catalog_reasoning_for(std::string_view model_id) {
+    if (!catalog_reasoning_detail::any().load(std::memory_order_relaxed))
+        return -1;
+    std::shared_lock lk(catalog_reasoning_detail::mu());
+    auto& m = catalog_reasoning_detail::map_();
+    auto it = m.find(std::string{model_id});
+    if (it == m.end()) return -1;
+    return it->second ? 1 : 0;
+}
 
 // ── Per-model reasoning-effort override registry ─────────────────────────
 // The "configure it myself" seam (issue #20). The constexpr from_id() decode
@@ -803,12 +879,19 @@ inline void set_reasoning_overrides(std::map<std::string, bool> all) {
     // never fabricate their max/xhigh ladder or disturb tier/context logic.
     if (caps.is_known_family() || caps.family == ModelCapabilities::Family::Gpt)
         return caps;
-    // Precedence: explicit per-model override > global env > from_id inference.
+    // Precedence: explicit per-model override > global env > the provider's
+    // OWN catalog declaration (capabilities.reasoning, recorded by
+    // list_models) > from_id inference. The catalog layer is what absorbs
+    // provider drift — e.g. Mistral flipping magistral to accept
+    // reasoning_effort, or a dated mistral-medium revision that rejects it —
+    // without a code change.
     const int per_model = reasoning_override_for(model_id);
     if (per_model >= 0) {
         caps.reasoning_compat = (per_model == 1);
     } else if (const int env = effort_force_override(); env >= 0) {
         caps.reasoning_compat = (env == 1);
+    } else if (const int live = catalog_reasoning_for(model_id); live >= 0) {
+        caps.reasoning_compat = (live == 1);
     }
     return caps;
 }
@@ -1021,6 +1104,9 @@ enum class Effort : std::uint8_t { None, Low, Medium, High, Xhigh, Max };
 [[nodiscard]] inline std::string_view effort_wire_for(
         Effort e, const ModelCapabilities& caps) noexcept {
     if (e == Effort::None || !effort_capable(caps)) return "";
+    // Binary-enum models (Mistral platform): any active tier collapses to
+    // `high` — the only ON value the API accepts; low/medium would 400.
+    if (caps.effort_high_only) return effort_wire(Effort::High);
     if (e == Effort::Max   && !caps.supports_effort_max())   e = Effort::High;
     if (e == Effort::Xhigh && !caps.supports_effort_xhigh()) e = Effort::High;
     return effort_wire(e);
@@ -1034,16 +1120,21 @@ enum class Effort : std::uint8_t { None, Low, Medium, High, Xhigh, Max };
 [[nodiscard]] inline Effort clamp_effort(
         Effort e, const ModelCapabilities& caps) noexcept {
     if (e == Effort::None || !effort_capable(caps)) return Effort::None;
+    // Binary-enum models: any non-off tier becomes High (the only ON level).
+    if (caps.effort_high_only) return Effort::High;
     if (e == Effort::Max   && !caps.supports_effort_max())   e = Effort::High;
     if (e == Effort::Xhigh && !caps.supports_effort_xhigh()) e = Effort::High;
     return e;
 }
 
 // Ordered efforts the user may cycle for a given model: always
-// {None, Low, Medium, High}, plus Xhigh / Max where supported. The picker
-// cycles within this so the user never lands on a level the model 400s on.
+// {None, Low, Medium, High}, plus Xhigh / Max where supported. Binary-enum
+// models (effort_high_only) collapse to {None, High} — the only two values
+// their API accepts — so the picker ladder shows exactly what won't 400.
 [[nodiscard]] inline std::vector<Effort> available_efforts(
         const ModelCapabilities& caps) {
+    if (caps.effort_high_only)
+        return {Effort::None, Effort::High};
     std::vector<Effort> out{Effort::None, Effort::Low,
                             Effort::Medium, Effort::High};
     if (caps.supports_effort_xhigh()) out.push_back(Effort::Xhigh);
