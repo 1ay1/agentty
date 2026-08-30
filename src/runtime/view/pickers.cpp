@@ -635,9 +635,23 @@ Element provider_picker(const Model& m) {
                 return {active ? "\xe2\x9c\x93 signed in \xc2\xb7 accounts" : "\xe2\x9c\x93 signed in", success};
             return {"\xe2\x9a\xa0 sign in", warn};
         }
-        // Hosted API-key provider: show which env var supplies (or is missing) the key.
-        for (auto env : p.auth_env)
-            if (env_has(env)) return {"\xe2\x9c\x93 " + std::string{env}, success};
+        // Hosted API-key provider: distinguish a SAVED (pasted) key — which
+        // ^D signs out — from an ENV key, which can't be removed in-app, so
+        // the badge must not imply ^D will work on it.
+        switch (provider::auth_source(p, settings)) {
+            case provider::AuthSource::Saved:
+                return {active ? "\xe2\x9c\x93 signed in \xc2\xb7 key"
+                               : "\xe2\x9c\x93 key saved", success};
+            case provider::AuthSource::Env: {
+                std::string ev;
+                for (auto e : p.auth_env) if (env_has(e)) { ev = e; break; }
+                return {"\xe2\x97\x8f key from " + ev, info};
+            }
+            case provider::AuthSource::Local:
+                return {"\xe2\x97\x8f local", info};
+            case provider::AuthSource::None:
+            default: break;
+        }
         std::string_view want = p.auth_env.front();
         return {want.empty() ? "\xe2\x9a\xa0 no key" : "\xe2\x9a\xa0 " + std::string{want}, warn};
     };

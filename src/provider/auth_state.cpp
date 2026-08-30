@@ -56,4 +56,24 @@ bool provider_is_authed(std::string_view id, const store::Settings& settings) {
     return settings.provider_keys.count(std::string{id}) != 0;
 }
 
+AuthSource auth_source(const ProviderDescriptor& p,
+                       const store::Settings& settings) {
+    if (p.is_local || p.auth == AuthStyle::None) return AuthSource::Local;
+    // In-process OAuth + Anthropic: a saved credential (disk/token) or a
+    // pasted key. These are all in-app removable, so "Saved".
+    if (p.id == "chatgpt" || p.id == "copilot" || p.id == "kimi"
+        || kind_of(p.wire) == Kind::Anthropic)
+        return provider_is_authed(p, settings) ? AuthSource::Saved
+                                               : AuthSource::None;
+    // Hosted OpenAI-family: a pasted key (removable) takes precedence in
+    // resolution, so report Saved when one exists; otherwise Env iff any of
+    // the provider's env vars is set (that key can't be dropped in-app).
+    if (auto it = settings.provider_keys.find(std::string{p.id});
+        it != settings.provider_keys.end() && !it->second.empty())
+        return AuthSource::Saved;
+    for (auto env : p.auth_env)
+        if (env_has(env)) return AuthSource::Env;
+    return AuthSource::None;
+}
+
 } // namespace agentty::provider

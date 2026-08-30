@@ -34,4 +34,16 @@ struct ProviderDescriptor;   // registry.hpp
 [[nodiscard]] bool provider_is_authed(std::string_view id,
                                       const store::Settings& settings);
 
+// WHERE a provider's credential comes from — lets the picker tell the user
+// "signed in" from "key from env" (the latter can't be signed out in-app,
+// so ^D there is a no-op and would otherwise look broken).
+enum class AuthSource {
+    None,        // not authed
+    Saved,       // OAuth on disk / in-process, or a pasted provider_keys entry
+    Env,         // resolved ONLY from an environment variable
+    Local,       // no-auth backend (Ollama, custom http host)
+};
+[[nodiscard]] AuthSource auth_source(const ProviderDescriptor& p,
+                                     const store::Settings& settings);
+
 } // namespace agentty::provider

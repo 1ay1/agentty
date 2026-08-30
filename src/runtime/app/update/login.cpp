@@ -25,6 +25,7 @@
 #include "agentty/provider/registry.hpp"
 #include "agentty/provider/selection.hpp"
 #include "agentty/provider/credentials.hpp"
+#include "agentty/provider/auth_state.hpp"
 #include "agentty/runtime/app/cmd_factory.hpp"
 #include "agentty/runtime/app/deps.hpp"
 #include "agentty/runtime/view/helpers.hpp"
@@ -231,6 +232,18 @@ Step host_probed(Model m, HostProbed r) {
             maya::Cmd<Msg>::batch(std::move(step.second), std::move(found))};
 }
 
+// Canonical account/registry id for a provider selection — mirrors the
+// account_provider_id() helper below but is self-contained so sign_out
+// (defined above it) needs no forward reference across linkage boundaries.
+static std::string signout_provider_id(const provider::Selection& sel) {
+    if (sel.is_copilot())                      return "copilot";
+    if (sel.is_kimi())                         return "kimi";
+    if (sel.is_chatgpt())                      return "chatgpt";
+    if (sel.kind == provider::Kind::Anthropic) return "anthropic";
+    if (sel.kind == provider::Kind::OpenAI)    return sel.openai_endpoint.label;
+    return {};
+}
+
 Step sign_out(Model m) {
     // Clear the ACTIVE provider's credentials, so "Sign out" targets whatever
     // the user is currently signed in to. ChatGPT/Codex keeps its token in a
@@ -268,10 +281,53 @@ Step sign_out(Model m) {
     }
 
     // Zero the live auth header so the very next turn can't reuse a
-    // now-revoked credential, then drop the user straight into sign-in.
+    // now-revoked credential.
     agentty::app::update_auth(auth::AuthHeader{});
+
+    // If ANOTHER provider is still authed, fall back to it rather than
+    // dumping the user at a sign-in modal — signing out of one of several
+    // accounts should keep you working, not strand you. Prefer the most
+    // recently used still-authed provider (MRU order), else the first authed
+    // registry row. Only when nothing is left do we open the sign-in modal.
+    {
+        const std::string just_left = signout_provider_id(sel);
+        auto settings = deps().load_settings();
+        // Only fall back to a provider with a REAL credential (saved or env) —
+        // never silently hop onto an always-on local backend (Ollama) the
+        // user never chose. That would be a surprising "I signed out but I'm
+        // suddenly on some local model" jump.
+        auto is_usable = [&](std::string_view pid) {
+            if (pid == just_left || pid.empty()) return false;
+            const auto* p = provider::preset_for(pid);
+            if (!p) return true;   // saved custom host (has a provider_keys entry)
+            const auto src = provider::auth_source(*p, settings);
+            return src == provider::AuthSource::Saved
+                || src == provider::AuthSource::Env;
+        };
+        std::string fallback;
+        for (const auto& ref : m.d.recent_models)   // MRU, newest first
+            if (is_usable(ref.provider_id)) { fallback = ref.provider_id; break; }
+        if (fallback.empty())
+            for (const auto& p : provider::providers())
+                if (is_usable(p.id)) { fallback = std::string{p.id}; break; }
+        if (!fallback.empty()) {
+            m.ui.login = login::Closed{};
+            m.s.status = "signed out of " + what + " \xe2\x80\x94 switched to "
+                       + provider::provider_display_name(
+                             provider::parse_selection(fallback));
+            m.s.status_until = std::chrono::steady_clock::now()
+                             + std::chrono::seconds{5};
+            auth::AuthHeader fb_auth = provider::credentials::resolve(fallback);
+            return commit_provider_switch(
+                std::move(m), fallback, std::move(fb_auth),
+                provider::provider_display_name(
+                    provider::parse_selection(fallback)));
+        }
+    }
+
+    // Nothing else authed — drop the user straight into sign-in.
     m.ui.login = login::Picking{};
-    m.s.status = "signed out of " + what + " — sign in to continue";
+    m.s.status = "signed out of " + what + " \xe2\x80\x94 sign in to continue";
     m.s.status_until = std::chrono::steady_clock::now()
                      + std::chrono::seconds{5};
     return done(std::move(m));

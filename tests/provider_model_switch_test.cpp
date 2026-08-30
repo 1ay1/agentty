@@ -1076,3 +1076,47 @@ TEST_CASE("fused and classic model pickers toggle, not stack") {
     CHECK(ui::pick::is_open(m3.ui.fused_picker));
     CHECK(!ui::pick::is_open(m3.ui.model_picker));
 }
+
+// Signing out of ONE provider when others are still authed should fall back
+// to a still-authed provider — not strand the user at the sign-in modal.
+TEST_CASE("SignOut falls back to another authed provider") {
+    using namespace agentty::msg;
+    install_stub_deps();
+    g_settings = store::Settings{};
+    g_settings.provider_keys["openrouter"] = "sk-or";
+    g_settings.provider_keys["groq"]       = "sk-gr";
+    provider::select(provider::parse_selection("openrouter"));
+
+    Model m;
+    m.d.recent_models = { ModelRef{"groq", "llama-3.3-70b"} };  // MRU fallback
+    auto [m1, c1] = app::update(std::move(m), Msg{LoginMsg{SignOut{}}});
+
+    // openrouter's key was dropped…
+    CHECK(g_settings.provider_keys.count("openrouter") == 0);
+    // …and we did NOT strand the user at the sign-in modal.
+    CHECK(!std::holds_alternative<agentty::ui::login::Picking>(m1.ui.login));
+    // The switch targeted the still-authed fallback (groq).
+    CHECK(provider::active().openai_endpoint.label == "groq");
+}
+
+// Signing out of the ONLY authed provider opens the sign-in modal. (When the
+// machine running the test happens to have real on-disk Anthropic creds, the
+// fallback correctly finds them instead — so assert the CONTRACT: either the
+// modal opened, or we switched to a genuinely-authed different provider, but
+// NEVER left openrouter's dropped key as the active credential.)
+TEST_CASE("SignOut with no saved fallback opens sign-in") {
+    using namespace agentty::msg;
+    install_stub_deps();
+    g_settings = store::Settings{};
+    g_settings.provider_keys["openrouter"] = "sk-or";
+    provider::select(provider::parse_selection("openrouter"));
+
+    Model m;
+    auto [m1, c1] = app::update(std::move(m), Msg{LoginMsg{SignOut{}}});
+    CHECK(g_settings.provider_keys.count("openrouter") == 0);
+    const bool opened_signin =
+        std::holds_alternative<agentty::ui::login::Picking>(m1.ui.login);
+    const bool switched_away =
+        provider::active().openai_endpoint.label != "openrouter";
+    CHECK((opened_signin || switched_away));
+}
