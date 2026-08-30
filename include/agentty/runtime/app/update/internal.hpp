@@ -118,7 +118,8 @@ std::string    model_for_provider(std::string_view spec);
 [[nodiscard]] std::pair<Model, maya::Cmd<Msg>>
 commit_provider_switch(Model m, std::string_view spec,
                        auth::AuthHeader new_auth, std::string_view label,
-                       std::string_view desired_model = {});
+                       std::string_view desired_model = {},
+                       bool open_picker = true);
 
 // ── Frozen-scrollback prefix helpers (frozen.cpp) ────────────────────────
 //

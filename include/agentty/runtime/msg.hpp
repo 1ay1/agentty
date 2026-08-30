@@ -642,7 +642,11 @@ struct SignOut {};
 // every saved account so the user can switch who they're signed in as without
 // leaving agentty. On first open with only a legacy single login, that login is
 // auto-registered as "default" so it shows up as a switchable row.
-struct OpenAccounts {};
+// Open the account manager. Empty `provider` = the ACTIVE provider (the
+// classic drill-down); a non-empty id opens accounts for THAT provider without
+// switching to it first — so Enter on any provider row shows its accounts, not
+// the model picker.
+struct OpenAccounts { std::string provider; };
 // Move the highlight in the account switcher (wraps at both ends; the last
 // row is always "+ Add another account…").
 struct AccountMove { int delta; };

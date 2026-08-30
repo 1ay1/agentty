@@ -725,7 +725,8 @@ void persist_settings(const Model& m) {
 std::pair<Model, maya::Cmd<Msg>>
 commit_provider_switch(Model m, std::string_view spec,
                        auth::AuthHeader new_auth, std::string_view label,
-                       std::string_view desired_model) {
+                       std::string_view desired_model,
+                       bool open_picker) {
     using maya::Cmd;
     const std::string spec_s{spec};
 
@@ -812,7 +813,8 @@ commit_provider_switch(Model m, std::string_view spec,
     // choice already made. Skip it — the desired model installs on ModelsLoaded
     // — and give a "Switching to X…" toast instead.
     const bool have_desired = !desired_model.empty();
-    if (provider::active().kind != provider::Kind::ExternalAcp && !have_desired)
+    if (open_picker && provider::active().kind != provider::Kind::ExternalAcp
+        && !have_desired)
         m.ui.model_picker = ui::pick::OpenAt{0};
 
     // Name the DERIVED wire endpoint for OpenAI-dialect hosts so the /v1

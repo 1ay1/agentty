@@ -78,13 +78,6 @@ std::vector<int> model_filtered(const std::vector<ModelInfo>& models,
 // model added upstream shows up within a normal session.
 constexpr std::int64_t kCatalogTtlMs = 60'000;   // 60s
 
-// A provider that supports multiple switchable accounts (the OAuth lane).
-// These offer the ^A "manage accounts" action in the provider picker; every
-// other provider (API-key presets, custom hosts, ACP) has a single identity.
-[[nodiscard]] bool preset_is_account_capable(const provider::ProviderPreset& p) {
-    return p.id == "chatgpt" || p.id == "copilot" || p.id == "kimi"
-        || p.kind() == provider::Kind::Anthropic;
-}
 
 // Defined further down (with the fused-picker MRU helpers); forward-declared
 // here so the classic model-picker reducer above can feed the same ring.
@@ -852,32 +845,19 @@ Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
             }
 
             const auto& preset = *chosen.preset();
-            // Enter on an ACCOUNT-CAPABLE provider that is ALREADY active
-            // opens its account manager — UNIFORM across every provider that
-            // has accounts (OAuth: Anthropic/ChatGPT/Copilot/Kimi; hosted API
-            // key: Mistral/Groq/…; custom hosts). Only keyless local servers
-            // (add_method == None) have nothing to manage and just switch.
-            // Esc from the account list steps back to the provider picker.
+            // Enter on an ACCOUNT-CAPABLE provider opens its account manager
+            // DIRECTLY — UNIFORM across every provider that has accounts (OAuth:
+            // Anthropic/ChatGPT/Copilot/Kimi; hosted API key: Mistral/Groq/…;
+            // custom hosts), whether or not it's the active provider. No
+            // switch-first (that popped the model picker); OpenAccounts targets
+            // this provider by id and builds its list from a parsed Selection.
+            // Only keyless local servers (add_method == None) skip straight to
+            // the switch. Esc from the account list steps back to this picker.
             if (provider::credentials::add_method(preset.id)
                     != provider::credentials::AddMethod::None) {
-                const auto& active = provider::active();
-                const bool is_active =
-                    (preset.id == "chatgpt" && active.is_chatgpt())
-                    || (preset.id == "copilot" && active.is_copilot())
-                    || (preset.id == "kimi" && active.is_kimi())
-                    || (preset.kind() == provider::Kind::Anthropic
-                        && active.kind == provider::Kind::Anthropic)
-                    // Hosted OpenAI-family key providers (Mistral/Groq/…): the
-                    // active OpenAI endpoint label IS the provider id.
-                    || (preset.kind() == provider::Kind::OpenAI
-                        && active.kind == provider::Kind::OpenAI
-                        && active.openai_endpoint.label == preset.id);
-                if (is_active) {
-                    m.ui.provider_picker = pick::Closed{};
-                    return agentty::app::update(std::move(m), Msg{OpenAccounts{}});
-                }
-                // Not active — fall through to the switch below; the account
-                // list opens on a follow-up Enter once it's active.
+                m.ui.provider_picker = pick::Closed{};
+                return agentty::app::update(
+                    std::move(m), Msg{OpenAccounts{std::string{preset.id}}});
             }
 
             const std::string spec{preset.id};

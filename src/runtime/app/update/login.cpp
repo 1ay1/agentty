@@ -320,8 +320,13 @@ login::AccountList build_account_list(const provider::Selection& sel) {
 
 } // namespace
 
-Step open_accounts(Model m) {
-    const auto sel = provider::active();
+Step open_accounts(Model m, const std::string& provider_id = {}) {
+    // Target the requested provider if given (Enter on a provider row), else
+    // the active one. Building from a parsed Selection means we DON'T have to
+    // switch to the provider first — no model-picker pop — the account list
+    // shows immediately for whatever row the user pressed Enter on.
+    const auto sel = provider_id.empty() ? provider::active()
+                                         : provider::parse_selection(provider_id);
     auto al = build_account_list(sel);
     if (al.provider.empty()) {
         // Provider has no switchable accounts — fall back to the normal
@@ -406,6 +411,33 @@ Step account_select(Model m) {
     if (!acc::activate(provider, label)) {
         m.ui.login = login::Failed{"could not switch to \"" + label + "\""};
         return done(std::move(m));
+    }
+
+    // If the chosen account belongs to a provider that ISN'T currently active
+    // (Enter on a non-active provider row → its account list), selecting the
+    // account SWITCHES to that provider too — provider + account + auth +
+    // model recall + refetch, all atomically — and returns straight to chat
+    // (open_picker=false, so no model-picker pop). The recalled model is
+    // pre-stashed so commit_provider_switch doesn't open the picker.
+    {
+        const std::string active_pid =
+            provider::active().kind == provider::Kind::OpenAI
+                ? provider::active().openai_endpoint.label
+                : std::string{provider::default_provider_id()};
+        const bool provider_changed =
+            provider != active_pid
+            && !(provider == "anthropic"
+                 && provider::active().kind == provider::Kind::Anthropic);
+        if (provider_changed) {
+            m.ui.login = login::Closed{};
+            const auto* p = provider::preset_for(provider);
+            const std::string plabel = p ? std::string{p->label} : provider;
+            std::string recalled = deps().load_settings().provider_models.count(provider)
+                ? deps().load_settings().provider_models.at(provider) : std::string{};
+            return commit_provider_switch(std::move(m), provider,
+                                          provider::credentials::resolve(provider),
+                                          plabel, recalled, /*open_picker=*/false);
+        }
     }
     // Re-install the live auth header from the now-swapped active store.
     // If the account we're switching TO has an OAuth token that's expired or
@@ -1091,7 +1123,7 @@ Step login_update(Model m, msg::LoginMsg lm) {
         [&](LoginBack)              -> Step { return login_back(std::move(m)); },
         [&](HostProbed& e)          -> Step { return host_probed(std::move(m), std::move(e)); },
         [&](SignOut)                -> Step { return sign_out(std::move(m)); },
-        [&](OpenAccounts)           -> Step { return open_accounts(std::move(m)); },
+        [&](OpenAccounts& e)        -> Step { return open_accounts(std::move(m), e.provider); },
         [&](AccountMove& e)         -> Step { return account_move(std::move(m), e.delta); },
         [&](AccountSelect)          -> Step { return account_select(std::move(m)); },
         [&](AccountRemove)          -> Step { return account_remove(std::move(m)); },
