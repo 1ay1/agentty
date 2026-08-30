@@ -879,6 +879,38 @@ TEST_CASE("provider picker: ^D signs out of a keyed preset (two-press)") {
     CHECK(g_settings.provider_keys.count("anthropic") == 1);   // others intact
 }
 
+// ^D on the ACTIVE provider's row must also zero the live auth header —
+// otherwise the session keeps streaming with a credential the user just
+// revoked, and the "signed out" toast lies.
+TEST_CASE("provider picker: ^D on the ACTIVE provider zeroes live auth") {
+    using namespace agentty::msg;
+    install_stub_deps();
+    g_settings = store::Settings{};
+    g_settings.provider_keys["openrouter"] = "sk-or";
+    provider::select(provider::parse_selection("openrouter"));
+    app::update_auth(auth::AuthHeader{auth::ApiKeyHeader{"sk-or"}});
+
+    Model m;
+    auto [m1, c1] = app::update(std::move(m), Msg{OpenProviderPicker{}});
+    auto* p = ui::pick::opened(m1.ui.provider_picker);
+    REQUIRE(p != nullptr);
+    const auto rows = ui::build_provider_rows(
+        agentty::provider::saved_custom_hosts(g_settings.provider_keys), "");
+    int or_idx = -1;
+    for (int i = 0; i < static_cast<int>(rows.size()); ++i)
+        if (const auto* pr = rows[static_cast<std::size_t>(i)].preset();
+            pr && std::string{pr->id} == "openrouter") { or_idx = i; break; }
+    REQUIRE(or_idx >= 0);
+    p->index = or_idx;
+    p->query.clear();
+
+    auto [m2, c2] = app::update(std::move(m1), Msg{ProviderPickerDelete{}});
+    auto [m3, c3] = app::update(std::move(m2), Msg{ProviderPickerDelete{}});
+    CHECK(g_settings.provider_keys.count("openrouter") == 0);
+    // The live header was zeroed — the next turn cannot reuse the dead key.
+    CHECK(agentty::auth::is_empty(app::deps().auth));
+}
+
 // Enter on an ACCOUNT-CAPABLE provider that is already active opens its
 // accounts drill-down (Esc from there closes the whole picker — handled by
 // login_back → close_login for AccountList). Non-account providers switch.

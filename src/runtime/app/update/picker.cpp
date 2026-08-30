@@ -785,6 +785,15 @@ Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
                 for (const auto& acc : auth::accounts::list_for(removed))
                     auth::accounts::remove(removed, acc.label);
             p->confirm_remove.clear();
+            // Signing out of the ACTIVE provider must not leave the session
+            // pointing at a dead credential — the palette SignOut zeroes the
+            // live header and prompts re-auth, and this path is the same
+            // action spelled differently. Zero the header (the next turn
+            // must not reuse the erased key) and say what to do next; the
+            // picker stays open so the user can pick another provider (or
+            // re-enter this one to sign back in).
+            const bool was_active = (removed == active_provider_id());
+            if (was_active) app::update_auth(auth::AuthHeader{});
             // Rebuild the row list so a removed custom host is gone; clamp.
             auto s2 = deps().load_settings();
             const auto fresh = ui::build_provider_rows(
@@ -792,8 +801,11 @@ Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
             if (!fresh.empty() && p->index >= static_cast<int>(fresh.size()))
                 p->index = static_cast<int>(fresh.size()) - 1;
             auto toast = set_status_toast(m,
-                (is_custom_host ? "removed custom host: "
-                                : "signed out of ") + removed);
+                was_active
+                    ? "signed out of " + removed
+                          + " (active) — pick a provider to continue"
+                    : (is_custom_host ? "removed custom host: "
+                                      : "signed out of ") + removed);
             return {std::move(m), std::move(toast)};
         },
         [&](ProviderPickerSelect) -> Step {
@@ -1457,7 +1469,10 @@ Step fused_picker_update(Model m, msg::FusedPickerMsg pm) {
                 return done(std::move(m));
             const auto& row = m.d.fused_rows[static_cast<std::size_t>(c->index)];
             if (row.is_signin_offer()) return done(std::move(m));
-            const auto caps = resolved_caps(row.model.id.value);
+            // Resolve under the ROW's provider — a Groq row highlighted while
+            // Mistral is active must walk Groq's ladder, not Mistral's.
+            const auto caps = resolved_caps(row.model.id.value,
+                                            row.provider_id);
             if (!effort_capable(caps)) return done(std::move(m));
             m.d.effort = cycle_effort(clamp_effort(m.d.effort, caps),
                                       e.delta, caps);

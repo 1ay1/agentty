@@ -782,12 +782,19 @@ inline void set_caps_provider_scope(std::string provider_id) {
     return caps_scope_detail::val();
 }
 // "provider/model" when a scope is set; "" when not (callers then use bare).
+// The one-arg form uses the ACTIVE provider scope; pass `scope` explicitly
+// when resolving for a row that belongs to a DIFFERENT provider (the fused
+// picker renders every authed provider's models at once).
+[[nodiscard]] inline std::string scoped_caps_key(std::string_view model_id,
+                                                 std::string_view scope) {
+    if (scope.empty()) return {};
+    std::string k{scope};
+    k += '/';
+    k += model_id;
+    return k;
+}
 [[nodiscard]] inline std::string scoped_caps_key(std::string_view model_id) {
-    auto p = caps_provider_scope();
-    if (p.empty()) return {};
-    p += '/';
-    p += model_id;
-    return p;
+    return scoped_caps_key(model_id, caps_provider_scope());
 }
 
 // ── Live-catalog reasoning registry ──────────────────────────────────────────
@@ -816,12 +823,15 @@ inline void set_catalog_reasoning(std::string model_id, bool reasons) {
 }
 // Tri-state: 1 (catalog says reasons), 0 (catalog says not), -1 (no info).
 // Scoped-first ("provider/model"), bare fallback — see scoped_caps_key.
-[[nodiscard]] inline int catalog_reasoning_for(std::string_view model_id) {
+[[nodiscard]] inline int catalog_reasoning_for(std::string_view model_id,
+                                               std::string_view scope = {}) {
     if (!catalog_reasoning_detail::any().load(std::memory_order_relaxed))
         return -1;
     std::shared_lock lk(catalog_reasoning_detail::mu());
     auto& m = catalog_reasoning_detail::map_();
-    if (auto scoped = scoped_caps_key(model_id); !scoped.empty())
+    auto scoped = scope.empty() ? scoped_caps_key(model_id)
+                                : scoped_caps_key(model_id, scope);
+    if (!scoped.empty())
         if (auto it = m.find(scoped); it != m.end())
             return it->second ? 1 : 0;
     auto it = m.find(std::string{model_id});
@@ -850,12 +860,15 @@ inline void set_catalog_effort_set(std::string model_id, std::uint8_t set) {
 }
 // -1 = no declaration; else the bitmask of declared ON levels.
 // Scoped-first ("provider/model"), bare fallback — see scoped_caps_key.
-[[nodiscard]] inline int catalog_effort_set_for(std::string_view model_id) {
+[[nodiscard]] inline int catalog_effort_set_for(std::string_view model_id,
+                                                std::string_view scope = {}) {
     if (!catalog_effort_detail::any().load(std::memory_order_relaxed))
         return -1;
     std::shared_lock lk(catalog_effort_detail::mu());
     auto& m = catalog_effort_detail::map_();
-    if (auto scoped = scoped_caps_key(model_id); !scoped.empty())
+    auto scoped = scope.empty() ? scoped_caps_key(model_id)
+                                : scoped_caps_key(model_id, scope);
+    if (!scoped.empty())
         if (auto it = m.find(scoped); it != m.end())
             return static_cast<int>(it->second);
     auto it = m.find(std::string{model_id});
@@ -987,12 +1000,15 @@ learned_effort_sets_snapshot() {
 // Scoped-first lookup: a fact learned while Groq was active is keyed
 // "groq/gpt-oss-120b" and does NOT leak to the same id on Cerebras; a bare
 // entry (legacy, or explicitly unscoped) still matches everywhere.
-[[nodiscard]] inline int learned_effort_set_for(std::string_view model_id) {
+[[nodiscard]] inline int learned_effort_set_for(std::string_view model_id,
+                                                std::string_view scope = {}) {
     if (!learned_effort_detail::any().load(std::memory_order_relaxed))
         return -1;
     std::shared_lock lk(learned_effort_detail::mu());
     auto& m = learned_effort_detail::map_();
-    if (auto scoped = scoped_caps_key(model_id); !scoped.empty())
+    auto scoped = scope.empty() ? scoped_caps_key(model_id)
+                                : scoped_caps_key(model_id, scope);
+    if (!scoped.empty())
         if (auto it = m.find(scoped); it != m.end())
             return static_cast<int>(it->second);
     auto it = m.find(std::string{model_id});
@@ -1005,13 +1021,21 @@ learned_effort_sets_snapshot() {
 // pure constexpr from_id(): effort call sites use THIS so a user's override
 // reaches supports_effort()/effort_wire_for()/the picker uniformly — every
 // consumer already funnels through the returned caps.
-[[nodiscard]] inline ModelCapabilities resolved_caps(std::string_view model_id) {
+//
+// `scope`: the provider whose contract to resolve against. Empty = the
+// ACTIVE provider (right for the wire path and the classic picker). Pass the
+// row's own provider_id when rendering CROSS-provider surfaces (the fused
+// picker shows every authed provider's rows at once — resolving a Groq row
+// under the active Mistral scope would read the wrong host's facts).
+[[nodiscard]] inline ModelCapabilities resolved_caps(std::string_view model_id,
+                                                     std::string_view scope = {}) {
     ModelCapabilities caps = ModelCapabilities::from_id(model_id);
     // The LEARNED set applies to every lane — even Claude/GPT — because it is
     // ground truth straight from the provider's own rejection. (In practice
     // Claude/GPT never land here; the guard exists for aggregator hosts that
     // serve claude-* ids over the OpenAI wire with different contracts.)
-    if (const int learned = learned_effort_set_for(model_id); learned >= 0) {
+    if (const int learned = learned_effort_set_for(model_id, scope);
+        learned >= 0) {
         caps.effort_set       = static_cast<std::uint8_t>(learned);
         caps.effort_set_known = true;
     }
@@ -1023,7 +1047,7 @@ learned_effort_sets_snapshot() {
     // only: family ladders are already exact, and third-party metadata for
     // Claude/GPT expresses different wire semantics (adaptive thinking).
     if (!caps.effort_set_known)
-        if (const int declared = catalog_effort_set_for(model_id);
+        if (const int declared = catalog_effort_set_for(model_id, scope);
             declared >= 0) {
             caps.effort_set       = static_cast<std::uint8_t>(declared);
             caps.effort_set_known = true;
@@ -1046,7 +1070,8 @@ learned_effort_sets_snapshot() {
     } else if (const int env = effort_force_override(); env >= 0) {
         caps.reasoning_compat = (env == 1);
         if (env == 0 && caps.effort_set_known) caps.effort_set = 0;
-    } else if (const int live = catalog_reasoning_for(model_id); live >= 0) {
+    } else if (const int live = catalog_reasoning_for(model_id, scope);
+               live >= 0) {
         caps.reasoning_compat = (live == 1);
     }
     return caps;

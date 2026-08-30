@@ -148,16 +148,19 @@ constexpr int kPickerChromeRows = 7;
 // The reasoning-effort control footer, shared by the classic model picker AND
 // the fused picker so both surfaces render IDENTICALLY and read/write the SAME
 // state (m.d.effort, the per-model reasoning_override, m.d.show_reasoning).
-// `model_id` is the highlighted row's model. Returns the rows to append to a
-// picker's footer (may be empty). Kept in ONE place so the two pickers can
-// never diverge (the "off in one, on in the other" bug).
+// `model_id` is the highlighted row's model; `scope` its provider (empty =
+// active provider) so a fused row's ladder reflects THAT host's contract.
+// Returns the rows to append to a picker's footer (may be empty). Kept in ONE
+// place so the two pickers can never diverge (the "off in one, on in the
+// other" bug).
 inline std::vector<Element> reasoning_effort_footer(const Model& m,
-                                                    std::string_view model_id) {
+                                                    std::string_view model_id,
+                                                    std::string_view scope = {}) {
     std::vector<Element> out;
     if (model_id.empty()) return out;
 
     const std::string hi_id{model_id};
-    const auto caps = resolved_caps(hi_id);
+    const auto caps = resolved_caps(hi_id, scope);
 
     // ── Show-reasoning toggle piece (^R), a global on/off display switch.
     // Appended inline to the reasoning line so effort + show/hide live in
@@ -529,7 +532,8 @@ Element fused_picker(const Model& m) {
     if (picker->index >= 0 && picker->index < static_cast<int>(rows.size())) {
         const auto& hl = rows[static_cast<std::size_t>(picker->index)];
         if (!hl.is_signin_offer())
-            for (auto& row : reasoning_effort_footer(m, hl.model.id.value))
+            for (auto& row : reasoning_effort_footer(m, hl.model.id.value,
+                                                     hl.provider_id))
                 cfg.footer.push_back(std::move(row));
     }
 
