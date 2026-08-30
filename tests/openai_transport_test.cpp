@@ -289,6 +289,38 @@ TEST_CASE("test_sse_reasoning_alt_field") {
     CHECK(joined_text(msgs) == "ok");
 }
 
+TEST_CASE("test_sse_structured_thinking_parts") {
+    // Mistral reasoning models (mistral-small 4 / -medium 3.5 with
+    // reasoning_effort) stream chain-of-thought as a STRUCTURED content-parts
+    // ARRAY — probed live:
+    //   {"content":[{"type":"thinking",
+    //                "thinking":[{"type":"text","text":"…"}]}]}
+    // …then the final answer as a plain content STRING. The thinking parts
+    // must surface as StreamThinkingDelta (not be dropped, not leak into
+    // prose); text-type parts inside an array must render as prose.
+    std::string sse =
+        "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":[{\"type\":\"thinking\","
+        "\"thinking\":[{\"type\":\"text\",\"text\":\"Okay, let\"}],\"closed\":true}]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":[{\"type\":\"thinking\","
+        "\"thinking\":[{\"type\":\"text\",\"text\":\"'s see.\"}]}]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":[{\"type\":\"text\","
+        "\"text\":\"Part-array prose. \"}]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"Four\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+        "data: [DONE]\n\n";
+    auto msgs = oai::parse_sse_for_test(sse);
+
+    std::string think;
+    for (const auto& m : msgs)
+        if (const auto* t = get_leaf<StreamThinkingDelta>(m)) think += t->text;
+    CHECK(think == "Okay, let's see.");
+
+    // Prose = array text part + the plain string answer; thinking never leaks.
+    CHECK(joined_text(msgs) == "Part-array prose. Four");
+    CHECK(count_leaf<StreamFinished>(msgs) == 1);
+}
+
 // Mistral / Magistral inline reasoning as [THINK]…[/THINK] INSIDE content
 // (no reasoning_content field). It must surface as StreamThinkingDelta, the
 // tags must be stripped, and the visible answer must NOT lose its first char

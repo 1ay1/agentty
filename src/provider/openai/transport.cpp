@@ -856,6 +856,53 @@ void handle_delta(StreamCtx& ctx, const json& delta) {
         }
     }
 
+    // Structured content-parts array (Mistral reasoning models): `content`
+    // arrives as a LIST of typed parts instead of a string —
+    //   {"content":[{"type":"thinking",
+    //                "thinking":[{"type":"text","text":"…"}]}]}
+    // for chain-of-thought, and {"type":"text","text":"…"} parts for prose.
+    // (Probed live on mistral-small-latest with reasoning_effort=high; the
+    // final answer still arrives as a plain content STRING, handled below.)
+    // Route thinking parts to the same StreamThinkingDelta the
+    // reasoning_content path emits, and text parts into the normal prose
+    // handling — without this branch the whole array form was silently
+    // DROPPED: reasoning invisible and no liveness heartbeat during it.
+    if (delta.contains("content") && delta["content"].is_array()) {
+        for (const auto& part : delta["content"]) {
+            if (!part.is_object()) continue;
+            const std::string type = part.value("type", "");
+            if (type == "thinking") {
+                // Nested: thinking: [{type:"text", text:"…"}, …]
+                std::string chunk;
+                if (auto th = part.find("thinking");
+                    th != part.end() && th->is_array()) {
+                    for (const auto& seg : *th)
+                        if (seg.is_object() && seg.value("type", "") == "text")
+                            chunk += seg.value("text", "");
+                } else if (auto tx = part.find("text");
+                           tx != part.end() && tx->is_string()) {
+                    chunk = tx->get<std::string>();   // flat variant
+                }
+                if (!chunk.empty()) {
+                    if (ctx.show_reasoning)
+                        ctx.sink(StreamThinkingDelta{chunk, {}});
+                    else
+                        ctx.sink(StreamHeartbeat{});
+                }
+            } else if (type == "text") {
+                const std::string t = part.value("text", "");
+                if (!t.empty()) {
+                    // Prose from a parts array is never leaked tool JSON
+                    // (structured emitters use the real tool_calls channel),
+                    // so emit directly — mirrors the salvage-disabled path.
+                    ctx.sink(StreamTextDelta{t});
+                    ctx.any_text_flushed = true;
+                    ctx.salvage_eligible = false;
+                }
+            }
+        }
+    }
+
     // Plain assistant text.
     if (delta.contains("content") && delta["content"].is_string()) {
         const auto& raw = delta["content"].get_ref<const std::string&>();
