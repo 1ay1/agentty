@@ -9,6 +9,7 @@
 
 #include "agentty/runtime/view/helpers.hpp"
 #include "agentty/runtime/view/palette.hpp"
+#include <maya/core/render_context.hpp>   // available_height (tail-spinner gate)
 #include "agentty/runtime/view/thread/turn/agent_timeline/tool_args.hpp"
 #include "agentty/runtime/view/thread/turn/agent_timeline/tool_body_preview.hpp"
 #include "agentty/runtime/view/thread/turn/agent_timeline/tool_helpers.hpp"
@@ -593,7 +594,33 @@ maya::AgentTimeline::Config agent_timeline_config(std::span<const ToolUse> tool_
     // must be byte-stable — but a frozen braille frame (`⠋` forever) reads
     // as "stuck". A solid ● is equally immutable and reads as intentional.
     // The moving spinner lives in the FOOTER glyph (seam-safe, see above).
-    if (!all_terminal_title) cfg.frame = -1;
+    //
+    // EXCEPTION — the TAIL-RUNNING case (the overwhelmingly common
+    // sequential flow): when the ONLY non-terminal event is the LAST one,
+    // its header row is bounded to within a few rows of the transcript
+    // bottom (its own live body is elision-capped, and only the footer +
+    // border render below it), so it cannot have crossed the viewport top
+    // — animating its glyph is exactly as seam-safe as the ●→✓ rewrite
+    // that already lands on that row at completion. Pass the real frame so
+    // the in-flight action visibly spins; every terminal event's ✓/✗ is
+    // frame-independent, so nothing else animates. Any OTHER shape (a
+    // non-terminal event with events after it — parallel batches) keeps
+    // the static ●: those headers can genuinely sit above the seam.
+    // Gated on a roomy viewport: on very short terminals (oracle tests
+    // run 60x18) the bounded distance can still exceed the viewport, so
+    // keep the conservative static glyph there.
+    if (!all_terminal_title) {
+        const bool tail_running =
+            !tool_calls.empty()
+            && !tool_calls.back().is_terminal()
+            && [&] {
+                   for (std::size_t i = 0; i + 1 < tool_calls.size(); ++i)
+                       if (!tool_calls[i].is_terminal()) return false;
+                   return true;
+               }();
+        if (!(tail_running && maya::available_height() >= 20))
+            cfg.frame = -1;
+    }
 
     // Panel-level cache key for an ALL-TERMINAL batch. Settled tool bytes
     // are immutable and no chrome animates (every elapsed is final, no
