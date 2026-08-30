@@ -112,7 +112,7 @@ TEST_CASE("fused: MRU section then all-providers, deduped") {
     CHECK(rows.size() == 3);
 }
 
-TEST_CASE("fused: un-authed providers become sign-in offers at the end") {
+TEST_CASE("fused: sign-in offers are QUERY-GATED — hidden while browsing") {
     std::vector<ProviderCatalog> cats = {
         cat("anthropic", "Anthropic",
             {mk("claude-sonnet-4-6", "Claude Sonnet 4.6", "anthropic")}),
@@ -124,15 +124,21 @@ TEST_CASE("fused: un-authed providers become sign-in offers at the end") {
     in.catalogs = &cats;
     in.offers = &offers;
 
+    // Empty query = browse view: NO offer rows (the list stays clean; signing
+    // in is reachable by TYPING the provider's name, or via ^P).
     auto rows = build_fused_rows(in);
-    REQUIRE(rows.size() == 3);
-    // Authed model rows first, offers last.
+    REQUIRE(rows.size() == 1);
     CHECK(rows[0].authed);
-    CHECK(rows[1].is_signin_offer());
-    CHECK(rows[2].is_signin_offer());
-    CHECK(rows[1].provider_id == "groq");
+
+    // A query matching an un-authed provider surfaces its offer — searching
+    // for a provider you haven't added is never a dead end.
+    in.query = "groq";
+    rows = build_fused_rows(in);
+    REQUIRE(rows.size() == 1);
+    CHECK(rows[0].is_signin_offer());
+    CHECK(rows[0].provider_id == "groq");
     // A sign-in offer carries no model id.
-    CHECK(rows[1].model.id.value.empty());
+    CHECK(rows[0].model.id.value.empty());
 }
 
 TEST_CASE("fused: query filters sign-in offers by provider name") {

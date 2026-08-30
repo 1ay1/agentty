@@ -765,10 +765,10 @@ TEST_CASE("fused ^L forces a full refresh") {
     maya::testing::unfreeze_anim_clock();
 }
 
-// The fused MODEL picker never shows "sign in to X" rows for un-authed
-// providers — signing in belongs to the provider picker (^P). Only authed
-// providers' models appear.
-TEST_CASE("fused list has no sign-in offer rows") {
+// Sign-in offers are QUERY-GATED in the fused picker: un-authed providers
+// are seeded as offers (so a query naming one can surface it — no dead end)
+// but the BROWSE view (empty query) renders none of them.
+TEST_CASE("fused browse view hides sign-in offers; query surfaces them") {
     using namespace agentty::msg;
     install_stub_deps();
     g_settings = store::Settings{};
@@ -780,9 +780,23 @@ TEST_CASE("fused list has no sign-in offer rows") {
     m.d.available_models = {mi("claude-sonnet-4-5", "anthropic")};
     auto [m1, c1] = app::update(std::move(m), Msg{OpenFusedPicker{}});
 
-    CHECK(m1.d.fused_offers.empty());   // no offers seeded
+    CHECK(!m1.d.fused_offers.empty());  // un-authed providers ARE seeded…
     for (const auto& r : m1.d.fused_rows)
-        CHECK(!r.is_signin_offer());    // and none rendered
+        CHECK(!r.is_signin_offer());    // …but browsing renders none
+
+    // Typing an un-authed provider's name surfaces exactly its offer row.
+    Model m2 = std::move(m1);
+    for (char ch : std::string{"mistral"}) {
+        auto [mm, cc] = app::update(std::move(m2),
+                                    Msg{FusedPickerFilterInput{
+                                        static_cast<char32_t>(ch)}});
+        m2 = std::move(mm);
+    }
+    bool offer_shown = false;
+    for (const auto& r : m2.d.fused_rows)
+        if (r.is_signin_offer() && r.provider_id == "mistral")
+            offer_shown = true;
+    CHECK(offer_shown);
 }
 
 // Signing out of a provider while the fused picker is open prunes its catalog,

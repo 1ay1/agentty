@@ -137,6 +137,11 @@ struct Settings {
     // arm in stream.cpp); hydrated into the catalog's learned-effort registry
     // at init so every later session's ladder/clamps/wire start correct.
     std::map<std::string, std::uint8_t> learned_effort_sets;
+    // Has the user EVER opened a model picker (^/ or classic)? Until true the
+    // status-bar model badge appends a dim "^/" teaser — the one-time
+    // discoverability hint for the primary switching verb; it disappears
+    // forever after the first open (no permanent chrome).
+    bool model_picker_used = false;
     // Tool names the user granted "always allow" (PermissionApproveAlways).
     // Persisted so the grant survives restarts — Zed's always_allow rules.
     // Loaded into Model::session_grants at init; note CycleProfile still

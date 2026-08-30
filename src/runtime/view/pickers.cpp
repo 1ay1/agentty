@@ -422,17 +422,28 @@ Element fused_picker(const Model& m) {
     // list visibly reads as "more coming", not "that's all". Failed providers
     // are surfaced separately so a network blip doesn't look like "that's all".
     {
-        int loading = 0, failed = 0;
+        int failed = 0;
+        std::vector<std::string_view> pending;
         for (const auto& c : m.d.provider_catalogs) {
-            if (c.state == ProviderCatalog::State::Loading) ++loading;
+            if (c.state == ProviderCatalog::State::Loading)
+                pending.push_back(c.label);
             else if (c.state == ProviderCatalog::State::Failed) ++failed;
         }
-        if (loading > 0)
+        if (!pending.empty()) {
+            // Name who we're waiting on — "⋯ loading Groq, Mistral…" answers
+            // "where's X?" precisely, where a bare count made the user guess.
+            std::string who;
+            const std::size_t shown = std::min<std::size_t>(pending.size(), 3);
+            for (std::size_t i = 0; i < shown; ++i) {
+                if (i) who += ", ";
+                who += pending[i];
+            }
+            if (pending.size() > shown)
+                who += " +" + std::to_string(pending.size() - shown);
             cfg.header.push_back(text(
-                "  \xe2\x8b\xaf loading " + std::to_string(loading)
-                    + (loading == 1 ? " more provider\xe2\x80\xa6"
-                                    : " more providers\xe2\x80\xa6"),
+                "  \xe2\x8b\xaf loading " + who + "\xe2\x80\xa6",
                 fg_italic(muted)));
+        }
         if (failed > 0)
             cfg.header.push_back(text(
                 "  \xe2\x9a\xa0 " + std::to_string(failed)
@@ -451,10 +462,12 @@ Element fused_picker(const Model& m) {
         return Picker{std::move(cfg)}.build();
     }
 
-    // Section dividers. Sign-in offers are never emitted into the fused list
-    // (they live in the provider picker), so only RECENT vs ALL PROVIDERS.
-    enum class Section { Recent, All };
+    // Section dividers: RECENT vs ALL PROVIDERS, plus a query-gated SIGN IN
+    // section — an un-authed provider whose name matches the query renders as
+    // one dim actionable row so searching for it is never a dead end.
+    enum class Section { Recent, All, SignIn };
     auto section_of = [](const FusedRow& r) {
+        if (r.is_signin_offer()) return Section::SignIn;
         return r.recent ? Section::Recent : Section::All;
     };
     std::optional<Section> cur;
@@ -466,12 +479,27 @@ Element fused_picker(const Model& m) {
             cur = sec;
             Picker::Config::Row hdr;
             hdr.is_header = true;
-            hdr.leading = sec == Section::Recent ? "recent" : "all providers";
+            hdr.leading = sec == Section::Recent ? "recent"
+                        : sec == Section::All    ? "all providers"
+                                                  : "not signed in";
             cfg.rows.push_back(std::move(hdr));
         }
         if (i == picker->index)
             visual_selected = static_cast<int>(cfg.rows.size());
         const bool selected = (i == picker->index);
+
+        // Sign-in offer row: "<Provider>  — Enter to sign in". Dim, single
+        // action, no trailing chips (there's no model yet).
+        if (r.is_signin_offer()) {
+            Picker::Config::Row row;
+            row.selected      = selected;
+            row.leading       = "  " + r.label;
+            row.leading_style = selected ? fg_bold(fg) : fg_of(muted);
+            row.trailing       = "Enter to sign in \xe2\x86\x92";   // →
+            row.trailing_style = fg_dim(muted);
+            cfg.rows.push_back(std::move(row));
+            continue;
+        }
 
         Picker::Config::Row row;
         row.selected = selected;   // drives the highlight bar + selected bg

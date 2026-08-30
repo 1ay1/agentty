@@ -7,6 +7,7 @@
 #include "agentty/domain/catalog.hpp"
 #include "agentty/domain/bundled_catalog.hpp"
 #include "agentty/provider/selection.hpp"
+#include "agentty/provider/auth_state.hpp"
 #include "agentty/provider/chatgpt/responses.hpp"
 #include "agentty/provider/copilot/copilot_oauth.hpp"
 #include "agentty/provider/kimi/kimi_oauth.hpp"
@@ -124,6 +125,7 @@ std::pair<Model, maya::Cmd<Msg>> init() {
     // ladder / clamps / wire are correct from frame 1 — the reject→learn→
     // retry loop only ever pays its one-time cost once per model, ever.
     set_learned_effort_sets(settings.learned_effort_sets);
+    m.ui.model_picker_used = settings.model_picker_used;
 
     // Smart Mode: rehydrate role config from settings. A slot counts as
     // "set" once the user pinned a model for it.
@@ -167,6 +169,10 @@ std::pair<Model, maya::Cmd<Msg>> init() {
     m.d.current.id  = deps().new_thread_id();
     m.s.status = "ready";
 
+    // Deferred startup Cmds (declared early: the first-run branch below may
+    // queue an OpenProviderPicker dispatch).
+    std::vector<maya::Cmd<Msg>> cmds;
+
     // No credentials installed yet → main() invoked install() with an
     // empty header. Open the login modal so the user can authenticate
     // without leaving the TUI; subscribe.cpp routes all input there
@@ -179,9 +185,34 @@ std::pair<Model, maya::Cmd<Msg>> init() {
     // header there means "no key in env" — popping the Anthropic OAuth
     // modal would be nonsensical. Those users get a stream error naming
     // the missing key on first send instead.
+    //
+    // FIRST-RUN CREDENTIAL DETECTION: before defaulting to the Anthropic
+    // modal, scan the registry for a provider that ALREADY has a credential
+    // (a pasted key from a previous run, or an env var like GROQ_API_KEY
+    // exported in the shell). If one exists, open the PROVIDER PICKER
+    // instead — its rows badge exactly where each credential came from
+    // ("● key from GROQ_API_KEY"), so the user's literally-first
+    // interaction is "oh, it found my key → Enter", not an Anthropic
+    // sign-in they never wanted. Plain first-runs (no creds anywhere)
+    // keep the classic Anthropic modal — the majority path is unchanged.
     if (auth::is_empty(deps().auth)
-        && provider::active().kind == provider::Kind::Anthropic)
-        m.ui.login = ui::login::Picking{};
+        && provider::active().kind == provider::Kind::Anthropic) {
+        bool cred_elsewhere = false;
+        for (const auto& p : provider::providers()) {
+            if (p.id == "anthropic") continue;
+            const auto src = provider::auth_source(p, settings);
+            if (src == provider::AuthSource::Saved
+                || src == provider::AuthSource::Env) {
+                cred_elsewhere = true;
+                break;
+            }
+        }
+        if (cred_elsewhere)
+            cmds.push_back(maya::Cmd<Msg>::after(
+                std::chrono::milliseconds{0}, Msg{OpenProviderPicker{}}));
+        else
+            m.ui.login = ui::login::Picking{};
+    }
 
     // Codex (ChatGPT) is a first-class provider too: if it's the active
     // backend and no ChatGPT credential is saved, land the user directly on
@@ -201,7 +232,6 @@ std::pair<Model, maya::Cmd<Msg>> init() {
             m.ui.login = ui::login::Picking{.provider = "kimi"};
     }
 
-    std::vector<maya::Cmd<Msg>> cmds;
     cmds.push_back(cmd::load_threads_async());
     // Connect MCP servers (plugins) at startup on a worker, exactly like
     // threads. This warms the tool surface for the first turn AND lands the

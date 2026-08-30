@@ -164,6 +164,13 @@ using maya::Cmd;
 Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
     return std::visit(overload{
         [&](OpenModelPicker) -> Step {
+            // First-ever open retires the status-bar "^/" teaser.
+            if (!m.ui.model_picker_used) {
+                m.ui.model_picker_used = true;
+                auto s = deps().load_settings();
+                s.model_picker_used = true;
+                deps().save_settings(s);
+            }
             // Close the provider picker if the user cross-hopped here from it
             // (^/ in the provider picker). pick_overlay + the key dispatcher
             // both check model_picker BEFORE provider_picker, so a lingering
@@ -1046,11 +1053,15 @@ void refresh_fused_sources(Model& m) {
     for (const auto& p : provider::providers()) {
         const std::string id{p.id};
         if (!provider::provider_is_authed(p, settings)) {
-            // Un-authed providers are NOT offered in the fused MODEL picker —
-            // it's for switching models across providers you're already signed
-            // into. Signing in lives in the PROVIDER picker (^P), so the fused
-            // list stays clean (no "sign in to X" rows). fused_offers is left
-            // empty; build_fused_rows renders no sign-in section.
+            // Un-authed providers become QUERY-GATED sign-in offers: they
+            // never clutter the browse view (build_fused_rows hides them
+            // while the query is empty), but typing "mistral" with no Mistral
+            // account surfaces one "Mistral — sign in" row instead of a DEAD
+            // END. Enter routes into its auth flow (origin::FusedPicker) and
+            // returns here with the catalog loading — search is the single
+            // verb: find model → maybe sign in → pick.
+            m.d.fused_offers.push_back(
+                SigninOffer{id, std::string{p.label}});
             continue;
         }
         ProviderCatalog* c = find_cat(id);
@@ -1258,6 +1269,14 @@ Step fused_picker_update(Model m, msg::FusedPickerMsg pm) {
     return std::visit(overload{
         [&](OpenFusedPicker) -> Step {
             hydrate_recents(m);
+            // First-ever open retires the status-bar "^/" teaser (persisted
+            // once, on the transition only — not per open).
+            if (!m.ui.model_picker_used) {
+                m.ui.model_picker_used = true;
+                auto s = deps().load_settings();
+                s.model_picker_used = true;
+                deps().save_settings(s);
+            }
             // ^/ TOGGLES from the classic single-provider picker back to this
             // one. Tear the classic picker down cleanly — flush a pending
             // effort edit and abandon any Smart Mode slot-assign arming (the

@@ -1243,6 +1243,7 @@ store::Settings load_settings() {
         }
         auto grants = j.value("always_allow_tools", std::vector<std::string>{});
         s.always_allow_tools = std::move(grants);
+        s.model_picker_used = j.value("model_picker_used", false);
         s.context_1m_blocked = j.value("context_1m_blocked", false);
         s.show_changes_strip = j.value("show_changes_strip", false);
         s.show_reasoning     = j.value("show_reasoning", false);
@@ -1336,6 +1337,7 @@ void save_settings(const store::Settings& s) {
     }
     if (!s.always_allow_tools.empty())
         j["always_allow_tools"] = s.always_allow_tools;
+    if (s.model_picker_used) j["model_picker_used"] = true;
     if (s.context_1m_blocked) j["context_1m_blocked"] = true;
     // Only persisted when turned ON (default is off), keeping fresh configs clean.
     if (s.show_changes_strip) j["show_changes_strip"] = true;

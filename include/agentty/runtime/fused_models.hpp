@@ -201,9 +201,13 @@ find_catalog(const std::vector<ProviderCatalog>& cats, std::string_view pid) {
         });
     for (auto& s : scored) out.push_back(std::move(s.row));
 
-    // ── Section 3: sign-in offers (un-authed providers) ──────────────────
+    // ── Section 3: sign-in offers (un-authed providers) ────────────────────
+    // QUERY-GATED: with no query the browse view stays clean (no "sign in"
+    // clutter); a query that fuzzy-matches an un-authed provider's name
+    // surfaces its offer so searching for a provider you haven't added is
+    // never a dead end — the row IS the next step.
     for (const auto& off : offers) {
-        if (!no_query && !fuzzy::matches(off.label, q)) continue;
+        if (no_query || !fuzzy::matches(off.label, q)) continue;
         FusedRow row;
         row.provider_id = off.provider_id;
         row.label       = off.label;

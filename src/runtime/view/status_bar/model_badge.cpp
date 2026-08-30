@@ -47,10 +47,23 @@ maya::Element model_badge_config(const Model& m) {
         }
     }
 
+    // One-time discoverability teaser: until the user has EVER opened a
+    // model picker, ride a dim " · ^/ models" after the badge — the model
+    // name is the natural anchor for "how do I change this?", so the hint
+    // sits exactly where the eye already is. Retired forever on first open
+    // (Settings.model_picker_used); zero permanent chrome.
+    Element hint_chip = text("");
+    bool has_hint_chip = false;
+    if (!m.ui.model_picker_used) {
+        hint_chip = h(text(" \xc2\xb7 ", fg_dim(muted)),
+                      text("^/ models", fg_dim(muted))).build();
+        has_hint_chip = true;
+    }
+
     if (model.empty()) {
         // No model yet (e.g. an ACP agent that picks its own): show just the
         // provider so the slot is never blank.
-        return h(text("● ", fg_dim(muted)),
+        return h(text("\xe2\x97\x8f ", fg_dim(muted)),
                  text(prov, fg_dim(muted))).build();
     }
     // Update chip: when a newer release is known (background check), a
@@ -59,16 +72,18 @@ maya::Element model_badge_config(const Model& m) {
     // `agentty update`) are the actions; this chip is only the signal.
     if (!m.s.update_latest.empty()) {
         return h(mb.build(),
-                 text(" · ", fg_dim(muted)),
+                 text(" \xc2\xb7 ", fg_dim(muted)),
                  text(prov, fg_dim(muted)),
                  has_effort_chip ? effort_chip : text(""),
-                 text("  ⬆ v" + m.s.update_latest,
+                 has_hint_chip ? hint_chip : text(""),
+                 text("  \xe2\xac\x86 v" + m.s.update_latest,
                       fg_of(maya::Color::green()))).build();
     }
     return h(mb.build(),
-             text(" · ", fg_dim(muted)),
+             text(" \xc2\xb7 ", fg_dim(muted)),
              text(prov, fg_dim(muted)),
-             has_effort_chip ? effort_chip : text("")).build();
+             has_effort_chip ? effort_chip : text(""),
+             has_hint_chip ? hint_chip : text("")).build();
 }
 
 } // namespace agentty::ui
