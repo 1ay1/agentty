@@ -3,9 +3,11 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <string_view>
 
 #include "agentty/runtime/composer_attachment.hpp"
+#include "agentty/runtime/overlay.hpp"
 #include "agentty/runtime/view/helpers.hpp"
 #include "agentty/runtime/view/palette.hpp"
 
@@ -201,6 +203,22 @@ maya::Composer::Config composer_config(const Model& m) {
     // an aggressive repaint_delay.
     cfg.last_edit_ms    = m.ui.composer.last_edit_ms;
 
+    // ── Hardware caret ─────────────────────────────────────────
+    // Use the terminal's REAL cursor as the composer caret: native
+    // blink with zero idle wake-ups, IME popovers anchored at the true
+    // cell, screen readers tracking the real position. Only while the
+    // composer actually OWNS input focus — any overlay (palette,
+    // picker, viewer…) claims the keys, so the caret must not sit in
+    // the composer under it; maya falls back to park-and-hide and the
+    // widget falls back to the painted caret, which reads as "dimmed /
+    // unfocused" — exactly right. AGENTTY_PAINTED_CARET=1 opts out
+    // wholesale (terminals with a broken DECTCEM or users who prefer
+    // the block).
+    static const bool painted_caret_env =
+        std::getenv("AGENTTY_PAINTED_CARET") != nullptr;
+    cfg.hardware_caret =
+        !painted_caret_env && ui::overlay::top(m) == ui::overlay::Kind::None;
+
     // ── Cross-frame cache key (streaming anti-flicker) ───────────────
     //
     // During streaming the host re-runs view() on every delta; without
@@ -223,6 +241,7 @@ maya::Composer::Config composer_config(const Model& m) {
         .add(std::string_view{cfg.profile.label})
         .add(cfg.profile.color)
         .add(static_cast<std::uint64_t>(cfg.expanded ? 1 : 0))
+        .add(static_cast<std::uint64_t>(cfg.hardware_caret ? 1 : 0))
         .add(static_cast<std::uint64_t>(cfg.min_body_rows))
         .add(static_cast<std::uint64_t>(
             static_cast<std::uint32_t>(cfg.token_estimate)))

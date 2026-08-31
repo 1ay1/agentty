@@ -47,6 +47,7 @@ struct VtEmu {
     int cx = 0, cy = 0;
     std::vector<std::string> screen;
     bool decawm = true;
+    bool cursor_hidden = false;   // DECTCEM (?25l/?25h)
 
     VtEmu(int c, int r)
         : w(c), h(r), screen(static_cast<std::size_t>(r),
@@ -169,8 +170,14 @@ struct VtEmu {
                                 }
                                 break;
                             }
-                            case 'h': if (params.find("?7") != std::string::npos) decawm = true; break;
-                            case 'l': if (params.find("?7") != std::string::npos) decawm = false; break;
+                            case 'h':
+                                if (params.find("?7") != std::string::npos) decawm = true;
+                                if (params.find("?25") != std::string::npos) cursor_hidden = false;
+                                break;
+                            case 'l':
+                                if (params.find("?7") != std::string::npos) decawm = false;
+                                if (params.find("?25") != std::string::npos) cursor_hidden = true;
+                                break;
                             case 'm': case 'r': case 's': case 'u': case 't': default: break;
                         }
                         continue;
@@ -305,6 +312,15 @@ int main() {
     int first_text_row = -1, caret_row = -1, caret_col = -1;
     auto scan = [&]() {
         first_text_row = caret_row = caret_col = -1;
+        // The caret is EITHER the visible hardware cursor (hardware-
+        // caret mode — the default since the maya CursorHint work) OR a
+        // painted '#' block (painted mode / AGENTTY_PAINTED_CARET).
+        // Both map to "exactly one caret on screen"; the assertions
+        // below are mode-agnostic.
+        if (!emu.cursor_hidden) {
+            caret_row = emu.cy;
+            caret_col = emu.cx;
+        }
         for (int y = 0; y < H; ++y) {
             std::size_t p = emu.screen[static_cast<std::size_t>(y)].find('#');
             if (p != std::string::npos
@@ -346,6 +362,7 @@ int main() {
     int br = -1, bc = -1;
     auto scan_caret = [&](int& r, int& c) {
         r = c = -1;
+        if (!emu.cursor_hidden) { r = emu.cy; c = emu.cx; return; }
         for (int y = 0; y < H; ++y) {
             std::size_t p = emu.screen[static_cast<std::size_t>(y)].find('#');
             if (p != std::string::npos) { r = y; c = static_cast<int>(p); return; }
@@ -396,16 +413,21 @@ int main() {
                 "shrink.\n", cycle, br);
             return 42;
         }
-        // Stale caret DUPLICATE check: exactly one '#' on screen.
+        // Stale-caret DUPLICATE check, mode-agnostic. Hardware-caret
+        // mode: the terminal's own cursor IS the caret — it must be
+        // visible and there must be ZERO painted '#' blocks (any '#' is
+        // a stale painted cell). Painted mode: exactly one '#'.
         int n = 0;
         for (int y = 0; y < H; ++y)
             for (char ch : emu.screen[static_cast<std::size_t>(y)])
                 if (ch == '#') ++n;
-        if (n != 1) {
+        const int want = emu.cursor_hidden ? 1 : 0;
+        if (n != want) {
             dump(emu, "BUG state (osc, dup)");
             std::fprintf(stderr,
-                "\nBUG (variant, cycle %d): %d caret blocks on screen "
-                "(expected exactly 1).\n", cycle, n);
+                "\nBUG (variant, cycle %d): %d painted caret block(s) on "
+                "screen (expected %d; hardware cursor %s).\n",
+                cycle, n, want, emu.cursor_hidden ? "hidden" : "visible");
             return 43;
         }
     }
