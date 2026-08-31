@@ -975,11 +975,22 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
                       "replies \xe2\x80\x94 use plain ssh (or tmux over ssh), or set "
                       "AGENTTY_CLIPBOARD_CMD";
             } else if (in_tmux) {
-                // Name the ACTUAL blocker instead of guessing. tmux tells
-                // us both things: whether it will forward raw bytes at all
-                // (allow-passthrough, which defaults to OFF), and whether
-                // it believes the outer terminal does clipboard (OSC 52).
-                if (!maya::tmux::passthrough_allowed()) {
+                // Name the ACTUAL blocker instead of guessing. Order
+                // matters: these are checked in the order tmux applies
+                // them, so the first failure reported is the first one
+                // the user has to fix.
+                if (!maya::tmux::clipboard_reads_relayed()) {
+                    // THE common case, and silent until now: tmux's
+                    // `get-clipboard` defaults to `buffer`, so tmux
+                    // answers a clipboard read from its OWN paste buffer
+                    // and never asks the terminal. A paste buffer holds
+                    // TEXT — an image can never come back through it, no
+                    // matter what the outer terminal supports.
+                    msg = "clipboard: tmux answers reads from its own paste "
+                          "buffer (text only) \xe2\x80\x94 run `tmux set -g "
+                          "get-clipboard both` so it asks your terminal, "
+                          "then retry";
+                } else if (!maya::tmux::passthrough_allowed()) {
                     msg = "clipboard: tmux is dropping the request \xe2\x80\x94 run "
                           "`tmux set -g allow-passthrough on` (it is OFF by "
                           "default), then retry";
