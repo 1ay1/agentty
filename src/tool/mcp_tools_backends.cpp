@@ -29,6 +29,7 @@
 #include "agentty/provider/error_class.hpp"
 #include "agentty/provider/provider.hpp"
 #include "agentty/provider/selection.hpp"
+#include "agentty/provider/credentials.hpp"
 #include "agentty/provider/wire.hpp"
 
 #include "agentty/rag/rag_adapter.hpp"
@@ -824,9 +825,32 @@ provider::StreamResult run_one_completion(Thread& thread,
     // "kept the parent" fallback and the write-role (cfg.model) path.
     req.model         = agentty::wire_model_id(req.model);
     req.system_prompt = subagent_system_prompt(type);
-    req.auth          = provider::active().kind == provider::Kind::Anthropic
-                      ? auth::fresh_auth_header(cfg.auth)
-                      : cfg.auth;
+    // Resolve auth LIVE from the ACTIVE provider through the central
+    // credential layer — the same discipline as launch_stream's
+    // auth_snapshot(). cfg.auth is a snapshot taken at the last
+    // update_auth/switch_provider; a background OAuth refresh or an
+    // in-picker account switch between then and this subagent's launch
+    // would ship a stale (or the WRONG provider's) credential — the exact
+    // 401 class fixed on the main turn path. cfg.auth remains the fallback
+    // for oauth_native/local providers whose transports own their tokens
+    // (resolve returns empty there).
+    {
+        const auto sel = provider::active();
+        const std::string pid =
+            sel.kind == provider::Kind::OpenAI
+                ? sel.openai_endpoint.label
+                : std::string{provider::default_provider_id()};
+        auth::AuthHeader live = provider::credentials::resolve(pid);
+        const bool live_real = !auth::bearer_token(live).empty()
+            || std::holds_alternative<auth::BearerHeader>(live);
+        req.auth = live_real
+                 ? (sel.kind == provider::Kind::Anthropic
+                        ? auth::fresh_auth_header(live)
+                        : std::move(live))
+                 : (sel.kind == provider::Kind::Anthropic
+                        ? auth::fresh_auth_header(cfg.auth)
+                        : cfg.auth);
+    }
     // A subagent's job is to investigate and return a CONCISE standalone
     // report — not to emit a 32k-token essay. The parent's default is 16k;
     // 8k is ample for a report yet caps the per-turn output cost of a
