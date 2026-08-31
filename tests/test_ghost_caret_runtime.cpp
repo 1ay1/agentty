@@ -836,5 +836,62 @@ int main() {
                      "wrap/shrink is clean.\n", Hw);
     }
 
+    // ── Exit path: the "agentty eats composer lines on close" repro ───
+    // In hardware-caret mode every frame ends with the physical cursor
+    // AT THE CARET CELL — inside the composer box, rows above the frame
+    // bottom. Runtime::cleanup() must emit the finalize bytes (CUD back
+    // to the resting row) BEFORE the Terminal dtor's teardown \r\n;
+    // otherwise the shell prompt lands mid-box and its output eats the
+    // remaining composer rows from scrollback.
+    {
+        // Ensure a normal focused idle composer with the caret shown.
+        m.s.phase = agentty::phase::Idle{};
+        frame("pre-exit");
+        scan_caret(br, bc);
+        const bool caret_was_shown = !emu.cursor_hidden;
+        const int  caret_row_pre   = br;
+
+        // Find the frame's bottom row: the status bar's bottom border is
+        // the last non-blank row on screen.
+        int frame_bottom = -1;
+        for (int y = emu.h - 1; y >= 0; --y) {
+            if (emu.row(y).find_first_not_of(' ') != std::string::npos) {
+                frame_bottom = y;
+                break;
+            }
+        }
+
+        // Tear down the runtime the way a real quit does.
+        (void)rt.cleanup();
+        emu.feed(read_all(master));
+
+        // The cursor must now sit AT or BELOW the frame's last row —
+        // never inside the composer box — so the shell prompt that
+        // follows starts on a fresh line below the transcript.
+        if (caret_was_shown && caret_row_pre >= 0 && frame_bottom >= 0
+            && emu.cy < frame_bottom) {
+            dump(emu, "exit state");
+            std::fprintf(stderr,
+                "\nBUG REPRODUCED (exit): cleanup left the cursor at row %d "
+                "but the frame bottom is row %d — the shell prompt will "
+                "overwrite composer rows (the 'eats lines on close' "
+                "report).\n", emu.cy, frame_bottom);
+            return 49;
+        }
+        // Simulate the shell prompt the terminal prints next; it must
+        // land on a fresh row, not inside the box.
+        const int prompt_row = emu.cy;
+        emu.feed("$ \r\n");
+        if (frame_bottom >= 0 && prompt_row < frame_bottom) {
+            std::fprintf(stderr,
+                "\nBUG (exit variant): shell prompt rendered at row %d, "
+                "inside the frame (bottom %d).\n", prompt_row, frame_bottom);
+            return 49;
+        }
+        std::fprintf(stderr, "PASS: exit path returns the cursor below the "
+                     "frame (row %d >= bottom %d) before the shell prompt.\n",
+                     prompt_row, frame_bottom);
+    }
+
     return 0;
 }
