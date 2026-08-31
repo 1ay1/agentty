@@ -250,6 +250,21 @@ std::string pretty_model_label(std::string_view id) {
     // (chatgpt-4o-latest, codex-mini-latest) — same rule as the :latest tag.
     if (words.size() > 1 && lower_eq(words.back(), "latest"))
         words.pop_back();
+    // Server display names spell the same alias parenthetically —
+    // "GPT-5.3 Chat (latest)" — which our '-_ ' split leaves as a
+    // "(latest)" word. Drop a trailing parenthesized alias/status tag
+    // ((latest), (preview), (deprecated)) so a name-derived label reads
+    // as cleanly as an id-derived one.
+    if (words.size() > 1) {
+        std::string_view last = words.back();
+        if (last.size() >= 2 && last.front() == '(' && last.back() == ')') {
+            std::string_view inner = last.substr(1, last.size() - 2);
+            if (lower_eq(inner, "latest") || lower_eq(inner, "preview") ||
+                lower_eq(inner, "deprecated") || lower_eq(inner, "beta") ||
+                lower_eq(inner, "exp") || lower_eq(inner, "experimental"))
+                words.pop_back();
+        }
+    }
 
     std::string out;
     out.reserve(id.size() + tag.size() + 1);
@@ -309,6 +324,42 @@ std::string pretty_model_label(std::string_view id) {
         }
     }
     return out;
+}
+
+std::string model_display_label(std::string_view id,
+                                std::string_view display_name) {
+    // No server name (OpenAI-compat / Ollama that echo the id) → the
+    // id-normalized label is the only source.
+    if (display_name.empty() || display_name == id)
+        return pretty_model_label(id);
+
+    const std::string from_id   = pretty_model_label(id);
+    const std::string from_name = pretty_model_label(display_name);
+
+    // Is the server name just a re-cased / re-punctuated spelling of the
+    // id ("GPT-4o" for gpt-4o, "Hy-MT2-30B-A3B" for hy-mt2-30b-a3b)? If
+    // so, both normalize to the same tidy form and we prefer the
+    // id-derived one for cross-provider CONSISTENCY. We compare the
+    // alphanumeric-only, case-folded skeletons: identical skeleton ⇒
+    // same model, no marketing signal.
+    auto skeleton = [](std::string_view s) {
+        std::string k;
+        k.reserve(s.size());
+        for (char c : s)
+            if (std::isalnum(static_cast<unsigned char>(c)))
+                k.push_back(static_cast<char>(
+                    std::tolower(static_cast<unsigned char>(c))));
+        return k;
+    };
+    if (skeleton(from_id) == skeleton(from_name) ||
+        skeleton(display_name) == skeleton(id))
+        return from_id;
+
+    // The names genuinely diverge — a marketing alias the id can't
+    // reconstruct ("Nano Banana Pro" for gemini-3-pro-image). Keep the
+    // human name, but NORMALIZED so its own cruft ((latest), casing)
+    // is cleaned to match the rest of the list's typography.
+    return from_name;
 }
 
 std::string timestamp_hh_mm(std::chrono::system_clock::time_point tp) {

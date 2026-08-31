@@ -139,3 +139,37 @@ TEST_CASE("model_order_less: family group + natural version-desc") {
     CHECK(ordered({"Gemini 2.5 Flash", "Gemini 2.5 Flash"})
           == "Gemini 2.5 Flash | Gemini 2.5 Flash");
 }
+
+TEST_CASE("model_display_label: one canonical label across providers") {
+    using agentty::ui::model_display_label;
+    auto L = [](std::string_view id, std::string_view name) {
+        return model_display_label(id, name);
+    };
+
+    // No server name (OpenAI-compat / Ollama echo the id) → id-normalized.
+    CHECK(L("gpt-4o-mini", "")            == "GPT 4o Mini");
+    CHECK(L("gpt-image-1.5", "gpt-image-1.5") == "GPT Image 1.5"); // name==id
+
+    // A server name that's just a re-cased id ("GPT-4o", "Hy-MT2-30B-A3B")
+    // yields the SAME tidy label as the id alone — cross-provider
+    // consistency, not the provider's ad-hoc casing.
+    CHECK(L("gpt-4o", "GPT-4o")           == L("gpt-4o", ""));
+    CHECK(L("hy-mt2-30b-a3b", "Hy-MT2-30B-A3B") == L("hy-mt2-30b-a3b", ""));
+
+    // Cruft in a server name ((latest), casing) is normalized away, so it
+    // matches the id-derived form too.
+    CHECK(L("gpt-5.3-chat-latest", "GPT-5.3 Chat (latest)")
+          == L("gpt-5.3-chat-latest", ""));
+
+    // A genuine MARKETING alias the id can't reconstruct is KEPT (but
+    // still normalized) — "Nano Banana Pro" is not a rearrangement of
+    // "gemini-3-pro-image".
+    CHECK(L("gemini-3-pro-image", "Nano Banana Pro") == "Nano Banana Pro");
+
+    // Anthropic's clean names round-trip unchanged.
+    CHECK(L("claude-sonnet-4-5-20250929", "Claude Sonnet 4.5")
+          == "Claude Sonnet 4.5");
+
+    // Degenerate: empty id + empty name never crashes.
+    CHECK(L("", "") == "");
+}

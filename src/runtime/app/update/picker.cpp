@@ -1127,6 +1127,9 @@ std::vector<FusedRow> fused_rows_for_model(const Model& m) {
     in.recents    = &m.d.recent_models;
     in.active     = ModelRef{active_provider_id(), m.d.model_id.value};
     in.recent_cap = kRecentCap;
+    // The canonical, provider-uniform label so the fused rows read AND
+    // match identically to the per-provider picker (ui::model_display_label).
+    in.label_fn   = &ui::model_display_label;
     if (auto* c = m.ui.overlay.get<ov::FusedPicker>()) in.query = c->query;
     return ui::build_fused_rows(in);
 }
@@ -1176,7 +1179,14 @@ void rebuild_fused_rows(Model& m, bool sync_sources) {
             c.search_keys.clear();
             c.search_keys.reserve(c.models.size());
             for (const auto& mi : c.models) {
-                std::string key = ui::detail::fused_haystack(c.label, mi);
+                // Canonical label (ui::model_display_label) as the name
+                // segment — the SAME string build_fused_rows scores and
+                // the view renders — so a cached haystack can't drift from
+                // what's on screen.
+                std::string key = ui::detail::fused_haystack(
+                    c.label,
+                    ui::model_display_label(mi.id.value, mi.display_name),
+                    mi);
                 for (char& ch : key)
                     if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch - 'A' + 'a');
                 c.search_keys.push_back(std::move(key));

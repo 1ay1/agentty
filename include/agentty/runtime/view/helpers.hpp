@@ -78,6 +78,25 @@ namespace agentty::ui {
 // all-caps acronyms (GPT/GLM/SQL) and version/size runs (4o, 2.5, 8x7b).
 [[nodiscard]] std::string pretty_model_label(std::string_view model_id);
 
+// THE canonical human label for a model row — used by the per-provider
+// picker, the fused "all providers" picker, AND their fuzzy-match
+// anchor, so what you SEE is what gets matched and highlighted, and
+// every provider renders identically in both views.
+//
+// The two label sources are provably inconsistent: `id` is structured
+// and uniform ("gpt-5.3-chat-latest"), but the server `display_name`
+// ranges from clean ("Claude Sonnet 4.5") through raw-cased
+// ("Hy-MT2-30B-A3B", "gpt-image-1.5") to cruft-bearing ("GPT-5.3 Chat
+// (latest)") — and is sometimes a marketing alias unrelated to the id
+// ("Nano Banana Pro"). Rather than trust either blindly, this NORMALIZES
+// whichever source through pretty_model_label so both an id and its
+// server name collapse to the same tidy form. A server name is used
+// only when it carries real signal pretty(id) can't reconstruct (a
+// marketing name whose letters aren't a case-folded rearrangement of
+// the id); otherwise the id-derived label wins for consistency.
+[[nodiscard]] std::string model_display_label(std::string_view id,
+                                              std::string_view display_name);
+
 // Context window size for a given model id. Defaults to 200 K but bumps
 // to 1 M when the model id carries the agentty-internal `[1m]` tag (which
 // triggers the `context-1m-2025-08-07` beta on the wire). Used by the

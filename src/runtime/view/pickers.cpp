@@ -271,9 +271,7 @@ Element model_picker(const Model& m) {
     const std::string q = picker->query;
     for (int i = 0; i < static_cast<int>(m.d.available_models.size()); ++i) {
         const auto& cand = m.d.available_models[static_cast<std::size_t>(i)];
-        const std::string shown = (cand.display_name == cand.id.value)
-                                      ? pretty_model_label(cand.id.value)
-                                      : cand.display_name;
+        const std::string shown = model_display_label(cand.id.value, cand.display_name);
         if (q.empty()) {
             vscored.push_back({i, 0, {}, true, shown, cand.favorite});
             continue;
@@ -334,14 +332,12 @@ Element model_picker(const Model& m) {
             const bool sel    = vi == picker->index;
             const bool active = mi.id == m.d.model_id;
             Picker::Config::Row row;
-            // Anthropic/Copilot catalogs carry a server-provided display name
-            // ("Claude Sonnet 4.5"); OpenAI-compat and Ollama set
-            // display_name = raw id. Prettify exactly the fallback case — a
-            // real server-provided name passes through untouched, and the
-            // raw id stays searchable via the id-aware filter above.
-            row.leading        = (mi.display_name == mi.id.value)
-                                     ? pretty_model_label(mi.id.value)
-                                     : mi.display_name;
+            // The canonical, provider-uniform label — the SAME string the
+            // fuzzy match + highlight offsets were computed against (see
+            // the vscored build above), so highlights land on the right
+            // glyphs and every provider reads identically here and in the
+            // fused "all providers" view.
+            row.leading        = model_display_label(mi.id.value, mi.display_name);
             row.leading_style  = active ? fg_bold(fg) : fg_of(muted);
             // Light up the fuzzy-matched characters of the label (when the
             // match was on the label, not the raw id) so the ranking is
@@ -530,8 +526,7 @@ Element fused_picker(const Model& m) {
         row.badge_style   = fg_dim(active ? accent : muted);
         row.leading       = (active ? std::string{"\xe2\x97\x8f "}   // ●
                                     : std::string{"  "})
-                          + (r.model.display_name.empty()
-                                 ? r.model.id.value : r.model.display_name);
+                          + r.model_label;
         row.leading_style = active ? fg_bold(fg) : fg_of(muted);
         // fzf-style match highlight: paint the query's matched chars in the
         // name so a big filtered list shows WHY each row is here. Use the same

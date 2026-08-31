@@ -106,6 +106,14 @@ struct SigninOffer {
 struct FusedRow {
     std::string provider_id;
     std::string label;                    // provider display name
+    // The canonical, provider-uniform MODEL label the view renders and
+    // highlights — the SAME string match_positions index into. Computed
+    // in build_fused_rows via FusedInputs::label_fn (ui::model_display_
+    // label), so the fused picker reads identically to the per-provider
+    // one. Empty for sign-in offer rows (no model). Falls back to the
+    // raw display_name/id when no label_fn is injected (unit tests that
+    // call build_fused_rows directly).
+    std::string model_label;
     ModelInfo   model;                    // empty id ⇒ "sign in" offer
     bool        authed = true;
     bool        active = false;           // == current provider + model

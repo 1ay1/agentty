@@ -41,21 +41,33 @@ struct FusedInputs {
     ModelRef    active;                                       // current prov+model
     std::string query;
     int         recent_cap = 6;
+    // The canonical model label + fuzzy-match anchor. Injected by the
+    // view (ui::model_display_label) so the fused picker's rows read AND
+    // match identically to the per-provider picker's. Defaulted to the
+    // raw display_name-or-id so unit tests can call build_fused_rows
+    // without pulling in the view layer.
+    std::string (*label_fn)(std::string_view id, std::string_view name) =
+        [](std::string_view id, std::string_view name) -> std::string {
+            return std::string{name.empty() ? id : name};
+        };
 };
 
 namespace detail {
 
-// The searchable text for a (provider, model) row: "<label> <model display>".
+// The searchable text for a (provider, model) row:
+// "<provider label> <canonical model label> <raw id>". The canonical
+// label (ui::model_display_label) is what the view shows, so matching
+// and highlight offsets index the same string; the raw id is appended
+// so "gpt-5-codex" still matches even after prettification.
 [[nodiscard]] inline std::string fused_haystack(std::string_view label,
+                                                std::string_view model_label,
                                                 const ModelInfo& mi) {
     std::string h;
-    h.reserve(label.size() + 1 + mi.display_name.size() + 1
+    h.reserve(label.size() + 1 + model_label.size() + 1
               + mi.id.value.size());
     h += label;
     h += ' ';
-    h += mi.display_name;
-    // Also match the raw id so "gpt-5-codex" matches even when the display
-    // name is prettified.
+    h += model_label;
     h += ' ';
     h += mi.id.value;
     return h;
@@ -99,19 +111,25 @@ find_catalog(const std::vector<ProviderCatalog>& cats, std::string_view pid) {
     out.reserve(recents.size() + 32);
 
     auto matches = [&](std::string_view label, const ModelInfo& mi) -> bool {
-        return no_query || fuzzy::matches(fused_haystack(label, mi), q);
+        return no_query ||
+               fuzzy::matches(fused_haystack(label,
+                                             in.label_fn(mi.id.value, mi.display_name),
+                                             mi), q);
     };
 
-    // The visible model NAME (what the view puts in the row's leading cell).
-    auto name_of = [](const ModelInfo& mi) -> std::string_view {
-        return mi.display_name.empty() ? std::string_view{mi.id.value}
-                                       : std::string_view{mi.display_name};
+    // The visible model NAME the view puts in the row's leading cell —
+    // the canonical, provider-uniform label (ui::model_display_label via
+    // in.label_fn), so matching + highlighting index the SAME string the
+    // view renders. Returns by value (label_fn normalizes), so callers
+    // bind it to a local before taking offsets against it.
+    auto name_of = [&](const ModelInfo& mi) -> std::string {
+        return in.label_fn(mi.id.value, mi.display_name);
     };
     // Byte offsets of the query within the NAME, for fzf-style highlighting.
     // Empty when no query, or when the row matched only on the provider name.
-    auto name_positions = [&](const ModelInfo& mi) -> std::vector<int> {
+    auto name_positions = [&](std::string_view name) -> std::vector<int> {
         if (no_query) return {};
-        return fuzzy::score(name_of(mi), q).positions;
+        return fuzzy::score(name, q).positions;
     };
 
     // ── Section 1: RECENT (MRU) ──────────────────────────────────────────
@@ -141,12 +159,13 @@ find_catalog(const std::vector<ProviderCatalog>& cats, std::string_view pid) {
         row.provider_id = r.provider_id;
         row.label       = c->label;
         row.model       = *mi;
+        row.model_label = name_of(*mi);
         row.authed      = true;
         row.active      = (r == in.active);
         row.recent      = true;
         row.reasons     = effort_capable(
             resolved_caps(mi->id.value, r.provider_id));
-        row.match_positions = name_positions(*mi);
+        row.match_positions = name_positions(row.model_label);
         out.push_back(std::move(row));
         seen.push_back(r);
     };
@@ -185,6 +204,7 @@ find_catalog(const std::vector<ProviderCatalog>& cats, std::string_view pid) {
                                          // (mistral-medium-3-5 AND -3.5)
             int mscore = 0;
             std::vector<int> positions;
+            const std::string model_label = name_of(mi);
             if (!no_query) {
                 // Prefer the catalog's PRECOMPUTED lowercased haystack (built
                 // once per catalog change), so a keystroke never re-allocates
@@ -194,34 +214,37 @@ find_catalog(const std::vector<ProviderCatalog>& cats, std::string_view pid) {
                 std::string tmp;
                 std::string_view h = i < nkeys
                     ? std::string_view{c.search_keys[i]}
-                    : std::string_view{(tmp = fused_haystack(c.label, mi))};
+                    : std::string_view{(tmp = fused_haystack(c.label, model_label, mi))};
                 const auto sc = fuzzy::score(h, q);
                 if (!sc.matched()) continue;
                 mscore = sc.score;
-                // Highlight positions: the haystack is "<label> <name>", so a
-                // match confined to the name substring maps by offset. When
-                // any position falls inside the label, re-score just the name
-                // (rare — only when the query matches the provider name).
-                const std::size_t name_off = h.size() >= name_of(mi).size()
-                    ? h.size() - name_of(mi).size() : 0;
-                bool all_in_name = true;
-                for (int p : sc.positions)
-                    if (static_cast<std::size_t>(p) < name_off) {
-                        all_in_name = false;
-                        break;
-                    }
-                if (all_in_name) {
+                // Highlight offsets index the visible label, which is a
+                // SUBSTRING of the haystack ("<provider> <label> <id>") at a
+                // known start. Map by that offset when every matched char
+                // lands inside the label span; otherwise the query matched
+                // the provider name or the raw id — re-score just the label
+                // so we only ever highlight what's on screen (empty result
+                // is fine: nothing to light up).
+                const std::size_t label_off = c.label.size() + 1;  // "<provider> "
+                const std::size_t label_end = label_off + model_label.size();
+                bool all_in_label = !sc.positions.empty();
+                for (int p : sc.positions) {
+                    const auto up = static_cast<std::size_t>(p);
+                    if (up < label_off || up >= label_end) { all_in_label = false; break; }
+                }
+                if (all_in_label) {
                     positions.reserve(sc.positions.size());
                     for (int p : sc.positions)
-                        positions.push_back(p - static_cast<int>(name_off));
+                        positions.push_back(p - static_cast<int>(label_off));
                 } else {
-                    positions = fuzzy::score(name_of(mi), q).positions;
+                    positions = name_positions(model_label);
                 }
             }
             FusedRow row;
             row.provider_id = c.provider_id;
             row.label       = c.label;
             row.model       = mi;
+            row.model_label = model_label;
             row.authed      = true;
             row.active      = (r == in.active);
             row.recent      = false;
