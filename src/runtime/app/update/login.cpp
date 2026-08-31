@@ -26,6 +26,7 @@
 #include "agentty/provider/selection.hpp"
 #include "agentty/provider/credentials.hpp"
 #include "agentty/provider/auth_state.hpp"
+#include "agentty/auth/vault.hpp"
 #include "agentty/runtime/app/cmd_factory.hpp"
 #include "agentty/runtime/app/deps.hpp"
 #include "agentty/runtime/view/helpers.hpp"
@@ -246,38 +247,37 @@ static std::string signout_provider_id(const provider::Selection& sel) {
 
 Step sign_out(Model m) {
     // Clear the ACTIVE provider's credentials, so "Sign out" targets whatever
-    // the user is currently signed in to. ChatGPT/Codex keeps its token in a
-    // separate store; Anthropic uses credentials.json. OpenAI-family API keys
-    // come from env / in-app paste (saved in settings.provider_keys) — we drop
-    // the pasted key so a re-auth is required.
+    // the user is currently signed in to. WHICH store that is (Anthropic's
+    // credentials.json, an OAuth token file, a provider_keys entry) is the
+    // vault's question — one descriptor per provider, no per-provider ladder
+    // here (see auth/vault.hpp).
     const auto& sel = provider::active();
-    std::string what = "credentials";
-    if (sel.is_copilot()) {
-        provider::copilot::clear_credentials();
-        what = "GitHub Copilot";
-    } else if (sel.is_kimi()) {
-        provider::kimi::clear_credentials();
-        what = "Kimi";
-    } else if (sel.is_oauth_native()) {
-        provider::chatgpt::clear_codex_credentials();
-        what = "ChatGPT";
-    } else if (sel.kind == provider::Kind::Anthropic) {
-        auth::clear_credentials();
-        what = "Anthropic";
+    const std::string pid = signout_provider_id(sel);
+    std::string what = pid.empty() ? std::string{"credentials"}
+                                   : provider::provider_display_name(sel);
+    // SettingsKey stores (hosted keys + custom hosts) clear through the
+    // INJECTED settings door so the write is visible to tests' in-memory
+    // stubs and rides the same persistence path as every reducer write.
+    // File-backed stores (Anthropic / OAuth token files) are the vault's.
+    if (!pid.empty()) {
+        if (auth::vault::of(pid).kind == auth::vault::Kind::SettingsKey) {
+            auto settings = deps().load_settings();
+            if (settings.provider_keys.erase(pid) > 0)
+                deps().save_settings(settings);
+        } else {
+            auth::vault::sign_out(pid);
+        }
+    }
+
+    if (sel.kind == provider::Kind::Anthropic) {
         // The 1M-context entitlement block was learned FOR the account being
         // dropped; the next sign-in may be entitled. Re-arm discovery.
+        // (Policy, not storage — stays here, not in the vault.)
         auto settings = deps().load_settings();
         if (settings.context_1m_blocked) {
             settings.context_1m_blocked = false;
             deps().save_settings(settings);
         }
-    } else if (sel.kind == provider::Kind::OpenAI) {
-        // Drop the in-app-pasted key for this endpoint; env keys are the
-        // process env and can't be unset from here.
-        auto settings = deps().load_settings();
-        settings.provider_keys.erase(sel.openai_endpoint.label);
-        deps().save_settings(settings);
-        what = std::string{sel.openai_endpoint.label};
     }
 
     // Zero the live auth header so the very next turn can't reuse a

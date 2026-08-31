@@ -6,6 +6,7 @@
 
 #include "agentty/provider/registry.hpp"
 #include "agentty/auth/auth.hpp"
+#include "agentty/auth/vault.hpp"
 #include "agentty/provider/chatgpt/responses.hpp"
 #include "agentty/provider/copilot/copilot_oauth.hpp"
 #include "agentty/provider/kimi/kimi_oauth.hpp"
@@ -27,23 +28,28 @@ bool provider_is_authed(const ProviderDescriptor& p,
     // Local / no-auth backends are always usable.
     if (p.is_local || p.auth == AuthStyle::None) return true;
 
-    // In-process OAuth providers: ask their own stat-cached predicate.
-    if (p.id == "chatgpt") return chatgpt::responses_available();
-    if (p.id == "copilot") return copilot::signed_in();
-    if (p.id == "kimi")    return kimi::signed_in();
-
-    // Anthropic: OAuth (Pro/Max) or x-api-key on disk — independent of the
-    // currently-active provider.
-    if (kind_of(p.wire) == Kind::Anthropic)
-        return auth::anthropic_signed_in()
-            || settings.provider_keys.count(std::string{p.id}) != 0;
-
-    // Hosted OpenAI-family: a bearer key from env OR the saved provider_keys.
-    for (auto env : p.auth_env)
-        if (env_has(env)) return true;
+    // Dispatch on the vault DESCRIPTOR (which store family this provider
+    // uses) but answer the SettingsKey question from the INJECTED settings —
+    // this function is a pure query over its inputs (tests inject an
+    // in-memory Settings; the vault's own accessor reads disk and would
+    // break that hermeticity and the DI discipline).
+    switch (auth::vault::of(p.id).kind) {
+        case auth::vault::Kind::AnthropicFile:
+            if (auth::anthropic_signed_in()) return true;
+            // Pasted-key overlap: provider_keys["anthropic"].
+            return settings.provider_keys.count(std::string{p.id}) != 0;
+        case auth::vault::Kind::OAuthFile:
+            return auth::vault::signed_in(std::string{p.id});
+        case auth::vault::Kind::SettingsKey:
+        case auth::vault::Kind::None:
+            break;
+    }
+    // Hosted key: saved entry in the injected settings, or an env var.
     if (auto it = settings.provider_keys.find(std::string{p.id});
         it != settings.provider_keys.end() && !it->second.empty())
         return true;
+    for (auto env : p.auth_env)
+        if (env_has(env)) return true;
     return false;
 }
 
@@ -59,18 +65,25 @@ bool provider_is_authed(std::string_view id, const store::Settings& settings) {
 AuthSource auth_source(const ProviderDescriptor& p,
                        const store::Settings& settings) {
     if (p.is_local || p.auth == AuthStyle::None) return AuthSource::Local;
-    // In-process OAuth + Anthropic: a saved credential (disk/token) or a
-    // pasted key. These are all in-app removable, so "Saved".
-    if (p.id == "chatgpt" || p.id == "copilot" || p.id == "kimi"
-        || kind_of(p.wire) == Kind::Anthropic)
-        return provider_is_authed(p, settings) ? AuthSource::Saved
-                                               : AuthSource::None;
-    // Hosted OpenAI-family: a pasted key (removable) takes precedence in
-    // resolution, so report Saved when one exists; otherwise Env iff any of
-    // the provider's env vars is set (that key can't be dropped in-app).
+    // Same dispatch discipline as provider_is_authed: vault kind selects
+    // the store family; SettingsKey answers come from the INJECTED settings.
+    switch (auth::vault::of(p.id).kind) {
+        case auth::vault::Kind::AnthropicFile:
+            if (auth::anthropic_signed_in()
+                || settings.provider_keys.count(std::string{p.id}) != 0)
+                return AuthSource::Saved;
+            return AuthSource::None;
+        case auth::vault::Kind::OAuthFile:
+            return auth::vault::signed_in(std::string{p.id})
+                 ? AuthSource::Saved : AuthSource::None;
+        case auth::vault::Kind::SettingsKey:
+        case auth::vault::Kind::None:
+            break;
+    }
     if (auto it = settings.provider_keys.find(std::string{p.id});
         it != settings.provider_keys.end() && !it->second.empty())
         return AuthSource::Saved;
+    // Env-only credential: usable but NOT removable in-app.
     for (auto env : p.auth_env)
         if (env_has(env)) return AuthSource::Env;
     return AuthSource::None;

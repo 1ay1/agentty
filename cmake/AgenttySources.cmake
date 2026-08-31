@@ -26,6 +26,7 @@ set(AGENTTY_IO_SOURCES
     src/io/auth.cpp
     src/io/accounts.cpp
     src/io/account_switch.cpp
+    src/io/vault.cpp
     src/io/cred_crypt.cpp
     src/io/keystore.cpp
     src/io/persistence.cpp
