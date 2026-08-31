@@ -962,7 +962,18 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
 #endif
                 return false;
             }();
-            const bool in_tmux = std::getenv("TMUX") != nullptr;
+            const bool in_tmux = [] {
+                // Same both-topologies detection as maya's tmux_in_path():
+                // $TMUX (tmux on this host) OR a tmux-*/screen-* TERM that
+                // survived ssh (tmux on the LOCAL side of the session).
+                if (std::getenv("TMUX")) return true;
+                if (const char* t = std::getenv("TERM"); t && *t) {
+                    std::string_view tv{t};
+                    if (tv.rfind("tmux", 0) == 0 || tv.rfind("screen", 0) == 0)
+                        return true;
+                }
+                return false;
+            }();
             const bool in_ssh  = std::getenv("SSH_CONNECTION") != nullptr
                               || std::getenv("SSH_TTY") != nullptr;
             std::string msg;
