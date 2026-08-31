@@ -895,10 +895,17 @@ TEST_CASE("wire dialect reasoning-text transmissibility") {
     // Responses API surfaces it). The picker labels this "n/a on this API"
     // instead of promising "✦ shown" output that can never arrive.
     CHECK(!wire_streams_reasoning_text("copilot"));
-    // agentty's own "openai" row is Wire::OpenAIResponses — the Responses
-    // API DOES return reasoning summaries, which is exactly why Copilot
-    // (routing GPT-5 through Chat Completions) is the odd one out.
-    CHECK(wire_streams_reasoning_text("openai"));
+    // agentty's `openai` row dials api.openai.com/v1/chat/completions — the
+    // SAME Chat Completions dialect — so it hides reasoning text for the
+    // same reason. This assertion used to say the opposite: the row was
+    // mislabelled Wire::OpenAIResponses, and since the predicate only
+    // checked the dialect it answered "yes" by accident. The row now
+    // carries its real path (registry.hpp), a static_assert pins wire and
+    // path together, and this test pins the user-visible consequence.
+    // The genuinely-Responses path is `chatgpt`, which has its own
+    // transport (/backend-api/codex/responses) — asserted below.
+    CHECK(!wire_streams_reasoning_text("openai"));
+    CHECK(wire_streams_reasoning_text("chatgpt"));
     // Anthropic streams thinking blocks natively.
     CHECK(wire_streams_reasoning_text("anthropic"));
     // OpenAI-COMPAT servers on the SAME dialect DO populate

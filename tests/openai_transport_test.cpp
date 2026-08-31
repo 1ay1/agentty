@@ -655,6 +655,59 @@ TEST_CASE("test_sse_two_leaked_calls_unique_ids") {
             CHECK(s->id.value == "call_salvaged_0");
 }
 
+TEST_CASE("endpoints are a projection of the provider registry (SSOT)") {
+    // The endpoint facts used to live TWICE: half on the registry row, half
+    // in a 14-arm if-chain inside from_spec. They drifted — the `openai` row
+    // advertised Wire::OpenAIResponses while the transport dialled
+    // /v1/chat/completions, which made the reasoning-text UI promise output
+    // the wire never sends.
+    //
+    // from_spec is now a projection of the table, and this pins that: every
+    // HTTP-dialled row must resolve to EXACTLY its own columns. A future
+    // hardcoded arm that shadows a row fails here.
+    for (const auto& row : provider::kProviders) {
+        if (!row.http_dialled()) continue;
+        CAPTURE(row.id);
+        auto ep = oai::Endpoint::from_spec(row.id);
+        CHECK(ep.host        == row.host);
+        CHECK(ep.path        == row.path);
+        CHECK(ep.models_path == row.models_path);
+        CHECK(ep.port        == row.port);
+        CHECK(ep.use_tls     == row.use_tls);
+        CHECK(ep.native_api  == row.native_api);
+        // The label is the routing key every dispatch site compares on.
+        CHECK(ep.label       == row.id);
+    }
+}
+
+TEST_CASE("non-HTTP providers keep their sentinel endpoints") {
+    // Anthropic, ChatGPT and ACP are NOT reached over the OpenAI-compat
+    // transport (own transport / OAuth Responses path / subprocess). They
+    // deliberately carry no endpoint columns, so from_spec must not invent
+    // one for them — the label still has to route correctly.
+    auto chatgpt = oai::Endpoint::from_spec("chatgpt");
+    CHECK(chatgpt.label == "chatgpt");
+    // Legacy spec canonicalises to the same label.
+    CHECK(oai::Endpoint::from_spec("codex-cli").label == "chatgpt");
+}
+
+TEST_CASE("legacy codex alias resolves to the openai row, not a copy") {
+    // `codex` was once its own picker row, byte-identical to `openai`. It is
+    // now an alias that RESOLVES THROUGH the registry rather than restating
+    // the host — so it cannot drift from `openai` the way it could when both
+    // were hardcoded literals.
+    auto codex  = oai::Endpoint::from_spec("codex");
+    auto openai = oai::Endpoint::from_spec("openai");
+    CHECK(codex.host == openai.host);
+    CHECK(codex.path == openai.path);
+    CHECK(codex.models_path == openai.models_path);
+    CHECK(codex.label == openai.label);
+    // And the empty spec means "the default host" — same row again.
+    auto empty = oai::Endpoint::from_spec("");
+    CHECK(empty.host == openai.host);
+    CHECK(empty.path == openai.path);
+}
+
 TEST_CASE("test_endpoint_presets") {
     auto groq = oai::Endpoint::from_spec("groq");
     CHECK(groq.host == "api.groq.com");

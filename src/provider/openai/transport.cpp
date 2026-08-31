@@ -37,6 +37,7 @@
 #include <simdjson.h>
 
 #include "agentty/provider/debug.hpp"   // shared AGENTTY_DEBUG_API logger
+#include "agentty/provider/registry.hpp" // endpoint columns: from_spec's SSOT
 #include "agentty/provider/stream_epilogue.hpp"
 #include "agentty/provider/usage.hpp"
 #include "agentty/provider/msg_shared.hpp"
@@ -1423,7 +1424,7 @@ Endpoint Endpoint::from_spec(std::string_view spec) {
     auto eq = [](std::string_view a, const char* b) {
         return a == std::string_view{b};
     };
-    if (spec.empty() || eq(spec, "openai") || eq(spec, "codex")) {
+    if (eq(spec, "codex")) {
         // "codex" is a LEGACY ALIAS: it used to be its own "Codex API" picker
         // row, but that was byte-identical to `openai` (same host, same
         // /v1/chat/completions, same bearer auth — only the key env var
@@ -1431,9 +1432,12 @@ Endpoint Endpoint::from_spec(std::string_view spec) {
         // `openai` preset's auth_env; the spec still resolves here so
         // `--provider codex` and persisted configs keep working. The genuinely
         // distinct Codex path is `chatgpt` (Responses API over ChatGPT OAuth).
-        return Endpoint{"api.openai.com", 443, "/v1/chat/completions",
-                        "/v1/models", true, "openai"};
+        // Resolved through the registry so it can't drift from `openai`.
+        spec = "openai";
     }
+    // Empty spec = the default OpenAI-family host, resolved through the
+    // registry like every other preset (no second copy of its host/path).
+    if (spec.empty()) spec = "openai";
     if (eq(spec, "chatgpt") || eq(spec, "codex-cli")) {
         // The native ChatGPT path never dials this endpoint: main.cpp
         // dispatches this label to chatgpt::ChatGptProvider. Keep a
@@ -1443,69 +1447,32 @@ Endpoint Endpoint::from_spec(std::string_view spec) {
         // `--provider codex-cli`) but normalises to the same endpoint.
         return Endpoint{"localhost", 0, "/", "/", false, "chatgpt"};
     }
-    if (eq(spec, "copilot")) {
-        // Like chatgpt: the native Copilot path (copilot::CopilotProvider)
-        // builds the REAL endpoint at request time — the host comes from the
-        // token exchange's `endpoints.api` (Individual/Business/Enterprise all
-        // differ), so it can't be hardcoded here. This is only a sentinel so
-        // generic OpenAI-family selection invariants hold; the label is what
-        // the picker/badge read.
-        return Endpoint{"api.githubcopilot.com", 443, "/chat/completions",
-                        "/models", true, "copilot"};
-    }
-    if (eq(spec, "groq")) {
-        return Endpoint{"api.groq.com", 443, "/openai/v1/chat/completions",
-                        "/openai/v1/models", true, "groq"};
-    }
-    if (eq(spec, "openrouter")) {
-        return Endpoint{"openrouter.ai", 443, "/api/v1/chat/completions",
-                        "/api/v1/models", true, "openrouter"};
-    }
-    if (eq(spec, "together")) {
-        return Endpoint{"api.together.xyz", 443, "/v1/chat/completions",
-                        "/v1/models", true, "together"};
-    }
-    if (eq(spec, "cerebras")) {
-        return Endpoint{"api.cerebras.ai", 443, "/v1/chat/completions",
-                        "/v1/models", true, "cerebras"};
-    }
-    if (eq(spec, "deepseek")) {
-        // DeepSeek's OpenAI-compatible endpoints live at the ROOT (no /v1
-        // prefix): https://api.deepseek.com/chat/completions and /models.
-        return Endpoint{"api.deepseek.com", 443, "/chat/completions",
-                        "/models", true, "deepseek"};
-    }
-    if (eq(spec, "xai")) {
-        // xAI (Grok): standard OpenAI-compat surface on /v1.
-        return Endpoint{"api.x.ai", 443, "/v1/chat/completions",
-                        "/v1/models", true, "xai"};
-    }
-    if (eq(spec, "mistral")) {
-        return Endpoint{"api.mistral.ai", 443, "/v1/chat/completions",
-                        "/v1/models", true, "mistral"};
-    }
-    if (eq(spec, "gemini")) {
-        // Google's OpenAI-compat shim lives under /v1beta/openai (chat +
-        // models), NOT the native generateContent surface.
-        return Endpoint{"generativelanguage.googleapis.com", 443,
-                        "/v1beta/openai/chat/completions",
-                        "/v1beta/openai/models", true, "gemini"};
-    }
-    if (eq(spec, "fireworks")) {
-        // Fireworks serves the OpenAI dialect under /inference/v1.
-        return Endpoint{"api.fireworks.ai", 443, "/inference/v1/chat/completions",
-                        "/inference/v1/models", true, "fireworks"};
-    }
-    if (eq(spec, "ollama")) {
-        Endpoint ep{"localhost", 11434, "/api/chat",
-                    "/api/tags", false, "ollama"};
-        ep.native_api = true;
+    // NOTE `copilot` resolves from its registry row below. The native
+    // Copilot path (copilot::CopilotProvider) overrides the host at request
+    // time from the token exchange's `endpoints.api` (Individual/Business/
+    // Enterprise all differ); the row is the sentinel + label.
+
+    // ── Preset rows: ONE lookup over the provider registry ──────────────
+    // This used to be a 14-arm if-chain that re-stated host/path facts the
+    // registry row already half-carried. The two drifted (the `openai` row
+    // claimed Wire::OpenAIResponses while this function dialled
+    // /v1/chat/completions), so the endpoint columns now live on the row and
+    // this is a pure projection of them. Adding a provider touches the table
+    // only — there is no arm here to forget.
+    if (const auto* row = provider::preset_for(spec);
+        row && row->http_dialled()) {
+        Endpoint ep{std::string{row->host}, row->port, std::string{row->path},
+                    std::string{row->models_path}, row->use_tls,
+                    std::string{row->id}};
+        ep.native_api = row->native_api;
         return ep;
     }
+
     if (eq(spec, "llama.cpp")) {
-        // llama.cpp's built-in server speaks the OpenAI REST dialect on
-        // /v1 (NOT Ollama's native /api/chat), defaults to port 8080, and
-        // needs no auth. Plain HTTP — it's a localhost daemon.
+        // Not a preset row (a llama.cpp/vLLM/LM Studio server is just a
+        // generic OpenAI-compatible host — see the registry NOTE), but kept
+        // as a convenience alias: OpenAI REST dialect on /v1 (NOT Ollama's
+        // native /api/chat), port 8080, no auth, plain HTTP (localhost).
         return Endpoint{"localhost", 8080, "/v1/chat/completions",
                          "/v1/models", false, "llama.cpp"};
     }

@@ -127,6 +127,41 @@ struct ProviderDescriptor {
     // routing/prewarm/login sites — a second such provider just sets the flag.
     bool oauth_native = false;
 
+    // ── Wire endpoint (the HTTP facts) ───────────────────────────────
+    // Where this provider is actually dialled. These used to live in a
+    // 14-arm if-chain inside Endpoint::from_spec, RE-STATING host/path
+    // facts that were already half-present on this row. Two sources of
+    // truth drifted exactly as you'd expect: the `openai` row claimed
+    // Wire::OpenAIResponses while the transport dialled
+    // /v1/chat/completions, which silently made the reasoning-text UI
+    // promise something the wire never delivers.
+    //
+    // Keeping them HERE, one column over from `wire`, makes that class of
+    // drift unrepresentable: a row that says Responses but points at
+    // /chat/completions is now a visible contradiction on a single line,
+    // and a static_assert below rejects it at compile time.
+    //
+    // Empty `host` means "not dialled over the generic OpenAI-compat
+    // transport": Anthropic (own transport, hardcoded host), ChatGPT
+    // (dedicated OAuth transport) and ACP (subprocess, no HTTP) leave
+    // these blank and are routed by `wire` / `oauth_native` instead.
+    std::string_view host;          // "api.groq.com"; "" = not HTTP-dialled.
+    std::string_view path;          // completions path, e.g. "/v1/chat/completions".
+    std::string_view models_path;   // model-list path, e.g. "/v1/models".
+    std::uint16_t    port = 443;
+    bool             use_tls = true;
+
+    // Ollama's NATIVE /api/chat protocol (NDJSON, structured tool_calls)
+    // instead of its OpenAI-compat shim, which makes weak local models
+    // leak tool calls as raw JSON in `content`.
+    bool             native_api = false;
+
+    // True when this row is reached over the generic OpenAI-compat
+    // transport (i.e. it carries real endpoint data above).
+    [[nodiscard]] constexpr bool http_dialled() const noexcept {
+        return !host.empty();
+    }
+
     // Coarse Kind view, derived from `wire` so it can never drift. Kept for
     // the call sites that only need Anthropic-vs-OpenAI-family-vs-ACP.
     [[nodiscard]] constexpr Kind kind() const noexcept { return kind_of(wire); }
@@ -141,40 +176,68 @@ using ProviderPreset = ProviderDescriptor;
 // Order = display order in the picker. Anthropic first (the default), then
 // hosted OpenAI-family by popularity, then the local backend last.
 //
-// To add a provider: append a row here, and — if it's OpenAI-compatible with
-// a non-default wire path — add the matching `Endpoint` arm in
-// openai/transport.cpp::from_spec keyed on the same `id`.
+// To add a provider: append ONE row here. The endpoint columns below are the
+// only place its host/path live — Endpoint::from_spec is a lookup over this
+// table, so there is no second arm to keep in sync.
 inline constexpr std::array<ProviderDescriptor, 15> kProviders{{
     {"anthropic",  "Anthropic",  "Claude — OAuth (Pro/Max) or API key",
-     Wire::AnthropicMessages, Lifetime::LongLived, AuthStyle::OAuthOrKey, false, {"", "", ""}, "api.anthropic.com"},
+     Wire::AnthropicMessages, Lifetime::LongLived, AuthStyle::OAuthOrKey, false, {"", "", ""}, "api.anthropic.com", false,
+     // Own transport (not the OpenAI-compat one): no endpoint columns.
+     "", "", ""},
     {"openai",     "OpenAI",     "GPT / Codex — api.openai.com",
-     Wire::OpenAIResponses,   Lifetime::PerCall,   AuthStyle::ApiKey,     false, {"OPENAI_API_KEY", "CODEX_API_KEY", ""}, ""},
+     // Chat Completions, NOT Responses. The row used to claim
+     // Wire::OpenAIResponses while dialling /v1/chat/completions — the
+     // label was decorative (nothing dispatched on it) so the lie went
+     // unnoticed and made the reasoning-text UI over-promise. The wire
+     // and the path now sit on one line and must agree.
+     Wire::OpenAIChat,        Lifetime::PerCall,   AuthStyle::ApiKey,     false, {"OPENAI_API_KEY", "CODEX_API_KEY", ""}, "", false,
+     "api.openai.com", "/v1/chat/completions", "/v1/models"},
     {"chatgpt",   "ChatGPT",    "Sign in with ChatGPT — Codex models, no API key",
-     Wire::OpenAIResponses,   Lifetime::LongLived, AuthStyle::None,       true,  {"", "", ""}, "chatgpt.com", /*oauth_native=*/true},
+     // Genuinely Responses — but over its OWN OAuth transport
+     // (/backend-api/codex/responses), not the compat one, so no columns.
+     Wire::OpenAIResponses,   Lifetime::LongLived, AuthStyle::None,       true,  {"", "", ""}, "chatgpt.com", /*oauth_native=*/true,
+     "", "", ""},
     {"copilot",   "GitHub Copilot", "Sign in with GitHub — Copilot models, no API key",
-     Wire::OpenAIChat,        Lifetime::LongLived, AuthStyle::None,       false, {"", "", ""}, "api.githubcopilot.com", /*oauth_native=*/true},
+     Wire::OpenAIChat,        Lifetime::LongLived, AuthStyle::None,       false, {"", "", ""}, "api.githubcopilot.com", /*oauth_native=*/true,
+     "api.githubcopilot.com", "/chat/completions", "/models"},
     {"kimi",      "Kimi",       "Sign in with Kimi — Kimi K2 models, no API key",
-     Wire::OpenAIChat,        Lifetime::LongLived, AuthStyle::None,       false, {"", "", ""}, "api.kimi.com", /*oauth_native=*/true},
+     // Kimi Code inference API: base https://api.kimi.com/coding/v1 (its
+     // own provider builds this; the columns must agree with it).
+     Wire::OpenAIChat,        Lifetime::LongLived, AuthStyle::None,       false, {"", "", ""}, "api.kimi.com", /*oauth_native=*/true,
+     "api.kimi.com", "/coding/v1/chat/completions", "/coding/v1/models"},
     {"groq",       "Groq",       "Llama/Mixtral on Groq LPUs — very fast",
-     Wire::OpenAIChat,        Lifetime::PerCall,   AuthStyle::ApiKey,     false, {"GROQ_API_KEY", "OPENAI_API_KEY", ""}, ""},
+     Wire::OpenAIChat,        Lifetime::PerCall,   AuthStyle::ApiKey,     false, {"GROQ_API_KEY", "OPENAI_API_KEY", ""}, "", false,
+     "api.groq.com", "/openai/v1/chat/completions", "/openai/v1/models"},
     {"openrouter", "OpenRouter", "Any model via openrouter.ai",
-     Wire::OpenAIChat,        Lifetime::PerCall,   AuthStyle::ApiKey,     false, {"OPENROUTER_API_KEY", "OPENAI_API_KEY", ""}, ""},
+     Wire::OpenAIChat,        Lifetime::PerCall,   AuthStyle::ApiKey,     false, {"OPENROUTER_API_KEY", "OPENAI_API_KEY", ""}, "", false,
+     "openrouter.ai", "/api/v1/chat/completions", "/api/v1/models"},
     {"together",   "Together",   "Open models on together.ai",
-     Wire::OpenAIChat,        Lifetime::PerCall,   AuthStyle::ApiKey,     false, {"TOGETHER_API_KEY", "OPENAI_API_KEY", ""}, ""},
+     Wire::OpenAIChat,        Lifetime::PerCall,   AuthStyle::ApiKey,     false, {"TOGETHER_API_KEY", "OPENAI_API_KEY", ""}, "", false,
+     "api.together.xyz", "/v1/chat/completions", "/v1/models"},
     {"cerebras",   "Cerebras",   "Wafer-scale inference — very fast",
-     Wire::OpenAIChat,        Lifetime::PerCall,   AuthStyle::ApiKey,     false, {"CEREBRAS_API_KEY", "OPENAI_API_KEY", ""}, ""},
+     Wire::OpenAIChat,        Lifetime::PerCall,   AuthStyle::ApiKey,     false, {"CEREBRAS_API_KEY", "OPENAI_API_KEY", ""}, "", false,
+     "api.cerebras.ai", "/v1/chat/completions", "/v1/models"},
     {"deepseek",   "DeepSeek",   "DeepSeek V4 — api.deepseek.com",
-     Wire::OpenAIChat,        Lifetime::PerCall,   AuthStyle::ApiKey,     false, {"DEEPSEEK_API_KEY", "OPENAI_API_KEY", ""}, ""},
+     // DeepSeek serves completions WITHOUT the /v1 prefix.
+     Wire::OpenAIChat,        Lifetime::PerCall,   AuthStyle::ApiKey,     false, {"DEEPSEEK_API_KEY", "OPENAI_API_KEY", ""}, "", false,
+     "api.deepseek.com", "/chat/completions", "/models"},
     {"xai",        "xAI (Grok)", "Grok models — api.x.ai",
-     Wire::OpenAIChat,        Lifetime::PerCall,   AuthStyle::ApiKey,     false, {"XAI_API_KEY", "OPENAI_API_KEY", ""}, ""},
+     Wire::OpenAIChat,        Lifetime::PerCall,   AuthStyle::ApiKey,     false, {"XAI_API_KEY", "OPENAI_API_KEY", ""}, "", false,
+     "api.x.ai", "/v1/chat/completions", "/v1/models"},
     {"mistral",    "Mistral",    "Mistral / Codestral / Magistral — api.mistral.ai",
-     Wire::OpenAIChat,        Lifetime::PerCall,   AuthStyle::ApiKey,     false, {"MISTRAL_API_KEY", "OPENAI_API_KEY", ""}, ""},
+     Wire::OpenAIChat,        Lifetime::PerCall,   AuthStyle::ApiKey,     false, {"MISTRAL_API_KEY", "OPENAI_API_KEY", ""}, "", false,
+     "api.mistral.ai", "/v1/chat/completions", "/v1/models"},
     {"gemini",     "Google Gemini", "Gemini models via the OpenAI-compat API",
-     Wire::OpenAIChat,        Lifetime::PerCall,   AuthStyle::ApiKey,     false, {"GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENAI_API_KEY"}, ""},
+     Wire::OpenAIChat,        Lifetime::PerCall,   AuthStyle::ApiKey,     false, {"GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENAI_API_KEY"}, "", false,
+     "generativelanguage.googleapis.com", "/v1beta/openai/chat/completions", "/v1beta/openai/models"},
     {"fireworks",  "Fireworks",  "Open models on fireworks.ai",
-     Wire::OpenAIChat,        Lifetime::PerCall,   AuthStyle::ApiKey,     false, {"FIREWORKS_API_KEY", "OPENAI_API_KEY", ""}, ""},
+     Wire::OpenAIChat,        Lifetime::PerCall,   AuthStyle::ApiKey,     false, {"FIREWORKS_API_KEY", "OPENAI_API_KEY", ""}, "", false,
+     "api.fireworks.ai", "/inference/v1/chat/completions", "/inference/v1/models"},
     {"ollama",     "Ollama",     "Local models at localhost:11434",
-     Wire::OpenAIChat,        Lifetime::PerCall,   AuthStyle::None,       true,  {"", "", ""}, ""},
+     // Plain HTTP on loopback, and the NATIVE /api/chat protocol.
+     Wire::OpenAIChat,        Lifetime::PerCall,   AuthStyle::None,       true,  {"", "", ""}, "", false,
+     "localhost", "/api/chat", "/api/tags", /*port=*/11434, /*use_tls=*/false,
+     /*native_api=*/true},
     // NOTE: no "llama.cpp" preset row. A llama.cpp / vLLM / LM Studio server is
     // just a generic OpenAI-compatible host — use "Custom host…" (which the
     // picker offers, saves, and can delete). The from_spec("llama.cpp") alias in
@@ -199,6 +262,58 @@ inline constexpr std::array<ProviderDescriptor, 15> kProviders{{
     return nullptr;
 }
 
+// ── Compile-time invariants ─────────────────────────────────────────────
+// These are what make the single source of truth actually HOLD. The
+// `openai` row previously claimed Wire::OpenAIResponses while the
+// transport dialled /v1/chat/completions; nothing dispatched on the enum,
+// so the contradiction survived review and silently taught the UI to
+// promise reasoning text the wire never sends. Now the dialect and the
+// path live on one row, and disagreeing is a BUILD ERROR rather than a
+// bug someone notices months later.
+namespace detail {
+
+[[nodiscard]] constexpr bool ends_with(std::string_view s,
+                                      std::string_view suf) noexcept {
+    return s.size() >= suf.size() && s.substr(s.size() - suf.size()) == suf;
+}
+
+[[nodiscard]] constexpr bool endpoints_consistent() noexcept {
+    for (const auto& p : kProviders) {
+        if (!p.http_dialled()) {
+            // Not dialled over the compat transport ⇒ must not carry half
+            // an endpoint (a stray path with no host is how rows rot).
+            if (!p.path.empty() || !p.models_path.empty()) return false;
+            continue;
+        }
+        if (p.path.empty() || p.models_path.empty()) return false;
+        if (p.port == 0) return false;
+        // Anthropic/ACP are never reached over the OpenAI-compat transport.
+        if (p.wire == Wire::AnthropicMessages || p.wire == Wire::Acp)
+            return false;
+        if (p.native_api) continue;   // Ollama's /api/chat is its own shape.
+        if (p.wire == Wire::OpenAIChat
+            && !ends_with(p.path, "/chat/completions")) return false;
+        if (p.wire == Wire::OpenAIResponses
+            && !ends_with(p.path, "/responses")) return false;
+    }
+    return true;
+}
+
+// Ids are the primary key: a duplicate makes preset_for() ambiguous.
+[[nodiscard]] constexpr bool ids_unique() noexcept {
+    for (std::size_t i = 0; i < kProviders.size(); ++i)
+        for (std::size_t j = i + 1; j < kProviders.size(); ++j)
+            if (kProviders[i].id == kProviders[j].id) return false;
+    return true;
+}
+
+} // namespace detail
+
+static_assert(detail::endpoints_consistent(),
+              "provider row: Wire disagrees with the path it dials, or an "
+              "HTTP-dialled row is missing endpoint data");
+static_assert(detail::ids_unique(), "duplicate provider id in kProviders");
+
 // Can this wire DIALECT carry reasoning TEXT back to us?
 //
 // A model reasoning and a model letting you SEE it are different things.
@@ -220,13 +335,17 @@ inline constexpr std::array<ProviderDescriptor, 15> kProviders{{
     const ProviderPreset* p = preset_for(provider_id);
     if (!p) return true;                       // unknown/custom host: assume yes
     if (p->wire != Wire::OpenAIChat) return true;
-    // Only the first-party GitHub Copilot endpoint hides it. Note that
-    // agentty's own "openai" row is Wire::OpenAIResponses — the Responses
-    // API DOES return reasoning summaries, which is precisely why Copilot
-    // routing GPT-5 through Chat Completions is the odd one out. Every
+    // The FIRST-PARTY OpenAI-family hosts on this dialect hide it:
+    //   • copilot — routes GPT-5 through /chat/completions.
+    //   • openai  — agentty dials api.openai.com/v1/chat/completions too.
+    // The `openai` row used to be mislabelled Wire::OpenAIResponses, which
+    // made this predicate answer "yes" BY ACCIDENT (it only checked the
+    // dialect) and let the picker promise reasoning text the wire never
+    // sends. The genuinely-Responses path is the `chatgpt` provider, which
+    // has its own transport. Every
     // other OpenAI-COMPAT host on this dialect (DeepSeek, Mistral,
     // OpenRouter, vLLM, Ollama) populates reasoning_content.
-    return provider_id != "copilot";
+    return provider_id != "copilot" && provider_id != "openai";
 }
 
 // The default provider's id — first row of the table.
