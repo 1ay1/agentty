@@ -220,3 +220,39 @@ TEST_CASE("learned effort set drives ladder, clamp and wire") {
 
     set_learned_effort_sets({});   // reset global state for other tests
 }
+
+TEST_CASE("parse_effort_rejection: ollama think-value + minimal harvesting") {
+    using agentty::provider::parse_effort_rejection;
+    using agentty::Effort;
+    using agentty::effort_bit;
+
+    // The bit table in error_class.hpp is hand-mirrored from effort_bit
+    // (layering forbids the include) — this pins them together.
+    static_assert(agentty::effort_bit(agentty::Effort::Low)     == 1u << 0);
+    static_assert(agentty::effort_bit(agentty::Effort::Medium)  == 1u << 1);
+    static_assert(agentty::effort_bit(agentty::Effort::High)    == 1u << 2);
+    static_assert(agentty::effort_bit(agentty::Effort::Xhigh)   == 1u << 3);
+    static_assert(agentty::effort_bit(agentty::Effort::Max)     == 1u << 4);
+    static_assert(agentty::effort_bit(agentty::Effort::Minimal) == 1u << 5);
+
+    // Ollama's REAL think rejection (ollama/ollama#12004).
+    {
+        auto set = parse_effort_rejection(
+            "invalid think value: \"minimal\" (must be \"high\", \"medium\", "
+            "\"low\", true, or false)", 400);
+        REQUIRE(set.has_value());
+        CHECK((*set & effort_bit(Effort::High))   != 0);
+        CHECK((*set & effort_bit(Effort::Medium)) != 0);
+        CHECK((*set & effort_bit(Effort::Low))    != 0);
+        CHECK((*set & effort_bit(Effort::Max))    == 0);
+    }
+    // A declared minimal tier harvests to the Minimal bit now (was dropped).
+    {
+        auto set = parse_effort_rejection(
+            "reasoning_effort must be one of 'minimal', 'low', 'medium', "
+            "'high'", 400);
+        REQUIRE(set.has_value());
+        CHECK((*set & effort_bit(Effort::Minimal)) != 0);
+        CHECK((*set & effort_bit(Effort::High))    != 0);
+    }
+}

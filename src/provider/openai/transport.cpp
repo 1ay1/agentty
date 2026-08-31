@@ -2181,6 +2181,11 @@ std::string local_model_system_prompt() {
 namespace {
 struct OllamaProbe {
     std::optional<bool> supports_tools;
+    // Ollama's /api/show capabilities[] also advertises "thinking" for
+    // reasoning-capable models (deepseek-r1, qwen3, qwq, gpt-oss, magistral
+    // …) — a LIVE, per-model, authoritative declaration. nullopt = probe
+    // failed / older ollama without the field.
+    std::optional<bool> supports_thinking;
     int context_window = 0;  // real model window from model_info.*.context_length
 };
 
@@ -2211,10 +2216,15 @@ OllamaProbe probe_ollama_model(const AuthHeader& auth,
         // native function-call channel.
         if (j.contains("capabilities") && j["capabilities"].is_array()) {
             bool has_tools = false;
+            bool has_thinking = false;
             for (const auto& cap : j["capabilities"])
-                if (cap.is_string() && cap.get<std::string>() == "tools")
-                    has_tools = true;
-            out.supports_tools = has_tools;
+                if (cap.is_string()) {
+                    const auto& s = cap.get_ref<const std::string&>();
+                    if (s == "tools")    has_tools = true;
+                    if (s == "thinking") has_thinking = true;
+                }
+            out.supports_tools    = has_tools;
+            out.supports_thinking = has_thinking;
         }
         // Real context window. /api/show returns model_info as a flat map of
         // arch-prefixed keys; the window lives under "<arch>.context_length"
@@ -2364,6 +2374,23 @@ std::vector<ModelInfo> list_models(const AuthHeader& auth, const Endpoint& endpo
                 };
                 if (probe.context_window > 0)
                     info.context_window = probe.context_window;
+                // Ollama DECLARES per-model reasoning in /api/show
+                // capabilities[] ("thinking") — record it scoped to this
+                // endpoint so resolved_caps' live-catalog layer covers local
+                // models the id heuristics don't know (qwq, qwen3, new
+                // community models). Ollama's `think` accepts graded
+                // low|medium|high, so declare exactly that ladder; the
+                // encode side folds minimal/xhigh/max inward to match.
+                if (probe.supports_thinking.value_or(false)) {
+                    set_catalog_reasoning(endpoint.label + "/" + id, true);
+                    set_catalog_effort_set(
+                        endpoint.label + "/" + id,
+                        static_cast<std::uint8_t>(
+                            effort_bit(Effort::Low) | effort_bit(Effort::Medium)
+                            | effort_bit(Effort::High)));
+                } else if (probe.supports_thinking.has_value()) {
+                    set_catalog_reasoning(endpoint.label + "/" + id, false);
+                }
                 result.push_back(std::move(info));
             }
         } else {

@@ -236,7 +236,17 @@ enum class ErrorClass {
         }
         return std::string_view::npos;
     };
-    const std::size_t at = ifind(message, "reasoning_effort", 0);
+    // The parameter under rejection. Three wire spellings of the same knob:
+    //   • reasoning_effort — OpenAI-compat chat (Mistral, DeepSeek, …)
+    //   • reasoning.effort / "reasoning" — Responses-style bodies
+    //   • think — Ollama native ("invalid think value: \"minimal\" (must
+    //     be \"high\", \"medium\", \"low\", true, or false)")
+    // Any of them anchors the parse; the value-harvest below is shared.
+    std::size_t at = ifind(message, "reasoning_effort", 0);
+    if (at == std::string_view::npos)
+        at = ifind(message, "think value", 0);
+    if (at == std::string_view::npos)
+        at = ifind(message, "reasoning.effort", 0);
     if (at == std::string_view::npos) return std::nullopt;
     // Must look like a rejection of the parameter, not an incidental mention.
     const bool rejected =
@@ -262,13 +272,18 @@ enum class ErrorClass {
     }
     std::uint8_t set = 0;
     bool any_named = false;
+    // Bit values MUST mirror catalog.hpp's effort_bit (error_class.hpp
+    // can't include catalog.hpp — layering): Low=1<<0 Medium=1<<1 High=1<<2
+    // Xhigh=1<<3 Max=1<<4 Minimal=1<<5. Quote forms cover the observed error
+    // grammars: 'single' (Mistral enum), "double" (Ollama think), .dotted
+    // (Mistral ReasoningEffort.high), [bracketed / space-led lists.
     struct { std::string_view name; std::uint8_t bit; } levels[] = {
-        {"minimal", 0},                       // not in our ladder → ignore
-        {"'low'", 1u << 0},   {".low", 1u << 0},   {"[low", 1u << 0},   {" low", 1u << 0},
-        {"'medium'", 1u << 1},{".medium", 1u << 1},{"[medium", 1u << 1},{" medium", 1u << 1},
-        {"'high'", 1u << 2},  {".high", 1u << 2},  {"[high", 1u << 2},  {" high", 1u << 2},
-        {"'xhigh'", 1u << 3}, {".xhigh", 1u << 3},
-        {"'max'", 1u << 4},   {".max", 1u << 4},
+        {"'minimal'", 1u << 5}, {"\"minimal\"", 1u << 5}, {".minimal", 1u << 5},
+        {"'low'", 1u << 0},   {"\"low\"", 1u << 0},   {".low", 1u << 0},   {"[low", 1u << 0},   {" low", 1u << 0},
+        {"'medium'", 1u << 1},{"\"medium\"", 1u << 1},{".medium", 1u << 1},{"[medium", 1u << 1},{" medium", 1u << 1},
+        {"'high'", 1u << 2},  {"\"high\"", 1u << 2},  {".high", 1u << 2},  {"[high", 1u << 2},  {" high", 1u << 2},
+        {"'xhigh'", 1u << 3}, {"\"xhigh\"", 1u << 3}, {".xhigh", 1u << 3},
+        {"'max'", 1u << 4},   {"\"max\"", 1u << 4},   {".max", 1u << 4},
     };
     // "xhigh" contains "high": scan xhigh spellings FIRST and blank them out
     // conceptually by requiring exact quoted/dotted forms for the short names
