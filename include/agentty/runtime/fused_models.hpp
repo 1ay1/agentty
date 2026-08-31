@@ -149,9 +149,22 @@ find_catalog(const std::vector<ProviderCatalog>& cats, std::string_view pid) {
         push_recent(r);
     }
 
-    // ── Section 2: all providers, fuzzy-ranked ───────────────────────────
+    // ── Section 2: all providers, fuzzy-ranked ───────────────────────
+    // HOT LOOP — runs per keystroke over every model of every catalog (an
+    // OpenRouter catalog alone is 300+). Three costs are deliberately kept
+    // OUT of it:
+    //   • ModelInfo copies: score first, materialise the FusedRow only for
+    //     rows that MATCH (with no query every row matches, but that path
+    //     runs once per open, not per keystroke).
+    //   • fuzzy re-scoring: score once against the cached haystack; reuse
+    //     the SAME result's positions when the match lies inside the name
+    //     prefix (the common case) instead of re-scoring the bare name.
+    //   • resolved_caps: 3 registry map-lookups behind a shared_mutex per
+    //     call — memoised per (provider, model) for the duration of this
+    //     build; catalogs repeat ids across rebuilds but never within one.
     struct Scored { FusedRow row; int score; int prov_ord; };
     std::vector<Scored> scored;
+    scored.reserve(64);
     int prov_ord = 0;
     for (const auto& c : catalogs) {
         const std::size_t nkeys = c.search_keys.size();
@@ -160,13 +173,13 @@ find_catalog(const std::vector<ProviderCatalog>& cats, std::string_view pid) {
             ModelRef r{c.provider_id, mi.id.value};
             if (already(r)) continue;                // already in RECENT
             int mscore = 0;
+            std::vector<int> positions;
             if (!no_query) {
                 // Prefer the catalog's PRECOMPUTED lowercased haystack (built
                 // once per catalog change), so a keystroke never re-allocates
                 // or re-lowercases a haystack per model. Fall back to composing
                 // it inline only when the cache isn't populated (e.g. unit
-                // tests that call build_fused_rows directly). No query ⇒ no
-                // scoring and no haystack at all.
+                // tests that call build_fused_rows directly).
                 std::string tmp;
                 std::string_view h = i < nkeys
                     ? std::string_view{c.search_keys[i]}
@@ -174,6 +187,25 @@ find_catalog(const std::vector<ProviderCatalog>& cats, std::string_view pid) {
                 const auto sc = fuzzy::score(h, q);
                 if (!sc.matched()) continue;
                 mscore = sc.score;
+                // Highlight positions: the haystack is "<label> <name>", so a
+                // match confined to the name substring maps by offset. When
+                // any position falls inside the label, re-score just the name
+                // (rare — only when the query matches the provider name).
+                const std::size_t name_off = h.size() >= name_of(mi).size()
+                    ? h.size() - name_of(mi).size() : 0;
+                bool all_in_name = true;
+                for (int p : sc.positions)
+                    if (static_cast<std::size_t>(p) < name_off) {
+                        all_in_name = false;
+                        break;
+                    }
+                if (all_in_name) {
+                    positions.reserve(sc.positions.size());
+                    for (int p : sc.positions)
+                        positions.push_back(p - static_cast<int>(name_off));
+                } else {
+                    positions = fuzzy::score(name_of(mi), q).positions;
+                }
             }
             FusedRow row;
             row.provider_id = c.provider_id;
@@ -182,9 +214,13 @@ find_catalog(const std::vector<ProviderCatalog>& cats, std::string_view pid) {
             row.authed      = true;
             row.active      = (r == in.active);
             row.recent      = false;
-            row.reasons     = effort_capable(
-                resolved_caps(mi.id.value, c.provider_id));
-            row.match_positions = name_positions(mi);
+            // Prefer the catalog's MEMOISED reasoning flag (built once per
+            // catalog/capability change); resolve live only when the cache
+            // isn't populated (unit tests calling build_fused_rows raw).
+            row.reasons     = i < c.reason_flags.size()
+                ? static_cast<bool>(c.reason_flags[i])
+                : effort_capable(resolved_caps(mi.id.value, c.provider_id));
+            row.match_positions = std::move(positions);
             scored.push_back({std::move(row), mscore, prov_ord});
         }
         ++prov_ord;

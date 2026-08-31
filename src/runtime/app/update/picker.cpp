@@ -1078,6 +1078,7 @@ void refresh_fused_sources(Model& m) {
             if (c->models != m.d.available_models) {
                 c->models = m.d.available_models;
                 c->search_keys.clear();     // model set changed — keys stale
+                c->reason_flags.clear();    // …and the memoised chips with them
             }
             c->state = ProviderCatalog::State::Ready;
         }
@@ -1118,9 +1119,18 @@ namespace {
 // keys without the auth-stat churn, so a burst of providers resolving doesn't
 // re-enumerate + re-stat auth N times.
 void rebuild_fused_rows(Model& m, bool sync_sources) {
-    // Snapshot the current rows so we can re-anchor the cursor to the same
-    // model after the rebuild (see the tail of this function).
-    std::vector<FusedRow> prev_rows = m.d.fused_rows;
+    // Snapshot ONLY the highlighted row's identity for the cursor re-anchor
+    // below — NOT the whole row list. The old full deep copy (every row's
+    // strings + ModelInfo) ran per keystroke; two strings carry the same
+    // information.
+    std::string prev_provider, prev_model;
+    if (auto* c = m.ui.overlay.get<ov::FusedPicker>();
+        c && c->index >= 0
+        && c->index < static_cast<int>(m.d.fused_rows.size())) {
+        const auto& r = m.d.fused_rows[static_cast<std::size_t>(c->index)];
+        prev_provider = r.provider_id;
+        prev_model    = r.model.id.value;
+    }
     // Re-sync the sources FIRST: mirror the active provider's live
     // available_models into its catalog + pick up any newly-authed provider.
     // Without this a rebuild re-ranks the STALE catalog, so a model the live
@@ -1134,14 +1144,30 @@ void rebuild_fused_rows(Model& m, bool sync_sources) {
     // change clears search_keys at the mutation site (size mismatch here), so
     // this rebuild runs O(models) only when a catalog actually changed.
     for (auto& c : m.d.provider_catalogs) {
-        if (c.search_keys.size() == c.models.size()) continue;
-        c.search_keys.clear();
-        c.search_keys.reserve(c.models.size());
-        for (const auto& mi : c.models) {
-            std::string key = ui::detail::fused_haystack(c.label, mi);
-            for (char& ch : key)
-                if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch - 'A' + 'a');
-            c.search_keys.push_back(std::move(key));
+        if (c.search_keys.size() != c.models.size()) {
+            c.search_keys.clear();
+            c.search_keys.reserve(c.models.size());
+            for (const auto& mi : c.models) {
+                std::string key = ui::detail::fused_haystack(c.label, mi);
+                for (char& ch : key)
+                    if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch - 'A' + 'a');
+                c.search_keys.push_back(std::move(key));
+            }
+        }
+        // Memoise the per-model reasoning chip: resolved_caps is 3 registry
+        // lookups behind a shared_mutex — far too hot for the per-keystroke
+        // row build over large catalogs. Rebuild when the model set changed
+        // OR any capability registry wrote since we last built (caps_epoch:
+        // models.dev refresh, learned rejection, ^E override).
+        const std::uint64_t epoch = caps_epoch();
+        if (c.reason_flags.size() != c.models.size()
+            || c.reason_epoch != epoch) {
+            c.reason_flags.clear();
+            c.reason_flags.reserve(c.models.size());
+            for (const auto& mi : c.models)
+                c.reason_flags.push_back(effort_capable(
+                    resolved_caps(mi.id.value, c.provider_id)));
+            c.reason_epoch = epoch;
         }
     }
     m.d.fused_rows = fused_rows_for_model(m);
@@ -1149,19 +1175,19 @@ void rebuild_fused_rows(Model& m, bool sync_sources) {
     // Keep the CURSOR on the SAME model across a rebuild. A rebuild can re-rank
     // the rows (an async catalog landed, or the query changed), so the row at
     // the old index may now be a DIFFERENT model — a subsequent ^E/^F/effort
-    // edit would hit the wrong one. Snapshot the highlighted model id before
-    // the rebuild and re-find it after; fall back to a clamped index.
+    // edit would hit the wrong one. Re-find the snapshotted (provider, model)
+    // after the rebuild; fall back to a clamped index.
     if (auto* c = m.ui.overlay.get<ov::FusedPicker>()) {
         const int n = static_cast<int>(m.d.fused_rows.size());
         if (n == 0) { c->index = 0; return; }
-        std::string want;
-        if (c->index >= 0 && c->index < static_cast<int>(prev_rows.size()))
-            want = prev_rows[static_cast<std::size_t>(c->index)].model.id.value;
-        if (!want.empty()) {
-            for (int i = 0; i < n; ++i)
-                if (m.d.fused_rows[static_cast<std::size_t>(i)].model.id.value == want) {
+        if (!prev_model.empty()) {
+            for (int i = 0; i < n; ++i) {
+                const auto& r = m.d.fused_rows[static_cast<std::size_t>(i)];
+                if (r.model.id.value == prev_model
+                    && r.provider_id == prev_provider) {
                     c->index = i; return;
                 }
+            }
         }
         if (c->index >= n) c->index = n - 1;
         if (c->index < 0)  c->index = 0;
@@ -1422,6 +1448,7 @@ Step fused_picker_update(Model m, msg::FusedPickerMsg pm) {
                 if (e.ok && !e.models.empty()) {
                     c.models = std::move(e.models);
                     c.search_keys.clear();   // stale — rebuilt on next filter
+                    c.reason_flags.clear();  // ids changed — flags stale too
                     c.state  = ProviderCatalog::State::Ready;
                     c.loaded_at_ms = now_ms();   // mark fresh
                 } else {

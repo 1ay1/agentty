@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <map>
 #include <mutex>
+#include <set>
 #include <atomic>
 #include <shared_mutex>
 #include <optional>
@@ -72,6 +73,18 @@ struct ProviderCatalog {
     // re-lowercases a haystack for every model. Empty ⇒ not yet built (the
     // build falls back to composing the haystack inline).
     std::vector<std::string> search_keys;
+    // Derived per-model "has an effort ladder" flags (same order as `models`),
+    // memoising effort_capable(resolved_caps(id, provider)) — 3 registry map
+    // lookups behind a shared_mutex per call, far too hot for the
+    // per-keystroke row build over a 300-model catalog. Rebuilt alongside
+    // search_keys whenever `models` changes; also invalidated when the
+    // capability registries change (models.dev refresh / learned rejection /
+    // ^E override) via the caps_epoch stamp below. Empty ⇒ not built (the
+    // row build falls back to the live resolve).
+    std::vector<bool> reason_flags;
+    // Value of caps_epoch() when reason_flags was built; a mismatch means a
+    // capability registry changed underneath us → rebuild the flags.
+    std::uint64_t reason_epoch = 0;
 };
 
 // A provider the user is NOT signed into — rendered as a single "sign in to
@@ -808,17 +821,70 @@ inline void set_caps_provider_scope(std::string provider_id) {
 // OVER the from_id guess. Same lock discipline as the override registry
 // (atomic emptiness probe → shared lock), since this too sits on the render
 // path.
+// ── Capability epoch ──────────────────────────────────────────────────────
+// Monotonic counter bumped by EVERY capability-registry write (catalog
+// reasoning declarations, declared/learned effort sets, user overrides).
+// Callers that memoise resolved_caps-derived values (the fused picker's
+// per-model reason_flags) stamp the epoch at build time and rebuild when it
+// moves — so a models.dev refresh landing mid-session invalidates exactly
+// the caches that depend on it, and nothing polls.
+namespace caps_epoch_detail {
+inline std::atomic<std::uint64_t>& counter() {
+    static std::atomic<std::uint64_t> c{1};
+    return c;
+}
+} // namespace caps_epoch_detail
+[[nodiscard]] inline std::uint64_t caps_epoch() noexcept {
+    return caps_epoch_detail::counter().load(std::memory_order_relaxed);
+}
+inline void bump_caps_epoch() noexcept {
+    caps_epoch_detail::counter().fetch_add(1, std::memory_order_relaxed);
+}
+
 namespace catalog_reasoning_detail {
 inline std::shared_mutex& mu() { static std::shared_mutex m; return m; }
 inline std::map<std::string, bool>& map_() {
     static std::map<std::string, bool> m; return m;
 }
+// Keys whose recorded reasoning fact CONFLICTED across sources (one source
+// said reasons, another said not). Cross-provider aggregators disagree about
+// the SAME bare id (e.g. one lists `mistral-large-2402` as reasoning, another
+// as not) — and a flat bare namespace would otherwise be last-writer-wins,
+// silently lighting a reasoning chip on an instruct model. A poisoned key is
+// treated as "no info" so resolution falls through to the scoped fact or
+// id-inference instead of trusting a coin-flip. Provider-agnostic: no model
+// ids are hardcoded; the data corrects itself by disagreeing.
+inline std::set<std::string>& poisoned_() {
+    static std::set<std::string> s; return s;
+}
 inline std::atomic<bool>& any() { static std::atomic<bool> a{false}; return a; }
 } // namespace catalog_reasoning_detail
 
 inline void set_catalog_reasoning(std::string model_id, bool reasons) {
+    bump_caps_epoch();
     std::unique_lock lk(catalog_reasoning_detail::mu());
     catalog_reasoning_detail::map_()[std::move(model_id)] = reasons;
+    catalog_reasoning_detail::any().store(true, std::memory_order_relaxed);
+}
+
+// Merge a fact that may share a key with a DIFFERENT source (the bare-tail
+// path in modelsdev). First writer records; a later writer that AGREES is a
+// no-op; a later writer that DISAGREES poisons the key so it reads as "no
+// info". Scoped keys never collide across providers, so they use the plain
+// setter above; only the ambiguous bare tail goes through here.
+inline void merge_catalog_reasoning(const std::string& model_id, bool reasons) {
+    std::unique_lock lk(catalog_reasoning_detail::mu());
+    auto& m = catalog_reasoning_detail::map_();
+    auto& poisoned = catalog_reasoning_detail::poisoned_();
+    if (poisoned.count(model_id)) return;          // already ambiguous
+    if (auto it = m.find(model_id); it != m.end()) {
+        if (it->second != reasons) {               // sources disagree → poison
+            m.erase(it);
+            poisoned.insert(model_id);
+        }
+        return;
+    }
+    m[model_id] = reasons;
     catalog_reasoning_detail::any().store(true, std::memory_order_relaxed);
 }
 // Tri-state: 1 (catalog says reasons), 0 (catalog says not), -1 (no info).
@@ -850,12 +916,33 @@ inline std::shared_mutex& mu() { static std::shared_mutex m; return m; }
 inline std::map<std::string, std::uint8_t>& map_() {
     static std::map<std::string, std::uint8_t> m; return m;
 }
+inline std::set<std::string>& poisoned_() {
+    static std::set<std::string> s; return s;
+}
 inline std::atomic<bool>& any() { static std::atomic<bool> a{false}; return a; }
 } // namespace catalog_effort_detail
 
 inline void set_catalog_effort_set(std::string model_id, std::uint8_t set) {
+    bump_caps_epoch();
     std::unique_lock lk(catalog_effort_detail::mu());
     catalog_effort_detail::map_()[std::move(model_id)] = set;
+    catalog_effort_detail::any().store(true, std::memory_order_relaxed);
+}
+
+// Bare-tail merge for the effort-set registry — same cross-provider collision
+// semantics as merge_catalog_reasoning: agree → keep, disagree → poison to
+// "no declaration" so resolution falls back to the scoped fact / id-inference.
+inline void merge_catalog_effort_set(const std::string& model_id,
+                                     std::uint8_t set) {
+    std::unique_lock lk(catalog_effort_detail::mu());
+    auto& m = catalog_effort_detail::map_();
+    auto& poisoned = catalog_effort_detail::poisoned_();
+    if (poisoned.count(model_id)) return;
+    if (auto it = m.find(model_id); it != m.end()) {
+        if (it->second != set) { m.erase(it); poisoned.insert(model_id); }
+        return;
+    }
+    m[model_id] = set;
     catalog_effort_detail::any().store(true, std::memory_order_relaxed);
 }
 // -1 = no declaration; else the bitmask of declared ON levels.
@@ -906,6 +993,7 @@ inline std::atomic<bool>&                    reasoning_override_any() {
 
 // Set/clear a single model's override (true = force effort on, false = off).
 inline void set_reasoning_override(std::string model_id, bool on) {
+    bump_caps_epoch();
     std::unique_lock lk(reasoning_override_detail::reasoning_override_mu());
     reasoning_override_detail::reasoning_override_map()[std::move(model_id)] = on;
     reasoning_override_detail::reasoning_override_any().store(
@@ -913,6 +1001,7 @@ inline void set_reasoning_override(std::string model_id, bool on) {
         std::memory_order_relaxed);
 }
 inline void clear_reasoning_override(const std::string& model_id) {
+    bump_caps_epoch();
     std::unique_lock lk(reasoning_override_detail::reasoning_override_mu());
     reasoning_override_detail::reasoning_override_map().erase(model_id);
     reasoning_override_detail::reasoning_override_any().store(
@@ -920,12 +1009,14 @@ inline void clear_reasoning_override(const std::string& model_id) {
         std::memory_order_relaxed);
 }
 inline void clear_reasoning_overrides() {
+    bump_caps_epoch();
     std::unique_lock lk(reasoning_override_detail::reasoning_override_mu());
     reasoning_override_detail::reasoning_override_map().clear();
     reasoning_override_detail::reasoning_override_any().store(false,
         std::memory_order_relaxed);
 }
 inline void set_reasoning_overrides(std::map<std::string, bool> all) {
+    bump_caps_epoch();
     std::unique_lock lk(reasoning_override_detail::reasoning_override_mu());
     reasoning_override_detail::reasoning_override_any().store(!all.empty(),
         std::memory_order_relaxed);
@@ -982,11 +1073,13 @@ inline std::atomic<bool>& any() { static std::atomic<bool> a{false}; return a; }
 } // namespace learned_effort_detail
 
 inline void set_learned_effort_set(std::string model_id, std::uint8_t set) {
+    bump_caps_epoch();
     std::unique_lock lk(learned_effort_detail::mu());
     learned_effort_detail::map_()[std::move(model_id)] = set;
     learned_effort_detail::any().store(true, std::memory_order_relaxed);
 }
 inline void set_learned_effort_sets(std::map<std::string, std::uint8_t> all) {
+    bump_caps_epoch();
     std::unique_lock lk(learned_effort_detail::mu());
     learned_effort_detail::any().store(!all.empty(), std::memory_order_relaxed);
     learned_effort_detail::map_() = std::move(all);

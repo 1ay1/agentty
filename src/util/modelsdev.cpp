@@ -71,9 +71,22 @@ void register_model(const std::string& scoped_id, const json& m) {
             set_catalog_effort_set(id, static_cast<std::uint8_t>(set));
     };
     record(scoped_id);
-    // Bare tail: "deepseek/deepseek-v4-flash" → "deepseek-v4-flash".
-    if (auto slash = scoped_id.rfind('/'); slash != std::string::npos)
-        record(scoped_id.substr(slash + 1));
+    // Bare tail: "deepseek/deepseek-v4-flash" → "deepseek-v4-flash". This key
+    // is SHARED across every models.dev provider, so different aggregators
+    // can disagree about the same bare id (one lists mistral-large-2402 as
+    // reasoning, another as instruct-only). A plain last-writer-wins record
+    // here is exactly what lit a phantom reasoning chip on Mistral Large 3.
+    // Merge instead: agree → keep, disagree → poison the key to "no info" so
+    // resolution falls back to the scoped fact or id-inference. No hardcoded
+    // ids — the collision resolves itself by the sources disagreeing.
+    if (auto slash = scoped_id.rfind('/'); slash != std::string::npos) {
+        const std::string bare = scoped_id.substr(slash + 1);
+        if (!bare.empty()) {
+            merge_catalog_reasoning(bare, reasoning->get<bool>());
+            if (set >= 0)
+                merge_catalog_effort_set(bare, static_cast<std::uint8_t>(set));
+        }
+    }
 }
 
 // Parse a full api.json document; returns models registered.
