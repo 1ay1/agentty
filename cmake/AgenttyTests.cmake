@@ -61,6 +61,11 @@ agentty_fold_test(palette_render_probe     TIMEOUT 30)
 agentty_fold_test(thread_delete_test       TIMEOUT 30)
 agentty_fold_test(diff_review_test         TIMEOUT 30)
 agentty_fold_test(reveal_freeze_gate_probe TIMEOUT 30)
+if(UNIX)
+    # PTY-driven (openpty); full-runtime ghost-caret repro — see the
+    # header of tests/test_ghost_caret_runtime.cpp (credit: davidwed).
+    agentty_fold_test(test_ghost_caret_runtime TIMEOUT 60 SKIP_CODE 77 UNIX_LIBS util)
+endif()
 agentty_fold_test(toolset_e2e_test         TIMEOUT 120)
 agentty_fold_test(subagent_report_test     TIMEOUT 60)
 agentty_fold_test(plugin_disabled_tools_test TIMEOUT 60)

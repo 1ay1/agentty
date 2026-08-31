@@ -11,6 +11,9 @@ FOLD_NOARGS(thread_delete_test)
 FOLD_NOARGS(diff_review_test)
 FOLD_NOARGS(cross_process_lock_test)
 FOLD_NOARGS(reveal_freeze_gate_probe)
+#if !defined(_WIN32)
+FOLD_NOARGS(test_ghost_caret_runtime)   // PTY-driven (openpty) — POSIX only
+#endif
 FOLD_NOARGS(toolset_e2e_test)
 FOLD_NOARGS(subagent_report_test)
 FOLD_NOARGS(plugin_disabled_tools_test)

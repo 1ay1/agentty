@@ -184,7 +184,7 @@ define_property(DIRECTORY PROPERTY AGENTTY_FOLD_NAMES
     BRIEF_DOCS "folded standalone test names" FULL_DOCS "AgenttyTestRegistry")
 
 function(agentty_fold_test name)
-    cmake_parse_arguments(F "ARGS" "TIMEOUT" "LABELS;UNIX_LIBS" ${ARGN})
+    cmake_parse_arguments(F "ARGS" "TIMEOUT;SKIP_CODE" "LABELS;UNIX_LIBS" ${ARGN})
     set_property(DIRECTORY APPEND PROPERTY AGENTTY_FOLD_NAMES ${name})
     # Rename this TU's main() to <name>_main so the dispatcher can call it.
     set_source_files_properties(${CMAKE_SOURCE_DIR}/tests/${name}.cpp
@@ -198,6 +198,12 @@ function(agentty_fold_test name)
     endif()
     add_test(NAME ${name} COMMAND agentty_standalone_tests ${name})
     set_tests_properties(${name} PROPERTIES TIMEOUT ${F_TIMEOUT})
+    if(F_SKIP_CODE)
+        # A test may bail with this exit code when its environment can't
+        # produce the geometry it needs (e.g. a PTY-driven repro whose
+        # composer refuses to wrap) — ctest reports "Skipped", not FAILED.
+        set_tests_properties(${name} PROPERTIES SKIP_RETURN_CODE ${F_SKIP_CODE})
+    endif()
     if(F_LABELS)
         set_tests_properties(${name} PROPERTIES LABELS "${F_LABELS}")
         if("perf" IN_LIST F_LABELS)
