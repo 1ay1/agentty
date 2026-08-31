@@ -265,7 +265,7 @@ Element model_picker(const Model& m) {
     // the user, and the fused "all providers" view is already ordered, so
     // an unqueried single-provider list should read just as tidily.
     struct Vis { int idx; int score; std::vector<int> pos; bool pos_on_label;
-                 std::string sort_key; bool favorite; };
+                 std::string label; bool favorite; };
     std::vector<Vis> vscored;
     vscored.reserve(m.d.available_models.size());
     const std::string q = picker->query;
@@ -275,10 +275,7 @@ Element model_picker(const Model& m) {
                                       ? pretty_model_label(cand.id.value)
                                       : cand.display_name;
         if (q.empty()) {
-            std::string key = shown;
-            std::transform(key.begin(), key.end(), key.begin(),
-                           [](unsigned char c){ return std::tolower(c); });
-            vscored.push_back({i, 0, {}, true, std::move(key), cand.favorite});
+            vscored.push_back({i, 0, {}, true, shown, cand.favorite});
             continue;
         }
         auto ml = fuzzy::score(shown, q);
@@ -291,13 +288,13 @@ Element model_picker(const Model& m) {
             vscored.push_back({i, il.score, {}, true, {}, cand.favorite});   // matched via id only
     }
     if (q.empty()) {
-        // Alphabetical by label, favorites hoisted to the top (the ternary
-        // keeps a user's ★ picks reachable without scrolling). Stable so
-        // equal keys keep catalog order as the last tiebreak.
+        // Favourites first (a deliberate user signal outranks recency),
+        // then the natural family/newest-first order — see
+        // model_order_less. Stable so any residual ties keep catalog order.
         std::stable_sort(vscored.begin(), vscored.end(),
             [](const Vis& a, const Vis& b){
                 if (a.favorite != b.favorite) return a.favorite;
-                return a.sort_key < b.sort_key;
+                return model_order_less(a.label, b.label);
             });
     } else {
         std::stable_sort(vscored.begin(), vscored.end(),

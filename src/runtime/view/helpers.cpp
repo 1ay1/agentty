@@ -1,9 +1,11 @@
 #include "agentty/runtime/view/helpers.hpp"
 
 #include <concepts>
+#include <cctype>
 #include <cstdint>
 #include <cstdio>
 #include <ctime>
+#include <string>
 #include <variant>
 #include <vector>
 
@@ -412,6 +414,81 @@ int chip_next(std::string_view s, int byte_pos) noexcept {
         return byte_pos + static_cast<int>(len);
     }
     return utf8_next(s, byte_pos);
+}
+
+namespace {
+// Natural three-way compare of two labels: split each into alternating
+// non-digit / digit chunks and compare chunk-by-chunk — digit chunks as
+// INTEGERS (so "10" > "2"), non-digit chunks case-folded lexically. The
+// leading non-digit chunk is the family; the first numeric chunk is the
+// generation, etc. Returns <0 / 0 / >0.
+[[nodiscard]] int natural_cmp(std::string_view a, std::string_view b) noexcept {
+    auto lower = [](char c) -> char {
+        return static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    };
+    std::size_t i = 0, j = 0;
+    while (i < a.size() && j < b.size()) {
+        const bool da = std::isdigit(static_cast<unsigned char>(a[i]));
+        const bool db = std::isdigit(static_cast<unsigned char>(b[j]));
+        if (da && db) {
+            // Compare digit runs as integers: skip leading zeros, then
+            // longer run wins; equal length → lexical over the digits.
+            std::size_t ia = i, jb = j;
+            while (ia < a.size() && a[ia] == '0') ++ia;
+            while (jb < b.size() && b[jb] == '0') ++jb;
+            std::size_t ea = ia; while (ea < a.size() && std::isdigit((unsigned char)a[ea])) ++ea;
+            std::size_t eb = jb; while (eb < b.size() && std::isdigit((unsigned char)b[eb])) ++eb;
+            const std::size_t la = ea - ia, lb = eb - jb;
+            if (la != lb) return la < lb ? -1 : 1;
+            for (std::size_t k = 0; k < la; ++k)
+                if (a[ia + k] != b[jb + k])
+                    return a[ia + k] < b[jb + k] ? -1 : 1;
+            // advance past the FULL digit runs (including the zeros)
+            i = ea; j = eb;
+            while (i < a.size() && std::isdigit((unsigned char)a[i])) ++i;   // no-op after ea
+            while (j < b.size() && std::isdigit((unsigned char)b[j])) ++j;
+        } else if (da != db) {
+            // A number sorts before letters at the same position so
+            // "gpt-4" and "gpt-4o" group before "gpt-image".
+            return da ? -1 : 1;
+        } else {
+            const char ca = lower(a[i]), cb = lower(b[j]);
+            if (ca != cb) return ca < cb ? -1 : 1;
+            ++i; ++j;
+        }
+    }
+    if (i < a.size()) return 1;
+    if (j < b.size()) return -1;
+    return 0;
+}
+
+// The leading non-digit run, case-folded — the "family" ("claude sonnet",
+// "gpt", "gemini"). Trailing separators are trimmed so "gpt-" == "gpt".
+[[nodiscard]] std::string family_of(std::string_view s) noexcept {
+    std::string out;
+    for (char c : s) {
+        if (std::isdigit(static_cast<unsigned char>(c))) break;
+        out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    }
+    while (!out.empty() && (out.back() == ' ' || out.back() == '-'
+                            || out.back() == '_' || out.back() == '.'))
+        out.pop_back();
+    return out;
+}
+}  // namespace
+
+bool model_order_less(std::string_view a, std::string_view b) noexcept {
+    // 1. Family ASCENDING (all Sonnets together, alphabetical across
+    //    families) — the categorized look.
+    const std::string fa = family_of(a), fb = family_of(b);
+    if (fa != fb) return fa < fb;
+    // 2. Within a family, NEWEST FIRST: natural compare, DESCENDING, so
+    //    the higher version number floats to the top.
+    const int c = natural_cmp(a, b);
+    if (c != 0) return c > 0;
+    // 3. Fully equal under natural compare (e.g. "latest" vs a dated
+    //    alias of the same model) — raw byte order for a stable result.
+    return a < b;
 }
 
 } // namespace agentty::ui

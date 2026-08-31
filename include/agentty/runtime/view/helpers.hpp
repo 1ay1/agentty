@@ -98,6 +98,29 @@ namespace agentty::ui {
 [[nodiscard]] int chip_prev(std::string_view s, int byte_pos) noexcept;
 [[nodiscard]] int chip_next(std::string_view s, int byte_pos) noexcept;
 
+// ── Model list ordering ──────────────────────────────────────
+// Providers hand back models in catalog/wire order — effectively random
+// to a reader. `model_order_less(a, b)` gives the tidy, human ordering
+// the fused "all providers" view already has, for an unqueried
+// single-provider list. It is NOT plain lexical sort: version numbers
+// break that ("claude-opus-4-10" sorts BEFORE "...-4-8" because '1' <
+// '8'; "gpt-10" before "gpt-2"). Instead it is a NATURAL comparator on
+// the shown label:
+//   1. group by FAMILY — the label's leading non-numeric run ("Claude
+//      Sonnet", "GPT"), case-folded — so all Sonnets / all GPT-4s sit
+//      together, matching the categorized look of the all-providers view;
+//   2. within a family, NEWEST FIRST — numeric chunks compared as
+//      integers, descending, so 4.6 ▷ 4.5 ▷ 4 and 10 ▷ 2 (the intent
+//      behind every "sort models by release" request — current model on
+//      top — achieved without a release date, which local/custom
+//      endpoints don't carry);
+//   3. full case-folded label as the final, stable tiebreak.
+// `a`/`b` are the labels as SHOWN (pretty_model_label output or a
+// provider display_name). Favourites are hoisted by the caller BEFORE
+// this runs — a deliberate user signal outranks recency.
+[[nodiscard]] bool model_order_less(std::string_view a,
+                                    std::string_view b) noexcept;
+
 // Hardware-caret cell for an overlay's live search input (command
 // palette / model picker / fused picker query lines). One concealed
 // █ whose style carries the caret_anchor meta-bit: maya's inline

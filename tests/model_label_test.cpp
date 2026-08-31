@@ -8,8 +8,11 @@
 
 #include "agentty/runtime/view/helpers.hpp"
 
+#include <algorithm>
+#include <cstddef>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "agtest.hpp"
 
@@ -20,6 +23,21 @@ void expect_label(std::string_view id, std::string_view want) {
     CHECK_MESSAGE(got == want, "pretty_model_label(\"" << std::string(id)
                                   << "\") got \"" << got << "\" want \""
                                   << std::string(want) << "\"");
+}
+
+// Sort a list with the picker's empty-query comparator and join for a
+// single readable assertion.
+std::string ordered(std::vector<std::string> in) {
+    std::stable_sort(in.begin(), in.end(),
+        [](const std::string& a, const std::string& b){
+            return agentty::ui::model_order_less(a, b);
+        });
+    std::string out;
+    for (std::size_t i = 0; i < in.size(); ++i) {
+        if (i) out += " | ";
+        out += in[i];
+    }
+    return out;
 }
 
 } // namespace
@@ -84,4 +102,40 @@ TEST_CASE("pretty_model_label normalizes real-world ids") {
     expect_label(":latest",                 "");      // family empty, tag dropped
     expect_label("model",                   "Model");
     expect_label("a",                       "A");
+}
+
+TEST_CASE("model_order_less: family group + natural version-desc") {
+    // Within a family, NEWEST first — and version numbers compared as
+    // integers, so 4.10 sorts ABOVE 4.8 (plain lexical would invert it,
+    // the classic file2/file10 bug).
+    CHECK(ordered({"Claude Sonnet 4.5", "Claude Sonnet 4.6",
+                   "Claude Sonnet 4", "Claude Sonnet 4.10"})
+          == "Claude Sonnet 4.10 | Claude Sonnet 4.6 | "
+             "Claude Sonnet 4.5 | Claude Sonnet 4");
+
+    // gpt-10 must outrank gpt-2 (integer, not lexical).
+    CHECK(ordered({"GPT 2", "GPT 10", "GPT 5"})
+          == "GPT 10 | GPT 5 | GPT 2");
+
+    // Families group together and sort alphabetically across families;
+    // within each, newest first. (Opus before Sonnet: 'o' < 's'.)
+    CHECK(ordered({"Claude Sonnet 4.5", "Claude Opus 4.1",
+                   "Claude Sonnet 4.6", "Claude Opus 4.5"})
+          == "Claude Opus 4.5 | Claude Opus 4.1 | "
+             "Claude Sonnet 4.6 | Claude Sonnet 4.5");
+
+    // A pure-number chunk sorts before letters at the same position, so
+    // "GPT 4o" (number 4) groups before "GPT Image".
+    CHECK(ordered({"GPT Image 1", "GPT 4o", "GPT 5"})
+          == "GPT 5 | GPT 4o | GPT Image 1");
+
+    // Decimal minor versions compare naturally: 5.6 > 5.10 is FALSE
+    // (10 > 6 as integers) — dotted parts are separate numeric chunks.
+    CHECK(ordered({"GPT 5.6", "GPT 5.10", "GPT 5.2"})
+          == "GPT 5.10 | GPT 5.6 | GPT 5.2");
+
+    // Stable / total: equal-family same-version aliases don't crash and
+    // land deterministically.
+    CHECK(ordered({"Gemini 2.5 Flash", "Gemini 2.5 Flash"})
+          == "Gemini 2.5 Flash | Gemini 2.5 Flash");
 }

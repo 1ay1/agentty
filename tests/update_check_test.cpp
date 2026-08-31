@@ -61,6 +61,7 @@ TEST_CASE("current_version is the compiled-in triple") {
 }
 
 #include "agentty/auth/auth.hpp"
+#include "agentty/util/user_root.hpp"
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
@@ -68,7 +69,10 @@ TEST_CASE("current_version is the compiled-in triple") {
 
 TEST_CASE("cached_check: fresh cache honoured, stale/foreign rejected") {
     namespace fs = std::filesystem;
-    const auto cache = agentty::auth::config_dir() / "update_check.json";
+    // update_check.json moved to the cache/ subdir in the single-root
+    // consolidation (see util/user_root.hpp); write where cached_check()
+    // now reads, not the old config_dir root.
+    const auto cache = agentty::util::user_cache_dir() / "update_check.json";
     // Preserve any real cache byte-for-byte.
     std::string saved;
     if (fs::exists(cache)) {
