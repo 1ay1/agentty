@@ -797,3 +797,24 @@ TEST_CASE("capkey: registry keys normalise on write AND read") {
     CHECK(catalog_effort_set_for("regr_model_3.5", "mistral")
           == static_cast<int>(hi));
 }
+
+TEST_CASE("capkey: [1m]/[2m] context markers fold out of capability keys") {
+    using agentty::capkey::norm_model;
+    // Capability facts belong to the MODEL, not the context-window variant:
+    // a fact learned under the wire id must hit under the picker's marked id.
+    CHECK(norm_model("claude-opus-4-8[1m]") == "claude-opus-4-8");
+    CHECK(norm_model("claude-sonnet-5[2m]") == "claude-sonnet-5");
+    CHECK(norm_model("claude-opus-4-8")     == "claude-opus-4-8");
+    // A bracket that is NOT the marker survives untouched.
+    CHECK(norm_model("weird[3x]model") == "weird[3x]model");
+}
+
+TEST_CASE("clamp_effort: empty/unknown ids never wipe the user's tier") {
+    using agentty::clamp_effort;
+    using agentty::resolved_caps;
+    using agentty::Effort;
+    // resolved_caps("") has no effort support — a blind clamp would collapse
+    // the user's tier to None. The model-switch sites guard on empty id; this
+    // locks the caps-side behaviour those guards rely on.
+    CHECK(clamp_effort(Effort::High, resolved_caps("")) == Effort::None);
+}

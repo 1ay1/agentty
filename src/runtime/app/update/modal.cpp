@@ -785,11 +785,15 @@ commit_provider_switch(Model m, std::string_view spec,
     //     bogus chip and get silently dropped only at request time. When the
     //     new model isn't known yet (local, empty id) this is a no-op until
     //     ModelsLoaded, which is fine — the wire path re-clamps regardless.
-    const bool chatgpt = provider::active().is_chatgpt();
-    if (!chatgpt) {
+    //     Uniform for ChatGPT too: gpt-5.x decodes through Family::Gpt with
+    //     an exact ladder, so the same clamp keeps chip == wire everywhere.
+    //     EMPTY id = model unknown → do NOT clamp (resolved_caps("") has no
+    //     effort support, so clamping would WIPE the user's tier rather than
+    //     no-op; this is why ChatGPT — whose id is empty until ModelsLoaded —
+    //     used to be excluded here). ModelsLoaded re-clamps with the real id.
+    if (!m.d.model_id.value.empty())
         m.d.effort = clamp_effort(
             m.d.effort, resolved_caps(m.d.model_id.value));
-    }
 
     // (5) Persist the FULL settings shape (provider + per-provider model +
     //     effort + favorites) through the one owner so effort is never

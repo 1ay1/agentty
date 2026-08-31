@@ -1036,10 +1036,15 @@ inline void clear_reasoning_overrides() {
 }
 inline void set_reasoning_overrides(std::map<std::string, bool> all) {
     bump_caps_epoch();
+    // Normalise each key: these maps hydrate from persisted settings, which
+    // may predate the capkey discipline or carry a different spelling than
+    // today's lookups. Raw installation would silently orphan those facts.
+    std::map<std::string, bool> normed;
+    for (auto& [k, v] : all) normed[norm_caps_key(k)] = v;
     std::unique_lock lk(reasoning_override_detail::reasoning_override_mu());
-    reasoning_override_detail::reasoning_override_any().store(!all.empty(),
+    reasoning_override_detail::reasoning_override_any().store(!normed.empty(),
         std::memory_order_relaxed);
-    reasoning_override_detail::reasoning_override_map() = std::move(all);
+    reasoning_override_detail::reasoning_override_map() = std::move(normed);
 }
 // Tri-state lookup: 1 (force on), 0 (force off), -1 (no override for this id).
 // Lock-free when no overrides exist (the common case). Otherwise a SHARED lock
@@ -1100,9 +1105,14 @@ inline void set_learned_effort_set(std::string model_id, std::uint8_t set) {
 }
 inline void set_learned_effort_sets(std::map<std::string, std::uint8_t> all) {
     bump_caps_epoch();
+    // Normalise each key — same persisted-spelling hazard as
+    // set_reasoning_overrides above.
+    std::map<std::string, std::uint8_t> normed;
+    for (auto& [k, v] : all) normed[norm_caps_key(k)] = v;
     std::unique_lock lk(learned_effort_detail::mu());
-    learned_effort_detail::any().store(!all.empty(), std::memory_order_relaxed);
-    learned_effort_detail::map_() = std::move(all);
+    learned_effort_detail::any().store(!normed.empty(),
+                                       std::memory_order_relaxed);
+    learned_effort_detail::map_() = std::move(normed);
 }
 [[nodiscard]] inline std::map<std::string, std::uint8_t>
 learned_effort_sets_snapshot() {

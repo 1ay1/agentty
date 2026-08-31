@@ -64,10 +64,6 @@ std::vector<int> model_filtered(const std::vector<ModelInfo>& models,
     return out;
 }
 
-[[nodiscard]] bool is_chatgpt_active() {
-    return provider::active().is_chatgpt();
-}
-
 // Monotonic ms from maya's animation clock — test-controllable via
 // maya::testing::advance_anim_clock_ms, so catalog freshness (loaded_at_ms) is
 // reproducible / advanceable in tests.
@@ -261,10 +257,15 @@ Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
                 // rode over from the previous provider — clamp it so the picker
                 // chip and the wire agree (commit_provider_switch couldn't do
                 // this yet: the model id was empty until this refetch landed).
-                if (!is_chatgpt_active()) {
+                // Uniform across every provider INCLUDING ChatGPT: gpt-5.x
+                // decodes through Family::Gpt with an exact ladder, so the
+                // same clamp keeps chip == wire (a stale `max` on a model
+                // capped at xhigh must degrade in the CHIP too, not just be
+                // silently rewritten at request time). Empty id = unknown
+                // model → skip (clamping would wipe the tier, not no-op).
+                if (!m.d.model_id.value.empty())
                     m.d.effort = clamp_effort(
                         m.d.effort, resolved_caps(m.d.model_id.value));
-                }
                 tools::subagent::set_model(m.d.model_id.value);
                 persist_settings(m);
             }
@@ -463,10 +464,9 @@ Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
                     // supports — picking a non-reasoning (or lower-ceiling)
                     // model while effort=Xhigh must not leave a stale chip that
                     // the wire silently drops.
-                    if (!is_chatgpt_active()) {
+                    if (!m.d.model_id.value.empty())
                         m.d.effort = clamp_effort(
                             m.d.effort, resolved_caps(m.d.model_id.value));
-                    }
                     // Keep subagents on the live model: the startup config
                     // captured whatever was saved at launch, which can be a
                     // stale/invalid id (every subagent request 400s and the
@@ -1252,7 +1252,7 @@ Step switch_to_model_ref(Model m, const ModelRef& ref, bool record = true) {
             if (mi.id == m.d.model_id && mi.context_window > 0) {
                 m.s.context_max = mi.context_window; break;
             }
-        if (!is_chatgpt_active())
+        if (!m.d.model_id.value.empty())
             m.d.effort = clamp_effort(m.d.effort,
                                       resolved_caps(m.d.model_id.value));
         tools::subagent::set_model(m.d.model_id.value);

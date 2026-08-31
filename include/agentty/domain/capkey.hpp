@@ -54,14 +54,28 @@
 
 namespace agentty::capkey {
 
-// ── RULE 1: canonical model spelling ────────────────────────────────────
+// ── RULE 1: canonical model spelling ───────────────────────────────────
 // Lowercase; '.', '_', ' ', ':' fold to '-'; runs of '-' collapse; leading/
-// trailing '-' trimmed. Only separators fold — alphanumerics are never
-// altered, so distinct models can't merge.
+// trailing '-' trimmed; agentty's internal extended-context markers
+// ([1m]/[2m] — picker-only, never on the wire) are removed, because
+// capability facts (reasoning, effort enums) belong to the MODEL, not to
+// the context-window variant — a fact learned under the wire id must hit
+// when looked up under the [1m]-marked picker id. Only separators and the
+// internal markers fold — alphanumerics are never altered, so distinct
+// models can't merge.
 [[nodiscard]] inline std::string norm_model(std::string_view id) {
     std::string out;
     out.reserve(id.size());
-    for (char c : id) {
+    for (std::size_t i = 0; i < id.size();) {
+        // Skip "[1m]" / "[2m]" (case-insensitive on the 'm').
+        if (id[i] == '[' && i + 3 < id.size()
+            && (id[i + 1] == '1' || id[i + 1] == '2')
+            && (id[i + 2] == 'm' || id[i + 2] == 'M')
+            && id[i + 3] == ']') {
+            i += 4;
+            continue;
+        }
+        char c = id[i++];
         if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
         if (c == '.' || c == '_' || c == ' ' || c == ':') c = '-';
         if (c == '-' && (out.empty() || out.back() == '-')) continue;
