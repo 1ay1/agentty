@@ -61,6 +61,13 @@ struct ComposerCursorRight {};
 struct ComposerCursorHome {};
 struct ComposerCursorEnd {};
 struct ComposerPaste { std::string text; };
+// Fired ~1.2s after an escape-based clipboard read (OSC 5522 / OSC 52) was
+// emitted. If no paste reply arrived by then, the reducer surfaces an
+// ACTIONABLE diagnosis (which terminal, tmux, mosh, the exact env-var fix)
+// instead of the old behaviour — the "reading clipboard…" toast silently
+// lapsing and teaching the user nothing. `seq` matches the query that armed
+// it so a stale timeout never fires after a successful paste.
+struct ClipboardQueryTimeout { std::uint64_t seq = 0; };
 // Recall queued messages back into the composer for editing. Bound to
 // Up-arrow when the composer is empty and queued messages exist.
 // Mirrors Claude Code's `Lc_` (binary offset 76303220): drains every
@@ -919,7 +926,7 @@ using ComposerMsg = std::variant<
     ComposerUndo, ComposerRedo,
     ComposerHistoryPrev, ComposerHistoryNext,
     ComposerImagePasteFromClipboard,
-    ComposerPaste, ComposerRecallQueued,
+    ComposerPaste, ClipboardQueryTimeout, ComposerRecallQueued,
     ComposerQueuePeekPrev, ComposerQueuePeekNext, ComposerQueuePopLast>;
 
 using StreamMsg = std::variant<

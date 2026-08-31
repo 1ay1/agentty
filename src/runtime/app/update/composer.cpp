@@ -12,6 +12,10 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
+#if !defined(_WIN32)
+#  include <unistd.h>   // getppid (mosh ancestry walk in the clipboard diagnosis)
+#endif
 #include <string>
 #include <string_view>
 
@@ -431,9 +435,18 @@ Step smart_paste_from_clipboard(Model m) {
         auto toast = set_status_toast(
             m, "reading clipboard from your terminal\xE2\x80\xA6",
             std::chrono::seconds{3});
+        // Arm the no-reply diagnosis: if no paste lands within the window,
+        // ClipboardQueryTimeout surfaces an actionable message naming the
+        // user's exact situation (terminal / tmux / mosh) instead of the
+        // toast just lapsing into silence. 1.2s is comfortably above a
+        // slow SSH round-trip yet short enough to feel responsive.
+        const std::uint64_t seq = ++m.ui.clipboard_query_seq;
         return {std::move(m),
-                maya::Cmd<Msg>::batch(maya::Cmd<Msg>::query_clipboard(),
-                                      std::move(toast))};
+                maya::Cmd<Msg>::batch(
+                    maya::Cmd<Msg>::query_clipboard(),
+                    std::move(toast),
+                    maya::Cmd<Msg>::after(std::chrono::milliseconds{1200},
+                                          Msg{ClipboardQueryTimeout{seq}}))};
     }
 }
 
@@ -784,6 +797,10 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             return smart_paste_from_clipboard(std::move(m));
         },
         [&](ComposerPaste& e) -> Step {
+            // ANY paste (bracketed, OSC 52 reply, OSC 5522 image reply)
+            // satisfies an in-flight escape-based clipboard query — cancel
+            // the pending no-reply diagnosis.
+            m.ui.clipboard_query_done = m.ui.clipboard_query_seq;
             // Empty bracketed paste → Windows Terminal signature for
             // "user hit Ctrl+V but the clipboard has no text content".
             // The terminal swallows Ctrl+V to run its own paste action;
@@ -901,6 +918,73 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             m.ui.composer.cursor += static_cast<int>(placeholder.size());
             if (lines > 1) m.ui.composer.expanded = true;
             return done(std::move(m));
+        },
+        [&](ClipboardQueryTimeout& e) -> Step {
+            // The escape-based clipboard read went unanswered. Stale guard:
+            // only diagnose if THIS query is still the latest and no paste
+            // arrived meanwhile.
+            if (e.seq != m.ui.clipboard_query_seq
+                || m.ui.clipboard_query_done >= e.seq)
+                return done(std::move(m));
+            // Name the user's EXACT situation and the shortest path out —
+            // an unanswered query must never dead-end in silence.
+            const bool in_mosh = [] {
+                // mosh-server exports no reliable env marker into its child
+                // shell — detect it by walking the process ancestry instead
+                // (Linux/procfs; other platforms fall through to false and
+                // get the generic SSH wording, which still applies).
+#if defined(__linux__)
+                int pid = static_cast<int>(::getppid());
+                for (int hop = 0; hop < 12 && pid > 1; ++hop) {
+                    std::string base = "/proc/" + std::to_string(pid);
+                    if (std::ifstream comm(base + "/comm"); comm) {
+                        std::string name;
+                        std::getline(comm, name);
+                        if (name.find("mosh-server") != std::string::npos)
+                            return true;
+                    }
+                    std::ifstream stat(base + "/stat");
+                    if (!stat) break;
+                    // stat: pid (comm) state ppid … — comm may contain
+                    // spaces, so parse from after the LAST ')'.
+                    std::string line;
+                    std::getline(stat, line);
+                    auto rp = line.rfind(')');
+                    if (rp == std::string::npos) break;
+                    int state_and_ppid_at = static_cast<int>(rp) + 2;
+                    std::istringstream tail(line.substr(
+                        static_cast<std::size_t>(state_and_ppid_at)));
+                    char state_ch; int ppid = 0;
+                    tail >> state_ch >> ppid;
+                    if (ppid <= 1) break;
+                    pid = ppid;
+                }
+#endif
+                return false;
+            }();
+            const bool in_tmux = std::getenv("TMUX") != nullptr;
+            const bool in_ssh  = std::getenv("SSH_CONNECTION") != nullptr
+                              || std::getenv("SSH_TTY") != nullptr;
+            std::string msg;
+            if (in_mosh) {
+                msg = "clipboard: mosh doesn't relay terminal clipboard "
+                      "replies \xe2\x80\x94 use plain ssh (or tmux over ssh), or set "
+                      "AGENTTY_CLIPBOARD_CMD";
+            } else if (in_tmux) {
+                msg = "clipboard: no reply through tmux \xe2\x80\x94 needs "
+                      "`set -g allow-passthrough on` (tmux \xe2\x89\xa5 3.3) and a "
+                      "kitty outer terminal for images";
+            } else if (in_ssh) {
+                msg = "clipboard: your terminal didn't answer \xe2\x80\x94 images "
+                      "over SSH need kitty (OSC 5522); else set "
+                      "AGENTTY_CLIPBOARD_CMD='ssh <laptop> wl-paste -t image/png'";
+            } else {
+                msg = "clipboard: terminal didn't answer the read query "
+                      "\xe2\x80\x94 install wl-clipboard/xclip (Linux) or use a "
+                      "terminal with OSC 52 read support";
+            }
+            auto toast = set_status_toast(m, msg, std::chrono::seconds{8});
+            return {std::move(m), std::move(toast)};
         },
         [&](ComposerRecallQueued) -> Step {
             // No-op when there's nothing to recall — the caller (the

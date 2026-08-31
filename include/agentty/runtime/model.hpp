@@ -225,6 +225,13 @@ struct Model {
         // permission, todo — they coexist with the slot by design;
         // overlay::top() composes all four into the priority answer).
         ui::overlay::State  overlay;
+        // Escape-based clipboard read bookkeeping: bumped when a query is
+        // emitted; a successful paste stamps done = seq. The delayed
+        // ClipboardQueryTimeout{seq} only fires its diagnosis when seq still
+        // matches and done hasn't caught up — so a reply always cancels the
+        // timeout, and rapid re-triggers can't fire stale toasts.
+        std::uint64_t       clipboard_query_seq  = 0;
+        std::uint64_t       clipboard_query_done = 0;
         // When the model picker was opened to ASSIGN a Smart Mode role slot
         // (not to switch the active model), this names the target slot.
         // ModelPickerSelect writes the chosen model into that slot and
