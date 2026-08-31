@@ -40,8 +40,33 @@ std::uint8_t bit_of(std::string_view v) {
     return 0;
 }
 
-// Register one model's declaration under BOTH its scoped and bare id.
-void register_model(const std::string& scoped_id, const json& m) {
+// Register one model's declaration.
+//
+// KEYING IS THE WHOLE GAME here. models.dev model keys are only SOMETIMES
+// provider-prefixed ("mistral-medium-3-5" on requesty, "mistral/mistral-
+// medium-3.5" on nano-gpt, "mistralai/mistral-medium-3-5" on openrouter),
+// and agentty's capability registries use "provider/model" scoped keys. Two
+// bugs fell out of treating the raw key as already-scoped:
+//   • an unprefixed key from an AGGREGATOR (requesty's full low..max effort
+//     ladder for a model that is BINARY on Mistral's own platform) was
+//     recorded via the direct setter and matched agentty's bare-id fallback
+//     — the wrong ladder for the real provider;
+//   • a "mistral/..."-prefixed key from nano-gpt collided byte-for-byte
+//     with agentty's OWN "mistral/<model>" scope namespace — a third
+//     party's declaration masquerading as the Mistral-platform fact.
+// Now: the authoritative record is ALWAYS scoped under the models.dev
+// PROVIDER id ("mistral/mistral-medium-2604", "requesty/mistral-medium-
+// 3-5") — which for real platforms (mistral, openai, groq, cerebras…)
+// exactly matches agentty's endpoint-label scope, so the active provider's
+// scoped lookup hits the fact from ITS OWN models.dev entry and never an
+// aggregator's. Bare tails go ONLY through the merge-or-poison path:
+// cross-provider agreement keeps the fact, any disagreement poisons the
+// bare key to "no info" so resolution falls to the scoped fact or id
+// inference. (Your requesty-vs-openrouter disagreement on mistral-medium-
+// 3-5 now poisons the bare key, and id inference's effort_high_only
+// correctly yields the {off, high} ladder.)
+void register_model(const std::string& dev_provider,
+                    const std::string& mid, const json& m) {
     if (!m.is_object()) return;
     const auto reasoning = m.find("reasoning");
     if (reasoning == m.end() || !reasoning->is_boolean()) return;
@@ -64,28 +89,40 @@ void register_model(const std::string& scoped_id, const json& m) {
         }
     }
 
-    auto record = [&](const std::string& id) {
-        if (id.empty()) return;
-        set_catalog_reasoning(id, reasoning->get<bool>());
+    // The model id as agentty sees it on that provider's wire: the tail
+    // after any prefix (openrouter/nano-gpt style keys embed the upstream
+    // vendor as a path segment, which is part of THEIR wire id — keep the
+    // full mid for the scoped key, and use the tail only for bare merging).
+    const std::string bare = [&] {
+        auto slash = mid.rfind('/');
+        return slash == std::string::npos ? mid : mid.substr(slash + 1);
+    }();
+
+    // Authoritative, collision-free: "<models.dev provider>/<mid>".
+    if (!dev_provider.empty()) {
+        set_catalog_reasoning(dev_provider + "/" + mid,
+                              reasoning->get<bool>());
         if (set >= 0)
-            set_catalog_effort_set(id, static_cast<std::uint8_t>(set));
-    };
-    record(scoped_id);
-    // Bare tail: "deepseek/deepseek-v4-flash" → "deepseek-v4-flash". This key
-    // is SHARED across every models.dev provider, so different aggregators
-    // can disagree about the same bare id (one lists mistral-large-2402 as
-    // reasoning, another as instruct-only). A plain last-writer-wins record
-    // here is exactly what lit a phantom reasoning chip on Mistral Large 3.
-    // Merge instead: agree → keep, disagree → poison the key to "no info" so
-    // resolution falls back to the scoped fact or id-inference. No hardcoded
-    // ids — the collision resolves itself by the sources disagreeing.
-    if (auto slash = scoped_id.rfind('/'); slash != std::string::npos) {
-        const std::string bare = scoped_id.substr(slash + 1);
-        if (!bare.empty()) {
-            merge_catalog_reasoning(bare, reasoning->get<bool>());
+            set_catalog_effort_set(dev_provider + "/" + mid,
+                                   static_cast<std::uint8_t>(set));
+        // Aggregator-style mids ("mistralai/mistral-medium-3-5"): also
+        // record under "<provider>/<tail>" so agentty's scoped lookup —
+        // which uses the wire model id — hits when the user's endpoint
+        // strips the vendor prefix.
+        if (bare != mid) {
+            set_catalog_reasoning(dev_provider + "/" + bare,
+                                  reasoning->get<bool>());
             if (set >= 0)
-                merge_catalog_effort_set(bare, static_cast<std::uint8_t>(set));
+                set_catalog_effort_set(dev_provider + "/" + bare,
+                                       static_cast<std::uint8_t>(set));
         }
+    }
+
+    // Bare key: SHARED across every provider — merge-or-poison only.
+    if (!bare.empty()) {
+        merge_catalog_reasoning(bare, reasoning->get<bool>());
+        if (set >= 0)
+            merge_catalog_effort_set(bare, static_cast<std::uint8_t>(set));
     }
 }
 
@@ -95,12 +132,12 @@ int load_document(const std::string& body) {
     try {
         json j = json::parse(body);
         if (!j.is_object()) return 0;
-        for (const auto& [_, provider] : j.items()) {
+        for (const auto& [pid, provider] : j.items()) {
             if (!provider.is_object()) continue;
             auto models = provider.find("models");
             if (models == provider.end() || !models->is_object()) continue;
             for (const auto& [mid, m] : models->items()) {
-                register_model(mid, m);
+                register_model(pid, mid, m);
                 ++n;
             }
         }
