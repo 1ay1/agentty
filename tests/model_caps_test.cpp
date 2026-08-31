@@ -437,6 +437,47 @@ TEST_CASE("live-catalog reasoning declaration") {
     set_catalog_reasoning("magistral-medium-latest", false);
 }
 
+TEST_CASE("models.dev bare-key collision poisons to no-info") {
+    using agentty::merge_catalog_reasoning;
+    using agentty::catalog_reasoning_for;
+    using agentty::resolved_caps;
+
+    // The real bug: models.dev aggregates ~50 providers into one document and
+    // agentty records each model's reasoning fact under its BARE tail too
+    // (the cross-provider lookup namespace). Different aggregators disagree
+    // about the SAME bare id — e.g. one lists an old dated Mistral Large as a
+    // reasoning model, the canonical provider lists it as instruct-only. A
+    // last-writer-wins record lit a phantom off/high effort chip on Mistral
+    // Large 3 that never emitted any thinking.
+    const std::string bare = "mistral-large-2402";
+
+    // First source: instruct-only (the truthful one).
+    merge_catalog_reasoning(bare, false);
+    CHECK(catalog_reasoning_for(bare) == 0);
+
+    // A second source DISAGREES (claims it reasons) → the key is poisoned to
+    // "no info" (-1) rather than flipped to a phantom-reasoning true.
+    merge_catalog_reasoning(bare, true);
+    CHECK(catalog_reasoning_for(bare) == -1);
+
+    // Once poisoned it stays ambiguous — later writers can't resurrect it,
+    // so a stray aggregator can never re-light the chip.
+    merge_catalog_reasoning(bare, true);
+    merge_catalog_reasoning(bare, false);
+    CHECK(catalog_reasoning_for(bare) == -1);
+
+    // With no catalog declaration standing, resolution falls to id-inference:
+    // "mistral-large" is NOT in infer_reasoning_compat's reasoning list, so
+    // the effort chip is correctly absent.
+    CHECK(!resolved_caps(bare).supports_effort());
+
+    // Agreeing sources do NOT poison — a fact backed by consensus survives.
+    const std::string agree = "deepseek-v4-flash";
+    merge_catalog_reasoning(agree, true);
+    merge_catalog_reasoning(agree, true);
+    CHECK(catalog_reasoning_for(agree) == 1);
+}
+
 TEST_CASE("capability tiers") {
     using T = ModelCapabilities::Tier;
     auto tier = [](std::string_view id) { return ModelCapabilities::tier_for(id); };
