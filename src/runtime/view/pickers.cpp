@@ -1,6 +1,7 @@
 #include "agentty/runtime/view/pickers.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstdlib>
 #include <string_view>
@@ -259,8 +260,12 @@ Element model_picker(const Model& m) {
     // and the raw id (users paste wire ids like `claude-sonnet-4-5`, which the
     // prettified label never contains) and keep the better of the two, so
     // "s4" floats "claude-sonnet-4-5" up and "which chars matched" can be
-    // highlighted. Empty query → catalog order (score 0, no positions).
-    struct Vis { int idx; int score; std::vector<int> pos; bool pos_on_label; };
+    // highlighted. Empty query → alphabetical by shown label (favorites
+    // first) — the provider's catalog/wire order is effectively random to
+    // the user, and the fused "all providers" view is already ordered, so
+    // an unqueried single-provider list should read just as tidily.
+    struct Vis { int idx; int score; std::vector<int> pos; bool pos_on_label;
+                 std::string sort_key; bool favorite; };
     std::vector<Vis> vscored;
     vscored.reserve(m.d.available_models.size());
     const std::string q = picker->query;
@@ -269,19 +274,35 @@ Element model_picker(const Model& m) {
         const std::string shown = (cand.display_name == cand.id.value)
                                       ? pretty_model_label(cand.id.value)
                                       : cand.display_name;
-        if (q.empty()) { vscored.push_back({i, 0, {}, true}); continue; }
+        if (q.empty()) {
+            std::string key = shown;
+            std::transform(key.begin(), key.end(), key.begin(),
+                           [](unsigned char c){ return std::tolower(c); });
+            vscored.push_back({i, 0, {}, true, std::move(key), cand.favorite});
+            continue;
+        }
         auto ml = fuzzy::score(shown, q);
         auto il = fuzzy::score(cand.id.value, q);
         if (!ml.matched() && !il.matched()) continue;
         // Prefer highlighting on the visible label; fall back to id score.
         if (ml.score >= il.score)
-            vscored.push_back({i, ml.score, std::move(ml.positions), true});
+            vscored.push_back({i, ml.score, std::move(ml.positions), true, {}, cand.favorite});
         else
-            vscored.push_back({i, il.score, {}, true});   // matched via id only
+            vscored.push_back({i, il.score, {}, true, {}, cand.favorite});   // matched via id only
     }
-    if (!q.empty())
+    if (q.empty()) {
+        // Alphabetical by label, favorites hoisted to the top (the ternary
+        // keeps a user's ★ picks reachable without scrolling). Stable so
+        // equal keys keep catalog order as the last tiebreak.
+        std::stable_sort(vscored.begin(), vscored.end(),
+            [](const Vis& a, const Vis& b){
+                if (a.favorite != b.favorite) return a.favorite;
+                return a.sort_key < b.sort_key;
+            });
+    } else {
         std::stable_sort(vscored.begin(), vscored.end(),
             [](const Vis& a, const Vis& b){ return a.score > b.score; });
+    }
     std::vector<int> vis;
     vis.reserve(vscored.size());
     for (const auto& v : vscored) vis.push_back(v.idx);
