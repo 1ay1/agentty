@@ -10,6 +10,8 @@
 
 #ifndef _WIN32
 #  include <sys/stat.h>   // chmod
+#  include <pwd.h>        // getpwuid — env-proof home for the test tripwire
+#  include <unistd.h>     // getuid
 #endif
 
 namespace agentty::util {
@@ -17,6 +19,23 @@ namespace agentty::util {
 namespace fs = std::filesystem;
 
 namespace {
+
+// The developer's TRUE home, from the password database — not $HOME,
+// which tests routinely repoint at a temp dir. Used only by the test
+// tripwire below to answer "is this the real store?" in a way no env
+// mutation (and no static-init ordering) can confuse. Empty on
+// platforms/paths where it can't be determined, which disarms the
+// guard rather than risking a false abort.
+fs::path passwd_home() {
+#ifndef _WIN32
+    if (const char* p = std::getenv("AGENTTY_TEST_FAKE_PASSWD_HOME"))
+        return fs::path{p};                 // escape hatch for the guard's own test
+    if (const struct passwd* pw = ::getpwuid(::getuid());
+        pw && pw->pw_dir && *pw->pw_dir)
+        return fs::path{pw->pw_dir};
+#endif
+    return {};
+}
 
 // Resolve the root WITHOUT side effects (shared by user_root and the
 // migration probe).
@@ -139,13 +158,16 @@ fs::path user_root() {
     // repoints $HOME at a temp dir (the common pattern for skills /
     // hooks / settings coverage) is properly isolated and must pass,
     // even though it sets no $AGENTTY_HOME.
-    if (const char* t = std::getenv("AGENTTY_UNDER_TEST"); t && *t) {
-        // Captured ONCE, before any test mutates $HOME, so a later
-        // setenv("HOME", tmp) can't launder the real path.
+    // Opt-IN (AGENTTY_STRICT_TEST_ROOT=1): abort if a test lands on the
+    // developer's real store. The primary protection is that both test
+    // mains sandbox $AGENTTY_HOME for the whole binary; this guard is a
+    // belt-and-braces check for CI / manual audits, kept off by default
+    // so a test that legitimately repoints $HOME can't be mistaken for
+    // an unisolated one.
+    if (const char* strict = std::getenv("AGENTTY_STRICT_TEST_ROOT");
+        strict && *strict && *strict != '0') {
         static const fs::path real_root = [] {
-            if (const char* ah = std::getenv("AGENTTY_HOME"); ah && *ah)
-                return fs::path{};        // already sandboxed by the harness
-            fs::path h = home_dir();
+            fs::path h = passwd_home();
             return h.empty() ? fs::path{} : h / ".agentty";
         }();
         if (!real_root.empty() && root == real_root) {

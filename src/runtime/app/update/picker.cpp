@@ -970,10 +970,10 @@ void record_recent(Model& m, const std::string& provider_id,
     // and picking two spellings at different times must not grow two RECENT
     // rows for one model. The newest pick's SPELLING wins (it replaces the
     // older entry wholesale), so the ring shows what the user last chose.
-    const std::string folded = capkey::norm_model(model_id);
+    const std::string folded = capkey::norm_row_id(model_id);
     std::erase_if(mru, [&](const ModelRef& r) {
         return r.provider_id == provider_id
-            && capkey::norm_model(r.model_id) == folded;
+            && capkey::norm_row_id(r.model_id) == folded;
     });
     mru.insert(mru.begin(), std::move(ref));
     if (static_cast<int>(mru.size()) > kRecentCap) mru.resize(kRecentCap);
@@ -996,11 +996,11 @@ void hydrate_recents(Model& m) {
             // Fold legacy duplicate SPELLINGS of one model (persisted before
             // record_recent deduped by capkey identity): first (newest)
             // spelling wins, later aliases are dropped.
-            const std::string folded = capkey::norm_model(ref.model_id);
+            const std::string folded = capkey::norm_row_id(ref.model_id);
             bool dup = false;
             for (const auto& r : m.d.recent_models)
                 if (r.provider_id == ref.provider_id
-                    && capkey::norm_model(r.model_id) == folded) {
+                    && capkey::norm_row_id(r.model_id) == folded) {
                     dup = true;
                     break;
                 }
@@ -1015,11 +1015,11 @@ void hydrate_recents(Model& m) {
     // entry must not append a visual duplicate.
     if (!m.d.model_id.value.empty()) {
         const ModelRef active{active_provider_id(), m.d.model_id.value};
-        const std::string folded = capkey::norm_model(active.model_id);
+        const std::string folded = capkey::norm_row_id(active.model_id);
         bool present = false;
         for (const auto& r : m.d.recent_models)
             if (r.provider_id == active.provider_id
-                && capkey::norm_model(r.model_id) == folded) {
+                && capkey::norm_row_id(r.model_id) == folded) {
                 present = true;
                 break;
             }

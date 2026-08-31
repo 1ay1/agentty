@@ -188,3 +188,44 @@ TEST_CASE("fused: a recent whose model left the catalog is dropped") {
     CHECK(rows[0].model.id.value == "gpt-4o");
     CHECK(rows[0].recent);
 }
+
+TEST_CASE("fused: [1m] context variants are distinct rows, not alias dupes") {
+    // The 1M-context variant is a SEPARATE choice from its base model —
+    // both must be listable. Row identity folds spelling aliases but must
+    // NOT fold the `[1m]` marker (capkey::norm_row_id vs norm_model): the
+    // latter strips it for capability lookups, which made every 1M row
+    // look like an alias of its base and vanish from the list.
+    std::vector<ProviderCatalog> cats = {
+        cat("anthropic", "Anthropic",
+            {mk("claude-opus-4-8",     "Claude Opus 4.8", "anthropic"),
+             mk("claude-opus-4-8[1m]", "Claude Opus 4.8 (1M Context)",
+                "anthropic", 1'000'000),
+             mk("claude-sonnet-4-6",   "Claude Sonnet 4.6", "anthropic")}),
+    };
+    ui::FusedInputs in;
+    in.catalogs = &cats;
+    auto rows = ui::build_fused_rows(in);
+
+    bool base = false, one_m = false;
+    for (const auto& r : rows) {
+        if (r.model.id.value == "claude-opus-4-8")     base  = true;
+        if (r.model.id.value == "claude-opus-4-8[1m]") one_m = true;
+    }
+    CHECK(base);
+    CHECK(one_m);   // regression: was silently deduped away
+
+    // A genuine alias SPELLING still dedups (the behaviour norm_model
+    // was there for): -3-5 and -3.5 are one model, one row.
+    std::vector<ProviderCatalog> alias = {
+        cat("mistral", "Mistral",
+            {mk("mistral-medium-3-5", "Mistral Medium 3.5", "mistral"),
+             mk("mistral-medium-3.5", "Mistral Medium 3.5", "mistral")}),
+    };
+    ui::FusedInputs in2;
+    in2.catalogs = &alias;
+    auto rows2 = ui::build_fused_rows(in2);
+    int mistral_rows = 0;
+    for (const auto& r : rows2)
+        if (r.provider_id == "mistral") ++mistral_rows;
+    CHECK(mistral_rows == 1);
+}

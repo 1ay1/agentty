@@ -141,10 +141,15 @@ find_catalog(const std::vector<ProviderCatalog>& cats, std::string_view pid) {
     // one spelling must suppress the catalog's twin — not sit above it.
     std::vector<ModelRef> seen;
     auto already = [&](const ModelRef& r) {
-        const std::string folded = capkey::norm_model(r.model_id);
+        // norm_ROW_id, not norm_model: the latter folds `[1m]`/`[2m]`
+        // away (right for capability lookups, wrong for row identity),
+        // which made every 1M-context variant look like an alias of its
+        // base model and vanish from the list. Row identity keeps the
+        // marker while still folding genuine spelling aliases.
+        const std::string folded = capkey::norm_row_id(r.model_id);
         for (const auto& s : seen)
             if (s.provider_id == r.provider_id
-                && capkey::norm_model(s.model_id) == folded)
+                && capkey::norm_row_id(s.model_id) == folded)
                 return true;
         return false;
     };

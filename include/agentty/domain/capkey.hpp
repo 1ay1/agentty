@@ -85,6 +85,46 @@ namespace agentty::capkey {
     return out;
 }
 
+// ── ROW IDENTITY: like norm_model, but KEEPS the context marker ────────
+// norm_model folds `[1m]`/`[2m]` away on purpose — a capability fact
+// belongs to the model, not to the window variant. That is exactly wrong
+// for anything that has to tell two picker ROWS apart:
+// `claude-opus-4-8` and `claude-opus-4-8[1m]` are two distinct choices
+// the user must be able to select between, and folding them made the
+// fused picker treat the 1M row as an "alias spelling" of the base row
+// and silently DROP it (reported as "1M models are not visible").
+//
+// So: same separator/case folding (so genuine alias spellings like
+// mistral-medium-3-5 vs -3.5 still dedup), but the marker survives as a
+// distinguishing suffix. Use this for row dedup / selection identity;
+// use norm_model for capability lookups.
+[[nodiscard]] inline std::string norm_row_id(std::string_view id) {
+    std::string out;
+    out.reserve(id.size());
+    for (std::size_t i = 0; i < id.size();) {
+        // Preserve "[1m]" / "[2m]" verbatim (lowercased) instead of
+        // skipping it — the whole point of this variant.
+        if (id[i] == '[' && i + 3 < id.size()
+            && (id[i + 1] == '1' || id[i + 1] == '2')
+            && (id[i + 2] == 'm' || id[i + 2] == 'M')
+            && id[i + 3] == ']') {
+            out += '[';
+            out += id[i + 1];
+            out += 'm';
+            out += ']';
+            i += 4;
+            continue;
+        }
+        char c = id[i++];
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+        if (c == '.' || c == '_' || c == ' ' || c == ':') c = '-';
+        if (c == '-' && (out.empty() || out.back() == '-')) continue;
+        out.push_back(c);
+    }
+    while (!out.empty() && out.back() == '-') out.pop_back();
+    return out;
+}
+
 // The bare tail of a possibly vendor-prefixed model id, normalized.
 // "mistralai/Mistral-Medium-3.5" → "mistral-medium-3-5".
 [[nodiscard]] inline std::string norm_tail(std::string_view id) {
