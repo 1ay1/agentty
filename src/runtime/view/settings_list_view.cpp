@@ -21,6 +21,8 @@
 
 #include <string>
 
+namespace ov = agentty::ui::overlay;
+
 namespace agentty::ui {
 
 using namespace maya;
@@ -80,7 +82,7 @@ const char* add_prompt(se::Category c) {
 } // namespace
 
 Element settings_list_picker(const Model& m) {
-    const auto* o = settings_list_opened(m.ui.settings_list);
+    const auto* o = m.ui.overlay.get<ov::SettingsList>();
     if (!o) return nothing();
 
     const bool adding = o->input_active;

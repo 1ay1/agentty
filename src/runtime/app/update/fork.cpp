@@ -44,6 +44,8 @@
 #include "agentty/tool/skills.hpp"
 #include "agentty/provider/selection.hpp"   // prewarm_active_provider
 
+namespace ov = agentty::ui::overlay;
+
 namespace agentty::app::detail {
 
 namespace fp   = agentty::fork_picker;
@@ -84,27 +86,27 @@ Step fork_update(Model m, msg::ForkMsg fm) {
             if (!m.s.is_idle() || m.s.compacting || m.s.thread_loading)
                 return {std::move(m),
                         set_status_toast(m, "cannot fork while the agent is working")};
-            m.ui.fork_picker = fp::Open{0};
-            m.ui.command_palette = agentty::palette::Closed{};
+            m.ui.overlay = ov::Fork{{0}};
+            m.ui.overlay.close<ov::CommandPalette>();
             return {std::move(m), Cmd<Msg>::none()};
         },
         [&](CloseForkPicker) -> Step {
-            m.ui.fork_picker = fp::Closed{};
+            m.ui.overlay.close<ov::Fork>();
             return {std::move(m), Cmd<Msg>::none()};
         },
         [&](ForkPickerMove& e) -> Step {
-            if (auto* o = fork_picker_opened(m.ui.fork_picker)) {
+            if (auto* o = m.ui.overlay.get<ov::Fork>()) {
                 int n = fp::kChoiceCount;
                 o->index = ((o->index + e.delta) % n + n) % n;
             }
             return {std::move(m), Cmd<Msg>::none()};
         },
         [&](ForkThread&) -> Step {
-            const auto* picked = fork_picker_opened(m.ui.fork_picker);
+            const auto* picked = m.ui.overlay.get<ov::Fork>();
             const fp::Choice choice = picked
                 ? static_cast<fp::Choice>(picked->index)
                 : fp::Choice::RagOff;
-            m.ui.fork_picker = fp::Closed{};
+            m.ui.overlay.close<ov::Fork>();
             if (m.d.current.messages.empty())
                 return {std::move(m), set_status_toast(m, "nothing to fork yet")};
             if (!m.s.is_idle() || m.s.compacting || m.s.thread_loading)
@@ -197,7 +199,7 @@ Step fork_update(Model m, msg::ForkMsg fm) {
             m.ui.view_cache.clear();
             m.d.current = std::move(fork);
             deps().save_thread(m.d.current);
-            m.ui.thread_list = pick::Closed{};
+            m.ui.overlay.close<ov::ThreadList>();
             rehydrate_frozen(m);
             m.ui.needs_warmup_render = !m.ui.frozen.empty();
             // The fork's first turn hits the network fresh — warm the socket

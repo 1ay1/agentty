@@ -23,6 +23,8 @@
 #include "agentty/runtime/composer_attachment.hpp"
 #include "agentty/workspace/checkpoint.hpp"
 
+namespace ov = agentty::ui::overlay;
+
 namespace agentty::app::detail {
 
 namespace cp = agentty::checkpoint_picker;
@@ -145,23 +147,23 @@ Step checkpoint_update(Model m, msg::CheckpointMsg cm) {
             // target, and the one the old single-shot path always took.
             const int last = static_cast<int>(entries.size()) - 1;
             auto diffs = load_all_diffs(entries);
-            m.ui.checkpoints = cp::Open{std::move(entries), last};
+            m.ui.overlay = ov::Checkpoints{{std::move(entries), last}};
             m.ui.checkpoints_scroll = Model::UI::routed_scroll();
             return {std::move(m), std::move(diffs)};
         },
         [&](CloseCheckpointPicker) -> Step {
-            m.ui.checkpoints = cp::Closed{};
+            m.ui.overlay.close<ov::Checkpoints>();
             return done(std::move(m));
         },
         [&](CheckpointPickerMove& e) -> Step {
-            auto* o = checkpoint_picker_opened(m.ui.checkpoints);
+            auto* o = m.ui.overlay.get<ov::Checkpoints>();
             if (!o || o->entries.empty()) return done(std::move(m));
             const int n = static_cast<int>(o->entries.size());
             o->index = (o->index + e.delta % n + n) % n;
             return done(std::move(m));
         },
         [&](CheckpointDiffLoaded& e) -> Step {
-            auto* o = checkpoint_picker_opened(m.ui.checkpoints);
+            auto* o = m.ui.overlay.get<ov::Checkpoints>();
             if (!o) return done(std::move(m));   // picker closed mid-load
             if (e.index < 0 || e.index >= static_cast<int>(o->entries.size()))
                 return done(std::move(m));
@@ -178,14 +180,14 @@ Step checkpoint_update(Model m, msg::CheckpointMsg cm) {
             return done(std::move(m));
         },
         [&](CheckpointPickerSelect) -> Step {
-            auto* o = checkpoint_picker_opened(m.ui.checkpoints);
+            auto* o = m.ui.overlay.get<ov::Checkpoints>();
             if (!o || o->entries.empty()
                 || o->index < 0 || o->index >= static_cast<int>(o->entries.size())) {
-                m.ui.checkpoints = cp::Closed{};
+                m.ui.overlay.close<ov::Checkpoints>();
                 return done(std::move(m));
             }
             auto id = o->entries[static_cast<std::size_t>(o->index)].id;
-            m.ui.checkpoints = cp::Closed{};
+            m.ui.overlay.close<ov::Checkpoints>();
             // Hand off to the existing, battle-tested rewind: it re-gates on
             // Idle, restores files on an isolated worker, then truncates the
             // transcript + refills the composer in CheckpointRestored.

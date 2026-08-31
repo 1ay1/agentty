@@ -20,6 +20,8 @@
 #include "agentty/runtime/view/status_bar/status_bar.hpp"
 #include "agentty/runtime/view/thread/thread.hpp"
 
+namespace ov = agentty::ui::overlay;
+
 namespace agentty::ui {
 
 namespace {

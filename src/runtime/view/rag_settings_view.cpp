@@ -16,6 +16,8 @@
 #include <algorithm>
 #include <string>
 
+namespace ov = agentty::ui::overlay;
+
 namespace agentty::ui {
 
 using namespace maya;
@@ -23,7 +25,7 @@ using namespace maya::dsl;
 namespace rs = agentty::rag_settings;
 
 Element rag_settings_picker(const Model& m) {
-    const auto* o = rag_settings_opened(m.ui.rag_settings);
+    const auto* o = m.ui.overlay.get<ov::RagSettings>();
     if (!o) return nothing();
 
     // Which mode is currently persisted (to mark the active row with a dot).

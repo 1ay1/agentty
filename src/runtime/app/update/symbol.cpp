@@ -15,6 +15,8 @@
 #include "agentty/runtime/symbol_palette.hpp"
 #include "agentty/workspace/symbols.hpp"
 
+namespace ov = agentty::ui::overlay;
+
 namespace agentty::app::detail {
 
 using maya::overload;
@@ -28,15 +30,15 @@ Step symbol_update(Model m, msg::SymbolPaletteMsg sm) {
             // outlives the picker by design).
             symbol_palette::Open o;
             o.entries = list_workspace_symbols();
-            m.ui.symbol_palette = std::move(o);
+            m.ui.overlay = ov::Symbol{std::move(o)};
             return done(std::move(m));
         },
         [&](CloseSymbolPalette) -> Step {
-            m.ui.symbol_palette = symbol_palette::Closed{};
+            m.ui.overlay.close<ov::Symbol>();
             return done(std::move(m));
         },
         [&](SymbolPaletteInput& e) -> Step {
-            auto* o = symbol_palette_opened(m.ui.symbol_palette);
+            auto* o = m.ui.overlay.get<ov::Symbol>();
             if (o && static_cast<uint32_t>(e.ch) < 0x80
                   && e.ch >= 0x20) {
                 // Fill a cold-opened snapshot once the parallel scan lands.
@@ -48,10 +50,10 @@ Step symbol_update(Model m, msg::SymbolPaletteMsg sm) {
             return done(std::move(m));
         },
         [&](SymbolPaletteBackspace) -> Step {
-            auto* o = symbol_palette_opened(m.ui.symbol_palette);
+            auto* o = m.ui.overlay.get<ov::Symbol>();
             if (!o) return done(std::move(m));
             if (o->query.empty()) {
-                m.ui.symbol_palette = symbol_palette::Closed{};
+                m.ui.overlay.close<ov::Symbol>();
                 return done(std::move(m));
             }
             o->query.pop_back();
@@ -59,7 +61,7 @@ Step symbol_update(Model m, msg::SymbolPaletteMsg sm) {
             return done(std::move(m));
         },
         [&](SymbolPaletteMove& e) -> Step {
-            auto* o = symbol_palette_opened(m.ui.symbol_palette);
+            auto* o = m.ui.overlay.get<ov::Symbol>();
             if (!o) return done(std::move(m));
             int sz = static_cast<int>(symbol_filtered(*o).size());
             if (sz <= 0) { o->index = 0; return done(std::move(m)); }
@@ -67,13 +69,13 @@ Step symbol_update(Model m, msg::SymbolPaletteMsg sm) {
             return done(std::move(m));
         },
         [&](SymbolPaletteSelect) -> Step {
-            auto* o = symbol_palette_opened(m.ui.symbol_palette);
+            auto* o = m.ui.overlay.get<ov::Symbol>();
             if (!o) return done(std::move(m));
             const auto& matches = symbol_filtered(*o);
             if (matches.empty()
                 || o->index < 0
                 || o->index >= static_cast<int>(matches.size())) {
-                m.ui.symbol_palette = symbol_palette::Closed{};
+                m.ui.overlay.close<ov::Symbol>();
                 return done(std::move(m));
             }
             const auto& sym = o->entries[matches[
@@ -83,7 +85,7 @@ Step symbol_update(Model m, msg::SymbolPaletteMsg sm) {
             att.name        = sym.name;
             att.path        = sym.path;
             att.line_number = sym.line_number;
-            m.ui.symbol_palette = symbol_palette::Closed{};
+            m.ui.overlay.close<ov::Symbol>();
 
             std::size_t idx = m.ui.composer.attachments.size();
             m.ui.composer.attachments.push_back(std::move(att));

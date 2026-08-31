@@ -60,6 +60,8 @@
 #include "agentty/runtime/win_shell_encode.hpp"
 #include "agentty/tool/util/subprocess.hpp"
 
+namespace ov = agentty::ui::overlay;
+
 namespace agentty::app::detail {
 
 using maya::overload;
@@ -569,22 +571,22 @@ Step codeblock_update(Model m, msg::CodeBlockMsg cm) {
                     return {std::move(m), std::move(cmd)};
                 }
             }
-            m.ui.code_blocks = cbp::Open{std::move(blocks), 0};
+            m.ui.overlay = ov::CodeBlocks{{std::move(blocks), 0}};
             m.ui.code_blocks_scroll.y = 0;
             return done(std::move(m));
         },
         [&](CloseCodeBlockPicker) -> Step {
-            m.ui.code_blocks = cbp::Closed{};
+            m.ui.overlay.close<ov::CodeBlocks>(); m.ui.overlay.close<ov::CodeBlockResult>();
             return done(std::move(m));
         },
         [&](CodeBlockPickerMove& e) -> Step {
-            if (auto* o = code_block_picker_opened(m.ui.code_blocks)) {
+            if (auto* o = m.ui.overlay.get<ov::CodeBlocks>()) {
                 int sz = static_cast<int>(o->blocks.size());
                 if (sz <= 0) return done(std::move(m));
                 o->index = std::clamp(o->index + e.delta, 0, sz - 1);
                 return done(std::move(m));
             }
-            if (code_block_result(m.ui.code_blocks)) {
+            if (m.ui.overlay.get<ov::CodeBlockResult>()) {
                 // Read-only result card: Move deltas scroll the capture
                 // viewport directly. max_y is paint-written-back by the
                 // Picker widget; clamp against it (0 before first paint
@@ -595,7 +597,7 @@ Step codeblock_update(Model m, msg::CodeBlockMsg cm) {
             return done(std::move(m));
         },
         [&](CodeBlockPickerSelect& e) -> Step {
-            auto* o = code_block_picker_opened(m.ui.code_blocks);
+            auto* o = m.ui.overlay.get<ov::CodeBlocks>();
             if (!o) return done(std::move(m));
             const int idx = (e.index >= 0) ? e.index : o->index;
             if (idx < 0 || idx >= static_cast<int>(o->blocks.size()))
@@ -613,17 +615,17 @@ Step codeblock_update(Model m, msg::CodeBlockMsg cm) {
                     "press e to edit or y to copy");
                 return {std::move(m), std::move(cmd)};
             }
-            m.ui.code_blocks = cbp::Closed{};
+            m.ui.overlay.close<ov::CodeBlocks>(); m.ui.overlay.close<ov::CodeBlockResult>();
             return {std::move(m), run_block_cmd(std::move(block.body), shell)};
         },
         [&](CodeBlockPickerEdit) -> Step {
-            auto* o = code_block_picker_opened(m.ui.code_blocks);
+            auto* o = m.ui.overlay.get<ov::CodeBlocks>();
             if (!o) return done(std::move(m));
             const int idx = o->index;
             if (idx < 0 || idx >= static_cast<int>(o->blocks.size()))
                 return done(std::move(m));
             std::string body = o->blocks[static_cast<std::size_t>(idx)].body;
-            m.ui.code_blocks = cbp::Closed{};
+            m.ui.overlay.close<ov::CodeBlocks>(); m.ui.overlay.close<ov::CodeBlockResult>();
             // Splice at the cursor rather than replacing — same
             // convention as the @file / #symbol chips. The common case
             // is an empty composer, where this IS a replace.
@@ -633,13 +635,13 @@ Step codeblock_update(Model m, msg::CodeBlockMsg cm) {
             return done(std::move(m));
         },
         [&](CodeBlockPickerCopy) -> Step {
-            auto* o = code_block_picker_opened(m.ui.code_blocks);
+            auto* o = m.ui.overlay.get<ov::CodeBlocks>();
             if (!o) return done(std::move(m));
             const int idx = o->index;
             if (idx < 0 || idx >= static_cast<int>(o->blocks.size()))
                 return done(std::move(m));
             std::string body = o->blocks[static_cast<std::size_t>(idx)].body;
-            m.ui.code_blocks = cbp::Closed{};
+            m.ui.overlay.close<ov::CodeBlocks>(); m.ui.overlay.close<ov::CodeBlockResult>();
             // Write via native tooling (pbcopy/wl-copy/xclip) synchronously
             // AND emit the OSC 52 Cmd. OSC 52 is opt-in in Terminal.app /
             // iTerm2 so it silently no-ops there; the native write is what
@@ -658,14 +660,14 @@ Step codeblock_update(Model m, msg::CodeBlockMsg cm) {
             // is the decision beat: attach the captured copy to the
             // composer, copy it clean, or discard. The composer only
             // ever receives output the user explicitly asked for.
-            m.ui.code_blocks = cbp::Result{
+            m.ui.overlay = ov::CodeBlockResult{{
                 std::move(e.command), std::move(e.output),
-                e.exit_code, e.timed_out};
+                e.exit_code, e.timed_out}};
             m.ui.code_blocks_scroll.y = 0;
             return done(std::move(m));
         },
         [&](CodeBlockResultAttach) -> Step {
-            auto* r = code_block_result(m.ui.code_blocks);
+            auto* r = m.ui.overlay.get<ov::CodeBlockResult>();
             if (!r) return done(std::move(m));
             // Fold the captured output into the composer as an Output
             // attachment — the SAME collapse-to-chip / expand-on-submit
@@ -690,15 +692,15 @@ Step codeblock_update(Model m, msg::CodeBlockMsg cm) {
                 static_cast<std::size_t>(m.ui.composer.cursor), placeholder);
             m.ui.composer.cursor += static_cast<int>(placeholder.size());
             m.ui.composer.expanded = true;
-            m.ui.code_blocks = cbp::Closed{};
+            m.ui.overlay.close<ov::CodeBlocks>(); m.ui.overlay.close<ov::CodeBlockResult>();
             auto toast = set_status_toast(m, "output attached to composer");
             return {std::move(m), std::move(toast)};
         },
         [&](CodeBlockResultCopy) -> Step {
-            auto* r = code_block_result(m.ui.code_blocks);
+            auto* r = m.ui.overlay.get<ov::CodeBlockResult>();
             if (!r) return done(std::move(m));
             std::string body = std::move(r->output);
-            m.ui.code_blocks = cbp::Closed{};
+            m.ui.overlay.close<ov::CodeBlocks>(); m.ui.overlay.close<ov::CodeBlockResult>();
             (void)write_clipboard_text(body);   // native pbcopy/wl-copy/xclip
             auto toast = set_status_toast(m, "output copied to clipboard");
             return {std::move(m),
@@ -707,7 +709,7 @@ Step codeblock_update(Model m, msg::CodeBlockMsg cm) {
                         std::move(toast))};
         },
         [&](CodeBlockResultDiscard) -> Step {
-            m.ui.code_blocks = cbp::Closed{};
+            m.ui.overlay.close<ov::CodeBlocks>(); m.ui.overlay.close<ov::CodeBlockResult>();
             return done(std::move(m));
         },
     }, cm);

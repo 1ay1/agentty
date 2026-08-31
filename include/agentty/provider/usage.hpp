@@ -57,6 +57,14 @@ using json = nlohmann::json;
         su.cache_read_input_tokens =
             u["prompt_tokens_details"].value("cached_tokens", 0);
     }
+    // reasoning_tokens is nested under completion_tokens_details on the Chat
+    // wire (o-series / gpt-5 / compat reasoning models). Already counted in
+    // completion_tokens — surfaced for display only.
+    if (u.contains("completion_tokens_details")
+        && u["completion_tokens_details"].is_object()) {
+        su.reasoning_output_tokens =
+            u["completion_tokens_details"].value("reasoning_tokens", 0);
+    }
     return any(su) ? std::optional{su} : std::nullopt;
 }
 
@@ -74,6 +82,13 @@ using json = nlohmann::json;
         && u["input_tokens_details"].is_object()) {
         su.cache_read_input_tokens =
             u["input_tokens_details"].value("cached_tokens", 0);
+    }
+    // reasoning_tokens is nested under output_tokens_details on the Responses
+    // wire. Already counted in output_tokens — surfaced for display only.
+    if (u.contains("output_tokens_details")
+        && u["output_tokens_details"].is_object()) {
+        su.reasoning_output_tokens =
+            u["output_tokens_details"].value("reasoning_tokens", 0);
     }
     return any(su) ? std::optional{su} : std::nullopt;
 }

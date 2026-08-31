@@ -167,6 +167,21 @@ TEST_CASE("usage extractors") {
         CHECK(su->output_tokens == 40);
         CHECK(su->cache_read_input_tokens == 64);
     }
+    // reasoning_tokens under completion_tokens_details (o-series / gpt-5 /
+    // compat reasoning). Surfaced separately; already inside completion_tokens.
+    {
+        auto u = json::parse(R"({"prompt_tokens":10,"completion_tokens":200,
+            "completion_tokens_details":{"reasoning_tokens":150}})");
+        auto su = usage::from_openai(u);
+        CHECK(su.has_value());
+        CHECK(su->output_tokens == 200);
+        CHECK(su->reasoning_output_tokens == 150);
+    }
+    // Absent detail → 0 (non-reasoning model).
+    {
+        auto su = usage::from_openai(json::parse(R"({"prompt_tokens":5,"completion_tokens":9})"));
+        CHECK(su.has_value() && su->reasoning_output_tokens == 0);
+    }
     // OpenAI: no details object → cache_read stays 0.
     {
         auto su = usage::from_openai(json::parse(R"({"prompt_tokens":5,"completion_tokens":1})"));
@@ -189,6 +204,15 @@ TEST_CASE("usage extractors") {
         CHECK(su->input_tokens == 200);
         CHECK(su->output_tokens == 50);
         CHECK(su->cache_read_input_tokens == 128);
+    }
+    // reasoning_tokens under output_tokens_details (Responses/Codex).
+    {
+        auto u = json::parse(R"({"input_tokens":20,"output_tokens":300,
+            "output_tokens_details":{"reasoning_tokens":220}})");
+        auto su = usage::from_responses(u);
+        CHECK(su.has_value());
+        CHECK(su->output_tokens == 300);
+        CHECK(su->reasoning_output_tokens == 220);
     }
     CHECK(!usage::from_responses(json::object()).has_value());
 

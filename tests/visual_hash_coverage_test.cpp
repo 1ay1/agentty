@@ -54,6 +54,8 @@
 #include "agentty/runtime/app/program.hpp"
 #include "agentty/runtime/model.hpp"
 
+namespace ov = agentty::ui::overlay;
+
 using agentty::Model;
 using agentty::app::AgenttyApp;
 
@@ -165,95 +167,95 @@ const std::vector<Axis>& visual_axes() {
             m.ui.frozen_turn = 7;
         }},
         {"model_picker opens", [](Model& m) {
-            m.ui.model_picker = agentty::ui::pick::OpenAt{0};
+            m.ui.overlay = ov::ModelPicker{{0}};
         }},
         {"model_picker cursor move", [](Model& m) {
-            m.ui.model_picker = agentty::ui::pick::OpenAt{3};
+            m.ui.overlay = ov::ModelPicker{{3}};
         }},
         {"model_picker query", [](Model& m) {
             agentty::ui::pick::OpenAt o; o.index = 0; o.query = "free";
-            m.ui.model_picker = std::move(o);
+            m.ui.overlay = ov::ModelPicker{std::move(o)};
         }},
         {"provider_picker opens", [](Model& m) {
-            m.ui.provider_picker = agentty::ui::pick::OpenAt{0};
+            m.ui.overlay = ov::ProviderPicker{{0}};
         }},
         {"provider_picker cursor move", [](Model& m) {
-            m.ui.provider_picker = agentty::ui::pick::OpenAt{2};
+            m.ui.overlay = ov::ProviderPicker{{2}};
         }},
         {"thread_list opens", [](Model& m) {
-            m.ui.thread_list = agentty::ui::pick::OpenAt{0};
+            m.ui.overlay = ov::ThreadList{{0}};
         }},
         {"thread_list cursor move", [](Model& m) {
-            m.ui.thread_list = agentty::ui::pick::OpenAt{4};
+            m.ui.overlay = ov::ThreadList{{4}};
         }},
         {"thread_list delete confirm", [](Model& m) {
             auto o = agentty::ui::pick::OpenAt{2};
             o.confirm_remove = "abc123";
-            m.ui.thread_list = std::move(o);
+            m.ui.overlay = agentty::ui::overlay::ThreadList{std::move(o)};
         }},
         {"diff_review opens at cell", [](Model& m) {
-            m.ui.diff_review = agentty::ui::pick::OpenAtCell{0, 0};
+            m.ui.overlay = ov::DiffReview{{0, 0}};
         }},
         {"diff_review hunk move", [](Model& m) {
-            m.ui.diff_review = agentty::ui::pick::OpenAtCell{1, 2};
+            m.ui.overlay = ov::DiffReview{{1, 2}};
         }},
         {"command_palette opens", [](Model& m) {
-            m.ui.command_palette = agentty::palette::Open{};
+            m.ui.overlay = ov::CommandPalette{{}};
         }},
         {"command_palette query", [](Model& m) {
-            m.ui.command_palette = agentty::palette::Open{"git", 0};
+            m.ui.overlay = ov::CommandPalette{{"git", 0}};
         }},
         {"command_palette index", [](Model& m) {
-            m.ui.command_palette = agentty::palette::Open{"git", 5};
+            m.ui.overlay = ov::CommandPalette{{"git", 5}};
         }},
         {"mention_palette opens", [](Model& m) {
-            m.ui.mention_palette = agentty::mention::Open{};
+            m.ui.overlay = agentty::ui::overlay::Mention{};
         }},
         {"mention_palette query", [](Model& m) {
             agentty::mention::Open o; o.query = "src"; o.index = 0;
-            m.ui.mention_palette = std::move(o);
+            m.ui.overlay = ov::Mention{std::move(o)};
         }},
         {"mention_palette index", [](Model& m) {
             agentty::mention::Open o; o.query = "src"; o.index = 3;
-            m.ui.mention_palette = std::move(o);
+            m.ui.overlay = ov::Mention{std::move(o)};
         }},
         {"symbol_palette opens", [](Model& m) {
-            m.ui.symbol_palette = agentty::symbol_palette::Open{};
+            m.ui.overlay = agentty::ui::overlay::Symbol{};
         }},
         {"symbol_palette query", [](Model& m) {
             agentty::symbol_palette::Open o; o.query = "foo"; o.index = 0;
-            m.ui.symbol_palette = std::move(o);
+            m.ui.overlay = ov::Symbol{std::move(o)};
         }},
         {"symbol_palette index", [](Model& m) {
             agentty::symbol_palette::Open o; o.query = "foo"; o.index = 2;
-            m.ui.symbol_palette = std::move(o);
+            m.ui.overlay = ov::Symbol{std::move(o)};
         }},
         {"todo modal opens", [](Model& m) {
             m.ui.todo.open = agentty::ui::pick::OpenModal{};
         }},
         {"tool viewer opens", [](Model& m) {
-            m.ui.tool_viewer = agentty::tool_viewer::Open{{}, 0, false};
+            m.ui.overlay = ov::ToolViewer{{{}, 0, false}};
         }},
         {"tool viewer list cursor move", [](Model& m) {
-            m.ui.tool_viewer = agentty::tool_viewer::Open{{}, 2, false};
+            m.ui.overlay = ov::ToolViewer{{{}, 2, false}};
         }},
         {"tool viewer list -> body stage", [](Model& m) {
-            m.ui.tool_viewer = agentty::tool_viewer::Open{{}, 0, true};
+            m.ui.overlay = ov::ToolViewer{{{}, 0, true}};
         }},
         {"tool viewer body scroll", [](Model& m) {
-            m.ui.tool_viewer = agentty::tool_viewer::Open{{}, 0, true};
+            m.ui.overlay = ov::ToolViewer{{{}, 0, true}};
             m.ui.tool_viewer_scroll.y = 5;
         }},
         {"tool viewer live tail toggled", [](Model& m) {
-            m.ui.tool_viewer = agentty::tool_viewer::Open{
-                {agentty::tool_viewer::Entry{}}, 0, /*viewing=*/true};
+            m.ui.overlay = ov::ToolViewer{{
+                {agentty::tool_viewer::Entry{}}, 0, /*viewing=*/true}};
             m.ui.tool_viewer_tail = false;
         }},
         {"code block picker opens", [](Model& m) {
-            m.ui.code_blocks = agentty::code_block_picker::Open{{}, 0};
+            m.ui.overlay = ov::CodeBlocks{{{}, 0}};
         }},
         {"code block picker cursor move", [](Model& m) {
-            m.ui.code_blocks = agentty::code_block_picker::Open{{}, 3};
+            m.ui.overlay = ov::CodeBlocks{{{}, 3}};
         }},
         {"login modal opens", [](Model& m) {
             m.ui.login = agentty::ui::login::Picking{};
@@ -264,13 +266,13 @@ const std::vector<Axis>& visual_axes() {
         {"settings_list opens (Plugins)", [](Model& m) {
             agentty::settings::ListOpen o;
             o.concern = agentty::settings::Category::Plugins;
-            m.ui.settings_list = o;
+            m.ui.overlay = agentty::ui::overlay::SettingsList{o};
         }},
         {"settings_list cursor move", [](Model& m) {
             agentty::settings::ListOpen o;
             o.concern = agentty::settings::Category::Plugins;
             o.index = 3;
-            m.ui.settings_list = o;
+            m.ui.overlay = agentty::ui::overlay::SettingsList{o};
         }},
         {"settings_list add-mode input", [](Model& m) {
             agentty::settings::ListOpen o;
@@ -278,7 +280,7 @@ const std::vector<Axis>& visual_axes() {
             o.input_active = true;
             o.input = "date -- /path/date_server";
             o.cursor = 4;
-            m.ui.settings_list = o;
+            m.ui.overlay = agentty::ui::overlay::SettingsList{o};
         }},
         {"plugins loading flag", [](Model& m) {
             m.ui.plugins_loading = true;
@@ -298,25 +300,25 @@ const std::vector<Axis>& visual_axes() {
             m.ui.plugins.servers.push_back(std::move(s));
         }},
         {"smart_mode overlay opens", [](Model& m) {
-            m.ui.smart_mode = agentty::ui::pick::OpenAt{0};
+            m.ui.overlay = ov::SmartMode{{0}};
         }},
         {"smart_mode cursor move", [](Model& m) {
-            m.ui.smart_mode = agentty::ui::pick::OpenAt{3};
+            m.ui.overlay = ov::SmartMode{{3}};
         }},
         {"rag picker opens", [](Model& m) {
             agentty::rag_settings::Open o;
-            m.ui.rag_settings = o;
+            m.ui.overlay = agentty::ui::overlay::RagSettings{o};
         }},
         {"rag picker cursor move", [](Model& m) {
             agentty::rag_settings::Open o;
             o.index = 2;
-            m.ui.rag_settings = o;
+            m.ui.overlay = agentty::ui::overlay::RagSettings{o};
         }},
         {"fork picker opens", [](Model& m) {
-            m.ui.fork_picker = agentty::fork_picker::Open{0};
+            m.ui.overlay = ov::Fork{{0}};
         }},
         {"fork picker cursor move", [](Model& m) {
-            m.ui.fork_picker = agentty::fork_picker::Open{2};
+            m.ui.overlay = ov::Fork{{2}};
         }},
     };
     return axes;

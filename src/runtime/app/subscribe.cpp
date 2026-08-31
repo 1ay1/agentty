@@ -13,6 +13,8 @@
 #include "agentty/runtime/nav.hpp"
 #include "agentty/runtime/app/update/internal.hpp"
 
+namespace ov = agentty::ui::overlay;
+
 namespace agentty::app {
 
 using maya::Sub;
@@ -922,7 +924,7 @@ Sub<Msg> subscribe(const Model& m) {
     const auto active_overlay = ui::overlay::top(m);
     const bool in_login = active_overlay == ui::overlay::Kind::Login;
     const bool settings_list_adding = [&] {
-        const auto* so = settings_list_opened(m.ui.settings_list);
+        const auto* so = m.ui.overlay.get<ov::SettingsList>();
         return so && so->input_active;
     }();
     const bool streaming  = m.s.active()

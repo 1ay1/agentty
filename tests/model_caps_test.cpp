@@ -185,6 +185,21 @@ TEST_CASE("gpt5 codex caps") {
         CHECK(c.generation == 5);
         CHECK(c.supports_effort());
     }
+    // `minimal` is OpenAI's gpt-5+ bottom tier. It must be in the DERIVED
+    // ladder for the Gpt family (gen >= 5), map to the "minimal" wire value,
+    // and sit BELOW low so a Minimal request never rounds up.
+    {
+        const auto c = ModelCapabilities::from_id("gpt-5.6-sol");
+        CHECK(effort_wire_for(Effort::Minimal, c) == "minimal");
+        const auto ladder = agentty::available_efforts(c);
+        // off + minimal + low + medium + high + xhigh + max
+        REQUIRE(ladder.size() >= 3);
+        CHECK(ladder[0] == Effort::None);
+        CHECK(ladder[1] == Effort::Minimal);
+        CHECK(ladder[2] == Effort::Low);
+        // A Minimal request stays minimal (nearest at-or-below is itself).
+        CHECK(agentty::clamp_effort(Effort::Minimal, c) == Effort::Minimal);
+    }
     // gpt-5.4-mini output ceiling is the large-output 64k (not the 16k
     // non-Claude default).
     CHECK(agentty::max_output_tokens_for("gpt-5.4-mini") == 64000);
@@ -264,6 +279,9 @@ TEST_CASE("compat reasoning effort (chat wire)") {
         // 3-level enum only — no max / xhigh on this wire.
         CHECK(!c.supports_effort_max());
         CHECK(!c.supports_effort_xhigh());
+        // `minimal` is a gpt-5-only tier — compat models must NOT expose it
+        // (it would 400; their ladder is low|medium|high).
+        CHECK((agentty::effort_set_of(c) & agentty::effort_bit(Effort::Minimal)) == 0);
         CHECK(!c.is_known_family());   // stays orthogonal to the family ladder
         // A stale Max/Xhigh pick degrades to `high` instead of 400ing.
         CHECK(effort_wire_for(Effort::Max, c)    == "high");

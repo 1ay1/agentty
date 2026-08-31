@@ -21,6 +21,8 @@
 #include <string>
 #include <vector>
 
+namespace ov = agentty::ui::overlay;
+
 using namespace agentty;
 
 namespace {
@@ -59,7 +61,7 @@ Model in_slot_assign(int slot) {
     m.d.available_models = { mi("claude-opus-4-5", "anthropic"),
                              mi("claude-haiku-4-5", "anthropic") };
     m.ui.smart_assign_slot = slot;
-    m.ui.model_picker = ui::pick::OpenAt{0};
+    m.ui.overlay = ov::ModelPicker{{0}};
     return m;
 }
 
@@ -78,13 +80,13 @@ TEST_CASE("smart slot picker stack") {
         Model m = in_slot_assign(slot);
         auto [m2, cmd] = app::update(std::move(m), Msg{CloseModelPicker{}});
 
-        CHECK(!ui::pick::is_open(m2.ui.model_picker),
+        CHECK(!m2.ui.overlay.is<ov::ModelPicker>(),
               "Esc closes the model picker");
-        CHECK(ui::pick::is_open(m2.ui.smart_mode),
+        CHECK(m2.ui.overlay.is<ov::SmartMode>(),
               "Esc RE-OPENS Smart Mode — navigation is a stack, not a trapdoor");
         CHECK(m2.ui.smart_assign_slot == -1,
               "the pending slot-assign is cleared on back-out");
-        if (auto* o = ui::pick::opened(m2.ui.smart_mode)) {
+        if (auto* o = m2.ui.overlay.get<ov::SmartMode>()) {
             CHECK(o->index == 8 + slot,
                   "cursor lands back on the slot row you descended from");
         } else {
@@ -103,12 +105,12 @@ TEST_CASE("smart slot picker stack") {
         Model m = in_slot_assign(slot);
         auto [m2, cmd] = app::update(std::move(m), Msg{ModelPickerSelect{}});
 
-        CHECK(!ui::pick::is_open(m2.ui.model_picker),
+        CHECK(!m2.ui.overlay.is<ov::ModelPicker>(),
               "Enter closes the model picker");
-        CHECK(ui::pick::is_open(m2.ui.smart_mode),
+        CHECK(m2.ui.overlay.is<ov::SmartMode>(),
               "Enter returns to Smart Mode so sibling slots stay one step away");
         CHECK(m2.ui.smart_assign_slot == -1, "slot-assign consumed");
-        if (auto* o = ui::pick::opened(m2.ui.smart_mode)) {
+        if (auto* o = m2.ui.overlay.get<ov::SmartMode>()) {
             CHECK(o->index == 8 + slot, "cursor on the slot just set");
         }
 
@@ -128,10 +130,10 @@ TEST_CASE("smart slot picker stack") {
         Model m;
         m.d.available_models = { mi("claude-opus-4-5", "anthropic") };
         m.ui.smart_assign_slot = -1;          // ordinary model switch
-        m.ui.model_picker = ui::pick::OpenAt{0};
+        m.ui.overlay = ov::ModelPicker{{0}};
         auto [m2, cmd] = app::update(std::move(m), Msg{CloseModelPicker{}});
-        CHECK(!ui::pick::is_open(m2.ui.model_picker), "ordinary Esc closes picker");
-        CHECK(!ui::pick::is_open(m2.ui.smart_mode),
+        CHECK(!m2.ui.overlay.is<ov::ModelPicker>(), "ordinary Esc closes picker");
+        CHECK(!m2.ui.overlay.is<ov::SmartMode>(),
               "ordinary model-switch Esc does NOT spuriously open Smart Mode");
     }
 }

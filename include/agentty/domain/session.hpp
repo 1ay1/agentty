@@ -454,6 +454,14 @@ struct StreamState {
     std::chrono::steady_clock::time_point last_wire_at{};
     int tokens_in   = 0;
     int tokens_out  = 0;
+    // Reasoning/thinking tokens the model spent on THIS turn's reply, as
+    // reported by the provider (OpenAI completion_tokens_details /
+    // output_tokens_details.reasoning_tokens). Already INCLUDED in
+    // tokens_out — kept separately only to surface the breakdown in the
+    // status bar. 0 when the wire doesn't report it (Anthropic, Ollama,
+    // non-reasoning models). Replaced (not accumulated) each turn like
+    // tokens_out; the wire value is the per-request total.
+    int reasoning_tokens = 0;
     // Prompt-cache telemetry for the LAST completed pricing (per turn).
     // cache_hit_ratio = cache_read / (input + cache_read + cache_creation)
     // — 1.0 means the whole prefix was served from cache (cheap + fast

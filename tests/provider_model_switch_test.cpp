@@ -34,6 +34,8 @@
 #include <string>
 #include <vector>
 
+namespace ov = agentty::ui::overlay;
+
 using namespace agentty;
 
 // The ModelsLoaded reducer touches deps().load_settings() (favorites) and
@@ -145,7 +147,7 @@ TEST_CASE("model picker ^E toggles reasoning override + feedback") {
     Model m;
     m.d.available_models = { mi("codestral-latest", "mistral") };
     m.d.model_id = ModelId{"codestral-latest"};
-    m.ui.model_picker = pick::OpenAt{0};
+    m.ui.overlay = ov::ModelPicker{{0}};
 
     // Baseline: inference says NOT a reasoner, so no override, no effort.
     CHECK(agentty::reasoning_override_for("codestral-latest") == -1);
@@ -193,7 +195,7 @@ TEST_CASE("model picker ^E on family-gated model is a hinted no-op") {
     Model m;
     m.d.available_models = { mi("claude-opus-4-5", "anthropic") };
     m.d.model_id = ModelId{"claude-opus-4-5"};
-    m.ui.model_picker = pick::OpenAt{0};
+    m.ui.overlay = ov::ModelPicker{{0}};
 
     auto [m1, c1] = app::update(std::move(m), Msg{ModelPickerToggleReasoning{}});
     CHECK(agentty::reasoning_override_for("claude-opus-4-5") == -1,
@@ -302,7 +304,7 @@ TEST_CASE("fused picker open, merge, same-provider switch, MRU") {
     // Open: picker opens, active provider's catalog is seeded from
     // available_models (Ready), other authed providers get Loading + a fetch.
     auto [m1, c1] = app::update(std::move(m), Msg{OpenFusedPicker{}});
-    CHECK(ui::pick::is_open(m1.ui.fused_picker));
+    CHECK(m1.ui.overlay.is<ov::FusedPicker>());
     bool anthropic_seeded = false;
     for (const auto& c : m1.d.provider_catalogs)
         if (c.provider_id == "anthropic") {
@@ -325,11 +327,11 @@ TEST_CASE("fused picker open, merge, same-provider switch, MRU") {
             opus_idx = i; break;
         }
     REQUIRE(opus_idx >= 0);
-    if (auto* c = ui::pick::opened(m1.ui.fused_picker)) c->index = opus_idx;
+    if (auto* c = m1.ui.overlay.get<ov::FusedPicker>()) c->index = opus_idx;
 
     auto [m2, c2] = app::update(std::move(m1), Msg{FusedPickerSelect{}});
     CHECK(m2.d.model_id.value == "claude-opus-4");
-    CHECK(!ui::pick::is_open(m2.ui.fused_picker));       // picker closed
+    CHECK(!m2.ui.overlay.is<ov::FusedPicker>());       // picker closed
     // MRU recorded the switch (front = the model just selected).
     REQUIRE(!m2.d.recent_models.empty());
     CHECK(m2.d.recent_models.front().provider_id == "anthropic");
@@ -412,11 +414,11 @@ TEST_CASE("fused picker caches rows and clears them on close") {
     // Filtering rebuilds the cache in place (cursor clamped, still open).
     auto [m2, c2] = app::update(std::move(m1b),
                                 Msg{FusedPickerFilterInput{U'c'}});
-    CHECK(ui::pick::is_open(m2.ui.fused_picker));
+    CHECK(m2.ui.overlay.is<ov::FusedPicker>());
 
     // Close releases the cache.
     auto [m3, c3] = app::update(std::move(m2), Msg{CloseFusedPicker{}});
-    CHECK(!ui::pick::is_open(m3.ui.fused_picker));
+    CHECK(!m3.ui.overlay.is<ov::FusedPicker>());
     CHECK(m3.d.fused_rows.empty());
 }
 
@@ -444,7 +446,7 @@ TEST_CASE("fused picker number quick-select") {
 
     // '3' on the empty query jumps to the 3rd row (index 2), not into search.
     auto [m3, c3] = app::update(std::move(m2), Msg{FusedPickerFilterInput{U'3'}});
-    const auto* c = ui::pick::opened(m3.ui.fused_picker);
+    const auto* c = m3.ui.overlay.get<ov::FusedPicker>();
     REQUIRE(c != nullptr);
     CHECK(c->index == 2);
     CHECK(c->query.empty());          // digit did NOT enter the query
@@ -452,7 +454,7 @@ TEST_CASE("fused picker number quick-select") {
     // Once a query exists, a digit is search text (jump is disabled).
     auto [m4, c4] = app::update(std::move(m3), Msg{FusedPickerFilterInput{U'g'}});
     auto [m5, c5] = app::update(std::move(m4), Msg{FusedPickerFilterInput{U'3'}});
-    const auto* c2p = ui::pick::opened(m5.ui.fused_picker);
+    const auto* c2p = m5.ui.overlay.get<ov::FusedPicker>();
     REQUIRE(c2p != nullptr);
     CHECK(c2p->query == "g3");        // digit appended, not a jump
 }
@@ -545,7 +547,7 @@ TEST_CASE("classic model picker feeds the MRU ring") {
 
     // Open the classic picker, move to claude-b, select it.
     auto [m1, c1] = app::update(std::move(m), Msg{OpenModelPicker{}});
-    if (auto* p = ui::pick::opened(m1.ui.model_picker)) p->index = 1;
+    if (auto* p = m1.ui.overlay.get<ov::ModelPicker>()) p->index = 1;
     auto [m2, c2] = app::update(std::move(m1), Msg{ModelPickerSelect{}});
     CHECK(m2.d.model_id.value == "claude-b");
     // The pick landed in the ring (front = newest).
@@ -653,7 +655,7 @@ TEST_CASE("ModelsLoaded refreshes the open fused picker") {
     auto [m2, c2] = app::update(std::move(m1), Msg{std::move(ml)});
 
     // The OPEN picker's rows refreshed in place — no reopen needed.
-    CHECK(ui::pick::opened(m2.ui.fused_picker));
+    CHECK(m2.ui.overlay.get<ov::FusedPicker>());
     bool after = false;
     for (const auto& r : m2.d.fused_rows)
         if (r.model.id.value == "claude-fable-5") after = true;
@@ -870,7 +872,7 @@ TEST_CASE("provider picker: ^D signs out of a keyed preset (two-press)") {
 
     // Point the cursor at the openrouter row deterministically by locating
     // it in the built row list, then set the picker index.
-    auto* p = ui::pick::opened(m1.ui.provider_picker);
+    auto* p = m1.ui.overlay.get<ov::ProviderPicker>();
     REQUIRE(p != nullptr);
     const auto rows = ui::build_provider_rows(
         agentty::provider::saved_custom_hosts(g_settings.provider_keys), "");
@@ -906,7 +908,7 @@ TEST_CASE("provider picker: ^D on the ACTIVE provider zeroes live auth") {
 
     Model m;
     auto [m1, c1] = app::update(std::move(m), Msg{OpenProviderPicker{}});
-    auto* p = ui::pick::opened(m1.ui.provider_picker);
+    auto* p = m1.ui.overlay.get<ov::ProviderPicker>();
     REQUIRE(p != nullptr);
     const auto rows = ui::build_provider_rows(
         agentty::provider::saved_custom_hosts(g_settings.provider_keys), "");
@@ -940,7 +942,7 @@ TEST_CASE("provider picker: Enter opens accounts on active OAuth provider") {
     auto [m1, c1] = app::update(std::move(m), Msg{OpenProviderPicker{}});
 
     // Land the cursor on the (active) anthropic row.
-    auto* p = ui::pick::opened(m1.ui.provider_picker);
+    auto* p = m1.ui.overlay.get<ov::ProviderPicker>();
     REQUIRE(p != nullptr);
     const auto rows = ui::build_provider_rows(
         agentty::provider::saved_custom_hosts(g_settings.provider_keys), "");
@@ -954,13 +956,13 @@ TEST_CASE("provider picker: Enter opens accounts on active OAuth provider") {
     // Enter opens the accounts list (and closes the provider picker).
     auto [m2, c2] = app::update(std::move(m1), Msg{ProviderPickerSelect{}});
     CHECK(std::holds_alternative<ui::login::AccountList>(m2.ui.login));
-    CHECK(!ui::pick::opened(m2.ui.provider_picker));  // picker closed
+    CHECK(!m2.ui.overlay.get<ov::ProviderPicker>());  // picker closed
 
     // Esc from the accounts list steps BACK to the provider picker (not a
     // full close), keeping the hierarchy accounts → providers → chat.
     auto [m3, c3] = app::update(std::move(m2), Msg{LoginBack{}});
     CHECK(std::holds_alternative<ui::login::Closed>(m3.ui.login));  // accounts gone
-    CHECK(ui::pick::opened(m3.ui.provider_picker));                 // back at providers
+    CHECK(m3.ui.overlay.get<ov::ProviderPicker>());                 // back at providers
 }
 
 // A custom host can hold MULTIPLE saved keys (accounts): the accounts layer
@@ -1039,7 +1041,7 @@ TEST_CASE("fused picker cycles reasoning effort") {
 
     auto [m1, c1] = app::update(std::move(m), Msg{OpenFusedPicker{}});
     // Cursor on the active (only) model row.
-    if (auto* cur = ui::pick::opened(m1.ui.fused_picker)) cur->index = 0;
+    if (auto* cur = m1.ui.overlay.get<ov::FusedPicker>()) cur->index = 0;
     const Effort before = m1.d.effort;
     auto [m2, c2] = app::update(std::move(m1), Msg{FusedPickerCycleEffort{+1}});
     // ←/→ mutates the GLOBAL m.d.effort LIVE — identical to the classic model
@@ -1051,11 +1053,11 @@ TEST_CASE("fused picker cycles reasoning effort") {
     // The change is already global; select just persists + switches.
     auto [m3, c3] = app::update(std::move(m2), Msg{FusedPickerSelect{}});
     CHECK(m3.d.effort == after);
-    CHECK(!ui::pick::opened(m3.ui.fused_picker));  // picker closed on select
+    CHECK(!m3.ui.overlay.get<ov::FusedPicker>());  // picker closed on select
 
     // Closing flushes a dirty effort edit (parity with the classic picker).
     auto [m4, c4] = app::update(std::move(m3), Msg{OpenFusedPicker{}});
-    if (auto* cur = ui::pick::opened(m4.ui.fused_picker)) cur->index = 0;
+    if (auto* cur = m4.ui.overlay.get<ov::FusedPicker>()) cur->index = 0;
     auto [m5, c5] = app::update(std::move(m4), Msg{FusedPickerCycleEffort{+1}});
     auto [m6, c6] = app::update(std::move(m5), Msg{CloseFusedPicker{}});
     CHECK(!m6.ui.effort_dirty);            // persisted on close
@@ -1076,19 +1078,19 @@ TEST_CASE("fused and classic model pickers toggle, not stack") {
 
     // ^/ once: fused open.
     auto [m1, c1] = app::update(std::move(m), Msg{OpenFusedPicker{}});
-    CHECK(ui::pick::is_open(m1.ui.fused_picker));
-    CHECK(!ui::pick::is_open(m1.ui.model_picker));
+    CHECK(m1.ui.overlay.is<ov::FusedPicker>());
+    CHECK(!m1.ui.overlay.is<ov::ModelPicker>());
 
     // ^/ twice: classic opens, fused closes (+ its cache released).
     auto [m2, c2] = app::update(std::move(m1), Msg{OpenModelPicker{}});
-    CHECK(ui::pick::is_open(m2.ui.model_picker));
-    CHECK(!ui::pick::is_open(m2.ui.fused_picker));
+    CHECK(m2.ui.overlay.is<ov::ModelPicker>());
+    CHECK(!m2.ui.overlay.is<ov::FusedPicker>());
     CHECK(m2.d.fused_rows.empty());
 
     // ^/ again: back to fused, classic closes.
     auto [m3, c3] = app::update(std::move(m2), Msg{OpenFusedPicker{}});
-    CHECK(ui::pick::is_open(m3.ui.fused_picker));
-    CHECK(!ui::pick::is_open(m3.ui.model_picker));
+    CHECK(m3.ui.overlay.is<ov::FusedPicker>());
+    CHECK(!m3.ui.overlay.is<ov::ModelPicker>());
 }
 
 // Signing out of ONE provider when others are still authed should fall back

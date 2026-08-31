@@ -11,6 +11,8 @@
 #include <cstdio>
 #include <string>
 
+namespace ov = agentty::ui::overlay;
+
 using namespace agentty;
 
 static int g_fail = 0;
@@ -28,14 +30,14 @@ static int count_of(const std::string& h, const std::string& n) {
 
 static void palette_checks() {
     Model m;
-    m.ui.command_palette = palette::Open{};
+    m.ui.overlay = ov::CommandPalette{{}};
     m.d.pending_changes.push_back(FileChange{});
     auto rend = [&]{ return maya::render_to_string(ui::command_palette(m), 82); };
     std::string out = rend();
     check(has(out, "\xe2\x94\x8c\xe2\x94\x80 THREAD"), "palette: bracket section header");
     check(has(out, "\xe2\x94\x82"), "palette: spine");
     check(!has_mojibake(out), "palette: no mojibake");
-    auto* o = std::get_if<palette::Open>(&m.ui.command_palette);
+    auto* o = m.ui.overlay.get<agentty::ui::overlay::CommandPalette>();
     o->query = "rev";
     std::string ansi = maya::render_to_string_ansi(ui::command_palette(m), 82);
     // Locate the Review row and confirm it carries a distinct highlight style.
@@ -55,7 +57,7 @@ static void diff_review_checks() {
     m.d.pending_changes.push_back(a);
     auto b = diff::compute("README.md", "old\n", "new\nmore\n");
     m.d.pending_changes.push_back(b);
-    m.ui.diff_review = ui::pick::TwoAxis{ui::pick::OpenAtCell{0, 0}};
+    m.ui.overlay = ui::overlay::DiffReview{{0, 0}};
 
     std::string out = maya::render_to_string(ui::diff_review(m), 84);
     check(has(out, "login.cpp") && has(out, "README.md"),

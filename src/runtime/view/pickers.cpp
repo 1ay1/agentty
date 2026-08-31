@@ -46,6 +46,8 @@
 // maya measures the column it allocated to the row and returns a
 // truncated-with-ellipsis single line if the natural content overflows.
 
+namespace ov = agentty::ui::overlay;
+
 namespace agentty::ui {
 
 using namespace maya;
@@ -206,7 +208,7 @@ inline std::vector<Element> reasoning_effort_footer(const Model& m,
 } // namespace
 
 Element model_picker(const Model& m) {
-    auto* picker = pick::opened(m.ui.model_picker);
+    auto* picker = m.ui.overlay.get<ov::ModelPicker>();
     if (!picker) return nothing();
 
     Picker::Config cfg;
@@ -398,7 +400,7 @@ Element model_picker(const Model& m) {
 // (recent / all providers / sign in) render as is_header dividers. Selecting
 // switches provider+model atomically; a dim "sign in to X" row routes to login.
 Element fused_picker(const Model& m) {
-    auto* picker = pick::opened(m.ui.fused_picker);
+    auto* picker = m.ui.overlay.get<ov::FusedPicker>();
     if (!picker) return text("");
 
     // Read the reducer-maintained cache — never rebuild per frame.
@@ -597,7 +599,7 @@ namespace {
 } // namespace
 
 Element provider_picker(const Model& m) {
-    auto* picker = pick::opened(m.ui.provider_picker);
+    auto* picker = m.ui.overlay.get<ov::ProviderPicker>();
     if (!picker) return nothing();
 
     Picker::Config cfg;
@@ -774,7 +776,7 @@ Element provider_picker(const Model& m) {
 }
 
 Element thread_list(const Model& m) {
-    auto* picker = pick::opened(m.ui.thread_list);
+    auto* picker = m.ui.overlay.get<ov::ThreadList>();
     if (!picker) return nothing();
 
     Picker::Config cfg;
@@ -845,7 +847,7 @@ Element thread_list(const Model& m) {
 // each showing its RESOLVED model (pinned, or the auto-fill). See
 // docs/design/smart-mode.md.
 Element smart_mode_overlay(const Model& m) {
-    auto* o = pick::opened(m.ui.smart_mode);
+    auto* o = m.ui.overlay.get<ov::SmartMode>();
     if (!o) return nothing();
 
     const auto& sm = m.d.smart;
@@ -969,7 +971,7 @@ Element smart_mode_overlay(const Model& m) {
 }
 
 Element command_palette(const Model& m) {
-    auto* o = opened(m.ui.command_palette);
+    auto* o = m.ui.overlay.get<ov::CommandPalette>();
     if (!o) return nothing();
 
     // Live visibility context — the SAME predicate the reducer uses, so a row
@@ -1139,7 +1141,7 @@ Element command_palette(const Model& m) {
 }
 
 Element mention_palette(const Model& m) {
-    auto* o = mention_opened(m.ui.mention_palette);
+    auto* o = m.ui.overlay.get<ov::Mention>();
     if (!o) return nothing();
 
     const auto& matches = mention_filtered(*o);
@@ -1217,7 +1219,7 @@ Element mention_palette(const Model& m) {
 }
 
 Element symbol_palette(const Model& m) {
-    auto* o = symbol_palette_opened(m.ui.symbol_palette);
+    auto* o = m.ui.overlay.get<ov::Symbol>();
     if (!o) return nothing();
 
     const auto& matches = symbol_filtered(*o);
@@ -1284,7 +1286,7 @@ Element symbol_palette(const Model& m) {
 // shortcut in the key handler maps 1-based onto these rows, so the
 // leading number is the affordance that teaches the fast path.
 Element code_block_picker(const Model& m) {
-    auto* o = code_block_picker_opened(m.ui.code_blocks);
+    auto* o = m.ui.overlay.get<ov::CodeBlocks>();
     if (!o) return nothing();
 
     Picker::Config cfg;
@@ -1371,7 +1373,7 @@ Element code_block_picker(const Model& m) {
 // TUI); this card shows the summary — command, exit code, size — plus
 // the LAST few lines (errors live at the end) and the decision keys.
 Element code_block_result_card(const Model& m) {
-    auto* r = code_block_result(m.ui.code_blocks);
+    auto* r = m.ui.overlay.get<ov::CodeBlockResult>();
     if (!r) return nothing();
 
     const bool ok_exit = !r->timed_out && r->exit_code == 0;
@@ -1525,7 +1527,7 @@ Element code_block_result_card(const Model& m) {
 // would rewrite committed rows (HardReset corruption class). The overlay
 // paints strictly over the live viewport, same as every other picker.
 Element tool_output_viewer(const Model& m) {
-    const auto* o = tool_viewer_opened(m.ui.tool_viewer);
+    const auto* o = m.ui.overlay.get<ov::ToolViewer>();
     if (!o) return nothing();
 
     const int sz = static_cast<int>(o->entries.size());
@@ -1844,7 +1846,7 @@ Element tool_output_viewer(const Model& m) {
 // blind. Enter rewinds; the destructive files+transcript revert is the
 // existing RestoreCheckpoint flow.
 Element checkpoint_picker(const Model& m) {
-    auto* o = checkpoint_picker_opened(m.ui.checkpoints);
+    auto* o = m.ui.overlay.get<ov::Checkpoints>();
     if (!o) return nothing();
 
     // Relative "time ago" from a wall-clock ms stamp — local to the view;

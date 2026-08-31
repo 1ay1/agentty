@@ -1647,6 +1647,11 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                 }
             }
             if (e.output_tokens) m.s.tokens_out = e.output_tokens;
+            // Reasoning-token breakdown (already inside output_tokens; kept
+            // only for the status-bar display). Update whenever the wire
+            // reports it so the last real turn's value stays visible.
+            if (e.reasoning_output_tokens)
+                m.s.reasoning_tokens = e.reasoning_output_tokens;
             return done(std::move(m));
         },
         [&](StreamNotice& e) -> Step {

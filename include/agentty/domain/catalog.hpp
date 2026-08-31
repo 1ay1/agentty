@@ -1237,17 +1237,24 @@ learned_effort_sets_snapshot() {
 // `None` sends nothing — preserving the default no-thinking, replay-safe
 // wire. Any other level makes the Claude provider send adaptive thinking +
 // the matching `output_config.effort`. Selectable live from the model picker.
-enum class Effort : std::uint8_t { None, Low, Medium, High, Xhigh, Max };
+// Ordered LOWEST→HIGHEST reasoning intent. `Minimal` is OpenAI's gpt-5
+// bottom tier (reasoning_effort="minimal" — fastest, least reasoning); it
+// sits BELOW Low in the ladder. NB the enum ORDINAL order is the ladder
+// order, but the persisted bitmask (effort_bit) is INDEPENDENT of it —
+// Minimal takes a fresh high bit so existing learned_effort_sets masks
+// (which encoded low..max as bits 0..4) survive untouched.
+enum class Effort : std::uint8_t { None, Minimal, Low, Medium, High, Xhigh, Max };
 
 // Wire value for output_config.effort. None → "" (the field is omitted).
 [[nodiscard]] constexpr std::string_view effort_wire(Effort e) noexcept {
     switch (e) {
-        case Effort::None:   return "";
-        case Effort::Low:    return "low";
-        case Effort::Medium: return "medium";
-        case Effort::High:   return "high";
-        case Effort::Xhigh:  return "xhigh";
-        case Effort::Max:    return "max";
+        case Effort::None:    return "";
+        case Effort::Minimal: return "minimal";
+        case Effort::Low:     return "low";
+        case Effort::Medium:  return "medium";
+        case Effort::High:    return "high";
+        case Effort::Xhigh:   return "xhigh";
+        case Effort::Max:     return "max";
     }
     return "";
 }
@@ -1259,6 +1266,7 @@ enum class Effort : std::uint8_t { None, Low, Medium, High, Xhigh, Max };
 
 // Parse a persisted wire value back to Effort. Unknown / "" → None.
 [[nodiscard]] constexpr Effort effort_from_wire(std::string_view s) noexcept {
+    if (s == "minimal") return Effort::Minimal;
     if (s == "low")    return Effort::Low;
     if (s == "medium") return Effort::Medium;
     if (s == "high")   return Effort::High;
@@ -1274,12 +1282,17 @@ enum class Effort : std::uint8_t { None, Low, Medium, High, Xhigh, Max };
 // bit — "off" (omit the field) is always available and never learned away.
 [[nodiscard]] constexpr std::uint8_t effort_bit(Effort e) noexcept {
     switch (e) {
-        case Effort::Low:    return 1u << 0;
-        case Effort::Medium: return 1u << 1;
-        case Effort::High:   return 1u << 2;
-        case Effort::Xhigh:  return 1u << 3;
-        case Effort::Max:    return 1u << 4;
-        case Effort::None:   return 0;
+        case Effort::Low:     return 1u << 0;
+        case Effort::Medium:  return 1u << 1;
+        case Effort::High:    return 1u << 2;
+        case Effort::Xhigh:   return 1u << 3;
+        case Effort::Max:     return 1u << 4;
+        // Minimal takes a fresh bit ABOVE the historical low..max range so a
+        // persisted mask written before this tier existed still decodes
+        // identically (no migration). Ladder position is set by the enum
+        // ordinal + the explicit ladders below, not by this bit value.
+        case Effort::Minimal: return 1u << 5;
+        case Effort::None:    return 0;
     }
     return 0;
 }
@@ -1296,6 +1309,12 @@ enum class Effort : std::uint8_t { None, Low, Medium, High, Xhigh, Max };
     std::uint8_t s = static_cast<std::uint8_t>(
         effort_bit(Effort::Low) | effort_bit(Effort::Medium)
         | effort_bit(Effort::High));
+    // `minimal` is OpenAI's gpt-5+ bottom tier (reasoning_effort="minimal").
+    // It is NOT a Claude/compat level, so gate it to the GPT family from
+    // gen 5 up. When the exact set is known (learned/models.dev) that wins
+    // above; this only seeds the DERIVED default so the picker offers it.
+    if (caps.family == ModelCapabilities::Family::Gpt && caps.generation >= 5)
+        s |= effort_bit(Effort::Minimal);
     if (caps.supports_effort_xhigh()) s |= effort_bit(Effort::Xhigh);
     if (caps.supports_effort_max())   s |= effort_bit(Effort::Max);
     return s;
@@ -1316,13 +1335,14 @@ enum class Effort : std::uint8_t { None, Low, Medium, High, Xhigh, Max };
 [[nodiscard]] constexpr Effort nearest_effort(
         Effort e, std::uint8_t set) noexcept {
     if (set == 0 || e == Effort::None) return Effort::None;
-    constexpr Effort ladder[] = {Effort::Low, Effort::Medium, Effort::High,
-                                 Effort::Xhigh, Effort::Max};
+    constexpr Effort ladder[] = {Effort::Minimal, Effort::Low, Effort::Medium,
+                                 Effort::High, Effort::Xhigh, Effort::Max};
+    constexpr int kN = 6;
     int want = 0;
-    for (int i = 0; i < 5; ++i) if (ladder[i] == e) { want = i; break; }
+    for (int i = 0; i < kN; ++i) if (ladder[i] == e) { want = i; break; }
     for (int i = want; i >= 0; --i)          // at-or-below first
         if (set & effort_bit(ladder[i])) return ladder[i];
-    for (int i = want + 1; i < 5; ++i)       // else lowest above
+    for (int i = want + 1; i < kN; ++i)      // else lowest above
         if (set & effort_bit(ladder[i])) return ladder[i];
     return Effort::None;   // unreachable while set != 0
 }
@@ -1355,7 +1375,7 @@ enum class Effort : std::uint8_t { None, Low, Medium, High, Xhigh, Max };
         const ModelCapabilities& caps) {
     const std::uint8_t set = effort_set_of(caps);
     std::vector<Effort> out{Effort::None};
-    for (Effort e : {Effort::Low, Effort::Medium, Effort::High,
+    for (Effort e : {Effort::Minimal, Effort::Low, Effort::Medium, Effort::High,
                      Effort::Xhigh, Effort::Max})
         if (set & effort_bit(e)) out.push_back(e);
     return out;

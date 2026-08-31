@@ -23,17 +23,9 @@
 #include "agentty/domain/profile.hpp"
 #include "agentty/domain/session.hpp"
 #include "agentty/domain/todo.hpp"
-#include "agentty/runtime/command_palette.hpp"
-#include "agentty/runtime/code_block_picker.hpp"
-#include "agentty/runtime/checkpoint_picker.hpp"
-#include "agentty/runtime/rag_settings.hpp"
-#include "agentty/runtime/settings_list.hpp"
-#include "agentty/runtime/fork_picker.hpp"
+#include "agentty/runtime/overlay_state.hpp"   // ui::overlay::State (the exclusive slot)
 #include "agentty/mcp/plugin_model.hpp"    // mcp::PluginModel (owned in the Model)
-#include "agentty/runtime/tool_output_viewer.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
-#include "agentty/runtime/mention_palette.hpp"
-#include "agentty/runtime/symbol_palette.hpp"
 #include "agentty/runtime/login.hpp"
 #include "agentty/runtime/picker.hpp"
 #include "agentty/runtime/view/cache.hpp"
@@ -223,7 +215,16 @@ struct Model {
 
     struct UI {
         ComposerState       composer;
-        ui::pick::OneAxis   model_picker;     // Closed | OpenAt{index}
+        // ── THE exclusive overlay slot ─────────────────────────────
+        // Every modal overlay (pickers, palettes, viewers, diff review)
+        // lives in this ONE variant: opening is assignment, which
+        // structurally closes whatever was open — "two overlays open" is
+        // unrepresentable, and the ~17 rival-closing writes the old 16
+        // separate fields required are gone. See overlay_state.hpp for
+        // the alternatives and the deliberate non-members (login,
+        // permission, todo — they coexist with the slot by design;
+        // overlay::top() composes all four into the priority answer).
+        ui::overlay::State  overlay;
         // When the model picker was opened to ASSIGN a Smart Mode role slot
         // (not to switch the active model), this names the target slot.
         // ModelPickerSelect writes the chosen model into that slot and
@@ -234,20 +235,6 @@ struct Model {
         // load+fsync+rename on the UI thread; instead the CycleEffort arm
         // sets this and CloseModelPicker/Select flush once.
         bool                effort_dirty = false;
-        ui::pick::OneAxis   provider_picker;  // Closed | OpenAt{index}
-        // Fused cross-provider model picker (docs/design/unified-model-picker.md):
-        // one list over every authed provider. OpenAt{index} into the
-        // build_fused_rows() output; the query lives in OpenAt::query.
-        ui::pick::OneAxis   fused_picker;     // Closed | OpenAt{index, query}
-        ui::pick::OneAxis   thread_list;      // Closed | OpenAt{index}
-        ui::pick::OneAxis   smart_mode;        // Closed | OpenAt{row} — Smart Mode config overlay
-        CommandPaletteState command_palette;
-        MentionPaletteState mention_palette;  // Closed | Open{query, index, files}
-        SymbolPaletteState  symbol_palette;   // Closed | Open{query, index, entries}
-        CodeBlockPickerState code_blocks;      // Closed | Open{blocks, index}
-        CheckpointPickerState checkpoints;     // Closed | Open{entries, index}
-        RagSettingsState    rag_settings;      // Closed | Open{cfg, index}
-        SettingsListState   settings_list;     // Closed | Open{concern, index}
         // Plugins/MCP connection snapshot — OWNED BY THE MODEL, not read from
         // the global pool at render time. This is the architectural fix for
         // the recurring "stuck on connecting… / laggy panel" bugs: the view
@@ -261,14 +248,11 @@ struct Model {
         // view renders THIS; nothing in the view path calls plugin_model().
         mcp::PluginModel    plugins;
         bool                plugins_loading = false;  // a connect/reload Cmd is in flight
-        ForkPickerState     fork_picker;       // Closed | Open{index}
-        ToolViewerState     tool_viewer;       // Closed | Open{entries, index, viewing}
         // Tail-follow toggle for the tool viewer's LIVE row (row 0). True =
         // the body auto-scrolls to the newest streamed output (tail -f);
         // scrolling up disengages it, End / scrolling back to the bottom
         // re-engages. Only consulted while viewing a live entry.
         bool                tool_viewer_tail = true;
-        ui::pick::TwoAxis   diff_review;      // Closed | OpenAtCell{file_index,hunk_index}
         TodoState           todo;
         ui::login::State    login;            // Closed | Picking | OAuthCode | OAuthExchanging | ApiKeyInput | Failed
         int                 thread_scroll = 0;

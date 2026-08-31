@@ -24,6 +24,8 @@
 #include <string>
 #include <vector>
 
+namespace ov = agentty::ui::overlay;
+
 using namespace agentty;
 namespace detail = agentty::app::detail;
 namespace pick = agentty::ui::pick;
@@ -67,7 +69,7 @@ Model make_model(int cursor, const std::string& current_id) {
     }
     m.d.current.id = ThreadId{current_id};
     m.d.current.title = "active";
-    m.ui.thread_list = pick::OpenAt{cursor};
+    m.ui.overlay = ov::ThreadList{{cursor}};
     return m;
 }
 
@@ -76,7 +78,7 @@ Model step(Model m, msg::ThreadListMsg tm) {
 }
 
 const pick::OpenAt* picker(const Model& m) {
-    return pick::opened(m.ui.thread_list);
+    return m.ui.overlay.get<ov::ThreadList>();
 }
 
 } // namespace
@@ -139,7 +141,7 @@ int main() {
         check(m.d.current.messages.empty(), "the fresh thread is empty");
         check(std::holds_alternative<phase::Idle>(m.s.phase),
               "a mid-stream active-thread delete drops phase back to Idle");
-        check(std::holds_alternative<pick::Closed>(m.ui.thread_list),
+        check(!m.ui.overlay.is<agentty::ui::overlay::ThreadList>(),
               "the picker closes on an active-thread delete (full reset_inline swap)");
     }
 

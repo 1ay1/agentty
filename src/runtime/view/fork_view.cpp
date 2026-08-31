@@ -15,6 +15,8 @@
 
 #include <string>
 
+namespace ov = agentty::ui::overlay;
+
 namespace agentty::ui {
 
 using namespace maya;
@@ -34,7 +36,7 @@ const RowSpec kRows[fp::kChoiceCount] = {
 } // namespace
 
 Element fork_picker_view(const Model& m) {
-    const auto* o = fork_picker_opened(m.ui.fork_picker);
+    const auto* o = m.ui.overlay.get<ov::Fork>();
     if (!o) return nothing();
 
     Picker::Config cfg;

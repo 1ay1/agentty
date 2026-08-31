@@ -20,6 +20,8 @@
 #include "agentty/domain/decomposition_memory.hpp"
 #include "agentty/runtime/view/helpers.hpp"
 
+namespace ov = agentty::ui::overlay;
+
 namespace agentty::app::detail {
 
 namespace pick = agentty::ui::pick;
@@ -152,15 +154,15 @@ template <class T, class V>
 Step palette_update(Model m, msg::CommandPaletteMsg pm) {
     return std::visit(overload{
         [&](OpenCommandPalette) -> Step {
-            m.ui.command_palette = palette::Open{};
+            m.ui.overlay = ov::CommandPalette{};
             return done(std::move(m));
         },
         [&](CloseCommandPalette) -> Step {
-            m.ui.command_palette = palette::Closed{};
+            m.ui.overlay.close<ov::CommandPalette>();
             return done(std::move(m));
         },
         [&](CommandPaletteInput& e) -> Step {
-            auto* o = opened(m.ui.command_palette);
+            auto* o = m.ui.overlay.get<ov::CommandPalette>();
             if (o && static_cast<uint32_t>(e.ch) < 0x80) {
                 o->query.push_back(static_cast<char>(e.ch));
                 // Reset cursor to the top of the (newly filtered) list so
@@ -170,7 +172,7 @@ Step palette_update(Model m, msg::CommandPaletteMsg pm) {
             return done(std::move(m));
         },
         [&](CommandPaletteBackspace) -> Step {
-            auto* o = opened(m.ui.command_palette);
+            auto* o = m.ui.overlay.get<ov::CommandPalette>();
             if (o && !o->query.empty()) {
                 o->query.pop_back();
                 o->index = 0;
@@ -178,7 +180,7 @@ Step palette_update(Model m, msg::CommandPaletteMsg pm) {
             return done(std::move(m));
         },
         [&](CommandPaletteMove& e) -> Step {
-            auto* o = opened(m.ui.command_palette);
+            auto* o = m.ui.overlay.get<ov::CommandPalette>();
             if (!o) return done(std::move(m));
             // Clamp against the *visible* row count, not kCommands.size().
             // Without the upper bound the cursor used to walk off-screen
@@ -190,14 +192,14 @@ Step palette_update(Model m, msg::CommandPaletteMsg pm) {
             return done(std::move(m));
         },
         [&](CommandPaletteSelect) -> Step {
-            auto* o = opened(m.ui.command_palette);
+            auto* o = m.ui.overlay.get<ov::CommandPalette>();
             if (!o) return done(std::move(m));
             // Resolve cursor → typed Command via the SAME filtered list
             // the view rendered. The previous design switched on the raw
             // o->index against the unfiltered enum, which silently fired
             // the wrong command whenever any query was active.
             auto matches = filtered_commands(o->query, palette_ctx(m));
-            m.ui.command_palette = palette::Closed{};
+            m.ui.overlay.close<ov::CommandPalette>();
             if (matches.empty()
                 || o->index < 0
                 || o->index >= static_cast<int>(matches.size()))

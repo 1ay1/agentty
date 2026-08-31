@@ -16,6 +16,8 @@
 #include "agentty/runtime/rag_settings.hpp"
 #include "agentty/tool/mcp_tools_backends.hpp"
 
+namespace ov = agentty::ui::overlay;
+
 namespace agentty::app::detail {
 
 namespace rs = agentty::rag_settings;
@@ -47,7 +49,7 @@ Step rag_settings_update(Model m, msg::RagSettingsMsg rm) {
     return std::visit(overload{
         [&](OpenRagSettings) -> Step {
             const store::RagMode cur = deps().load_settings().rag.mode;
-            m.ui.rag_settings = rs::Open{index_of(cur), cur};
+            m.ui.overlay = ov::RagSettings{{index_of(cur), cur}};
             return {std::move(m), Cmd<Msg>::none()};
         },
         [&](CloseRagSettings) -> Step {
@@ -55,13 +57,12 @@ Step rag_settings_update(Model m, msg::RagSettingsMsg rm) {
             // matching the other Ctrl+K settings pickers. (Selecting a
             // mode, below, commits and drops to the thread — that's "done",
             // not "back".)
-            m.ui.rag_settings = rs::Closed{};
-            m.ui.command_palette =
-                palette::Open{"", palette_index_of(Command::OpenRagSettings)};
+            m.ui.overlay.close<ov::RagSettings>();
+            m.ui.overlay = ov::CommandPalette{{"", palette_index_of(Command::OpenRagSettings)}};
             return {std::move(m), Cmd<Msg>::none()};
         },
         [&](RagSettingsMove& e) -> Step {
-            if (auto* o = rag_settings_opened(m.ui.rag_settings)) {
+            if (auto* o = m.ui.overlay.get<ov::RagSettings>()) {
                 int n = rs::kModeCount;
                 o->index = ((o->index + e.delta) % n + n) % n;
             }
@@ -69,10 +70,10 @@ Step rag_settings_update(Model m, msg::RagSettingsMsg rm) {
         },
         // Select the highlighted mode and close.
         [&](RagSettingsAdjust&) -> Step {
-            if (auto* o = rag_settings_opened(m.ui.rag_settings)) {
+            if (auto* o = m.ui.overlay.get<ov::RagSettings>()) {
                 commit_mode(rs::kModes[o->index]);
                 std::string label{store::to_string(rs::kModes[o->index])};
-                m.ui.rag_settings = rs::Closed{};
+                m.ui.overlay.close<ov::RagSettings>();
                 return {std::move(m),
                         set_status_toast(m, "RAG: " + label, std::chrono::seconds{3})};
             }
@@ -80,7 +81,7 @@ Step rag_settings_update(Model m, msg::RagSettingsMsg rm) {
         },
         [&](RagSettingsReset) -> Step {
             commit_mode(store::RagMode::On);
-            if (auto* o = rag_settings_opened(m.ui.rag_settings))
+            if (auto* o = m.ui.overlay.get<ov::RagSettings>())
                 o->index = index_of(store::RagMode::On);
             return {std::move(m), Cmd<Msg>::none()};
         },

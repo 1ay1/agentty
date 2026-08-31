@@ -19,6 +19,8 @@
 
 namespace agentty::app {
 
+namespace ov = agentty::ui::overlay;   // the exclusive overlay slot's alternatives
+
 [[nodiscard]] std::pair<Model, maya::Cmd<Msg>> init();
 
 struct AgenttyApp {
@@ -144,16 +146,30 @@ struct AgenttyApp {
         // variant::index() captures Closed-vs-Open (and login's
         // sub-states); the OpenAt index / palette query+index capture the
         // cursor movement within an open picker.
-        mix(static_cast<std::uint64_t>(m.ui.model_picker.index()));
-        mix(static_cast<std::uint64_t>(ui::pick::index_or(m.ui.model_picker)));
-        if (auto* mp = ui::pick::opened(m.ui.model_picker))
+        // The exclusive overlay slot: its variant index captures WHICH
+        // overlay is open (None-vs-any and picker-vs-picker); the per-
+        // alternative blocks below add cursor/query movement INSIDE the
+        // open overlay.
+        mix(static_cast<std::uint64_t>(m.ui.overlay.raw().index()));
+        if (auto* mp = m.ui.overlay.get<ov::ModelPicker>()) {
+            mix(static_cast<std::uint64_t>(mp->index));
             mix_str(mp->query);   // live search buffer
-        mix(static_cast<std::uint64_t>(m.ui.provider_picker.index()));
-        mix(static_cast<std::uint64_t>(ui::pick::index_or(m.ui.provider_picker)));
-        mix(static_cast<std::uint64_t>(m.ui.fused_picker.index()));
-        mix(static_cast<std::uint64_t>(ui::pick::index_or(m.ui.fused_picker)));
-        if (auto* fp = ui::pick::opened(m.ui.fused_picker))
+        }
+        if (auto* pp = m.ui.overlay.get<ov::ProviderPicker>()) {
+            mix(static_cast<std::uint64_t>(pp->index));
+            mix_str(pp->query);
+            mix_str(pp->confirm_remove);   // two-press ^D arm state
+        }
+        if (auto* tl = m.ui.overlay.get<ov::ThreadList>()) {
+            mix(static_cast<std::uint64_t>(tl->index));
+            mix_str(tl->confirm_remove);   // two-press delete arm state
+        }
+        if (auto* sm = m.ui.overlay.get<ov::SmartMode>())
+            mix(static_cast<std::uint64_t>(sm->index));
+        if (auto* fp = m.ui.overlay.get<ov::FusedPicker>()) {
+            mix(static_cast<std::uint64_t>(fp->index));
             mix_str(fp->query);   // live search buffer
+        }
         // The fused list also changes as async provider catalogs resolve
         // (each FusedCatalogLoaded grows/updates provider_catalogs), so mix a
         // coarse fingerprint of the merged catalogs' sizes + states.
@@ -170,10 +186,7 @@ struct AgenttyApp {
         for (const auto& r : m.d.fused_rows)
             mix(static_cast<std::uint64_t>((r.model.favorite ? 1u : 0u)
                                          | (r.active ? 2u : 0u)));
-        mix(static_cast<std::uint64_t>(m.ui.thread_list.index()));
-        mix(static_cast<std::uint64_t>(ui::pick::index_or(m.ui.thread_list)));
-        mix(static_cast<std::uint64_t>(m.ui.diff_review.index()));
-        if (auto* c = ui::pick::opened(m.ui.diff_review)) {
+        if (auto* c = m.ui.overlay.get<ov::DiffReview>()) {
             mix(static_cast<std::uint64_t>(c->file_index));
             mix(static_cast<std::uint64_t>(c->hunk_index));
             // Hunk-body scroll (^D/^U) changes which diff rows are visible;
@@ -183,18 +196,15 @@ struct AgenttyApp {
             // Armed two-press ^X swaps the footer for a warning row.
             mix(c->confirm_reject_all ? 1ULL : 0ULL);
         }
-        mix(static_cast<std::uint64_t>(m.ui.command_palette.index()));
-        if (auto* o = opened(m.ui.command_palette)) {
+        if (auto* o = m.ui.overlay.get<ov::CommandPalette>()) {
             mix_str(o->query);
             mix(static_cast<std::uint64_t>(o->index));
         }
-        mix(static_cast<std::uint64_t>(m.ui.mention_palette.index()));
-        if (auto* o = mention_opened(m.ui.mention_palette)) {
+        if (auto* o = m.ui.overlay.get<ov::Mention>()) {
             mix_str(o->query);
             mix(static_cast<std::uint64_t>(o->index));
         }
-        mix(static_cast<std::uint64_t>(m.ui.symbol_palette.index()));
-        if (auto* o = symbol_palette_opened(m.ui.symbol_palette)) {
+        if (auto* o = m.ui.overlay.get<ov::Symbol>()) {
             mix_str(o->query);
             mix(static_cast<std::uint64_t>(o->index));
         }
@@ -208,8 +218,7 @@ struct AgenttyApp {
         // or every ↑/↓/PgDn in the body is gated away until the caret
         // parity flips ~265 ms later — the "viewer movement is laggy"
         // symptom, same class as the picker-cursor bug above.
-        mix(static_cast<std::uint64_t>(m.ui.tool_viewer.index()));
-        if (auto* o = tool_viewer_opened(m.ui.tool_viewer)) {
+        if (auto* o = m.ui.overlay.get<ov::ToolViewer>()) {
             mix(static_cast<std::uint64_t>(o->index));
             mix(o->viewing ? 1ULL : 0ULL);
             mix(static_cast<std::uint64_t>(m.ui.tool_viewer_scroll.y));
@@ -222,8 +231,7 @@ struct AgenttyApp {
             mix(m.ui.tool_viewer_tail ? 1ULL : 0ULL);
         }
         // Code-block picker (and its Result card): same contract.
-        mix(static_cast<std::uint64_t>(m.ui.code_blocks.index()));
-        if (auto* o = code_block_picker_opened(m.ui.code_blocks))
+        if (auto* o = m.ui.overlay.get<ov::CodeBlocks>())
             mix(static_cast<std::uint64_t>(o->index));
 
         // Checkpoint picker: open/closed + cursor + each entry's async
@@ -231,8 +239,7 @@ struct AgenttyApp {
         // stat, so it MUST advance the hash or the row's diffstat wouldn't
         // repaint when its background load lands). Same selection-driven
         // repaint contract as the other pickers above.
-        mix(static_cast<std::uint64_t>(m.ui.checkpoints.index()));
-        if (auto* o = checkpoint_picker_opened(m.ui.checkpoints)) {
+        if (auto* o = m.ui.overlay.get<ov::Checkpoints>()) {
             mix(static_cast<std::uint64_t>(o->index));
             for (const auto& e : o->entries)
                 mix(static_cast<std::uint64_t>(e.diff_state) * 131
@@ -251,8 +258,7 @@ struct AgenttyApp {
         // forever. The nonce is the ONLY backing for the reload-done
         // repaint (the connected state lives in the external MCP pool,
         // not the Model), so it MUST feed the hash.
-        mix(static_cast<std::uint64_t>(m.ui.settings_list.index()));
-        if (auto* o = settings_list_opened(m.ui.settings_list)) {
+        if (auto* o = m.ui.overlay.get<ov::SettingsList>()) {
             mix(static_cast<std::uint64_t>(o->index));
             mix(static_cast<std::uint64_t>(o->concern));
             mix(o->input_active ? 1ULL : 0ULL);
@@ -288,17 +294,13 @@ struct AgenttyApp {
         // flips ~265 ms later — the "selector doesn't move sometimes"
         // symptom. These three were entirely absent from the hash.
         //   • Smart Mode config overlay (Ctrl+S) — a OneAxis like the pickers.
-        mix(static_cast<std::uint64_t>(m.ui.smart_mode.index()));
-        mix(static_cast<std::uint64_t>(ui::pick::index_or(m.ui.smart_mode)));
         //   • RAG picker (Ctrl+K → RAG) — 3 rows; active marks the persisted mode.
-        mix(static_cast<std::uint64_t>(m.ui.rag_settings.index()));
-        if (auto* o = rag_settings_opened(m.ui.rag_settings)) {
+        if (auto* o = m.ui.overlay.get<ov::RagSettings>()) {
             mix(static_cast<std::uint64_t>(o->index));
             mix(static_cast<std::uint64_t>(o->active));
         }
         //   • Fork picker (Ctrl+K → Fork thread) — 3 RAG-mode rows.
-        mix(static_cast<std::uint64_t>(m.ui.fork_picker.index()));
-        if (auto* o = fork_picker_opened(m.ui.fork_picker))
+        if (auto* o = m.ui.overlay.get<ov::Fork>())
             mix(static_cast<std::uint64_t>(o->index));
 
         // Time-driven animation buckets. Each bucket flip forces a

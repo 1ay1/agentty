@@ -55,6 +55,8 @@
 #include "agentty/runtime/view/thread/thread.hpp"
 #include "agentty/runtime/view/view.hpp"
 
+namespace ov = agentty::ui::overlay;
+
 using agentty::Model;
 using agentty::Message;
 using agentty::Role;
@@ -1765,9 +1767,9 @@ TEST_CASE("model picker open close no scrollback growth") {
     {
         Canvas closed_c = paint(view_root(m), kWidth, pool);
         const int closed_rows = closed_c.max_content_row();
-        m.ui.model_picker = ui::pick::OpenAt{0};
+        m.ui.overlay = ov::ModelPicker{{0}};
         Canvas open_c = paint(view_root(m), kWidth, pool);
-        m.ui.model_picker = ui::pick::Closed{};
+        m.ui.overlay.close<ov::ModelPicker>();
         const int open_rows = open_c.max_content_row();
         if (open_rows > closed_rows) {
             std::fprintf(stderr,
@@ -1783,7 +1785,7 @@ TEST_CASE("model picker open close no scrollback growth") {
     // Render multiple animation frames per state so the welcome
     // wordmark's per-frame bob and the picker animation advance.
     for (int cycle = 0; cycle < 4; ++cycle) {
-        m.ui.model_picker = ui::pick::OpenAt{0};   // open
+        m.ui.overlay = ov::ModelPicker{{0}};   // open
         for (int f = 0; f < 5; ++f) {
             render_state(m);
             std::this_thread::sleep_for(std::chrono::milliseconds{8});

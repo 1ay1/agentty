@@ -22,6 +22,8 @@
 #include "agentty/store/store.hpp"
 #include "agentty/workspace/checkpoint.hpp"
 
+namespace ov = agentty::ui::overlay;
+
 namespace agentty::app::detail {
 
 using maya::overload;
@@ -109,22 +111,22 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             return {std::move(m), std::move(toast)};
         },
         [&](OpenSmartMode) -> Step {
-            m.ui.smart_mode = ui::pick::OpenAt{0};
+            m.ui.overlay = ov::SmartMode{{0}};
             return done(std::move(m));
         },
         [&](CloseSmartMode) -> Step {
-            m.ui.smart_mode = ui::pick::Closed{};
+            m.ui.overlay.close<ov::SmartMode>();
             return done(std::move(m));
         },
         [&](SmartModeMove& e) -> Step {
-            if (auto* o = ui::pick::opened(m.ui.smart_mode)) {
+            if (auto* o = m.ui.overlay.get<ov::SmartMode>()) {
                 const int rows = 11;  // Enabled + 3 layers + 4 learning + 3 slots
                 o->index = ((o->index + e.delta) % rows + rows) % rows;
             }
             return done(std::move(m));
         },
         [&](SmartModeSelect) -> Step {
-            auto* o = ui::pick::opened(m.ui.smart_mode);
+            auto* o = m.ui.overlay.get<ov::SmartMode>();
             if (!o) return done(std::move(m));
             // Rows 0-7 are boolean toggles; 8-10 are model slots.
             auto toggled = [&](const char* label, bool flag_on,
@@ -187,11 +189,11 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             }
             // A slot row → open the model picker in slot-assign mode.
             m.ui.smart_assign_slot = o->index - 8;   // 0=Strategic 1=Impl 2=Utility
-            m.ui.smart_mode = ui::pick::Closed{};
+            m.ui.overlay.close<ov::SmartMode>();
             return agentty::app::update(std::move(m), Msg{OpenModelPicker{}});
         },
         [&](SmartModeClearSlot) -> Step {
-            auto* o = ui::pick::opened(m.ui.smart_mode);
+            auto* o = m.ui.overlay.get<ov::SmartMode>();
             if (!o || o->index < 8) return done(std::move(m));
             smart::SlotOverride* slot =
                   o->index == 8  ? &m.d.smart.strategic

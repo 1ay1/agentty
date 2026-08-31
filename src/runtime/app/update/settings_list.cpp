@@ -19,6 +19,8 @@
 #include "agentty/tool/plugin.hpp"
 #include "agentty/tool/registry.hpp"   // reload_mcp_plugins
 
+namespace ov = agentty::ui::overlay;
+
 namespace agentty::app::detail {
 
 using maya::overload;
@@ -73,7 +75,7 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
             // wholly-informational / empty pane too.
             const int start =
                 first_actionable(se::items_for(m, e.concern), 0, +1);
-            m.ui.settings_list = se::ListOpen{e.concern, start};
+            m.ui.overlay = ov::SettingsList{{e.concern, start}};
             // Opening the Plugins panel is what CONNECTS the servers (and
             // refreshes the snapshot): the connection is driven by the update
             // loop, not a lazy side effect of the first tool call. Without
@@ -104,7 +106,7 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
             // Remember which row (by server+tool+action) was selected BEFORE
             // the swap, then restore the cursor to that same row after.
             std::optional<std::tuple<std::string, std::string, se::Action>> sel;
-            if (auto* o = settings_list_opened(m.ui.settings_list);
+            if (auto* o = m.ui.overlay.get<ov::SettingsList>();
                 o && o->concern == se::Category::Plugins) {
                 auto before = se::items_for(m, o->concern);
                 if (o->index >= 0 && o->index < static_cast<int>(before.size())) {
@@ -116,7 +118,7 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
             m.ui.plugins = std::move(e.model);
             m.ui.plugins_loading = false;
 
-            if (auto* o = settings_list_opened(m.ui.settings_list);
+            if (auto* o = m.ui.overlay.get<ov::SettingsList>();
                 o && o->concern == se::Category::Plugins) {
                 auto after = se::items_for(m, o->concern);
                 const int cnt = static_cast<int>(after.size());
@@ -147,7 +149,7 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
             // Restore the cursor to the row that opened this picker so the
             // palette comes back exactly where the user left it.
             Command src = Command::OpenPlugins;
-            if (auto* o = settings_list_opened(m.ui.settings_list)) {
+            if (auto* o = m.ui.overlay.get<ov::SettingsList>()) {
                 switch (o->concern) {
                     case se::Category::Plugins:  src = Command::OpenPlugins;  break;
                     case se::Category::Commands: src = Command::OpenCommands; break;
@@ -156,12 +158,12 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
                     case se::Category::General:  src = Command::OpenPlugins;  break;
                 }
             }
-            m.ui.settings_list = se::ListClosed{};
-            m.ui.command_palette = palette::Open{"", palette_index_of(src)};
+            m.ui.overlay.close<ov::SettingsList>();
+            m.ui.overlay = ov::CommandPalette{{"", palette_index_of(src)}};
             return done(std::move(m));
         },
         [&](SettingsListMove& e) -> Step {
-            auto* o = settings_list_opened(m.ui.settings_list);
+            auto* o = m.ui.overlay.get<ov::SettingsList>();
             if (!o) return done(std::move(m));
             o->confirm_remove.clear();   // moving off a row disarms a pending `d`
             auto rows = se::items_for(m, o->concern);
@@ -202,7 +204,7 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
             return done(std::move(m));
         },
         [&](SettingsListActivate) -> Step {
-            auto* o = settings_list_opened(m.ui.settings_list);
+            auto* o = m.ui.overlay.get<ov::SettingsList>();
             if (!o) return done(std::move(m));
             o->confirm_remove.clear();   // any Enter action disarms a pending `d`
             auto rows = se::items_for(m, o->concern);
@@ -214,10 +216,10 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
                 case se::Action::CycleProfile:
                     return agentty::app::update(std::move(m), Msg{CycleProfile{}});
                 case se::Action::OpenRag:
-                    m.ui.settings_list = se::ListClosed{};
+                    m.ui.overlay.close<ov::SettingsList>();
                     return agentty::app::update(std::move(m), Msg{OpenRagSettings{}});
                 case se::Action::OpenSmart:
-                    m.ui.settings_list = se::ListClosed{};
+                    m.ui.overlay.close<ov::SettingsList>();
                     return agentty::app::update(std::move(m), Msg{OpenSmartMode{}});
                 case se::Action::RemovePlugin: {
                     auto path = edit_target(row);
@@ -239,7 +241,7 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
                                   "could not remove '" + row.arg + "'");
                     }
                     // Re-clamp: the list shrank by one.
-                    if (auto* oo = settings_list_opened(m.ui.settings_list)) {
+                    if (auto* oo = m.ui.overlay.get<ov::SettingsList>()) {
                         const int n = static_cast<int>(
                             se::items_for(m, oo->concern).size());
                         oo->index = std::clamp(oo->index, 0, std::max(0, n - 1));
@@ -315,7 +317,7 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
                             "could not toggle '" + row.arg2 + "'");
                     }
                     // Keep the cursor on the same row after the list rebuilds.
-                    if (auto* oo = settings_list_opened(m.ui.settings_list)) {
+                    if (auto* oo = m.ui.overlay.get<ov::SettingsList>()) {
                         const int n = static_cast<int>(
                             se::items_for(m, oo->concern).size());
                         oo->index = std::clamp(oo->index, 0, std::max(0, n - 1));
@@ -364,7 +366,7 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
             // to a server row (Plugins concern, TogglePlugin action); ignored
             // on tool sub-rows and every other category.
             if (m.ui.plugins_loading) return done(std::move(m));
-            auto* o = settings_list_opened(m.ui.settings_list);
+            auto* o = m.ui.overlay.get<ov::SettingsList>();
             if (!o || o->concern != se::Category::Plugins)
                 return done(std::move(m));
             auto rows = se::items_for(m, o->concern);
@@ -400,14 +402,14 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
             } else {
                 cmd = set_status_toast(m, "could not remove '" + row.arg + "'");
             }
-            if (auto* oo = settings_list_opened(m.ui.settings_list)) {
+            if (auto* oo = m.ui.overlay.get<ov::SettingsList>()) {
                 const int n = static_cast<int>(se::items_for(m, oo->concern).size());
                 oo->index = std::clamp(oo->index, 0, std::max(0, n - 1));
             }
             return {std::move(m), std::move(cmd)};
         },
         [&](SettingsListAddStart) -> Step {
-            auto* o = settings_list_opened(m.ui.settings_list);
+            auto* o = m.ui.overlay.get<ov::SettingsList>();
             if (!o) return done(std::move(m));
             // Add is only meaningful for the file/config-backed concerns.
             if (o->concern != se::Category::Plugins
@@ -420,7 +422,7 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
             return done(std::move(m));
         },
         [&](SettingsListChar& e) -> Step {
-            auto* o = settings_list_opened(m.ui.settings_list);
+            auto* o = m.ui.overlay.get<ov::SettingsList>();
             if (!o || !o->input_active) return done(std::move(m));
             const std::string utf8 = ui::utf8_encode(e.ch);
             o->input.insert(static_cast<std::size_t>(o->cursor), utf8);
@@ -428,7 +430,7 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
             return done(std::move(m));
         },
         [&](SettingsListPaste& e) -> Step {
-            auto* o = settings_list_opened(m.ui.settings_list);
+            auto* o = m.ui.overlay.get<ov::SettingsList>();
             if (!o || !o->input_active) return done(std::move(m));
             // The add-prompt is a single line (a plugin's "name command
             // args…" spec, or a new file's name). Flatten any newlines/tabs
@@ -443,7 +445,7 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
             return done(std::move(m));
         },
         [&](SettingsListBackspace) -> Step {
-            auto* o = settings_list_opened(m.ui.settings_list);
+            auto* o = m.ui.overlay.get<ov::SettingsList>();
             if (!o || !o->input_active || o->cursor <= 0)
                 return done(std::move(m));
             int p = ui::utf8_prev(o->input, o->cursor);
@@ -453,7 +455,7 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
             return done(std::move(m));
         },
         [&](SettingsListCancelInput) -> Step {
-            auto* o = settings_list_opened(m.ui.settings_list);
+            auto* o = m.ui.overlay.get<ov::SettingsList>();
             if (!o) return done(std::move(m));
             o->input_active = false;
             o->input.clear();
@@ -461,7 +463,7 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
             return done(std::move(m));
         },
         [&](SettingsListSubmitInput) -> Step {
-            auto* o = settings_list_opened(m.ui.settings_list);
+            auto* o = m.ui.overlay.get<ov::SettingsList>();
             if (!o || !o->input_active) return done(std::move(m));
             const std::string line = o->input;
             const se::Category concern = o->concern;
@@ -488,7 +490,7 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
                 r.message += " — connecting…";
             }
             // Re-clamp the (possibly grown) list to the top of the new row.
-            if (auto* oo = settings_list_opened(m.ui.settings_list)) {
+            if (auto* oo = m.ui.overlay.get<ov::SettingsList>()) {
                 const int cnt =
                     static_cast<int>(se::items_for(m, oo->concern).size());
                 oo->index = std::clamp(oo->index, 0, std::max(0, cnt - 1));

@@ -483,7 +483,7 @@ TEST_CASE("tool timeline adapter") {
     viewer_entry.output = "line one\nline two\nline three";
     viewer_entry.is_live = true;
     viewer_entry.call = make_tool("bash", A::ToolUse::Running{});
-    viewer_model.ui.tool_viewer = A::tool_viewer::Open{{viewer_entry}, 0, false};
+    viewer_model.ui.overlay = A::ui::overlay::ToolViewer{{{viewer_entry}, 0, false}};
     int list_height = -1;
     for (int width = 8; width <= 120; ++width) {
         auto viewer = U::tool_output_viewer(viewer_model);
@@ -496,7 +496,7 @@ TEST_CASE("tool timeline adapter") {
         check(measured.height.value == list_height,
               "tool viewer list never wraps at width " + std::to_string(width));
     }
-    std::get<A::tool_viewer::Open>(viewer_model.ui.tool_viewer).viewing = true;
+    viewer_model.ui.overlay.get<A::ui::overlay::ToolViewer>()->viewing = true;
     int body_height = -1;
     for (int width = 8; width <= 120; ++width) {
         auto viewer = U::tool_output_viewer(viewer_model);
@@ -537,8 +537,8 @@ TEST_CASE("tool timeline adapter") {
         entry.output = call.output();
         entry.call = call;
         A::Model structured_model;
-        structured_model.ui.tool_viewer =
-            A::tool_viewer::Open{{std::move(entry)}, 0, true};
+        structured_model.ui.overlay =
+            A::ui::overlay::ToolViewer{{{std::move(entry)}, 0, true}};
         int expected_height = -1;
         for (int width : viewer_widths) {
             auto viewer = U::tool_output_viewer(structured_model);
@@ -564,8 +564,8 @@ TEST_CASE("tool timeline adapter") {
             ? make_tool(empty.name, A::ToolUse::Running{})
             : make_tool(empty.name, A::ToolUse::Done{});
         A::Model empty_model;
-        empty_model.ui.tool_viewer =
-            A::tool_viewer::Open{{std::move(empty)}, 0, true};
+        empty_model.ui.overlay =
+            A::ui::overlay::ToolViewer{{{std::move(empty)}, 0, true}};
         int expected_height = -1;
         for (int width : viewer_widths) {
             auto viewer = U::tool_output_viewer(empty_model);
@@ -595,8 +595,8 @@ TEST_CASE("tool timeline adapter") {
     long_entry.call = make_tool("bash",
         A::ToolUse::Done{{}, {}, long_entry.output});
     A::Model short_terminal_model;
-    short_terminal_model.ui.tool_viewer =
-        A::tool_viewer::Open{{std::move(long_entry)}, 0, true};
+    short_terminal_model.ui.overlay =
+        A::ui::overlay::ToolViewer{{{std::move(long_entry)}, 0, true}};
     static constexpr std::array<int, 4> short_heights = {8, 10, 11, 12};
     for (int height : short_heights) {
         const auto height_text = std::to_string(height);
@@ -624,8 +624,8 @@ TEST_CASE("tool timeline adapter") {
         short_list_entries.push_back(std::move(entry));
     }
     A::Model short_list_model;
-    short_list_model.ui.tool_viewer =
-        A::tool_viewer::Open{std::move(short_list_entries), 0, false};
+    short_list_model.ui.overlay =
+        A::ui::overlay::ToolViewer{{std::move(short_list_entries), 0, false}};
     for (int height : short_heights) {
         const auto height_text = std::to_string(height);
 #ifdef _WIN32

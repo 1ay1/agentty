@@ -152,12 +152,13 @@ namespace detail {
     using E = Effort;
     E stepped = e;
     switch (e) {
-        case E::Max:   stepped = E::Xhigh; break;
-        case E::Xhigh: stepped = E::High;  break;
-        case E::High:  stepped = E::Medium; break;
-        case E::Medium:stepped = E::Low;   break;
-        case E::Low:   stepped = E::None;  break;
-        case E::None:  stepped = E::None;  break;
+        case E::Max:    stepped = E::Xhigh;   break;
+        case E::Xhigh:  stepped = E::High;    break;
+        case E::High:   stepped = E::Medium;  break;
+        case E::Medium: stepped = E::Low;     break;
+        case E::Low:    stepped = E::Minimal; break;
+        case E::Minimal:stepped = E::None;    break;
+        case E::None:   stepped = E::None;    break;
     }
     return clamp_effort(stepped, caps);
 }

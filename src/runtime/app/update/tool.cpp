@@ -25,6 +25,8 @@
 #include "agentty/tool/spec.hpp"
 #include "agentty/tool/util/utf8.hpp"
 
+namespace ov = agentty::ui::overlay;
+
 namespace agentty::app::detail {
 
 using json = nlohmann::json;
@@ -254,7 +256,7 @@ void arm_reconcile_cooldown(Model& m) {
 // Keep the Ctrl+O snapshot synchronized from both stream.cpp (tool-input
 // deltas/snapshots) and this TU (execution progress/results).
 void resync_live_tool_viewer(Model& m) {
-    auto* o = tool_viewer_opened(m.ui.tool_viewer);
+    auto* o = m.ui.overlay.get<ov::ToolViewer>();
     if (!o) return;
     // Anchor: remember which entry the user is on by identity, not index —
     // prepending/removing the live row shifts indices under them.
@@ -626,23 +628,23 @@ Step tool_update(Model m, msg::ToolMsg tm) {
                 auto cmd = set_status_toast(m, "nothing to inspect yet");
                 return {std::move(m), std::move(cmd)};
             }
-            m.ui.tool_viewer = tool_viewer::Open{std::move(entries), 0, false};
+            m.ui.overlay = ov::ToolViewer{{std::move(entries), 0, false}};
             m.ui.tool_viewer_scroll.y = 0;
             m.ui.tool_viewer_tail = true;
             return done(std::move(m));
         },
         [&](CloseToolOutputViewer) -> Step {
             // Esc semantics: body stage → back to the list; list → closed.
-            if (auto* o = tool_viewer_opened(m.ui.tool_viewer); o && o->viewing) {
+            if (auto* o = m.ui.overlay.get<ov::ToolViewer>(); o && o->viewing) {
                 o->viewing = false;
                 m.ui.tool_viewer_scroll.y = 0;
                 return done(std::move(m));
             }
-            m.ui.tool_viewer = tool_viewer::Closed{};
+            m.ui.overlay.close<ov::ToolViewer>();
             return done(std::move(m));
         },
         [&](ToolViewerMove& e) -> Step {
-            auto* o = tool_viewer_opened(m.ui.tool_viewer);
+            auto* o = m.ui.overlay.get<ov::ToolViewer>();
             if (!o) return done(std::move(m));
             if (o->viewing) {
                 // Body stage: deltas scroll the output viewport directly.
@@ -661,7 +663,7 @@ Step tool_update(Model m, msg::ToolMsg tm) {
             return done(std::move(m));
         },
         [&](ToolViewerSelect) -> Step {
-            auto* o = tool_viewer_opened(m.ui.tool_viewer);
+            auto* o = m.ui.overlay.get<ov::ToolViewer>();
             if (!o || o->viewing) return done(std::move(m));
             if (o->index < 0
                 || o->index >= static_cast<int>(o->entries.size()))
@@ -676,7 +678,7 @@ Step tool_update(Model m, msg::ToolMsg tm) {
             // entry's body directly. Clamped at the ends (no wrap — the
             // list is short and wrap-around disorients more than it
             // helps). List stage: no-op.
-            auto* o = tool_viewer_opened(m.ui.tool_viewer);
+            auto* o = m.ui.overlay.get<ov::ToolViewer>();
             if (!o || !o->viewing) return done(std::move(m));
             int sz = static_cast<int>(o->entries.size());
             if (sz <= 0) return done(std::move(m));
@@ -688,7 +690,7 @@ Step tool_update(Model m, msg::ToolMsg tm) {
             return done(std::move(m));
         },
         [&](ToolViewerCopy) -> Step {
-            auto* o = tool_viewer_opened(m.ui.tool_viewer);
+            auto* o = m.ui.overlay.get<ov::ToolViewer>();
             if (!o) return done(std::move(m));
             if (o->index < 0
                 || o->index >= static_cast<int>(o->entries.size()))

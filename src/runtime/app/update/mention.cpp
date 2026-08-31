@@ -18,6 +18,8 @@
 #include "agentty/runtime/mention_palette.hpp"
 #include "agentty/workspace/files.hpp"
 
+namespace ov = agentty::ui::overlay;
+
 namespace agentty::app::detail {
 
 using maya::overload;
@@ -30,15 +32,15 @@ Step mention_update(Model m, msg::MentionPaletteMsg mm) {
             // larger repos and produce visible lag in the picker.
             mention::Open o;
             o.files = list_workspace_files();
-            m.ui.mention_palette = std::move(o);
+            m.ui.overlay = ov::Mention{std::move(o)};
             return done(std::move(m));
         },
         [&](CloseMentionPalette) -> Step {
-            m.ui.mention_palette = mention::Closed{};
+            m.ui.overlay.close<ov::Mention>();
             return done(std::move(m));
         },
         [&](MentionPaletteInput& e) -> Step {
-            auto* o = mention_opened(m.ui.mention_palette);
+            auto* o = m.ui.overlay.get<ov::Mention>();
             if (o && static_cast<uint32_t>(e.ch) < 0x80
                   && e.ch >= 0x20) {
                 // Picker opened cold (index still warming) → empty snapshot.
@@ -53,12 +55,12 @@ Step mention_update(Model m, msg::MentionPaletteMsg mm) {
             return done(std::move(m));
         },
         [&](MentionPaletteBackspace) -> Step {
-            auto* o = mention_opened(m.ui.mention_palette);
+            auto* o = m.ui.overlay.get<ov::Mention>();
             if (!o) return done(std::move(m));
             if (o->query.empty()) {
                 // Backspace on empty query closes the picker — same
                 // affordance as command palette + most chat apps.
-                m.ui.mention_palette = mention::Closed{};
+                m.ui.overlay.close<ov::Mention>();
                 return done(std::move(m));
             }
             o->query.pop_back();
@@ -66,7 +68,7 @@ Step mention_update(Model m, msg::MentionPaletteMsg mm) {
             return done(std::move(m));
         },
         [&](MentionPaletteMove& e) -> Step {
-            auto* o = mention_opened(m.ui.mention_palette);
+            auto* o = m.ui.overlay.get<ov::Mention>();
             if (!o) return done(std::move(m));
             int sz = static_cast<int>(mention_filtered(*o).size());
             if (sz <= 0) { o->index = 0; return done(std::move(m)); }
@@ -74,18 +76,18 @@ Step mention_update(Model m, msg::MentionPaletteMsg mm) {
             return done(std::move(m));
         },
         [&](MentionPaletteSelect) -> Step {
-            auto* o = mention_opened(m.ui.mention_palette);
+            auto* o = m.ui.overlay.get<ov::Mention>();
             if (!o) return done(std::move(m));
             const auto& matches = mention_filtered(*o);
             if (matches.empty()
                 || o->index < 0
                 || o->index >= static_cast<int>(matches.size())) {
-                m.ui.mention_palette = mention::Closed{};
+                m.ui.overlay.close<ov::Mention>();
                 return done(std::move(m));
             }
             std::string path = std::move(o->files[matches[
                 static_cast<std::size_t>(o->index)]]);
-            m.ui.mention_palette = mention::Closed{};
+            m.ui.overlay.close<ov::Mention>();
 
             // Frecency: this path just got referenced — rank it near the
             // top of the next `@`. Cheap, bounded recency window.

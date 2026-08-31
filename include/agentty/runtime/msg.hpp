@@ -205,6 +205,13 @@ struct StreamUsage {
     int output_tokens              = 0;
     int cache_creation_input_tokens = 0;
     int cache_read_input_tokens    = 0;
+    // Reasoning/thinking tokens billed WITHIN output_tokens (OpenAI counts
+    // them under completion_tokens_details.reasoning_tokens /
+    // output_tokens_details.reasoning_tokens; Anthropic doesn't break them
+    // out). Purely informational — do NOT add to output_tokens for cost/
+    // context math, they are already included there. 0 when the wire omits
+    // the detail (non-reasoning model, or a provider that doesn't report it).
+    int reasoning_output_tokens    = 0;
 };
 // Why the stream ended. Maps Anthropic's wire string
 // (`message_delta.delta.stop_reason`: "end_turn" | "tool_use" |
