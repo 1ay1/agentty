@@ -117,10 +117,18 @@ find_catalog(const std::vector<ProviderCatalog>& cats, std::string_view pid) {
     // ── Section 1: RECENT (MRU) ──────────────────────────────────────────
     // The active row is pinned first even if not literally the newest MRU
     // entry, so `●` always leads. De-dup against what we emit here so the
-    // "all providers" section never repeats a recent row.
+    // "all providers" section never repeats a recent row. Identity is the
+    // capkey-FOLDED (provider, model): providers alias one model under
+    // several spellings (mistral-medium-3-5 / -3.5), and a recent pick of
+    // one spelling must suppress the catalog's twin — not sit above it.
     std::vector<ModelRef> seen;
     auto already = [&](const ModelRef& r) {
-        return std::find(seen.begin(), seen.end(), r) != seen.end();
+        const std::string folded = capkey::norm_model(r.model_id);
+        for (const auto& s : seen)
+            if (s.provider_id == r.provider_id
+                && capkey::norm_model(s.model_id) == folded)
+                return true;
+        return false;
     };
     auto push_recent = [&](const ModelRef& r) {
         if (already(r)) return;
@@ -171,7 +179,10 @@ find_catalog(const std::vector<ProviderCatalog>& cats, std::string_view pid) {
         for (std::size_t i = 0; i < c.models.size(); ++i) {
             const auto& mi = c.models[i];
             ModelRef r{c.provider_id, mi.id.value};
-            if (already(r)) continue;                // already in RECENT
+            if (already(r)) continue;    // in RECENT, or an alias spelling
+                                         // of a row already emitted — the
+                                         // catalog itself lists twins
+                                         // (mistral-medium-3-5 AND -3.5)
             int mscore = 0;
             std::vector<int> positions;
             if (!no_query) {
@@ -221,6 +232,9 @@ find_catalog(const std::vector<ProviderCatalog>& cats, std::string_view pid) {
                 ? static_cast<bool>(c.reason_flags[i])
                 : effort_capable(resolved_caps(mi.id.value, c.provider_id));
             row.match_positions = std::move(positions);
+            // Register AFTER the query gate: a filtered-out twin must not
+            // suppress its matching sibling.
+            seen.push_back(std::move(r));
             scored.push_back({std::move(row), mscore, prov_ord});
         }
         ++prov_ord;

@@ -964,8 +964,18 @@ void record_recent(Model& m, const std::string& provider_id,
     if (provider_id.empty() || model_id.empty()) return;
     ModelRef ref{provider_id, model_id};
     auto& mru = m.d.recent_models;
-    std::erase(mru, ref);
-    mru.insert(mru.begin(), ref);
+    // Identity for the ring is the capkey-FOLDED id: providers list the
+    // same model under multiple alias spellings (Mistral's catalog carries
+    // mistral-medium-3-5 AND -3.5 — both canonical mistral-medium-latest),
+    // and picking two spellings at different times must not grow two RECENT
+    // rows for one model. The newest pick's SPELLING wins (it replaces the
+    // older entry wholesale), so the ring shows what the user last chose.
+    const std::string folded = capkey::norm_model(model_id);
+    std::erase_if(mru, [&](const ModelRef& r) {
+        return r.provider_id == provider_id
+            && capkey::norm_model(r.model_id) == folded;
+    });
+    mru.insert(mru.begin(), std::move(ref));
     if (static_cast<int>(mru.size()) > kRecentCap) mru.resize(kRecentCap);
 
     auto s = deps().load_settings();
@@ -982,19 +992,37 @@ void hydrate_recents(Model& m) {
         for (const auto& e : s.recent_models) {
             auto tab = e.find('\t');
             if (tab == std::string::npos) continue;
-            m.d.recent_models.push_back(
-                ModelRef{e.substr(0, tab), e.substr(tab + 1)});
+            ModelRef ref{e.substr(0, tab), e.substr(tab + 1)};
+            // Fold legacy duplicate SPELLINGS of one model (persisted before
+            // record_recent deduped by capkey identity): first (newest)
+            // spelling wins, later aliases are dropped.
+            const std::string folded = capkey::norm_model(ref.model_id);
+            bool dup = false;
+            for (const auto& r : m.d.recent_models)
+                if (r.provider_id == ref.provider_id
+                    && capkey::norm_model(r.model_id) == folded) {
+                    dup = true;
+                    break;
+                }
+            if (!dup) m.d.recent_models.push_back(std::move(ref));
         }
     }
     // Always ensure the ACTIVE (provider, model) is present so ^Tab has a
     // home to return to and the ring is never a lone stale entry. Persisted
     // history may predate the current model (e.g. a fresh switch that hasn't
     // been recorded yet, or a first-ever session), so append it if missing.
+    // Folded comparison: the active id being an alias spelling of a ring
+    // entry must not append a visual duplicate.
     if (!m.d.model_id.value.empty()) {
         const ModelRef active{active_provider_id(), m.d.model_id.value};
+        const std::string folded = capkey::norm_model(active.model_id);
         bool present = false;
         for (const auto& r : m.d.recent_models)
-            if (r == active) { present = true; break; }
+            if (r.provider_id == active.provider_id
+                && capkey::norm_model(r.model_id) == folded) {
+                present = true;
+                break;
+            }
         if (!present) m.d.recent_models.push_back(active);
     }
 }
