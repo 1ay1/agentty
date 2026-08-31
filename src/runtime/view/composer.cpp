@@ -11,6 +11,7 @@
 #include "agentty/runtime/view/helpers.hpp"
 #include "agentty/runtime/view/palette.hpp"
 #include <maya/core/anim_clock.hpp>
+#include <maya/terminal/tmux.hpp>
 #include <maya/app/app.hpp>   // request_animation_frame_after (typing-window lapse wake)
 
 namespace agentty::ui {
@@ -238,7 +239,16 @@ maya::Composer::Config composer_config(const Model& m) {
     cfg.hardware_caret = !painted_caret_env
         && ui::overlay::top(m) == ui::overlay::Kind::None
         && m.ui.terminal_focused
-        && (!agent_active || typing_recently);
+        && (!agent_active || typing_recently)
+        // Inside tmux, only claim the hardware caret when tmux will
+        // actually FORWARD the cursor-style escape (its `cstyle`
+        // feature). Without it our DECSCUSR is swallowed and the caret
+        // silently reverts to whatever shape the outer terminal had —
+        // the painted fallback is honest about that instead. Outside
+        // tmux has_feature() is false for everything, so the check is
+        // scoped to the tmux case only.
+        && (!maya::tmux::active()
+            || maya::tmux::has_feature(maya::tmux::Feature::CursorStyle));
     // Rationale for the (!agent_active || typing_recently) gate — the
     // SAME rule with and without tmux:
     //   • idle (agent not streaming): the screen is STATIC, so tmux's

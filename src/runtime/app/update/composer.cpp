@@ -19,6 +19,7 @@
 #include <string>
 #include <string_view>
 
+#include <maya/terminal/tmux.hpp>
 #include <maya/core/overload.hpp>
 
 #include "agentty/runtime/app/update/internal.hpp"
@@ -962,18 +963,10 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
 #endif
                 return false;
             }();
-            const bool in_tmux = [] {
-                // Same both-topologies detection as maya's tmux_in_path():
-                // $TMUX (tmux on this host) OR a tmux-*/screen-* TERM that
-                // survived ssh (tmux on the LOCAL side of the session).
-                if (std::getenv("TMUX")) return true;
-                if (const char* t = std::getenv("TERM"); t && *t) {
-                    std::string_view tv{t};
-                    if (tv.rfind("tmux", 0) == 0 || tv.rfind("screen", 0) == 0)
-                        return true;
-                }
-                return false;
-            }();
+            // Single source of truth for tmux presence: maya::tmux owns
+            // both topologies ($TMUX here, or a tmux-*/screen-* TERM that
+            // survived ssh) plus the passthrough/feature probes below.
+            const bool in_tmux = maya::tmux::active();
             const bool in_ssh  = std::getenv("SSH_CONNECTION") != nullptr
                               || std::getenv("SSH_TTY") != nullptr;
             std::string msg;
@@ -982,9 +975,24 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
                       "replies \xe2\x80\x94 use plain ssh (or tmux over ssh), or set "
                       "AGENTTY_CLIPBOARD_CMD";
             } else if (in_tmux) {
-                msg = "clipboard: no reply through tmux \xe2\x80\x94 needs "
-                      "`set -g allow-passthrough on` (tmux \xe2\x89\xa5 3.3) and a "
-                      "kitty outer terminal for images";
+                // Name the ACTUAL blocker instead of guessing. tmux tells
+                // us both things: whether it will forward raw bytes at all
+                // (allow-passthrough, which defaults to OFF), and whether
+                // it believes the outer terminal does clipboard (OSC 52).
+                if (!maya::tmux::passthrough_allowed()) {
+                    msg = "clipboard: tmux is dropping the request \xe2\x80\x94 run "
+                          "`tmux set -g allow-passthrough on` (it is OFF by "
+                          "default), then retry";
+                } else if (!maya::tmux::has_feature(
+                               maya::tmux::Feature::Clipboard)) {
+                    msg = "clipboard: tmux reports your outer terminal has no "
+                          "clipboard support \xe2\x80\x94 add `set -ga terminal-features "
+                          "\",*:clipboard\"` if it does, or set AGENTTY_CLIPBOARD_CMD";
+                } else {
+                    msg = "clipboard: no reply through tmux \xe2\x80\x94 passthrough and "
+                          "clipboard are on, so the outer terminal didn't answer "
+                          "(images need a kitty outer terminal)";
+                }
             } else if (in_ssh) {
                 msg = "clipboard: your terminal didn't answer \xe2\x80\x94 images "
                       "over SSH need kitty (OSC 5522); else set "
