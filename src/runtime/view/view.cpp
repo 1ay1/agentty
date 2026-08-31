@@ -11,6 +11,7 @@
 #include <maya/widget/overlay.hpp>
 
 #include "agentty/runtime/login.hpp"
+#include "agentty/runtime/overlay.hpp"
 #include "agentty/runtime/view/changes_strip.hpp"
 #include "agentty/runtime/view/composer.hpp"
 #include "agentty/runtime/view/diff_review.hpp"
@@ -23,27 +24,37 @@ namespace agentty::ui {
 
 namespace {
 
-// Pick the active overlay, if any. Login modal has highest priority —
-// auth gates everything else.
+// Render the active overlay, if any. WHICH overlay is active is decided by
+// overlay::top() — the SAME function subscribe.cpp routes keys through, so
+// what renders and what owns the keyboard cannot diverge (they used to be
+// two hand-ordered if-chains that DID disagree on priority). This function
+// only maps Kind → view; it holds no ordering knowledge of its own.
+// Exhaustive on Kind (-Wswitch): a new overlay without a view arm is a
+// compile warning, not an invisible modal.
 std::optional<maya::Element> pick_overlay(const Model& m) {
-    if (login::is_open(m.ui.login))        return login_modal(m);
-    if (pick::is_open(m.ui.model_picker))  return model_picker(m);
-    if (pick::is_open(m.ui.fused_picker))   return fused_picker(m);
-    if (pick::is_open(m.ui.provider_picker)) return provider_picker(m);
-    if (pick::is_open(m.ui.thread_list))   return thread_list(m);
-    if (pick::is_open(m.ui.smart_mode))    return smart_mode_overlay(m);
-    if (is_open(m.ui.command_palette))     return command_palette(m);
-    if (mention_is_open(m.ui.mention_palette)) return mention_palette(m);
-    if (symbol_palette_is_open(m.ui.symbol_palette)) return symbol_palette(m);
-    if (code_block_picker_is_open(m.ui.code_blocks)) return code_block_picker(m);
-    if (code_block_result_is_open(m.ui.code_blocks)) return code_block_result_card(m);
-    if (tool_viewer_is_open(m.ui.tool_viewer))       return tool_output_viewer(m);
-    if (checkpoint_picker_is_open(m.ui.checkpoints)) return checkpoint_picker(m);
-    if (rag_settings_is_open(m.ui.rag_settings))     return rag_settings_picker(m);
-    if (settings_list_is_open(m.ui.settings_list))   return settings_list_picker(m);
-    if (fork_picker_is_open(m.ui.fork_picker))       return fork_picker_view(m);
-    if (pick::is_open(m.ui.diff_review))   return diff_review(m);
-    if (pick::is_open(m.ui.todo.open))     return todo_modal(m);
+    using OK = overlay::Kind;
+    switch (overlay::top(m)) {
+        case OK::Login:          return login_modal(m);
+        case OK::Permission:     return std::nullopt;   // renders inline, not as an overlay
+        case OK::CommandPalette: return command_palette(m);
+        case OK::Mention:        return mention_palette(m);
+        case OK::Symbol:         return symbol_palette(m);
+        case OK::CodeBlocks:     return code_block_picker(m);
+        case OK::CodeBlockResult: return code_block_result_card(m);
+        case OK::ToolViewer:     return tool_output_viewer(m);
+        case OK::Checkpoints:    return checkpoint_picker(m);
+        case OK::RagSettings:    return rag_settings_picker(m);
+        case OK::SettingsList:   return settings_list_picker(m);
+        case OK::Fork:           return fork_picker_view(m);
+        case OK::ModelPicker:    return model_picker(m);
+        case OK::FusedPicker:    return fused_picker(m);
+        case OK::ProviderPicker: return provider_picker(m);
+        case OK::ThreadList:     return thread_list(m);
+        case OK::SmartMode:      return smart_mode_overlay(m);
+        case OK::DiffReview:     return diff_review(m);
+        case OK::Todo:           return todo_modal(m);
+        case OK::None:           return std::nullopt;
+    }
     return std::nullopt;
 }
 

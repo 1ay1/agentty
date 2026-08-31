@@ -9,6 +9,8 @@
 
 #include "agentty/runtime/login.hpp"
 #include "agentty/runtime/picker.hpp"
+#include "agentty/runtime/overlay.hpp"
+#include "agentty/runtime/nav.hpp"
 #include "agentty/runtime/app/update/internal.hpp"
 
 namespace agentty::app {
@@ -18,6 +20,7 @@ using maya::KeyEvent;
 using maya::CharKey;
 using maya::SpecialKey;
 namespace pick = agentty::ui::pick;
+namespace nav  = agentty::ui::nav;
 
 namespace {
 
@@ -98,68 +101,47 @@ std::optional<Msg> on_permission(const KeyEvent& ev) {
 }
 
 std::optional<Msg> on_command_palette(const KeyEvent& ev) {
-    if (std::holds_alternative<SpecialKey>(ev.key)) {
-        auto sk = std::get<SpecialKey>(ev.key);
-        switch (sk) {
-            case SpecialKey::Escape:    return CloseCommandPalette{};
-            case SpecialKey::Enter:     return CommandPaletteSelect{};
-            case SpecialKey::Up:        return CommandPaletteMove{-1};
-            case SpecialKey::Down:      return CommandPaletteMove{+1};
-            case SpecialKey::Backspace: return CommandPaletteBackspace{};
-            default: break;
-        }
-    }
-    if (auto* ck = std::get_if<CharKey>(&ev.key)) {
-        char32_t c = ck->codepoint;
-        const bool raw_ctrl = (c >= 0x01 && c <= 0x1A);
-        if (raw_ctrl) c = U'a' + (c - 1);
-        const bool ctrl = ev.mods.ctrl || raw_ctrl;
-        // Re-pressing the open key (^K) toggles the palette shut — the
-        // dispatcher returns this handler's result unconditionally, so
-        // without an explicit arm the key would previously TYPE into the
-        // query (a literal 'k', or a raw 0x0B control byte that passed the
-        // reducer's <0x80 filter and corrupted the search string).
-        if (ctrl && (c == U'k' || c == U'K')) return CloseCommandPalette{};
-        // Ctrl chords are never query text; printable chars only.
-        if (!ctrl && ck->codepoint >= 0x20)
-            return CommandPaletteInput{ck->codepoint};
-        return std::nullopt;
-    }
-    return std::nullopt;
+    // ^K palette: shared grammar + typed filter. No jump/vim (printables
+    // type into the query). Ctrl chords other than the toggle are eaten —
+    // they must never become query text.
+    nav::NavSpec s;
+    s.close     = [] { return Msg{CloseCommandPalette{}}; };
+    s.select    = [] { return Msg{CommandPaletteSelect{}}; };
+    s.move      = [](int d) { return Msg{CommandPaletteMove{d}}; };
+    s.filter_bs = [] { return Msg{CommandPaletteBackspace{}}; };
+    s.filter_ch = [](char32_t c) { return Msg{CommandPaletteInput{c}}; };
+    s.toggle_close_chord = U'k';
+    return nav::translate(s, ev);
 }
 
 std::optional<Msg> on_mention_palette(const KeyEvent& ev) {
-    if (std::holds_alternative<SpecialKey>(ev.key)) {
-        auto sk = std::get<SpecialKey>(ev.key);
-        switch (sk) {
-            case SpecialKey::Escape:    return CloseMentionPalette{};
-            case SpecialKey::Enter:     return MentionPaletteSelect{};
-            case SpecialKey::Up:        return MentionPaletteMove{-1};
-            case SpecialKey::Down:      return MentionPaletteMove{+1};
-            case SpecialKey::Backspace: return MentionPaletteBackspace{};
-            default: break;
-        }
-    }
-    if (auto* ck = std::get_if<CharKey>(&ev.key))
-        return MentionPaletteInput{ck->codepoint};
-    return std::nullopt;
+    // @-mention list rides the composer: every CharKey (even ctrl'd) goes
+    // to the palette's own input handling, so `extra` claims chars first.
+    nav::NavSpec s;
+    s.close     = [] { return Msg{CloseMentionPalette{}}; };
+    s.select    = [] { return Msg{MentionPaletteSelect{}}; };
+    s.move      = [](int d) { return Msg{MentionPaletteMove{d}}; };
+    s.filter_bs = [] { return Msg{MentionPaletteBackspace{}}; };
+    s.extra     = [](const KeyEvent& e) -> std::optional<Msg> {
+        if (auto* ck = std::get_if<CharKey>(&e.key))
+            return Msg{MentionPaletteInput{ck->codepoint}};
+        return std::nullopt;
+    };
+    return nav::translate(s, ev);
 }
 
 std::optional<Msg> on_symbol_palette(const KeyEvent& ev) {
-    if (std::holds_alternative<SpecialKey>(ev.key)) {
-        auto sk = std::get<SpecialKey>(ev.key);
-        switch (sk) {
-            case SpecialKey::Escape:    return CloseSymbolPalette{};
-            case SpecialKey::Enter:     return SymbolPaletteSelect{};
-            case SpecialKey::Up:        return SymbolPaletteMove{-1};
-            case SpecialKey::Down:      return SymbolPaletteMove{+1};
-            case SpecialKey::Backspace: return SymbolPaletteBackspace{};
-            default: break;
-        }
-    }
-    if (auto* ck = std::get_if<CharKey>(&ev.key))
-        return SymbolPaletteInput{ck->codepoint};
-    return std::nullopt;
+    nav::NavSpec s;
+    s.close     = [] { return Msg{CloseSymbolPalette{}}; };
+    s.select    = [] { return Msg{SymbolPaletteSelect{}}; };
+    s.move      = [](int d) { return Msg{SymbolPaletteMove{d}}; };
+    s.filter_bs = [] { return Msg{SymbolPaletteBackspace{}}; };
+    s.extra     = [](const KeyEvent& e) -> std::optional<Msg> {
+        if (auto* ck = std::get_if<CharKey>(&e.key))
+            return Msg{SymbolPaletteInput{ck->codepoint}};
+        return std::nullopt;
+    };
+    return nav::translate(s, ev);
 }
 
 // Ctrl+G code-block picker. Enter runs the cursor row; a bare digit
@@ -167,33 +149,25 @@ std::optional<Msg> on_symbol_palette(const KeyEvent& ev) {
 // zero-navigation fast path: Ctrl+G, 2, done). `e` stages into the
 // composer for editing, `y` copies clean.
 std::optional<Msg> on_code_block_picker(const KeyEvent& ev) {
-    if (std::holds_alternative<SpecialKey>(ev.key)) {
-        switch (std::get<SpecialKey>(ev.key)) {
-            case SpecialKey::Escape: return CloseCodeBlockPicker{};
-            case SpecialKey::Enter:  return CodeBlockPickerSelect{};
-            case SpecialKey::Up:     return CodeBlockPickerMove{-1};
-            case SpecialKey::Down:   return CodeBlockPickerMove{+1};
+    nav::NavSpec s;
+    s.close  = [] { return Msg{CloseCodeBlockPicker{}}; };
+    s.select = [] { return Msg{CodeBlockPickerSelect{}}; };
+    s.move   = [](int d) { return Msg{CodeBlockPickerMove{d}}; };
+    s.toggle_close_chord = U'g';
+    s.extra  = [](const KeyEvent& e) -> std::optional<Msg> {
+        const auto v = nav::char_view(e);
+        if (!v) return std::nullopt;
+        if (!v->ctrl && v->c >= U'1' && v->c <= U'9')
+            return Msg{CodeBlockPickerSelect{static_cast<int>(v->c - U'1')}};
+        if (!v->ctrl) switch (v->c) {
+            case U'e': case U'E': return Msg{CodeBlockPickerEdit{}};
+            case U'y': case U'Y': return Msg{CodeBlockPickerCopy{}};
+            case U'q': case U'Q': return Msg{CloseCodeBlockPicker{}};
             default: break;
         }
-    }
-    if (auto* ck = std::get_if<CharKey>(&ev.key)) {
-        char32_t c = ck->codepoint;
-        const bool raw_ctrl = (c >= 0x01 && c <= 0x1A);
-        if (raw_ctrl) c = U'a' + (c - 1);
-        // ^G re-press closes the picker (open/close symmetry; raw 0x07 on
-        // legacy terminals).
-        if ((ev.mods.ctrl || raw_ctrl) && (c == U'g' || c == U'G'))
-            return CloseCodeBlockPicker{};
-        if (c >= U'1' && c <= U'9' && !ev.mods.ctrl && !raw_ctrl)
-            return CodeBlockPickerSelect{static_cast<int>(c - U'1')};
-        switch (c) {
-            case U'e': case U'E': return CodeBlockPickerEdit{};
-            case U'y': case U'Y': return CodeBlockPickerCopy{};
-            case U'q': case U'Q': return CloseCodeBlockPicker{};
-            default: break;
-        }
-    }
-    return std::nullopt;
+        return std::nullopt;
+    };
+    return nav::translate(s, ev);
 }
 
 // Post-run result card: a = attach to composer, y = copy, Esc/q/Enter
@@ -201,372 +175,265 @@ std::optional<Msg> on_code_block_picker(const KeyEvent& ev) {
 // default action must be the safe one (no surprise composer content);
 // attaching is the explicit `a`.
 std::optional<Msg> on_code_block_result(const KeyEvent& ev) {
-    if (std::holds_alternative<SpecialKey>(ev.key)) {
-        switch (std::get<SpecialKey>(ev.key)) {
-            case SpecialKey::Escape:
-            case SpecialKey::Enter:    return CodeBlockResultDiscard{};
-            // Scroll the capture. The result card is read-only (no
-            // selection cursor), so Move deltas translate straight to
-            // viewport scroll rows in the reducer.
-            case SpecialKey::Up:       return CodeBlockPickerMove{-1};
-            case SpecialKey::Down:     return CodeBlockPickerMove{+1};
-            case SpecialKey::PageUp:   return CodeBlockPickerMove{-10};
-            case SpecialKey::PageDown: return CodeBlockPickerMove{+10};
-            default: break;
-        }
-    }
-    if (auto* ck = std::get_if<CharKey>(&ev.key)) {
-        switch (ck->codepoint) {
-            case U'a': case U'A': return CodeBlockResultAttach{};
-            case U'y': case U'Y': return CodeBlockResultCopy{};
+    nav::NavSpec s;
+    s.close     = [] { return Msg{CodeBlockResultDiscard{}}; };
+    s.select    = [] { return Msg{CodeBlockResultDiscard{}}; };   // safe default
+    s.move      = [](int d) { return Msg{CodeBlockPickerMove{d}}; };
+    s.page_step = 10;
+    s.extra     = [](const KeyEvent& e) -> std::optional<Msg> {
+        const auto v = nav::char_view(e);
+        if (!v || v->ctrl) return std::nullopt;
+        switch (v->c) {
+            case U'a': case U'A': return Msg{CodeBlockResultAttach{}};
+            case U'y': case U'Y': return Msg{CodeBlockResultCopy{}};
             case U'q': case U'Q': case U'd': case U'D':
-                return CodeBlockResultDiscard{};
-            default: break;
+                return Msg{CodeBlockResultDiscard{}};
+            default: return std::nullopt;
         }
-    }
-    return std::nullopt;
+    };
+    return nav::translate(s, ev);
 }
 
-// Rewind checkpoint picker: ↑↓/j/k move, Enter rewinds the highlighted
-// turn, Esc/q cancel. Home/End jump to oldest/newest. Read-only list
-// (no filter) — the rows are the thread's checkpointed turns.
+// Rewind checkpoint picker: shared grammar + vim nav; read-only list.
 std::optional<Msg> on_checkpoint_picker(const KeyEvent& ev) {
-    if (std::holds_alternative<SpecialKey>(ev.key)) {
-        switch (std::get<SpecialKey>(ev.key)) {
-            case SpecialKey::Escape:   return CloseCheckpointPicker{};
-            case SpecialKey::Enter:    return CheckpointPickerSelect{};
-            case SpecialKey::Up:       return CheckpointPickerMove{-1};
-            case SpecialKey::Down:     return CheckpointPickerMove{+1};
-            case SpecialKey::PageUp:   return CheckpointPickerMove{-10};
-            case SpecialKey::PageDown: return CheckpointPickerMove{+10};
-            default: break;
-        }
-    }
-    if (auto* ck = std::get_if<CharKey>(&ev.key)) {
-        switch (ck->codepoint) {
-            case U'k': case U'K': return CheckpointPickerMove{-1};
-            case U'j': case U'J': return CheckpointPickerMove{+1};
-            case U'q': case U'Q': return CloseCheckpointPicker{};
-            default: break;
-        }
-    }
-    return std::nullopt;
+    nav::NavSpec s;
+    s.close     = [] { return Msg{CloseCheckpointPicker{}}; };
+    s.select    = [] { return Msg{CheckpointPickerSelect{}}; };
+    s.move      = [](int d) { return Msg{CheckpointPickerMove{d}}; };
+    s.vim_nav   = true;
+    s.page_step = 10;
+    return nav::translate(s, ev);
 }
 
-// RAG mode picker. ↑↓/j/k move; Enter/Space/←→ select the highlighted mode;
-// Esc/q close.
+// RAG mode picker. Enter/Space/←→ all adjust the highlighted mode.
 std::optional<Msg> on_rag_settings(const KeyEvent& ev) {
-    if (std::holds_alternative<SpecialKey>(ev.key)) {
-        switch (std::get<SpecialKey>(ev.key)) {
-            case SpecialKey::Escape:   return CloseRagSettings{};
-            case SpecialKey::Up:       return RagSettingsMove{-1};
-            case SpecialKey::Down:     return RagSettingsMove{+1};
-            case SpecialKey::Enter:    return RagSettingsAdjust{};
-            case SpecialKey::Left:     return RagSettingsAdjust{};
-            case SpecialKey::Right:    return RagSettingsAdjust{};
-            default: break;
-        }
-    }
-    if (auto* ck = std::get_if<CharKey>(&ev.key)) {
-        switch (ck->codepoint) {
-            case U'k': case U'K': return RagSettingsMove{-1};
-            case U'j': case U'J': return RagSettingsMove{+1};
-            case U' ':            return RagSettingsAdjust{};
-            case U'q': case U'Q': return CloseRagSettings{};
-            default: break;
-        }
-    }
-    return std::nullopt;
+    nav::NavSpec s;
+    s.close   = [] { return Msg{CloseRagSettings{}}; };
+    s.select  = [] { return Msg{RagSettingsAdjust{}}; };
+    s.move    = [](int d) { return Msg{RagSettingsMove{d}}; };
+    s.vim_nav = true;
+    s.extra   = [](const KeyEvent& e) -> std::optional<Msg> {
+        if (const auto* sk = std::get_if<SpecialKey>(&e.key))
+            if (*sk == SpecialKey::Left || *sk == SpecialKey::Right)
+                return Msg{RagSettingsAdjust{}};
+        const auto v = nav::char_view(e);
+        if (v && !v->ctrl && v->c == U' ') return Msg{RagSettingsAdjust{}};
+        return std::nullopt;
+    };
+    return nav::translate(s, ev);
 }
 
-// Settings pickers (Plugins/Commands/Agents/Hooks). A plain list: ↑↓/j/k
-// move, Enter/Space act on the focused row, Esc/q close.
 // Settings pickers (Plugins/Commands/Agents/Hooks). Two modes:
-//   list mode  — ↑↓/j/k move, Enter/Space act, `a` starts an add prompt,
-//               Esc/q close (back to the palette).
-//   add mode   — a one-line text prompt: printable chars type, Backspace
-//               deletes, Enter submits (creates), Esc cancels back to the
-//               list. In add mode j/k/q/space are LITERAL text, so the
-//               nav shortcuts are suppressed — hence the `input_active`
-//               branch.
+//   list mode — shared grammar + vim nav, `a` add, `d` remove, Space act.
+//   add mode  — a one-line text prompt: every printable is LITERAL text,
+//               so the nav shortcuts are suppressed entirely.
 std::optional<Msg> on_settings_list(const KeyEvent& ev, bool input_active) {
     if (input_active) {
-        if (std::holds_alternative<SpecialKey>(ev.key)) {
-            switch (std::get<SpecialKey>(ev.key)) {
-                case SpecialKey::Escape:    return SettingsListCancelInput{};
-                case SpecialKey::Enter:     return SettingsListSubmitInput{};
-                case SpecialKey::Backspace: return SettingsListBackspace{};
-                default: break;
-            }
-        }
-        if (auto* ck = std::get_if<CharKey>(&ev.key)) {
-            if (ck->codepoint >= 0x20)   // printable
-                return SettingsListChar{ck->codepoint};
-        }
-        return std::nullopt;
+        nav::NavSpec s;
+        s.close     = [] { return Msg{SettingsListCancelInput{}}; };
+        s.select    = [] { return Msg{SettingsListSubmitInput{}}; };
+        s.filter_bs = [] { return Msg{SettingsListBackspace{}}; };
+        s.filter_ch = [](char32_t c) { return Msg{SettingsListChar{c}}; };
+        return nav::translate(s, ev);
     }
-    if (std::holds_alternative<SpecialKey>(ev.key)) {
-        switch (std::get<SpecialKey>(ev.key)) {
-            case SpecialKey::Escape: return CloseSettingsList{};
-            case SpecialKey::Up:     return SettingsListMove{-1};
-            case SpecialKey::Down:   return SettingsListMove{+1};
-            case SpecialKey::Enter:  return SettingsListActivate{};
-            default: break;
+    nav::NavSpec s;
+    s.close   = [] { return Msg{CloseSettingsList{}}; };
+    s.select  = [] { return Msg{SettingsListActivate{}}; };
+    s.move    = [](int d) { return Msg{SettingsListMove{d}}; };
+    s.vim_nav = true;
+    s.extra   = [](const KeyEvent& e) -> std::optional<Msg> {
+        const auto v = nav::char_view(e);
+        if (!v || v->ctrl) return std::nullopt;
+        switch (v->c) {
+            case U'a': case U'A': return Msg{SettingsListAddStart{}};
+            case U'd': case U'D': return Msg{SettingsListRemove{}};
+            case U' ':            return Msg{SettingsListActivate{}};
+            default: return std::nullopt;
         }
-    }
-    if (auto* ck = std::get_if<CharKey>(&ev.key)) {
-        switch (ck->codepoint) {
-            case U'k': case U'K': return SettingsListMove{-1};
-            case U'j': case U'J': return SettingsListMove{+1};
-            case U'a': case U'A': return SettingsListAddStart{};
-            case U'd': case U'D': return SettingsListRemove{};
-            case U' ':            return SettingsListActivate{};
-            case U'q': case U'Q': return CloseSettingsList{};
-            default: break;
-        }
-    }
-    return std::nullopt;
+    };
+    return nav::translate(s, ev);
 }
 
-// Fork picker. ↑↓/j/k choose the RAG behaviour; Enter forks with it; Esc/q
-// close. A pure list — each row is a distinct RAG mode for the fresh fork.
+// Fork picker: a pure list — each row is a distinct RAG mode for the fork.
 std::optional<Msg> on_fork_picker(const KeyEvent& ev) {
-    if (std::holds_alternative<SpecialKey>(ev.key)) {
-        switch (std::get<SpecialKey>(ev.key)) {
-            case SpecialKey::Escape:   return CloseForkPicker{};
-            case SpecialKey::Up:       return ForkPickerMove{-1};
-            case SpecialKey::Down:     return ForkPickerMove{+1};
-            case SpecialKey::Enter:    return ForkThread{};
-            default: break;
-        }
-    }
-    if (auto* ck = std::get_if<CharKey>(&ev.key)) {
-        switch (ck->codepoint) {
-            case U'k': case U'K': return ForkPickerMove{-1};
-            case U'j': case U'J': return ForkPickerMove{+1};
-            case U'q': case U'Q': return CloseForkPicker{};
-            default: break;
-        }
-    }
-    return std::nullopt;
+    nav::NavSpec s;
+    s.close   = [] { return Msg{CloseForkPicker{}}; };
+    s.select  = [] { return Msg{ForkThread{}}; };
+    s.move    = [](int d) { return Msg{ForkPickerMove{d}}; };
+    s.vim_nav = true;
+    return nav::translate(s, ev);
 }
 
+// Fused (all-providers) picker: full grammar + typed filter + effort
+// cycling. ^/ toggles to the classic picker, ^P cross-hops to providers,
+// ^F favourites, ^L force-refreshes every catalog.
 std::optional<Msg> on_fused_picker(const KeyEvent& ev) {
-    using namespace agentty::msg;
-    if (std::holds_alternative<SpecialKey>(ev.key)) {
-        auto sk = std::get<SpecialKey>(ev.key);
-        switch (sk) {
-            case SpecialKey::Escape:   return CloseFusedPicker{};
-            case SpecialKey::Enter:    return FusedPickerSelect{};
-            case SpecialKey::Up:       return FusedPickerMove{-1};
-            case SpecialKey::Down:     return FusedPickerMove{+1};
-            case SpecialKey::Backspace: return FusedPickerFilterBackspace{};
-            case SpecialKey::Home:     return FusedPickerJump{FusedPickerJump::Where::Home};
-            case SpecialKey::End:      return FusedPickerJump{FusedPickerJump::Where::End};
-            case SpecialKey::PageUp:   return FusedPickerJump{FusedPickerJump::Where::PageUp};
-            case SpecialKey::PageDown: return FusedPickerJump{FusedPickerJump::Where::PageDown};
+    nav::NavSpec s;
+    s.close     = [] { return Msg{CloseFusedPicker{}}; };
+    s.select    = [] { return Msg{FusedPickerSelect{}}; };
+    s.move      = [](int d) { return Msg{FusedPickerMove{d}}; };
+    s.jump      = [](nav::Jump j) {
+        using W = FusedPickerJump::Where;
+        return Msg{FusedPickerJump{j == nav::Jump::Home ? W::Home
+                                 : j == nav::Jump::End  ? W::End
+                                 : j == nav::Jump::PageUp ? W::PageUp
+                                                          : W::PageDown}};
+    };
+    s.filter_bs = [] { return Msg{FusedPickerFilterBackspace{}}; };
+    s.filter_ch = [](char32_t c) { return Msg{FusedPickerFilterInput{c}}; };
+    s.extra     = [](const KeyEvent& e) -> std::optional<Msg> {
+        if (const auto* sk = std::get_if<SpecialKey>(&e.key)) {
             // ←/→ cycle the highlighted model's reasoning-effort tier.
-            case SpecialKey::Left:     return FusedPickerCycleEffort{-1};
-            case SpecialKey::Right:    return FusedPickerCycleEffort{+1};
-            default: break;
-        }
-    }
-    if (auto* ck = std::get_if<CharKey>(&ev.key)) {
-        char32_t c = ck->codepoint;
-        // ^/ TOGGLES the two model surfaces: fused (this, all providers)
-        // ⇄ the classic single-provider picker. Esc closes either.
-        if (c == 0x1F || (ev.mods.ctrl && c == U'/')) return OpenModelPicker{};
-        // ^P cross-hops to the provider picker (manage backends/hosts).
-        if (c == 0x10 || (ev.mods.ctrl && (c == U'p' || c == U'P')))
-            return OpenProviderPicker{};
-        // ^F favourites the highlighted model (raw ctrl byte or flagged).
-        const bool raw_ctrl = (c >= 0x01 && c <= 0x1A);
-        if (ev.mods.ctrl || raw_ctrl) {
-            if (raw_ctrl) c = U'a' + (c - 1);
-            if (c == U'f') return FusedPickerToggleFavorite{};
-            // ^L — force a full live refresh of every provider's catalog.
-            if (c == U'l') return FusedPickerRefresh{};
-            // ^E (per-model reasoning override) removed — ←/→ already cycles the
-            // effort tier through 'off', so it was redundant / a no-op on
-            // Claude/GPT. ^E now uniformly means "expand composer".
+            if (*sk == SpecialKey::Left)  return Msg{FusedPickerCycleEffort{-1}};
+            if (*sk == SpecialKey::Right) return Msg{FusedPickerCycleEffort{+1}};
             return std::nullopt;
         }
-        // Any other printable codepoint types into the filter query.
-        if (c >= 0x20) return FusedPickerFilterInput{c};
-    }
-    return std::nullopt;
+        const auto v = nav::char_view(e);
+        if (!v) return std::nullopt;
+        // ^/ TOGGLES fused ⇄ classic (raw 0x1F carries no ctrl flag).
+        if (v->raw == 0x1F || (v->ctrl && v->c == U'/'))
+            return Msg{OpenModelPicker{}};
+        if (v->ctrl) {
+            switch (v->c) {
+                case U'p': return Msg{OpenProviderPicker{}};   // cross-hop
+                case U'f': return Msg{FusedPickerToggleFavorite{}};
+                case U'l': return Msg{FusedPickerRefresh{}};
+                default:   break;
+            }
+            // Fall through to nullopt: translate() never types ctrl'd
+            // chars into the filter, and the dispatch chain returns this
+            // handler's result unconditionally — the chord is swallowed.
+        }
+        return std::nullopt;
+    };
+    return nav::translate(s, ev);
 }
 
+// Classic (single-provider) picker: same grammar; ^/ toggles back to
+// fused, ^R toggles reasoning display.
 std::optional<Msg> on_model_picker(const KeyEvent& ev) {
-    if (std::holds_alternative<SpecialKey>(ev.key)) {
-        auto sk = std::get<SpecialKey>(ev.key);
-        switch (sk) {
-            case SpecialKey::Escape:   return CloseModelPicker{};
-            case SpecialKey::Enter:    return ModelPickerSelect{};
-            case SpecialKey::Up:       return ModelPickerMove{-1};
-            case SpecialKey::Down:     return ModelPickerMove{+1};
-            // Backspace edits the live search query rather than paging.
-            case SpecialKey::Backspace: return ModelPickerFilterBackspace{};
-            case SpecialKey::Home:     return ModelPickerJump{ModelPickerJump::Where::Home};
-            case SpecialKey::End:      return ModelPickerJump{ModelPickerJump::Where::End};
-            case SpecialKey::PageUp:   return ModelPickerJump{ModelPickerJump::Where::PageUp};
-            case SpecialKey::PageDown: return ModelPickerJump{ModelPickerJump::Where::PageDown};
-            // ←/→ cycle the reasoning-effort tier for the highlighted model.
-            case SpecialKey::Left:     return ModelPickerCycleEffort{-1};
-            case SpecialKey::Right:    return ModelPickerCycleEffort{+1};
-            default: break;
+    nav::NavSpec s;
+    s.close     = [] { return Msg{CloseModelPicker{}}; };
+    s.select    = [] { return Msg{ModelPickerSelect{}}; };
+    s.move      = [](int d) { return Msg{ModelPickerMove{d}}; };
+    s.jump      = [](nav::Jump j) {
+        using W = ModelPickerJump::Where;
+        return Msg{ModelPickerJump{j == nav::Jump::Home ? W::Home
+                                 : j == nav::Jump::End  ? W::End
+                                 : j == nav::Jump::PageUp ? W::PageUp
+                                                          : W::PageDown}};
+    };
+    s.filter_bs = [] { return Msg{ModelPickerFilterBackspace{}}; };
+    s.filter_ch = [](char32_t c) { return Msg{ModelPickerFilterInput{c}}; };
+    s.extra     = [](const KeyEvent& e) -> std::optional<Msg> {
+        if (const auto* sk = std::get_if<SpecialKey>(&e.key)) {
+            if (*sk == SpecialKey::Left)  return Msg{ModelPickerCycleEffort{-1}};
+            if (*sk == SpecialKey::Right) return Msg{ModelPickerCycleEffort{+1}};
+            return std::nullopt;
         }
-    }
-    if (auto* ck = std::get_if<CharKey>(&ev.key)) {
-        char32_t c = ck->codepoint;
-        // ^/ TOGGLES back to the fused (all-providers) picker — the mirror
-        // of the fused picker's ^/ → this classic one. Esc closes either.
-        // ^/ arrives as raw 0x1F (no ctrl flag) or '/' with mods.ctrl.
-        if (c == 0x1F || (ev.mods.ctrl && c == U'/')) return OpenFusedPicker{};
-        // ^P cross-hops to the PROVIDER picker — the footer advertises it
-        // ("^P providers"). on_global binds ^P → OpenProviderPicker, but this
-        // handler's result is returned unconditionally so it would never
-        // reach it; dispatch it here. OpenProviderPicker closes this picker.
-        // Legacy terminals send Ctrl-P as raw 0x10 (no ctrl flag).
-        if (c == 0x10 || (ev.mods.ctrl && (c == U'p' || c == U'P')))
-            return OpenProviderPicker{};
-        // Ctrl+F toggles the highlighted model as a favourite — moved off
-        // the bare `f` key now that plain letters feed the search box.
-        // Accept BOTH the flagged form (KKP terminals: 'f' + ctrl mod) and
-        // the legacy raw control byte (0x01..0x1A, no ctrl flag) — without
-        // the raw path ^F/^E/^R were dead on plain xterm/tmux-without-KKP.
-        {
-            const bool raw_ctrl = (c >= 0x01 && c <= 0x1A);
-            if (ev.mods.ctrl || raw_ctrl) {
-                if (raw_ctrl) c = U'a' + (c - 1);
-                if (c == U'f') return ModelPickerToggleFavorite{};
-                // NOTE: ^E (per-model reasoning-effort override) was removed —
-                // ←/→ already cycles the effort tier through 'off', so the
-                // override was redundant AND a no-op on Claude/GPT (their
-                // reasoning is auto-detected). Dropping it frees ^E to mean
-                // "expand composer" everywhere, one key one meaning.
-                // Ctrl+R toggles whether reasoning/thinking is SHOWN (transcript
-                // block + Anthropic visible-thinking beta). Global, all providers.
-                if (c == U'r') return ModelPickerToggleShowReasoning{};
-                return std::nullopt;
+        const auto v = nav::char_view(e);
+        if (!v) return std::nullopt;
+        if (v->raw == 0x1F || (v->ctrl && v->c == U'/'))
+            return Msg{OpenFusedPicker{}};
+        if (v->ctrl) {
+            switch (v->c) {
+                case U'p': return Msg{OpenProviderPicker{}};   // cross-hop
+                case U'f': return Msg{ModelPickerToggleFavorite{}};
+                case U'r': return Msg{ModelPickerToggleShowReasoning{}};
+                default:   break;
             }
         }
-        // Any other printable codepoint types into the filter query.
-        if (c >= 0x20) return ModelPickerFilterInput{c};
-    }
-    return std::nullopt;
+        return std::nullopt;
+    };
+    return nav::translate(s, ev);
 }
 
+// Provider picker: shared grammar + typed filter. ^/ hops to the fused
+// model picker; ^D (and forward-Delete) removes a saved host / signs out
+// of a keyed preset — two-press. Ctrl'd so it can't collide with typing
+// a provider name starting with 'd' (deepseek…).
 std::optional<Msg> on_provider_picker(const KeyEvent& ev) {
-    if (std::holds_alternative<SpecialKey>(ev.key)) {
-        auto sk = std::get<SpecialKey>(ev.key);
-        switch (sk) {
-            case SpecialKey::Escape:   return CloseProviderPicker{};
-            case SpecialKey::Enter:    return ProviderPickerSelect{};
-            case SpecialKey::Up:       return ProviderPickerMove{-1};
-            case SpecialKey::Down:     return ProviderPickerMove{+1};
-            // Backspace edits the live search query rather than paging.
-            case SpecialKey::Backspace: return ProviderPickerFilterBackspace{};
-            // Del removes a saved custom host (two-press). On a Mac laptop
-            // the key LABELLED "delete" sends Backspace, not forward-Delete
-            // (that needs Fn+Delete), so relying on Delete alone means Mac
-            // users can't remove a provider at all. Bare `d`/`D` on an EMPTY
-            // query is also accepted below (mirrors the thread picker), so
-            // there's always a reachable delete key.
-            case SpecialKey::Delete:   return ProviderPickerDelete{};
-            case SpecialKey::Home:     return ProviderPickerJump{ProviderPickerJump::Where::Home};
-            case SpecialKey::End:      return ProviderPickerJump{ProviderPickerJump::Where::End};
-            case SpecialKey::PageUp:   return ProviderPickerJump{ProviderPickerJump::Where::PageUp};
-            case SpecialKey::PageDown: return ProviderPickerJump{ProviderPickerJump::Where::PageDown};
-            default: break;
+    nav::NavSpec s;
+    s.close     = [] { return Msg{CloseProviderPicker{}}; };
+    s.select    = [] { return Msg{ProviderPickerSelect{}}; };
+    s.move      = [](int d) { return Msg{ProviderPickerMove{d}}; };
+    s.jump      = [](nav::Jump j) {
+        using W = ProviderPickerJump::Where;
+        return Msg{ProviderPickerJump{j == nav::Jump::Home ? W::Home
+                                    : j == nav::Jump::End  ? W::End
+                                    : j == nav::Jump::PageUp ? W::PageUp
+                                                             : W::PageDown}};
+    };
+    s.filter_bs = [] { return Msg{ProviderPickerFilterBackspace{}}; };
+    s.filter_ch = [](char32_t c) { return Msg{ProviderPickerFilterInput{c}}; };
+    s.toggle_close_chord = U'p';
+    s.extra     = [](const KeyEvent& e) -> std::optional<Msg> {
+        if (const auto* sk = std::get_if<SpecialKey>(&e.key)) {
+            // Forward-Delete removes; Mac laptops lack the key (their
+            // "delete" sends Backspace) — ^D below is the reachable twin.
+            if (*sk == SpecialKey::Delete) return Msg{ProviderPickerDelete{}};
+            return std::nullopt;
         }
-    }
-    // A printable character types into the live search filter (mirrors the
-    // model picker). Ctrl-modified chars are reserved for other bindings.
-    if (auto* ck = std::get_if<CharKey>(&ev.key)) {
-        // Cross-navigation + toggle-close. The footer advertises "^/ models":
-        // ^/ hops to the fused MODEL picker (spans every provider); a
-        // re-press of the open key ^P closes this picker. on_global binds
-        // both, but this handler's result is returned unconditionally so
-        // neither would reach it — dispatch them here. Normalise the legacy
-        // raw control byte (Ctrl-P = 0x10 / Ctrl-/ = 0x1F, no ctrl flag)
-        // exactly as on_global does before comparing.
-        char32_t c = ck->codepoint;
-        const bool raw_ctrl = (c >= 0x01 && c <= 0x1A);
-        if (c == 0x1F || (ev.mods.ctrl && c == U'/')) return OpenFusedPicker{};
-        if (raw_ctrl) c = U'a' + (c - 1);
-        const bool ctrl = ev.mods.ctrl || raw_ctrl;
-        if (ctrl && (c == U'p' || c == U'P')) return CloseProviderPicker{};
-        // ^D removes a saved custom host / signs out of a keyed preset — the
-        // Mac-reachable stand-in for forward-Delete (Mac laptops send
-        // Backspace for the key labelled "delete"). Ctrl-D so it never
-        // collides with typing a name that starts with 'd' (deepseek, …).
-        if (ctrl && (c == U'd' || c == U'D')) return ProviderPickerDelete{};
-        if (!ctrl && c >= 0x20)
-            return ProviderPickerFilterInput{c};
-    }
-    return std::nullopt;
+        const auto v = nav::char_view(e);
+        if (!v) return std::nullopt;
+        if (v->raw == 0x1F || (v->ctrl && v->c == U'/'))
+            return Msg{OpenFusedPicker{}};                       // cross-hop
+        if (v->ctrl && (v->c == U'd' || v->c == U'D'))
+            return Msg{ProviderPickerDelete{}};
+        return std::nullopt;
+    };
+    return nav::translate(s, ev);
 }
 
+// Thread list: shared grammar + vim nav; n = new thread, d = delete
+// (two-press confirm).
 std::optional<Msg> on_thread_list(const KeyEvent& ev) {
-    if (std::holds_alternative<SpecialKey>(ev.key)) {
-        auto sk = std::get<SpecialKey>(ev.key);
-        switch (sk) {
-            case SpecialKey::Escape:   return CloseThreadList{};
-            case SpecialKey::Enter:    return ThreadListSelect{};
-            case SpecialKey::Up:       return ThreadListMove{-1};
-            case SpecialKey::Down:     return ThreadListMove{+1};
-            case SpecialKey::Home:     return ThreadListJump{ThreadListJump::Where::Home};
-            case SpecialKey::End:      return ThreadListJump{ThreadListJump::Where::End};
-            case SpecialKey::PageUp:   return ThreadListJump{ThreadListJump::Where::PageUp};
-            case SpecialKey::PageDown: return ThreadListJump{ThreadListJump::Where::PageDown};
-            default: break;
+    nav::NavSpec s;
+    s.close   = [] { return Msg{CloseThreadList{}}; };
+    s.select  = [] { return Msg{ThreadListSelect{}}; };
+    s.move    = [](int d) { return Msg{ThreadListMove{d}}; };
+    s.jump    = [](nav::Jump j) {
+        using W = ThreadListJump::Where;
+        return Msg{ThreadListJump{j == nav::Jump::Home ? W::Home
+                                : j == nav::Jump::End  ? W::End
+                                : j == nav::Jump::PageUp ? W::PageUp
+                                                         : W::PageDown}};
+    };
+    s.vim_nav = true;
+    // ^J re-press closes (raw 0x0A is Enter on legacy terminals and maya
+    // maps it to SpecialKey::Enter first, so only the flagged form arrives).
+    s.toggle_close_chord = U'j';
+    s.extra   = [](const KeyEvent& e) -> std::optional<Msg> {
+        const auto v = nav::char_view(e);
+        if (!v || v->ctrl) return std::nullopt;
+        switch (v->c) {
+            case U'n': case U'N': return Msg{NewThread{}};
+            case U'd': case U'D': return Msg{ThreadListDelete{}};
+            default: return std::nullopt;
         }
-    }
-    if (auto* ck = std::get_if<CharKey>(&ev.key)) {
-        char32_t c = ck->codepoint;
-        const bool raw_ctrl = (c >= 0x01 && c <= 0x1A);
-        if (raw_ctrl) c = U'a' + (c - 1);
-        const bool ctrl = ev.mods.ctrl || raw_ctrl;
-        // ^J re-press closes the list (open/close symmetry). NOTE: raw 0x0A
-        // is Enter on legacy terminals and maya maps it to SpecialKey::Enter
-        // before we see it, so only the flagged form arrives here.
-        if (ctrl && (c == U'j' || c == U'J')) return CloseThreadList{};
-        // Plain j/k vim nav — every other list picker has it.
-        if (!ctrl && (c == U'k' || c == U'K')) return ThreadListMove{-1};
-        if (!ctrl && (c == U'j' || c == U'J')) return ThreadListMove{+1};
-        if (!ctrl && (c == U'n' || c == U'N')) return NewThread{};
-        if (!ctrl && (c == U'd' || c == U'D')) return ThreadListDelete{};
-    }
-    return std::nullopt;
+    };
+    return nav::translate(s, ev);
 }
 
+// Smart Mode config: shared grammar + vim nav; Space toggles the row,
+// x resets the selected slot to auto.
 std::optional<Msg> on_smart_mode(const KeyEvent& ev) {
-    if (std::holds_alternative<SpecialKey>(ev.key)) {
-        switch (std::get<SpecialKey>(ev.key)) {
-            case SpecialKey::Escape: return CloseSmartMode{};
-            case SpecialKey::Up:     return SmartModeMove{-1};
-            case SpecialKey::Down:   return SmartModeMove{+1};
-            case SpecialKey::Enter:  return SmartModeSelect{};
-            default: break;
+    nav::NavSpec s;
+    s.close   = [] { return Msg{CloseSmartMode{}}; };
+    s.select  = [] { return Msg{SmartModeSelect{}}; };
+    s.move    = [](int d) { return Msg{SmartModeMove{d}}; };
+    s.vim_nav = true;
+    s.toggle_close_chord = U's';
+    s.extra   = [](const KeyEvent& e) -> std::optional<Msg> {
+        const auto v = nav::char_view(e);
+        if (!v || v->ctrl) return std::nullopt;
+        switch (v->c) {
+            case U'x': case U'X': return Msg{SmartModeClearSlot{}};
+            case U' ':            return Msg{SmartModeSelect{}};
+            default: return std::nullopt;
         }
-    }
-    if (auto* ck = std::get_if<CharKey>(&ev.key)) {
-        char32_t c = ck->codepoint;
-        // Re-pressing the open key (^S) toggles the overlay shut — the
-        // dispatcher returns this handler's result unconditionally, so
-        // without this the key is swallowed (same class as the ^P/^/ picker
-        // bug). Legacy terminals send Ctrl-S as raw 0x13.
-        if (c == 0x13 || (ev.mods.ctrl && (c == U's' || c == U'S')))
-            return CloseSmartMode{};
-        // Plain j/k vim nav — every other list picker has it.
-        if (!ev.mods.ctrl && (c == 'k' || c == 'K')) return SmartModeMove{-1};
-        if (!ev.mods.ctrl && (c == 'j' || c == 'J')) return SmartModeMove{+1};
-        // 'x' resets the selected slot to auto; space toggles the row.
-        if (c == 'x' || c == 'X') return SmartModeClearSlot{};
-        if (c == ' ') return SmartModeSelect{};
-    }
-    return std::nullopt;
+    };
+    return nav::translate(s, ev);
 }
 
 std::optional<Msg> on_diff_review(const KeyEvent& ev) {
@@ -635,64 +502,44 @@ std::optional<Msg> on_diff_review(const KeyEvent& ev) {
     return std::nullopt;
 }
 
+// Todo modal is AMBIENT: it only claims Esc + its ^T toggle; every other
+// key falls through to on_global via the dispatcher's todo arm.
 std::optional<Msg> on_todo_modal(const KeyEvent& ev) {
-    if (std::holds_alternative<SpecialKey>(ev.key)
-        && std::get<SpecialKey>(ev.key) == SpecialKey::Escape)
-        return CloseTodoModal{};
-    // ^T re-press toggles the modal shut (open/close symmetry; raw 0x14 on
-    // legacy terminals). Other keys fall through to on_global via the
-    // dispatcher's todo-specific fall-through arm.
-    if (auto* ck = std::get_if<CharKey>(&ev.key)) {
-        char32_t c = ck->codepoint;
-        const bool raw_ctrl = (c >= 0x01 && c <= 0x1A);
-        if (raw_ctrl) c = U'a' + (c - 1);
-        if ((ev.mods.ctrl || raw_ctrl) && (c == U't' || c == U'T'))
-            return CloseTodoModal{};
-    }
-    return std::nullopt;
+    nav::NavSpec s;
+    s.close = [] { return Msg{CloseTodoModal{}}; };
+    s.toggle_close_chord = U't';
+    return nav::translate(s, ev);
 }
 
 // Ctrl+O tool-output viewer. Two stages share one handler: the LIST
 // (↑↓/j/k move the cursor, Enter opens the body, y copies, Esc/q close)
 // and the BODY (↑↓/j/k/PgUp/PgDn/Home/End scroll, y copies, Esc back to
 // the list). The reducer branches on Open::viewing, so the same Move/
-// Copy msgs serve both stages.
+// Copy msgs serve both stages. h/l (and ←/→) step between entries.
 std::optional<Msg> on_tool_viewer(const KeyEvent& ev) {
-    if (std::holds_alternative<SpecialKey>(ev.key)) {
-        switch (std::get<SpecialKey>(ev.key)) {
-            case SpecialKey::Escape:   return CloseToolOutputViewer{};
-            case SpecialKey::Enter:    return ToolViewerSelect{};
-            case SpecialKey::Up:       return ToolViewerMove{-1};
-            case SpecialKey::Down:     return ToolViewerMove{+1};
-            case SpecialKey::PageUp:   return ToolViewerMove{-10};
-            case SpecialKey::PageDown: return ToolViewerMove{+10};
-            case SpecialKey::Home:     return ToolViewerMove{-1000000};
-            case SpecialKey::End:      return ToolViewerMove{+1000000};
-            case SpecialKey::Left:     return ToolViewerStep{-1};
-            case SpecialKey::Right:    return ToolViewerStep{+1};
-            default: break;
+    nav::NavSpec s;
+    s.close     = [] { return Msg{CloseToolOutputViewer{}}; };
+    s.select    = [] { return Msg{ToolViewerSelect{}}; };
+    s.move      = [](int d) { return Msg{ToolViewerMove{d}}; };
+    s.vim_nav   = true;
+    s.page_step = 10;
+    s.toggle_close_chord = U'o';
+    s.extra     = [](const KeyEvent& e) -> std::optional<Msg> {
+        if (const auto* sk = std::get_if<SpecialKey>(&e.key)) {
+            if (*sk == SpecialKey::Left)  return Msg{ToolViewerStep{-1}};
+            if (*sk == SpecialKey::Right) return Msg{ToolViewerStep{+1}};
+            return std::nullopt;
         }
-    }
-    if (auto* ck = std::get_if<CharKey>(&ev.key)) {
-        char32_t c = ck->codepoint;
-        const bool raw_ctrl = (c >= 0x01 && c <= 0x1A);
-        if (raw_ctrl) c = U'a' + (c - 1);
-        // ^O re-press closes the viewer (open/close symmetry; raw 0x0F on
-        // legacy terminals) — the dispatcher never falls through to
-        // on_global from an open modal.
-        if ((ev.mods.ctrl || raw_ctrl) && (c == U'o' || c == U'O'))
-            return CloseToolOutputViewer{};
-        switch (c) {
-            case U'k': case U'K': return ToolViewerMove{-1};
-            case U'j': case U'J': return ToolViewerMove{+1};
-            case U'h': case U'H': return ToolViewerStep{-1};
-            case U'l': case U'L': return ToolViewerStep{+1};
-            case U'y': case U'Y': return ToolViewerCopy{};
-            case U'q': case U'Q': return CloseToolOutputViewer{};
-            default: break;
+        const auto v = nav::char_view(e);
+        if (!v || v->ctrl) return std::nullopt;
+        switch (v->c) {
+            case U'h': case U'H': return Msg{ToolViewerStep{-1}};
+            case U'l': case U'L': return Msg{ToolViewerStep{+1}};
+            case U'y': case U'Y': return Msg{ToolViewerCopy{}};
+            default: return std::nullopt;
         }
-    }
-    return std::nullopt;
+    };
+    return nav::translate(s, ev);
 }
 
 // Login modal — dispatches based on which sub-state we're in.
@@ -1067,29 +914,17 @@ std::optional<Msg> on_composer(ComposerKeyState s, const KeyEvent& ev) {
 } // namespace
 
 Sub<Msg> subscribe(const Model& m) {
-    const bool in_perm    = m.d.pending_permission.has_value();
-    const bool in_cmd     = is_open(m.ui.command_palette);
-    const bool in_mention = mention_is_open(m.ui.mention_palette);
-    const bool in_symbol  = symbol_palette_is_open(m.ui.symbol_palette);
-    const bool in_blocks  = code_block_picker_is_open(m.ui.code_blocks);
-    const bool in_blockres = code_block_result_is_open(m.ui.code_blocks);
-    const bool in_toolview = tool_viewer_is_open(m.ui.tool_viewer);
-    const bool in_checkpoints = checkpoint_picker_is_open(m.ui.checkpoints);
-    const bool in_rag_settings = rag_settings_is_open(m.ui.rag_settings);
-    const bool in_settings_list = settings_list_is_open(m.ui.settings_list);
+    // THE routing decision: which overlay owns the keyboard. Computed once
+    // per subscription rebuild by overlay::top() — the SAME function the
+    // view uses to decide what renders, so keys and pixels can never go to
+    // different surfaces (the old twin if-chains could, and did, disagree
+    // on order).
+    const auto active_overlay = ui::overlay::top(m);
+    const bool in_login = active_overlay == ui::overlay::Kind::Login;
     const bool settings_list_adding = [&] {
         const auto* so = settings_list_opened(m.ui.settings_list);
         return so && so->input_active;
     }();
-    const bool in_fork = fork_picker_is_open(m.ui.fork_picker);
-    const bool in_models  = pick::is_open(m.ui.model_picker);
-    const bool in_providers = pick::is_open(m.ui.provider_picker);
-    const bool in_fused   = pick::is_open(m.ui.fused_picker);
-    const bool in_threads = pick::is_open(m.ui.thread_list);
-    const bool in_smart   = pick::is_open(m.ui.smart_mode);
-    const bool in_diff    = pick::is_open(m.ui.diff_review);
-    const bool in_todo    = pick::is_open(m.ui.todo.open);
-    const bool in_login   = ui::login::is_open(m.ui.login);
     const bool streaming  = m.s.active()
                          && !m.s.is_awaiting_permission();
     // Ctrl+←/→ thread-cycle gate: the agent turn must be fully idle.
@@ -1125,26 +960,37 @@ Sub<Msg> subscribe(const Model& m) {
             // Login modal owns the whole keyboard — auth is the gating
             // step, no other UI is reachable until the user finishes
             // (or Escs out, which is allowed but leaves agentty unauth'd).
-            if (in_login)   return on_login(login_state, ev);
-            if (in_perm)    return on_permission(ev);
-            if (in_cmd)     return on_command_palette(ev);
-            if (in_mention) return on_mention_palette(ev);
-            if (in_symbol)  return on_symbol_palette(ev);
-            if (in_blocks)  return on_code_block_picker(ev);
-            if (in_blockres) return on_code_block_result(ev);
-            if (in_toolview) return on_tool_viewer(ev);
-            if (in_checkpoints) return on_checkpoint_picker(ev);
-            if (in_rag_settings) return on_rag_settings(ev);
-            if (in_settings_list)
-                return on_settings_list(ev, settings_list_adding);
-            if (in_fork) return on_fork_picker(ev);
-            if (in_models)  return on_model_picker(ev);
-            if (in_fused)   return on_fused_picker(ev);
-            if (in_providers) return on_provider_picker(ev);
-            if (in_threads) return on_thread_list(ev);
-            if (in_smart)   return on_smart_mode(ev);
-            if (in_diff)    return on_diff_review(ev);
-            if (in_todo)    if (auto r = on_todo_modal(ev)) return r;
+            // Route to the active overlay's handler. Exhaustive on Kind
+            // (-Wswitch): adding an overlay without a routing arm is a
+            // compile warning, not a silent dead key. Kind::Todo is the one
+            // AMBIENT overlay — unclaimed keys fall THROUGH to the global
+            // handling below rather than being swallowed.
+            using OK = ui::overlay::Kind;
+            switch (active_overlay) {
+                case OK::Login:          return on_login(login_state, ev);
+                case OK::Permission:     return on_permission(ev);
+                case OK::CommandPalette: return on_command_palette(ev);
+                case OK::Mention:        return on_mention_palette(ev);
+                case OK::Symbol:         return on_symbol_palette(ev);
+                case OK::CodeBlocks:     return on_code_block_picker(ev);
+                case OK::CodeBlockResult: return on_code_block_result(ev);
+                case OK::ToolViewer:     return on_tool_viewer(ev);
+                case OK::Checkpoints:    return on_checkpoint_picker(ev);
+                case OK::RagSettings:    return on_rag_settings(ev);
+                case OK::SettingsList:
+                    return on_settings_list(ev, settings_list_adding);
+                case OK::Fork:           return on_fork_picker(ev);
+                case OK::ModelPicker:    return on_model_picker(ev);
+                case OK::FusedPicker:    return on_fused_picker(ev);
+                case OK::ProviderPicker: return on_provider_picker(ev);
+                case OK::ThreadList:     return on_thread_list(ev);
+                case OK::SmartMode:      return on_smart_mode(ev);
+                case OK::DiffReview:     return on_diff_review(ev);
+                case OK::Todo:
+                    if (auto r = on_todo_modal(ev)) return r;
+                    break;                     // ambient: fall through
+                case OK::None:           break;
+            }
             // Esc during a live stream cancels the request rather than
             // quitting the app. Modals above swallow Esc themselves, so this
             // only fires from the bare composer view.
