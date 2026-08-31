@@ -27,11 +27,12 @@ fs::path cache_path() { return auth::config_dir() / "modelsdev.json"; }
 constexpr auto kMaxAge = std::chrono::hours{24};
 constexpr std::size_t kMaxBody = 8ull * 1024 * 1024;   // api.json is ~2 MB
 
-// Map a models.dev effort value name to our Effort bit; 0 = not in our ladder
-// (e.g. "minimal", "ultra") — ignored, the nearest_effort clamp covers gaps.
+// Map a models.dev effort value name to our Effort bit; 0 = not in our
+// ladder (e.g. "ultra") — ignored, the nearest_effort clamp covers gaps.
 std::uint8_t bit_of(std::string_view v) {
     using agentty::Effort;
     using agentty::effort_bit;
+    if (v == "minimal") return effort_bit(Effort::Minimal);
     if (v == "low")    return effort_bit(Effort::Low);
     if (v == "medium") return effort_bit(Effort::Medium);
     if (v == "high")   return effort_bit(Effort::High);
@@ -83,11 +84,21 @@ void register_model(const std::string& dev_provider,
         ro != m.end() && ro->is_array()) {
         for (const auto& opt : *ro) {
             if (!opt.is_object()) continue;
-            if (opt.value("type", std::string{}) != "effort") continue;
-            std::uint8_t bits = 0;
-            for (const auto& v : opt.value("values", json::array()))
-                if (v.is_string()) bits |= bit_of(v.get<std::string>());
-            if (bits != 0) set = bits;
+            const std::string type = opt.value("type", std::string{});
+            if (type == "effort") {
+                std::uint8_t bits = 0;
+                for (const auto& v : opt.value("values", json::array()))
+                    if (v.is_string()) bits |= bit_of(v.get<std::string>());
+                if (bits != 0) set = bits;
+            } else if (type == "toggle" && set < 0) {
+                // Toggle-only reasoning (Kimi k2.5, some Qwen): on/off with
+                // no tiers. Model it as the binary {high} mask — the ladder
+                // renders off·high (an honest on/off switch) and any
+                // requested tier clamps to "on". An effort option in the
+                // same list wins (k3 declares BOTH toggle and effort).
+                set = static_cast<int>(
+                    agentty::effort_bit(agentty::Effort::High));
+            }
         }
     }
 

@@ -1595,8 +1595,31 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
     // stream handler emits message.thinking as StreamThinkingDelta — the SAME
     // unified event every other provider uses — so local reasoning renders in
     // the same block. Off by default keeps the dead-air-free wire unchanged.
-    if (req.show_reasoning && !ctx.json_protocol)
-        body["think"] = true;
+    // Native thinking. Ollama's `think` accepts a BOOLEAN or a graded level
+    // ("low"|"medium"|"high", newer builds also "max"); GPT-OSS in
+    // particular REQUIRES a level to tune trace length. Map the model-
+    // agnostic effort tier onto it so local reasoning models honour the
+    // picker's ladder exactly like hosted ones:
+    //   effort set  → think:"<level>"  (minimal folds to low — ollama
+    //                 rejects "minimal"; xhigh/max fold to "high" since
+    //                 "max" is not yet universal — see ollama#15831)
+    //   effort off  → think:true only when the user shows reasoning
+    //                 (visible thinking without a tier), else omitted.
+    // Ollama ignores `think` on models that can't reason, so sending it
+    // broadly is safe. Gated off in JSON-protocol mode (weak models; the
+    // grammar would fight the think field). The stream handler emits
+    // message.thinking as StreamThinkingDelta — the SAME unified event
+    // every other provider uses.
+    if (!ctx.json_protocol) {
+        if (!req.effort.empty()) {
+            std::string level = req.effort;
+            if (level == "minimal")                    level = "low";
+            else if (level == "xhigh" || level == "max") level = "high";
+            body["think"] = level;
+        } else if (req.show_reasoning) {
+            body["think"] = true;
+        }
+    }
 
     json messages = json::array();
     std::string sys = req.system_prompt;
