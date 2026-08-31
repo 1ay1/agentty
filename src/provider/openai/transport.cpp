@@ -883,11 +883,20 @@ void handle_delta(StreamCtx& ctx, const json& delta) {
                            tx != part.end() && tx->is_string()) {
                     chunk = tx->get<std::string>();   // flat variant
                 }
-                if (!chunk.empty()) {
-                    if (ctx.show_reasoning)
+                // A thinking PART arrived — that is itself a liveness signal,
+                // even when its accumulated text is empty. Mistral streams
+                // near-empty thinking segments during a long reasoning pass;
+                // with reasoning hidden (show_reasoning=false) and no visible
+                // prose yet, dropping these silently starves the stall
+                // watchdog. Emit the reasoning when shown; otherwise ALWAYS
+                // pulse a heartbeat for the part, empty text or not.
+                if (ctx.show_reasoning) {
+                    if (!chunk.empty())
                         ctx.sink(StreamThinkingDelta{chunk, {}});
                     else
                         ctx.sink(StreamHeartbeat{});
+                } else {
+                    ctx.sink(StreamHeartbeat{});
                 }
             } else if (type == "text") {
                 const std::string t = part.value("text", "");
@@ -1050,7 +1059,18 @@ FastData dispatch_data_fast(StreamCtx& ctx, std::string_view data, char* padded)
         // can't safely peek a field it hasn't reached, so hand any
         // reasoning-bearing frame to handle_delta (random-access). The probe
         // matches both field names via the common "reasoning prefix.
-        || data.find("\"reasoning") != std::string_view::npos)
+        || data.find("\"reasoning") != std::string_view::npos
+        // Mistral (Small/Medium 3.5+ with reasoning_effort=high) streams the
+        // model's chain-of-thought as a STRUCTURED content array:
+        //   delta.content = [{"type":"thinking","thinking":[{"type":"text",…}]}]
+        // and only later flips content to a plain answer STRING. The fast path
+        // reads content as a string field, so a thinking-array frame would be
+        // silently dropped (no reasoning render, no liveness heartbeat → a long
+        // post-tool reasoning pass can trip the stall watchdog). Once prose is
+        // flowing (salvage disabled) this frame reaches the fast path on later
+        // turns / interleaved thinking, so probe for the thinking-part marker
+        // and hand any structured-content frame to handle_delta.
+        || data.find("\"thinking\"") != std::string_view::npos)
         return FastData::Unparseable;
 
     const std::size_t cap = data.size() + simdjson::SIMDJSON_PADDING;
