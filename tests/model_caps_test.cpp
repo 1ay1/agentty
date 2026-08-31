@@ -11,6 +11,8 @@
 
 #include "agtest.hpp"
 
+#include "agentty/domain/capkey.hpp"
+
 #include "agentty/domain/catalog.hpp"
 
 using namespace agentty;
@@ -737,4 +739,61 @@ TEST_CASE("model picker ordering") {
     CHECK((flagship_order == std::vector<std::string>{
         "claude-fable-5", "claude-opus-4-8", "claude-opus-4-7",
         "claude-opus-4-6", "claude-opus-4-5"}));
+}
+
+// ── capkey: the canonical capability-key discipline ──────────────────────
+// The mistral-medium-3-5 vs -3.5 two-ladders bug was a KEYING bug: two
+// spellings of one model resolved through different keys to different facts.
+// capkey makes that class unrepresentable — these tests lock the three rules.
+TEST_CASE("capkey: one spelling (norm_model folds separators, never alnums)") {
+    using agentty::capkey::norm_model;
+    using agentty::capkey::norm_tail;
+    // Spelling variants of the SAME model → one key. (Cases straight from
+    // the models.dev corpus: 269 real multi-spelling groups unify this way.)
+    CHECK(norm_model("mistral-medium-3.5") == "mistral-medium-3-5");
+    CHECK(norm_model("Kimi-K2.5")          == "kimi-k2-5");
+    CHECK(norm_model("kimi k2.5")          == "kimi-k2-5");
+    CHECK(norm_model("GLM_5.2")            == "glm-5-2");
+    CHECK(norm_model("gpt-oss:20b")        == "gpt-oss-20b");
+    // Alphanumerics are NEVER altered — distinct models can't merge.
+    CHECK(norm_model("gpt-5-5") != norm_model("gpt-55"));
+    // Separator runs collapse; edges trim.
+    CHECK(norm_model("--a..b__c--")        == "a-b-c");
+    // Vendor prefixes strip via norm_tail.
+    CHECK(norm_tail("mistralai/Mistral-Medium-3.5") == "mistral-medium-3-5");
+    CHECK(norm_tail("bare-model")                    == "bare-model");
+}
+
+TEST_CASE("capkey: one provider namespace (identity-anchored dev mapping)") {
+    using agentty::capkey::resolve_dev_provider;
+    using agentty::capkey::dev_scope;
+    // Anchor 1: exact id.
+    CHECK(resolve_dev_provider("mistral", "MISTRAL_API_KEY", "") == "mistral");
+    CHECK(resolve_dev_provider("groq", "GROQ_API_KEY", "") == "groq");
+    // Anchor 2: primary env var — models.dev "google" carries GOOGLE_API_KEY
+    // first, which is NOT agentty's gemini row's primary (GEMINI_API_KEY),
+    // so it does NOT match via env… but "togetherai" ↔ TOGETHER_API_KEY does.
+    CHECK(resolve_dev_provider("togetherai", "TOGETHER_API_KEY", "")
+          == "together");
+    // Anchor 3: api host (github-copilot pins api.githubcopilot.com).
+    CHECK(resolve_dev_provider("github-copilot", "GITHUB_TOKEN",
+                               "https://api.githubcopilot.com") == "copilot");
+    // Unknown aggregators land in the inert foreign namespace.
+    CHECK(dev_scope("requesty", "REQUESTY_API_KEY", "https://api.requesty.ai")
+          == "dev:requesty");
+}
+
+TEST_CASE("capkey: registry keys normalise on write AND read") {
+    using agentty::set_catalog_effort_set;
+    using agentty::catalog_effort_set_for;
+    using agentty::Effort;
+    using agentty::effort_bit;
+    // Write with one spelling, read with another — same fact. This is the
+    // regression lock for the two-ladders screenshot bug.
+    const std::uint8_t hi = effort_bit(Effort::High);
+    set_catalog_effort_set("mistral/regr-model-3.5", hi);
+    CHECK(catalog_effort_set_for("Regr-Model-3-5", "mistral")
+          == static_cast<int>(hi));
+    CHECK(catalog_effort_set_for("regr_model_3.5", "mistral")
+          == static_cast<int>(hi));
 }

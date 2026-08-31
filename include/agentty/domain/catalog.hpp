@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "agentty/domain/id.hpp"
+#include "agentty/domain/capkey.hpp"   // canonical capability-key discipline
 
 namespace agentty {
 
@@ -798,13 +799,13 @@ inline void set_caps_provider_scope(std::string provider_id) {
 // The one-arg form uses the ACTIVE provider scope; pass `scope` explicitly
 // when resolving for a row that belongs to a DIFFERENT provider (the fused
 // picker renders every authed provider's models at once).
+// The model component is canonicalised (capkey::norm_model) so "3.5" vs
+// "3-5" vs case variants are one key — the registries' writers normalise
+// identically, making spelling-based misses structurally impossible.
 [[nodiscard]] inline std::string scoped_caps_key(std::string_view model_id,
                                                  std::string_view scope) {
     if (scope.empty()) return {};
-    std::string k{scope};
-    k += '/';
-    k += model_id;
-    return k;
+    return capkey::scoped(scope, model_id);
 }
 [[nodiscard]] inline std::string scoped_caps_key(std::string_view model_id) {
     return scoped_caps_key(model_id, caps_provider_scope());
@@ -841,6 +842,19 @@ inline void bump_caps_epoch() noexcept {
     caps_epoch_detail::counter().fetch_add(1, std::memory_order_relaxed);
 }
 
+
+// Normalise a registry key in place: the model component (after the last
+// '/', or the whole string when bare) goes through capkey::norm_model so
+// writers and readers agree byte-for-byte regardless of source spelling.
+[[nodiscard]] inline std::string norm_caps_key(std::string_view key) {
+    if (auto slash = key.rfind('/'); slash != std::string_view::npos) {
+        std::string out{key.substr(0, slash + 1)};
+        out += capkey::norm_model(key.substr(slash + 1));
+        return out;
+    }
+    return capkey::norm_model(key);
+}
+
 namespace catalog_reasoning_detail {
 inline std::shared_mutex& mu() { static std::shared_mutex m; return m; }
 inline std::map<std::string, bool>& map_() {
@@ -862,6 +876,7 @@ inline std::atomic<bool>& any() { static std::atomic<bool> a{false}; return a; }
 
 inline void set_catalog_reasoning(std::string model_id, bool reasons) {
     bump_caps_epoch();
+    model_id = norm_caps_key(model_id);
     std::unique_lock lk(catalog_reasoning_detail::mu());
     catalog_reasoning_detail::map_()[std::move(model_id)] = reasons;
     catalog_reasoning_detail::any().store(true, std::memory_order_relaxed);
@@ -872,7 +887,8 @@ inline void set_catalog_reasoning(std::string model_id, bool reasons) {
 // no-op; a later writer that DISAGREES poisons the key so it reads as "no
 // info". Scoped keys never collide across providers, so they use the plain
 // setter above; only the ambiguous bare tail goes through here.
-inline void merge_catalog_reasoning(const std::string& model_id, bool reasons) {
+inline void merge_catalog_reasoning(const std::string& raw_id, bool reasons) {
+    const std::string model_id = norm_caps_key(raw_id);
     std::unique_lock lk(catalog_reasoning_detail::mu());
     auto& m = catalog_reasoning_detail::map_();
     auto& poisoned = catalog_reasoning_detail::poisoned_();
@@ -900,7 +916,7 @@ inline void merge_catalog_reasoning(const std::string& model_id, bool reasons) {
     if (!scoped.empty())
         if (auto it = m.find(scoped); it != m.end())
             return it->second ? 1 : 0;
-    auto it = m.find(std::string{model_id});
+    auto it = m.find(capkey::norm_tail(model_id));
     if (it == m.end()) return -1;
     return it->second ? 1 : 0;
 }
@@ -924,6 +940,7 @@ inline std::atomic<bool>& any() { static std::atomic<bool> a{false}; return a; }
 
 inline void set_catalog_effort_set(std::string model_id, std::uint8_t set) {
     bump_caps_epoch();
+    model_id = norm_caps_key(model_id);
     std::unique_lock lk(catalog_effort_detail::mu());
     catalog_effort_detail::map_()[std::move(model_id)] = set;
     catalog_effort_detail::any().store(true, std::memory_order_relaxed);
@@ -932,8 +949,9 @@ inline void set_catalog_effort_set(std::string model_id, std::uint8_t set) {
 // Bare-tail merge for the effort-set registry — same cross-provider collision
 // semantics as merge_catalog_reasoning: agree → keep, disagree → poison to
 // "no declaration" so resolution falls back to the scoped fact / id-inference.
-inline void merge_catalog_effort_set(const std::string& model_id,
+inline void merge_catalog_effort_set(const std::string& raw_id,
                                      std::uint8_t set) {
+    const std::string model_id = norm_caps_key(raw_id);
     std::unique_lock lk(catalog_effort_detail::mu());
     auto& m = catalog_effort_detail::map_();
     auto& poisoned = catalog_effort_detail::poisoned_();
@@ -958,7 +976,7 @@ inline void merge_catalog_effort_set(const std::string& model_id,
     if (!scoped.empty())
         if (auto it = m.find(scoped); it != m.end())
             return static_cast<int>(it->second);
-    auto it = m.find(std::string{model_id});
+    auto it = m.find(capkey::norm_tail(model_id));
     if (it == m.end()) return -1;
     return static_cast<int>(it->second);
 }
@@ -994,6 +1012,7 @@ inline std::atomic<bool>&                    reasoning_override_any() {
 // Set/clear a single model's override (true = force effort on, false = off).
 inline void set_reasoning_override(std::string model_id, bool on) {
     bump_caps_epoch();
+    model_id = norm_caps_key(model_id);
     std::unique_lock lk(reasoning_override_detail::reasoning_override_mu());
     reasoning_override_detail::reasoning_override_map()[std::move(model_id)] = on;
     reasoning_override_detail::reasoning_override_any().store(
@@ -1032,7 +1051,7 @@ inline void set_reasoning_overrides(std::map<std::string, bool> all) {
         return -1;
     std::shared_lock lk(reasoning_override_detail::reasoning_override_mu());
     auto& m = reasoning_override_detail::reasoning_override_map();
-    auto it = m.find(std::string{model_id});
+    auto it = m.find(capkey::norm_tail(model_id));
     if (it == m.end()) return -1;
     return it->second ? 1 : 0;
 }
@@ -1074,6 +1093,7 @@ inline std::atomic<bool>& any() { static std::atomic<bool> a{false}; return a; }
 
 inline void set_learned_effort_set(std::string model_id, std::uint8_t set) {
     bump_caps_epoch();
+    model_id = norm_caps_key(model_id);
     std::unique_lock lk(learned_effort_detail::mu());
     learned_effort_detail::map_()[std::move(model_id)] = set;
     learned_effort_detail::any().store(true, std::memory_order_relaxed);
@@ -1104,7 +1124,7 @@ learned_effort_sets_snapshot() {
     if (!scoped.empty())
         if (auto it = m.find(scoped); it != m.end())
             return static_cast<int>(it->second);
-    auto it = m.find(std::string{model_id});
+    auto it = m.find(capkey::norm_tail(model_id));
     if (it == m.end()) return -1;
     return static_cast<int>(it->second);
 }

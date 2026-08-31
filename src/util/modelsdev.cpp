@@ -66,6 +66,8 @@ std::uint8_t bit_of(std::string_view v) {
 // 3-5 now poisons the bare key, and id inference's effort_high_only
 // correctly yields the {off, high} ladder.)
 void register_model(const std::string& dev_provider,
+                    const std::string& dev_env0,
+                    const std::string& dev_api,
                     const std::string& mid, const json& m) {
     if (!m.is_object()) return;
     const auto reasoning = m.find("reasoning");
@@ -89,40 +91,36 @@ void register_model(const std::string& dev_provider,
         }
     }
 
-    // The model id as agentty sees it on that provider's wire: the tail
-    // after any prefix (openrouter/nano-gpt style keys embed the upstream
-    // vendor as a path segment, which is part of THEIR wire id — keep the
-    // full mid for the scoped key, and use the tail only for bare merging).
-    const std::string bare = [&] {
-        auto slash = mid.rfind('/');
-        return slash == std::string::npos ? mid : mid.substr(slash + 1);
-    }();
+    // The scope for these records: agentty's OWN provider id when the
+    // models.dev entry's identity resolves to a registry row (exact id →
+    // primary env var → api host, see capkey::resolve_dev_provider), else
+    // the inert "dev:<id>" namespace agentty's lookups can never collide
+    // with — unknown aggregators' facts are preserved but harmless.
+    const std::string scope = capkey::dev_scope(dev_provider, dev_env0,
+                                                dev_api);
 
-    // Authoritative, collision-free: "<models.dev provider>/<mid>".
-    if (!dev_provider.empty()) {
-        set_catalog_reasoning(dev_provider + "/" + mid,
-                              reasoning->get<bool>());
+    // Scoped records: under the full mid AND — for vendor-prefixed keys
+    // ("mistralai/mistral-medium-3-5") — under the tail, since agentty's
+    // scoped lookup uses the wire model id which may omit the vendor path.
+    // capkey normalisation inside the setters folds spelling variants.
+    set_catalog_reasoning(scope + "/" + mid, reasoning->get<bool>());
+    if (set >= 0)
+        set_catalog_effort_set(scope + "/" + mid,
+                               static_cast<std::uint8_t>(set));
+    const std::string tail = capkey::norm_tail(mid);
+    if (tail != capkey::norm_model(mid)) {
+        set_catalog_reasoning(scope + "/" + tail, reasoning->get<bool>());
         if (set >= 0)
-            set_catalog_effort_set(dev_provider + "/" + mid,
+            set_catalog_effort_set(scope + "/" + tail,
                                    static_cast<std::uint8_t>(set));
-        // Aggregator-style mids ("mistralai/mistral-medium-3-5"): also
-        // record under "<provider>/<tail>" so agentty's scoped lookup —
-        // which uses the wire model id — hits when the user's endpoint
-        // strips the vendor prefix.
-        if (bare != mid) {
-            set_catalog_reasoning(dev_provider + "/" + bare,
-                                  reasoning->get<bool>());
-            if (set >= 0)
-                set_catalog_effort_set(dev_provider + "/" + bare,
-                                       static_cast<std::uint8_t>(set));
-        }
     }
 
-    // Bare key: SHARED across every provider — merge-or-poison only.
-    if (!bare.empty()) {
-        merge_catalog_reasoning(bare, reasoning->get<bool>());
+    // Bare key: SHARED across every provider — merge-or-poison only
+    // (agree → keep, disagree → no-info; RULE 3 in capkey.hpp).
+    if (!tail.empty()) {
+        merge_catalog_reasoning(tail, reasoning->get<bool>());
         if (set >= 0)
-            merge_catalog_effort_set(bare, static_cast<std::uint8_t>(set));
+            merge_catalog_effort_set(tail, static_cast<std::uint8_t>(set));
     }
 }
 
@@ -136,8 +134,16 @@ int load_document(const std::string& body) {
             if (!provider.is_object()) continue;
             auto models = provider.find("models");
             if (models == provider.end() || !models->is_object()) continue;
+            // Identity anchors for capkey::dev_scope (see capkey.hpp): the
+            // entry's FIRST env var + api URL, empty when absent.
+            std::string env0;
+            if (auto e = provider.find("env");
+                e != provider.end() && e->is_array() && !e->empty()
+                && (*e)[0].is_string())
+                env0 = (*e)[0].get<std::string>();
+            const std::string api = provider.value("api", std::string{});
             for (const auto& [mid, m] : models->items()) {
-                register_model(pid, mid, m);
+                register_model(pid, env0, api, mid, m);
                 ++n;
             }
         }
