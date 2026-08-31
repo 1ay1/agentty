@@ -172,6 +172,24 @@ inline std::vector<Element> reasoning_effort_footer(const Model& m,
         const bool on = m.d.show_reasoning;
         parts.push_back(text("  ", fg_dim(muted)));
         parts.push_back(text("^R ", fg_of(fg)));
+        // Honest label when the DIALECT can't carry reasoning text back.
+        // Copilot / first-party OpenAI use Chat Completions, which does not
+        // transmit GPT-5 reasoning at all (it is generated and billed, but
+        // only the Responses API returns it). Showing "✦ shown" there
+        // promises output that can never arrive — the user reasonably
+        // reads that as a bug in agentty.
+        //
+        // `scope` is the row's provider in the fused picker; empty means
+        // the per-provider picker, i.e. the ACTIVE provider — which is
+        // exactly what caps_provider_scope() publishes on every switch
+        // (endpoint label for OpenAI-family, agent id for ACP, else the
+        // default id).
+        const std::string prov =
+            scope.empty() ? caps_provider_scope() : std::string{scope};
+        if (!provider::wire_streams_reasoning_text(prov)) {
+            parts.push_back(text("n/a on this API", fg_dim(muted)));
+            return;
+        }
         parts.push_back(text(on ? "\xe2\x9c\xa6 shown" : "hidden",
                              on ? fg_bold(accent) : fg_dim(muted)));
     };

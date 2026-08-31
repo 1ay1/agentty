@@ -15,6 +15,7 @@
 
 #include "agentty/domain/catalog.hpp"
 #include "agentty/provider/selection.hpp"
+#include "agentty/provider/registry.hpp"
 
 using namespace agentty;
 
@@ -885,4 +886,26 @@ TEST_CASE("caps scope: provider::select publishes the SAME id lookups use") {
         provider::select(s);
         CHECK(caps_provider_scope() == std::string{provider::default_provider_id()});
     }
+}
+
+TEST_CASE("wire dialect reasoning-text transmissibility") {
+    using provider::wire_streams_reasoning_text;
+    // Copilot + first-party OpenAI ride Chat Completions, which does not
+    // return GPT-5 reasoning text at all (generated + billed, but only the
+    // Responses API surfaces it). The picker labels this "n/a on this API"
+    // instead of promising "✦ shown" output that can never arrive.
+    CHECK(!wire_streams_reasoning_text("copilot"));
+    // agentty's own "openai" row is Wire::OpenAIResponses — the Responses
+    // API DOES return reasoning summaries, which is exactly why Copilot
+    // (routing GPT-5 through Chat Completions) is the odd one out.
+    CHECK(wire_streams_reasoning_text("openai"));
+    // Anthropic streams thinking blocks natively.
+    CHECK(wire_streams_reasoning_text("anthropic"));
+    // OpenAI-COMPAT servers on the SAME dialect DO populate
+    // reasoning_content (DeepSeek-R1, Mistral, OpenRouter, vLLM) — the
+    // rule is per-host, not per-dialect.
+    CHECK(wire_streams_reasoning_text("mistral"));
+    CHECK(wire_streams_reasoning_text("openrouter"));
+    // Unknown / custom host: assume yes rather than hiding a real feature.
+    CHECK(wire_streams_reasoning_text("localhost:8080"));
 }

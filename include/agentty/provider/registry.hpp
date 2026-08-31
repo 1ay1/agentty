@@ -199,6 +199,36 @@ inline constexpr std::array<ProviderDescriptor, 15> kProviders{{
     return nullptr;
 }
 
+// Can this wire DIALECT carry reasoning TEXT back to us?
+//
+// A model reasoning and a model letting you SEE it are different things.
+// OpenAI's Chat Completions dialect does not transmit reasoning text for
+// the GPT-5 family: the tokens are generated and billed, but the response
+// carries no reasoning_content / summary — that is exclusive to the
+// Responses API. Anthropic Messages streams thinking blocks natively, and
+// many OpenAI-COMPAT servers (DeepSeek-R1, Mistral, vLLM, OpenRouter) do
+// populate reasoning_content on the Chat dialect, which is why the
+// transport parses it unconditionally.
+//
+// So this is deliberately about the FIRST-PARTY OpenAI/Copilot case:
+// callers use it to explain that reasoning is happening but cannot be
+// displayed, rather than showing a "shown" toggle that can never produce
+// output. It takes the provider id (not just the Wire) precisely because
+// the same dialect behaves differently across hosts.
+[[nodiscard]] inline bool wire_streams_reasoning_text(
+        std::string_view provider_id) noexcept {
+    const ProviderPreset* p = preset_for(provider_id);
+    if (!p) return true;                       // unknown/custom host: assume yes
+    if (p->wire != Wire::OpenAIChat) return true;
+    // Only the first-party GitHub Copilot endpoint hides it. Note that
+    // agentty's own "openai" row is Wire::OpenAIResponses — the Responses
+    // API DOES return reasoning summaries, which is precisely why Copilot
+    // routing GPT-5 through Chat Completions is the odd one out. Every
+    // other OpenAI-COMPAT host on this dialect (DeepSeek, Mistral,
+    // OpenRouter, vLLM, Ollama) populates reasoning_content.
+    return provider_id != "copilot";
+}
+
 // The default provider's id — first row of the table.
 [[nodiscard]] inline std::string_view default_provider_id() noexcept {
     return kProviders.front().id;
