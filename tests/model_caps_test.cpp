@@ -14,6 +14,7 @@
 #include "agentty/domain/capkey.hpp"
 
 #include "agentty/domain/catalog.hpp"
+#include "agentty/provider/selection.hpp"
 
 using namespace agentty;
 
@@ -817,4 +818,71 @@ TEST_CASE("clamp_effort: empty/unknown ids never wipe the user's tier") {
     // the user's tier to None. The model-switch sites guard on empty id; this
     // locks the caps-side behaviour those guards rely on.
     CHECK(clamp_effort(Effort::High, resolved_caps("")) == Effort::None);
+}
+
+// ── Capability-scope robustness ───────────────────────────────────────
+// Capability facts are keyed "provider/model" so the SAME bare model id
+// served by two hosts can carry different ladders. These pin the two
+// invariants that make that safe across every provider.
+
+TEST_CASE("caps scope: learned facts are per-provider, never cross-talk") {
+    // Two hosts serving the same bare id must not share a learned ladder.
+    const std::string id = "mistral-small-latest";
+    set_learned_effort_set(scoped_caps_key(id, "mistral"),
+                           static_cast<int>(effort_bit(Effort::Low) | effort_bit(Effort::High)));
+    set_learned_effort_set(scoped_caps_key(id, "openrouter"),
+                           static_cast<int>(effort_bit(Effort::Medium)));
+
+    const auto a = resolved_caps(id, "mistral");
+    const auto b = resolved_caps(id, "openrouter");
+    CHECK(a.effort_set_known);
+    CHECK(b.effort_set_known);
+    CHECK(a.effort_set != b.effort_set);   // no bleed between hosts
+
+    // An unknown host falls back rather than inheriting a neighbour's set.
+    const auto c = resolved_caps(id, "some-unconfigured-host");
+    CHECK(c.effort_set != a.effort_set);
+}
+
+TEST_CASE("caps scope: [1m] variant shares the base model's facts") {
+    // norm_model folds the context marker on PURPOSE — a capability fact
+    // belongs to the model, not the window variant — so a fact learned
+    // on the wire id must still hit when looked up under the picker's
+    // [1m]-marked id. (Row IDENTITY keeps the marker; see norm_row_id.)
+    const std::string base = "claude-opus-4-8";
+    const std::string one_m = "claude-opus-4-8[1m]";
+    CHECK(capkey::norm_model(base) == capkey::norm_model(one_m));
+    CHECK(capkey::norm_row_id(base) != capkey::norm_row_id(one_m));
+    // Same scope key ⇒ one fact serves both.
+    CHECK(scoped_caps_key(base, "anthropic")
+          == scoped_caps_key(one_m, "anthropic"));
+}
+
+TEST_CASE("caps scope: provider::select publishes the SAME id lookups use") {
+    // The ambient caps scope must equal what the rest of the tree calls
+    // the provider id (modal.cpp's active_provider_id()), or facts are
+    // filed under one key and looked up under another — they can never
+    // be found again. Regression: external ACP agents published the
+    // DEFAULT id ("anthropic") as their scope while every catalog /
+    // recents / fused row was keyed by the agent id.
+    {
+        provider::Selection s;
+        s.kind = provider::Kind::ExternalAcp;
+        s.acp_agent_id = "my-acp-agent";
+        provider::select(s);
+        CHECK(caps_provider_scope() == "my-acp-agent");
+    }
+    {
+        provider::Selection s;
+        s.kind = provider::Kind::OpenAI;
+        s.openai_endpoint.label = "groq";
+        provider::select(s);
+        CHECK(caps_provider_scope() == "groq");
+    }
+    {
+        provider::Selection s;
+        s.kind = provider::Kind::Anthropic;
+        provider::select(s);
+        CHECK(caps_provider_scope() == std::string{provider::default_provider_id()});
+    }
 }

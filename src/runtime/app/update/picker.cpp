@@ -1264,7 +1264,8 @@ Step switch_to_model_ref(Model m, const ModelRef& ref, bool record = true) {
             }
         if (!m.d.model_id.value.empty())
             m.d.effort = clamp_effort(m.d.effort,
-                                      resolved_caps(m.d.model_id.value));
+                                      resolved_caps(m.d.model_id.value,
+                                                    ref.provider_id));
         tools::subagent::set_model(m.d.model_id.value);
         persist_settings(m);
         if (record) record_recent(m, ref.provider_id, ref.model_id);
@@ -1578,7 +1579,15 @@ Step fused_picker_update(Model m, msg::FusedPickerMsg pm) {
                 label = "reasoning: auto (catalog default)";
             }
             deps().save_settings(s);
-            m.d.effort = clamp_effort(m.d.effort, resolved_caps(id));
+            // Clamp against the ROW's provider scope, not the ambient one:
+            // the fused picker lists models from providers that are NOT
+            // active, and capability facts are keyed "provider/model".
+            // Using the ambient scope here (as this arm used to) resolved
+            // a non-active row's effort ladder against the CURRENT
+            // provider's facts — the sibling FusedPickerCycleEffort arm
+            // already passes row.provider_id for exactly this reason.
+            m.d.effort = clamp_effort(m.d.effort,
+                                      resolved_caps(id, row.provider_id));
             auto toast = set_status_toast(m, label);
             return {std::move(m), std::move(toast)};
         },

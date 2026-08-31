@@ -158,9 +158,18 @@ void select(Selection s) {
     // Publish the provider id as the capability-key scope BEFORE swapping the
     // selection in, so a resolved_caps() racing the switch sees, at worst,
     // the OLD scope with the OLD selection — never a mismatched pair.
+    //
+    // The value MUST match what the rest of the tree calls the provider id
+    // (modal.cpp's active_provider_id(), which every catalog/recents/fused
+    // row is keyed by): OpenAI-family → the endpoint label, external ACP →
+    // the agent id, everything else → the default id. Collapsing ACP onto
+    // the default id (as this did) filed its capability facts under
+    // "anthropic/..." while every lookup asked for "<agent-id>/...", so an
+    // ACP agent's learned effort ladder could never be found again.
     set_caps_provider_scope(
-        s.kind == Kind::OpenAI ? s.openai_endpoint.label
-                               : std::string{default_provider_id()});
+        s.kind == Kind::OpenAI      ? s.openai_endpoint.label
+      : s.kind == Kind::ExternalAcp ? s.acp_agent_id
+                                    : std::string{default_provider_id()});
     std::lock_guard lk(g_active_mu);
     g_active = std::move(s);
 }

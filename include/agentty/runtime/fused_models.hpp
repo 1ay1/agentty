@@ -73,11 +73,23 @@ namespace detail {
     return h;
 }
 
-// Find a model in a catalog by wire id. Returns nullptr if absent.
+// Find a model in a catalog by wire id. Exact match first; on a miss,
+// fall back to ROW IDENTITY (capkey::norm_row_id) so a recent survives
+// the provider re-spelling its id — "mistral-medium-3.5" vs
+// "mistral-medium-3-5", a case change, a stray separator. Without the
+// fallback such a recent silently vanished from the MRU on the next
+// catalog refresh even though the model was still served.
+//
+// Row identity (not norm_model) so a `[1m]` context variant still only
+// matches its own row, never its base model.
 [[nodiscard]] inline const ModelInfo* find_model(const ProviderCatalog& c,
                                                  std::string_view model_id) {
     for (const auto& mi : c.models)
         if (mi.id.value == model_id) return &mi;
+    const std::string want = capkey::norm_row_id(model_id);
+    if (want.empty()) return nullptr;
+    for (const auto& mi : c.models)
+        if (capkey::norm_row_id(mi.id.value) == want) return &mi;
     return nullptr;
 }
 
