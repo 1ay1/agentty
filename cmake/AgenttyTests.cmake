@@ -153,6 +153,16 @@ target_include_directories(host_escape_test PRIVATE include)
 add_test(NAME host_escape_test COMMAND host_escape_test)
 set_tests_properties(host_escape_test PROPERTIES TIMEOUT 30)
 
+# Single-root layout + legacy ~/.config/agentty migration. Narrow link —
+# user_root.cpp + home_dir.cpp only — so the sandboxed $HOME manipulation
+# can't interact with any other subsystem's statics.
+agentty_test(user_root_test MODE raw)
+add_executable(user_root_test EXCLUDE_FROM_ALL
+    tests/user_root_test.cpp src/util/user_root.cpp src/util/home_dir.cpp)
+target_include_directories(user_root_test PRIVATE include)
+add_test(NAME user_root_test COMMAND user_root_test)
+set_tests_properties(user_root_test PROPERTIES TIMEOUT 30)
+
 # ── Finalize: build agentty_tests + derived aggregates ──────────────────────
 agentty_finalize_tests()
 

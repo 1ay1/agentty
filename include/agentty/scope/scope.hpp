@@ -132,6 +132,12 @@ struct Tagged {
 // any resolution deterministically.
 struct Env {
     fs::path                home;         // ~ (empty ⇒ User/…/interop skipped)
+    // The native User-locus base: util::user_root() (~/.agentty, or
+    // $AGENTTY_HOME when overridden). Carried separately from `home` so
+    // the interop dialects (~/.agents, ~/.claude) keep anchoring at ~
+    // while the native dir follows the override. Empty ⇒ same as
+    // home/".agentty" unavailable.
+    fs::path                user_native_base;
     // The ACTIVE PROJECT dir (util::project_root(): the launch cwd clamped
     // inside the access boundary), NOT the widenable workspace_root(). This is
     // where Project/Local config anchors, so `read` under `--workspace /`

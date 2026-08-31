@@ -5,7 +5,7 @@
 
 #include "agentty/util/update.hpp"
 
-#include "agentty/auth/auth.hpp"    // auth::config_dir()
+#include "agentty/util/user_root.hpp"    // user_cache_dir()
 #include "agentty/io/http.hpp"
 #include "agentty/util/dbglog.hpp"
 
@@ -38,7 +38,7 @@ namespace {
 constexpr const char* kRepo = "1ay1/agentty";
 constexpr auto kCacheTtl = std::chrono::hours{24};
 
-fs::path cache_path() { return auth::config_dir() / "update_check.json"; }
+fs::path cache_path() { return util::user_cache_dir() / "update_check.json"; }
 
 // Where is the running binary?
 fs::path self_path() {

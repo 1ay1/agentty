@@ -23,6 +23,7 @@
 
 #include "agentty/domain/conversation.hpp"
 #include "agentty/provider/provider.hpp"   // provider::ToolSpec
+#include "agentty/util/user_root.hpp"      // single per-user root (~/.agentty)
 
 namespace agentty::provider::wire {
 
@@ -113,13 +114,14 @@ namespace agentty::provider::wire {
 // when neither candidate exists.
 [[nodiscard]] inline std::filesystem::path resolve_global_agents_md() noexcept {
     const auto home = home_dir();
-    if (home.empty()) return {};
+    const auto root = ::agentty::util::user_root();
 
     const std::filesystem::path candidates[] = {
-        home / ".agentty" / "AGENTS.md",
-        home / ".agents"  / "AGENTS.md",
+        root.empty() ? std::filesystem::path{} : root / "AGENTS.md",
+        home.empty() ? std::filesystem::path{} : home / ".agents" / "AGENTS.md",
     };
     for (const auto& p : candidates) {
+        if (p.empty()) continue;
         std::error_code ec;
         if (std::filesystem::is_regular_file(p, ec) && !ec) {
             // Non-empty check via read_capped_file (cheaper than stat+open twice).

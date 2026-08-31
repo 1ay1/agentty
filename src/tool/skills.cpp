@@ -1,6 +1,7 @@
 // agentty::tools::skills — implementation. See skills.hpp for the
 // progressive-disclosure rationale and the discovery-root table.
 
+#include "agentty/util/user_root.hpp"
 #include "agentty/tool/skills.hpp"
 #include "agentty/util/home_dir.hpp"
 
@@ -282,6 +283,7 @@ const std::vector<Skill>& all() {
     // env.project_root = "." preserves that exactly.
     scope::Env env;
     env.home             = home_dir();
+    env.user_native_base = ::agentty::util::user_root();
     env.project_root     = fs::path{"."};
     env.project_writable = true;   // discovery reads all dialects; unused here
     const scope::Layout layout{.leaf = "skills"};

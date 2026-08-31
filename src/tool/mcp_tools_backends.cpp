@@ -13,6 +13,7 @@
 //
 //   Built + installed by build_mcp_tool_defs() (mcp_tools_bridge.cpp).
 
+#include "agentty/util/user_root.hpp"
 #include "agentty/tool/mcp_tools_backends.hpp"
 #include "agentty/util/home_dir.hpp"
 
@@ -590,6 +591,7 @@ void refresh_user_agents_locked(UserAgentStore& store) {
     {
         scope::Env env;
         env.home             = home;
+        env.user_native_base = ::agentty::util::user_root();
         env.project_root     = fs::path{"."};
         env.project_writable = true;
         const scope::Layout layout{.leaf = "agents"};

@@ -16,6 +16,7 @@
 
 #include "agentty/tool/hooks.hpp"
 #include "agentty/util/home_dir.hpp"
+#include "agentty/util/user_root.hpp"
 
 #include "agentty/auth/auth.hpp"            // auth::sha256_hex (file-content hash)
 #include "agentty/scope/scope.hpp"          // scope::Approvals (shared trust store)
@@ -105,7 +106,8 @@ struct HooksFile {
     HooksFile out;
     const fs::path candidates[] = {
         fs::path{".agentty"} / "hooks.json",
-        home_dir().empty() ? fs::path{} : home_dir() / ".agentty" / "hooks.json",
+        ::agentty::util::user_root().empty() ? fs::path{}
+                                  : ::agentty::util::user_root() / "hooks.json",
     };
     for (const auto& c : candidates) {
         if (c.empty()) continue;
@@ -136,9 +138,9 @@ struct HooksFile {
 }
 
 [[nodiscard]] fs::path approvals_path() {
-    auto h = home_dir();
-    if (h.empty()) return {};
-    return h / ".agentty" / "hooks_approved.json";
+    auto root = ::agentty::util::user_root();
+    if (root.empty()) return {};
+    return root / "hooks_approved.json";
 }
 
 // Hooks trust now rides on the SHARED content-hash primitive

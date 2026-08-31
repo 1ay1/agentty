@@ -166,26 +166,34 @@ bool init() {
 
     if (spec && *spec) parse_filter(spec);
     if (file && *file) open_sink(file);
-    // A filter without a file logs to $XDG_STATE_HOME/agentty/agentty.log
-    // (or ~/.agentty/agentty.log) so AGENTTY_LOG=debug alone just works.
+    // A filter without a file logs to <user-root>/logs/agentty.log
+    // ($AGENTTY_HOME/logs or ~/.agentty/logs — the single-root layout,
+    // see util/user_root.hpp) so AGENTTY_LOG=debug alone just works.
+    // Deliberately hand-rolled env reads (no <filesystem>, no user_root
+    // dependency): logx must stay linkable from the narrow sanitizer
+    // test TUs and be crash-handler-safe.
     if (g_fd < 0 && spec && *spec) {
-        std::string fallback;
-        if (const char* xdg = std::getenv("XDG_STATE_HOME"); xdg && *xdg)
-            fallback = std::string{xdg} + "/agentty";
+        std::string root;
+        if (const char* ah = std::getenv("AGENTTY_HOME"); ah && *ah)
+            root = ah;
         else if (const char* home = std::getenv("HOME"); home && *home)
-            fallback = std::string{home} + "/.agentty";
+            root = std::string{home} + "/.agentty";
 #if defined(_WIN32)
-        if (fallback.empty())
+        if (root.empty())
             if (const char* prof = std::getenv("USERPROFILE"); prof && *prof)
-                fallback = std::string{prof} + "\\.agentty";
+                root = std::string{prof} + "\\.agentty";
 #endif
-        if (!fallback.empty()) {
+        if (!root.empty()) {
 #if defined(_WIN32)
-            ::_mkdir(fallback.c_str());
-            open_sink((fallback + "\\agentty.log").c_str());
+            ::_mkdir(root.c_str());
+            const std::string dir = root + "\\logs";
+            ::_mkdir(dir.c_str());
+            open_sink((dir + "\\agentty.log").c_str());
 #else
-            ::mkdir(fallback.c_str(), 0755);
-            open_sink((fallback + "/agentty.log").c_str());
+            ::mkdir(root.c_str(), 0700);
+            const std::string dir = root + "/logs";
+            ::mkdir(dir.c_str(), 0755);
+            open_sink((dir + "/agentty.log").c_str());
 #endif
         }
     }

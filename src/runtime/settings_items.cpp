@@ -2,6 +2,7 @@
 
 #include "agentty/runtime/settings_items.hpp"
 #include "agentty/util/home_dir.hpp"
+#include "agentty/util/user_root.hpp"
 
 #include "agentty/runtime/model.hpp"
 #include "agentty/domain/profile.hpp"
@@ -253,10 +254,6 @@ std::vector<Item> items_for(const Model& m, Category cat) {
 
 namespace {
 
-fs::path home_dir_() {
-    return util::home_dir_or_empty();
-}
-
 // Whitespace-split a line into tokens.
 std::vector<std::string> split_ws(const std::string& s) {
     std::vector<std::string> out;
@@ -397,8 +394,8 @@ AddResult create_starter(Category cat, const std::string& name) {
     if (segs.empty())
         return {false, "name: letters/digits/_/- per segment, ':' to nest, "
                        "≤3 levels, no leading dot or dash"};
-    const fs::path home = home_dir_();
-    if (home.empty()) return {false, "no HOME to write under"};
+    const fs::path uroot = util::user_root();
+    if (uroot.empty()) return {false, "no HOME to write under"};
 
     const char* sub = nullptr;
     std::string tmpl;
@@ -418,10 +415,12 @@ AddResult create_starter(Category cat, const std::string& name) {
         return {false, "create_starter only supports commands/agents"};
     }
 
-    // Build <home>/.agentty/<sub>/<seg1>/<seg2>/<leaf>.md from the validated
+    // Build <user-root>/<sub>/<seg1>/<seg2>/<leaf>.md from the validated
     // segments (all-but-last are directories). Segments are known-safe
-    // (no '.'/'..'/separators), so no path escape is possible.
-    fs::path dir = home / ".agentty" / sub;
+    // (no '.'/'..'/separators), so no path escape is possible. user_root
+    // honors $AGENTTY_HOME and is the same base the skills/commands
+    // scan ladder resolves (scope::Env::user_native_base).
+    fs::path dir = uroot / sub;
     for (std::size_t i = 0; i + 1 < segs.size(); ++i) dir /= segs[i];
     const fs::path file = dir / (segs.back() + ".md");
 

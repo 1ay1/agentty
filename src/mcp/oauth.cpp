@@ -8,6 +8,7 @@
 
 #include "agentty/mcp/oauth.hpp"
 #include "agentty/util/home_dir.hpp"
+#include "agentty/util/user_root.hpp"
 
 #include <atomic>
 #include <cctype>
@@ -549,10 +550,9 @@ fs::path resolve_mcp_config() {
         return fs::is_regular_file(p, ec) ? p : fs::path{};
     }
     if (auto local = fs::path{".agentty"} / "mcp.json"; fs::is_regular_file(local, ec)) return local;
-    // Unified home root ($HOME on POSIX/MSYS2, $USERPROFILE on native Windows)
-    // — matches config_dir()/data_dir() so the user config is looked up in the
-    // same place agentty writes it, on every platform.
-    if (auto user = util::home_dir() / ".agentty" / "mcp.json";
+    // Single per-user root (~/.agentty or $AGENTTY_HOME — see
+    // util/user_root.hpp) — the same place the bridge + plugin write it.
+    if (auto user = util::user_root() / "mcp.json";
         fs::is_regular_file(user, ec)) {
         return user;
     }

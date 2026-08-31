@@ -11,6 +11,7 @@
 // path rewrites the file atomically through util::write_file (which
 // itself uses write+flush+rename when the underlying impl supports it).
 
+#include "agentty/util/user_root.hpp"
 #include "agentty/tool/memory_store.hpp"
 
 #include "agentty/scope/scope.hpp"
@@ -511,6 +512,7 @@ fs::path path_for(Scope s) {
     const scope::Layout layout{.leaf = "memory.jsonl"};
     scope::Env env;
     env.home             = home_dir();       // richer than scope's own
+    env.user_native_base = ::agentty::util::user_root();
     env.project_root     = util::project_root();
     env.project_writable = dir_path_writable(env.project_root / ".agentty");
 

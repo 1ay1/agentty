@@ -75,6 +75,7 @@
 #include "agentty/mcp/client.hpp"   // mcp::release_servers
 #include "agentty/rag/rag_adapter.hpp"
 #include "agentty/util/update.hpp"
+#include "agentty/util/user_root.hpp"   // user_logs_dir (stderr.log home)
 #include "agentty/provider/anthropic/provider.hpp"
 #include "agentty/provider/chatgpt/provider.hpp"
 #include "agentty/provider/copilot/provider.hpp"
@@ -986,7 +987,7 @@ int main(int argc, char** argv) {
     if (const char* off = std::getenv("AGENTTY_NO_STDERR_REDIRECT");
         !(off && off[0] && off[0] != '0')) {
         std::error_code lec;
-        std::filesystem::path logdir = auth::config_dir();   // ~/.agentty
+        std::filesystem::path logdir = util::user_logs_dir();   // ~/.agentty/logs
         std::filesystem::create_directories(logdir, lec);
         std::filesystem::path logpath = logdir / "stderr.log";
         // Append so a crash's trailing output survives across sessions;

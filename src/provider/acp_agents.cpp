@@ -3,6 +3,7 @@
 
 #include "agentty/provider/acp_agents.hpp"
 #include "agentty/util/home_dir.hpp"
+#include "agentty/util/user_root.hpp"
 
 #include <cstdio>
 #include <cstdlib>
@@ -39,8 +40,8 @@ fs::path resolve_config(bool& out_project_local) {
         fs::path p{e};
         return fs::is_regular_file(p, ec) ? p : fs::path{};
     }
-    if (fs::path h = home_dir(); !h.empty()) {
-        fs::path p = h / ".agentty" / "acp-agents.json";
+    if (fs::path root = ::agentty::util::user_root(); !root.empty()) {
+        fs::path p = root / "acp-agents.json";
         if (fs::is_regular_file(p, ec)) return p;
     }
     fs::path proj = fs::path{".agentty"} / "acp-agents.json";

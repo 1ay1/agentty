@@ -4,6 +4,7 @@
 
 #include "agentty/tool/plugin.hpp"
 #include "agentty/util/home_dir.hpp"
+#include "agentty/util/user_root.hpp"
 
 #include "agentty/scope/scope.hpp"
 
@@ -132,8 +133,8 @@ struct Loaded {
 
 fs::path config_path(bool project) {
     if (project) return fs::path{".agentty"} / "mcp.json";
-    auto h = home_dir();
-    return (h.empty() ? fs::path{".agentty"} : h / ".agentty") / "mcp.json";
+    auto root = ::agentty::util::user_root();
+    return (root.empty() ? fs::path{".agentty"} : root) / "mcp.json";
 }
 
 namespace {

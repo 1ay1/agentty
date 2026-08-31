@@ -86,8 +86,8 @@ priority order:
 1. **`-k` / `--key`** — CLI flag, API key for a single session
 2. **`ANTHROPIC_API_KEY`** env var — API key
 3. **`CLAUDE_CODE_OAUTH_TOKEN`** env var — OAuth token (reuse Claude Code's auth)
-4. **Credentials file** — `~/.config/agentty/credentials.json`
-   (or `$XDG_CONFIG_HOME/agentty/credentials.json`)
+4. **Credentials file** — `~/.agentty/credentials/credentials.json`
+   (or `$AGENTTY_HOME/credentials/credentials.json`)
 
 If a stored OAuth token is expired and a refresh token is present, `resolve()`
 refreshes inline before returning. If the refresh fails (or there is no refresh
@@ -96,7 +96,7 @@ authenticated" message.
 
 ## Credentials File
 
-**Path:** `~/.config/agentty/credentials.json` (mode `0600`, set via
+**Path:** `~/.agentty/credentials/credentials.json` (mode `0600`, set via
 `restrict_perms()` → `chmod` on POSIX; best-effort on Windows).
 
 ```json
@@ -111,9 +111,13 @@ authenticated" message.
 - `method` — `"oauth"` or `"api_key"`
 - `expires_at` — Unix milliseconds; `0` means no expiration info (API keys never expire)
 
-`config_dir()` honours `XDG_CONFIG_HOME`, then falls back to `$HOME/.config`,
-then `$USERPROFILE/.config` on Windows. The directory is created on first read
-(`src/io/auth.cpp`) and `chmod 0700`'d best-effort.
+`config_dir()` resolves to `<user-root>/credentials` — the single per-user
+root `~/.agentty` (override: `$AGENTTY_HOME`), NOT `$XDG_CONFIG_HOME`. See
+`include/agentty/util/user_root.hpp` for the full rationale (secrets and
+conversation data must not ride along when users sync `~/.config` as
+dotfiles) and the one-time migration that moves a legacy
+`~/.config/agentty` install into place. Both the root and `credentials/`
+are created on first use and `chmod 0700`'d best-effort.
 
 ### At-Rest Encryption (opt-in)
 
@@ -261,7 +265,7 @@ OpenSSL `RAND_bytes` (CSPRNG) with an unbiased 6-bit mask:
 │                                                           │
 │  8. Receive: { access_token, refresh_token, expires_in }  │
 │  9. expires_at_ms = now_ms() + expires_in * 1000          │
-│ 10. save_credentials() → ~/.config/agentty/credentials.json  │
+│ 10. save_credentials() → ~/.agentty/credentials/credentials.json  │
 │                                                           │
 └───────────────────────────────────────────────────────────┘
 ```

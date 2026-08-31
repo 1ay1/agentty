@@ -122,7 +122,7 @@ using AuthHeader = std::variant<ApiKeyHeader, BearerHeader>;
 [[nodiscard]] std::string_view persist_tag(const Credentials& c) noexcept;
 
 // ── Paths ────────────────────────────────────────────────────────────────
-[[nodiscard]] std::filesystem::path config_dir();              // ~/.config/agentty on Unix
+[[nodiscard]] std::filesystem::path config_dir();              // ~/.agentty/credentials (see util/user_root.hpp)
 [[nodiscard]] std::filesystem::path credentials_path();
 
 // ── Prewarm ──────────────────────────────────────────────────────────────

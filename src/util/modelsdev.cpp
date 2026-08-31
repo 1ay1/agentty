@@ -10,7 +10,7 @@
 
 #include <nlohmann/json.hpp>
 
-#include "agentty/auth/auth.hpp"        // config_dir()
+#include "agentty/util/user_root.hpp"    // user_cache_dir()
 #include "agentty/domain/catalog.hpp"   // set_catalog_reasoning / set_catalog_effort_set
 #include "agentty/io/http.hpp"
 #include "agentty/util/dbglog.hpp"
@@ -22,7 +22,7 @@ namespace {
 using json = nlohmann::json;
 namespace fs = std::filesystem;
 
-fs::path cache_path() { return auth::config_dir() / "modelsdev.json"; }
+fs::path cache_path() { return util::user_cache_dir() / "modelsdev.json"; }
 
 constexpr auto kMaxAge = std::chrono::hours{24};
 constexpr std::size_t kMaxBody = 8ull * 1024 * 1024;   // api.json is ~2 MB
@@ -218,7 +218,7 @@ int refresh() {
     if (n > 0) {
         // Atomic-ish write: tmp + rename, matching the rest of the config dir.
         std::error_code ec;
-        fs::create_directories(auth::config_dir(), ec);
+        fs::create_directories(util::user_cache_dir(), ec);
         const auto tmp = cache_path().string() + ".tmp";
         {
             std::ofstream ofs(tmp, std::ios::binary | std::ios::trunc);

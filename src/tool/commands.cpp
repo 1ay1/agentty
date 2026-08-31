@@ -3,6 +3,7 @@
 // skills.cpp deliberately (same lenient frontmatter subset, same mtime-
 // signature cache) so the two loaders stay conceptually one thing.
 
+#include "agentty/util/user_root.hpp"
 #include "agentty/tool/commands.hpp"
 #include "agentty/util/home_dir.hpp"
 
@@ -205,6 +206,7 @@ const std::vector<Command>& all() {
     // ".agentty/commands" against cwd.
     scope::Env env;
     env.home             = home_dir();
+    env.user_native_base = ::agentty::util::user_root();
     env.project_root     = fs::path{"."};
     env.project_writable = true;
     const scope::Layout layout{.leaf = "commands"};

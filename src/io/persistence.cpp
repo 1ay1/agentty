@@ -27,6 +27,7 @@
 #include "agentty/util/base64.hpp"
 #include "agentty/util/dbglog.hpp"
 #include "agentty/util/home_dir.hpp"
+#include "agentty/util/user_root.hpp"
 
 namespace agentty::persistence {
 
@@ -84,19 +85,18 @@ bool write_json_atomic(const fs::path& target, const std::string& content) {
 }
 
 fs::path data_dir() {
-    // Unified home resolution (see util::home_dir) so the data root and the
-    // config root never diverge under MSYS2/mintty, where $HOME and
-    // $USERPROFILE point at different filesystems.
-    fs::path p = util::home_dir();
-    p /= ".agentty";
+    // The single per-user root (~/.agentty or $AGENTTY_HOME) — see
+    // util/user_root.hpp for the layout and the reason it is NOT under
+    // ~/.config. user_root() creates it 0700 and runs the one-time
+    // legacy-config migration.
+    fs::path p = util::user_root();
     std::error_code ec;
-    fs::create_directories(p, ec);
     // Surface a persistent-storage failure once. Silently swallowing it
     // meant threads/settings/memory writes became no-ops with zero
     // feedback (read-only $HOME, full disk, EACCES). One warning to
     // stderr is enough — it prints before maya takes the screen, and
     // the static guard keeps it from spamming on every save.
-    if (ec && !fs::is_directory(p, ec)) {
+    if (p.empty() || !fs::is_directory(p, ec)) {
         static bool warned = false;
         if (!warned) {
             warned = true;

@@ -7,6 +7,7 @@
 #include "agentty/provider/copilot/copilot_oauth.hpp"
 #include "agentty/util/dbglog.hpp"
 #include "agentty/util/home_dir.hpp"
+#include "agentty/util/user_root.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -170,28 +171,14 @@ std::string OAuthError::render() const {
 // ---------------------------------------------------------------------------
 
 fs::path config_dir() {
-    const char* xdg = std::getenv("XDG_CONFIG_HOME");
-    fs::path base;
-    if (xdg && *xdg) {
-        base = xdg;
-    } else {
-        // Unified home resolution (see util::home_dir): $HOME first (MSYS2/
-        // POSIX) then $USERPROFILE (native Windows), so config and data roots
-        // agree under mintty instead of splitting across two filesystems.
-        base = util::home_dir() / ".config";
-    }
-    fs::path p = base / "agentty";
-    std::error_code ec;
-    fs::create_directories(p, ec);
-    // Tighten to owner-only (SECURITY_AUDIT): the directory holds
-    // credentials.json; a world-listable/traversable parent is an
-    // unnecessary information leak even though the file itself is 0600.
-    // Best-effort — chmod failures (e.g. Windows, restricted FS) are
-    // non-fatal; the file's own 0600 remains the real barrier.
-#ifndef _WIN32
-    ::chmod(p.c_str(), S_IRWXU);
-#endif
-    return p;
+    // Consolidated: the credential store lives under the ONE per-user
+    // root — ~/.agentty/credentials — not $XDG_CONFIG_HOME/agentty.
+    // See util/user_root.hpp for the full single-root rationale (why
+    // .config is the WRONG home for tokens + threads) and the one-time
+    // migration that moves a legacy ~/.config/agentty install here.
+    // The name `config_dir` is kept for its 13 call sites; semantically
+    // it has always been "where credentials live".
+    return util::user_credentials_dir();
 }
 
 fs::path credentials_path() { return config_dir() / "credentials.json"; }

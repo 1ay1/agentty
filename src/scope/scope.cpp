@@ -9,6 +9,7 @@
 
 #include "agentty/scope/scope.hpp"
 #include "agentty/util/home_dir.hpp"
+#include "agentty/util/user_root.hpp"
 
 #include "agentty/tool/util/fs_helpers.hpp"   // util::project_root()
 
@@ -95,13 +96,23 @@ std::vector<Source> plan(const Layout& layout, const Env& env) {
     }
 
     // User — global, across every workspace. One Source per dialect dir.
-    if (!env.home.empty()) {
+    // The native dialect anchors at user_native_base (util::user_root():
+    // ~/.agentty or $AGENTTY_HOME); the interop dialects stay at ~.
+    if (!env.home.empty() || !env.user_native_base.empty()) {
         for (Dialect d : kDialects) {
             Source s;
             s.locus    = Locus::User;
             s.dialect  = d;
-            s.base     = env.home / dir_name(d);
-            s.writable = (d == Dialect::Agentty) && dir_writable(env.home);
+            if (d == Dialect::Agentty) {
+                s.base = !env.user_native_base.empty()
+                             ? env.user_native_base
+                             : env.home / dir_name(d);
+                s.writable = dir_writable(s.base.parent_path());
+            } else {
+                if (env.home.empty()) continue;   // interop needs a real ~
+                s.base     = env.home / dir_name(d);
+                s.writable = false;               // interop dirs are read-only
+            }
             out.push_back(std::move(s));
         }
     }
@@ -112,7 +123,8 @@ std::vector<Source> plan(const Layout& layout, const Env& env) {
 
 Env current_env(const Layout& layout) {
     Env e;
-    e.home         = home_dir();
+    e.home             = home_dir();
+    e.user_native_base = util::user_root();
     e.project_root = tools::util::project_root();
     e.project_writable =
         usable_project_root(e.project_root) &&
