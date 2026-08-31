@@ -24,23 +24,31 @@ namespace fs = std::filesystem;
 namespace {
 
 struct TmpHome {
-    fs::path dir;
-    const char* old_home;
-    const char* old_xdg;
+    fs::path    dir;
+    std::string old_home;
+    std::string old_agentty;
+    bool        had_home    = false;
+    bool        had_agentty = false;
     TmpHome() {
         dir = fs::temp_directory_path()
             / ("agentty_cred_test_" + std::to_string(::getpid()));
         fs::remove_all(dir);
         fs::create_directories(dir);
-        old_home = ::getenv("HOME");
-        old_xdg  = ::getenv("XDG_CONFIG_HOME");
+        // COPY the previous values: getenv() returns a pointer INTO the
+        // environment block, which setenv() may reallocate — restoring
+        // from a stale pointer corrupted the env for every later test in
+        // this shared binary (and could leave AGENTTY_HOME unset, which
+        // the user-root tripwire then aborts on).
+        if (const char* h = ::getenv("HOME"))          { old_home = h; had_home = true; }
+        if (const char* a = ::getenv("AGENTTY_HOME"))  { old_agentty = a; had_agentty = true; }
         ::setenv("HOME", dir.c_str(), 1);
-        ::setenv("XDG_CONFIG_HOME", dir.c_str(), 1);
+        ::setenv("AGENTTY_HOME", dir.c_str(), 1);
     }
     ~TmpHome() {
-        if (old_home) ::setenv("HOME", old_home, 1); else ::unsetenv("HOME");
-        if (old_xdg)  ::setenv("XDG_CONFIG_HOME", old_xdg, 1);
-        else          ::unsetenv("XDG_CONFIG_HOME");
+        if (had_home) ::setenv("HOME", old_home.c_str(), 1);
+        else          ::unsetenv("HOME");
+        if (had_agentty) ::setenv("AGENTTY_HOME", old_agentty.c_str(), 1);
+        else             ::unsetenv("AGENTTY_HOME");
         fs::remove_all(dir);
     }
 };

@@ -160,6 +160,10 @@ TEST_CASE("hooks_gate") {
     _putenv_s("USERPROFILE", home.string().c_str());
 #else
     ::setenv("HOME", home.string().c_str(), 1);
+    // User-scope config resolves via util::user_root() ($AGENTTY_HOME,
+    // else $HOME/.agentty) — point it at this test's home so the files
+    // written under home/.agentty are the ones the loader reads.
+    ::unsetenv("AGENTTY_HOME");   // fall back to $HOME/.agentty
 #endif
 
     std::println("=== hooks_gate_test ===");

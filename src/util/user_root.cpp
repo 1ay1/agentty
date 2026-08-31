@@ -4,6 +4,7 @@
 #include "agentty/util/home_dir.hpp"
 
 #include <cstdlib>
+#include <cstdio>
 #include <mutex>
 #include <system_error>
 
@@ -123,6 +124,39 @@ fs::path user_root() {
     static std::once_flag once;
     fs::path root = resolve_root();
     if (root.empty()) return root;
+
+    // ── Test-isolation tripwire ──────────────────────────────────
+    // A test binary that touches the DEVELOPER'S REAL ~/.agentty writes
+    // into their live credential store, account registry and threads.
+    // That is exactly what happened when the single-root consolidation
+    // repointed config_dir() at AGENTTY_HOME while five credential tests
+    // still isolated via XDG_CONFIG_HOME — their sandbox silently became
+    // a no-op and the suite mutated real accounts.
+    //
+    // Under AGENTTY_UNDER_TEST (set by both test mains), abort if the
+    // resolved root is the REAL one. "Real" is judged against the
+    // process's actual home as recorded at first use — a test that
+    // repoints $HOME at a temp dir (the common pattern for skills /
+    // hooks / settings coverage) is properly isolated and must pass,
+    // even though it sets no $AGENTTY_HOME.
+    if (const char* t = std::getenv("AGENTTY_UNDER_TEST"); t && *t) {
+        // Captured ONCE, before any test mutates $HOME, so a later
+        // setenv("HOME", tmp) can't launder the real path.
+        static const fs::path real_root = [] {
+            if (const char* ah = std::getenv("AGENTTY_HOME"); ah && *ah)
+                return fs::path{};        // already sandboxed by the harness
+            fs::path h = home_dir();
+            return h.empty() ? fs::path{} : h / ".agentty";
+        }();
+        if (!real_root.empty() && root == real_root) {
+            std::fprintf(stderr,
+                "\n[agentty] FATAL: a test reached the real user root (%s).\n"
+                "Isolate it — setenv AGENTTY_HOME (or HOME) to a temp dir — "
+                "otherwise it mutates real credentials/threads.\n\n",
+                root.string().c_str());
+            std::abort();
+        }
+    }
 
     std::error_code ec;
     fs::create_directories(root, ec);

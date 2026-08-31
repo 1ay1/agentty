@@ -57,10 +57,10 @@ void isolate_config_dir() {
                ("agentty_acctsw_" + std::to_string(now_ms()));
     fs::create_directories(dir);
 #if defined(_WIN32)
-    _putenv_s("XDG_CONFIG_HOME", dir.string().c_str());
+    _putenv_s("AGENTTY_HOME", dir.string().c_str());
     _putenv_s("AGENTTY_USE_KEYSTORE", "0");
 #else
-    ::setenv("XDG_CONFIG_HOME", dir.string().c_str(), 1);
+    ::setenv("AGENTTY_HOME", dir.string().c_str(), 1);
     ::setenv("AGENTTY_USE_KEYSTORE", "0", 1);
 #endif
 }
@@ -147,4 +147,57 @@ TEST_CASE("account switch refreshes a stale token") {
               "trigger a refresh");
         CHECK(acc::active_label("anthropic") == "A", "switch activated A");
     }
+}
+
+TEST_CASE("re-login reuses the derived-label slot, no proliferation") {
+    isolate_config_dir();
+    install_stub_deps();
+    {
+        provider::Selection sel;
+        sel.kind = provider::Kind::Anthropic;
+        provider::select(sel);
+    }
+
+    // Start from a clean anthropic registry: drop any slots a prior case
+    // left (this test asserts on the exact count).
+    for (const auto& a : acc::list_for("anthropic"))
+        acc::remove("anthropic", a.label);
+    REQUIRE(acc::list_for("anthropic").empty());
+
+    // First OAuth login → one "OAuth login" slot (label derived from the
+    // credential; OAuth has no per-account identity).
+    save_oauth(now_ms() + 3'600'000, "rt-1");
+    acc::snapshot_active("anthropic", acc::derive_current_label("anthropic"));
+    REQUIRE(acc::list_for("anthropic").size() == 1);
+    CHECK(acc::derive_current_label("anthropic") == "OAuth login");
+    const std::string first_secret =
+        acc::get("anthropic", "OAuth login")->secret;
+
+    // Re-login THREE more times — an expired-token refresh, or just
+    // re-testing. Each derives the SAME "OAuth login" label, so the fix
+    // (snapshot_active upserts by (provider,label)) UPDATES the one slot
+    // in place. The pre-fix reducer suffixed "OAuth login 2/3/4", the
+    // reported accumulation.
+    for (int i = 2; i <= 4; ++i) {
+        save_oauth(now_ms() + 3'600'000, "rt-" + std::to_string(i));
+        acc::snapshot_active("anthropic", acc::derive_current_label("anthropic"));
+        CHECK(acc::list_for("anthropic").size() == 1,
+              "re-login must not create a new slot");
+    }
+
+    // The single slot now holds a DIFFERENT (newer) credential than the
+    // first login's — the secret is a sealed blob, so compare bytes
+    // rather than looking for a plaintext token.
+    auto slot = acc::get("anthropic", "OAuth login");
+    REQUIRE(slot.has_value());
+    CHECK(slot->secret != first_secret,
+          "the reused slot carries the most recent login's credential");
+    CHECK(acc::active_label("anthropic") == "OAuth login", "reused slot is active");
+
+    // A DELIBERATE second account (explicit label) still coexists — the
+    // reuse rule keys on the label, so distinct labels never collide.
+    save_oauth(now_ms() + 3'600'000, "rt-work");
+    acc::snapshot_active("anthropic", "work laptop");
+    CHECK(acc::list_for("anthropic").size() == 2,
+          "a distinctly-labelled account is a separate slot");
 }

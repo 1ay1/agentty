@@ -42,25 +42,49 @@ namespace {
 
 // Persist + live-install credentials, then close the modal. Single
 // point so OAuth and ApiKey paths can't drift — both end here.
-void install_and_close(Model& m, auth::Credentials creds) {
+void install_and_close(Model& m, auth::Credentials creds,
+                       bool as_new_account = false) {
     auth::save_credentials(creds);
     agentty::app::update_auth(auth::make_auth_header(creds));
 
-    // Capture this login as a named account so it's switchable in-app. When
-    // the registry already has a "default", a subsequent OAuth/key login is a
-    // DIFFERENT account — register it under an incrementing name so both
-    // survive and the user can flip between them without re-authing.
+    // Capture this login as a named account so it's switchable in-app.
+    //
+    // OAuth / API-key credentials carry NO stable per-account identity
+    // (the tokens rotate; there's no email/subject on the wire), so the
+    // derived label IS the account's identity here. A re-login — an
+    // expired-token refresh, or just re-testing — therefore produces the
+    // SAME derived label ("OAuth login", "API key") and must UPDATE the
+    // existing slot in place, not spawn "OAuth login 2/3/…". The old
+    // suffix-until-unique loop turned every re-auth into a fresh junk
+    // account and could leave the active-label pointer aimed at a slot
+    // whose live credential no longer matched — the reported
+    // accumulation + wedge.
+    //
+    // snapshot_active(label) upserts by (provider, label): reusing the
+    // derived label overwrites the same account's stored secret and
+    // re-marks it active, which is exactly right for a re-login. A
+    // DELIBERATE second account on the same provider is created through
+    // the account manager's "+ Add another account…" flow, which the
+    // user labels explicitly — that path already carries its own label
+    // and never lands here with a colliding one.
     {
         namespace acc = agentty::auth::accounts;
         const std::string provider = "anthropic";
         std::string base = acc::derive_current_label(provider);
         if (base.empty()) base = "account";
         std::string label = base;
-        // Avoid clobbering an existing DIFFERENT account that happens to share
-        // the derived label (both "OAuth login", say): suffix until unique,
-        // unless a slot with this exact label already holds this same login.
-        for (int n = 2; acc::get(provider, label).has_value() && n < 100; ++n)
-            label = base + " " + std::to_string(n);
+        if (as_new_account) {
+            // DELIBERATE add of a separate account whose derived label
+            // collides (two "OAuth login"s — Anthropic OAuth carries no
+            // distinguishing identity). Suffix until unique so both slots
+            // survive and the user can flip between them.
+            for (int n = 2; acc::get(provider, label).has_value() && n < 100; ++n)
+                label = base + " " + std::to_string(n);
+        }
+        // Plain sign-in (as_new_account == false): reuse the derived-label
+        // slot. snapshot_active upserts by (provider, label), so a re-auth
+        // overwrites the same account's secret in place instead of spawning
+        // "OAuth login 2/3/…" — the reported accumulation + wedge.
         acc::snapshot_active(provider, label);
     }
 
@@ -914,7 +938,8 @@ Step login_submit(Model m) {
                                           std::move(new_auth), provider_label);
         }
 
-        install_and_close(m, auth::Credentials{auth::cred::ApiKey{std::move(key)}});
+        install_and_close(m, auth::Credentials{auth::cred::ApiKey{std::move(key)}},
+                          std::holds_alternative<login::origin::Accounts>(api->origin));
         return done(std::move(m));
     }
     if (auto* oc = std::get_if<login::OAuthCode>(&m.ui.login)) {
@@ -929,7 +954,15 @@ Step login_submit(Model m) {
         }
         auto verifier = std::move(oc->verifier);
         auto state    = std::move(oc->state);
-        m.ui.login = login::OAuthExchanging{};
+        // OAuthCode carries no origin, so a deliberate "+ Add another
+        // account" OAuth login can't be distinguished from a re-login
+        // at exchange time. Default to REUSE (as_new_account = false):
+        // the common case is a re-auth of the same account, and two
+        // Anthropic OAuth logins are content-indistinguishable anyway
+        // (no email/subject on the wire) — so collapsing them onto one
+        // "OAuth login" slot is honest, not lossy. Multi-account with
+        // real identity is served by API keys / ChatGPT.
+        m.ui.login = login::OAuthExchanging{/*as_new_account=*/false};
         return {std::move(m),
             cmd::oauth_exchange(auth::OAuthCode{std::move(code_raw)},
                                 std::move(verifier), std::move(state))};
@@ -983,8 +1016,10 @@ Step login_open_browser_again(Model m) {
 }
 
 Step login_exchanged(Model m, auth::TokenResult result) {
-    if (!std::holds_alternative<login::OAuthExchanging>(m.ui.login))
+    auto* xchg = std::get_if<login::OAuthExchanging>(&m.ui.login);
+    if (!xchg)
         return done(std::move(m));
+    const bool as_new = xchg->as_new_account;
     if (!result) {
         m.ui.login = login::Failed{result.error().render()};
         return done(std::move(m));
@@ -996,7 +1031,7 @@ Step login_exchanged(Model m, auth::TokenResult result) {
         std::move(tok.access_token),
         std::move(tok.refresh_token),
         tok.expires_in_s ? now_ms + tok.expires_in_s * 1000 : 0,
-    }});
+    }}, as_new);
     return done(std::move(m));
 }
 

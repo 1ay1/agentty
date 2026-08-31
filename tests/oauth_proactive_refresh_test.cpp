@@ -46,10 +46,10 @@ void isolate_config_dir() {
                ("agentty_proactive_" + std::to_string(now_ms()));
     fs::create_directories(dir);
 #if defined(_WIN32)
-    _putenv_s("XDG_CONFIG_HOME", dir.string().c_str());
+    _putenv_s("AGENTTY_HOME", dir.string().c_str());
     _putenv_s("AGENTTY_USE_KEYSTORE", "0");
 #else
-    ::setenv("XDG_CONFIG_HOME", dir.string().c_str(), 1);
+    ::setenv("AGENTTY_HOME", dir.string().c_str(), 1);
     ::setenv("AGENTTY_USE_KEYSTORE", "0", 1);
 #endif
 }

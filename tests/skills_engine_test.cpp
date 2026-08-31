@@ -52,8 +52,14 @@ TEST_CASE("skills engine") {
 
 #if defined(_WIN32)
     _putenv_s("HOME", home.string().c_str());
+    // The user-scope base is util::user_root() ($AGENTTY_HOME, falling
+    // back to $HOME/.agentty). Point it at THIS test's home so the
+    // skills the test writes under home/.agentty are the ones discovery
+    // finds — otherwise it resolves the shared per-binary sandbox.
+    _putenv_s("AGENTTY_HOME", "");   // fall back to $HOME/.agentty
 #else
     setenv("HOME", home.string().c_str(), 1);
+    unsetenv("AGENTTY_HOME");   // fall back to $HOME/.agentty (this test's home)
 #endif
     fs::current_path(work);
     util::set_workspace_root(work);

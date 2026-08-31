@@ -64,22 +64,32 @@ TEST_CASE("current_version is the compiled-in triple") {
 #include "agentty/util/user_root.hpp"
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 
 TEST_CASE("cached_check: fresh cache honoured, stale/foreign rejected") {
     namespace fs = std::filesystem;
+    // Sandbox the user root FIRST: this case writes update_check.json, and
+    // without an $AGENTTY_HOME override that lands in the developer's real
+    // ~/.agentty/cache. (The user-root tripwire aborts the binary if a test
+    // reaches the real root — see util/user_root.cpp.)
+    const auto sandbox = fs::temp_directory_path() /
+        ("agentty_update_check_" + std::to_string(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count()));
+    std::error_code sec;
+    fs::create_directories(sandbox, sec);
+#if defined(_WIN32)
+    _putenv_s("AGENTTY_HOME", sandbox.string().c_str());
+#else
+    ::setenv("AGENTTY_HOME", sandbox.string().c_str(), 1);
+#endif
+
     // update_check.json moved to the cache/ subdir in the single-root
     // consolidation (see util/user_root.hpp); write where cached_check()
     // now reads, not the old config_dir root.
     const auto cache = agentty::util::user_cache_dir() / "update_check.json";
-    // Preserve any real cache byte-for-byte.
-    std::string saved;
-    if (fs::exists(cache)) {
-        std::ifstream in(cache, std::ios::binary);
-        saved.assign((std::istreambuf_iterator<char>(in)),
-                     std::istreambuf_iterator<char>());
-    }
     auto now_s = std::chrono::duration_cast<std::chrono::seconds>(
                      std::chrono::system_clock::now().time_since_epoch())
                      .count();
@@ -114,8 +124,8 @@ TEST_CASE("cached_check: fresh cache honoured, stale/foreign rejected") {
     write("{not json");
     CHECK(!agentty::update::cached_check().has_value());
 
-    // Restore.
-    std::error_code ec;
-    if (saved.empty()) fs::remove(cache, ec);
-    else { std::ofstream f(cache, std::ios::trunc | std::ios::binary); f << saved; }
+    // Teardown: drop the sandbox. Nothing outside it was touched, so
+    // there is no real cache to restore (the pre-isolation version of
+    // this test save/restored the developer's actual update stamp).
+    fs::remove_all(sandbox, sec);
 }

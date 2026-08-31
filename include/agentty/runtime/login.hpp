@@ -78,7 +78,14 @@ struct OAuthCode {
     int                      cursor = 0;
 };
 
-struct OAuthExchanging {};
+struct OAuthExchanging {
+    // True when this login came from the account manager's "+ Add
+    // another account…" flow (origin::Accounts), i.e. the user
+    // DELIBERATELY wants a separate slot even if the derived label
+    // collides. A plain sign-in leaves this false and reuses the
+    // derived-label slot on re-auth (no "OAuth login 2/3/…" churn).
+    bool as_new_account = false;
+};
 
 // Native ChatGPT (Codex) login is in flight. Local sessions wait for the
 // port-1455 browser callback. SSH sessions use device authorization and this

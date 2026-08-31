@@ -24,7 +24,7 @@ TEST_CASE("accounts registry list/upsert/get/remove/set_active") {
                 ("agentty_accounts_" + std::to_string(::getpid()));
     fs::remove_all(root);
     fs::create_directories(root);
-    ::setenv("XDG_CONFIG_HOME", root.c_str(), 1);
+    ::setenv("AGENTTY_HOME", root.c_str(), 1);
     ::setenv("HOME", root.c_str(), 1);
     // Keystore is opt-in (AGENTTY_USE_KEYSTORE); leaving it unset keeps the
     // pure file/crypt path, which is what we want to exercise here.

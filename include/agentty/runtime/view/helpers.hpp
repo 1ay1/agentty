@@ -152,21 +152,20 @@ namespace agentty::ui {
 // Bottom-most-anchor-wins in the serializer, and the composer stops
 // emitting its anchor while any overlay is open (overlay::top gate in
 // composer_config), so exactly one anchor exists per frame.
-// Under tmux, degrade to a PAINTED block: tmux copy-mode redraws a
-// live hardware cursor over frozen scrollback (the ghost-cursor bug),
-// so the composer disables the hardware caret there too — a painted
-// block is a canvas cell that can't ghost. Same visual, no wandering.
+//
+// Shape 2 (steady BLOCK) is deliberate and unconditional: a text
+// input's caret reads as a block everywhere — same under tmux, and
+// regardless of the terminal's own default cursor style. No tmux
+// special-case: the epilogue parks at the right margin and resets
+// cosmetics, so tmux's copy-mode cursor lands on blank padding rather
+// than mid-content (see maya's emit_caret_epilogue). One code path,
+// one look, everywhere.
 [[nodiscard]] inline auto query_caret(maya::Color accent) {
-    if (maya::ansi::tmux_in_path()) {
-        // Painted solid block in the accent color — reads as "cursor
-        // here" without a live terminal cursor.
-        return maya::dsl::text("\xe2\x96\x88", maya::Style{}.with_fg(accent));
-    }
     return maya::dsl::text("\xe2\x96\x88",
                            maya::Style{}
                                .with_conceal()
                                .with_caret_anchor()
-                               .with_caret_shape(5)   // blinking bar
+                               .with_caret_shape(2)   // steady block
                                .with_fg(accent));
 }
 

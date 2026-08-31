@@ -68,6 +68,9 @@ TEST_CASE("mcp reload race") {
     fs::remove_all(tmp);
     fs::create_directories(tmp);
     ::setenv("HOME", tmp.c_str(), 1);
+    // mcp.json is looked up under util::user_root() ($AGENTTY_HOME,
+    // else $HOME/.agentty); keep both pointing at this sandbox.
+    ::unsetenv("AGENTTY_HOME");   // fall back to $HOME/.agentty
     ::unsetenv("USERPROFILE");
 
     const fs::path server = write_fake_server(tmp);

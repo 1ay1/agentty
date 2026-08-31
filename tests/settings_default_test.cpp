@@ -43,6 +43,9 @@ TEST_CASE("settings defaults + persistence round-trip") {
     fs::remove_all(tmp);
     fs::create_directories(tmp);
     ::setenv("HOME", tmp.c_str(), 1);
+    // Settings/user-scope paths resolve via util::user_root()
+    // ($AGENTTY_HOME, else $HOME/.agentty) — keep both in the sandbox.
+    ::unsetenv("AGENTTY_HOME");   // fall back to $HOME/.agentty
     ::unsetenv("USERPROFILE");   // data_dir() prefers this on Windows; clear it
 
     const auto settings_json = tmp / ".agentty" / "settings.json";
@@ -90,6 +93,9 @@ TEST_CASE("settings rows harden bad input") {
     fs::remove_all(tmp);
     fs::create_directories(tmp);
     ::setenv("HOME", tmp.c_str(), 1);
+    // Settings/user-scope paths resolve via util::user_root()
+    // ($AGENTTY_HOME, else $HOME/.agentty) — keep both in the sandbox.
+    ::unsetenv("AGENTTY_HOME");   // fall back to $HOME/.agentty
     ::unsetenv("USERPROFILE");
 
     // create_starter: a ':'-namespaced command becomes a SUBDIRECTORY tree

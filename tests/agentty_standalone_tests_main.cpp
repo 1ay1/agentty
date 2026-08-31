@@ -16,6 +16,9 @@
 // asan-clean, which folding into the full object set would defeat.
 #include <cstdio>
 #include <cstdlib>
+#include <chrono>
+#include <filesystem>
+#include <string>
 #include <string_view>
 
 // Declarations — arity per the original main().
@@ -26,6 +29,27 @@
 #undef FOLD_ARGS
 
 int main(int argc, char** argv) {
+    // Sandbox the per-user root for the whole binary before any test
+    // runs — these are full-runtime tests that write credentials,
+    // threads and settings; without this they mutate the developer's
+    // real ~/.agentty. Mirrors tests/test_main.cpp; see the rationale
+    // there and the tripwire in util/user_root.cpp.
+    {
+        namespace fs = std::filesystem;
+        const auto stamp = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        const auto sandbox = fs::temp_directory_path() /
+            ("agentty_stests_home_" + std::to_string(stamp));
+        std::error_code ec;
+        fs::create_directories(sandbox, ec);
+#if defined(_WIN32)
+        _putenv_s("AGENTTY_HOME", sandbox.string().c_str());
+        _putenv_s("AGENTTY_UNDER_TEST", "1");
+#else
+        ::setenv("AGENTTY_HOME", sandbox.string().c_str(), 1);
+        ::setenv("AGENTTY_UNDER_TEST", "1", 1);
+#endif
+    }
     // These tests drive the real app reducers, some of which fire a network
     // prewarm (a detached background TLS handshake). A standalone test never
     // calls join_prewarm(), so that thread would outlive main() and race

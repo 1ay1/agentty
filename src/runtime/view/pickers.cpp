@@ -249,11 +249,20 @@ Element model_picker(const Model& m) {
 
     // Live search header — mirrors the command palette. Type to filter,
     // Backspace to trim; the row list below is the filtered subset.
-    cfg.header.push_back(h(text("\xf0\x9f\x94\x8d ", fg_of(muted)),
-        text(picker->query.empty() ? "type to filter models\xe2\x80\xa6" : picker->query,
-             picker->query.empty() ? fg_italic(muted) : fg_of(fg)),
-        query_caret(accent)
-    ).build());
+    // Caret placement: an input's caret sits at the INSERTION POINT —
+    // after the typed query, but BEFORE the greyed placeholder when the
+    // field is empty (a caret trailing the hint text reads as "the hint
+    // is content").
+    cfg.header.push_back(
+        picker->query.empty()
+            ? h(text("\xf0\x9f\x94\x8d ", fg_of(muted)),
+                query_caret(accent),
+                text("type to filter models\xe2\x80\xa6", fg_italic(muted))
+              ).build()
+            : h(text("\xf0\x9f\x94\x8d ", fg_of(muted)),
+                text(picker->query, fg_of(fg)),
+                query_caret(accent)
+              ).build());
     cfg.header.push_back(sep);
 
     // Build the filtered + RANKED index list. We fuzzy-score the display name
@@ -427,12 +436,17 @@ Element fused_picker(const Model& m) {
     cfg.viewport_h = picker_viewport_h();
     cfg.scroll     = &m.ui.fused_picker_scroll;
 
-    cfg.header.push_back(h(text("\xf0\x9f\x94\x8d ", fg_of(muted)),
-        text(picker->query.empty() ? std::string{"type to filter across providers"}
-                                   : picker->query,
-             picker->query.empty() ? fg_italic(muted) : fg_of(fg)),
-        query_caret(accent)
-    ).build());
+    cfg.header.push_back(
+        picker->query.empty()
+            ? h(text("\xf0\x9f\x94\x8d ", fg_of(muted)),
+                query_caret(accent),
+                text(std::string{"type to filter across providers"},
+                     fg_italic(muted))
+              ).build()
+            : h(text("\xf0\x9f\x94\x8d ", fg_of(muted)),
+                text(picker->query, fg_of(fg)),
+                query_caret(accent)
+              ).build());
     cfg.header.push_back(sep);   // rule under the filter (matches classic picker)
 
     // Lazy-load hint: while any provider's catalog is still streaming in,
@@ -1015,11 +1029,16 @@ Element command_palette(const Model& m) {
     cfg.scroll     = &m.ui.command_palette_scroll;
     cfg.selected   = matches.empty() ? -1 : o->index;
 
-    cfg.header.push_back(h(text("\xe2\x8c\x98 ", fg_bold(highlight)),   // ⌘
-        text(o->query.empty() ? "type to filter\xe2\x80\xa6" : o->query,
-             o->query.empty() ? fg_italic(muted) : fg_of(fg)),
-        query_caret(highlight)
-    ).build());
+    cfg.header.push_back(
+        o->query.empty()
+            ? h(text("\xe2\x8c\x98 ", fg_bold(highlight)),   // ⌘
+                query_caret(highlight),
+                text("type to filter\xe2\x80\xa6", fg_italic(muted))
+              ).build()
+            : h(text("\xe2\x8c\x98 ", fg_bold(highlight)),
+                text(o->query, fg_of(fg)),
+                query_caret(highlight)
+              ).build());
     cfg.header.push_back(sep);
 
     // Each category owns a hue so the flat list reads as coloured bands; the
