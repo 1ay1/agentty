@@ -12,6 +12,7 @@
 #include "agentty/runtime/view/palette.hpp"
 #include <maya/core/anim_clock.hpp>
 #include <maya/terminal/ansi.hpp>
+#include <maya/app/app.hpp>   // request_animation_frame_after (typing-window lapse wake)
 
 namespace agentty::ui {
 
@@ -226,23 +227,28 @@ maya::Composer::Config composer_config(const Model& m) {
     // AGENTTY_PAINTED_CARET=1 opts out wholesale (broken-DECTCEM
     // terminals or users who prefer the block).
     //
-    // tmux: FORCED off. In copy-mode (scroll-up) tmux freezes the
-    // visible screen but keeps drawing the pane's live hardware cursor
-    // (cursor_flag stays 1) — our shown caret then renders on top of
-    // whatever scrollback line you've scrolled to (the "ghost cursor on
-    // the rail" report). tmux does NOT forward focus / copy-mode state
-    // to the pane program, so we can't detect it to hide the caret. The
-    // painted caret has no such problem — it is a canvas CELL that
-    // scrolls into scrollback as content and is never redrawn as a live
-    // cursor. Under tmux the hardware caret's wins (native blink, IME
-    // anchoring) are mediated by tmux anyway, so the fallback costs
-    // little. Detected via maya::ansi::tmux_in_path ($TMUX or a
-    // tmux-*/screen-* TERM, incl. the ssh-local case).
-    static const bool painted_caret_env =
-        std::getenv("AGENTTY_PAINTED_CARET") != nullptr;
+    // tmux: typing-window ONLY (any agent state). Probed empirically:
+    // in copy-mode (scroll-up) tmux draws ITS OWN selection cursor at
+    // the pane-cursor coordinates — independent of DECTCEM (a hidden
+    // pane cursor still yields a copy-mode cursor, and a pane-side
+    // ?25l mid-copy-mode reaches the outer terminal as ZERO bytes). No
+    // escape we emit can remove it; the only thing we control is WHERE
+    // it appears, because it tracks the pane cursor. So under tmux:
+    //   • typing (≤4s since last edit): hardware caret at the caret
+    //     cell — the user is looking at the composer, IME anchoring +
+    //     native blink exactly when they matter;
+    //   • otherwise: parked hidden at the frame's bottom-left corner
+    //     — tmux's unavoidable copy-mode cursor then rests on border
+    //     chrome at col 1, not mid-content (the "ghost on the rail"
+    //     was the caret-cell resting position, not the caret per se).
+    // The painted caret takes over between typing bursts so the
+    // composer never looks caret-less.
+    //
     // NOT static: tmux presence is re-checked each build so a test (or
     // a re-exec into/out of tmux) sees the current env. tmux_in_path is
     // a couple of getenv + small string compares — negligible per frame.
+    static const bool painted_caret_env =
+        std::getenv("AGENTTY_PAINTED_CARET") != nullptr;
     const bool under_tmux = maya::ansi::tmux_in_path();
     constexpr std::int64_t kTypingWindowMs = 4000;
     const bool agent_active =
@@ -253,10 +259,22 @@ maya::Composer::Config composer_config(const Model& m) {
         (maya::anim::default_clock().now_ms() - m.ui.composer.last_edit_ms)
             < kTypingWindowMs;
     cfg.hardware_caret = !painted_caret_env
-        && !under_tmux
         && ui::overlay::top(m) == ui::overlay::Kind::None
         && m.ui.terminal_focused
-        && (!agent_active || typing_recently);
+        && (under_tmux ? typing_recently                    // tmux: typing bursts only
+                       : (!agent_active || typing_recently)); // else: reading gate only while streaming
+    // The typing window LAPSES without any model change — nothing would
+    // re-run view() to flip the caret back (painted mode / park) until
+    // the next keystroke or stream tick. Request one wake at the lapse
+    // boundary so the flip happens on time. Idle-with-no-window frames
+    // request nothing (zero-wake idle preserved).
+    if (cfg.hardware_caret && typing_recently
+        && (under_tmux || agent_active)) {
+        const auto until_lapse = kTypingWindowMs
+            - (maya::anim::default_clock().now_ms() - m.ui.composer.last_edit_ms);
+        if (until_lapse > 0)
+            maya::request_animation_frame_after(until_lapse + 30);
+    }
 
     // ── Cross-frame cache key (streaming anti-flicker) ───────────────
     //
