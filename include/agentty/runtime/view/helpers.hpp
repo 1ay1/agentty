@@ -153,10 +153,12 @@ namespace agentty::ui {
 // emitting its anchor while any overlay is open (overlay::top gate in
 // composer_config), so exactly one anchor exists per frame.
 //
-// Shape 2 (steady BLOCK) is deliberate and unconditional: a text
-// input's caret reads as a block everywhere — same under tmux, and
-// regardless of the terminal's own default cursor style. No tmux
-// special-case: the epilogue parks at the right margin and resets
+// Shape 1 (BLINKING block) is deliberate and unconditional: a search
+// field is an idle text input, so its caret blinks exactly like the
+// composer's idle caret — same everywhere, including under tmux, and
+// regardless of the terminal's own default cursor style. The blink is
+// the TERMINAL's (DECSCUSR), so it costs zero animation frames. No
+// tmux special-case: the epilogue parks at the right margin and resets
 // cosmetics, so tmux's copy-mode cursor lands on blank padding rather
 // than mid-content (see maya's emit_caret_epilogue). One code path,
 // one look, everywhere.
@@ -165,7 +167,7 @@ namespace agentty::ui {
                            maya::Style{}
                                .with_conceal()
                                .with_caret_anchor()
-                               .with_caret_shape(2)   // steady block
+                               .with_caret_shape(1)   // blinking block
                                .with_fg(accent));
 }
 
