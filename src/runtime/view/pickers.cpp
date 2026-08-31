@@ -250,7 +250,8 @@ Element model_picker(const Model& m) {
     // Backspace to trim; the row list below is the filtered subset.
     cfg.header.push_back(h(text("\xf0\x9f\x94\x8d ", fg_of(muted)),
         text(picker->query.empty() ? "type to filter models\xe2\x80\xa6" : picker->query,
-             picker->query.empty() ? fg_italic(muted) : fg_of(fg))
+             picker->query.empty() ? fg_italic(muted) : fg_of(fg)),
+        query_caret(accent)
     ).build());
     cfg.header.push_back(sep);
 
@@ -415,7 +416,8 @@ Element fused_picker(const Model& m) {
     cfg.header.push_back(h(text("\xf0\x9f\x94\x8d ", fg_of(muted)),
         text(picker->query.empty() ? std::string{"type to filter across providers"}
                                    : picker->query,
-             picker->query.empty() ? fg_italic(muted) : fg_of(fg))
+             picker->query.empty() ? fg_italic(muted) : fg_of(fg)),
+        query_caret(accent)
     ).build());
     cfg.header.push_back(sep);   // rule under the filter (matches classic picker)
 
@@ -1002,7 +1004,8 @@ Element command_palette(const Model& m) {
 
     cfg.header.push_back(h(text("\xe2\x8c\x98 ", fg_bold(highlight)),   // ⌘
         text(o->query.empty() ? "type to filter\xe2\x80\xa6" : o->query,
-             o->query.empty() ? fg_italic(muted) : fg_of(fg))
+             o->query.empty() ? fg_italic(muted) : fg_of(fg)),
+        query_caret(highlight)
     ).build());
     cfg.header.push_back(sep);
 

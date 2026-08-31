@@ -6,6 +6,8 @@
 #include <string_view>
 
 #include <maya/style/color.hpp>
+#include <maya/style/style.hpp>
+#include <maya/dsl.hpp>
 
 #include "agentty/runtime/model.hpp"
 
@@ -94,5 +96,26 @@ namespace agentty::ui {
 // sentinel from the left jumps to after the closing sentinel.
 [[nodiscard]] int chip_prev(std::string_view s, int byte_pos) noexcept;
 [[nodiscard]] int chip_next(std::string_view s, int byte_pos) noexcept;
+
+// Hardware-caret cell for an overlay's live search input (command
+// palette / model picker / fused picker query lines). One concealed
+// █ whose style carries the caret_anchor meta-bit: maya's inline
+// serializer moves the REAL terminal cursor onto it and shows it as a
+// blinking bar — so the caret travels with focus (composer → palette →
+// back) instead of vanishing whenever an overlay opens. IME candidate
+// windows anchor in the search field too. Append it directly after
+// the query text. `accent` colors the caret via OSC 12 (Rgb only;
+// ignored elsewhere — harmless).
+// Bottom-most-anchor-wins in the serializer, and the composer stops
+// emitting its anchor while any overlay is open (overlay::top gate in
+// composer_config), so exactly one anchor exists per frame.
+[[nodiscard]] inline auto query_caret(maya::Color accent) {
+    return maya::dsl::text("\xe2\x96\x88",
+                           maya::Style{}
+                               .with_conceal()
+                               .with_caret_anchor()
+                               .with_caret_shape(5)   // blinking bar
+                               .with_fg(accent));
+}
 
 } // namespace agentty::ui

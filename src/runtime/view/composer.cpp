@@ -10,6 +10,7 @@
 #include "agentty/runtime/overlay.hpp"
 #include "agentty/runtime/view/helpers.hpp"
 #include "agentty/runtime/view/palette.hpp"
+#include <maya/core/anim_clock.hpp>
 
 namespace agentty::ui {
 
@@ -206,18 +207,37 @@ maya::Composer::Config composer_config(const Model& m) {
     // ── Hardware caret ─────────────────────────────────────────
     // Use the terminal's REAL cursor as the composer caret: native
     // blink with zero idle wake-ups, IME popovers anchored at the true
-    // cell, screen readers tracking the real position. Only while the
-    // composer actually OWNS input focus — any overlay (palette,
-    // picker, viewer…) claims the keys, so the caret must not sit in
-    // the composer under it; maya falls back to park-and-hide and the
-    // widget falls back to the painted caret, which reads as "dimmed /
-    // unfocused" — exactly right. AGENTTY_PAINTED_CARET=1 opts out
-    // wholesale (terminals with a broken DECTCEM or users who prefer
-    // the block).
+    // cell, screen readers tracking the real position. Shown only when
+    // ALL of these hold — each gate kills a real ghost-cursor report:
+    //   • no overlay (palette/picker owns the keys — and now owns the
+    //     caret too, via query_caret in its search header);
+    //   • terminal window is FOCUSED (?1004) — no blinking bar in an
+    //     inactive pane;
+    //   • agent idle, OR the user typed within the last few seconds —
+    //     while the agent streams, rows scroll into native scrollback
+    //     under a shown cursor; if the user scrolls up to read (tmux
+    //     copy-mode / scrollback freezes the visible screen) the
+    //     re-aimed cursor renders over THREAD content — the "ghost
+    //     cursor on the rail line" report. A reading user needs no
+    //     caret; a typing one gets it back on the first keystroke
+    //     (ComposerCharInput refreshes last_edit_ms), and the
+    //     streaming tick re-evaluates this window every frame.
+    // AGENTTY_PAINTED_CARET=1 opts out wholesale (broken-DECTCEM
+    // terminals or users who prefer the block).
     static const bool painted_caret_env =
         std::getenv("AGENTTY_PAINTED_CARET") != nullptr;
-    cfg.hardware_caret =
-        !painted_caret_env && ui::overlay::top(m) == ui::overlay::Kind::None;
+    constexpr std::int64_t kTypingWindowMs = 4000;
+    const bool agent_active =
+        cfg.state == maya::Composer::State::Streaming ||
+        cfg.state == maya::Composer::State::ExecutingTool;
+    const bool typing_recently =
+        m.ui.composer.last_edit_ms > 0 &&
+        (maya::anim::default_clock().now_ms() - m.ui.composer.last_edit_ms)
+            < kTypingWindowMs;
+    cfg.hardware_caret = !painted_caret_env
+        && ui::overlay::top(m) == ui::overlay::Kind::None
+        && m.ui.terminal_focused
+        && (!agent_active || typing_recently);
 
     // ── Cross-frame cache key (streaming anti-flicker) ───────────────
     //

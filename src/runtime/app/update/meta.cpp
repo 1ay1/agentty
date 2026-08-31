@@ -328,6 +328,10 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             m.ui.thread_scroll = std::max(0, m.ui.thread_scroll + e.delta);
             return done(std::move(m));
         },
+        [&](TerminalFocus& e) -> Step {
+            m.ui.terminal_focused = e.focused;
+            return done(std::move(m));
+        },
         [&](ToggleRetrievedExpanded& e) -> Step {
             // Flip the addressed retrieved-context card between its compact
             // snippet form and full-passage expansion. Frozen-prefix gate,

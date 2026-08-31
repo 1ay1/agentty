@@ -865,6 +865,10 @@ struct CheckpointDiffLoaded {
     int  deletions      = 0;
 };
 struct ScrollThread { int delta; };
+// Terminal window focus changed (?1004 CSI I/O via maya Sub::on_focus).
+// Gates the hardware caret: an unfocused agentty parks + hides the real
+// cursor instead of leaving a blinking bar in an inactive pane.
+struct TerminalFocus { bool focused = true; };
 // Ctrl+U on the transcript — flip the newest retrieved-context card between
 // its compact one-line-per-source form and a full-passage-text expansion.
 // Carries the target message id so the reducer mutates exactly that card
@@ -1025,6 +1029,7 @@ using DiffReviewMsg = std::variant<
 using MetaMsg = std::variant<
     CompactContext, CycleProfile, RestoreCheckpoint, CheckpointRestored,
     ScrollThread, ToggleRetrievedExpanded,
+    TerminalFocus,
     OpenSmartMode, CloseSmartMode, SmartModeMove, SmartModeSelect,
     SmartModeClearSlot,
     Tick, Quit, NoOp, ClearStatus, RedrawScreen,

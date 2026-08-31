@@ -1105,14 +1105,22 @@ Sub<Msg> subscribe(const Model& m) {
     // is_parsing) has NOT drained, so we keep waking the widget until the
     // typewriter reaches the live edge — the same reason build_live_tail
     // and the deferred settle-freeze consult this predicate.
+    // Terminal window focus (?1004, maya enables it in inline mode).
+    // Gates the hardware caret: unfocused ⇒ the composer stops emitting
+    // its caret anchor and the real cursor parks + hides.
+    auto focus_sub = Sub<Msg>::on_focus(
+        [](bool focused) -> Msg { return TerminalFocus{focused}; });
+
     if (m.s.active() || tail_has_live_bytes(m) || m.ui.pending_settle_freeze
         || m.ui.settle_cooldown_ticks > 0
         || m.ui.pending_rehydrate_trim
         || !detail::live_tail_reveal_settled(m)) {
         auto tick = Sub<Msg>::every(streaming_tick_period(), Tick{});
-        return Sub<Msg>::batch(std::move(key_sub), std::move(paste_sub), std::move(tick));
+        return Sub<Msg>::batch(std::move(key_sub), std::move(paste_sub),
+                               std::move(focus_sub), std::move(tick));
     }
-    return Sub<Msg>::batch(std::move(key_sub), std::move(paste_sub));
+    return Sub<Msg>::batch(std::move(key_sub), std::move(paste_sub),
+                           std::move(focus_sub));
 }
 
 } // namespace agentty::app

@@ -113,6 +113,10 @@ struct VtEmu {
                                       || s[j] == ';' || s[j] == '?')) {
                             params += s[j]; ++j;
                         }
+                        // Intermediate bytes (0x20-0x2F): e.g. the SP in
+                        // DECSCUSR `CSI 5 SP q`. Consume so the final
+                        // byte lands in `fin`, not printed as a glyph.
+                        while (j < n && s[j] >= 0x20 && s[j] <= 0x2F) ++j;
                         if (j >= n) { carry.clear(); break; }  // partial CSI
                         char fin = s[j];
                         i = j + 1;
