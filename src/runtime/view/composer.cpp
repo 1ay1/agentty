@@ -11,6 +11,7 @@
 #include "agentty/runtime/view/helpers.hpp"
 #include "agentty/runtime/view/palette.hpp"
 #include <maya/core/anim_clock.hpp>
+#include <maya/terminal/ansi.hpp>
 
 namespace agentty::ui {
 
@@ -224,8 +225,25 @@ maya::Composer::Config composer_config(const Model& m) {
     //     streaming tick re-evaluates this window every frame.
     // AGENTTY_PAINTED_CARET=1 opts out wholesale (broken-DECTCEM
     // terminals or users who prefer the block).
+    //
+    // tmux: FORCED off. In copy-mode (scroll-up) tmux freezes the
+    // visible screen but keeps drawing the pane's live hardware cursor
+    // (cursor_flag stays 1) — our shown caret then renders on top of
+    // whatever scrollback line you've scrolled to (the "ghost cursor on
+    // the rail" report). tmux does NOT forward focus / copy-mode state
+    // to the pane program, so we can't detect it to hide the caret. The
+    // painted caret has no such problem — it is a canvas CELL that
+    // scrolls into scrollback as content and is never redrawn as a live
+    // cursor. Under tmux the hardware caret's wins (native blink, IME
+    // anchoring) are mediated by tmux anyway, so the fallback costs
+    // little. Detected via maya::ansi::tmux_in_path ($TMUX or a
+    // tmux-*/screen-* TERM, incl. the ssh-local case).
     static const bool painted_caret_env =
         std::getenv("AGENTTY_PAINTED_CARET") != nullptr;
+    // NOT static: tmux presence is re-checked each build so a test (or
+    // a re-exec into/out of tmux) sees the current env. tmux_in_path is
+    // a couple of getenv + small string compares — negligible per frame.
+    const bool under_tmux = maya::ansi::tmux_in_path();
     constexpr std::int64_t kTypingWindowMs = 4000;
     const bool agent_active =
         cfg.state == maya::Composer::State::Streaming ||
@@ -235,6 +253,7 @@ maya::Composer::Config composer_config(const Model& m) {
         (maya::anim::default_clock().now_ms() - m.ui.composer.last_edit_ms)
             < kTypingWindowMs;
     cfg.hardware_caret = !painted_caret_env
+        && !under_tmux
         && ui::overlay::top(m) == ui::overlay::Kind::None
         && m.ui.terminal_focused
         && (!agent_active || typing_recently);

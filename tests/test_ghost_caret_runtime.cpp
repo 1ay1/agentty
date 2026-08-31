@@ -37,6 +37,7 @@
 #include "agentty/runtime/msg.hpp"
 #include "agentty/runtime/model.hpp"
 #include "agentty/runtime/view/view.hpp"
+#include "agentty/runtime/view/composer.hpp"
 
 using agentty::Model;
 using agentty::Msg;
@@ -247,7 +248,83 @@ int main() {
     // would violate) aborts loudly instead of soft-recovering.
     setenv("MAYA_GATE_ABORT", "1", 1);
     setenv("MAYA_NO_SYNC", "1", 1);   // no synchronized-output wrapper — unsynced wire
+    // Force the hardware-caret path: under tmux the composer falls back
+    // to the painted caret (tmux copy-mode ghosts a live cursor), so
+    // the hardware-caret assertions below require a tmux-free env.
+    // The tmux fallback itself is covered by the painted-mode run
+    // (AGENTTY_PAINTED_CARET=1) which shares the composer's painted
+    // path.
+    unsetenv("TMUX");
+    setenv("TERM", "xterm-256color", 1);
     setlocale(LC_ALL, "C.UTF-8");
+
+    // ── Gate unit-check ─────────────────────────────────────
+    // The composer only shows the hardware caret when it is safe. Each
+    // gate below fixes a real ghost-cursor report; assert the decision
+    // directly (cheaper + more precise than driving the whole app).
+    // Skipped under the AGENTTY_PAINTED_CARET wholesale opt-out (which
+    // forces every gate off) — the painted-mode run covers that path.
+    if (std::getenv("AGENTTY_PAINTED_CARET") == nullptr) {
+        Model g;
+        g.d.current.messages.push_back({});
+        g.d.current.messages.back().role = agentty::Role::User;
+        g.ui.composer.text = "hi";
+        g.ui.composer.cursor = 2;
+        g.ui.terminal_focused = true;
+        g.s.phase = agentty::phase::Idle{};
+
+        // Base case (tmux-free, focused, idle): hardware caret ON.
+        unsetenv("TMUX");
+        if (!agentty::ui::composer_config(g).hardware_caret) {
+            std::fprintf(stderr, "FAIL(gate): hardware caret off in the "
+                         "safe base case (tmux-free, focused, idle)\n");
+            return 1;
+        }
+        // tmux: FORCED off — copy-mode redraws a live cursor over frozen
+        // scrollback (the "ghost cursor on the rail" report).
+        setenv("TMUX", "/tmp/tmux-0/default,1,0", 1);
+        if (agentty::ui::composer_config(g).hardware_caret) {
+            std::fprintf(stderr, "FAIL(gate): hardware caret ON under tmux "
+                         "— will ghost on scroll-up\n");
+            return 1;
+        }
+        unsetenv("TMUX");
+        // Unfocused terminal: off (no blinking bar in an inactive pane).
+        g.ui.terminal_focused = false;
+        if (agentty::ui::composer_config(g).hardware_caret) {
+            std::fprintf(stderr, "FAIL(gate): hardware caret ON while the "
+                         "terminal window is unfocused\n");
+            return 1;
+        }
+        g.ui.terminal_focused = true;
+        // Streaming with no recent edit: off (a reading user scrolled up
+        // must not have a caret re-aimed onto thread content). In
+        // production last_edit_ms is stamped from default_clock().now_ms()
+        // at edit time and read later after the clock advanced; simulate
+        // that by stamping now, then ADVANCING the anim clock past the
+        // window.
+        g.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
+        g.ui.composer.last_edit_ms = maya::anim::default_clock().now_ms();
+        maya::testing::advance_anim_clock_ms(10'000);   // 10 s later
+        if (agentty::ui::composer_config(g).hardware_caret) {
+            std::fprintf(stderr, "FAIL(gate): hardware caret ON while "
+                         "streaming with no recent edit\n");
+            return 1;
+        }
+        // …but a RECENT edit during streaming keeps it on (you're typing
+        // a queued message, not scrolled up reading). tmux-free for this
+        // one so an outer `env TMUX=…` can't mask it.
+        unsetenv("TMUX");
+        g.ui.composer.last_edit_ms = maya::anim::default_clock().now_ms();
+        maya::testing::advance_anim_clock_ms(500);      // 0.5 s later
+        if (!agentty::ui::composer_config(g).hardware_caret) {
+            std::fprintf(stderr, "FAIL(gate): hardware caret OFF while "
+                         "streaming but actively typing\n");
+            return 1;
+        }
+        std::fprintf(stderr, "PASS(gate): caret gated off under tmux / "
+                     "unfocused / streaming-idle; on in the safe case.\n");
+    }
 
     // Small terminal so the composer text wraps at a reachable edge AND
     // the whole frame (thread + composer + status bar) OVERFLOWS the

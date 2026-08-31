@@ -8,6 +8,7 @@
 #include <maya/style/color.hpp>
 #include <maya/style/style.hpp>
 #include <maya/dsl.hpp>
+#include <maya/terminal/ansi.hpp>
 
 #include "agentty/runtime/model.hpp"
 
@@ -109,7 +110,16 @@ namespace agentty::ui {
 // Bottom-most-anchor-wins in the serializer, and the composer stops
 // emitting its anchor while any overlay is open (overlay::top gate in
 // composer_config), so exactly one anchor exists per frame.
+// Under tmux, degrade to a PAINTED block: tmux copy-mode redraws a
+// live hardware cursor over frozen scrollback (the ghost-cursor bug),
+// so the composer disables the hardware caret there too — a painted
+// block is a canvas cell that can't ghost. Same visual, no wandering.
 [[nodiscard]] inline auto query_caret(maya::Color accent) {
+    if (maya::ansi::tmux_in_path()) {
+        // Painted solid block in the accent color — reads as "cursor
+        // here" without a live terminal cursor.
+        return maya::dsl::text("\xe2\x96\x88", maya::Style{}.with_fg(accent));
+    }
     return maya::dsl::text("\xe2\x96\x88",
                            maya::Style{}
                                .with_conceal()
