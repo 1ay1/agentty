@@ -280,12 +280,17 @@ int main() {
                          "safe base case (tmux-free, focused, idle)\n");
             return 1;
         }
-        // tmux: FORCED off — copy-mode redraws a live cursor over frozen
-        // scrollback (the "ghost cursor on the rail" report).
+        // tmux + idle: caret ON. The copy-mode ghost is a streaming-
+        // plus-scroll problem; an idle screen is static, so tmux's
+        // copy-mode cursor tracks a stable position and never lands on
+        // shifting content. (Earlier this was force-hidden under tmux,
+        // leaving the common idle state caret-LESS — "tmux doesn't have
+        // the hardware caret.") The right-margin park handles the
+        // streaming-scroll case; idle no longer pays for it.
         setenv("TMUX", "/tmp/tmux-0/default,1,0", 1);
-        if (agentty::ui::composer_config(g).hardware_caret) {
-            std::fprintf(stderr, "FAIL(gate): hardware caret ON under tmux "
-                         "— will ghost on scroll-up\n");
+        if (!agentty::ui::composer_config(g).hardware_caret) {
+            std::fprintf(stderr, "FAIL(gate): hardware caret OFF under tmux "
+                         "while idle — idle is static, no copy-mode ghost\n");
             return 1;
         }
         unsetenv("TMUX");
@@ -297,20 +302,21 @@ int main() {
             return 1;
         }
         g.ui.terminal_focused = true;
-        // Streaming with no recent edit: off (a reading user scrolled up
-        // must not have a caret re-aimed onto thread content). In
-        // production last_edit_ms is stamped from default_clock().now_ms()
-        // at edit time and read later after the clock advanced; simulate
-        // that by stamping now, then ADVANCING the anim clock past the
-        // window.
+        // tmux + streaming with no recent edit: still OFF (rows scroll;
+        // a reading user scrolled up must not have a caret re-aimed onto
+        // thread content — the ghost the right-margin park mitigates but
+        // doesn't fully remove while the screen is moving). Verify the
+        // gate holds under tmux specifically, not just tmux-free.
+        setenv("TMUX", "/tmp/tmux-0/default,1,0", 1);
         g.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
         g.ui.composer.last_edit_ms = maya::anim::default_clock().now_ms();
         maya::testing::advance_anim_clock_ms(10'000);   // 10 s later
         if (agentty::ui::composer_config(g).hardware_caret) {
             std::fprintf(stderr, "FAIL(gate): hardware caret ON while "
-                         "streaming with no recent edit\n");
+                         "streaming with no recent edit (under tmux)\n");
             return 1;
         }
+        unsetenv("TMUX");
         // …but a RECENT edit during streaming keeps it on (you're typing
         // a queued message, not scrolled up reading). tmux-free for this
         // one so an outer `env TMUX=…` can't mask it.
@@ -322,8 +328,9 @@ int main() {
                          "streaming but actively typing\n");
             return 1;
         }
-        std::fprintf(stderr, "PASS(gate): caret gated off under tmux / "
-                     "unfocused / streaming-idle; on in the safe case.\n");
+        std::fprintf(stderr, "PASS(gate): caret on when idle (incl. tmux) "
+                     "and while typing; off when unfocused or "
+                     "streaming-idle.\n");
     }
 
     // Small terminal so the composer text wraps at a reachable edge AND

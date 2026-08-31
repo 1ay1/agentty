@@ -11,7 +11,6 @@
 #include "agentty/runtime/view/helpers.hpp"
 #include "agentty/runtime/view/palette.hpp"
 #include <maya/core/anim_clock.hpp>
-#include <maya/terminal/ansi.hpp>
 #include <maya/app/app.hpp>   // request_animation_frame_after (typing-window lapse wake)
 
 namespace agentty::ui {
@@ -226,30 +225,8 @@ maya::Composer::Config composer_config(const Model& m) {
     //     streaming tick re-evaluates this window every frame.
     // AGENTTY_PAINTED_CARET=1 opts out wholesale (broken-DECTCEM
     // terminals or users who prefer the block).
-    //
-    // tmux: typing-window ONLY (any agent state). Probed empirically:
-    // in copy-mode (scroll-up) tmux draws ITS OWN selection cursor at
-    // the pane-cursor coordinates — independent of DECTCEM (a hidden
-    // pane cursor still yields a copy-mode cursor, and a pane-side
-    // ?25l mid-copy-mode reaches the outer terminal as ZERO bytes). No
-    // escape we emit can remove it; the only thing we control is WHERE
-    // it appears, because it tracks the pane cursor. So under tmux:
-    //   • typing (≤4s since last edit): hardware caret at the caret
-    //     cell — the user is looking at the composer, IME anchoring +
-    //     native blink exactly when they matter;
-    //   • otherwise: parked hidden at the frame's bottom-left corner
-    //     — tmux's unavoidable copy-mode cursor then rests on border
-    //     chrome at col 1, not mid-content (the "ghost on the rail"
-    //     was the caret-cell resting position, not the caret per se).
-    // The painted caret takes over between typing bursts so the
-    // composer never looks caret-less.
-    //
-    // NOT static: tmux presence is re-checked each build so a test (or
-    // a re-exec into/out of tmux) sees the current env. tmux_in_path is
-    // a couple of getenv + small string compares — negligible per frame.
     static const bool painted_caret_env =
         std::getenv("AGENTTY_PAINTED_CARET") != nullptr;
-    const bool under_tmux = maya::ansi::tmux_in_path();
     constexpr std::int64_t kTypingWindowMs = 4000;
     const bool agent_active =
         cfg.state == maya::Composer::State::Streaming ||
@@ -261,15 +238,32 @@ maya::Composer::Config composer_config(const Model& m) {
     cfg.hardware_caret = !painted_caret_env
         && ui::overlay::top(m) == ui::overlay::Kind::None
         && m.ui.terminal_focused
-        && (under_tmux ? typing_recently                    // tmux: typing bursts only
-                       : (!agent_active || typing_recently)); // else: reading gate only while streaming
+        && (!agent_active || typing_recently);
+    // Rationale for the (!agent_active || typing_recently) gate — the
+    // SAME rule with and without tmux:
+    //   • idle (agent not streaming): the screen is STATIC, so tmux's
+    //     copy-mode cursor tracks a stable position — no ghost. This
+    //     is the resting state you spend most time in, and where the
+    //     hardware caret's wins (your configured block/beam, native
+    //     blink, IME anchoring) matter most. Caret ON.
+    //   • streaming AND you've typed within 4 s: you're queueing a
+    //     message and looking at the composer — caret ON (parked at
+    //     the right margin, so a tmux scroll-up ghost lands on blank
+    //     padding, not the thread rail; see maya's caret epilogue).
+    //   • streaming AND idle-handed: rows scroll into scrollback; if
+    //     you scroll up to read, a shown caret would track content.
+    //     Caret OFF — painted fallback covers it.
+    // Under tmux the copy-mode cursor is tmux's OWN, drawn at the pane-
+    // cursor position regardless of DECTCEM and unremovable from the
+    // pane side (probed empirically). The right-margin park + this gate
+    // mean it only ever appears on blank padding, never mid-thread —
+    // so tmux no longer needs a stricter rule than a bare terminal.
     // The typing window LAPSES without any model change — nothing would
     // re-run view() to flip the caret back (painted mode / park) until
     // the next keystroke or stream tick. Request one wake at the lapse
     // boundary so the flip happens on time. Idle-with-no-window frames
     // request nothing (zero-wake idle preserved).
-    if (cfg.hardware_caret && typing_recently
-        && (under_tmux || agent_active)) {
+    if (cfg.hardware_caret && typing_recently && agent_active) {
         const auto until_lapse = kTypingWindowMs
             - (maya::anim::default_clock().now_ms() - m.ui.composer.last_edit_ms);
         if (until_lapse > 0)
