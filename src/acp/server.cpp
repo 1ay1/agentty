@@ -7,6 +7,8 @@
 
 #include "agentty/acp/server.hpp"
 
+#include "agentty/util/logx.hpp"
+
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -842,15 +844,17 @@ a::AgentHandlers AgentServer::make_handlers() {
 
 int AgentServer::serve() {
     // ── observability ──────────────────────────────────────────────────────
-    // AGENTTY_ACP_TRACE=1 → every JSON-RPC frame to stderr (debug Zed/glue).
-    // Stderr is reserved by the ACP stdio framing for free-form logging.
-    if (const char* t = std::getenv("AGENTTY_ACP_TRACE"); t && *t && std::strcmp(t, "0") != 0) {
-        static std::mutex trace_mu;
+    // Every JSON-RPC frame lands on the `acp` channel of the ONE structured
+    // log — captured by default in a non-release build, or via
+    // AGENTTY_LOG=acp=trace in a release one. This used to be its own
+    // AGENTTY_ACP_TRACE env var writing to stderr; that was one of eight
+    // logging knobs, and a frame dump that cannot be correlated with the
+    // wire/auth/tool events of the same turn is much less useful than one
+    // that can.
+    if (logx::enabled(logx::Channel::Acp, logx::Level::Trace)) {
         conn_.set_wire_trace([](a::WireDir dir, std::string_view line) {
-            std::lock_guard lk(trace_mu);
-            std::cerr << (dir == a::WireDir::Inbound ? "acp ← " : "acp → ")
-                      << line << '\n';
-            std::cerr.flush();
+            AGT_LOG(Acp, Trace, "acp.frame", "dir={} raw={}",
+                    dir == a::WireDir::Inbound ? "in" : "out", line);
         });
     }
     // Surface transport-level faults (peer EOF, reader exception) — silent
@@ -2174,7 +2178,9 @@ AgentServer::run_bash_via_terminal(Session& sess, ToolUse& tc) {
             }
             if (is_cancelled()) {
                 try { a::TerminalKillParams k; k.sessionId = ref.sessionId; k.terminalId = ref.terminalId;
-                      conn_.terminal_kill(k).get(); } catch (...) {}
+                      conn_.terminal_kill(k).get(); }
+                catch (const std::exception& e) { util::dbglog("acp.terminal_kill", e.what()); }
+                catch (...) { util::dbglog("acp.terminal_kill", "non-std exception"); }
                 set_status(ToolUse::Failed{{}, {}, "cancelled"});
                 a::ToolCallUpdate c;
                 c.toolCallId = a::ToolCallId{tc.id.value};

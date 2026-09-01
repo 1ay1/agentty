@@ -34,6 +34,7 @@
 #include "agentty/auth/auth.hpp"
 #include "agentty/io/http.hpp"
 #include "agentty/util/base64.hpp"
+#include "agentty/util/dbglog.hpp"
 
 namespace agentty::provider::chatgpt {
 namespace {
@@ -138,7 +139,11 @@ std::string jwt_claim(const std::string& jwt, const char* key) {
             const auto& o = j["https://api.openai.com/auth"];
             if (o.contains(key) && o[key].is_string()) return o[key].get<std::string>();
         }
-    } catch (...) {}
+    } catch (const std::exception& e) {
+        util::dbglog("codex.jwt_claim.parse", e.what());
+    } catch (...) {
+        util::dbglog("codex.jwt_claim.parse", "non-std exception");
+    }
     return {};
 }
 

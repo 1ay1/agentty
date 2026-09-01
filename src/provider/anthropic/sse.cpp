@@ -208,15 +208,10 @@ static_assert(kind_of_event("who_knows")        == SseEventKind::Unknown);
 void dispatch_event(StreamCtx& ctx, std::string_view name, std::string_view data,
                     char* padded) {
     if (data.empty() || data == "[DONE]") return;
-    // dbg() format string is %s — copy through a small stack buffer only
-    // when the debug log is actually enabled (debug_log() returns nullptr
-    // otherwise, in which case dbg() short-circuits and `name` is never
-    // touched). Avoids constructing a std::string per event in the hot path.
-    if (debug_log()) {
-        std::string name_owned{name};
-        std::string data_owned{data};
-        dbg("<< event=%s data=%s\n", name_owned.c_str(), data_owned.c_str());
-    }
+    // Per-event dump on the `wire` channel. The macro's gate short-circuits
+    // before any formatting, so a disabled log costs one atomic load and no
+    // string construction in this hot path.
+    AGT_LOG(Wire, Trace, "anthropic.event", "event={} data={}", name, data);
 
     // Hot path first — ~95% of events during a streaming turn. The
     // simdjson fast path parses in place over the framer's padded buffer.
@@ -242,14 +237,27 @@ void dispatch_event(StreamCtx& ctx, std::string_view name, std::string_view data
     if (kind == SseEventKind::Ping) { ctx.sink(StreamHeartbeat{}); return; }
 
     json j;
-    try { j = json::parse(data); } catch (...) { return; }
+    try { j = json::parse(data); } catch (const std::exception& e) {
+        // Both parsers failed — this frame is about to be DROPPED. That is
+        // never fine to do silently: a lost content_block_start reads as
+        // "the model stopped talking", not as a parse bug. Warn: captured
+        // by default in release + kept in the crash flight recorder.
+        AGT_LOG(Wire, Warn, "anthropic.frame_unparseable",
+                "event={} err={} bytes={} head={}",
+                name, e.what(), data.size(), data.substr(0, 256));
+        return;
+    }
 
     switch (kind) {
         case SseEventKind::Unknown:
             // Forward-compat sink: a new event Anthropic added that we
-            // don't know yet. Drop silently — the wire stays parseable,
-            // and a future update either adds an arm or learns the
-            // model needs a behavioural change. Logged via dbg() above.
+            // don't know yet. Dropping is the right BEHAVIOUR (unknown
+            // events are usually structural) but it must not be invisible —
+            // the wire Trace dump above only exists when trace is enabled,
+            // and "a new event we ignored" is exactly what a field report
+            // needs named. Debug so a shared AGENTTY_LOG=debug log shows it.
+            AGT_LOG(Wire, Debug, "anthropic.unknown_event",
+                    "event={} bytes={}", name, data.size());
             break;
 
         case SseEventKind::Ping:
@@ -398,7 +406,7 @@ void feed_sse(StreamCtx& ctx, const char* data, std::size_t len) {
     // the screen lags). This line stamps each read with its byte length so
     // the count of `<< event=` lines that follow before the NEXT `-- chunk`
     // is exactly the number of SSE events that arrived together.
-    if (debug_log()) dbg("-- chunk len=%zu\n", len);
+    AGT_LOG(Wire, Trace, "anthropic.chunk", "bytes={}", len);
     // The shared framer owns the byte buffer, `event:`/`data:` accumulation,
     // the multi-line data join, the 4 MiB overflow cap, and amortized buffer
     // compaction. We only dispatch each complete event.

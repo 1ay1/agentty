@@ -30,6 +30,7 @@
 #include "agentty/auth/cred_crypt.hpp"
 #include "agentty/util/base64.hpp"
 #include "agentty/io/http.hpp"
+#include "agentty/util/dbglog.hpp"
 
 #ifndef _WIN32
 #  include <sys/stat.h>   // chmod
@@ -413,6 +414,8 @@ SupportSets load_support() {
             if (e.is_string()) s.unsupported.insert(e.get<std::string>());
         for (auto& e : j.value("supported", json::array()))
             if (e.is_string()) s.supported.insert(e.get<std::string>());
+    } catch (const std::exception& e) {
+        util::dbglog("copilot.support_cache.parse", e.what());
     } catch (...) {}
     return s;
 }
@@ -580,6 +583,8 @@ std::int64_t jwt_exp_ms(const std::string& jwt) {
         auto raw = util::base64_decode(payload);
         auto j = json::parse(raw);
         if (auto e = j.value("exp", std::int64_t{0}); e > 0) return e * 1000;
+    } catch (const std::exception& e) {
+        util::dbglog("copilot.jwt_exp.parse", e.what());
     } catch (...) {}
     return 0;
 }
@@ -588,9 +593,31 @@ std::mutex& auto_mu() { static std::mutex m; return m; }
 AutoSession& auto_cache() { static AutoSession s; return s; }
 } // namespace
 
+// Guarded by auto_mu(), like auto_cache(). 0 = no backoff armed.
+std::int64_t& auto_failed_until_ms() { static std::int64_t v = 0; return v; }
+
 std::optional<AutoSession> auto_session() {
     std::scoped_lock lk(auto_mu());
     if (auto_cache().valid()) return auto_cache();
+
+    // NEGATIVE CACHE. Everything below is blocking network I/O held under
+    // auto_mu(), and a FAILED attempt used to cache nothing — so an account
+    // that can't open an Auto session (no entitlement, org policy, a flaky
+    // 5xx) re-dialled /models/session on EVERY turn, and every turn paid a
+    // full TLS handshake + round-trip before the first token. That is the
+    // "weirdly hangs for a second" report.
+    //
+    // Back off instead: remember the last failure and answer nullopt straight
+    // from memory for a short window. Long enough that a turn never waits on a
+    // known-bad endpoint, short enough that a user who fixes their plan or
+    // waits out a blip recovers without restarting. invalidate_auto_session()
+    // clears it, so an explicit account switch or a 401 retry re-probes at once.
+    const auto now = CopilotToken::now_ms();
+    if (now < auto_failed_until_ms()) return std::nullopt;
+    constexpr std::int64_t kBackoffMs = 60'000;
+    // Any early return below is a failure; arm the backoff up front so no
+    // path can forget it.
+    auto_failed_until_ms() = now + kBackoffMs;
 
     auto tok = fresh_token();
     if (!tok || !tok->chat_enabled) return std::nullopt;
@@ -621,6 +648,7 @@ std::optional<AutoSession> auto_session() {
         if (s.session_token.empty()) return std::nullopt;
         s.expires_at_ms = jwt_exp_ms(s.session_token);
         auto_cache() = s;
+        auto_failed_until_ms() = 0;   // succeeded — disarm the backoff
         return s;
     } catch (...) { return std::nullopt; }
 }
@@ -628,6 +656,10 @@ std::optional<AutoSession> auto_session() {
 void invalidate_auto_session() {
     std::scoped_lock lk(auto_mu());
     auto_cache() = AutoSession{};
+    // Also clear the negative cache: an explicit invalidation (account switch,
+    // 401 retry) is a statement that the world changed, so re-probe at once
+    // rather than serving a stale "this account can't" for another minute.
+    auto_failed_until_ms() = 0;
 }
 
 } // namespace agentty::provider::copilot

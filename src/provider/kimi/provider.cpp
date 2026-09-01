@@ -22,6 +22,7 @@
 #include "agentty/provider/kimi/kimi_oauth.hpp"
 #include "agentty/provider/openai/transport.hpp"
 #include "agentty/io/http.hpp"
+#include "agentty/util/dbglog.hpp"
 
 namespace agentty::provider::kimi {
 
@@ -67,7 +68,11 @@ std::optional<std::string> quota_error_message(const std::string& access_token) 
             || msg.find("Credits") != std::string::npos
             || msg.find("quota") != std::string::npos)
             body_quota = true;
-    } catch (...) {}
+    } catch (const std::exception& e) {
+        util::dbglog("kimi.quota_probe.parse", e.what());
+    } catch (...) {
+        util::dbglog("kimi.quota_probe.parse", "non-std exception");
+    }
     if (http_quota || body_quota)
         return std::string{
             "Kimi credits exhausted \xe2\x80\x94 your Kimi Code plan is out of "
@@ -150,7 +155,16 @@ std::vector<ModelInfo> list_models() {
     auto ep = KimiProvider::make_endpoint();
     auto models = provider::openai::list_models(auth::BearerHeader{tok->access_token}, ep);
     if (models.empty()) return bundled_models();
-    for (auto& m : models) m.provider = "kimi";
+    // Kimi's /models payload carries no context length, so the generic OpenAI
+    // parser leaves every row on ModelInfo's 200k default — 56k short of K2's
+    // real 256k window, which makes the context gauge and the compaction
+    // threshold fire early. Adopt the bundled window for any id we know.
+    const auto seed = bundled_models();
+    for (auto& m : models) {
+        m.provider = "kimi";
+        for (const auto& b : seed)
+            if (b.id.value == m.id.value) { m.context_window = b.context_window; break; }
+    }
 
     std::lock_guard<std::mutex> lk(models_mu());
     models_cache() = models;

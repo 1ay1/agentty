@@ -26,6 +26,7 @@
 #include "agentty/provider/credentials.hpp"
 #include "agentty/util/modelsdev.hpp"
 #include "agentty/util/logx.hpp"
+#include "agentty/util/dbglog.hpp"
 #include "agentty/tool/registry.hpp"
 #include "agentty/mcp/client.hpp"   // plugin_model(), reload_mcp_plugins via registry
 #include "agentty/tool/hooks.hpp"
@@ -1164,7 +1165,25 @@ Cmd<Msg> run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args,
                             "blocked by pre_tool hook: " + pre.reason))});
                     return;
                 }
+                const auto t_start = std::chrono::steady_clock::now();
                 auto result = tool::DynamicDispatch::execute(name.value, args);
+                const auto t_ms = std::chrono::duration_cast<
+                    std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - t_start).count();
+                // Every tool call, with its outcome and duration. A FAILING
+                // tool logs at Warn with the error kind + message, so the
+                // "[invalid args] pattern required" class of bug is visible
+                // in the log with the arguments that produced it — the exact
+                // evidence that was missing when Copilot's tool calls were
+                // arriving empty.
+                AGT_LOGL(Tool, result ? ::agentty::logx::Level::Debug
+                                      : ::agentty::logx::Level::Warn,
+                         "tool.exec", "name={} ms={} ok={} err={} args={}",
+                         name.value, t_ms, result ? 1 : 0,
+                         result ? std::string{"-"}
+                                : std::string{tools::to_string(result.error().kind)}
+                                      + ": " + result.error().detail,
+                         args_dump);
                 if (result) {
                     // post_tool hooks: fire-and-forget (never block, never
                     // rewrite the result).
@@ -1184,6 +1203,8 @@ Cmd<Msg> run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args,
                 // DynamicDispatch already catches tool exceptions, but guard
                 // against anything in the dispatch infrastructure itself so
                 // the tool never gets stuck in Running with no terminal Msg.
+                AGT_LOG(Tool, Error, "tool.dispatch_throw", "name={} err={}",
+                        name.value, e.what());
                 dispatch(ToolExecOutput{id, std::unexpected(
                     tools::ToolError::unknown(
                         std::string{"dispatch error: "} + e.what()))});
@@ -1683,7 +1704,11 @@ Cmd<Msg> check_for_update() {
                                              std::move(c.url)}});
                 return;
             }
-        } catch (...) {}
+        } catch (const std::exception& e) {
+            util::dbglog("update.check", e.what());
+        } catch (...) {
+            util::dbglog("update.check", "non-std exception");
+        }
         dispatch(Msg{UpdateCheckDone{}});
     });
 }
@@ -1694,7 +1719,9 @@ Cmd<Msg> refresh_modelsdev() {
         // there is no Msg to dispatch — the moment the fetch lands, the next
         // frame's ladder/badges and the next request's clamp see it. Errors
         // are swallowed; a metadata refresh must never surface as a failure.
-        try { (void)agentty::modelsdev::refresh(); } catch (...) {}
+        try { (void)agentty::modelsdev::refresh(); }
+        catch (const std::exception& e) { util::dbglog("modelsdev.refresh", e.what()); }
+        catch (...) { util::dbglog("modelsdev.refresh", "non-std exception"); }
     });
 }
 
@@ -1746,6 +1773,15 @@ Cmd<Msg> fetch_models() {
                         + std::to_string(sel.openai_endpoint.port)
                         + " \xe2\x80\x94 is the server running?";
             }
+            // The model catalog is the other half of "which model ran".
+            // An empty list is how BOTH the custom-host Copilot bug and a
+            // dead local server present, so log the count and the reason
+            // together — they are indistinguishable in the UI.
+            AGT_LOGL(Wire, models.empty() ? ::agentty::logx::Level::Warn
+                                          : ::agentty::logx::Level::Info,
+                     "models.loaded", "provider={} count={} err={}",
+                     for_provider, models.size(),
+                     err.empty() ? std::string{"-"} : err);
             dispatch(ModelsLoaded{std::move(models), for_provider,
                                   std::move(err)});
         } catch (const std::exception& e) {
@@ -1759,6 +1795,8 @@ Cmd<Msg> fetch_models() {
             // receiving deltas and race a RetryStream worker into the
             // session — or latch a healthy turn terminal. The reducer
             // surfaces `error` as a transient status toast instead.
+            AGT_LOG(Wire, Warn, "models.failed", "provider={} err={}",
+                    for_provider, e.what());
             dispatch(ModelsLoaded{std::vector<ModelInfo>{}, for_provider,
                                   std::string{"models fetch: "} + e.what()});
         } catch (...) {

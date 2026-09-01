@@ -36,12 +36,13 @@
 #include <nlohmann/json.hpp>
 #include <simdjson.h>
 
-#include "agentty/provider/debug.hpp"   // shared AGENTTY_DEBUG_API logger
+#include "agentty/provider/debug.hpp"   // wire dump → logx `wire` channel
 #include "agentty/provider/registry.hpp" // endpoint columns: from_spec's SSOT
 #include "agentty/provider/stream_epilogue.hpp"
 #include "agentty/provider/usage.hpp"
 #include "agentty/provider/msg_shared.hpp"
 #include "agentty/provider/wire.hpp"
+#include "agentty/provider/wire/streamed.hpp"
 #include "agentty/provider/wire_supersede.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
 #include "agentty/tool/util/fs_helpers.hpp"   // util::workspace_root/project_root — AGENTS.md anchor + walk start
@@ -68,6 +69,13 @@ using wire::scrub_utf8;
 struct ToolCallSlot {
     std::string id;
     std::string name;
+    // Everything decoded so far for this call. `delta.tool_calls[].function
+    // .arguments` USUALLY carries fragments, but a coalescing proxy may repeat
+    // the COMPLETE arguments in each chunk — blind concatenation turns that
+    // into `{"a":1}{"a":1}`, which fails as "invalid args" exactly like the
+    // Responses `.done` bug did. Keeping the running value lets unseen()
+    // recognise a repeat and emit nothing.
+    std::string args;
     bool started = false;   // StreamToolUseStart already emitted
     bool ended   = false;   // StreamToolUseEnd already emitted
 };
@@ -1015,8 +1023,19 @@ void handle_delta(StreamCtx& ctx, const json& delta) {
                 slot.started = true;
             }
 
-            if (!fn_args.empty() && slot.started)
-                ctx.sink(StreamToolUseDelta{ToolCallId{slot.id}, fn_args});
+            if (!fn_args.empty() && slot.started) {
+                // A chunk that REPEATS what we already hold is a coalescing
+                // proxy restating the whole value, not new bytes. Treat a
+                // fragment that our accumulated args already start with as a
+                // snapshot; otherwise append. Either way emit only what is
+                // newly known, so both dialects behave identically.
+                const bool repeat = fn_args.size() <= slot.args.size()
+                                 && slot.args.compare(0, fn_args.size(), fn_args) == 0;
+                const auto fresh = wire::unseen(slot.args, fn_args, repeat);
+                if (!fresh.empty())
+                    ctx.sink(StreamToolUseDelta{ToolCallId{slot.id},
+                                                std::string{fresh}});
+            }
         }
     }
 }
@@ -1900,22 +1919,16 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
     http::append_sse_no_buffer(hreq.headers);
     hreq.body    = std::move(body_str);
 
-    // AGENTTY_DEBUG_API trace — same logger/file as the Anthropic wire
-    // (provider/debug.hpp). The custom-host/llama.cpp report specifically
-    // asked for this: the env vars produced a dump ONLY on the Anthropic
-    // path, so local-endpoint failures were untraceable.
-    if (provider::debug_log()) {
-        provider::dbg(">> openai POST %s://%s:%u%s model=%s native=%d body=%zuB\n",
-                      req.endpoint.use_tls ? "https" : "http",
-                      req.endpoint.host.c_str(),
-                      static_cast<unsigned>(req.endpoint.port),
-                      req.endpoint.path.c_str(),
-                      req.model.c_str(), native ? 1 : 0, hreq.body.size());
-        provider::dbg(">> body: %.*s%s\n",
-                      static_cast<int>(std::min<std::size_t>(hreq.body.size(), 4096)),
-                      hreq.body.c_str(),
-                      hreq.body.size() > 4096 ? " …[truncated]" : "");
-    }
+    // Request metadata + the full body land on the `wire` channel of the one
+    // structured log (see provider/debug.hpp). Body is NOT truncated: a
+    // request that a server rejects is exactly the case where the last bytes
+    // matter, and a clipped dump sends you back to guessing.
+    AGT_LOG(Wire, Debug, "openai.request",
+            "POST {}://{}:{}{} model={} native={} bytes={}",
+            req.endpoint.use_tls ? "https" : "http", req.endpoint.host,
+            static_cast<unsigned>(req.endpoint.port), req.endpoint.path,
+            req.model, native ? 1 : 0, hreq.body.size());
+    AGT_LOG(Wire, Trace, "openai.request.body", "raw={}", hreq.body);
 
     int  http_status = 0;
     bool is_success  = false;
@@ -1926,8 +1939,7 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
     handler.on_headers = [&](int status, const http::Headers& hh) {
         http_status = status;
         is_success  = (status >= 200 && status < 300);
-        if (provider::debug_log())
-            provider::dbg("<< openai status=%d\n", status);
+        AGT_LOG(Wire, Debug, "openai.response", "status={}", status);
         if (is_success) return;
         retry_after_hint = provider::parse_retry_after(hh);
     };
@@ -1936,11 +1948,11 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
     };
     handler.on_buffered_wait = [&] { ctx.sink(StreamBufferedWait{}); };
     handler.on_chunk = [&](std::string_view chunk) -> bool {
-        if (provider::debug_log())
-            provider::dbg("<< chunk %zuB: %.*s%s\n", chunk.size(),
-                          static_cast<int>(std::min<std::size_t>(chunk.size(), 2048)),
-                          chunk.data(),
-                          chunk.size() > 2048 ? " …[truncated]" : "");
+        // VERBATIM, untruncated: the parser is often the thing under
+        // suspicion, so a clipped frame hides exactly the bytes that matter
+        // (the Copilot `.done` event that carried the tool arguments landed
+        // well past 2 KB in a real turn).
+        provider::dbg_chunk(native ? "ollama-native" : "openai-chat", chunk);
         if (is_success) {
             if (native) feed_ndjson(ctx, chunk.data(), chunk.size());
             else        feed_sse(ctx, chunk.data(), chunk.size());
@@ -1974,6 +1986,20 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
     http::CancelTokenPtr cancel_for_end = cancel;
     auto result = http::default_client().stream(hreq, std::move(handler),
                                                 tos, std::move(cancel));
+
+    // One end-of-turn line + the raw error body on failure — the pair every
+    // "why did my provider fail?" report needs. Mirrors the Anthropic
+    // transport's anthropic.response/anthropic.error.body seam so a shared
+    // log reads the same regardless of which backend was active.
+    AGT_LOG(Wire, Debug, "openai.result",
+            "host={} dialect={} status={} transport={} terminated={}",
+            req.endpoint.host, native ? "ollama-native" : "openai-chat",
+            http_status,
+            result ? std::string{"ok"} : result.error().render(),
+            ctx.terminated ? 1 : 0);
+    if ((!result || http_status >= 400) && !error_body.empty())
+        AGT_LOG(Wire, Warn, "openai.error.body", "status={} raw={}",
+                http_status, error_body);
 
     // Whole post-loop through the SHARED epilogue: one terminal event, correct
     // precedence, identical to every other provider. on_any_end closes an open

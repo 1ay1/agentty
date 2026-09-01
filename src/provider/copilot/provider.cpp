@@ -21,6 +21,7 @@
 #include "agentty/provider/openai/transport.hpp"
 #include "agentty/provider/responses/responses.hpp"
 #include "agentty/io/http.hpp"
+#include "agentty/util/dbglog.hpp"
 
 #ifndef AGENTTY_VERSION
 #define AGENTTY_VERSION "0.0.0-dev"
@@ -41,7 +42,7 @@ HostPort parse_api_base(const std::string& base) {
     if (auto colon = s.find(':'); colon != std::string_view::npos) {
         hp.host = std::string{s.substr(0, colon)};
         try { hp.port = static_cast<std::uint16_t>(std::stoi(std::string{s.substr(colon + 1)})); }
-        catch (...) {}
+        catch (...) { util::dbglog("copilot.api_base.parse", base); }
     } else {
         hp.host = std::string{s};
     }
@@ -166,25 +167,35 @@ void note_responses_only(const std::string& model) {
 // resolve the same slug the chat path would, or a user switching between
 // them would silently get different models.
 //
-// Honour the user's choice when the session allows it; else the server's
-// `selected_model`; else the first available. Chat-compatibility is only a
-// TIE-BREAK for the fallback: a Responses-only model (mai-code-*) is a
-// perfectly good pick now that we can drive that dialect, but we still
-// prefer a chat-capable one when we're choosing on the user's behalf.
+// A CONCRETE request is honoured or it FAILS. It is never quietly swapped for
+// another model: a user (or a Smart Mode role slot) that pinned `gpt-5.6-luna`
+// and silently got `gpt-5.3-codex` gets wrong latency, wrong cost, wrong
+// capabilities — and, when the substitute is Responses-only but the chat path
+// was taken, an outright 400. Substitution is only correct when the user asked
+// us to choose, i.e. for the synthetic Auto entry.
+//
+// Returns "" when a concrete request cannot be served; the caller turns that
+// into a clear error naming the model.
 [[nodiscard]] std::string pick_auto_model(const AutoSession& as,
                                           const std::string& requested) {
-    std::string picked;
-    if (requested != kAutoId)
+    if (requested != kAutoId) {
         for (const auto& m : as.available_models)
-            if (m == requested) { picked = m; break; }
-    if (picked.empty() && auto_chat_compatible(as.selected_model))
-        picked = as.selected_model;
-    if (picked.empty())
-        for (const auto& m : as.available_models)
-            if (auto_chat_compatible(m)) { picked = m; break; }
-    if (picked.empty() && !as.available_models.empty())
-        picked = as.available_models.front();
-    return picked;
+            if (m == requested) return requested;
+        return {};   // pinned but unavailable — say so, don't reroute
+    }
+    // Auto: the user delegated the choice. Prefer the server's own pick, then
+    // any chat-capable model, then whatever is on offer.
+    //
+    // The emptiness check matters: auto_chat_compatible("") is true (an empty
+    // string doesn't start with "mai-code"), so a session that returned no
+    // selected_model would otherwise resolve to the EMPTY model slug and
+    // stream a request with no model at all.
+    if (!as.selected_model.empty() && auto_chat_compatible(as.selected_model))
+        return as.selected_model;
+    for (const auto& m : as.available_models)
+        if (auto_chat_compatible(m)) return m;
+    return as.available_models.empty() ? std::string{}
+                                       : as.available_models.front();
 }
 
 // ── The Copilot Responses site ──────────────────────────────────
@@ -250,6 +261,8 @@ std::string copilot_explain_http_error(int status, std::string_view body) {
             else if (e.is_object())
                 detail = e.value("message", e.value("code", std::string{}));
         }
+    } catch (const std::exception& e) {
+        util::dbglog("copilot.http_error.decode", e.what());
     } catch (...) {}
     std::string msg = "copilot returned HTTP " + std::to_string(status);
     if (!detail.empty()) msg += ": " + detail;
@@ -337,13 +350,31 @@ provider::StreamResult CopilotProvider::stream(provider::Request req,
         // turns are byte-identical to before this fork existed.
         if (as && as->valid()) {
             const std::string picked = pick_auto_model(*as, requested);
+            // A concrete pin the session can't serve is an ERROR, not a cue to
+            // pick something else. Smart Mode pins a model per role slot; a
+            // silent swap there spends the wrong model's budget and, when the
+            // substitute is Responses-only, 400s on the chat path with a
+            // message that blames the model the user never chose.
+            if (picked.empty() && requested != kAutoId) {
+                std::string avail;
+                for (const auto& m : as->available_models) {
+                    if (!avail.empty()) avail += ", ";
+                    avail += m;
+                }
+                sink(StreamError{
+                    "copilot: this account's Auto session does not offer `"
+                    + requested + "`. Available: "
+                    + (avail.empty() ? std::string{"(none)"} : avail)
+                    + ". Pick one of those, or select Auto to let Copilot choose.",
+                    std::nullopt});
+                return provider::StreamResult{
+                    .end   = provider::StreamEnd::TransportError,
+                    .error = "copilot: model not in Auto session"};
+            }
             const bool responses_capable =
                 !picked.empty() && session_lists_model(*as, picked)
                 && prefers_responses_dialect(picked);
             if (responses_capable) {
-                if (requested != kAutoId && picked != requested)
-                    sink(StreamNotice{"copilot auto: " + requested
-                                      + " \xe2\x86\x92 " + picked});
                 auto& rt = responses_turn();
                 rt.host          = parse_api_base(as->endpoint_api).host;
                 rt.token         = t.token;
@@ -361,18 +392,19 @@ provider::StreamResult CopilotProvider::stream(provider::Request req,
         oreq.context_window = req.context_window;
         oreq.session_key    = req.session_key;
         if (as && as->valid()) {
-            // Same resolver the Responses fork used — one implementation.
+            // Same resolver the Responses fork used — one implementation. A
+            // concrete pin is already proven available above (that path
+            // returns early), so `picked` here is either the pin itself or
+            // Auto's own choice. No substitution is possible, hence no notice.
             const std::string picked = pick_auto_model(*as, requested);
-            // SURFACE the substitution: the user picked `requested`, the
-            // Auto session is streaming `picked`. Silence here reads as
-            // "model switching is broken"; one toast makes the server-side
-            // routing visible. Auto itself always "substitutes" — only
-            // notify when a CONCRETE pick was rerouted.
-            if (requested != kAutoId && !picked.empty() && picked != requested)
-                sink(StreamNotice{"copilot auto: " + requested + " \xe2\x86\x92 "
-                                  + picked});
-            oreq.model    = picked;
-            oreq.endpoint = make_auto_endpoint(as->endpoint_api, as->session_token);
+            if (picked.empty()) {
+                // Auto had nothing to offer at all — fall back to the direct
+                // endpoint rather than streaming an empty model slug.
+                oreq.endpoint = make_endpoint(t.endpoint_api);
+            } else {
+                oreq.model    = picked;
+                oreq.endpoint = make_auto_endpoint(as->endpoint_api, as->session_token);
+            }
         } else {
             oreq.endpoint = make_endpoint(t.endpoint_api);
         }
@@ -604,6 +636,16 @@ bool chat_dialect_unsupported(const std::string& model) {
     // Learned at runtime (a 400 unsupported_api_for_model on the chat path)
     // OR known by family: mai-code-* has never accepted /chat/completions.
     return is_responses_only(model) || !auto_chat_compatible(model);
+}
+
+std::string pick_auto_model_for_test(
+        const std::vector<std::string>& available_models,
+        const std::string& selected_model,
+        const std::string& requested) {
+    AutoSession as;
+    as.available_models = available_models;
+    as.selected_model   = selected_model;
+    return pick_auto_model(as, requested);
 }
 
 void invalidate_model_cache() {

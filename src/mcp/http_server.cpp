@@ -525,7 +525,11 @@ protected:
         // inside one of our use() calls — the recursive lock re-enters.
         try {
             conn_.use([&](Conn& c) { if (c.transport) c.transport->stop(); });
-        } catch (...) {}
+        } catch (const std::exception& e) {
+            util::dbglog("mcp.http_server.teardown", e.what());
+        } catch (...) {
+            util::dbglog("mcp.http_server.teardown", "non-std exception");
+        }
     }
 
 private:

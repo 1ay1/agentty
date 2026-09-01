@@ -26,6 +26,7 @@
 #include "agentty/provider/chatgpt/codex_oauth.hpp"
 #include "agentty/provider/copilot/copilot_oauth.hpp"
 #include "agentty/provider/kimi/kimi_oauth.hpp"
+#include "agentty/util/dbglog.hpp"
 
 namespace agentty::auth::accounts {
 
@@ -218,7 +219,11 @@ std::string derive_current_label(const std::string& provider) {
     try {
         json j = json::parse(*body);
         if (b.label_body) return b.label_body(j);
-    } catch (...) {}
+    } catch (const std::exception& e) {
+        util::dbglog("accounts.derive_label.parse", e.what());
+    } catch (...) {
+        util::dbglog("accounts.derive_label.parse", "non-std exception");
+    }
     return "signed in";
 }
 

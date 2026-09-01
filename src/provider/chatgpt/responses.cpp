@@ -34,6 +34,7 @@
 #include "agentty/provider/chatgpt/codex_oauth.hpp"
 #include "agentty/provider/chatgpt/oauth.hpp"
 #include "agentty/io/http.hpp"
+#include "agentty/util/dbglog.hpp"
 
 namespace agentty::provider::chatgpt {
 namespace {
@@ -92,7 +93,10 @@ std::string format_http_error(int status, std::string_view body) {
     };
 
     bool decoded = false;
-    try { decoded = decode(json::parse(body)); } catch (...) {}
+    try { decoded = decode(json::parse(body)); }
+    catch (const std::exception& e) {
+        util::dbglog("chatgpt.http_error.decode", e.what());
+    } catch (...) {}
 
     // Some edge responses retain SSE framing even on an HTTP error. Decode
     // their `data: {...}` payload instead of showing the raw frame.

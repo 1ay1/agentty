@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -29,9 +30,12 @@
 #include "agentty/provider/usage.hpp"
 #include "agentty/provider/msg_shared.hpp"
 #include "agentty/provider/wire.hpp"
+#include "agentty/provider/debug.hpp"
+#include "agentty/provider/wire/streamed.hpp"
 #include "agentty/provider/wire_supersede.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
 #include "agentty/util/base64.hpp"
+#include "agentty/util/dbglog.hpp"
 
 namespace agentty::provider::responses {
 namespace {
@@ -224,24 +228,54 @@ json build_body(const provider::Request& req) {
 }
 
 // ── SSE dispatch state ─────────────────────────────────────────────────────
+// One open function_call item. `args` accumulates from all four carriers the
+// Responses dialect may use — `arguments` on output_item.added, the .delta
+// fragments, the .done snapshot, and the item snapshot on output_item.done.
+// unseen() makes the redundant ones no-ops, so we route every carrier and
+// none can be the one we forgot. (Copilot sends ONLY .done; we used to drop
+// it and dispatch every tool call with `{}`.)
+struct ToolSlot {
+    std::string call_id;   // the id a tool_result must echo
+    std::string args;
+};
+
 struct StreamCtx {
     EventSink sink;
     wire::SseFramer sse;
-    // item.id (fc_…) → call_id (call_…) so argument deltas keyed by item_id
-    // can be forwarded under the correlation id the result must echo.
-    std::unordered_map<std::string, std::string> call_ids;
+    // item.id (fc_…) → the open call's slot. Keyed by item_id because that is
+    // what argument events carry; the slot holds the call_id they must be
+    // forwarded under.
+    std::unordered_map<std::string, ToolSlot> tools;
     std::unordered_set<std::string> open_tool_items;
     std::string latest_tool_item;   // fallback for older events without item_id
     bool text_block_open = false;
     bool saw_function_call = false;
     bool terminated = false;
     StopReason stop = StopReason::EndTurn;
+    // Diagnostic: how many reasoning-bearing events arrived this turn.
+    // Lets a "reasoning is not showing" report be split into its two REAL
+    // causes from the log alone: 0 → the server never sent summary text
+    // (model/account tier doesn't emit it), >0 → it arrived and the loss is
+    // client-side (reducer/render). Surfaced in the end-of-turn Debug line.
+    int thinking_deltas = 0;
 };
+
+// Route an argument payload from ANY carrier into the slot and forward only
+// what is newly known. `total` = the server's complete view, not a fragment.
+void feed_tool_args(StreamCtx& ctx, const std::string& item_id,
+                    std::string_view payload, bool total) {
+    const auto it = ctx.tools.find(item_id);
+    if (it == ctx.tools.end()) return;
+    const auto fresh = wire::unseen(it->second.args, payload, total);
+    if (!fresh.empty())
+        ctx.sink(StreamToolUseDelta{ToolCallId{it->second.call_id},
+                                    std::string{fresh}});
+}
 
 void close_tool(StreamCtx& ctx, const std::string& item_id) {
     if (item_id.empty() || !ctx.open_tool_items.erase(item_id)) return;
-    if (const auto it = ctx.call_ids.find(item_id); it != ctx.call_ids.end())
-        ctx.sink(StreamToolUseEnd{ToolCallId{it->second}});
+    if (const auto it = ctx.tools.find(item_id); it != ctx.tools.end())
+        ctx.sink(StreamToolUseEnd{ToolCallId{it->second.call_id}});
     if (ctx.latest_tool_item == item_id) {
         ctx.latest_tool_item = ctx.open_tool_items.empty()
             ? std::string{} : *ctx.open_tool_items.begin();
@@ -263,7 +297,17 @@ void emit_usage(StreamCtx& ctx, const json& usage) {
 void dispatch(StreamCtx& ctx, std::string_view data) {
     if (data.empty() || data == "[DONE]") return;
     json j;
-    try { j = json::parse(data); } catch (...) { return; }
+    try { j = json::parse(data); } catch (const std::exception& e) {
+        // A frame we could not even parse is a DROPPED wire event — the
+        // single most expensive thing to lose silently (a dropped
+        // output_text/function_call frame reads as "model went mute" or
+        // "invalid args", never as what it is). Warn: on by default in
+        // release, and lands in the crash-ring flight recorder.
+        AGT_LOG(Wire, Warn, "responses.frame_unparseable",
+                "err={} bytes={} head={}", e.what(), data.size(),
+                data.substr(0, 256));
+        return;
+    }
 
     const auto type = j.value("type", std::string{});
 
@@ -274,6 +318,7 @@ void dispatch(StreamCtx& ctx, std::string_view data) {
     }
     if (type == "response.reasoning_summary_text.delta"
         || type == "response.reasoning_text.delta") {
+        ++ctx.thinking_deltas;
         ctx.sink(StreamThinkingDelta{j.value("delta", std::string{}), {}});
         return;
     }
@@ -305,29 +350,46 @@ void dispatch(StreamCtx& ctx, std::string_view data) {
             const std::string item_id = item.value("id", std::string{});
             const std::string call_id = item.value("call_id", item_id);
             const std::string name    = item.value("name", std::string{});
-            ctx.call_ids[item_id] = call_id;
+            ctx.tools[item_id] = ToolSlot{call_id, {}};
             ctx.open_tool_items.insert(item_id);
             ctx.latest_tool_item = item_id;
             ctx.saw_function_call = true;
             ctx.sink(StreamToolUseStart{ToolCallId{call_id}, ToolName{name}});
-            // Some backends deliver the whole args string up-front on `added`.
+            // Carrier (1): some backends deliver the whole args string
+            // up-front on `added`. A snapshot, so route it as a total.
             if (const auto a = item.value("arguments", std::string{}); !a.empty())
-                ctx.sink(StreamToolUseDelta{ToolCallId{call_id}, a});
+                feed_tool_args(ctx, item_id, a, /*total=*/true);
         }
         return;
     }
+    // Carrier (2): incremental fragments. What Codex sends.
     if (type == "response.function_call_arguments.delta") {
-        const std::string item_id = j.value("item_id", ctx.latest_tool_item);
-        if (const auto it = ctx.call_ids.find(item_id); it != ctx.call_ids.end())
-            ctx.sink(StreamToolUseDelta{
-                ToolCallId{it->second}, j.value("delta", std::string{})});
+        feed_tool_args(ctx, j.value("item_id", ctx.latest_tool_item),
+                       j.value("delta", std::string{}), /*total=*/false);
+        return;
+    }
+    // Carrier (3): the authoritative snapshot that terminates the argument
+    // stream. GitHub Copilot's proxy coalesces and sends ONLY this, so a
+    // codec that ignores it dispatches every tool call with `{}`. For a
+    // server that also streamed fragments this is a no-op, because
+    // observe_total() returns just the unseen suffix (usually nothing).
+    if (type == "response.function_call_arguments.done") {
+        feed_tool_args(ctx, j.value("item_id", ctx.latest_tool_item),
+                       j.value("arguments", std::string{}), /*total=*/true);
         return;
     }
     if (type == "response.output_item.done") {
         const auto& item = j.value("item", json::object());
         const auto itype = item.value("type", std::string{});
-        if (itype == "function_call")
-            close_tool(ctx, item.value("id", std::string{}));
+        if (itype == "function_call") {
+            const std::string item_id = item.value("id", std::string{});
+            // Carrier (4): the completed item may restate the full arguments.
+            // Last chance to learn them before the call is dispatched — a
+            // no-op when an earlier carrier already supplied them.
+            if (const auto a = item.value("arguments", std::string{}); !a.empty())
+                feed_tool_args(ctx, item_id, a, /*total=*/true);
+            close_tool(ctx, item_id);
+        }
         else if (itype == "reasoning") {
             // A reasoning item completed. Capture its opaque encrypted_content
             // so the reducer can stash it on the assistant message and replay
@@ -355,6 +417,10 @@ void dispatch(StreamCtx& ctx, std::string_view data) {
         // No finish_reason on the wire — a function_call in the output means
         // the model wants tool results before continuing.
         ctx.stop = ctx.saw_function_call ? StopReason::ToolUse : StopReason::EndTurn;
+        AGT_LOG(Wire, Debug, "responses.completed",
+                "stop={} tool_calls={} thinking_deltas={}",
+                ctx.saw_function_call ? "tool_use" : "end_turn",
+                ctx.tools.size(), ctx.thinking_deltas);
         ctx.sink(StreamFinished{ctx.stop});
         ctx.terminated = true;
         return;
@@ -365,6 +431,10 @@ void dispatch(StreamCtx& ctx, std::string_view data) {
         emit_usage(ctx, resp.value("usage", json::object()));
         const auto reason = resp.value("incomplete_details", json::object())
                                 .value("reason", std::string{});
+        // Warn: an incomplete response is a truncated turn the user WILL
+        // notice; the wire reason ("max_output_tokens", "content_filter"…)
+        // is the answer to their "why did it stop mid-sentence?" report.
+        AGT_LOG(Wire, Warn, "responses.incomplete", "reason={}", reason);
         ctx.stop = reason == "max_output_tokens" ? StopReason::MaxTokens
                                                   : StopReason::EndTurn;
         ctx.sink(StreamFinished{ctx.stop});
@@ -404,6 +474,11 @@ void dispatch(StreamCtx& ctx, std::string_view data) {
             msg = compose(err);
             if (msg.empty()) msg = "Codex request failed";
         }
+        // The full wire error event, not just the composed one-liner: the
+        // event may carry fields compose() doesn't surface (param, request
+        // id) that decide a provider-side ticket vs a client bug.
+        AGT_LOG(Wire, Warn, "responses.error_event", "msg={} raw={}",
+                msg, data.substr(0, 2048));
         ctx.sink(StreamError{msg, std::nullopt});
         ctx.terminated = true;
         return;
@@ -411,6 +486,25 @@ void dispatch(StreamCtx& ctx, std::string_view data) {
     // response.created / in_progress / content_part.* / *_summary_part.* etc.
     // are structural — nothing to render. Bump liveness so the stall watchdog
     // knows the wire is healthy during a long reasoning pass.
+    //
+    // Anything we don't recognise lands here too, and silence is what made the
+    // Copilot bug so expensive: `.done` carried the tool arguments, we ignored
+    // it, and the only symptom was "[invalid args] pattern required" — which
+    // reads as a bad model, not a dropped event. Falling through is still the
+    // right BEHAVIOUR (an unknown event is usually structural); it just must
+    // not be invisible. One debug line per event type, deduped, so a new
+    // dialect quirk names itself instead of being blamed on the model.
+    if (!type.empty() && !type.starts_with("response.created")
+        && !type.starts_with("response.in_progress")
+        && !type.starts_with("response.content_part")
+        && !type.starts_with("response.output_text.done")
+        && !type.contains("_summary_part")) {
+        static std::mutex           seen_mu;
+        static std::set<std::string> seen;
+        std::lock_guard lk(seen_mu);
+        if (seen.insert(type).second)
+            util::dbglog("responses.unhandled_event", type);
+    }
     ctx.sink(StreamHeartbeat{});
 }
 
@@ -471,6 +565,8 @@ provider::StreamResult stream(const Site& site, provider::Request req,
     http::StreamHandler cbs;
     cbs.on_headers = [&](int status, const http::Headers& hh) {
         http_status = status;
+        AGT_LOG(Wire, Debug, "responses.response", "host={} status={}",
+                hr.host, status);
         if (status < 400) return;   // only care about the error path
         retry_after_hint = provider::parse_retry_after(hh);
     };
@@ -479,6 +575,7 @@ provider::StreamResult stream(const Site& site, provider::Request req,
     };
     cbs.on_buffered_wait = [&] { sink(StreamBufferedWait{}); };
     cbs.on_chunk = [&](std::string_view chunk) -> bool {
+        provider::dbg_chunk("openai-responses", chunk);
         if (http_status >= 400) {
             // Cap the buffered error body so a misbehaving edge / proxy that
             // streams an unbounded 4xx/5xx body can't drive us into OOM on the
@@ -510,6 +607,18 @@ provider::StreamResult stream(const Site& site, provider::Request req,
     tos.idle    = std::chrono::milliseconds(90'000);
 
     auto result = http::default_client().stream(hr, cbs, tos, req.cancel);
+
+    // One end-of-turn summary + the raw error body when the turn failed.
+    // This is the line a user's shared log answers "why did the provider
+    // fail?" with — the HTTP status, the transport verdict, and the exact
+    // bytes the server sent back (capped at 64 KB by on_chunk above).
+    AGT_LOG(Wire, Debug, "responses.result",
+            "status={} transport={} terminated={} thinking_deltas={}",
+            http_status, result ? std::string{"ok"} : result.error().render(),
+            ctx.terminated ? 1 : 0, ctx.thinking_deltas);
+    if ((!result || http_status >= 400) && !error_body.empty())
+        AGT_LOG(Wire, Warn, "responses.error.body", "status={} raw={}",
+                http_status, error_body);
 
     // End the turn through the SHARED epilogue so every Responses host
     // finishes identically to Anthropic/OpenAI/Ollama. The critical case is
