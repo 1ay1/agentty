@@ -327,6 +327,10 @@ Element fused_picker(const Model& m) {
     };
     std::optional<Section> cur;
     int visual_selected = 0;
+    // Size of the "all providers" section, for the header count below.
+    int all_count = 0;
+    for (const auto& r : rows)
+        if (section_of(r) == Section::All) ++all_count;
     for (int i = 0; i < static_cast<int>(rows.size()); ++i) {
         const auto& r = rows[static_cast<std::size_t>(i)];
         const Section sec = section_of(r);
@@ -337,6 +341,18 @@ Element fused_picker(const Model& m) {
             hdr.leading = sec == Section::Recent ? "recent"
                         : sec == Section::All    ? "all providers"
                                                   : "not signed in";
+            // Name the size of the browse list. An aggregator (OpenRouter et
+            // al.) contributes hundreds of models to a 14-row viewport, and
+            // without a count a tiny scrollbar is the only hint that the list
+            // runs far past the screen — which reads as "my model is missing"
+            // rather than "type to narrow". Browse-only: with a query active
+            // the row count is the answer to the query, and a total would
+            // just be noise next to it.
+            if (sec == Section::All && picker->query.empty() && all_count > 0) {
+                hdr.trailing = std::to_string(all_count) + " models \xc2\xb7 "
+                               "type to filter";
+                hdr.trailing_style = fg_italic(muted);
+            }
             cfg.rows.push_back(std::move(hdr));
         }
         if (i == picker->index)

@@ -222,7 +222,12 @@ find_catalog(const std::vector<ProviderCatalog>& cats, std::string_view pid) {
     //   • resolved_caps: 3 registry map-lookups behind a shared_mutex per
     //     call — memoised per (provider, model) for the duration of this
     //     build; catalogs repeat ids across rebuilds but never within one.
-    struct Scored { FusedRow row; int score; int prov_ord; };
+    // `tier` is precomputed per row rather than derived inside the
+    // comparator: ModelCapabilities::tier_for tokenises the id and runs
+    // several substring scans, and a comparator is called O(n log n) times.
+    // On an aggregator's few-hundred-model catalog that was thousands of
+    // redundant scans per keystroke. 0 when browsing is off (unused).
+    struct Scored { FusedRow row; int score; int prov_ord; int tier; };
     std::vector<Scored> scored;
     scored.reserve(64);
     int prov_ord = 0;
@@ -292,17 +297,34 @@ find_catalog(const std::vector<ProviderCatalog>& cats, std::string_view pid) {
             // Register AFTER the query gate: a filtered-out twin must not
             // suppress its matching sibling.
             seen.push_back(std::move(r));
-            scored.push_back({std::move(row), mscore, prov_ord});
+            const int tier = no_query
+                ? static_cast<int>(ModelCapabilities::tier_for(mi.id.value))
+                : 0;   // unused while filtering — don't pay for it
+            scored.push_back({std::move(row), mscore, prov_ord, tier});
         }
         ++prov_ord;
     }
     std::stable_sort(scored.begin(), scored.end(),
-        [](const Scored& a, const Scored& b) {
-            // favorite first, then fuzzy score, then provider registry order,
-            // then wider context window.
+        [no_query](const Scored& a, const Scored& b) {
+            // favorite first, then fuzzy score, then — when BROWSING — model
+            // strength, then provider registry order, then wider context.
             if (a.row.model.favorite != b.row.model.favorite)
                 return a.row.model.favorite;
             if (a.score != b.score) return a.score > b.score;
+            // TIER, browse-only. With no query the list is whatever every
+            // provider happens to serve — on an aggregator that is hundreds of
+            // rows, and provider-registry order alone put an arbitrary slice in
+            // the viewport. Ranking by capability tier makes the first screen
+            // the models you would plausibly pick (flagships, then mid, then
+            // cheap, then weak), so scrolling is a choice rather than a
+            // requirement.
+            //
+            // Deliberately NOT applied while filtering: once the user types,
+            // fuzzy score is the intent signal and re-ranking behind it would
+            // move the row they are aiming at. Search stays purely
+            // relevance-ordered.
+            if (no_query && a.tier != b.tier)
+                return a.tier > b.tier;         // Flagship(3) … Weak(0)
             if (a.prov_ord != b.prov_ord) return a.prov_ord < b.prov_ord;
             return a.row.model.context_window > b.row.model.context_window;
         });

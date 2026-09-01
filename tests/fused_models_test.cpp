@@ -229,3 +229,99 @@ TEST_CASE("fused: [1m] context variants are distinct rows, not alias dupes") {
         if (r.provider_id == "mistral") ++mistral_rows;
     CHECK(mistral_rows == 1);
 }
+
+// Browse-view ranking: with NO query the head of the list must be the models
+// you would plausibly pick, not an arbitrary slice of whatever the providers
+// happen to serve.
+//
+// The motivating case is an aggregator: OpenRouter-class catalogs contribute
+// hundreds of rows to a ~14-row viewport, and ordering by provider-registry
+// position alone meant the first screen was determined by nothing the user
+// cares about. Ranking by capability tier (Flagship → Mid → Cheap → Weak) puts
+// the plausible picks on screen 1, so scrolling becomes a choice.
+//
+// The inverse matters just as much: once a QUERY is active, fuzzy score is the
+// intent signal and tier must NOT re-rank behind it — otherwise the row the
+// user is aiming at moves under them as they type.
+TEST_CASE("fused: browse ranks by tier, search stays relevance-ordered") {
+    // One provider, deliberately listed weakest-first so registry order alone
+    // would leave the weak model at the top.
+    std::vector<ProviderCatalog> cats = {
+        cat("openrouter", "OpenRouter",
+            {mk("tinyllama:1b",        "TinyLlama 1B",   "openrouter"),
+             mk("qwen2.5-coder:7b",    "Qwen2.5 Coder",  "openrouter"),
+             mk("claude-haiku-4-5",    "Claude Haiku",   "openrouter"),
+             mk("claude-sonnet-4-6",   "Claude Sonnet",  "openrouter"),
+             mk("claude-opus-4-5",     "Claude Opus",    "openrouter")}),
+    };
+
+    // ── Browse: strongest first ──────────────────────────────────────
+    {
+        ui::FusedInputs in;
+        in.catalogs = &cats;
+        const auto rows = ui::build_fused_rows(in);
+        REQUIRE(rows.size() >= 5);
+        // Tier is non-increasing down the list.
+        int prev = 4;   // above Flagship(3)
+        for (const auto& r : rows) {
+            if (r.is_signin_offer()) continue;
+            const int t = static_cast<int>(
+                ModelCapabilities::tier_for(r.model.id.value));
+            INFO("browse list is ordered strongest-first");
+        CHECK(t <= prev);
+            prev = t;
+        }
+        // Concretely: the flagship outranks the 1B local model that the
+        // catalog listed first.
+        int opus = -1, tiny = -1;
+        for (int i = 0; i < static_cast<int>(rows.size()); ++i) {
+            if (rows[static_cast<std::size_t>(i)].model.id.value == "claude-opus-4-5") opus = i;
+            if (rows[static_cast<std::size_t>(i)].model.id.value == "tinyllama:1b")    tiny = i;
+        }
+        REQUIRE(opus >= 0);
+        REQUIRE(tiny >= 0);
+        INFO("a flagship outranks a 1B local model when browsing");
+        CHECK(opus < tiny);
+    }
+
+    // ── Search: relevance wins, tier does NOT reorder behind it ──────
+    {
+        ui::FusedInputs in;
+        in.catalogs = &cats;
+        in.query = "coder";           // matches only the weak local model
+        const auto rows = ui::build_fused_rows(in);
+        REQUIRE(!rows.empty());
+        INFO("a query's best match leads, regardless of its tier");
+        CHECK(rows.front().model.id.value == "qwen2.5-coder:7b");
+    }
+
+    // ── Favorites still outrank everything, in both modes ────────────
+    {
+        std::vector<ProviderCatalog> favc = {
+            cat("openrouter", "OpenRouter",
+                {mk("tinyllama:1b",    "TinyLlama 1B", "openrouter", 8000, true),
+                 mk("claude-opus-4-5", "Claude Opus",  "openrouter")}),
+        };
+        ui::FusedInputs in;
+        in.catalogs = &favc;
+        const auto rows = ui::build_fused_rows(in);
+        REQUIRE(!rows.empty());
+        INFO("an explicit favorite outranks tier — the user already chose");
+        CHECK(rows.front().model.id.value == "tinyllama:1b");
+    }
+
+    // ── The ACTIVE model stays pinned to the top of RECENT ───────────
+    // Tier ranking applies to section 2 only; it must not disturb the
+    // recents section's meaning.
+    {
+        ui::FusedInputs in;
+        in.catalogs = &cats;
+        in.active = ModelRef{"openrouter", "tinyllama:1b"};   // weak, but active
+        const auto rows = ui::build_fused_rows(in);
+        REQUIRE(!rows.empty());
+        INFO("the active model still leads the list");
+        CHECK(rows.front().active);
+        INFO("tier ranking does not evict the active model from the top");
+        CHECK(rows.front().model.id.value == "tinyllama:1b");
+    }
+}
