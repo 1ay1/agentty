@@ -14,6 +14,7 @@
 #include "agentty/workspace/files.hpp"
 #include "agentty/workspace/symbols.hpp"
 #include "agentty/util/modelsdev.hpp"
+#include "agentty/util/dbglog.hpp"
 #include "agentty/tool/subagent.hpp"   // set_smart: push pins to the task router
 
 #include <cstdlib>
@@ -301,16 +302,35 @@ std::pair<Model, maya::Cmd<Msg>> init() {
     if (!std::getenv("AGENTTY_NO_UPDATE_CHECK"))
         cmds.push_back(cmd::check_for_update());
 
-    // models.dev capability snapshot: load the cached copy NOW (one small
-    // file read — declared reasoning + exact effort enums reach the ladder
-    // from frame 1), then refresh in the background (24h-cached fetch of
-    // https://models.dev/api.json). Community-maintained metadata absorbs
-    // provider drift between releases; the learned-from-rejection registry
-    // still outranks it for anything the provider itself corrected. Same
-    // opt-outs as the release check (airgap installs must not dial out).
-    agentty::modelsdev::load_cached();
-    if (!std::getenv("AGENTTY_NO_UPDATE_CHECK"))
-        cmds.push_back(cmd::refresh_modelsdev());
+    // models.dev capability snapshot: parse the cached copy on a BACKGROUND
+    // thread, then refresh over the network (24h-cached fetch of
+    // https://models.dev/api.json). The cache is ~4.4 MB of JSON (~7.5k
+    // models); parsing it inline here cost the first frame tens of
+    // milliseconds of main-thread time — measured as the single largest
+    // pre-paint block. The capability registries are mutex-guarded and
+    // epoch-versioned (caps_epoch), and every consumer (ladder, badges,
+    // wire clamp) re-resolves per frame/request, so facts landing a few
+    // frames after first paint are picked up automatically — the same
+    // contract the background refresh below has always relied on.
+    // Ordering: load_cached FIRST, then refresh — sequenced inside one
+    // task so the network copy can never lose to the disk copy.
+    // Community-maintained metadata absorbs provider drift between
+    // releases; the learned-from-rejection registry still outranks it.
+    // Same opt-outs as the release check (airgap installs must not dial
+    // out).
+    const bool no_net = std::getenv("AGENTTY_NO_UPDATE_CHECK") != nullptr;
+    cmds.push_back(maya::Cmd<Msg>::task_isolated(
+        [no_net](std::function<void(Msg)>) {
+            agentty::modelsdev::load_cached();
+            if (!no_net) {
+                try { (void)agentty::modelsdev::refresh(); }
+                catch (const std::exception& e) {
+                    util::dbglog("modelsdev.refresh", e.what());
+                } catch (...) {
+                    util::dbglog("modelsdev.refresh", "non-std exception");
+                }
+            }
+        }));
 
     // Prewarm the composer's `@` (files) and `#` (symbols) indices on
     // background threads NOW, so by the time the user types either trigger
