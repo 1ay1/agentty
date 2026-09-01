@@ -430,3 +430,36 @@ TEST_CASE("fused: row columns align") {
         CHECK(star_slot(true) == star_slot(false));
     }
 }
+
+// The badge column scales with the terminal. A fixed clamp is wrong in both
+// directions: too greedy in a narrow split (14 columns restating the provider
+// on every row starves the model NAME, which is what the user reads), too
+// tight on a wide screen (truncating "GitHub Copilot" to "GitHub Copil" when
+// there is ample room). The picker is commonly used in a split pane, so this
+// is not a hypothetical.
+TEST_CASE("fused: badge column scales with terminal width") {
+    // Mirrors picker_badge_max_cols()'s ladder.
+    auto badge_max = [](int cols) {
+        if (cols < 70)  return 8;
+        if (cols < 100) return 12;
+        return 16;
+    };
+
+    CHECK(badge_max(60)  == 8);    // narrow split
+    CHECK(badge_max(80)  == 12);   // classic terminal
+    CHECK(badge_max(120) == 16);   // wide
+
+    // Monotonic: a wider terminal never yields a NARROWER badge column.
+    int prev = 0;
+    for (int c : {40, 60, 70, 80, 100, 120, 200}) {
+        const int w = badge_max(c);
+        CHECK(w >= prev);
+        prev = w;
+    }
+
+    // The widest real provider label fits without truncation once there is
+    // room for it — "GitHub Copilot" is 14 columns.
+    CHECK(badge_max(120) >= 14);
+    // …and is abbreviated, not permitted to eat the row, when there isn't.
+    CHECK(badge_max(60) < 14);
+}

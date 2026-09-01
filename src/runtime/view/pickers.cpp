@@ -142,6 +142,42 @@ constexpr int kPickerChromeRows = 7;
     return std::clamp(avail, 4, kViewportH);
 }
 
+// Terminal WIDTH, resolved the same way picker_terminal_rows() resolves
+// height: real ioctl first, COLUMNS only when there is no tty (pipe / test
+// harness, where maya's query returns its hardcoded {80,24}).
+[[nodiscard]] int picker_terminal_cols() {
+    const auto sz = maya::platform::query_terminal_size(
+        maya::platform::stdout_handle());
+    int cols = sz.width.value;
+    const bool have_tty = maya::platform::is_tty(
+        maya::platform::stdout_handle());
+    if (!have_tty) {
+        if (const char* c = std::getenv("COLUMNS")) {
+            if (const int n = std::atoi(c); n > 0) cols = n;
+        }
+    }
+    if (cols <= 0) cols = 80;
+    return cols;
+}
+
+// How many columns the provider badge may occupy.
+//
+// The badge is the grouping signal in a flat cross-provider list, so it must
+// stay legible — but it competes with the model NAME, which is what the user
+// is actually reading. On a wide terminal there is room for the full label
+// ("GitHub Copilot"); on an 80-column one, spending 14 columns restating the
+// provider on every row starves the names.
+//
+// Scales with the terminal instead of a magic constant: a fixed clamp is
+// either too tight when wide or too greedy when narrow, and the picker is
+// commonly used in a split pane.
+[[nodiscard]] int picker_badge_max_cols() {
+    const int cols = picker_terminal_cols();
+    if (cols < 70)  return 8;    // narrow split: abbreviate hard
+    if (cols < 100) return 12;   // typical 80-col terminal
+    return 16;                   // wide: full labels fit
+}
+
 // One key-binding hint in a footer strip: a key glyph + a short label,
 // plus a priority that decides survival order when the picker is too
 // narrow to show them all (higher = kept longer).
@@ -310,11 +346,42 @@ Element fused_picker(const Model& m) {
     }
 
     if (rows.empty()) {
+        // A dead end should say WHY it is empty and what to do next. The bare
+        // "no models match" was the same message whether you had mistyped,
+        // whether every catalog was still loading, or whether you were signed
+        // out of everything — three very different situations with three
+        // different next actions. It also returned before the footer was
+        // built, so the picker offered no hint that Esc even worked.
+        const bool loading = std::any_of(
+            m.d.provider_catalogs.begin(), m.d.provider_catalogs.end(),
+            [](const ProviderCatalog& c) {
+                return c.state == ProviderCatalog::State::Loading;
+            });
+        const bool any_authed = std::any_of(
+            m.d.provider_catalogs.begin(), m.d.provider_catalogs.end(),
+            [](const ProviderCatalog& c) { return !c.models.empty(); });
+
         Picker::Config::Row nr;
-        nr.leading = "  no models match";
+        if (loading) {
+            nr.leading = "  loading model catalogs\xe2\x80\xa6";
+        } else if (!any_authed) {
+            nr.leading = "  no providers signed in \xc2\xb7 "
+                         "^P to add one";
+        } else if (!picker->query.empty()) {
+            nr.leading = "  no model matches \xe2\x80\x9c" + picker->query
+                       + "\xe2\x80\x9d \xc2\xb7 Backspace to widen";
+        } else {
+            nr.leading = "  no models available";
+        }
         nr.leading_style = fg_italic(muted);
         cfg.rows.push_back(std::move(nr));
         cfg.selected = 0;
+        // Keep the footer: an empty list is exactly when the user most needs
+        // to be told how to leave or how to reach the provider picker.
+        cfg.footer.push_back(key_hints({
+            {"^P", "providers", 1},
+            {"Esc", "close", 4},
+        }));
         return Picker{std::move(cfg)}.build();
     }
 
@@ -341,14 +408,16 @@ Element fused_picker(const Model& m) {
     // provider badge is the grouping signal in a flat cross-provider list, so
     // a ragged column defeats the whole layout.
     //
-    // Labels are ASCII (registry `label` fields), so bytes == columns here.
-    // Clamp the column so one long label can't push every name off a narrow
-    // terminal; maya truncates the overflow.
-    std::size_t badge_w = 0;
+    // Measured in DISPLAY COLUMNS via maya::string_width, not bytes: registry
+    // labels are ASCII today, but a custom host is user-named and may hold
+    // CJK or emoji, where a byte count would over-pad and re-break the very
+    // alignment this exists to create. (The same helper the provider picker
+    // and the hints strip already use.)
+    int badge_w = 0;
     for (const auto& r : rows)
         if (!r.is_signin_offer())
-            badge_w = std::max(badge_w, r.label.size());
-    badge_w = std::min<std::size_t>(badge_w, 12);
+            badge_w = std::max(badge_w, maya::string_width(r.label));
+    badge_w = std::min(badge_w, picker_badge_max_cols());
     for (int i = 0; i < static_cast<int>(rows.size()); ++i) {
         const auto& r = rows[static_cast<std::size_t>(i)];
         const Section sec = section_of(r);
@@ -393,8 +462,10 @@ Element fused_picker(const Model& m) {
         Picker::Config::Row row;
         row.selected = selected;   // drives the highlight bar + selected bg
         const bool active = r.active;
-        row.badge         = r.label.size() < badge_w
-                              ? r.label + std::string(badge_w - r.label.size(), ' ')
+        const int bw = maya::string_width(r.label);
+        row.badge         = bw < badge_w
+                              ? r.label + std::string(
+                                    static_cast<std::size_t>(badge_w - bw), ' ')
                               : r.label;
         row.badge_style   = fg_dim(active ? accent : muted);
         row.leading       = (active ? std::string{"\xe2\x97\x8f "}   // ●
@@ -454,6 +525,12 @@ Element fused_picker(const Model& m) {
         // The active row keeps the accent so the current model still reads at
         // a glance.
         row.trailing_style = active ? fg_of(accent) : fg_dim(muted);
+        // Under width pressure the CHIPS give way, not the model name — the
+        // name is what you are selecting; the context window and marks are
+        // reference data. Without this the default policy (leading yields
+        // first) truncated "Claude Sonnet 4.6" to keep "200k ★ ✦" intact on a
+        // narrow split, which is exactly backwards.
+        row.trailing_secondary = true;
         cfg.rows.push_back(std::move(row));
     }
     cfg.selected = visual_selected;
