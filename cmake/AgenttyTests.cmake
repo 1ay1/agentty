@@ -16,11 +16,11 @@ include(AgenttyTestRegistry)
 # a per-exe build; see git history for the per-test rationale comments.
 set(_AGENTTY_CONSOLIDATED
     error_class_test accounts_registry_test acp_agents_test acp_integration_test
-    custom_host_key_prompt_test decomposition_memory_test dispatch_route_test
+    custom_host_key_prompt_test dispatch_route_test
     model_label_test cache_anchor_test composer_edit_test hooks_gate_test
     midrun_freeze_test smart_mode_test stream_liveness_test wire_golden_test
-    wire_shared_test complexity_test copilot_token_test kimi_token_test routing_memory_test
-    smart_cascade_gate_test chatgpt_bundled_models_test settings_default_test
+    wire_shared_test complexity_test copilot_token_test kimi_token_test
+    chatgpt_bundled_models_test settings_default_test
     turn_provenance_test
     update_check_test
     workspace_index_test
@@ -36,7 +36,7 @@ set(_AGENTTY_CONSOLIDATED
     param_tag_repair_test sandbox_escape_test scope_test table_render_test
     ssrf_guard_test render_key_coverage_test reasoning_render_test
     plugin_config_test skills_engine_test slash_commands_test fuzzy_match_smoke
-    provider_model_switch_test speculative_dispatch_test
+    provider_model_switch_test
     oauth_proactive_refresh_test maya_host_sequence_test
     smart_slot_picker_stack_test account_switch_refresh_test fused_models_test
     credentials_test)

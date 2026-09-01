@@ -139,7 +139,6 @@ using maya::Cmd;
     // priors (RoutingMemory) survive by design — they are cross-thread.
     m.s.smart_turn_complexity  = smart::Complexity::Standard;
     m.s.smart_effort_bias      = 0;
-    m.s.smart_turn_signature.clear();
     m.s.smart_turn_had_failure = false;
     release_to_kernel();
     // Re-warm the active provider's TLS socket. The launch-time prewarm in
@@ -1678,7 +1677,6 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
             // momentum and its first follow-up trains the old signature.
             m.s.smart_turn_complexity  = smart::Complexity::Standard;
             m.s.smart_effort_bias      = 0;
-            m.s.smart_turn_signature.clear();
             m.s.smart_turn_had_failure = false;
             // Optional timing probe. AGENTTY_LOAD_PROF=1 keeps surfacing
             // the synchronous portion of the load (rehydrate +

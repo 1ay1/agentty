@@ -66,53 +66,37 @@ struct SlotOverride {
 };
 
 struct RoleConfig {
-    bool         enabled = false;   // Smart Mode master switch (off by default)
-    // Three INDEPENDENTLY-selectable behaviour layers (all gated by `enabled`).
-    // Each is a pure win in isolation; the user picks which to run.
-    //   route_internal   Layer 2 — send internal utility LLM calls (compaction,
-    //                    thread title, commit message, HyDE, fork retrieval) to
-    //                    the Utility model. Invisible cost win. Default ON.
-    //   orchestrate      Layer 3a — run the MAIN turn on the Strategic model and
-    //                    inject a delegation directive so it offloads mechanical
-    //                    work to subagents (orchestrator-workers). Default ON.
-    //   route_subagents  Layer 3b — resolve each subagent's model by its role
-    //                    (explorer→Utility, reviewer→Strategic, coder/tester/
-    //                    general→Implementation) instead of the tier auto-router.
-    //                    Default ON.
-    bool route_internal  = true;
-    bool orchestrate     = true;
-    bool route_subagents = true;
-    // Four learning/innovation layers (all gated by `enabled`, all default
-    // ON). They exploit substrate stateless routers lack: agentty's own
-    // execution history in this workspace.
-    //   learn_routing    persist the cascade correction per-workspace, keyed
-    //                    by turn signature, so the router improves on YOUR repo
-    //                    across sessions (RoutingMemory prior).
-    //   outcome_feedback ground the learning in REAL outcomes — a user
-    //                    correction / failed build / git revert right after a
-    //                    turn is a routing regret that re-rates its signature.
-    //   speculative      pre-warm the likely explorer worker while the lead is
-    //                    still thinking, so delegation isn't on the critical path.
-    //   recall_plans     retrieve past SUCCESSFUL decompositions for similar
-    //                    turns and prime the delegation prompt with them.
-    bool learn_routing    = true;
-    bool outcome_feedback = true;
-    bool speculative      = false;   // off by default — can waste a worker
-    bool recall_plans     = true;
+    bool enabled = false;   // Smart Mode master switch (off by default)
+
+    // ONE decision, three slots. There used to be seven more toggles here.
+    //
+    // Three of them (internal routing, orchestration, subagent routing) are
+    // now FOLDED IN: they are what Smart Mode *means*, and no user rationally
+    // turned them off. "Send my compaction summaries to the flagship instead
+    // of the cheap model" is not a preference worth a row — it is strictly
+    // more expensive for no benefit. A toggle earns its place only where a
+    // reasonable user would reasonably choose either way; these didn't.
+    // Debug/bisect escape hatches live in env vars (smart::tuning::layers()),
+    // not in the UI.
+    //
+    // Four of them (learned routing, outcome feedback, speculative prewarm,
+    // plan recall) were self-supervised feedback loops that mutated routing
+    // from per-workspace persisted state. They were never measured against
+    // the fixed policy, and each carried a correctness surface (two state
+    // files, a regret denominator, a decay schedule) plus the cognitive cost
+    // of a user wondering what they do. Deleted. Four unmeasured feedback
+    // loops is the product hedging, not an opinion.
     SlotOverride strategic;
     SlotOverride implementation;
     SlotOverride utility;
 
-    // Whether a given layer is active right now (master switch AND its flag).
-    [[nodiscard]] bool internal_routing() const noexcept { return enabled && route_internal; }
-    [[nodiscard]] bool orchestration()    const noexcept { return enabled && orchestrate; }
-    [[nodiscard]] bool subagent_routing() const noexcept { return enabled && route_subagents; }
-    // The learning layers additionally require orchestration — they all refine
-    // the orchestrated main turn's routing, which only exists when it's on.
-    [[nodiscard]] bool routing_learning()  const noexcept { return orchestration() && learn_routing; }
-    [[nodiscard]] bool outcome_learning()  const noexcept { return orchestration() && outcome_feedback; }
-    [[nodiscard]] bool speculation()       const noexcept { return orchestration() && speculative; }
-    [[nodiscard]] bool plan_recall()       const noexcept { return orchestration() && recall_plans; }
+    // Whether a given layer is active right now. All three are simply the
+    // master switch (kept as named accessors so call sites read as intent
+    // — "is orchestration on" — rather than a bare bool, and so an env
+    // escape hatch has exactly one place to apply).
+    [[nodiscard]] bool internal_routing() const noexcept;
+    [[nodiscard]] bool orchestration()    const noexcept;
+    [[nodiscard]] bool subagent_routing() const noexcept;
 
     [[nodiscard]] const SlotOverride& slot(ModelRole r) const noexcept {
         switch (r) {
@@ -123,6 +107,19 @@ struct RoleConfig {
         return strategic;
     }
 };
+
+// Layer gates. Each is the master switch minus a developer escape hatch
+// (see smart_tuning.hpp). Defined out-of-class so the tuning header's
+// helpers are in scope; still header-inline, still trivially inlined.
+inline bool RoleConfig::internal_routing() const noexcept {
+    return enabled && !tuning::no_internal();
+}
+inline bool RoleConfig::orchestration() const noexcept {
+    return enabled && !tuning::no_orchestrate();
+}
+inline bool RoleConfig::subagent_routing() const noexcept {
+    return enabled && !tuning::no_subagents();
+}
 
 namespace detail {
 
@@ -339,23 +336,6 @@ namespace detail {
     }
     return cheapest_capable_model(wire_model_id(parent_model), candidates,
                                   ModelCapabilities::Tier::Cheap);
-}
-
-// Blend the live SESSION cascade bias with the persisted LEARNED prior. Both
-// encode the same regret signal at two timescales, so they must NOT be summed
-// (that double-escalates a sticky turn-class). A NEUTRAL session (0, the cold-
-// start state of every fresh session) defers to the prior outright — 0 carries
-// no evidence, and treating it as "positive sign" would discard a learned
-// negative prior, silently disabling the relax-effort half of the loop.
-// Same-sign: keep whichever points harder. Opposite-sign: the live session
-// wins (more recent evidence). Used by both launch_stream (the real effort)
-// and the routing card (its provenance), so the card can never disagree with
-// the wire.
-[[nodiscard]] inline int blend_bias(int session, int prior) noexcept {
-    if (session == 0) return prior;
-    if ((prior >= 0) == (session >= 0))
-        return std::abs(prior) > std::abs(session) ? prior : session;
-    return session;
 }
 
 } // namespace agentty::smart

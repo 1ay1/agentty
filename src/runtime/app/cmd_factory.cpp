@@ -14,8 +14,6 @@
 
 #include "agentty/auth/auth.hpp"
 #include "agentty/domain/catalog.hpp"
-#include "agentty/domain/routing_memory.hpp"
-#include "agentty/domain/decomposition_memory.hpp"
 #include "agentty/runtime/app/deps.hpp"
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/io/http.hpp"
@@ -621,12 +619,11 @@ std::optional<Message> build_smart_routing_card(const Model& m) {
     const smart::ComplexityScore cx = smart::classify_turn(
         newest_user, m.s.smart_turn_complexity, nu_attach_bytes, nu_images);
     const auto caps = resolved_caps(prof.model);
-    const int learned = m.d.smart.routing_learning()
-        ? smart::RoutingMemory::instance().prior_bias(
-              smart::turn_signature(cx.tier, newest_user))
-        : 0;
-    const int session = m.s.smart_effort_bias;
-    const int bias    = smart::blend_bias(session, learned);
+    // Session cascade bias only. The per-workspace LEARNED prior (a Beta-
+    // smoothed regret rate keyed by turn signature) was deleted with the rest
+    // of the self-supervised layers: it mutated routing from persisted state
+    // that was never measured against the fixed policy.
+    const int bias = m.s.smart_effort_bias;
     const Effort scaled = smart::effort_for_score(prof.effort, cx, caps, bias);
 
     // Effort PROVENANCE — make the adaptive decision legible: base effort, the
@@ -645,8 +642,7 @@ std::optional<Message> build_smart_routing_card(const Model& m) {
         else note += " (payload)";
     }
     if (bias != 0) {
-        const bool from_learned = (bias == learned && learned != 0);
-        note += from_learned ? " \xc2\xb7 learned " : " \xc2\xb7 session ";
+        note += " \xc2\xb7 session ";
         note += (bias > 0 ? "+" : "-") + std::to_string(std::abs(bias));
     }
 
@@ -782,9 +778,6 @@ Cmd<Msg> launch_stream(Model& m) {
     // (needs the live catalog); a no-op profile == (model_id, effort) when
     // orchestration is off, so the captured values below are always valid.
     const bool orchestrate = m.d.smart.orchestration();
-    const bool plan_recall = m.d.smart.plan_recall();
-    const bool speculative = m.d.smart.speculation();
-    std::string recalled_plan;   // filled below when a past decomposition matches
     smart::RoleProfile strategic_profile =
         smart::resolve_role(smart::ModelRole::Strategic, model_id,
                             m.d.effort, m.d.available_models, m.d.smart);
@@ -802,8 +795,7 @@ Cmd<Msg> launch_stream(Model& m) {
             // Skip the zero-text 🧠 routing card (Role::User, smart_routing):
             // submit_message inserts it AFTER the real user message, so
             // without this guard the scan classifies an empty string — wrong
-            // effort on the wire, a degenerate turn_signature pooling every
-            // turn's learned prior, and a card that disagrees with the wire.
+            // effort on the wire and a card that disagrees with it.
             if (it->role == Role::User && !it->proactive_context
                 && !it->smart_routing && !it->fork_note) {
                 newest_user = it->text;
@@ -822,48 +814,12 @@ Cmd<Msg> launch_stream(Model& m) {
             newest_user, m.s.smart_turn_complexity, nu_attach_bytes, nu_images);
         turn_complexity = turn_cx.tier;
         const auto caps = resolved_caps(strategic_profile.model);
-        // Innovation 1 — LEARNED ROUTING: fold in the per-workspace prior this
-        // repo has taught us for this class of turn (persisted cascade). The
-        // live session bias (smart_effort_bias) and this persisted prior encode
-        // the SAME regret signal at two timescales, so we must NOT sum them —
-        // that double-escalates a sticky turn-class to ~2× the intended
-        // correction. Blend instead: take whichever points harder in a given
-        // direction, keeping the effort nudge a single-strength correction.
-        int total_bias = m.s.smart_effort_bias;
-        std::string sig;
-        if (m.d.smart.routing_learning()) {
-            sig = smart::turn_signature(turn_complexity, newest_user);
-            const int prior = smart::RoutingMemory::instance().prior_bias(sig);
-            // Same-sign keeps the stronger; opposite-sign lets the live session
-            // win. Shared with build_smart_routing_card so the card's shown
-            // effort can never disagree with the wire.
-            total_bias = smart::blend_bias(total_bias, prior);
-            // Record the routing ONCE per user turn so the outcome signal at
-            // finalize_turn has an honest denominator. launch_stream re-runs on
-            // post-tool sub-turns and transient retries; the latch skips those.
-            if (!m.s.smart_turn_routed) {
-                smart::RoutingMemory::instance().note_routed(sig);
-                m.s.smart_turn_routed = true;
-            }
-        }
-        m.s.smart_turn_signature = sig;
-        // Innovation 4 (deep) — PLAN RECALL: pull the closest past successful
-        // decomposition for this class of turn and hand it to the orchestrator
-        // as a concrete few-shot, so it reuses what worked in THIS repo.
-        if (m.d.smart.plan_recall() && !sig.empty()
-            && turn_complexity == smart::Complexity::Complex) {
-            auto hits = smart::DecompositionMemory::instance().recall(sig, 1);
-            if (!hits.empty() && !hits.front().steps.empty()) {
-                std::string plan = "A past turn like this in THIS repo was "
-                                   "decomposed as:\n";
-                for (const auto& s : hits.front().steps) plan += "  • " + s + "\n";
-                plan += "Reuse this shape where it fits; adapt as needed.";
-                recalled_plan = std::move(plan);
-            }
-        }
+        // Session cascade bias only. The per-workspace learned prior, the
+        // regret denominator it needed, and the plan-recall few-shot all went
+        // with the self-supervised layers — see RoleConfig's comment.
         strategic_profile.effort =
             smart::effort_for_score(strategic_profile.effort, turn_cx,
-                                    caps, total_bias);
+                                    caps, m.s.smart_effort_bias);
         // Stash for the cascade feedback at finalize_turn.
         m.s.smart_turn_complexity = turn_complexity;
     }
@@ -902,8 +858,7 @@ Cmd<Msg> launch_stream(Model& m) {
     return Cmd<Msg>::task(
         [thread = std::move(thread_snapshot),
          compacting, compaction_style, compaction_ceiling, context_max, retry_count,
-         orchestrate, strategic_profile, turn_complexity, plan_recall, speculative,
-         recalled_plan = std::move(recalled_plan),
+         orchestrate, strategic_profile, turn_complexity,
          session_key = std::move(session_key),
          model_id = std::move(model_id),
          compaction_model = std::move(compaction_model),
@@ -998,19 +953,6 @@ Cmd<Msg> launch_stream(Model& m) {
                 "task(agent_type:\"tester\"); critical review → "
                 "task(agent_type:\"reviewer\"). Start wide, then narrow.\n"
                 + std::string{budget} +
-                (plan_recall
-                   ? "\nBefore decomposing a non-trivial task, recall how similar "
-                     "work was structured in THIS codebase: check your learned "
-                     "memory and `search_docs` for a prior decomposition or plan "
-                     "that worked, and reuse its shape rather than re-deriving it."
-                   : "") +
-                (recalled_plan.empty() ? "" : "\n" + recalled_plan) +
-                (speculative && turn_complexity == smart::Complexity::Complex
-                   ? "\nSPECULATE: fire your first exploration task(s) as your "
-                     "VERY FIRST action — before you finish planning — so the "
-                     "worker runs while you think. Launch the independent "
-                     "explorers together, then reason over their reports."
-                   : "") +
                 "\n</smart-mode>";
         }
         const bool openai_provider = sel_now.kind == provider::Kind::OpenAI;

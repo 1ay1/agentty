@@ -160,13 +160,6 @@ struct Settings {
     // strings mirror the `effort` field's grammar (""/"low"/"medium"/…).
     // Reloaded into Model::Domain::smart at startup.
     bool                 smart_enabled = false;
-    bool                 smart_route_internal  = true;
-    bool                 smart_orchestrate     = true;
-    bool                 smart_route_subagents = true;
-    bool                 smart_learn_routing    = true;
-    bool                 smart_outcome_feedback = true;
-    bool                 smart_speculative      = false;
-    bool                 smart_recall_plans     = true;
     std::string          smart_strategic_model,      smart_strategic_effort;
     std::string          smart_impl_model,           smart_impl_effort;
     std::string          smart_utility_model,        smart_utility_effort;

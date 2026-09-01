@@ -39,8 +39,6 @@ set(AGENTTY_IO_SOURCES
     src/util/update.cpp
     src/util/modelsdev.cpp
     src/domain/complexity.cpp
-    src/domain/routing_memory.cpp
-    src/domain/decomposition_memory.cpp
 )
 
 set(AGENTTY_WORKSPACE_SOURCES

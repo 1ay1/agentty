@@ -333,36 +333,6 @@ bool proactive_first_turn_only() {
     } catch (...) { return false; }
 }
 
-void smart_speculative_prewarm(const std::string& query) {
-    if (query.empty()) return;
-    std::string q = query.substr(0, 2000);
-    // Dedup: the prewarm is a detached, best-effort warm-up whose only product
-    // is a cache entry in the shared retriever. Re-running it for a query we
-    // already warmed this session (a resubmit, an edit-and-retry, or the same
-    // turn re-entering) is pure wasted work — the cache is already hot. Guard
-    // on the last warmed query; process-local, tiny, mutex for the detached
-    // launcher racing the reducer thread.
-    {
-        static std::mutex mu;
-        static std::string last;
-        std::lock_guard<std::mutex> lk(mu);
-        if (q == last) return;
-        last = q;
-    }
-    // Detached + terminate-proof: warm the index and prime a code retrieval on
-    // the query so it's cached by the time the orchestrator's first explorer
-    // runs. Best-effort — any failure is swallowed; results are cached inside
-    // the shared retriever, not returned.
-    ::agentty::util::run_isolated_detached("smart.speculative_prewarm",
-        [q = std::move(q)] {
-            try {
-                auto& r = shared_retriever();
-                r.warm_async();
-                (void)r.retrieve_code(q, 5);
-            } catch (...) { /* best-effort */ }
-        });
-}
-
 namespace {
 
 class AgenttyDocRetriever final : public mt::DocRetriever {

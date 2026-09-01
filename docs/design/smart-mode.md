@@ -1,32 +1,70 @@
 # Smart Mode — role-based execution routing
 
-**Status:** SHIPPED (master `832688a4..0d79d510`). The original three-role
-vision below is the foundation; the shipped feature grew past it into a full
-self-supervised orchestrator. See §0 for what actually landed.
+**Status:** SHIPPED, then SIMPLIFIED. The original three-role vision below is
+the foundation; the feature grew past it into a self-supervised orchestrator
+with eight toggles, and was then cut back to what it should have been. See §0.
 
 ## 0. What shipped (the map)
 
-Smart Mode is one master toggle plus eight independently-selectable layers,
-all in the `Ctrl+S` overlay, all gated by the master switch, **off = a
-byte-for-byte no-op**:
+Smart Mode is **one master switch plus three model slots** — four rows in the
+`Ctrl+S` overlay. Off is a byte-for-byte no-op. Turning it on enables all of
+this together:
 
-| Layer | What it does | Where |
-|-------|--------------|-------|
+| Behaviour | What it does | Where |
+|-----------|--------------|-------|
 | Internal routing | utility engine calls (compaction) → cheapest model | `smart::utility_model` |
 | Orchestration | main turn on Strategic + `<smart-mode>` delegation directive | `cmd_factory` `launch_stream` |
 | Subagent routing | each `task` worker's model by its role | `mcp_tools_backends` `run_one_completion` |
-| Complexity-scaled effort | classify turn → scale Strategic effort | `smart::classify_complexity` + `effort_for_complexity` |
-| Cascade feedback | session bias self-corrects from delegation behaviour | `stream.cpp` `finalize_turn` |
-| Learned routing | per-workspace Beta-smoothed effort prior | `smart::RoutingMemory` |
-| Outcome feedback | build-fail / next-turn correction → regret | `finalize_turn` + `submit_message` |
-| Speculative | detached retrieval prewarm on Complex turns | `tools::smart_speculative_prewarm` |
-| Plan recall | retrieve past successful decompositions into the prompt | `smart::DecompositionMemory` |
+| Complexity-scaled effort | classify turn → scale Strategic effort | `smart::classify_turn` + `effort_for_score` |
+| Cascade feedback | in-session bias self-corrects from delegation + build outcomes | `stream.cpp` `finalize_turn` |
 
 The per-turn routing decision renders as a first-class 🧠 card; delegations
-render as ordinary `task` tool cards. Config persists to `settings.json`
-(`"smart"` object) and the two learning stores persist per-workspace under
-`.agentty/` (`routing_memory.tsv`, `decompositions.jsonl`). The design below
-is retained as the rationale for the core routing decision.
+render as ordinary `task` tool cards, and each assistant turn's header names
+the model that actually served it (`Message::served_model`) with a per-role
+accent. Config persists to `settings.json` (`"smart"` object: `enabled` plus
+the three slots). Nothing persists per-workspace.
+
+### What was removed, and why
+
+The first three behaviours above used to be user-facing toggles
+(`route_internal`, `orchestrate`, `route_subagents`). They are now folded into
+the master switch: no user rationally ran Smart Mode with orchestration off,
+and "make my compaction summaries more expensive" is not a preference worth a
+row. A toggle earns its place only where a reasonable user would reasonably
+choose either way. Developer escape hatches survive as `AGENTTY_SMART_NO_*`
+env vars — deliberately env-only, deliberately negative.
+
+Four further layers were **deleted outright**:
+
+| Deleted | What it was |
+|---------|-------------|
+| Learned routing | per-workspace Beta-smoothed effort prior (`RoutingMemory`) |
+| Outcome feedback | build-fail / correction → persisted regret keyed by turn signature |
+| Speculative | detached retrieval prewarm on Complex turns |
+| Plan recall | retrieve past successful decompositions into the prompt (`DecompositionMemory`) |
+
+They were self-supervised feedback loops that mutated routing from persisted
+state, and they were never measured against the fixed policy. Each carried a
+real correctness surface — two on-disk stores, a regret denominator that a
+tool-heavy turn could inflate 5×, a decay schedule, a blend rule to stop the
+session and persisted signals double-escalating — plus the cognitive cost of a
+user wondering what four unexplained toggles did. Four unmeasured feedback
+loops is a product hedging, not an opinion.
+
+The *useful half* of the signal is retained where it costs nothing: the
+**session** cascade still reads delegation count, build failures and next-turn
+corrections, still decays each turn, is still clamped by
+`AGENTTY_SMART_BIAS_CLAMP` — and dies with the process, so it can never ratchet
+one week's cost into the next.
+
+Net: −1 012 lines of runtime code (−1 542 with tests and docs), two
+state files no longer written, 11 overlay rows → 4.
+
+Existing workspaces keep an inert `.agentty/routing_memory.tsv` (and
+`decompositions.jsonl`) until deleted by hand. Nothing reads them, and no
+migration runs: silently deleting a user's files on upgrade is worse than
+leaving a few stale KB. The same applies to the seven dead `smart_mode` keys
+in `settings.json` — unknown keys were always tolerated on load.
 
 ---
 **Author:** agentty

@@ -23,7 +23,6 @@
 #include "agentty/provider/registry.hpp"
 #include "agentty/provider/selection.hpp"
 #include "agentty/store/store.hpp"
-#include "agentty/domain/routing_memory.hpp"
 #include "agentty/tool/mcp_tools_backends.hpp"
 #include "agentty/tool/skills.hpp"
 #include "agentty/tool/subagent.hpp"
@@ -405,61 +404,25 @@ Step submit_message(Model m) {
             proactive_probe = std::move(probe);
         }
     }
-    // Chip-stripped, human-readable view of the turn for Smart Mode's
-    // speculative prewarm (Innovation 3). Captured before `user` is moved.
-    std::string speculate_probe;
-    if (m.d.smart.speculation()) {
-        speculate_probe.reserve(user.text.size());
-        for (std::size_t i = 0; i < user.text.size();) {
-            if (static_cast<unsigned char>(user.text[i]) == attachment::kSentinel) {
-                auto len = attachment::placeholder_len_at(user.text, i);
-                if (len > 0) { i += len; continue; }
-            }
-            speculate_probe.push_back(user.text[i++]);
-        }
-    }
-
-    // Freeze the prior turn AND the freshly-pushed User in one pass —
-    // the agent_session SessionStart analog (it pushes gap() + the user
-    // Turn into m.frozen the moment the user submits). The prior turn
-    // is fully settled by construction: submit only proceeds when
-    // m.s.is_idle(), so no tool is running and no stream is in flight.
-    // The user message is immutable from birth, so freezing it
-    // immediately is always safe. After this, the live tail contains
-    // ONLY the in-flight assistant run — exactly agent_session's shape:
-    // the user Turn paints once from frozen (zero-copy list_ref blit)
     // instead of being re-built every frame for the whole run, and the
     // settle-time freeze has one fewer seam to hand off.
-    // Innovation 2 — OUTCOME FEEDBACK (correction side): if this new user
-    // turn looks like a correction of the PREVIOUS turn ("no", "that's wrong",
-    // "actually…", "undo", "revert"), that's ground truth the prior route was
-    // too weak — attribute a regret to its signature so this class of turn
-    // escalates next time. Cheap prefix/keyword scan on the trimmed text.
-    if (m.d.smart.outcome_learning() && !m.s.smart_turn_signature.empty()) {
-        // A genuine routing regret is DISSATISFACTION with the previous turn's
-        // result — not a redirection, an additive request, or praise. The
-        // classifier is a pure, unit-tested function (smart::) so this hot
-        // reduce path just asks it.
-        const bool correction = smart::is_routing_correction(user.text);
-        if (correction)
-            smart::RoutingMemory::instance().note_regret(m.s.smart_turn_signature, +1);
-        else if (m.s.smart_turn_complexity != smart::Complexity::Complex
-                 && !m.s.smart_turn_had_failure)
-            // #5 SYMMETRIC signal: a non-correction follow-up after a turn we
-            // did NOT already escalate is weak ground truth the route was
-            // adequate. Feed a small negative regret so the prior can relax
-            // back down — without this the store only ever accrues positive
-            // regret (corrections + tool failures) and ratchets effort/cost
-            // upward monotonically. Gated off Complex so a genuinely hard
-            // class that got a clean answer isn't pushed to under-think next
-            // time — and off turns that already earned a +1 failure regret,
-            // else the −1 would silently cancel that ground-truth signal.
-            smart::RoutingMemory::instance().note_regret(m.s.smart_turn_signature, -1);
+    // CORRECTION SIGNAL (session cascade): if this new user turn looks like a
+    // correction of the previous one ("no", "that's wrong", "actually…",
+    // "undo", "revert"), that is ground truth the prior route was too weak —
+    // nudge the SESSION effort bias up so this session thinks harder. The
+    // classifier is a pure, unit-tested function (smart::), so this hot reduce
+    // path just asks it.
+    //
+    // This used to also write a per-workspace regret keyed by turn signature
+    // (RoutingMemory). That store is gone: the same signal at a second,
+    // persisted timescale was never measured against the fixed policy, and it
+    // silently ratcheted cost across sessions. The in-memory cascade keeps the
+    // useful half — it decays every turn, is clamped, and dies with the
+    // process.
+    if (m.d.smart.orchestration() && smart::is_routing_correction(user.text)) {
+        const int clamp = smart::tuning::bias_clamp();
+        if (m.s.smart_effort_bias < clamp) ++m.s.smart_effort_bias;
     }
-
-    // New user turn begins: clear the first-stream-of-turn routing latch so
-    // the upcoming launch_stream records exactly one note_routed for it.
-    m.s.smart_turn_routed = false;
 
     m.d.current.messages.push_back(std::move(user));
 
@@ -493,13 +456,6 @@ Step submit_message(Model m) {
     // detail what orchestration did. Wire-inert; std::nullopt when off.
     if (auto card = cmd::build_smart_routing_card(m))
         m.d.current.messages.push_back(std::move(*card));
-
-    // Innovation 3 (deep) — SPECULATIVE: on a Complex orchestrated turn, kick a
-    // detached retrieval warm-up NOW so the workspace grounding is hot by the
-    // time the lead delegates. Free (local retrieval), best-effort.
-    if (m.d.smart.speculation() && !speculate_probe.empty()
-        && smart::classify_complexity(speculate_probe) == smart::Complexity::Complex)
-        tools::smart_speculative_prewarm(speculate_probe);
 
     Message placeholder;
     placeholder.role = Role::Assistant;
@@ -705,13 +661,6 @@ void persist_settings(const Model& m) {
     // persisted preference untouched so the pin never leaks into config.
     if (!smart::tuning::enabled_override())
         s.smart_enabled      = m.d.smart.enabled;
-    s.smart_route_internal   = m.d.smart.route_internal;
-    s.smart_orchestrate      = m.d.smart.orchestrate;
-    s.smart_route_subagents  = m.d.smart.route_subagents;
-    s.smart_learn_routing    = m.d.smart.learn_routing;
-    s.smart_outcome_feedback = m.d.smart.outcome_feedback;
-    s.smart_speculative      = m.d.smart.speculative;
-    s.smart_recall_plans     = m.d.smart.recall_plans;
     s.smart_strategic_model  = m.d.smart.strategic.model;
     s.smart_strategic_effort = std::string{effort_wire(m.d.smart.strategic.effort)};
     s.smart_impl_model       = m.d.smart.implementation.model;

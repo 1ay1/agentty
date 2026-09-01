@@ -23,8 +23,6 @@
 
 #include "agentty/auth/auth.hpp"
 #include "agentty/domain/catalog.hpp"
-#include "agentty/domain/routing_memory.hpp"
-#include "agentty/domain/decomposition_memory.hpp"
 #include "agentty/domain/smart_tuning.hpp"
 #include "agentty/provider/error_class.hpp"
 #include "agentty/provider/selection.hpp"
@@ -724,8 +722,7 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
     // every tool round-trip. finalize_turn fires on each StreamFinished, and a
     // tool-using turn produces several (StopReason::ToolUse) before its real
     // EndTurn. Running the cascade on each would decay the bias N times, count
-    // regret N times (poisoning the RoutingMemory denominator, exactly the
-    // note_routed bug's twin), and record the decomposition repeatedly. The
+    // regret N times, and double-count the delegation evidence. The
     // turn is still mid-flight if the model asked for tools OR any pending/
     // approved tool call is queued for kick_pending_tools to promote.
     const bool tools_pending =
@@ -750,26 +747,11 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
     if (!tools_pending && m.d.smart.orchestration() && !m.d.current.messages.empty()) {
         int delegations = 0;
         bool tool_failure = false;
-        std::vector<std::string> decomposition;   // "agent_type: brief" in call order
         for (auto it = m.d.current.messages.rbegin();
              it != m.d.current.messages.rend(); ++it) {
             if (it->role != Role::Assistant) break;   // this turn's run only
             for (const auto& tc : it->tool_calls) {
-                if (tc.name == "task") {
-                    ++delegations;
-                    // Capture the delegation shape for plan recall (Innovation
-                    // 4): agent_type + a short brief gist.
-                    if (m.d.smart.plan_recall() && tc.args.is_object()) {
-                        std::string atype = tc.args.value("agent_type", "general");
-                        std::string brief = tc.args.value("prompt",
-                                              tc.args.value("description", ""));
-                        // First line / clause of the brief, clipped.
-                        auto nl = brief.find('\n');
-                        if (nl != std::string::npos) brief.resize(nl);
-                        if (brief.size() > 90) brief.resize(90);
-                        decomposition.push_back(atype + ": " + brief);
-                    }
-                }
+                if (tc.name == "task") ++delegations;
                 // A failed build / test / diagnostics call in this turn is a
                 // ground-truth "the cheap route may have been wrong" signal.
                 if (std::holds_alternative<ToolUse::Failed>(tc.status)
@@ -792,11 +774,12 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
         // effectively a direct reply.
         else if (delegations == 0 && cx == smart::Complexity::Complex)
             regret = -1;
-        // Innovation 2 — OUTCOME FEEDBACK: a failed build/test this turn is
-        // real evidence the turn was harder than routed; bias up regardless of
-        // delegation count (ground truth beats the proxy).
-        if (m.d.smart.outcome_learning() && tool_failure && regret <= 0)
-            regret = +1;
+        // A failed build/test this turn is real evidence the turn was harder
+        // than routed; bias up regardless of delegation count (ground truth
+        // beats the delegation-count proxy). This is the SESSION cascade —
+        // in-memory, decays every turn, clamped, gone on exit. The persisted
+        // per-workspace variant of this signal was deleted; see RoleConfig.
+        if (tool_failure && regret <= 0) regret = +1;
         m.s.smart_effort_bias += regret;
         // Symmetric clamp on the session cascade bias, env-tunable
         // (AGENTTY_SMART_BIAS_CLAMP): caps how far this session's self-
@@ -809,29 +792,6 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
         // signal — a turn that already earned a +1 failure regret must not be
         // silently relaxed back to neutral by the follow-up.
         m.s.smart_turn_had_failure = tool_failure;
-        // Innovation 1 — persist the correction per-workspace for this class of
-        // turn so it survives the session.
-        if (m.d.smart.routing_learning() && regret != 0
-            && !m.s.smart_turn_signature.empty())
-            smart::RoutingMemory::instance().note_regret(m.s.smart_turn_signature, regret);
-        // Innovation 4 — capture a SUCCESSFUL decomposition: a Complex turn
-        // that delegated real work and hit no tool failure is a pattern worth
-        // remembering for next time. Keyed by the same signature.
-        if (m.d.smart.plan_recall() && !tool_failure
-            && m.s.smart_turn_complexity == smart::Complexity::Complex
-            && decomposition.size() >= 1 && !m.s.smart_turn_signature.empty()) {
-            std::string gist;
-            for (auto it = m.d.current.messages.rbegin();
-                 it != m.d.current.messages.rend(); ++it)
-                if (it->role == Role::User && !it->proactive_context && !it->smart_routing
-                    && !it->fork_note && !it->text.empty()) {
-                    gist = it->text.substr(0, 100);
-                    if (auto nl = gist.find('\n'); nl != std::string::npos) gist.resize(nl);
-                    break;
-                }
-            smart::DecompositionMemory::instance().record(
-                m.s.smart_turn_signature, gist, std::move(decomposition));
-        }
     }
 
     deps().save_thread(m.d.current);

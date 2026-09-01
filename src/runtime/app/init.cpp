@@ -135,13 +135,6 @@ std::pair<Model, maya::Cmd<Msg>> init() {
     // preference survives the session untouched.
     if (auto ov = smart::tuning::enabled_override())
         m.d.smart.enabled = *ov;
-    m.d.smart.route_internal  = settings.smart_route_internal;
-    m.d.smart.orchestrate     = settings.smart_orchestrate;
-    m.d.smart.route_subagents = settings.smart_route_subagents;
-    m.d.smart.learn_routing    = settings.smart_learn_routing;
-    m.d.smart.outcome_feedback = settings.smart_outcome_feedback;
-    m.d.smart.speculative      = settings.smart_speculative;
-    m.d.smart.recall_plans     = settings.smart_recall_plans;
     auto load_slot = [](smart::SlotOverride& slot,
                         const std::string& model, const std::string& eff) {
         if (!model.empty()) {

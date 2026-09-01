@@ -598,17 +598,6 @@ struct StreamState {
     // launch so finalize_turn can compare it against what the model actually
     // did (delegation count) and update smart_effort_bias.
     smart::Complexity smart_turn_complexity = smart::Complexity::Standard;
-    // The RoutingMemory signature of the in-flight turn (Innovation 1/2), so
-    // finalize_turn can attribute the outcome regret to the right class of
-    // turn. Empty when learned routing is off.
-    std::string smart_turn_signature;
-    // First-stream-of-turn latch for learned-routing accounting. launch_stream
-    // re-runs on every post-tool sub-turn AND every transient retry; without
-    // this gate each of those would call note_routed() again, inflating the
-    // `routed` denominator 5× on a tool-heavy turn and structurally diluting
-    // the regret rate the prior is built from. Set true after the first
-    // note_routed of a user turn; reset to false at submit_message.
-    bool smart_turn_routed = false;
     // The model + role the IN-FLIGHT turn was actually dispatched on. Written
     // by launch_stream once the role is resolved, read when the assistant
     // message settles so the turn header can name its true author (see

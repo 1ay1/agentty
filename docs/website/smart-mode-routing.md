@@ -74,7 +74,7 @@ You don't set the tier — it's inferred from your prompt. Ask a design or "why"
 
 The upfront classifier is a good first guess, not an oracle. Smart Mode layers a **cascade** on top: as a turn plays out, agentty watches what the orchestrator actually did and adjusts a running effort bias for the rest of the session. If a turn the heuristic called "Simple" ends up spawning several parallel workers, it was really complex — so the bias nudges up and the next turns think harder. If a "Complex"-rated turn delegated nothing and answered directly, the bias relaxes. The bias decays toward neutral each turn, so one anomaly never sticks.
 
-This is the routing research's actual recommendation — *cascade beats one-shot routing* — and it's free here because the agent loop already sees the outcome. Persisting that correction across sessions is [Learned Routing](/docs/smart-mode-learning).
+This is the routing research's actual recommendation — *cascade beats one-shot routing* — and it's free here because the agent loop already sees the outcome. The correction is **session-scoped**: it decays each turn, is clamped, and resets when you exit. agentty deliberately does not persist it across sessions — a routing prior that ratchets cost from one week's work into the next is a correctness surface that was never worth its complexity.
 
 ## Where each role is used
 

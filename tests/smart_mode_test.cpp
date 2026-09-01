@@ -110,18 +110,36 @@ TEST_CASE("smart_mode") {
     // 5. The three behaviour layers gate independently, all under `enabled`.
     {
         sm::RoleConfig cfg;
-        // Off master ⇒ no layer is active regardless of flags.
+        // The three layers are now the master switch — there are no per-layer
+        // flags to clear. A user cannot run Smart Mode with orchestration off;
+        // only the AGENTTY_SMART_NO_* developer escape hatches can do that,
+        // and they are env-only by design.
         CHECK(!cfg.internal_routing() && !cfg.orchestration() && !cfg.subagent_routing(),
               "layers: disabled master → all layers inactive");
-        cfg.enabled = true;   // flags default true
+        cfg.enabled = true;
         CHECK(cfg.internal_routing() && cfg.orchestration() && cfg.subagent_routing(),
-              "layers: enabled + default flags → all three active");
-        cfg.orchestrate = false;
-        CHECK(cfg.internal_routing() && !cfg.orchestration() && cfg.subagent_routing(),
-              "layers: clearing one flag disables only that layer");
+              "layers: enabled master → all three active, no sub-toggles");
         cfg.enabled = false;
-        CHECK(!cfg.internal_routing() && !cfg.subagent_routing(),
-              "layers: master off overrides any set flag");
+        CHECK(!cfg.internal_routing() && !cfg.orchestration() && !cfg.subagent_routing(),
+              "layers: master off is the single source of truth");
+
+        // The escape hatches suppress exactly one layer each and leave the
+        // others running — that is the point of having three of them.
+        cfg.enabled = true;
+        setenv("AGENTTY_SMART_NO_ORCHESTRATE", "1", 1);
+        CHECK(cfg.internal_routing() && !cfg.orchestration() && cfg.subagent_routing(),
+              "escape hatch: NO_ORCHESTRATE disables only orchestration");
+        unsetenv("AGENTTY_SMART_NO_ORCHESTRATE");
+        setenv("AGENTTY_SMART_NO_INTERNAL", "1", 1);
+        CHECK(!cfg.internal_routing() && cfg.orchestration() && cfg.subagent_routing(),
+              "escape hatch: NO_INTERNAL disables only internal routing");
+        unsetenv("AGENTTY_SMART_NO_INTERNAL");
+        setenv("AGENTTY_SMART_NO_SUBAGENTS", "1", 1);
+        CHECK(cfg.internal_routing() && cfg.orchestration() && !cfg.subagent_routing(),
+              "escape hatch: NO_SUBAGENTS disables only subagent routing");
+        unsetenv("AGENTTY_SMART_NO_SUBAGENTS");
+        CHECK(cfg.internal_routing() && cfg.orchestration() && cfg.subagent_routing(),
+              "escape hatches are not sticky");
     }
 
     // 6. Cascade effort bias: a positive bias steps effort UP, negative DOWN,
@@ -186,22 +204,6 @@ TEST_CASE("smart_mode") {
             CHECK(p.effort == Effort::None,
                   "subagent: parent effort None ⇒ worker effort None");
         }
-    }
-
-    // 9. blend_bias: session + learned prior must not SUM (that double-
-    //    escalates); same-sign keeps the stronger, opposite-sign the session
-    //    wins. This helper is shared by the wire and the routing card, so the
-    //    card can never show an effort the wire didn't use.
-    {
-        CHECK(sm::blend_bias(1, 1) == 1,  "blend: equal same-sign → that value (no sum)");
-        CHECK(sm::blend_bias(1, 2) == 2,  "blend: same-sign keeps the stronger (prior)");
-        CHECK(sm::blend_bias(2, 1) == 2,  "blend: same-sign keeps the stronger (session)");
-        CHECK(sm::blend_bias(1, -2) == 1, "blend: opposite-sign → the live session wins");
-        CHECK(sm::blend_bias(0, 2) == 2,  "blend: zero session → pure prior");
-        CHECK(sm::blend_bias(0, -2) == -2,
-              "blend: zero session defers to a NEGATIVE prior too — cold-start "
-              "sessions must not discard the learned relax-effort signal");
-        CHECK(sm::blend_bias(-1, -1) == -1, "blend: negative same-sign → no double-down");
     }
 
     // ── classify_turn: the ONE composed classifier ──────────────────

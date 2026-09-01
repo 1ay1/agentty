@@ -17,8 +17,6 @@
 #include "agentty/runtime/view/hints.hpp"
 #include "agentty/runtime/view/palette.hpp"
 #include "agentty/runtime/code_block_picker.hpp"  // extract_code_blocks (palette gating)
-#include "agentty/domain/routing_memory.hpp"
-#include "agentty/domain/decomposition_memory.hpp"
 #include "agentty/runtime/view/thread/turn/agent_timeline/tool_helpers.hpp"
 #include "agentty/runtime/view/thread/turn/agent_timeline/tool_args.hpp"
 #include "agentty/runtime/view/thread/turn/agent_timeline/tool_body_preview.hpp"
@@ -737,41 +735,17 @@ Element smart_mode_overlay(const Model& m) {
 
     const bool on = sm.enabled;
     struct Row { std::string lead, trail; };
-    auto tog = [&](bool active, std::string_view lbl) -> Row {
-        // Filled dot when the layer is active (master on AND its flag), hollow
-        // otherwise. Dimmed entirely when the master switch is off.
-        return { std::string{on ? (active ? "\xe2\x97\x8f " : "\xe2\x97\x8b ")
-                                 : "  "} + std::string{lbl},
-                 on ? (active ? "on" : "off") : std::string{"\xe2\x80\x94"} };
-    };
-    // The four learning layers additionally require ORCHESTRATION (see the
-    // smart_mode.hpp accessors: routing_learning() = orchestration() && flag).
-    // Render their EFFECTIVE state, not the raw flag — a filled "on" dot on a
-    // layer that is actually inert (flag set, orchestration off) is a lie the
-    // user can't detect. Half-filled glyph + "needs orchestration" says both
-    // "your preference is remembered" and "it isn't running".
-    auto tog_dep = [&](bool flag, std::string_view lbl) -> Row {
-        if (!on) return { "  " + std::string{lbl}, "\xe2\x80\x94" };
-        const bool effective = flag && sm.orchestrate;
-        if (flag && !effective)
-            return { "\xe2\x97\x8d " + std::string{lbl},   // ◍ half-filled
-                     "needs orchestration" };
-        return { std::string{effective ? "\xe2\x97\x8f " : "\xe2\x97\x8b "}
-                     + std::string{lbl},
-                 effective ? "on" : "off" };
-    };
+    // FOUR rows: the master switch and the three role slots. There used to be
+    // eleven — seven of them sub-layer toggles. Three of those folded into the
+    // master switch (a toggle earns its place only where a reasonable user
+    // would reasonably choose either way; "make my compaction more expensive"
+    // isn't such a choice) and four were deleted with the self-supervised
+    // layers. Developer escape hatches live in AGENTTY_SMART_NO_* env vars.
     std::vector<Row> rows = {
-        {std::string{on ? "\xe2\x97\x8f Enabled" : "\xe2\x97\x8b Enabled"},
+        {std::string{on ? "\xe2\x97\x8f Smart Mode" : "\xe2\x97\x8b Smart Mode"},
          smart::tuning::enabled_override()
              ? std::string{on ? "on (env pin)" : "off (env pin)"}
              : std::string{on ? "on" : "off"}},
-        tog(sm.route_internal,  "  Internal routing"),
-        tog(sm.orchestrate,     "  Orchestration"),
-        tog(sm.route_subagents, "  Subagent routing"),
-        tog_dep(sm.learn_routing,    "  Learned routing"),
-        tog_dep(sm.outcome_feedback, "  Outcome feedback"),
-        tog_dep(sm.speculative,      "  Speculative"),
-        tog_dep(sm.recall_plans,     "  Plan recall"),
         {"  Strategic",      on ? shown(smart::ModelRole::Strategic)      + slot_suffix(sm.strategic)      : std::string{"\xe2\x80\x94"}},
         {"  Implementation", on ? shown(smart::ModelRole::Implementation) + slot_suffix(sm.implementation) : std::string{"\xe2\x80\x94"}},
         {"  Utility",        on ? shown(smart::ModelRole::Utility)        + slot_suffix(sm.utility)        : std::string{"\xe2\x80\x94"}},
@@ -790,14 +764,6 @@ Element smart_mode_overlay(const Model& m) {
 
     cfg.footer.push_back(text(""));
     {
-        // Telemetry: make the learning legible — how much this workspace has
-        // taught the router. Reset via the palette's "Reset Smart Mode learning".
-        const auto rp = smart::RoutingMemory::instance().learned_count();
-        const auto dp = smart::DecompositionMemory::instance().learned_count();
-        cfg.footer.push_back(text(
-            "  Learned " + std::to_string(rp) + " routing pattern"
-            + (rp == 1 ? "" : "s") + " \xc2\xb7 " + std::to_string(dp)
-            + " plan" + (dp == 1 ? "" : "s") + " in this repo", fg_dim(muted)));
         // Live SESSION state — the two adaptive inputs that move the next
         // turn's route (cascade bias + tier momentum). Without this line the
         // "learning" is a black box: a route that shifted from a session
@@ -823,11 +789,11 @@ Element smart_mode_overlay(const Model& m) {
     {
         std::vector<Hint> hints = {
             {"\xe2\x86\x91\xe2\x86\x93", "move", 5},        // ↑↓
-            {"Enter", o->index < 8 ? "toggle" : "set model", 4},
+            {"Enter", o->index == 0 ? "toggle" : "set model", 4},
         };
-        // `x` only acts on the three model-slot rows (8-10) — advertising it
-        // on a toggle row promises a key that silently does nothing.
-        if (o->index >= 8) hints.push_back({"x", "auto", 3});
+        // `x` only acts on the three model-slot rows (1-3) — advertising it
+        // on the master row promises a key that silently does nothing.
+        if (o->index >= 1) hints.push_back({"x", "auto", 3});
         hints.push_back({"Esc", "close", 4});
         cfg.footer.push_back(key_hints(std::move(hints)));
     }

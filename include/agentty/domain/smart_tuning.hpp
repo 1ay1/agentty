@@ -102,4 +102,28 @@ inline int env_int(const char* var, int dflt, int lo, int hi) noexcept {
     return !(s == "0" || s == "false" || s == "off" || s == "no");
 }
 
+// ── Per-layer escape hatches ────────────────────────────────────
+// Smart Mode's three behaviours used to be user-facing toggles. They are
+// now folded into the master switch — nobody rationally ran Smart Mode with
+// orchestration off — but each keeps a NEGATIVE env override so a
+// developer can bisect a routing bug ("is this orchestration or the
+// subagent router?") without editing settings or rebuilding.
+//
+// Deliberately env-only and deliberately negative: the default is on, the
+// override is an escape hatch, and an escape hatch in the UI is just a
+// toggle with extra steps.
+//
+//   AGENTTY_SMART_NO_INTERNAL=1     compaction/titles stay on the main model
+//   AGENTTY_SMART_NO_ORCHESTRATE=1  main turn stays on the selected model
+//   AGENTTY_SMART_NO_SUBAGENTS=1    workers use the tier auto-router
+[[nodiscard]] inline bool disabled(const char* var) noexcept {
+    const char* v = std::getenv(var);
+    if (!v || !v[0]) return false;
+    const std::string s{v};
+    return !(s == "0" || s == "false" || s == "off" || s == "no");
+}
+[[nodiscard]] inline bool no_internal()    noexcept { return disabled("AGENTTY_SMART_NO_INTERNAL"); }
+[[nodiscard]] inline bool no_orchestrate() noexcept { return disabled("AGENTTY_SMART_NO_ORCHESTRATE"); }
+[[nodiscard]] inline bool no_subagents()   noexcept { return disabled("AGENTTY_SMART_NO_SUBAGENTS"); }
+
 } // namespace agentty::smart::tuning

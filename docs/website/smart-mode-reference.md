@@ -10,26 +10,20 @@ The complete reference for Smart Mode: the overlay, the persisted config, the on
 
 ## The overlay ([[Ctrl+S]])
 
-[[↑]]/[[↓]] move; [[Enter]] or [[Space]] toggles a row or assigns a slot; [[x]] resets a slot to auto; [[Esc]] closes. A filled dot marks an active layer; layers dim when the master switch is off.
+Four rows. [[↑]]/[[↓]] move; [[Enter]] toggles the master switch or assigns a slot; [[x]] resets a slot to auto; [[Esc]] closes. The slots dim when Smart Mode is off.
 
 | Row | What it controls | Default |
 |-----|------------------|---------|
-| **Enabled** | master switch — off means every layer is inert (byte-for-byte no-op) | off |
-| **Internal routing** | engine-internal utility calls (compaction summary) run on the Utility model | on |
-| **Orchestration** | main turn runs on Strategic + the delegation directive | on |
-| **Subagent routing** | each `task` worker's model resolved by its role | on |
-| **Learned routing** | persist the per-workspace effort prior across sessions | on |
-| **Outcome feedback** | build-fail / next-turn correction re-rates the turn's signature | on |
-| **Speculative** | detached retrieval warm-up on Complex turns | off |
-| **Plan recall** | capture and recall successful decompositions | on |
+| **Smart Mode** | master switch — off is a byte-for-byte no-op | off |
 | **Strategic / Implementation / Utility** | the three model slots (pinned, or auto) | auto |
 
-The learning layers (learned routing, outcome feedback, speculative, plan recall) additionally require **Orchestration** — they refine the orchestrated turn, which only exists when it's running. The footer shows the workspace's learning: `Learned N routing patterns · M plans in this repo`.
+That's the whole surface. Turning Smart Mode **on** enables all three of its behaviours together — internal routing (compaction and other engine calls run on the Utility model), orchestration (the main turn runs on Strategic with the delegation directive), and subagent routing (each `task` worker's model resolves by its role).
+
+They aren't separate toggles because no one reasonably wants them apart: switching internal routing off just makes your compaction summaries more expensive for no benefit. A toggle earns a row only where a reasonable user would reasonably choose either way.
 
 ## Commands
 
 - **[[Ctrl+K]] → Smart Mode** (or [[Ctrl+S]]) — open the config overlay.
-- **[[Ctrl+K]] → Reset Smart Mode learning** — wipe this workspace's learned routing priors and captured decompositions.
 
 ## Persisted config
 
@@ -38,14 +32,9 @@ Every overlay choice is saved to your settings so the next session starts where 
 | Key | Meaning |
 |-----|---------|
 | `enabled` | master switch |
-| `route_internal` | internal routing layer |
-| `orchestrate` | orchestration layer |
-| `route_subagents` | subagent routing layer |
-| `learn_routing` | learned routing layer |
-| `outcome_feedback` | outcome feedback layer |
-| `speculative` | speculative prewarm layer |
-| `recall_plans` | plan recall layer |
 | `strategic` / `implementation` / `utility` | pinned model id for each slot, or empty for auto |
+
+Older settings files may still contain `route_internal`, `orchestrate`, `route_subagents`, `learn_routing`, `outcome_feedback`, `speculative` and `recall_plans`. Those keys are ignored — no migration is needed.
 
 :::note
 You never have to hand-edit this file — the [[Ctrl+S]] overlay writes it for you. The keys are listed here so you know what a synced/checked-in settings file is carrying.
@@ -84,7 +73,19 @@ AGENTTY_SMART_MODE=0 agentty   # force it off without touching your config
 
 The pin is **session-scoped and non-destructive**: agentty never persists it, so a benchmark, CI run, or bisect can't overwrite the preference you use interactively. While a pin is active the `^S` overlay's Enabled row shows `on (env pin)` / `off (env pin)`, and toggling it in-app is a hinted no-op (unset the variable to toggle again). Ideal for reproducible experiments.
 
-The signature hash space, storage compaction thresholds, and individual classifier weights are deliberately *not* exposed — changing them would invalidate stored learning or break invariants. The tier **threshold** is the right control surface, not fifteen fiddly weights.
+Individual classifier weights are deliberately *not* exposed. The tier **threshold** is the right control surface, not fifteen fiddly weights.
+
+### Developer escape hatches
+
+Each folded-in behaviour keeps a negative env override, for bisecting a routing bug without editing settings:
+
+```bash
+AGENTTY_SMART_NO_INTERNAL=1     # compaction/titles stay on the main model
+AGENTTY_SMART_NO_ORCHESTRATE=1  # main turn stays on the selected model
+AGENTTY_SMART_NO_SUBAGENTS=1    # workers use the tier auto-router
+```
+
+These are deliberately env-only and deliberately negative: the default is on, and an escape hatch in the UI is just a toggle with extra steps.
 
 ## Constraints
 

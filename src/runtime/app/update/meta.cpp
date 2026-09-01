@@ -129,77 +129,38 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             auto* o = m.ui.overlay.get<ov::SmartMode>();
             if (!o) return done(std::move(m));
             // Rows 0-7 are boolean toggles; 8-10 are model slots.
-            auto toggled = [&](const char* label, bool flag_on,
-                               bool needs_orchestration = false) -> Step {
+            // Row 0 is the master switch; rows 1-3 are the role slots.
+            // The seven sub-layer toggles are gone: three folded into the
+            // master switch (nobody rationally ran Smart Mode with
+            // orchestration off) and four deleted with the self-supervised
+            // layers. See smart::RoleConfig.
+            if (o->index == 0) {
+                // Session pin (AGENTTY_SMART_MODE) owns the master switch: a
+                // toggle would be silently overridden at next launch and never
+                // persisted (see persist_settings). Hinted no-op beats a lying
+                // toggle.
+                if (smart::tuning::enabled_override())
+                    return {std::move(m), set_status_toast(m,
+                        "Smart Mode is pinned by AGENTTY_SMART_MODE — "
+                        "unset the env var to toggle")};
+                m.d.smart.enabled = !m.d.smart.enabled;
                 persist_settings(m);
-                // Honest toast: a sub-layer flag flipped while the MASTER is
-                // off (or, for the learning layers, while orchestration is
-                // off) doesn't change behaviour — say "will be on when …"
-                // instead of a bare "on" that implies it's running.
-                std::string msg{label};
-                if (!flag_on) {
-                    msg += " off";
-                } else if (!m.d.smart.enabled) {
-                    msg += " on (inactive until Smart Mode is enabled)";
-                } else if (needs_orchestration && !m.d.smart.orchestrate) {
-                    msg += " on (inactive until Orchestration is on)";
-                } else {
-                    msg += " on";
-                }
-                return {std::move(m), set_status_toast(m, std::move(msg))};
-            };
-            switch (o->index) {
-                case 0:
-                    // Session pin (AGENTTY_SMART_MODE/_ENABLED) owns the
-                    // master switch: a toggle would be silently overridden
-                    // at next launch and never persisted (see
-                    // persist_settings). Hinted no-op beats a lying toggle.
-                    if (smart::tuning::enabled_override())
-                        return {std::move(m), set_status_toast(m,
-                            "Smart Mode is pinned by AGENTTY_SMART_MODE — "
-                            "unset the env var to toggle")};
-                    m.d.smart.enabled = !m.d.smart.enabled;
-                    return toggled("Smart Mode", m.d.smart.enabled);
-                case 1:
-                    m.d.smart.route_internal = !m.d.smart.route_internal;
-                    return toggled("internal routing", m.d.smart.route_internal);
-                case 2:
-                    m.d.smart.orchestrate = !m.d.smart.orchestrate;
-                    return toggled("orchestration", m.d.smart.orchestrate);
-                case 3:
-                    m.d.smart.route_subagents = !m.d.smart.route_subagents;
-                    return toggled("subagent routing", m.d.smart.route_subagents);
-                case 4:
-                    m.d.smart.learn_routing = !m.d.smart.learn_routing;
-                    return toggled("learned routing", m.d.smart.learn_routing,
-                                   /*needs_orchestration=*/true);
-                case 5:
-                    m.d.smart.outcome_feedback = !m.d.smart.outcome_feedback;
-                    return toggled("outcome feedback", m.d.smart.outcome_feedback,
-                                   /*needs_orchestration=*/true);
-                case 6:
-                    m.d.smart.speculative = !m.d.smart.speculative;
-                    return toggled("speculative", m.d.smart.speculative,
-                                   /*needs_orchestration=*/true);
-                case 7:
-                    m.d.smart.recall_plans = !m.d.smart.recall_plans;
-                    return toggled("plan recall", m.d.smart.recall_plans,
-                                   /*needs_orchestration=*/true);
-                default: break;
+                return {std::move(m), set_status_toast(m,
+                    m.d.smart.enabled ? "Smart Mode on" : "Smart Mode off")};
             }
             // A slot row → open the model picker in slot-assign mode. The
             // picker scopes itself to the active provider and writes the
             // slot on Enter (see fused_picker_update's Select arm).
-            m.ui.smart_assign_slot = o->index - 8;   // 0=Strategic 1=Impl 2=Utility
+            m.ui.smart_assign_slot = o->index - 1;   // 0=Strategic 1=Impl 2=Utility
             m.ui.overlay.close<ov::SmartMode>();
             return agentty::app::update(std::move(m), Msg{OpenFusedPicker{}});
         },
         [&](SmartModeClearSlot) -> Step {
             auto* o = m.ui.overlay.get<ov::SmartMode>();
-            if (!o || o->index < 8) return done(std::move(m));
+            if (!o || o->index < 1) return done(std::move(m));   // row 0 = master
             smart::SlotOverride* slot =
-                  o->index == 8  ? &m.d.smart.strategic
-                : o->index == 9  ? &m.d.smart.implementation
+                  o->index == 1  ? &m.d.smart.strategic
+                : o->index == 2  ? &m.d.smart.implementation
                                  : &m.d.smart.utility;
             *slot = smart::SlotOverride{};   // reset to auto (empty + unset)
             persist_settings(m);

@@ -16,8 +16,6 @@
 #include "agentty/runtime/picker.hpp"
 #include "agentty/runtime/app/deps.hpp"
 #include "agentty/runtime/code_block_picker.hpp"
-#include "agentty/domain/routing_memory.hpp"
-#include "agentty/domain/decomposition_memory.hpp"
 #include "agentty/runtime/view/helpers.hpp"
 
 namespace ov = agentty::ui::overlay;
@@ -118,12 +116,6 @@ template <class T, class V>
         add(Command::OpenCommands,     emit_val<OpenSettingsList>(settings::Category::Commands));
         add(Command::OpenAgents,       emit_val<OpenSettingsList>(settings::Category::Agents));
         add(Command::OpenHooks,        emit_val<OpenSettingsList>(settings::Category::Hooks));
-        add(Command::ResetSmartLearning, [](Model m) -> Step {
-            smart::RoutingMemory::instance().reset();
-            smart::DecompositionMemory::instance().reset();
-            return {std::move(m),
-                set_status_toast(m, "Smart Mode learning reset for this workspace")};
-        });
         // ── Account ──
         add(Command::OpenLogin,        emit<OpenLogin>());
         add(Command::SignOut,          emit<SignOut>());

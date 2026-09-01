@@ -28,26 +28,25 @@ The planner thinks in *roles*, never model names. At dispatch time each unit of 
 
 Leave the roles empty and Smart Mode **auto-fills** them from your provider's catalog: Strategic = your current model, Implementation = the strongest mid-tier model, Utility = the cheapest capable one.
 
-## What it does, layer by layer
+## What it does
 
-Smart Mode is one master switch plus a stack of independently-selectable layers. Each is a toggle in the [[Ctrl+S]] overlay; each is a pure win in isolation, so you pick exactly what you want.
+Smart Mode is **one switch**. Turn it on and you get all of this together — there are no sub-toggles to reason about:
 
 - **Internal routing** — engine-internal utility calls (like the auto-compaction summary) run on the cheap Utility model instead of your flagship.
 - **Orchestration** — the *main turn* runs on Strategic, and it's told to keep the decisions and **delegate** mechanical work to subagents.
 - **Subagent routing** — each `task` subagent's model is chosen by its role (an explorer runs cheap; a reviewer runs strong).
 - **Complexity-scaled effort** — a language-agnostic feature classifier rates every turn and scales the Strategic model's reasoning budget up for hard turns, down for trivial ones, continuously with how hard the turn actually is.
-- **Cascade feedback** — the effort estimate self-corrects *within a session* from what the model actually did.
-- **Learned routing** — a per-workspace memory remembers whether each kind of turn was under- or over-rated in *this* repo, so routing improves across sessions.
-- **Outcome feedback** — a failed build or a "no, that's wrong" on the next turn teaches the router that class of turn needs more.
-- **Speculative** — on hard turns, retrieval warms up while the lead thinks.
-- **Plan recall** — successful decompositions are remembered and offered back as a template next time.
+- **Cascade feedback** — the effort estimate self-corrects *within a session* from what the model actually did, then resets when you exit.
+
+The only thing you configure is **which model plays each role** — and even that defaults to auto.
+
+Smart Mode used to ship eight independently-selectable layers, four of which persisted per-workspace learning. They were never measured against the fixed policy, and each was a correctness surface plus one more thing to understand. Eight unmeasured knobs is a product hedging, not an opinion — so they're gone, and what remains is on by default.
 
 Deep dives:
 
 - **[Roles & Routing](/docs/smart-mode-routing)** — the three roles, auto-fill, effort scaling, and how the resolver never checks a model name.
 - **[Orchestration](/docs/smart-mode-orchestration)** — the orchestrator-workers pattern, the delegation directive, and the 🧠 routing card.
-- **[Learning](/docs/smart-mode-learning)** — the self-supervised loop that makes Smart Mode get better at your repo.
-- **[Reference](/docs/smart-mode-reference)** — every toggle, every `settings.json` key, the on-disk stores, and the design rationale.
+- **[Reference](/docs/smart-mode-reference)** — the overlay, every `settings.json` key, the env knobs, and the design rationale.
 
 ## Why this shape
 

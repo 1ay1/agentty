@@ -52,7 +52,7 @@ void rag_apply_settings(const store::RagConfig& cfg);
 // grounding is pre-fetched by the time the orchestrator delegates — real
 // speculative execution overlapping the lead's thinking, with zero wasted-
 // token risk (retrieval is local). Returns immediately; never throws.
-void smart_speculative_prewarm(const std::string& query);
+
 
 // ── Proactive retrieval (explicit opt-in) ────────────────────────────
 // Run the RAG pipeline outside the model's tool loop. The app invokes the

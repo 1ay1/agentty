@@ -28,7 +28,6 @@ static constexpr std::array kAll = {
     Command::OpenProviders, Command::OpenThreads, Command::OpenPlan,
     Command::RunCodeBlock, Command::InspectToolOutputs, Command::CompactContext,
     Command::SmartMode,
-    Command::ResetSmartLearning,
     Command::RewindCheckpoint, Command::ForkThread,
     Command::OpenPlugins, Command::OpenCommands, Command::OpenAgents, Command::OpenHooks,
     Command::OpenRagSettings, Command::OpenLogin,
@@ -133,7 +132,7 @@ TEST_CASE("command palette — categories, gating, danger") {
         // The commands that discard work or mutate the worktree.
         auto is_expected_danger = [](Command c) {
             return c == Command::RejectAll || c == Command::RewindCheckpoint
-                || c == Command::ResetSmartLearning || c == Command::SignOut;
+                || c == Command::SignOut;
         };
         for (const auto& c : kCommands) {
             check(c.danger == is_expected_danger(c.id),
