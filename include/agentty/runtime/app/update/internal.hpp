@@ -304,7 +304,6 @@ bool with_live_tool(Model& m, const ToolCallId& id, F&& f) {
 Step composer_update      (Model m, msg::ComposerMsg       cm);
 Step stream_update        (Model m, msg::StreamMsg         sm);
 Step tool_update          (Model m, msg::ToolMsg           tm);
-Step model_picker_update  (Model m, msg::ModelPickerMsg    pm);
 Step provider_picker_update(Model m, msg::ProviderPickerMsg pm);
 Step fused_picker_update  (Model m, msg::FusedPickerMsg     pm);
 // Shared fused-row builder (SSOT for reducer + view): enumerates authed

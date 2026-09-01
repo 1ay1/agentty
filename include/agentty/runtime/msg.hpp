@@ -370,39 +370,7 @@ struct PermissionApprove {};
 struct PermissionReject {};
 struct PermissionApproveAlways {};
 
-// ── Model picker ─────────────────────────────────────────────────────────
-struct OpenModelPicker {};
-struct CloseModelPicker {};
-struct ModelPickerMove { int delta; };
-// Absolute-jump nav for long lists. Where::Home/End snap to first/last;
-// PageUp/PageDown step by one viewport (no wrap, clamped at the edges).
-// Saves the user mashing ↑/↓ through hundreds of entries.
-struct ModelPickerJump  { enum class Where { Home, End, PageUp, PageDown }; Where where; };
-struct ModelPickerSelect {};
-struct ModelPickerToggleFavorite {};
-// Incremental search over the model list. FilterInput appends a printable
-// codepoint to the picker's query; FilterBackspace drops the last one. The
-// query is a case-insensitive substring match over the model display name;
-// the reducer keeps the cursor on a still-visible row after every edit.
-struct ModelPickerFilterInput { char32_t ch; };
-struct ModelPickerFilterBackspace {};
-// Cycle the reasoning effort tier (←/→ in the model picker). delta steps
-// within the active model's supported efforts (wrapping); the new tier is
-// persisted immediately. No-op when the model doesn't support effort.
-struct ModelPickerCycleEffort { int delta; };
-// Toggle the per-model reasoning-effort capability override for the
-// highlighted model (^E). Cycles inference → force-on → force-off → inference
-// for compat models the catalog doesn't gate; persisted immediately and
-// pushed into the catalog override registry. No-op for Claude/GPT (family-
-// gated) — their effort isn't user-overridable.
-struct ModelPickerToggleReasoning {};
-// Toggle whether the model's reasoning/thinking is SHOWN (^R in the model
-// picker). Flips the persisted Settings.show_reasoning / Model.show_reasoning:
-// renders the reasoning block in the transcript for every provider AND asks
-// Anthropic for visible thinking (interleaved-thinking beta). Distinct from
-// ModelPickerToggleReasoning above, which flips a single model's effort
-// CAPABILITY override.
-struct ModelPickerToggleShowReasoning {};
+// ── Model catalog ────────────────────────────────────────────────────────
 // Result of a background model-catalog fetch. `provider_id` is the canonical
 // id of the provider the fetch was FOR (captured when the fetch launched):
 // the reducer drops the payload if the active provider has changed since —
@@ -428,6 +396,10 @@ struct ModelsLoaded {
 // unified-model-picker.md). Each row is a concrete (provider, model) the
 // user switches to atomically, or a "sign in to X" offer that routes to
 // login. Opened with `^/` and the `/model` slash command.
+//
+// This is the ONE model surface. It also serves Smart Mode role→model
+// assignment: when Model::ui.smart_assign_slot >= 0 the list is scoped to
+// the active provider and Select writes the slot instead of switching.
 struct OpenFusedPicker {};
 // Deferred lazy refresh: after the ACTIVE provider's fast refetch is issued on
 // open, this fires (via a short After delay) to background-refresh every OTHER
@@ -446,11 +418,17 @@ struct FusedPickerJump { enum class Where { Home, End, PageUp, PageDown }; Where
 struct FusedPickerSelect {};        // atomic switch to the highlighted row
 struct FusedPickerToggleFavorite {};
 // ←/→ cycles the reasoning-effort tier of the highlighted model; ^E toggles
-// thinking on/off. Ported from the model picker so the fused picker is the
-// COMPLETE "pick + tune your model" surface (the old picker is now only the
-// Smart Mode slot-assignment picker).
+// thinking on/off. The fused picker is the COMPLETE "pick + tune your model"
+// surface — there is no second picker.
 struct FusedPickerCycleEffort { int delta; };
 struct FusedPickerToggleReasoning {};
+// Toggle whether the model's reasoning/thinking is SHOWN (^R). Flips the
+// persisted Settings.show_reasoning / Model.show_reasoning: renders the
+// reasoning block in the transcript for every provider AND asks Anthropic
+// for visible thinking (interleaved-thinking beta). Distinct from
+// FusedPickerToggleReasoning above, which flips a single model's effort
+// CAPABILITY override.
+struct FusedPickerToggleShowReasoning {};
 struct FusedPickerFilterInput { char32_t ch; };
 struct FusedPickerFilterBackspace {};
 // One authed provider's catalog resolved (async, one per provider on open).
@@ -490,7 +468,7 @@ struct ProviderPickerDelete {};
 struct OpenThreadList {};
 struct CloseThreadList {};
 struct ThreadListMove { int delta; };
-// Absolute-jump nav for long thread histories. See ModelPickerJump.
+// Absolute-jump nav for long thread histories. See FusedPickerJump.
 struct ThreadListJump  { enum class Where { Home, End, PageUp, PageDown }; Where where; };
 struct ThreadListSelect {};
 // `d` / `D` in the thread picker — two-press delete with confirm_remove.
@@ -949,25 +927,23 @@ using ToolMsg = std::variant<
     OpenToolOutputViewer, CloseToolOutputViewer,
     ToolViewerMove, ToolViewerSelect, ToolViewerCopy, ToolViewerStep>;
 
-using ModelPickerMsg = std::variant<
-    OpenModelPicker, CloseModelPicker, ModelPickerMove, ModelPickerJump,
-    ModelPickerSelect, ModelPickerToggleFavorite, ModelPickerCycleEffort,
-    ModelPickerToggleReasoning, ModelPickerToggleShowReasoning,
-    ModelPickerFilterInput, ModelPickerFilterBackspace,
-    ModelsLoaded>;
-
 using ProviderPickerMsg = std::variant<
     OpenProviderPicker, CloseProviderPicker, ProviderPickerMove,
     ProviderPickerJump, ProviderPickerSelect,
     ProviderPickerFilterInput, ProviderPickerFilterBackspace,
     ProviderPickerDelete>;
 
+// The ONE model surface: browse/filter every provider's models, tune effort,
+// and (in Smart Mode slot-assign mode) pin a role→model. `ModelsLoaded` is
+// the active provider's catalog fetch; `FusedCatalogLoaded` is a background
+// per-provider one.
 using FusedPickerMsg = std::variant<
     OpenFusedPicker, CloseFusedPicker, FusedPickerMove, FusedPickerJump,
     FusedPickerSelect, FusedPickerToggleFavorite,
     FusedPickerCycleEffort, FusedPickerToggleReasoning,
+    FusedPickerToggleShowReasoning,
     FusedPickerFilterInput, FusedPickerFilterBackspace,
-    FusedCatalogLoaded, SwitchToPreviousModel, FusedRefreshOthers,
+    ModelsLoaded, FusedCatalogLoaded, SwitchToPreviousModel, FusedRefreshOthers,
     FusedPickerRefresh>;
 
 using ThreadListMsg = std::variant<
@@ -1052,7 +1028,6 @@ using Msg = std::variant<
     msg::ComposerMsg,
     msg::StreamMsg,
     msg::ToolMsg,
-    msg::ModelPickerMsg,
     msg::ProviderPickerMsg,
     msg::FusedPickerMsg,
     msg::ThreadListMsg,
@@ -1097,8 +1072,8 @@ consteval int leaf_domain_count() {
     return int{in_variant_v<L, msg::ComposerMsg>}
          + int{in_variant_v<L, msg::StreamMsg>}
          + int{in_variant_v<L, msg::ToolMsg>}
-         + int{in_variant_v<L, msg::ModelPickerMsg>}
          + int{in_variant_v<L, msg::ProviderPickerMsg>}
+         + int{in_variant_v<L, msg::FusedPickerMsg>}
          + int{in_variant_v<L, msg::ThreadListMsg>}
          + int{in_variant_v<L, msg::CommandPaletteMsg>}
          + int{in_variant_v<L, msg::MentionPaletteMsg>}
@@ -1126,8 +1101,10 @@ static_assert(leaf_domain_count<StreamTextDelta>()           == 1,
               "StreamTextDelta must belong to exactly one Msg domain");
 static_assert(leaf_domain_count<ToolExecOutput>()            == 1,
               "ToolExecOutput must belong to exactly one Msg domain");
-static_assert(leaf_domain_count<OpenModelPicker>()           == 1,
-              "OpenModelPicker must belong to exactly one Msg domain");
+static_assert(leaf_domain_count<OpenFusedPicker>()            == 1,
+              "OpenFusedPicker must belong to exactly one Msg domain");
+static_assert(leaf_domain_count<ModelsLoaded>()               == 1,
+              "ModelsLoaded must belong to exactly one Msg domain");
 static_assert(leaf_domain_count<OpenProviderPicker>()        == 1,
               "OpenProviderPicker must belong to exactly one Msg domain");
 static_assert(leaf_domain_count<NewThread>()                 == 1,
@@ -1159,7 +1136,7 @@ static_assert(leaf_domain_count<Tick>()                      == 1,
 // they must also update the kDomains array used by the dispatcher in
 // update.cpp, which currently exhausts on 12 arms. Mismatch → dispatch
 // switch loses a domain silently.
-static_assert(std::variant_size_v<Msg> == 19,
+static_assert(std::variant_size_v<Msg> == 18,
               "Msg domain count changed — update the dispatcher in "
               "src/runtime/app/update.cpp and this proof to match");
 

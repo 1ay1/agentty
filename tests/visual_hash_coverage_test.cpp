@@ -167,14 +167,14 @@ const std::vector<Axis>& visual_axes() {
             m.ui.frozen_turn = 7;
         }},
         {"model_picker opens", [](Model& m) {
-            m.ui.overlay = ov::ModelPicker{{0}};
+            m.ui.overlay = ov::FusedPicker{{0, ""}};
         }},
         {"model_picker cursor move", [](Model& m) {
-            m.ui.overlay = ov::ModelPicker{{3}};
+            m.ui.overlay = ov::FusedPicker{{3}};
         }},
         {"model_picker query", [](Model& m) {
             agentty::ui::pick::OpenAt o; o.index = 0; o.query = "free";
-            m.ui.overlay = ov::ModelPicker{std::move(o)};
+            m.ui.overlay = ov::FusedPicker{std::move(o)};
         }},
         {"provider_picker opens", [](Model& m) {
             m.ui.overlay = ov::ProviderPicker{{0}};

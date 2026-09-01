@@ -5,15 +5,22 @@
 // the Smart Mode picker — never nuke every overlay back to the thread.
 // Navigating into a sub-setting and hitting Esc should land you on the row
 // you came from, so you can keep configuring the sibling slots. This guards
-// the reducer paths in src/runtime/app/update/picker.cpp (ModelPickerSelect
-// and CloseModelPicker, slot-assign branches).
+// the reducer paths in src/runtime/app/update/picker.cpp (FusedPickerSelect
+// and CloseFusedPicker, slot-assign branches).
 //
 // Driven through the REAL app::update reducer, no mocks of the reducer path.
+//
+// Since the picker consolidation there is ONE model surface (the fused,
+// all-providers picker); this guards its slot-assign mode — the reducer
+// paths in src/runtime/app/update/picker.cpp (FusedPickerSelect and
+// CloseFusedPicker, slot-assign branches) plus the active-provider scoping
+// that keeps an unstreamable cross-provider pin unrepresentable.
 
 #include "agtest.hpp"
 
 #include "agentty/runtime/app/update.hpp"
 #include "agentty/runtime/app/deps.hpp"
+#include "agentty/runtime/app/update/internal.hpp"  // app::detail::fused_rows_for_model
 #include "agentty/runtime/picker.hpp"
 #include "agentty/provider/selection.hpp"
 
@@ -52,17 +59,18 @@ ModelInfo mi(const char* id, const char* prov) {
     return m;
 }
 
-// A Model with a small catalog and the model picker already opened in
-// slot-assign mode for `slot` (0 strategic / 1 implementation / 2 utility),
-// the cursor sitting on the first catalog entry. This mirrors the state right
-// after SmartModeSelect on a slot row descends into the model chooser.
+// A Model with a small catalog, opened through the REAL OpenFusedPicker
+// path in slot-assign mode for `slot` (0 strategic / 1 implementation /
+// 2 utility). This mirrors the state right after SmartModeSelect on a slot
+// row descends into the model chooser — which is exactly what meta.cpp does.
 Model in_slot_assign(int slot) {
     Model m;
+    m.d.model_id = ModelId{"claude-opus-4-5"};
     m.d.available_models = { mi("claude-opus-4-5", "anthropic"),
                              mi("claude-haiku-4-5", "anthropic") };
     m.ui.smart_assign_slot = slot;
-    m.ui.overlay = ov::ModelPicker{{0}};
-    return m;
+    auto [m1, _] = app::update(std::move(m), Msg{OpenFusedPicker{}});
+    return std::move(m1);
 }
 
 } // namespace
@@ -78,9 +86,9 @@ TEST_CASE("smart slot picker stack") {
     // ── Esc in slot-assign pops back to Smart Mode, does NOT exit ──
     for (int slot = 0; slot <= 2; ++slot) {
         Model m = in_slot_assign(slot);
-        auto [m2, cmd] = app::update(std::move(m), Msg{CloseModelPicker{}});
+        auto [m2, cmd] = app::update(std::move(m), Msg{CloseFusedPicker{}});
 
-        CHECK(!m2.ui.overlay.is<ov::ModelPicker>(),
+        CHECK(!m2.ui.overlay.is<ov::FusedPicker>(),
               "Esc closes the model picker");
         CHECK(m2.ui.overlay.is<ov::SmartMode>(),
               "Esc RE-OPENS Smart Mode — navigation is a stack, not a trapdoor");
@@ -103,9 +111,20 @@ TEST_CASE("smart slot picker stack") {
     // ── Enter in slot-assign writes the slot AND pops back to Smart Mode ──
     for (int slot = 0; slot <= 2; ++slot) {
         Model m = in_slot_assign(slot);
-        auto [m2, cmd] = app::update(std::move(m), Msg{ModelPickerSelect{}});
+        // Put the cursor on the opus row explicitly — the fused list orders
+        // by (active, favourite, family) rather than raw catalog order.
+        const auto rows = app::detail::fused_rows_for_model(m);
+        int opus = -1;
+        for (int i = 0; i < static_cast<int>(rows.size()); ++i)
+            if (rows[static_cast<std::size_t>(i)].model.id.value == "claude-opus-4-5") {
+                opus = i; break;
+            }
+        REQUIRE(opus >= 0);
+        if (auto* c = m.ui.overlay.get<ov::FusedPicker>()) c->index = opus;
 
-        CHECK(!m2.ui.overlay.is<ov::ModelPicker>(),
+        auto [m2, cmd] = app::update(std::move(m), Msg{FusedPickerSelect{}});
+
+        CHECK(!m2.ui.overlay.is<ov::FusedPicker>(),
               "Enter closes the model picker");
         CHECK(m2.ui.overlay.is<ov::SmartMode>(),
               "Enter returns to Smart Mode so sibling slots stay one step away");
@@ -123,6 +142,40 @@ TEST_CASE("smart slot picker stack") {
               "the highlighted catalog model is written into the slot");
         CHECK(m2.d.smart.enabled,
               "pinning a slot implicitly enables Smart Mode");
+        CHECK(m2.d.model_id.value == "claude-opus-4-5",
+              "slot-assign must NOT switch the active model");
+    }
+
+    // ── Slot-assign scopes the list to the ACTIVE provider ────────────
+    // A pinned slot model is dispatched to whatever provider is active at
+    // turn time, so a row from another provider would be unstreamable.
+    // The list must not offer one — nor a "sign in to X" row.
+    {
+        Model m = in_slot_assign(0);
+        const auto rows = app::detail::fused_rows_for_model(m);
+        REQUIRE(!rows.empty());
+        for (const auto& r : rows) {
+            CHECK(r.provider_id == "anthropic",
+                  "slot-assign lists ONLY the active provider's models");
+            CHECK(!r.is_signin_offer(),
+                  "slot-assign never offers a provider you aren't signed into");
+        }
+    }
+
+    // ── Ordinary (non-slot) mode still spans providers ───────────────
+    // The scoping above must be conditional on slot-assign, not permanent.
+    {
+        Model m;
+        m.d.model_id = ModelId{"claude-opus-4-5"};
+        m.d.available_models = { mi("claude-opus-4-5", "anthropic") };
+        m.ui.smart_assign_slot = -1;
+        auto [m1, _] = app::update(std::move(m), Msg{OpenFusedPicker{}});
+        const auto rows = app::detail::fused_rows_for_model(m1);
+        bool any_other = false;
+        for (const auto& r : rows)
+            if (r.provider_id != "anthropic") { any_other = true; break; }
+        CHECK(any_other,
+              "the ordinary picker still spans every provider / sign-in offer");
     }
 
     // ── A NON-slot model-picker Esc still exits cleanly (no regression) ──
@@ -130,9 +183,9 @@ TEST_CASE("smart slot picker stack") {
         Model m;
         m.d.available_models = { mi("claude-opus-4-5", "anthropic") };
         m.ui.smart_assign_slot = -1;          // ordinary model switch
-        m.ui.overlay = ov::ModelPicker{{0}};
-        auto [m2, cmd] = app::update(std::move(m), Msg{CloseModelPicker{}});
-        CHECK(!m2.ui.overlay.is<ov::ModelPicker>(), "ordinary Esc closes picker");
+        auto [m1, _] = app::update(std::move(m), Msg{OpenFusedPicker{}});
+        auto [m2, cmd] = app::update(std::move(m1), Msg{CloseFusedPicker{}});
+        CHECK(!m2.ui.overlay.is<ov::FusedPicker>(), "ordinary Esc closes picker");
         CHECK(!m2.ui.overlay.is<ov::SmartMode>(),
               "ordinary model-switch Esc does NOT spuriously open Smart Mode");
     }

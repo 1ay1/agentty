@@ -1,4 +1,4 @@
-// model_picker_update + thread_list_update — reducers for the model and
+// fused_picker_update + thread_list_update — reducers for the model and
 // thread pickers (and the related async loads, ModelsLoaded / ThreadsLoaded).
 // Both are list-modal pickers that the user opens with a key shortcut, moves
 // through with Up/Down, and confirms with Enter; the underlying data comes
@@ -159,466 +159,6 @@ using maya::Cmd;
     return Cmd<Msg>::reset_inline();
 }
 
-Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
-    return std::visit(overload{
-        [&](OpenModelPicker) -> Step {
-            // Close the provider picker if the user cross-hopped here from it
-            // (^/ in the provider picker). pick_overlay + the key dispatcher
-            // both check model_picker BEFORE provider_picker, so a lingering
-            // open provider_picker would render/eat keys under this one.
-            m.ui.overlay.close<ov::ProviderPicker>();
-            // Same for the fused picker: ^/ cycles fused → this classic
-            // (single-provider) picker, so tear the fused one down cleanly
-            // — release its row cache and flush any pending effort edit.
-            if (m.ui.overlay.is<ov::FusedPicker>()) {
-                m.ui.overlay.close<ov::FusedPicker>();
-                m.d.fused_rows.clear();
-                if (m.ui.effort_dirty) { persist_settings(m); m.ui.effort_dirty = false; }
-            }
-            int idx = 0;
-            for (int i = 0; i < static_cast<int>(m.d.available_models.size()); ++i)
-                if (m.d.available_models[i].id == m.d.model_id) idx = i;
-            m.ui.overlay = ov::ModelPicker{{idx}};
-            m.s.models_loading = true;
-            return {std::move(m), cmd::fetch_models()};
-        },
-        [&](ModelsLoaded& e) -> Step {
-            // STALENESS GATE: only accept a payload fetched FOR the provider
-            // that is active NOW. Two quick switches interleave their slow
-            // fetches; without this, provider A's late catalog lands under
-            // provider B and the picker offers models B cannot stream.
-            // (Empty provider_id = legacy/synthetic dispatch — accept.)
-            if (!e.provider_id.empty()
-                && e.provider_id != active_provider_id()) {
-                return done(std::move(m));   // keep models_loading: the
-                                             // newer fetch is still in flight
-            }
-            // The fetch finished (success OR failure) — always clear the
-            // in-flight flag so the picker leaves "Loading models…".
-            m.s.models_loading = false;
-            // A failed fetch surfaces its reason as a transient toast —
-            // never as a StreamError, which would feed the live turn's
-            // retry machinery (see the ModelsLoaded msg comment).
-            if (!e.error.empty()) {
-                auto toast = set_status_toast(m, std::move(e.error),
-                                              std::chrono::seconds{6});
-                return {std::move(m), std::move(toast)};
-            }
-            if (e.models.empty()) return done(std::move(m));
-            auto settings = deps().load_settings();
-            // PERSIST-ON-SUCCESS: a custom --provider spec registered at
-            // startup as unproven becomes sticky NOW — the host answered a
-            // non-empty model fetch, so it's a real endpoint, not a typo.
-            // Presets persisted at parse time as always; this only fires
-            // for raw host/URL specs, at most once per process.
-            if (auto proven = provider::take_unproven_spec(
-                    active_provider_id())) {
-                settings.provider = proven->first;
-                if (!proven->second.empty())
-                    settings.provider_models[proven->first] = proven->second;
-                deps().save_settings(settings);
-            }
-            m.d.available_models.clear();
-            for (auto& mi : e.models) {
-                // DISCOVERED entitlement: this account already 400'd on the
-                // context-1m beta ("long context beta is not available for
-                // this subscription"), so offering the `[1m]` rows would
-                // just sell a window the wire will reject. OAuth alone can't
-                // tell us (the token carries no entitlement field) — the
-                // flag is learned from the first rejection and cleared on
-                // sign-out/account switch.
-                if (settings.context_1m_blocked
-                    && mi.id.value.find("[1m]") != std::string::npos)
-                    continue;
-                for (const auto& fav : settings.favorite_models)
-                    if (mi.id == fav) mi.favorite = true;
-                m.d.available_models.push_back(std::move(mi));
-            }
-            // Refresh the subagent router's candidate pool so read-only roles
-            // route to the cheapest capable model THIS provider offers. Done
-            // on every load (startup, provider switch, refetch) so routing
-            // never uses a stale provider's list.
-            tools::subagent::set_candidates(m.d.available_models);
-            // Keep the subagent role-router in sync with Smart Mode (Layer 3b).
-            tools::subagent::set_smart(m.d.smart);
-            // If the active model isn't offered by this provider (e.g. just
-            // switched to Ollama with no recall, or a stale saved id), fall
-            // back to the first available model so the user is never pointed
-            // at a model that 400s on the first prompt. Persist the pick so
-            // it sticks as this provider's recall.
-            bool active_present = false;
-            for (const auto& mi : m.d.available_models)
-                if (mi.id == m.d.model_id) { active_present = true; break; }
-            if (!active_present && !m.d.available_models.empty()) {
-                m.d.model_id = m.d.available_models.front().id;
-                m.s.context_max =
-                    ui::context_max_for_model(m.d.model_id.value);
-                // The auto-selected model may not support the effort tier that
-                // rode over from the previous provider — clamp it so the picker
-                // chip and the wire agree (commit_provider_switch couldn't do
-                // this yet: the model id was empty until this refetch landed).
-                // Uniform across every provider INCLUDING ChatGPT: gpt-5.x
-                // decodes through Family::Gpt with an exact ladder, so the
-                // same clamp keeps chip == wire (a stale `max` on a model
-                // capped at xhigh must degrade in the CHIP too, not just be
-                // silently rewritten at request time). Empty id = unknown
-                // model → skip (clamping would wipe the tier, not no-op).
-                if (!m.d.model_id.value.empty())
-                    m.d.effort = clamp_effort(
-                        m.d.effort, resolved_caps(m.d.model_id.value));
-                tools::subagent::set_model(m.d.model_id.value);
-                persist_settings(m);
-            }
-            // The active model may have remained valid, in which case the
-            // old branch did not refresh its context cap. Codex publishes a
-            // 272K window (rather than Agentty's generic 200K fallback), and
-            // the status-bar gauge must reflect that immediately.
-            for (const auto& mi : m.d.available_models) {
-                if (mi.id == m.d.model_id && mi.context_window > 0) {
-                    m.s.context_max = mi.context_window;
-                    break;
-                }
-            }
-            if (auto* p = m.ui.overlay.get<ov::ModelPicker>()) {
-                // Cursor indexes the FILTERED list; a fetch can land while a
-                // query is active. Find the active model's position within
-                // the current filter (fall back to row 0).
-                const auto vis = model_filtered(m.d.available_models, p->query);
-                p->index = 0;
-                for (int i = 0; i < static_cast<int>(vis.size()); ++i)
-                    if (m.d.available_models[static_cast<std::size_t>(vis[static_cast<std::size_t>(i)])].id
-                        == m.d.model_id) { p->index = i; break; }
-            }
-            // If the FUSED picker is open, the active provider's catalog just
-            // changed (available_models is its source), so its rows are stale
-            // — rebuild them. rebuild_fused_rows re-mirrors available_models
-            // into the active catalog and re-ranks, so a newly-listed model
-            // (e.g. one the live /v1/models fetch just added) appears without
-            // reopening the picker. Clamp the cursor to the new row count.
-            if (auto* c = m.ui.overlay.get<ov::FusedPicker>()) {
-                // The active provider's live catalog just completed — mark its
-                // catalog fresh so the TTL refresh doesn't immediately refetch
-                // it, then rebuild the open rows.
-                const std::string apid = active_provider_id();
-                for (auto& cat : m.d.provider_catalogs)
-                    if (cat.provider_id == apid) { cat.loaded_at_ms = now_ms(); break; }
-                rebuild_fused_rows(m);
-                const int n = static_cast<int>(m.d.fused_rows.size());
-                if (n == 0) c->index = 0;
-                else if (c->index >= n) c->index = n - 1;
-                else if (c->index < 0) c->index = 0;
-            }
-            return done(std::move(m));
-        },
-        [&](CloseModelPicker) -> Step {
-            // Flush any effort-tier cycling to disk ONCE on close (see the
-            // CycleEffort arm — persisting per arrow keystroke was a
-            // synchronous load+fsync+rename on the UI thread per keypress).
-            // Select persists on its own arm; Quit persists globally; this
-            // covers the Esc path.
-            if (m.ui.effort_dirty) {
-                persist_settings(m);
-                m.ui.effort_dirty = false;
-            }
-            m.ui.overlay.close<ov::ModelPicker>();
-            // Slot-assign mode: Esc is BACK, not exit. Pop one level up the
-            // picker stack — re-open Smart Mode at the slot row we descended
-            // from — instead of closing every overlay. Navigating into a
-            // setting and hitting Esc should return you to the parent picker.
-            if (m.ui.smart_assign_slot >= 0) {
-                const int slot = m.ui.smart_assign_slot;
-                m.ui.smart_assign_slot = -1;
-                m.ui.overlay = ov::SmartMode{{8 + slot}};   // rows 8..10
-                return done(std::move(m));
-            }
-            return done(std::move(m));
-        },
-        [&](ModelPickerMove& e) -> Step {
-            auto* p = m.ui.overlay.get<ov::ModelPicker>();
-            if (!p) return done(std::move(m));
-            const auto vis = model_filtered(m.d.available_models, p->query);
-            if (vis.empty()) return done(std::move(m));
-            int sz = static_cast<int>(vis.size());
-            p->index = (p->index + e.delta + sz) % sz;
-            return done(std::move(m));
-        },
-        [&](ModelPickerJump& e) -> Step {
-            auto* p = m.ui.overlay.get<ov::ModelPicker>();
-            if (!p) return done(std::move(m));
-            const auto vis = model_filtered(m.d.available_models, p->query);
-            if (vis.empty()) return done(std::move(m));
-            int sz = static_cast<int>(vis.size());
-            using W = ModelPickerJump::Where;
-            constexpr int kPage = 14;  // matches kViewportH in pickers.cpp
-            switch (e.where) {
-                case W::Home:     p->index = 0; break;
-                case W::End:      p->index = sz - 1; break;
-                case W::PageUp:   p->index = std::max(0, p->index - kPage); break;
-                case W::PageDown: p->index = std::min(sz - 1, p->index + kPage); break;
-            }
-            return done(std::move(m));
-        },
-        [&](ModelPickerFilterInput& e) -> Step {
-            auto* p = m.ui.overlay.get<ov::ModelPicker>();
-            if (!p) return done(std::move(m));
-            // Append the codepoint (UTF-8). Narrowing the list can leave
-            // the cursor past the new end — clamp so it always points at a
-            // visible row (the Picker widget auto-scrolls to it).
-            char buf[4];
-            const char32_t c = e.ch;
-            if (c < 0x80) p->query.push_back(static_cast<char>(c));
-            else {
-                int n = 0;
-                if (c < 0x800) { buf[n++] = static_cast<char>(0xC0 | (c >> 6)); }
-                else if (c < 0x10000) {
-                    buf[n++] = static_cast<char>(0xE0 | (c >> 12));
-                    buf[n++] = static_cast<char>(0x80 | ((c >> 6) & 0x3F));
-                } else {
-                    buf[n++] = static_cast<char>(0xF0 | (c >> 18));
-                    buf[n++] = static_cast<char>(0x80 | ((c >> 12) & 0x3F));
-                    buf[n++] = static_cast<char>(0x80 | ((c >> 6) & 0x3F));
-                }
-                if (c >= 0x80) buf[n++] = static_cast<char>(0x80 | (c & 0x3F));
-                p->query.append(buf, static_cast<std::size_t>(n));
-            }
-            const int sz = static_cast<int>(
-                model_filtered(m.d.available_models, p->query).size());
-            p->index = sz == 0 ? 0 : std::clamp(p->index, 0, sz - 1);
-            return done(std::move(m));
-        },
-        [&](ModelPickerFilterBackspace) -> Step {
-            auto* p = m.ui.overlay.get<ov::ModelPicker>();
-            if (!p || p->query.empty()) return done(std::move(m));
-            // Drop the last UTF-8 codepoint (walk back over continuation
-            // bytes 0x80..0xBF).
-            std::size_t n = p->query.size();
-            do { --n; } while (n > 0
-                && (static_cast<unsigned char>(p->query[n]) & 0xC0) == 0x80);
-            p->query.resize(n);
-            const int sz = static_cast<int>(
-                model_filtered(m.d.available_models, p->query).size());
-            p->index = sz == 0 ? 0 : std::clamp(p->index, 0, sz - 1);
-            return done(std::move(m));
-        },
-        [&](ModelPickerSelect) -> Step {
-            auto* p = m.ui.overlay.get<ov::ModelPicker>();
-            if (p) {
-                const auto vis = model_filtered(m.d.available_models, p->query);
-                if (!vis.empty() && p->index >= 0
-                    && p->index < static_cast<int>(vis.size())) {
-                    const int real = vis[static_cast<std::size_t>(p->index)];
-                    const std::string chosen =
-                        m.d.available_models[static_cast<std::size_t>(real)].id.value;
-
-                    // Smart Mode slot-assign mode: write the chosen model into
-                    // the target role slot instead of switching the active
-                    // model. Enabling Smart Mode implicitly (pinning a slot
-                    // means you want it on).
-                    if (m.ui.smart_assign_slot >= 0) {
-                        smart::SlotOverride* slot = nullptr;
-                        switch (m.ui.smart_assign_slot) {
-                            case 0: slot = &m.d.smart.strategic;      break;
-                            case 1: slot = &m.d.smart.implementation; break;
-                            case 2: slot = &m.d.smart.utility;        break;
-                        }
-                        if (slot) {
-                            slot->model = chosen;
-                            slot->set   = true;
-                            m.d.smart.enabled = true;
-                        }
-                        const int assigned = m.ui.smart_assign_slot;
-                        m.ui.smart_assign_slot = -1;
-                        persist_settings(m);
-                        m.ui.effort_dirty = false;
-                        m.ui.overlay.close<ov::ModelPicker>();
-                        // Pop back to the parent Smart Mode picker, cursor on
-                        // the slot we just set — not out to the thread. You
-                        // came from there and probably want to set the sibling
-                        // slots too; forcing a re-open of Smart Mode after
-                        // every slot is the exact tedium this fixes.
-                        m.ui.overlay = ov::SmartMode{{8 + assigned}};
-                        auto toast = set_status_toast(m,
-                            "Smart Mode slot set");
-                        return {std::move(m), std::move(toast)};
-                    }
-
-                    // Seed the MRU with the model we're LEAVING (before we
-                    // overwrite m.d.model_id), so A→B leaves the ring [B, A]
-                    // and ^Tab has a prior entry to cycle back to.
-                    hydrate_recents(m);
-                    m.d.model_id = m.d.available_models[static_cast<std::size_t>(real)].id;
-                    // Update the per-model context cap so the status-bar ctx
-                    // % bar (and the auto-compaction threshold) uses the right
-                    // denominator. Prefer the window the provider actually
-                    // advertised for this model (list_models stamps 1M for the
-                    // Sonnet-4 line on OAuth; Ollama/OpenAI probe a real
-                    // window) and only fall back to the auth-blind id guess
-                    // when the loaded row carries no window.
-                    m.s.context_max = ui::context_max_for_model(m.d.model_id.value);
-                    for (const auto& mi : m.d.available_models)
-                        if (mi.id == m.d.model_id && mi.context_window > 0) {
-                            m.s.context_max = mi.context_window;
-                            break;
-                        }
-                    // Degrade the effort tier to what the newly-picked model
-                    // supports — picking a non-reasoning (or lower-ceiling)
-                    // model while effort=Xhigh must not leave a stale chip that
-                    // the wire silently drops.
-                    if (!m.d.model_id.value.empty())
-                        m.d.effort = clamp_effort(
-                            m.d.effort, resolved_caps(m.d.model_id.value));
-                    // Keep subagents on the live model: the startup config
-                    // captured whatever was saved at launch, which can be a
-                    // stale/invalid id (every subagent request 400s and the
-                    // tool returns no report). Track the picker selection.
-                    tools::subagent::set_model(m.d.model_id.value);
-                    // Record the pick in the MRU so RECENT + ^Tab reflect it —
-                    // the classic picker is a real switch site too, not just
-                    // the fused picker. The pre-switch model was already seeded
-                    // into the ring above; this pushes the new pick to the
-                    // front, so the ring becomes [new, old, …] — a real cycle.
-                    record_recent(m, active_provider_id(), m.d.model_id.value);
-                    persist_settings(m);
-                    m.ui.effort_dirty = false;
-                    // Confirmation toast naming model AND provider — the
-                    // same feedback the provider switch gives. Without it a
-                    // pick is silent, and when a stale-catalog race (or a
-                    // provider the user forgot they were on) is in play,
-                    // "model changed but provider didn't" has no on-screen
-                    // contradiction the user can catch.
-                    m.ui.overlay.close<ov::ModelPicker>();
-                    auto toast = set_status_toast(m,
-                        ui::pretty_model_label(m.d.model_id.value) + " \xc2\xb7 "
-                            + provider::provider_display_name(provider::active()),
-                        std::chrono::seconds{3});
-                    return {std::move(m), std::move(toast)};
-                }
-            }
-            m.ui.overlay.close<ov::ModelPicker>();
-            return done(std::move(m));
-        },
-        [&](ModelPickerToggleFavorite) -> Step {
-            auto* p = m.ui.overlay.get<ov::ModelPicker>();
-            if (p) {
-                const auto vis = model_filtered(m.d.available_models, p->query);
-                if (!vis.empty() && p->index >= 0
-                    && p->index < static_cast<int>(vis.size())) {
-                    auto& mi = m.d.available_models[
-                        static_cast<std::size_t>(vis[static_cast<std::size_t>(p->index)])];
-                    mi.favorite = !mi.favorite;
-                    // Persist NOW — a toggle that only reaches disk via some
-                    // later select/switch/quit is lost on a crash or kill.
-                    persist_settings(m);
-                }
-            }
-            return done(std::move(m));
-        },
-        [&](ModelPickerCycleEffort& e) -> Step {
-            // Step the reasoning-effort tier within what the highlighted
-            // model supports. The ladder is ONE thing: cycle_effort walks the
-            // model's catalog-declared levels (resolved_caps → supports_effort
-            // / _xhigh / _max), wrapping and returning None for a model that
-            // can't reason. This is uniform across EVERY provider — including
-            // ChatGPT/Codex, whose gpt-5* models decode to Family::Gpt with the
-            // correct low..xhigh(..max) ladder — so the picker never offers a
-            // level the model won't accept, and the chip/footer/wire all read
-            // the same source. The new tier takes effect in live state
-            // immediately; the DISK persist is deferred to picker close/select
-            // (effort_dirty) — persisting per keystroke was UI-thread jank under
-            // key repeat. The request path re-clamps at send time.
-            auto* p = m.ui.overlay.get<ov::ModelPicker>();
-            if (p) {
-                const auto vis = model_filtered(m.d.available_models, p->query);
-                if (!vis.empty() && p->index >= 0
-                    && p->index < static_cast<int>(vis.size())) {
-                    const auto caps = resolved_caps(
-                        m.d.available_models[
-                            static_cast<std::size_t>(vis[static_cast<std::size_t>(p->index)])]
-                            .id.value);
-                    m.d.effort = cycle_effort(m.d.effort, e.delta, caps);
-                    m.ui.effort_dirty = true;
-                }
-            }
-            return done(std::move(m));
-        },
-        [&](ModelPickerToggleReasoning&) -> Step {
-            // Cycle the highlighted model's per-model reasoning-effort
-            // override: inference → force-on → force-off → inference. Claude/
-            // GPT are family-gated (their effort ladder isn't user-editable),
-            // so this is a no-op with a hint for them. Persisted immediately
-            // (an explicit config action, not a hot keystroke) and pushed to
-            // the catalog registry so resolved_caps() honors it live.
-            auto* p = m.ui.overlay.get<ov::ModelPicker>();
-            if (!p) return done(std::move(m));
-            const auto vis = model_filtered(m.d.available_models, p->query);
-            if (vis.empty() || p->index < 0
-                || p->index >= static_cast<int>(vis.size()))
-                return done(std::move(m));
-            const std::string id =
-                m.d.available_models[
-                    static_cast<std::size_t>(vis[static_cast<std::size_t>(p->index)])]
-                    .id.value;
-            const auto base = ModelCapabilities::from_id(id);
-            if (base.is_known_family()
-                || base.family == ModelCapabilities::Family::Gpt) {
-                auto toast = set_status_toast(m,
-                    "reasoning effort is model-managed here (←/→ to set the tier)");
-                return {std::move(m), std::move(toast)};
-            }
-            // Determine the next state from the CURRENT override (tri-state).
-            const int cur = reasoning_override_for(id);   // -1 none, 0 off, 1 on
-            auto s = deps().load_settings();
-            const char* label = nullptr;
-            if (cur < 0) {                 // inference → force ON
-                s.reasoning_effort_overrides[id] = true;
-                set_reasoning_override(id, true);
-                label = "reasoning effort: forced ON for this model";
-            } else if (cur == 1) {         // ON → force OFF
-                s.reasoning_effort_overrides[id] = false;
-                set_reasoning_override(id, false);
-                label = "reasoning effort: forced OFF for this model";
-            } else {                       // OFF → back to inference (clear)
-                s.reasoning_effort_overrides.erase(id);
-                clear_reasoning_override(id);
-                label = "reasoning effort: auto (catalog default)";
-            }
-            deps().save_settings(s);
-            // If the model just lost effort capability, drop any live tier so
-            // the chip doesn't linger; re-clamp against the new caps.
-            m.d.effort = clamp_effort(m.d.effort, resolved_caps(id));
-            auto toast = set_status_toast(m, label);
-            return {std::move(m), std::move(toast)};
-        },
-        [&](ModelPickerToggleShowReasoning&) -> Step {
-            // Flip whether the model's reasoning/thinking is SHOWN. Global (all
-            // providers): renders the transcript reasoning block AND makes the
-            // Anthropic transport request VISIBLE thinking. Persisted so it
-            // survives restarts. Mirrors the ToggleChangesStrip pattern.
-            m.d.show_reasoning = !m.d.show_reasoning;
-            auto s = deps().load_settings();
-            s.show_reasoning = m.d.show_reasoning;
-            deps().save_settings(s);
-            // Anthropic caveat: visible thinking is only REQUESTED when an
-            // effort tier is active (the transport gates thinking mode on
-            // req.effort). With effort off, ^R would silently show nothing —
-            // tell the user what to flip instead of leaving a dead toggle.
-            const auto caps = resolved_caps(m.d.model_id.value);
-            const bool claude_no_effort =
-                caps.family != ModelCapabilities::Family::Unknown
-                && caps.family != ModelCapabilities::Family::Gpt
-                && !caps.reasoning_compat
-                && m.d.effort == Effort::None;
-            auto toast = set_status_toast(m, !m.d.show_reasoning
-                ? "reasoning: hidden (existing blocks fold away too)"
-                : claude_no_effort
-                    ? "reasoning: shown — needs an effort tier on this model "
-                      "(\xe2\x86\x90/\xe2\x86\x92 in the picker)"
-                    : "reasoning: shown (live thinking + \xe2\x9c\xa6 summary)");
-            return {std::move(m), std::move(toast)};
-        },
-    }, pm);
-}
-
 // ── Provider picker ────────────────────────────────────────────────────────
 // Selecting a row live-switches the active backend: parse the preset id
 // into a Selection, install it (process-global), persist it, swap the
@@ -645,7 +185,7 @@ Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
             // (^P in the model picker). Without this the model picker stays
             // open and wins pick_overlay's priority order (checked first), so
             // the hop would render nothing new. Flush any pending effort-tier
-            // change first — the same persist CloseModelPicker does on Esc,
+            // change first — the same persist CloseFusedPicker does on Esc,
             // so a hop doesn't silently drop it.
             if (m.ui.effort_dirty) {
                 persist_settings(m);
@@ -656,7 +196,7 @@ Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
             // behind, or the NEXT regular model pick silently lands in the
             // smart slot instead of switching the model.
             m.ui.smart_assign_slot = -1;
-            m.ui.overlay.close<ov::ModelPicker>();
+            m.ui.overlay.close<ov::FusedPicker>();
             // Open at the row matching the currently-active provider. Fresh
             // rows with an empty query (so every provider is present to match).
             const auto fresh = ui::build_provider_rows(saved_custom_hosts, "");
@@ -1130,6 +670,9 @@ std::vector<FusedRow> fused_rows_for_model(const Model& m) {
     // The canonical, provider-uniform label so the fused rows read AND
     // match identically to the per-provider picker (ui::model_display_label).
     in.label_fn   = &ui::model_display_label;
+    // Smart Mode slot-assign pins a model that will be dispatched to the
+    // ACTIVE provider, so only its models may appear. See the Select arm.
+    if (m.ui.smart_assign_slot >= 0) in.only_provider = active_provider_id();
     if (auto* c = m.ui.overlay.get<ov::FusedPicker>()) in.query = c->query;
     return ui::build_fused_rows(in);
 }
@@ -1329,15 +872,6 @@ Step fused_picker_update(Model m, msg::FusedPickerMsg pm) {
     return std::visit(overload{
         [&](OpenFusedPicker) -> Step {
             hydrate_recents(m);
-            // ^/ TOGGLES from the classic single-provider picker back to this
-            // one. Tear the classic picker down cleanly — flush a pending
-            // effort edit and abandon any Smart Mode slot-assign arming (the
-            // fused picker doesn't assign slots).
-            if (m.ui.overlay.is<ov::ModelPicker>()) {
-                m.ui.overlay.close<ov::ModelPicker>();
-                m.ui.smart_assign_slot = -1;
-                if (m.ui.effort_dirty) { persist_settings(m); m.ui.effort_dirty = false; }
-            }
             m.ui.overlay = ov::FusedPicker{{0, ""}};
             // ONE expensive pass: enumerate providers, read settings, seed
             // every authed provider's catalog from its bundled list so the
@@ -1415,6 +949,15 @@ Step fused_picker_update(Model m, msg::FusedPickerMsg pm) {
             m.ui.overlay.close<ov::FusedPicker>();
             m.d.fused_rows.clear();       // release the cache while closed
             if (m.ui.effort_dirty) { persist_settings(m); m.ui.effort_dirty = false; }
+            // Slot-assign mode: Esc is BACK, not exit. Pop one level up the
+            // picker stack — re-open Smart Mode at the slot row we descended
+            // from — instead of closing every overlay. Navigating into a
+            // setting and hitting Esc should return you to the parent picker.
+            if (m.ui.smart_assign_slot >= 0) {
+                const int slot = m.ui.smart_assign_slot;
+                m.ui.smart_assign_slot = -1;
+                m.ui.overlay = ov::SmartMode{{8 + slot}};   // rows 8..10
+            }
             return done(std::move(m));
         },
         [&](FusedPickerMove e) -> Step {
@@ -1428,7 +971,7 @@ Step fused_picker_update(Model m, msg::FusedPickerMsg pm) {
             if (auto* c = m.ui.overlay.get<ov::FusedPicker>()) {
                 const int n = static_cast<int>(m.d.fused_rows.size());
                 // Page by a full viewport so PageUp/Down lands a screen away
-                // (matches the classic pickers' kPage), not a fixed 10 that
+                // (matches the other pickers' kPage), not a fixed 10 that
                 // under-shoots the ~14-row viewport.
                 constexpr int page = 14;  // matches kViewportH in pickers.cpp
                 using W = FusedPickerJump::Where;
@@ -1532,8 +1075,8 @@ Step fused_picker_update(Model m, msg::FusedPickerMsg pm) {
             // ←/→ walks the reasoning-effort ladder of the HIGHLIGHTED model
             // (off → low → medium → high … within its caps), mutating the
             // GLOBAL m.d.effort LIVE — exactly like the classic model picker's
-            // ModelPickerCycleEffort. Both surfaces share m.d.effort, so a
-            // change here shows in the old picker too (no staging split, no
+            // FusedPickerCycleEffort. Both surfaces share m.d.effort, so a
+            // change here shows everywhere at once (no staging split, no
             // "off in one, on in the other"). Persisted lazily via effort_dirty.
             auto* c = m.ui.overlay.get<ov::FusedPicker>();
             if (!c || c->index < 0
@@ -1631,7 +1174,7 @@ Step fused_picker_update(Model m, msg::FusedPickerMsg pm) {
             const FusedRow row = m.d.fused_rows[static_cast<std::size_t>(c->index)];
             m.ui.overlay.close<ov::FusedPicker>();
             m.d.fused_rows.clear();
-            // ←/→ already mutated m.d.effort live (shared with the old picker);
+            // ←/→ already mutated m.d.effort live;
             // the switch below persists settings, so no separate apply needed.
             m.ui.effort_dirty = false;
 
@@ -1641,7 +1184,192 @@ Step fused_picker_update(Model m, msg::FusedPickerMsg pm) {
                                       row.label,
                                       ui::login::origin::FusedPicker{});
             }
+
+            // Smart Mode slot-assign mode: write the chosen model into the
+            // target role slot instead of switching the active model, then
+            // pop back to the parent Smart Mode picker.
+            //
+            // Slot models are ACTIVE-PROVIDER scoped: smart::resolve_role
+            // hands the pinned id straight to the turn's request, which is
+            // dispatched to whatever provider is active. Pinning a row from a
+            // different provider would therefore send an unknown model id to
+            // the active endpoint. Slot-assign mode filters the row list to
+            // the active provider (see rebuild_fused_rows) so such a row is
+            // never selectable in the first place — unrepresentable beats
+            // validated.
+            if (m.ui.smart_assign_slot >= 0) {
+                smart::SlotOverride* slot = nullptr;
+                switch (m.ui.smart_assign_slot) {
+                    case 0: slot = &m.d.smart.strategic;      break;
+                    case 1: slot = &m.d.smart.implementation; break;
+                    case 2: slot = &m.d.smart.utility;        break;
+                }
+                if (slot) {
+                    slot->model = row.model.id.value;
+                    slot->set   = true;
+                    m.d.smart.enabled = true;   // pinning a slot means "on"
+                }
+                const int assigned = m.ui.smart_assign_slot;
+                m.ui.smart_assign_slot = -1;
+                persist_settings(m);
+                m.ui.overlay.close<ov::FusedPicker>();
+                m.d.fused_rows.clear();
+                // Pop back to the parent Smart Mode picker, cursor on the
+                // slot we just set — not out to the thread. You came from
+                // there and probably want to set the sibling slots too;
+                // forcing a re-open of Smart Mode after every slot is the
+                // exact tedium this fixes.
+                m.ui.overlay = ov::SmartMode{{8 + assigned}};
+                auto toast = set_status_toast(m, "Smart Mode slot set");
+                return {std::move(m), std::move(toast)};
+            }
+
             return switch_to_model_ref(std::move(m), row.ref());
+        },
+        [&](ModelsLoaded& e) -> Step {
+            // STALENESS GATE: only accept a payload fetched FOR the provider
+            // that is active NOW. Two quick switches interleave their slow
+            // fetches; without this, provider A's late catalog lands under
+            // provider B and the picker offers models B cannot stream.
+            // (Empty provider_id = legacy/synthetic dispatch — accept.)
+            if (!e.provider_id.empty()
+                && e.provider_id != active_provider_id()) {
+                return done(std::move(m));   // keep models_loading: the
+                                             // newer fetch is still in flight
+            }
+            // The fetch finished (success OR failure) — always clear the
+            // in-flight flag so the picker leaves "Loading models…".
+            m.s.models_loading = false;
+            // A failed fetch surfaces its reason as a transient toast —
+            // never as a StreamError, which would feed the live turn's
+            // retry machinery (see the ModelsLoaded msg comment).
+            if (!e.error.empty()) {
+                auto toast = set_status_toast(m, std::move(e.error),
+                                              std::chrono::seconds{6});
+                return {std::move(m), std::move(toast)};
+            }
+            if (e.models.empty()) return done(std::move(m));
+            auto settings = deps().load_settings();
+            // PERSIST-ON-SUCCESS: a custom --provider spec registered at
+            // startup as unproven becomes sticky NOW — the host answered a
+            // non-empty model fetch, so it's a real endpoint, not a typo.
+            // Presets persisted at parse time as always; this only fires
+            // for raw host/URL specs, at most once per process.
+            if (auto proven = provider::take_unproven_spec(
+                    active_provider_id())) {
+                settings.provider = proven->first;
+                if (!proven->second.empty())
+                    settings.provider_models[proven->first] = proven->second;
+                deps().save_settings(settings);
+            }
+            m.d.available_models.clear();
+            for (auto& mi : e.models) {
+                // DISCOVERED entitlement: this account already 400'd on the
+                // context-1m beta ("long context beta is not available for
+                // this subscription"), so offering the `[1m]` rows would
+                // just sell a window the wire will reject. OAuth alone can't
+                // tell us (the token carries no entitlement field) — the
+                // flag is learned from the first rejection and cleared on
+                // sign-out/account switch.
+                if (settings.context_1m_blocked
+                    && mi.id.value.find("[1m]") != std::string::npos)
+                    continue;
+                for (const auto& fav : settings.favorite_models)
+                    if (mi.id == fav) mi.favorite = true;
+                m.d.available_models.push_back(std::move(mi));
+            }
+            // Refresh the subagent router's candidate pool so read-only roles
+            // route to the cheapest capable model THIS provider offers. Done
+            // on every load (startup, provider switch, refetch) so routing
+            // never uses a stale provider's list.
+            tools::subagent::set_candidates(m.d.available_models);
+            // Keep the subagent role-router in sync with Smart Mode (Layer 3b).
+            tools::subagent::set_smart(m.d.smart);
+            // If the active model isn't offered by this provider (e.g. just
+            // switched to Ollama with no recall, or a stale saved id), fall
+            // back to the first available model so the user is never pointed
+            // at a model that 400s on the first prompt. Persist the pick so
+            // it sticks as this provider's recall.
+            bool active_present = false;
+            for (const auto& mi : m.d.available_models)
+                if (mi.id == m.d.model_id) { active_present = true; break; }
+            if (!active_present && !m.d.available_models.empty()) {
+                m.d.model_id = m.d.available_models.front().id;
+                m.s.context_max =
+                    ui::context_max_for_model(m.d.model_id.value);
+                // The auto-selected model may not support the effort tier that
+                // rode over from the previous provider — clamp it so the picker
+                // chip and the wire agree (commit_provider_switch couldn't do
+                // this yet: the model id was empty until this refetch landed).
+                // Uniform across every provider INCLUDING ChatGPT: gpt-5.x
+                // decodes through Family::Gpt with an exact ladder, so the
+                // same clamp keeps chip == wire (a stale `max` on a model
+                // capped at xhigh must degrade in the CHIP too, not just be
+                // silently rewritten at request time). Empty id = unknown
+                // model → skip (clamping would wipe the tier, not no-op).
+                if (!m.d.model_id.value.empty())
+                    m.d.effort = clamp_effort(
+                        m.d.effort, resolved_caps(m.d.model_id.value));
+                tools::subagent::set_model(m.d.model_id.value);
+                persist_settings(m);
+            }
+            // The active model may have remained valid, in which case the
+            // old branch did not refresh its context cap. Codex publishes a
+            // 272K window (rather than Agentty's generic 200K fallback), and
+            // the status-bar gauge must reflect that immediately.
+            for (const auto& mi : m.d.available_models) {
+                if (mi.id == m.d.model_id && mi.context_window > 0) {
+                    m.s.context_max = mi.context_window;
+                    break;
+                }
+            }
+            // If the FUSED picker is open, the active provider's catalog just
+            // changed (available_models is its source), so its rows are stale
+            // — rebuild them. rebuild_fused_rows re-mirrors available_models
+            // into the active catalog and re-ranks, so a newly-listed model
+            // (e.g. one the live /v1/models fetch just added) appears without
+            // reopening the picker. Clamp the cursor to the new row count.
+            if (auto* c = m.ui.overlay.get<ov::FusedPicker>()) {
+                // The active provider's live catalog just completed — mark its
+                // catalog fresh so the TTL refresh doesn't immediately refetch
+                // it, then rebuild the open rows.
+                const std::string apid = active_provider_id();
+                for (auto& cat : m.d.provider_catalogs)
+                    if (cat.provider_id == apid) { cat.loaded_at_ms = now_ms(); break; }
+                rebuild_fused_rows(m);
+                const int n = static_cast<int>(m.d.fused_rows.size());
+                if (n == 0) c->index = 0;
+                else if (c->index >= n) c->index = n - 1;
+                else if (c->index < 0) c->index = 0;
+            }
+            return done(std::move(m));
+        },
+        [&](FusedPickerToggleShowReasoning&) -> Step {
+            // Flip whether the model's reasoning/thinking is SHOWN. Global (all
+            // providers): renders the transcript reasoning block AND makes the
+            // Anthropic transport request VISIBLE thinking. Persisted so it
+            // survives restarts. Mirrors the ToggleChangesStrip pattern.
+            m.d.show_reasoning = !m.d.show_reasoning;
+            auto s = deps().load_settings();
+            s.show_reasoning = m.d.show_reasoning;
+            deps().save_settings(s);
+            // Anthropic caveat: visible thinking is only REQUESTED when an
+            // effort tier is active (the transport gates thinking mode on
+            // req.effort). With effort off, ^R would silently show nothing —
+            // tell the user what to flip instead of leaving a dead toggle.
+            const auto caps = resolved_caps(m.d.model_id.value);
+            const bool claude_no_effort =
+                caps.family != ModelCapabilities::Family::Unknown
+                && caps.family != ModelCapabilities::Family::Gpt
+                && !caps.reasoning_compat
+                && m.d.effort == Effort::None;
+            auto toast = set_status_toast(m, !m.d.show_reasoning
+                ? "reasoning: hidden (existing blocks fold away too)"
+                : claude_no_effort
+                    ? "reasoning: shown — needs an effort tier on this model "
+                      "(\xe2\x86\x90/\xe2\x86\x92 in the picker)"
+                    : "reasoning: shown (live thinking + \xe2\x9c\xa6 summary)");
+            return {std::move(m), std::move(toast)};
         },
     }, pm);
 }

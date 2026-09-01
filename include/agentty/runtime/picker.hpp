@@ -3,7 +3,7 @@
 //
 // Replaces the canonical anti-pattern this codebase used to have:
 //
-//     struct ModelPickerState { bool open = false; int index = 0; };
+//     struct FusedPickerState { bool open = false; int index = 0; };
 //
 // where `index` is meaningless when `open == false`. A reader had to
 // remember which fields were valid in which combination; a writer had to

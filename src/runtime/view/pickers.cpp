@@ -233,215 +233,6 @@ inline std::vector<Element> reasoning_effort_footer(const Model& m,
 
 } // namespace
 
-Element model_picker(const Model& m) {
-    auto* picker = m.ui.overlay.get<ov::ModelPicker>();
-    if (!picker) return nothing();
-
-    Picker::Config cfg;
-    // Title names the ACTIVE provider so the list is never context-free: after
-    // a provider switch the user immediately sees WHOSE models these are
-    // (" Anthropic models ", " Groq models ", …) instead of a bare " Models ".
-    {
-        const auto& sel = provider::active();
-        std::string prov;
-        if (sel.kind == provider::Kind::OpenAI) {
-            const provider::ProviderPreset* p =
-                provider::preset_for(sel.openai_endpoint.label);
-            prov = p ? std::string{p->label}
-                     : std::string{sel.openai_endpoint.label};
-        } else if (sel.kind == provider::Kind::ExternalAcp) {
-            prov = sel.acp_agent_id;
-        } else {
-            const provider::ProviderPreset* p =
-                provider::preset_for(provider::default_provider_id());
-            prov = p ? std::string{p->label} : "Anthropic";
-        }
-        cfg.title = prov.empty() ? std::string{" Models "}
-                                 : " " + prov + " models ";
-    }
-    // Slot-assign mode: retitle so it's clear the pick fills a Smart Mode role.
-    if (m.ui.smart_assign_slot >= 0) {
-        const char* role = m.ui.smart_assign_slot == 0 ? "Strategic"
-                         : m.ui.smart_assign_slot == 1 ? "Implementation"
-                                                       : "Utility";
-        cfg.title = std::string{" Smart Mode \xc2\xb7 pick "} + role + " model ";
-    }
-    cfg.accent     = accent;
-    cfg.min_width  = 40;
-    cfg.viewport_h = picker_viewport_h();
-    cfg.scroll     = &m.ui.model_picker_scroll;
-    cfg.selected   = picker->index;
-
-    // Live search header — mirrors the command palette. Type to filter,
-    // Backspace to trim; the row list below is the filtered subset.
-    // Caret placement: an input's caret sits at the INSERTION POINT —
-    // after the typed query, but BEFORE the greyed placeholder when the
-    // field is empty (a caret trailing the hint text reads as "the hint
-    // is content").
-    cfg.header.push_back(
-        picker->query.empty()
-            ? h(text("\xf0\x9f\x94\x8d ", fg_of(muted)),
-                query_caret(accent),
-                text("type to filter models\xe2\x80\xa6", fg_italic(muted))
-              ).build()
-            : h(text("\xf0\x9f\x94\x8d ", fg_of(muted)),
-                text(picker->query, fg_of(fg)),
-                query_caret(accent)
-              ).build());
-    cfg.header.push_back(sep);
-
-    // Build the filtered + RANKED index list. We fuzzy-score the display name
-    // and the raw id (users paste wire ids like `claude-sonnet-4-5`, which the
-    // prettified label never contains) and keep the better of the two, so
-    // "s4" floats "claude-sonnet-4-5" up and "which chars matched" can be
-    // highlighted. Empty query → alphabetical by shown label (favorites
-    // first) — the provider's catalog/wire order is effectively random to
-    // the user, and the fused "all providers" view is already ordered, so
-    // an unqueried single-provider list should read just as tidily.
-    struct Vis { int idx; int score; std::vector<int> pos; bool pos_on_label;
-                 std::string label; bool favorite; };
-    std::vector<Vis> vscored;
-    vscored.reserve(m.d.available_models.size());
-    const std::string q = picker->query;
-    for (int i = 0; i < static_cast<int>(m.d.available_models.size()); ++i) {
-        const auto& cand = m.d.available_models[static_cast<std::size_t>(i)];
-        const std::string shown = model_display_label(cand.id.value, cand.display_name);
-        if (q.empty()) {
-            vscored.push_back({i, 0, {}, true, shown, cand.favorite});
-            continue;
-        }
-        auto ml = fuzzy::score(shown, q);
-        auto il = fuzzy::score(cand.id.value, q);
-        if (!ml.matched() && !il.matched()) continue;
-        // Prefer highlighting on the visible label; fall back to id score.
-        if (ml.score >= il.score)
-            vscored.push_back({i, ml.score, std::move(ml.positions), true, {}, cand.favorite});
-        else
-            vscored.push_back({i, il.score, {}, true, {}, cand.favorite});   // matched via id only
-    }
-    if (q.empty()) {
-        // Favourites first (a deliberate user signal outranks recency),
-        // then the natural family/newest-first order — see
-        // model_order_less. Stable so any residual ties keep catalog order.
-        std::stable_sort(vscored.begin(), vscored.end(),
-            [](const Vis& a, const Vis& b){
-                if (a.favorite != b.favorite) return a.favorite;
-                return model_order_less(a.label, b.label);
-            });
-    } else {
-        std::stable_sort(vscored.begin(), vscored.end(),
-            [](const Vis& a, const Vis& b){ return a.score > b.score; });
-    }
-    std::vector<int> vis;
-    vis.reserve(vscored.size());
-    for (const auto& v : vscored) vis.push_back(v.idx);
-
-    if (m.d.available_models.empty()) {
-        std::string empty_msg;
-        if (m.s.models_loading) {
-            empty_msg = "  Loading models\xe2\x80\xa6";
-        } else {
-            // Name the LIKELY fix per provider kind instead of one generic
-            // line. For a local host the cause is almost always "server not
-            // running / wrong port" — telling a llama.cpp user to "check the
-            // key" sent them down the wrong path entirely.
-            const auto& sel = provider::active();
-            const bool local = sel.kind == provider::Kind::OpenAI
-                            && !sel.openai_endpoint.use_tls;
-            empty_msg = local
-                ? "  No models \xe2\x80\x94 is the server running on "
-                    + sel.openai_endpoint.host + ":"
-                    + std::to_string(sel.openai_endpoint.port)
-                    + "? Start it, or fix the host (^P), then reopen."
-                : "  No models available \xe2\x80\x94 check the provider/key, then Esc.";
-        }
-        cfg.items.push_back(text(std::move(empty_msg), fg_italic(muted)));
-    } else if (vis.empty()) {
-        cfg.items.push_back(text("  no models match", fg_italic(muted)));
-    } else {
-        cfg.rows.reserve(vis.size());
-        for (int vi = 0; vi < static_cast<int>(vis.size()); ++vi) {
-            const auto& mi = m.d.available_models[
-                static_cast<std::size_t>(vis[static_cast<std::size_t>(vi)])];
-            const bool sel    = vi == picker->index;
-            const bool active = mi.id == m.d.model_id;
-            Picker::Config::Row row;
-            // The canonical, provider-uniform label — the SAME string the
-            // fuzzy match + highlight offsets were computed against (see
-            // the vscored build above), so highlights land on the right
-            // glyphs and every provider reads identically here and in the
-            // fused "all providers" view.
-            row.leading        = model_display_label(mi.id.value, mi.display_name);
-            row.leading_style  = active ? fg_bold(fg) : fg_of(muted);
-            // Light up the fuzzy-matched characters of the label (when the
-            // match was on the label, not the raw id) so the ranking is
-            // legible — typing "son4" glows the s-o-n…4 in "Claude Sonnet 4.5".
-            if (!q.empty()) {
-                const auto& vp = vscored[static_cast<std::size_t>(vi)];
-                if (vp.pos_on_label) {
-                    row.highlight    = vp.pos;
-                    row.highlight_fg = highlight;
-                }
-            }
-            // Trailing: context window · favourite star · reasoning-effort
-            // tier (highlighted row only, ←/→ cycles). The window is the one
-            // spec that differentiates otherwise-similar rows (a 1M-context
-            // variant vs the 200k base; a 128k local vs an 8k one), so it
-            // earns the column; "unknown" (0) prints nothing rather than a
-            // made-up default.
-            std::string trailing;
-            if (const int win = mi.context_window; win > 0) {
-                if (win >= 1'000'000) {
-                    trailing += std::to_string(win / 1'000'000) + "M";
-                    if (win % 1'000'000 != 0) trailing += "+";   // 1.x M → "1M+"
-                } else if (win >= 1'000) {
-                    trailing += std::to_string(win / 1'000) + "k";
-                } else {
-                    trailing += std::to_string(win);
-                }
-            }
-            if (mi.favorite) {
-                if (!trailing.empty()) trailing += "  ";
-                trailing += "\xe2\x98\x85";
-            }
-            if (sel && effort_capable(resolved_caps(mi.id.value))
-                    && m.d.effort != Effort::None) {
-                if (!trailing.empty()) trailing += "  ";
-                trailing += "\xe2\x97\x87 " + std::string{effort_label(m.d.effort)};
-            }
-            row.trailing       = std::move(trailing);
-            row.trailing_style = fg_of(warn);
-            row.selected = sel;
-            row.active   = active;
-            cfg.rows.push_back(std::move(row));
-        }
-    }
-
-    cfg.footer.push_back(text(""));
-    // Reasoning-effort line — ONE unified control for the highlighted model.
-    // Reasoning-effort line — ONE unified control for the highlighted model,
-    // now shared verbatim with the fused picker (reasoning_effort_footer) so
-    // the two surfaces render identically and can't drift.
-    if (!vis.empty()) {
-        const int hi = std::clamp(picker->index, 0,
-            static_cast<int>(vis.size()) - 1);
-        const std::string& hi_id =
-            m.d.available_models[
-                static_cast<std::size_t>(vis[static_cast<std::size_t>(hi)])].id.value;
-        for (auto& row : reasoning_effort_footer(m, hi_id))
-            cfg.footer.push_back(std::move(row));
-    }
-    cfg.footer.push_back(key_hints({
-        {"\xe2\x86\x91\xe2\x86\x93", "move", 5},        // ↑↓
-        {"Enter", "select", 5},
-        {"^/", "all providers", 3},               // toggle: fused picker
-        {"^F", "favorite", 1},
-        {"^P", "providers", 2},                    // cross-hint: provider picker
-        {"Esc", "close", 4},
-    }));
-
-    return Picker{std::move(cfg)}.build();
-}
 
 // ── Fused cross-provider model picker ────────────────────────────────────
 // One list over EVERY authed provider (docs/design/unified-model-picker.md).
@@ -456,7 +247,15 @@ Element fused_picker(const Model& m) {
     const auto& rows = m.d.fused_rows;
 
     Picker::Config cfg;
-    cfg.title    = " Models \xc2\xb7 all providers ";
+    // Slot-assign mode: retitle so it's clear the pick fills a Smart Mode
+    // role rather than switching the model you're chatting with, and say
+    // which provider the list is scoped to (see fused_rows_for_model).
+    const int slot = m.ui.smart_assign_slot;
+    cfg.title = slot < 0
+        ? std::string{" Models \xc2\xb7 all providers "}
+        : std::string{" Smart Mode \xc2\xb7 pick "}
+          + (slot == 0 ? "Strategic" : slot == 1 ? "Implementation" : "Utility")
+          + " model ";
     cfg.accent   = accent;
     cfg.viewport_h = picker_viewport_h();
     cfg.scroll     = &m.ui.fused_picker_scroll;
@@ -465,14 +264,15 @@ Element fused_picker(const Model& m) {
         picker->query.empty()
             ? h(text("\xf0\x9f\x94\x8d ", fg_of(muted)),
                 query_caret(accent),
-                text(std::string{"type to filter across providers"},
+                text(std::string{slot < 0 ? "type to filter across providers"
+                                          : "type to filter this provider"},
                      fg_italic(muted))
               ).build()
             : h(text("\xf0\x9f\x94\x8d ", fg_of(muted)),
                 text(picker->query, fg_of(fg)),
                 query_caret(accent)
               ).build());
-    cfg.header.push_back(sep);   // rule under the filter (matches classic picker)
+    cfg.header.push_back(sep);   // rule under the filter (matches the other pickers)
 
     // Lazy-load hint: while any provider's catalog is still streaming in,
     // show a dim spinner-ish note so the (initially active-provider-only)
@@ -576,7 +376,7 @@ Element fused_picker(const Model& m) {
             const int prefix = active ? 4 : 2;
             row.highlight.reserve(r.match_positions.size());
             for (int p : r.match_positions) row.highlight.push_back(prefix + p);
-            row.highlight_fg = highlight;   // same hue as the classic picker
+            row.highlight_fg = highlight;   // same hue as the other pickers
         }
         // Trailing cell mirrors the classic model picker exactly: context
         // window first, then a ★ favorite mark, then a ✦ reasoning badge — all
@@ -608,11 +408,9 @@ Element fused_picker(const Model& m) {
     }
     cfg.selected = visual_selected;
 
-    // Reasoning-effort control for the highlighted model — the SAME shared
-    // footer the classic picker renders (reasoning_effort_footer), so the two
-    // surfaces look identical and read/write the same state. No staged tier:
-    // ←/→ mutates the global m.d.effort live (like the old picker), so the two
-    // can't disagree ("off in one, on in the other").
+    // Reasoning-effort control for the highlighted model — the shared
+    // reasoning_effort_footer. ←/→ mutates the global m.d.effort live (no
+    // staged tier), so the chip, the footer and the wire can't disagree.
     if (picker->index >= 0 && picker->index < static_cast<int>(rows.size())) {
         const auto& hl = rows[static_cast<std::size_t>(picker->index)];
         if (!hl.is_signin_offer())
@@ -621,16 +419,28 @@ Element fused_picker(const Model& m) {
                 cfg.footer.push_back(std::move(row));
     }
 
-    cfg.footer.push_back(key_hints({
-        {"\xe2\x86\x91\xe2\x86\x93", "move", 5},
-        {"1-9", "jump", 3},
-        {"Enter", "switch", 5},
-        {"^/", "this provider", 3},
-        {"^F", "favorite", 1},
-        {"^L", "refresh", 2},
-        {"^Tab", "prev", 2},
-        {"Esc", "close", 4},
-    }));
+    // Footer hints follow the mode: in slot-assign Enter PINS a role and Esc
+    // goes BACK to Smart Mode, so promising "switch"/"close" would misstate
+    // what the keys do. ^/ and ^Tab are switch-only affordances.
+    cfg.footer.push_back(slot >= 0
+        ? key_hints({
+            {"\xe2\x86\x91\xe2\x86\x93", "move", 5},
+            {"1-9", "jump", 3},
+            {"Enter", "pin to role", 5},
+            {"^F", "favorite", 1},
+            {"^L", "refresh", 2},
+            {"Esc", "back", 4},
+          })
+        : key_hints({
+            {"\xe2\x86\x91\xe2\x86\x93", "move", 5},
+            {"1-9", "jump", 3},
+            {"Enter", "switch", 5},
+            {"^F", "favorite", 1},
+            {"^R", "reasoning", 2},
+            {"^L", "refresh", 2},
+            {"^Tab", "prev", 2},
+            {"Esc", "close", 4},
+          }));
     return Picker{std::move(cfg)}.build();
 }
 

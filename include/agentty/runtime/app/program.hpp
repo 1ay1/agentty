@@ -137,7 +137,7 @@ struct AgenttyApp {
         // cursor/query must feed the hash. These pickers are
         // selection-driven — pressing ↑/↓ only mutates an index (or a
         // query string) inside the variant; nothing else in the model
-        // moves. If that index isn't hashed, ModelPickerMove produces a
+        // moves. If that index isn't hashed, FusedPickerMove produces a
         // model the gate considers visually identical, skip_render fires,
         // and the cursor doesn't repaint until some OTHER hashed axis
         // (caret-blink parity, status text) happens to flip ~265 ms later.
@@ -151,10 +151,6 @@ struct AgenttyApp {
         // alternative blocks below add cursor/query movement INSIDE the
         // open overlay.
         mix(static_cast<std::uint64_t>(m.ui.overlay.raw().index()));
-        if (auto* mp = m.ui.overlay.get<ov::ModelPicker>()) {
-            mix(static_cast<std::uint64_t>(mp->index));
-            mix_str(mp->query);   // live search buffer
-        }
         if (auto* pp = m.ui.overlay.get<ov::ProviderPicker>()) {
             mix(static_cast<std::uint64_t>(pp->index));
             mix_str(pp->query);
@@ -169,6 +165,11 @@ struct AgenttyApp {
         if (auto* fp = m.ui.overlay.get<ov::FusedPicker>()) {
             mix(static_cast<std::uint64_t>(fp->index));
             mix_str(fp->query);   // live search buffer
+            // Slot-assign mode retitles the picker, rewrites the footer
+            // hints and scopes the row list to the active provider, so it
+            // is part of the visible state — not hashing it would freeze
+            // stale chrome when Smart Mode descends into the picker.
+            mix(static_cast<std::uint64_t>(m.ui.smart_assign_slot + 1));
         }
         // The fused list also changes as async provider catalogs resolve
         // (each FusedCatalogLoaded grows/updates provider_catalogs), so mix a

@@ -1,14 +1,15 @@
 # Unified cross-provider model picker
 
-Status: design → implementation (staged)
+Status: **SHIPPED**. `^/` opens the one and only model surface; the old
+single-provider picker has been deleted.
 Author: agentty
 Scope: `runtime/app/update/picker.cpp`, `runtime/view/pickers.cpp`, `domain/catalog.hpp`, `provider/selection.*`, `runtime/msg.hpp`
 
 ## The problem
 
-Switching model and switching provider are two separate journeys today:
+Switching model and switching provider used to be two separate journeys:
 
-* `^/` opens the **model picker** — but it lists only the *currently active*
+* `^/` opened the **model picker** — but it listed only the *currently active*
   provider's catalog (`Model::d.available_models`, refetched on every
   provider switch and cleared in between).
 * `^P` opens the **provider picker** — pick a provider, *then* its models
@@ -255,3 +256,42 @@ it happened — the confirmation is the affordance.
 4. Bind `/model` and `^/` to the fused picker; keep `^P` as-is.
 5. `^Tab` quick-swap + MRU persistence.
 6. Tests, then docs (`docs/website/interface.md` + a keybindings note).
+
+## Consolidation (shipped)
+
+The fused picker initially landed *alongside* the single-provider one, with
+`^/` toggling between them. That left two near-identical surfaces for one
+concept — two reducers, two views, two key handlers, two `Msg` domains, two
+sets of effort/favourite/filter messages that had to be kept in lockstep.
+Every feature added to one had to be ported to the other (the effort ladder
+and `^E` override were, twice).
+
+The old picker's only remaining job was **Smart Mode role→model assignment**,
+which is now a *mode* of the fused picker rather than a second picker:
+
+* `Model::ui.smart_assign_slot >= 0` (set by `SmartModeSelect` on a slot row)
+  puts the picker in **slot-assign mode**.
+* In that mode `fused_rows_for_model` sets `FusedInputs::only_provider` to the
+  active provider, so the list shows **only models that can actually run**.
+  A slot's pinned model is handed to whatever provider is active at turn
+  time (`smart::resolve_role`), so a cross-provider pin would be an
+  unstreamable id — scoping the list makes that **unrepresentable** rather
+  than validated-and-rejected. Sign-in offers are suppressed for the same
+  reason.
+* `FusedPickerSelect` writes the slot (and implicitly enables Smart Mode)
+  instead of switching the active model; `CloseFusedPicker` pops back to the
+  Smart Mode overlay at the row you descended from. Picker navigation is a
+  **stack, not a trapdoor**.
+* The title, the filter placeholder and the footer hints all derive from
+  `smart_assign_slot`, so the mode is legible (`Smart Mode · pick Strategic
+  model`, `Enter pin to role`, `Esc back`).
+
+Deleted by the consolidation: `ov::ModelPicker`, `overlay::Kind::ModelPicker`,
+the entire `ModelPickerMsg` domain (11 leaves), `model_picker_update`,
+`ui::model_picker`, `on_model_picker`, and `model_picker_scroll` — ~700 lines
+net, one `Msg` domain (19→18), and one whole surface a user had to learn.
+`ModelsLoaded` moved into `FusedPickerMsg`; `^R` (toggle reasoning display)
+was ported over as `FusedPickerToggleShowReasoning`.
+
+Guarded by `smart_slot_picker_stack_test` (Esc pops, Enter pins + pops, the
+list is provider-scoped in slot-assign mode and cross-provider outside it).

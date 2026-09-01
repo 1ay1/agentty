@@ -58,7 +58,6 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
         [&](msg::ComposerMsg cm)       { return detail::composer_update     (std::move(m), std::move(cm)); },
         [&](msg::StreamMsg sm)         { return detail::stream_update       (std::move(m), std::move(sm)); },
         [&](msg::ToolMsg tm)           { return detail::tool_update         (std::move(m), std::move(tm)); },
-        [&](msg::ModelPickerMsg pm)    { return detail::model_picker_update (std::move(m), std::move(pm)); },
         [&](msg::ProviderPickerMsg pm) { return detail::provider_picker_update(std::move(m), std::move(pm)); },
         [&](msg::FusedPickerMsg pm)    { return detail::fused_picker_update  (std::move(m), std::move(pm)); },
         [&](msg::ThreadListMsg tm)     { return detail::thread_list_update  (std::move(m), std::move(tm)); },

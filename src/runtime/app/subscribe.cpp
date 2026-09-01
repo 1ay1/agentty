@@ -266,9 +266,9 @@ std::optional<Msg> on_fork_picker(const KeyEvent& ev) {
     return nav::translate(s, ev);
 }
 
-// Fused (all-providers) picker: full grammar + typed filter + effort
-// cycling. ^/ toggles to the classic picker, ^P cross-hops to providers,
-// ^F favourites, ^L force-refreshes every catalog.
+// The model picker: full grammar + typed filter + effort cycling. ^P
+// cross-hops to providers, ^F favourites, ^R toggles reasoning display,
+// ^L force-refreshes every catalog. There is exactly one model surface.
 std::optional<Msg> on_fused_picker(const KeyEvent& ev) {
     nav::NavSpec s;
     s.close     = [] { return Msg{CloseFusedPicker{}}; };
@@ -292,58 +292,22 @@ std::optional<Msg> on_fused_picker(const KeyEvent& ev) {
         }
         const auto v = nav::char_view(e);
         if (!v) return std::nullopt;
-        // ^/ TOGGLES fused ⇄ classic (raw 0x1F carries no ctrl flag).
+        // ^/ is the picker's own key — pressing it again closes it (raw
+        // 0x1F carries no ctrl flag). Previously it toggled to a second,
+        // near-identical picker; there is only one now.
         if (v->raw == 0x1F || (v->ctrl && v->c == U'/'))
-            return Msg{OpenModelPicker{}};
+            return Msg{CloseFusedPicker{}};
         if (v->ctrl) {
             switch (v->c) {
                 case U'p': return Msg{OpenProviderPicker{}};   // cross-hop
                 case U'f': return Msg{FusedPickerToggleFavorite{}};
+                case U'r': return Msg{FusedPickerToggleShowReasoning{}};
                 case U'l': return Msg{FusedPickerRefresh{}};
                 default:   break;
             }
             // Fall through to nullopt: translate() never types ctrl'd
             // chars into the filter, and the dispatch chain returns this
             // handler's result unconditionally — the chord is swallowed.
-        }
-        return std::nullopt;
-    };
-    return nav::translate(s, ev);
-}
-
-// Classic (single-provider) picker: same grammar; ^/ toggles back to
-// fused, ^R toggles reasoning display.
-std::optional<Msg> on_model_picker(const KeyEvent& ev) {
-    nav::NavSpec s;
-    s.close     = [] { return Msg{CloseModelPicker{}}; };
-    s.select    = [] { return Msg{ModelPickerSelect{}}; };
-    s.move      = [](int d) { return Msg{ModelPickerMove{d}}; };
-    s.jump      = [](nav::Jump j) {
-        using W = ModelPickerJump::Where;
-        return Msg{ModelPickerJump{j == nav::Jump::Home ? W::Home
-                                 : j == nav::Jump::End  ? W::End
-                                 : j == nav::Jump::PageUp ? W::PageUp
-                                                          : W::PageDown}};
-    };
-    s.filter_bs = [] { return Msg{ModelPickerFilterBackspace{}}; };
-    s.filter_ch = [](char32_t c) { return Msg{ModelPickerFilterInput{c}}; };
-    s.extra     = [](const KeyEvent& e) -> std::optional<Msg> {
-        if (const auto* sk = std::get_if<SpecialKey>(&e.key)) {
-            if (*sk == SpecialKey::Left)  return Msg{ModelPickerCycleEffort{-1}};
-            if (*sk == SpecialKey::Right) return Msg{ModelPickerCycleEffort{+1}};
-            return std::nullopt;
-        }
-        const auto v = nav::char_view(e);
-        if (!v) return std::nullopt;
-        if (v->raw == 0x1F || (v->ctrl && v->c == U'/'))
-            return Msg{OpenFusedPicker{}};
-        if (v->ctrl) {
-            switch (v->c) {
-                case U'p': return Msg{OpenProviderPicker{}};   // cross-hop
-                case U'f': return Msg{ModelPickerToggleFavorite{}};
-                case U'r': return Msg{ModelPickerToggleShowReasoning{}};
-                default:   break;
-            }
         }
         return std::nullopt;
     };
@@ -982,7 +946,6 @@ Sub<Msg> subscribe(const Model& m) {
                 case OK::SettingsList:
                     return on_settings_list(ev, settings_list_adding);
                 case OK::Fork:           return on_fork_picker(ev);
-                case OK::ModelPicker:    return on_model_picker(ev);
                 case OK::FusedPicker:    return on_fused_picker(ev);
                 case OK::ProviderPicker: return on_provider_picker(ev);
                 case OK::ThreadList:     return on_thread_list(ev);

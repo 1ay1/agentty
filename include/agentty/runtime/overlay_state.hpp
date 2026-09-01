@@ -10,10 +10,10 @@
 //
 // Now every exclusive overlay lives in ONE slot:
 //
-//     m.ui.overlay = ov::ModelPicker{{.index = 3}};   // opens (closes rival)
-//     m.ui.overlay.is<ov::ModelPicker>()              // open?
-//     m.ui.overlay.get<ov::ModelPicker>()             // payload* or nullptr
-//     m.ui.overlay.close<ov::ModelPicker>()           // close IF topmost
+//     m.ui.overlay = ov::FusedPicker{{.index = 3}};    // opens (closes rival)
+//     m.ui.overlay.is<ov::FusedPicker>()               // open?
+//     m.ui.overlay.get<ov::FusedPicker>()              // payload* or nullptr
+//     m.ui.overlay.close<ov::FusedPicker>()            // close IF topmost
 //
 // Opening is assignment — it structurally closes whatever was open,
 // because a variant holds one alternative. "Two exclusive overlays open"
@@ -63,7 +63,6 @@ namespace agentty::ui::overlay {
 struct None {};
 
 // ── The exclusive overlays: one distinct type each, payload inherited ───
-struct ModelPicker     : pick::OpenAt {};
 struct FusedPicker     : pick::OpenAt {};
 struct ProviderPicker  : pick::OpenAt {};
 struct ThreadList      : pick::OpenAt {};
@@ -82,7 +81,7 @@ struct DiffReview      : pick::OpenAtCell {};
 
 using Variant = std::variant<
     None,
-    ModelPicker, FusedPicker, ProviderPicker, ThreadList, SmartMode,
+    FusedPicker, ProviderPicker, ThreadList, SmartMode,
     CommandPalette, Mention, Symbol,
     CodeBlocks, CodeBlockResult, ToolViewer, Checkpoints,
     RagSettings, SettingsList, Fork,
@@ -118,7 +117,7 @@ public:
     }
 
     // Close K IF it is the open overlay; leave any other overlay alone.
-    // Mirrors the old per-field close semantics: a stale CloseModelPicker
+    // Mirrors the old per-field close semantics: a stale CloseFusedPicker
     // arriving after the user hopped to the provider picker must not
     // close the provider picker.
     template <Alternative K>
@@ -149,7 +148,6 @@ enum class Kind {
     RagSettings,
     SettingsList,
     Fork,
-    ModelPicker,
     FusedPicker,
     ProviderPicker,
     ThreadList,
@@ -163,7 +161,6 @@ enum class Kind {
 [[nodiscard]] inline Kind kind_of(const State& s) noexcept {
     struct V {
         Kind operator()(const None&)            const { return Kind::None; }
-        Kind operator()(const ModelPicker&)     const { return Kind::ModelPicker; }
         Kind operator()(const FusedPicker&)     const { return Kind::FusedPicker; }
         Kind operator()(const ProviderPicker&)  const { return Kind::ProviderPicker; }
         Kind operator()(const ThreadList&)      const { return Kind::ThreadList; }

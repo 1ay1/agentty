@@ -234,13 +234,13 @@ struct Model {
         std::uint64_t       clipboard_query_done = 0;
         // When the model picker was opened to ASSIGN a Smart Mode role slot
         // (not to switch the active model), this names the target slot.
-        // ModelPickerSelect writes the chosen model into that slot and
+        // FusedPickerSelect writes the chosen model into that slot and
         // clears this instead of switching models. -1 = normal model switch.
         int                 smart_assign_slot = -1;   // -1 | 0=Strategic 1=Impl 2=Utility
         // Effort tier changed via ←/→ in the model picker but not yet
         // flushed to disk. Persisting per keystroke is a synchronous
         // load+fsync+rename on the UI thread; instead the CycleEffort arm
-        // sets this and CloseModelPicker/Select flush once.
+        // sets this and CloseFusedPicker/Select flush once.
         bool                effort_dirty = false;
         // Plugins/MCP connection snapshot — OWNED BY THE MODEL, not read from
         // the global pool at render time. This is the architectural fix for
@@ -411,7 +411,7 @@ struct Model {
         // the filter query changes the match set).
         //
         // auto_dispatch = false: these pickers are selection-driven. The
-        // reducer owns the cursor (ModelPickerMove / ThreadListMove /
+        // reducer owns the cursor (FusedPickerMove / ThreadListMove /
         // CommandPaletteMove / …) and the Picker widget auto-scrolls the
         // viewport to keep the selected row visible every build. Leaving
         // auto_dispatch on (the default) would ALSO feed every ↑/↓/PageUp
@@ -433,9 +433,8 @@ struct Model {
             s.auto_dispatch = false;
             return s;
         }
-        mutable maya::ScrollState model_picker_scroll     = routed_scroll();
-        mutable maya::ScrollState provider_picker_scroll  = routed_scroll();
         mutable maya::ScrollState fused_picker_scroll     = routed_scroll();
+        mutable maya::ScrollState provider_picker_scroll  = routed_scroll();
         mutable maya::ScrollState thread_list_scroll      = routed_scroll();
         mutable maya::ScrollState command_palette_scroll  = routed_scroll();
         mutable maya::ScrollState mention_palette_scroll  = routed_scroll();

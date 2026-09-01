@@ -41,6 +41,14 @@ struct FusedInputs {
     ModelRef    active;                                       // current prov+model
     std::string query;
     int         recent_cap = 6;
+    // Restrict the list to ONE provider. Empty (the default) = the fused,
+    // cross-provider view. Set to a provider id by Smart Mode slot-assign
+    // mode, where a pinned model is handed to whatever provider is active
+    // at turn time — so a row from another provider must not be selectable.
+    // Filtering here rather than validating at Select keeps the invalid
+    // choice unrepresentable instead of merely rejected. Sign-in offers are
+    // suppressed too: you cannot pin a model you aren't signed in to.
+    std::string only_provider;
     // The canonical model label + fuzzy-match anchor. Injected by the
     // view (ui::model_display_label) so the fused picker's rows read AND
     // match identically to the per-provider picker's. Defaulted to the
@@ -118,6 +126,13 @@ find_catalog(const std::vector<ProviderCatalog>& cats, std::string_view pid) {
 
     const std::string& q = in.query;
     const bool no_query = q.empty();
+    // Single-provider mode (Smart Mode slot-assign). Gates all three
+    // sections: RECENT entries from other providers, their catalog rows,
+    // and every sign-in offer.
+    const bool one_provider = !in.only_provider.empty();
+    auto in_scope = [&](std::string_view pid) {
+        return !one_provider || pid == in.only_provider;
+    };
 
     std::vector<FusedRow> out;
     out.reserve(recents.size() + 32);
@@ -167,6 +182,7 @@ find_catalog(const std::vector<ProviderCatalog>& cats, std::string_view pid) {
     };
     auto push_recent = [&](const ModelRef& r) {
         if (already(r)) return;
+        if (!in_scope(r.provider_id)) return;
         const ProviderCatalog* c = find_catalog(catalogs, r.provider_id);
         if (!c) return;                              // provider signed out
         const ModelInfo* mi = find_model(*c, r.model_id);
@@ -211,6 +227,7 @@ find_catalog(const std::vector<ProviderCatalog>& cats, std::string_view pid) {
     scored.reserve(64);
     int prov_ord = 0;
     for (const auto& c : catalogs) {
+        if (!in_scope(c.provider_id)) continue;
         const std::size_t nkeys = c.search_keys.size();
         for (std::size_t i = 0; i < c.models.size(); ++i) {
             const auto& mi = c.models[i];
@@ -297,6 +314,7 @@ find_catalog(const std::vector<ProviderCatalog>& cats, std::string_view pid) {
     // surfaces its offer so searching for a provider you haven't added is
     // never a dead end — the row IS the next step.
     for (const auto& off : offers) {
+        if (one_provider) break;    // can't pin a model you aren't signed in to
         if (no_query || !fuzzy::matches(off.label, q)) continue;
         FusedRow row;
         row.provider_id = off.provider_id;

@@ -48,7 +48,6 @@ std::optional<maya::Element> pick_overlay(const Model& m) {
         case OK::RagSettings:    return rag_settings_picker(m);
         case OK::SettingsList:   return settings_list_picker(m);
         case OK::Fork:           return fork_picker_view(m);
-        case OK::ModelPicker:    return model_picker(m);
         case OK::FusedPicker:    return fused_picker(m);
         case OK::ProviderPicker: return provider_picker(m);
         case OK::ThreadList:     return thread_list(m);

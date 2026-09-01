@@ -1154,7 +1154,7 @@ learned_effort_sets_snapshot() {
 // consumer already funnels through the returned caps.
 //
 // `scope`: the provider whose contract to resolve against. Empty = the
-// ACTIVE provider (right for the wire path and the classic picker). Pass the
+// ACTIVE provider (right for the wire path). Pass the
 // row's own provider_id when rendering CROSS-provider surfaces (the fused
 // picker shows every authed provider's rows at once — resolving a Groq row
 // under the active Mistral scope would read the wrong host's facts).
