@@ -830,11 +830,36 @@ int main(int argc, char** argv) {
             !args.cli_model.empty()       ? args.cli_model
           : !sa_settings.model_id.empty() ? sa_settings.model_id.value
           :                                 std::string{"claude-opus-4-5"};
+        // Smart Mode config, resolved the same way init() does. The TUI
+        // re-pushes this from init() once the Model exists (and again on any
+        // overlay edit / catalog load), but `agentty run` and `agentty acp`
+        // never build a Model — without this they delegated with a
+        // default-constructed RoleConfig, i.e. Smart Mode silently off and
+        // every pinned role slot ignored. Headless runs are exactly where
+        // role routing matters most (they are all delegation).
+        smart::RoleConfig sa_smart;
+        sa_smart.enabled = sa_settings.smart_enabled;
+        if (auto ov = smart::tuning::enabled_override())
+            sa_smart.enabled = *ov;
+        auto load_slot = [](smart::SlotOverride& slot,
+                            const std::string& model, const std::string& eff) {
+            if (model.empty()) return;
+            slot.model  = model;
+            slot.effort = effort_from_wire(eff);
+            slot.set    = true;
+        };
+        load_slot(sa_smart.strategic,      sa_settings.smart_strategic_model,
+                                           sa_settings.smart_strategic_effort);
+        load_slot(sa_smart.implementation, sa_settings.smart_impl_model,
+                                           sa_settings.smart_impl_effort);
+        load_slot(sa_smart.utility,        sa_settings.smart_utility_model,
+                                           sa_settings.smart_utility_effort);
         tools::subagent::install(tools::subagent::Config{
             .auth = provider_auth,
             .model = std::move(sa_model),
             .installed = true,
-            .stream = stream_fn});
+            .stream = stream_fn,
+            .smart = std::move(sa_smart)});
     }
 
     // ── MCP server mode: serve agentty's native tools over MCP (stdio) ──

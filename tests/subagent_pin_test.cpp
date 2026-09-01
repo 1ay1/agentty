@@ -159,4 +159,26 @@ TEST_CASE("subagent honours a pinned Smart Mode slot from the first turn") {
         CHECK(p.effort == Effort::None,
               "utility workers never carry a reasoning budget");
     }
+
+    // ── install() can carry the config, for the paths with no Model ───
+    // `agentty run` and `agentty acp` never construct a Model, so they never
+    // reach init()'s push-down — main() must seed Smart Mode at install time
+    // or headless delegation silently ignores every pin. Headless runs are
+    // all delegation, so this is where role routing matters most.
+    {
+        tools::subagent::install(tools::subagent::Config{
+            .model = "gpt-5.3-codex",
+            .installed = true,
+            .smart = pinned_impl("luna-2"),
+        });
+        tools::subagent::set_candidates(candidates);
+        const auto cfg = tools::subagent::current();
+        CHECK(cfg.smart.enabled,
+              "install() carries Smart Mode for the Model-less entry points");
+        const auto p = smart::resolve_role(smart::ModelRole::Implementation,
+                                           cfg.model, Effort::None,
+                                           cfg.candidates, cfg.smart);
+        CHECK(p.model == "luna-2",
+              "headless / ACP delegation honours the pinned slot");
+    }
 }

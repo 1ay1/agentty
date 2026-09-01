@@ -169,6 +169,14 @@ std::pair<Model, maya::Cmd<Msg>> init() {
     // left workers ranking over an EMPTY list. Seed it with what we have now
     // (the bundled/seeded catalog); ModelsLoaded refreshes it on success.
     tools::subagent::set_candidates(m.d.available_models);
+    // …and the PARENT model, for the same reason. main() installs whatever
+    // settings.json held, but the cross-provider guard above can REJECT that
+    // id (a leftover "qwen2.5-coder:7b" relaunched on Anthropic) and fall back
+    // to the seed default. Without this the snapshot keeps the rejected id, so
+    // a write-role worker — which inherits the parent model — dispatches the
+    // exact id the UI just refused to use. init() is the single source of
+    // truth for the resolved model; make the router agree with it.
+    tools::subagent::set_model(m.d.model_id.value);
     // Review UI: whether the persistent changes strip renders after edits.
     m.d.show_changes_strip = settings.show_changes_strip;
     m.d.show_reasoning     = settings.show_reasoning;
