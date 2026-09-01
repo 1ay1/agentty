@@ -398,6 +398,67 @@ behaviour change (on by default in release — the bug-report tier) · `Info` =
 notable-but-healthy · `Debug` = per-decision detail · `Trace` = per-event/
 per-byte. Never log secrets — redaction is a safety net, not a licence.
 
+## For developers: the always-on capture workflow
+
+If you're hacking on agentty itself, the loop you want is *logs always
+running, so when a bug happens the evidence already exists*. That's the
+default: **a non-release build (the `dev` preset) captures `trace` on every
+channel with no env var at all.** Just run your build:
+
+```bash
+./build/dev/agentty
+```
+
+Everything — wire bytes, `dispatch.turn` fingerprints, tool exec, salvage
+events — appends to `~/.agentty/logs/agentty.log`. The file is opened
+`O_APPEND`, so concurrent sessions interleave line-atomically and a crash
+never loses the tail.
+
+**When you hit a bug**, snapshot the tail before it drowns in later trace
+noise:
+
+```bash
+tail -c 512k ~/.agentty/logs/agentty.log > ~/bug-$(date +%H%M%S).log
+```
+
+Or watch live in a second pane while reproducing — warnings/errors plus the
+per-turn fingerprint, without the token-level firehose:
+
+```bash
+tail -f ~/.agentty/logs/agentty.log | grep --line-buffered 'W \|E \|dispatch.turn'
+```
+
+Worth knowing:
+
+- **There is no rotation.** At trace level a long session grows the file
+  fast (wire chunks are verbatim). Truncating is safe *while agentty is
+  running* — `O_APPEND` means the next write just lands at the new end:
+
+  ```bash
+  : > ~/.agentty/logs/agentty.log   # start-of-day clean slate
+  ```
+
+- **Multiple instances?** Give each its own file so streams don't
+  interleave:
+
+  ```bash
+  AGENTTY_LOG_FILE=/tmp/agentty-$$.log ./build/dev/agentty
+  ```
+
+Suggested muscle memory — two shell helpers are the whole workflow
+(reproduce → `agbug` → keep working):
+
+```bash
+alias agl='tail -f ~/.agentty/logs/agentty.log'
+agbug() { tail -c 512k ~/.agentty/logs/agentty.log \
+          > ~/agentty-bugs/bug-$(date +%m%d-%H%M%S).log; echo saved; }
+```
+
+Each capture is self-contained: the `dispatch.turn` line at the top of the
+affected turn says route/model/effort, the `*.result` / `*.error.body` lines
+say how it ended — the same triage flow as a user's `agentty diagnostics`,
+just at trace granularity.
+
 
 ## Reporting a bug
 
