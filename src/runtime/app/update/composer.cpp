@@ -20,6 +20,7 @@
 #include <string_view>
 
 #include <maya/terminal/tmux.hpp>
+#include <maya/terminal/ansi.hpp>   // env_supports_osc5522 — kitty detection
 #include <maya/core/overload.hpp>
 
 #include "agentty/runtime/app/update/internal.hpp"
@@ -933,11 +934,32 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             // this text), but silently accepting it looks like the image
             // feature is broken, so name what happened and the way out.
             if (wanted_image) {
+                // WHY the image didn't arrive differs, and guessing wrong
+                // sends the user to fix something that isn't broken.
+                //
+                //  • kitty in the path  → it DOES implement OSC 5522, so the
+                //    request reached a terminal that understands it. The
+                //    overwhelmingly common cause is kitty's clipboard_control
+                //    defaulting to WRITE-ONLY (`write-clipboard
+                //    write-primary`): a read is answered `status=EPERM`, which
+                //    maya abandons silently, and the OSC 52 text reply lands
+                //    instead. Name the setting.
+                //  • anything else      → the terminal genuinely has no image
+                //    dialect; the ferry or a file path is the way out.
+                const bool kitty = maya::ansi::env_supports_osc5522();
                 auto toast = set_status_toast(
-                    m, "pasted text \xe2\x80\x94 your terminal can't send images "
-                       "over SSH (needs kitty's OSC 5522); attach by path, or "
-                       "set AGENTTY_CLIPBOARD_CMD",
-                    std::chrono::seconds{7});
+                    m,
+                    kitty
+                        ? std::string{
+                              "pasted text \xe2\x80\x94 kitty needs clipboard READ "
+                              "permission: add `clipboard_control write-clipboard "
+                              "write-primary read-clipboard read-primary` to "
+                              "kitty.conf, then restart it"}
+                        : std::string{
+                              "pasted text \xe2\x80\x94 your terminal can't send images "
+                              "over SSH (needs kitty's OSC 5522); attach by path, "
+                              "or set AGENTTY_CLIPBOARD_CMD"},
+                    std::chrono::seconds{9});
                 return {std::move(m), std::move(toast)};
             }
             return done(std::move(m));
