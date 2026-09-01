@@ -828,19 +828,16 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m,
             //
             //     rows_below_tail + tail_rows  >  viewport_rows
             //
-            // Both terms are boundable at build time: est_card_rows is the
-            // same estimate hidden_fits already uses, and the unresolved tail
-            // is bounded below. Add a chrome margin and require STRICT
-            // headroom. When that holds, showing the card cannot push a
-            // ghosted row off the top *this frame*, and the reveal cursor is
-            // simultaneously ramped to the edge (request_finalize below), so
-            // the tail resolves before any later growth can consume the
-            // margin. That is the no-corruption guarantee: it is a bound on
-            // geometry, not a bet on timing.
-            //
-            // Only when the proof FAILS (a tall card, a deep backlog, or a
-            // short terminal) do we fall back to holding the card until the
-            // glide lands — the old always-defer behaviour, now the rare path.
+            // The KEY refinement over a binary "does it all fit" gate: the
+            // invariant is not "the tail is fully revealed" but "nothing
+            // UNRESOLVED crosses the top". Those differ. Rows leaving the
+            // viewport are only dangerous while they are still ghosted, and
+            // their animation is about to become invisible anyway. So when
+            // the tail does NOT fit we do not hide the card and we do not
+            // paste the whole tail — we resolve EXACTLY the overflowing
+            // prefix (advance_reveal_floor) and let every still-visible row
+            // keep its typewriter. The card therefore appears immediately in
+            // ALL cases; only the part you could not have watched is skipped.
             const int term_rows_now = ::maya::available_height();
             const int cols_now      = std::max(1, ::maya::available_width());
 
@@ -868,18 +865,21 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m,
             // greater than the real one is a genuine upper bound.
             constexpr int kBlockInset = 2;   // padding/indent safety margin
             const int wrap_w = std::max(1, cols_now - kBlockInset);
+            const std::string_view tail_sv =
+                std::string_view{source}.substr(source.size() - reveal_backlog);
+            auto rows_of_line = [&](std::size_t len) {
+                return std::max<int>(
+                    1, static_cast<int>((len + static_cast<std::size_t>(wrap_w) - 1)
+                                        / static_cast<std::size_t>(wrap_w)));
+            };
             int est_tail_rows = 0;
             {
-                const std::string_view tail =
-                    std::string_view{source}.substr(source.size() - reveal_backlog);
                 std::size_t line_start = 0;
-                while (line_start <= tail.size()) {
-                    const std::size_t nl = tail.find('\n', line_start);
+                while (line_start <= tail_sv.size()) {
+                    const std::size_t nl = tail_sv.find('\n', line_start);
                     const std::size_t len =
-                        (nl == std::string_view::npos ? tail.size() : nl) - line_start;
-                    est_tail_rows += std::max<int>(
-                        1, static_cast<int>((len + static_cast<std::size_t>(wrap_w) - 1)
-                                            / static_cast<std::size_t>(wrap_w)));
+                        (nl == std::string_view::npos ? tail_sv.size() : nl) - line_start;
+                    est_tail_rows += rows_of_line(len);
                     if (nl == std::string_view::npos) break;
                     line_start = nl + 1;
                 }
@@ -892,16 +892,29 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m,
             // rows beyond its own text lines (code-fence borders, table
             // separators, blockquote padding).
             constexpr int kBlockChromeSlack = 4;
-            const bool reveal_has_headroom =
-                term_rows_now > 0
-                && est_hidden_rows + est_tail_rows + kChromeRows + kBlockChromeSlack
-                       < term_rows_now;
+            // How many rows must leave the viewport once the card is shown.
+            // >0 means that many LEADING tail rows would scroll into
+            // immutable scrollback while still ghosted.
+            const int overflow_rows =
+                (term_rows_now <= 0)
+                    ? 0
+                    : (est_hidden_rows + est_tail_rows + kChromeRows
+                       + kBlockChromeSlack) - term_rows_now + 1;
 
-            // Show the card IMMEDIATELY when the proof holds: the prose keeps
-            // revealing above it (no paste, no hold). Defer only otherwise.
+            const bool instant_card_ok =
+                backlog_worth_smoothing
+                && is_tail_bottom
+                && all_pending
+                && !m.d.pending_permission
+                && term_rows_now > 0;
+
+            // Defer ONLY when the geometry is unusable (no viewport dims) or
+            // a precondition unrelated to height fails. Height alone never
+            // forces a hold any more — overflow is handled by resolving the
+            // overflowing prefix instead.
             const bool can_defer =
                 backlog_worth_smoothing
-                && !reveal_has_headroom
+                && !instant_card_ok
                 && is_tail_bottom
                 && all_pending
                 && hidden_fits
@@ -915,23 +928,52 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m,
                 // emit StreamTextBlockClosed (the drain above may not
                 // have fired) and re-arms idempotently when it did.
                 cache.streaming->request_finalize(/*ramp_ms=*/160);
-            } else if (backlog_worth_smoothing && reveal_has_headroom
-                       && is_tail_bottom && all_pending
-                       && !m.d.pending_permission) {
-                // ── INSTANT CARD (the headroom-proof path) ──
+            } else if (instant_card_ok) {
+                // ── INSTANT CARD + PARTIAL RESOLVE ──
                 //
-                // There is provably room for the whole unresolved tail AND
-                // the card without pushing a ghosted row past the viewport
-                // top, so the card appears THIS frame while the prose keeps
-                // revealing above it. No hold, no paste — the tool result is
-                // never gated behind a prose animation.
-                //
-                // Do NOT snap and do NOT finish() here: the reveal stays live
-                // and keeps gliding under the visible card. request_finalize
-                // arms the adaptive ramp so the tail still lands promptly
-                // (and, on transports without StreamTextBlockClosed, at all)
-                // instead of crawling at the readable floor now that there is
-                // no wire jitter left to smooth.
+                // The card is shown THIS frame unconditionally. If the tail
+                // fits, nothing else is needed and the whole reveal keeps
+                // animating. If it does NOT fit, resolve just the leading
+                // `overflow_rows` rows so no ghosted cell can be stranded in
+                // scrollback, and let the rest keep typing on screen.
+                if (overflow_rows > 0) {
+                    // Rows → codepoint prefix. Walk whole LINES and stop once
+                    // the accumulated row cost covers the overflow. Rounding
+                    // is deliberately UP (we consume the entire line that
+                    // straddles the boundary): resolving MORE than strictly
+                    // required is always safe, resolving less is not.
+                    std::size_t resolve_bytes = 0;
+                    int rows_acc = 0;
+                    std::size_t line_start = 0;
+                    while (line_start <= tail_sv.size() && rows_acc < overflow_rows) {
+                        const std::size_t nl = tail_sv.find('\n', line_start);
+                        const std::size_t len =
+                            (nl == std::string_view::npos ? tail_sv.size() : nl) - line_start;
+                        rows_acc += rows_of_line(len);
+                        if (nl == std::string_view::npos) {
+                            resolve_bytes = tail_sv.size();
+                            break;
+                        }
+                        resolve_bytes = nl + 1;
+                        line_start    = nl + 1;
+                    }
+                    // advance_reveal_floor takes an ABSOLUTE codepoint
+                    // position in the whole source, so count the revealed
+                    // prefix plus the slice we just decided to resolve.
+                    const std::size_t abs_bytes =
+                        (source.size() - reveal_backlog) + resolve_bytes;
+                    std::size_t cp = 0;
+                    for (std::size_t i = 0; i < abs_bytes && i < source.size(); ++i)
+                        if ((static_cast<unsigned char>(source[i]) & 0xC0) != 0x80) ++cp;
+                    cache.streaming->advance_reveal_floor(cp);
+                }
+
+                // Do NOT snap and do NOT finish(): the reveal stays live and
+                // keeps gliding under the visible card. request_finalize arms
+                // the adaptive ramp so the tail still lands promptly (and, on
+                // transports without StreamTextBlockClosed, at all) instead of
+                // crawling at the readable floor now that there is no wire
+                // jitter left to smooth.
                 cache.defer_tool_panel    = false;
                 cache.defer_exit_finished = false;
                 cache.card_defer_since_ms = 0;

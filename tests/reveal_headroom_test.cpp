@@ -126,6 +126,106 @@ void check_shape(const Shape& sh, int cols) {
 
 }  // namespace
 
+namespace {
+
+// ── advance_reveal_floor semantics ──────────────────────────────────────
+// The primitive behind the INSTANT-CARD path: resolve a prefix, keep the
+// tail animating. Guards the three properties turn.cpp relies on.
+void check_partial_resolve() {
+    const std::string body =
+        "Line one of the reply.\nLine two of the reply.\n"
+        "Line three of the reply.\nLine four of the reply.\n"
+        "Line five of the reply.\nLine six of the reply.\n";
+
+    StylePool pool;
+    std::vector<layout::LayoutNode> nodes;
+    RenderContext ctx{80, 4000, render_generation(), true};
+    RenderContextGuard guard(ctx);
+
+    StreamingMarkdown md;
+    md.set_reveal_fx(true);
+    md.set_live(true);
+    md.set_content(body);
+    // Pace slowly so the cursor is demonstrably mid-tail, not at the edge.
+    md.set_reveal_pacing(/*floor_cps=*/40.0, /*drain_secs=*/0.8);
+
+    auto paint = [&] {
+        Canvas c(80, 4000, &pool);
+        c.clear();
+        render_tree(md.build(), c, pool, theme::dark, nodes, true);
+    };
+    paint();
+    maya::testing::advance_anim_clock_ms(16);
+    paint();
+
+    const double before = md.debug_reveal_cp();
+
+    // 1. Advances to the requested floor.
+    const std::size_t floor_cp = 60;
+    md.advance_reveal_floor(floor_cp);
+    paint();
+    const double after = md.debug_reveal_cp();
+    if (after < static_cast<double>(floor_cp)) {
+        std::fprintf(stderr,
+            "FAIL: advance_reveal_floor(%zu) left cursor at %.1f (was %.1f)\n",
+            floor_cp, after, before);
+        ++failures;
+    } else {
+        std::fprintf(stderr, "ok  : floor advances cursor %.1f -> %.1f\n",
+                     before, after);
+    }
+
+    // 2. PARTIAL — the tail past the floor must still be clipped, i.e. the
+    //    widget did NOT paste the whole body. This is the property that
+    //    distinguishes it from snap_reveal_to_edge.
+    const std::size_t total_cp = md.debug_source_size();
+    if (md.debug_reveal_cp() >= static_cast<double>(total_cp)) {
+        std::fprintf(stderr,
+            "FAIL: cursor reached the edge (%.1f of %zu) — resolve was TOTAL, "
+            "not partial; the tail would stop animating\n",
+            md.debug_reveal_cp(), total_cp);
+        ++failures;
+    } else {
+        std::fprintf(stderr, "ok  : partial — cursor %.1f < total %zu\n",
+                     md.debug_reveal_cp(), total_cp);
+    }
+
+    // 3. MONOTONE — a lower floor must not rewind (that would re-ghost a row
+    //    which may already have scrolled into immutable scrollback).
+    const double pinned = md.debug_reveal_cp();
+    md.advance_reveal_floor(1);
+    paint();
+    if (md.debug_reveal_cp() < pinned) {
+        std::fprintf(stderr,
+            "FAIL: a lower floor REWOUND the cursor %.1f -> %.1f\n",
+            pinned, md.debug_reveal_cp());
+        ++failures;
+    } else {
+        std::fprintf(stderr, "ok  : monotone — lower floor did not rewind\n");
+    }
+
+    // 4. STILL ANIMATING — the reveal must keep advancing on later frames.
+    //    If advance_reveal_floor stamped the µs clock it would zero every
+    //    dt and freeze here, which is the exact stall this path removes.
+    const double t0 = md.debug_reveal_cp();
+    for (int i = 0; i < 8; ++i) {
+        maya::testing::advance_anim_clock_ms(16);
+        paint();
+    }
+    const double t1 = md.debug_reveal_cp();
+    if (!(t1 > t0)) {
+        std::fprintf(stderr,
+            "FAIL: reveal FROZE after advance_reveal_floor (%.1f -> %.1f over "
+            "8 frames)\n", t0, t1);
+        ++failures;
+    } else {
+        std::fprintf(stderr,
+            "ok  : still animating — cursor %.1f -> %.1f over 8 frames\n", t0, t1);
+    }
+}
+
+}  // namespace
+
 int main() {
     // Widths spanning the oracle's shapes, including a narrow one where
     // wrapping dominates and a wide one where line COUNT dominates.
@@ -133,6 +233,9 @@ int main() {
     for (const auto& sh : corpus())
         for (int w : widths)
             check_shape(sh, w);
+
+    std::fprintf(stderr, "\n-- advance_reveal_floor --\n");
+    check_partial_resolve();
 
     if (failures) {
         std::fprintf(stderr,
