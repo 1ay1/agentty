@@ -104,7 +104,7 @@ The `#name` is a local tag only — it never reaches the wire — but it shows o
 Custom hosts you add are **saved** — they reappear in the `^P` picker every session (`Del` on a row removes one, two-press). A local host committed without a key is saved too, so you never re-type it.
 
 :::tip Debugging a custom host
-Set `AGENTTY_LOG=wire=trace` (or the full-fidelity `AGENTTY_DEBUG_API=1`) to see the exact request path, status, and response your server returned — see **[Logging & diagnostics](/docs/logging)**. The most common issues are a missing `/v1` (→ 404) and a model id that doesn't match what `/v1/models` reports.
+Set `AGENTTY_LOG=wire=trace`  to see the exact request path, status, and response your server returned — see **[Logging & diagnostics](/docs/logging)**. The most common issues are a missing `/v1` (→ 404) and a model id that doesn't match what `/v1/models` reports.
 :::
 ## Sign in with GitHub Copilot
 
@@ -176,4 +176,4 @@ If prompts fail immediately (rather than after a long think), agentty now tells 
 - **A retry ladder that can't make progress** — after 6 attempts with no model output, agentty stops with *“giving up after 6 failed attempts with no model output — check the server/model”* rather than hammering a broken endpoint.
 - **A stale saved model** — if the model id recalled for a local host isn't in its live `/v1/models` list, agentty refuses cleanly (*“model X isn't served by this host — pick one (^/)”*) instead of 400-ing every prompt.
 
-When in doubt, `AGENTTY_LOG=wire=trace agentty` (or `AGENTTY_DEBUG_API=1`) shows the exact request and response — see **[Logging & diagnostics](/docs/logging)**.
+When in doubt, `AGENTTY_LOG=wire=trace agentty` shows the exact request and response — see **[Logging & diagnostics](/docs/logging)**.

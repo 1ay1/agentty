@@ -1,4 +1,6 @@
 #include "agentty/io/http.hpp"
+
+#include "agentty/util/logx.hpp"
 #include "agentty/io/fsm.hpp"
 #include "agentty/io/tls.hpp"
 #include "agentty/util/env.hpp"
@@ -389,6 +391,13 @@ public:
     [[nodiscard]] bool was_pooled() const noexcept { return was_pooled_; }
     void set_pooled(bool v) noexcept { was_pooled_ = v; }
 
+    // How long this connection sat idle in the pool before this acquire, in
+    // ms (0 for a fresh dial). Diagnostic only: a mid-stream hangup whose
+    // idle age clusters at a fixed value is a proxy/edge idle timeout, which
+    // is fixable by evicting sooner; random ages are ordinary network loss.
+    [[nodiscard]] long long idle_ms() const noexcept { return idle_ms_; }
+    void set_idle_ms(long long v) noexcept { idle_ms_ = v; }
+
     // Liveness for pool reuse. Two stages:
     //   (1) nghttp2 thinks the session has work to do or is at least
     //       readable. If neither, the session has wound down.
@@ -473,6 +482,7 @@ private:
     // Reuse marker — see was_pooled(). Defaults false (fresh dial);
     // Pool::acquire flips it true before handing the connection out.
     bool             was_pooled_            = false;
+    long long        idle_ms_               = 0;
 };
 
 // -----------------------------------------------------------------------
@@ -2519,10 +2529,35 @@ h1_tls_stream(const Endpoint& ep, const Request& req, StreamHandler& handler,
 // connections 5× longer when SOCKS is active sidesteps that — the
 // kMaxLifetime ceiling (10 min) still bounds tenure for proxy-drain
 // safety so we don't hang on to a connection forever.
+// AGENTTY_POOL_IDLE_TTL (seconds) overrides both defaults.
+//
+// The default 90 s is longer than the idle timeout many corporate proxies,
+// VPNs and CDN edges enforce (30-60 s is common). When the network kills the
+// connection first, agentty discovers the corpse only when it writes — and if
+// that write already produced a 2xx, the stream is semantically committed, so
+// it CANNOT be replayed without risking a duplicate assistant turn. The user
+// sees `h2 socket hangup (server accepted request; not replayed
+// automatically)` mid-answer.
+//
+// Setting this BELOW the network's timeout converts that visible failure into
+// an invisible fresh dial: the pool evicts the entry itself instead of finding
+// it dead. `http.stream_hangup` logs the idle age of each hangup, so the right
+// value is measurable rather than guessed — if hangups cluster near 60000 ms,
+// set this to 45.
+//
+// 0 disables pooling entirely (dial fresh every request) — the safest setting
+// on a hostile network, at the cost of a TLS handshake per turn.
 inline auto idle_ttl() noexcept -> std::chrono::seconds {
-    static const std::chrono::seconds v =
-        agentty_socks_proxy().active() ? std::chrono::seconds(450)
-                                    : std::chrono::seconds(90);
+    static const std::chrono::seconds v = [] {
+        if (const char* e = std::getenv("AGENTTY_POOL_IDLE_TTL"); e && *e) {
+            char* end = nullptr;
+            const long n = std::strtol(e, &end, 10);
+            if (end != e && n >= 0 && n <= 3600)
+                return std::chrono::seconds(n);
+        }
+        return agentty_socks_proxy().active() ? std::chrono::seconds(450)
+                                              : std::chrono::seconds(90);
+    }();
     return v;
 }
 constexpr auto kMaxLifetime = std::chrono::minutes(10);
@@ -2592,6 +2627,9 @@ public:
             if (!p.conn->is_alive())                continue;
             if (!socket_is_alive(p.conn->fd()))     continue;
             p.conn->set_pooled(true);   // reused socket — see was_pooled()
+            p.conn->set_idle_ms(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    now - p.released_at).count());
             return std::move(p.conn);
         }
         return nullptr;
@@ -2752,8 +2790,13 @@ Client::send(const Request& req, Timeouts tos, CancelTokenPtr cancel) {
     HttpError last_err = HttpError::unknown("send: no attempts made");
 
     // Cleartext local server (Ollama / llama.cpp) — no TLS, no h2, no pool.
-    if (req.plaintext)
-        return plain_unary_send(ep, req, tos, cancel.get());
+    if (req.plaintext) {
+        auto r = plain_unary_send(ep, req, tos, cancel.get());
+        if (!r)
+            AGT_LOG(Net, Warn, "http.local_failed", "host={}:{} err={}",
+                    ep.host, ep.port, r.error().render());
+        return r;
+    }
 
     for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
         if (is_cancelled(cancel)) return std::unexpected(HttpError::cancelled());
@@ -2767,6 +2810,14 @@ Client::send(const Request& req, Timeouts tos, CancelTokenPtr cancel) {
             : dial_new(ep, tos, cancel);
         if (!conn_or) {
             last_err = std::move(conn_or).error();
+            // Connect failures are the single most common "agentty is broken"
+            // report (wrong port, dead local server, proxy, DNS, TLS). Each
+            // attempt is logged with the endpoint it tried, so the log names
+            // the host instead of the user guessing at it.
+            AGT_LOG(Net, Warn, "http.connect_failed",
+                    "host={}:{} attempt={}/{} err={}",
+                    ep.host, ep.port, attempt + 1, kMaxAttempts,
+                    last_err.render());
             // An ALPN downgrade won't fix itself on retry — bail to the h1
             // fallback below immediately rather than burning the retry budget.
             if (is_alpn_h2_failure(last_err)) break;
@@ -2837,6 +2888,13 @@ Client::stream(const Request& req, StreamHandler handler, Timeouts tos,
             plain.error().detail +=
                 " (server accepted request; not replayed automatically)";
         }
+        // Local endpoints take this separate no-retry path, so the retry
+        // loop's logging never sees them — yet "is my Ollama/llama.cpp
+        // actually running on that port?" is the most common local failure
+        // of all. Log the endpoint that was tried.
+        if (!plain)
+            AGT_LOG(Net, Warn, "http.local_failed", "host={}:{} err={}",
+                    ep.host, ep.port, plain.error().render());
         return plain;
     }
 
@@ -2905,6 +2963,17 @@ Client::stream(const Request& req, StreamHandler handler, Timeouts tos,
         if (accepted_non_idempotent) {
             last_err.non_replayable = true;
             last_err.detail += " (server accepted request; not replayed automatically)";
+            // The user-visible "socket hangup … not replayed" banner. Record
+            // HOW LONG the connection had been idle before it died and whether
+            // it came from the pool: a hangup that clusters at a fixed idle
+            // age is a proxy/edge idle timeout (fixable by lowering the pool
+            // TTL below it), while random ages are genuine network loss. That
+            // distinction is invisible from the banner alone.
+            AGT_LOG(Net, Warn, "http.stream_hangup",
+                    "host={}:{} reused={} idle_ms={} status={} err={}",
+                    ep.host, ep.port, was_reused ? 1 : 0,
+                    was_reused ? conn->idle_ms() : 0,
+                    sctx.status, last_err.render());
         }
 
         // Once DATA arrived, or a 2xx response proved a non-idempotent POST

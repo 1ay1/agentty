@@ -39,41 +39,40 @@ struct Selection {
     // hands it to stream_external_acp() to spawn/drive the right subprocess.
     std::string      acp_agent_id;
 
-    // Data-driven "this OpenAI-Kind endpoint is an OAuth-native backend riding
-    // a dedicated long-lived transport" — read from the provider registry
-    // (ProviderPreset::oauth_native) keyed on the endpoint label, NOT a literal
-    // label compare. A second such provider becomes true by setting one flag on
-    // its row; no predicate here changes.
+    // The provider row this selection names, resolved ONCE by parse_selection.
+    //
+    // Identity and endpoint are ORTHOGONAL, and collapsing them is what broke
+    // the custom-host flow. Identity used to be re-derived on every query by
+    // comparing `openai_endpoint.label` against a literal — but pointing a
+    // provider at a custom base URL OVERWRITES that label, so the identity was
+    // destroyed and a Copilot-backed custom host silently degraded to the
+    // generic OpenAI path (empty model list, no error).
+    //
+    // Carrying the row makes identity a value, not a derivation. Points into
+    // the constexpr kProviders table (static storage, never dangles); null
+    // only for a genuinely unknown custom host, which correctly has no
+    // registry identity.
+    const ProviderPreset* row = nullptr;
+
+    // This selection's provider id ("copilot", "kimi", …), or "" for an
+    // unrecognised custom host. THE identity accessor — prefer it to any
+    // is_X() predicate at new call sites.
+    [[nodiscard]] std::string_view provider_id() const noexcept {
+        return row ? row->id : std::string_view{};
+    }
+
+    // Rides a dedicated long-lived transport with its own OAuth store
+    // (ChatGPT/Codex, Copilot, Kimi) rather than the generic key-authed
+    // OpenAI path. A new such provider becomes true by setting one row flag.
     [[nodiscard]] bool is_oauth_native() const noexcept {
-        if (kind != Kind::OpenAI) return false;
-        const ProviderPreset* p = preset_for(openai_endpoint.label);
-        return p && p->oauth_native;
+        return row && row->oauth_native;
     }
 
-    // The native ChatGPT/Codex OAuth backend. This ONE predicate replaces the
-    // `kind == Kind::OpenAI && openai_endpoint.label == "chatgpt"` idiom that
-    // used to be re-derived at ~6 call sites (dispatch, prewarm, model list,
-    // effort ladder, login gate, picker). It now reads the registry's
-    // oauth_native flag (see is_oauth_native) rather than comparing the label,
-    // so "chatgpt is special" is a capability on one registry row — today the
-    // only oauth_native OpenAI provider, so the two predicates coincide.
-    [[nodiscard]] bool is_chatgpt() const noexcept {
-        return is_oauth_native() && openai_endpoint.label == "chatgpt";
-    }
-
-    // The native GitHub Copilot OAuth backend — the sibling of is_chatgpt().
-    // Both are oauth_native OpenAI-family rows; the label disambiguates which
-    // dedicated long-lived transport (and login flow) to route to.
-    [[nodiscard]] bool is_copilot() const noexcept {
-        return is_oauth_native() && openai_endpoint.label == "copilot";
-    }
-
-    // The native Kimi Code OAuth backend — sibling of is_chatgpt/is_copilot.
-    // Also an oauth_native OpenAI-family row; the label routes to Kimi's
-    // dedicated long-lived transport + device-flow login.
-    [[nodiscard]] bool is_kimi() const noexcept {
-        return is_oauth_native() && openai_endpoint.label == "kimi";
-    }
+    // Identity by registry id — the row's immutable primary key. NOT the
+    // display label, which the custom-host flow overwrites.
+    [[nodiscard]] bool is_copilot() const noexcept { return provider_id() == "copilot"; }
+    [[nodiscard]] bool is_kimi()    const noexcept { return provider_id() == "kimi"; }
+    [[nodiscard]] bool is_chatgpt() const noexcept { return provider_id() == "chatgpt"; }
 };
 
 // Parse a provider spec into a Selection. Accepts:

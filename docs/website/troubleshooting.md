@@ -8,6 +8,39 @@ slug: troubleshooting
 
 The usual suspects, and how to get unstuck.
 
+## `h2 socket hangup (server accepted request; not replayed automatically)`
+
+The connection died **mid-answer**, after the provider had already started
+streaming. agentty deliberately does not retry at that point: the turn is
+semantically committed, and replaying it could duplicate the assistant message
+or re-run tool calls.
+
+This is almost always the network, not agentty and not the model. Corporate
+proxies, VPNs and CDN edges routinely kill idle HTTP/2 connections at 30-60
+seconds; agentty's connection pool holds them for 90, so it can hand you a
+socket the network already closed.
+
+Find out which:
+
+```bash
+grep http.stream_hangup ~/.agentty/logs/agentty.log
+```
+
+```
+W net  http.stream_hangup: host=api.anthropic.com:443 reused=1 idle_ms=61402 status=200 …
+```
+
+- **`idle_ms` clusters near a round number** (30000, 60000) and `reused=1` —
+  a network idle timeout. Set `AGENTTY_POOL_IDLE_TTL` below it:
+
+  ```bash
+  AGENTTY_POOL_IDLE_TTL=45 agentty      # evict before the network does
+  AGENTTY_POOL_IDLE_TTL=0  agentty      # no pooling at all (safest, slower)
+  ```
+
+- **`idle_ms` is small or random** — ordinary packet loss or a flaky link;
+  the pool is not the cause.
+
 ## agentty seems stuck after Esc
 
 Fixed in current builds — a cancelled worker thread could null out a new turn's cancel token. Update to the latest release. If you still see it, restart the process and file a bug with your `git rev-parse HEAD` (or release version).
@@ -38,7 +71,7 @@ agentty now diagnoses this instead of looping. The usual causes:
 
 - **The spec is missing `/v1`.** Most local servers only serve under `/v1`. A bare `localhost:8080` gets the `/v1` prefix automatically, but a partial path like `localhost:8080/api` is honoured verbatim and will 404. Use the picker (`^P` → Custom host) so the derived path shows in the connect toast, or check with `AGENTTY_LOG=wire=trace`.
 - **The model id doesn't match the server.** `llama-server` serves exactly what its `/v1/models` reports (often the GGUF filename). If a recalled id isn't listed, agentty refuses with *“model X isn't served by this host — pick one (^/)”* — open `^/` and pick a listed model.
-- **A chat-template rejection.** Some models (gemma, gpt-oss) reject agentty's system prompt/tools with a streamed error. agentty surfaces the server's actual message; run `AGENTTY_DEBUG_API=1` to see the exact request and rejection.
+- **A chat-template rejection.** Some models (gemma, gpt-oss) reject agentty's system prompt/tools with a streamed error. agentty surfaces the server's actual message; run `AGENTTY_LOG=wire=trace` to see the exact request and rejection.
 - **Slow, not stuck.** A big model can process the prompt silently for minutes; the phase chip reads *“processing…”* and the timeout is 10 minutes for local endpoints. That's expected — `Esc` cancels if you don't want to wait.
 
 See [Providers › Custom hosts](/docs/providers#custom-hosts) for the full model.
@@ -50,7 +83,7 @@ AGENTTY_LOG=debug AGENTTY_LOG_FILE=/tmp/agentty.log agentty
 # reproduce, then attach /tmp/agentty.log
 ```
 
-For a provider/wire problem add `AGENTTY_DEBUG_API=1` to capture the raw request/response bytes. If agentty crashed, the stderr output already includes a backtrace and the last ~256 events (the flight recorder). Full details: **[Logging & diagnostics](/docs/logging)**.
+For a provider/wire problem add `AGENTTY_LOG=wire=trace` to capture the raw request/response bytes. If agentty crashed, the stderr output already includes a backtrace and the last ~256 events (the flight recorder). Full details: **[Logging & diagnostics](/docs/logging)**.
 
 ## Ctrl+V pastes text instead of my image
 

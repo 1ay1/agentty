@@ -32,6 +32,12 @@ public:
     static provider::openai::Endpoint make_endpoint();
 };
 
+// Every backend must satisfy the streaming contract. Kimi was the one provider
+// missing this line — it happened to conform, but nothing PROVED it, so a
+// signature drift here would have surfaced as a link error in main.cpp's
+// dispatch rather than a crisp "KimiProvider does not satisfy Provider".
+static_assert(provider::Provider<KimiProvider>);
+
 // The account's live model catalog from Kimi's /models (falls back to a small
 // bundled list when offline / not signed in).
 [[nodiscard]] std::vector<ModelInfo> list_models();

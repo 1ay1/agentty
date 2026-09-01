@@ -17,7 +17,7 @@
 #include <simdjson.h>
 
 #include "agentty/domain/catalog.hpp"        // StopReason
-#include "agentty/provider/debug.hpp"        // shared AGENTTY_DEBUG_API logger
+#include "agentty/provider/debug.hpp"        // wire dump → logx `wire` channel
 #include "agentty/provider/provider.hpp"     // EventSink
 #include "agentty/provider/wire.hpp"         // wire::SseFramer
 #include "agentty/runtime/msg.hpp"
@@ -25,16 +25,12 @@
 
 namespace agentty::provider::anthropic {
 
-// Env-var-gated request/SSE dump. Set AGENTTY_DEBUG_API=1 to write to
-// $AGENTTY_DEBUG_FILE (or ./agentty-api.log). Appends, never truncates.
 // Shared by the parser (per-event trace) and run_stream_sync (request +
 // status trace) — inline so both TUs see one definition.
-// Env-var-gated request/SSE dump. Set AGENTTY_DEBUG_API=1 to write to
-// $AGENTTY_DEBUG_FILE (or ./agentty-api.log). Appends, never truncates.
-// Now delegates to the SHARED provider/debug.hpp logger (one file, every
-// transport); these aliases keep the existing anthropic:: call sites.
+// Wire dumping goes through the ONE structured log (logx `wire` channel,
+// see provider/debug.hpp): captured by default in non-release builds, and via
+// AGENTTY_LOG=wire=trace in a release build. Call sites use AGT_LOG directly.
 using provider::debug_log;
-using provider::dbg;
 
 // Per-stream parse state. One instance lives for the duration of a single
 // /v1/messages stream; every SSE frame mutates it via dispatch_event (in

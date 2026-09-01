@@ -88,7 +88,7 @@ session without a restart.
 
 ## Observability
 
-`AGENTTY_ACP_TRACE=1 agentty acp` dumps every JSON-RPC frame to stderr
+`AGENTTY_LOG=acp=trace agentty acp` dumps every JSON-RPC frame to the structured log
 (stderr is free-form under the ACP stdio framing) — the ground-truth wire log
 while building or debugging a client.
 

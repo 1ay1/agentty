@@ -1302,7 +1302,25 @@ public:
                         continue;
                     }
                     ran_a_tool = true;
+                    const auto t_start = std::chrono::steady_clock::now();
                     auto res = tool::DynamicDispatch::execute(tc.name.value, tc.args);
+                    // Same tool.exec record the main loop emits, so a headless
+                    // `agentty run` and a subagent turn are as diagnosable as
+                    // an interactive one. A failing tool is Warn (and therefore
+                    // in the crash flight recorder) with the args that caused
+                    // it — the evidence that was missing while Copilot's tool
+                    // calls were arriving empty.
+                    AGT_LOGL(Tool, res ? ::agentty::logx::Level::Debug
+                                       : ::agentty::logx::Level::Warn,
+                             "tool.exec", "name={} ms={} ok={} err={} args={}",
+                             tc.name.value,
+                             std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 std::chrono::steady_clock::now() - t_start).count(),
+                             res ? 1 : 0,
+                             res ? std::string{"-"}
+                                 : std::string{tools::to_string(res.error().kind)}
+                                       + ": " + res.error().detail,
+                             tc.args.dump());
                     // AGENTTY_TRACE_TOOLS=1 emits one machine-parseable line per
                     // executed tool to STDERR (run/acp/mcp-serve keep stderr as
                     // their diagnostic channel, so the stdout report stays

@@ -1,0 +1,851 @@
+% =============================================================================
+%  WORSE IS BETTER  —  an editorial essay
+%  Build:  lualatex worse-is-better.tex   (run twice for the TOC)
+% =============================================================================
+\documentclass[11pt]{article}
+
+% ---- engine / fonts ---------------------------------------------------------
+\usepackage{fontspec}
+\usepackage[math-style=ISO]{unicode-math}
+
+\setmainfont{EB Garamond}[
+  Numbers = OldStyle, Ligatures = {TeX, Common},
+]
+\setsansfont{Fira Sans}[
+  UprightFont = *, BoldFont = * SemiBold, Ligatures = TeX,
+]
+\newfontfamily\firalight{Fira Sans Light}
+\newfontfamily\firabook{Fira Sans Book}
+\setmonofont{Menlo}[Scale=0.86]
+\setmathfont{Libertinus Math}
+
+% ---- geometry ---------------------------------------------------------------
+\usepackage[
+  a4paper,
+  inner=2.2cm, outer=4.9cm,
+  top=2.4cm, bottom=2.5cm,
+  marginparwidth=3.4cm, marginparsep=0.6cm, headsep=1.0cm,
+]{geometry}
+
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage[table]{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{calc,arrows.meta,decorations.pathmorphing,shadings,positioning}
+\usepackage{enumitem}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{longtable}
+\usepackage{lettrine}
+\usepackage{fontawesome5}
+\usepackage{ragged2e}
+\usepackage[most,skins,breakable]{tcolorbox}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage{marginnote}
+\usepackage[hidelinks]{hyperref}
+
+% ---- palette (muted editorial) ---------------------------------------------
+\definecolor{ink}{HTML}{2B2A28}       % warm near-black
+\definecolor{paper}{HTML}{F7F3EA}     % cream
+\definecolor{paperdeep}{HTML}{EFE9DA} % deeper cream (panels)
+\definecolor{terra}{HTML}{A6432E}     % terracotta accent (New Jersey)
+\definecolor{terrasoft}{HTML}{F0E0D8}
+\definecolor{slate}{HTML}{3C5A6E}     % slate counter-accent (MIT)
+\definecolor{slatesoft}{HTML}{E1E7EB}
+\definecolor{brass}{HTML}{9C7A32}     % brass hairline
+\definecolor{sage}{HTML}{4A6152}      % agentty green
+\definecolor{sagesoft}{HTML}{E4EBE4}
+\definecolor{faint}{HTML}{8B8578}     % muted caption grey
+\definecolor{hair}{HTML}{CFC7B4}
+
+\color{ink}
+\pagecolor{paper}
+\hypersetup{
+  colorlinks=true, linkcolor=terra!85!black, urlcolor=slate, citecolor=terra,
+  pdftitle={Worse is Better}, pdfauthor={after Richard P. Gabriel},
+}
+
+% ---- section styling: small-caps, numbered, hairline ------------------------
+\titleformat{\section}
+  {\normalfont}
+  {}{0pt}
+  {\bfseries\sffamily\large\color{terra}\thesection\enspace}
+  [\vspace{-0.35em}{\color{hair}\titlerule[0.7pt]}]
+\titleformat{\subsection}
+  {\sffamily\bfseries\normalsize\color{ink!85}}
+  {\thesubsection}{0.55em}{}
+\titlespacing*{\section}{0pt}{1.7\baselineskip}{0.7\baselineskip}
+\titlespacing*{\subsection}{0pt}{1.0\baselineskip}{0.3\baselineskip}
+
+% wrap section title in sans small-caps look
+\let\oldsection\section
+\renewcommand{\section}[1]{\oldsection{\sffamily\bfseries\large #1}}
+
+% ---- running heads (masthead style) -----------------------------------------
+\pagestyle{fancy}
+\fancyhf{}
+\renewcommand{\headrulewidth}{0pt}
+\fancyhead[L]{\firalight\footnotesize\color{faint}Worse is Better}
+\fancyhead[R]{\firalight\footnotesize\color{faint}\thepage}
+\fancyfoot[C]{\color{hair}\rule{2cm}{0.4pt}}
+
+% ---- margin note ------------------------------------------------------------
+\renewcommand*{\marginfont}{\firabook\footnotesize\color{faint}}
+\newcommand{\mnote}[1]{\marginnote{\RaggedRight #1}}
+\newcommand{\mnum}[2]{\marginnote{\RaggedRight
+  {\sffamily\bfseries\color{terra}#1}\\[1pt]#2}}
+
+% ---- drop cap ---------------------------------------------------------------
+\newcommand{\dropcap}[2]{%
+  \lettrine[lines=3, lhang=0.10, loversize=0.10, findent=3pt, nindent=5pt,
+    slope=0pt, findent=2pt]{\color{terra}\sffamily\bfseries #1}{#2}}
+
+% ---- pull quote (big, hanging, brass rule) ----------------------------------
+\newcommand{\pull}[2]{%
+  \par\vspace{0.5\baselineskip}
+  \noindent\hspace*{-0.3cm}%
+  \begin{minipage}{\dimexpr\linewidth+0.3cm}
+    {\color{brass}\rule{2.4cm}{1.2pt}}\\[4pt]
+    {\firalight\Large\itshape\color{terra!90!black}\setlength{\parindent}{0pt}#1}\\[5pt]
+    {\sffamily\footnotesize\color{faint}#2}
+  \end{minipage}\par\vspace{0.6\baselineskip}}
+
+% ---- callouts ---------------------------------------------------------------
+% generic side-tab box
+\newtcolorbox{sidebox}[2][]{%
+  enhanced, breakable, sharp corners,
+  colback=#2!8, colframe=#2!8, boxrule=0pt,
+  borderline west={3pt}{0pt}{#2},
+  left=13pt, right=11pt, top=9pt, bottom=9pt,
+  fontupper=\normalsize,
+  overlay unbroken and first={%
+    \node[anchor=north west, font=\sffamily\bfseries\footnotesize\color{#2!80!black}]
+      at ([xshift=13pt,yshift=-5pt]frame.north west) {#1};},
+  before upper={\vspace{0.75\baselineskip}},
+}
+\newenvironment{keybox}[1][The idea]{\begin{sidebox}[#1]{terra}}{\end{sidebox}}
+\newenvironment{counterbox}[1][Counterpoint]{\begin{sidebox}[\faBalanceScale\ \ #1]{slate}}{\end{sidebox}}
+\newenvironment{agentbox}[1][In agentty]{\begin{sidebox}[\faTerminal\ \ #1]{sage}}{\end{sidebox}}
+\newenvironment{mythbox}[1][But wait]{\begin{sidebox}[\faQuestionCircle\ \ #1]{brass}}{\end{sidebox}}
+
+% "case file" framed box for the marquee story
+\newtcolorbox{casefile}[1]{%
+  enhanced, breakable,
+  colback=paperdeep, colframe=ink!55, boxrule=0.8pt,
+  arc=0pt, outer arc=0pt,
+  left=14pt, right=14pt, top=30pt, bottom=12pt,
+  overlay unbroken and first={%
+    \fill[ink!55] (frame.north west) rectangle
+      ([yshift=-20pt]frame.north east);
+    \node[anchor=west, font=\sffamily\bfseries\small\color{paper}]
+      at ([xshift=12pt,yshift=-10pt]frame.north west)
+      {\faFolderOpen\ \ CASE FILE\, ---\, #1};},
+}
+
+% ---- figure caption helper --------------------------------------------------
+\newcommand{\figcap}[2]{\par\vspace{2pt}\noindent
+  {\sffamily\footnotesize\color{terra}\textbf{Fig.\ #1}}\,%
+  {\firabook\footnotesize\color{faint}\enspace#2}\par}
+
+% ---- misc -------------------------------------------------------------------
+\setlength{\parindent}{1.15em}
+\setlength{\parskip}{0pt}
+\setlist{itemsep=2.5pt, topsep=4pt, parsep=0pt}
+\renewcommand{\arraystretch}{1.3}
+\newcommand{\NJ}{\textcolor{terra}{\sffamily\bfseries NEW JERSEY}}
+\newcommand{\MITs}{\textcolor{slate}{\sffamily\bfseries MIT}}
+\newcommand{\wib}{\textit{worse\,is\,better}}
+
+% small dinkus separator
+\newcommand{\dinkus}{\par\vspace{4pt}
+  \centerline{\color{brass}\small\quad$\ast\ \ \ast\ \ \ast$\quad}\vspace{4pt}\par}
+
+% =============================================================================
+\begin{document}
+
+% ========================================================= COVER =============
+\begin{titlepage}
+\hypersetup{pageanchor=false}
+\thispagestyle{empty}
+\begin{tikzpicture}[remember picture, overlay]
+
+  % full-bleed cream
+  \fill[paper] (current page.south west) rectangle (current page.north east);
+
+  % ---- masthead: thin double rule + kicker ----
+  \coordinate (TL) at ([yshift=-2.6cm,xshift=2.2cm]current page.north west);
+  \coordinate (TR) at ([yshift=-2.6cm,xshift=-2.2cm]current page.north east);
+  \draw[ink, line width=1.1pt] (TL) -- (TR);
+  \draw[ink, line width=0.5pt] ($(TL)+(0,-0.14)$) -- ($(TR)+(0,-0.14)$);
+  \node[anchor=south, font=\sffamily\footnotesize, text=faint]
+    at ($(TL)!0.5!(TR)+(0,0.08)$)
+    {\textls[300]{AN ESSAY ON HOW SOFTWARE ACTUALLY WINS}};
+
+  % ---- big title ----
+  \node[anchor=north, align=center] at ([yshift=-3.5cm]current page.north)
+    {\firalight\fontsize{58}{58}\selectfont\color{ink} Worse\\[-6pt]};
+  \node[anchor=north, align=center] at ([yshift=-6.0cm]current page.north)
+    {\itshape\fontsize{30}{30}\selectfont\color{brass} is};
+  \node[anchor=north, align=center] at ([yshift=-7.2cm]current page.north)
+    {\sffamily\bfseries\fontsize{58}{58}\selectfont\color{terra} Better};
+
+  % ---- deck / standfirst ----
+  \node[anchor=north, align=center, text width=12cm]
+    at ([yshift=-10.3cm]current page.north)
+    {\firabook\large\color{ink!85}
+     Why the simple, good-enough thing that ships \emph{today}\\
+     so often beats the perfect thing that ships \emph{tomorrow}\,---\\
+     and what a Lisp hacker's 1989 lament still teaches us.};
+
+  % ---- the "vs" diptych, refined ----
+  \begin{scope}[shift={($(current page.center)+(0,-1.6cm)$)}]
+    % MIT plate
+    \fill[slate] (-3.55,-1.35) rectangle (-0.25,1.35);
+    \draw[paper, line width=0.5pt] (-3.4,-1.2) rectangle (-0.4,1.2);
+    \node[paper, font=\sffamily\bfseries\LARGE] at (-1.9,0.52) {MIT};
+    \node[slatesoft, font=\firabook\small, align=center]
+      at (-1.9,-0.45) {\itshape ``the Right Thing''};
+    % NJ plate
+    \fill[terra] (0.25,-1.35) rectangle (3.55,1.35);
+    \draw[paper, line width=0.5pt] (0.4,-1.2) rectangle (3.4,1.2);
+    \node[paper, font=\sffamily\bfseries\LARGE] at (1.9,0.52) {N\,J};
+    \node[terrasoft, font=\firabook\small, align=center]
+      at (1.9,-0.45) {\itshape ``Worse is Better''};
+    % vs monogram
+    \node[circle, fill=paper, draw=ink, line width=0.8pt, minimum size=0.95cm,
+          font=\itshape\normalsize\color{ink}] at (0,0) {vs};
+  \end{scope}
+
+  % ---- footer colophon ----
+  \coordinate (BL) at ([yshift=2.5cm,xshift=2.2cm]current page.south west);
+  \coordinate (BR) at ([yshift=2.5cm,xshift=-2.2cm]current page.south east);
+  \draw[ink, line width=0.5pt] (BL) -- (BR);
+  \node[anchor=north, align=center] at ($(BL)!0.5!(BR)+(0,-0.22)$)
+    {\sffamily\footnotesize\color{ink}
+     after \textbf{Richard P.\ Gabriel} $\cdot$
+     \emph{Lisp: Good News, Bad News, How to Win Big} (1989)\\[3pt]
+     {\color{faint}\firabook a reading of the essay, its critics,
+     and a field guide for the \texttt{agentty} coding assistant}};
+\end{tikzpicture}
+\end{titlepage}
+
+% ========================================================= FRONT MATTER ======
+\clearpage
+\hypersetup{pageanchor=true}
+\pagenumbering{roman}
+\thispagestyle{empty}
+
+\vspace*{0.3cm}
+\noindent{\color{hair}\rule{\linewidth}{0.7pt}}\\[-2pt]
+\noindent{\sffamily\bfseries\Large\color{terra}Contents}\hfill
+{\firalight\small\color{faint}nine short chapters}\\[-4pt]
+\noindent{\color{hair}\rule{\linewidth}{0.7pt}}
+
+\vspace{0.5cm}
+\begin{minipage}{0.62\linewidth}
+{\hypersetup{linkcolor=ink!85}\tableofcontents}
+\end{minipage}\hfill
+\begin{minipage}{0.33\linewidth}
+\raggedright\firabook\small\color{ink!80}
+\textbf{\sffamily\color{terra}In one sentence.}\\[3pt]
+A simple, good-enough thing that ships \emph{today} usually beats a beautiful,
+perfect thing that ships \emph{next year}\,---\,because by the time the perfect
+thing arrives, everyone already uses (and is locked into) the simple one.
+\end{minipage}
+
+\clearpage
+
+% =============================================================================
+\pagenumbering{arabic}
+\section{The idea, explained like you're new to it}
+% =============================================================================
+
+\dropcap{I}{magine} two restaurants opening on the same street. \textbf{A}
+opens next week: small menu, burgers and fries, nothing fancy\,---\,but the
+doors are \emph{open} and people can eat. \textbf{B} will be \emph{perfect}: a
+Michelin chef, a wine cellar, hand-made everything. It opens \emph{in two
+years}. Maybe.
+
+\mnote{The whole theory fits inside a story about lunch.}
+By the time B finally opens, A already has regulars, a loyalty card, a delivery
+deal, and a reputation. The neighborhood \emph{eats at A}. B may be objectively
+better\,---\,and it still loses, or claws for scraps. That, in a nutshell, is
+\wib.
+
+The phrase was coined by \textbf{Richard P.\ Gabriel}, a Lisp programmer, in a
+1989 essay. He was chasing a puzzle that nagged at him: why do \emph{technically
+inferior} pieces of software so often beat \emph{technically superior} ones? His
+answer\,---\,because ``worse'' designs are simpler, so they ship sooner, spread
+faster, and get entrenched before the ``right'' design is even finished.
+
+\begin{keybox}[The core mechanism]
+A simpler design is \emph{cheaper to build}, \emph{easier to move to new
+machines}, and \emph{easier to change}. So it reaches users first. Once they
+adopt it, three barriers lock them in: \textbf{habit} (they learned its quirks),
+\textbf{compatibility} (their other tools now depend on it), and
+\textbf{momentum} (everyone else uses it too). The ``better'' design arrives late
+to a party where every guest already has a partner.
+\end{keybox}
+
+Gabriel pointed to real history where ``technically worse'' won: \textbf{C} beat
+\textbf{Lisp}; \textbf{Unix} beat Lisp machines and \textbf{VMS}; \textbf{x86}
+beat the cleaner \textbf{RISC} chips. He even called Unix and C ``the ultimate
+computer viruses''\,---\,not an insult, but a compliment about how they
+\emph{spread}.
+
+\pull{As long as the initial program is good enough, it will spread\ldots\ long
+before a program developed using the MIT approach has a chance to be
+deployed.}{The argument in one breath}
+
+% =============================================================================
+\section{Where it came from --- a story that spread the way it describes}
+% =============================================================================
+
+Gabriel formed the idea in 1989 inside a longer essay,
+\emph{``Lisp: Good News, Bad News, How to Win Big.''} One section was titled
+\textbf{``The Rise of `Worse is Better'.''}
+
+\mnote{Fittingly, the essay itself spread the \wib\ way\,---\,informally, virally,
+good-enough, and fast.}
+It could have stayed obscure. But in 1991 the programmer \textbf{Jamie Zawinski}
+found it in Gabriel's files at Lucid Inc.\ and emailed it to friends. From there
+it travelled by word of mouth: Zawinski's friends at Carnegie Mellon forwarded
+it to friends at Bell Labs, ``who sent them to their friends everywhere.'' It
+was reprinted as an appendix in the 1994 book \emph{The UNIX-HATERS Handbook},
+and became famous enough to be credited with popularizing the ``East Coast vs.\
+West Coast'' split among developers\,---\,a framing, we'll see, that Gabriel
+never actually used.
+
+% =============================================================================
+\section{Two philosophies, face to face}
+% =============================================================================
+
+Gabriel described two schools of design, each with several names\,---\,which is
+why the same idea appears under different labels.
+
+\vspace{2pt}
+\begin{center}
+\begin{tikzpicture}[font=\sffamily]
+  \node[fill=slatesoft, draw=slate, line width=0.9pt,
+        text width=6.1cm, align=center, inner sep=9pt] (mit) at (-3.55,0)
+    {\bfseries\color{slate}The ``MIT'' approach\\[2pt]
+     \normalfont\firabook\footnotesize\color{ink}
+     a.k.a.\ MIT/Stanford $\cdot$ ``The Right Thing''\\
+     \emph{Common Lisp, Scheme}};
+  \node[fill=terrasoft, draw=terra, line width=0.9pt,
+        text width=6.1cm, align=center, inner sep=9pt] (nj) at (3.55,0)
+    {\bfseries\color{terra}The ``New Jersey'' style\\[2pt]
+     \normalfont\firabook\footnotesize\color{ink}
+     a.k.a.\ Berkeley $\cdot$ ``Worse is Better''\\
+     \emph{Unix \& C, out of Bell Labs, NJ}};
+  \node[circle, fill=paper, draw=ink, line width=0.7pt, minimum size=0.8cm,
+        font=\itshape\small] at (0,0) {vs};
+\end{tikzpicture}
+\end{center}
+\figcap{1}{The two camps. Both prize the same four qualities; they rank them
+differently, and the ranking is the whole ball game.}
+
+\vspace{4pt}
+Both schools care about \textbf{Simplicity}, \textbf{Correctness},
+\textbf{Consistency}, and \textbf{Completeness}\,---\,in that descending order of
+importance. They just disagree on what to sacrifice.
+
+\vspace{4pt}
+{\small
+\begin{longtable}{@{}>{\sffamily\bfseries}p{2.0cm} >{\RaggedRight}p{5.4cm} >{\RaggedRight}p{5.4cm}@{}}
+\toprule
+& \cellcolor{slatesoft}\sffamily\bfseries\color{slate}MIT / The Right Thing
+& \cellcolor{terrasoft}\sffamily\bfseries\color{terra}New Jersey \\
+\midrule
+\endhead
+Simplicity &
+Simple in both\,---\,but if forced, keep the \emph{interface} simple, even at the
+cost of a hairier implementation. &
+Simple in both\,---\,but if forced, keep the \emph{implementation} simple.
+Simplicity is the single most important thing. \\[2pt]
+Correctness &
+``Incorrectness is simply not allowed.'' Non-negotiable. &
+Correct in all observable ways, yet ``slightly better to be simple than
+correct.'' \\[2pt]
+Consistency &
+Must be consistent; as important as correctness. May sacrifice a little
+simplicity to keep it. &
+Must not be \emph{overly} inconsistent. May trade consistency for simplicity;
+drop rare cases rather than complicate the code. \\[2pt]
+Completeness &
+All reasonably expected cases \emph{must} be covered; simplicity may not
+``overly reduce'' completeness. &
+Cover what's practical, but completeness yields to \emph{any} other quality, and
+\emph{must} yield when it threatens implementation simplicity. \\
+\bottomrule
+\end{longtable}}
+\figcap{2}{Gabriel's own four-by-two table, reworded. Read the two Correctness
+cells back to back: that single row is the whole disagreement.}
+
+\begin{keybox}[The difference in one line]
+For the \MITs{} mind, being \emph{wrong} is unacceptable\,---\,correctness first.
+For the \NJ{} mind, being \emph{complicated} is unacceptable\,---\,simplicity
+first, and a little wrongness at the edges is a fair price to ship.
+\end{keybox}
+
+% =============================================================================
+\section{The case file: ``PC loser-ing'' --- the story at the heart of the essay}
+% =============================================================================
+
+Gabriel doesn't argue in the abstract. He tells a \emph{true story} about two
+engineers arguing over one gnarly operating-system problem\,---\,and it's the
+best single illustration of the whole idea. Here it is, unpacked.
+
+\begin{casefile}{the interrupted system call}
+\small
+\textbf{The setup.} A program asks the operating system to do something slow
+(say, read from disk into a buffer). Halfway through, an \textbf{interrupt}
+fires\,---\,something else needs attention \emph{right now}. The system must
+decide: what happens to the half-finished operation?
+
+\smallskip
+\textbf{\color{slate}The MIT answer (``the Right Thing'').} Quietly rewind. Back
+the program's counter up to \emph{before} it made the call, save every scrap of
+state, handle the interrupt, then transparently re-enter the call. The program
+never even knows it was interrupted. Beautiful\,---\,and a nightmare to implement,
+because the kernel must be able to unwind partial state for \emph{every}
+long-running call. Gabriel's nickname for the mechanism: \textbf{PC loser-ing},
+because the program counter (``PC'') gets coerced into ``loser mode''
+(``loser'' being MIT's affectionate word for ``user'').
+
+\smallskip
+\textbf{\color{terra}The New Jersey answer (``Worse is Better'').} Don't rewind.
+Just \emph{give up}, finish the call, and hand back an error code that means
+``I got interrupted\,---\,you deal with it.'' A correct program must now check for
+that code and \emph{retry the call itself}. Simpler kernel; more work pushed onto
+every program that calls it.
+\end{casefile}
+
+\mnote{\faQuoteLeft\ ``Sometimes it takes a tough man to make a tender chicken,''
+the MIT guy mutters at the end\,---\,and, Gabriel admits, ``the New Jersey guy
+didn't understand. (I'm not sure I do either.)''}
+The MIT engineer hated the New Jersey answer: the \emph{interface} is now
+complex (every caller must loop-and-retry) even though the \emph{implementation}
+is simple. The New Jersey engineer shrugged: that's the right trade\,---\,
+implementation simplicity beats interface simplicity.
+
+\subsection{The twist: what that error code became}
+If you've ever written Unix code, you've met the New Jersey answer in person. It
+is \textbf{\texttt{EINTR}} --- ``interrupted system call'' --- and to this day
+robust programs wrap their slow calls in a retry loop:
+
+\begin{center}\small\ttfamily
+\begin{minipage}{9cm}
+again:\\
+\hspace*{2em}n = read(fd, buf, size);\\
+\hspace*{2em}if (n < 0 \&\& errno == EINTR) goto again;
+\end{minipage}
+\end{center}
+
+\mnote{\faLightbulb\ The ``worse'' system \emph{became} the right thing\,---\,
+exactly as Gabriel predicted in step three. But the wart never fully healed.}
+Here's the beautiful part, dug up by later engineers: Berkeley Unix added
+\emph{automatic} retry (the \texttt{SA\_RESTART} flag) back in \textbf{1983}\,---\,
+five years \emph{before} the essay was written. In other words, the ``worse''
+system quietly grew ``the Right Thing'' on its own, in response to users tired
+of writing that loop. And yet the scar remains: to this day, a careful Unix
+programmer still has to think about \texttt{EINTR}. \emph{That} is \wib\ in one
+real API: shipped simple, spread everywhere, improved later\,---\,but never
+quite perfectly.
+
+% =============================================================================
+\section{Why the ``worse'' one wins --- the three-step trap}
+% =============================================================================
+
+Gabriel's case for \emph{why} it works is a chain of three steps. Slow down
+here; the whole idea lives on this staircase.
+
+\vspace{4pt}
+\begin{center}
+\begin{tikzpicture}[font=\sffamily\small, scale=0.94, transform shape]
+  \def\bw{4.35}\def\bh{2.7}\def\dx{0.3}\def\dy{0.6}
+  \foreach \i/\c/\t/\d in {%
+    0/{terra!45}/{Ship first}/{Simple $\Rightarrow$ cheap, portable, fast to
+       adapt\,---\,out spreading \emph{before} the ``right thing'' is done.},
+    1/{terra!68}/{Lower the bar}/{Users adapt to its rough edges and stop
+       expecting the ``right thing.'' It ``conditions users to expect less.''},
+    2/{terra!90}/{Grow to almost-right}/{Now ubiquitous, it attracts the talent
+       and pressure that grow it into \emph{almost} the right thing.}} {
+    \pgfmathsetmacro{\x}{\i*(\bw+\dx) - (\bw+\dx)}
+    \pgfmathsetmacro{\y}{\i*\dy}
+    \pgfmathsetmacro{\tw}{\bw-0.55}
+    \node[fill=\c, text=white, sharp corners,
+          minimum width=\bw cm, minimum height=\bh cm,
+          text width=\tw cm, align=center, inner sep=6pt] (s\i) at (\x,\y)
+      {\bfseries\Large \the\numexpr\i+1\relax\\[2pt]
+       \bfseries\normalsize \t\\[4pt]\normalfont\footnotesize \d};
+  }
+  \draw[-{Latex[length=2.6mm]}, ink!70, line width=1.1pt] (s0.east) -- (s1.west);
+  \draw[-{Latex[length=2.6mm]}, ink!70, line width=1.1pt] (s1.east) -- (s2.west);
+\end{tikzpicture}
+\end{center}
+\figcap{3}{The staircase. Each step is also a rung the ``right thing'' never gets
+to climb, because it's still in the lab when step one happens.}
+
+\mnote{\faLightbulb\ Popularity \emph{recruits} the people who make a tool
+better. That is the quiet engine of step three.}
+Gabriel's sharpest line lives in step three: \emph{even though Lisp compilers in
+1987 were about as good as C compilers, there were far more experts trying to
+improve C compilers than Lisp compilers}. Once a tool is everywhere, the crowd
+that improves it is everywhere too.
+
+\subsection{The ``50\%--80\% solution''}
+Gabriel is precise about how good ``good enough'' must be: early Unix and C, he
+says, ``provide about 50\%--80\% of what you want.'' That's the sweet spot\,---\,
+enough to be genuinely useful, little enough to stay simple and portable. And
+because half of all computers are always below the median in power, a lean 50\%
+tool that \emph{runs everywhere} beats a lavish 100\% tool that needs a
+supercomputer. He also names the failure modes of The Right Thing:
+
+\begin{itemize}[leftmargin=1.4em]
+  \item \textbf{The big complex system.} Aims for 100\%; ``the last 20\% takes
+        80\% of the effort''; ships late, huge, and only on top-end hardware.
+        \emph{(His example: Common Lisp.)}
+  \item \textbf{The diamond-like jewel.} Stays tiny and elegant at every step\,---\,
+        but making it run fast is ``beyond the capabilities of most
+        implementors.'' \emph{(His example: Scheme.)}
+\end{itemize}
+
+He tied all this to \textbf{Richard Stallman}, to the philosophy of \textbf{Unix},
+and to the \textbf{open-source movement}\,---\,all of which fed straight into
+\textbf{Linux}. The pattern is not a one-off; it's a recurring shape.
+
+% =============================================================================
+\section{The counter-argument: ``Worse is Worse''}
+% =============================================================================
+
+Here is what most retellings leave out: serious people think Gabriel was
+\emph{wrong}\,---\,and the sharpest of them is \textbf{Jim Waldo}, a Distinguished
+Engineer at Sun, whose 2003 essay \emph{``Worse is Worse''} is a direct rebuttal.
+His case is worth taking seriously.
+
+\begin{counterbox}[Waldo's thesis]
+``\emph{Worse is better} is a much catchier slogan than \emph{better depends on
+your goodness metric}.'' The dominant technologies weren't \emph{worse}\,---\,they
+were \emph{better on the axes customers actually cared about}. We just measured
+``better'' with the wrong ruler.
+\end{counterbox}
+
+Run his argument through the famous examples:
+
+\begin{itemize}[leftmargin=1.4em]
+  \item \textbf{C over Lisp.} C ``produced faster code, was easier to master,
+        was easier to use in groups, and ran well on less expensive hardware.''
+        Those \emph{are} dimensions of better. On them, C winning was
+        \emph{better is better}, not worse is better.
+  \item \textbf{VHS over Betamax.} The classic ``inferior format won'' story\,---\,
+        but VHS recorded \emph{longer} tapes on \emph{cheaper} machines from
+        \emph{more} suppliers. Better on the axes buyers valued (length, cost),
+        worse only on the one they didn't (picture quality).
+  \item \textbf{Unix / DOS over Multics / VMS.} Unix ``had the twin advantages of
+        actually existing, and running on a wide variety of cheap hardware.''
+        \emph{Existence on cheap hardware} was itself the metric of goodness that
+        won.
+\end{itemize}
+
+\mnote{Waldo also corrects a myth: Gabriel's essay \emph{never} says ``East
+Coast vs.\ West Coast''\,---\,it says MIT/Stanford vs.\ New Jersey. The
+coasts were added by retellers.}
+Waldo's deeper worry is cultural. The slogan, he argues, ``has become a catch
+phrase for those who\ldots\ never understood [the article] in the first
+place''\,---\,used to ``justify shoddy design'' and to whisper that ``our
+customers are too stupid to\ldots\ deserve high quality products.'' His verdict:
+reject that reading and ``start putting out software that really is better\,---\,
+on the dimension of goodness that our customers have.''
+
+\pull{Better is a complicated notion, and can depend on a variety of different
+metrics. What we geeks think of as better may not be what our customers think is
+better.}{Jim Waldo, ``Worse is Worse'' (2003)}
+
+And here's the twist that makes the whole debate honest: \textbf{Gabriel agreed
+enough to argue against himself.} In 2000 he wrote \emph{``Worse Is Better Is
+Worse''} under the pseudonym \emph{Nickieben Bourbaki}, and separately \emph{``Is
+Worse Really Better?''}, applying the idea to C++'s triumph over more elegant
+object-oriented languages. He has publicly called himself of two minds. So \wib\
+is best read not as a \emph{commandment} but as a \emph{description of a
+force}\,---\,one even its author distrusts.
+
+% =============================================================================
+\section{The family of related ideas}
+% =============================================================================
+
+The same wisdom, seen from other angles:
+
+\begin{description}[leftmargin=1.4em, style=nextline, font=\sffamily\bfseries\color{ink!85}]
+  \item[Gresham's law] ``Bad money drives out good''\,---\,cheap-and-common crowds
+        out rare-and-fine.
+  \item[If it ain't broke, don't fix it] Don't gold-plate what already works.
+  \item[KISS \& Less is more] Simplicity as a first-class goal; fewer features
+        done well beat many done poorly.
+  \item[Minimum viable product] Ship the smallest thing that delivers value, then
+        learn from real users\,---\,\wib\ as a startup method.
+  \item[Neats vs.\ scruffies] In AI: clean theory (MIT) vs.\ things that work now
+        (New Jersey).
+  \item[Perfect is the enemy of good] Wait for perfect and you ship nothing.
+  \item[Satisficing] Herbert Simon's word for accepting ``good enough'' instead
+        of hunting the optimum\,---\,often the rational move under time limits.
+  \item[Wabi-sabi] The Japanese aesthetic that finds beauty in the imperfect and
+        incomplete\,---\,and Christopher Alexander's ``piecemeal growth,'' which
+        Gabriel himself cites.
+\end{description}
+
+\subsection{``Wait --- isn't this the \emph{opposite} of KISS?''}
+A fair objection. KISS says \emph{simple is good}; the title says \emph{worse} is
+better. The knot unties once you see that \textbf{``worse'' is sarcasm.} Gabriel
+isn't confessing low quality\,---\,he's needling the purists: \emph{the very thing
+you call worse is the thing that wins.} Decode the two words and they stop
+fighting:
+
+\begin{itemize}[leftmargin=1.4em]
+  \item \textbf{``Better''} $=$ survives, spreads, wins in the real world.
+  \item \textbf{``Worse''} $=$ scores lower on the MIT scorecard\,---\,less
+        \emph{complete}, not perfectly correct at every edge\,---\,\emph{not}
+        lower quality overall.
+\end{itemize}
+
+Read that way, KISS and \wib\ aren't opposites\,---\,they're the \emph{same move},
+\textbf{simplicity beats completeness}, differing only in emphasis:
+
+\vspace{2pt}
+{\small
+\begin{longtable}{@{}>{\RaggedRight}p{2.7cm} >{\RaggedRight}p{5.0cm} >{\RaggedRight}p{5.2cm}@{}}
+\toprule
+& \sffamily\bfseries KISS & \sffamily\bfseries\color{terra}Worse is Better \\
+\midrule
+\endhead
+The advice &
+``Keep it simple.'' &
+``Keep it simple \emph{even when that means leaving cases out and being slightly
+wrong at the edges}.'' \\[2pt]
+The tone &
+A design \emph{virtue}\,---\,simple is nicer. &
+A market \emph{prediction}\,---\,the simple one out-competes the complete one. \\[2pt]
+Argues against &
+Over-engineering. &
+The MIT belief that you must be complete and perfectly correct \emph{before}
+shipping. \\
+\bottomrule
+\end{longtable}}
+
+\begin{mythbox}[The one honest difference]
+KISS is purely about simplicity and never tells you to accept being \emph{wrong}.
+\wib\ goes one notch further: a little incorrectness \emph{at the rare edges} is
+an acceptable price for staying simple. But even here the first version must be
+\textbf{good enough to work}. So it's KISS pushed one notch toward \emph{ship
+it}\,---\,never an excuse for broken.
+\end{mythbox}
+
+% =============================================================================
+\section{A field guide for \texorpdfstring{\texttt{agentty}}{agentty}}
+% =============================================================================
+
+\texttt{agentty} is a terminal coding assistant\,---\,and it is the perfect
+crucible for this whole debate, because it has a \textbf{split personality}. Read
+its own docs and the tension is right there on the page.
+
+\begin{keybox}[The split personality]
+The \emph{codebase} of \texttt{agentty} is a card-carrying \MITs{} ``Right
+Thing'' project. But the \emph{behavior} it ships\,---\,how the binary acts, and
+how the agent inside it should edit your code\,---\,is pure \NJ. Knowing which
+hat to wear \emph{when} is the entire art of working on it.
+\end{keybox}
+
+\subsection{The codebase is ``The Right Thing'' --- on purpose}
+Agentty's own \texttt{docs/DESIGN.md} opens with a line no New Jersey hacker
+would write:
+
+\pull{If a change makes the codebase look inconsistent\,---\,if it requires a
+reader to ask ``wait, is this that style or this style?''\,---\,it doesn't go in.
+There is one style.}{\texttt{docs/DESIGN.md}, ``the one idea''}
+
+\mnote{Look at Gabriel's MIT column again: \emph{consistency as important as
+correctness; incorrectness simply not allowed}. That \emph{is} agentty's design
+contract.}
+That is Gabriel's MIT scorecard almost verbatim. Concretely, agentty:
+
+\begin{sloppypar}
+\begin{itemize}[leftmargin=1.4em]
+  \item makes illegal states \emph{unrepresentable}\,---\,every state machine is a
+        \texttt{std::variant}, every fallible call an
+        \texttt{std::expected<T,E>} (\texttt{DESIGN.md}'s seven rules);
+  \item pins invariants at \emph{compile time}\,---\,151+ \texttt{static\_assert}
+        / \texttt{consteval} proofs (\texttt{tool/policy.hpp} proves the
+        permission matrix cell by cell; \texttt{provider/error\_class.hpp}
+        proves every retry branch). ``The build is the test runner'': green build
+        $\Rightarrow$ the invariants hold. \emph{Incorrectness is not allowed}
+        because it \emph{will not compile};
+  \item funnels all the messy dynamism (JSON, network, terminal IO) through
+        \emph{one thin boundary}, past which everything is typed.
+\end{itemize}
+\end{sloppypar}
+
+This is the opposite of ``ship it and check \texttt{EINTR} later.'' And it's the
+\emph{right} call here, by our own decision guide: a coding agent that edits your
+files and runs commands is exactly the high-stakes, irreversible domain where
+Gabriel and Waldo both say \emph{do the Right Thing up front}.
+
+\subsection{The behavior is ``Worse is Better'' --- also on purpose}
+Now flip to what the binary \emph{does}. Every headline feature is a New Jersey
+move:
+
+\vspace{2pt}
+{\small
+\begin{longtable}{@{}>{\RaggedRight}p{5.4cm} >{\RaggedRight}p{7.8cm}@{}}
+\toprule
+\sffamily\bfseries agentty behavior & \sffamily\bfseries the \wib\ move it embodies \\
+\midrule
+\endhead
+One 16.7\,MB native binary, {\raise0.1ex\hbox{$\sim$}}3\,ms cold start, zero runtime deps &
+The lean 50--80\% tool that \emph{runs everywhere}, versus the lavish
+Node/Python stack that needs its whole ecosystem installed first. \\
+Retrieval sends only relevant slices ({\raise0.1ex\hbox{$\sim$}}80\% less context) &
+``Good enough'' beats ``complete'': don't dump the whole repo, ship the slices
+that matter and iterate. Falls back to keyword search when embeddings are
+absent\,---\,\emph{always works, sometimes worse}. \\
+Smart Mode scales effort to each turn &
+A one-line rename and a cross-file refactor ``don't deserve the same effort.''
+Spend the minimum that works; escalate only when a cheap attempt falls short. \\
+\texttt{edit} preferred over \texttt{write} for changes &
+The smallest diff that solves the problem\,---\,streams less, reviews easier,
+reverts cleanly. \\
+\bottomrule
+\end{longtable}}
+\figcap{4}{Agentty's product decisions, read as \wib. The codebase is MIT; the
+product is New Jersey. Both are deliberate.}
+
+So when \emph{you} (or the agent) work \emph{on} agentty, the rule is: obey the
+MIT contract in the code you write, while behaving the New Jersey way in how you
+land the change. The seven habits below are exactly that, keyed to real files.
+
+\begin{agentbox}[1 · Ship the good-enough change, then iterate]
+Agentty's own system prompt says it: on a vague request (``fix it,'' ``make it
+better'') make one reasonable improvement \emph{now} rather than presenting a
+menu and waiting. A concrete \texttt{edit} that lands beats an elegant plan that
+stalls. \emph{Ship first} at the granularity of a single diff.
+\end{agentbox}
+
+\begin{agentbox}[2 · Smallest diff --- \texttt{edit}, not \texttt{write}]
+The tool guidance is a \wib\ rule in disguise: use \texttt{edit} (a targeted
+substitution, a reviewable diff) over \texttt{write} (dumps the whole file, stalls
+the stream). Don't refactor a module when a five-line change will do. Small
+changes are cheap to review, revert, and trust.
+\end{agentbox}
+
+\begin{agentbox}[3 · Correctness has a floor --- here, the compiler]
+\wib\ tolerates \emph{incompleteness}, never \emph{incorrectness of what you
+shipped}. In agentty that floor is enforced mechanically: run
+\texttt{cmake --build build -j} (the build \emph{is} the test runner). If you
+touch a \texttt{static\_assert}-guarded table (\texttt{policy.hpp},
+\texttt{spec.hpp}, \texttt{error\_class.hpp}), a wrong edit \emph{won't compile}.
+Never route around a proof to ``ship faster.''
+\end{agentbox}
+
+\begin{agentbox}[4 · Defer rare cases --- out loud]
+Handle what the user will actually hit; \emph{name} the edge-cases you deferred
+in your reply. Silent incompleteness is a bug; declared incompleteness is a
+roadmap. (This is why agentty surfaces every tool action as its own card\,---\,
+nothing important happens invisibly.)
+\end{agentbox}
+
+\begin{agentbox}[5 · Measure ``better'' by the user's metric (Waldo)]
+Don't chase your own elegance. Agentty already encodes this: retrieval optimises
+for \emph{the user's} relevant context, Smart Mode optimises for \emph{their}
+cost and latency, not for a maximal answer. Your edit's ``better'' is what serves
+the user's goal\,---\,speed, clarity, fitting the repo\,---\,not your scorecard.
+\end{agentbox}
+
+\begin{agentbox}[6 · Respect the one style --- reduce switching cost]
+Gabriel's lock-in argument, turned inward. \texttt{DESIGN.md}: ``there is one
+style.'' So match it exactly\,---\,\texttt{variant} for state, \texttt{expected}
+for failure, the dynamism boundary for IO, a \texttt{static\_assert} beside any
+new table. A ``more elegant'' pattern that fights the house style is the MIT
+mistake: correct in a vacuum, rejected in review.
+\end{agentbox}
+
+\begin{agentbox}[7 · Know which hat you're wearing]
+The whole trick. \textbf{Writing agentty's code} $\Rightarrow$ \MITs: types,
+proofs, consistency, no cut corners. \textbf{Acting as the agent inside it}
+$\Rightarrow$ \NJ: smallest diff, ship, iterate. And for genuinely irreversible
+work\,---\,auth (\texttt{auth::Credentials}), the permission policy, persistence,
+concurrency\,---\,it's \MITs\ \emph{both} ways: get it right before it ships.
+\end{agentbox}
+
+\subsection{A quick decision guide}
+{\small
+\begin{longtable}{@{}>{\RaggedRight}p{6.2cm} >{\RaggedRight}p{7.0cm}@{}}
+\toprule
+\sffamily\bfseries Situation & \sffamily\bfseries Mode, and why \\
+\midrule
+\endhead
+Vague request, low blast radius (a small feature, a doc, formatting) &
+\textcolor{terra}{\bfseries New Jersey.} Ship a reasonable \texttt{edit} now;
+iterate. \\
+Bug in a common code path &
+\textcolor{terra}{\bfseries New Jersey}, compiler as the floor. Smallest correct
+diff; \texttt{cmake --build build -j} green before ``done.'' \\
+Editing a \texttt{static\_assert}-guarded table (\texttt{policy}, \texttt{spec},
+\texttt{error\_class}) &
+\textcolor{slate}{\bfseries MIT.} Change the proof \emph{and} the code together;
+let the build check you. \\
+Auth, credentials, persistence, permissions, concurrency &
+\textcolor{slate}{\bfseries MIT / The Right Thing.} Typed, consistent, correct
+\emph{before} shipping. No \texttt{EINTR}-style ``deal with it later.'' \\
+``Refactor it to be perfect'' &
+\textcolor{terra}{\bfseries Push back} toward the smallest useful slice\,---\,but
+keep the one style. \\
+Edge-case you noticed, user didn't ask &
+Handle if cheap; otherwise \textbf{defer and say so}. \\
+\bottomrule
+\end{longtable}}
+
+\begin{keybox}[The agentty mantra]
+\itshape Wear the MIT hat when you \emph{write} the code\,---\,types, proofs, one
+style, let the build be the test. Wear the New Jersey hat when you \emph{land} the
+change\,---\,smallest \texttt{edit}, measured by the user's yardstick, ship and
+iterate, name what you deferred. And for anything irreversible, wear both:
+do the Right Thing before it ships.
+\end{keybox}
+
+% =============================================================================
+\section*{Take-aways in six lines}
+\addcontentsline{toc}{section}{Take-aways in six lines}
+% =============================================================================
+\begin{enumerate}[leftmargin=1.6em]
+  \item Simple-and-shipping beats perfect-and-late\,---\,first-mover advantage
+        plus lock-in.
+  \item The staircase: gain acceptance $\rightarrow$ lower expectations
+        $\rightarrow$ grow to almost-right.
+  \item ``Worse'' means \emph{simpler and less complete}, never \emph{broken}; a
+        ``good-enough'' 50--80\% solution is the target.
+  \item The \texttt{EINTR} story is \wib\ made real: shipped simple, spread,
+        improved\,---\,but left a permanent wart.
+  \item Waldo's rebuttal: it wasn't ``worse'' that won, but \emph{better on the
+        metric that mattered}. Measure goodness by the user's ruler.
+  \item It's a \emph{force}, not a rule\,---\,Gabriel argued both sides. And
+        \texttt{agentty} lives the split: an \MITs\ \emph{codebase} (types,
+        compile-time proofs, one style) that ships \NJ\ \emph{behavior} (one lean
+        binary, 80\% less context, smallest \texttt{edit}, iterate)\,---\,so wear
+        the right hat for the task, and both hats for anything irreversible.
+\end{enumerate}
+
+\vfill
+\begin{center}
+{\color{brass}\rule{0.35\linewidth}{0.4pt}}\\[6pt]
+{\sffamily\scriptsize\color{faint}
+Sources: R.\,P.\ Gabriel, \emph{The Rise of ``Worse is Better''} (1989) $\cdot$
+Jim Waldo, \emph{``Worse is Worse''} (Artima, 2003) $\cdot$
+J.\ Haberman, \emph{``EINTR and PC loser-ing''} (2011) $\cdot$
+Gabriel, \emph{``Worse Is Better Is Worse''} \& \emph{``Is Worse Really Better?''} (2000)\\
+and the Wikipedia article ``Worse is better'' and its further reading
+(Gancarz, Graham, Mayer). The \texttt{agentty} section draws on the project's own
+\texttt{docs/DESIGN.md}, \texttt{ARCHITECTURE.md}, \texttt{WHY-NOT-RUST.md}, and
+\texttt{README.md}.}
+\end{center}
+
+\end{document}

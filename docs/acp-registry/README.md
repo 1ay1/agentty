@@ -70,7 +70,7 @@ The asset base names are fixed by `src/util/update.cpp::platform_asset()`:
 
 ```sh
 # The agent must respond to an ACP initialize with authMethods when logged out.
-AGENTTY_ACP_TRACE=1 agentty acp   # then send an `initialize` frame and read the reply on stderr
+AGENTTY_LOG=acp=trace agentty acp   # then send an `initialize` frame; frames land in ~/.agentty/logs/agentty.log
 ```
 
 See `docs/acp-editor-integration.md` for the full ACP surface agentty exposes.

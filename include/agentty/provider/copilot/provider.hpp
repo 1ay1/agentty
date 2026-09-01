@@ -48,6 +48,18 @@ static_assert(provider::Provider<CopilotProvider>);
 // freshly learned per-model support (after a turn's 400/200 outcome).
 void invalidate_model_cache();
 
+// TEST SEAM: resolve which model an Auto session will actually stream.
+//
+// A CONCRETE `requested` is honoured or returns "" — never swapped for a
+// different model. Smart Mode pins a model per role slot, and a silent
+// substitution there spends the wrong model's budget and can route a
+// Responses-only slug onto the chat path (an outright 400 naming a model the
+// user never chose). Only the synthetic Auto entry delegates the choice.
+[[nodiscard]] std::string pick_auto_model_for_test(
+    const std::vector<std::string>& available_models,
+    const std::string& selected_model,
+    const std::string& requested);
+
 // ── Dialect selection (exposed for tests) ──────────────────────────
 //
 // Copilot is agentty's only MIXED-dialect provider: the same account, over

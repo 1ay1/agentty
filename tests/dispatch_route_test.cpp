@@ -70,9 +70,9 @@ TEST_CASE("anthropic selection hits anthropic route") {
 }
 
 TEST_CASE("chatgpt selection hits chatgpt route") {
-    provider::Selection sel;
-    sel.kind = provider::Kind::OpenAI;
-    sel.openai_endpoint.label = "chatgpt";   // the native OAuth Codex backend
+    // parse_selection resolves the registry row; identity travels ON the
+    // selection rather than being re-derived from a mutable label.
+    const auto sel = provider::parse_selection("chatgpt");
     CHECK(sel.is_chatgpt());
     CHECK(route_for(sel) == "chatgpt");
 }
@@ -83,15 +83,11 @@ TEST_CASE("is_chatgpt predicate") {
     CHECK(!a.is_chatgpt());
     CHECK(!a.is_oauth_native());
 
-    provider::Selection o;
-    o.kind = provider::Kind::OpenAI;
-    o.openai_endpoint.label = "openai";
-    CHECK(!o.is_chatgpt());       // OpenAI-Kind but not the chatgpt label
+    const auto o = provider::parse_selection("openai");
+    CHECK(!o.is_chatgpt());       // OpenAI-Kind but not the chatgpt row
     CHECK(!o.is_oauth_native());  // openai row is ApiKey, not oauth_native
 
-    provider::Selection c;
-    c.kind = provider::Kind::OpenAI;
-    c.openai_endpoint.label = "chatgpt";
+    const auto c = provider::parse_selection("chatgpt");
     CHECK(c.is_chatgpt());
     // is_oauth_native() is DATA-DRIVEN: it reads ProviderPreset::oauth_native
     // from the registry row, not a label compare. The chatgpt row is the only
@@ -109,9 +105,7 @@ TEST_CASE("long lived slot derivation") {
     anth.kind = provider::Kind::Anthropic;
     CHECK(provider::long_lived_slot(anth) == provider::LongLived::Anthropic);
 
-    provider::Selection chatgpt;
-    chatgpt.kind = provider::Kind::OpenAI;
-    chatgpt.openai_endpoint.label = "chatgpt";     // oauth_native row
+    const auto chatgpt = provider::parse_selection("chatgpt");
     CHECK(provider::long_lived_slot(chatgpt) == provider::LongLived::ChatGpt);
 
     // A hosted OpenAI-compat backend has NO long-lived slot — it is built per
@@ -207,9 +201,7 @@ TEST_CASE("dispatch propagates stream result") {
     CHECK(ra.ok());
     CHECK(!ra.cancelled());
 
-    provider::Selection cg;
-    cg.kind = provider::Kind::OpenAI;
-    cg.openai_endpoint.label = "chatgpt";
+    const auto cg = provider::parse_selection("chatgpt");
     auto rc = result_for(cg);
     CHECK(rc.end == provider::StreamEnd::TransportError);
     CHECK(!rc.ok());

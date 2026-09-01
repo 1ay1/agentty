@@ -1,5 +1,7 @@
 #include "agentty/auth/auth.hpp"
 
+#include "agentty/util/logx.hpp"
+
 // OAuth config lives with the provider it belongs to; `using` lets the
 // existing OAuthConfig:: references below stay short.
 #include "agentty/provider/anthropic/oauth.hpp"
@@ -795,10 +797,22 @@ TokenResult refresh_access_token(const RefreshToken& refresh_token) {
         {"client_id",     OAuthConfig::client_id},
         {"refresh_token", refresh_token.value},
     });
-    if (!r.transport_error.empty())
+    // A failed refresh presents to the user as "suddenly logged out" or a
+    // silent 401 loop, with nothing on screen to explain it. The refresh
+    // TOKEN never reaches the log (redaction would strip it anyway); only
+    // the outcome does.
+    if (!r.transport_error.empty()) {
+        AGT_LOG(Auth, Warn, "auth.refresh", "result=network_error err={}",
+                r.transport_error);
         return std::unexpected(OAuthError{
             OAuthErrorKind::Network, r.transport_error});
-    return parse_token_json(r.body, r.status);
+    }
+    auto parsed = parse_token_json(r.body, r.status);
+    AGT_LOGL(Auth, parsed ? ::agentty::logx::Level::Info
+                          : ::agentty::logx::Level::Warn,
+             "auth.refresh", "result={} status={}",
+             parsed ? "ok" : "rejected", r.status);
+    return parsed;
 }
 
 namespace {

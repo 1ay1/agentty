@@ -225,97 +225,150 @@ using ProviderPreset = ProviderDescriptor;
 // only place its host/path live — Endpoint::from_spec is a lookup over this
 // table, so there is no second arm to keep in sync.
 inline constexpr std::array<ProviderDescriptor, 15> kProviders{{
-    {"anthropic",  "Anthropic",  "Claude — OAuth (Pro/Max) or API key",
-     Wire::AnthropicMessages, Lifetime::LongLived, AuthStyle::OAuthOrKey, false, {"", "", ""}, "api.anthropic.com", false,
+    {.id = "anthropic", .label = "Anthropic",
+     .blurb = "Claude — OAuth (Pro/Max) or API key",
      // Own transport (not the OpenAI-compat one): no endpoint columns.
-     "", "", "", 443, true, false,
-     // Auth caps: offers the OAuth-vs-key method menu, and is the one row
-     // that gets a proactive token refresh + 1M-entitlement re-arm on an
-     // account switch.
-     /*device_login=*/false, /*method_menu=*/true,
-     /*token_in_transport=*/false, /*oauth_proactive_refresh=*/true,
-     /*default_model=*/"claude-opus-4-5"},
-    {"openai",     "OpenAI",     "GPT / Codex — api.openai.com",
+     // The one row that gets a proactive token refresh + 1M-entitlement
+     // re-arm on an account switch.
+     .wire = Wire::AnthropicMessages, .lifetime = Lifetime::LongLived,
+     .auth = AuthStyle::OAuthOrKey,
+     .prewarm_host = "api.anthropic.com",
+     .method_menu = true, .oauth_proactive_refresh = true,
+     .default_model = "claude-opus-4-5"},
+
+    {.id = "openai", .label = "OpenAI", .blurb = "GPT / Codex — api.openai.com",
      // Chat Completions, NOT Responses. The row used to claim
-     // Wire::OpenAIResponses while dialling /v1/chat/completions — the
-     // label was decorative (nothing dispatched on it) so the lie went
-     // unnoticed and made the reasoning-text UI over-promise. The wire
-     // and the path now sit on one line and must agree.
-     Wire::OpenAIChat,        Lifetime::PerCall,   AuthStyle::ApiKey,     false, {"OPENAI_API_KEY", "CODEX_API_KEY", ""}, "", false,
-     "api.openai.com", "/v1/chat/completions", "/v1/models", 443, true, false,
-     /*device_login=*/false, /*method_menu=*/false,
-     /*token_in_transport=*/false, /*oauth_proactive_refresh=*/false,
-     /*default_model=*/"gpt-4o"},
-    {"chatgpt",   "ChatGPT",    "Sign in with ChatGPT — Codex models, no API key",
+     // Wire::OpenAIResponses while dialling /v1/chat/completions — the label
+     // was decorative (nothing dispatched on it) so the lie went unnoticed and
+     // made the reasoning-text UI over-promise. Wire and path must agree.
+     .wire = Wire::OpenAIChat, .lifetime = Lifetime::PerCall,
+     .auth = AuthStyle::ApiKey,
+     .auth_env = {"OPENAI_API_KEY", "CODEX_API_KEY", ""},
+     .host = "api.openai.com", .path = "/v1/chat/completions",
+     .models_path = "/v1/models",
+     .default_model = "gpt-4o"},
+
+    {.id = "chatgpt", .label = "ChatGPT",
+     .blurb = "Sign in with ChatGPT — Codex models, no API key",
      // Genuinely Responses — but over its OWN OAuth transport
-     // (/backend-api/codex/responses), not the compat one, so no columns.
-     // is_local=FALSE: chatgpt.com is a remote host. It used to be true as a
-     // stand-in for "needs no API key" — which AuthStyle::None already says —
-     // and that lie forced a `is_local && !oauth_native` workaround at the one
-     // site that wanted the literal meaning (login.cpp's key-prompt gate).
-     Wire::OpenAIResponses,   Lifetime::LongLived, AuthStyle::None,       false, {"", "", ""}, "chatgpt.com", /*oauth_native=*/true,
-     "", "", "", 443, true, false,
-     // oauth_native already marks the bespoke Codex launch path; device_login
-     // stays false so the generic launcher doesn't also claim it.
-     /*device_login=*/false, /*method_menu=*/false,
-     /*token_in_transport=*/true, /*oauth_proactive_refresh=*/false},
-    {"copilot",   "GitHub Copilot", "Sign in with GitHub — Copilot models, no API key",
-     Wire::OpenAIChat,        Lifetime::LongLived, AuthStyle::None,       false, {"", "", ""}, "api.githubcopilot.com", /*oauth_native=*/true,
-     "api.githubcopilot.com", "/chat/completions", "/models", 443, true, false,
-     /*device_login=*/true, /*method_menu=*/false,
-     /*token_in_transport=*/true, /*oauth_proactive_refresh=*/false,
+     // (/backend-api/codex/responses), not the compat one, so no endpoint
+     // columns. is_local stays FALSE: chatgpt.com is a remote host, and
+     // "needs no API key" is what AuthStyle::None already says.
+     // No default_model: the cached catalog picks.
+     .wire = Wire::OpenAIResponses, .lifetime = Lifetime::LongLived,
+     .auth = AuthStyle::None,
+     .prewarm_host = "chatgpt.com", .oauth_native = true,
+     .token_in_transport = true},
+
+    {.id = "copilot", .label = "GitHub Copilot",
+     .blurb = "Sign in with GitHub — Copilot models, no API key",
      // gpt-4o runs on every Copilot tier; the async fetch replaces it with
      // the account's real line-up (incl. Auto) shortly after the switch.
-     /*default_model=*/"gpt-4o"},
-    {"kimi",      "Kimi",       "Sign in with Kimi — Kimi K2 models, no API key",
-     // Kimi Code inference API: base https://api.kimi.com/coding/v1 (its
-     // own provider builds this; the columns must agree with it).
-     Wire::OpenAIChat,        Lifetime::LongLived, AuthStyle::None,       false, {"", "", ""}, "api.kimi.com", /*oauth_native=*/true,
-     "api.kimi.com", "/coding/v1/chat/completions", "/coding/v1/models", 443, true, false,
-     /*device_login=*/true, /*method_menu=*/false,
-     /*token_in_transport=*/true, /*oauth_proactive_refresh=*/false},
-    {"groq",       "Groq",       "Llama/Mixtral on Groq LPUs — very fast",
-     Wire::OpenAIChat,        Lifetime::PerCall,   AuthStyle::ApiKey,     false, {"GROQ_API_KEY", "OPENAI_API_KEY", ""}, "", false,
-     "api.groq.com", "/openai/v1/chat/completions", "/openai/v1/models"},
-    {"openrouter", "OpenRouter", "Any model via openrouter.ai",
-     Wire::OpenAIChat,        Lifetime::PerCall,   AuthStyle::ApiKey,     false, {"OPENROUTER_API_KEY", "OPENAI_API_KEY", ""}, "", false,
-     "openrouter.ai", "/api/v1/chat/completions", "/api/v1/models"},
-    {"together",   "Together",   "Open models on together.ai",
-     Wire::OpenAIChat,        Lifetime::PerCall,   AuthStyle::ApiKey,     false, {"TOGETHER_API_KEY", "OPENAI_API_KEY", ""}, "", false,
-     "api.together.xyz", "/v1/chat/completions", "/v1/models"},
-    {"cerebras",   "Cerebras",   "Wafer-scale inference — very fast",
-     Wire::OpenAIChat,        Lifetime::PerCall,   AuthStyle::ApiKey,     false, {"CEREBRAS_API_KEY", "OPENAI_API_KEY", ""}, "", false,
-     "api.cerebras.ai", "/v1/chat/completions", "/v1/models"},
-    {"deepseek",   "DeepSeek",   "DeepSeek V4 — api.deepseek.com",
+     .wire = Wire::OpenAIChat, .lifetime = Lifetime::LongLived,
+     .auth = AuthStyle::None,
+     .prewarm_host = "api.githubcopilot.com", .oauth_native = true,
+     .host = "api.githubcopilot.com", .path = "/chat/completions",
+     .models_path = "/models",
+     .device_login = true, .token_in_transport = true,
+     .default_model = "gpt-4o"},
+
+    {.id = "kimi", .label = "Kimi",
+     .blurb = "Sign in with Kimi — Kimi K2 models, no API key",
+     // Kimi Code inference API: base https://api.kimi.com/coding/v1 (its own
+     // provider builds this; the columns must agree with it).
+     .wire = Wire::OpenAIChat, .lifetime = Lifetime::LongLived,
+     .auth = AuthStyle::None,
+     .prewarm_host = "api.kimi.com", .oauth_native = true,
+     .host = "api.kimi.com", .path = "/coding/v1/chat/completions",
+     .models_path = "/coding/v1/models",
+     .device_login = true, .token_in_transport = true},
+
+    {.id = "groq", .label = "Groq",
+     .blurb = "Llama/Mixtral on Groq LPUs — very fast",
+     .wire = Wire::OpenAIChat, .lifetime = Lifetime::PerCall,
+     .auth = AuthStyle::ApiKey,
+     .auth_env = {"GROQ_API_KEY", "OPENAI_API_KEY", ""},
+     .host = "api.groq.com", .path = "/openai/v1/chat/completions",
+     .models_path = "/openai/v1/models"},
+
+    {.id = "openrouter", .label = "OpenRouter",
+     .blurb = "Any model via openrouter.ai",
+     .wire = Wire::OpenAIChat, .lifetime = Lifetime::PerCall,
+     .auth = AuthStyle::ApiKey,
+     .auth_env = {"OPENROUTER_API_KEY", "OPENAI_API_KEY", ""},
+     .host = "openrouter.ai", .path = "/api/v1/chat/completions",
+     .models_path = "/api/v1/models"},
+
+    {.id = "together", .label = "Together",
+     .blurb = "Open models on together.ai",
+     .wire = Wire::OpenAIChat, .lifetime = Lifetime::PerCall,
+     .auth = AuthStyle::ApiKey,
+     .auth_env = {"TOGETHER_API_KEY", "OPENAI_API_KEY", ""},
+     .host = "api.together.xyz", .path = "/v1/chat/completions",
+     .models_path = "/v1/models"},
+
+    {.id = "cerebras", .label = "Cerebras",
+     .blurb = "Wafer-scale inference — very fast",
+     .wire = Wire::OpenAIChat, .lifetime = Lifetime::PerCall,
+     .auth = AuthStyle::ApiKey,
+     .auth_env = {"CEREBRAS_API_KEY", "OPENAI_API_KEY", ""},
+     .host = "api.cerebras.ai", .path = "/v1/chat/completions",
+     .models_path = "/v1/models"},
+
+    {.id = "deepseek", .label = "DeepSeek",
+     .blurb = "DeepSeek V4 — api.deepseek.com",
      // DeepSeek serves completions WITHOUT the /v1 prefix.
-     Wire::OpenAIChat,        Lifetime::PerCall,   AuthStyle::ApiKey,     false, {"DEEPSEEK_API_KEY", "OPENAI_API_KEY", ""}, "", false,
-     "api.deepseek.com", "/chat/completions", "/models"},
-    {"xai",        "xAI (Grok)", "Grok models — api.x.ai",
-     Wire::OpenAIChat,        Lifetime::PerCall,   AuthStyle::ApiKey,     false, {"XAI_API_KEY", "OPENAI_API_KEY", ""}, "", false,
-     "api.x.ai", "/v1/chat/completions", "/v1/models"},
-    {"mistral",    "Mistral",    "Mistral / Codestral / Magistral — api.mistral.ai",
-     Wire::OpenAIChat,        Lifetime::PerCall,   AuthStyle::ApiKey,     false, {"MISTRAL_API_KEY", "OPENAI_API_KEY", ""}, "", false,
-     "api.mistral.ai", "/v1/chat/completions", "/v1/models"},
-    {"gemini",     "Google Gemini", "Gemini models via the OpenAI-compat API",
-     Wire::OpenAIChat,        Lifetime::PerCall,   AuthStyle::ApiKey,     false, {"GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENAI_API_KEY"}, "", false,
-     "generativelanguage.googleapis.com", "/v1beta/openai/chat/completions", "/v1beta/openai/models"},
-    {"fireworks",  "Fireworks",  "Open models on fireworks.ai",
-     Wire::OpenAIChat,        Lifetime::PerCall,   AuthStyle::ApiKey,     false, {"FIREWORKS_API_KEY", "OPENAI_API_KEY", ""}, "", false,
-     "api.fireworks.ai", "/inference/v1/chat/completions", "/inference/v1/models"},
-    {"ollama",     "Ollama",     "Local models at localhost:11434",
+     .wire = Wire::OpenAIChat, .lifetime = Lifetime::PerCall,
+     .auth = AuthStyle::ApiKey,
+     .auth_env = {"DEEPSEEK_API_KEY", "OPENAI_API_KEY", ""},
+     .host = "api.deepseek.com", .path = "/chat/completions",
+     .models_path = "/models"},
+
+    {.id = "xai", .label = "xAI (Grok)", .blurb = "Grok models — api.x.ai",
+     .wire = Wire::OpenAIChat, .lifetime = Lifetime::PerCall,
+     .auth = AuthStyle::ApiKey,
+     .auth_env = {"XAI_API_KEY", "OPENAI_API_KEY", ""},
+     .host = "api.x.ai", .path = "/v1/chat/completions",
+     .models_path = "/v1/models"},
+
+    {.id = "mistral", .label = "Mistral",
+     .blurb = "Mistral / Codestral / Magistral — api.mistral.ai",
+     .wire = Wire::OpenAIChat, .lifetime = Lifetime::PerCall,
+     .auth = AuthStyle::ApiKey,
+     .auth_env = {"MISTRAL_API_KEY", "OPENAI_API_KEY", ""},
+     .host = "api.mistral.ai", .path = "/v1/chat/completions",
+     .models_path = "/v1/models"},
+
+    {.id = "gemini", .label = "Google Gemini",
+     .blurb = "Gemini models via the OpenAI-compat API",
+     .wire = Wire::OpenAIChat, .lifetime = Lifetime::PerCall,
+     .auth = AuthStyle::ApiKey,
+     .auth_env = {"GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENAI_API_KEY"},
+     .host = "generativelanguage.googleapis.com",
+     .path = "/v1beta/openai/chat/completions",
+     .models_path = "/v1beta/openai/models"},
+
+    {.id = "fireworks", .label = "Fireworks",
+     .blurb = "Open models on fireworks.ai",
+     .wire = Wire::OpenAIChat, .lifetime = Lifetime::PerCall,
+     .auth = AuthStyle::ApiKey,
+     .auth_env = {"FIREWORKS_API_KEY", "OPENAI_API_KEY", ""},
+     .host = "api.fireworks.ai", .path = "/inference/v1/chat/completions",
+     .models_path = "/inference/v1/models"},
+
+    {.id = "ollama", .label = "Ollama",
+     .blurb = "Local models at localhost:11434",
      // Plain HTTP on loopback, and the NATIVE /api/chat protocol.
-     Wire::OpenAIChat,        Lifetime::PerCall,   AuthStyle::None,       true,  {"", "", ""}, "", false,
-     "localhost", "/api/chat", "/api/tags", /*port=*/11434, /*use_tls=*/false,
-     /*native_api=*/true},
+     .wire = Wire::OpenAIChat, .lifetime = Lifetime::PerCall,
+     .auth = AuthStyle::None, .is_local = true,
+     .host = "localhost", .path = "/api/chat", .models_path = "/api/tags",
+     .port = 11434, .use_tls = false, .native_api = true},
+
     // NOTE: no "llama.cpp" preset row. A llama.cpp / vLLM / LM Studio server is
     // just a generic OpenAI-compatible host — use "Custom host…" (which the
     // picker offers, saves, and can delete). The from_spec("llama.cpp") alias in
     // openai/transport.cpp is kept so `--provider llama.cpp` on the CLI still
-    // resolves to localhost:8080. Having BOTH a preset row and the custom-host
-    // flow was the confusing duplicate behind the "dead loops when prompted"
-    // report (the preset switched async and could be prompted before its
-    // /models fetch landed; the empty-model guard in submit_message now stops
-    // that dead-loop regardless).
+    // resolves to localhost:8080.
 }};
 
 // All presets, for the picker / iteration.

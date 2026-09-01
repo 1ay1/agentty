@@ -37,6 +37,7 @@
 #include <string>
 
 #include "agentty/io/http.hpp"
+#include "agentty/util/logx.hpp"
 #include "agentty/provider/provider.hpp"
 #include "agentty/runtime/msg.hpp"
 
@@ -238,6 +239,38 @@ inline StreamResult finish_stream(StreamOutcome o) {
     tr.retry_after = o.retry_after;
     tr.non_replayable = o.non_replayable;
 
+    // EVERY provider's turn ends here, so one line records how every turn
+    // ended — for all four dialects, without touching a single transport.
+    //
+    // ABOVE the AlreadyTerminated early-return: a normal streaming turn ends
+    // by seeing its terminal SSE event, so it takes that branch. Logging
+    // after it recorded only the failures and made a healthy turn invisible —
+    // which is precisely the "did my turn even run?" question a support
+    // thread starts with.
+    //
+    // A failing turn is Warn, so it also lands in the flight recorder and
+    // therefore in a crash dump, even with file logging off.
+    AGT_LOGL(Wire, end == StreamEnd::CleanClose
+                       || end == StreamEnd::AlreadyTerminated
+                   ? ::agentty::logx::Level::Debug
+                   : ::agentty::logx::Level::Warn,
+            "stream.end", "end={} http={} stop={} replayable={}",
+            // NAMES, not enum indices: a log a user pastes into a bug report
+            // has to be readable without the source tree open. `end=3` meant
+            // nothing to anyone; `end=transport_error` is the answer.
+            end == StreamEnd::AlreadyTerminated ? "already_terminated"
+          : end == StreamEnd::UserCancelled     ? "cancelled"
+          : end == StreamEnd::HttpError         ? "http_error"
+          : end == StreamEnd::TransportError    ? "transport_error"
+                                                : "clean_close",
+            o.http_status,
+            o.stop == StopReason::EndTurn      ? "end_turn"
+          : o.stop == StopReason::ToolUse      ? "tool_use"
+          : o.stop == StopReason::MaxTokens    ? "max_tokens"
+          : o.stop == StopReason::StopSequence ? "stop_sequence"
+                                               : "unspecified",
+            !o.non_replayable);
+
     if (end == StreamEnd::AlreadyTerminated) return tr;
     // All-paths cleanup (e.g. close an open tool block) before the terminal
     // event, on both success and error. Runs exactly once.
@@ -253,6 +286,11 @@ inline StreamResult finish_stream(StreamOutcome o) {
             tr.error = o.http_error_message
                            ? o.http_error_message()
                            : std::string{"HTTP "} + std::to_string(o.http_status);
+            // The message the USER sees, in the log verbatim — so a support
+            // thread can start from the real provider text instead of a
+            // screenshot of it.
+            AGT_LOG(Wire, Warn, "stream.http_error", "status={} msg={}",
+                    o.http_status, *tr.error);
             // Stamp the precise status on the Msg so the retry reducer can
             // classify via the typed provider::classify(HttpError) path.
             finish_turn_once(terminated, sink, o.stop, tr.error, o.retry_after,
@@ -262,6 +300,11 @@ inline StreamResult finish_stream(StreamOutcome o) {
             tr.error = o.transport_error_message
                            ? o.transport_error_message()
                            : std::string{"transport error"};
+            // The message the USER sees, in the log verbatim — so a support
+            // thread can start from the real provider text instead of a
+            // screenshot of it.
+            AGT_LOG(Wire, Warn, "stream.transport_error", "status={} msg={}",
+                    o.http_status, *tr.error);
             finish_turn_once(terminated, sink, o.stop, tr.error,
                              std::nullopt, {}, 0, o.non_replayable);
             return tr;

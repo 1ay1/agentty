@@ -2,6 +2,8 @@
 
 #include "agentty/provider/selection.hpp"
 
+#include "agentty/util/logx.hpp"
+
 #include <algorithm>
 #include <cstdlib>
 #include <mutex>
@@ -92,6 +94,12 @@ Selection parse_selection(std::string_view spec) {
     // OpenAI-compatible transport with the matching Endpoint.
     const ProviderPreset* p = spec.empty() ? preset_for(default_provider_id())
                                             : preset_for(spec);
+    // Bind the row ONCE, here, on every path out of this function. Downstream
+    // predicates then read identity off the row instead of re-deriving it from
+    // `openai_endpoint.label` — a display string the custom-host flow
+    // overwrites, which is how a Copilot-backed custom provider used to lose
+    // its identity and fall through to the generic /v1/models fetch.
+    s.row = p;
     if (p && p->kind() == Kind::Anthropic) {
         s.kind = Kind::Anthropic;
         return s;
@@ -114,6 +122,33 @@ Selection parse_selection(std::string_view spec) {
     s.kind = Kind::OpenAI;
     s.openai_endpoint = openai::Endpoint::from_spec(
         spec.empty() ? default_provider_id() : spec);
+
+    // A CUSTOM HOST that happens to name a provider we know is that provider.
+    //
+    // "Custom host" specs (raw `host[:port]`, or a full URL) have no registry
+    // row — preset_for() only matches canonical ids. So a user who added
+    // `api.githubcopilot.com` as a custom provider got the GENERIC OpenAI
+    // defaults: /v1/models instead of Copilot's /models, and none of the
+    // OAuth session handling. The picker showed no models at all, with no
+    // error, because an empty catalog and a failed fetch look identical.
+    //
+    // Match on HOST, which is the one part of a custom spec that is not a
+    // display string the user can rename. Only adopt rows for hosts we
+    // actually special-case (oauth_native backends); a generic hosted
+    // provider gains nothing from adoption and keeps the user's endpoint
+    // exactly as typed.
+    if (!p && !s.openai_endpoint.host.empty()) {
+        for (const auto& row : kProviders) {
+            if (!row.oauth_native) continue;
+            if (row.host != s.openai_endpoint.host) continue;
+            // Adopt the row's identity AND its endpoint columns — the paths
+            // are part of what makes it that provider.
+            s.row = &row;
+            s.openai_endpoint = openai::Endpoint::from_spec(row.id);
+            break;
+        }
+    }
+
     // Stamp the session's --auth-header override onto every OpenAI-family
     // endpoint, here rather than at the call sites so live provider switches
     // (picker / login reducers) keep it without knowing it exists.
@@ -170,6 +205,32 @@ void select(Selection s) {
         s.kind == Kind::OpenAI      ? s.openai_endpoint.label
       : s.kind == Kind::ExternalAcp ? s.acp_agent_id
                                     : std::string{default_provider_id()});
+    // Record WHICH backend every subsequent turn will use. select() is the one
+    // seam both the startup path and every later provider switch pass through,
+    // so one line here means a log can always answer "which provider/endpoint
+    // was active when this broke" — the question that cost the most time on
+    // the custom-host and Copilot reports, because the answer was invisible.
+    // Endpoint columns are meaningful ONLY for the OpenAI-family wire —
+    // Anthropic and ACP leave openai_endpoint at its struct defaults, and
+    // printing those (host=api.openai.com for an Anthropic turn) actively
+    // misleads whoever reads the log.
+    const bool http_wire = s.kind == Kind::OpenAI;
+    // Warn for the same retention reason as the startup banner: "which
+    // provider/endpoint was active" is the second question on every report,
+    // and a handful of lines per session is a fair price for always having it.
+    AGT_LOG(Wire, Warn, "provider.select",
+            "provider={} kind={} endpoint={} agent={}",
+            s.provider_id().empty()
+                ? (s.openai_endpoint.label.empty() ? std::string{"custom"}
+                                                   : s.openai_endpoint.label)
+                : std::string{s.provider_id()},
+            s.kind == Kind::Anthropic      ? "anthropic"
+          : s.kind == Kind::ExternalAcp    ? "acp"
+                                           : "openai",
+            http_wire ? s.openai_endpoint.host + s.openai_endpoint.path
+                      : std::string{"-"},
+            s.kind == Kind::ExternalAcp ? s.acp_agent_id : std::string{"-"});
+
     std::lock_guard lk(g_active_mu);
     g_active = std::move(s);
 }
@@ -294,33 +355,27 @@ void prewarm_active_provider() {
 
 std::vector<ModelInfo> list_models_for(const Selection& sel,
                                        const auth::AuthHeader& auth) {
-    // Dispatch on the SAME axes as the stream path so the picker and the
-    // transport can never disagree about which backend a selection names:
-    //   • ACP subprocess  — no catalog endpoint; the agent picks its own model.
-    //   • oauth_native     — ChatGPT/Codex: fetch from the account's /models via
-    //                        its in-process OAuth creds (ignores `auth`).
-    //   • OpenAI dialect   — the Endpoint's /v1/models with the bearer `auth`.
-    //   • Anthropic        — the Messages backend's model list with `auth`.
-    // Adding a provider does NOT touch this function unless it introduces a
-    // brand-new catalog mechanism — it inherits one of these by its Wire /
-    // oauth_native row fields.
-    if (sel.kind == Kind::ExternalAcp) return {};
-    if (sel.is_copilot())              return copilot::list_models();
-    if (sel.is_kimi())                 return kimi::list_models();
-    if (sel.is_oauth_native())         return chatgpt::list_models();
-    if (sel.kind == Kind::OpenAI) {
-        auto models = openai::list_models(auth, sel.openai_endpoint);
-        // Hosted API-key providers return an EMPTY list when no key is set yet
-        // (or the /models fetch fails / the network is down). Seed the picker
-        // with a small bundled catalog keyed on the provider id so a freshly
-        // selected provider shows sensible models immediately — the live fetch
-        // supersedes this the moment the account can be reached. Local /
-        // custom-host endpoints have no seed and legitimately stay empty.
-        if (models.empty())
-            return bundled_models_for(sel.openai_endpoint.label);
-        return models;
-    }
-    return anthropic::list_models(auth);
+    // Dispatch on the CARRIED provider id, not on a re-derived label. The
+    // three OAuth-native backends fetch their own catalogs because their
+    // endpoints expose metadata the generic parser discards (Copilot's
+    // policy/tier, ChatGPT's account line-up, Kimi's coding models).
+    //
+    // This used to compare `openai_endpoint.label`, which the custom-host flow
+    // overwrites — so a Copilot-backed custom host matched nothing, fell
+    // through to the generic /v1/models GET (Copilot serves /models), and the
+    // picker came up empty with no error.
+    if (sel.kind == Kind::ExternalAcp) return {};   // the agent picks its own
+    if (sel.is_copilot()) return copilot::list_models();
+    if (sel.is_kimi())    return kimi::list_models();
+    if (sel.is_chatgpt()) return chatgpt::list_models();
+    if (sel.kind == Kind::Anthropic) return anthropic::list_models(auth);
+
+    auto models = openai::list_models(auth, sel.openai_endpoint);
+    // Hosted providers return nothing before a key is set (or when the fetch
+    // fails). Seed from the bundled catalog so the picker is never stranded
+    // empty; custom hosts have no seed and legitimately stay empty.
+    if (models.empty()) return bundled_models_for(sel.openai_endpoint.label);
+    return models;
 }
 
 std::vector<int> filter_provider_indices(std::string_view query) {

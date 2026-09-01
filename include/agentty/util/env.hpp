@@ -48,8 +48,6 @@ enum class Var : std::uint8_t {
     ClipboardCmd,            // AGENTTY_CLIPBOARD_CMD (shell cmd → image bytes on stdout)
 
     // ── Debug ─────────────────────────────────────────────────────────────────────
-    DebugApi,                // AGENTTY_DEBUG_API=1  (dump streaming events)
-    DebugFile,               // AGENTTY_DEBUG_FILE   (target path for above)
 
     // ── Smart Mode session pin ────────────────────────────────
     SmartMode,               // AGENTTY_SMART_MODE=0|1    (session master-switch pin)
@@ -70,8 +68,6 @@ inline constexpr std::array kCatalog = {
     VarSpec{Var::NoPrewarm,        "AGENTTY_NO_PREWARM"},
     VarSpec{Var::AirgapSsh,        "AGENTTY_AIRGAP_SSH"},
     VarSpec{Var::ClipboardCmd,     "AGENTTY_CLIPBOARD_CMD"},
-    VarSpec{Var::DebugApi,         "AGENTTY_DEBUG_API"},
-    VarSpec{Var::DebugFile,        "AGENTTY_DEBUG_FILE"},
     VarSpec{Var::SmartMode,        "AGENTTY_SMART_MODE"},
 };
 
@@ -105,7 +101,6 @@ consteval bool every_var_has_row() {
         Var::NoPrewarm,
         Var::AirgapSsh,
         Var::ClipboardCmd,
-        Var::DebugApi, Var::DebugFile,
         Var::SmartMode,
     };
     if (std::size(kAll) != kCatalog.size()) return false;

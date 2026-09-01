@@ -311,7 +311,10 @@ git clone --recursive git@github.com:1ay1/agentty.git
 cd agentty && cmake -B build && cmake --build build -j
 ```
 
-**Named presets** (reproducible configs, no `-D` soup):
+**Named presets** (reproducible configs, no `-D` soup) — **use these if you are
+going to edit the code**: `dev` rebuilds in ~0.7 s after a one-line change vs
+~28 s for the plain `cmake -B build` above, because it skips LTO. See
+[Building from source](https://agentty.org/docs/building#the-development-loop).
 
 ```bash
 cmake --preset dev        && cmake --build --preset dev        # fast Debug loop (no LTO, ccache)

@@ -56,6 +56,9 @@
 #include <vector>
 
 #include <nlohmann/json.hpp>
+#include "agentty/util/logx.hpp"
+
+
 
 namespace agentty::mcp {
 
@@ -1209,6 +1212,10 @@ std::vector<tools::ToolDef> mcp_tools(PoolHandle& out_pool) {
                 "mcp: server '%s' did not connect within the deadline — skipping\n",
                 pend.name.c_str());
             pool->connect_errors[pend.name] = "did not connect within deadline";
+            // stderr is invisible under the TUI, so this used to vanish: a
+            // plugin that silently failed to connect just meant its tools
+            // "weren't there", with no way to tell that from a config typo.
+            AGT_LOG(Mcp, Warn, "mcp.connect", "server={} result=timeout", pend.name);
             // Detach so the still-handshaking worker can finish and clean up
             // without blocking startup; its result is dropped. Terminate-proof
             // wrapper: any throw out of a bare detached lambda is process
@@ -1223,11 +1230,17 @@ std::vector<tools::ToolDef> mcp_tools(PoolHandle& out_pool) {
             std::fprintf(stderr,
                 "mcp: server '%s' connected (%zu tools, %zu resources, %zu prompts)\n",
                 pend.name.c_str(), p->list().size(), p->resources().size(), p->prompts().size());
+            AGT_LOG(Mcp, Info, "mcp.connect",
+                    "server={} result=ok tools={} resources={} prompts={}",
+                    pend.name, p->list().size(), p->resources().size(),
+                    p->prompts().size());
             pool->registry.add(std::move(p));
         } else {
             // make_provider returned nullptr — spawn/handshake failed. The
             // specific reason went to stderr; record a generic marker so the
             // model shows this server as failed rather than silently absent.
+            AGT_LOG(Mcp, Warn, "mcp.connect", "server={} result=spawn_failed",
+                    pend.name);
             if (!pool->connect_errors.count(pend.name))
                 pool->connect_errors[pend.name] = "failed to start (see stderr log)";
         }

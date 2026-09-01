@@ -23,10 +23,113 @@ AppleClang tops out at C++23 — building the tests (`AGENTTY_BUILD_TESTS`) requ
 ```bash
 git clone --recursive git@github.com:1ay1/agentty.git
 cd agentty
-cmake -B build
-cmake --build build -j
-./build/agentty
+cmake --preset release
+cmake --build build/release -j
+./build/release/agentty
 ```
+
+:::tip Use the presets, not a hand-rolled `-B build`
+`cmake -B build` **ignores `CMakePresets.json`** and gives you a Release +
+LTO + Makefiles configuration. That is fine for a one-off binary and actively
+painful for development — LTO re-links the whole executable on every edit.
+If you are going to change code, jump to
+[The development loop](#the-development-loop) instead.
+:::
+
+## The development loop
+
+If you are editing agentty, this is the section that matters. The `dev` preset
+(Ninja + Debug + ccache, no LTO) turns the edit→build→test cycle from ~30
+seconds into under two:
+
+```bash
+cmake --preset dev                                 # once
+cmake --build build/dev --target agentty -j 12     # after each edit
+./build/dev/agentty
+```
+
+Pass `--target agentty`. Without it the build also makes every example,
+benchmark and submodule tool — measured at 19.6 s versus 0.65 s for the one
+target you actually care about.
+
+**Measured on an 8-core Apple M-series**, changing one `.cpp` and rebuilding:
+
+| Configuration | Incremental rebuild |
+|---------------|--------------------:|
+| `cmake -B build` (Release + LTO + Make) | **28.1 s** |
+| `cmake --preset dev` (Debug + Ninja + ccache) | **0.66 s** |
+
+That is a **43×** difference, and it is entirely the link step: LTO must
+re-optimize the whole binary for a one-line change, while a Debug link is
+nearly free. The first `dev` build is a normal cold compile (~4 min); every
+one after it is sub-second.
+
+Three things make it fast, all already configured:
+
+- **Ninja** — a much tighter dependency graph than Make, and it parallelises
+  the objlib fan-out properly.
+- **No LTO** — the single biggest cost in an incremental Release build.
+- **ccache** — auto-detected by `cmake/AgenttyToolchain.cmake`. Switching
+  branches or rebasing mostly hits the cache instead of recompiling.
+
+### Running tests fast
+
+Tests live in one consolidated binary plus a handful of standalone ones. Build
+and run only what your change touches:
+
+```bash
+cmake --build build/dev --target agentty_tests -j 12   # ~1.3 s incremental
+./build/dev/agentty_tests -tc="*framing*"              # ~0.16 s
+```
+
+`-tc` takes a doctest pattern and matches on test-case *names*, so
+`-tc="*conformance*"` or `-tc="*framing*"` narrows to one area. A pattern that
+matches nothing reports `0 passed` and still exits 0 — check the case count.
+
+A few suites are separate executables (they need their own process to set
+environment before anything initialises). Run those through ctest by name:
+
+```bash
+cd build/dev && ctest -R "logx"      # logx_test, logx_redaction_test, logx_format_test
+```
+
+For the pre-commit gate, run everything **except** the three long fuzz/replay
+tests:
+
+```bash
+cd build/dev
+ctest -j 8 -E "reveal_scrollback_test|scrollback_wire_fuzz|frozen_invariant_fuzz"
+```
+
+| Scope | Tests | Time |
+|-------|------:|-----:|
+| One case (`-tc=…`) | 1–2 | **0.16 s** |
+| Everything but the slow three | 432 | **26 s** |
+| Full suite | 435 | **110 s** |
+
+Those three account for nearly all of it — `reveal_scrollback_test` alone is
+120 s of CPU, `scrollback_wire_fuzz` 86 s, `frozen_invariant_fuzz` 50 s. They
+are deep property/fuzz runs worth having in CI and rarely worth waiting for
+locally. Everything else is sub-second.
+
+:::warn A green run proves nothing if nothing ran
+Check the assertion count, not just the status line. doctest happily reports
+`8 passed` for eight cases that asserted zero times — which is exactly what
+happened when a set of log tests guarded on an environment variable the suite
+did not set. `assertions: 0` is the tell.
+:::
+
+### The other presets
+
+```bash
+cmake --preset release     # -O3 + thin LTO — the optimized local binary
+cmake --preset ci          # mirrors the Linux CI gate
+cmake --preset sanitizer   # ASan + UBSan over agentty's own-logic set
+cmake --preset standalone  # portable binary, no third-party shared libs
+```
+
+Each builds into `build/<preset>/`, so they coexist — you can keep a `dev`
+tree hot while a `release` tree stays warm for benchmarking.
 
 ## Standalone (static) build
 

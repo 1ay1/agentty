@@ -471,7 +471,7 @@ state — flagging because any change that makes the renderer assume
 - `src/provider/anthropic/transport.cpp:105+` (debug log file, not tty)
 
 Children get stdin from `/dev/null`, stdout+stderr dup2'd to a pipe.
-No child writes to the parent's fd 1. `AGENTTY_DEBUG_API` writes to a
+No child writes to the parent's fd 1. `AGENTTY_LOG=wire=trace` writes to a
 file. No path was found by which a subprocess could corrupt the
 terminal mid-frame.
 

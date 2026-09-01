@@ -1,5 +1,7 @@
 #include "agentty/io/persistence.hpp"
 
+#include "agentty/util/logx.hpp"
+
 #include <atomic>
 #include <condition_variable>
 #include <cstdio>
@@ -1096,12 +1098,25 @@ static void save_thread_sync(const Thread& t) {
     // exception as a belt-and-suspenders guard against future regressions —
     // a silently-skipped save beats a process-terminating uncaught throw.
     try {
-        (void)write_json_atomic(threads_dir() / (t.id.value + ".json"), j.dump(2));
+        const bool ok = write_json_atomic(
+            threads_dir() / (t.id.value + ".json"), j.dump(2));
+        // A failed save loses the user's conversation with nothing on screen
+        // to say so — the worst kind of silent failure, and previously
+        // invisible because the result was discarded.
+        if (!ok)
+            AGT_LOG(Persist, Error, "thread.save",
+                    "result=write_failed id={} messages={}",
+                    t.id.value, t.messages.size());
+        else
+            AGT_LOG(Persist, Debug, "thread.save", "result=ok id={} messages={}",
+                    t.id.value, t.messages.size());
         // Keep the metadata index in lock-step with the file we just
         // wrote so the next startup's fast path picks it up.
         reindex_thread(t);
-    } catch (const nlohmann::json::exception&) {
+    } catch (const nlohmann::json::exception& e) {
         // caller can't react; best-effort persistence is acceptable here.
+        AGT_LOG(Persist, Error, "thread.save", "result=json_error id={} err={}",
+                t.id.value, e.what());
     }
 }
 
@@ -1395,7 +1410,12 @@ void save_settings(const store::Settings& s) {
         if (!s.smart_utility_effort.empty())   sm["utility_effort"]   = s.smart_utility_effort;
         j["smart"] = std::move(sm);
     }
-    (void)write_json_atomic(data_dir() / "settings.json", j.dump(2));
+    // A failed settings write silently discards the user's provider keys,
+    // model choice and preferences — they simply "don't stick" across
+    // restarts, with nothing to explain why. The result was discarded here.
+    if (!write_json_atomic(data_dir() / "settings.json", j.dump(2)))
+        AGT_LOG(Persist, Error, "settings.save", "result=write_failed path={}",
+                (data_dir() / "settings.json").string());
 }
 
 ThreadId new_id() {

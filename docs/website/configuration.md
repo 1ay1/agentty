@@ -10,6 +10,10 @@ agentty is configured through flags, environment variables, and two on-disk path
 
 ## Environment variables
 
+The most commonly used ones are below. For the **complete** list — every
+variable agentty reads, grouped by subsystem — see
+**[Environment variables](/docs/environment)**.
+
 | Variable | Effect |
 |---|---|
 | `ANTHROPIC_API_KEY` | Claude API key used when no -k flag is passed. Second-highest priority in credential resolution. |
@@ -54,9 +58,8 @@ agentty is configured through flags, environment variables, and two on-disk path
 | `AGENTTY_RAG_PROACTIVE / AGENTTY_RAG_PROACTIVE_MIN` | Pre-turn auto-retrieval that injects a `<retrieved-context>` block when a query looks knowledge-shaped. **Off by default** (explicit opt-in — the `search_docs` tool is usually more economical); `=1` enables for the session, or turn it on persistently via Ctrl+K → RAG. `_MIN` is the CRAG-calibrated confidence bar to inject (default `0.35`). |
 | `AGENTTY_RAG_PROACTIVE_BUDGET_MS` | Fast-path **hedge** for the proactive pre-turn retrieval. The submit thread waits at most this long for the funnel; if it lands, grounding is injected inline with zero added latency. If it overruns the submit thread never blocks — the turn enters its normal streaming state (status shows *retrieving context…*, the UI never feels hung) and the stream launch is HELD behind a background retrieval that injects the block **same-turn** the moment it lands. Grounding is always for the question just asked; it is never dropped or deferred to a later turn. Default `250`; `0` skips the inline hedge. |
 | `BM25_USE_STEMMER / BM25_HEADING_BOOST` | Lexical tuning. Porter stemming ("run/runs/running" match) is **on by default**; set `BM25_USE_STEMMER=0` to disable (e.g. a code-symbol corpus). `BM25_HEADING_BOOST` (default 3) is how many times a chunk's heading breadcrumb is folded into its BM25 tokens — heading matches out-score body matches; 1 disables the boost. |
-| `AGENTTY_LOG` | Structured diagnostic log. RUST_LOG-style filter: `debug`, `wire=trace`, `warn,auth=debug`, `off`. Writes to `AGENTTY_LOG_FILE` or `~/.agentty/agentty.log`. Free when unset. See **[Logging & diagnostics](/docs/logging)**. |
+| `AGENTTY_LOG` | **The** diagnostic knob — one log, every subsystem. RUST_LOG-style filter: `trace`, `debug`, `wire=trace`, `warn,auth=debug`, `off`. Channels: `wire` (raw request/response bytes, untruncated, tagged by dialect), `auth`, `persist`, `tool`, `ui`, `rag`, `mcp`, `acp`, `smart`, `net`, `general`. **Release builds keep warnings + errors by default** (~2 lines per healthy session), so `agentty diagnostics` produces a useful bug report with no setup; non-release builds capture everything. When a model "ignores tools", sends empty tool arguments, or a turn fails in a way that looks like model quality, `AGENTTY_LOG=wire=trace` shows the actual bytes instead of leaving you to guess. The file holds your conversation (prompts, file contents, tool results); request headers are not logged, so API keys stay out of it. See **[Logging & diagnostics](/docs/logging)**. |
 | `AGENTTY_LOG_FILE` | Explicit path for the structured log (default `$XDG_STATE_HOME/agentty/agentty.log`). |
-| `AGENTTY_DEBUG_API / AGENTTY_DEBUG_FILE` | Set `AGENTTY_DEBUG_API=1` to dump **raw** provider request/response bytes (request line + body, status, every chunk) to `AGENTTY_DEBUG_FILE` (default `./agentty-api.log`) — for every wire, not just Anthropic. The byte-level companion to `AGENTTY_LOG=wire=trace`. |
 | `AGENTTY_DEBUG_LOG` | Legacy single-file debug var: sets the log file **and** implies `AGENTTY_LOG=debug` when the latter is unset. Prefer `AGENTTY_LOG`. |
 | `AGENTTY_SMART_MODE` | Session pin for the Smart Mode master switch: `1` forces on, `0` forces off, for that process only. Never persisted (safe for CI / benchmarks). Unset = your saved setting governs. |
 | `AGENTTY_SMART_NO_INTERNAL` | Escape hatch: keep engine-internal calls (compaction summary, thread title) on the main model instead of the Utility slot. For bisecting a routing bug — Smart Mode's three behaviours are otherwise one switch. |

@@ -15,6 +15,8 @@
 
 #include "agentty/rag/rag_adapter.hpp"
 
+#include "agentty/util/logx.hpp"
+
 // agentty's retrieval engine is rag-cpp. On platforms where rag-cpp isn't
 // buildable yet (MSVC — see CMakeLists.txt), AGENTTY_HAS_RAGCPP is 0 and this
 // TU compiles to a tiny no-op implementation of the public boundary so the
@@ -1597,6 +1599,16 @@ Retrieval Retriever::retrieve(const std::string& query, int k, bool skip_docs) {
     } catch (...) {
         out.error = "retrieval error";
     }
+    // Retrieval quietly returning nothing looks identical to "the docs have
+    // no answer", so a broken index / missing embedder / unreachable Ollama
+    // reads as a model failure. Record the outcome and the pipeline that
+    // produced it.
+    AGT_LOGL(Rag, out.error.empty() ? ::agentty::logx::Level::Debug
+                                    : ::agentty::logx::Level::Warn,
+             "rag.retrieve", "k={} passages={} mode={} err={}",
+             k, out.passages.size(),
+             out.mode.empty() ? std::string{"-"} : out.mode,
+             out.error.empty() ? std::string{"-"} : out.error);
     return out;
 }
 

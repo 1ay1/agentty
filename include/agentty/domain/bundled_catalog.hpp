@@ -81,8 +81,15 @@ inline void add_1m_variants(std::vector<ModelInfo>& v) {
         v = { mk("gpt-4o"), mk("gpt-4.1"), mk("o4-mini"),
               mk("claude-sonnet-4"), mk("gemini-2.5-pro") };
     } else if (provider_id == "kimi") {
-        v = { mk("kimi-k2-turbo-preview"), mk("kimi-k2-0905-preview"),
-              mk("kimi-k2-0711-preview") };
+        // Kimi K2 ships a 256k window. Stated explicitly because Kimi's
+        // /models payload carries no context length, so nothing overwrites
+        // this later — leaving it on the 200k default silently under-reported
+        // the window by 56k and made the context gauge (and compaction
+        // threshold) fire early on every Kimi turn.
+        constexpr int k256 = 262144;
+        v = { mk("kimi-k2-turbo-preview", nullptr, k256),
+              mk("kimi-k2-0905-preview", nullptr, k256),
+              mk("kimi-k2-0711-preview", nullptr, k256) };
     } else if (provider_id == "xai") {
         v = { mk("grok-4.6"), mk("grok-4"), mk("grok-code-fast-1"),
               mk("grok-3"), mk("grok-3-mini") };

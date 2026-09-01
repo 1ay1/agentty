@@ -261,11 +261,10 @@ Step host_probed(Model m, HostProbed r) {
 // account_provider_id() helper below but is self-contained so sign_out
 // (defined above it) needs no forward reference across linkage boundaries.
 static std::string signout_provider_id(const provider::Selection& sel) {
-    if (sel.is_copilot())                      return "copilot";
-    if (sel.is_kimi())                         return "kimi";
-    if (sel.is_chatgpt())                      return "chatgpt";
-    if (sel.kind == provider::Kind::Anthropic) return "anthropic";
-    if (sel.kind == provider::Kind::OpenAI)    return sel.openai_endpoint.label;
+    // The carried registry row IS the identity. Only an unrecognised custom
+    // host has no row, and it keys its account on the endpoint label.
+    if (const auto id = sel.provider_id(); !id.empty()) return std::string{id};
+    if (sel.kind == provider::Kind::OpenAI) return sel.openai_endpoint.label;
     return {};
 }
 
@@ -364,10 +363,7 @@ namespace {
 // layer can snapshot; OpenAI-family keys already switch per-endpoint via the
 // picker.
 std::string account_provider_id(const provider::Selection& sel) {
-    if (sel.is_copilot())                 return "copilot";
-    if (sel.is_kimi())                    return "kimi";
-    if (sel.is_chatgpt())                 return "chatgpt";
-    if (sel.kind == provider::Kind::Anthropic) return "anthropic";
+    if (const auto id = sel.provider_id(); !id.empty()) return std::string{id};
     // Any OpenAI-family endpoint — a hosted API-key PRESET (mistral/groq/…) OR
     // a user-added CUSTOM HOST — keys its account(s) on the endpoint label ==
     // the provider id under which its bearer key(s) live in provider_keys.

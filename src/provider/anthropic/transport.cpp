@@ -24,6 +24,7 @@
 #include "agentty/io/http.hpp"
 #include "agentty/provider/stream_epilogue.hpp"
 #include "agentty/provider/wire.hpp"
+#include "agentty/provider/debug.hpp"
 #include "agentty/provider/wire_supersede.hpp"
 #include "agentty/tool/registry.hpp"
 #include "agentty/util/dbglog.hpp"
@@ -504,7 +505,7 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
         body_str.replace(pos, kDumpedPlaceholder.size(), messages_str);
     }
 
-    dbg("==== request ====\n%s\n==== /request ====\n", body_str.c_str());
+    AGT_LOG(Wire, Trace, "anthropic.request.body", "raw={}", body_str);
 
     StreamCtx ctx;
     ctx.sink = std::move(sink);
@@ -560,6 +561,7 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
     };
     handler.on_buffered_wait = [&] { ctx.sink(StreamBufferedWait{}); };
     handler.on_chunk = [&](std::string_view chunk) -> bool {
+        provider::dbg_chunk("anthropic-messages", chunk);
         if (is_success) {
             feed_sse(ctx, chunk.data(), chunk.size());
         } else {
@@ -603,14 +605,15 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
     auto result = http::default_client().stream(hreq, std::move(handler),
                                                 tos, std::move(cancel));
 
-    dbg("==== http status=%d transport=%s thinking_deltas=%d ====\n",
-        http_status, result ? "ok" : result.error().render().c_str(),
-        ctx.thinking_deltas);
+    AGT_LOG(Wire, Debug, "anthropic.response",
+            "status={} transport={} thinking_deltas={}",
+            http_status, result ? std::string{"ok"} : result.error().render(),
+            ctx.thinking_deltas);
 
     if (!result) {
-        dbg("error body: %s\n", error_body.c_str());
+        AGT_LOG(Wire, Debug, "anthropic.error.body", "raw={}", error_body);
     } else if (!is_success) {
-        dbg("error body: %s\n", error_body.c_str());
+        AGT_LOG(Wire, Debug, "anthropic.error.body", "raw={}", error_body);
     }
 
     // Whole post-loop through the SHARED epilogue: classify the exit and emit
