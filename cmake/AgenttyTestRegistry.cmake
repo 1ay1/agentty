@@ -50,6 +50,10 @@ function(_agentty_test_link_full name)
     target_include_directories(${name} PRIVATE ${CMAKE_SOURCE_DIR}/include)
     target_compile_definitions(${name} PRIVATE
         AGENTTY_VERSION="${PROJECT_VERSION}"
+        # Source path for the picker row-style convention guard: those rules
+        # are view-layer style constants with no runtime seam to assert
+        # against, so the test reads the source.
+        AGENTTY_PICKERS_SRC="${CMAKE_SOURCE_DIR}/src/runtime/view/pickers.cpp"
         AGENTTY_MCP=1)
     target_link_libraries(${name} PRIVATE
         maya::maya

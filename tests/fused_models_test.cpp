@@ -4,6 +4,9 @@
 
 #include "agentty/runtime/fused_models.hpp"
 
+#include <fstream>
+#include <sstream>
+
 #include <doctest/doctest.h>
 
 using namespace agentty;
@@ -539,4 +542,53 @@ TEST_CASE("fused: rows carry a precomputed capability tier") {
             CHECK(!r.model_label.empty());             // and the name is there
         }
     }
+}
+
+// ── Picker row-style convention (source-level guard) ────────────────────
+//
+// Three rules hold across every picker, and all three were violated somewhere
+// before this session:
+//
+//   1. The PRIMARY label renders at full foreground on non-selected rows.
+//      Dimming every row but one inverts the hierarchy: the list reads as
+//      uniformly unavailable while the trailing reference chip out-shouts the
+//      name you are actually choosing between.
+//   2. The TRAILING cell is `trailing_secondary`, so it yields space FIRST
+//      under width pressure. maya's default is the opposite (for rows like
+//      the file picker's diffstat, where the trailing cell matters more), and
+//      inheriting it truncated model names to preserve "200k ★ ✦".
+//   3. Badge columns are padded in DISPLAY COLUMNS, never bytes — a custom
+//      host is user-named and may hold CJK or emoji.
+//
+// These are view-layer style constants with no runtime seam to assert
+// against, so this reads the source. A grep-shaped test is unusual, but the
+// alternative is a convention that silently rots — which is exactly what
+// happened to rules 1 and 2 across four pickers.
+TEST_CASE("pickers: primary labels are not dimmed, trailing yields first") {
+    const char* path = AGENTTY_PICKERS_SRC;
+    std::ifstream in(path);
+    REQUIRE_MESSAGE(in.good(), "cannot open " << path);
+    std::stringstream ss;
+    ss << in.rdbuf();
+    const std::string src = ss.str();
+    REQUIRE(!src.empty());
+
+    auto count = [&](std::string_view needle) {
+        std::size_t n = 0, pos = 0;
+        while ((pos = src.find(needle, pos)) != std::string::npos) { ++n; ++pos; }
+        return n;
+    };
+
+    // Rule 1: no picker dims its primary label on the non-active branch.
+    // (`fg_dim(muted)` on a TRAILING cell is correct and not matched here.)
+    CHECK(count("leading_style  = active ? fg_bold(fg) : fg_of(muted)") == 0);
+    CHECK(count("leading_style = active ? fg_bold(fg) : fg_of(muted)") == 0);
+    CHECK(count("leading_style  = is_current ? fg_bold(info) : fg_of(muted)") == 0);
+
+    // Rule 2: every picker that shows a trailing chip marks it secondary.
+    // Model, provider, thread list, command palette.
+    CHECK(count("trailing_secondary = true") >= 4);
+
+    // Rule 3: badge padding measures columns, not bytes.
+    CHECK(src.find("maya::string_width(r.label)") != std::string::npos);
 }

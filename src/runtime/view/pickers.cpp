@@ -719,7 +719,12 @@ Element provider_picker(const Model& m) {
             const bool confirming = (picker->confirm_remove == std::string{p->id});
             auto [note, note_color] = preset_note(*p, active);
             row.leading        = std::string{p->label} + "  " + std::string{p->blurb};
-            row.leading_style  = active ? fg_bold(fg) : fg_of(muted);
+            // Primary content renders at full foreground (same rule as the
+            // model picker): dimming EVERY non-active row to make one stand
+            // out inverts the hierarchy — it makes the whole list read as
+            // unavailable while the trailing status chip out-shouts the name.
+            // Bold + the ● marker is enough to find the active row.
+            row.leading_style  = active ? fg_bold(fg) : fg_of(fg);
             if (confirming) {
                 // Del/d armed on a preset that has a saved key — second press
                 // signs out (clears the key), the preset itself stays.
@@ -733,7 +738,7 @@ Element provider_picker(const Model& m) {
         } else if (const auto* agent = r.acp()) {
             const bool active = (agent->id == active_id);
             row.leading        = agent->id + "  external ACP agent (" + agent->command + ")";
-            row.leading_style  = active ? fg_bold(fg) : fg_of(muted);
+            row.leading_style  = active ? fg_bold(fg) : fg_of(fg);
             row.trailing       = "\xe2\x97\x8f agent";
             row.trailing_style = fg_of(info);
             row.active         = active;
@@ -741,7 +746,7 @@ Element provider_picker(const Model& m) {
             const bool active = (*spec == active_id);
             const bool confirming = (picker->confirm_remove == *spec);
             row.leading        = *spec + "  custom OpenAI-compatible host";
-            row.leading_style  = active ? fg_bold(fg) : fg_of(muted);
+            row.leading_style  = active ? fg_bold(fg) : fg_of(fg);
             if (confirming) {
                 row.trailing       = "\xe2\x9c\x97 press again to remove";
                 row.trailing_style = fg_of(warn);
@@ -758,6 +763,12 @@ Element provider_picker(const Model& m) {
             row.trailing_style = fg_of(info);
         }
         row.selected = sel;
+        // Under width pressure the STATUS chip gives way, not the provider
+        // name — the name is what you select; "✓ signed in · accounts" is
+        // reference data. Same policy as the command palette and the model
+        // picker; maya's default (leading yields first) is for rows where the
+        // trailing cell matters more, like the file picker's diffstat.
+        row.trailing_secondary = true;
         cfg.rows.push_back(std::move(row));
         ++i;
     }
@@ -826,7 +837,9 @@ Element thread_list(const Model& m) {
             // get a two-space gutter so titles stay column-aligned.
             row.leading        = (is_current ? "\xe2\x97\x8f " : "  ")
                                + (t.title.empty() ? "(untitled)" : t.title);
-            row.leading_style  = is_current ? fg_bold(info) : fg_of(muted);
+            // Thread TITLES are what you are choosing between — full
+            // foreground. Same hierarchy rule as the model/provider pickers.
+            row.leading_style  = is_current ? fg_bold(info) : fg_of(fg);
             if (confirming) {
                 row.badge       = "\xe2\x9a\xa0";           // ⚠
                 row.badge_style = fg_of(warn);
@@ -838,6 +851,9 @@ Element thread_list(const Model& m) {
                 row.trailing_style = fg_dim(muted);
             }
             row.selected = (i == picker->index);
+            // The TITLE is what you are choosing; the timestamp is reference
+            // data and yields first on a narrow terminal.
+            row.trailing_secondary = true;
             cfg.rows.push_back(std::move(row));
             ++i;
         }
