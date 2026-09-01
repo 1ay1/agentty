@@ -14,6 +14,7 @@
 #include "agentty/workspace/files.hpp"
 #include "agentty/workspace/symbols.hpp"
 #include "agentty/util/modelsdev.hpp"
+#include "agentty/tool/subagent.hpp"   // set_smart: push pins to the task router
 
 #include <cstdlib>
 #include <vector>
@@ -146,6 +147,28 @@ std::pair<Model, maya::Cmd<Msg>> init() {
     load_slot(m.d.smart.strategic,      settings.smart_strategic_model, settings.smart_strategic_effort);
     load_slot(m.d.smart.implementation, settings.smart_impl_model,      settings.smart_impl_effort);
     load_slot(m.d.smart.utility,        settings.smart_utility_model,   settings.smart_utility_effort);
+    // Push the rehydrated config down to the subagent router NOW.
+    //
+    // `task` runs on a worker thread with no access to this Model, so the
+    // router keeps its own process-global snapshot (tools::subagent::Config::
+    // smart). main() installs that config before settings are read, with a
+    // DEFAULT-CONSTRUCTED RoleConfig — enabled=false, no slots. Until
+    // something pushes the real one down, every delegation resolves as if
+    // Smart Mode were off, silently ignoring the user's pins.
+    //
+    // The two paths that used to do it are both conditional: persist_settings
+    // (only if you EDIT Smart Mode this session) and the ModelsLoaded reducer
+    // arm (only on a SUCCESSFUL catalog fetch — it early-returns on a stale
+    // provider id, a fetch error, and an empty list). A user with pins saved
+    // from a previous session whose fetch fails therefore delegates on the
+    // auto-router's pick, which on Copilot can be a Responses-only
+    // `gpt-5.x-codex` id that 400s on the Chat endpoint. Unconditional here.
+    tools::subagent::set_smart(m.d.smart);
+    // Same reasoning for the candidate pool the auto-router ranks over: it is
+    // otherwise only ever set from the ModelsLoaded arm, so a failed fetch
+    // left workers ranking over an EMPTY list. Seed it with what we have now
+    // (the bundled/seeded catalog); ModelsLoaded refreshes it on success.
+    tools::subagent::set_candidates(m.d.available_models);
     // Review UI: whether the persistent changes strip renders after edits.
     m.d.show_changes_strip = settings.show_changes_strip;
     m.d.show_reasoning     = settings.show_reasoning;
