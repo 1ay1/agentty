@@ -264,3 +264,83 @@ TEST_CASE("hosted models share agent prompt policy") {
     CHECK(provider::system_prompt_for(local) != full);
 }
 
+
+// Auth capabilities live on the registry row, not in a chain of provider-name
+// compares. Before this, login.cpp / modal.cpp / pickers.cpp held ~26 string
+// comparisons against "anthropic" / "copilot" / "chatgpt" / "kimi" to decide
+// which OAuth flow to run, whether to show the method menu, what to do with
+// the cached auth header on account switch, and which model to default to.
+// That is precisely the `if openai {} else if anthropic {}` shape the registry
+// exists to delete: adding a provider meant grepping for its peers.
+//
+// These assertions pin the CAPABILITIES so a future row can't quietly
+// contradict the code that reads them. The structural invariants themselves
+// are static_asserts in registry.hpp (auth_caps_consistent) — this covers the
+// semantic mapping those can't see.
+TEST_CASE("provider registry carries the auth capabilities login reads") {
+    using namespace agentty::provider;
+
+    auto row = [](std::string_view id) -> const ProviderDescriptor& {
+        const auto* p = preset_for(id);
+        REQUIRE(p != nullptr);
+        return *p;
+    };
+
+    // ── Anthropic: the only method menu (OAuth subscription vs API key) ──
+    {
+        const auto& p = row("anthropic");
+        CHECK(p.method_menu);
+        CHECK(p.oauth_proactive_refresh);
+        CHECK(!p.device_login);
+        CHECK(!p.token_in_transport);   // creds resolve to a real header
+        CHECK(p.default_model == "claude-opus-4-5");
+    }
+
+    // ── ChatGPT: bespoke Codex flow, token held by its own transport ──
+    // Also the row that used to claim is_local=true as a stand-in for "needs
+    // no API key", which forced an `is_local && !oauth_native` workaround at
+    // the one site wanting the literal meaning.
+    {
+        const auto& p = row("chatgpt");
+        CHECK(p.oauth_native);
+        CHECK(p.token_in_transport);
+        CHECK(!p.device_login);         // oauth_native owns the launch path
+        CHECK(!p.method_menu);
+        CHECK(!p.is_local);             // chatgpt.com is not localhost
+    }
+
+    // ── Copilot / Kimi: the shared generic device launcher ──────────
+    for (std::string_view id : {"copilot", "kimi"}) {
+        const auto& p = row(id);
+        CHECK(p.device_login);
+        CHECK(p.token_in_transport);
+        CHECK(!p.method_menu);
+        CHECK(!p.is_local);
+    }
+
+    // ── Local backends never authenticate ───────────────────────────
+    {
+        const auto& p = row("ollama");
+        CHECK(p.is_local);
+        CHECK(!p.device_login);
+        CHECK(!p.method_menu);
+        CHECK(!p.token_in_transport);
+    }
+
+    // ── Keyed hosted providers: no OAuth machinery at all ───────────
+    for (std::string_view id : {"groq", "mistral", "openrouter"}) {
+        const auto& p = row(id);
+        CHECK(p.auth == AuthStyle::ApiKey);
+        CHECK(!p.device_login);
+        CHECK(!p.method_menu);
+        CHECK(!p.token_in_transport);
+        CHECK(!p.oauth_proactive_refresh);
+    }
+
+    // ── is_local means LOCALHOST, exclusively ───────────────────────
+    // The regression this guards: a remote provider marking itself local to
+    // mean "keyless". AuthStyle::None already says that.
+    for (const auto& p : providers())
+        if (p.is_local)
+            CHECK(p.host.empty() || p.host == "localhost");
+}

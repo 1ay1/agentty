@@ -222,7 +222,8 @@ std::pair<Model, maya::Cmd<Msg>> init() {
         && provider::active().kind == provider::Kind::Anthropic) {
         bool cred_elsewhere = false;
         for (const auto& p : provider::providers()) {
-            if (p.id == "anthropic") continue;
+            // Skip the provider we already know is unauthed (the active one).
+            if (p.id == provider::default_provider_id()) continue;
             const auto src = provider::auth_source(p, settings);
             if (src == provider::AuthSource::Saved
                 || src == provider::AuthSource::Env) {

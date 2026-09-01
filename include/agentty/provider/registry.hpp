@@ -100,7 +100,12 @@ struct ProviderDescriptor {
     Wire             wire;       // on-the-wire dialect (transport branches here).
     Lifetime         lifetime;   // long-lived (owns state) vs rebuilt per call.
     AuthStyle        auth;
-    bool             is_local;  // localhost backend — no network key needed.
+    // TRUE only for a backend that runs on this machine (Ollama, a custom
+    // localhost host). NOT "needs no API key" — that is AuthStyle::None, and
+    // conflating the two is why ChatGPT once claimed to be local. Read by the
+    // credential layer to skip key resolution and by the picker to skip the
+    // key prompt.
+    bool             is_local;
 
     // Env vars consulted (in order) to find this provider's API key. The
     // last entry is usually the generic OPENAI_API_KEY fallback. Empty for
@@ -156,6 +161,46 @@ struct ProviderDescriptor {
     // leak tool calls as raw JSON in `content`.
     bool             native_api = false;
 
+    // ── Auth capabilities (what the LOGIN flow needs to know) ───────
+    // These four used to be ~26 provider-name string compares scattered
+    // through login.cpp / modal.cpp / pickers.cpp — exactly the
+    // `if anthropic {} else if copilot {}` chain the registry exists to
+    // delete. Each is the CAPABILITY the branch was really testing, so a
+    // new OAuth provider becomes a row edit rather than a grep.
+
+    // Runs a device/browser OAuth flow (no key prompt). Copilot and Kimi
+    // share the generic launcher; ChatGPT has its own because the Codex
+    // flow negotiates device-vs-browser at runtime (see oauth_native).
+    bool device_login = false;
+
+    // The login modal offers a CHOICE of method (OAuth subscription vs
+    // API key). Only Anthropic does today: everything else is either
+    // key-only or OAuth-only, and showing a one-item menu is noise.
+    bool method_menu = false;
+
+    // Tokens live in the provider's OWN store (the transport reads them
+    // per turn) rather than in a resolvable AuthHeader. On account switch
+    // these need the cached header CLEARED, not replaced — resolve()
+    // returns empty for them by design.
+    bool token_in_transport = false;
+
+    // Anthropic-only extras that are genuinely not uniform: a long-idle
+    // OAuth token gets a proactive background refresh on account switch,
+    // and the learned "1M context is blocked" flag is re-armed because the
+    // switched-to account may hold a different entitlement.
+    bool oauth_proactive_refresh = false;
+
+    // Model to select when switching TO this provider with no recalled
+    // choice, and no live catalog yet (the switch runs on the UI thread, so
+    // it cannot fetch). Empty = "let the ModelsLoaded refetch auto-select
+    // the first available", which is right for local backends and for any
+    // provider whose line-up is server-driven.
+    //
+    // A static default belongs on the row; a DERIVED one does not — ChatGPT
+    // reads its cached catalog and Copilot's line-up varies by tier, so those
+    // stay in code with the reason written down at the call site.
+    std::string_view default_model;
+
     // True when this row is reached over the generic OpenAI-compat
     // transport (i.e. it carries real endpoint data above).
     [[nodiscard]] constexpr bool http_dialled() const noexcept {
@@ -183,7 +228,13 @@ inline constexpr std::array<ProviderDescriptor, 15> kProviders{{
     {"anthropic",  "Anthropic",  "Claude — OAuth (Pro/Max) or API key",
      Wire::AnthropicMessages, Lifetime::LongLived, AuthStyle::OAuthOrKey, false, {"", "", ""}, "api.anthropic.com", false,
      // Own transport (not the OpenAI-compat one): no endpoint columns.
-     "", "", ""},
+     "", "", "", 443, true, false,
+     // Auth caps: offers the OAuth-vs-key method menu, and is the one row
+     // that gets a proactive token refresh + 1M-entitlement re-arm on an
+     // account switch.
+     /*device_login=*/false, /*method_menu=*/true,
+     /*token_in_transport=*/false, /*oauth_proactive_refresh=*/true,
+     /*default_model=*/"claude-opus-4-5"},
     {"openai",     "OpenAI",     "GPT / Codex — api.openai.com",
      // Chat Completions, NOT Responses. The row used to claim
      // Wire::OpenAIResponses while dialling /v1/chat/completions — the
@@ -191,20 +242,38 @@ inline constexpr std::array<ProviderDescriptor, 15> kProviders{{
      // unnoticed and made the reasoning-text UI over-promise. The wire
      // and the path now sit on one line and must agree.
      Wire::OpenAIChat,        Lifetime::PerCall,   AuthStyle::ApiKey,     false, {"OPENAI_API_KEY", "CODEX_API_KEY", ""}, "", false,
-     "api.openai.com", "/v1/chat/completions", "/v1/models"},
+     "api.openai.com", "/v1/chat/completions", "/v1/models", 443, true, false,
+     /*device_login=*/false, /*method_menu=*/false,
+     /*token_in_transport=*/false, /*oauth_proactive_refresh=*/false,
+     /*default_model=*/"gpt-4o"},
     {"chatgpt",   "ChatGPT",    "Sign in with ChatGPT — Codex models, no API key",
      // Genuinely Responses — but over its OWN OAuth transport
      // (/backend-api/codex/responses), not the compat one, so no columns.
-     Wire::OpenAIResponses,   Lifetime::LongLived, AuthStyle::None,       true,  {"", "", ""}, "chatgpt.com", /*oauth_native=*/true,
-     "", "", ""},
+     // is_local=FALSE: chatgpt.com is a remote host. It used to be true as a
+     // stand-in for "needs no API key" — which AuthStyle::None already says —
+     // and that lie forced a `is_local && !oauth_native` workaround at the one
+     // site that wanted the literal meaning (login.cpp's key-prompt gate).
+     Wire::OpenAIResponses,   Lifetime::LongLived, AuthStyle::None,       false, {"", "", ""}, "chatgpt.com", /*oauth_native=*/true,
+     "", "", "", 443, true, false,
+     // oauth_native already marks the bespoke Codex launch path; device_login
+     // stays false so the generic launcher doesn't also claim it.
+     /*device_login=*/false, /*method_menu=*/false,
+     /*token_in_transport=*/true, /*oauth_proactive_refresh=*/false},
     {"copilot",   "GitHub Copilot", "Sign in with GitHub — Copilot models, no API key",
      Wire::OpenAIChat,        Lifetime::LongLived, AuthStyle::None,       false, {"", "", ""}, "api.githubcopilot.com", /*oauth_native=*/true,
-     "api.githubcopilot.com", "/chat/completions", "/models"},
+     "api.githubcopilot.com", "/chat/completions", "/models", 443, true, false,
+     /*device_login=*/true, /*method_menu=*/false,
+     /*token_in_transport=*/true, /*oauth_proactive_refresh=*/false,
+     // gpt-4o runs on every Copilot tier; the async fetch replaces it with
+     // the account's real line-up (incl. Auto) shortly after the switch.
+     /*default_model=*/"gpt-4o"},
     {"kimi",      "Kimi",       "Sign in with Kimi — Kimi K2 models, no API key",
      // Kimi Code inference API: base https://api.kimi.com/coding/v1 (its
      // own provider builds this; the columns must agree with it).
      Wire::OpenAIChat,        Lifetime::LongLived, AuthStyle::None,       false, {"", "", ""}, "api.kimi.com", /*oauth_native=*/true,
-     "api.kimi.com", "/coding/v1/chat/completions", "/coding/v1/models"},
+     "api.kimi.com", "/coding/v1/chat/completions", "/coding/v1/models", 443, true, false,
+     /*device_login=*/true, /*method_menu=*/false,
+     /*token_in_transport=*/true, /*oauth_proactive_refresh=*/false},
     {"groq",       "Groq",       "Llama/Mixtral on Groq LPUs — very fast",
      Wire::OpenAIChat,        Lifetime::PerCall,   AuthStyle::ApiKey,     false, {"GROQ_API_KEY", "OPENAI_API_KEY", ""}, "", false,
      "api.groq.com", "/openai/v1/chat/completions", "/openai/v1/models"},
@@ -307,12 +376,46 @@ namespace detail {
     return true;
 }
 
+// Auth capabilities must be internally consistent. These fields replaced a
+// chain of provider-name compares in login.cpp, so a row that contradicts
+// itself is exactly the bug the migration set out to make impossible — catch
+// it at build time rather than at a user's login prompt.
+[[nodiscard]] constexpr bool auth_caps_consistent() noexcept {
+    for (const auto& p : kProviders) {
+        // A method menu only makes sense when there IS more than one method.
+        if (p.method_menu && p.auth != AuthStyle::OAuthOrKey) return false;
+        // Device login is an OAuth flow: a row that also advertises a key
+        // env var would present two conflicting paths to the same account.
+        if (p.device_login && p.auth != AuthStyle::None) return false;
+        // Local backends never authenticate at all.
+        if (p.is_local
+            && (p.device_login || p.method_menu || p.token_in_transport))
+            return false;
+        // A transport-held token implies an OAuth backend, never a keyed
+        // one — an API key is resolvable, so it would never need the cached
+        // header cleared. NOT equality with oauth_native: that flag means
+        // specifically "OpenAI-FAMILY OAuth transport" and is false for
+        // Anthropic, whose OAuth rides its own AnthropicMessages transport.
+        // (An earlier draft asserted the two were equal; this static_assert
+        // caught it, which is the point of encoding the rule.)
+        if (p.token_in_transport && p.auth == AuthStyle::ApiKey) return false;
+        if (p.oauth_native && !p.token_in_transport) return false;
+        // The proactive-refresh extra is meaningless without OAuth.
+        if (p.oauth_proactive_refresh && p.auth == AuthStyle::ApiKey)
+            return false;
+    }
+    return true;
+}
+
 } // namespace detail
 
 static_assert(detail::endpoints_consistent(),
               "provider row: Wire disagrees with the path it dials, or an "
               "HTTP-dialled row is missing endpoint data");
 static_assert(detail::ids_unique(), "duplicate provider id in kProviders");
+static_assert(detail::auth_caps_consistent(),
+              "provider row: auth capability flags contradict the row's "
+              "AuthStyle (see ProviderDescriptor's auth capability block)");
 
 // Can this wire DIALECT carry reasoning TEXT back to us, for THIS model?
 //

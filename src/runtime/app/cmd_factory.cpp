@@ -1986,6 +1986,16 @@ Cmd<Msg> device_login_async(std::string provider, std::string provider_label,
             // device-code sink, cancel-probe) but its own DeviceCode type;
             // map it to the generic dispatch. login() persists the token on
             // success, so we only forward success-or-error to the reducer.
+            //
+            // This is one of the few provider branches that legitimately
+            // survives the registry migration: the two arms call DIFFERENT
+            // functions returning DIFFERENT types, and each renders its code
+            // URL differently (GitHub shows a bare URL + code; Kimi wants the
+            // pre-filled ?user_code= link so an SSH user can paste one thing).
+            // A registry flag can say "this provider does device login" — it
+            // cannot erase a type difference. Erasing it would need a
+            // DeviceLoginFn seam on the row, which is worth doing at three
+            // providers, not two.
             std::optional<std::string> err;
             if (provider == "copilot") {
                 auto r = provider::copilot::login(900,

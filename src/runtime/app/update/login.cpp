@@ -375,8 +375,11 @@ std::string account_provider_id(const provider::Selection& sel) {
     if (sel.kind == provider::Kind::OpenAI) {
         const std::string label = sel.openai_endpoint.label;
         // Keyless local servers (ollama/llama.cpp) have no account to manage.
+        // `is_local` now means exactly "runs on this machine", so the old
+        // `&& !oauth_native` guard (which existed only because ChatGPT
+        // mislabelled itself local) is gone.
         const auto* p = provider::preset_for(label);
-        if (p && (p->is_local && !p->oauth_native)) return {};
+        if (p && p->is_local) return {};
         return label;
     }
     return {};   // no account switching for this provider (local/ACP)
@@ -473,9 +476,14 @@ Step account_select(Model m) {
         case provider::credentials::AddMethod::OAuthDevice:
             break;   // handled below (provider-specific launch)
         }
-        // OAuth device login. ChatGPT uses the Codex device/browser flow; the
-        // other OAuth providers share launch_device_login.
-        if (provider == "chatgpt") {
+        // OAuth login, routed off REGISTRY CAPABILITIES rather than provider
+        // names. `oauth_native` marks the bespoke ChatGPT/Codex flow (it
+        // negotiates device-vs-browser at runtime); `device_login` marks the
+        // providers that share the generic launcher; `method_menu` marks the
+        // one that offers a choice of method. A new OAuth provider sets a
+        // flag on its row and lands here with no edit to this function.
+        const auto* prow = provider::preset_for(provider);
+        if (prow && prow->oauth_native) {
             const auto attempt_id = cmd::next_codex_login_attempt_id();
             auto cancel = std::make_shared<std::atomic_bool>(false);
             m.ui.login = login::ChatGptWaiting{
@@ -485,12 +493,10 @@ Step account_select(Model m) {
             };
             return {std::move(m), cmd::codex_login_async(attempt_id, std::move(cancel))};
         }
-        if (provider == "copilot")
-            return launch_device_login(std::move(m), "copilot", "GitHub Copilot");
-        if (provider == "kimi")
-            return launch_device_login(std::move(m), "kimi", "Kimi");
-        // Anthropic (or any other OAuth provider): the provider-selection
-        // method menu, which offers OAuth-vs-key.
+        if (prow && prow->device_login)
+            return launch_device_login(std::move(m), provider,
+                                       std::string{prow->label});
+        // Otherwise: the method menu (OAuth subscription vs API key).
         m.ui.login = login::Picking{
             .provider = provider,
             .origin   = login::origin::Accounts{provider}};
@@ -522,10 +528,12 @@ Step account_select(Model m) {
             provider::active().kind == provider::Kind::OpenAI
                 ? provider::active().openai_endpoint.label
                 : std::string{provider::default_provider_id()};
-        const bool provider_changed =
-            provider != active_pid
-            && !(provider == "anthropic"
-                 && provider::active().kind == provider::Kind::Anthropic);
+        // The active provider's id, for non-OpenAI kinds, is the registry
+        // default — compare ids, not names. (The old form special-cased
+        // "anthropic" because active_pid falls back to the default id when
+        // the active kind isn't OpenAI; that IS the default id, so the
+        // comparison already covers it.)
+        const bool provider_changed = provider != active_pid;
         if (provider_changed) {
             m.ui.login = login::Closed{};
             const auto* p = provider::preset_for(provider);
@@ -560,7 +568,8 @@ Step account_select(Model m) {
     // turn on the switched-to account can't fire with a lapsed bearer; and
     // re-arm 1M-context discovery (the block was learned for the PREVIOUS
     // account; this one may be entitled).
-    if (provider == "anthropic") {
+    if (const auto* prow = provider::preset_for(provider);
+        prow && prow->oauth_proactive_refresh) {
         if (auto tok = auth::oauth_proactive_refresh_token()) {
             m.s.oauth_refresh_in_flight = true;
             refresh_cmd = cmd::refresh_oauth(std::move(*tok));
@@ -608,11 +617,15 @@ Step account_remove(Model m) {
     if (was_active) {
         if (auto next = acc::get(row.provider, acc::active_label(row.provider))) {
             acc::activate(row.provider, next->label);
-            if (row.provider == "anthropic") {
+            const auto* rrow = provider::preset_for(row.provider);
+            if (rrow && rrow->oauth_proactive_refresh) {
+                // Anthropic-shaped: credentials live in the shared store and
+                // resolve to a real header.
                 if (auto c = auth::load_credentials())
                     agentty::app::update_auth(auth::make_auth_header(*c));
-            } else if (row.provider == "copilot" || row.provider == "chatgpt"
-                       || row.provider == "kimi") {
+            } else if (rrow && rrow->token_in_transport) {
+                // The transport owns the token and reads it per turn; the
+                // cached header must be CLEARED, not replaced.
                 agentty::app::update_auth(auth::AuthHeader{});
             } else {
                 // CUSTOM HOST: activate() wrote the promoted key into
@@ -658,7 +671,10 @@ Step login_pick_method(Model m, char32_t key) {
     const auto* picking = std::get_if<login::Picking>(&m.ui.login);
     if (!picking && !std::holds_alternative<login::Failed>(m.ui.login))
         return done(std::move(m));
-    const bool anthropic_only = picking && picking->provider == "anthropic";
+    // Does this provider offer a CHOICE of auth method? Registry flag, not a
+    // name: a second OAuth-or-key provider gets the menu by setting it.
+    const auto* mrow = picking ? provider::preset_for(picking->provider) : nullptr;
+    const bool anthropic_only = mrow && mrow->method_menu;
     if (key == U'2') {
         // OAuth: mint PKCE pair, open browser, transition to OAuthCode.
         // The URL lives in state so the modal can show it as a fallback

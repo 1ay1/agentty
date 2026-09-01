@@ -14,6 +14,7 @@
 #include <maya/platform/io.hpp>
 
 #include "agentty/runtime/view/helpers.hpp"
+#include "agentty/auth/vault.hpp"   // vault::signed_in — uniform OAuth status
 #include "agentty/runtime/view/hints.hpp"
 #include "agentty/runtime/view/palette.hpp"
 #include "agentty/runtime/code_block_picker.hpp"  // extract_code_blocks (palette gating)
@@ -517,22 +518,21 @@ Element provider_picker(const Model& m) {
     // provider's badge stays consistent.
     auto preset_note = [&](const provider::ProviderPreset& p, bool active)
         -> std::pair<std::string, maya::Color> {
-        auto signed_badge = [&](const char* signed_label) {
+        auto signed_badge = [&](std::string signed_label) {
             return std::pair<std::string, maya::Color>{
-                active ? "\xe2\x9c\x93 signed in \xc2\xb7 accounts" : signed_label,
+                active ? std::string{"\xe2\x9c\x93 signed in \xc2\xb7 accounts"}
+                       : std::move(signed_label),
                 active ? success : muted};
         };
-        if (p.id == "chatgpt") {
-            if (provider::chatgpt::responses_available()) return signed_badge("ChatGPT (signed in)");
-            return {"\xe2\x9a\xa0 sign in with ChatGPT", warn};
-        }
-        if (p.id == "copilot") {
-            if (provider::copilot::signed_in()) return signed_badge("GitHub Copilot (signed in)");
-            return {"\xe2\x9a\xa0 sign in with GitHub", warn};
-        }
-        if (p.id == "kimi") {
-            if (provider::kimi::signed_in()) return signed_badge("Kimi (signed in)");
-            return {"\xe2\x9a\xa0 sign in with Kimi", warn};
+        // OAuth providers whose token lives in their own transport: one
+        // uniform status line, answered by the auth vault. Was three
+        // near-identical name-keyed blocks calling three different
+        // signed_in() probes; vault::signed_in dispatches over the same
+        // table, so a new OAuth provider gets its status row for free.
+        if (p.token_in_transport) {
+            if (auth::vault::signed_in(std::string{p.id}))
+                return signed_badge(std::string{p.label} + " (signed in)");
+            return {"\xe2\x9a\xa0 sign in with " + std::string{p.label}, warn};
         }
         if (p.is_local || p.auth == provider::AuthStyle::None)
             return {"\xe2\x97\x8f local", info};

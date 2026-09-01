@@ -27,6 +27,7 @@
 #include "agentty/provider/auth_state.hpp"
 #include "agentty/provider/acp_agents.hpp"
 #include "agentty/provider/selection.hpp"
+#include "agentty/auth/vault.hpp"
 #include "agentty/provider/credentials.hpp"
 #include "agentty/auth/auth.hpp"
 #include "agentty/auth/accounts.hpp"
@@ -48,22 +49,6 @@ namespace pick = agentty::ui::pick;
 using maya::overload;
 
 namespace {
-// Indices into m.d.available_models that match the picker's live query
-// (case-insensitive substring over the display name). An empty query
-// yields every index in order, so the un-filtered picker is unchanged.
-// The picker cursor (OpenAt::index) indexes INTO this filtered list, so
-// every nav/select site resolves through here to reach the real model.
-std::vector<int> model_filtered(const std::vector<ModelInfo>& models,
-                                std::string_view query) {
-    std::vector<int> out;
-    out.reserve(models.size());
-    for (int i = 0; i < static_cast<int>(models.size()); ++i)
-        if (pick::fuzzy_contains(models[static_cast<std::size_t>(i)].display_name,
-                                 query))
-            out.push_back(i);
-    return out;
-}
-
 // Monotonic ms from maya's animation clock — test-controllable via
 // maya::testing::advance_anim_clock_ms, so catalog freshness (loaded_at_ms) is
 // reproducible / advanceable in tests.
@@ -439,46 +424,37 @@ Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
                 return done(std::move(m));
             }
 
-            // Native device-flow OAuth providers (Copilot, Kimi): if not signed
-            // in, launch the device login instead of switching to a backend
-            // that would show "not signed in" on the first turn. One helper
-            // path for both — see launch_device_login in login.cpp.
-            if (spec == "copilot" && !provider::copilot::signed_in()) {
+            // OAuth providers: if not signed in, launch the login flow rather
+            // than switching to a backend that would fail on the first turn.
+            //
+            // Routed off registry capabilities + the auth vault, not provider
+            // names. `oauth_native` picks the bespoke ChatGPT/Codex flow;
+            // `device_login` picks the shared device launcher; vault::signed_in
+            // answers "has this provider a live token" for every OAuth row
+            // through one table. A new OAuth provider needs no edit here.
+            if (preset.token_in_transport
+                && !auth::vault::signed_in(std::string{spec})) {
                 const auto attempt_id = cmd::next_codex_login_attempt_id();
                 auto cancel = std::make_shared<std::atomic_bool>(false);
+                if (preset.oauth_native) {
+                    m.ui.login = ui::login::ChatGptWaiting{
+                        .attempt_id = attempt_id,
+                        .cancel = cancel,
+                        .device_auth =
+                            provider::chatgpt::codex_device_auth_preferred(),
+                    };
+                    return {std::move(m),
+                            cmd::codex_login_async(attempt_id, std::move(cancel))};
+                }
                 m.ui.login = ui::login::DeviceWaiting{
-                    .provider = "copilot", .provider_label = "GitHub Copilot",
+                    .provider = std::string{spec},
+                    .provider_label = std::string{preset.label},
                     .attempt_id = attempt_id, .cancel = cancel,
                 };
                 return {std::move(m),
-                        cmd::device_login_async("copilot", "GitHub Copilot",
+                        cmd::device_login_async(std::string{spec},
+                                                std::string{preset.label},
                                                 attempt_id, std::move(cancel))};
-            }
-            if (spec == "kimi" && !provider::kimi::signed_in()) {
-                const auto attempt_id = cmd::next_codex_login_attempt_id();
-                auto cancel = std::make_shared<std::atomic_bool>(false);
-                m.ui.login = ui::login::DeviceWaiting{
-                    .provider = "kimi", .provider_label = "Kimi",
-                    .attempt_id = attempt_id, .cancel = cancel,
-                };
-                return {std::move(m),
-                        cmd::device_login_async("kimi", "Kimi",
-                                                attempt_id, std::move(cancel))};
-            }
-
-            // codex-cli / chatgpt authenticates via native ChatGPT OAuth
-            // (loopback or device). Launch it if not signed in.
-            if ((spec == "chatgpt" || spec == "codex-cli")
-                && !provider::chatgpt::responses_available()) {
-                const auto attempt_id = cmd::next_codex_login_attempt_id();
-                auto cancel = std::make_shared<std::atomic_bool>(false);
-                m.ui.login = ui::login::ChatGptWaiting{
-                    .attempt_id = attempt_id,
-                    .cancel = cancel,
-                    .device_auth = provider::chatgpt::codex_device_auth_preferred(),
-                };
-                return {std::move(m),
-                        cmd::codex_login_async(attempt_id, std::move(cancel))};
             }
 
             // Every entry point funnels the actual switch through the ONE

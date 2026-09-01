@@ -923,6 +923,14 @@ TEST_CASE("test_endpoint_presets") {
     // silently dial the wrong place.
     for (const auto& p : agentty::provider::providers()) {
         if (p.kind() != agentty::provider::Kind::OpenAI) continue;
+        // Skip rows that are NOT reached over the OpenAI-compat transport.
+        // ChatGPT is Kind::OpenAI but rides its own OAuth transport
+        // (/backend-api/codex/responses) and carries no endpoint columns, so
+        // asserting host/port/TLS on it tests nothing. This used to be masked
+        // by that row claiming is_local=true as a stand-in for "needs no API
+        // key"; http_dialled() is the honest predicate, and the registry
+        // already exposes it.
+        if (!p.http_dialled()) continue;
         auto ep = oai::Endpoint::from_spec(p.id);
         CHECK(!ep.host.empty());
         CHECK(!ep.path.empty());

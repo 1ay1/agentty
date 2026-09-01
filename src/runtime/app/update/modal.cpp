@@ -592,25 +592,20 @@ std::string model_for_provider(std::string_view spec) {
     }
 
     // 2) No recall — fall back to a sane built-in default per provider.
-    //    Local backends (Ollama) have no fixed default; return empty so the
-    //    model-list refetch auto-selects the first available model.
-    if (spec == "anthropic" || spec.empty()) return "claude-opus-4-5";
-    if (spec == "openai")                    return "gpt-4o";
-    // Native ChatGPT (Codex Responses API) path — the account's model line-up
-    // is server-driven and changes over time (e.g. gpt-5.4, not the stale
-    // gpt-5.1-codex we used to hardcode). Resolve from the CACHED catalog
-    // (never the network — UI thread); a cold cache returns empty and the
+    //
+    // DERIVED defaults first: ChatGPT's line-up is server-driven and changes
+    // over time (gpt-5.4, not the stale gpt-5.1-codex we once hardcoded), so
+    // it resolves from the CACHED catalog — never the network, this runs on
+    // the UI thread during a switch. A cold cache returns empty and the
     // ModelsLoaded refetch auto-selects the account's real default.
     if (is_chatgpt) {
         auto cached = provider::chatgpt::list_models_cached();
         return cached.empty() ? std::string{} : cached.front().id.value;
     }
-    if (is_copilot) {
-        // Network-free default (this runs on the UI thread during a switch).
-        // gpt-4o runs on every Copilot tier; the async fetch_models will
-        // replace it with the account's real line-up (incl. Auto) shortly.
-        return "gpt-4o";
-    }
+    // STATIC defaults come off the registry row. Empty (local backends,
+    // aggregators) means "let the refetch auto-select the first available".
+    if (const auto* row = provider::preset_for(spec.empty() ? "anthropic" : spec))
+        return std::string{row->default_model};
     return {};
 }
 

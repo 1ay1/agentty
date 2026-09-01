@@ -153,10 +153,15 @@ Element url_panel(std::string_view url) {
 
 Element panel_picking(std::string_view provider,
                       bool failed, std::string_view fail_msg) {
-    const bool anthropic_only = (provider == "anthropic");
+    // "Does this provider offer a CHOICE of auth method" is a registry
+    // capability (method_menu), not a name — the reducer's gate reads the
+    // same flag, so the view and the behaviour cannot drift.
+    const auto* prow = provider::preset_for(provider);
+    const bool anthropic_only = prow && prow->method_menu;
     std::vector<Element> rows;
-    rows.push_back(text(anthropic_only ? "Add an Anthropic account"
-                                       : "Sign in to agentty",
+    rows.push_back(text(anthropic_only
+                            ? "Add a " + std::string{prow->label} + " account"
+                            : std::string{"Sign in to agentty"},
                         fg_bold(fg)));
     rows.push_back(body_text(
         anthropic_only
