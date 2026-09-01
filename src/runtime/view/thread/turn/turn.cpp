@@ -812,8 +812,53 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m,
             const bool backlog_worth_smoothing =
                 reveal_backlog >= kMinDeferBacklogBytes;
 
+            // ── Headroom proof: why the card can pop while prose reveals ──
+            //
+            // The scrollback oracle's invariant is that committed rows are
+            // append-only. A mid-reveal row (ghosted tail / scramble glyphs)
+            // is only DANGEROUS if it can reach immutable scrollback before
+            // it resolves — and a row reaches scrollback ONLY by being pushed
+            // past the viewport top, which requires total content height to
+            // exceed the viewport.
+            //
+            // Geometry we control: the reveal tail is always the BOTTOM-MOST
+            // prose of this message, and the only thing rendered below it is
+            // this message's tool card(s). So the unresolved tail crosses the
+            // top iff
+            //
+            //     rows_below_tail + tail_rows  >  viewport_rows
+            //
+            // Both terms are boundable at build time: est_card_rows is the
+            // same estimate hidden_fits already uses, and the unresolved tail
+            // is at most ceil(reveal_backlog / cols) wrapped rows (a byte is
+            // at most one column). Add a chrome margin and require STRICT
+            // headroom. When that holds, showing the card cannot push a
+            // ghosted row off the top *this frame*, and the reveal cursor is
+            // simultaneously ramped to the edge (request_finalize below), so
+            // the tail resolves before any later growth can consume the
+            // margin. That is the no-corruption guarantee: it is a bound on
+            // geometry, not a bet on timing.
+            //
+            // Only when the proof FAILS (a tall card, a deep backlog, or a
+            // short terminal) do we fall back to holding the card until the
+            // glide lands — the old always-defer behaviour, now the rare path.
+            const int term_rows_now = ::maya::available_height();
+            const int cols_now      = std::max(1, ::maya::available_width());
+            const int est_tail_rows =
+                static_cast<int>((reveal_backlog + static_cast<std::size_t>(cols_now) - 1)
+                                 / static_cast<std::size_t>(cols_now));
+            // Chrome the tail shares the viewport with: composer + status +
+            // the turn's own header/rail. Matches the margin hidden_fits uses.
+            constexpr int kChromeRows = 6;
+            const bool reveal_has_headroom =
+                term_rows_now > 0
+                && est_hidden_rows + est_tail_rows + kChromeRows < term_rows_now;
+
+            // Show the card IMMEDIATELY when the proof holds: the prose keeps
+            // revealing above it (no paste, no hold). Defer only otherwise.
             const bool can_defer =
                 backlog_worth_smoothing
+                && !reveal_has_headroom
                 && is_tail_bottom
                 && all_pending
                 && hidden_fits
@@ -827,6 +872,28 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m,
                 // emit StreamTextBlockClosed (the drain above may not
                 // have fired) and re-arms idempotently when it did.
                 cache.streaming->request_finalize(/*ramp_ms=*/160);
+            } else if (backlog_worth_smoothing && reveal_has_headroom
+                       && is_tail_bottom && all_pending
+                       && !m.d.pending_permission) {
+                // ── INSTANT CARD (the headroom-proof path) ──
+                //
+                // There is provably room for the whole unresolved tail AND
+                // the card without pushing a ghosted row past the viewport
+                // top, so the card appears THIS frame while the prose keeps
+                // revealing above it. No hold, no paste — the tool result is
+                // never gated behind a prose animation.
+                //
+                // Do NOT snap and do NOT finish() here: the reveal stays live
+                // and keeps gliding under the visible card. request_finalize
+                // arms the adaptive ramp so the tail still lands promptly
+                // (and, on transports without StreamTextBlockClosed, at all)
+                // instead of crawling at the readable floor now that there is
+                // no wire jitter left to smooth.
+                cache.defer_tool_panel    = false;
+                cache.defer_exit_finished = false;
+                cache.card_defer_since_ms = 0;
+                cache.streaming->request_finalize(/*ramp_ms=*/160);
+                ::maya::request_animation_frame();
             } else {
                 // Exit (glide done / cap hit / bail-out). Instead of an
                 // INSTANT snap+finish (which pasted the whole typed-but-
