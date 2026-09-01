@@ -34,6 +34,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <csignal>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -196,6 +198,187 @@ void install_crash_handler() {
 
 void print_version() {
     std::printf("agentty %s\n", AGENTTY_VERSION);
+    // Where diagnostics land, and whether they are being captured right now.
+    // A user cannot send a log they cannot find, and `--version` is the first
+    // thing anyone runs when asked "what are you on?" — so it is the one
+    // place a bug-reporting workflow can rely on being seen.
+    const auto lf = agentty::logx::log_file();
+    if (!lf.empty()) {
+        std::printf("log: %.*s\n", static_cast<int>(lf.size()), lf.data());
+        if (const auto n = agentty::logx::redaction_count(); n > 0)
+            std::printf("     (%lu secret%s redacted)\n", n, n == 1 ? "" : "s");
+    } else {
+        std::printf("log: off \u2014 set AGENTTY_LOG=trace to capture diagnostics\n");
+    }
+}
+
+// ── `agentty diagnostics` ─────────────────────────────────────────────────
+//
+// One command that produces ONE file a user can attach to a bug report.
+//
+// The alternative — what we had — is a four-step ritual: know that
+// AGENTTY_LOG exists, set it BEFORE reproducing (bugs are noticed after),
+// find ~/.agentty/logs, and remember to also state your version, OS and
+// provider. Every step loses people; the field evidence is that a user
+// reported a wire bug by photographing their screen.
+//
+// Plain text, not a zip: no dependency, and the user can READ it before
+// sending. That matters more than compactness — someone who can see what
+// they are sharing actually sends it. Secrets are already stripped at the
+// logx emit() seam, and the redaction count is printed so that is visible.
+int cmd_diagnostics() {
+    namespace fs = std::filesystem;
+    std::string out;
+    out.reserve(1 << 16);
+    const auto dir = agentty::util::user_logs_dir();
+
+    const auto section = [&](const char* name) {
+        out += "\n===== "; out += name; out += " =====\n";
+    };
+
+    section("agentty");
+    out += std::string{"version: "} + AGENTTY_VERSION + "\n";
+    out += std::string{"os: "} +
+#if defined(_WIN32)
+        "windows"
+#elif defined(__APPLE__)
+        "macos"
+#else
+        "linux"
+#endif
+        + "  arch: " +
+#if defined(__aarch64__) || defined(_M_ARM64)
+        "arm64"
+#else
+        "x86_64"
+#endif
+        + "  build: " +
+#if defined(NDEBUG)
+        "release"
+#else
+        "debug"
+#endif
+        + "\n";
+
+    // NOTE: no live provider section. This command runs as its OWN process,
+    // so provider::active() is a default-constructed selection, not the one
+    // the failing session used — printing it would state a confident lie.
+    // The real provider/model is in the log's `provider.select` line, which
+    // the tail below carries. One truth, from the session that mattered.
+    section("session (from the log)");
+    {
+        const auto lf = agentty::logx::log_file();
+        std::error_code sec;
+        if (!lf.empty() && std::filesystem::exists(
+                std::filesystem::path{std::string{lf}}, sec)) {
+            std::ifstream in{std::string{lf}, std::ios::binary};
+            std::string ln, startup, provider;
+            while (std::getline(in, ln)) {
+                if (ln.find("startup:") != std::string::npos)         startup  = ln;
+                if (ln.find("provider.select:") != std::string::npos) provider = ln;
+            }
+            // These are Info-level, so a default release run (Warn+) does not
+            // capture them. Say so rather than printing a bare "(not
+            // captured)", which reads like a bug in the collector.
+            out += (startup.empty()
+                        ? std::string{"startup: (not captured \u2014 Info level; "
+                                      "set AGENTTY_LOG=info for this)"}
+                        : startup) + "\n";
+            out += (provider.empty()
+                        ? std::string{"provider: (not captured \u2014 Info level; "
+                                      "set AGENTTY_LOG=info for this)"}
+                        : provider) + "\n";
+        } else {
+            out += "(no log captured \u2014 see the NOTE below)\n";
+        }
+    }
+
+    // The FLIGHT RECORDER — the part that works without any setup.
+    //
+    // Warn-and-above events are always kept in an in-process ring, even with
+    // file logging off, so a failure that already happened was still
+    // captured. Without this section the common case is useless: a release
+    // user hits a bug, runs `diagnostics`, and gets a file saying "logging
+    // was off" — the bug is over, and asking them to reproduce it under
+    // AGENTTY_LOG is exactly the friction this command exists to remove.
+    //
+    // Same process, so this only covers a bug hit in THIS run. That is the
+    // interactive case (hit the bug, run diagnostics from the same shell);
+    // the log-file path below covers everything longer-lived.
+    // Only when there is no log file: with one, the same Warn+ events are
+    // already in the tail below and duplicating them just makes the report
+    // harder to read.
+    if (agentty::logx::log_file().empty()) {
+    section("recent warnings + errors (in-memory flight recorder)");
+    {
+        const auto fr = dir / "agentty-flight.txt";
+        std::error_code fec;
+        fs::create_directories(dir, fec);
+        if (agentty::logx::dump_flight_recorder_to(fr.string().c_str())) {
+            std::ifstream in{fr, std::ios::binary};
+            std::string body{std::istreambuf_iterator<char>(in),
+                             std::istreambuf_iterator<char>()};
+            out += body.empty() ? std::string{"(nothing recorded this run)\n"}
+                                : body;
+            fs::remove(fr, fec);
+        } else {
+            out += "(flight recorder unavailable)\n";
+        }
+    }
+    }
+
+    section("log");
+    {
+        const auto lf = agentty::logx::log_file();
+        if (lf.empty()) {
+            out += "logging: OFF at collection time\n";
+            out += "NOTE: the warnings above were captured automatically.\n"
+                   "      For a FULL byte-level trace (raw provider traffic),\n"
+                   "      re-run with AGENTTY_LOG=trace, reproduce, then\n"
+                   "      run `agentty diagnostics` again.\n";
+        } else {
+            out += "file: " + std::string{lf} + "\n";
+            out += "secrets redacted so far: "
+                 + std::to_string(agentty::logx::redaction_count()) + "\n";
+        }
+    }
+
+    // The log itself, tail-limited: a long session can run to tens of MB and
+    // nobody pastes that. The tail holds the failure, which is what matters.
+    section("log tail (last 4000 lines)");
+    {
+        const auto lf = agentty::logx::log_file();
+        std::error_code ec;
+        if (!lf.empty() && fs::exists(fs::path{std::string{lf}}, ec)) {
+            std::ifstream in{std::string{lf}, std::ios::binary};
+            std::vector<std::string> lines;
+            std::string ln;
+            while (std::getline(in, ln)) {
+                lines.push_back(std::move(ln));
+                if (lines.size() > 4000) lines.erase(lines.begin());
+            }
+            for (const auto& l : lines) { out += l; out += '\n'; }
+        } else {
+            out += "(no log file — see the NOTE above)\n";
+        }
+    }
+
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    const auto path = dir / "agentty-diagnostics.txt";
+    std::ofstream f{path, std::ios::binary | std::ios::trunc};
+    f << out;
+    f.close();
+
+    std::printf("agentty %s \u2014 diagnostics written\n", AGENTTY_VERSION);
+    if (const auto n = agentty::logx::redaction_count(); n > 0)
+        std::printf("  %lu secret%s redacted\n", n, n == 1 ? "" : "s");
+    if (agentty::logx::log_file().empty())
+        std::printf("  note: logging was OFF \u2014 for a full trace run\n"
+                    "        AGENTTY_LOG=trace agentty   (reproduce, then re-run this)\n");
+    std::printf("\n  %s\n\n  Attach that file to your report.\n",
+                path.string().c_str());
+    return 0;
 }
 
 void print_usage() {
@@ -223,6 +406,8 @@ void print_usage() {
         "                    (2026-07-28 OAuth 2.1 + PKCE via your browser).\n"
         "  mcp-logout <srv>  Remove a stored MCP server token.\n"
         "  mcp-status        List MCP servers and their authorization state.\n"
+        "  diagnostics       Collect a redacted diagnostic bundle for a bug\n"
+        "                    report (build info, logs, config \u2014 no secrets)\n"
         "  skills            List discovered skills with spec-lint diagnostics\n"
         "                    (exit 1 on warnings — CI-friendly validate)\n"
         "  hooks [list]      Show configured lifecycle hooks + approval state\n"
@@ -315,7 +500,8 @@ Args parse_args(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "login" || a == "logout" || a == "status" || a == "help"
-         || a == "acp" || a == "skills" || a == "mcp-serve") {
+         || a == "acp" || a == "skills" || a == "mcp-serve"
+         || a == "diagnostics") {
             out.subcommand = std::move(a);
         } else if (a == "update") {
             // `agentty update [--check]` — --check rides in cli_run_agent
@@ -509,9 +695,32 @@ int main(int argc, char** argv) {
     // before any child is spawned.
 #if !defined(_WIN32)
     std::signal(SIGPIPE, SIG_IGN);
+    // Dev bug-marker: `kill -USR1 $(pgrep agentty)` stamps the live log with
+    // a MARK banner + flight-recorder snapshot at the moment a bug is SEEN.
+    // signal_mark() is async-signal-safe (static bytes, raw write(2)s).
+    std::signal(SIGUSR1, [](int) { agentty::logx::signal_mark(); });
 #endif
 
     auto args = parse_args(argc, argv);
+
+    // Every run self-identifies in the (append-mode, multi-session) log:
+    // version + build type + pid + cwd. `grep "=== agentty"` splits the file
+    // into runs; a shared log names the exact binary that produced it.
+    {
+        std::string banner;
+        banner += AGENTTY_VERSION;
+#if defined(NDEBUG)
+        banner += " release";
+#else
+        banner += " debug";
+#endif
+        banner += " pid=";
+        banner += std::to_string(agentty_pid());
+        std::error_code cwd_ec;
+        const auto cwd = std::filesystem::current_path(cwd_ec);
+        if (!cwd_ec) { banner += " cwd="; banner += cwd.string(); }
+        agentty::logx::session_banner(banner);
+    }
     if (args.bad)                    { print_usage(); return 2; }
 
     // ── Scrollback-gate abort: opt-in for maya developers ──────────────────
@@ -531,8 +740,51 @@ int main(int argc, char** argv) {
 #endif
     }
 
+    // ── Startup banner ────────────────────────────────────────────────
+    // ONE line, first in every log, naming the build and the machine.
+    //
+    // Without it a log fragment is unattributable: the first three questions
+    // on every bug report were "which version / which OS / which provider",
+    // and a user who has already moved on rarely answers all three. Emitting
+    // it here — after arg parsing, before any work — means every log a user
+    // ever sends is self-describing, including one that ends in a crash.
+    //
+    // Info level: present in any enabled configuration without needing trace.
+    // Warn, not Info: this is the single most useful line in any bug report
+    // (version/OS/build), and the release default keeps Warn+ only. Not an
+    // error — the level here is chosen for RETENTION, which is the honest
+    // trade for one line per process.
+    AGT_LOG(General, Warn, "startup",
+            "agentty {} os={} arch={} build={} pid={}",
+            AGENTTY_VERSION,
+#if defined(_WIN32)
+            "windows",
+#elif defined(__APPLE__)
+            "macos",
+#else
+            "linux",
+#endif
+#if defined(__aarch64__) || defined(_M_ARM64)
+            "arm64",
+#else
+            "x86_64",
+#endif
+#if defined(NDEBUG)
+            "release",
+#else
+            "debug",
+#endif
+            static_cast<long long>(
+#if defined(_WIN32)
+                _getpid()
+#else
+                ::getpid()
+#endif
+            ));
+
     if (args.subcommand == "help")    { print_usage();   return 0; }
     if (args.subcommand == "version") { print_version(); return 0; }
+    if (args.subcommand == "diagnostics") return cmd_diagnostics();
     if (args.subcommand == "update") {
         const bool check_only = args.cli_run_agent == "--check";
         std::printf("agentty %s — checking for updates…\n",

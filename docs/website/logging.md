@@ -414,6 +414,28 @@ events — appends to `~/.agentty/logs/agentty.log`. The file is opened
 `O_APPEND`, so concurrent sessions interleave line-atomically and a crash
 never loses the tail.
 
+Every run writes a **session banner** on startup:
+
+```
+=== agentty session: 0.5.0 debug pid=76883 cwd=/Users/you/projects/x ===
+```
+
+so a multi-day append-mode log splits into runs with
+`grep -n "=== agentty"`, and any shared capture names the exact binary
+(version + build type) that produced it.
+
+**Mark the moment you see a bug.** Send `SIGUSR1` and agentty stamps the
+live log — a `=== MARK ===` banner plus a flight-recorder snapshot (the
+last ~256 events) — at the exact observation point, no TUI interaction:
+
+```bash
+kill -USR1 $(pgrep agentty)
+```
+
+Then find it with `grep -n "MARK (SIGUSR1)" ~/.agentty/logs/agentty.log`.
+The handler is async-signal-safe (preformatted bytes, raw writes), so it's
+safe to fire at any moment, including mid-stream.
+
 **When you hit a bug**, snapshot the tail before it drowns in later trace
 noise:
 
@@ -430,13 +452,12 @@ tail -f ~/.agentty/logs/agentty.log | grep --line-buffered 'W \|E \|dispatch.tur
 
 Worth knowing:
 
-- **There is no rotation.** At trace level a long session grows the file
-  fast (wire chunks are verbatim). Truncating is safe *while agentty is
-  running* — `O_APPEND` means the next write just lands at the new end:
-
-  ```bash
-  : > ~/.agentty/logs/agentty.log   # start-of-day clean slate
-  ```
+- **Rotation is automatic.** The sink rotates at 32 MB — both at startup
+  and mid-run — renaming the current file to `agentty.log.old` and starting
+  fresh, so an always-on trace session never grows one file unbounded. You
+  keep at most ~64 MB (`agentty.log` + `.old`). Manual truncation is still
+  safe while agentty runs (`: > ~/.agentty/logs/agentty.log`) thanks to
+  `O_APPEND`.
 
 - **Multiple instances?** Give each its own file so streams don't
   interleave:
@@ -445,11 +466,12 @@ Worth knowing:
   AGENTTY_LOG_FILE=/tmp/agentty-$$.log ./build/dev/agentty
   ```
 
-Suggested muscle memory — two shell helpers are the whole workflow
-(reproduce → `agbug` → keep working):
+Suggested muscle memory — the whole workflow is: see bug → mark → snapshot
+→ keep working:
 
 ```bash
 alias agl='tail -f ~/.agentty/logs/agentty.log'
+alias agmark='kill -USR1 $(pgrep -n agentty)'   # stamp the log NOW
 agbug() { tail -c 512k ~/.agentty/logs/agentty.log \
           > ~/agentty-bugs/bug-$(date +%m%d-%H%M%S).log; echo saved; }
 ```

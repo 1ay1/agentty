@@ -139,7 +139,7 @@ set_tests_properties(logx_test PROPERTIES TIMEOUT 30)
 # guard `if (!logging_on()) return;` made all 8 cases pass with ZERO
 # assertions in CI: a green suite proving nothing. ENV makes ctest configure
 # the log before the binary starts, so the assertions actually run.
-foreach(_logx_t logx_redaction_test logx_format_test)
+foreach(_logx_t logx_redaction_test logx_format_test logx_lifecycle_test)
     agentty_test(${_logx_t} MODE raw)
     add_executable(${_logx_t} EXCLUDE_FROM_ALL
         tests/${_logx_t}.cpp tests/test_main.cpp

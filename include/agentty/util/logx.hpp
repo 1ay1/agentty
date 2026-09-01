@@ -158,6 +158,20 @@ std::size_t dump_flight_recorder(int fd) noexcept;
 // tests and orderly shutdown paths.
 bool dump_flight_recorder_to(const char* path) noexcept;
 
+// Async-signal-safe log marker: writes a "=== MARK ===" banner plus a
+// flight-recorder snapshot into the live log file. Installed on SIGUSR1 in
+// main() so `kill -USR1 $(pgrep agentty)` stamps the log at the moment a
+// bug is OBSERVED — no TUI interaction, no timestamp archaeology. No-op
+// when file logging is off.
+void signal_mark() noexcept;
+
+// Write a session banner line straight to the file sink (bypasses the
+// level filter — if a file is being written at all, each process run must
+// self-identify in it). Called once from main() with version/build/pid/
+// cwd; makes a multi-session append-mode log navigable: grep "=== agentty"
+// splits it into runs. No-op when file logging is off.
+void session_banner(std::string_view info) noexcept;
+
 // The resolved log-file path ("" = file logging disabled). For status UI.
 [[nodiscard]] std::string_view log_file() noexcept;
 
