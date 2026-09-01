@@ -86,6 +86,31 @@ enum class AuthStyle : std::uint8_t {
     None,        // local server (Ollama / llama.cpp): no auth needed.
 };
 
+// Which long-lived provider slot serves this row. A LongLived-lifetime
+// provider holds cross-turn state (refreshed OAuth tokens / a warm
+// transport), so it is constructed ONCE in main() and reused; dispatch
+// indexes the router by this value. `None` = served by a per-call transport
+// (the generic OpenAI-compat/Ollama builder) or the ACP arm.
+//
+// This lives ON THE ROW — not in an if-chain inside dispatch — so routing is
+// a data lookup and the static_asserts below can PROVE the table coherent:
+// adding an OAuth-native provider without a slot, or a slot without the
+// long-lived lifetime, is a compile error, not a field bug.
+enum class RouteSlot : std::uint8_t { None, Anthropic, ChatGpt, Copilot, Kimi };
+inline constexpr std::size_t kRouteSlots = 5;
+
+// Log/diagnostic tag for a slot — the `route=` value in dispatch.turn.
+[[nodiscard]] constexpr std::string_view slot_tag(RouteSlot s) noexcept {
+    switch (s) {
+        case RouteSlot::Anthropic: return "anthropic-messages";
+        case RouteSlot::ChatGpt:   return "chatgpt-responses";
+        case RouteSlot::Copilot:   return "copilot";
+        case RouteSlot::Kimi:      return "kimi";
+        case RouteSlot::None:      return "";
+    }
+    return "";
+}
+
 // One backend agentty knows how to reach: its identity, how it authenticates,
 // which wire dialect it speaks, and its lifetime. POD + string_view so the
 // whole table is a constant-initialised `constexpr` array with zero heap.
@@ -201,6 +226,12 @@ struct ProviderDescriptor {
     // stay in code with the reason written down at the call site.
     std::string_view default_model;
 
+    // The long-lived routing slot serving this row (see RouteSlot above).
+    // RouteSlot::None = per-call transport chosen by wire/native_api at
+    // dispatch time. Proven coherent against lifetime/oauth_native by the
+    // static_asserts under kProviders.
+    RouteSlot route = RouteSlot::None;
+
     // True when this row is reached over the generic OpenAI-compat
     // transport (i.e. it carries real endpoint data above).
     [[nodiscard]] constexpr bool http_dialled() const noexcept {
@@ -234,7 +265,8 @@ inline constexpr std::array<ProviderDescriptor, 15> kProviders{{
      .auth = AuthStyle::OAuthOrKey,
      .prewarm_host = "api.anthropic.com",
      .method_menu = true, .oauth_proactive_refresh = true,
-     .default_model = "claude-opus-4-5"},
+     .default_model = "claude-opus-4-5",
+     .route = RouteSlot::Anthropic},
 
     {.id = "openai", .label = "OpenAI", .blurb = "GPT / Codex — api.openai.com",
      // Chat Completions, NOT Responses. The row used to claim
@@ -258,7 +290,8 @@ inline constexpr std::array<ProviderDescriptor, 15> kProviders{{
      .wire = Wire::OpenAIResponses, .lifetime = Lifetime::LongLived,
      .auth = AuthStyle::None,
      .prewarm_host = "chatgpt.com", .oauth_native = true,
-     .token_in_transport = true},
+     .token_in_transport = true,
+     .route = RouteSlot::ChatGpt},
 
     {.id = "copilot", .label = "GitHub Copilot",
      .blurb = "Sign in with GitHub — Copilot models, no API key",
@@ -270,7 +303,8 @@ inline constexpr std::array<ProviderDescriptor, 15> kProviders{{
      .host = "api.githubcopilot.com", .path = "/chat/completions",
      .models_path = "/models",
      .device_login = true, .token_in_transport = true,
-     .default_model = "gpt-4o"},
+     .default_model = "gpt-4o",
+     .route = RouteSlot::Copilot},
 
     {.id = "kimi", .label = "Kimi",
      .blurb = "Sign in with Kimi — Kimi K2 models, no API key",
@@ -281,7 +315,8 @@ inline constexpr std::array<ProviderDescriptor, 15> kProviders{{
      .prewarm_host = "api.kimi.com", .oauth_native = true,
      .host = "api.kimi.com", .path = "/coding/v1/chat/completions",
      .models_path = "/coding/v1/models",
-     .device_login = true, .token_in_transport = true},
+     .device_login = true, .token_in_transport = true,
+     .route = RouteSlot::Kimi},
 
     {.id = "groq", .label = "Groq",
      .blurb = "Llama/Mixtral on Groq LPUs — very fast",
@@ -461,6 +496,35 @@ namespace detail {
 }
 
 } // namespace detail
+
+namespace detail {
+// Routing must be coherent with the rest of the row — this is the proof
+// that makes RouteSlot-on-the-row safe to trust blindly at dispatch time:
+//   • a routed row must be LongLived (slots hold cross-turn state);
+//   • a LongLived row must be routed (otherwise it can never be reached);
+//   • an oauth_native OpenAI-family row must be routed (its dedicated
+//     transport IS its slot — unrouted it would silently degrade to the
+//     generic per-call path, the exact custom-host bug class);
+//   • no two rows may share a slot (a slot is one provider instance).
+[[nodiscard]] constexpr bool routing_consistent() noexcept {
+    for (const auto& p : kProviders) {
+        if (p.route != RouteSlot::None && p.lifetime != Lifetime::LongLived)
+            return false;
+        if (p.lifetime == Lifetime::LongLived && p.route == RouteSlot::None)
+            return false;
+        if (p.oauth_native && p.route == RouteSlot::None) return false;
+    }
+    for (std::size_t i = 0; i < kProviders.size(); ++i)
+        for (std::size_t j = i + 1; j < kProviders.size(); ++j)
+            if (kProviders[i].route != RouteSlot::None
+                && kProviders[i].route == kProviders[j].route) return false;
+    return true;
+}
+} // namespace detail
+
+static_assert(detail::routing_consistent(),
+              "provider row: route slot contradicts lifetime/oauth_native, "
+              "or two rows share a long-lived slot");
 
 static_assert(detail::endpoints_consistent(),
               "provider row: Wire disagrees with the path it dials, or an "

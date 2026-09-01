@@ -22,6 +22,7 @@
 
 #include "agentty/provider/provider.hpp"
 #include "agentty/provider/stream_epilogue.hpp"
+#include "agentty/provider/registry.hpp"   // RouteSlot: the routing SSOT
 
 #include <cstdint>
 #include <functional>
@@ -38,20 +39,19 @@ struct Selection;  // selection.hpp
 // p.stream(std::move(r), std::move(s)); }`.
 using StreamFn = std::function<StreamResult(Request, EventSink)>;
 
-// Which long-lived provider slot a descriptor routes to. A LongLived provider
-// holds cross-turn state (refreshed OAuth tokens / a warm transport), so it is
-// constructed ONCE in main() and reused; dispatch looks it up here instead of
-// re-deriving "is this chatgpt" from a label. `None` means the selection is
-// served by a per-call transport (OpenAI-compat / Ollama) or the ACP arm.
-//
-// Adding a long-lived provider = one enumerator here + one slot in Router +
-// one `slot_for` arm. Adding a per-call provider needs NONE of this — it flows
-// through the generic OpenAI-compat builder purely from its registry row.
-enum class LongLived : std::uint8_t { None, Anthropic, ChatGpt, Copilot, Kimi };
+// The routing key IS the registry row's RouteSlot field — there is no second
+// enum to keep in sync. `long_lived_slot` reads it off the Selection's
+// resolved row; the coherence static_asserts in registry.hpp guarantee every
+// LongLived row has a slot and no two rows share one, so dispatch can index
+// blindly. Adding a long-lived provider = one enumerator in RouteSlot + one
+// `.route =` on its row + one `router.set(...)` in main(). Adding a per-call
+// provider needs NONE of this — it flows through the generic OpenAI-compat
+// builder purely from its registry row.
+using LongLived = RouteSlot;
 
-// Map a selection to its long-lived slot, purely from registry data: the
-// oauth_native flag (ChatGPT/Codex) and the Anthropic dialect. No label
-// compares — a new OAuth-native provider is added by a row + an arm here.
+// Map a selection to its long-lived slot: the resolved registry row's
+// `.route` field. Row-less selections (custom hosts) and the ACP arm are
+// RouteSlot::None.
 [[nodiscard]] LongLived long_lived_slot(const Selection& sel);
 
 // The router: the long-lived providers as erased StreamFns (owned by main() so
@@ -62,7 +62,7 @@ enum class LongLived : std::uint8_t { None, Anthropic, ChatGpt, Copilot, Kimi };
 // (OpenAI-compat / Ollama) are built inside dispatch from the active Endpoint,
 // so they need no slot here.
 struct ProviderRouter {
-    StreamFn long_lived[5]{};   // indexed by LongLived: [None]=unused, [Anthropic], [ChatGpt], [Copilot], [Kimi]
+    StreamFn long_lived[kRouteSlots]{};   // indexed by RouteSlot; [None] unused
 
     // Kind::ExternalAcp — drive an external ACP agent subprocess. Bound in
     // main() to stream_external_acp(agent_id, …); erased here so dispatch has

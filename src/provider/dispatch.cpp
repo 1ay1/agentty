@@ -20,27 +20,24 @@ namespace {
 // misbehaves: the same model id can stream through different dialects on
 // different hosts (claude-* over OpenAI-compat on an aggregator, gpt-*
 // over /responses on Copilot but /chat/completions on Azure).
-[[nodiscard]] const char* route_tag(const Selection& sel) noexcept {
+// Slot rows carry their tag in the registry (slot_tag); only the
+// slot-less arms (ACP / per-call compat) are named here.
+[[nodiscard]] std::string_view route_tag(const Selection& sel) noexcept {
     if (sel.kind == Kind::ExternalAcp)  return "acp";
-    if (sel.is_copilot())               return "copilot";
-    if (sel.is_kimi())                  return "kimi";
-    if (sel.is_oauth_native())          return "chatgpt-responses";
-    if (sel.kind == Kind::Anthropic)    return "anthropic-messages";
+    if (const auto s = long_lived_slot(sel); s != RouteSlot::None)
+        return slot_tag(s);
     if (sel.openai_endpoint.native_api) return "ollama-native";
     return "openai-chat";
 }
 } // namespace
 
 LongLived long_lived_slot(const Selection& sel) {
-    // Purely registry-driven. oauth_native (a row flag) picks the ChatGPT/Codex
-    // long-lived transport; the Anthropic dialect picks the Anthropic one.
-    // Everything else (per-call OpenAI-compat / Ollama, or the ACP arm) has no
-    // long-lived slot. No label compares, no is_chatgpt idiom.
-    if (sel.is_copilot())             return LongLived::Copilot;
-    if (sel.is_kimi())                return LongLived::Kimi;
-    if (sel.is_oauth_native())        return LongLived::ChatGpt;
-    if (sel.kind == Kind::Anthropic)  return LongLived::Anthropic;
-    return LongLived::None;
+    // ONE field read. The registry's routing_consistent() static_assert
+    // proves every LongLived row carries a unique slot, so there is nothing
+    // to derive and nothing to drift: the row IS the routing decision.
+    // Row-less selections (a custom host that matched no preset) fall to the
+    // per-call transports — by construction, since they have no row to read.
+    return sel.row ? sel.row->route : RouteSlot::None;
 }
 
 StreamResult dispatch_stream(const ProviderRouter& router, const Selection& sel,
@@ -70,8 +67,20 @@ StreamResult dispatch_stream(const ProviderRouter& router, const Selection& sel,
     //    cross-turn OAuth/connection state, constructed once in main(). The
     //    slot is derived from registry data, NOT from a label ladder.
     if (const LongLived slot = long_lived_slot(sel); slot != LongLived::None) {
-        return router.long_lived[static_cast<std::size_t>(slot)](
-            std::move(req), std::move(sink));
+        const auto& fn = router.long_lived[static_cast<std::size_t>(slot)];
+        if (!fn) {
+            // A routed row whose slot main() never bound. Cannot happen when
+            // main() binds every enumerator (the registry proves rows↔slots
+            // 1:1), but if a refactor drops one, fail as a named StreamError
+            // — not a bad_function_call unwinding through the worker thread.
+            AGT_LOG(Model, Error, "dispatch.unbound_slot", "route={}",
+                    slot_tag(slot));
+            sink(Msg{StreamError{std::string{"internal: provider slot '"}
+                                 + std::string{slot_tag(slot)}
+                                 + "' is not bound", std::nullopt}});
+            return StreamResult::failed("unbound provider slot");
+        }
+        return fn(std::move(req), std::move(sink));
     }
 
     // 3) Per-call transport, built fresh from the active Endpoint so a

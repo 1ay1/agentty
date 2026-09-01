@@ -1838,14 +1838,9 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
     // before the first close tag is implicit reasoning. Other models only get
     // EXPLICIT [THINK]/<think> spans routed — never leading text — so a stray
     // close tag in ordinary prose is kept verbatim.
-    {
-        std::string ml = req.model;
-        for (char& ch : ml) ch = static_cast<char>(std::tolower((unsigned char)ch));
-        ctx.reason_by_default =
-            ml.find("magistral") != std::string::npos
-            || ml.find("deepseek-r1") != std::string::npos
-            || ml.find("deepseek-reasoner") != std::string::npos;
-    }
+    // The family list is a MODEL fact and lives in the catalog
+    // (reasons_by_default) — one authority for every transport.
+    ctx.reason_by_default = agentty::reasons_by_default(req.model);
     set_memory_salvage_intent(ctx, req);
     // Tools we advertised this turn — the salvage path only converts a
     // leaked-JSON "tool call" into a real one when it names one of these.

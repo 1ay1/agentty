@@ -159,3 +159,46 @@ TEST_CASE("copilot: Auto still delegates the choice") {
     // Nothing on offer at all.
     CHECK(copilot::pick_auto_model_for_test({}, "", "copilot-auto").empty());
 }
+
+// ── Routing: the registry row IS the routing decision ────────────────────
+//
+// long_lived_slot reads sel.row->route — one field, no derivation. The
+// registry's routing_consistent() static_assert already proves the table
+// coherent at compile time; these pin the RUNTIME face of the same
+// contract: what dispatch actually sees for each id, and that a row-less
+// (genuinely custom) selection falls to the per-call path.
+#include "agentty/provider/dispatch.hpp"
+
+TEST_CASE("routing: every long-lived provider maps to its unique slot") {
+    auto slot_of = [](const char* spec) {
+        return provider::long_lived_slot(provider::parse_selection(spec));
+    };
+    CHECK(slot_of("anthropic") == provider::RouteSlot::Anthropic);
+    CHECK(slot_of("chatgpt")   == provider::RouteSlot::ChatGpt);
+    CHECK(slot_of("copilot")   == provider::RouteSlot::Copilot);
+    CHECK(slot_of("kimi")      == provider::RouteSlot::Kimi);
+    // Per-call rows have no slot: served by the generic compat transport.
+    CHECK(slot_of("openai")    == provider::RouteSlot::None);
+    CHECK(slot_of("ollama")    == provider::RouteSlot::None);
+    // A genuinely custom host has no row at all → per-call by construction.
+    CHECK(slot_of("http://my-llama-box:8080/v1")
+          == provider::RouteSlot::None);
+}
+
+TEST_CASE("routing: slot identity survives an endpoint override") {
+    // The custom-host bug class this design retires: a custom spec naming a
+    // known provider's host adopts its ROW — and with the row comes the
+    // route slot, so it is served by the same long-lived transport (same
+    // OAuth session), not silently degraded to the generic per-call path.
+    auto sel = provider::parse_selection("https://api.githubcopilot.com");
+    CHECK(provider::long_lived_slot(sel) == provider::RouteSlot::Copilot);
+}
+
+TEST_CASE("routing: slot tags match the dispatch.turn route vocabulary") {
+    // slot_tag feeds the `route=` field of the dispatch.turn log line; the
+    // troubleshooting docs grep for these exact strings.
+    CHECK(provider::slot_tag(provider::RouteSlot::Anthropic) == "anthropic-messages");
+    CHECK(provider::slot_tag(provider::RouteSlot::ChatGpt)   == "chatgpt-responses");
+    CHECK(provider::slot_tag(provider::RouteSlot::Copilot)   == "copilot");
+    CHECK(provider::slot_tag(provider::RouteSlot::Kimi)      == "kimi");
+}

@@ -1219,6 +1219,45 @@ learned_effort_sets_snapshot() {
     return ModelCapabilities::from_id(model_id).is_weak_tool_user();
 }
 
+// Does this model BEGIN its output in reasoning with NO opening think-tag?
+// vLLM calls this reason-by-default; the families that do it are Magistral
+// (Mistral's reasoning line — emits thoughts, then [/THINK], then the
+// answer) and DeepSeek-R1 / deepseek-reasoner (prepends <think> only
+// sometimes). For these, leading content before the FIRST close tag is
+// implicit reasoning and must be routed to the thinking block. Any other
+// model must NEVER have leading text treated as reasoning — a stray
+// "</think>" in ordinary answer prose stays verbatim.
+//
+// A MODEL fact, not a transport fact: it describes how the model was
+// trained to emit tokens, identically on every host that serves it. Lives
+// here (with is_weak_model / infer_reasoning_compat) so every transport
+// reads one authority — the openai-compat transport used to sniff this
+// inline, which is exactly how a second transport would have drifted.
+[[nodiscard]] constexpr bool reasons_by_default(std::string_view model_id) noexcept {
+    // constexpr-friendly case-insensitive substring scan (mirrors the
+    // contains() helpers used by from_id's inference blocks).
+    constexpr auto has = [](std::string_view id, std::string_view n) {
+        if (n.size() > id.size()) return false;
+        for (std::size_t i = 0; i + n.size() <= id.size(); ++i) {
+            bool eq = true;
+            for (std::size_t j = 0; j < n.size(); ++j) {
+                char a = id[i + j], b = n[j];
+                if (a >= 'A' && a <= 'Z') a = static_cast<char>(a - 'A' + 'a');
+                if (a != b) { eq = false; break; }
+            }
+            if (eq) return true;
+        }
+        return false;
+    };
+    return has(model_id, "magistral")
+        || has(model_id, "deepseek-r1")
+        || has(model_id, "deepseek-reasoner");
+}
+static_assert(reasons_by_default("Magistral-Small-2506"));
+static_assert(reasons_by_default("deepseek-r1:70b"));
+static_assert(!reasons_by_default("mistral-small-latest"));
+static_assert(!reasons_by_default("qwen3:32b"));   // explicit-tag family
+
 
 // Is this id a chat/completions model an agent can actually DRIVE (stream text
 // + call tools), as opposed to an embedding / image / audio / moderation /

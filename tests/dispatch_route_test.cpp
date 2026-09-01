@@ -64,9 +64,9 @@ static provider::StreamResult result_for(const provider::Selection& sel) {
 }
 
 TEST_CASE("anthropic selection hits anthropic route") {
-    provider::Selection sel;                 // defaults to Kind::Anthropic
-    sel.kind = provider::Kind::Anthropic;
-    CHECK(route_for(sel) == "anthropic");
+    // Through parse_selection: routing reads the registry row's .route
+    // field, and a row-less Kind::Anthropic is unreachable in production.
+    CHECK(route_for(provider::parse_selection("anthropic")) == "anthropic");
 }
 
 TEST_CASE("chatgpt selection hits chatgpt route") {
@@ -101,19 +101,17 @@ TEST_CASE("is_chatgpt predicate") {
 // label ladder. This locks that derivation so a future edit can't route a
 // ChatGPT turn to the Anthropic transport or vice versa.
 TEST_CASE("long lived slot derivation") {
-    provider::Selection anth;
-    anth.kind = provider::Kind::Anthropic;
-    CHECK(provider::long_lived_slot(anth) == provider::LongLived::Anthropic);
-
-    const auto chatgpt = provider::parse_selection("chatgpt");
-    CHECK(provider::long_lived_slot(chatgpt) == provider::LongLived::ChatGpt);
+    // The slot IS the registry row's .route field — resolve rows the way
+    // production does (parse_selection), never hand-build.
+    CHECK(provider::long_lived_slot(provider::parse_selection("anthropic"))
+          == provider::LongLived::Anthropic);
+    CHECK(provider::long_lived_slot(provider::parse_selection("chatgpt"))
+          == provider::LongLived::ChatGpt);
 
     // A hosted OpenAI-compat backend has NO long-lived slot — it is built per
     // call from the Endpoint, so dispatch falls through to the transport path.
-    provider::Selection groq;
-    groq.kind = provider::Kind::OpenAI;
-    groq.openai_endpoint.label = "groq";
-    CHECK(provider::long_lived_slot(groq) == provider::LongLived::None);
+    CHECK(provider::long_lived_slot(provider::parse_selection("groq"))
+          == provider::LongLived::None);
 
     // An ACP subprocess is neither long-lived slot — it takes the ACP arm.
     provider::Selection acp;
@@ -194,8 +192,10 @@ TEST_CASE("prewarm target table") {
 // outcome is a VALUE that survives the type-erased boundary, not just a side
 // effect on the sink.
 TEST_CASE("dispatch propagates stream result") {
-    provider::Selection anth;
-    anth.kind = provider::Kind::Anthropic;
+    // parse_selection, not a hand-built Selection: routing reads the
+    // registry row (sel.row->route), and a row-less Kind::Anthropic value
+    // is a state production cannot produce.
+    const auto anth = provider::parse_selection("anthropic");
     auto ra = result_for(anth);
     CHECK(ra.end == provider::StreamEnd::CleanClose);
     CHECK(ra.ok());
