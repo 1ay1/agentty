@@ -830,8 +830,7 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m,
             //
             // Both terms are boundable at build time: est_card_rows is the
             // same estimate hidden_fits already uses, and the unresolved tail
-            // is at most ceil(reveal_backlog / cols) wrapped rows (a byte is
-            // at most one column). Add a chrome margin and require STRICT
+            // is bounded below. Add a chrome margin and require STRICT
             // headroom. When that holds, showing the card cannot push a
             // ghosted row off the top *this frame*, and the reveal cursor is
             // simultaneously ramped to the edge (request_finalize below), so
@@ -844,15 +843,59 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m,
             // glide lands — the old always-defer behaviour, now the rare path.
             const int term_rows_now = ::maya::available_height();
             const int cols_now      = std::max(1, ::maya::available_width());
-            const int est_tail_rows =
-                static_cast<int>((reveal_backlog + static_cast<std::size_t>(cols_now) - 1)
-                                 / static_cast<std::size_t>(cols_now));
+
+            // Row bound for the unrevealed tail. ceil(bytes/cols) ALONE is
+            // NOT an upper bound, for TWO independent reasons — both measured
+            // in tests/reveal_headroom_test.cpp:
+            //
+            //  1. Newlines. It assumes every byte consumes a column, which a
+            //     '\n' violates: 100 bytes holding 40 '\n' occupies 40+ rows,
+            //     not 2 (measured 41 vs 2, a 20x under-estimate). Newline-
+            //     dense markdown (lists, tables, short fenced lines) is
+            //     exactly the shape that tends to precede a tool call.
+            //  2. Inset. Markdown blocks render inside padding/indent, so the
+            //     usable text width is NARROWER than the terminal. Dividing
+            //     by the full `cols` therefore over-states how much text fits
+            //     per row (measured: a 500-char line at 46 cols renders 12
+            //     rows, but cols-wide division predicts 11).
+            //
+            // So: bound each unrevealed LINE separately against a CONSERVATIVE
+            // wrap width. A line of length L costs ceil(L/wrap_w) rows,
+            // minimum 1 (a blank line still occupies a row). Summing that over
+            // the tail dominates both the wrap term and the line-count term.
+            // Word-wrap only breaks EARLIER than a hard character wrap (it
+            // backs up to a space), so a character-wrap count at a width no
+            // greater than the real one is a genuine upper bound.
+            constexpr int kBlockInset = 2;   // padding/indent safety margin
+            const int wrap_w = std::max(1, cols_now - kBlockInset);
+            int est_tail_rows = 0;
+            {
+                const std::string_view tail =
+                    std::string_view{source}.substr(source.size() - reveal_backlog);
+                std::size_t line_start = 0;
+                while (line_start <= tail.size()) {
+                    const std::size_t nl = tail.find('\n', line_start);
+                    const std::size_t len =
+                        (nl == std::string_view::npos ? tail.size() : nl) - line_start;
+                    est_tail_rows += std::max<int>(
+                        1, static_cast<int>((len + static_cast<std::size_t>(wrap_w) - 1)
+                                            / static_cast<std::size_t>(wrap_w)));
+                    if (nl == std::string_view::npos) break;
+                    line_start = nl + 1;
+                }
+            }
+
             // Chrome the tail shares the viewport with: composer + status +
             // the turn's own header/rail. Matches the margin hidden_fits uses.
             constexpr int kChromeRows = 6;
+            // Slack for block-level markup in the unrevealed tail that adds
+            // rows beyond its own text lines (code-fence borders, table
+            // separators, blockquote padding).
+            constexpr int kBlockChromeSlack = 4;
             const bool reveal_has_headroom =
                 term_rows_now > 0
-                && est_hidden_rows + est_tail_rows + kChromeRows < term_rows_now;
+                && est_hidden_rows + est_tail_rows + kChromeRows + kBlockChromeSlack
+                       < term_rows_now;
 
             // Show the card IMMEDIATELY when the proof holds: the prose keeps
             // revealing above it (no paste, no hold). Defer only otherwise.

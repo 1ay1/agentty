@@ -31,6 +31,8 @@ set(_AGENTTY_CONSOLIDATED
     scheduler_path_test tool_result_budget_test tool_wedge_liveness_test
     transcript_bound_test turn_settle_test midrun_seam_test midrun_wire_test
     codex_responses_test doom_loop_test visual_hash_coverage_test
+    wire_fragmentation_test provider_identity_test provider_conformance_test
+    capability_conformance_test
     ollama_transport_test openai_transport_test code_block_extract_test
     command_palette_test compaction_threshold_test fsm_test model_caps_test
     param_tag_repair_test sandbox_escape_test scope_test table_render_test
@@ -76,6 +78,7 @@ agentty_fold_test(reveal_scrollback_test   TIMEOUT 180 UNIX_LIBS util)
 agentty_fold_test(scrollback_oracle_test   TIMEOUT 600 UNIX_LIBS util)
 agentty_fold_test(external_acp_backend_test TIMEOUT 60)
 agentty_fold_test(md_shape_sweep           TIMEOUT 120)
+agentty_fold_test(reveal_headroom_test     TIMEOUT 60)
 agentty_fold_test(md_cache_probe           TIMEOUT 120)
 if(AGENTTY_MCP)
     agentty_fold_test(mcp_bridge_test      TIMEOUT 60)
@@ -129,6 +132,24 @@ add_executable(logx_test EXCLUDE_FROM_ALL
 target_include_directories(logx_test PRIVATE include)
 add_test(NAME logx_test COMMAND logx_test)
 set_tests_properties(logx_test PROPERTIES TIMEOUT 30)
+
+# logx redaction/format: standalone for the SAME reason as logx_test above —
+# the sink latches on first use, so a test that needs logging ON must own its
+# process. These were briefly folded into the consolidated binary, where the
+# guard `if (!logging_on()) return;` made all 8 cases pass with ZERO
+# assertions in CI: a green suite proving nothing. ENV makes ctest configure
+# the log before the binary starts, so the assertions actually run.
+foreach(_logx_t logx_redaction_test logx_format_test)
+    agentty_test(${_logx_t} MODE raw)
+    add_executable(${_logx_t} EXCLUDE_FROM_ALL
+        tests/${_logx_t}.cpp tests/test_main.cpp
+        src/util/logx.cpp src/util/dbglog.cpp)
+    target_include_directories(${_logx_t} PRIVATE include tests)
+    target_link_libraries(${_logx_t} PRIVATE doctest::doctest maya::maya)
+    add_test(NAME ${_logx_t} COMMAND ${_logx_t})
+    set_tests_properties(${_logx_t} PROPERTIES TIMEOUT 30
+        ENVIRONMENT "AGENTTY_LOG=trace;AGENTTY_LOG_FILE=${CMAKE_CURRENT_BINARY_DIR}/${_logx_t}.log")
+endforeach()
 
 agentty_test(keystore_test MODE raw LABELS sanitizer)
 add_executable(keystore_test EXCLUDE_FROM_ALL

@@ -24,6 +24,7 @@ FOLD_NOARGS(scrollback_oracle_test)
 FOLD_NOARGS(mcp_bridge_test)
 FOLD_NOARGS(mcp_http_test)
 FOLD_NOARGS(md_shape_sweep)
+FOLD_NOARGS(reveal_headroom_test)
 
 FOLD_ARGS(external_acp_backend_test)
 FOLD_ARGS(long_session_bench)
