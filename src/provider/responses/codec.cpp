@@ -26,7 +26,10 @@
 
 #include <nlohmann/json.hpp>
 
+#include <format>
+
 #include "agentty/provider/stream_epilogue.hpp"
+#include "agentty/provider/stream_scaffold.hpp"
 #include "agentty/provider/usage.hpp"
 #include "agentty/provider/msg_shared.hpp"
 #include "agentty/provider/wire.hpp"
@@ -564,37 +567,14 @@ provider::StreamResult stream(const Site& site, provider::Request req,
 
     StreamCtx ctx;
     ctx.sink = sink;
-    int http_status = 0;
-    std::string error_body;
-    // Server-provided backoff hint (429 rate-limit / 5xx overload). The
-    // Responses backends emit standard `Retry-After` (integer seconds) just
-    // like Anthropic/OpenAI; capturing it lets the runtime honor the server's
-    // schedule instead of falling back to its blind ladder.
-    std::optional<std::chrono::seconds> retry_after_hint;
-
-    http::StreamHandler cbs;
-    cbs.on_headers = [&](int status, const http::Headers& hh) {
-        http_status = status;
-        AGT_LOG(Wire, Debug, "responses.response", "host={} status={}",
-                hr.host, status);
-        if (status < 400) return;   // only care about the error path
-        retry_after_hint = provider::parse_retry_after(hh);
-    };
-    cbs.on_activity = [&] {
-        sink(StreamHeartbeat{.transport_only = true});
-    };
-    cbs.on_buffered_wait = [&] { sink(StreamBufferedWait{}); };
-    cbs.on_chunk = [&](std::string_view chunk) -> bool {
-        provider::dbg_chunk("openai-responses", chunk);
-        if (http_status >= 400) {
-            // Cap the buffered error body so a misbehaving edge / proxy that
-            // streams an unbounded 4xx/5xx body can't drive us into OOM on the
-            // error path (parity with the Anthropic transport's 64 KB guard).
-            if (error_body.size() < 64 * 1024)
-                error_body.append(chunk.data(),
-                                  std::min(chunk.size(), 64 * 1024 - error_body.size()));
-            return true;
-        }
+    // Shared scaffold: status/Retry-After capture, heartbeats, buffered-wait,
+    // wire dump, capped error body. Our feed stops the read once dispatch()
+    // fired the terminal event (deliberate post-`response.completed` abort —
+    // a latency win the epilogue understands as AlreadyTerminated).
+    provider::StreamScaffold sc;
+    sc.dialect = "openai-responses";
+    sc.sink    = sink;
+    sc.feed    = [&](std::string_view chunk) {
         ctx.sse.feed(chunk.data(), chunk.size(),
             [&](std::string_view, std::string_view payload, char*) {
                 dispatch(ctx, payload);
@@ -602,33 +582,16 @@ provider::StreamResult stream(const Site& site, provider::Request req,
         return !ctx.terminated;
     };
 
-    http::Timeouts tos;
-    tos.connect = std::chrono::milliseconds(15'000);
-    tos.total   = std::chrono::minutes(30);
-    // Idle/stall watchdog — parity with the Anthropic stream. A healthy
-    // Responses stream emits SSE frames (deltas / heartbeats) continuously,
-    // so 90 s without a single byte means the transport is dead (silent peer,
-    // proxy stall, half-open TCP). Without this, a mid-turn stall would wait
-    // for the generous total cap instead of being retried promptly.
-    // 15 s PING probes keep a half-open TCP detectable and produce
-    // transport-only heartbeats when a corporate gateway is alive but
-    // withholding SSE DATA. The 30-minute total cap is the final bound.
-    tos.ping    = std::chrono::milliseconds(15'000);
-    tos.idle    = std::chrono::milliseconds(90'000);
+    http::Timeouts tos = provider::stream_timeouts();
 
-    auto result = http::default_client().stream(hr, cbs, tos, req.cancel);
+    auto result = http::default_client().stream(hr, sc.handler(), tos, req.cancel);
 
-    // One end-of-turn summary + the raw error body when the turn failed.
-    // This is the line a user's shared log answers "why did the provider
-    // fail?" with — the HTTP status, the transport verdict, and the exact
-    // bytes the server sent back (capped at 64 KB by on_chunk above).
-    AGT_LOG(Wire, Debug, "responses.result",
-            "status={} transport={} terminated={} thinking_deltas={}",
-            http_status, result ? std::string{"ok"} : result.error().render(),
-            ctx.terminated ? 1 : 0, ctx.thinking_deltas);
-    if ((!result || http_status >= 400) && !error_body.empty())
-        AGT_LOG(Wire, Warn, "responses.error.body", "status={} raw={}",
-                http_status, error_body);
+    // Uniform end-of-turn pair (Debug summary + Warn raw error body) with the
+    // dialect-specific counters appended.
+    sc.log_result(bool(result),
+                  result ? std::string_view{} : result.error().render(),
+                  std::format("terminated={} thinking_deltas={}",
+                              ctx.terminated ? 1 : 0, ctx.thinking_deltas));
 
     // End the turn through the SHARED epilogue so every Responses host
     // finishes identically to Anthropic/OpenAI/Ollama. The critical case is
@@ -641,14 +604,14 @@ provider::StreamResult stream(const Site& site, provider::Request req,
         .terminated  = ctx.terminated,
         .sink        = sink,
         .result_ok   = bool(result),
-        .http_status = http_status,
+        .http_status = sc.http_status,
         .non_replayable = !result && result.error().non_replayable,
         .cancel      = req.cancel,
         .stop        = ctx.stop,
         .http_error_message = [&]() -> std::string {
-            return site.explain_http_error(http_status, error_body);
+            return site.explain_http_error(sc.http_status, sc.error_body);
         },
-        .retry_after = retry_after_hint,
+        .retry_after = sc.retry_after_hint,
         .transport_error_message = [&]() -> std::string {
             return result.error().render();
         },

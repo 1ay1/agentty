@@ -7,6 +7,7 @@
 #include <array>
 #include <chrono>
 #include <cstdio>
+#include <format>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -23,6 +24,7 @@
 #include "agentty/domain/bundled_catalog.hpp"
 #include "agentty/io/http.hpp"
 #include "agentty/provider/stream_epilogue.hpp"
+#include "agentty/provider/stream_scaffold.hpp"
 #include "agentty/provider/wire.hpp"
 #include "agentty/provider/debug.hpp"
 #include "agentty/provider/wire_supersede.hpp"
@@ -535,68 +537,21 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
                                          /*retry_count=*/req.retry_count);
     hreq.body    = std::move(body_str);
 
-    // We split on HTTP status: 2xx → feed SSE chunks straight to the parser;
-    // anything else → buffer the whole body and surface a structured error.
-    int  http_status = 0;
-    bool is_success  = false;
-    std::string error_body;
-    // Server-provided Retry-After hint, when present. Anthropic emits this
-    // on 429 (rate_limit_error) and 529 (overloaded_error) — always as an
-    // integer number of seconds (see Zed's parse_retry_after,
-    // anthropic.rs:574-580). The runtime prefers this over its hardcoded
-    // backoff schedule because the server knows better than we do how long
-    // the brown-out will last. Clamped at the use site so a buggy proxy
-    // can't pin us for an hour.
-    std::optional<std::chrono::seconds> retry_after_hint;
-
-    http::StreamHandler handler;
-    handler.on_headers = [&](int status, const http::Headers& hh) {
-        http_status = status;
-        is_success  = (status >= 200 && status < 300);
-        if (is_success) return;
-        retry_after_hint = provider::parse_retry_after(hh);
-    };
-    handler.on_activity = [&] {
-        ctx.sink(StreamHeartbeat{.transport_only = true});
-    };
-    handler.on_buffered_wait = [&] { ctx.sink(StreamBufferedWait{}); };
-    handler.on_chunk = [&](std::string_view chunk) -> bool {
-        provider::dbg_chunk("anthropic-messages", chunk);
-        if (is_success) {
-            feed_sse(ctx, chunk.data(), chunk.size());
-        } else {
-            // Cap the buffered error body so a misbehaving edge can't OOM us.
-            if (error_body.size() < 64 * 1024)
-                error_body.append(chunk.data(),
-                                  std::min(chunk.size(), 64 * 1024 - error_body.size()));
-        }
+    // All the per-turn handler scaffolding — status capture, Retry-After on
+    // the error path (Anthropic emits it on 429/529 as integer seconds),
+    // heartbeats, buffered-wait, wire dump, capped error-body accumulation —
+    // is the shared StreamScaffold. Only the parser feed is ours.
+    provider::StreamScaffold sc;
+    sc.dialect = "anthropic-messages";
+    sc.sink    = ctx.sink;
+    sc.feed    = [&](std::string_view chunk) {
+        feed_sse(ctx, chunk.data(), chunk.size());
         return true;
     };
+    http::StreamHandler handler = sc.handler();
 
-    http::Timeouts tos;
-    tos.connect = std::chrono::milliseconds(10'000);
-    // A responsive corporate gateway can keep the transport alive while
-    // buffering every SSE frame. Give legitimate large turns ample time, but
-    // retain an absolute ceiling now that control-frame activity suppresses
-    // the short app-layer stall watchdog.
-    tos.total   = std::chrono::minutes(30);
-    // A healthy Anthropic stream emits SSE `ping` heartbeats every 10-15 s
-    // even during long thinking blocks. 90 s without a single byte means
-    // the transport is dead (silent peer, proxy stall, half-open TCP).
-    // The error surfaces as "h2: idle timeout (no bytes for Ns)" and is
-    // classified as Transient by provider::error_class — auto-retried
-    // with backoff.
-    //
-    // The 90 s value is deliberately more patient than the historical
-    // 45 s: on heavily-loaded edge pops we've observed legitimate 30-60 s
-    // intervals. Inbound control bytes are forwarded as transport-only
-    // heartbeats, allowing buffered VPN paths to wait up to the total cap.
-    //
-    // 15 s PING probe interval keeps a half-open TCP from going
-    // undetected for long; the PING ACK bumps last_rx so a healthy peer
-    // never trips idle.
-    tos.ping    = std::chrono::milliseconds(15'000);
-    tos.idle    = std::chrono::milliseconds(90'000);
+    // Standard streaming ladder — the rationale lives with stream_timeouts().
+    http::Timeouts tos = provider::stream_timeouts();
 
     // Keep a copy of the cancel token: it is moved into the stream call below,
     // but finish_stream needs it to distinguish a user cancel from a transport
@@ -605,16 +560,11 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
     auto result = http::default_client().stream(hreq, std::move(handler),
                                                 tos, std::move(cancel));
 
-    AGT_LOG(Wire, Debug, "anthropic.response",
-            "status={} transport={} thinking_deltas={}",
-            http_status, result ? std::string{"ok"} : result.error().render(),
-            ctx.thinking_deltas);
-
-    if (!result) {
-        AGT_LOG(Wire, Debug, "anthropic.error.body", "raw={}", error_body);
-    } else if (!is_success) {
-        AGT_LOG(Wire, Debug, "anthropic.error.body", "raw={}", error_body);
-    }
+    // Uniform end-of-turn pair via the scaffold; thinking_deltas appended so
+    // a "reasoning not showing" report splits server-vs-client from the log.
+    sc.log_result(bool(result),
+                  result ? std::string_view{} : result.error().render(),
+                  std::format("thinking_deltas={}", ctx.thinking_deltas));
 
     // Whole post-loop through the SHARED epilogue: classify the exit and emit
     // exactly one terminal event with correct precedence. on_any_end closes an
@@ -624,28 +574,28 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
         .terminated  = ctx.terminated,
         .sink        = ctx.sink,
         .result_ok   = bool(result),
-        .http_status = http_status,
+        .http_status = sc.http_status,
         .non_replayable = !result && result.error().non_replayable,
         .cancel      = cancel_for_end,
         .stop        = ctx.stop_reason,
         .http_error_message = [&]() -> std::string {
-            std::string msg = "HTTP " + std::to_string(http_status);
+            std::string msg = "HTTP " + std::to_string(sc.http_status);
             try {
-                auto j = json::parse(error_body);
+                auto j = json::parse(sc.error_body);
                 if (j.contains("error") && j["error"].contains("message"))
                     msg += ": " + j["error"]["message"].get<std::string>();
                 else if (j.contains("message"))
                     msg += ": " + j["message"].get<std::string>();
                 else
-                    msg += ": " + error_body.substr(0, 300);
+                    msg += ": " + sc.error_body.substr(0, 300);
             } catch (...) {
-                if (!error_body.empty()) msg += ": " + error_body.substr(0, 300);
+                if (!sc.error_body.empty()) msg += ": " + sc.error_body.substr(0, 300);
             }
-            if (http_status == 401 || http_status == 403)
+            if (sc.http_status == 401 || sc.http_status == 403)
                 msg += "  (run 'agentty login' to re-authenticate)";
             return msg;
         },
-        .retry_after = retry_after_hint,
+        .retry_after = sc.retry_after_hint,
         // Network / TLS / nghttp2-level error — never produced a complete SSE
         // stream. The typed HttpError's render() is embedded so the
         // downstream error_class substring sniff still routes it.

@@ -31,6 +31,7 @@
 #include "agentty/provider/chatgpt/responses.hpp"
 #include "agentty/provider/ollama/transport.hpp"
 #include "agentty/provider/openai/transport.hpp"
+#include "agentty/provider/stream_scaffold.hpp"
 
 using namespace agentty;
 using json = nlohmann::json;
@@ -228,4 +229,80 @@ TEST_CASE("conformance: an empty argument object survives every dialect") {
     CHECK(empty(Chat::run("repo_map", "{}", Style::Snapshot).args));
     CHECK(empty(AnthropicMessages::run("repo_map", "{}", Style::Fragments).args));
     CHECK(empty(OllamaNative::run("repo_map", "{}", Style::Snapshot).args));
+}
+
+// ── StreamScaffold: the shared per-turn handler contract ─────────────────
+//
+// Every transport now builds its StreamHandler from provider::StreamScaffold,
+// so these invariants hold for ALL of them by construction. Pinned here so a
+// transport that regresses to a hand-rolled handler (or a scaffold edit that
+// weakens the contract) fails this suite, not a user in the field.
+TEST_CASE("conformance: scaffold caps the error body at exactly 64 KB") {
+    provider::StreamScaffold sc;
+    sc.dialect = "test";
+    sc.sink = [](Msg) {};
+    sc.feed = [](std::string_view) { return true; };
+    auto h = sc.handler();
+    h.on_headers(500, {});
+    CHECK(!sc.ok());
+    // Feed 3 chunks of 32 KB — only the first two fit under the cap.
+    const std::string chunk(32 * 1024, 'x');
+    CHECK(h.on_chunk(chunk));   // error path keeps draining
+    CHECK(h.on_chunk(chunk));
+    CHECK(h.on_chunk(chunk));
+    CHECK(sc.error_body.size() == provider::kErrorBodyCap);
+}
+
+TEST_CASE("conformance: scaffold routes success chunks to feed, error to body") {
+    provider::StreamScaffold sc;
+    sc.dialect = "test";
+    sc.sink = [](Msg) {};
+    std::string fed;
+    sc.feed = [&](std::string_view c) { fed += c; return true; };
+
+    auto h = sc.handler();
+    h.on_headers(200, {});
+    CHECK(sc.ok());
+    CHECK(h.on_chunk("data: hello\n\n"));
+    CHECK(fed == "data: hello\n\n");
+    CHECK(sc.error_body.empty());
+
+    // feed's return value propagates (the Responses codec's deliberate
+    // stop-after-terminal read abort).
+    sc.feed = [&](std::string_view) { return false; };
+    CHECK(!h.on_chunk("more"));
+}
+
+TEST_CASE("conformance: scaffold forwards liveness as transport-only events") {
+    provider::StreamScaffold sc;
+    sc.dialect = "test";
+    int heartbeats = 0, buffered = 0;
+    sc.sink = [&](Msg m) {
+        if (leaf<StreamHeartbeat>(m))    ++heartbeats;
+        if (leaf<StreamBufferedWait>(m)) ++buffered;
+    };
+    sc.feed = [](std::string_view) { return true; };
+    auto h = sc.handler();
+    // EVERY transport must wire both callbacks — Ollama shipped without
+    // on_buffered_wait for months (buffered sends showed as dead air).
+    REQUIRE(h.on_activity);
+    REQUIRE(h.on_buffered_wait);
+    h.on_activity();
+    h.on_buffered_wait();
+    CHECK(heartbeats == 1);
+    CHECK(buffered == 1);
+}
+
+TEST_CASE("conformance: shared streaming timeout ladder") {
+    // The ladder is a contract with the reducer's stall watchdog and the
+    // retry classifier; a silent change here shifts user-visible behaviour
+    // on every provider at once.
+    const auto tos = provider::stream_timeouts();
+    CHECK(tos.connect == std::chrono::milliseconds(10'000));
+    CHECK(tos.total   == std::chrono::minutes(30));
+    CHECK(tos.ping    == std::chrono::milliseconds(15'000));
+    CHECK(tos.idle    == std::chrono::milliseconds(90'000));
+    // The one legitimate knob: local servers get a longer idle.
+    CHECK(provider::stream_timeouts(std::chrono::milliseconds(600'000)).idle
+          == std::chrono::milliseconds(600'000));
 }

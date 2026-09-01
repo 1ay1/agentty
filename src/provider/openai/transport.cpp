@@ -25,6 +25,7 @@
 #include <cctype>
 #include <array>
 #include <chrono>
+#include <format>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -39,6 +40,7 @@
 #include "agentty/provider/debug.hpp"   // wire dump → logx `wire` channel
 #include "agentty/provider/registry.hpp" // endpoint columns: from_spec's SSOT
 #include "agentty/provider/stream_epilogue.hpp"
+#include "agentty/provider/stream_scaffold.hpp"
 #include "agentty/provider/usage.hpp"
 #include "agentty/provider/msg_shared.hpp"
 #include "agentty/provider/wire.hpp"
@@ -1952,55 +1954,25 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
             req.model, native ? 1 : 0, hreq.body.size());
     AGT_LOG(Wire, Trace, "openai.request.body", "raw={}", hreq.body);
 
-    int  http_status = 0;
-    bool is_success  = false;
-    std::string error_body;
-    std::optional<std::chrono::seconds> retry_after_hint;
-
-    http::StreamHandler handler;
-    handler.on_headers = [&](int status, const http::Headers& hh) {
-        http_status = status;
-        is_success  = (status >= 200 && status < 300);
-        AGT_LOG(Wire, Debug, "openai.response", "status={}", status);
-        if (is_success) return;
-        retry_after_hint = provider::parse_retry_after(hh);
-    };
-    handler.on_activity = [&] {
-        ctx.sink(StreamHeartbeat{.transport_only = true});
-    };
-    handler.on_buffered_wait = [&] { ctx.sink(StreamBufferedWait{}); };
-    handler.on_chunk = [&](std::string_view chunk) -> bool {
-        // VERBATIM, untruncated: the parser is often the thing under
-        // suspicion, so a clipped frame hides exactly the bytes that matter
-        // (the Copilot `.done` event that carried the tool arguments landed
-        // well past 2 KB in a real turn).
-        provider::dbg_chunk(native ? "ollama-native" : "openai-chat", chunk);
-        if (is_success) {
-            if (native) feed_ndjson(ctx, chunk.data(), chunk.size());
-            else        feed_sse(ctx, chunk.data(), chunk.size());
-        } else {
-            if (error_body.size() < 64 * 1024)
-                error_body.append(chunk.data(),
-                    std::min(chunk.size(), 64 * 1024 - error_body.size()));
-        }
+    provider::StreamScaffold sc;
+    sc.dialect = native ? "ollama-native" : "openai-chat";
+    sc.sink    = ctx.sink;
+    sc.feed    = [&](std::string_view chunk) {
+        if (native) feed_ndjson(ctx, chunk.data(), chunk.size());
+        else        feed_sse(ctx, chunk.data(), chunk.size());
         return true;
     };
+    http::StreamHandler handler = sc.handler();
 
-    http::Timeouts tos;
-    tos.connect = std::chrono::milliseconds(10'000);
-    tos.total   = std::chrono::minutes(30); // tolerate buffering, never wedge forever
-    tos.ping    = std::chrono::milliseconds(15'000);
-    // Idle gap between wire bytes. Hosted APIs stream keepalives, so 90 s of
-    // silence means a wedged proxy. LOCAL servers are different: llama.cpp
-    // sends NOTHING during prompt processing, and a 20-30B model on consumer
-    // hardware can grind for minutes on agentty's system prompt before the
-    // first token. A 90 s idle cut mid-processing forced a retry that
-    // re-processed the same prompt from scratch — another face of the local
-    // dead loop (each attempt dies at 90 s forever). 10 min for plaintext
-    // (local) endpoints; the stall watchdog still shows elapsed time and Esc
-    // still cancels instantly.
-    tos.idle    = req.endpoint.use_tls ? std::chrono::milliseconds(90'000)
-                                       : std::chrono::milliseconds(600'000);
+    // Standard ladder, with the ONE legitimate per-transport knob: LOCAL
+    // (plaintext) servers send nothing during prompt processing — llama.cpp
+    // on consumer hardware can grind for minutes before the first token, and
+    // a 90 s idle cut mid-processing forced a retry that re-processes the
+    // same prompt from scratch, forever (the local dead loop). 10 min for
+    // plaintext endpoints; Esc still cancels instantly.
+    http::Timeouts tos = provider::stream_timeouts(
+        req.endpoint.use_tls ? std::chrono::milliseconds(90'000)
+                             : std::chrono::milliseconds(600'000));
 
     // Keep a copy of the cancel token: moved into the stream call, but
     // finish_stream needs it to distinguish a user cancel from a transport
@@ -2013,15 +1985,12 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
     // "why did my provider fail?" report needs. Mirrors the Anthropic
     // transport's anthropic.response/anthropic.error.body seam so a shared
     // log reads the same regardless of which backend was active.
-    AGT_LOG(Wire, Debug, "openai.result",
-            "host={} dialect={} status={} transport={} terminated={}",
-            req.endpoint.host, native ? "ollama-native" : "openai-chat",
-            http_status,
-            result ? std::string{"ok"} : result.error().render(),
-            ctx.terminated ? 1 : 0);
-    if ((!result || http_status >= 400) && !error_body.empty())
-        AGT_LOG(Wire, Warn, "openai.error.body", "status={} raw={}",
-                http_status, error_body);
+    // Uniform end-of-turn pair via the scaffold (Debug summary + Warn raw
+    // error body), host + terminated appended as dialect detail.
+    sc.log_result(bool(result),
+                  result ? std::string_view{} : result.error().render(),
+                  std::format("host={} terminated={}",
+                              req.endpoint.host, ctx.terminated ? 1 : 0));
 
     // Whole post-loop through the SHARED epilogue: one terminal event, correct
     // precedence, identical to every other provider. on_any_end closes an open
@@ -2031,32 +2000,32 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
         .terminated  = ctx.terminated,
         .sink        = ctx.sink,
         .result_ok   = bool(result),
-        .http_status = http_status,
+        .http_status = sc.http_status,
         .non_replayable = !result && result.error().non_replayable,
         .cancel      = cancel_for_end,
         .stop        = ctx.stop_reason,
         .http_error_message = [&]() -> std::string {
-            std::string msg = "HTTP " + std::to_string(http_status);
+            std::string msg = "HTTP " + std::to_string(sc.http_status);
             try {
-                auto j = json::parse(error_body);
+                auto j = json::parse(sc.error_body);
                 if (j.contains("error") && j["error"].is_object()
                     && j["error"].contains("message"))
                     msg += ": " + j["error"]["message"].get<std::string>();
                 else if (j.contains("message"))
                     msg += ": " + j["message"].get<std::string>();
-                else if (!error_body.empty())
-                    msg += ": " + error_body.substr(0, 300);
+                else if (!sc.error_body.empty())
+                    msg += ": " + sc.error_body.substr(0, 300);
             } catch (...) {
-                if (!error_body.empty()) msg += ": " + error_body.substr(0, 300);
+                if (!sc.error_body.empty()) msg += ": " + sc.error_body.substr(0, 300);
             }
-            if (http_status == 401 || http_status == 403)
+            if (sc.http_status == 401 || sc.http_status == 403)
                 msg += "  (check the provider API key)";
             // A 404 on a local OpenAI-compatible server is one of TWO things:
             // the chat path doesn't exist on this server (custom-host spec
             // missing its /v1 prefix — llama.cpp only serves /v1/…), or the
             // model id isn't loaded/known. Name both, server-neutrally — the
             // old hint said 'ollama pull' to llama.cpp/vLLM users.
-            if (http_status == 404 && !req.endpoint.use_tls)
+            if (sc.http_status == 404 && !req.endpoint.use_tls)
                 msg += "  (404 from " + req.endpoint.host + ": either the "
                        "path '" + req.endpoint.path + "' doesn't exist on "
                        "this server \xe2\x80\x94 most need the spec to end in /v1 \xe2\x80\x94 "
@@ -2065,7 +2034,7 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
                        "model with ^/)";
             return msg;
         },
-        .retry_after = retry_after_hint,
+        .retry_after = sc.retry_after_hint,
         .transport_error_message = [&]() -> std::string {
             std::string msg = std::string{"http: "} + result.error().render();
             // Local backend unreachable — the daemon almost certainly isn't

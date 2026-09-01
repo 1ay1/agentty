@@ -27,6 +27,7 @@
 #include <nlohmann/json.hpp>
 
 #include "agentty/provider/stream_epilogue.hpp"
+#include "agentty/provider/stream_scaffold.hpp"
 #include "agentty/provider/usage.hpp"
 #include "agentty/provider/msg_shared.hpp"
 #include "agentty/provider/wire.hpp"
@@ -1681,41 +1682,24 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
     hreq.headers = build_request_headers(req.auth);
     hreq.body    = std::move(body_str);
 
-    int  http_status = 0;
-    bool is_success  = false;
-    std::string error_body;
-    std::optional<std::chrono::seconds> retry_after_hint;
-
-    http::StreamHandler handler;
-    handler.on_activity = [&] {
-        ctx.sink(StreamHeartbeat{.transport_only = true});
-    };
-    handler.on_headers = [&](int status, const http::Headers& hh) {
-        http_status = status;
-        is_success  = (status >= 200 && status < 300);
-        if (is_success) return;
-        // Honour a server backoff hint like every other transport — this was
-        // silently dropped before (unnamed Headers param), so a 429 from a
-        // gateway-fronted Ollama ignored Retry-After and hammered the default
-        // schedule.
-        retry_after_hint = provider::parse_retry_after(hh);
-    };
-    handler.on_chunk = [&](std::string_view chunk) -> bool {
-        provider::dbg_chunk("ollama-native", chunk);
-        if (is_success) {
-            feed_ndjson(ctx, chunk.data(), chunk.size());
-        } else if (error_body.size() < 64 * 1024) {
-            error_body.append(chunk.data(),
-                std::min(chunk.size(), 64 * 1024 - error_body.size()));
-        }
+    // Shared scaffold: status/Retry-After capture, heartbeats, buffered-wait
+    // (previously MISSING here — buffered sends showed as dead air), wire
+    // dump, capped error body. Only the NDJSON feed is ours.
+    provider::StreamScaffold sc;
+    sc.dialect = "ollama-native";
+    sc.sink    = ctx.sink;
+    sc.feed    = [&](std::string_view chunk) {
+        feed_ndjson(ctx, chunk.data(), chunk.size());
         return true;
     };
+    http::StreamHandler handler = sc.handler();
 
-    http::Timeouts tos;
-    tos.connect = std::chrono::milliseconds(10'000);
-    tos.total   = std::chrono::milliseconds(0);   // streaming unbounded
-    tos.ping    = std::chrono::milliseconds(15'000);
-    tos.idle    = std::chrono::milliseconds(120'000);  // local gen can be slow
+    // Standard ladder with the two local-server deviations: idle=120 s (local
+    // generation is slow between tokens) and total=0/unbounded (a big model
+    // can legitimately stream for longer than any hosted cap).
+    http::Timeouts tos = provider::stream_timeouts(
+        std::chrono::milliseconds(120'000));
+    tos.total = std::chrono::milliseconds(0);
 
     // Keep a copy of the cancel token: moved into the stream call, but
     // finish_stream needs it to distinguish a user cancel from a transport
@@ -1723,6 +1707,11 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
     http::CancelTokenPtr cancel_for_end = cancel;
     auto result = http::default_client().stream(hreq, std::move(handler),
                                                 tos, std::move(cancel));
+
+    // Uniform end-of-turn pair via the scaffold — this transport previously
+    // logged NOTHING at stream end (drift vs every sibling).
+    sc.log_result(bool(result),
+                  result ? std::string_view{} : result.error().render());
 
     // Whole post-loop through the SHARED epilogue: one terminal event, correct
     // precedence, identical to every other provider. before_finish (success
@@ -1732,26 +1721,26 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
         .terminated  = ctx.terminated,
         .sink        = ctx.sink,
         .result_ok   = bool(result),
-        .http_status = http_status,
+        .http_status = sc.http_status,
         .non_replayable = !result && result.error().non_replayable,
         .cancel      = cancel_for_end,
         .stop        = ctx.stop_reason,
         .http_error_message = [&]() -> std::string {
-            std::string msg = "HTTP " + std::to_string(http_status);
+            std::string msg = "HTTP " + std::to_string(sc.http_status);
             try {
-                auto j = json::parse(error_body);
+                auto j = json::parse(sc.error_body);
                 if (j.contains("error") && j["error"].is_string())
                     msg += ": " + j["error"].get<std::string>();
-                else if (!error_body.empty())
-                    msg += ": " + error_body.substr(0, 300);
+                else if (!sc.error_body.empty())
+                    msg += ": " + sc.error_body.substr(0, 300);
             } catch (...) {
-                if (!error_body.empty()) msg += ": " + error_body.substr(0, 300);
+                if (!sc.error_body.empty()) msg += ": " + sc.error_body.substr(0, 300);
             }
-            if (http_status == 404)
+            if (sc.http_status == 404)
                 msg += "  (model not loaded — run 'ollama pull " + req.model + "')";
             return msg;
         },
-        .retry_after = retry_after_hint,
+        .retry_after = sc.retry_after_hint,
         .transport_error_message = [&]() -> std::string {
             std::string msg = std::string{"http: "} + result.error().render();
             msg += "  (is Ollama running? start it with 'ollama serve', or check "
