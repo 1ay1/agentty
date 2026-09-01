@@ -86,6 +86,16 @@ bool snapshot_active(const std::string& provider, const std::string& label);
 // in-process auth header — the caller (reducer) re-installs that via
 // make_auth_header so this module stays free of runtime/app deps. Returns
 // false when the slot is absent or the install fails.
+//
+// TOKEN-ROTATION SAFETY: before overwriting the active store, the CURRENT
+// live credential is re-snapshotted into the registry slot of the account
+// being switched AWAY from (the provider's registry-active label).
+// Providers that rotate refresh tokens (Anthropic rotates on EVERY
+// refresh) invalidate the old token server-side, so a registry snapshot
+// taken at login time goes stale the moment the live store refreshes;
+// switching back to it later would present a dead refresh token and every
+// refresh would be refused (invalid_grant). Re-snapshotting on the way out
+// keeps every slot as fresh as the last moment it was live.
 bool activate(const std::string& provider, const std::string& label);
 
 // Best-effort human label for whatever credential is currently live in the

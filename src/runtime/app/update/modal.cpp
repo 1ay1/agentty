@@ -748,6 +748,22 @@ commit_provider_switch(Model m, std::string_view spec,
     m.d.available_models.clear();
     m.s.models_loading = true;
 
+    // Stale-token guard for the switched-TO provider. The account-picker
+    // switch path (account_select) has always done this; the CROSS-provider
+    // path did not — so switching openai→anthropic after the anthropic
+    // token lapsed fired the first turn with a stale bearer (a guaranteed
+    // 401 → reactive refresh → retry, i.e. a visibly slow first turn — or
+    // a hard error when the refresh path had any other problem). Same
+    // registry-driven gate: only rows that opt into proactive refresh.
+    maya::Cmd<Msg> refresh_cmd = Cmd<Msg>::none();
+    if (const auto* prow = provider::preset_for(spec_s);
+        prow && prow->oauth_proactive_refresh && !m.s.oauth_refresh_in_flight) {
+        if (auto tok = auth::oauth_proactive_refresh_token()) {
+            m.s.oauth_refresh_in_flight = true;
+            refresh_cmd = cmd::refresh_oauth(std::move(*tok));
+        }
+    }
+
     // Open the model picker immediately so the user sees "Loading models…"
     // the instant they switch, instead of an empty thread until they think
     // to hit /model. Done HERE, in the one shared switch helper, so EVERY
@@ -787,7 +803,8 @@ commit_provider_switch(Model m, std::string_view spec,
     auto toast = set_status_toast(m, std::move(toast_text),
                                   std::chrono::seconds{4});
     return {std::move(m),
-            Cmd<Msg>::batch(std::move(toast), cmd::fetch_models())};
+            Cmd<Msg>::batch(std::move(toast), cmd::fetch_models(),
+                            std::move(refresh_cmd))};
 }
 
 maya::Cmd<Msg> set_status_toast(Model& m, std::string text,

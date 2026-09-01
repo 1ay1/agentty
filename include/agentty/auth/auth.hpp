@@ -161,6 +161,10 @@ enum class OAuthErrorKind : std::uint8_t {
     BadResponse,    // server replied but body wasn't valid JSON
     ApiError,       // server returned an OAuth error_description
     MissingToken,   // 200 OK but no access_token field
+    Superseded,     // refresh succeeded but the credential store was swapped
+                    // mid-exchange (account switch); result discarded. BENIGN:
+                    // the switched-to account's token is already live — do not
+                    // surface an error, do not retry.
 };
 
 struct OAuthError {

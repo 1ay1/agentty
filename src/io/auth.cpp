@@ -164,6 +164,7 @@ std::string OAuthError::render() const {
         case OAuthErrorKind::BadResponse:  kind_str = "bad response"; break;
         case OAuthErrorKind::ApiError:     kind_str = "api error";    break;
         case OAuthErrorKind::MissingToken: kind_str = "missing token";break;
+        case OAuthErrorKind::Superseded:   kind_str = "superseded";   break;
     }
     return "[" + std::string{kind_str} + "] " + detail;
 }
@@ -855,6 +856,33 @@ TokenResult refresh_access_token_locked(const RefreshToken& refresh_token) {
 
     auto tr = refresh_access_token(RefreshToken{rt});
     if (!tr) return tr;
+
+    // LINEAGE CHECK before persisting: an account switch (accounts::activate)
+    // writes the store WITHOUT taking this lock — deliberately, so a switch
+    // never blocks behind a 1-2 s network exchange. That means the store may
+    // now belong to a DIFFERENT account than the one we just refreshed.
+    // Detect it by re-reading: if the on-disk refresh token is neither the
+    // one we exchanged (`rt`) nor the one the exchange returned, the store
+    // was swapped underneath us — saving would clobber the switched-to
+    // account's credentials with the switched-away account's token (registry
+    // says A, store holds B: the "switch refuses to refresh" family).
+    // Skip the save AND report Superseded so the caller neither installs
+    // the stale-account token nor shows a scary error for a benign race.
+    if (xlock.held()) {
+        if (auto now_on_disk = load_credentials()) {
+            if (auto* o = std::get_if<cred::OAuth>(&*now_on_disk)) {
+                if (!o->refresh_token.empty() && o->refresh_token != rt
+                    && o->refresh_token != tr->refresh_token) {
+                    AGT_LOG(Auth, Warn, "auth.refresh.superseded",
+                            "store swapped mid-refresh (account switch); "
+                            "discarding refreshed token");
+                    return std::unexpected(OAuthError{
+                        OAuthErrorKind::Superseded,
+                        "account switched during refresh"});
+                }
+            }
+        }
+    }
 
     // Persist under the lock so the next instance's re-read sees it. This is
     // best-effort for the CURRENT process (we return `tr` regardless, so this

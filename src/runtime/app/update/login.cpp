@@ -28,6 +28,7 @@
 #include "agentty/provider/auth_state.hpp"
 #include "agentty/auth/vault.hpp"
 #include "agentty/runtime/app/cmd_factory.hpp"
+#include "agentty/util/logx.hpp"
 #include "agentty/runtime/app/deps.hpp"
 #include "agentty/runtime/view/helpers.hpp"
 #include "agentty/tool/subagent.hpp"
@@ -566,7 +567,12 @@ Step account_select(Model m) {
     // account; this one may be entitled).
     if (const auto* prow = provider::preset_for(provider);
         prow && prow->oauth_proactive_refresh) {
-        if (auto tok = auth::oauth_proactive_refresh_token()) {
+        // Guard against a concurrent kick (composer's 30s probe / init):
+        // two refresh workers would exchange back-to-back — harmless since
+        // the file lock serializes them and the second re-reads the freshest
+        // token, but wasteful and it double-toggles the in-flight flag.
+        if (auto tok = auth::oauth_proactive_refresh_token();
+            tok && !m.s.oauth_refresh_in_flight) {
             m.s.oauth_refresh_in_flight = true;
             refresh_cmd = cmd::refresh_oauth(std::move(*tok));
         }
@@ -1145,6 +1151,22 @@ Step token_refreshed(Model m, auth::TokenResult result) {
     const bool stream_parked = m.s.in_scheduled();
 
     if (!result) {
+        // BENIGN RACE, not a failure: the refresh landed after an account
+        // switch replaced the credential store. The switched-to account's
+        // token is already live (activate installed it) and the refreshed
+        // token belongs to the switched-AWAY account — installing it would
+        // cross-wire the accounts, and an error toast would alarm the user
+        // over a race they can't see. If a stream was parked on this
+        // refresh, retry it: it will pick up the live (switched-to) header.
+        if (result.error().kind == auth::OAuthErrorKind::Superseded) {
+            AGT_LOG(Auth, Info, "auth.refresh.superseded_dropped",
+                    "stream_parked={}", stream_parked ? 1 : 0);
+            if (stream_parked)
+                return {std::move(m),
+                        Cmd<Msg>::after(std::chrono::milliseconds{0},
+                                        Msg{RetryStream{}})};
+            return {std::move(m), Cmd<Msg>::none()};
+        }
         // Refresh failed — surface the typed error in the bottom row.
         // The "error:" prefix triggers shortcut_row.cpp's danger
         // styling. 6s gives the user time to read before the toast
@@ -1188,19 +1210,41 @@ Step token_refreshed(Model m, auth::TokenResult result) {
         return {std::move(m), std::move(cmd)};
     }
 
-    // Refresh OK — install fresh creds into Deps so the next stream
-    // uses the new bearer, persist them so a relaunch doesn't refresh
-    // again, and surface a success toast.
-    auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::system_clock::now().time_since_epoch()).count();
+    // Refresh OK — install fresh creds into Deps so the next stream uses
+    // the new bearer.
+    //
+    // Do NOT save here. The refresh worker (refresh_access_token_locked)
+    // already persisted under the cross-process file lock — and crucially,
+    // its save preserves the previous refresh token when the server chose
+    // not to rotate (empty refresh_token in the response). A second save
+    // here wrote `tok.refresh_token` VERBATIM — possibly empty — wiping the
+    // on-disk refresh token, so the NEXT refresh had nothing to exchange
+    // and the account was stuck until re-login ("switch refuses to refresh"
+    // when the wiped slot was later snapshotted/activated). One writer, one
+    // policy: the locked worker owns persistence; the reducer only installs.
+    //
+    // LINEAGE before install: an account switch may have replaced the store
+    // after the worker saved. Installing this (older account's) bearer into
+    // Deps would cross-wire the live header against the registry-active
+    // account. The store is the truth — install only if it still carries
+    // the access token this refresh produced.
     auto& tok = *result;
-    auth::Credentials creds{auth::cred::OAuth{
-        std::move(tok.access_token),
-        std::move(tok.refresh_token),
-        tok.expires_in_s ? now_ms + tok.expires_in_s * 1000 : 0,
-    }};
-    auth::save_credentials(creds);
-    agentty::app::update_auth(auth::make_auth_header(creds));
+    {
+        auto on_disk = auth::load_credentials();
+        const auto* o = on_disk ? std::get_if<auth::cred::OAuth>(&*on_disk)
+                                : nullptr;
+        if (!o || o->access_token != tok.access_token) {
+            AGT_LOG(Auth, Info, "auth.refresh.stale_install_dropped",
+                    "store no longer carries the refreshed token "
+                    "(account switched); keeping live header as-is");
+            if (stream_parked)
+                return {std::move(m),
+                        Cmd<Msg>::after(std::chrono::milliseconds{0},
+                                        Msg{RetryStream{}})};
+            return {std::move(m), Cmd<Msg>::none()};
+        }
+        agentty::app::update_auth(auth::make_auth_header(*on_disk));
+    }
 
     auto toast_cmd = set_status_toast(m, "OAuth token refreshed",
                                       std::chrono::seconds{3});

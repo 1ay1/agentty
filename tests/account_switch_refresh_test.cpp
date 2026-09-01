@@ -201,3 +201,82 @@ TEST_CASE("re-login reuses the derived-label slot, no proliferation") {
     CHECK(acc::list_for("anthropic").size() == 2,
           "a distinctly-labelled account is a separate slot");
 }
+
+// ── Token-rotation safety across switches ────────────────────────────────
+//
+// Anthropic rotates the refresh token on every refresh and invalidates the
+// old one server-side. The registry slot for an account is a SNAPSHOT; if
+// the live store refreshes after the snapshot, the slot is stale. The fix:
+// activate() re-snapshots the OUTGOING account's slot from the live store
+// before overwriting it, so switching back later presents the freshest
+// (still-valid) refresh token — never the login-day one.
+TEST_CASE("switch A→B→A returns A's FRESHEST token, not the login-day one") {
+    isolate_config_dir();
+    install_stub_deps();
+
+    // Log in as A (rt-A-v1), snapshot, then simulate a background refresh
+    // that ROTATED A's token in the live store (rt-A-v2) — the registry
+    // slot still holds v1, exactly the staleness window.
+    save_oauth(now_ms() + 3'600'000, "rt-A-v1");
+    acc::snapshot_active("anthropic", "A");
+    save_oauth(now_ms() + 3'600'000, "rt-A-v2");   // rotation post-snapshot
+
+    // Log in as B and register it.
+    // (In the app, login saves the store then snapshots — same order here.)
+    // Switching A→B via activate("B") must FIRST re-snapshot A from the
+    // live store (capturing v2), THEN install B.
+    {
+        // Register B from a separate live credential.
+        auto keep_a = auth::load_credentials();
+        REQUIRE(keep_a.has_value());
+        save_oauth(now_ms() + 3'600'000, "rt-B-v1");
+        acc::snapshot_active("anthropic", "B");
+        // Restore A live (as if A was the active account all along).
+        auth::save_credentials(*keep_a);
+        acc::set_active("anthropic", "A");
+    }
+
+    REQUIRE(acc::activate("anthropic", "B"));
+    // Live store now carries B.
+    {
+        auto c = auth::load_credentials();
+        REQUIRE(c.has_value());
+        auto* o = std::get_if<auth::cred::OAuth>(&*c);
+        REQUIRE(o != nullptr);
+        CHECK(o->refresh_token == "rt-B-v1");
+    }
+
+    // Switch back to A: the token must be v2 (the rotated one), because
+    // activate() re-snapshotted A on the way OUT. Pre-fix this was v1 —
+    // server-invalidated, so every refresh failed until re-login.
+    REQUIRE(acc::activate("anthropic", "A"));
+    {
+        auto c = auth::load_credentials();
+        REQUIRE(c.has_value());
+        auto* o = std::get_if<auth::cred::OAuth>(&*c);
+        REQUIRE(o != nullptr);
+        CHECK(o->refresh_token == "rt-A-v2");
+    }
+}
+
+TEST_CASE("activate to the SAME label does not self-snapshot-clobber") {
+    isolate_config_dir();
+    install_stub_deps();
+
+    save_oauth(now_ms() + 3'600'000, "rt-same-v1");
+    acc::snapshot_active("anthropic", "solo");
+    // Live store rotates…
+    save_oauth(now_ms() + 3'600'000, "rt-same-v2");
+
+    // Re-activating the already-active label must install the SLOT's copy
+    // (v1) — the outgoing==incoming guard skips the outgoing snapshot, so
+    // this is a genuine "restore from registry" and not a no-op — without
+    // upserting v2 into the slot first (which would make restore-from-
+    // registry impossible).
+    REQUIRE(acc::activate("anthropic", "solo"));
+    auto c = auth::load_credentials();
+    REQUIRE(c.has_value());
+    auto* o = std::get_if<auth::cred::OAuth>(&*c);
+    REQUIRE(o != nullptr);
+    CHECK(o->refresh_token == "rt-same-v1");
+}

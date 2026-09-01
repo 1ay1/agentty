@@ -196,6 +196,22 @@ bool snapshot_active(const std::string& provider, const std::string& label) {
 bool activate(const std::string& provider, const std::string& label) {
     auto slot = get(provider, label);
     if (!slot) return false;
+
+    // TOKEN-ROTATION SAFETY (see accounts.hpp): capture the LIVE credential
+    // back into the outgoing account's registry slot before overwriting the
+    // active store. Anthropic rotates the refresh token on every refresh —
+    // without this, the slot for the account we're leaving still holds the
+    // refresh token from login day, which the server has since invalidated;
+    // switching back to it later then FAILS EVERY REFRESH (invalid_grant)
+    // until the user re-logs-in. Best-effort by design: if nothing is live
+    // (fresh install, store wiped) there is nothing fresher to save.
+    if (const std::string outgoing = active_label(provider);
+        !outgoing.empty() && outgoing != label) {
+        if (!snapshot_active(provider, outgoing))
+            util::dbglog("accounts.activate.snapshot_outgoing",
+                         provider + "/" + outgoing + ": no live credential");
+    }
+
     const Backend b = backend_for(provider);
     if (b.store == Store::SettingsKey) {
         set_settings_key(provider, slot->secret);   // the endpoint resolve() reads
