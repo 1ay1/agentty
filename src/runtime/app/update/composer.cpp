@@ -442,6 +442,11 @@ Step smart_paste_from_clipboard(Model m) {
         // toast just lapsing into silence. 1.2s is comfortably above a
         // slow SSH round-trip yet short enough to feel responsive.
         const std::uint64_t seq = ++m.ui.clipboard_query_seq;
+        // This path is only reached from an IMAGE paste intent (Ctrl+V /
+        // Alt+V after the local probes found no image). Remember that, so a
+        // TEXT-only reply can explain itself instead of silently inserting
+        // prose where the user expected a screenshot.
+        m.ui.clipboard_wanted_image = true;
         return {std::move(m),
                 maya::Cmd<Msg>::batch(
                     maya::Cmd<Msg>::query_clipboard(),
@@ -802,6 +807,8 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             // satisfies an in-flight escape-based clipboard query — cancel
             // the pending no-reply diagnosis.
             m.ui.clipboard_query_done = m.ui.clipboard_query_seq;
+            const bool wanted_image = m.ui.clipboard_wanted_image;
+            m.ui.clipboard_wanted_image = false;
             // Empty bracketed paste → Windows Terminal signature for
             // "user hit Ctrl+V but the clipboard has no text content".
             // The terminal swallows Ctrl+V to run its own paste action;
@@ -918,6 +925,21 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             m.ui.composer.text.insert(m.ui.composer.cursor, placeholder);
             m.ui.composer.cursor += static_cast<int>(placeholder.size());
             if (lines > 1) m.ui.composer.expanded = true;
+            // The user asked to paste an IMAGE and the terminal answered with
+            // TEXT. That is the expected outcome on every non-kitty terminal
+            // over SSH — agentty sends OSC 5522 (image, kitty-only) and OSC 52
+            // (text, widely supported) together, and only the latter is
+            // answered. The paste still lands (their clipboard genuinely held
+            // this text), but silently accepting it looks like the image
+            // feature is broken, so name what happened and the way out.
+            if (wanted_image) {
+                auto toast = set_status_toast(
+                    m, "pasted text \xe2\x80\x94 your terminal can't send images "
+                       "over SSH (needs kitty's OSC 5522); attach by path, or "
+                       "set AGENTTY_CLIPBOARD_CMD",
+                    std::chrono::seconds{7});
+                return {std::move(m), std::move(toast)};
+            }
             return done(std::move(m));
         },
         [&](ClipboardQueryTimeout& e) -> Step {
@@ -927,6 +949,9 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             if (e.seq != m.ui.clipboard_query_seq
                 || m.ui.clipboard_query_done >= e.seq)
                 return done(std::move(m));
+            // This query is dead. Clear the image-intent latch so it cannot
+            // leak into an unrelated later paste and mislabel it.
+            m.ui.clipboard_wanted_image = false;
             // Name the user's EXACT situation and the shortest path out —
             // an unanswered query must never dead-end in silence.
             const bool in_mosh = [] {

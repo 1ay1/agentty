@@ -232,6 +232,18 @@ struct Model {
         // timeout, and rapid re-triggers can't fire stale toasts.
         std::uint64_t       clipboard_query_seq  = 0;
         std::uint64_t       clipboard_query_done = 0;
+        // True when the in-flight query was raised by an IMAGE-paste intent
+        // (Ctrl+V / Alt+V on a clipboard we could not read locally), as
+        // opposed to an ordinary text paste. Set alongside the seq bump.
+        //
+        // Why it matters: over SSH+tmux agentty asks for BOTH dialects — OSC
+        // 5522 (kitty only; carries image bytes) and OSC 52 (text only,
+        // widely supported). A non-kitty terminal ignores the first and
+        // answers the second, so the user who wanted to paste a screenshot
+        // silently receives TEXT. The reply cancels the no-reply timeout, so
+        // without this flag there is no moment at which anything can explain
+        // what happened — the failure is invisible.
+        bool                clipboard_wanted_image = false;
         // When the model picker was opened to ASSIGN a Smart Mode role slot
         // (not to switch the active model), this names the target slot.
         // FusedPickerSelect writes the chosen model into that slot and
