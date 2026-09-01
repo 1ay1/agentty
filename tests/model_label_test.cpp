@@ -173,3 +173,46 @@ TEST_CASE("model_display_label: one canonical label across providers") {
     // Degenerate: empty id + empty name never crashes.
     CHECK(L("", "") == "");
 }
+
+// Extended-context variants must be DISTINGUISHABLE in the list.
+//
+// `[1m]` is a picker-only marker: agentty appends it to offer the 1M context
+// window as a separate, selectable row, and wire_model_id strips it before the
+// id reaches the wire. pretty_model_label strips it too — correctly, since a
+// wire marker must never leak as literal "[1m]" — but the consequence was that
+// `claude-opus-4-8` and `claude-opus-4-8[1m]` rendered as the SAME string.
+// Two rows, identical names, and the only difference (the context column) sat
+// in dim reference text at the far end of the row.
+//
+// fused_models_test already asserts the two are distinct ROWS; this asserts
+// they are distinct to the READER, which is the half that matters.
+TEST_CASE("model label: extended-context variants stay distinguishable") {
+    auto L = [](std::string_view id, std::string_view name = "") {
+        return agentty::ui::model_display_label(id, name);
+    };
+
+    // The base model is untouched.
+    CHECK(L("claude-opus-4-8") == "Claude Opus 4.8");
+
+    // The variant carries the window in its NAME, not just its ctx column.
+    CHECK(L("claude-opus-4-8[1m]") == "Claude Opus 4.8 \xc2\xb7 1M");
+    CHECK(L("claude-sonnet-4-6[2m]") == "Claude Sonnet 4.6 \xc2\xb7 2M");
+
+    // …and they differ, which is the whole point.
+    CHECK(L("claude-opus-4-8") != L("claude-opus-4-8[1m]"));
+
+    // No DOUBLE labelling when the server already names the variant.
+    CHECK(L("claude-opus-4-8[1m]", "Claude Opus 4.8 (1M Context)")
+          == "Claude Opus 4.8 (1M Context)");
+
+    // The marker never leaks literally, in either form.
+    for (std::string_view id : {"claude-opus-4-8[1m]", "claude-sonnet-4-6[2m]"}) {
+        const auto s = L(id);
+        CHECK(s.find("[1m]") == std::string::npos);
+        CHECK(s.find("[2m]") == std::string::npos);
+    }
+
+    // A marketing alias is still preferred over the id-derived form, and is
+    // not disturbed by the variant handling.
+    CHECK(L("gemini-3-pro-image", "Nano Banana Pro") == "Nano Banana Pro");
+}

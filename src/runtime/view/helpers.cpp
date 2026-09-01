@@ -328,6 +328,34 @@ std::string pretty_model_label(std::string_view id) {
 
 std::string model_display_label(std::string_view id,
                                 std::string_view display_name) {
+    // ── Extended-context variants must stay DISTINGUISHABLE ─────────
+    // `[1m]` is a picker-only marker: agentty appends it to offer the 1M
+    // context window as a separate choice, and wire_model_id strips it before
+    // the id reaches the wire. pretty_model_label strips it too — correctly,
+    // since a wire marker must never leak as literal "[1m]" — but that made
+    // `claude-opus-4-8` and `claude-opus-4-8[1m]` render as the SAME string.
+    // Two identical rows, and the only difference (the context column) sat in
+    // reference-weight text at the far end of the row.
+    //
+    // The variant IS the point of the row, so it belongs in the name. Recurse
+    // on the stripped id and re-attach a human suffix.
+    for (const auto& [marker, suffix] :
+         {std::pair<std::string_view, std::string_view>{"[1m]", " · 1M"},
+          std::pair<std::string_view, std::string_view>{"[2m]", " · 2M"}}) {
+        if (auto pos = id.find(marker); pos != std::string_view::npos) {
+            std::string bare{id.substr(0, pos)};
+            bare += id.substr(pos + marker.size());
+            // The server rarely names the variant; when it does (e.g.
+            // "Claude Opus 4.8 (1M Context)") that name already says it, so
+            // don't double up.
+            std::string base = model_display_label(bare, display_name);
+            const bool already_says =
+                base.find("1M") != std::string::npos
+                || base.find("2M") != std::string::npos;
+            return already_says ? base : base + std::string{suffix};
+        }
+    }
+
     // No server name (OpenAI-compat / Ollama that echo the id) → the
     // id-normalized label is the only source.
     if (display_name.empty() || display_name == id)
