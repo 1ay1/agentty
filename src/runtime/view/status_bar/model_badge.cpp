@@ -17,7 +17,15 @@ maya::Element model_badge_config(const Model& m) {
     // ("● Sonnet") coloured by family. The model was previously invisible while
     // idle — it only appeared in assistant turn headers — so a freshly-switched
     // model had no on-screen home. Now it lives here.
-    const std::string& model = m.d.model_id.value;
+    //
+    // While a Smart Mode turn is in flight the badge names the model ACTUALLY
+    // serving it (m.s.smart_turn_model), not the picker selection: under
+    // orchestration those differ, and showing the selection meant the chip
+    // claimed "Mistral" while every token came from the Strategic model. The
+    // selection reappears the moment the turn settles.
+    const std::string& model = !m.s.smart_turn_model.empty()
+                                   ? m.s.smart_turn_model
+                                   : m.d.model_id.value;
     maya::ModelBadge mb{model};
     mb.set_compact(true);
     // Unknown family (new Claude line, local model, aggregator id): the badge

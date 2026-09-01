@@ -609,6 +609,13 @@ struct StreamState {
     // the regret rate the prior is built from. Set true after the first
     // note_routed of a user turn; reset to false at submit_message.
     bool smart_turn_routed = false;
+    // The model + role the IN-FLIGHT turn was actually dispatched on. Written
+    // by launch_stream once the role is resolved, read when the assistant
+    // message settles so the turn header can name its true author (see
+    // Message::served_model). Empty when Smart Mode is off — the turn ran on
+    // the plain selection and the header falls back to it.
+    std::string smart_turn_model;
+    std::string smart_turn_role;
     // True if the just-settled turn had a build/test/edit tool FAILURE. Set in
     // finalize_turn (where the +1 outcome regret is applied), read by the next
     // submit_message: the symmetric −1 "clean continuation" signal must NOT

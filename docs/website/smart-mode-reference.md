@@ -75,7 +75,7 @@ The overlay controls *which* layers run. Four numeric **policy** knobs — for p
 
 ### Force the master switch for one session
 
-`AGENTTY_SMART_MODE=1` (or its alias `AGENTTY_SMART_ENABLED=1`) forces Smart Mode **on** for that process; `=0` forces it **off**. `1`/`true`/`yes`/`on` count as on, `0`/`false`/`no`/`off` as off; unset means your saved setting governs, as before.
+`AGENTTY_SMART_MODE=1` forces Smart Mode **on** for that process; `=0` forces it **off**. `1`/`true`/`yes`/`on` count as on, `0`/`false`/`no`/`off` as off; unset means your saved setting governs, as before.
 
 ```bash
 AGENTTY_SMART_MODE=1 agentty   # deterministic routing for a scripted run

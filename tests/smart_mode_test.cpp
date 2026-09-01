@@ -238,7 +238,7 @@ TEST_CASE("smart_mode") {
               "cue: long turns carry their own signal");
     }
 
-    // ── AGENTTY_SMART_MODE / AGENTTY_SMART_ENABLED session pin ────────
+    // ── AGENTTY_SMART_MODE session pin ────────────────────────
     {
         auto reset = [] {
             unsetenv("AGENTTY_SMART_MODE");
@@ -256,13 +256,16 @@ TEST_CASE("smart_mode") {
         setenv("AGENTTY_SMART_MODE", "false", 1);
         CHECK(sm::tuning::enabled_override() == std::optional<bool>{false},
               "env pin: 'false' → off");
-        reset();
-        setenv("AGENTTY_SMART_ENABLED", "1", 1);
+        setenv("AGENTTY_SMART_MODE", "on", 1);
         CHECK(sm::tuning::enabled_override() == std::optional<bool>{true},
-              "env pin: AGENTTY_SMART_ENABLED alias works");
-        setenv("AGENTTY_SMART_MODE", "0", 1);
-        CHECK(sm::tuning::enabled_override() == std::optional<bool>{false},
-              "env pin: AGENTTY_SMART_MODE wins over the alias");
+              "env pin: any non-falsy value → on");
+        reset();
+        // ONE env name. The former AGENTTY_SMART_ENABLED alias is gone: a
+        // second spelling is a second source of truth, and "which wins"
+        // is a question no user should have to ask.
+        setenv("AGENTTY_SMART_ENABLED", "1", 1);
+        CHECK(!sm::tuning::enabled_override().has_value(),
+              "env pin: AGENTTY_SMART_ENABLED is NOT read (alias removed)");
         reset();
     }
 }

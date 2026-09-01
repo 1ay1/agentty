@@ -51,9 +51,8 @@ enum class Var : std::uint8_t {
     DebugApi,                // AGENTTY_DEBUG_API=1  (dump streaming events)
     DebugFile,               // AGENTTY_DEBUG_FILE   (target path for above)
 
-    // ── Smart Mode session pin ───────────────────────────────────────
+    // ── Smart Mode session pin ────────────────────────────────
     SmartMode,               // AGENTTY_SMART_MODE=0|1    (session master-switch pin)
-    SmartEnabled,            // AGENTTY_SMART_ENABLED=0|1 (alias of the above)
 };
 
 struct VarSpec {
@@ -74,7 +73,6 @@ inline constexpr std::array kCatalog = {
     VarSpec{Var::DebugApi,         "AGENTTY_DEBUG_API"},
     VarSpec{Var::DebugFile,        "AGENTTY_DEBUG_FILE"},
     VarSpec{Var::SmartMode,        "AGENTTY_SMART_MODE"},
-    VarSpec{Var::SmartEnabled,     "AGENTTY_SMART_ENABLED"},
 };
 
 // Compile-time name lookup. `env::name<Var::SocksProxy>()` returns the
@@ -108,7 +106,7 @@ consteval bool every_var_has_row() {
         Var::AirgapSsh,
         Var::ClipboardCmd,
         Var::DebugApi, Var::DebugFile,
-        Var::SmartMode, Var::SmartEnabled,
+        Var::SmartMode,
     };
     if (std::size(kAll) != kCatalog.size()) return false;
     for (auto v : kAll) {

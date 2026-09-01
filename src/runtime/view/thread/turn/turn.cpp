@@ -1020,16 +1020,41 @@ struct SpeakerStyle {
     maya::Color color;
     std::string glyph;
     std::string label;
+    // Smart Mode role accent, empty when Smart Mode didn't route this turn.
+    // Rendered as a dim " · strategist" suffix next to the model name so
+    // delegation is legible without a second UI surface.
+    std::string role_label;
+    maya::Color role_color;
 };
 
-SpeakerStyle speaker_style_for(Role role, const Model& m) {
+// Per-role accent for Smart Mode turns. Distinct hues so a scrolled
+// transcript reads as a delegation trace at a glance: who did the thinking,
+// who did the work, who did the grunt task.
+struct RoleAccent { std::string label; maya::Color color; };
+[[nodiscard]] std::optional<RoleAccent> role_accent_for(std::string_view role) {
+    if (role == "strategic")      return RoleAccent{"strategist",  role_brand_alt};
+    if (role == "implementation") return RoleAccent{"implementer", role_info};
+    if (role == "utility")        return RoleAccent{"utility",     code_path};
+    return std::nullopt;
+}
+
+// `msg` is the message being titled: an assistant turn is labelled by the
+// model that ACTUALLY served it (Message::served_model), not by the live
+// picker selection. Under Smart Mode those differ on most turns, and the
+// selection also changes retroactively when the user switches models — so
+// reading it here mislabelled the whole transcript.
+SpeakerStyle speaker_style_for(Role role, const Model& m, const Message* msg) {
     if (role == Role::User) {
         // User rail is `role_brand` (magenta) — distinct from code-reference
         // cyan and matching the composer's accent color when has-text, so
         // the user's typed message visually flows into their turn header.
         return {role_brand, "\xe2\x9d\xaf", "You"};                  // ❯
     }
-    const auto& id = m.d.model_id.value;
+    // Prefer the turn's own provenance; fall back to the live selection for
+    // turns that predate the field (or ran with Smart Mode off).
+    const std::string& id = (msg && !msg->served_model.empty())
+                                ? msg->served_model
+                                : m.d.model_id.value;
     const auto caps = ModelCapabilities::from_id(id);
     maya::Color c;
     std::string label;
@@ -1104,7 +1129,13 @@ SpeakerStyle speaker_style_for(Role role, const Model& m) {
             }
         }
     }
-    return {c, "\xe2\x9c\xa6", std::move(label)};                    // ✦
+    SpeakerStyle out{c, "\xe2\x9c\xa6", std::move(label)};           // ✦
+    if (msg)
+        if (auto ra = role_accent_for(msg->served_role)) {
+            out.role_label = std::move(ra->label);
+            out.role_color = ra->color;
+        }
+    return out;
 }
 
 // ── Trailing meta strip for the turn header — `12:34 · 4.2s · turn N`.
@@ -1399,7 +1430,7 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
         ? std::span<const ToolUse>{msg.tool_calls}
         : tool_calls_override;
 
-    auto style = speaker_style_for(msg.role, m);
+    auto style = speaker_style_for(msg.role, m, &msg);
 
     maya::Turn::Config cfg;
     cfg.glyph        = style.glyph;
@@ -1413,6 +1444,10 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
                           /*checkpoint=*/msg.role == Role::User
                               && msg.checkpoint_id.has_value());
     if (!meta_override.empty()) cfg.meta = std::string{meta_override};
+    // Smart Mode role tag, leading the meta strip so the delegation trace
+    // reads down the right-hand gutter: "strategist · 12:34 · 4.2s · turn 3".
+    if (!style.role_label.empty())
+        cfg.meta = style.role_label + "  \xc2\xb7  " + cfg.meta;
 
     // Compact-boundary turn: rendered as a real, minimal SYSTEM turn
     // rather than a bare full-width divider (which read as chrome / a
@@ -1971,7 +2006,7 @@ maya::Turn::Config turn_config_for_assistant_run(
     const std::size_t end = std::min(run_end, msgs.size());
 
     const Message& head = msgs[run_first];
-    auto style = speaker_style_for(head.role, m);
+    auto style = speaker_style_for(head.role, m, &head);
 
     maya::Turn::Config cfg;
     cfg.glyph        = style.glyph;
@@ -1981,6 +2016,8 @@ maya::Turn::Config turn_config_for_assistant_run(
                           head.role == Role::Assistant
                               ? assistant_elapsed(head, m)
                               : std::nullopt);
+    if (!style.role_label.empty())
+        cfg.meta = style.role_label + "  \xc2\xb7  " + cfg.meta;
 
     if (head.role != Role::Assistant) {
         // Defensive: only Assistant runs use the multi-message path.

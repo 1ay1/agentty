@@ -144,10 +144,16 @@ TEST_CASE("model picker ^E toggles reasoning override + feedback") {
     // A non-chatgpt provider with a genuinely non-reasoning model (codestral,
     // a code model) highlighted in an open picker — inference does NOT light
     // it up, so ^E force-on has something to prove.
-    Model m;
-    m.d.available_models = { mi("codestral-latest", "mistral") };
-    m.d.model_id = ModelId{"codestral-latest"};
-    m.ui.overlay = ov::FusedPicker{{0, ""}};
+    // The picker reads its cached rows, so open it through the REAL reducer
+    // (which seeds provider_catalogs + fused_rows) rather than hand-placing
+    // the overlay. Hermetic auth so the catalog seeds without on-disk creds.
+    g_settings.provider_keys["mistral"] = "sk-test";
+    provider::select(provider::parse_selection("mistral"));
+    Model m0;
+    m0.d.available_models = { mi("codestral-latest", "mistral") };
+    m0.d.model_id = ModelId{"codestral-latest"};
+    auto [m, _open] = app::update(std::move(m0), Msg{OpenFusedPicker{}});
+    REQUIRE(!m.d.fused_rows.empty());
 
     // Baseline: inference says NOT a reasoner, so no override, no effort.
     CHECK(agentty::reasoning_override_for("codestral-latest") == -1);
@@ -192,10 +198,23 @@ TEST_CASE("model picker ^E on family-gated model is a hinted no-op") {
     g_settings = store::Settings{};
     agentty::clear_reasoning_overrides();
 
-    Model m;
-    m.d.available_models = { mi("claude-opus-4-5", "anthropic") };
-    m.d.model_id = ModelId{"claude-opus-4-5"};
-    m.ui.overlay = ov::FusedPicker{{0, ""}};
+    g_settings.provider_keys["anthropic"] = "sk-test";
+    provider::select(provider::parse_selection("anthropic"));
+    Model m0;
+    m0.d.available_models = { mi("claude-opus-4-5", "anthropic") };
+    m0.d.model_id = ModelId{"claude-opus-4-5"};
+    auto [m, _open] = app::update(std::move(m0), Msg{OpenFusedPicker{}});
+    REQUIRE(!m.d.fused_rows.empty());
+    // ^E acts on the HIGHLIGHTED row. The seeded catalog carries Anthropic's
+    // bundled line-up, so row 0 isn't necessarily opus — point at it.
+    {
+        int idx = -1;
+        for (int i = 0; i < static_cast<int>(m.d.fused_rows.size()); ++i)
+            if (m.d.fused_rows[static_cast<std::size_t>(i)].model.id.value
+                == "claude-opus-4-5") { idx = i; break; }
+        REQUIRE(idx >= 0);
+        if (auto* c = m.ui.overlay.get<ov::FusedPicker>()) c->index = idx;
+    }
 
     auto [m1, c1] = app::update(std::move(m), Msg{FusedPickerToggleReasoning{}});
     CHECK(agentty::reasoning_override_for("claude-opus-4-5") == -1,
@@ -1065,7 +1084,11 @@ TEST_CASE("fused picker cycles reasoning effort") {
 
 // ^/ toggles between the fused (all-providers) picker and the classic
 // single-provider picker: opening one tears the other down cleanly.
-TEST_CASE("fused and classic model pickers toggle, not stack") {
+// There is ONE model picker: re-issuing OpenFusedPicker must re-open it
+// cleanly (fresh query, reseeded rows) rather than stacking a second overlay
+// or leaving the previous one's cache behind. This used to be a toggle
+// between the fused and the classic picker; the classic one is gone.
+TEST_CASE("the model picker re-opens cleanly, never stacks") {
     using namespace agentty::msg;
     install_stub_deps();
     g_settings = store::Settings{};
@@ -1076,21 +1099,22 @@ TEST_CASE("fused and classic model pickers toggle, not stack") {
     m.d.model_id = ModelId{"claude-sonnet-4-6"};
     m.d.available_models = {mi("claude-sonnet-4-6", "anthropic")};
 
-    // ^/ once: fused open.
     auto [m1, c1] = app::update(std::move(m), Msg{OpenFusedPicker{}});
-    CHECK(m1.ui.overlay.is<ov::FusedPicker>());
-    CHECK(!m1.ui.overlay.is<ov::FusedPicker>());
-
-    // ^/ twice: classic opens, fused closes (+ its cache released).
+    CHECK(m1.ui.overlay.is<ov::FusedPicker>(), "^/ opens the picker");
+    REQUIRE(!m1.d.fused_rows.empty());
+    // Type a query, then re-open: the overlay is replaced, not stacked, and
+    // the stale query does not survive.
+    if (auto* c = m1.ui.overlay.get<ov::FusedPicker>()) c->query = "zzz";
     auto [m2, c2] = app::update(std::move(m1), Msg{OpenFusedPicker{}});
-    CHECK(m2.ui.overlay.is<ov::FusedPicker>());
-    CHECK(!m2.ui.overlay.is<ov::FusedPicker>());
-    CHECK(m2.d.fused_rows.empty());
+    CHECK(m2.ui.overlay.is<ov::FusedPicker>(), "still exactly one picker");
+    if (auto* c = m2.ui.overlay.get<ov::FusedPicker>())
+        CHECK(c->query.empty(), "re-open resets the filter");
+    CHECK(!m2.d.fused_rows.empty(), "rows reseeded on re-open");
 
-    // ^/ again: back to fused, classic closes.
-    auto [m3, c3] = app::update(std::move(m2), Msg{OpenFusedPicker{}});
-    CHECK(m3.ui.overlay.is<ov::FusedPicker>());
-    CHECK(!m3.ui.overlay.is<ov::FusedPicker>());
+    // Esc closes it and releases the row cache.
+    auto [m3, c3] = app::update(std::move(m2), Msg{CloseFusedPicker{}});
+    CHECK(!m3.ui.overlay.is<ov::FusedPicker>(), "Esc closes the picker");
+    CHECK(m3.d.fused_rows.empty(), "closing releases the row cache");
 }
 
 // Signing out of ONE provider when others are still authed should fall back

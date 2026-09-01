@@ -299,6 +299,23 @@ struct Message {
     /// corresponding ImageContent's path.
     std::vector<Attachment>   attachments;
     std::string streaming_text;
+    // The wire model id that ACTUALLY served this assistant turn, and the
+    // Smart Mode role it was routed as. Empty = "whatever was selected"
+    // (no Smart Mode, or a turn from before this field existed).
+    //
+    // Why this is stored per-message rather than read from Model::d.model_id
+    // at render time: under Smart Mode the turn is dispatched on the
+    // resolved ROLE model (`strategic_profile.model` in launch_stream), which
+    // is frequently NOT the model in the picker. Rendering the header from
+    // the live selection therefore lied — the badge said "Mistral" while
+    // every byte came from GLM. It also lied retroactively: switching models
+    // relabelled every turn already in the transcript. A turn's provenance is
+    // a property OF THE TURN, so it lives on the turn.
+    std::string served_model;
+    // Which role slot produced it: "strategic" | "implementation" |
+    // "utility". Drives the accent colour on the turn header so delegation
+    // is visible at a glance. Empty when Smart Mode was off.
+    std::string served_role;
     // ── Extended/adaptive thinking (Assistant turns only) ──────────────
     // When effort is on, the Claude provider enables adaptive thinking and
     // the model emits a leading `thinking` content block (text — usually
@@ -537,6 +554,12 @@ struct Message {
         // bit re-renders the cached Element across that transition. Uses the
         // unified accessor so all providers key identically.
         mix(reasoning_display_text().size());
+        // Turn provenance drives the header label + role tag, so a message
+        // whose served_model differs from another's must not reuse its
+        // cached Element. Sizes suffice: the pair is written once, at
+        // StreamStarted, and never mutates afterwards.
+        mix(served_model.size());
+        mix(served_role.size());
         if (smart_routing) {
             mix(8ULL);
             mix(smart_route_model.size());

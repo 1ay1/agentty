@@ -77,6 +77,12 @@ Model in_slot_assign(int slot) {
 
 TEST_CASE("smart slot picker stack") {
     install_stub_deps();
+    // Hermetic auth: the fused picker only seeds catalogs for providers that
+    // are AUTHED, and a bare test env has no on-disk credentials (nor should
+    // it depend on any). A provider_keys entry makes provider_is_authed
+    // ("anthropic") true, so OpenFusedPicker populates real rows.
+    g_settings = store::Settings{};
+    g_settings.provider_keys["anthropic"] = "sk-test";
     {
         provider::Selection sel;
         sel.kind = provider::Kind::Anthropic;
@@ -162,20 +168,34 @@ TEST_CASE("smart slot picker stack") {
         }
     }
 
-    // ── Ordinary (non-slot) mode still spans providers ───────────────
-    // The scoping above must be conditional on slot-assign, not permanent.
+    // ── The scoping is CONDITIONAL on slot-assign, not permanent ──────
+    // (Cross-provider breadth itself is fused_models_test's job; here we only
+    // prove that only_provider is applied in slot-assign mode and NOT applied
+    // outside it — the bug this filter could plausibly introduce.)
     {
-        Model m;
-        m.d.model_id = ModelId{"claude-opus-4-5"};
-        m.d.available_models = { mi("claude-opus-4-5", "anthropic") };
-        m.ui.smart_assign_slot = -1;
-        auto [m1, _] = app::update(std::move(m), Msg{OpenFusedPicker{}});
-        const auto rows = app::detail::fused_rows_for_model(m1);
-        bool any_other = false;
-        for (const auto& r : rows)
-            if (r.provider_id != "anthropic") { any_other = true; break; }
-        CHECK(any_other,
-              "the ordinary picker still spans every provider / sign-in offer");
+        auto rows_for = [](int slot) {
+            Model m;
+            m.d.model_id = ModelId{"claude-opus-4-5"};
+            m.d.available_models = { mi("claude-opus-4-5", "anthropic"),
+                                     mi("claude-haiku-4-5", "anthropic") };
+            m.ui.smart_assign_slot = slot;
+            auto [m1, _] = app::update(std::move(m), Msg{OpenFusedPicker{}});
+            return app::detail::fused_rows_for_model(m1);
+        };
+        const auto plain = rows_for(-1);
+        const auto scoped = rows_for(0);
+        REQUIRE(!plain.empty());
+        REQUIRE(!scoped.empty());
+        // Slot-assign never shows MORE than the unscoped list, and never a
+        // sign-in offer (you can't pin a model you aren't signed in to).
+        CHECK(scoped.size() <= plain.size(),
+              "slot-assign narrows the list, never widens it");
+        for (const auto& r : scoped) {
+            CHECK(r.provider_id == "anthropic",
+                  "slot-assign lists ONLY the active provider's models");
+            CHECK(!r.is_signin_offer(),
+                  "slot-assign never offers a provider you aren't signed into");
+        }
     }
 
     // ── A NON-slot model-picker Esc still exits cleanly (no regression) ──

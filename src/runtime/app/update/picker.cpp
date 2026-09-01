@@ -1105,6 +1105,22 @@ Step fused_picker_update(Model m, msg::FusedPickerMsg pm) {
             const auto& row = m.d.fused_rows[static_cast<std::size_t>(c->index)];
             if (row.is_signin_offer()) return done(std::move(m));
             const std::string id = row.model.id.value;
+            // Claude/GPT are FAMILY-GATED: their effort ladder is decoded from
+            // the model family and is not user-editable, so an override here
+            // would be a stored no-op that silently shadows the real ladder.
+            // Hint and bail instead — ←/→ is the control that works for them.
+            // (The classic picker had this gate; it was dropped when the arm
+            // was ported, letting ^E persist junk overrides for Opus/GPT.)
+            {
+                const auto base = ModelCapabilities::from_id(id);
+                if (base.is_known_family()
+                    || base.family == ModelCapabilities::Family::Gpt) {
+                    auto toast = set_status_toast(m,
+                        "reasoning effort is model-managed here "
+                        "(\xe2\x86\x90/\xe2\x86\x92 to set the tier)");
+                    return {std::move(m), std::move(toast)};
+                }
+            }
             const int cur = reasoning_override_for(id);   // -1 auto, 0 off, 1 on
             auto s = deps().load_settings();
             const char* label = nullptr;

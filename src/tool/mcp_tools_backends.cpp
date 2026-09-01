@@ -39,6 +39,7 @@
 
 #include "agentty/mcp/client.hpp"   // mcp_resources / mcp_read_resource seams
 #include "agentty/util/dbglog.hpp"
+#include "agentty/util/logx.hpp"
 #include "agentty/util/isolated_thread.hpp"
 
 #include <mcp/tools/host.hpp>
@@ -879,6 +880,20 @@ provider::StreamResult run_one_completion(Thread& thread,
     // "kept the parent" fallback and the write-role (cfg.model) path.
     req.model         = agentty::wire_model_id(req.model);
     req.system_prompt = subagent_system_prompt(type);
+    // Smart-channel telemetry, the delegation half of the trace. Without this
+    // a debug log showed ONLY the Strategic turn: subagents dispatch on a
+    // worker thread through the same transport, so their requests appeared
+    // (if at all) as anonymous wire traffic with no role, no parent, and no
+    // indication they were delegations at all. One line per worker launch,
+    // naming the role, the model the router actually chose, and whether
+    // Layer 3b or the tier auto-router chose it.
+    AGT_LOG(Smart, Debug, "route.subagent",
+            "agent={} role_routing={} read_only={} parent_model={} model={}",
+            type.name,
+            cfg.smart.subagent_routing() ? 1 : 0,
+            type.read_only ? 1 : 0,
+            cfg.model,
+            req.model);
     // Resolve auth LIVE from the ACTIVE provider through the central
     // credential layer — the same discipline as launch_stream's
     // auth_snapshot(). cfg.auth is a snapshot taken at the last

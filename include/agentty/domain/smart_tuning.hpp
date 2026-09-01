@@ -34,12 +34,12 @@
 //       turns escalate to Complex (more reasoning, more cost); higher ⇒ fewer.
 //       The Simple/Standard boundary tracks it (Standard is the band just below).
 //
-//   AGENTTY_SMART_MODE / AGENTTY_SMART_ENABLED  (0 or 1, unset ⇒ settings.json)
+//   AGENTTY_SMART_MODE  (0 or 1, unset ⇒ settings.json)
 //       SESSION override for the Smart Mode master switch. 1 forces it on,
 //       0 forces it off, for THIS process only — the persisted setting is
 //       neither read as the source of truth nor overwritten (persist skips
 //       the field while the override is active, and the ^S overlay shows
-//       the pin). Both names accepted; AGENTTY_SMART_MODE wins if both set.
+//       the pin).
 //       Useful for scripted runs (CI, benchmarks, bisecting) where you want
 //       deterministic routing without touching the user's config.
 
@@ -90,18 +90,16 @@ inline int env_int(const char* var, int dflt, int lo, int hi) noexcept {
 }
 
 // Session override for the Smart Mode master switch. nullopt = no override
-// (settings.json governs); true/false = pinned for this process. Reads
-// AGENTTY_SMART_MODE first, then AGENTTY_SMART_ENABLED (alias). Any value
-// other than empty/"0" counts as on — so =1, =true, =yes all work — and a
-// literal "0" (or "false") is off.
+// (settings.json governs); true/false = pinned for this process. Any value
+// other than empty counts as on — so =1, =true, =yes all work — and
+// "0"/"false"/"off"/"no" are off. ONE env name: a second spelling is a
+// second source of truth, and "which one wins" is a question no user should
+// have to ask.
 [[nodiscard]] inline std::optional<bool> enabled_override() noexcept {
-    for (const char* var : {"AGENTTY_SMART_MODE", "AGENTTY_SMART_ENABLED"}) {
-        if (const char* v = std::getenv(var); v && v[0]) {
-            const std::string s{v};
-            return !(s == "0" || s == "false" || s == "off" || s == "no");
-        }
-    }
-    return std::nullopt;
+    const char* v = std::getenv("AGENTTY_SMART_MODE");
+    if (!v || !v[0]) return std::nullopt;
+    const std::string s{v};
+    return !(s == "0" || s == "false" || s == "off" || s == "no");
 }
 
 } // namespace agentty::smart::tuning

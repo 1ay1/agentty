@@ -334,6 +334,13 @@ static json message_to_json(const Message& m) {
         if (!m.fork_transcript.empty())
             j["fork_transcript"] = tools::util::to_valid_utf8(m.fork_transcript);
     }
+    // Turn provenance: the model that ACTUALLY served this turn (Smart Mode
+    // routes it away from the picker selection) and the role it played.
+    // Only written when set, so non-Smart-Mode threads gain no bytes.
+    if (!m.served_model.empty())
+        j["served_model"] = m.served_model;
+    if (!m.served_role.empty())
+        j["served_role"] = m.served_role;
     // Adaptive-thinking block (Assistant turns under an effort setting).
     // Persisted so a reloaded thread can replay it on a follow-up turn —
     // Anthropic 400s a tool_use turn whose thinking block was dropped.
@@ -468,6 +475,11 @@ static std::expected<Message, DeserializeError> parse_message(const json& j) {
         m.id = MessageId{it->get<std::string>()};
     m.role = role_from_string(j.value("role", "user"));
     m.text = j.value("text", "");
+    // Turn provenance (which model/role actually served it). Absent on
+    // threads written before the field existed — the view falls back to the
+    // live selection, which is what those turns used to render anyway.
+    m.served_model = j.value("served_model", "");
+    m.served_role  = j.value("served_role", "");
     m.thinking = j.value("thinking", "");
     m.thinking_signature = j.value("thinking_signature", "");
     m.reasoning_ms = j.value("reasoning_ms", static_cast<std::int64_t>(0));

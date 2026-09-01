@@ -27,6 +27,7 @@
 #include "agentty/provider/selection.hpp"
 #include "agentty/provider/credentials.hpp"
 #include "agentty/util/modelsdev.hpp"
+#include "agentty/util/logx.hpp"
 #include "agentty/tool/registry.hpp"
 #include "agentty/mcp/client.hpp"   // plugin_model(), reload_mcp_plugins via registry
 #include "agentty/tool/hooks.hpp"
@@ -866,6 +867,37 @@ Cmd<Msg> launch_stream(Model& m) {
         // Stash for the cascade feedback at finalize_turn.
         m.s.smart_turn_complexity = turn_complexity;
     }
+
+    // Record what this turn will ACTUALLY be dispatched on, so the assistant
+    // header can name its true author instead of the picker selection (which
+    // Smart Mode routinely overrides). Mirrors the req.model choice below;
+    // orchestrate=false means the plain selection serves the turn, and an
+    // empty string tells the view to fall back to it.
+    if (!compacting && orchestrate && !strategic_profile.model.empty()) {
+        m.s.smart_turn_model = strategic_profile.model;
+        m.s.smart_turn_role  = "strategic";
+    } else {
+        m.s.smart_turn_model.clear();
+        m.s.smart_turn_role.clear();
+    }
+
+    // Smart-channel telemetry. The `smart` log channel existed but NOTHING
+    // wrote to it, so the only routing evidence in a debug file was whatever
+    // the wire happened to dump — i.e. the Strategic turn only, with no way
+    // to tell it apart from an ordinary one. Every dispatch that Smart Mode
+    // influences now names itself here (subagents log their own line in
+    // run_one_completion), so `AGENTTY_LOG=smart=debug` yields the complete
+    // delegation trace.
+    AGT_LOG(Smart, Debug, "route.turn",
+            "role={} model={} effort={} complexity={} orchestrate={} "
+            "subagents={} compacting={}",
+            m.s.smart_turn_role.empty() ? "none" : m.s.smart_turn_role,
+            m.s.smart_turn_model.empty() ? model_id : m.s.smart_turn_model,
+            effort_label(strategic_profile.effort),
+            smart::to_string(turn_complexity),
+            orchestrate ? 1 : 0,
+            m.d.smart.subagent_routing() ? 1 : 0,
+            compacting ? 1 : 0);
 
     return Cmd<Msg>::task(
         [thread = std::move(thread_snapshot),

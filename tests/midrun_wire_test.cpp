@@ -1790,7 +1790,7 @@ TEST_CASE("model picker open close no scrollback growth") {
             render_state(m);
             std::this_thread::sleep_for(std::chrono::milliseconds{8});
         }
-        auto [m2, cmd] = app::detail::model_picker_update(
+        auto [m2, cmd] = app::detail::fused_picker_update(
             std::move(m), msg::FusedPickerMsg{FusedPickerSelect{}});  // close
         m = std::move(m2);
         (void)cmd;

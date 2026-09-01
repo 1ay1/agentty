@@ -739,6 +739,14 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
                }
                return false;
            }();
+    // The turn is over (no more wire round-trips): drop the in-flight routing
+    // stamp so the status badge falls back to the picker selection while idle.
+    // The stamp already lives on each assistant Message, so the transcript
+    // keeps its provenance — this only clears the LIVE indicator.
+    if (!tools_pending) {
+        m.s.smart_turn_model.clear();
+        m.s.smart_turn_role.clear();
+    }
     if (!tools_pending && m.d.smart.orchestration() && !m.d.current.messages.empty()) {
         int delegations = 0;
         bool tool_failure = false;
@@ -1092,6 +1100,19 @@ Step stream_update(Model m, msg::StreamMsg sm) {
             // on top of a healthy connection.
             m.s.status.clear();
             m.s.status_until = {};
+            // Stamp the turn's TRUE author onto the assistant message now
+            // that the wire is live. launch_stream resolved the role model a
+            // moment ago; recording it here (rather than reading the live
+            // selection at render time) means the header stays honest even
+            // after the user switches models mid-thread.
+            if (!m.s.smart_turn_model.empty()
+                && !m.d.current.messages.empty()
+                && m.d.current.messages.back().role == Role::Assistant) {
+                auto& last = m.d.current.messages.back();
+                last.served_model = m.s.smart_turn_model;
+                last.served_role  = m.s.smart_turn_role;
+                m.ui.view_cache.drop(m.d.current.id, last.id);
+            }
             return done(std::move(m));
         },
         [&](StreamTextDelta& e) -> Step {
