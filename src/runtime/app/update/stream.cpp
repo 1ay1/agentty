@@ -7,6 +7,7 @@
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/runtime/app/update/param_tag_repair.hpp"
 #include "agentty/runtime/app/update/stream_args.hpp"
+#include "agentty/util/logx.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -1692,6 +1693,18 @@ Step stream_update(Model m, msg::StreamMsg sm) {
             return {std::move(m), std::move(cmd)};
         },
         [&](StreamError& e) -> Step {
+            // THE seam where a failure becomes something the user sees.
+            // Logged with the classification that drives what happens next
+            // (retry vs surface vs drop to Idle), so a "why did it give up?"
+            // or "why did it retry forever?" report is answerable from the
+            // log instead of from the transcript screenshot.
+            AGT_LOG(Ui, Warn, "stream.error",
+                    "class={} http={} from_stall={} compacting={} msg={}",
+                    static_cast<int>(
+                        provider::classify_stream_error(e.message, e.http_status)),
+                    e.http_status, e.from_stall ? 1 : 0,
+                    m.s.compacting ? 1 : 0, e.message);
+
             // Dedupe: when the stall watchdog fired, it tripped the
             // cancel token, which causes the worker thread to unwind
             // and emit its own StreamError("cancelled") shortly after.
@@ -2001,6 +2014,16 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                     const auto caps = resolved_caps(m.d.model_id.value);
                     const Effort before = m.d.effort;
                     m.d.effort = clamp_effort(m.d.effort, caps);
+                    // A capability FACT was just learned from the provider's
+                    // own rejection — the highest-value heterogeneity event
+                    // there is. Warn (on by default): the persisted fact
+                    // changes behaviour in every future session, so a shared
+                    // log must show when and why it was written.
+                    AGT_LOG(Model, Warn, "caps.effort_learned",
+                            "key={} set={:#x} effort {} -> {} http={} msg={}",
+                            key, *learned, effort_label(before),
+                            effort_label(m.d.effort), e.http_status,
+                            std::string_view{e.message}.substr(0, 256));
                     if (!reschedule_streaming(m.s.phase, [&](phase::Active& c) {
                             c.transient_retries = prior_transient + 1;
                             c.last_failure_at   = std::chrono::steady_clock::now();
@@ -2255,6 +2278,16 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                 placeholder.role = Role::Assistant;
                 m.d.current.messages.push_back(std::move(placeholder));
                 auto retry_cmd = Cmd<Msg>::after(delay, Msg{RetryStream{}});
+                // Each retry with its delay and remaining budget: the two
+                // questions a stuck turn raises are "is it still trying?"
+                // and "why did it stop?", and both are answered by seeing
+                // the attempt sequence.
+                AGT_LOG(Ui, Info, "stream.retry",
+                        "attempt={} delay_ms={} mid_stream={}",
+                        shown_attempt + 1,
+                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                            delay).count(),
+                        mid_stream ? 1 : 0);
                 // No force_redraw needed: the pre-settle above already
                 // finalised StreamingMarkdown so its height is locked
                 // before the retry stream feeds new deltas; the normal

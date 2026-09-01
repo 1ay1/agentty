@@ -10,8 +10,26 @@
 #include "agentty/provider/ollama/provider.hpp"
 #include "agentty/provider/openai/provider.hpp"
 #include "agentty/provider/selection.hpp"
+#include "agentty/util/logx.hpp"
 
 namespace agentty::provider {
+
+namespace {
+// Human tag for the route taken — which ADAPTER (thin ugly per-provider
+// shim) owns this turn. This is the single most useful fact when a model
+// misbehaves: the same model id can stream through different dialects on
+// different hosts (claude-* over OpenAI-compat on an aggregator, gpt-*
+// over /responses on Copilot but /chat/completions on Azure).
+[[nodiscard]] const char* route_tag(const Selection& sel) noexcept {
+    if (sel.kind == Kind::ExternalAcp)  return "acp";
+    if (sel.is_copilot())               return "copilot";
+    if (sel.is_kimi())                  return "kimi";
+    if (sel.is_oauth_native())          return "chatgpt-responses";
+    if (sel.kind == Kind::Anthropic)    return "anthropic-messages";
+    if (sel.openai_endpoint.native_api) return "ollama-native";
+    return "openai-chat";
+}
+} // namespace
 
 LongLived long_lived_slot(const Selection& sel) {
     // Purely registry-driven. oauth_native (a row flag) picks the ChatGPT/Codex
@@ -27,6 +45,20 @@ LongLived long_lived_slot(const Selection& sel) {
 
 StreamResult dispatch_stream(const ProviderRouter& router, const Selection& sel,
                              Request req, EventSink sink) {
+    // THE turn fingerprint. One Debug line naming every heterogeneity
+    // decision that shaped this request BEFORE any bytes hit the wire:
+    // which adapter, which model id, what effort survived the clamp,
+    // whether tools are advertised (and how many), whether the weak-model
+    // JSON protocol is on, whether reasoning display is requested. When a
+    // user reports "model X does Y on provider Z", this line + the
+    // end-of-turn result line bracket the whole story.
+    AGT_LOG(Model, Debug, "dispatch.turn",
+            "route={} provider={} model={} effort={} tools={} json_protocol={} "
+            "show_reasoning={} ctx_window={} max_tokens={} retry={}",
+            route_tag(sel), sel.provider_id(), req.model,
+            req.effort.empty() ? "off" : req.effort, req.tools.size(),
+            req.json_protocol ? 1 : 0, req.show_reasoning ? 1 : 0,
+            req.context_window, req.max_tokens, req.retry_count);
     // 1) External ACP agent subprocess. Routed through an erased fn (bound in
     //    main() to stream_external_acp) so dispatch has no dependency on the
     //    acp TU. The agent id travels on the Selection.

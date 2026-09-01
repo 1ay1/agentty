@@ -82,6 +82,9 @@ struct ToolCallSlot {
 
 struct StreamCtx {
     EventSink sink;
+    // Model id, diagnostics only — stamps the Model-channel log lines so a
+    // salvage/drop event names which model produced it.
+    std::string model_id;
 
     // Mirrors req.show_reasoning. When the user has reasoning HIDDEN we
     // convert reasoning text deltas into heartbeats: the wire streams
@@ -486,10 +489,20 @@ void flush_text_hold(StreamCtx& ctx) {
     ctx.holding = false;
     if (ctx.text_hold.empty()) return;
     if (hold_is_truncated_tool_json(ctx.text_hold)) {
+        // Weak-model heterogeneity event: the model tried to call a tool by
+        // leaking JSON into content and got cut off. The bytes are dropped
+        // (correct), but the ATTEMPT must be visible — this is what "the
+        // model ignores tools" actually looks like on the wire.
+        AGT_LOG(Model, Warn, "salvage.dropped_truncated",
+                "model={} bytes={} head={}", ctx.model_id, ctx.text_hold.size(),
+                std::string_view{ctx.text_hold}.substr(0, 200));
         ctx.text_hold.clear();   // truncated leaked tool call — drop
         return;
     }
     if (hold_is_unknown_tool_call(ctx.text_hold, ctx.known_tools)) {
+        AGT_LOG(Model, Warn, "salvage.dropped_unknown_tool",
+                "model={} bytes={} head={}", ctx.model_id, ctx.text_hold.size(),
+                std::string_view{ctx.text_hold}.substr(0, 200));
         ctx.text_hold.clear();   // complete leak naming an unadvertised tool
         return;
     }
@@ -565,6 +578,14 @@ void ensure_nonempty_turn(StreamCtx& ctx) {
     }
 
     std::string call_id = "call_salvaged_" + std::to_string(ctx.salvage_seq++);
+    // The model bypassed the structured tool channel and we recovered it
+    // from leaked content JSON. Works, but it's a MODEL CAPABILITY smell:
+    // frequent salvage on a given (model, host) means its native tool
+    // grammar is broken or disabled ("grammar set to none") — the exact
+    // heterogeneity fact worth reporting upstream.
+    AGT_LOG(Model, Info, "salvage.tool_call",
+            "model={} tool={} args_bytes={} id={}",
+            ctx.model_id, name, args.size(), call_id);
     ctx.sink(StreamToolUseStart{ToolCallId{call_id}, ToolName{name}});
     ctx.sink(StreamToolUseDelta{ToolCallId{call_id}, args});
     ctx.sink(StreamToolUseEnd{ToolCallId{call_id}});
@@ -1808,6 +1829,7 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
 
     StreamCtx ctx;
     ctx.sink = std::move(sink);
+    ctx.model_id = req.model;
     ctx.show_reasoning = req.show_reasoning;
     // Models that BEGIN in reasoning with no open tag: Magistral (Mistral's
     // reasoning line) and the DeepSeek-R1 family. For these, leading content

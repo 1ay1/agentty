@@ -969,6 +969,14 @@ Cmd<Msg> launch_stream(Model& m) {
         // structured channel.
         req.json_protocol =
             weak_model && openai_provider && sel_now.openai_endpoint.native_api;
+        // The single biggest per-turn behaviour fork: a weak model on a
+        // native endpoint abandons the structured tool channel entirely and
+        // gets the inline-JSON protocol. When someone asks "why does model X
+        // call tools fine but model Y doesn't", this line is the answer.
+        if (weak_model)
+            AGT_LOG(Model, Debug, "dispatch.weak_model",
+                    "model={} json_protocol={}", req.model,
+                    req.json_protocol ? 1 : 0);
         req.cancel        = cancel;
         req.auth          = std::move(auth);
         req.retry_count   = retry_count;

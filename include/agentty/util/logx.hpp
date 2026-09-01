@@ -52,8 +52,9 @@
 // LEGACY COMPAT: AGENTTY_DEBUG_LOG=<path> (the old dbglog var) still
 // works — it sets the file AND acts as AGENTTY_LOG=debug when AGENTTY_LOG
 // is unset. The old util::dbglog(where,msg) API forwards here (General/
-// Error). AGENTTY_DEBUG_API's raw wire dump stays separate on purpose:
-// full request/chunk bodies are a byte-level tool, not log events.
+// Error). Raw wire bytes are NOT a separate system: full request/chunk
+// bodies land here too, on the `wire` channel at Trace, so a byte-level
+// question and a behavioural one are answered from the same file.
 //
 // THREADING: format on the caller's stack; publish to the ring with a
 // relaxed fetch_add claim; append with one write(2). No background
@@ -84,6 +85,11 @@ enum class Channel : std::uint8_t {
     Acp,       // ACP server/adapter
     Smart,     // smart-mode routing decisions
     Net,       // sockets, TLS, proxy, prewarm
+    Model,     // capability resolution + provider/model heterogeneity:
+               // which dialect a turn routed to, what effort survived the
+               // clamp, learned capability facts, weak-model fallbacks,
+               // tool-call salvage. The channel to open when a model
+               // "behaves weird" on one provider but not another.
     kCount_,   // sentinel — keep last
 };
 inline constexpr std::size_t kChannels =
@@ -91,7 +97,7 @@ inline constexpr std::size_t kChannels =
 
 inline constexpr std::string_view kChannelNames[kChannels] = {
     "general", "wire", "auth", "persist", "tool", "ui",
-    "rag", "mcp", "acp", "smart", "net",
+    "rag", "mcp", "acp", "smart", "net", "model",
 };
 
 // ── Levels ────────────────────────────────────────────────────────────
@@ -155,6 +161,11 @@ bool dump_flight_recorder_to(const char* path) noexcept;
 // The resolved log-file path ("" = file logging disabled). For status UI.
 [[nodiscard]] std::string_view log_file() noexcept;
 
+// How many secrets have been stripped from log lines so far. Surfaced to the
+// user when they go looking for the log: seeing "redacted 47 secrets" is what
+// makes someone comfortable attaching it to a bug report.
+[[nodiscard]] unsigned long redaction_count() noexcept;
+
 // ── Spans ─────────────────────────────────────────────────────────────
 // RAII scope timer: entry at Trace, exit at Trace with the duration.
 // The exit line always emits when the channel is at Trace — including
@@ -214,6 +225,18 @@ void logf(Channel ch, Level lv, std::string_view site,
                                       ::agentty::logx::Level::lv))          \
             ::agentty::logx::logf(::agentty::logx::Channel::ch,             \
                                   ::agentty::logx::Level::lv,               \
+                                  site, __VA_ARGS__);                       \
+    } while (0)
+
+// AGT_LOGL — same as AGT_LOG but the LEVEL is a runtime expression, for the
+// sites that log success and failure through one statement (e.g. a turn
+// outcome that is Debug when clean and Warn when not). Keeps those from
+// duplicating the whole call in an if/else.
+#define AGT_LOGL(ch, lv_expr, site, ...)                                    \
+    do {                                                                    \
+        const ::agentty::logx::Level agt_lv_ = (lv_expr);                   \
+        if (::agentty::logx::recorded(::agentty::logx::Channel::ch, agt_lv_))\
+            ::agentty::logx::logf(::agentty::logx::Channel::ch, agt_lv_,    \
                                   site, __VA_ARGS__);                       \
     } while (0)
 

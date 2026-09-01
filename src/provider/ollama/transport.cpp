@@ -30,6 +30,7 @@
 #include "agentty/provider/usage.hpp"
 #include "agentty/provider/msg_shared.hpp"
 #include "agentty/provider/wire.hpp"
+#include "agentty/provider/debug.hpp"
 #include "agentty/provider/wire_supersede.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
 #include "agentty/tool/util/fs_helpers.hpp"   // util::workspace_root/project_root — AGENTS.md anchor + walk start
@@ -408,8 +409,16 @@ using wire::could_be_tool_json;
 void flush_text_hold(StreamCtx& ctx) {
     ctx.holding = false;
     if (ctx.text_hold.empty()) return;
-    if (hold_is_truncated_tool_json(ctx.text_hold)) { ctx.text_hold.clear(); return; }
+    if (hold_is_truncated_tool_json(ctx.text_hold)) {
+        AGT_LOG(Model, Warn, "salvage.dropped_truncated",
+                "dialect=ollama bytes={} head={}", ctx.text_hold.size(),
+                std::string_view{ctx.text_hold}.substr(0, 200));
+        ctx.text_hold.clear(); return;
+    }
     if (hold_is_unknown_tool_call(ctx.text_hold, ctx.known_tools)) {
+        AGT_LOG(Model, Warn, "salvage.dropped_unknown_tool",
+                "dialect=ollama bytes={} head={}", ctx.text_hold.size(),
+                std::string_view{ctx.text_hold}.substr(0, 200));
         ctx.text_hold.clear(); return;
     }
     // Whitespace-only hold is not a real reply — leave it for the
@@ -1692,6 +1701,7 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
         retry_after_hint = provider::parse_retry_after(hh);
     };
     handler.on_chunk = [&](std::string_view chunk) -> bool {
+        provider::dbg_chunk("ollama-native", chunk);
         if (is_success) {
             feed_ndjson(ctx, chunk.data(), chunk.size());
         } else if (error_body.size() < 64 * 1024) {
