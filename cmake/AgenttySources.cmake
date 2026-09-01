@@ -61,6 +61,10 @@ set(AGENTTY_PROVIDER_SOURCES
     src/provider/chatgpt/provider.cpp
     src/provider/chatgpt/codex_oauth.cpp
     src/provider/chatgpt/responses.cpp
+    # The OpenAI Responses-API dialect, shared by every host that speaks it
+    # (ChatGPT/Codex today, GitHub Copilot next). Extracted from
+    # chatgpt/responses.cpp — see responses/responses.hpp for the contract.
+    src/provider/responses/codec.cpp
     src/provider/copilot/provider.cpp
     src/provider/copilot/copilot_oauth.cpp
     src/provider/kimi/provider.cpp

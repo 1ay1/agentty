@@ -1,0 +1,548 @@
+// agentty::provider::responses — the OpenAI Responses-API dialect codec.
+//
+// This file was EXTRACTED from src/provider/chatgpt/responses.cpp (see the
+// git history through the rename): the conversation encoder, the tools
+// encoder and the SSE state machine turned out to be entirely host-neutral,
+// while only the HTTP envelope differed per backend. It is now shared by
+// every host that speaks this dialect — ChatGPT/Codex and GitHub Copilot —
+// with per-host differences supplied through a `responses::Site` descriptor.
+// See include/agentty/provider/responses/responses.hpp for the contract and
+// the measured table of what actually varies between hosts.
+#include "agentty/provider/responses/responses.hpp"
+
+#include <array>
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cstdint>
+#include <mutex>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+
+#include <nlohmann/json.hpp>
+
+#include "agentty/provider/stream_epilogue.hpp"
+#include "agentty/provider/usage.hpp"
+#include "agentty/provider/msg_shared.hpp"
+#include "agentty/provider/wire.hpp"
+#include "agentty/provider/wire_supersede.hpp"
+#include "agentty/runtime/composer_attachment.hpp"
+#include "agentty/util/base64.hpp"
+
+namespace agentty::provider::responses {
+namespace {
+using json = nlohmann::json;
+
+// UTF-8 scrub — a pasted blob / tool output can carry invalid UTF-8 that
+// nlohmann::dump() would throw on. Replace malformed bytes with U+FFFD.
+std::string scrub_utf8(std::string_view in) {
+    std::string out;
+    out.reserve(in.size());
+    const auto* p   = reinterpret_cast<const unsigned char*>(in.data());
+    const auto* end = p + in.size();
+    while (p < end) {
+        unsigned char c = *p;
+        if (c < 0x80) { out.push_back(static_cast<char>(c)); ++p; continue; }
+        int extra = (c >= 0xF0) ? 3 : (c >= 0xE0) ? 2 : (c >= 0xC0) ? 1 : -1;
+        if (extra < 0 || p + extra >= end) { out.append("\xEF\xBF\xBD"); ++p; continue; }
+        bool ok = true;
+        for (int k = 1; k <= extra; ++k)
+            if ((p[k] & 0xC0) != 0x80) { ok = false; break; }
+        if (!ok) { out.append("\xEF\xBF\xBD"); ++p; continue; }
+        out.append(reinterpret_cast<const char*>(p), extra + 1);
+        p += extra + 1;
+    }
+    return out;
+}
+
+} // namespace  (host-neutral helpers above are TU-local)
+
+// ── agentty conversation → Responses `input[]` array ───────────────────────
+//
+// Rebuilds the whole turn history each call (the Codex backend runs
+// store:false, so state is client-side). Every assistant tool_call becomes a
+// `function_call` item immediately followed by its `function_call_output`.
+json build_input(const provider::Request& req) {
+    json input = json::array();
+    // Count terminal-carrying tool results so each can be assigned a recency
+    // rank (0 = newest) for the shared age-tiered wire budget. Without this a
+    // 500 KiB grep or a big-file `read` replays VERBATIM on every subsequent
+    // turn, bloating the prompt long before compaction — the same fix every
+    // other transport applies via wire::cap_tool_result_aged. Errors never
+    // fade (the model may need the full failure to recover), and results
+    // already under budget ship as-is.
+    int total_tool_results = 0;
+    for (const auto& m : req.messages)
+        for (const auto& tc : m.tool_calls)
+            if (tc.is_terminal()) ++total_tool_results;
+    int seen_tool_results = 0;
+    const auto superseded = wire::superseded_read_ids(req.messages);
+    for (const auto& m : req.messages) {
+        if (m.role == Role::System) continue;   // folded into `instructions`
+
+        const std::string text = m.attachments.empty()
+            ? m.text
+            : attachment::expand(m.text, m.attachments);
+
+        if (m.role == Role::User) {
+            json content = json::array();
+            if (!text.empty())
+                content.push_back({
+                    {"type", "input_text"}, {"text", scrub_utf8(text)},
+                });
+            for (const auto& img : m.images) {
+                if (img.bytes.empty()) continue;
+                const std::string_view media_type = img.media_type.empty()
+                    ? std::string_view{"image/png"}
+                    : std::string_view{img.media_type};
+                content.push_back({
+                    {"type", "input_image"},
+                    {"image_url", "data:" + std::string{media_type} + ";base64,"
+                                    + util::base64_encode(img.bytes)},
+                });
+            }
+            if (content.empty()) continue;
+            input.push_back({
+                {"type", "message"}, {"role", "user"},
+                {"content", std::move(content)},
+            });
+            continue;
+        }
+
+        // Assistant turn: emit its prose (if any) as an output_text message,
+        // then each tool call as function_call + function_call_output.
+        //
+        // FIRST replay any captured reasoning items. Responses requires the
+        // reasoning item to precede the message / function_call items it
+        // produced (item-pairing invariant). Under store:false we send only
+        // `encrypted_content` — NOT the server `id` (echoing a rs_… id makes
+        // the backend do a lookup that 404s on a non-persisted response).
+        if (!m.reasoning_encrypted.empty()) {
+            std::size_t start = 0;
+            while (start <= m.reasoning_encrypted.size()) {
+                std::size_t nl = m.reasoning_encrypted.find('\n', start);
+                std::string blob = m.reasoning_encrypted.substr(
+                    start, nl == std::string::npos ? std::string::npos : nl - start);
+                if (!blob.empty())
+                    input.push_back({
+                        {"type", "reasoning"},
+                        {"summary", json::array()},
+                        {"encrypted_content", std::move(blob)},
+                    });
+                if (nl == std::string::npos) break;
+                start = nl + 1;
+            }
+        }
+
+        if (!text.empty()) {
+            input.push_back({
+                {"type", "message"}, {"role", "assistant"},
+                {"content", json::array({
+                    json{{"type", "output_text"}, {"text", scrub_utf8(text)}}})},
+            });
+        }
+        for (const auto& tc : m.tool_calls) {
+            std::string args = tc.args.is_null() ? "{}" : tc.args.dump();
+            input.push_back({
+                {"type", "function_call"},
+                {"call_id", tc.id.value},
+                {"name", tc.name.value},
+                {"arguments", scrub_utf8(args)},
+            });
+            // The result the host produced for this call (may be pending if
+            // the turn is still in flight — then we skip, the model re-requests).
+            if (tc.is_terminal()) {
+                // Age-tiered wire budget (shared with every other transport):
+                // newest results keep the full budget, stale successes fade to
+                // a tight head+tail so a big dump stops replaying every turn.
+                const int recency_rank =
+                    total_tool_results - 1 - seen_tool_results;
+                ++seen_tool_results;
+                const bool is_error = tc.is_failed() || tc.is_rejected();
+                std::string out = (!is_error && superseded.count(tc.id.value))
+                    ? std::string{wire::kSupersededReadPointer}
+                    : wire::cap_tool_result_aged(
+                          tc.output(), recency_rank, is_error);
+                input.push_back({
+                    {"type", "function_call_output"},
+                    {"call_id", tc.id.value},
+                    {"output", scrub_utf8(out)},
+                });
+            }
+        }
+    }
+    return input;
+}
+
+json build_tools(const provider::Request& req) {
+    json tools = json::array();
+    for (const auto& t : req.tools) {
+        // Responses API function tool is FLAT (name/description/parameters at
+        // top level), unlike Chat Completions' nested {function:{...}}. The
+        // null-schema guard is shared with the Chat/Ollama encoder (SSOT).
+        tools.push_back({
+            {"type", "function"},
+            {"name", t.name},
+            {"description", t.description},
+            {"parameters", wire::tool_schema_or_empty(t.input_schema)},
+        });
+    }
+    return tools;
+}
+
+// The NEUTRAL Responses request body. Everything here is true of the
+// dialect itself; anything true of only ONE backend belongs in that host's
+// Site::decorate_body instead (ChatGPT's store:false + encrypted-reasoning
+// include[], Copilot's reasoning.summary mode, …).
+//
+// `model` is deliberately NOT defaulted here: hosts can rewrite the slug
+// (Copilot's Auto session picks a server-blessed model), so the caller's
+// Target::model is authoritative and stream() stamps it after decoration.
+json build_body(const provider::Request& req) {
+    json body{
+        {"model", req.model},
+        {"instructions", scrub_utf8(req.system_prompt)},
+        {"input", build_input(req)},
+        {"tool_choice", "auto"},
+        {"parallel_tool_calls", true},
+        {"stream", true},
+    };
+    if (auto tools = build_tools(req); !tools.empty()) body["tools"] = tools;
+    // Reasoning ladder. `summary: auto` is what makes a reasoning model
+    // return human-readable summary text (response.reasoning_summary_text.*)
+    // rather than silently burning thinking tokens — measured on both
+    // ChatGPT and Copilot.
+    if (!req.effort.empty())
+        body["reasoning"] = json{{"effort", req.effort}, {"summary", "auto"}};
+    else
+        body["reasoning"] = json{{"summary", "auto"}};
+    return body;
+}
+
+// ── SSE dispatch state ─────────────────────────────────────────────────────
+struct StreamCtx {
+    EventSink sink;
+    wire::SseFramer sse;
+    // item.id (fc_…) → call_id (call_…) so argument deltas keyed by item_id
+    // can be forwarded under the correlation id the result must echo.
+    std::unordered_map<std::string, std::string> call_ids;
+    std::unordered_set<std::string> open_tool_items;
+    std::string latest_tool_item;   // fallback for older events without item_id
+    bool text_block_open = false;
+    bool saw_function_call = false;
+    bool terminated = false;
+    StopReason stop = StopReason::EndTurn;
+};
+
+void close_tool(StreamCtx& ctx, const std::string& item_id) {
+    if (item_id.empty() || !ctx.open_tool_items.erase(item_id)) return;
+    if (const auto it = ctx.call_ids.find(item_id); it != ctx.call_ids.end())
+        ctx.sink(StreamToolUseEnd{ToolCallId{it->second}});
+    if (ctx.latest_tool_item == item_id) {
+        ctx.latest_tool_item = ctx.open_tool_items.empty()
+            ? std::string{} : *ctx.open_tool_items.begin();
+    }
+}
+
+void close_all_tools(StreamCtx& ctx) {
+    std::vector<std::string> ids(ctx.open_tool_items.begin(),
+                                 ctx.open_tool_items.end());
+    for (const auto& id : ids) close_tool(ctx, id);
+}
+
+void emit_usage(StreamCtx& ctx, const json& usage) {
+    // Shared extractor — see usage::from_responses (single source of truth for
+    // the Responses/Codex usage shape).
+    if (auto su = usage::from_responses(usage)) ctx.sink(*su);
+}
+
+void dispatch(StreamCtx& ctx, std::string_view data) {
+    if (data.empty() || data == "[DONE]") return;
+    json j;
+    try { j = json::parse(data); } catch (...) { return; }
+
+    const auto type = j.value("type", std::string{});
+
+    if (type == "response.output_text.delta") {
+        if (!ctx.text_block_open) ctx.text_block_open = true;
+        ctx.sink(StreamTextDelta{j.value("delta", std::string{})});
+        return;
+    }
+    if (type == "response.reasoning_summary_text.delta"
+        || type == "response.reasoning_text.delta") {
+        ctx.sink(StreamThinkingDelta{j.value("delta", std::string{}), {}});
+        return;
+    }
+    // Summary PART boundary: the Responses API splits a reasoning summary
+    // into parts (one per paragraph) and emits several reasoning ITEMS per
+    // response (one before each tool call). Their text deltas would
+    // otherwise concatenate with no separator ("…thought one.Start of
+    // thought two…"). Emit a block boundary so the reducer inserts the
+    // paragraph break — same event Anthropic uses for a new thinking block.
+    if (type == "response.reasoning_summary_part.added") {
+        ctx.sink(StreamThinkingDelta{{}, {}, /*block_boundary=*/true});
+        return;
+    }
+    if (type == "response.output_item.added") {
+        const auto& item = j.value("item", json::object());
+        const auto itype  = item.value("type", std::string{});
+        if (itype == "reasoning") {
+            // New reasoning item — paragraph boundary for its summary text
+            // (see above). Harmless if the item produces no visible text.
+            ctx.sink(StreamThinkingDelta{{}, {}, /*block_boundary=*/true});
+        }
+        if (itype == "function_call") {
+            // A new tool call opens. Close any prior text block first so the
+            // reveal cursor snaps before the card (matches Anthropic seam).
+            if (ctx.text_block_open) {
+                ctx.text_block_open = false;
+                ctx.sink(StreamTextBlockClosed{});
+            }
+            const std::string item_id = item.value("id", std::string{});
+            const std::string call_id = item.value("call_id", item_id);
+            const std::string name    = item.value("name", std::string{});
+            ctx.call_ids[item_id] = call_id;
+            ctx.open_tool_items.insert(item_id);
+            ctx.latest_tool_item = item_id;
+            ctx.saw_function_call = true;
+            ctx.sink(StreamToolUseStart{ToolCallId{call_id}, ToolName{name}});
+            // Some backends deliver the whole args string up-front on `added`.
+            if (const auto a = item.value("arguments", std::string{}); !a.empty())
+                ctx.sink(StreamToolUseDelta{ToolCallId{call_id}, a});
+        }
+        return;
+    }
+    if (type == "response.function_call_arguments.delta") {
+        const std::string item_id = j.value("item_id", ctx.latest_tool_item);
+        if (const auto it = ctx.call_ids.find(item_id); it != ctx.call_ids.end())
+            ctx.sink(StreamToolUseDelta{
+                ToolCallId{it->second}, j.value("delta", std::string{})});
+        return;
+    }
+    if (type == "response.output_item.done") {
+        const auto& item = j.value("item", json::object());
+        const auto itype = item.value("type", std::string{});
+        if (itype == "function_call")
+            close_tool(ctx, item.value("id", std::string{}));
+        else if (itype == "reasoning") {
+            // A reasoning item completed. Capture its opaque encrypted_content
+            // so the reducer can stash it on the assistant message and replay
+            // it next turn (chain-of-thought continuity across tool rounds
+            // under store:false). The visible summary already streamed via
+            // reasoning_summary_text.delta → StreamThinkingDelta.
+            if (auto enc = item.value("encrypted_content", std::string{});
+                !enc.empty())
+                ctx.sink(StreamReasoning{std::move(enc)});
+            if (ctx.text_block_open) {
+                ctx.text_block_open = false;
+                ctx.sink(StreamTextBlockClosed{});
+            }
+        }
+        else if (ctx.text_block_open) {
+            ctx.text_block_open = false;
+            ctx.sink(StreamTextBlockClosed{});
+        }
+        return;
+    }
+    if (type == "response.completed") {
+        close_all_tools(ctx);
+        const auto& resp = j.value("response", json::object());
+        emit_usage(ctx, resp.value("usage", json::object()));
+        // No finish_reason on the wire — a function_call in the output means
+        // the model wants tool results before continuing.
+        ctx.stop = ctx.saw_function_call ? StopReason::ToolUse : StopReason::EndTurn;
+        ctx.sink(StreamFinished{ctx.stop});
+        ctx.terminated = true;
+        return;
+    }
+    if (type == "response.incomplete") {
+        close_all_tools(ctx);
+        const auto& resp = j.value("response", json::object());
+        emit_usage(ctx, resp.value("usage", json::object()));
+        const auto reason = resp.value("incomplete_details", json::object())
+                                .value("reason", std::string{});
+        ctx.stop = reason == "max_output_tokens" ? StopReason::MaxTokens
+                                                  : StopReason::EndTurn;
+        ctx.sink(StreamFinished{ctx.stop});
+        ctx.terminated = true;
+        return;
+    }
+    if (type == "response.failed" || type == "error") {
+        close_all_tools(ctx);
+        std::string msg;
+        // Surface the error TYPE/CODE alongside the message. The runtime's
+        // classify(string_view) sniffs this text to decide retryability
+        // (e.g. "rate_limit", "429", "overloaded", "server_error") — dropping
+        // the type would misclassify a transient overload as terminal and
+        // skip the auto-retry that Anthropic/OpenAI get. Mirror the wire's
+        // in-band error shape: `{type|code}: {message}`.
+        auto compose = [](const json& err) {
+            std::string m = err.value("message", std::string{});
+            std::string tag = err.value("type", err.value("code", std::string{}));
+            if (!tag.empty()) return m.empty() ? tag : tag + ": " + m;
+            return m;
+        };
+        if (type == "error") {
+            // A top-level `error` event: its own `type` field is the SSE event
+            // discriminator ("error"), so the meaningful classifier token is
+            // `code` (e.g. "rate_limit_exceeded", "server_error"). Some
+            // variants nest the detail under `error`; handle both.
+            const json& err = j.contains("error") && j["error"].is_object()
+                                  ? j["error"] : j;
+            std::string m   = err.value("message", j.value("message", std::string{}));
+            std::string tag = err.value("code", err.value("type", std::string{}));
+            if (tag == "error") tag.clear();   // never the event discriminator
+            msg = tag.empty() ? m : (m.empty() ? tag : tag + ": " + m);
+            if (msg.empty()) msg = "stream error";
+        } else {
+            const auto& err = j.value("response", json::object())
+                                  .value("error", json::object());
+            msg = compose(err);
+            if (msg.empty()) msg = "Codex request failed";
+        }
+        ctx.sink(StreamError{msg, std::nullopt});
+        ctx.terminated = true;
+        return;
+    }
+    // response.created / in_progress / content_part.* / *_summary_part.* etc.
+    // are structural — nothing to render. Bump liveness so the stall watchdog
+    // knows the wire is healthy during a long reasoning pass.
+    ctx.sink(StreamHeartbeat{});
+}
+
+// ── The shared transport ──────────────────────────────────────────────────
+//
+// Everything above this line is host-neutral. Everything a HOST differs on
+// arrives through `site`: where to POST, with what credentials, what extra
+// body fields, and how to phrase an HTTP error. The loop itself — SSE
+// framing, error-body capping, retry-after capture, watchdog timeouts and
+// the shared epilogue — is identical for every Responses backend, which is
+// the whole reason this module exists.
+provider::StreamResult stream(const Site& site, provider::Request req,
+                              provider::EventSink sink) {
+    sink(StreamStarted{});
+
+    // Host resolves credentials + destination (may block on a token refresh,
+    // and may rewrite req.model — e.g. Copilot's Auto session picking a
+    // server-blessed slug). Auth prose is the host's: this layer never
+    // invents remediation text it can't be sure of.
+    auto target = site.authorize(req);
+    if (!target) {
+        sink(StreamError{target.error()});
+        return provider::StreamResult::failed(
+            std::string{site.id} + ": " + target.error());
+    }
+
+    http::Request hr;
+    hr.method  = http::HttpMethod::Post;
+    hr.host    = target->host;
+    hr.port    = target->port;
+    hr.path    = target->path;
+    hr.headers = target->headers;
+    // The SSE anti-buffering trio every streaming transport in agentty sends.
+    http::append_sse_no_buffer(hr.headers);
+
+    try {
+        json body = build_body(req);
+        // Host-specific fields layer on top of the neutral body.
+        if (site.decorate_body) site.decorate_body(body, req);
+        // The host's model choice is authoritative (see build_body).
+        if (!target->model.empty()) body["model"] = target->model;
+        hr.body = body.dump();
+    } catch (const std::exception& e) {
+        sink(StreamError{std::string{"could not encode request: "} + e.what()});
+        return provider::StreamResult::failed("could not encode request");
+    }
+
+    StreamCtx ctx;
+    ctx.sink = sink;
+    int http_status = 0;
+    std::string error_body;
+    // Server-provided backoff hint (429 rate-limit / 5xx overload). The
+    // Responses backends emit standard `Retry-After` (integer seconds) just
+    // like Anthropic/OpenAI; capturing it lets the runtime honor the server's
+    // schedule instead of falling back to its blind ladder.
+    std::optional<std::chrono::seconds> retry_after_hint;
+
+    http::StreamHandler cbs;
+    cbs.on_headers = [&](int status, const http::Headers& hh) {
+        http_status = status;
+        if (status < 400) return;   // only care about the error path
+        retry_after_hint = provider::parse_retry_after(hh);
+    };
+    cbs.on_activity = [&] {
+        sink(StreamHeartbeat{.transport_only = true});
+    };
+    cbs.on_buffered_wait = [&] { sink(StreamBufferedWait{}); };
+    cbs.on_chunk = [&](std::string_view chunk) -> bool {
+        if (http_status >= 400) {
+            // Cap the buffered error body so a misbehaving edge / proxy that
+            // streams an unbounded 4xx/5xx body can't drive us into OOM on the
+            // error path (parity with the Anthropic transport's 64 KB guard).
+            if (error_body.size() < 64 * 1024)
+                error_body.append(chunk.data(),
+                                  std::min(chunk.size(), 64 * 1024 - error_body.size()));
+            return true;
+        }
+        ctx.sse.feed(chunk.data(), chunk.size(),
+            [&](std::string_view, std::string_view payload, char*) {
+                dispatch(ctx, payload);
+            });
+        return !ctx.terminated;
+    };
+
+    http::Timeouts tos;
+    tos.connect = std::chrono::milliseconds(15'000);
+    tos.total   = std::chrono::minutes(30);
+    // Idle/stall watchdog — parity with the Anthropic stream. A healthy
+    // Responses stream emits SSE frames (deltas / heartbeats) continuously,
+    // so 90 s without a single byte means the transport is dead (silent peer,
+    // proxy stall, half-open TCP). Without this, a mid-turn stall would wait
+    // for the generous total cap instead of being retried promptly.
+    // 15 s PING probes keep a half-open TCP detectable and produce
+    // transport-only heartbeats when a corporate gateway is alive but
+    // withholding SSE DATA. The 30-minute total cap is the final bound.
+    tos.ping    = std::chrono::milliseconds(15'000);
+    tos.idle    = std::chrono::milliseconds(90'000);
+
+    auto result = http::default_client().stream(hr, cbs, tos, req.cancel);
+
+    // End the turn through the SHARED epilogue so every Responses host
+    // finishes identically to Anthropic/OpenAI/Ollama. The critical case is
+    // AlreadyTerminated: when a `response.completed` frame fired StreamFinished
+    // inside dispatch(), on_chunk returned false to stop reading (a deliberate
+    // latency win), which the HTTP layer reports as an aborted / "cancelled"
+    // transfer. finish_stream treats that as EXPECTED (emits nothing), avoiding
+    // the spurious StreamError{"cancelled"} that used to show after clean turns.
+    return provider::finish_stream({
+        .terminated  = ctx.terminated,
+        .sink        = sink,
+        .result_ok   = bool(result),
+        .http_status = http_status,
+        .non_replayable = !result && result.error().non_replayable,
+        .cancel      = req.cancel,
+        .stop        = ctx.stop,
+        .http_error_message = [&]() -> std::string {
+            return site.explain_http_error(http_status, error_body);
+        },
+        .retry_after = retry_after_hint,
+        .transport_error_message = [&]() -> std::string {
+            return result.error().render();
+        },
+    });
+}
+
+// ── Codec accessors (shared by hosts and tests) ───────────────────────────
+std::vector<Msg> parse_sse_for_test(const std::vector<std::string>& sse_data_lines) {
+    std::vector<Msg> out;
+    StreamCtx ctx;
+    ctx.sink = [&](Msg m) { out.push_back(std::move(m)); };
+    for (const auto& line : sse_data_lines) dispatch(ctx, line);
+    return out;
+}
+
+} // namespace agentty::provider::responses
