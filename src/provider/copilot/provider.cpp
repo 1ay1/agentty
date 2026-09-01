@@ -12,11 +12,14 @@
 
 #include <algorithm>
 #include <mutex>
+#include <set>
+#include <string>
 
 #include <nlohmann/json.hpp>
 
 #include "agentty/provider/copilot/copilot_oauth.hpp"
 #include "agentty/provider/openai/transport.hpp"
+#include "agentty/provider/responses/responses.hpp"
 #include "agentty/io/http.hpp"
 
 #ifndef AGENTTY_VERSION
@@ -90,9 +93,177 @@ bool is_base_direct(const std::string& id) {
 
 // Some Auto models only speak /responses (mai-code-*), which agentty's
 // OpenAI-Chat transport can't drive. Prefer a chat-completions model.
+//
+// NOTE this is now only used to pick a CHAT-dialect fallback. Since the
+// Responses site below exists, a mai-code-* pick is no longer a dead end:
+// dialect_for() routes it to /responses instead of skipping it.
 bool auto_chat_compatible(const std::string& id) {
     return id.rfind("mai-code", 0) != 0;
 }
+
+// ── Which dialect does THIS model speak? ────────────────────────────
+//
+// Copilot is the first provider that is genuinely MIXED: the same account,
+// over the same host, serves some models on /chat/completions and others on
+// /responses. Measured against api.individual.githubcopilot.com with an Auto
+// session (see the probe notes in the commit):
+//
+//   gpt-5-mini          both  — /responses returns REAL reasoning summaries
+//                             (SSE response.reasoning_summary_text.delta)
+//   mai-code-1.1-flash  /responses ONLY (400 unsupported_api_for_model on chat)
+//   claude-*, gpt-4.1   /chat/completions ONLY (400 on /responses)
+//
+// Two hard rules, both measured: the `copilot-session-token` from an Auto
+// session is REQUIRED (without it even gpt-5-mini 400s model_not_supported),
+// and only models the session lists in available_models[] are accepted.
+//
+// So Responses is used when we hold an Auto session that blesses the model.
+// Everything else keeps the Chat path — no guessing, no hardcoded allowlist
+// beyond what the SERVER told us it can route.
+enum class Dialect { Chat, Responses };
+
+[[nodiscard]] bool session_lists_model(const AutoSession& as,
+                                       const std::string& model) {
+    for (const auto& m : as.available_models)
+        if (m == model) return true;
+    return false;
+}
+
+// Models we have OBSERVED to reject /chat/completions. Learned, not baked:
+// a 400 unsupported_api_for_model on the chat path records the model here so
+// the next turn goes straight to /responses.
+std::mutex& responses_only_mu() { static std::mutex m; return m; }
+std::set<std::string>& responses_only_set() {
+    static std::set<std::string> s;
+    return s;
+}
+void note_responses_only(const std::string& model) {
+    std::scoped_lock lk(responses_only_mu());
+    responses_only_set().insert(model);
+}
+[[nodiscard]] bool is_responses_only(const std::string& model) {
+    std::scoped_lock lk(responses_only_mu());
+    return responses_only_set().count(model) > 0;
+}
+
+// Does this model return reasoning TEXT on /responses?
+//
+// MEASURED against a live Auto session: gpt-5-* answers /responses with a
+// `reasoning` output item carrying real summary text (and streams
+// response.reasoning_summary_text.delta), while the same model on
+// /chat/completions returns none — which is the whole reason this fork
+// exists. Claude and GPT-4.x reject /responses outright, so they are never
+// candidates. Kept as a narrow prefix test rather than a hardcoded model
+// list so new gpt-5 spellings are picked up without a release; anything
+// wrong here degrades to "stay on chat", never to a broken turn.
+[[nodiscard]] bool wants_reasoning_text(const std::string& model) {
+    return model.rfind("gpt-5", 0) == 0;
+}
+
+// Which concrete model will the Auto session stream?
+//
+// ONE implementation, used by BOTH dialect paths — the Responses fork must
+// resolve the same slug the chat path would, or a user switching between
+// them would silently get different models.
+//
+// Honour the user's choice when the session allows it; else the server's
+// `selected_model`; else the first available. Chat-compatibility is only a
+// TIE-BREAK for the fallback: a Responses-only model (mai-code-*) is a
+// perfectly good pick now that we can drive that dialect, but we still
+// prefer a chat-capable one when we're choosing on the user's behalf.
+[[nodiscard]] std::string pick_auto_model(const AutoSession& as,
+                                          const std::string& requested) {
+    std::string picked;
+    if (requested != kAutoId)
+        for (const auto& m : as.available_models)
+            if (m == requested) { picked = m; break; }
+    if (picked.empty() && auto_chat_compatible(as.selected_model))
+        picked = as.selected_model;
+    if (picked.empty())
+        for (const auto& m : as.available_models)
+            if (auto_chat_compatible(m)) { picked = m; break; }
+    if (picked.empty() && !as.available_models.empty())
+        picked = as.available_models.front();
+    return picked;
+}
+
+// ── The Copilot Responses site ──────────────────────────────────
+//
+// Copilot's /responses needs credentials that are resolved ONCE per turn
+// (proxy token + Auto session, both refreshable). Site::authorize is a plain
+// function pointer by design — the descriptor stays data — so the resolved
+// turn context is handed over in this thread-local, set by stream() right
+// before it calls into the shared codec. Per-thread because a turn runs on
+// one worker and subagents stream concurrently on their own.
+struct ResponsesTurn {
+    std::string host;          // inference host for this session
+    std::string token;         // proxy token (Bearer)
+    std::string session_token; // copilot-session-token — REQUIRED, measured
+    std::string model;         // server-blessed slug
+};
+ResponsesTurn& responses_turn() {
+    static thread_local ResponsesTurn t;
+    return t;
+}
+
+std::expected<provider::responses::Target, std::string>
+copilot_authorize(provider::Request&) {
+    const auto& t = responses_turn();
+    if (t.token.empty() || t.session_token.empty())
+        return std::unexpected(std::string{
+            "copilot: no Auto session for the Responses API — sign in again "
+            "with `agentty login` and choose GitHub Copilot"});
+    provider::responses::Target target;
+    target.host = t.host.empty() ? std::string{"api.githubcopilot.com"} : t.host;
+    target.port = 443;
+    target.path = "/responses";
+    target.model = t.model;
+    target.headers = {
+        {"authorization", "Bearer " + t.token},
+        {"content-type", "application/json"},
+        {"accept", "text/event-stream"},
+        // The Auto-session token is what unlocks /responses at all: without
+        // it every model — including gpt-5-mini — 400s model_not_supported.
+        {"copilot-session-token", t.session_token},
+        {"x-github-api-version", kAutoApiVersion},
+    };
+    for (auto& h : copilot_headers()) target.headers.push_back({h.first, h.second});
+    return target;
+}
+
+void copilot_decorate_body(nlohmann::json& body, const provider::Request&) {
+    // Copilot is stateful server-side for Responses; unlike the Codex
+    // backend we do NOT send store:false or ask for encrypted reasoning
+    // (it rejects the include). `summary: auto` — already set by the shared
+    // builder — is what makes the reasoning text actually come back.
+    body.erase("store");
+    body.erase("include");
+}
+
+std::string copilot_explain_http_error(int status, std::string_view body) {
+    std::string detail;
+    try {
+        auto j = nlohmann::json::parse(body);
+        if (j.contains("error")) {
+            const auto& e = j["error"];
+            if (e.is_string()) detail = e.get<std::string>();
+            else if (e.is_object())
+                detail = e.value("message", e.value("code", std::string{}));
+        }
+    } catch (...) {}
+    std::string msg = "copilot returned HTTP " + std::to_string(status);
+    if (!detail.empty()) msg += ": " + detail;
+    if (status == 401 || status == 403)
+        msg += " — sign in again with `agentty login` and choose GitHub Copilot";
+    return msg;
+}
+
+const provider::responses::Site kCopilotSite{
+    .id                 = "copilot",
+    .authorize          = &copilot_authorize,
+    .decorate_body      = &copilot_decorate_body,
+    .explain_http_error = &copilot_explain_http_error,
+};
 
 // An auto Endpoint carries the session token + CAPI api-version so the server
 // accepts models that a free/limited plan can only reach via Auto.
@@ -132,36 +303,66 @@ provider::StreamResult CopilotProvider::stream(provider::Request req,
     // a premium model the account can only reach via a session. Base gpt-4o
     // family models run DIRECT (they're not in the Auto set), and models we've
     // confirmed work directly also skip Auto.
+    //
+    // ALSO route through Auto when the model would prefer the Responses
+    // dialect. The Auto session's `copilot-session-token` is the credential
+    // /responses REQUIRES (measured: without it even gpt-5-mini 400s
+    // model_not_supported), so a gpt-5 model that already works on the chat
+    // path would otherwise never get a session — and never show reasoning.
+    // Responses-only models (mai-code-*) need it for the same reason.
     const bool wants_auto = (requested == kAutoId)
-        || (!is_base_direct(requested) && !is_supported_model(requested));
+        || (!is_base_direct(requested) && !is_supported_model(requested))
+        || prefers_responses_dialect(requested);
 
     std::optional<AutoSession> as;
     if (wants_auto) as = auto_session();
 
     auto run = [&](const CopilotToken& t) -> provider::StreamResult {
+        // ── Responses fork ─────────────────────────────────────────
+        // MUST come before lower_shared(), which MOVES model/messages/tools
+        // out of `req` into the chat-shaped request. Forking after it would
+        // hand the Responses codec a gutted Request — empty input[], empty
+        // instructions — which Copilot rejects with `One of "input" … must
+        // be provided`. (It did, until this was measured.)
+        //
+        // The Auto session is exactly the credential /responses requires,
+        // and it tells us which models the server will route. When the pick
+        // is one of them, prefer the Responses dialect: it is the ONLY way
+        // Copilot returns reasoning TEXT (measured — gpt-5-mini streams
+        // response.reasoning_summary_text.delta there and nothing on
+        // /chat/completions), and it is the only path at all for the
+        // Responses-only models (mai-code-*) we used to skip entirely.
+        //
+        // Chat stays the default for everything else, so Claude / GPT-4.1
+        // turns are byte-identical to before this fork existed.
+        if (as && as->valid()) {
+            const std::string picked = pick_auto_model(*as, requested);
+            const bool responses_capable =
+                !picked.empty() && session_lists_model(*as, picked)
+                && prefers_responses_dialect(picked);
+            if (responses_capable) {
+                if (requested != kAutoId && picked != requested)
+                    sink(StreamNotice{"copilot auto: " + requested
+                                      + " \xe2\x86\x92 " + picked});
+                auto& rt = responses_turn();
+                rt.host          = parse_api_base(as->endpoint_api).host;
+                rt.token         = t.token;
+                rt.session_token = as->session_token;
+                rt.model         = picked;
+                provider::Request rr = req;   // still INTACT here
+                rr.model = picked;
+                return provider::responses::stream(kCopilotSite, std::move(rr),
+                                                   sink);
+            }
+        }
+
         provider::openai::Request oreq;
         provider::lower_shared(oreq, req);
         oreq.context_window = req.context_window;
         oreq.session_key    = req.session_key;
         if (as && as->valid()) {
-            // Pick the concrete model: honour the user's choice if it's in the
-            // session's allow-list, else the server's selected_model, else the
-            // first available.
-            std::string picked;
-            if (requested != kAutoId) {
-                for (auto& m : as->available_models)
-                    if (m == requested) { picked = m; break; }
-            }
-            // For Auto (or if the request wasn't in the set), pick the server's
-            // choice — but only if it's chat-completions-compatible; else the
-            // first compatible available model.
-            if (picked.empty() && auto_chat_compatible(as->selected_model))
-                picked = as->selected_model;
-            if (picked.empty())
-                for (auto& m : as->available_models)
-                    if (auto_chat_compatible(m)) { picked = m; break; }
-            if (picked.empty() && !as->available_models.empty())
-                picked = as->available_models.front();
+            // Same resolver the Responses fork used — one implementation.
+            const std::string picked = pick_auto_model(*as, requested);
             // SURFACE the substitution: the user picked `requested`, the
             // Auto session is streaming `picked`. Silence here reads as
             // "model switching is broken"; one toast makes the server-side
@@ -392,6 +593,19 @@ std::string default_model() {
 
 // Drop the cached catalog so the next list_models() re-ranks with freshly
 // learned support (called after a turn records a 400/200 outcome).
+// ── Dialect selection (public; see provider.hpp for the measured table) ──
+bool prefers_responses_dialect(const std::string& model) {
+    // Responses-only models must use it; gpt-5* should, because that is the
+    // only dialect on which Copilot returns reasoning TEXT.
+    return chat_dialect_unsupported(model) || wants_reasoning_text(model);
+}
+
+bool chat_dialect_unsupported(const std::string& model) {
+    // Learned at runtime (a 400 unsupported_api_for_model on the chat path)
+    // OR known by family: mai-code-* has never accepted /chat/completions.
+    return is_responses_only(model) || !auto_chat_compatible(model);
+}
+
 void invalidate_model_cache() {
     std::lock_guard<std::mutex> lk(models_mu());
     models_cache().clear();

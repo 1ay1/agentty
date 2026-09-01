@@ -890,11 +890,21 @@ TEST_CASE("caps scope: provider::select publishes the SAME id lookups use") {
 
 TEST_CASE("wire dialect reasoning-text transmissibility") {
     using provider::wire_streams_reasoning_text;
-    // Copilot + first-party OpenAI ride Chat Completions, which does not
-    // return GPT-5 reasoning text at all (generated + billed, but only the
-    // Responses API surfaces it). The picker labels this "n/a on this API"
-    // instead of promising "✦ shown" output that can never arrive.
-    CHECK(!wire_streams_reasoning_text("copilot"));
+    // Copilot is MIXED, so the answer is per MODEL — measured against a live
+    // Auto session against api.individual.githubcopilot.com:
+    //   gpt-5-mini / mai-code-*  stream over the Responses API, which DOES
+    //                            return reasoning summary text
+    //   claude-* / gpt-4.x       are chat-only, which returns none
+    // agentty routes the first group over /responses precisely so the
+    // thinking is visible, so the picker may honestly say "✦ shown" there
+    // while saying "n/a on this API" one row below.
+    CHECK(wire_streams_reasoning_text("copilot", "gpt-5-mini"));
+    CHECK(wire_streams_reasoning_text("copilot", "mai-code-1.1-flash"));
+    CHECK(!wire_streams_reasoning_text("copilot", "claude-haiku-4.5"));
+    CHECK(!wire_streams_reasoning_text("copilot", "gpt-4.1"));
+    // No model named ⇒ the coarse provider-level question ("could ANY model
+    // here show reasoning?"), which for Copilot is now yes.
+    CHECK(wire_streams_reasoning_text("copilot"));
     // agentty's `openai` row dials api.openai.com/v1/chat/completions — the
     // SAME Chat Completions dialect — so it hides reasoning text for the
     // same reason. This assertion used to say the opposite: the row was

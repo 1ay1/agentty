@@ -48,4 +48,26 @@ static_assert(provider::Provider<CopilotProvider>);
 // freshly learned per-model support (after a turn's 400/200 outcome).
 void invalidate_model_cache();
 
+// ── Dialect selection (exposed for tests) ──────────────────────────
+//
+// Copilot is agentty's only MIXED-dialect provider: the same account, over
+// the same host, serves some models on /chat/completions and others on the
+// Responses API. Which one a model speaks was MEASURED against a live Auto
+// session, not guessed:
+//
+//   gpt-5-mini          both — but ONLY /responses returns reasoning text
+//   mai-code-1.1-flash  /responses only (chat 400s unsupported_api_for_model)
+//   claude-*, gpt-4.1   /chat/completions only (400 on /responses)
+//
+// True when the model should be streamed over the Responses dialect,
+// GIVEN that the Auto session lists it (the session's copilot-session-token
+// is a hard requirement for /responses — without it even gpt-5-mini is
+// rejected with model_not_supported).
+[[nodiscard]] bool prefers_responses_dialect(const std::string& model);
+
+// True when the model is known to REJECT /chat/completions, so Responses is
+// the only way to reach it at all (the mai-code-* family today). Such models
+// used to be filtered out of the picker entirely.
+[[nodiscard]] bool chat_dialect_unsupported(const std::string& model);
+
 } // namespace agentty::provider::copilot

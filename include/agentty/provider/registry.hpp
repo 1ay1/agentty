@@ -314,7 +314,7 @@ static_assert(detail::endpoints_consistent(),
               "HTTP-dialled row is missing endpoint data");
 static_assert(detail::ids_unique(), "duplicate provider id in kProviders");
 
-// Can this wire DIALECT carry reasoning TEXT back to us?
+// Can this wire DIALECT carry reasoning TEXT back to us, for THIS model?
 //
 // A model reasoning and a model letting you SEE it are different things.
 // OpenAI's Chat Completions dialect does not transmit reasoning text for
@@ -325,28 +325,14 @@ static_assert(detail::ids_unique(), "duplicate provider id in kProviders");
 // populate reasoning_content on the Chat dialect, which is why the
 // transport parses it unconditionally.
 //
-// So this is deliberately about the FIRST-PARTY OpenAI/Copilot case:
-// callers use it to explain that reasoning is happening but cannot be
-// displayed, rather than showing a "shown" toggle that can never produce
-// output. It takes the provider id (not just the Wire) precisely because
-// the same dialect behaves differently across hosts.
-[[nodiscard]] inline bool wire_streams_reasoning_text(
-        std::string_view provider_id) noexcept {
-    const ProviderPreset* p = preset_for(provider_id);
-    if (!p) return true;                       // unknown/custom host: assume yes
-    if (p->wire != Wire::OpenAIChat) return true;
-    // The FIRST-PARTY OpenAI-family hosts on this dialect hide it:
-    //   • copilot — routes GPT-5 through /chat/completions.
-    //   • openai  — agentty dials api.openai.com/v1/chat/completions too.
-    // The `openai` row used to be mislabelled Wire::OpenAIResponses, which
-    // made this predicate answer "yes" BY ACCIDENT (it only checked the
-    // dialect) and let the picker promise reasoning text the wire never
-    // sends. The genuinely-Responses path is the `chatgpt` provider, which
-    // has its own transport. Every
-    // other OpenAI-COMPAT host on this dialect (DeepSeek, Mistral,
-    // OpenRouter, vLLM, Ollama) populates reasoning_content.
-    return provider_id != "copilot" && provider_id != "openai";
-}
+// `model` matters because a provider is not necessarily ONE dialect.
+// GitHub Copilot serves the same account over both: gpt-5* and mai-code-*
+// stream over the Responses API (where reasoning summaries DO come back —
+// measured), while claude-* and gpt-4.x are chat-only (where they do not).
+// Passing an empty model asks the coarser question "could ANY model on this
+// provider show reasoning", which is what a provider-level row wants.
+[[nodiscard]] bool wire_streams_reasoning_text(
+        std::string_view provider_id, std::string_view model = {}) noexcept;
 
 // The default provider's id — first row of the table.
 [[nodiscard]] inline std::string_view default_provider_id() noexcept {

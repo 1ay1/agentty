@@ -172,12 +172,19 @@ inline std::vector<Element> reasoning_effort_footer(const Model& m,
         const bool on = m.d.show_reasoning;
         parts.push_back(text("  ", fg_dim(muted)));
         parts.push_back(text("^R ", fg_of(fg)));
-        // Honest label when the DIALECT can't carry reasoning text back.
-        // Copilot / first-party OpenAI use Chat Completions, which does not
-        // transmit GPT-5 reasoning at all (it is generated and billed, but
-        // only the Responses API returns it). Showing "✦ shown" there
+        // Honest label when the DIALECT can't carry reasoning text back for
+        // THIS model. First-party OpenAI uses Chat Completions, which does
+        // not transmit GPT-5 reasoning at all (it is generated and billed,
+        // but only the Responses API returns it). Showing "✦ shown" there
         // promises output that can never arrive — the user reasonably
         // reads that as a bug in agentty.
+        //
+        // Copilot is MIXED and therefore model-dependent: gpt-5* and
+        // mai-code-* stream over the Responses API (reasoning text DOES
+        // come back, measured), while claude-* and gpt-4.x are chat-only.
+        // So the answer is per ROW, not per provider — the same Copilot
+        // picker legitimately shows "✦ shown" on one line and "n/a on this
+        // API" on the next.
         //
         // `scope` is the row's provider in the fused picker; empty means
         // the per-provider picker, i.e. the ACTIVE provider — which is
@@ -186,7 +193,7 @@ inline std::vector<Element> reasoning_effort_footer(const Model& m,
         // default id).
         const std::string prov =
             scope.empty() ? caps_provider_scope() : std::string{scope};
-        if (!provider::wire_streams_reasoning_text(prov)) {
+        if (!provider::wire_streams_reasoning_text(prov, hi_id)) {
             parts.push_back(text("n/a on this API", fg_dim(muted)));
             return;
         }

@@ -11,6 +11,7 @@
 #include "agtest.hpp"
 
 #include "agentty/provider/copilot/copilot_oauth.hpp"
+#include "agentty/provider/copilot/provider.hpp"
 #include "agentty/domain/catalog.hpp"
 
 using namespace agentty;
@@ -116,4 +117,56 @@ TEST_CASE("copilot token exchange + expiry") {
         (void)gpt; (void)claude;   // from_id must not crash on these ids
         CHECK(true, "from_id handles Copilot model ids without crashing");
     }
+}
+
+// ── Mixed-dialect routing ────────────────────────────────────────────────
+//
+// Copilot is agentty's only provider where the SAME account serves some
+// models over /chat/completions and others over the Responses API. These
+// expectations are MEASURED, not assumed — a live probe against
+// api.individual.githubcopilot.com with an Auto session returned:
+//
+//   gpt-5-mini          /responses 200 + real reasoning summary text
+//                       (SSE response.reasoning_summary_text.delta);
+//                       /chat/completions 200 but NO reasoning text
+//   mai-code-1.1-flash  /responses 200; /chat/completions 400
+//                       unsupported_api_for_model
+//   claude-haiku-4.5    /chat/completions 200; /responses 400
+//   gpt-4.1             /chat/completions 200; /responses 400
+//
+// Getting this wrong is silent: the turn still "works", the user just never
+// sees the thinking they were promised (or a whole model family stays
+// invisible), which is exactly the bug this routing was built to fix.
+TEST_CASE("copilot dialect routing follows the measured wire behaviour") {
+    // gpt-5* → Responses. This is the ONLY dialect on which Copilot returns
+    // reasoning text, so preferring it is what makes ^R honest for GPT-5.
+    CHECK(prefers_responses_dialect("gpt-5-mini"),
+          "gpt-5-mini prefers Responses (only dialect carrying reasoning text)");
+    CHECK(prefers_responses_dialect("gpt-5"),
+          "the whole gpt-5 family prefers Responses");
+    // …but gpt-5 is NOT chat-incapable: chat works, it just can't show
+    // thinking. The distinction matters — a chat fallback must stay legal.
+    CHECK(!chat_dialect_unsupported("gpt-5-mini"),
+          "gpt-5-mini still speaks chat (fallback must remain available)");
+
+    // mai-code-* is Responses-ONLY: it 400s on the chat path. Before the
+    // Responses transport existed these models were filtered out of the
+    // picker entirely; now they are reachable.
+    CHECK(chat_dialect_unsupported("mai-code-1.1-flash"),
+          "mai-code-* rejects chat/completions");
+    CHECK(prefers_responses_dialect("mai-code-1.1-flash"),
+          "a chat-incapable model must route to Responses, not be skipped");
+
+    // Chat-only families must NOT be dragged onto Responses: they 400 there.
+    // This is the regression that would break every Claude turn on Copilot.
+    CHECK(!prefers_responses_dialect("claude-haiku-4.5"),
+          "claude stays on chat/completions (400s on /responses)");
+    CHECK(!prefers_responses_dialect("claude-sonnet-4.6"),
+          "no claude model is routed to Responses");
+    CHECK(!prefers_responses_dialect("gpt-4.1"),
+          "gpt-4.x stays on chat/completions");
+    CHECK(!prefers_responses_dialect("gpt-4o"),
+          "gpt-4o stays on chat/completions");
+    CHECK(!chat_dialect_unsupported("claude-haiku-4.5"),
+          "claude is chat-capable");
 }
