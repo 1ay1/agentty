@@ -332,6 +332,23 @@ Element fused_picker(const Model& m) {
     int all_count = 0;
     for (const auto& r : rows)
         if (section_of(r) == Section::All) ++all_count;
+
+    // ── Badge column width ──────────────────────────────────────────
+    // maya's Picker asks callers to "pad badges to a common width" for column
+    // alignment, and this picker never did — so with provider labels running
+    // 3..14 chars ("Groq" .. "GitHub Copilot") every model NAME started at a
+    // different column and the list could not be scanned vertically. The
+    // provider badge is the grouping signal in a flat cross-provider list, so
+    // a ragged column defeats the whole layout.
+    //
+    // Labels are ASCII (registry `label` fields), so bytes == columns here.
+    // Clamp the column so one long label can't push every name off a narrow
+    // terminal; maya truncates the overflow.
+    std::size_t badge_w = 0;
+    for (const auto& r : rows)
+        if (!r.is_signin_offer())
+            badge_w = std::max(badge_w, r.label.size());
+    badge_w = std::min<std::size_t>(badge_w, 12);
     for (int i = 0; i < static_cast<int>(rows.size()); ++i) {
         const auto& r = rows[static_cast<std::size_t>(i)];
         const Section sec = section_of(r);
@@ -376,12 +393,20 @@ Element fused_picker(const Model& m) {
         Picker::Config::Row row;
         row.selected = selected;   // drives the highlight bar + selected bg
         const bool active = r.active;
-        row.badge         = r.label;
+        row.badge         = r.label.size() < badge_w
+                              ? r.label + std::string(badge_w - r.label.size(), ' ')
+                              : r.label;
         row.badge_style   = fg_dim(active ? accent : muted);
         row.leading       = (active ? std::string{"\xe2\x97\x8f "}   // ●
                                     : std::string{"  "})
                           + r.model_label;
-        row.leading_style = active ? fg_bold(fg) : fg_of(muted);
+        // The model NAME is the primary content — the thing you are choosing
+        // between — so it renders at full foreground. It used to be `muted` for
+        // every non-active row, which dimmed the entire list to make ONE row
+        // stand out; that inverted the hierarchy (reference chips out-shouted
+        // the names) and made a long list read as uniformly unavailable. The
+        // active row keeps bold + the ● marker, which is enough to find it.
+        row.leading_style = active ? fg_bold(fg) : fg_of(fg);
         // fzf-style match highlight: paint the query's matched chars in the
         // name so a big filtered list shows WHY each row is here. Use the same
         // `highlight` theme hue as the classic model picker (not `info`) so
@@ -393,32 +418,42 @@ Element fused_picker(const Model& m) {
             for (int p : r.match_positions) row.highlight.push_back(prefix + p);
             row.highlight_fg = highlight;   // same hue as the other pickers
         }
-        // Trailing cell mirrors the classic model picker exactly: context
-        // window first, then a ★ favorite mark, then a ✦ reasoning badge — all
-        // one warm chip style (fg_of(warn)) so the two pickers look identical.
-        std::string trailing;
+        // Trailing cell: context window, then the two marks. RIGHT-ALIGNED as
+        // a fixed-width column — the number is a MEASUREMENT, and measurements
+        // that don't share a decimal column can't be compared at a glance
+        // ("1M" next to "200k" next to "8k" read as noise when ragged).
+        //
+        // The marks sit in their own two fixed slots after it, so ★ and ✦
+        // always land in the same place: a row without a favourite leaves a
+        // hole rather than sliding its ✦ left into the ★ column, which is what
+        // made the old list look jittery as you scrolled.
+        std::string ctx;
         if (const int win = r.model.context_window; win > 0) {
             if (win >= 1'000'000) {
-                trailing += std::to_string(win / 1'000'000) + "M";
-                if (win % 1'000'000 != 0) trailing += "+";   // 1.x M → "1M+"
+                ctx = std::to_string(win / 1'000'000) + "M";
+                if (win % 1'000'000 != 0) ctx += "+";        // 1.x M → "1M+"
             } else if (win >= 1000) {
-                trailing += std::to_string(win / 1'000) + "k";
+                ctx = std::to_string(win / 1'000) + "k";
             } else {
-                trailing += std::to_string(win);
+                ctx = std::to_string(win);
             }
         }
-        if (r.model.favorite) {
-            if (!trailing.empty()) trailing += "  ";
-            trailing += "\xe2\x98\x85";                                   // ★
-        }
-        // Reasoning badge (precomputed in build_fused_rows) — marks models that
-        // can think, so "which of these reason" is legible across providers.
-        if (r.reasons) {
-            if (!trailing.empty()) trailing += "  ";
-            trailing += "\xe2\x9c\xa6";                                   // ✦
-        }
+        // Widest realistic context label is 5 columns ("200k", "1M+").
+        std::string trailing = ctx.size() < 5
+            ? std::string(5 - ctx.size(), ' ') + ctx
+            : ctx;
+        trailing += r.model.favorite ? "  \xe2\x98\x85" : "   ";      // ★
+        // Reasoning badge (precomputed in build_fused_rows) — marks models
+        // that can think, so "which of these reason" is legible across
+        // providers.
+        trailing += r.reasons ? " \xe2\x9c\xa6" : "  ";               // ✦
         row.trailing       = std::move(trailing);
-        row.trailing_style = fg_of(warn);
+        // Dim by default: the trailing cell is REFERENCE data, not the thing
+        // you are choosing between. It used to share the composer's warm
+        // accent with the model name's own emphasis, so every row shouted.
+        // The active row keeps the accent so the current model still reads at
+        // a glance.
+        row.trailing_style = active ? fg_of(accent) : fg_dim(muted);
         cfg.rows.push_back(std::move(row));
     }
     cfg.selected = visual_selected;

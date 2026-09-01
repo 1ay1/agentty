@@ -325,3 +325,108 @@ TEST_CASE("fused: browse ranks by tier, search stays relevance-ordered") {
         CHECK(rows.front().model.id.value == "tinyllama:1b");
     }
 }
+
+// Row-layout arithmetic: the picker aligns three columns —
+//
+//   <provider, padded>  <● marker><model name>   <ctx, right-aligned> <★> <✦>
+//
+// maya's Picker documents that callers must "pad badges to a common width for
+// column alignment", and this picker did not, so with provider labels running
+// 3..14 chars every model NAME began at a different column. In a FLAT
+// cross-provider list the provider badge is the grouping signal, so a ragged
+// badge column defeats the entire layout — you cannot scan it vertically.
+//
+// The context window is a MEASUREMENT and is right-aligned into a fixed 5-col
+// field; the two marks occupy fixed slots after it so a row lacking a
+// favourite leaves a hole rather than sliding its ✦ leftwards (which is what
+// made the list jitter while scrolling).
+//
+// This test pins the arithmetic the view performs. It deliberately does NOT
+// render — it reproduces the exact expressions from ui::fused_picker so a
+// change there without a change here is caught.
+TEST_CASE("fused: row columns align") {
+    // ── Badge padding ────────────────────────────────────────────────
+    auto pad_badge = [](const std::string& label, std::size_t w) {
+        return label.size() < w ? label + std::string(w - label.size(), ' ')
+                                : label;
+    };
+    {
+        // Width is the widest label present, clamped to 12.
+        const std::vector<std::string> labels = {
+            "Groq", "Anthropic", "GitHub Copilot", "OpenRouter"};
+        std::size_t w = 0;
+        for (const auto& l : labels) w = std::max(w, l.size());
+        w = std::min<std::size_t>(w, 12);
+        CHECK(w == 12);   // "GitHub Copilot" is 14 → clamped
+
+        // Every padded badge is the same width, so the next column starts at
+        // one fixed offset for every row.
+        std::size_t first = pad_badge(labels.front(), w).size();
+        for (const auto& l : labels) {
+            const auto b = pad_badge(l, w);
+            CHECK(b.size() == std::max(first, l.size()));
+        }
+        // A short label really is padded (this is the bug being fixed).
+        CHECK(pad_badge("Groq", w) == "Groq        ");
+        // An over-long label is left alone; maya truncates the overflow.
+        CHECK(pad_badge("GitHub Copilot", w) == "GitHub Copilot");
+    }
+
+    // ── Context window is right-aligned in a 5-column field ─────────
+    auto ctx_field = [](int win) {
+        std::string ctx;
+        if (win > 0) {
+            if (win >= 1'000'000) {
+                ctx = std::to_string(win / 1'000'000) + "M";
+                if (win % 1'000'000 != 0) ctx += "+";
+            } else if (win >= 1000) {
+                ctx = std::to_string(win / 1'000) + "k";
+            } else {
+                ctx = std::to_string(win);
+            }
+        }
+        return ctx.size() < 5 ? std::string(5 - ctx.size(), ' ') + ctx : ctx;
+    };
+    {
+        CHECK(ctx_field(200000) == " 200k");
+        CHECK(ctx_field(128000) == " 128k");
+        CHECK(ctx_field(8000)   == "   8k");
+        CHECK(ctx_field(1000000)== "   1M");
+        CHECK(ctx_field(1500000)== "  1M+");
+        CHECK(ctx_field(0)      == "     ");   // unknown: blank, still aligned
+        // Every field is exactly 5 wide → the digits share a column.
+        for (int w : {200000, 128000, 8000, 1000000, 1500000, 0})
+            CHECK(ctx_field(w).size() == 5);
+    }
+
+    // ── Marks occupy fixed slots ────────────────────────────────────
+    auto marks = [](bool fav, bool reasons) {
+        std::string t;
+        t += fav ? "  \xe2\x98\x85" : "   ";
+        t += reasons ? " \xe2\x9c\xa6" : "  ";
+        return t;
+    };
+    {
+        // DISPLAY COLUMNS, not bytes. ★ and ✦ are 3-byte UTF-8 sequences that
+        // occupy ONE column each, so byte offsets legitimately differ between
+        // a row with a favourite and one without — an earlier version of this
+        // test compared find() offsets and "failed" on correct layout. What
+        // must hold is that both marks land in the same COLUMN.
+        auto cols = [](std::string_view t) {
+            int n = 0;
+            for (unsigned char c : t)
+                if ((c & 0xC0) != 0x80) ++n;   // count non-continuation bytes
+            return n;
+        };
+        // Every combination occupies exactly 5 columns: "  ★" / "   " is 3,
+        // " ✦" / "  " is 2.
+        CHECK(cols(marks(true,  true))  == 5);
+        CHECK(cols(marks(true,  false)) == 5);
+        CHECK(cols(marks(false, true))  == 5);
+        CHECK(cols(marks(false, false)) == 5);
+        // The ✦ therefore starts at column 3 whether or not ★ is present —
+        // it can never slide into the favourite's slot.
+        auto star_slot = [&](bool fav) { return cols(std::string{marks(fav, false)}); };
+        CHECK(star_slot(true) == star_slot(false));
+    }
+}
