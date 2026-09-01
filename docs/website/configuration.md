@@ -59,6 +59,9 @@ agentty is configured through flags, environment variables, and two on-disk path
 | `AGENTTY_DEBUG_API / AGENTTY_DEBUG_FILE` | Set `AGENTTY_DEBUG_API=1` to dump **raw** provider request/response bytes (request line + body, status, every chunk) to `AGENTTY_DEBUG_FILE` (default `./agentty-api.log`) — for every wire, not just Anthropic. The byte-level companion to `AGENTTY_LOG=wire=trace`. |
 | `AGENTTY_DEBUG_LOG` | Legacy single-file debug var: sets the log file **and** implies `AGENTTY_LOG=debug` when the latter is unset. Prefer `AGENTTY_LOG`. |
 | `AGENTTY_SMART_MODE` | Session pin for the Smart Mode master switch: `1` forces on, `0` forces off, for that process only. Never persisted (safe for CI / benchmarks). Unset = your saved setting governs. |
+| `AGENTTY_SMART_NO_INTERNAL` | Escape hatch: keep engine-internal calls (compaction summary, thread title) on the main model instead of the Utility slot. For bisecting a routing bug — Smart Mode's three behaviours are otherwise one switch. |
+| `AGENTTY_SMART_NO_ORCHESTRATE` | Escape hatch: run the main turn on the selected model instead of the Strategic slot, and drop the delegation directive. |
+| `AGENTTY_SMART_NO_SUBAGENTS` | Escape hatch: resolve each `task` worker's model with the tier auto-router instead of by its role. |
 | `AGENTTY_NO_TRANSFORMS` | Set to 1 to drop the transform/aggregate/structured-data tool family (`extract`, `aggregate`, `replace`, `read_filter`, `json_query`) — trims ~5 KB of tool schema off every request for a minimal or latency-sensitive profile, **without** losing `grep`/`read`/`edit`. On (family present) by default. |
 | `AGENTTY_TRACE_TOOLS` | Set to 1 to emit one `TOOL <name> <ok\|error>` line to **stderr** for each tool a headless `agentty run` (or subagent) executes — the stdout answer stays clean. Useful for debugging/scripting headless runs and for the agentic tool-selection evals. Off by default. |
 | `SSL_CERT_FILE / SSL_CERT_DIR / CURL_CA_BUNDLE` | Override the TLS root store agentty trusts (standard OpenSSL vars). |
@@ -71,7 +74,6 @@ The Smart Mode *feature* toggles (which layers run) live in the `Ctrl+S` overlay
 |----------|---------|
 | `AGENTTY_SMART_COMPLEX_THRESHOLD` | Feature-score at/above which a turn classifies as **Complex** (more reasoning, more cost). Lower ⇒ more turns escalate; higher ⇒ fewer. The Simple/Standard boundary tracks it. Default `3`; range 1–8. |
 | `AGENTTY_SMART_DEEP_MARGIN` | How far *into* a tier (score margin) a turn must sit to earn the extra **continuous effort** step — a genuinely hard Complex turn reaches +2 immediately instead of waiting for the session bias to drift. Lower ⇒ eager; higher ⇒ stays close to the discrete tier. Default `3`; range 1–8. |
-| `AGENTTY_SMART_PRIOR_EVIDENCE` | Evidence pseudo-count before the per-workspace **learned routing prior** is trusted. Lower ⇒ the store reacts faster (fewer turns to move a prior); higher ⇒ more conservative. Default `5`; range 1–100. |
 | `AGENTTY_SMART_BIAS_CLAMP` | Symmetric cap (±N steps) on the **session cascade bias** — how far this session's self-correction can drift effort from baseline. Default `2`; range 1–4. |
 
 ## On-disk paths

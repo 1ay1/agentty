@@ -14,11 +14,6 @@
 // weights) are deliberately NOT here — the tier THRESHOLDS are the right control
 // surface for classification, not fifteen fiddly per-feature weights.
 //
-//   AGENTTY_SMART_PRIOR_EVIDENCE   (double, default 5.0, range 1..100)
-//       Pseudo-count controlling how much evidence the per-workspace learned
-//       routing prior needs before it's trusted. Lower ⇒ the store reacts
-//       faster (fewer turns to move a prior); higher ⇒ more conservative.
-//
 //   AGENTTY_SMART_DEEP_MARGIN      (int, default 3, range 1..8)
 //       Classifier-score margin at which a turn is "deep" in its band and earns
 //       the extra continuous effort step. Lower ⇒ continuous scaling is more
@@ -52,13 +47,6 @@ namespace agentty::smart::tuning {
 
 namespace detail {
 
-inline double env_double(const char* var, double dflt, double lo, double hi) noexcept {
-    if (const char* v = std::getenv(var); v && v[0]) {
-        try { return std::clamp(std::stod(v), lo, hi); } catch (...) {}
-    }
-    return dflt;
-}
-
 inline int env_int(const char* var, int dflt, int lo, int hi) noexcept {
     if (const char* v = std::getenv(var); v && v[0]) {
         try { return std::clamp(std::stoi(v), lo, hi); } catch (...) {}
@@ -67,11 +55,6 @@ inline int env_int(const char* var, int dflt, int lo, int hi) noexcept {
 }
 
 } // namespace detail
-
-// Evidence pseudo-count for the learned routing prior (RoutingMemory::kPriorN).
-[[nodiscard]] inline double prior_evidence() noexcept {
-    return detail::env_double("AGENTTY_SMART_PRIOR_EVIDENCE", 5.0, 1.0, 100.0);
-}
 
 // Margin at which continuous effort scaling adds the deep-band extra step.
 [[nodiscard]] inline int deep_margin() noexcept {

@@ -40,26 +40,31 @@ Older settings files may still contain `route_internal`, `orchestrate`, `route_s
 You never have to hand-edit this file — the [[Ctrl+S]] overlay writes it for you. The keys are listed here so you know what a synced/checked-in settings file is carrying.
 :::
 
-## On-disk learning stores
+## Nothing is stored per-workspace
 
-All learning is **local to the workspace** and lives in the project's `.agentty/` directory. Nothing is uploaded; delete the files (or run **Reset Smart Mode learning**) to start clean.
+Smart Mode keeps **no on-disk state**. Earlier versions persisted a learned
+routing prior (`.agentty/routing_memory.tsv`) and a log of successful task
+decompositions (`.agentty/decompositions.jsonl`); both were removed, along with
+the four self-supervised layers that fed them. They were never measured against
+the fixed policy, and a routing prior that quietly ratchets one week's cost into
+the next is not a feature you can verify.
 
-| File | Written by | Contents |
-|------|-----------|----------|
-| `.agentty/routing_memory.tsv` | learned routing + outcome feedback | one row per turn signature: the effort prior and its running success rate |
-| `.agentty/decompositions.jsonl` | plan recall | append-only log of successful task decompositions, keyed by turn signature |
+The useful half of that signal is retained where it costs nothing: the **session
+cascade** still self-corrects from delegation behaviour, build failures and
+next-turn corrections — it decays each turn, is clamped by
+`AGENTTY_SMART_BIAS_CLAMP`, and dies with the process.
 
-Both are plain text and safe to inspect, diff, or delete. The routing memory is a small TSV keyed by a **hierarchical turn signature** (a language-agnostic structural class plus a content feature-hash — the task's *shape*, never the prompt text); the decomposition log is one JSON object per line. Both are **periodically compacted** so they stay small no matter how long you use the repo, and both are safe to write from **two agentty processes at once** in the same repo (an advisory file lock serialises them and merges rather than clobbers).
+If you upgraded from an older build, the two files are still on disk and inert.
+Nothing reads them; delete them whenever you like.
 
 ## Advanced tuning
 
-The overlay controls *which* layers run. Four numeric **policy** knobs — for power users who want to retune the router's aggressiveness — are exposed as environment variables (read live, clamped to a safe range, unset = the shipped default). They're documented in full under [Configuration › Smart Mode tuning](/docs/configuration#smart-mode-tuning):
+The overlay picks your models. Three numeric **policy** knobs — for power users who want to retune the router's aggressiveness — are exposed as environment variables (read live, clamped to a safe range, unset = the shipped default). They're documented in full under [Configuration › Smart Mode tuning](/docs/configuration#smart-mode-tuning):
 
 | Variable | Controls |
 |----------|----------|
 | `AGENTTY_SMART_COMPLEX_THRESHOLD` | how readily a turn classifies as Complex (the main cost/quality dial) |
 | `AGENTTY_SMART_DEEP_MARGIN` | how deep into a tier before continuous effort adds an extra step |
-| `AGENTTY_SMART_PRIOR_EVIDENCE` | how much evidence before the learned prior is trusted (learn-speed vs. stability) |
 | `AGENTTY_SMART_BIAS_CLAMP` | how far the session cascade can drift effort from baseline |
 
 ### Force the master switch for one session
