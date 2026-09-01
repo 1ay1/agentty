@@ -159,7 +159,7 @@ int main() {
 
     // ── A. Tool-only to the cap: never write prose. ─────────────────────
     // Every completion emits ONE grep call (harmless, read-only) with empty
-    // text, so ran_a_tool stays true and the loop runs to kMaxTurns. The
+    // text, so ran_a_tool stays true and the loop runs to the role budget. The
     // turn-1 completion additionally emits a narration line — the exact bait
     // the old reverse-walk would have returned.
     {
@@ -214,6 +214,37 @@ int main() {
         check(!out.is_error, "B: a clean finish is not an error");
     }
 
+    // ── P. Turn budgets are sized to the ROLE's shape of work. ─────────
+    // A single global cap could not serve both: read-only sweeps converge
+    // fast, while an implementation loop is read → edit → build → read the
+    // errors → fix → re-run, which is 6-10 turns for ONE honest cycle and
+    // several cycles for a real task. The old flat 24 meant a coder spent
+    // its whole budget orienting and reported "I ran out of turns" instead
+    // of doing the work — the exact failure the N/O cases above catch.
+    //
+    // These are CAPS, not quotas: finishing in 5 turns costs 5. So the only
+    // runs that pay for a higher ceiling are the ones that would otherwise
+    // have FAILED at it.
+    {
+        namespace sa = agentty::tools::subagent;
+        check(sa::max_turns_for(/*read_only=*/false)
+                  > sa::max_turns_for(/*read_only=*/true),
+              "P: write roles get a strictly larger budget than read-only ones");
+        // A coder must be able to run several full edit→build→verify cycles.
+        // At ~8 turns per cycle this is the floor for "more than a token
+        // attempt" — below it the cap, not the task, decides the outcome.
+        check(sa::max_turns_for(/*read_only=*/false) >= 48,
+              "P: a write role can run several edit→build→verify cycles");
+        // Read-only work still needs room for a real sweep (repo_map, a
+        // dozen greps, targeted reads) without being generous for its own
+        // sake — an explorer still going at turn 40 is lost, not thorough.
+        check(sa::max_turns_for(/*read_only=*/true) >= 24,
+              "P: read-only roles keep at least the historical budget");
+        // The ceiling is a runaway guard and must bound every role.
+        check(sa::kMaxTurns >= sa::max_turns_for(/*read_only=*/false),
+              "P: the global ceiling bounds the largest role budget");
+    }
+
     // ── N. Self-reported failure must NOT render as success. ───────────
     // THE bug this case exists for: an agent burns every turn, then signs off
     // with a well-formed report whose content says it did nothing. The old
@@ -228,7 +259,7 @@ int main() {
                                    const provider::EventSink& sink) {
             // Burn the budget on tool calls, then close with a tidy report
             // that admits failure — exactly the observed shape.
-            if (turn < agentty::tools::subagent::kMaxTurns - 1) {   // final turns write prose
+            if (turn < agentty::tools::subagent::max_turns_for(/*read_only=*/false) - 1) {   // final turns write prose
                 emit_tool_call(sink, "t" + std::to_string(turn), "grep",
                                json{{"pattern", "zzz_unique_" + std::to_string(turn)}});
                 emit_finish(sink, StopReason::ToolUse);
@@ -259,7 +290,7 @@ int main() {
     {
         install_scripted_stream([](int turn, const provider::Request&,
                                    const provider::EventSink& sink) {
-            if (turn < agentty::tools::subagent::kMaxTurns - 1) {   // final turns write prose
+            if (turn < agentty::tools::subagent::max_turns_for(/*read_only=*/false) - 1) {   // final turns write prose
                 emit_tool_call(sink, "t" + std::to_string(turn), "grep",
                                json{{"pattern", "zzz_no_match_expected"}});
                 emit_finish(sink, StopReason::ToolUse);

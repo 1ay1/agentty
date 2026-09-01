@@ -88,7 +88,44 @@ inline constexpr int kMaxDepth = 2;
 // Maximum sub-agent turns (model completions) before the loop force-stops
 // and returns whatever it has. Bounds token spend + wall-clock so a
 // looping subagent can't wedge the parent indefinitely.
-inline constexpr int kMaxTurns = 24;
+//
+// This is the CEILING across all roles — the bound that exists to stop a
+// runaway, not a target. Per-role budgets below are what actually apply;
+// keep this >= the largest of them.
+inline constexpr int kMaxTurns = 80;
+
+// ── Per-role turn budgets ──────────────────────────────────────
+// One global cap could not fit every role, because the roles do
+// structurally different work:
+//
+//   READ-ONLY roles (explorer, reviewer) are a bounded sweep: read, grep,
+//   map, summarise. They converge in a handful of turns and a big budget
+//   buys nothing but token spend — an explorer still on turn 40 is lost,
+//   not thorough.
+//
+//   WRITE roles (coder, tester, general) are ITERATIVE: read the code,
+//   make an edit, build, read the errors, fix, re-build, run the tests,
+//   fix again. One honest implementation cycle is easily 6-10 turns, and
+//   a real task is several cycles. At 24 turns a coder routinely spent
+//   its whole budget on orientation and reported "I ran out of turns" —
+//   the failure this sizing exists to prevent. Compilation-heavy work
+//   (C++ here) is the worst case: every build is a turn, every error list
+//   is another read.
+//
+// These are CAPS, not quotas: a subagent that finishes in 5 turns stops in
+// 5. Nothing is spent by raising a ceiling that isn't reached, so the cost
+// of being generous is only paid by runs that would otherwise have FAILED
+// at the cap — which is exactly the trade we want.
+inline constexpr int kMaxTurnsReadOnly = 32;
+inline constexpr int kMaxTurnsWrite    = 80;
+
+// The budget for a role, given whether it may modify the workspace.
+[[nodiscard]] inline constexpr int max_turns_for(bool read_only) noexcept {
+    return read_only ? kMaxTurnsReadOnly : kMaxTurnsWrite;
+}
+
+static_assert(kMaxTurnsReadOnly <= kMaxTurns);
+static_assert(kMaxTurnsWrite    <= kMaxTurns);
 
 // Process-wide current nesting depth, incremented while a subagent runs.
 // Read by the `task` tool to enforce kMaxDepth. Thread-safe via atomic;

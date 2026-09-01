@@ -915,7 +915,7 @@ provider::StreamResult run_one_completion(Thread& thread,
     req.cancel        = std::make_shared<http::CancelToken>();
     // Stable per-subagent conversation identity so the shared prefix
     // (heavy system prompt + tool schemas + accumulated tool results) is
-    // PROMPT-CACHED across this subagent's up-to-24 turns instead of being
+    // PROMPT-CACHED across this subagent's whole run instead of being
     // re-encoded from scratch every turn. Keyed on the agent role + the task
     // prompt so each spawned subagent gets its own stable cache lane and a
     // fan-out of parallel explorers doesn't collide. Without this the single
@@ -1191,24 +1191,40 @@ public:
         // salvages a stale early narration line instead of a real answer).
         bool wrapup_nudged = false;
 
-        while (turns < subagent::kMaxTurns && !doomed) {
+        // Turn budget for THIS role. A read-only sweep converges quickly; an
+        // implementation loop (edit → build → read errors → fix → re-run) is
+        // structurally longer, and starving it produces the "ran out of
+        // turns, made zero edits" report rather than the work.
+        const int max_turns = subagent::max_turns_for(type.read_only);
+
+        while (turns < max_turns && !doomed) {
             ++turns;
 
-            // FINAL-TURN NUDGE: when only a couple of turns of budget remain,
+            // FINAL-TURN NUDGE: when the remaining budget is nearly spent,
             // inject a synthetic user message ordering the model to stop
             // running tools and write its report. Without this the agent
             // spends its last completion on yet another tool call, hits the
             // cap mid-investigation, and returns no final text at all.
-            if (!wrapup_nudged && turns >= subagent::kMaxTurns - 1
+            //
+            // The lead time scales with the budget: one turn's warning is
+            // enough for a short read sweep, but a write role deep in an
+            // edit→build→fix cycle needs room to land what it started (finish
+            // the current edit, re-run the build) before summarising. Too
+            // early wastes budget; too late produces the very "ran out of
+            // turns with nothing to show" report this exists to prevent.
+            const int wrapup_lead = max_turns >= 48 ? 3 : 1;
+            if (!wrapup_nudged && turns >= max_turns - wrapup_lead
                 && !thread.messages.empty()
                 && thread.messages.back().role != Role::User) {
                 Message nudge;
                 nudge.role = Role::User;
                 nudge.text =
-                    "You are almost out of turn budget. Do NOT run any more "
-                    "tools. Write your FINAL report now as a plain text "
-                    "message: a complete, self-contained answer to the task "
-                    "using everything you have gathered so far.";
+                    "You are almost out of turn budget. Finish or abandon the "
+                    "step you are on — do not start anything new — then write "
+                    "your FINAL report as a plain text message: a complete, "
+                    "self-contained answer to the task using everything you "
+                    "have gathered so far. If you did not complete the task, "
+                    "say so plainly and state exactly what remains.";
                 thread.messages.push_back(std::move(nudge));
                 wrapup_nudged = true;
             }
@@ -1312,14 +1328,15 @@ public:
                         std::fprintf(stderr, "TOOL %s %s\n", tc.name.value.c_str(),
                                      res ? "ok" : "error");
                     if (res) {
-                        // ECONOMY: a subagent is a focused, read-heavy burst
-                        // (explorer/reviewer call read/grep/repo_map, whose
-                        // outputs run to tens of KiB each). Those results
-                        // accumulate in the subagent's OWN thread and replay
-                        // on every one of its up-to-24 turns. The parent's
-                        // 64 KiB newest-result budget is tuned for a long
-                        // interactive chat; for a subagent it's the dominant
-                        // cost (8 live results × 64 KiB replayed per turn).
+                        // ECONOMY: a subagent is a focused, tool-heavy burst
+                        // (read/grep/repo_map outputs run to tens of KiB
+                        // each). Those results accumulate in the subagent's
+                        // OWN thread and replay on EVERY subsequent turn, so
+                        // the cost is quadratic in turns — and write roles now
+                        // get a budget measured in dozens of turns, which is
+                        // exactly when that bites. The parent's 64 KiB
+                        // newest-result budget is tuned for a long interactive
+                        // chat; for a subagent it's the dominant cost.
                         // Cap each result to a tight head+tail the instant we
                         // store it, so the working set the model reasons over
                         // stays lean without losing the WHAT of any result.
@@ -1385,7 +1402,7 @@ public:
         // and the UI rendered a green ✓ DONE over a self-declared failure.
         // Observed exactly that. Treat hitting the cap as a reportable
         // condition in its own right.
-        const bool budget_exhausted = turns >= subagent::kMaxTurns;
+        const bool budget_exhausted = turns >= max_turns;
 
         if (report.empty() || salvaged_stale) {
             std::string why;
