@@ -178,6 +178,33 @@ constexpr int kPickerChromeRows = 7;
     return 16;                   // wide: full labels fit
 }
 
+// Provider-badge hue, keyed on the model's capability TIER.
+//
+// The browse list is ordered strongest-first (see build_fused_rows), but that
+// ordering was INVISIBLE: the user saw a reordered list with nothing to say
+// why, and no way to tell a flagship from a 3B local model without reading
+// every id. Colour is the cheapest way to make an existing ordering legible.
+//
+// Hues come from the shared palette's semantic ramp rather than new constants,
+// and the mapping is intensity-ordered so it reads as a gradient even to
+// someone who can't separate the hues: bright accent → blue → cyan → grey.
+//
+// Deliberately applied to the BADGE, not the name: the badge is already
+// reference-weight, so this adds a signal without making the list shout. And
+// it is never the ONLY carrier — the ordering itself, plus the ✦ reasoning
+// mark, say the same thing without colour (WCAG 1.4.1: colour is never the
+// sole means of conveying information).
+[[nodiscard]] maya::Color tier_hue(ModelCapabilities::Tier t) {
+    using T = ModelCapabilities::Tier;
+    switch (t) {
+        case T::Flagship: return role_brand_alt;  // bright magenta — the top lane
+        case T::Mid:      return role_info;       // blue — the workhorse lane
+        case T::Cheap:    return code_path;       // bright cyan — fast/small
+        case T::Weak:     return muted;           // grey — tool-use unreliable
+    }
+    return muted;
+}
+
 // One key-binding hint in a footer strip: a key glyph + a short label,
 // plus a priority that decides survival order when the picker is too
 // narrow to show them all (higher = kept longer).
@@ -467,7 +494,12 @@ Element fused_picker(const Model& m) {
                               ? r.label + std::string(
                                     static_cast<std::size_t>(badge_w - bw), ' ')
                               : r.label;
-        row.badge_style   = fg_dim(active ? accent : muted);
+        // Active row keeps the brand accent (it is the "you are here" marker);
+        // every other row is hued by capability tier, so the strongest-first
+        // browse ordering is legible at a glance instead of unexplained.
+        row.badge_style   = fg_dim(
+            active ? accent
+                   : tier_hue(static_cast<ModelCapabilities::Tier>(r.tier)));
         row.leading       = (active ? std::string{"\xe2\x97\x8f "}   // ●
                                     : std::string{"  "})
                           + r.model_label;

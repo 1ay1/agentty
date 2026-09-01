@@ -463,3 +463,80 @@ TEST_CASE("fused: badge column scales with terminal width") {
     // …and is abbreviated, not permitted to eat the row, when there isn't.
     CHECK(badge_max(60) < 14);
 }
+
+// The row carries its capability tier, precomputed. Two consumers need it —
+// the browse-mode sort and the view (which hues the provider badge by it so
+// the strongest-first ordering is legible rather than unexplained) — and both
+// run hot: a comparator is O(n log n), and the view touches every visible row
+// every frame. tier_for() tokenises the id and runs several substring scans,
+// so it is resolved ONCE per row, alongside `reasons`, for the same reason.
+TEST_CASE("fused: rows carry a precomputed capability tier") {
+    std::vector<ProviderCatalog> cats = {
+        cat("openrouter", "OpenRouter",
+            {mk("claude-opus-4-5",  "Claude Opus",   "openrouter"),
+             mk("claude-sonnet-4-6","Claude Sonnet", "openrouter"),
+             mk("claude-haiku-4-5", "Claude Haiku",  "openrouter"),
+             mk("tinyllama:1b",     "TinyLlama 1B",  "openrouter")}),
+    };
+
+    auto tier_of = [&](const std::vector<FusedRow>& rows, std::string_view id) {
+        for (const auto& r : rows)
+            if (r.model.id.value == id) return static_cast<int>(r.tier);
+        return -1;
+    };
+
+    // ── Populated on the ALL-PROVIDERS rows ─────────────────────────
+    {
+        ui::FusedInputs in;
+        in.catalogs = &cats;
+        const auto rows = ui::build_fused_rows(in);
+        CHECK(tier_of(rows, "claude-opus-4-5")   == 3);   // Flagship
+        CHECK(tier_of(rows, "claude-sonnet-4-6") == 2);   // Mid
+        CHECK(tier_of(rows, "claude-haiku-4-5")  == 1);   // Cheap
+        CHECK(tier_of(rows, "tinyllama:1b")      == 0);   // Weak
+    }
+
+    // ── Populated while FILTERING too ───────────────────────────────
+    // The sort only needed tier when browsing, so it used to be computed
+    // under `no_query`. The view needs it always — a filtered list still
+    // hues its badges — so a query must not leave the field at 0 (which
+    // would paint every match as Weak).
+    {
+        ui::FusedInputs in;
+        in.catalogs = &cats;
+        in.query = "opus";
+        const auto rows = ui::build_fused_rows(in);
+        REQUIRE(!rows.empty());
+        CHECK(tier_of(rows, "claude-opus-4-5") == 3);
+    }
+
+    // ── Populated on RECENT rows (a separate build path) ────────────
+    {
+        std::vector<ModelRef> recents = {ModelRef{"openrouter", "claude-opus-4-5"}};
+        ui::FusedInputs in;
+        in.catalogs = &cats;
+        in.recents  = &recents;
+        const auto rows = ui::build_fused_rows(in);
+        REQUIRE(!rows.empty());
+        CHECK(rows.front().recent);
+        CHECK(static_cast<int>(rows.front().tier) == 3);
+    }
+
+    // ── Colour is never the SOLE carrier of the tier signal ─────────
+    // The badge hue is an accessibility hazard if it is the only way to tell
+    // a flagship from a 3B local model. It is not: the browse ORDER encodes
+    // the same fact (strongest first), and every row still shows its model
+    // name and context window. This asserts the redundancy holds.
+    {
+        ui::FusedInputs in;
+        in.catalogs = &cats;
+        const auto rows = ui::build_fused_rows(in);
+        int prev = 4;
+        for (const auto& r : rows) {
+            if (r.is_signin_offer()) continue;
+            CHECK(static_cast<int>(r.tier) <= prev);   // order says it too
+            prev = static_cast<int>(r.tier);
+            CHECK(!r.model_label.empty());             // and the name is there
+        }
+    }
+}

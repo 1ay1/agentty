@@ -198,6 +198,8 @@ find_catalog(const std::vector<ProviderCatalog>& cats, std::string_view pid) {
         row.recent      = true;
         row.reasons     = effort_capable(
             resolved_caps(mi->id.value, r.provider_id));
+        row.tier        = static_cast<std::uint8_t>(
+            ModelCapabilities::tier_for(mi->id.value));
         row.match_positions = name_positions(row.model_label);
         out.push_back(std::move(row));
         seen.push_back(r);
@@ -294,12 +296,16 @@ find_catalog(const std::vector<ProviderCatalog>& cats, std::string_view pid) {
                 ? static_cast<bool>(c.reason_flags[i])
                 : effort_capable(resolved_caps(mi.id.value, c.provider_id));
             row.match_positions = std::move(positions);
+            // Tier: read by the browse-mode sort below AND by the view (which
+            // hues the provider badge by it, so the strongest-first ordering
+            // is legible). Computed once here rather than per-comparison or
+            // per-frame — tier_for tokenises the id and runs substring scans.
+            const int tier = static_cast<int>(
+                ModelCapabilities::tier_for(mi.id.value));
+            row.tier = static_cast<std::uint8_t>(tier);
             // Register AFTER the query gate: a filtered-out twin must not
             // suppress its matching sibling.
             seen.push_back(std::move(r));
-            const int tier = no_query
-                ? static_cast<int>(ModelCapabilities::tier_for(mi.id.value))
-                : 0;   // unused while filtering — don't pay for it
             scored.push_back({std::move(row), mscore, prov_ord, tier});
         }
         ++prov_ord;

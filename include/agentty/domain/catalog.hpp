@@ -120,6 +120,11 @@ struct FusedRow {
     bool        recent = false;           // belongs in the RECENT section
     bool        reasons = false;          // model can reason (precomputed at
                                           // build so the view never decodes
+    // Capability tier, precomputed alongside `reasons` for the same reason:
+    // ModelCapabilities::tier_for tokenises the id and runs several substring
+    // scans, and the view touches every visible row EVERY FRAME. 0..3 maps to
+    // Tier::Weak..Flagship.
+    std::uint8_t tier = 0;
                                           // caps per row per frame)
     // Fuzzy-match byte offsets into the model NAME (display_name, else id) for
     // the current query — the chars the view highlights (fzf-style) so a big
