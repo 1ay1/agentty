@@ -451,7 +451,16 @@ std::vector<ModelInfo> list_models() {
         if (!models_cache().empty()) return models_cache();
     }
     auto tok = fresh_token();
-    if (!tok || !tok->chat_enabled) return bundled_models();
+    if (!tok || !tok->chat_enabled) {
+        // The "no models / only stale models" report: the live catalog was
+        // never fetched. Name the reason — no CAPI token vs an account with
+        // chat disabled (org policy) — so a shared log distinguishes a
+        // sign-in problem from an entitlement problem.
+        AGT_LOG(Auth, Warn, "copilot.models.fallback",
+                "reason={} -> bundled catalog",
+                !tok ? "no_capi_token" : "chat_disabled");
+        return bundled_models();
+    }
 
     // Fetch /models directly so we can read Copilot's rich per-model metadata
     // (policy.state, capabilities, model_picker_category) that the generic
@@ -475,7 +484,14 @@ std::vector<ModelInfo> list_models() {
     req.max_body_bytes = 4ull * 1024 * 1024;
 
     auto resp = http::default_client().send(req);
-    if (!resp || resp->status < 200 || resp->status >= 300) return bundled_models();
+    if (!resp || resp->status < 200 || resp->status >= 300) {
+        AGT_LOG(Net, Warn, "copilot.models.fetch_failed",
+                "host={} status={} err={} -> bundled catalog", host,
+                resp ? resp->status : 0,
+                resp ? std::string_view{resp->body}.substr(0, 512)
+                     : std::string_view{"transport error"});
+        return bundled_models();
+    }
 
     // AUTHORITATIVE entitlement: does this account's billing tier include the
     // premium model families at all? On Copilot Free (premium_available=false)

@@ -265,7 +265,17 @@ struct StreamCtx {
 void feed_tool_args(StreamCtx& ctx, const std::string& item_id,
                     std::string_view payload, bool total) {
     const auto it = ctx.tools.find(item_id);
-    if (it == ctx.tools.end()) return;
+    if (it == ctx.tools.end()) {
+        // An argument payload we can't route is a tool call about to fail
+        // as "[invalid args]" — the model DID send the arguments, we just
+        // couldn't attach them (item never opened / id mismatch / a carrier
+        // event shape we don't know). Exactly the `.done` bug's failure
+        // shape; must never be silent.
+        AGT_LOG(Wire, Warn, "responses.tool_args_unroutable",
+                "item_id={} known_items={} bytes={}",
+                item_id, ctx.tools.size(), payload.size());
+        return;
+    }
     const auto fresh = wire::unseen(it->second.args, payload, total);
     if (!fresh.empty())
         ctx.sink(StreamToolUseDelta{ToolCallId{it->second.call_id},

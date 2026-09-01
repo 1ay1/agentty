@@ -31,6 +31,7 @@
 #include "agentty/util/base64.hpp"
 #include "agentty/io/http.hpp"
 #include "agentty/util/dbglog.hpp"
+#include "agentty/util/logx.hpp"
 
 #ifndef _WIN32
 #  include <sys/stat.h>   // chmod
@@ -620,7 +621,12 @@ std::optional<AutoSession> auto_session() {
     auto_failed_until_ms() = now + kBackoffMs;
 
     auto tok = fresh_token();
-    if (!tok || !tok->chat_enabled) return std::nullopt;
+    if (!tok || !tok->chat_enabled) {
+        AGT_LOG(Auth, Warn, "copilot.auto_session.skipped",
+                "reason={} backoff_ms=60000",
+                !tok ? "no_capi_token" : "chat_disabled");
+        return std::nullopt;
+    }
 
     std::string host = tok->endpoint_api;
     if (host.rfind("https://", 0) == 0) host = host.substr(8);
@@ -634,8 +640,17 @@ std::optional<AutoSession> auto_session() {
          {"x-github-api-version", kAutoApiVersion},
          {"content-type", "application/json"}},
         R"({"auto_mode":{"model_hints":["auto"]}})");
-    if (!r.transport_error.empty() || r.status < 200 || r.status >= 300)
+    if (!r.transport_error.empty() || r.status < 200 || r.status >= 300) {
+        // This failure arms the negative cache (see above) — the account
+        // will silently run WITHOUT an Auto session for the backoff window,
+        // which changes which dialect/models are reachable. That state
+        // switch must be visible in a shared log, with the server's reason.
+        AGT_LOG(Auth, Warn, "copilot.auto_session.failed",
+                "host={} status={} transport={} body={}", host, r.status,
+                r.transport_error.empty() ? "-" : r.transport_error,
+                std::string_view{r.body}.substr(0, 512));
         return std::nullopt;
+    }
     try {
         auto j = json::parse(r.body);
         AutoSession s;
@@ -645,11 +660,19 @@ std::optional<AutoSession> auto_session() {
         if (j.contains("available_models") && j["available_models"].is_array())
             for (auto& m : j["available_models"])
                 if (m.is_string()) s.available_models.push_back(m.get<std::string>());
-        if (s.session_token.empty()) return std::nullopt;
+        if (s.session_token.empty()) {
+            AGT_LOG(Auth, Warn, "copilot.auto_session.no_token",
+                    "status={} body={}", r.status,
+                    std::string_view{r.body}.substr(0, 512));
+            return std::nullopt;
+        }
         s.expires_at_ms = jwt_exp_ms(s.session_token);
         auto_cache() = s;
         auto_failed_until_ms() = 0;   // succeeded — disarm the backoff
         return s;
+    } catch (const std::exception& e) {
+        AGT_LOG(Auth, Warn, "copilot.auto_session.parse", "err={}", e.what());
+        return std::nullopt;
     } catch (...) { return std::nullopt; }
 }
 
