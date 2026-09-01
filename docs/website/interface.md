@@ -20,7 +20,7 @@ The input box at the bottom. Type and press [[Enter]] to send. [[Alt+Enter]] ins
 
 Type while a turn is streaming and your message **queues** — it lands automatically when the current turn finishes. On an empty composer, press [[↑]] to recall every queued message back into the buffer for editing.
 
-The composer is project-aware: type [[@]] to mention a file, [[#]] to jump to a symbol, and [[/]] (on an empty composer) to open the command palette — the same fuzzy list as [[Ctrl+K]], with entries like *Compact context*, *Switch provider*, and *New thread*. Drop an image file's path (or paste with [[Ctrl+V]]) to attach a PNG, JPEG, GIF, or WebP inline.
+The composer is project-aware: type [[@]] to mention a file, [[#]] to jump to a symbol, and [[/]] (on an empty composer) to open the command palette — the same fuzzy list as [[Ctrl+K]], with entries like *Compact context*, *Switch provider*, and *New thread*. Drop an image file's path (or paste with [[Ctrl+V]]) to attach a PNG, JPEG, GIF, or WebP inline — over SSH that needs a one-time terminal setting, see [Clipboard & Images](/docs/clipboard).
 
 ## Run code blocks (Ctrl+G)
 

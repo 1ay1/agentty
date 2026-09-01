@@ -52,6 +52,29 @@ AGENTTY_LOG=debug AGENTTY_LOG_FILE=/tmp/agentty.log agentty
 
 For a provider/wire problem add `AGENTTY_DEBUG_API=1` to capture the raw request/response bytes. If agentty crashed, the stderr output already includes a backtrace and the last ~256 events (the flight recorder). Full details: **[Logging & diagnostics](/docs/logging)**.
 
+## Ctrl+V pastes text instead of my image
+
+Your clipboard lives on the machine your **terminal** runs on, so over SSH
+agentty has to ask the terminal for it. Only **kitty** can send image bytes
+back (OSC 5522); every other terminal answers a text-only dialect (OSC 52),
+which is why the paste arrives as prose.
+
+On kitty this is almost always one setting — its `clipboard_control` defaults
+to write-only, so reads are refused:
+
+```conf
+# ~/.config/kitty/kitty.conf   (on the machine kitty runs on)
+clipboard_control write-clipboard write-primary read-clipboard read-primary
+```
+
+Restart kitty fully. Inside tmux also run `tmux set -g allow-passthrough on`
+(off by default), or the request never reaches kitty.
+
+On any other terminal, attach by path (`@shot.png`) or set
+`AGENTTY_CLIPBOARD_CMD` to ferry the clipboard over SSH. Full setup, including
+the Linux `wl-clipboard` / `xclip` requirement and a troubleshooting table:
+[Clipboard & Images](/docs/clipboard).
+
 ## Garbled rendering
 
 Some terminals lag on DEC 2026 synchronized output. File a bug with your `$TERM`, the terminal emulator name, and a screenshot.

@@ -111,6 +111,9 @@ Undo coalesces a run of typing into one step (broken on whitespace and on any
 non-typing edit), so one [[Ctrl+Z]] after a paste reaches the pre-paste state.
 [[Ctrl+V]] is intercepted by some terminals (Windows Terminal binds it to its
 own paste); [[Alt+V]] is the fallback that every terminal passes through.
+Pasting an image **over SSH** needs one setting — kitty must be allowed to
+answer clipboard reads, and tmux must pass the request through. See
+[Clipboard & Images](/docs/clipboard).
 
 > Kill-to-end is [[Alt+K]], not the readline-standard [[Ctrl+K]] — [[Ctrl+K]] is
 > reserved app-wide for the command palette. It pairs with [[Ctrl+U]]

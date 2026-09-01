@@ -234,6 +234,7 @@ The composer is a full readline-style editor:
 | `↑` | Recall queue / history | `Alt+↑/↓` | Edit queued messages one at a time |
 
 Full keymap: [docs/website/keybindings.md](docs/website/keybindings.md).
+Pasting images **over SSH** needs one terminal setting — see [Clipboard & Images](docs/website/clipboard.md).
 
 ## More
 

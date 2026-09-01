@@ -26,7 +26,7 @@ agentty is configured through flags, environment variables, and two on-disk path
 | `AGENTTY_PASSPHRASE` | Supply the at-rest encryption passphrase non-interactively (CI/scripts) instead of the tty prompt. |
 | `AGENTTY_KDF` | Set to `scrypt` to force the portable scrypt KDF instead of the default Argon2id for at-rest encryption. |
 | `AGENTTY_AIRGAP_SSH` | Extra flags injected into the ssh invocation for airgap (laptop side). |
-| `AGENTTY_CLIPBOARD_CMD` | Shell command that writes image bytes to stdout — used for Ctrl+V image paste over SSH. See [Pasting images over SSH](#pasting-images-over-ssh). |
+| `AGENTTY_CLIPBOARD_CMD` | Shell command that writes image bytes to stdout — used for Ctrl+V image paste over SSH. See [Clipboard & Images](/docs/clipboard). |
 | `AGENTTY_MCP_CONFIG` | Explicit path to an mcp.json, overriding the project/user lookup. |
 | `AGENTTY_MCP_ALLOW_PROJECT` | Blanket-trust a project-local .agentty/mcp.json so its stdio servers connect (gated off by default). Alternative to per-file [content-hash approval](/docs/plugins#config-scope). |
 | `AGENTTY_DOCS_DIR` | Folder of documents to index for the search_docs [retrieval](/docs/retrieval) tool. Auto-discovers `./docs` then `./.agentty/knowledge` when unset. Even with no docs, `search_docs` still searches your installed **skills** and **learned memory**. |
@@ -174,50 +174,3 @@ agentty --workspace /          # opt out of the boundary entirely
 
 agentty picks up the system trust store at startup. Behind a TLS-terminating corporate proxy, install the proxy's CA into the system store (`update-ca-certificates` / `update-ca-trust`). See [Corporate Proxies](/docs/proxies).
 
-
-## Pasting images over SSH
-
-Your clipboard lives on the machine your **terminal** runs on, not the host
-agentty runs on — so over SSH the remote box has nothing to read. agentty asks
-the terminal itself, using two escape dialects at once:
-
-- **OSC 5522** carries image bytes. **kitty is the only implementation.**
-- **OSC 52** is text-only, and widely supported (iTerm2, WezTerm, Ghostty,
-  foot, Terminal.app).
-
-A non-kitty terminal ignores the first and answers the second, so an image
-paste arrives as text.
-
-### On kitty: allow clipboard READS
-
-kitty implements OSC 5522 fully, but its `clipboard_control` option defaults to
-**write-only**. A read request is answered `EPERM`, the image never arrives,
-and the text reply lands instead — so image paste appears broken on the one
-terminal that supports it. Add to `kitty.conf`:
-
-```conf
-clipboard_control write-clipboard write-primary read-clipboard read-primary
-```
-
-then fully restart kitty. Inside tmux you also need:
-
-```bash
-tmux set -g allow-passthrough on
-```
-
-(off by default), which lets agentty's request reach kitty at all.
-
-### On any other terminal
-
-Either attach the image by path (`@screenshot.png`), or ferry your local
-clipboard back over the open SSH session:
-
-```bash
-# macOS local side needs: brew install pngpaste
-export AGENTTY_CLIPBOARD_CMD='ssh your-laptop pngpaste -'
-# Linux/Wayland laptop:
-export AGENTTY_CLIPBOARD_CMD='ssh your-laptop wl-paste -t image/png'
-```
-
-The command runs on the agentty host and must write raw image bytes to stdout.
-It takes priority over every other clipboard path.
