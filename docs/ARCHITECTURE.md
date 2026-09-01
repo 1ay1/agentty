@@ -109,6 +109,11 @@ Anything that streams a chat completion satisfies it — the real Anthropic
 and OpenAI-compatible transports in production, a deterministic in-memory
 script in tests.
 
+How the many concrete transports behind this seam stay coherent — routing
+as a registry-row field with `static_assert` proofs, model quirks as
+catalog facts, shared wire scaffolding — is its own document:
+[PROVIDER_HETEROGENEITY.md](PROVIDER_HETEROGENEITY.md).
+
 The four transports (Anthropic, OpenAI-compat, Ollama-native, ChatGPT/Codex
 Responses) each own their provider-specific streaming/salvage logic, but every
 ingress concern that is genuinely SHARED lives in exactly one place so a fix

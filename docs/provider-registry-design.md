@@ -1,5 +1,11 @@
 # Provider registry: single source of truth
 
+> **See also:** [PROVIDER_HETEROGENEITY.md](PROVIDER_HETEROGENEITY.md) — the
+> current, broader write-up of how provider/model heterogeneity is expressed
+> as data (RouteSlot routing, catalog model facts, StreamScaffold wire
+> mechanics) with compile-time coherence proofs. This doc predates that work
+> and covers the original registry seams in more depth.
+
 agentty speaks to Anthropic, OpenAI (chat + Responses), the ChatGPT/Codex
 native line, and any Ollama / raw `host:port` endpoint. Every one of those is a
 **native C++ transport** — HTTP/2 + SSE / NDJSON straight through the in-house
