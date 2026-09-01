@@ -214,6 +214,69 @@ int main() {
         check(!out.is_error, "B: a clean finish is not an error");
     }
 
+    // ── N. Self-reported failure must NOT render as success. ───────────
+    // THE bug this case exists for: an agent burns every turn, then signs off
+    // with a well-formed report whose content says it did nothing. The old
+    // exit path only inspected whether prose EXISTED, so this fell through
+    // every guard — no banner, is_error unset — and the UI drew a green
+    // "✓ DONE" over "Task NOT completed … made zero edits".
+    //
+    // Two independent signals must each be enough on their own: hitting the
+    // cap, and the report's own verdict.
+    {
+        install_scripted_stream([](int turn, const provider::Request&,
+                                   const provider::EventSink& sink) {
+            // Burn the budget on tool calls, then close with a tidy report
+            // that admits failure — exactly the observed shape.
+            if (turn < agentty::tools::subagent::kMaxTurns - 1) {   // final turns write prose
+                emit_tool_call(sink, "t" + std::to_string(turn), "grep",
+                               json{{"pattern", "zzz_unique_" + std::to_string(turn)}});
+                emit_finish(sink, StopReason::ToolUse);
+            } else {
+                emit_text(sink,
+                          "## OUTCOME\n\n**Task NOT completed.** I exhausted my "
+                          "turn budget on file reading and made **zero edits** — "
+                          "no files were created or modified.");
+                emit_finish(sink, StopReason::EndTurn);
+            }
+        });
+        auto out = run_task("extract the codec into a shared module");
+        check(out.is_error,
+              "N: a self-declared failure is flagged is_error (no green ✓ DONE)");
+        // The agent's own words are still worth surfacing — the caller needs
+        // to know HOW it failed, not just that it did.
+        check(has(out.text, "zero edits"),
+              "N: the agent's own account is preserved, not discarded");
+        check(has(out.text, "turn budget"),
+              "N: exhausting the budget is stated explicitly");
+    }
+
+    // ── O. Clean prose + exhausted budget is still not a success. ───────
+    // Same cap exhaustion, but the closing prose sounds POSITIVE. The report
+    // is kept verbatim (it may well be useful), yet the turn cap alone means
+    // the task cannot be assumed complete: an agent that ran out of room is
+    // not the same as an agent that finished.
+    {
+        install_scripted_stream([](int turn, const provider::Request&,
+                                   const provider::EventSink& sink) {
+            if (turn < agentty::tools::subagent::kMaxTurns - 1) {   // final turns write prose
+                emit_tool_call(sink, "t" + std::to_string(turn), "grep",
+                               json{{"pattern", "zzz_no_match_expected"}});
+                emit_finish(sink, StopReason::ToolUse);
+            } else {
+                emit_text(sink, "I mapped the modules and it all looks fine.");
+                emit_finish(sink, StopReason::EndTurn);
+            }
+        });
+        auto out = run_task("map the modules");
+        check(out.is_error,
+              "O: hitting the cap is an error even when the prose sounds happy");
+        check(has(out.text, "I mapped the modules"),
+              "O: the final prose is preserved for the caller to judge");
+        check(has(out.text, "incomplete") || has(out.text, "turn budget"),
+              "O: the caller is told the result may be incomplete");
+    }
+
     // ── C. The wrap-up nudge fires before the cap. ──────────────────────
     // Stay tool-only, but record whether any completion was handed the nudge.
     // A model that respected it would emit its report; we prove the nudge is

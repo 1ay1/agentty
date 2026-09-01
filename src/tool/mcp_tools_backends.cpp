@@ -45,6 +45,9 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
+
+#include "mcp/tools/util/fs_helpers.hpp"   // util::ReadContextScope
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -716,6 +719,55 @@ const AgentType& resolve_agent_type(std::string_view t) {
     return kTypes.back();
 }
 
+// Did the subagent's OWN report say it failed?
+//
+// The exit path can't always tell. An agent that burns its turn budget, or
+// decides mid-way that it can't proceed, often still returns a well-formed
+// final message — and that message says, in plain words, that it did not do
+// the work. Reporting that as a success is worse than useless: the caller
+// (a model or a human skimming a ✓) acts on an outcome that never happened.
+// This was observed exactly once and was enough: a coder subagent reported
+// "Task NOT completed … made zero edits", and the UI rendered ✓ DONE.
+//
+// Deliberately CONSERVATIVE — a false positive downgrades a good run to a
+// warning, so we only match unambiguous self-declarations, anchored near the
+// start of the report where a verdict lives. Prose like "the previous
+// approach did not work, so I fixed it" must NOT trip this, which is why
+// there is no bare "did not work" / "failed" pattern.
+[[nodiscard]] bool subagent_self_reported_failure(const std::string& report) {
+    // Only inspect the opening of the report: a verdict is stated up front
+    // (an "## OUTCOME" header, a first line). Scanning the whole body would
+    // match narration of intermediate failures that were later fixed.
+    constexpr std::size_t kVerdictWindow = 400;
+    std::string head = report.substr(0, std::min(report.size(), kVerdictWindow));
+    for (auto& c : head) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    // Strip markdown emphasis so "**Task NOT completed**" matches too.
+    std::string flat;
+    flat.reserve(head.size());
+    for (char c : head)
+        if (c != '*' && c != '_' && c != '`') flat.push_back(c);
+
+    static constexpr std::string_view kVerdicts[] = {
+        "task not completed",
+        "task was not completed",
+        "not completed",
+        "task incomplete",
+        "i was unable to complete",
+        "unable to complete the task",
+        "i could not complete",
+        "could not complete the task",
+        "no files were created or modified",
+        "made zero edits",
+        "zero edits",
+        "i made no changes",
+        "no changes were made",
+        "i did not make any changes",
+    };
+    for (auto v : kVerdicts)
+        if (flat.find(v) != std::string_view::npos) return true;
+    return false;
+}
+
 std::string subagent_system_prompt(const AgentType& type) {
     std::string base = provider::anthropic::default_system_prompt(/*lean=*/true);
     base += "\n\n<subagent>\n";
@@ -1109,6 +1161,18 @@ public:
         int turns = 0;
         std::string log = "\xe2\x97\x86 " + std::string{type.name} + " agent";
         std::string last_error;
+        // Give this subagent its OWN read-dedup context for the whole run.
+        //
+        // `read` answers a repeat of the same (path, range) with "refer to
+        // the earlier tool_result" — true only for the context that received
+        // those bytes. The cache is process-global, so without this scope a
+        // subagent inherits the PARENT's entries and is refused files it has
+        // never seen. That is not theoretical: a coder subagent spent all 23
+        // of its turns re-requesting one file, got the sentinel every time,
+        // and made zero edits. RAII-restored so nesting can't leak the id.
+        ::mcp::tools::util::ReadContextScope read_scope{
+            "subagent:" + std::string{type.name} + ":"
+            + std::to_string(reinterpret_cast<std::uintptr_t>(&thread))};
         // Transient stream failures (429/529 brown-out, TLS reset, transport
         // hiccup) are RETRIED with backoff instead of aborting the whole
         // subagent — "task fails a lot" was mostly one flaky completion
@@ -1313,6 +1377,16 @@ public:
             }
         }
 
+        // Budget exhaustion is a FAILURE MODE even when the last turn
+        // happened to produce clean prose. The old gate here was
+        // `report.empty() || salvaged_stale`, so an agent that spent every
+        // turn and then wrote a tidy "## OUTCOME — Task NOT completed, I made
+        // zero edits" fell through all of it: no banner, is_error never set,
+        // and the UI rendered a green ✓ DONE over a self-declared failure.
+        // Observed exactly that. Treat hitting the cap as a reportable
+        // condition in its own right.
+        const bool budget_exhausted = turns >= subagent::kMaxTurns;
+
         if (report.empty() || salvaged_stale) {
             std::string why;
             if (!last_error.empty())
@@ -1320,7 +1394,7 @@ public:
             else if (doomed)
                 why = "[subagent stopped: the same tool call failed 3\xc3\x97 "
                       "in a row without converging]";
-            else if (turns >= subagent::kMaxTurns)
+            else if (budget_exhausted)
                 why = "[subagent hit its turn budget without producing a final "
                       "report \xe2\x80\x94 the summary below is incomplete]";
             else
@@ -1338,6 +1412,24 @@ public:
             // A bare error (no salvageable report) propagates as an error so
             // the shell tags the tool_result is_error.
             if (!last_error.empty()) is_error = true;
+            // Neither a doom-loop abort nor an exhausted budget produced the
+            // work that was asked for. Both are failures; say so.
+            if (doomed || budget_exhausted) is_error = true;
+        } else if (budget_exhausted) {
+            // Ran out of turns but signed off cleanly. The prose is worth
+            // keeping — it is the agent's own account of how far it got — but
+            // it must not be mistaken for success by the caller or the UI.
+            report = "[subagent hit its turn budget \xe2\x80\x94 the task may be "
+                     "incomplete; verify before relying on it]\n\n" + report;
+            is_error = true;
+        }
+
+        // A subagent that NARRATES its own failure must not be reported as a
+        // success. The model is the authority on whether it did the work, and
+        // when it says it didn't, believing the exit path over the text is how
+        // a "zero edits made" report ends up rendered as ✓ DONE.
+        if (!is_error && subagent_self_reported_failure(report)) {
+            is_error = true;
         }
 
         std::ostringstream out;
