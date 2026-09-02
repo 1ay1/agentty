@@ -696,18 +696,27 @@ void rebuild_fused_rows(Model& m, bool sync_sources) {
         if (c.search_keys.size() != c.models.size()) {
             c.search_keys.clear();
             c.search_keys.reserve(c.models.size());
+            // Folded row identities in the same pass (same invalidation):
+            // build_fused_rows' alias-dedup probes these instead of calling
+            // capkey::norm_row_id per (candidate × seen) pair per keystroke.
+            c.row_keys.clear();
+            c.row_keys.reserve(c.models.size());
+            c.display_labels.clear();
+            c.display_labels.reserve(c.models.size());
             for (const auto& mi : c.models) {
                 // Canonical label (ui::model_display_label) as the name
                 // segment — the SAME string build_fused_rows scores and
                 // the view renders — so a cached haystack can't drift from
                 // what's on screen.
+                std::string label =
+                    ui::model_display_label(mi.id.value, mi.display_name);
                 std::string key = ui::detail::fused_haystack(
-                    c.label,
-                    ui::model_display_label(mi.id.value, mi.display_name),
-                    mi);
+                    c.label, label, mi);
                 for (char& ch : key)
                     if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch - 'A' + 'a');
                 c.search_keys.push_back(std::move(key));
+                c.row_keys.push_back(capkey::norm_row_id(mi.id.value));
+                c.display_labels.push_back(std::move(label));
             }
         }
         // Memoise the per-model reasoning chip: resolved_caps is 3 registry

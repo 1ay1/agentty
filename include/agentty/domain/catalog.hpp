@@ -74,6 +74,18 @@ struct ProviderCatalog {
     // re-lowercases a haystack for every model. Empty ⇒ not yet built (the
     // build falls back to composing the haystack inline).
     std::vector<std::string> search_keys;
+    // Derived per-model FOLDED ROW IDENTITY (capkey::norm_row_id), same order
+    // as `models`. The fused build's alias-dedup used to call norm_row_id on
+    // every (candidate × seen) pair — O(n²) with two string allocations per
+    // probe, ~200k allocs per keystroke on a 450-model aggregator list.
+    // Folding each id ONCE per catalog change turns dedup into a hash-set
+    // probe. Rebuilt alongside search_keys (same size guard).
+    std::vector<std::string> row_keys;
+    // Derived canonical display labels (ui::model_display_label), same order
+    // as `models` — label_fn normalises and allocates, and browse mode (empty
+    // query) materialises a label for EVERY model on every rebuild. Cached
+    // with the same size-guard invalidation as search_keys.
+    std::vector<std::string> display_labels;
     // Derived per-model "has an effort ladder" flags (same order as `models`),
     // memoising effort_capable(resolved_caps(id, provider)) — 3 registry map
     // lookups behind a shared_mutex per call, far too hot for the

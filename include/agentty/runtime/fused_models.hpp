@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <vector>
 
 #include "agentty/domain/catalog.hpp"
@@ -166,19 +167,32 @@ find_catalog(const std::vector<ProviderCatalog>& cats, std::string_view pid) {
     // capkey-FOLDED (provider, model): providers alias one model under
     // several spellings (mistral-medium-3-5 / -3.5), and a recent pick of
     // one spelling must suppress the catalog's twin — not sit above it.
-    std::vector<ModelRef> seen;
+    //
+    // norm_ROW_id, not norm_model: the latter folds `[1m]`/`[2m]` away
+    // (right for capability lookups, wrong for row identity), which made
+    // every 1M-context variant look like an alias of its base model and
+    // vanish from the list. Row identity keeps the marker while folding
+    // genuine spelling aliases.
+    //
+    // Hash-set on "<provider>\n<folded-id>" — the old O(seen) linear scan
+    // re-folded BOTH sides per probe (two allocations × candidates × seen:
+    // ~200k allocs/keystroke on a 450-model list). Catalog rows use the
+    // precomputed c.row_keys fold when present.
+    std::unordered_set<std::string> seen;
+    int emitted_recent = 0;
+    // One scratch buffer for probe keys — contains() takes it by const ref,
+    // so probing never allocates once the buffer's capacity is warm.
+    std::string probe;
+    auto seen_key = [&probe](std::string_view pid,
+                             std::string_view folded) -> const std::string& {
+        probe.clear();
+        probe.reserve(pid.size() + 1 + folded.size());
+        probe += pid; probe += '\n'; probe += folded;
+        return probe;
+    };
     auto already = [&](const ModelRef& r) {
-        // norm_ROW_id, not norm_model: the latter folds `[1m]`/`[2m]`
-        // away (right for capability lookups, wrong for row identity),
-        // which made every 1M-context variant look like an alias of its
-        // base model and vanish from the list. Row identity keeps the
-        // marker while still folding genuine spelling aliases.
-        const std::string folded = capkey::norm_row_id(r.model_id);
-        for (const auto& s : seen)
-            if (s.provider_id == r.provider_id
-                && capkey::norm_row_id(s.model_id) == folded)
-                return true;
-        return false;
+        return seen.contains(seen_key(r.provider_id,
+                                      capkey::norm_row_id(r.model_id)));
     };
     auto push_recent = [&](const ModelRef& r) {
         if (already(r)) return;
@@ -202,12 +216,13 @@ find_catalog(const std::vector<ProviderCatalog>& cats, std::string_view pid) {
             ModelCapabilities::tier_for(mi->id.value));
         row.match_positions = name_positions(row.model_label);
         out.push_back(std::move(row));
-        seen.push_back(r);
+        seen.insert(seen_key(r.provider_id, capkey::norm_row_id(r.model_id)));
+        ++emitted_recent;
     };
 
     if (!in.active.empty()) push_recent(in.active);
     for (const auto& r : recents) {
-        if (static_cast<int>(seen.size()) >= in.recent_cap) break;
+        if (emitted_recent >= in.recent_cap) break;
         push_recent(r);
     }
 
@@ -238,14 +253,25 @@ find_catalog(const std::vector<ProviderCatalog>& cats, std::string_view pid) {
         const std::size_t nkeys = c.search_keys.size();
         for (std::size_t i = 0; i < c.models.size(); ++i) {
             const auto& mi = c.models[i];
-            ModelRef r{c.provider_id, mi.id.value};
-            if (already(r)) continue;    // in RECENT, or an alias spelling
-                                         // of a row already emitted — the
-                                         // catalog itself lists twins
-                                         // (mistral-medium-3-5 AND -3.5)
+            // Dedup (in RECENT, or an alias spelling of an emitted row —
+            // catalogs list twins like mistral-medium-3-5 AND -3.5) via the
+            // catalog's precomputed fold when present: zero allocations on
+            // the per-keystroke path. (Two-step, not a ternary: a mixed
+            // lvalue/prvalue conditional materialises a COPY of the cached
+            // key, which would put the allocation right back.)
+            std::string folded_tmp;
+            std::string_view folded;
+            if (i < c.row_keys.size()) folded = c.row_keys[i];
+            else folded = (folded_tmp = capkey::norm_row_id(mi.id.value));
+            if (seen.contains(seen_key(c.provider_id, folded))) continue;
             int mscore = 0;
             std::vector<int> positions;
-            const std::string model_label = name_of(mi);
+            // Cached canonical label when the catalog has one (production);
+            // materialise via label_fn only on the fallback path. Deferred
+            // past the fuzzy gate so a narrow query never pays label cost
+            // for eliminated rows.
+            const bool have_label_cache = i < c.display_labels.size();
+            std::string model_label;
             if (!no_query) {
                 // Prefer the catalog's PRECOMPUTED lowercased haystack (built
                 // once per catalog change), so a keystroke never re-allocates
@@ -253,12 +279,19 @@ find_catalog(const std::vector<ProviderCatalog>& cats, std::string_view pid) {
                 // it inline only when the cache isn't populated (e.g. unit
                 // tests that call build_fused_rows directly).
                 std::string tmp;
-                std::string_view h = i < nkeys
-                    ? std::string_view{c.search_keys[i]}
-                    : std::string_view{(tmp = fused_haystack(c.label, model_label, mi))};
+                std::string_view h;
+                if (i < nkeys) {
+                    h = c.search_keys[i];
+                } else {
+                    model_label = name_of(mi);
+                    h = (tmp = fused_haystack(c.label, model_label, mi));
+                }
                 const auto sc = fuzzy::score(h, q);
                 if (!sc.matched()) continue;
                 mscore = sc.score;
+                if (model_label.empty())
+                    model_label = have_label_cache ? c.display_labels[i]
+                                                   : name_of(mi);
                 // Highlight offsets index the visible label, which is a
                 // SUBSTRING of the haystack ("<provider> <label> <id>") at a
                 // known start. Map by that offset when every matched char
@@ -280,6 +313,9 @@ find_catalog(const std::vector<ProviderCatalog>& cats, std::string_view pid) {
                 } else {
                     positions = name_positions(model_label);
                 }
+            } else {
+                model_label = have_label_cache ? c.display_labels[i]
+                                               : name_of(mi);
             }
             FusedRow row;
             row.provider_id = c.provider_id;
@@ -287,7 +323,8 @@ find_catalog(const std::vector<ProviderCatalog>& cats, std::string_view pid) {
             row.model       = mi;
             row.model_label = model_label;
             row.authed      = true;
-            row.active      = (r == in.active);
+            row.active      = (c.provider_id == in.active.provider_id
+                               && mi.id.value == in.active.model_id);
             row.recent      = false;
             // Prefer the catalog's MEMOISED reasoning flag (built once per
             // catalog/capability change); resolve live only when the cache
@@ -305,7 +342,7 @@ find_catalog(const std::vector<ProviderCatalog>& cats, std::string_view pid) {
             row.tier = static_cast<std::uint8_t>(tier);
             // Register AFTER the query gate: a filtered-out twin must not
             // suppress its matching sibling.
-            seen.push_back(std::move(r));
+            seen.insert(seen_key(c.provider_id, folded));
             scored.push_back({std::move(row), mscore, prov_ord, tier});
         }
         ++prov_ord;

@@ -3,6 +3,7 @@
 // catalogs and assert ordering, sections, de-dup, active pinning, auth split.
 
 #include "agentty/runtime/fused_models.hpp"
+#include "agentty/domain/capkey.hpp"
 
 #include <fstream>
 #include <sstream>
@@ -591,4 +592,76 @@ TEST_CASE("pickers: primary labels are not dimmed, trailing yields first") {
 
     // Rule 3: badge padding measures columns, not bytes.
     CHECK(src.find("maya::string_width(r.label)") != std::string::npos);
+}
+
+
+// ── Derived-cache coherence: the caches are an optimisation, not a fork ──
+//
+// The per-keystroke build reads three precomputed, size-guard-invalidated
+// caches on ProviderCatalog: search_keys (lowercased haystacks), row_keys
+// (capkey::norm_row_id folds, for alias dedup) and display_labels. They
+// exist purely for speed — 450-model aggregator lists went 3.8ms → 0.6ms
+// per keystroke — so the binding invariant is that results are IDENTICAL
+// with and without them. A cache that changes behaviour is a bug.
+namespace {
+// Populate a catalog's derived caches exactly the way rebuild_fused_rows
+// (src/runtime/app/update/picker.cpp) does.
+void build_caches(ProviderCatalog& c) {
+    c.row_keys.clear();
+    c.display_labels.clear();
+    for (const auto& mi : c.models) {
+        c.row_keys.push_back(agentty::capkey::norm_row_id(mi.id.value));
+        c.display_labels.push_back(
+            mi.display_name.empty() ? mi.id.value : mi.display_name);
+    }
+}
+std::vector<std::pair<std::string, std::string>> ids_of(
+        const std::vector<FusedRow>& rows) {
+    std::vector<std::pair<std::string, std::string>> v;
+    v.reserve(rows.size());
+    for (const auto& r : rows) v.emplace_back(r.provider_id, r.model.id.value);
+    return v;
+}
+} // namespace
+
+TEST_CASE("fused: derived caches never change the result set") {
+    std::vector<ProviderCatalog> cats = {
+        cat("anthropic", "Anthropic",
+            {mk("claude-sonnet-4-6", "Claude Sonnet 4.6", "anthropic"),
+             mk("claude-opus-4", "Claude Opus 4", "anthropic")}),
+        cat("openai", "OpenAI",
+            {mk("gpt-5-codex", "gpt-5-codex", "openai", 400000),
+             mk("gpt-4o", "gpt-4o", "openai", 128000)}),
+    };
+    std::vector<ModelRef> recents{{"anthropic", "claude-opus-4"}};
+    FusedInputs in;
+    in.catalogs = &cats;
+    in.recents  = &recents;
+    in.active   = ModelRef{"openai", "gpt-5-codex"};
+
+    for (const char* q : {"", "gpt", "claude", "o", "zzz"}) {
+        INFO("query = '" << q << "'");
+        in.query = q;
+        for (auto& c : cats) { c.row_keys.clear(); c.display_labels.clear(); }
+        const auto bare = ids_of(build_fused_rows(in));
+        for (auto& c : cats) build_caches(c);
+        CHECK(ids_of(build_fused_rows(in)) == bare);
+    }
+}
+
+TEST_CASE("fused: alias twins dedupe identically through the row_keys cache") {
+    // A catalog that lists two spellings of ONE model (the real
+    // mistral-medium-3-5 / -3.5 case). Exactly one row must surface,
+    // whether the fold comes from the cache or is computed live.
+    std::vector<ProviderCatalog> cats = {
+        cat("aggr", "Aggr",
+            {mk("mistral-medium-3-5", "Mistral Medium 3.5", "aggr"),
+             mk("mistral-medium-3.5", "Mistral Medium 3.5", "aggr")}),
+    };
+    FusedInputs in;
+    in.catalogs = &cats;
+
+    CHECK(build_fused_rows(in).size() == 1);   // live fold
+    for (auto& c : cats) build_caches(c);
+    CHECK(build_fused_rows(in).size() == 1);   // cached fold
 }
