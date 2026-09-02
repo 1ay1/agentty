@@ -665,3 +665,50 @@ TEST_CASE("fused: alias twins dedupe identically through the row_keys cache") {
     for (auto& c : cats) build_caches(c);
     CHECK(build_fused_rows(in).size() == 1);   // cached fold
 }
+
+// ── Tool capability is a RANKING signal, not just a label ───────────────
+//
+// A model whose provider positively reported no tool support cannot drive
+// the agent at all. Labelling it is necessary but not sufficient: while
+// BROWSING it must also sink below every model that can do the job, so
+// the first screen is models you can actually pick. An explicit search
+// still surfaces it immediately (you asked for it by name).
+TEST_CASE("fused: no-tools models sink below capable ones while browsing") {
+    auto no_tools = [](ModelInfo mi) { mi.supports_tools = false; return mi; };
+    std::vector<ProviderCatalog> cats = {
+        cat("ollama", "Ollama",
+            {no_tools(mk("llama3-chat", "llama3-chat", "ollama")),
+             mk("qwen3-coder", "qwen3-coder", "ollama")}),
+    };
+    FusedInputs in;
+    in.catalogs = &cats;
+
+    auto rows = build_fused_rows(in);
+    REQUIRE(rows.size() == 2);
+    CHECK(rows[0].model.id.value == "qwen3-coder");
+    CHECK(rows[0].tool_capable);
+    CHECK(rows[1].model.id.value == "llama3-chat");
+    CHECK(!rows[1].tool_capable);
+
+    // …but naming it finds it right away: the score gate outranks the sink.
+    // (Query chosen to be unmatchable via the provider label — "Ollama"
+    // itself contains "llama" as a subsequence, which would make BOTH rows
+    // match on the provider segment of the haystack.)
+    in.query = "chat";
+    auto hit = build_fused_rows(in);
+    REQUIRE(!hit.empty());
+    CHECK(hit[0].model.id.value == "llama3-chat");
+}
+
+TEST_CASE("fused: unknown tool support is treated as capable") {
+    // Hosted providers don't advertise this; absence must never be read as
+    // "cannot", or every OpenAI/Anthropic row would be labelled chat-only.
+    std::vector<ProviderCatalog> cats = {
+        cat("openai", "OpenAI", {mk("gpt-4o", "gpt-4o", "openai")}),
+    };
+    FusedInputs in;
+    in.catalogs = &cats;
+    auto rows = build_fused_rows(in);
+    REQUIRE(rows.size() == 1);
+    CHECK(rows[0].tool_capable);
+}

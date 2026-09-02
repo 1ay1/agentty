@@ -21,10 +21,17 @@
 
 #include <chrono>
 #include <cstdlib>
+#include <atomic>
 #include <filesystem>
 #include <optional>
 #include <string>
 #include <vector>
+
+#if defined(_WIN32)
+#  include <process.h>   // _getpid
+#else
+#  include <unistd.h>    // getpid
+#endif
 
 using namespace agentty;
 
@@ -49,12 +56,27 @@ void save_oauth(std::int64_t expires_at_ms, const std::string& refresh) {
     (void)auth::save_credentials(auth::Credentials{std::move(o)});
 }
 
+// Point this process's config root at a FRESH temp dir.
+//
+// Uniqueness must survive two things: (a) sibling ctest processes started
+// in the same millisecond under `ctest -j` (a bare timestamp collided, and
+// two processes sharing a credential store failed each other's
+// assertions non-deterministically), and (b) multiple CASES in one binary
+// — each wants a clean registry, since a leftover account from an earlier
+// case changes what "the outgoing account" is. So: timestamp + pid +
+// per-call counter, and no `static done` latch.
 void isolate_config_dir() {
-    static bool done = false;
-    if (done) return;
-    done = true;
-    auto dir = fs::temp_directory_path() /
-               ("agentty_acctsw_" + std::to_string(now_ms()));
+    static std::atomic<int> seq{0};
+    auto dir = fs::temp_directory_path()
+             / ("agentty_acctsw_" + std::to_string(now_ms())
+                + "_" + std::to_string(
+#if defined(_WIN32)
+                      static_cast<long>(::_getpid())
+#else
+                      static_cast<long>(::getpid())
+#endif
+                  )
+                + "_" + std::to_string(seq.fetch_add(1)));
     fs::create_directories(dir);
 #if defined(_WIN32)
     _putenv_s("AGENTTY_HOME", dir.string().c_str());

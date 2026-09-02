@@ -356,6 +356,15 @@ find_catalog(const std::vector<ProviderCatalog>& cats, std::string_view pid) {
             if (a.row.model.favorite != b.row.model.favorite)
                 return a.row.model.favorite;
             if (a.score != b.score) return a.score > b.score;
+            // CAN'T-DO-THE-JOB SINKS. A model the provider says has no tool
+            // support cannot drive the agent at all, so it must never
+            // outrank a model that can — ranking is about "what should I
+            // pick", and these are only pickable for plain chat. Below the
+            // score gate so an explicit search still finds one immediately
+            // (you asked for it by name), above tier so it sinks past every
+            // usable row while browsing.
+            if (a.row.tool_capable != b.row.tool_capable)
+                return a.row.tool_capable;
             // TIER, browse-only. With no query the list is whatever every
             // provider happens to serve — on an aggregator that is hundreds of
             // rows, and provider-registry order alone put an arbitrary slice in

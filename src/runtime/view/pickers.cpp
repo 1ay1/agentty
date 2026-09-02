@@ -550,15 +550,6 @@ Element fused_picker(const Model& m) {
         // that can think, so "which of these reason" is legible across
         // providers.
         trailing += r.reasons ? " \xe2\x9c\xa6" : "  ";               // ✦
-        // NO-TOOLS warning. A model whose provider positively reported it
-        // cannot call tools (Ollama /api/show) cannot drive the agent at
-        // all — picking it yields a model that only chats, with no visible
-        // reason. This is a MODEL fact (unlike the account, which belongs to
-        // the provider), so it belongs on the row: the picker must say it
-        // BEFORE the pick, not leave the user debugging silence afterwards.
-        // Occupies the same 2-column cell as the reasoning chip's blank, so
-        // the chip grid stays aligned.
-        if (!r.tool_capable) trailing += " \xe2\x8a\x98";             // ⊘
         row.trailing       = std::move(trailing);
         // Dim by default: the trailing cell is REFERENCE data, not the thing
         // you are choosing between. It used to share the composer's warm
@@ -566,6 +557,17 @@ Element fused_picker(const Model& m) {
         // The active row keeps the accent so the current model still reads at
         // a glance.
         row.trailing_style = active ? fg_of(accent) : fg_dim(muted);
+        // NO-TOOLS: a WORD appended to the NAME, not another glyph in the
+        // trailing cell. Three reasons: (1) it is a disqualifier, not
+        // reference data, and the trailing cell is dim-grey precisely
+        // because it IS reference — a warning painted as reference reads as
+        // decoration; (2) an unexplained glyph is a puzzle and this picker
+        // has no room for a legend; (3) the trailing cell is the FIRST
+        // thing dropped under width pressure (yields_trailing below), so
+        // the one mark that decides whether the model works at all would
+        // vanish on a narrow terminal. "chat only" is self-explanatory,
+        // needs no key, and travels with the name it disqualifies.
+        if (!r.tool_capable) row.leading += " \xc2\xb7 chat only";
         // Under width pressure the CHIPS give way, not the model name — the
         // name is what you are selecting; the context window and marks are
         // reference data. Without this the default policy (leading yields
