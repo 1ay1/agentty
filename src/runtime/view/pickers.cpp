@@ -336,6 +336,33 @@ Element fused_picker(const Model& m) {
               ).build());
     cfg.header.push_back(sep);   // rule under the filter (matches the other pickers)
 
+    // ── "You are here" ────────────────────────────────────────
+    //
+    // The `●` marker on the active ROW is the only statement of what you are
+    // currently on — and in a several-hundred-model list it is usually
+    // scrolled off-screen, or filtered out entirely by a query that doesn't
+    // match it. "Which model am I on?" is then unanswerable from the very
+    // surface whose job is switching models.
+    //
+    // State it once, up top, where it cannot scroll away: provider · model.
+    // Both halves matter and neither alone is enough — the same model id is
+    // served by several providers, and one provider serves many models.
+    // Skipped in slot-assign mode, where "active" means the chat model and
+    // would misdescribe what this pick does.
+    if (slot < 0 && !m.d.model_id.empty()) {
+        // provider_display_name is the SSOT for a provider's human label — the
+        // same source the fused rows' badge column uses — so this line and the
+        // list below can never disagree about what a provider is called.
+        const std::string prov = provider::provider_display_name(provider::active());
+        cfg.header.push_back(
+            h(text("  \xe2\x97\x8f ", fg_of(accent)),                 // ●
+              text(prov.empty() ? std::string{} : prov + " \xc2\xb7 ",  // ·
+                   fg_dim(muted)),
+              text(model_display_label(m.d.model_id.value, {}), fg_of(fg))
+            ).build());
+        cfg.header.push_back(sep);
+    }
+
     // Lazy-load hint: while any provider's catalog is still streaming in,
     // show a dim spinner-ish note so the (initially active-provider-only)
     // list visibly reads as "more coming", not "that's all". Failed providers
