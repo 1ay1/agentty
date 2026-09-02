@@ -943,39 +943,37 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             m.ui.composer.text.insert(m.ui.composer.cursor, placeholder);
             m.ui.composer.cursor += static_cast<int>(placeholder.size());
             if (lines > 1) m.ui.composer.expanded = true;
-            // The user asked to paste an IMAGE and the terminal answered with
-            // TEXT. That is the expected outcome on every non-kitty terminal
-            // over SSH — agentty sends OSC 5522 (image, kitty-only) and OSC 52
-            // (text, widely supported) together, and only the latter is
-            // answered. The paste still lands (their clipboard genuinely held
-            // this text), but silently accepting it looks like the image
-            // feature is broken, so name what happened and the way out.
-            if (wanted_image) {
-                // WHY the image didn't arrive differs, and guessing wrong
-                // sends the user to fix something that isn't broken.
-                //
-                //  • kitty in the path  → it DOES implement OSC 5522, so the
-                //    request reached a terminal that understands it. The
-                //    overwhelmingly common cause is kitty's clipboard_control
-                //    defaulting to WRITE-ONLY (`write-clipboard
-                //    write-primary`): a read is answered `status=EPERM`, which
-                //    maya abandons silently, and the OSC 52 text reply lands
-                //    instead. Name the setting.
-                //  • anything else      → the terminal genuinely has no image
-                //    dialect; the ferry or a file path is the way out.
-                const bool kitty = maya::ansi::env_supports_osc5522();
+            // The terminal answered with TEXT. Whether that deserves a
+            // warning depends entirely on what was on the clipboard, and we
+            // cannot see that from here — a text reply to a text clipboard
+            // is a complete success, not a degraded image paste.
+            //
+            // This used to fire on every Ctrl+V over SSH. `wanted_image` is
+            // set for ANY paste (Ctrl+V is the only paste key), and over SSH
+            // the local probes always fail, so every ordinary text paste
+            // reached this arm and was met with "kitty needs clipboard READ
+            // permission" — advice that is both wrong and, once the user has
+            // already granted it, actively confusing. A warning that fires
+            // when nothing is wrong trains people to ignore the one that
+            // matters.
+            //
+            // Only speak up when the terminal CANNOT deliver images at all
+            // (no OSC 5522), because then a genuine image paste is silently
+            // impossible and the user needs to know. A kitty that answered
+            // text simply had text on the clipboard: say nothing.
+            const bool terminal_can_do_images =
+                maya::ansi::env_supports_osc5522();
+            if (wanted_image && !terminal_can_do_images) {
+                // Reaching here means the terminal has no image dialect at
+                // all — the OSC 5522 branch is handled above by staying
+                // quiet, because a kitty that replied with text was simply
+                // asked for text. So there is exactly one thing to say, and
+                // it is about capability, not permission.
                 auto toast = set_status_toast(
                     m,
-                    kitty
-                        ? std::string{
-                              "pasted text \xe2\x80\x94 kitty needs clipboard READ "
-                              "permission: add `clipboard_control write-clipboard "
-                              "write-primary read-clipboard read-primary` to "
-                              "kitty.conf, then restart it"}
-                        : std::string{
-                              "pasted text \xe2\x80\x94 your terminal can't send images "
-                              "over SSH (needs kitty's OSC 5522); attach by path, "
-                              "or set AGENTTY_CLIPBOARD_CMD"},
+                    "pasted text \xe2\x80\x94 your terminal can't send images "
+                    "over SSH (needs kitty's OSC 5522); attach by path, "
+                    "or set AGENTTY_CLIPBOARD_CMD",
                     std::chrono::seconds{9});
                 return {std::move(m), std::move(toast)};
             }
