@@ -754,33 +754,37 @@ int main(int argc, char** argv) {
     // (version/OS/build), and the release default keeps Warn+ only. Not an
     // error — the level here is chosen for RETENTION, which is the honest
     // trade for one line per process.
-    AGT_LOG(General, Warn, "startup",
-            "agentty {} os={} arch={} build={} pid={}",
-            AGENTTY_VERSION,
+    // Resolve OS / arch / build / pid with plain #if blocks here instead of
+    // embedding the directives inside the AGT_LOG(...) macro args — a directive
+    // within macro arguments is not portable and trips -Wpedantic.
 #if defined(_WIN32)
-            "windows",
+    const char* os_name   = "windows";
 #elif defined(__APPLE__)
-            "macos",
+    const char* os_name   = "macos";
 #else
-            "linux",
+    const char* os_name   = "linux";
 #endif
 #if defined(__aarch64__) || defined(_M_ARM64)
-            "arm64",
+    const char* arch_name = "arm64";
 #else
-            "x86_64",
+    const char* arch_name = "x86_64";
 #endif
 #if defined(NDEBUG)
-            "release",
+    const char* build_kind = "release";
 #else
-            "debug",
+    const char* build_kind = "debug";
 #endif
-            static_cast<long long>(
+    const long long pid_ll = static_cast<long long>(
 #if defined(_WIN32)
-                _getpid()
+        _getpid()
 #else
-                ::getpid()
+        ::getpid()
 #endif
-            ));
+    );
+
+    AGT_LOG(General, Warn, "startup",
+            "agentty {} os={} arch={} build={} pid={}",
+            AGENTTY_VERSION, os_name, arch_name, build_kind, pid_ll);
 
     if (args.subcommand == "help")    { print_usage();   return 0; }
     if (args.subcommand == "version") { print_version(); return 0; }

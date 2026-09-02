@@ -2,7 +2,6 @@
 // See acp_agents.hpp for the format + resolution rules.
 
 #include "agentty/provider/acp_agents.hpp"
-#include "agentty/util/home_dir.hpp"
 #include "agentty/util/user_root.hpp"
 
 #include <cstdio>
@@ -21,10 +20,6 @@ namespace fs = std::filesystem;
 using json = nlohmann::json;
 
 namespace {
-
-[[nodiscard]] fs::path home_dir() noexcept {
-    return util::home_dir_or_empty();
-}
 
 // External ACP agents are entirely config-driven (Zed's `agent_servers`
 // model). ACP is the generic transport; agentty does not privilege or install
