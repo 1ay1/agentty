@@ -704,10 +704,17 @@ void persist_settings(const Model& m) {
     s.smart_impl_effort      = std::string{effort_wire(m.d.smart.implementation.effort)};
     s.smart_utility_model    = m.d.smart.utility.model;
     s.smart_utility_effort   = std::string{effort_wire(m.d.smart.utility.effort)};
+    // Which provider each pin belongs to (see SlotOverride::provider).
+    s.smart_strategic_provider = m.d.smart.strategic.provider;
+    s.smart_impl_provider      = m.d.smart.implementation.provider;
+    s.smart_utility_provider   = m.d.smart.utility.provider;
     deps().save_settings(s);
     // Keep the subagent role-router (Layer 3b) in step with any Smart Mode
     // change the user just made in the overlay.
     tools::subagent::set_smart(m.d.smart);
+    // …and the provider those pins are scoped to, so a worker resolves the
+    // same slot the main turn would.
+    tools::subagent::set_provider(active_provider_id());
 }
 
 std::pair<Model, maya::Cmd<Msg>>

@@ -824,7 +824,7 @@ provider::StreamResult run_one_completion(Thread& thread,
         smart::RoleProfile role_prof =
             smart::resolve_subagent_role(type.model_role, cfg.model,
                                          Effort::None, cfg.candidates,
-                                         cfg.smart);
+                                         cfg.smart, cfg.provider);
         req.model  = role_prof.model;
         // provider::Request.effort is the WIRE string; convert the clamped
         // Effort through the resolved model's capabilities (None → "", i.e.

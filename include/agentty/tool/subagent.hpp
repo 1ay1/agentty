@@ -49,6 +49,13 @@ struct Config {
     // smart.subagent_routing() is on. Off/unconfigured ⇒ the existing
     // read-only tier auto-router stands. Refreshed via set_smart().
     smart::RoleConfig smart;
+    // The provider the parent turn is currently dispatched on. A pinned slot
+    // model is only meaningful to the endpoint that serves it, so the role
+    // resolver replays a pin ONLY when its recorded provider matches this
+    // (see smart::SlotOverride::provider). Mirrored down alongside `smart`
+    // because `task` runs on a worker thread with no access to the Model.
+    // Empty ⇒ unknown, and every pin is honoured (pre-existing behaviour).
+    std::string provider;
 };
 
 // Install the subagent config (call once at startup, after auth resolves).
@@ -75,6 +82,11 @@ void set_candidates(std::vector<ModelInfo> candidates);
 // Called alongside set_candidates whenever Smart Mode or the model list
 // changes. No-op if the config was never installed.
 void set_smart(smart::RoleConfig smart);
+
+// Update the provider the parent turn runs on, so pinned slots stay scoped to
+// the endpoint that can actually serve them. Pushed alongside set_smart /
+// set_candidates whenever the active provider changes.
+void set_provider(std::string provider);
 
 // Snapshot the installed config. `installed == false` until install() runs.
 [[nodiscard]] Config current();

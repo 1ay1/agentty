@@ -605,12 +605,6 @@ struct StreamState {
     // the plain selection and the header falls back to it.
     std::string smart_turn_model;
     std::string smart_turn_role;
-    // True if the just-settled turn had a build/test/edit tool FAILURE. Set in
-    // finalize_turn (where the +1 outcome regret is applied), read by the next
-    // submit_message: the symmetric −1 "clean continuation" signal must NOT
-    // fire for a turn that already earned a +1 failure regret, else the two
-    // cancel and the failure signal is silently erased. Reset with the latch.
-    bool smart_turn_had_failure = false;
     // Which summary shape the in-flight compaction is producing. Set at
     // CompactContext / fork kickoff, read by the wire builder to choose the
     // summarisation prompt. Defaults to Recoverable (the original behaviour).

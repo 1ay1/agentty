@@ -595,7 +595,8 @@ std::optional<Message> build_smart_routing_card(const Model& m) {
     const std::string& model_id = m.d.model_id.value;
     smart::RoleProfile prof =
         smart::resolve_role(smart::ModelRole::Strategic, model_id,
-                            m.d.effort, m.d.available_models, m.d.smart);
+                            m.d.effort, m.d.available_models, m.d.smart,
+                            detail::active_provider_id());
     // Classify the newest real user turn (same logic launch_stream uses) so
     // the card's effort matches what the wire will actually carry.
     std::string_view newest_user;
@@ -771,7 +772,8 @@ Cmd<Msg> launch_stream(Model& m) {
     // cheapest-capable default (turning Smart Mode off never regresses
     // compaction back up to the flagship).
     std::string compaction_model =
-        smart::utility_model(model_id, m.d.available_models, m.d.smart);
+        smart::utility_model(model_id, m.d.available_models, m.d.smart,
+                             detail::active_provider_id());
 
     // Layer 3a (orchestration): when active, the MAIN turn runs on the
     // Strategic role's (model, effort) so the flagship orchestrates and
@@ -781,7 +783,8 @@ Cmd<Msg> launch_stream(Model& m) {
     const bool orchestrate = m.d.smart.orchestration();
     smart::RoleProfile strategic_profile =
         smart::resolve_role(smart::ModelRole::Strategic, model_id,
-                            m.d.effort, m.d.available_models, m.d.smart);
+                            m.d.effort, m.d.available_models, m.d.smart,
+                            detail::active_provider_id());
     // SOTA effort scaling (Anthropic multi-agent: "scale effort to query
     // complexity"). Classify the newest user turn and bump/drop the Strategic
     // model's reasoning effort accordingly, clamped to what the model supports.

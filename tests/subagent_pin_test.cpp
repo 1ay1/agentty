@@ -181,4 +181,62 @@ TEST_CASE("subagent honours a pinned Smart Mode slot from the first turn") {
         CHECK(p.model == "luna-2",
               "headless / ACP delegation honours the pinned slot");
     }
+
+    // ── A pin does NOT cross providers ──────────────────────────────
+    // The mirror image of the case above, and a real dispatch bug: a model id
+    // is only meaningful to the endpoint that serves it. The picker refuses to
+    // SELECT a cross-provider row, but a pin PERSISTS to settings.json — so a
+    // pin made on Anthropic was silently replayed after the user switched to
+    // another provider, sending an id that provider never heard of. Every turn
+    // (and every delegation) 400s until the user finds the Smart Mode overlay.
+    //
+    // The fix records the provider ON the pin and scopes replay to it. It is
+    // deliberately NOT a catalog-membership test — that would break the
+    // empty/stale-catalog cases asserted above.
+    {
+        smart::RoleConfig cfg = pinned_impl("claude-opus-4-5");
+        cfg.implementation.provider = "anthropic";
+
+        // Same provider → the pin applies, exactly as before.
+        const auto same = smart::resolve_role(
+            smart::ModelRole::Implementation, "claude-opus-4-5", Effort::None,
+            candidates, cfg, "anthropic");
+        CHECK(same.model == "claude-opus-4-5",
+              "a pin still applies under the provider it was made on");
+
+        // Different provider → the foreign id must NOT reach the wire.
+        const auto other = smart::resolve_role(
+            smart::ModelRole::Implementation, "gpt-5.3-codex", Effort::None,
+            candidates, cfg, "openai");
+        CHECK(other.model != "claude-opus-4-5",
+              "an Anthropic pin is never dispatched to another provider");
+        CHECK(!other.model.empty(),
+              "a foreign pin falls back to a real model, never to empty");
+
+        // An UNKNOWN-provenance pin (settings written before pins were
+        // provider-scoped) stays honoured everywhere — upgrading users must
+        // not silently lose their pins.
+        smart::RoleConfig legacy = pinned_impl("luna-2");   // .provider == ""
+        const auto up = smart::resolve_role(
+            smart::ModelRole::Implementation, "gpt-5.3-codex", Effort::None,
+            candidates, legacy, "openai");
+        CHECK(up.model == "luna-2",
+              "a pre-upgrade pin with no recorded provider is still honoured");
+
+        // Likewise when the CALLER doesn't know the provider (empty arg):
+        // strictly fewer surprises than before, never more.
+        const auto unknown_caller = smart::resolve_role(
+            smart::ModelRole::Implementation, "gpt-5.3-codex", Effort::None,
+            candidates, cfg, "");
+        CHECK(unknown_caller.model == "claude-opus-4-5",
+              "an unknown active provider preserves the old honour-always path");
+
+        // The subagent entry point scopes identically — delegations were the
+        // reported symptom, so assert the worker path, not just the main turn.
+        const auto worker = smart::resolve_subagent_role(
+            smart::ModelRole::Implementation, "gpt-5.3-codex", Effort::None,
+            candidates, cfg, "openai");
+        CHECK(worker.model != "claude-opus-4-5",
+              "a delegation never inherits a foreign-provider pin either");
+    }
 }

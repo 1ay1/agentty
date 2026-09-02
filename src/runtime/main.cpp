@@ -1098,18 +1098,23 @@ int main(int argc, char** argv) {
         if (auto ov = smart::tuning::enabled_override())
             sa_smart.enabled = *ov;
         auto load_slot = [](smart::SlotOverride& slot,
-                            const std::string& model, const std::string& eff) {
+                            const std::string& model, const std::string& eff,
+                            const std::string& provider) {
             if (model.empty()) return;
-            slot.model  = model;
-            slot.effort = effort_from_wire(eff);
-            slot.set    = true;
+            slot.model    = model;
+            slot.effort   = effort_from_wire(eff);
+            slot.set      = true;
+            slot.provider = provider;   // "" = honour everywhere (old settings)
         };
         load_slot(sa_smart.strategic,      sa_settings.smart_strategic_model,
-                                           sa_settings.smart_strategic_effort);
+                                           sa_settings.smart_strategic_effort,
+                                           sa_settings.smart_strategic_provider);
         load_slot(sa_smart.implementation, sa_settings.smart_impl_model,
-                                           sa_settings.smart_impl_effort);
+                                           sa_settings.smart_impl_effort,
+                                           sa_settings.smart_impl_provider);
         load_slot(sa_smart.utility,        sa_settings.smart_utility_model,
-                                           sa_settings.smart_utility_effort);
+                                           sa_settings.smart_utility_effort,
+                                           sa_settings.smart_utility_provider);
         tools::subagent::install(tools::subagent::Config{
             .auth = provider_auth,
             .model = std::move(sa_model),

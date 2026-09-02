@@ -155,16 +155,21 @@ std::pair<Model, maya::Cmd<Msg>> init() {
     if (auto ov = smart::tuning::enabled_override())
         m.d.smart.enabled = *ov;
     auto load_slot = [](smart::SlotOverride& slot,
-                        const std::string& model, const std::string& eff) {
+                        const std::string& model, const std::string& eff,
+                        const std::string& provider) {
         if (!model.empty()) {
-            slot.model  = model;
-            slot.effort = effort_from_wire(eff);
-            slot.set    = true;
+            slot.model    = model;
+            slot.effort   = effort_from_wire(eff);
+            slot.set      = true;
+            // "" for settings written before pins were provider-scoped —
+            // resolve_role treats unknown provenance as "honour everywhere",
+            // so an upgrading user sees no behaviour change.
+            slot.provider = provider;
         }
     };
-    load_slot(m.d.smart.strategic,      settings.smart_strategic_model, settings.smart_strategic_effort);
-    load_slot(m.d.smart.implementation, settings.smart_impl_model,      settings.smart_impl_effort);
-    load_slot(m.d.smart.utility,        settings.smart_utility_model,   settings.smart_utility_effort);
+    load_slot(m.d.smart.strategic,      settings.smart_strategic_model, settings.smart_strategic_effort, settings.smart_strategic_provider);
+    load_slot(m.d.smart.implementation, settings.smart_impl_model,      settings.smart_impl_effort,      settings.smart_impl_provider);
+    load_slot(m.d.smart.utility,        settings.smart_utility_model,   settings.smart_utility_effort,   settings.smart_utility_provider);
     // Push the rehydrated config down to the subagent router NOW.
     //
     // `task` runs on a worker thread with no access to this Model, so the
@@ -182,6 +187,11 @@ std::pair<Model, maya::Cmd<Msg>> init() {
     // auto-router's pick, which on Copilot can be a Responses-only
     // `gpt-5.x-codex` id that 400s on the Chat endpoint. Unconditional here.
     tools::subagent::set_smart(m.d.smart);
+    // The provider those pins are scoped to. Without it a pin rehydrated from
+    // settings would be honoured under whatever provider happens to be active
+    // at launch, which is exactly the cross-provider dispatch the scoping is
+    // there to prevent.
+    tools::subagent::set_provider(detail::active_provider_id());
     // Same reasoning for the candidate pool the auto-router ranks over: it is
     // otherwise only ever set from the ModelsLoaded arm, so a failed fetch
     // left workers ranking over an EMPTY list. Seed it with what we have now

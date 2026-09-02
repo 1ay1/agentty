@@ -175,6 +175,12 @@ struct Settings {
     std::string          smart_strategic_model,      smart_strategic_effort;
     std::string          smart_impl_model,           smart_impl_effort;
     std::string          smart_utility_model,        smart_utility_effort;
+    // Provider each pin was made under ("" = unknown provenance, honoured
+    // everywhere). See smart::SlotOverride::provider — a pinned model id is
+    // endpoint-scoped, so it must not be replayed against another provider.
+    std::string          smart_strategic_provider;
+    std::string          smart_impl_provider;
+    std::string          smart_utility_provider;
 
     // Show the persistent "N changes" review strip after the agent edits
     // files (the banner above the composer). OFF by default — edits apply

@@ -928,9 +928,13 @@ Element smart_mode_overlay(const Model& m) {
     const std::string parent = m.d.model_id.value;
 
     // Resolve each role for DISPLAY (what would actually run right now).
+    // Provider-scoped like the wire path, so a pin made under another provider
+    // shows the auto-fill that will really serve the turn rather than a model
+    // this endpoint cannot stream.
     auto shown = [&](smart::ModelRole role) -> std::string {
         auto rp = smart::resolve_role(role, parent, m.d.effort,
-                                      m.d.available_models, sm);
+                                      m.d.available_models, sm,
+                                      active_provider_id());
         std::string label = pretty_model_label(rp.model);
         return label.empty() ? rp.model : label;
     };

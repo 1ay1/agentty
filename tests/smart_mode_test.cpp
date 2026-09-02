@@ -270,4 +270,124 @@ TEST_CASE("smart_mode") {
               "env pin: AGENTTY_SMART_ENABLED is NOT read (alias removed)");
         reset();
     }
+
+    // 10. THE EFFORT LADDER IS PER-MODEL, NOT GLOBAL.
+    //
+    //     Regression for a silent, severe bug: the complexity scalers stepped
+    //     along a hardcoded ladder {None, Low, Medium, High, Xhigh, Max} that
+    //     OMITTED `minimal` — gpt-5's bottom reasoning tier. A user on gpt-5 at
+    //     minimal effort therefore had every Standard turn resolve to
+    //     Effort::None: the feature whose entire job is scaling reasoning was
+    //     silently switching reasoning OFF. The mirror bug hit Claude, which
+    //     has NO `minimal` rung: a step down from Low landed on Minimal, and
+    //     clamp_effort snapped it back UP to Low, so Implementation never
+    //     actually stepped down from a Low parent.
+    //
+    //     The invariant both violate: a step may only ever land on a rung the
+    //     model actually accepts, and a non-Trivial turn must never silently
+    //     extinguish an effort the user explicitly asked for.
+    {
+        const auto gpt = ModelCapabilities::from_id("gpt-5");
+        // o3 has a REAL ladder that lacks `minimal` (low·medium·high) — the
+        // shape that exposed the phantom-rung half of the bug. Claude 4 is the
+        // third shape: no effort ladder at all (off only).
+        const auto o3      = ModelCapabilities::from_id("o3");
+        const auto claude4 = ModelCapabilities::from_id("claude-sonnet-4-20250514");
+
+        // Premises. If these stop holding the rest of the case is vacuous.
+        REQUIRE(agentty::effort_set_of(gpt) & agentty::effort_bit(Effort::Minimal));
+        REQUIRE(agentty::effort_set_of(o3) & agentty::effort_bit(Effort::Low));
+        REQUIRE(!(agentty::effort_set_of(o3) & agentty::effort_bit(Effort::Minimal)));
+        REQUIRE(agentty::effort_set_of(claude4) == 0);
+
+        // (a) A Standard turn is a NO-OP on effort, at every rung including
+        //     the bottom one. This is the bug in its purest form, and it must
+        //     be asserted on effort_for_score — THE WIRE PATH. launch_stream
+        //     and build_smart_routing_card both call that one, and unlike
+        //     effort_for_complexity (which short-circuits Standard to `base`)
+        //     it unconditionally evaluates step(base, tier_step + extra). With
+        //     the old fixed ladder, step(minimal, 0) fell off the ladder to
+        //     index 0 == None: a gpt-5 user who picked `minimal` had reasoning
+        //     SILENTLY DISABLED on every ordinary turn.
+        for (Effort base : {Effort::Minimal, Effort::Low, Effort::Medium,
+                            Effort::High}) {
+            const sm::ComplexityScore std_turn{sm::Complexity::Standard, 0, 0};
+            CHECK(sm::effort_for_score(base, std_turn, gpt, 0) == base,
+                  "WIRE: standard turn leaves effort untouched on every rung");
+            CHECK(sm::effort_for_complexity(base, sm::Complexity::Standard, gpt, 0) == base,
+                  "standard turn leaves effort untouched on every rung");
+        }
+
+        // (a2) The same on the deep-band path: a Standard turn with a large
+        //      margin still resolves to exactly `base`.
+        {
+            const sm::ComplexityScore deep_std{sm::Complexity::Standard, 0, 9};
+            CHECK(sm::effort_for_score(Effort::Minimal, deep_std, gpt, 0) == Effort::Minimal,
+                  "WIRE: a deep Standard turn still does not move effort");
+        }
+
+        // (b) A Simple turn steps DOWN by exactly one rung of the model's own
+        //     ladder. `None` (off) IS a legitimate bottom rung — the user can
+        //     select it in the picker — so minimal→off is a correct step, not
+        //     the bug. The bug was Standard doing this silently, covered above.
+        CHECK(sm::effort_for_complexity(Effort::Minimal, sm::Complexity::Simple, gpt, 0)
+                  == Effort::None,
+              "simple turn steps down exactly one rung (minimal → off)");
+
+        // (b2) A Complex turn on gpt-5 from `minimal` reaches `low`, not a
+        //      skipped rung — the ladder's bottom is walked, not jumped.
+        {
+            const sm::ComplexityScore cx_turn{sm::Complexity::Complex, 0, 0};
+            CHECK(sm::effort_for_score(Effort::Minimal, cx_turn, gpt, 0) == Effort::Low,
+                  "WIRE: complex turn steps minimal → low");
+        }
+
+        // (c) Stepping walks the MODEL's rungs, so the same request resolves
+        //     differently per provider — which is the point. On gpt-5 one step
+        //     down from Low is `minimal`; on o3, which lacks that rung, Low
+        //     steps straight to off. Before the fix o3's step down from Low
+        //     produced the phantom Minimal, which clamp_effort snapped back UP
+        //     to Low — so Implementation never stepped down from a Low parent.
+        CHECK(sm::detail::effort_step_down(Effort::Low, gpt) == Effort::Minimal,
+              "gpt-5: one step down from low is minimal");
+        CHECK(sm::detail::effort_step_down(Effort::Low, o3) == Effort::None,
+              "o3: low steps to off, not to a minimal rung it does not have");
+        CHECK(static_cast<int>(sm::detail::effort_step_down(Effort::Low, o3))
+                  < static_cast<int>(Effort::Low),
+              "o3: a step down from low actually descends (no phantom rung)");
+        CHECK(sm::detail::effort_step_down(Effort::Medium, o3) == Effort::Low,
+              "o3: medium steps down to low, its true adjacent rung");
+
+        // (d) A model with NO effort ladder always resolves to off, at every
+        //     tier and bias — Smart Mode must never invent a reasoning level
+        //     for a model that would reject the field.
+        for (auto tier : {sm::Complexity::Trivial, sm::Complexity::Simple,
+                          sm::Complexity::Standard, sm::Complexity::Complex})
+            for (int b : {-2, 0, +2})
+                CHECK(sm::effort_for_complexity(Effort::High, tier, claude4, b)
+                          == Effort::None,
+                      "a model without an effort ladder is always off");
+
+        // (e) Every reachable step lands on a level the model ACCEPTS. A
+        //     level outside effort_set_of would 400 (or be silently
+        //     rewritten) at the provider.
+        for (Effort base : {Effort::None, Effort::Minimal, Effort::Low,
+                            Effort::Medium, Effort::High, Effort::Xhigh,
+                            Effort::Max})
+            for (int n = -3; n <= 3; ++n)
+                for (const auto& caps : {gpt, o3, claude4}) {
+                    const Effort got = sm::detail::effort_step(base, n, caps);
+                    CHECK((got == Effort::None
+                           || (agentty::effort_set_of(caps) & agentty::effort_bit(got))),
+                          "a step never lands on a rung the model lacks");
+                }
+
+        // (f) Monotonic: stepping up never lowers effort, down never raises.
+        for (Effort base : {Effort::Minimal, Effort::Low, Effort::Medium, Effort::High}) {
+            CHECK(static_cast<int>(sm::detail::effort_step(base, +1, gpt))
+                      >= static_cast<int>(base), "step up never lowers");
+            CHECK(static_cast<int>(sm::detail::effort_step(base, -1, gpt))
+                      <= static_cast<int>(base), "step down never raises");
+        }
+    }
 }

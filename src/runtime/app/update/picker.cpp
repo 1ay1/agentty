@@ -124,7 +124,6 @@ using maya::Cmd;
     // priors (RoutingMemory) survive by design — they are cross-thread.
     m.s.smart_turn_complexity  = smart::Complexity::Standard;
     m.s.smart_effort_bias      = 0;
-    m.s.smart_turn_had_failure = false;
     release_to_kernel();
     // Re-warm the active provider's TLS socket. The launch-time prewarm in
     // main() has usually aged out of the pool by now — a user reads a reply,
@@ -1205,6 +1204,16 @@ Step fused_picker_update(Model m, msg::FusedPickerMsg pm) {
                 if (slot) {
                     slot->model = row.model.id.value;
                     slot->set   = true;
+                    // Stamp the provider this pin was made under. A model id
+                    // only means something to the endpoint that serves it, so
+                    // resolve_role replays the pin ONLY under this provider
+                    // (see SlotOverride::provider). Prefer the row's own
+                    // provider — in slot-assign mode the list is already
+                    // filtered to the active one, so they agree, but the row
+                    // is the more direct truth.
+                    slot->provider = row.provider_id.empty()
+                                       ? active_provider_id()
+                                       : row.provider_id;
                     m.d.smart.enabled = true;   // pinning a slot means "on"
                 }
                 const int assigned = m.ui.smart_assign_slot;
@@ -1285,6 +1294,7 @@ Step fused_picker_update(Model m, msg::FusedPickerMsg pm) {
             tools::subagent::set_candidates(m.d.available_models);
             // Keep the subagent role-router in sync with Smart Mode (Layer 3b).
             tools::subagent::set_smart(m.d.smart);
+            tools::subagent::set_provider(active_provider_id());
             // If the active model isn't offered by this provider (e.g. just
             // switched to Ollama with no recall, or a stale saved id), fall
             // back to the first available model so the user is never pointed
@@ -1662,7 +1672,6 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
             // momentum and its first follow-up trains the old signature.
             m.s.smart_turn_complexity  = smart::Complexity::Standard;
             m.s.smart_effort_bias      = 0;
-            m.s.smart_turn_had_failure = false;
             // Optional timing probe. AGENTTY_LOAD_PROF=1 keeps surfacing
             // the synchronous portion of the load (rehydrate +
             // release_to_kernel) that still lives on the UI thread.

@@ -87,6 +87,32 @@ feature users *feel*:
    waste; a mid model at high effort on a hard bug can match the flagship.
    `RoleProfile { ModelId model; Effort effort; }` — the resolver returns both.
 
+   > **The ladder is per-model, not global.** Every effort adjustment (tier
+   > scaling, the cascade bias, Implementation's step-down) goes through ONE
+   > primitive, `detail::effort_step(e, n, caps)`, which walks *that model's*
+   > rungs: off, then exactly the levels in `effort_set_of(caps)`, ascending.
+   > A fixed global ladder is wrong in both directions, and shipped both bugs:
+   >
+   > - It **omitted `minimal`** (gpt-5's bottom reasoning tier), so
+   >   `step(minimal, 0)` fell off the ladder to `None`. A gpt-5 user at
+   >   minimal effort had reasoning **silently switched off on every ordinary
+   >   (Standard) turn** — the feature whose entire job is scaling reasoning
+   >   was disabling it. It bit `effort_for_score` (the wire path), which
+   >   unconditionally evaluates `step(base, tier_step + extra)`, and not the
+   >   `effort_for_complexity` sibling that short-circuits Standard — so
+   >   testing the tidier function would have missed it.
+   > - It **stepped onto rungs a model lacks**: on a ladder without `minimal`,
+   >   a step down from Low produced Minimal, which `clamp_effort` snapped
+   >   back **up** to Low — so Implementation never actually stepped down from
+   >   a Low parent.
+   >
+   > Walking the capability bitset fixes both structurally: a step can only
+   > land on a level the model accepts, so the result needs no post-hoc clamp.
+   > Heterogeneity as data, not a code path. Locked by `smart_mode_test` §10,
+   > which asserts a Standard turn is a no-op **at every rung**, that no step
+   > lands outside `effort_set_of`, and that a model with no ladder at all
+   > (Claude 4) always resolves to off.
+
 2. **Zero-config by default.** Turning Smart Mode *on* with no slots set
    auto-fills from the signed-in catalog: Strategic = the flagship you're
    already on, Implementation = the strongest mid-tier, Utility = the cheapest
@@ -478,6 +504,27 @@ All three role slots **must belong to the same provider** in v1. Reasons:
 
 The picker enforces this by scoping all three slots to the active provider.
 Switching provider clears/reseeds Smart Mode from that provider's tiers.
+
+> **Enforcement, corrected.** The picker's scoping is a *selection*-time guard
+> only: it filters the row list so a cross-provider row can't be **chosen**.
+> But a pin **persists** to `settings.json`, and nothing re-validated it after
+> a provider switch — so a slot pinned on Anthropic was replayed verbatim
+> against whatever provider was active later, sending an id that endpoint had
+> never heard of (an instant 400/404 on every turn *and* every delegation,
+> with no hint beyond the error). The `provider` field this section already
+> specified now actually exists on `SlotOverride`, is persisted, and
+> `resolve_role`/`resolve_subagent_role`/`utility_model` honour a pin **only**
+> under the provider it was made on; a foreign pin falls through to the
+> zero-config auto-fill for the active provider (the pin is kept, not cleared,
+> so switching back restores it).
+>
+> Note this is deliberately **not** a catalog-membership check. A pin must
+> still be honoured when the catalog is empty or stale — that is the Copilot
+> bug fixed in `subagent_pin_test`. Provider identity is knowable offline;
+> membership is not. Pins with no recorded provider (settings written before
+> the field existed) are honoured everywhere, so upgrading never silently
+> drops a pin.
+
 Cross-provider Smart Mode (Opus strategic + a local Utility model) is a
 compelling **future** direction but requires per-role auth threading through the
 delegation path — explicitly out of scope for v1 (§11).

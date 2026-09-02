@@ -788,11 +788,6 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
         const int kBiasCap = smart::tuning::bias_clamp();
         if (m.s.smart_effort_bias >  kBiasCap) m.s.smart_effort_bias =  kBiasCap;
         if (m.s.smart_effort_bias < -kBiasCap) m.s.smart_effort_bias = -kBiasCap;
-        // Publish whether this turn hit a tool failure so the NEXT
-        // submit_message can suppress its symmetric −1 "clean continuation"
-        // signal — a turn that already earned a +1 failure regret must not be
-        // silently relaxed back to neutral by the follow-up.
-        m.s.smart_turn_had_failure = tool_failure;
     }
 
     deps().save_thread(m.d.current);

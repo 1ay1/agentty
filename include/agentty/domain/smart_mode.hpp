@@ -63,6 +63,23 @@ struct SlotOverride {
     std::string             model;    // "" = auto
     Effort effort = Effort::None;
     bool                    set   = false;   // true once the user pins this slot
+    // The provider this pin was made under. A model id is only meaningful to
+    // the endpoint that serves it: `claude-opus-4-5` pinned on Anthropic is
+    // not a model Groq or Ollama can stream, and dispatching it there is an
+    // instant 400/404. The picker already refuses to SELECT a cross-provider
+    // row, but a pin PERSISTS — so a pin made on Anthropic was silently
+    // re-applied after the user switched to another provider, on a code path
+    // the picker's guard never sees.
+    //
+    // Recording the provider lets resolve_role scope the pin without
+    // validating it against the catalog, which matters: a pin must still be
+    // honoured when the catalog is EMPTY or STALE (see subagent_pin_test —
+    // the Copilot bug). Provider identity is knowable offline; catalog
+    // membership is not.
+    //
+    // Empty means "unknown provenance" (a settings.json written before this
+    // field existed) and is honoured everywhere, preserving old behaviour.
+    std::string             provider;
 };
 
 struct RoleConfig {
@@ -141,23 +158,55 @@ namespace detail {
     return best ? wire_model_id(std::string_view{best->id.value}) : std::string{};
 }
 
-// Effort one step DOWN from `e` within what `caps` supports (High->Medium,
-// Medium->Low, Low->None, None stays). Used to derive Implementation effort
-// from the user's Strategic effort so Impl thinks, but a notch less.
+// Step `n` places along THE MODEL'S OWN effort ladder: off, then exactly the
+// ON levels this model accepts, ascending. THE single stepping primitive —
+// every complexity/cascade/step-down adjustment in this header goes through
+// it, so "what is one step harder" has one answer per model.
+//
+// This walks the model's ladder rather than a fixed global one because a
+// fixed ladder is wrong twice over:
+//
+//   1. It omitted Minimal. `minimal` is gpt-5+'s BOTTOM reasoning tier, so a
+//      user on gpt-5 at minimal effort had `step(minimal, 0)` fall off the
+//      ladder to index 0 == None — Smart Mode silently turned REASONING OFF
+//      on every Standard turn, and a Simple turn did the same. The feature
+//      whose whole job is scaling reasoning was disabling it.
+//   2. It stepped through rungs the model does not have. On a Claude model
+//      (no `minimal`) a step down from Low landed on Minimal, which
+//      clamp_effort then snapped back UP to Low — so Implementation never
+//      actually stepped down from a Low parent.
+//
+// Walking effort_set_of(caps) fixes both: the ladder IS the capability data,
+// so a step can only ever land on a level the model will accept, and the
+// result needs no post-hoc clamp. Heterogeneity as data, not a code path.
+[[nodiscard]] inline Effort effort_step(
+        Effort e, int n, const ModelCapabilities& caps) noexcept {
+    Effort ladder[7];
+    int nl = 0;
+    ladder[nl++] = Effort::None;            // "off" is always a rung
+    const std::uint8_t set = effort_set_of(caps);
+    for (Effort lv : {Effort::Minimal, Effort::Low, Effort::Medium,
+                      Effort::High, Effort::Xhigh, Effort::Max})
+        if (set & effort_bit(lv)) ladder[nl++] = lv;
+
+    // Snap a stale/unsupported request onto a REAL rung before stepping, so
+    // the step is measured from where the model actually is.
+    const Effort start = nearest_effort(e, set);
+    int idx = 0;
+    for (int i = 0; i < nl; ++i) if (ladder[i] == start) { idx = i; break; }
+    idx += n;
+    if (idx < 0)   idx = 0;
+    if (idx >= nl) idx = nl - 1;
+    return ladder[idx];
+}
+
+// Effort one step DOWN from `e` on the model's ladder. Used to derive
+// Implementation effort from the user's Strategic effort so Impl thinks, but
+// a notch less. Already clamped — effort_step can only return a supported
+// level.
 [[nodiscard]] inline Effort effort_step_down(
         Effort e, const ModelCapabilities& caps) {
-    using E = Effort;
-    E stepped = e;
-    switch (e) {
-        case E::Max:    stepped = E::Xhigh;   break;
-        case E::Xhigh:  stepped = E::High;    break;
-        case E::High:   stepped = E::Medium;  break;
-        case E::Medium: stepped = E::Low;     break;
-        case E::Low:    stepped = E::Minimal; break;
-        case E::Minimal:stepped = E::None;    break;
-        case E::None:   stepped = E::None;    break;
-    }
-    return clamp_effort(stepped, caps);
+    return effort_step(e, -1, caps);
 }
 
 } // namespace detail
@@ -174,16 +223,8 @@ namespace detail {
 [[nodiscard]] inline Effort effort_for_complexity(
         Effort base, Complexity c, const ModelCapabilities& caps, int bias = 0) {
     using E = Effort;
-    auto step = [](E e, int n) {
-        // Ordered ladder; step n places, saturating at the ends.
-        constexpr E ladder[] = {E::None, E::Low, E::Medium, E::High, E::Xhigh, E::Max};
-        int idx = 0;
-        for (int i = 0; i < 6; ++i) if (ladder[i] == e) { idx = i; break; }
-        idx += n;
-        if (idx < 0) idx = 0;
-        if (idx > 5) idx = 5;
-        return ladder[idx];
-    };
+    // One stepping primitive, walking THIS model's ladder (see effort_step).
+    auto step = [&](E e, int n) { return detail::effort_step(e, n, caps); };
     E scaled;
     switch (c) {
         case Complexity::Trivial:  scaled = E::None;       break;
@@ -214,15 +255,9 @@ namespace detail {
         Effort base, const ComplexityScore& cx, const ModelCapabilities& caps,
         int bias = 0) {
     using E = Effort;
-    auto step = [](E e, int n) {
-        constexpr E ladder[] = {E::None, E::Low, E::Medium, E::High, E::Xhigh, E::Max};
-        int idx = 0;
-        for (int i = 0; i < 6; ++i) if (ladder[i] == e) { idx = i; break; }
-        idx += n;
-        if (idx < 0) idx = 0;
-        if (idx > 5) idx = 5;
-        return ladder[idx];
-    };
+    // Same single primitive as effort_for_complexity — identical output at the
+    // tier boundary is a property of sharing the stepper, not a coincidence.
+    auto step = [&](E e, int n) { return detail::effort_step(e, n, caps); };
     if (cx.tier == Complexity::Trivial) return E::None;
 
     const int kDeep = tuning::deep_margin();   // saturation margin (env-tunable)
@@ -257,19 +292,39 @@ namespace detail {
         std::string_view parent_model,
         Effort parent_effort,
         const std::vector<ModelInfo>& candidates,
-        const RoleConfig& cfg) {
+        const RoleConfig& cfg,
+        std::string_view active_provider = {}) {
     const std::string parent_wire = wire_model_id(parent_model);
     RoleProfile pass{parent_wire,
                      clamp_effort(parent_effort,
                                   resolved_caps(parent_wire))};
     if (!cfg.enabled) return pass;
 
-    // 1. Explicit user override for this slot wins outright.
+    // 1. Explicit user override for this slot wins outright — but only under
+    //    the provider it was pinned on. A model id is endpoint-scoped, so
+    //    replaying an Anthropic pin against Groq dispatches an id that
+    //    provider never heard of (an instant 400/404 on every turn, or every
+    //    delegation, until the user finds the Smart Mode overlay).
+    //
+    //    Deliberately NOT a catalog-membership check: a pin must survive an
+    //    empty or still-loading catalog (subagent_pin_test / the Copilot
+    //    bug). Provider identity is known offline; membership is not. Both an
+    //    unknown-provenance pin (pre-upgrade settings) and an unknown active
+    //    provider (callers that don't pass one) stay honoured — strictly
+    //    fewer surprises than before, never more.
     if (const auto& ov = cfg.slot(role); ov.set && !ov.model.empty()) {
-        const std::string wire = wire_model_id(std::string_view{ov.model});
-        return RoleProfile{wire,
-                           clamp_effort(ov.effort,
-                                        resolved_caps(wire))};
+        const bool provider_matches =
+            active_provider.empty() || ov.provider.empty()
+            || ov.provider == active_provider;
+        if (provider_matches) {
+            const std::string wire = wire_model_id(std::string_view{ov.model});
+            return RoleProfile{wire,
+                               clamp_effort(ov.effort,
+                                            resolved_caps(wire))};
+        }
+        // Foreign pin: fall through to the zero-config auto-fill below, which
+        // ranks over THIS provider's catalog. The pin is not cleared — switch
+        // back and it applies again.
     }
 
     // 2. Zero-config auto-fill from the catalog.
@@ -310,9 +365,10 @@ namespace detail {
         std::string_view parent_model,
         Effort parent_effort,
         const std::vector<ModelInfo>& candidates,
-        const RoleConfig& cfg) {
+        const RoleConfig& cfg,
+        std::string_view active_provider = {}) {
     RoleProfile p = resolve_role(role, parent_model, parent_effort,
-                                 candidates, cfg);
+                                 candidates, cfg, active_provider);
     // min(resolved, parent) on the ordered Effort scale.
     if (static_cast<int>(p.effort) > static_cast<int>(parent_effort))
         p.effort = parent_effort;
@@ -329,9 +385,12 @@ namespace detail {
 [[nodiscard]] inline std::string utility_model(
         std::string_view parent_model,
         const std::vector<ModelInfo>& candidates,
-        const RoleConfig& cfg) {
+        const RoleConfig& cfg,
+        std::string_view active_provider = {}) {
     if (cfg.internal_routing()) {
-        if (const auto& ov = cfg.utility; ov.set && !ov.model.empty())
+        if (const auto& ov = cfg.utility; ov.set && !ov.model.empty()
+            && (active_provider.empty() || ov.provider.empty()
+                || ov.provider == active_provider))
             return wire_model_id(std::string_view{ov.model});
     }
     return cheapest_capable_model(wire_model_id(parent_model), candidates,

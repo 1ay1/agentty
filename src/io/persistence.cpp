@@ -1324,6 +1324,12 @@ store::Settings load_settings() {
             s.smart_impl_effort      = sm.value("impl_effort", "");
             s.smart_utility_model    = sm.value("utility_model", "");
             s.smart_utility_effort   = sm.value("utility_effort", "");
+            // Missing (settings written before pins were provider-scoped) ⇒
+            // "" = unknown provenance, honoured under every provider. Same
+            // behaviour as before the field existed.
+            s.smart_strategic_provider = sm.value("strategic_provider", "");
+            s.smart_impl_provider      = sm.value("impl_provider", "");
+            s.smart_utility_provider   = sm.value("utility_provider", "");
         }
     } catch (const std::exception& e) {
         util::dbglog("persistence.load_settings", e.what());
@@ -1426,6 +1432,14 @@ void save_settings(const store::Settings& s) {
         if (!s.smart_impl_effort.empty())      sm["impl_effort"]      = s.smart_impl_effort;
         if (!s.smart_utility_model.empty())    sm["utility_model"]    = s.smart_utility_model;
         if (!s.smart_utility_effort.empty())   sm["utility_effort"]   = s.smart_utility_effort;
+        // Provider provenance per pin. A model id is only meaningful to the
+        // endpoint that serves it, so resolve_role replays a pin ONLY under
+        // the provider it was made on; without this the pin would be re-armed
+        // against whatever provider happens to be active next launch.
+        // Absent (old settings) reads back as "" = honour everywhere.
+        if (!s.smart_strategic_provider.empty()) sm["strategic_provider"] = s.smart_strategic_provider;
+        if (!s.smart_impl_provider.empty())      sm["impl_provider"]      = s.smart_impl_provider;
+        if (!s.smart_utility_provider.empty())   sm["utility_provider"]   = s.smart_utility_provider;
         j["smart"] = std::move(sm);
     }
     // A failed settings write silently discards the user's provider keys,
