@@ -216,6 +216,72 @@ TEST_CASE("skills engine") {
         CHECK(has_mismatch);
     }
 
+    // ── Stage 6.5: nested (grouped) skills ──────────────────────
+    // Skills may live at ANY depth below a discovery root; the name is
+    // the path below the root with segments joined by '-'.
+    write_file_at(work / ".agentty/skills/embedded/startup/SKILL.md",
+        "---\nname: embedded-startup\ndescription: nested two levels\n---\n"
+        "NESTED BODY\n");
+    write_file_at(work / ".agentty/skills/perf/alloc/SKILL.md",
+        "---\ndescription: name falls back to the joined path slug\n---\n"
+        "IMPLICIT NAME BODY\n");
+    write_file_at(work / ".agentty/skills/deep/a/b/c/SKILL.md",
+        "---\nname: deep-a-b-c\ndescription: four levels down\n---\nBODY\n");
+    // Hidden directories are storage, never skill territory.
+    write_file_at(work / ".agentty/skills/.cache/junk/SKILL.md",
+        "---\nname: cache-junk\ndescription: must not be discovered\n---\nBODY\n");
+    // Joined-name collision: the shallower skill wins.
+    write_file_at(work / ".agentty/skills/pair/SKILL.md",
+        "---\nname: pair\ndescription: shallow\n---\nSHALLOW\n");
+    write_file_at(work / ".agentty/skills/x/pair/SKILL.md",
+        "---\nname: pair\ndescription: deeper\n---\nDEEPER\n");
+    {
+        const auto* n = skills::find("embedded-startup");
+        CHECK(n && n->body == "NESTED BODY");
+        CHECK(n && n->source == "project");
+        // Lint compares against the LEAF directory, not the joined name.
+        if (n) {
+            bool mismatch = false;
+            for (const auto& d : skills::lint(*n))
+                if (d.find("does not match parent directory") != std::string::npos)
+                    mismatch = true;
+            CHECK(!mismatch);
+        }
+        // Explicit `name:` missing → fallback is the joined path slug.
+        const auto* impl = skills::find("perf-alloc");
+        CHECK(impl && impl->body == "IMPLICIT NAME BODY");
+        const auto* deep = skills::find("deep-a-b-c");
+        CHECK(deep && deep->body == "BODY");
+        // Hidden dirs never yield skills.
+        CHECK(skills::find("cache-junk") == nullptr);
+        // Shallower beats deeper on a joined-name collision.
+        const auto* p = skills::find("pair");
+        CHECK(p && p->description == "shallow");
+        CHECK(p && p->body == "SHALLOW");
+    }
+
+    // A nested skill is NOT a resource of the skill it sits inside.
+    write_file_at(work / ".agentty/skills/host/SKILL.md",
+        "---\nname: host\ndescription: holds a nested skill\n---\nHOST BODY\n");
+    write_file_at(work / ".agentty/skills/host/nested/inner/SKILL.md",
+        "---\nname: host-nested-inner\ndescription: inside host\n---\nINNER\n");
+    write_file_at(work / ".agentty/skills/host/refs/NOTE.md", "plain ref\n");
+    {
+        const auto* h = skills::find("host");
+        CHECK(h && h->resources.size() == 1);
+        if (h && h->resources.size() == 1)
+            CHECK(h->resources[0] == "refs/NOTE.md");
+        CHECK(skills::find("host-nested-inner") != nullptr);
+    }
+
+    // Project shadows user with the same nested name.
+    write_file_at(home / ".agentty/skills/embedded/startup/SKILL.md",
+        "---\nname: embedded-startup\ndescription: user variant\n---\nUSER BODY\n");
+    {
+        const auto* n = skills::find("embedded-startup");
+        CHECK(n && n->source == "project" && n->body == "NESTED BODY");
+    }
+
     // ── Stage 6: read-allowlist gate ─────────────────────────────────
     // A USER-scope skill's resources live outside the workspace; the
     // read gate must pass them, the write gate must still refuse.

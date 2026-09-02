@@ -23,6 +23,11 @@
 //     allowed-tools: bash read                              # optional
 //     disable-model-invocation: true                        # optional
 //     ---
+//
+// The directory may sit at any depth below a discovery root; nested
+// group folders are joined with `-` into the skill name (`skills/
+// embedded/startup/` → name `embedded-startup`, see the discovery
+// table below).
 //     <full markdown body: detailed instructions, code snippets, ...>
 //
 // Discovery roots, in precedence order (first hit on a name wins):
@@ -33,6 +38,18 @@
 //   user      ~/.agentty/skills/<slug>/SKILL.md       (native)
 //   user      ~/.agents/skills/<slug>/SKILL.md        (cross-client convention)
 //   user      ~/.claude/skills/<slug>/SKILL.md        (Claude Code compat)
+//
+// `<slug>` may be nested at ANY depth below the root (`skills/embedded/
+// startup/SKILL.md` is a skill named `embedded-startup`): group folders
+// organize the library, and the skill's name is its path below the root
+// with segments joined by `-` — staying inside the spec's `a-z0-9-`
+// charset. Hidden directories (leading `.`) are never descended into;
+// symlinked skill directories are discovered without following symlinks
+// during the walk. Names collide across roots or depths: the earlier
+// root in the table wins, and within a root the shallower skill wins —
+// so a root-level `startup/` keeps its name even when a grouped
+// `embedded/startup/` exists. Flat single-level layouts keep their
+// existing names unchanged.
 //
 // The `.agents/skills/` convention means skills installed by any
 // compliant client (Claude Code, Codex, Cursor, ...) are automatically
@@ -62,6 +79,12 @@ struct Skill {
     bool        user_only = false; // `disable-model-invocation`: hidden from the
                                    // model-facing catalog, loadable explicitly
     std::filesystem::path dir; // absolute skill directory (tier-3 base path)
+    // Spec-derived name: the path below the discovery root with segments
+    // joined by '-' — for a root-level skill this IS the leaf directory
+    // name. Kept alongside `name` because frontmatter may override the
+    // name; lint compares the two (nested skills never match their leaf
+    // directory alone, so that would be a false mismatch).
+    std::string slug;
     // Frontmatter `metadata:` nested mapping, flattened to key/value
     // pairs in file order. Spec: arbitrary client-defined properties.
     std::vector<std::pair<std::string, std::string>> metadata;
@@ -117,8 +140,10 @@ void reset_activations();
 // this surface is for authors: `agentty skills` prints every discovered
 // skill with its diagnostics. Checks: name charset (lowercase alnum +
 // single hyphens, no edge hyphens), name ≤ 64 chars, name matches the
-// parent directory, description present and ≤ 1024 chars, body ≤ 500
-// lines (spec recommendation — move detail to references/).
+// spec-derived slug (the '-'-joined path below the discovery root —
+// for flat layouts that is the parent directory), description present
+// and ≤ 1024 chars, body ≤ 500 lines (spec recommendation — move detail
+// to references/).
 [[nodiscard]] std::vector<std::string> lint(const Skill& s);
 
 // CLI entry: list every discovered skill (scope, dir, resource count)

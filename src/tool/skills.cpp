@@ -92,7 +92,8 @@ namespace {
 [[nodiscard]] Skill parse_skill(const std::string& raw, const std::string& slug,
                                 const std::string& source) {
     Skill s;
-    s.name = slug;
+    s.name = slug;   // fallback; frontmatter `name:` may override below
+    s.slug = slug;   // spec-derived identity, kept for lint
     s.source = source;
 
     std::istringstream in(raw);
@@ -180,7 +181,9 @@ namespace {
 
 // Enumerate bundled resource files under the skill dir (tier 3 of
 // progressive disclosure). Recursive but bounded: depth ≤ 3, at most
-// kMaxResources entries, skipping dotfiles and SKILL.md itself. Paths
+// kMaxResources entries, skipping dotfiles and every SKILL.md (the
+// skill's own AND a nested skill's — instructions are never resources).
+// Paths
 // recorded relative to the skill dir with forward slashes so the model
 // can splice them after the absolute dir we hand it.
 void enumerate_resources(const fs::path& dir, std::vector<std::string>& out) {
@@ -196,7 +199,9 @@ void enumerate_resources(const fs::path& dir, std::vector<std::string>& out) {
             continue;
         }
         if (!it->is_regular_file(ec)) continue;
-        if (fname == "SKILL.md" && it.depth() == 0) continue;
+        // Every SKILL.md — the skill's own (depth 0) AND a nested
+        // skill's (deeper) — is instructions, not a bundled resource.
+        if (fname == "SKILL.md") continue;
         auto rel = fs::relative(p, dir, ec);
         if (ec) continue;
         std::string r = rel.generic_string();   // forward slashes everywhere
@@ -205,10 +210,17 @@ void enumerate_resources(const fs::path& dir, std::vector<std::string>& out) {
     std::sort(out.begin(), out.end());
 }
 
-// Scan one root for <slug>/SKILL.md entries, appending to `out` (skipping
-// names already present — earlier roots win, see header precedence
-// table). Appends each found SKILL.md's mtime into `sig` so an in-place
-// edit (same dir mtime) still invalidates the cache.
+// Scan one root for skill entries — a `<dir>/SKILL.md` at ANY depth
+// below the root — appending to `out` (skipping names already present —
+// earlier roots win, see header precedence table). Nested group folders
+// are transparent: the slug is the skill directory's path relative to
+// the root with segments joined by `-` (`skills/embedded/startup/` →
+// `embedded-startup`), so names stay inside the spec's `a-z0-9-` set.
+// Paths are visited in sorted order, which puts shallower dirs first —
+// on a joined-name collision the shallower entry wins, and root-level
+// skills keep their flat names so existing libraries load unchanged.
+// Appends each found SKILL.md's mtime into `sig` so an in-place edit
+// (same dir mtime) still invalidates the cache.
 void scan_root(const fs::path& root, const std::string& source,
                std::vector<Skill>& out, std::string& sig) {
     std::error_code ec;
@@ -223,14 +235,47 @@ void scan_root(const fs::path& root, const std::string& source,
                    mt.time_since_epoch().count())) +
                ";";
 
-    std::vector<fs::path> dirs;
-    for (fs::directory_iterator it(root, ec), end; !ec && it != end; it.increment(ec)) {
-        if (it->is_directory(ec)) dirs.push_back(it->path());
+    // Collect every SKILL.md below the root. Hidden directories are
+    // never descended into (`.git`, `.obsidian`, ... are storage, not
+    // skill territory), and directory symlinks — which the iterator
+    // does not follow — are probed directly so a top-level symlinked
+    // skill dir keeps working (it was discoverable in the flat scan).
+    std::vector<fs::path> mds;
+    auto opts = fs::directory_options::skip_permission_denied;
+    fs::recursive_directory_iterator it(root, opts, ec), end;
+    for (; !ec && it != end; it.increment(ec)) {
+        if (it->is_directory(ec)) {
+            auto fname = it->path().filename().string();
+            if (!fname.empty() && fname.front() == '.') {
+                it.disable_recursion_pending();
+                continue;
+            }
+            if (it->is_symlink(ec)) {
+                fs::path md = it->path() / "SKILL.md";
+                if (fs::is_regular_file(md, ec)) mds.push_back(std::move(md));
+            }
+            continue;
+        }
+        if (it->is_regular_file(ec) && it->path().filename() == "SKILL.md")
+            mds.push_back(it->path());
     }
-    std::sort(dirs.begin(), dirs.end());
-    for (const auto& d : dirs) {
+    // Dedup (a repeated path can't actually occur across the walk and
+    // the symlink probe, but keep the invariant structural, not
+    // emergent) and visit in sorted order — lexicographic order puts
+    // shallower dirs first, which the shadow rule below relies on.
+    std::sort(mds.begin(), mds.end());
+    mds.erase(std::unique(mds.begin(), mds.end()), mds.end());
+
+    for (const auto& md : mds) {
         if (out.size() >= kMaxSkills) break;
-        fs::path md = d / "SKILL.md";
+        // Slug = path below the root, '-'-joined. A SKILL.md sitting
+        // directly in the root has no directory of its own — same as the
+        // flat scan, it is not a skill (a skill is a DIRECTORY holding
+        // SKILL.md).
+        std::string slug = fs::relative(md.parent_path(), root, ec).generic_string();
+        if (ec || slug.empty() || slug == ".") continue;
+        for (auto& c : slug)
+            if (c == '/') c = '-';
         std::error_code mec;
         auto fmt = fs::last_write_time(md, mec);
         if (!mec)
@@ -239,15 +284,16 @@ void scan_root(const fs::path& root, const std::string& source,
                    ";";
         std::string raw = read_capped(md, kMaxBodyBytes);
         if (raw.empty()) continue;
-        Skill s = parse_skill(raw, d.filename().string(), source);
+        Skill s = parse_skill(raw, slug, source);
         if (s.name.empty()) continue;
         // Shadow: earlier roots (project before user, native before
-        // interop) win on name collision.
+        // interop) — and earlier visit order (shallower before deeper)
+        // — win on name collision.
         if (std::ranges::any_of(out, [&](const Skill& e){ return e.name == s.name; }))
             continue;
         std::error_code cec;
-        auto abs = fs::weakly_canonical(d, cec);
-        s.dir = cec ? fs::absolute(d, cec) : abs;
+        auto abs = fs::weakly_canonical(md.parent_path(), cec);
+        s.dir = cec ? fs::absolute(md.parent_path(), cec) : abs;
         enumerate_resources(s.dir, s.resources);
         // Tier-3 access: allowlist the skill dir for READS so the model
         // can fetch bundled scripts/references that live outside the
@@ -405,9 +451,12 @@ std::vector<std::string> lint(const Skill& s) {
     if (!s.name.empty() && (s.name.front() == '-' || s.name.back() == '-'))
         out.push_back("name must not start or end with a hyphen");
     if (dbl) out.push_back("name contains consecutive hyphens");
-    if (!s.dir.empty() && s.dir.filename().string() != s.name)
+    // name/dir: the frontmatter name must match the spec-derived slug
+    // (the '-'-joined path below the discovery root). For a nested
+    // skill the leaf directory alone is not the name.
+    if (!s.slug.empty() && s.slug != s.name)
         out.push_back("name does not match parent directory '"
-                      + s.dir.filename().string() + "'");
+                      + s.slug + "'");
     // description: required, ≤ 1024.
     if (s.description.empty()) out.push_back("description is missing");
     if (s.description.size() > 1024)

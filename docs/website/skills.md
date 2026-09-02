@@ -46,6 +46,26 @@ agentty scans these roots for `<name>/SKILL.md`. Earlier roots win when two skil
 | `~/.agents/skills/` | Every project (shared agents format) |
 | `~/.claude/skills/` | Every project (Claude Code compat) |
 
+## Nesting skills (group folders)
+
+A skill directory may sit at **any depth** below a discovery root. Folders above the skill are group folders — they organize the library and are invisible to the model. The skill's name is its path below the root with segments joined by `-`, staying inside the spec's `a-z0-9-` name charset:
+
+```text
+.agentty/skills/
+  pdf-extract/SKILL.md          → name: pdf-extract
+  embedded/
+    startup/SKILL.md            → name: embedded-startup
+  perf/
+    alloc/
+      pools/SKILL.md            → name: perf-alloc-pools
+```
+
+Flat single-level layouts keep their existing names unchanged. On a name collision the shallower skill wins within a root, and project skills still shadow user skills (see the table above). Hidden directories (leading `.`) are never descended into — `.git`, `.obsidian` and friends are storage, not skill territory.
+
+:::note
+Keep the frontmatter `name:` equal to the joined path slug — `agentty skills` warns on a mismatch.
+:::
+
 ## Bundled resources
 
 A skill folder can ship supporting files — scripts, reference docs, templates — alongside its `SKILL.md`. agentty enumerates them (bounded to a shallow depth) and read-allowlists the skill directory, so the model can fetch a bundled reference even when it lives outside the workspace boundary. Those reads are read-only; the write gate never consults them.
