@@ -48,7 +48,7 @@ agentty scans these roots for `<name>/SKILL.md`. Earlier roots win when two skil
 
 ## Nesting skills (group folders)
 
-A skill directory may sit at **any depth** below a discovery root. Folders above the skill are group folders — they organize the library and are invisible to the model. The skill's name is its path below the root with segments joined by `-`, staying inside the spec's `a-z0-9-` name charset:
+A skill directory may sit **up to four levels** below a discovery root. Folders above the skill are group folders — they organize the library and are invisible to the model. The skill's name is its path below the root, lowercased with every character outside `a-z0-9` replaced by `-`:
 
 ```text
 .agentty/skills/
@@ -58,9 +58,17 @@ A skill directory may sit at **any depth** below a discovery root. Folders above
   perf/
     alloc/
       pools/SKILL.md            → name: perf-alloc-pools
+  My Group/
+    Sub_Dir/SKILL.md            → name: my-group-sub-dir
 ```
 
-Flat single-level layouts keep their existing names unchanged. On a name collision the shallower skill wins within a root, and project skills still shadow user skills (see the table above). Hidden directories (leading `.`) are never descended into — `.git`, `.obsidian` and friends are storage, not skill territory.
+The name is what you type as `/name`, so it is held to the spec's charset rather than passed through: spaces, underscores and capitals are folded, runs of separators collapse, and a name that would exceed 64 characters is truncated. A group folder whose name has no `a-z0-9` characters at all is skipped rather than given an invented name.
+
+Flat single-level layouts keep their existing names unchanged. On a name collision the **shallower** skill wins within a root — so an existing flat `a-b/` keeps its name even if an unrelated `a/b/` group folder appears beside it — and project skills still shadow user skills (see the table above). Hidden directories (leading `.`) are never descended into — `.git`, `.obsidian` and friends are storage, not skill territory.
+
+:::note
+The four-level cap and the 64-character name limit exist so a skills root that happens to contain a large tree (a stray checkout, a `node_modules`) cannot turn discovery into an unbounded filesystem walk on every cache miss.
+:::
 
 :::note
 Keep the frontmatter `name:` equal to the joined path slug — `agentty skills` warns on a mismatch.

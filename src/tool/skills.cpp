@@ -179,6 +179,49 @@ namespace {
     return s;
 }
 
+// Derive a skill's spec name from its directory path below the root.
+//
+// `embedded/startup` -> `embedded-startup`. The spec's charset is
+// `[a-z0-9-]`, and this function is the ONE place that guarantees it — the
+// name it returns is what `skills::find()` keys on and what the user types
+// as `/name`, so a character that survives here is a skill that cannot be
+// invoked. Replacing only '/' was not enough: a group folder named
+// `My Group/Sub_Dir` produced the name "My Group-Sub_Dir", which is
+// discoverable and listed but permanently unreachable, because the
+// slash-command parser (update/modal.cpp) splits its token on whitespace.
+//
+// Rules, applied in order:
+//   • ASCII upper -> lower (names are case-insensitive in practice; the
+//     picker and `find()` compare exactly, so folding here is what makes
+//     `Foo/` and `foo/` the same skill rather than two).
+//   • [a-z0-9] kept; everything else (separators, spaces, punctuation,
+//     any non-ASCII byte) becomes '-'.
+//   • runs of '-' collapse, and leading/trailing '-' are trimmed, so
+//     `a//b`, `a - b` and `-a-` do not yield doubled or edge hyphens.
+//
+// Returns empty when nothing survives (a directory named `___`), which the
+// caller treats as "not a skill" rather than inventing a name.
+[[nodiscard]] std::string slug_from_path(std::string_view rel) {
+    std::string out;
+    out.reserve(rel.size());
+    for (unsigned char c : rel) {
+        char mapped;
+        if (c >= 'A' && c <= 'Z')                      mapped = static_cast<char>(c - 'A' + 'a');
+        else if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'))
+                                                       mapped = static_cast<char>(c);
+        else                                           mapped = '-';
+        // Collapse runs rather than emitting doubled hyphens.
+        if (mapped == '-' && (out.empty() || out.back() == '-')) continue;
+        out.push_back(mapped);
+    }
+    while (!out.empty() && out.back() == '-') out.pop_back();
+    if (out.size() > kMaxSlugLen) {
+        out.resize(kMaxSlugLen);
+        while (!out.empty() && out.back() == '-') out.pop_back();
+    }
+    return out;
+}
+
 // Enumerate bundled resource files under the skill dir (tier 3 of
 // progressive disclosure). Recursive but bounded: depth ≤ 3, at most
 // kMaxResources entries, skipping dotfiles and every SKILL.md (the
@@ -216,9 +259,9 @@ void enumerate_resources(const fs::path& dir, std::vector<std::string>& out) {
 // are transparent: the slug is the skill directory's path relative to
 // the root with segments joined by `-` (`skills/embedded/startup/` →
 // `embedded-startup`), so names stay inside the spec's `a-z0-9-` set.
-// Paths are visited in sorted order, which puts shallower dirs first —
-// on a joined-name collision the shallower entry wins, and root-level
-// skills keep their flat names so existing libraries load unchanged.
+// Entries are visited SHALLOWEST-FIRST (see the sort below) — on a
+// joined-name collision the shallower entry wins, and root-level skills
+// keep their flat names so existing libraries load unchanged.
 // Appends each found SKILL.md's mtime into `sig` so an in-place edit
 // (same dir mtime) still invalidates the cache.
 void scan_root(const fs::path& root, const std::string& source,
@@ -240,10 +283,24 @@ void scan_root(const fs::path& root, const std::string& source,
     // skill territory), and directory symlinks — which the iterator
     // does not follow — are probed directly so a top-level symlinked
     // skill dir keeps working (it was discoverable in the flat scan).
+    //
+    // The walk is BOUNDED on both axes. Depth stops at kMaxSkillDepth
+    // (group folders organize a library; they do not nest arbitrarily),
+    // and the collection stops once enough candidates exist to fill
+    // kMaxSkills. Without the second bound the cap applied to the RESULT
+    // but not the WORK: a skills root that happened to contain a large
+    // tree was traversed in full on every cache miss.
     std::vector<fs::path> mds;
     auto opts = fs::directory_options::skip_permission_denied;
     fs::recursive_directory_iterator it(root, opts, ec), end;
     for (; !ec && it != end; it.increment(ec)) {
+        // depth() is 0 for entries directly in the root, so a skill dir at
+        // depth d has its SKILL.md at d+1. Stop DESCENDING past the cap
+        // rather than stopping the walk: siblings at legal depth still
+        // need visiting.
+        if (it.depth() >= static_cast<int>(kMaxSkillDepth))
+            it.disable_recursion_pending();
+        if (mds.size() >= kMaxSkills) break;
         if (it->is_directory(ec)) {
             auto fname = it->path().filename().string();
             if (!fname.empty() && fname.front() == '.') {
@@ -259,23 +316,55 @@ void scan_root(const fs::path& root, const std::string& source,
         if (it->is_regular_file(ec) && it->path().filename() == "SKILL.md")
             mds.push_back(it->path());
     }
-    // Dedup (a repeated path can't actually occur across the walk and
-    // the symlink probe, but keep the invariant structural, not
-    // emergent) and visit in sorted order — lexicographic order puts
-    // shallower dirs first, which the shadow rule below relies on.
-    std::sort(mds.begin(), mds.end());
+    // Visit SHALLOWEST-FIRST, then lexicographically within a depth.
+    //
+    // The shadow rule below is first-wins, so visit order IS precedence.
+    // Plain lexicographic order does not encode depth: '-' (0x2D) sorts
+    // before '/' (0x2F), so `a/b/SKILL.md` sorts BEFORE `a-b/SKILL.md`
+    // even though the latter is shallower. Both slug to `a-b`, so an
+    // existing flat `a-b/` skill was silently displaced the moment an
+    // unrelated `a/b/` group folder appeared next to it — a regression for
+    // libraries that predate nesting, which is exactly what "flat layouts
+    // keep their names unchanged" is supposed to guarantee.
+    //
+    // Comparing (depth, path) states the intent directly instead of
+    // relying on a byte-order coincidence. Depth is measured lexically
+    // for the same reason the slug is (see below): a symlinked skill dir
+    // belongs at the depth where it was PUT, not where it resolves to.
+    auto depth_of = [&](const fs::path& md) {
+        const auto rel = md.parent_path().lexically_relative(root);
+        return static_cast<std::size_t>(
+            std::distance(rel.begin(), rel.end()));
+    };
+    std::ranges::sort(mds, [&](const fs::path& a, const fs::path& b) {
+        const auto da = depth_of(a), db = depth_of(b);
+        if (da != db) return da < db;
+        return a < b;
+    });
     mds.erase(std::unique(mds.begin(), mds.end()), mds.end());
 
     for (const auto& md : mds) {
         if (out.size() >= kMaxSkills) break;
-        // Slug = path below the root, '-'-joined. A SKILL.md sitting
-        // directly in the root has no directory of its own — same as the
-        // flat scan, it is not a skill (a skill is a DIRECTORY holding
-        // SKILL.md).
-        std::string slug = fs::relative(md.parent_path(), root, ec).generic_string();
-        if (ec || slug.empty() || slug == ".") continue;
-        for (auto& c : slug)
-            if (c == '/') c = '-';
+        // Slug = path below the root, sanitized to the spec's charset. A
+        // SKILL.md sitting directly in the root has no directory of its
+        // own — same as the flat scan, it is not a skill (a skill is a
+        // DIRECTORY holding SKILL.md). A path that sanitizes to nothing
+        // (a group folder named `___`) is likewise not a skill; inventing
+        // a name for it would be worse than skipping it.
+        //
+        // LEXICAL relative, not fs::relative: the latter canonicalizes,
+        // which resolves symlinks. A skill dir symlinked into the library
+        // (`skills/linked -> /elsewhere/realskill`) then measured from its
+        // TARGET, escaping the root as `../../elsewhere/realskill` and
+        // naming the skill after an absolute filesystem path rather than
+        // after the name the user gave it in their library. The name a
+        // skill gets must come from where it was PUT, not from where its
+        // bytes happen to live.
+        const std::string rel =
+            md.parent_path().lexically_relative(root).generic_string();
+        if (rel.empty() || rel == "." || rel.starts_with("..")) continue;
+        const std::string slug = slug_from_path(rel);
+        if (slug.empty()) continue;
         std::error_code mec;
         auto fmt = fs::last_write_time(md, mec);
         if (!mec)

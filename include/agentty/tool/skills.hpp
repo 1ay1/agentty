@@ -39,16 +39,19 @@
 //   user      ~/.agents/skills/<slug>/SKILL.md        (cross-client convention)
 //   user      ~/.claude/skills/<slug>/SKILL.md        (Claude Code compat)
 //
-// `<slug>` may be nested at ANY depth below the root (`skills/embedded/
-// startup/SKILL.md` is a skill named `embedded-startup`): group folders
-// organize the library, and the skill's name is its path below the root
-// with segments joined by `-` — staying inside the spec's `a-z0-9-`
-// charset. Hidden directories (leading `.`) are never descended into;
-// symlinked skill directories are discovered without following symlinks
-// during the walk. Names collide across roots or depths: the earlier
-// root in the table wins, and within a root the shallower skill wins —
-// so a root-level `startup/` keeps its name even when a grouped
-// `embedded/startup/` exists. Flat single-level layouts keep their
+// `<slug>` may be nested up to `kMaxSkillDepth` levels below the root
+// (`skills/embedded/startup/SKILL.md` is a skill named
+// `embedded-startup`): group folders organize the library, and the
+// skill's name is its path below the root, SANITIZED to the spec's
+// `a-z0-9-` charset (see slug_from_path) — the name is what the user
+// types as `/name`, so it is enforced rather than assumed. Hidden
+// directories (leading `.`) are never descended into; symlinked skill
+// directories are discovered without following symlinks during the
+// walk. Names collide across roots or depths: the earlier root in the
+// table wins, and within a root the SHALLOWER skill wins — so a
+// root-level `startup/` keeps its name even when a grouped
+// `embedded/startup/` exists, and a flat `a-b/` is not displaced by an
+// unrelated `a/b/` group folder. Flat single-level layouts keep their
 // existing names unchanged.
 //
 // The `.agents/skills/` convention means skills installed by any
@@ -155,5 +158,16 @@ int cmd_skills();
 inline constexpr std::size_t kMaxSkills     = 64;
 inline constexpr std::size_t kMaxBodyBytes  = 64 * 1024;
 inline constexpr std::size_t kMaxResources  = 32;
+// Deepest group nesting a skill root is walked to. Group folders are an
+// ORGANIZING device — `embedded/startup/`, at most a category and a
+// sub-category — so 4 is already generous, while an uncapped walk turns a
+// skills root that happens to contain a large tree (a stray checkout, a
+// node_modules) into unbounded work on every cache miss. It also bounds the
+// derived name: each level appends a path segment, and a 40-deep nest
+// produced a 238-character "name" that no `/command` could ever invoke.
+inline constexpr std::size_t kMaxSkillDepth = 4;
+// Longest derived skill name. A name is typed as `/name`, so one that
+// cannot be typed is not a name.
+inline constexpr std::size_t kMaxSlugLen    = 64;
 
 } // namespace agentty::tools::skills

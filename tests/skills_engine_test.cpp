@@ -260,6 +260,110 @@ TEST_CASE("skills engine") {
         CHECK(p && p->body == "SHALLOW");
     }
 
+    // ── Depth precedence is by DEPTH, not by byte order ──────────────
+    //
+    // `pair` vs `pair/x` above happens to sort shallow-first, so it does
+    // not exercise the rule. This pair does: '-' (0x2D) sorts BEFORE '/'
+    // (0x2F), so plain lexicographic order visits `ambig/dup/SKILL.md`
+    // first and the DEEPER skill would win. Both slug to `ambig-dup`, so
+    // an existing flat skill would be silently displaced the moment an
+    // unrelated group folder appeared beside it — the exact regression
+    // "flat layouts keep their names unchanged" rules out.
+    write_file_at(work / ".agentty/skills/ambig-dup/SKILL.md",
+        "---\ndescription: flat and shallow\n---\nFLAT\n");
+    write_file_at(work / ".agentty/skills/ambig/dup/SKILL.md",
+        "---\ndescription: nested and deeper\n---\nNESTED\n");
+    {
+        const auto* a = skills::find("ambig-dup");
+        CHECK(a != nullptr);
+        CHECK(a && a->body == "FLAT");
+        CHECK(a && a->description == "flat and shallow");
+    }
+
+    // ── Derived names stay inside the spec charset ───────────────────
+    //
+    // A name is what the user types as `/name`, and the slash-command
+    // parser splits its token on whitespace — so a name containing a
+    // space is discoverable, listed, and permanently un-invokable.
+    // Replacing only '/' let spaces, underscores and uppercase through.
+    write_file_at(work / ".agentty/skills/My Group/Sub_Dir/SKILL.md",
+        "---\ndescription: charset\n---\nCHARSET\n");
+    {
+        const auto* c = skills::find("my-group-sub-dir");
+        CHECK(c != nullptr);
+        CHECK(c && c->body == "CHARSET");
+        // The raw, unsanitized form must not exist under any spelling.
+        CHECK(skills::find("My Group-Sub_Dir") == nullptr);
+        for (const auto& sk : skills::all()) {
+            bool clean = true;
+            for (unsigned char ch : sk.name) {
+                const bool ok = (ch >= 'a' && ch <= 'z')
+                             || (ch >= '0' && ch <= '9') || ch == '-';
+                if (!ok) { clean = false; break; }
+            }
+            // Frontmatter `name:` may legitimately override the slug, so
+            // only DERIVED names (slug == name) are charset-bound.
+            if (sk.slug == sk.name)
+                CHECK_MESSAGE(clean, "derived name outside [a-z0-9-]: " << sk.name);
+        }
+    }
+
+    // Runs collapse and edges trim: `a  b` / `-lead-` never yield
+    // doubled or edge hyphens.
+    write_file_at(work / ".agentty/skills/-Odd  Name-/SKILL.md",
+        "---\ndescription: collapse\n---\nCOLLAPSE\n");
+    {
+        const auto* c = skills::find("odd-name");
+        CHECK(c && c->body == "COLLAPSE");
+    }
+
+    // ── A symlinked skill is named where it was PUT ──────────────────
+    //
+    // Symlinking a skill dir into the library is a supported layout (the
+    // flat scan discovered it, and the walk probes symlinks directly
+    // because the iterator will not follow them). Its name must come from
+    // the link's name in the library, NOT from wherever the bytes live:
+    // fs::relative canonicalizes, so measuring the slug that way escaped
+    // the root as `../../elsewhere/real` and named the skill after an
+    // absolute filesystem path.
+    {
+        const fs::path target = base / "external" / "real-skill-dir";
+        write_file_at(target / "SKILL.md",
+            "---\ndescription: lives outside the library\n---\nLINKED\n");
+        std::error_code lec;
+        fs::create_directory_symlink(
+            target, work / ".agentty/skills/aliased", lec);
+        if (!lec) {   // skip where symlinks are unavailable (some CI hosts)
+            const auto* l = skills::find("aliased");
+            CHECK(l != nullptr);
+            CHECK(l && l->body == "LINKED");
+            // The resolved path must never leak into the name.
+            CHECK(skills::find("real-skill-dir") == nullptr);
+            for (const auto& sk : skills::all())
+                CHECK(sk.name.find("..") == std::string::npos);
+        }
+    }
+
+    // ── The walk is bounded ──────────────────────────────────────────
+    //
+    // Depth stops at kMaxSkillDepth: group folders organize a library,
+    // they do not nest arbitrarily. An unbounded walk both traversed a
+    // stray large tree in full on every cache miss and produced names
+    // too long to type (a 40-deep nest yielded 238 characters).
+    {
+        fs::path deep = work / ".agentty/skills/toodeep";
+        for (int i = 0; i < 8; ++i) deep /= ("lvl" + std::to_string(i));
+        write_file_at(deep / "SKILL.md",
+            "---\ndescription: past the cap\n---\nTOODEEP\n");
+        int past_cap = 0;
+        for (const auto& sk : skills::all())
+            if (sk.description == "past the cap") ++past_cap;
+        CHECK(past_cap == 0);
+        // …and every name that IS discovered is typeable.
+        for (const auto& sk : skills::all())
+            CHECK(sk.name.size() <= skills::kMaxSlugLen);
+    }
+
     // A nested skill is NOT a resource of the skill it sits inside.
     write_file_at(work / ".agentty/skills/host/SKILL.md",
         "---\nname: host\ndescription: holds a nested skill\n---\nHOST BODY\n");
