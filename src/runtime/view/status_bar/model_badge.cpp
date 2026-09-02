@@ -97,9 +97,13 @@ maya::Element model_badge_config(const Model& m) {
         update_chip = text("  \xe2\xac\x86 v" + m.s.update_latest,
                            fg_of(maya::Color::green()));
 
-    // The chip's fill already carries a trailing space, so it IS the gap —
-    // adding a separator on top of it reads as a double space.
+    // One UNFILLED space between the chip and the model. The chip's own
+    // trailing space is background-filled, so it reads as part of the chip
+    // (its right padding), not as separation — dropping this separator left
+    // the two words visually touching. The gap has to be outside the fill to
+    // be a gap.
     return h(text(" " + prov + " ", prov_style),
+             text(" "),
              mb.build(),
              std::move(effort_chip),
              std::move(update_chip)).build();
