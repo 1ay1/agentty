@@ -1008,12 +1008,57 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
                     pid = ppid;
                 }
 #endif
+                // Ancestry misses the common persistent-tmux topology:
+                // when the tmux SERVER is started by systemd (or an older
+                // login) the mosh client attaches to it later, so
+                // mosh-server is a sibling of the server, never an ancestor
+                // of us. Ask tmux who is attached and walk THAT process
+                // instead — otherwise a genuine mosh session is diagnosed
+                // with the tmux wording and the user chases a tmux config
+                // that was never the problem.
+#if defined(__linux__)
+                if (maya::tmux::active()) {
+                    if (const int cpid = maya::tmux::client_pid(); cpid > 1) {
+                        int p = cpid;
+                        for (int hop = 0; hop < 12 && p > 1; ++hop) {
+                            std::string base = "/proc/" + std::to_string(p);
+                            if (std::ifstream comm(base + "/comm"); comm) {
+                                std::string name;
+                                std::getline(comm, name);
+                                if (name.find("mosh-server") != std::string::npos)
+                                    return true;
+                            }
+                            std::ifstream stat(base + "/stat");
+                            if (!stat) break;
+                            std::string line;
+                            std::getline(stat, line);
+                            auto rp = line.rfind(')');
+                            if (rp == std::string::npos) break;
+                            std::istringstream tail(line.substr(rp + 2));
+                            char st; int pp = 0;
+                            tail >> st >> pp;
+                            if (pp <= 1) break;
+                            p = pp;
+                        }
+                    }
+                }
+#endif
                 return false;
             }();
             // Single source of truth for tmux presence: maya::tmux owns
             // both topologies ($TMUX here, or a tmux-*/screen-* TERM that
             // survived ssh) plus the passthrough/feature probes below.
             const bool in_tmux = maya::tmux::active();
+            // The capability answers below come from a probe maya memoises
+            // for the whole process. tmux capabilities are per-CLIENT, so
+            // detaching a desktop kitty and reattaching from a phone (or
+            // simply fixing tmux.conf and reattaching) leaves the cached
+            // verdict describing a terminal that is no longer there — the
+            // failure then repeats forever and no amount of correct config
+            // clears it. A clipboard read has just FAILED, which is exactly
+            // the moment a stale verdict is worth one ~8 ms round-trip to
+            // re-check. Only re-probes when the attached client changed.
+            if (in_tmux) (void)maya::tmux::refresh_if_client_changed();
             const bool in_ssh  = std::getenv("SSH_CONNECTION") != nullptr
                               || std::getenv("SSH_TTY") != nullptr;
             std::string msg;
