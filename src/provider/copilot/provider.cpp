@@ -138,10 +138,6 @@ std::set<std::string>& responses_only_set() {
     static std::set<std::string> s;
     return s;
 }
-void note_responses_only(const std::string& model) {
-    std::scoped_lock lk(responses_only_mu());
-    responses_only_set().insert(model);
-}
 [[nodiscard]] bool is_responses_only(const std::string& model) {
     std::scoped_lock lk(responses_only_mu());
     return responses_only_set().count(model) > 0;

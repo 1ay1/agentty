@@ -3,7 +3,6 @@
 // terminal); cli() is the argv shell over them.
 
 #include "agentty/tool/plugin.hpp"
-#include "agentty/util/home_dir.hpp"
 #include "agentty/util/user_root.hpp"
 
 #include "agentty/scope/scope.hpp"
@@ -58,10 +57,6 @@ namespace {
     if (!entry.is_object()) return false;
     auto it = entry.find("disabled");
     return it != entry.end() && it->is_boolean() && it->get<bool>();
-}
-
-[[nodiscard]] fs::path home_dir() {
-    return agentty::util::home_dir_or_empty();
 }
 
 // Read + parse the file. Distinguishes "absent" (fresh empty doc, ok=true)

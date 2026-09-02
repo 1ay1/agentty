@@ -15,7 +15,6 @@
 //     {path: hash} store is migrated transparently on first read.
 
 #include "agentty/tool/hooks.hpp"
-#include "agentty/util/home_dir.hpp"
 #include "agentty/util/user_root.hpp"
 
 #include "agentty/auth/auth.hpp"            // auth::sha256_hex (file-content hash)
@@ -75,10 +74,6 @@ struct HooksFile {
     std::vector<HookEntry> post_tool;
     bool                   ok = false;
 };
-
-[[nodiscard]] fs::path home_dir() {
-    return agentty::util::home_dir_or_empty();
-}
 
 [[nodiscard]] bool hooks_disabled() {
     const char* off = std::getenv("AGENTTY_NO_HOOKS");

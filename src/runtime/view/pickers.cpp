@@ -606,16 +606,21 @@ Element fused_picker(const Model& m) {
     // Footer hints follow the mode: in slot-assign Enter PINS a role and Esc
     // goes BACK to Smart Mode, so promising "switch"/"close" would misstate
     // what the keys do. ^/ and ^Tab are switch-only affordances.
-    cfg.footer.push_back(slot >= 0
-        ? key_hints({
+    // The ternary `slot >= 0 ? key_hints({...}) : key_hints({...})` made GCC's
+    // -Wdangling-pointer fire (a braced vector<Hint> temp lifetimes to the full
+    // expression). Resolve the mode into explicit push_back branches instead,
+    // which matches the surrounding footer style and dodges the temp entirely.
+    if (slot >= 0)
+        cfg.footer.push_back(key_hints({
             {"\xe2\x86\x91\xe2\x86\x93", "move", 5},
             {"1-9", "jump", 3},
             {"Enter", "pin to role", 5},
             {"^F", "favorite", 1},
             {"^L", "refresh", 2},
             {"Esc", "back", 4},
-          })
-        : key_hints({
+          }));
+    else
+        cfg.footer.push_back(key_hints({
             {"\xe2\x86\x91\xe2\x86\x93", "move", 5},
             {"1-9", "jump", 3},
             {"Enter", "switch", 5},
