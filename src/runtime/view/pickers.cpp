@@ -606,10 +606,16 @@ Element fused_picker(const Model& m) {
     // Footer hints follow the mode: in slot-assign Enter PINS a role and Esc
     // goes BACK to Smart Mode, so promising "switch"/"close" would misstate
     // what the keys do. ^/ and ^Tab are switch-only affordances.
-    // The ternary `slot >= 0 ? key_hints({...}) : key_hints({...})` made GCC's
-    // -Wdangling-pointer fire (a braced vector<Hint> temp lifetimes to the full
-    // expression). Resolve the mode into explicit push_back branches instead,
-    // which matches the surrounding footer style and dodges the temp entirely.
+    // Written as two branches rather than one `slot >= 0 ? key_hints({...})
+    // : key_hints({...})` ternary, which made GCC's -Wdangling-pointer fire.
+    // That warning is a FALSE POSITIVE, not a lifetime bug worth preserving:
+    // key_hints takes its vector BY VALUE and moves it into the component's
+    // capture, so the braced temp is consumed before the full expression
+    // ends and nothing outlives it. GCC just loses track of the temp's
+    // ownership across the two ternary arms. The branches are equivalent
+    // code, read better, and match the surrounding footer style — so this is
+    // a quieting rewrite, not a fix. Restoring the ternary would be correct
+    // C++ and would only bring the noise back.
     if (slot >= 0)
         cfg.footer.push_back(key_hints({
             {"\xe2\x86\x91\xe2\x86\x93", "move", 5},
