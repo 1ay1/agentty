@@ -319,6 +319,11 @@ Element fused_picker(const Model& m) {
           + (slot == 0 ? "Strategic" : slot == 1 ? "Implementation" : "Utility")
           + " model ";
     cfg.accent   = accent;
+    // The active-row edge bar shares the picker's accent, so "you are here"
+    // reads as one visual language with the title and query caret instead of
+    // introducing a third hue. The cursor bar (bright cyan) still wins on
+    // overlap, which is correct — where you ARE outranks where you were.
+    cfg.active_color = accent;
     cfg.viewport_h = picker_viewport_h();
     cfg.scroll     = &m.ui.fused_picker_scroll;
 
@@ -335,33 +340,6 @@ Element fused_picker(const Model& m) {
                 query_caret(accent)
               ).build());
     cfg.header.push_back(sep);   // rule under the filter (matches the other pickers)
-
-    // ── "You are here" ────────────────────────────────────────
-    //
-    // The `●` marker on the active ROW is the only statement of what you are
-    // currently on — and in a several-hundred-model list it is usually
-    // scrolled off-screen, or filtered out entirely by a query that doesn't
-    // match it. "Which model am I on?" is then unanswerable from the very
-    // surface whose job is switching models.
-    //
-    // State it once, up top, where it cannot scroll away: provider · model.
-    // Both halves matter and neither alone is enough — the same model id is
-    // served by several providers, and one provider serves many models.
-    // Skipped in slot-assign mode, where "active" means the chat model and
-    // would misdescribe what this pick does.
-    if (slot < 0 && !m.d.model_id.empty()) {
-        // provider_display_name is the SSOT for a provider's human label — the
-        // same source the fused rows' badge column uses — so this line and the
-        // list below can never disagree about what a provider is called.
-        const std::string prov = provider::provider_display_name(provider::active());
-        cfg.header.push_back(
-            h(text("  \xe2\x97\x8f ", fg_of(accent)),                 // ●
-              text(prov.empty() ? std::string{} : prov + " \xc2\xb7 ",  // ·
-                   fg_dim(muted)),
-              text(model_display_label(m.d.model_id.value, {}), fg_of(fg))
-            ).build());
-        cfg.header.push_back(sep);
-    }
 
     // Lazy-load hint: while any provider's catalog is still streaming in,
     // show a dim spinner-ish note so the (initially active-provider-only)
@@ -529,25 +507,32 @@ Element fused_picker(const Model& m) {
         row.badge_style   = fg_dim(
             active ? accent
                    : tier_hue(static_cast<ModelCapabilities::Tier>(r.tier)));
-        row.leading       = (active ? std::string{"\xe2\x97\x8f "}   // ●
-                                    : std::string{"  "})
-                          + r.model_label;
+        row.leading       = "  " + r.model_label;
+        // The ACTIVE row is marked by maya's native edge bar (a coloured `▎`
+        // in column 0, `active_color`) rather than a `● ` text prefix. Two
+        // reasons: the bar costs no name width — it lives in chrome the
+        // widget already reserves for the cursor — and it keeps every model
+        // name starting at the SAME column, so the list scans vertically.
+        // A text prefix indented exactly one row out of alignment.
+        row.active        = active;
         // The model NAME is the primary content — the thing you are choosing
         // between — so it renders at full foreground. It used to be `muted` for
         // every non-active row, which dimmed the entire list to make ONE row
         // stand out; that inverted the hierarchy (reference chips out-shouted
         // the names) and made a long list read as uniformly unavailable. The
-        // active row keeps bold + the ● marker, which is enough to find it.
+        // active row keeps bold plus the edge bar, which is enough to find it.
         row.leading_style = active ? fg_bold(fg) : fg_of(fg);
         // fzf-style match highlight: paint the query's matched chars in the
         // name so a big filtered list shows WHY each row is here. Use the same
         // `highlight` theme hue as the classic model picker (not `info`) so
         // the two pickers read identically. match_positions are offsets into
-        // the NAME; shift them past the "● " (4 bytes) / "  " (2 bytes) prefix.
+        // the NAME; shift them past the uniform two-space indent. (This used
+        // to branch on `active`, which carried a wider "● " prefix — the
+        // edge bar replaced it, so every row now has the same offset.)
         if (!r.match_positions.empty()) {
-            const int prefix = active ? 4 : 2;
+            constexpr int kPrefix = 2;
             row.highlight.reserve(r.match_positions.size());
-            for (int p : r.match_positions) row.highlight.push_back(prefix + p);
+            for (int p : r.match_positions) row.highlight.push_back(kPrefix + p);
             row.highlight_fg = highlight;   // same hue as the other pickers
         }
         // Trailing cell: context window, then the two marks. RIGHT-ALIGNED as
