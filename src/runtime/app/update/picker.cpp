@@ -620,8 +620,7 @@ void refresh_fused_sources(Model& m) {
         if (id == active_pid && !m.d.available_models.empty()) {
             if (c->models != m.d.available_models) {
                 c->models = m.d.available_models;
-                c->search_keys.clear();     // model set changed — keys stale
-                c->reason_flags.clear();    // …and the memoised chips with them
+                c->invalidate_derived();    // model set changed — all caches stale
             }
             c->state = ProviderCatalog::State::Ready;
         }
@@ -1013,8 +1012,7 @@ Step fused_picker_update(Model m, msg::FusedPickerMsg pm) {
                 if (c.provider_id != e.provider_id) continue;
                 if (e.ok && !e.models.empty()) {
                     c.models = std::move(e.models);
-                    c.search_keys.clear();   // stale — rebuilt on next filter
-                    c.reason_flags.clear();  // ids changed — flags stale too
+                    c.invalidate_derived();  // ids changed — all caches stale
                     c.state  = ProviderCatalog::State::Ready;
                     c.loaded_at_ms = now_ms();   // mark fresh
                 } else {

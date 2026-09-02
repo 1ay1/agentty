@@ -126,7 +126,8 @@ struct AgenttyApp {
         // invisibly (no repaint), and one hashed but not advanced burns
         // renders for an unchanged glyph. Both cases are live: streaming
         // turns AND the fused picker waiting on provider catalogs.
-        if (m.s.active() || m.s.models_loading) {
+        if (m.s.active() || m.s.models_loading
+            || m.d.any_catalog_loading()) {
             mix(static_cast<std::uint64_t>(m.s.spinner.frame_index() % 10));
         }
 

@@ -348,7 +348,8 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             // hang — precisely wrong for the slow-backend case it exists to
             // explain (Ollama / a custom host can take seconds). Gating the
             // advance on `active()` alone froze it there.
-            if (m.s.active() || m.s.models_loading) m.s.spinner.advance(dt);
+            if (m.s.active() || m.s.models_loading || m.d.any_catalog_loading())
+                m.s.spinner.advance(dt);
 
             // Glide the BIG tok/s readout. Retarget the smoothing spring at
             // the same raw instantaneous rate the status bar would show, then

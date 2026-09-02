@@ -211,6 +211,21 @@ struct Model {
         // run, mirroring Zed's per-session allow-list. Cleared on
         // profile change so tightening the profile re-arms prompts.
         std::set<std::string>            session_grants;
+
+        // Is ANY provider catalog still being fetched?
+        //
+        // THE predicate for "the fused picker's list is still filling in".
+        // Distinct from Session::models_loading, which covers only the
+        // ACTIVE provider's fetch (provider switch / startup) — the picker
+        // fans out to every authed provider and tracks each one's state
+        // here. Using the wrong one is how the picker's "loading …" spinner
+        // ended up gated on a flag the picker never sets: it advanced during
+        // provider switches and stayed frozen in the one place it exists for.
+        [[nodiscard]] bool any_catalog_loading() const noexcept {
+            for (const auto& c : provider_catalogs)
+                if (c.state == ProviderCatalog::State::Loading) return true;
+            return false;
+        }
     };
 
     struct UI {

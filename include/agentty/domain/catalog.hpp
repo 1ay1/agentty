@@ -98,6 +98,20 @@ struct ProviderCatalog {
     // Value of caps_epoch() when reason_flags was built; a mismatch means a
     // capability registry changed underneath us → rebuild the flags.
     std::uint64_t reason_epoch = 0;
+
+    // Drop every derived cache. Call this at EVERY site that replaces
+    // `models` — there are three, and they each used to hand-clear the
+    // caches they happened to remember, which is how a cache added later
+    // silently kept serving stale rows after a same-SIZE model swap (the
+    // size guard in rebuild_fused_rows only catches length changes).
+    // One method, so adding a cache updates every invalidation site at once.
+    void invalidate_derived() noexcept {
+        search_keys.clear();
+        row_keys.clear();
+        display_labels.clear();
+        reason_flags.clear();
+        reason_epoch = 0;
+    }
 };
 
 // A provider the user is NOT signed into — rendered as a single "sign in to

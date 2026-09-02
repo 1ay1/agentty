@@ -431,3 +431,36 @@ TEST_CASE("visual hash: an idle picker with no load does NOT animate") {
     m.s.spinner.advance(0.5f);
     CHECK(agentty::app::AgenttyApp::visual_hash(m) == h0);
 }
+
+TEST_CASE("visual hash: spinner animates while a PICKER catalog loads") {
+    // The picker fans out to every authed provider and tracks each fetch on
+    // ProviderCatalog::state — it never sets Session::models_loading (that
+    // covers the ACTIVE provider only: provider switch / startup). Gating
+    // the spinner on the wrong flag left it frozen in the one surface it
+    // exists for, which reads as a hang.
+    Model m;
+    REQUIRE(!m.s.active());
+    REQUIRE(!m.s.models_loading);
+    agentty::ProviderCatalog c;
+    c.provider_id = "openai";
+    c.state = agentty::ProviderCatalog::State::Loading;
+    m.d.provider_catalogs.push_back(std::move(c));
+    REQUIRE(m.d.any_catalog_loading());
+
+    const auto h0 = agentty::app::AgenttyApp::visual_hash(m);
+    m.s.spinner.advance(0.5f);
+    CHECK(agentty::app::AgenttyApp::visual_hash(m) != h0);
+}
+
+TEST_CASE("visual hash: a READY catalog does not animate") {
+    Model m;
+    agentty::ProviderCatalog c;
+    c.provider_id = "openai";
+    c.state = agentty::ProviderCatalog::State::Ready;
+    m.d.provider_catalogs.push_back(std::move(c));
+    REQUIRE(!m.d.any_catalog_loading());
+
+    const auto h0 = agentty::app::AgenttyApp::visual_hash(m);
+    m.s.spinner.advance(0.5f);
+    CHECK(agentty::app::AgenttyApp::visual_hash(m) == h0);
+}
