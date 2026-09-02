@@ -28,9 +28,15 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <thread>
+
+#include <unistd.h>   // chdir, getpid
+
+namespace fs = std::filesystem;
 
 #include <nlohmann/json.hpp>
 
@@ -147,6 +153,22 @@ bool req_has_nudge(const provider::Request& req) {
 
 int main() {
     tools::wire_mcp_runtime("off");   // no bwrap wrapping — CI portability
+    // Run from an EMPTY temp directory. This test drives the REAL subagent
+    // runner, which executes REAL grep tool calls — each one spawns ripgrep
+    // against the tool's workspace root (the process cwd). Left in the source
+    // tree, every one of the dozens of greps across all scenarios scans the
+    // whole 14 GB working tree; solo that is ~60 s, and under `ctest -j` it
+    // blew past the 60 s timeout and looked like a hang. The greps are
+    // deliberately no-match probes ("zzz_no_match_expected"), so an empty
+    // cwd tests the same report-extraction contract while each rg returns
+    // in microseconds — fast AND independent of where the suite is run.
+    {
+        std::error_code ec;
+        const auto dir = fs::temp_directory_path(ec)
+            / ("agentty-subagent-test-" + std::to_string(::getpid()));
+        fs::create_directories(dir, ec);
+        if (!ec) (void)!chdir(dir.c_str());
+    }
     // Select a non-Anthropic provider: the runner only calls the disk-reading
     // fresh_auth_header() when active().kind == Anthropic. The OpenAI-family
     // kind (covers Ollama/OpenAI-compat) uses cfg.auth verbatim, and our

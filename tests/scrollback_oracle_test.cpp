@@ -41,6 +41,7 @@
 
 #include <maya/app/app.hpp>
 #include <maya/core/anim_clock.hpp>
+#include <maya/terminal/tmux.hpp>   // reset_cache_for_test + FAKE probe seam
 
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/runtime/model.hpp"
@@ -1321,6 +1322,23 @@ int main() {
     // [transcript] checks remain the ground truth for real corruption.
     // Same precedent as scrollback_prefix_harness.cpp.
     setenv("MAYA_NO_GATE_ABORT", "1", 1);
+    // Neutralize tmux. Since a2b858f8 the composer's hardware-caret gate
+    // asks maya::tmux::active() instead of reading $TMUX inline — and
+    // active() consults a one-shot probe of the REAL tmux server. So when
+    // this suite is run FROM INSIDE tmux (a very normal dev setup), the
+    // composer takes its under-tmux render path: it paints a second,
+    // settling composer band during a reveal, which the emulator diffs as
+    // "composer chrome twice". CI and a bare-terminal dev run never saw it
+    // because $TMUX was unset there. The oracle must exercise ONE render
+    // path regardless of the host, so pin the tmux-free one: clear $TMUX
+    // and force maya's probe to answer from env (never spawning tmux) with
+    // an empty feature set. Then reset the cached probe so the override
+    // takes effect before the first frame.
+    unsetenv("TMUX");
+    setenv("MAYA_TMUX_FAKE", "1", 1);
+    unsetenv("MAYA_TMUX_FEATURES");
+    unsetenv("MAYA_TMUX_PASSTHROUGH");
+    maya::tmux::reset_cache_for_test();
     setlocale(LC_ALL, "C.UTF-8");   // wcwidth needs a UTF-8 locale
     err = fdopen(dup(STDERR_FILENO), "w");
     const int shapes[][2] = {{80, 30}, {60, 18}, {100, 50}, {46, 76}};
