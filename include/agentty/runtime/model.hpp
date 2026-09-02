@@ -247,6 +247,10 @@ struct Model {
         // timeout, and rapid re-triggers can't fire stale toasts.
         std::uint64_t       clipboard_query_seq  = 0;
         std::uint64_t       clipboard_query_done = 0;
+        // maya::clipboard_rx_bytes() sampled when the query was armed. The
+        // timeout compares against it to tell a silent terminal from one
+        // whose (large, image) reply is still streaming in.
+        std::uint64_t       clipboard_rx_mark    = 0;
         // True when the in-flight query was raised by an IMAGE-paste intent
         // (Ctrl+V / Alt+V on a clipboard we could not read locally), as
         // opposed to an ordinary text paste. Set alongside the seq bump.

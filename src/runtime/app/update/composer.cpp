@@ -448,11 +448,28 @@ Step smart_paste_from_clipboard(Model m) {
         // TEXT-only reply can explain itself instead of silently inserting
         // prose where the user expected a screenshot.
         m.ui.clipboard_wanted_image = true;
+        // How long to wait before declaring "the terminal never answered".
+        //
+        // 1.2 s is right for a LOCAL terminal answering a text read: the
+        // reply is a few hundred bytes and comes back in microseconds, so a
+        // longer wait would only delay an honest error. It is far too short
+        // for an IMAGE over ssh: a screenshot is base64 PNG measured in
+        // megabytes, and on a remote link the reply is still streaming when
+        // the timer fires — so the paste that matters most is exactly the
+        // one that always failed. Give a remote session room, and let the
+        // progress check below extend it further while bytes keep landing.
+        const bool remote = std::getenv("SSH_CONNECTION") != nullptr
+                         || std::getenv("SSH_TTY") != nullptr;
+        const auto deadline = std::chrono::milliseconds{remote ? 6000 : 1200};
+        // Snapshot the byte counter so the timeout arm can tell whether the
+        // terminal answered at all.
+        m.ui.clipboard_rx_mark =
+            maya::clipboard_rx_bytes().load(std::memory_order_relaxed);
         return {std::move(m),
                 maya::Cmd<Msg>::batch(
                     maya::Cmd<Msg>::query_clipboard(),
                     std::move(toast),
-                    maya::Cmd<Msg>::after(std::chrono::milliseconds{1200},
+                    maya::Cmd<Msg>::after(deadline,
                                           Msg{ClipboardQueryTimeout{seq}}))};
     }
 }
@@ -971,6 +988,25 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             if (e.seq != m.ui.clipboard_query_seq
                 || m.ui.clipboard_query_done >= e.seq)
                 return done(std::move(m));
+            // The terminal may be ANSWERING, just not finished: an image
+            // reply is megabytes of base64 and streams in over seconds on a
+            // remote link. Diagnosing "no answer" while bytes are actively
+            // landing is how a large screenshot became impossible to paste.
+            // If the counter moved since we armed, re-arm on the new mark
+            // and let it finish; only genuine silence reaches the diagnosis
+            // below. Bounded by the transfer itself — when the bytes stop,
+            // the next timeout sees no movement and reports honestly.
+            {
+                const std::uint64_t now =
+                    maya::clipboard_rx_bytes().load(std::memory_order_relaxed);
+                if (now != m.ui.clipboard_rx_mark) {
+                    m.ui.clipboard_rx_mark = now;
+                    const auto again = std::chrono::milliseconds{1500};
+                    return {std::move(m),
+                            maya::Cmd<Msg>::after(again,
+                                Msg{ClipboardQueryTimeout{e.seq}})};
+                }
+            }
             // This query is dead. Clear the image-intent latch so it cannot
             // leak into an unrelated later paste and mislabel it.
             m.ui.clipboard_wanted_image = false;
