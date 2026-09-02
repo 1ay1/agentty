@@ -67,18 +67,16 @@ maya::Element model_badge_config(const Model& m) {
     // ride a compact "· ◇high" so the current effort is visible at a glance
     // without opening the picker — the same tier you set there (←/→). Uses
     // resolved_caps so it never shows on a model that can't take effort (or
-    // where a stale pick would be dropped at send time).
+    // where a stale pick would be dropped at send time). An empty Element
+    // when absent, so it composes without a presence flag.
     Element effort_chip = text("");
-    bool has_effort_chip = false;
     if (m.d.effort != Effort::None && !model.empty()) {
         const auto caps = resolved_caps(model);
-        if (effort_capable(caps)) {
+        if (effort_capable(caps))
             effort_chip = h(text(" \xc2\xb7 ", fg_dim(muted)),
                             text("\xe2\x97\x87" +
                                  std::string{effort_label(m.d.effort)},
                                  fg_dim(muted))).build();
-            has_effort_chip = true;
-        }
     }
 
     if (model.empty() || name.name.empty()) {
@@ -99,8 +97,9 @@ maya::Element model_badge_config(const Model& m) {
         update_chip = text("  \xe2\xac\x86 v" + m.s.update_latest,
                            fg_of(maya::Color::green()));
 
+    // The chip's fill already carries a trailing space, so it IS the gap —
+    // adding a separator on top of it reads as a double space.
     return h(text(" " + prov + " ", prov_style),
-             text(" "),
              mb.build(),
              std::move(effort_chip),
              std::move(update_chip)).build();
