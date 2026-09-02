@@ -67,33 +67,42 @@ namespace agentty::ui {
 // required and "234ms" / "4.2s" reads better than padded forms.
 [[nodiscard]] std::string format_duration_compact(float secs);
 
-// Normalize an arbitrary model id (Ollama / OpenAI-compat / OpenRouter /
-// Gemini / xAI / local …) into a short, human turn-header label:
+// Normalize an arbitrary model id into a short, human label.
+//
+// THIN DELEGATE over the domain SSOT — `model_name::decode(id).full()`.
+// Kept as a named helper because it is the vocabulary the view layer reads
+// in, but it holds no logic of its own: the family table, the version
+// extraction, the date/`:latest`/`[1m]` handling and the colour policy all
+// live in `domain/model_name.hpp`, proven there and shared with the turn
+// header, the status chip and the welcome screen. Do NOT add a special case
+// here — add it to the decoder, where every surface gets it.
+//
 //   codellama:latest        → "Codellama"
 //   qwen2.5-coder:7b        → "Qwen2.5 Coder 7b"
 //   openai/gpt-4o-mini      → "GPT 4o Mini"
-//   claude-sonnet-4-5[1m]   → "Claude Sonnet 4 5"
-// Strips the provider namespace, a `:latest` tag, and the agentty `[1m]`
-// extended-context marker; title-cases word-by-word while preserving
-// all-caps acronyms (GPT/GLM/SQL) and version/size runs (4o, 2.5, 8x7b).
+//   claude-sonnet-4-5[1m]   → "Sonnet 4.5 · 1M"
+//
+// Note the last line: the model name carries NO vendor prefix ("Claude") and
+// the `[1m]` marker becomes a visible annotation instead of being silently
+// dropped. Provider identity is rendered once, from the registry row, by the
+// provider chip — see model_name.hpp on why vendor and provider are
+// independent axes that must not be conflated.
 [[nodiscard]] std::string pretty_model_label(std::string_view model_id);
 
 // THE canonical human label for a model row — used by the per-provider
-// picker, the fused "all providers" picker, AND their fuzzy-match
-// anchor, so what you SEE is what gets matched and highlighted, and
-// every provider renders identically in both views.
+// picker, the fused "all providers" picker, AND their fuzzy-match anchor, so
+// what you SEE is what gets matched and highlighted, and every provider
+// renders identically in both views.
 //
-// The two label sources are provably inconsistent: `id` is structured
-// and uniform ("gpt-5.3-chat-latest"), but the server `display_name`
-// ranges from clean ("Claude Sonnet 4.5") through raw-cased
-// ("Hy-MT2-30B-A3B", "gpt-image-1.5") to cruft-bearing ("GPT-5.3 Chat
-// (latest)") — and is sometimes a marketing alias unrelated to the id
-// ("Nano Banana Pro"). Rather than trust either blindly, this NORMALIZES
-// whichever source through pretty_model_label so both an id and its
-// server name collapse to the same tidy form. A server name is used
-// only when it carries real signal pretty(id) can't reconstruct (a
-// marketing name whose letters aren't a case-folded rearrangement of
-// the id); otherwise the id-derived label wins for consistency.
+// Also a thin delegate: `model_name::decode(id, display_name).full()`.
+//
+// The two label sources are provably inconsistent: `id` is structured and
+// uniform ("gpt-5.3-chat-latest"), but the server `display_name` ranges from
+// clean ("Claude Sonnet 4.5") through raw-cased ("Hy-MT2-30B-A3B",
+// "gpt-image-1.5") to cruft-bearing ("GPT-5.3 Chat (latest)") — and is
+// sometimes a marketing alias unrelated to the id ("Nano Banana Pro"). The
+// decoder normalizes whichever source it trusts, preferring the id-derived
+// form unless the server name carries signal the id cannot reconstruct.
 [[nodiscard]] std::string model_display_label(std::string_view id,
                                               std::string_view display_name);
 

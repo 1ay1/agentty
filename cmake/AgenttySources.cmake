@@ -39,6 +39,7 @@ set(AGENTTY_IO_SOURCES
     src/util/update.cpp
     src/util/modelsdev.cpp
     src/domain/complexity.cpp
+    src/domain/model_name.cpp
 )
 
 set(AGENTTY_WORKSPACE_SOURCES

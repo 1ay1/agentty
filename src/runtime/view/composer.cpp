@@ -10,6 +10,8 @@
 #include "agentty/runtime/overlay.hpp"
 #include "agentty/runtime/view/helpers.hpp"
 #include "agentty/runtime/view/palette.hpp"
+#include "agentty/runtime/view/status_bar/model_badge.hpp"
+#include "agentty/provider/selection.hpp"
 #include <maya/core/anim_clock.hpp>
 #include <maya/terminal/tmux.hpp>
 #include <maya/app/app.hpp>   // request_animation_frame_after (typing-window lapse wake)
@@ -164,6 +166,23 @@ maya::Composer::Config composer_config(const Model& m) {
                            .color = profile_color(m.d.profile)};
     cfg.expanded        = m.ui.composer.expanded;
 
+    // Footer-row left slot: the model · provider identity, relocated here
+    // from the status bar. Two reasons it reads better in this seat:
+    //
+    //   • It is a property of the message you are about to SEND, so it
+    //     belongs against the input, not in the turn-status strip that
+    //     churns with phase / throughput / context while streaming.
+    //   • The slot it takes over was spending itself on "↵ send · ⇧↵ /
+    //     ⌥↵ newline" — two keys the user learns once and then never
+    //     needs restated on every frame for the rest of the session.
+    //
+    // Setting a non-empty `status` displaces those hints in the widget;
+    // show_key_hints=false makes that intent explicit so a future empty
+    // badge (unknown model) leaves the slot blank rather than silently
+    // resurrecting the hints.
+    cfg.status          = model_badge_config(m);
+    cfg.show_key_hints  = false;
+
     // ── Ambient counters over the REAL payload ──────────────────────
     //
     // cfg.text is the chip-rendered display string: a long paste or
@@ -302,6 +321,14 @@ maya::Composer::Config composer_config(const Model& m) {
         .add(std::string_view{cfg.profile.label})
         .add(cfg.profile.color)
         .add(static_cast<std::uint64_t>(cfg.expanded ? 1 : 0))
+        // The footer's model · provider chip is an opaque Element to the
+        // cache, so hash the FACTS behind it — otherwise switching model
+        // or provider mid-session produces a composer the gate scores as
+        // visually identical and the chip keeps naming the old model
+        // until some other hashed axis happens to move.
+        .add(std::string_view{m.d.model_id.value})
+        .add(std::string_view{m.s.smart_turn_model})
+        .add(provider::active().provider_id())
         .add(static_cast<std::uint64_t>(cfg.hardware_caret ? 1 : 0))
         .add(static_cast<std::uint64_t>(cfg.min_body_rows))
         .add(static_cast<std::uint64_t>(

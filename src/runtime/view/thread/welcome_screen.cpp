@@ -3,14 +3,18 @@
 #include <maya/core/render_context.hpp>
 #include <maya/widget/model_badge.hpp>
 
+#include "agentty/domain/model_name.hpp"
 #include "agentty/runtime/view/helpers.hpp"
 #include "agentty/runtime/view/palette.hpp"
 
 namespace agentty::ui {
 
 maya::WelcomeScreen::Config welcome_screen_config(const Model& m) {
-    maya::ModelBadge mb{m.d.model_id.value};
-    mb.set_compact(true);
+    // The welcome screen has the whole terminal to itself, so it shows the
+    // richest projection — `full()` keeps the `· 1M` annotation a
+    // width-tight status chip would shed.
+    const auto name = model_name::decode(m.d.model_id.value);
+    maya::ModelBadge mb{{.label = name.full(), .color = name.color}};
 
     maya::WelcomeScreen::Config cfg;
     cfg.sigil_color = role_brand_alt;                   // bright_magenta flagship sigil

@@ -25,6 +25,7 @@
 #include <maya/app/app.hpp>
 
 #include "agentty/domain/catalog.hpp"
+#include "agentty/domain/model_name.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
 #include "agentty/runtime/view/thread/turn/agent_timeline/agent_timeline.hpp"
 #include "agentty/runtime/view/thread/turn/agent_timeline/tool_args.hpp"
@@ -1207,81 +1208,25 @@ SpeakerStyle speaker_style_for(Role role, const Model& m, const Message* msg) {
     const std::string& id = (msg && !msg->served_model.empty())
                                 ? msg->served_model
                                 : m.d.model_id.value;
-    const auto caps = ModelCapabilities::from_id(id);
-    maya::Color c;
-    std::string label;
-    // Model rails use ROLE colors (persistent identity), never status
-    // colors. Opus is the bright-magenta variant so it's visually
-    // distinguishable from the user-turn magenta (same hue family,
-    // different intensity — flagship gets the brighter shade). Haiku
-    // used to render in `success` (green) which collided with the ✓
-    // done icon; bright_cyan keeps the "fast/agile" feel without the
-    // status collision.
-    bool anthropic_known = true;
-    if      (caps.is_opus())   { c = role_brand_alt; label = "Opus";   } // bright_magenta
-    else if (caps.is_sonnet()) { c = role_info;      label = "Sonnet"; } // blue
-    else if (caps.is_haiku())  { c = code_path;      label = "Haiku";  } // bright_cyan
-    else {
-        // Non-Anthropic / local model: derive a short, title-cased name
-        // from the raw id (`codellama:latest` → "Codellama",
-        // `qwen2.5-coder:7b` → "Qwen2.5 Coder 7b"). No date-suffix
-        // version extraction — that's Anthropic-id specific.
-        c = highlight;                            // cyan (fallback)
-        label = pretty_model_label(id);
-        anthropic_known = false;
-    }
-    // Extract a short version run like "4-5" → "4.5" from Anthropic model
-    // ids only. Reject segments longer than 2 digits so date suffixes
-    // (8-digit YYYYMMDD on ids like "claude-sonnet-4-20250514") don't get
-    // displayed as `Sonnet 4.20250514`. Segments are 1–2 digits
-    // joined by `-`/`.`; once a 3-digit run appears we stop the
-    // version at the boundary before it (so `4-5-20250514` → `4.5`,
-    // `4-20250514` → `4` only).
-    for (std::size_t i = 0; anthropic_known && i + 2 < id.size(); ++i) {
-        char ch = id[i];
-        if (ch >= '0' && ch <= '9') {
-            char delim = id[i + 1];
-            if ((delim == '-' || delim == '.') && id[i + 2] >= '0' && id[i + 2] <= '9') {
-                std::size_t cursor = i;
-                std::string ver;
-                // Read 1–2 digits for the first segment.
-                {
-                    std::size_t start = cursor;
-                    while (cursor < id.size() && id[cursor] >= '0' && id[cursor] <= '9'
-                           && (cursor - start) < 2)
-                        ++cursor;
-                    ver.append(id, start, cursor - start);
-                    // If more digits follow than 2, this is a date — bail.
-                    if (cursor < id.size() && id[cursor] >= '0' && id[cursor] <= '9')
-                        goto have_ver;
-                }
-                // Optional further segments, each 1–2 digits.
-                while (cursor + 1 < id.size()
-                       && (id[cursor] == '-' || id[cursor] == '.')
-                       && id[cursor + 1] >= '0' && id[cursor + 1] <= '9')
-                {
-                    std::size_t sep_pos = cursor;
-                    std::size_t start   = cursor + 1;
-                    std::size_t end     = start;
-                    while (end < id.size() && id[end] >= '0' && id[end] <= '9'
-                           && (end - start) < 2)
-                        ++end;
-                    // If more than 2 digits in this segment, it's a date —
-                    // stop BEFORE the separator so the prior version stands.
-                    if (end < id.size() && id[end] >= '0' && id[end] <= '9') break;
-                    ver += '.';
-                    ver.append(id, start, end - start);
-                    cursor = end;
-                    (void)sep_pos;
-                }
-              have_ver:
-                if (!ver.empty())
-                    label += " " + ver;
-                break;
-            }
-        }
-    }
-    SpeakerStyle out{c, "\xe2\x9c\xa6", std::move(label)};           // ✦
+
+    // ONE decode, from the domain SSOT (domain/model_name.hpp). This used to
+    // be an if-chain over is_opus/is_sonnet/is_haiku plus a hand-rolled
+    // goto-based version scanner — roughly 60 lines that duplicated both the
+    // family classifier and the version extractor, and disagreed with the
+    // other copies. Two concrete bugs it carried:
+    //
+    //   • the chain had no is_fable/is_mythos/is_gpt arm, so the 2026
+    //     flagship lane fell through to the "non-Anthropic local model"
+    //     branch and rendered WITH a vendor prefix nothing else used;
+    //   • Haiku's hue here (bright_cyan) disagreed with the badge widget's
+    //     (green), so one model had two identities.
+    //
+    // Both are now structurally impossible: the family table is exhaustive
+    // over the enum and the colour table is proven not to collide with the
+    // status hues. `medium()` — "Opus 4.8" — is the turn-header projection;
+    // the `· 1M` annotation is the picker's business.
+    const auto name = model_name::decode(id);
+    SpeakerStyle out{name.color, "\xe2\x9c\xa6", name.medium()};     // ✦
     if (msg)
         if (auto ra = role_accent_for(msg->served_role)) {
             out.role_label = std::move(ra->label);

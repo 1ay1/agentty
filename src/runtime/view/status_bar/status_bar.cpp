@@ -2,7 +2,6 @@
 
 #include "agentty/runtime/view/status_bar/context_gauge.hpp"
 #include "agentty/runtime/view/helpers.hpp"
-#include "agentty/runtime/view/status_bar/model_badge.hpp"
 #include "agentty/runtime/view/status_bar/phase_chip.hpp"
 #include "agentty/runtime/view/status_bar/status_banner.hpp"
 #include "agentty/runtime/view/status_bar/title_chip.hpp"
@@ -16,7 +15,13 @@ maya::StatusBar::Config status_bar_config(const Model& m) {
     cfg.breadcrumb    = title_chip_config(m);
     cfg.phase         = phase_chip_config(m);
     cfg.token_stream  = token_stream_sparkline_config(m);
-    cfg.model_badge   = model_badge_config(m);
+    // Model · provider moved to the composer's footer row (see
+    // composer.cpp / model_badge.hpp). The status bar describes the
+    // TURN — phase, throughput, context budget; the model describes the
+    // MESSAGE you are about to send, so it belongs by the input. Leaving
+    // the badge slot default-empty makes StatusBar skip it entirely,
+    // which also hands the shed ladder back ~14 columns for the phase
+    // verb and context gauge on narrow terminals.
     cfg.context       = context_gauge_config(m);
     cfg.status_banner = status_banner_config(m);
     // Shortcuts row retired — the welcome screen carries the full
