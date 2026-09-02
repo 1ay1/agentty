@@ -32,6 +32,7 @@
 
 #include <maya/app/app.hpp>
 #include <maya/core/anim_clock.hpp>
+#include <maya/terminal/tmux.hpp>   // reset_cache_for_test — the probe is one-shot
 
 #include "agentty/runtime/app/update.hpp"
 #include "agentty/runtime/msg.hpp"
@@ -258,6 +259,36 @@ int main() {
     setenv("TERM", "xterm-256color", 1);
     setlocale(LC_ALL, "C.UTF-8");
 
+    // tmux presence is toggled through the FAKE probe seam, never by
+    // setting $TMUX alone. Two reasons, both of which bit this test:
+    //
+    //   1. maya's tmux probe is ONE-SHOT and cached per process. Setting
+    //      $TMUX after the first composer_config() call changes nothing,
+    //      because the probe already answered "not in tmux" and froze.
+    //      Every tmux assertion below was silently running tmux-FREE.
+    //   2. Without MAYA_TMUX_FAKE the probe shells out to the developer's
+    //      REAL tmux server, so the result depends on whose machine and
+    //      whose config is loaded — green on a box whose termfeatures
+    //      advertise cstyle, red on a box without a server. A capability
+    //      test must not ask the developer's environment for the answer.
+    //
+    // The feature list mirrors what a modern tmux reports; cstyle is the
+    // one the caret gate actually consults (DECSCUSR shaping).
+    auto set_tmux = [](bool on) {
+        if (on) {
+            setenv("TMUX", "/tmp/tmux-0/default,1,0", 1);
+            setenv("MAYA_TMUX_FAKE", "1", 1);
+            setenv("MAYA_TMUX_FEATURES",
+                   "ccolour,clipboard,cstyle,extkeys,focus,RGB,sync", 1);
+        } else {
+            unsetenv("TMUX");
+            unsetenv("MAYA_TMUX_FAKE");
+            unsetenv("MAYA_TMUX_FEATURES");
+        }
+        maya::tmux::reset_cache_for_test();   // re-probe under the new env
+    };
+    set_tmux(false);
+
     // ── Gate unit-check ─────────────────────────────────────
     // The composer only shows the hardware caret when it is safe. Each
     // gate below fixes a real ghost-cursor report; assert the decision
@@ -274,7 +305,7 @@ int main() {
         g.s.phase = agentty::phase::Idle{};
 
         // Base case (tmux-free, focused, idle): hardware caret ON.
-        unsetenv("TMUX");
+        set_tmux(false);
         if (!agentty::ui::composer_config(g).hardware_caret) {
             std::fprintf(stderr, "FAIL(gate): hardware caret off in the "
                          "safe base case (tmux-free, focused, idle)\n");
@@ -287,13 +318,13 @@ int main() {
         // leaving the common idle state caret-LESS — "tmux doesn't have
         // the hardware caret.") The right-margin park handles the
         // streaming-scroll case; idle no longer pays for it.
-        setenv("TMUX", "/tmp/tmux-0/default,1,0", 1);
+        set_tmux(true);
         if (!agentty::ui::composer_config(g).hardware_caret) {
             std::fprintf(stderr, "FAIL(gate): hardware caret OFF under tmux "
                          "while idle — idle is static, no copy-mode ghost\n");
             return 1;
         }
-        unsetenv("TMUX");
+        set_tmux(false);
         // Unfocused terminal: off (no blinking bar in an inactive pane).
         g.ui.terminal_focused = false;
         if (agentty::ui::composer_config(g).hardware_caret) {
@@ -307,7 +338,7 @@ int main() {
         // thread content — the ghost the right-margin park mitigates but
         // doesn't fully remove while the screen is moving). Verify the
         // gate holds under tmux specifically, not just tmux-free.
-        setenv("TMUX", "/tmp/tmux-0/default,1,0", 1);
+        set_tmux(true);
         g.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
         g.ui.composer.last_edit_ms = maya::anim::default_clock().now_ms();
         maya::testing::advance_anim_clock_ms(10'000);   // 10 s later
@@ -316,11 +347,10 @@ int main() {
                          "streaming with no recent edit (under tmux)\n");
             return 1;
         }
-        unsetenv("TMUX");
+        set_tmux(false);
         // …but a RECENT edit during streaming keeps it on (you're typing
         // a queued message, not scrolled up reading). tmux-free for this
         // one so an outer `env TMUX=…` can't mask it.
-        unsetenv("TMUX");
         g.ui.composer.last_edit_ms = maya::anim::default_clock().now_ms();
         maya::testing::advance_anim_clock_ms(500);      // 0.5 s later
         if (!agentty::ui::composer_config(g).hardware_caret) {
