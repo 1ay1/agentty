@@ -214,6 +214,7 @@ find_catalog(const std::vector<ProviderCatalog>& cats, std::string_view pid) {
             resolved_caps(mi->id.value, r.provider_id));
         row.tier        = static_cast<std::uint8_t>(
             ModelCapabilities::tier_for(mi->id.value));
+        row.tool_capable  = mi->supports_tools.value_or(true);
         row.match_positions = name_positions(row.model_label);
         out.push_back(std::move(row));
         seen.insert(seen_key(r.provider_id, capkey::norm_row_id(r.model_id)));
@@ -340,6 +341,7 @@ find_catalog(const std::vector<ProviderCatalog>& cats, std::string_view pid) {
             const int tier = static_cast<int>(
                 ModelCapabilities::tier_for(mi.id.value));
             row.tier = static_cast<std::uint8_t>(tier);
+            row.tool_capable  = mi.supports_tools.value_or(true);
             // Register AFTER the query gate: a filtered-out twin must not
             // suppress its matching sibling.
             seen.insert(seen_key(c.provider_id, folded));

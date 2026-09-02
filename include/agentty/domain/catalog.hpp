@@ -138,6 +138,21 @@ struct FusedRow {
     // Tier::Weak..Flagship.
     std::uint8_t tier = 0;
                                           // caps per row per frame)
+    // FALSE only when the provider positively reported that this model cannot
+    // call tools (Ollama's /api/show probe). Such a model cannot drive the
+    // agent at all — it can only chat — so the picker must say so BEFORE the
+    // pick, not leave the user wondering why nothing happens. Unknown (the
+    // common case: hosted providers don't advertise this) stays true.
+    //
+    // Deliberately NOT here: the account. A model is identified by
+    // (provider, model) — the account is which credential that provider is
+    // currently using, orthogonal to model choice and switchable underneath
+    // a fixed selection. Putting it on a model row would imply picking a
+    // model picks an account (it does not: switch_to_model_ref resolves the
+    // provider's ACTIVE credential) and would repeat one provider-level fact
+    // on every one of its rows. Account lives on the provider/account picker
+    // and the status bar, where it is actionable.
+    bool tool_capable = true;
     // Fuzzy-match byte offsets into the model NAME (display_name, else id) for
     // the current query — the chars the view highlights (fzf-style) so a big
     // filtered list shows WHY each row matched. Empty when no query / matched

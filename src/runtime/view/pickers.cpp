@@ -550,6 +550,15 @@ Element fused_picker(const Model& m) {
         // that can think, so "which of these reason" is legible across
         // providers.
         trailing += r.reasons ? " \xe2\x9c\xa6" : "  ";               // ✦
+        // NO-TOOLS warning. A model whose provider positively reported it
+        // cannot call tools (Ollama /api/show) cannot drive the agent at
+        // all — picking it yields a model that only chats, with no visible
+        // reason. This is a MODEL fact (unlike the account, which belongs to
+        // the provider), so it belongs on the row: the picker must say it
+        // BEFORE the pick, not leave the user debugging silence afterwards.
+        // Occupies the same 2-column cell as the reasoning chip's blank, so
+        // the chip grid stays aligned.
+        if (!r.tool_capable) trailing += " \xe2\x8a\x98";             // ⊘
         row.trailing       = std::move(trailing);
         // Dim by default: the trailing cell is REFERENCE data, not the thing
         // you are choosing between. It used to share the composer's warm
