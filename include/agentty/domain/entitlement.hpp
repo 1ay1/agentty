@@ -1,6 +1,11 @@
 #pragma once
 // agentty::domain::entitlement — ACCOUNT-scoped facts, keyed properly.
 //
+// THEORY: docs/IDENTITY_CAPABILITY_ENTITLEMENT.md explains the three-layer
+// split this header implements, the failure mode it retires (a manual reset
+// hook compensating for a missing key axis), and how to decide which layer a
+// new fact belongs to. Read that first if you are adding a Fact.
+//
 // ── The layering this header exists to make explicit ─────────────────────
 //
 // agentty separates three things that are easy to conflate:

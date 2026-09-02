@@ -7,6 +7,11 @@
 > (the original registry write-up) and §6 of
 > [ARCHITECTURE.md](ARCHITECTURE.md). Where they disagree, the code wins;
 > this doc names the code.
+>
+> For the LAYERING question underneath all of this — why a model is keyed
+> `(provider, model)` and never `(provider, account, model)`, and which
+> facts genuinely do need the account — see
+> [IDENTITY_CAPABILITY_ENTITLEMENT.md](IDENTITY_CAPABILITY_ENTITLEMENT.md).
 
 ---
 

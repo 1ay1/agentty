@@ -114,6 +114,12 @@ as a registry-row field with `static_assert` proofs, model quirks as
 catalog facts, shared wire scaffolding — is its own document:
 [PROVIDER_HETEROGENEITY.md](PROVIDER_HETEROGENEITY.md).
 
+The layering question underneath that — why a model is keyed
+`(provider, model)` while a subscription fact is keyed
+`(provider, account, model)`, and how to tell which layer a new fact
+belongs to — is
+[IDENTITY_CAPABILITY_ENTITLEMENT.md](IDENTITY_CAPABILITY_ENTITLEMENT.md).
+
 The four transports (Anthropic, OpenAI-compat, Ollama-native, ChatGPT/Codex
 Responses) each own their provider-specific streaming/salvage logic, but every
 ingress concern that is genuinely SHARED lives in exactly one place so a fix
