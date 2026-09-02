@@ -1081,7 +1081,7 @@ Sub<Msg> subscribe(const Model& m) {
     // "loading …" spinner actually spins while a slow backend (Ollama, a
     // custom host) is still answering — a frozen glyph is the visual
     // signature of a hang, which is the opposite of what it must convey.
-    if (m.s.active() || m.s.models_loading || m.d.any_catalog_loading()
+    if (m.s.active() || m.s.models_loading || m.loading_spinner_visible()
         || tail_has_live_bytes(m) || m.ui.pending_settle_freeze
         || m.ui.settle_cooldown_ticks > 0
         || m.ui.pending_rehydrate_trim

@@ -445,7 +445,8 @@ TEST_CASE("visual hash: spinner animates while a PICKER catalog loads") {
     c.provider_id = "openai";
     c.state = agentty::ProviderCatalog::State::Loading;
     m.d.provider_catalogs.push_back(std::move(c));
-    REQUIRE(m.d.any_catalog_loading());
+    m.ui.overlay = agentty::ui::overlay::FusedPicker{};
+    REQUIRE(m.loading_spinner_visible());
 
     const auto h0 = agentty::app::AgenttyApp::visual_hash(m);
     m.s.spinner.advance(0.5f);
@@ -458,7 +459,8 @@ TEST_CASE("visual hash: a READY catalog does not animate") {
     c.provider_id = "openai";
     c.state = agentty::ProviderCatalog::State::Ready;
     m.d.provider_catalogs.push_back(std::move(c));
-    REQUIRE(!m.d.any_catalog_loading());
+    m.ui.overlay = agentty::ui::overlay::FusedPicker{};
+    REQUIRE(!m.loading_spinner_visible());
 
     const auto h0 = agentty::app::AgenttyApp::visual_hash(m);
     m.s.spinner.advance(0.5f);

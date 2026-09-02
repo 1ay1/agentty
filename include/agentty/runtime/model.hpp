@@ -477,6 +477,26 @@ struct Model {
     Domain      d;
     StreamState s;
     UI          ui;
+
+    // Is a LOADING SPINNER currently on screen?
+    //
+    // THE gate for the picker's catalog-fetch animation — and the reason it
+    // is a Model-level predicate rather than a Domain one: a spinner is only
+    // worth a 33 ms tick when the surface that draws it is VISIBLE. Keying
+    // on catalog state alone kept the whole event loop waking at frame rate
+    // after the picker closed, which is both wasted work and, worse, latency:
+    // an idle loop that is already inside a timed poll answers the next
+    // keystroke a frame late. (Measured: arrow-key p90 12.7 ms / max 55 ms
+    // during navigation, against a p50 of 0.1 ms.)
+    //
+    // Pairs with Session::active() at every call site — see the THREE gates
+    // that must agree: subscribe.cpp (is a Tick delivered), update/meta.cpp
+    // (does the spinner advance) and app/program.hpp (does the frame change
+    // the visual hash).
+    [[nodiscard]] bool loading_spinner_visible() const noexcept {
+        return ui.overlay.is<ui::overlay::FusedPicker>()
+            && d.any_catalog_loading();
+    }
 };
 
 } // namespace agentty

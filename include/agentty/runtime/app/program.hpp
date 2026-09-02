@@ -127,7 +127,7 @@ struct AgenttyApp {
         // renders for an unchanged glyph. Both cases are live: streaming
         // turns AND the fused picker waiting on provider catalogs.
         if (m.s.active() || m.s.models_loading
-            || m.d.any_catalog_loading()) {
+            || m.loading_spinner_visible()) {
             mix(static_cast<std::uint64_t>(m.s.spinner.frame_index() % 10));
         }
 
