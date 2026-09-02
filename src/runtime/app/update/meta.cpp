@@ -342,7 +342,13 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             float dt = std::chrono::duration<float>(tick_gap).count();
             if (dt < 0.0f)  dt = 0.0f;
             if (dt > 0.25f) dt = 0.25f;   // dropped-frame clamp (250ms)
-            if (m.s.active()) m.s.spinner.advance(dt);
+            // Advance while a turn is streaming OR while the fused picker
+            // is waiting on provider catalogs. The picker's "loading X…"
+            // header used a STATIC glyph, which is the visual signature of a
+            // hang — precisely wrong for the slow-backend case it exists to
+            // explain (Ollama / a custom host can take seconds). Gating the
+            // advance on `active()` alone froze it there.
+            if (m.s.active() || m.s.models_loading) m.s.spinner.advance(dt);
 
             // Glide the BIG tok/s readout. Retarget the smoothing spring at
             // the same raw instantaneous rate the status bar would show, then

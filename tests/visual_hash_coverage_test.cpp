@@ -392,3 +392,42 @@ TEST_CASE("idle settled is stable") {
           "idle settled model produced two different hashes — a time "
           "term is leaking into a regime (c) state (should be none).");
 }
+
+// ── Spinner gates: subscription, advance and hash must agree ────────────
+//
+// A time-based animation in this app passes through THREE independent
+// gates, and all three must name the same condition:
+//
+//   1. subscribe.cpp   — is a Tick even delivered?
+//   2. update/meta.cpp — does the spinner advance on that Tick?
+//   3. program.hpp     — does the new frame change the visual hash
+//                        (i.e. does anything repaint)?
+//
+// Disagreement is SILENT: a frame that advances without being hashed
+// animates invisibly; one hashed without advancing burns renders on an
+// unchanged glyph. The fused picker's "loading …" spinner needs all
+// three while `models_loading` is set — a frozen glyph reads as a hang,
+// which is the exact opposite of what it exists to say.
+TEST_CASE("visual hash: spinner advances the hash while models load") {
+    Model m;
+    REQUIRE(!m.s.active());          // idle: the streaming gate is off
+    m.s.models_loading = true;
+
+    const auto h0 = agentty::app::AgenttyApp::visual_hash(m);
+    m.s.spinner.advance(0.5f);       // enough for a new frame index
+    const auto h1 = agentty::app::AgenttyApp::visual_hash(m);
+    CHECK(h0 != h1);
+}
+
+TEST_CASE("visual hash: an idle picker with no load does NOT animate") {
+    // The complement: without models_loading (and not streaming) the
+    // spinner must stay out of the hash, or an idle agentty repaints
+    // forever for a glyph nobody is looking at.
+    Model m;
+    REQUIRE(!m.s.active());
+    m.s.models_loading = false;
+
+    const auto h0 = agentty::app::AgenttyApp::visual_hash(m);
+    m.s.spinner.advance(0.5f);
+    CHECK(agentty::app::AgenttyApp::visual_hash(m) == h0);
+}

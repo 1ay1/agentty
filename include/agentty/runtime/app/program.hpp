@@ -120,7 +120,13 @@ struct AgenttyApp {
         // Spinner frame bucketed at 10 (its cycle length). Same bucket
         // size the turn-level AgentTimeline cache uses, so a hash
         // advance here corresponds to a new visual.
-        if (m.s.active()) {
+        //
+        // The condition MUST match the advance gate in update/meta.cpp's
+        // Tick arm: a frame that advances but isn't hashed animates
+        // invisibly (no repaint), and one hashed but not advanced burns
+        // renders for an unchanged glyph. Both cases are live: streaming
+        // turns AND the fused picker waiting on provider catalogs.
+        if (m.s.active() || m.s.models_loading) {
             mix(static_cast<std::uint64_t>(m.s.spinner.frame_index() % 10));
         }
 

@@ -360,7 +360,8 @@ Element fused_picker(const Model& m) {
             if (pending.size() > shown)
                 who += " +" + std::to_string(pending.size() - shown);
             cfg.header.push_back(text(
-                "  \xe2\x8b\xaf loading " + who + "\xe2\x80\xa6",
+                "  " + std::string{m.s.spinner.current_frame()}
+                    + " loading " + who + "\xe2\x80\xa6",
                 fg_italic(muted)));
         }
         if (failed > 0)
@@ -390,7 +391,8 @@ Element fused_picker(const Model& m) {
 
         Picker::Config::Row nr;
         if (loading) {
-            nr.leading = "  loading model catalogs\xe2\x80\xa6";
+            nr.leading = "  " + std::string{m.s.spinner.current_frame()}
+                       + " loading model catalogs\xe2\x80\xa6";
         } else if (!any_authed) {
             nr.leading = "  no providers signed in \xc2\xb7 "
                          "^P to add one";

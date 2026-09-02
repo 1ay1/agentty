@@ -1074,7 +1074,15 @@ Sub<Msg> subscribe(const Model& m) {
     auto focus_sub = Sub<Msg>::on_focus(
         [](bool focused) -> Msg { return TerminalFocus{focused}; });
 
-    if (m.s.active() || tail_has_live_bytes(m) || m.ui.pending_settle_freeze
+    // Tick drives every time-based animation. THREE gates must agree on
+    // when it runs, or an animation is silently dead: this subscription,
+    // the spinner advance (update/meta.cpp Tick arm), and the visual hash
+    // (app/program.hpp). `models_loading` is here so the fused picker's
+    // "loading …" spinner actually spins while a slow backend (Ollama, a
+    // custom host) is still answering — a frozen glyph is the visual
+    // signature of a hang, which is the opposite of what it must convey.
+    if (m.s.active() || m.s.models_loading
+        || tail_has_live_bytes(m) || m.ui.pending_settle_freeze
         || m.ui.settle_cooldown_ticks > 0
         || m.ui.pending_rehydrate_trim
         || !detail::live_tail_reveal_settled(m)) {
