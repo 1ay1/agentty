@@ -1271,6 +1271,14 @@ store::Settings load_settings() {
         auto grants = j.value("always_allow_tools", std::vector<std::string>{});
         s.always_allow_tools = std::move(grants);
         s.context_1m_blocked = j.value("context_1m_blocked", false);
+        // ACCOUNT-SCOPED entitlements (see domain/entitlement.hpp). Keys are
+        // opaque strings built by entitlement::key_for; stored as an object
+        // so a hand-edited settings.json stays readable.
+        if (j.contains("entitlements") && j["entitlements"].is_object()) {
+            for (auto& [k, v] : j["entitlements"].items())
+                if (v.is_boolean() && v.get<bool>())
+                    s.entitlements[k] = true;
+        }
         s.show_changes_strip = j.value("show_changes_strip", false);
         s.show_reasoning     = j.value("show_reasoning", false);
         if (j.contains("rag") && j["rag"].is_object()) {
@@ -1362,7 +1370,17 @@ void save_settings(const store::Settings& s) {
     }
     if (!s.always_allow_tools.empty())
         j["always_allow_tools"] = s.always_allow_tools;
-    if (s.context_1m_blocked) j["context_1m_blocked"] = true;
+    // Legacy account-blind flag is READ (for migration, above) but never
+    // written back — the keyed `entitlements` store supersedes it. Dropping
+    // it on the next save is the migration's final step: an older agentty
+    // reading this file simply re-learns the fact on its first 400, which is
+    // exactly the behaviour it had before.
+    if (!s.entitlements.empty()) {
+        json ent = json::object();
+        for (const auto& [k, v] : s.entitlements)
+            if (v) ent[k] = true;
+        if (!ent.empty()) j["entitlements"] = std::move(ent);
+    }
     // Only persisted when turned ON (default is off), keeping fresh configs clean.
     if (s.show_changes_strip) j["show_changes_strip"] = true;
     if (s.show_reasoning)     j["show_reasoning"] = true;

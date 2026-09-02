@@ -14,6 +14,7 @@
 #include <utility>
 
 #include "agentty/runtime/app/cmd_factory.hpp"
+#include "agentty/auth/accounts.hpp"   // entitlement scope: active account label
 #include "agentty/runtime/app/deps.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
 #include "agentty/tool/commands.hpp"
@@ -555,6 +556,47 @@ std::string active_provider_id() {
     if (sel.kind == provider::Kind::ExternalAcp)
         return sel.acp_agent_id;
     return std::string{provider::default_provider_id()};
+}
+
+// ── Entitlement accessors (see internal.hpp / domain/entitlement.hpp) ────
+//
+// (provider, account) is resolved HERE and nowhere else, so a call site
+// cannot key an account-scoped fact by provider alone — the exact defect of
+// the legacy account-blind bool this layer replaces.
+namespace {
+std::pair<std::string, std::string> entitlement_scope(std::string_view provider) {
+    std::string pid = provider.empty() ? active_provider_id()
+                                       : std::string{provider};
+    // The registry's active label for this provider. Empty is legitimate and
+    // means "the only account" — a single-account user keys under "", which
+    // is why this needs no migration for the common case.
+    std::string acct = auth::accounts::active_label(pid);
+    return {std::move(pid), std::move(acct)};
+}
+} // namespace
+
+bool entitlement_blocked(const store::Settings& s,
+                         domain::entitlement::Fact f,
+                         std::string_view model_id,
+                         std::string_view provider) {
+    const auto [pid, acct] = entitlement_scope(provider);
+    return domain::entitlement::blocked(s.entitlements, f, pid, acct, model_id);
+}
+
+bool entitlement_record_blocked(store::Settings& s,
+                                domain::entitlement::Fact f,
+                                std::string_view model_id,
+                                std::string_view provider) {
+    const auto [pid, acct] = entitlement_scope(provider);
+    const bool is_new = domain::entitlement::record_blocked(
+        s.entitlements, f, pid, acct, model_id);
+    if (is_new)
+        AGT_LOG(Model, Info, "entitlement.blocked",
+                "fact={} provider={} account={} model={}",
+                domain::entitlement::tag(f), pid,
+                acct.empty() ? std::string{"(only)"} : acct,
+                model_id.empty() ? std::string_view{"(account-wide)"} : model_id);
+    return is_new;
 }
 
 std::string model_for_provider(std::string_view spec) {

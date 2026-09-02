@@ -1271,7 +1271,9 @@ Step fused_picker_update(Model m, msg::FusedPickerMsg pm) {
                 // tell us (the token carries no entitlement field) — the
                 // flag is learned from the first rejection and cleared on
                 // sign-out/account switch.
-                if (settings.context_1m_blocked
+                if (entitlement_blocked(
+                        settings, domain::entitlement::Fact::Context1M,
+                        wire_model_id(mi.id.value))
                     && mi.id.value.find("[1m]") != std::string::npos)
                     continue;
                 for (const auto& fav : settings.favorite_models)

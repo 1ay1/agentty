@@ -147,9 +147,21 @@ struct Settings {
     // context-1m-2025-08-07 beta (HTTP 400 "long context beta is not yet
     // available for this subscription"). We only learn this by trying — the
     // OAuth token doesn't say. Once set: the catalog stops offering `[1m]`
-    // picker variants and the wire never sends the beta header. Cleared on
-    // sign-out / account switch (the next account may be entitled).
+    // picker variants and the wire never sends the beta header.
+    //
+    // LEGACY — read-only, migration source. Superseded by `entitlements`
+    // below: this bool is account-BLIND, so it had to be manually cleared
+    // on every account switch ("the block was learned FOR the account being
+    // dropped"), which meant ping-ponging between an entitled and an
+    // unentitled account re-discovered the same 400 forever. Loaded once
+    // and folded into the keyed store; never written again.
     bool                 context_1m_blocked = false;
+    // ACCOUNT-SCOPED entitlement facts, keyed
+    // "<fact>\x1f<provider>\x1f<account>[\x1f<folded-model>]" — see
+    // include/agentty/domain/entitlement.hpp for the layering rationale
+    // (identity and capability are account-blind; entitlement is not).
+    // Only negative facts are stored: absent ⇒ not known to be blocked.
+    std::map<std::string, bool> entitlements;
     // User-configured RAG behaviour (the RAG settings picker). Defaults to
     // configured=false ⇒ the adapter keeps its env-derived config.
     RagConfig rag;

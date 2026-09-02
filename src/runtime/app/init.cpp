@@ -52,20 +52,37 @@ std::pair<Model, maya::Cmd<Msg>> init() {
     m.d.available_models = seed_models();
 
     auto settings = deps().load_settings();
+    // ONE-TIME MIGRATION: the legacy account-blind `context_1m_blocked`
+    // bool becomes a keyed fact for the CURRENTLY ACTIVE account. That is
+    // the best available attribution — the bool never recorded whose block
+    // it was, and the active account is who it was last observed under.
+    // Attributing it (rather than dropping it) preserves the user's learned
+    // state across the upgrade; the next save drops the bool for good.
+    if (settings.context_1m_blocked) {
+        settings.context_1m_blocked = false;
+        if (detail::entitlement_record_blocked(
+                settings, domain::entitlement::Fact::Context1M,
+                wire_model_id(settings.model_id.value), "anthropic"))
+            deps().save_settings(settings);
+    }
     // DISCOVERED entitlement: this account 400'd on the context-1m beta in a
     // prior session. Strip the seeded `[1m]` rows up front so the picker
     // doesn't briefly offer them before the first live ModelsLoaded fetch
     // (which also filters) — selecting one would just re-trigger the fallback.
-    if (settings.context_1m_blocked) {
-        std::erase_if(m.d.available_models, [](const ModelInfo& mi) {
-            return mi.id.value.find("[1m]") != std::string::npos;
+    if (!m.d.available_models.empty()) {
+        std::erase_if(m.d.available_models, [&](const ModelInfo& mi) {
+            return mi.id.value.find("[1m]") != std::string::npos
+                && detail::entitlement_blocked(settings,
+                                       domain::entitlement::Fact::Context1M,
+                                       wire_model_id(mi.id.value));
         });
     }
     // DISCOVERED entitlement: this account 400'd on the context-1m beta in a
     // prior session. A persisted `[1m]` model id would re-send the beta on
     // the very first turn and dead-end again — strip the marker up front.
-    if (settings.context_1m_blocked
-        && settings.model_id.value.find("[1m]") != std::string::npos)
+    if (settings.model_id.value.find("[1m]") != std::string::npos
+        && detail::entitlement_blocked(settings, domain::entitlement::Fact::Context1M,
+                               wire_model_id(settings.model_id.value)))
         settings.model_id = ModelId{wire_model_id(settings.model_id.value)};
     if (!settings.model_id.empty()) {
         // Guard against a cross-provider model id collision. A persisted

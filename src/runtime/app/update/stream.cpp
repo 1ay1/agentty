@@ -2067,7 +2067,13 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                 // launch doesn't re-offer what this account can't use.
                 {
                     auto s = deps().load_settings();
-                    s.context_1m_blocked = true;
+                    // Account-scoped: this SUBSCRIPTION isn't entitled. Keyed
+                    // by (provider, account, model) so switching accounts
+                    // neither loses this fact nor applies it to an account
+                    // that may well be entitled.
+                    (void)entitlement_record_blocked(
+                        s, domain::entitlement::Fact::Context1M,
+                        wire_model_id(m.d.model_id.value));
                     s.model_id = m.d.model_id;
                     // Also strip `[1m]` from the per-provider recall so a
                     // later switch away-and-back to this provider doesn't

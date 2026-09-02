@@ -14,6 +14,7 @@
 #include <nlohmann/json_fwd.hpp>  // only json declarations here; full type lives in the .cpp
 
 #include "agentty/runtime/model.hpp"
+#include "agentty/domain/entitlement.hpp"
 #include "agentty/runtime/msg.hpp"
 
 namespace agentty::app {
@@ -89,6 +90,27 @@ void           reset_composer_draft(ComposerState& c);
 // Claude path, else the OpenAI endpoint label — "openai" / "ollama" / …).
 // Used to key per-provider model recall in Settings::provider_models.
 std::string    active_provider_id();
+
+// ── Entitlement (ACCOUNT-scoped facts) ──────────────────────────────────
+//
+// The ONE place (provider, account) is resolved for an entitlement lookup,
+// so no call site re-derives it and none can accidentally key by provider
+// alone — which is precisely what the legacy account-blind
+// `context_1m_blocked` bool did. See include/agentty/domain/entitlement.hpp
+// for why this layer exists at all.
+//
+// `is_blocked` reads the keyed store for the CURRENTLY ACTIVE account of
+// `provider` (empty provider ⇒ the active provider). `record_blocked`
+// learns a rejection and persists it; it returns true when the fact was
+// new, so callers can skip a redundant settings write.
+[[nodiscard]] bool entitlement_blocked(const store::Settings& s,
+                                       domain::entitlement::Fact f,
+                                       std::string_view model_id = {},
+                                       std::string_view provider = {});
+bool entitlement_record_blocked(store::Settings& s,
+                                domain::entitlement::Fact f,
+                                std::string_view model_id = {},
+                                std::string_view provider = {});
 
 // Pick the model to make active when switching TO provider `spec`. Prefers
 // the model last used on that provider (Settings::provider_models), else a

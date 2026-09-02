@@ -294,14 +294,15 @@ Step sign_out(Model m) {
     }
 
     if (sel.kind == provider::Kind::Anthropic) {
-        // The 1M-context entitlement block was learned FOR the account being
-        // dropped; the next sign-in may be entitled. Re-arm discovery.
-        // (Policy, not storage — stays here, not in the vault.)
-        auto settings = deps().load_settings();
-        if (settings.context_1m_blocked) {
-            settings.context_1m_blocked = false;
-            deps().save_settings(settings);
-        }
+        // NOTE: nothing to re-arm here any more. The 1M entitlement fact is
+        // keyed by (provider, ACCOUNT, model) — see domain/entitlement.hpp —
+        // so the account being dropped never speaks for the next one. This
+        // used to clear a global bool, which was lossy in the other
+        // direction: ping-ponging between an entitled and an unentitled
+        // account re-discovered the same 400 on every hop.
+        //
+        // Genuine sign-OUT (not a switch) is handled where the account is
+        // removed, via entitlement::forget_account.
     }
 
     // Zero the live auth header so the very next turn can't reuse a
@@ -576,11 +577,11 @@ Step account_select(Model m) {
             m.s.oauth_refresh_in_flight = true;
             refresh_cmd = cmd::refresh_oauth(std::move(*tok));
         }
-        auto settings = deps().load_settings();
-        if (settings.context_1m_blocked) {
-            settings.context_1m_blocked = false;
-            deps().save_settings(settings);
-        }
+        // No entitlement re-arm here: facts are keyed by (provider,
+        // ACCOUNT, model), so the account we just left cannot speak for the
+        // one we just entered — and, unlike the old global-bool reset, what
+        // we learned about the OUTGOING account survives for when the user
+        // switches back. See domain/entitlement.hpp.
     }
     const std::string provider_label = al->provider_label;
     m.ui.login = login::Closed{};
@@ -613,6 +614,18 @@ Step account_remove(Model m) {
     const int old_cursor = al->cursor;
     const std::string provider_label = al->provider_label;
     acc::remove(row.provider, row.label);
+
+    // Entitlement facts learned for THIS account can never be consulted
+    // again — and a later re-login may land on a different subscription
+    // tier, so keeping them would be wrong as well as dead. This is the one
+    // place forgetting is correct: removal, not a switch.
+    {
+        auto s = deps().load_settings();
+        const auto before = s.entitlements.size();
+        domain::entitlement::forget_account(s.entitlements, row.provider,
+                                            row.label);
+        if (s.entitlements.size() != before) deps().save_settings(s);
+    }
 
     // If we removed the account we're currently authed as, the newest
     // remaining one (promoted to active by remove()) becomes live.
