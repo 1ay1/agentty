@@ -44,6 +44,21 @@ inline constexpr std::size_t kStreamTailLines = 64;
 // before the render pass installs the sized RenderContext.
 [[nodiscard]] int stream_body_budget();
 
+// Upper bound on the rendered height of ONE streaming tool card, in rows.
+//
+// The reveal seam (turn.cpp) must know how tall a not-yet-shown card will
+// be BEFORE showing it: revealing a card that doesn't fit pushes the
+// still-typing prose tail past the viewport top, committing half-rendered
+// rows to immutable native scrollback where no repaint can fix them.
+//
+// Derived from stream_body_budget() — the same number edit_body/write_body
+// size their tail windows with — so the estimate and the renderer cannot
+// drift apart. A streaming edit card is 1 stat chip + 2×per_side diff rows
+// of body, plus per-card chrome (header, borders, footer). This is a BOUND,
+// not a guess: over-estimating only defers a card, while under-estimating
+// strands glyphs in scrollback permanently.
+[[nodiscard]] int stream_card_rows_bound();
+
 // Keep the LAST keep_lines lines of s (tail-anchored window).
 [[nodiscard]] std::string tail_window(std::string_view s,
                                       std::size_t keep_lines);

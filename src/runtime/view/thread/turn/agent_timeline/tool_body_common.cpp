@@ -38,6 +38,18 @@ int stream_body_budget() {
     return std::max(3, rows - kChromeBelowHeader);
 }
 
+int stream_card_rows_bound() {
+    // Mirror edit_body.cpp's per_side derivation EXACTLY — if that clamp
+    // changes, this must change with it, which is why they sit one call
+    // apart rather than as two independent constants.
+    const int per_side = std::clamp((stream_body_budget() - 1) / 2, 1, 6);
+    const int body_rows = 1 + 2 * per_side;   // stat chip + tail rows
+    // Per-card chrome: event header, hunk/stat line, top+bottom border,
+    // footer status, and the blank gutter rows the card sits in.
+    constexpr int kCardChromeRows = 7;
+    return body_rows + kCardChromeRows;
+}
+
 std::string tail_window(std::string_view s, std::size_t keep_lines) {
     if (s.empty()) return {};
     // Walk backwards counting newlines; stop after keep_lines+1 of them

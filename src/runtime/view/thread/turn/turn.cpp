@@ -29,6 +29,7 @@
 #include "agentty/runtime/composer_attachment.hpp"
 #include "agentty/runtime/view/thread/turn/agent_timeline/agent_timeline.hpp"
 #include "agentty/runtime/view/thread/turn/agent_timeline/tool_args.hpp"
+#include "agent_timeline/tool_body_common.hpp"   // stream_card_rows_bound
 #include "agentty/runtime/view/cache.hpp"
 #include "agentty/runtime/view/helpers.hpp"
 #include "agentty/runtime/view/palette.hpp"
@@ -763,16 +764,37 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m,
             const bool is_tail_bottom =
                 !m.d.current.messages.empty()
                 && &msg == &m.d.current.messages.back();
-            // Hidden-height budget: every card must be Pending (bounded
-            // tail-window preview) and the worst-case hidden rows
-            // (~12/card incl. chrome) must fit well inside the viewport
-            // so the unhide grow can never push the mutated seam row
-            // past the commit boundary in one frame.
+            // Hidden-height budget: every card must be Pending, and the
+            // worst-case hidden rows must fit well inside the viewport so
+            // the unhide grow can never push the mutated seam row past the
+            // commit boundary in one frame.
+            //
+            // This used to be a flat `12 rows per card`, which is not a
+            // bound — it is a guess, and it was wrong in the direction that
+            // corrupts. A STREAMING edit card renders
+            //
+            //     1 stat chip + 2×edit_tail_per_side diff rows
+            //
+            // where per_side = clamp((stream_body_budget()-1)/2, 1, 6)
+            // widens with terminal height (edit_body.cpp). At an 80x30
+            // terminal that is 1 + 2×6 = 13 body rows, and the card measured
+            // 20 rows with chrome — against an estimate of 12. The
+            // 8-row under-estimate authorized the instant card with more
+            // rows in flight than the viewport could hold, so a
+            // half-typed reveal line was committed to immutable scrollback
+            // (scrollback_oracle_test, 80x30: marker uniq-2-1 stranded).
+            //
+            // Derive it from the SAME budget the renderer uses, so the two
+            // cannot drift: see stream_card_rows_bound(). Over-estimating is
+            // safe here — it only defers the card or resolves a few extra
+            // rows; under-estimating strands glyphs in scrollback that no
+            // repaint can ever fix.
             bool all_pending = true;
             for (const auto& tc : msg.tool_calls)
                 if (!tc.is_pending()) { all_pending = false; break; }
             const int est_hidden_rows =
-                static_cast<int>(msg.tool_calls.size()) * 12;
+                static_cast<int>(msg.tool_calls.size())
+                * ui::detail::stream_card_rows_bound();
             const bool hidden_fits =
                 est_hidden_rows < ::maya::available_height() - 4;
 
