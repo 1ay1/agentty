@@ -56,8 +56,6 @@ std::chrono::milliseconds streaming_tick_period() noexcept {
     return period;
 }
 
-namespace {
-
 // True when the last message still carries in-flight wire bytes
 // (streaming_text / pending_stream not yet drained into the settled
 // body). The Tick subscription gates the reveal-fx animation clock and
@@ -78,6 +76,47 @@ bool tail_has_live_bytes(const Model& m) noexcept {
     const auto& back = m.d.current.messages.back();
     return !back.streaming_text.empty() || !back.pending_stream.empty();
 }
+
+bool reveal_needs_frames(const Model& m) noexcept {
+    if (!m.s.active() || m.d.current.messages.empty()) return false;
+    const auto& back = m.d.current.messages.back();
+    if (back.role != Role::Assistant) return false;
+    return !back.streaming_text.empty()
+        || !back.pending_stream.empty()
+        // Pure-reasoning phase: no answer bytes yet, but the reasoning
+        // channel (msg.thinking) streams through its own reveal. Omitting
+        // this term is the "Thinking gets stuck" bug: the fast bucket
+        // never engages, armed RAF frames get gated away, and the
+        // reasoning typewriter freezes until a keypress.
+        || (m.d.show_reasoning
+            && !back.reasoning_display_text().empty());
+}
+
+bool reveal_draining(const Model& m) noexcept {
+    return m.ui.pending_settle_freeze
+        || m.ui.settle_cooldown_ticks > 0
+        // True exactly while the reveal (is_live / reveal_in_progress /
+        // is_finalizing / is_parsing) has NOT drained — the wall-clock
+        // typewriter often has seconds of animation left after the wire
+        // goes quiet, and stopping the clock here freezes it mid-glide at
+        // 1% CPU until the next keystroke.
+        || !detail::live_tail_reveal_settled(m);
+}
+
+bool animation_demand(const Model& m) noexcept {
+    return m.s.active()
+        // `models_loading` keeps the fused picker's "loading …" spinner
+        // spinning while a slow backend (Ollama, a custom host) is still
+        // answering — a frozen glyph is the visual signature of a hang,
+        // the opposite of what it must convey.
+        || m.s.models_loading
+        || m.loading_spinner_visible()
+        || tail_has_live_bytes(m)
+        || m.ui.pending_rehydrate_trim
+        || reveal_draining(m);
+}
+
+namespace {
 
 // ── Per-modal key handlers — return std::nullopt to fall through ──────────
 
@@ -1075,17 +1114,12 @@ Sub<Msg> subscribe(const Model& m) {
         [](bool focused) -> Msg { return TerminalFocus{focused}; });
 
     // Tick drives every time-based animation. THREE gates must agree on
-    // when it runs, or an animation is silently dead: this subscription,
-    // the spinner advance (update/meta.cpp Tick arm), and the visual hash
-    // (app/program.hpp). `models_loading` is here so the fused picker's
-    // "loading …" spinner actually spins while a slow backend (Ollama, a
-    // custom host) is still answering — a frozen glyph is the visual
-    // signature of a hang, which is the opposite of what it must convey.
-    if (m.s.active() || m.s.models_loading || m.loading_spinner_visible()
-        || tail_has_live_bytes(m) || m.ui.pending_settle_freeze
-        || m.ui.settle_cooldown_ticks > 0
-        || m.ui.pending_rehydrate_trim
-        || !detail::live_tail_reveal_settled(m)) {
+    // WHAT is animating, and animation_demand (subscribe.hpp) is now the
+    // one definition they share — this subscription arms the timer, the
+    // spinner advance (update/meta.cpp Tick arm) steps reducer state, and
+    // the visual hash (app/program.hpp) lets the wake reach view(). The
+    // per-term rationale lives on animation_demand's definition above.
+    if (animation_demand(m)) {
         auto tick = Sub<Msg>::every(streaming_tick_period(), Tick{});
         return Sub<Msg>::batch(std::move(key_sub), std::move(paste_sub),
                                std::move(focus_sub), std::move(tick));

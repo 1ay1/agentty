@@ -599,3 +599,90 @@ TEST_CASE("visual hash: an idle welcome screen is hash-stable") {
     maya::consume_animation_request_for_test();
     maya::testing::freeze_anim_clock(1000000);
 }
+
+// ── The three-gate agreement, pinned structurally ───────────────────────
+//
+// animation_demand / reveal_needs_frames / reveal_draining (subscribe.hpp)
+// are the single definitions of "something is moving". This case pins the
+// agreement those predicates exist to guarantee:
+//
+//   ARMED ⇒ HASHED: any state where the Tick subscription arms the timer
+//   for REVEAL reasons must be a state whose visual_hash carries a time
+//   term — otherwise the loop wakes and the hash gate discards every
+//   wake: armed frames, frozen pixels (the mid-glide freeze). The
+//   converse (hashed ⇒ armed) is deliberately NOT asserted: widget-paced
+//   and caret-parity terms are maya's own frame sources, armed outside
+//   the Tick.
+//
+// Falsified: killing the drain bucket in visual_hash fails the three
+// drain-shaped cases below. Two honest limits, verified by trying:
+//   • reveal_needs_frames' REASONING term is cadence-only today —
+//     fine_anim_live (m.s.active()) sits below it in the chain and mixes
+//     a coarser bucket for the same states, so dropping the term degrades
+//     16ms→33/100ms smoothness on sync terminals but cannot freeze the
+//     hash. Defense-in-depth, deliberate; this test cannot (and should
+//     not) fail on cadence.
+//   • The drain states are the load-bearing ones: in that window BOTH
+//     m.s.active() and fine_anim_live are false, so the drain bucket is
+//     the ONLY time term — exactly why killing it fails here.
+TEST_CASE("visual hash: every reveal-armed state carries a time term") {
+    struct Case {
+        const char* name;
+        std::function<void(Model&)> setup;
+    };
+    const Case cases[] = {
+        {"streaming answer bytes", [](Model& m) {
+            m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
+            agentty::Message a; a.role = agentty::Role::Assistant;
+            a.streaming_text = "partial answer";
+            m.d.current.messages.push_back(std::move(a));
+        }},
+        {"pure reasoning phase", [](Model& m) {
+            m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
+            m.d.show_reasoning = true;
+            agentty::Message a; a.role = agentty::Role::Assistant;
+            a.thinking = "chain of thought so far";
+            m.d.current.messages.push_back(std::move(a));
+        }},
+        {"undrained bytes after active dropped", [](Model& m) {
+            agentty::Message a; a.role = agentty::Role::Assistant;
+            a.pending_stream = "tail not yet drained";
+            m.d.current.messages.push_back(std::move(a));
+        }},
+        {"settle-freeze pending", [](Model& m) {
+            agentty::Message a; a.role = agentty::Role::Assistant;
+            a.text = "done";
+            m.d.current.messages.push_back(std::move(a));
+            m.ui.pending_settle_freeze = true;
+        }},
+        {"settle cooldown", [](Model& m) {
+            agentty::Message a; a.role = agentty::Role::Assistant;
+            a.text = "done";
+            m.d.current.messages.push_back(std::move(a));
+            m.ui.settle_cooldown_ticks = 2;
+        }},
+    };
+
+    for (const auto& c : cases) {
+        Model m;
+        c.setup(m);
+        // Only assert on states the subscription actually arms for reveal
+        // reasons — the agreement under test.
+        if (!agentty::app::animation_demand(m)) continue;
+
+        maya::testing::freeze_anim_clock(3000000);
+        const auto h0 = agentty::app::AgenttyApp::visual_hash(m);
+        // One reveal bucket is 16-33ms; 300ms crosses several regardless
+        // of terminal sync mode. If no time term is mixed, the hash is
+        // frozen and the armed wakes render nothing.
+        maya::testing::freeze_anim_clock(3000000 + 300);
+        const auto h1 = agentty::app::AgenttyApp::visual_hash(m);
+        maya::testing::unfreeze_anim_clock();
+
+        INFO(c.name);
+        CHECK_MESSAGE(h0 != h1,
+            c.name << ": the Tick subscription arms for this state but "
+            "visual_hash mixes no time term — armed frames would be gated "
+            "away and the animation freezes until a keypress");
+    }
+}

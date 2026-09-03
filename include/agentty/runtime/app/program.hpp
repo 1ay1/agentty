@@ -461,21 +461,14 @@ struct AgenttyApp {
         // spinner-only case (tool running, no streaming_text) keeps the
         // calmer tick-period bucket so non-sync terminals don't tear the
         // chrome at 60 fps.
-        const bool revealing_text =
-            m.s.active()
-            && !m.d.current.messages.empty()
-            && m.d.current.messages.back().role == Role::Assistant
-            && (!m.d.current.messages.back().streaming_text.empty()
-                || !m.d.current.messages.back().pending_stream.empty()
-                // Pure-reasoning phase: no answer bytes yet, but the reasoning
-                // channel (msg.thinking) is streaming through its own reveal.
-                // Without this the fast reveal bucket doesn't engage while the
-                // model is only thinking, the hash falls to the 265 ms caret
-                // parity bucket, armed RAF frames are gated away, and the
-                // reasoning typewriter FREEZES until a keypress (the "Thinking
-                // gets stuck" symptom).
-                || (m.d.show_reasoning
-                    && !m.d.current.messages.back().reasoning_display_text().empty()));
+        // Reveal-frame demand: ask the shared predicate, don't re-derive.
+        // This block used to restate the whole condition inline (active +
+        // tail role + streaming_text/pending_stream + the reasoning-channel
+        // term), and the reasoning term was BORN from that restatement
+        // drifting: it was added here after "Thinking gets stuck" shipped,
+        // while subscribe.cpp's copy still lacked it. One definition —
+        // reveal_needs_frames in subscribe.hpp — now serves both.
+        const bool revealing_text = reveal_needs_frames(m);
         // Reveal render cadence.
         //
         // On a SYNC-output terminal (DEC mode 2026: kitty / ghostty /
@@ -559,9 +552,13 @@ struct AgenttyApp {
         // sources armed guarantees each of those frames actually renders,
         // so the reveal glides continuously to the edge over SSH / any
         // link where the wire goes quiet mid-reveal.
-        const bool draining_reveal =
-            m.ui.pending_settle_freeze || m.ui.settle_cooldown_ticks > 0
-            || !detail::live_tail_reveal_settled(m);
+        // Keying the fast bucket on the exact predicate that keeps the
+        // frame sources armed guarantees each of those frames actually
+        // renders — reveal_draining (subscribe.hpp) is that predicate, the
+        // SAME one the Tick subscription arms on via animation_demand, so
+        // the two gates cannot drift: a frame source the subscription
+        // keeps alive is a frame this hash lets through.
+        const bool draining_reveal = reveal_draining(m);
 
         if (revealing_text || draining_reveal) {
             mix(static_cast<std::uint64_t>(now_ms / kRevealBucketMs));
