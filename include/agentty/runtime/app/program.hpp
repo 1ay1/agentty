@@ -168,7 +168,7 @@ struct AgenttyApp {
             mix_str(tl->confirm_remove);   // two-press delete arm state
         }
         if (auto* sm = m.ui.overlay.get<ov::SmartMode>())
-            mix(static_cast<std::uint64_t>(sm->index));
+            mix(static_cast<std::uint64_t>(sm->row));
         if (auto* fp = m.ui.overlay.get<ov::FusedPicker>()) {
             mix(static_cast<std::uint64_t>(fp->index));
             mix_str(fp->query);   // live search buffer

@@ -102,7 +102,7 @@ TEST_CASE("smart slot picker stack") {
         CHECK(m2.ui.smart_assign_slot == -1,
               "the pending slot-assign is cleared on back-out");
         if (auto* o = m2.ui.overlay.get<ov::SmartMode>()) {
-            CHECK(o->index == 1 + slot,
+            CHECK(o->row == smart::row_of(static_cast<smart::ModelRole>(slot)),
                   "cursor lands back on the slot row you descended from");
         } else {
             CHECK(false, "smart_mode must be OpenAt after Esc");
@@ -137,7 +137,8 @@ TEST_CASE("smart slot picker stack") {
               "Enter returns to Smart Mode so sibling slots stay one step away");
         CHECK(m2.ui.smart_assign_slot == -1, "slot-assign consumed");
         if (auto* o = m2.ui.overlay.get<ov::SmartMode>()) {
-            CHECK(o->index == 1 + slot, "cursor on the slot just set");
+            CHECK(o->row == smart::row_of(static_cast<smart::ModelRole>(slot)),
+                  "cursor on the slot just set");
         }
 
         const smart::SlotOverride& s =
@@ -211,38 +212,42 @@ TEST_CASE("smart slot picker stack") {
               "ordinary model-switch Esc does NOT spuriously open Smart Mode");
     }
 
-    // ── The cursor never leaves the rows that are DRAWN ─────────────
-    // The overlay was cut from eleven rows to four, but SmartModeMove kept
-    // wrapping modulo 11 — so ↑/↓ drove the selection through seven rows
-    // that are never rendered and the highlight appeared to run off the top
-    // and bottom of the list. Walking a full lap in each direction pins the
-    // invariant that matters: every index is a real row.
+    // ── Navigation is closed over the row type ──────────────────────
+    // The overlay's cursor used to be a raw int, and four sites derived the
+    // layout independently: the mover wrapped modulo 11 after the list was
+    // cut to four rows, two slot-assign returns re-opened at `8 + slot`, and
+    // clear-slot mapped every index ≥ 3 onto Utility. All of those were
+    // REPRESENTABLE. The cursor is now a smart::OverlayRow, so the only
+    // thing left to check is that a lap through the enumeration returns
+    // where it started — a wrong row cannot be constructed to test for.
     {
         Model m;
         auto [m1, _] = app::update(std::move(m), Msg{OpenSmartMode{}});
         Model cur = std::move(m1);
 
-        // Down a full lap plus one: must visit 0..3 then wrap to 0.
-        for (int step = 1; step <= smart::kSmartModeRows + 1; ++step) {
+        auto row_of_overlay = [](const Model& mm) {
+            auto* o = mm.ui.overlay.get<ov::SmartMode>();
+            return o ? o->row : smart::OverlayRow::Master;
+        };
+        CHECK(row_of_overlay(cur) == smart::OverlayRow::Master,
+              "the overlay opens on the master switch");
+
+        // A full lap down returns to the start, visiting each row once.
+        std::vector<smart::OverlayRow> seen;
+        for (int i = 0; i < smart::kSmartModeRows; ++i) {
             auto [next, c] = app::update(std::move(cur), Msg{SmartModeMove{+1}});
             cur = std::move(next);
-            auto* o = cur.ui.overlay.get<ov::SmartMode>();
-            CHECK(o != nullptr, "Smart Mode stays open while navigating");
-            if (!o) break;
-            CHECK(o->index >= 0 && o->index < smart::kSmartModeRows,
-                  "cursor stays on a drawn row moving DOWN");
-            CHECK(o->index == step % smart::kSmartModeRows,
-                  "down wraps at the last row, not seven rows later");
+            seen.push_back(row_of_overlay(cur));
         }
+        CHECK(row_of_overlay(cur) == smart::OverlayRow::Master,
+              "a full lap down returns to the first row");
+        CHECK(seen.size() == static_cast<std::size_t>(smart::kSmartModeRows),
+              "one step per row");
 
-        // Up from row 0 must land on the LAST row, not a phantom.
-        {
-            auto [m0, c0] = app::update(std::move(cur), Msg{OpenSmartMode{}});
-            auto [up, c1] = app::update(std::move(m0), Msg{SmartModeMove{-1}});
-            cur = std::move(up);
-            auto* o = cur.ui.overlay.get<ov::SmartMode>();
-            CHECK(o && o->index == smart::kSmartModeRows - 1,
-                  "up from the first row wraps to the last DRAWN row");
-        }
+        // Up from the first row lands on the last — no phantom rows between.
+        auto [up, c1] = app::update(std::move(cur), Msg{SmartModeMove{-1}});
+        cur = std::move(up);
+        CHECK(row_of_overlay(cur) == smart::OverlayRow::Utility,
+              "up from the master switch wraps to the last row");
     }
 }

@@ -48,6 +48,7 @@
 #include <variant>
 
 #include "agentty/runtime/picker.hpp"
+#include "agentty/domain/smart_mode.hpp"   // smart::OverlayRow
 #include "agentty/runtime/command_palette.hpp"
 #include "agentty/runtime/mention_palette.hpp"
 #include "agentty/runtime/symbol_palette.hpp"
@@ -66,7 +67,14 @@ struct None {};
 struct FusedPicker     : pick::OpenAt {};
 struct ProviderPicker  : pick::OpenAt {};
 struct ThreadList      : pick::OpenAt {};
-struct SmartMode       : pick::OpenAt {};
+// Smart Mode carries a typed ROW, not an index. The other pickers list a
+// variable number of runtime-derived entries, so an int cursor is the honest
+// representation there; Smart Mode's rows are a fixed, named set, and
+// spelling them as an int is what let the cursor drift onto rows that do not
+// exist (see smart::OverlayRow for the full post-mortem).
+struct SmartMode {
+    smart::OverlayRow row = smart::OverlayRow::Master;
+};
 struct CommandPalette  : agentty::palette::Open {};
 struct Mention         : agentty::mention::Open {};
 struct Symbol          : agentty::symbol_palette::Open {};

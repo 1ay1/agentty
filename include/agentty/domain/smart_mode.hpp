@@ -21,6 +21,7 @@
 // parent model" — no change, no regression — exactly like the subagent router.
 
 #include <cstdlib>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -38,6 +39,18 @@ enum class ModelRole : std::uint8_t {
     Implementation,  // writing code, mechanical multi-file edits — capable mid model
     Utility,         // grep/read/commit-msg/retrieval/summaries — cheapest capable, no think
 };
+
+// Title-case label for the UI. role_label() above is the LOG/wire spelling
+// ("impl"); this is what a human reads in the overlay. Kept beside the enum
+// so adding a role makes both obligations visible at once.
+[[nodiscard]] constexpr std::string_view role_display_name(ModelRole r) noexcept {
+    switch (r) {
+        case ModelRole::Strategic:      return "Strategic";
+        case ModelRole::Implementation: return "Implementation";
+        case ModelRole::Utility:        return "Utility";
+    }
+    return "Strategic";
+}
 
 [[nodiscard]] constexpr std::string_view role_label(ModelRole r) noexcept {
     switch (r) {
@@ -122,6 +135,15 @@ struct RoleConfig {
             case ModelRole::Utility:        return utility;
         }
         return strategic;
+    }
+
+    // Mutable overload, so WRITERS go through the same role->field mapping
+    // as readers instead of re-deriving it. The clear-slot handler used to
+    // pick the field with a chain of index comparisons whose trailing else
+    // caught every out-of-range cursor and reset Utility.
+    [[nodiscard]] SlotOverride& slot(ModelRole r) noexcept {
+        return const_cast<SlotOverride&>(
+            static_cast<const RoleConfig&>(*this).slot(r));
     }
 };
 
@@ -397,14 +419,78 @@ namespace detail {
                                   ModelCapabilities::Tier::Cheap);
 }
 
-// Rows in the Smart Mode overlay: the master switch, then the three role
-// slots (Strategic / Implementation / Utility).
+// ── The Smart Mode overlay's rows, as a TYPE ────────────────────────────
 //
-// Shared so the RENDERER and the cursor arithmetic cannot disagree. They
-// did: the overlay was cut from eleven rows to four, the view followed, and
-// the move handler kept wrapping modulo 11 — so ↑/↓ drove the selection
-// through seven rows that are never drawn, and the highlight appeared to
-// escape past the top and bottom of the list.
-inline constexpr int kSmartModeRows = 4;
+// A row is the master switch or one of the three role slots. That is the
+// whole domain, so it is spelled as an enum rather than an int index into a
+// list someone has to remember the shape of.
+//
+// The int was not a small stylistic matter. The overlay was cut from eleven
+// rows to four; the renderer followed, and four other places did not. The
+// cursor wrapped modulo 11 (so ↑/↓ walked through seven rows that are never
+// drawn), two slot-assign returns re-opened at `8 + slot` (the old slot
+// rows), and the clear-slot handler mapped every index ≥ 3 to Utility — so
+// `x` on an out-of-range cursor silently reset a slot the user was not on.
+// Every one of those was representable because the type said "any integer"
+// while only four values were legal, and the layout was duplicated at each
+// site instead of being stated once.
+//
+// With this enum: there is no eighth row to name, `next`/`prev` cannot leave
+// the enumeration, and a slot row maps to a ModelRole by a total function
+// with no arithmetic. The bug class is gone, not patched.
+enum class OverlayRow : std::uint8_t {
+    Master,          // the on/off switch
+    Strategic,       // ─┐
+    Implementation,  //  ├─ the three role slots, in display order
+    Utility,         // ─┘
+};
+
+// Display order. The ONE place the layout is written down; every traversal
+// and every conversion below is derived from it.
+inline constexpr OverlayRow kOverlayRows[] = {
+    OverlayRow::Master,
+    OverlayRow::Strategic,
+    OverlayRow::Implementation,
+    OverlayRow::Utility,
+};
+inline constexpr int kSmartModeRows =
+    static_cast<int>(sizeof(kOverlayRows) / sizeof(kOverlayRows[0]));
+
+// Is this row one of the model slots? (i.e. does it have a ModelRole)
+[[nodiscard]] constexpr bool is_slot_row(OverlayRow r) noexcept {
+    return r != OverlayRow::Master;
+}
+
+// The role a slot row configures. Returns nullopt for the master switch, so
+// a caller cannot silently treat "not a slot" as a slot — which is exactly
+// how the old trailing `else` reset Utility from an out-of-range cursor.
+[[nodiscard]] constexpr std::optional<ModelRole> role_of(OverlayRow r) noexcept {
+    switch (r) {
+        case OverlayRow::Master:         return std::nullopt;
+        case OverlayRow::Strategic:      return ModelRole::Strategic;
+        case OverlayRow::Implementation: return ModelRole::Implementation;
+        case OverlayRow::Utility:        return ModelRole::Utility;
+    }
+    return std::nullopt;
+}
+
+// The row that configures a given role — the inverse of role_of. Total, so
+// "re-open the overlay on the slot I just set" needs no `1 + slot` arithmetic.
+[[nodiscard]] constexpr OverlayRow row_of(ModelRole r) noexcept {
+    switch (r) {
+        case ModelRole::Strategic:      return OverlayRow::Strategic;
+        case ModelRole::Implementation: return OverlayRow::Implementation;
+        case ModelRole::Utility:        return OverlayRow::Utility;
+    }
+    return OverlayRow::Strategic;
+}
+
+// Cursor movement, closed over the enumeration: wrapping is a property of
+// the type, so no call site can wrap by the wrong modulus.
+[[nodiscard]] constexpr OverlayRow next_row(OverlayRow r, int delta) noexcept {
+    const int n = kSmartModeRows;
+    const int i = ((static_cast<int>(r) + delta) % n + n) % n;
+    return kOverlayRows[i];
+}
 
 } // namespace agentty::smart

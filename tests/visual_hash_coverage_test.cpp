@@ -55,6 +55,7 @@
 #include "agentty/runtime/model.hpp"
 
 namespace ov = agentty::ui::overlay;
+namespace smart = agentty::smart;
 
 using agentty::Model;
 using agentty::app::AgenttyApp;
@@ -300,10 +301,10 @@ const std::vector<Axis>& visual_axes() {
             m.ui.plugins.servers.push_back(std::move(s));
         }},
         {"smart_mode overlay opens", [](Model& m) {
-            m.ui.overlay = ov::SmartMode{{0}};
+            m.ui.overlay = ov::SmartMode{smart::OverlayRow::Master};
         }},
         {"smart_mode cursor move", [](Model& m) {
-            m.ui.overlay = ov::SmartMode{{3}};
+            m.ui.overlay = ov::SmartMode{smart::OverlayRow::Utility};
         }},
         {"rag picker opens", [](Model& m) {
             agentty::rag_settings::Open o;

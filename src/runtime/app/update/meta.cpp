@@ -112,7 +112,7 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             return {std::move(m), std::move(toast)};
         },
         [&](OpenSmartMode) -> Step {
-            m.ui.overlay = ov::SmartMode{{0}};
+            m.ui.overlay = ov::SmartMode{smart::OverlayRow::Master};
             return done(std::move(m));
         },
         [&](CloseSmartMode) -> Step {
@@ -121,30 +121,19 @@ Step meta_update(Model m, msg::MetaMsg mm) {
         },
         [&](SmartModeMove& e) -> Step {
             if (auto* o = m.ui.overlay.get<ov::SmartMode>()) {
-                // FOUR rows: master switch + Strategic/Implementation/Utility.
-                // This said 11 ("Enabled + 3 layers + 4 learning + 3 slots")
-                // long after those seven toggles were deleted, so ↑/↓ walked
-                // the cursor through seven rows that are not drawn: the
-                // selection appeared to run off the top and bottom of the
-                // list and the highlight vanished until you wrapped past the
-                // phantoms. Derived from the same constant the view uses so
-                // the two cannot drift again.
-                const int rows = smart::kSmartModeRows;
-                o->index = ((o->index + e.delta) % rows + rows) % rows;
+                // Wrapping belongs to the row type, so there is no modulus
+                // here to get wrong and no index that can leave the drawn
+                // rows — next_row is closed over the enumeration.
+                o->row = smart::next_row(o->row, e.delta);
             }
             return done(std::move(m));
         },
         [&](SmartModeSelect) -> Step {
             auto* o = m.ui.overlay.get<ov::SmartMode>();
             if (!o) return done(std::move(m));
-            // Rows 0-7 are boolean toggles; 8-10 are model slots.
-            // Row 0 is the master switch; rows 1-3 are the role slots.
-            // The seven sub-layer toggles are gone: three folded into the
-            // master switch (nobody rationally ran Smart Mode with
-            // orchestration off) and four deleted with the self-supervised
-            // layers. See smart::RoleConfig.
-            if (o->index == 0) {
-                // Session pin (AGENTTY_SMART_MODE) owns the master switch: a
+            const auto role = smart::role_of(o->row);
+            if (!role) {
+                // Master switch. Session pin (AGENTTY_SMART_MODE) owns it: a
                 // toggle would be silently overridden at next launch and never
                 // persisted (see persist_settings). Hinted no-op beats a lying
                 // toggle.
@@ -160,23 +149,19 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             // A slot row → open the model picker in slot-assign mode. The
             // picker scopes itself to the active provider and writes the
             // slot on Enter (see fused_picker_update's Select arm).
-            m.ui.smart_assign_slot = o->index - 1;   // 0=Strategic 1=Impl 2=Utility
+            m.ui.smart_assign_slot = static_cast<int>(*role);
             m.ui.overlay.close<ov::SmartMode>();
             return agentty::app::update(std::move(m), Msg{OpenFusedPicker{}});
         },
         [&](SmartModeClearSlot) -> Step {
             auto* o = m.ui.overlay.get<ov::SmartMode>();
-            if (!o || o->index < 1) return done(std::move(m));   // row 0 = master
-            // Map ONLY the three slot rows. The trailing else used to catch
-            // every index ≥ 3, so any out-of-range cursor silently reset
-            // Utility — a destructive action attributed to a row the user
-            // was not on.
-            if (o->index > 3) return done(std::move(m));
-            smart::SlotOverride* slot =
-                  o->index == 1  ? &m.d.smart.strategic
-                : o->index == 2  ? &m.d.smart.implementation
-                                 : &m.d.smart.utility;
-            *slot = smart::SlotOverride{};   // reset to auto (empty + unset)
+            if (!o) return done(std::move(m));
+            // `x` only means something on a slot row. role_of returns nullopt
+            // for the master switch, so "not a slot" cannot fall through into
+            // a slot the way an int comparison could.
+            const auto role = smart::role_of(o->row);
+            if (!role) return done(std::move(m));
+            m.d.smart.slot(*role) = smart::SlotOverride{};   // reset to auto
             persist_settings(m);
             return {std::move(m), set_status_toast(m, "slot reset to auto")};
         },

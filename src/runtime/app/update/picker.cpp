@@ -936,13 +936,12 @@ Step fused_picker_update(Model m, msg::FusedPickerMsg pm) {
             // from — instead of closing every overlay. Navigating into a
             // setting and hitting Esc should return you to the parent picker.
             if (m.ui.smart_assign_slot >= 0) {
-                const int slot = m.ui.smart_assign_slot;
+                const auto role =
+                    static_cast<smart::ModelRole>(m.ui.smart_assign_slot);
                 m.ui.smart_assign_slot = -1;
-                // Slot rows are 1..3 (row 0 is the master switch). This said
-                // `8 + slot` from the eleven-row layout, so backing out of a
-                // slot assignment reopened Smart Mode with the cursor parked
-                // on a row that is never drawn.
-                m.ui.overlay = ov::SmartMode{{1 + slot}};   // rows 1..3
+                // row_of is the total inverse of role_of — no `1 + slot`
+                // offset to keep in step with the overlay's layout.
+                m.ui.overlay = ov::SmartMode{smart::row_of(role)};
             }
             return done(std::move(m));
         },
@@ -1230,7 +1229,8 @@ Step fused_picker_update(Model m, msg::FusedPickerMsg pm) {
                 // there and probably want to set the sibling slots too;
                 // forcing a re-open of Smart Mode after every slot is the
                 // exact tedium this fixes.
-                m.ui.overlay = ov::SmartMode{{1 + assigned}};   // rows 1..3
+                m.ui.overlay = ov::SmartMode{smart::row_of(
+                    static_cast<smart::ModelRole>(assigned))};
                 auto toast = set_status_toast(m, "Smart Mode slot set");
                 return {std::move(m), std::move(toast)};
             }
