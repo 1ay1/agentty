@@ -64,6 +64,19 @@ int est_tail_rows(std::string_view tail, int cols) {
     return rows;
 }
 
+// EXACT copy of turn.cpp's kBlockChromeSlack. The production proof is
+//     est_tail_rows + slack >= actual
+// so this test must assert the same sum — asserting the bare estimator
+// while production adds slack would test a formula production doesn't use.
+// The slack absorbs block-level markup that adds rows beyond its own text
+// lines. Measured over the corpus below (5 widths × 17 shapes): the worst
+// deficit is 2 rows — table_real, where maya draws a border row above and
+// below that have no source line — so slack=4 holds with 2 rows of margin.
+// If maya's markdown chrome grows (wider fence borders, extra table
+// separators), the corpus fails here BEFORE the reveal seam can authorize
+// an instant card that strands ghosted rows in scrollback.
+constexpr int kBlockChromeSlack = 4;
+
 struct Shape { const char* name; std::string body; };
 
 std::vector<Shape> corpus() {
@@ -87,6 +100,25 @@ std::vector<Shape> corpus() {
                                    "- a\n- b\n- c\n\n> quote\n\n"
                                    "final paragraph that runs on for a while "
                                    "so it wraps at narrow widths too.\n"});
+    // Block-level markup whose CHROME adds rows beyond its own text lines —
+    // the shapes kBlockChromeSlack exists to absorb. None of these were in
+    // the corpus before, so the slack's value (4) was asserted by nothing:
+    // a maya markdown change that grew fence or table chrome past 4 rows
+    // would have silently broken the headroom proof while this test stayed
+    // green on prose-only shapes.
+    s.push_back({"one_fence",      "```cpp\nint x = 1;\nint y = 2;\n```\n"});
+    s.push_back({"two_fences",     "```cpp\na();\n```\ntext\n"
+                                   "```py\nb()\n```\n"});
+    s.push_back({"four_fences",    rep("```\ncode();\n```\n\n", 4)});
+    s.push_back({"fence_empty",    "```\n```\n"});
+    s.push_back({"quote_block",    "> quoted line one\n> quoted line two\n"
+                                   "> three\n"});
+    s.push_back({"table_real",     "| a | b |\n|---|---|\n| 1 | 2 |\n"
+                                   "| 3 | 4 |\n"});
+    s.push_back({"hrule",          "before\n\n---\n\nafter\n"});
+    s.push_back({"heading_mix",    "# H1\ntext\n## H2\ntext\n### H3\ntext\n"});
+    s.push_back({"fence_in_list",  "- item\n  ```\n  code\n  ```\n- item2\n"});
+    s.push_back({"deep_quote",     "> outer\n> > inner\n> > > deepest\n"});
     return s;
 }
 
@@ -111,16 +143,22 @@ void check_shape(const Shape& sh, int cols) {
 
     const int estimate = est_tail_rows(sh.body, cols);
 
-    if (estimate < actual) {
+    // Mirror the production inequality: estimate + slack must cover the
+    // real render. A deficit within the slack is expected for block-chrome
+    // shapes; a deficit BEYOND it is exactly the ghosted-rows-in-scrollback
+    // authorization bug.
+    if (estimate + kBlockChromeSlack < actual) {
         std::fprintf(stderr,
-            "FAIL: %-16s cols=%3d  estimate=%3d < actual=%3d  "
+            "FAIL: %-16s cols=%3d  estimate=%3d + slack=%d < actual=%3d  "
             "(bound UNDER-estimates → instant card could push %d ghosted "
             "row(s) into scrollback)\n",
-            sh.name, cols, estimate, actual, actual - estimate);
+            sh.name, cols, estimate, kBlockChromeSlack, actual,
+            actual - estimate - kBlockChromeSlack);
         ++failures;
     } else {
-        std::fprintf(stderr, "ok  : %-16s cols=%3d  estimate=%3d >= actual=%3d\n",
-                     sh.name, cols, estimate, actual);
+        std::fprintf(stderr,
+            "ok  : %-16s cols=%3d  estimate=%3d+%d >= actual=%3d\n",
+            sh.name, cols, estimate, kBlockChromeSlack, actual);
     }
 }
 

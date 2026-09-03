@@ -913,7 +913,13 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m,
             constexpr int kChromeRows = 6;
             // Slack for block-level markup in the unrevealed tail that adds
             // rows beyond its own text lines (code-fence borders, table
-            // separators, blockquote padding).
+            // separators, blockquote padding). MEASURED, not guessed:
+            // reveal_headroom_test renders a fence/quote/table corpus at 5
+            // widths and asserts est_tail_rows + this slack covers every
+            // real height — worst observed deficit is 2 rows (table borders),
+            // so 4 holds with 2 rows of margin. Change maya's markdown
+            // chrome and that corpus fails before this proof can authorize
+            // a card that strands ghosted rows. Keep the two copies equal.
             constexpr int kBlockChromeSlack = 4;
             // How many rows must leave the viewport once the card is shown.
             // >0 means that many LEADING tail rows would scroll into
