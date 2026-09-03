@@ -624,6 +624,38 @@ void refresh_fused_sources(Model& m) {
             c->state = ProviderCatalog::State::Ready;
         }
     }
+
+    // SAVED CUSTOM HOSTS are the fused picker's second source. They have no
+    // registry row, so the loop above never created a catalog for them — and
+    // until cb5847aa retired the classic model picker (which read the active
+    // provider's list straight out of available_models), that was survivable:
+    // the fused picker simply never showed them. Now that the fused picker is
+    // the ONLY models menu, a custom host MUST have a catalog here or its
+    // models can never appear: the live fetch lands in available_models, the
+    // picker rebuilds from provider_catalogs, and no row is emitted. Symmetry
+    // with the preset loop: the ACTIVE host mirrors available_models (Ready);
+    // every other saved host starts Idle so Open's deferred wave fetches it
+    // through cmd::fetch_models_for(spec), which resolves its saved key.
+    // (provider_keys membership IS the auth test for a custom host — see
+    // provider_is_authed(id, settings) — so nothing needs a sign-in offer.)
+    for (const auto& spec : provider::saved_custom_hosts(settings.provider_keys)) {
+        ProviderCatalog* c = find_cat(spec);
+        if (!c) {
+            m.d.provider_catalogs.push_back(ProviderCatalog{
+                spec,
+                provider::provider_display_name(
+                    provider::parse_selection(spec)),
+                ProviderCatalog::State::Idle, {}, {}});
+            c = &m.d.provider_catalogs.back();
+        }
+        if (spec == active_pid && !m.d.available_models.empty()) {
+            if (c->models != m.d.available_models) {
+                c->models = m.d.available_models;
+                c->invalidate_derived();    // model set changed — all caches stale
+            }
+            c->state = ProviderCatalog::State::Ready;
+        }
+    }
 }
 
 } // namespace

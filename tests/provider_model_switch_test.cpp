@@ -1160,3 +1160,99 @@ TEST_CASE("SignOut with no saved fallback opens sign-in") {
         provider::active().openai_endpoint.label != "openrouter";
     CHECK((opened_signin || switched_away));
 }
+
+// ── Regression: custom-host models in the fused picker ───────────────────────
+// cb5847aa retired the classic per-provider model picker (which read the
+// active provider's list straight out of available_models) and made the
+// fused cross-provider picker the ONLY models menu. But the fused picker
+// reads provider_catalogs, and refresh_fused_sources enumerated ONLY
+// registry presets — a saved custom host never got a catalog, so its live
+// /v1/models fetch landed in available_models and the menu still showed
+// nothing. These cases pin the restored behaviour through the REAL reducer:
+// the active custom host's catalog mirrors available_models (rows appear),
+// and a non-active saved custom host gets a catalog that a FusedCatalogLoaded
+// can merge into.
+TEST_CASE("fused picker shows an active custom host's models") {
+    using namespace agentty::msg;
+    install_stub_deps();
+    g_settings = store::Settings{};
+    // A saved custom host (provider_keys key that is not a registry preset)
+    // is the ACTIVE provider, with a live catalog already in hand.
+    g_settings.provider_keys["my-box.lan:8080"] = "";   // keyless local host
+    provider::select(provider::parse_selection("my-box.lan:8080"));
+
+    Model m;
+    m.d.model_id = ModelId{"qwen3:32b"};
+    m.d.available_models = {mi("qwen3:32b", "my-box.lan:8080"),
+                            mi("llama3.3:70b", "my-box.lan:8080")};
+
+    auto [m1, c1] = app::update(std::move(m), Msg{OpenFusedPicker{}});
+    CHECK(m1.ui.overlay.is<ov::FusedPicker>());
+
+    // The custom host has a catalog, it is the ACTIVE one, and it mirrors
+    // the live list (Ready, non-empty) — the exact seeding contract the
+    // presets get on open.
+    bool host_ready = false;
+    for (const auto& c : m1.d.provider_catalogs) {
+        if (c.provider_id == "my-box.lan:8080") {
+            host_ready = c.state == ProviderCatalog::State::Ready
+                       && c.models.size() == 2;
+        }
+    }
+    CHECK(host_ready, "active custom host catalog mirrors available_models");
+
+    // …and therefore ROWS: the models menu actually lists the host's models.
+    CHECK(!m1.d.fused_rows.empty());
+    bool saw_qwen = false, saw_llama = false;
+    for (const auto& r : m1.d.fused_rows) {
+        if (r.provider_id == "my-box.lan:8080") {
+            if (r.model.id.value == "qwen3:32b") saw_qwen = true;
+            if (r.model.id.value == "llama3.3:70b") saw_llama = true;
+        }
+    }
+    CHECK(saw_qwen);
+    CHECK(saw_llama);
+}
+
+TEST_CASE("fused picker gives a non-active saved custom host a mergeable catalog") {
+    using namespace agentty::msg;
+    install_stub_deps();
+    g_settings = store::Settings{};
+    // Anthropic active; the custom host is saved but NOT active. provider_keys
+    // membership is the auth test for a custom host, so it must appear as a
+    // source — Idle, empty, ready for cmd::fetch_models_for to fill.
+    g_settings.provider_keys["anthropic"]     = "sk-test";
+    g_settings.provider_keys["api.my-gw.com"] = "sk-gw";
+    provider::select(provider::parse_selection("anthropic"));
+
+    Model m;
+    m.d.model_id = ModelId{"claude-sonnet-4-6"};
+    m.d.available_models = {mi("claude-sonnet-4-6", "anthropic")};
+
+    auto [m1, c1] = app::update(std::move(m), Msg{OpenFusedPicker{}});
+    bool gw_idle = false;
+    for (const auto& c : m1.d.provider_catalogs) {
+        if (c.provider_id == "api.my-gw.com")
+            gw_idle = c.state == ProviderCatalog::State::Idle
+                   && c.models.empty();
+    }
+    CHECK(gw_idle, "saved non-active custom host has an Idle catalog");
+
+    // The deferred wave's fetch lands: merge by provider_id, then rows show.
+    FusedCatalogLoaded gw;
+    gw.provider_id = "api.my-gw.com";
+    gw.models = {mi("some-model-x", "api.my-gw.com")};
+    gw.ok = true;
+    auto [m2, c2] = app::update(std::move(m1), Msg{std::move(gw)});
+    bool gw_ready = false;
+    for (const auto& c : m2.d.provider_catalogs)
+        if (c.provider_id == "api.my-gw.com")
+            gw_ready = c.state == ProviderCatalog::State::Ready
+                    && c.models.size() == 1;
+    CHECK(gw_ready);
+    bool saw_gw_model = false;
+    for (const auto& r : m2.d.fused_rows)
+        if (r.provider_id == "api.my-gw.com"
+            && r.model.id.value == "some-model-x") saw_gw_model = true;
+    CHECK(saw_gw_model, "merged custom-host catalog yields rows");
+}
