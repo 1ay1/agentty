@@ -685,6 +685,15 @@ struct StreamingStats { Stats frame; Stats build; Stats render;
             live.args_streaming =
                 "{\"file_path\":\"src/auth/login.cpp\",\"content\":\""
                 + gen::code_block(live_lines);
+            // ...and args carries the PARSED snapshot, exactly as the
+            // reducer's ~120ms try_parse_partial keeps it in production
+            // (stream.cpp). Without this the write card's body branch reads
+            // an empty "content" and renders NOTHING — the sweep then
+            // measures an empty card at every size and is flat by vacuity,
+            // which is precisely how an O(body) regression in the body
+            // renderer would slip past this probe unmeasured.
+            live.args = {{"file_path", "src/auth/login.cpp"},
+                         {"content", gen::code_block(live_lines)}};
             a.tool_calls.push_back(std::move(live));
         }
         msgs.push_back(std::move(a));
@@ -1035,6 +1044,79 @@ int main(int argc, char** argv) {
     constexpr double kMidrunFrameCeilMs = 5.0;   // 16ms budget, ~6× slack
     constexpr double kRenderKeyCeilMs   = 1.0;   // observed 0.00; huge slack
     int perf_violations = 0;
+
+    // ── Live-tail FLATNESS gate ──────────────────────────────────
+    // The single most important perf property of the streaming path: the
+    // per-frame cost of an IN-FLIGHT turn must not scale with the size of
+    // the body being streamed. maya's agent_session has this structurally
+    // (closed blocks are rolled up into built Elements; only the live edge
+    // is rebuilt); agentty achieves the same via tail windowing
+    // (tool_body_common's kStreamTailLines slice + tail-anchored
+    // renderers). Measured: ~0.18ms/frame flat from 8 to 3000 body lines.
+    //
+    // That equivalence is load-bearing and was previously enforced
+    // NOWHERE — BENCH_STREAM was a manual probe. Any change that feeds an
+    // unwindowed body to the widget layer (dropping a tail_window call,
+    // a renderer that stops being tail-anchored, an accidental O(body)
+    // parse per frame) turns long streams into a per-frame tax that grows
+    // without bound, and no existing gate would notice. Compare a small
+    // vs a large in-flight body directly and fail on the RATIO — a
+    // machine-speed-independent assertion, unlike the absolute ceilings.
+    if (assert_perf) {
+        Shape base{.name = "flatness", .n_turns = 6, .write_lines = 300,
+                   .assistant_prose_p = 2, .iters = 20};
+        struct Probe { const char* what; int small_body; int big_body;
+                       double ratio_ceil; };
+        // 100 vs 12000 lines: a 120x body-size spread. An unwindowed body
+        // shows up as O(n) BUILD cost, and the wide spread separates broken
+        // from healthy decisively — at only 30x spread a broken build ratio
+        // (~2.8x) sat under any ceiling loose enough not to flake.
+        //
+        // Per-probe ceilings because the two paths are not equally flat:
+        //   • write tool — tail_window slices the body host-side, so build
+        //     is FLAT (~1x healthy; measured 9.1x with the window removed).
+        //   • prose — the body never passes tail_window; StreamingMarkdown
+        //     owns the full source, and build carries a small structural
+        //     O(body) term (~6 ns/line: 0.014 ms at 100 lines → 0.084 ms
+        //     at 12k, ratio ~4.2x). Negligible against the 16 ms frame
+        //     budget, but REAL — so the prose ceiling is set just above
+        //     today's coefficient to catch it growing, not to pretend the
+        //     path is flat.
+        for (const Probe p : {Probe{"write tool", 100, 12000, 3.0},
+                              Probe{"prose", -100, -12000, 6.0}}) {
+            const auto s = phase::streaming_frame(base, p.small_body);
+            const auto b = phase::streaming_frame(base, p.big_body);
+            // Guard the ratio against a denominator in the noise floor.
+            // Gate on the BUILD ratio, not the frame ratio. O(body) work
+            // lives in Element construction (view_build); render is
+            // dominated by the ~fixed painted row count and dilutes the
+            // signal — measured: breaking the write tail-window grew build
+            // 8.4x while the frame total moved only 2.5x. Floor the small
+            // side well above timer noise so the ratio is meaningful.
+            const double small_ms = std::max(s.build.median, 0.02);
+            const double ratio    = b.build.median / small_ms;
+            if (ratio > p.ratio_ceil) {
+                ++perf_violations;
+                std::fprintf(stderr,
+                    "PERF REGRESSION [streaming %s]: live-tail BUILD cost is "
+                    "not flat — %.3f ms at %d lines vs %.3f ms at %d lines "
+                    "(%.1fx > %.1fx ceiling). Element construction now "
+                    "scales with the in-flight body; see tail_window / "
+                    "kStreamTailLines in tool_body_common.\n",
+                    p.what, b.build.median, std::abs(p.big_body),
+                    s.build.median, std::abs(p.small_body),
+                    ratio, p.ratio_ceil);
+            }
+            if (b.frame.median > kMidrunFrameCeilMs) {
+                ++perf_violations;
+                std::fprintf(stderr,
+                    "PERF REGRESSION [streaming %s]: %.3f ms/frame at %d "
+                    "lines > %.2f ms ceiling\n",
+                    p.what, b.frame.median, std::abs(p.big_body),
+                    kMidrunFrameCeilMs);
+            }
+        }
+    }
 
     for (const auto& sh : shapes) {
         if (*filter && sh.name.find(filter) == std::string::npos) continue;
