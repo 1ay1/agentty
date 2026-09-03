@@ -271,15 +271,27 @@ std::size_t estimate_json_string_rows(const nlohmann::json& j, int cols) {
 // counting full wrapped_rows(output) OVER-counts by the elided amount —
 // exactly what makes the mid-run keep-loop drop an on-screen entry and
 // strand a committed-scrollback ghost. Returns 0 when the tool renders
-// its full body (write/edit args path, git_diff show_all) so the caller
-// counts it whole.
+// its full body (write/edit args path) so the caller counts it whole.
 std::size_t tool_output_render_cap(std::string_view name) {
     if (name == "bash" || name == "diagnostics")          return 4;
     if (name == "read" || name == "find_definition")      return 5;
+    // EVERY git_* tool elides to code_head+code_tail. Three of them used to
+    // be listed by name here, which silently left the other seven
+    // (git_diff/show/blame/branch/stash/rebase/cherry_pick) counted at FULL
+    // output height while rendering 7 rows — a 500-line `git diff` was
+    // counted as ~500 and drawn as 7. That is the over-count this function
+    // exists to prevent, and it is what tore scrollback on git-heavy turns.
+    // Prefix-match so a git tool added later is covered by construction
+    // rather than by remembering to edit this list.
+    //
+    // git_diff renders Kind::GitDiff and the rest fall through to
+    // Kind::CodeBlock, but both elide via the same code_head/code_tail
+    // budget, so one cap is correct for all of them. (An older comment here
+    // claimed "git_diff show_all" renders full — it does not; git_diff_body
+    // never sets show_all.)
+    if (name.starts_with("git_"))                         return 7;
     if (name == "grep" || name == "glob" || name == "list_dir"
-     || name == "web_search" || name == "web_fetch"
-     || name == "git_status" || name == "git_log"
-     || name == "git_commit")                             return 7;
+     || name == "web_search" || name == "web_fetch")      return 7;
     return 0;   // 0 ⇒ no cap (render full output)
 }
 
@@ -348,6 +360,12 @@ std::size_t prose_rows(std::string_view body, int cols) {
 // single keep-walk is measured against the SAME terminal state the
 // margin was computed from — a width that drifts mid-walk is what
 // desyncs the "provably above the viewport" proof.
+//
+// NOT in the anonymous namespace: declared in internal.hpp so tests can pin
+// the estimate-vs-render contract (see the comment there). Production
+// callers are all in this file.
+}  // namespace
+
 std::size_t estimate_msg_rows(const Message& mm, int cols) {
     // Prose body: count real wrapped rows (newline-aware), folding long
     // code blocks to match the frozen render's auto-fold.
@@ -419,8 +437,11 @@ std::size_t estimate_msg_rows(const Message& mm, int cols) {
 }
 
 // Convenience forwarder for the one-shot freeze paths (freeze_range,
-// rehydrate_frozen) that don't already hold a dims snapshot.
-std::size_t estimate_msg_rows(const Message& mm) {
+// rehydrate_frozen) that don't already hold a dims snapshot. Named
+// distinctly rather than overloaded: an anonymous-namespace overload would
+// SHADOW the external two-arg one for every later caller in this file.
+namespace {
+std::size_t estimate_msg_rows_auto(const Message& mm) {
     return estimate_msg_rows(mm, estimate_wrap_cols());
 }
 
@@ -762,14 +783,14 @@ void rehydrate_frozen(Model& m) {
         }
         std::size_t run_rows = 0;
         for (std::size_t k = j; k < cursor; ++k)
-            run_rows += estimate_msg_rows(msgs[k]);
+            run_rows += estimate_msg_rows_auto(msgs[k]);
 
         if (units == 0 && run_rows > kRehydrateRowBudget
             && (cursor - j) > 1) {
             std::size_t kept = 0;
             std::size_t cut  = cursor;
             for (std::size_t k = cursor; k-- > j; ) {
-                kept += estimate_msg_rows(msgs[k]);
+                kept += estimate_msg_rows_auto(msgs[k]);
                 cut = k;
                 if (kept >= kRehydrateRowBudget) break;
             }

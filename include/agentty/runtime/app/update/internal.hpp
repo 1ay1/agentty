@@ -347,5 +347,19 @@ Step login_update         (Model m, msg::LoginMsg          lm);
 Step diff_review_update   (Model m, msg::DiffReviewMsg     dm);
 Step meta_update          (Model m, msg::MetaMsg           mm);
 
+// ── Row estimation (frozen.cpp) ──────────────────────────────────────────
+//
+// Predicted RENDERED height of a message, in terminal rows, at `cols`.
+// Feeds rehydrate_frozen's keep-loop, which walks newest-first summing
+// these until it has covered a row budget. The estimate must never exceed
+// the real rendered height: an over-count makes the loop believe it has
+// covered the budget early and stop, keeping LESS history than intended,
+// and for tools whose renderer elides output the gap can be arbitrarily
+// large (a 500-line diff drawn as 7 rows). Under-counting is safe.
+//
+// Exported solely so tests can pin that estimate-vs-render contract per
+// tool; nothing outside frozen.cpp calls it in production.
+std::size_t estimate_msg_rows(const Message& mm, int cols);
+
 } // namespace detail
 } // namespace agentty::app

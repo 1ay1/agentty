@@ -514,3 +514,73 @@ TEST_CASE("output elided tool row estimate matches render") {
           || txt.find("file19") != std::string::npos,
           "bash tail rows missing from the render");
 }
+
+// 10b. The same invariant for EVERY output-elided tool, not just bash.
+//      The case above pinned bash and passed for years while the estimator
+//      quietly disagreed with the renderer for other tools: frozen.cpp's
+//      cap was a hand-written list of names, and git_status/log/commit were
+//      on it while git_diff/show/blame/branch/stash/rebase/cherry_pick were
+//      not — so a long `git diff` was ESTIMATED at its full output height
+//      (~500 rows) and RENDERED elided (~7). That over-count is precisely
+//      what makes the keep-loop drop an entry that is still on screen.
+//
+//      Looping over the tools makes the coverage gap structural rather than
+//      a matter of remembering to add a case per tool.
+TEST_CASE("output elided row estimate matches render for every such tool") {
+    const char* kTools[] = {
+        "bash", "diagnostics", "read", "find_definition",
+        "grep", "glob", "list_dir", "web_search",
+        "git_status", "git_diff", "git_log", "git_show", "git_blame",
+        "git_commit", "git_branch", "git_stash", "git_rebase",
+        "git_cherry_pick",
+    };
+
+    for (const char* tool_cstr : kTools) {
+        const std::string tool{tool_cstr};
+        CAPTURE(tool);
+        Model m;
+        m.d.current.id = agentty::ThreadId{"elide"};
+        Message u; u.role = Role::User; u.text = "do a thing";
+        m.d.current.messages.push_back(std::move(u));
+        Message a; a.role = Role::Assistant;
+
+        agentty::ToolUse tc;
+        tc.id   = agentty::ToolCallId{tool + "_1"};
+        tc.name = agentty::ToolName{tool};
+        tc.args = nlohmann::json::object();
+        std::string output;
+        for (int i = 0; i < 400; ++i)
+            output += "output line " + std::to_string(i)
+                    + " with some trailing text to make it wrap-ish\n";
+        auto now = steady_clock::now();
+        tc.status = agentty::ToolUse::Done{now - milliseconds{5}, now,
+                                           std::move(output)};
+        a.tool_calls.push_back(std::move(tc));
+        m.d.current.messages.push_back(std::move(a));
+        m.s.phase = agentty::phase::Idle{};
+
+        // The REAL rendered height of the whole transcript at this width.
+        constexpr int kCols = 100;
+        agentty::app::detail::clear_frozen(m);
+        agentty::app::detail::freeze_through(m, m.d.current.messages.size());
+        auto txt = render_dump(m, kCols);
+        int real_rows = 0;
+        for (char c : txt) if (c == '\n') ++real_rows;
+
+        // The PREDICTION the keep-loop actually consumes. row_total() is
+        // measured from the real render, so asserting on it can't catch an
+        // estimator bug — estimate_msg_rows is the function under test.
+        const std::size_t est =
+            agentty::app::detail::estimate_msg_rows(
+                m.d.current.messages[1], kCols);
+
+        // One-sided: UNDER-counting only keeps more history (safe); an
+        // OVER-count makes the keep-loop stop early and silently drop
+        // history it believed it had covered. For an eliding renderer the
+        // gap is unbounded — 400 lines of output drawn as ~7 rows.
+        CHECK(est <= static_cast<std::size_t>(real_rows),
+              tool << ": estimate " << est << " exceeds the real render "
+                   << real_rows << " rows — frozen.cpp counts this tool's "
+                      "full output while its renderer elides it");
+    }
+}
