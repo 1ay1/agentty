@@ -387,10 +387,37 @@ struct AgenttyApp {
         // in turn.cpp; this was the last direct clock read in the render
         // path.
         const auto now_ms = maya::anim_now_ms();
+
+        // The WELCOME screen animates on maya's schedule, not ours.
+        //
+        // It is RAF-driven: welcome_screen.hpp runs the cascade at 60 fps
+        // for the first 1200 ms, then paces itself with
+        // request_animation_frame_after(110) — ~9 fps, chosen because the
+        // 2200 ms bob only crosses a handful of integer rows and finer
+        // wakes are pure cost. There is no Tick subscription in this state
+        // (subscribe.cpp does not arm one for an empty thread): the frames
+        // come from RAF alone.
+        //
+        // Bucketing it at the streaming tick period was therefore wrong in
+        // both directions. Over ssh that period is 80 ms against maya's
+        // 110 ms request, so the two BEAT: some RAF wakes found the hash
+        // unchanged and were skipped by the render gate, others advanced it
+        // twice. The bob and the caret stepped irregularly — visible as
+        // flicker on an otherwise idle welcome screen.
+        //
+        // Lock to maya's own number instead: bucket at exactly the interval
+        // it asks to be woken on, so each armed frame advances the hash
+        // once.
+        // Welcome-screen frame interval. welcome_screen.hpp paces itself
+        // with request_animation_frame_after(110) once its opening cascade
+        // settles; matching that number here is what keeps the two in
+        // phase. Kept next to the gate that uses it.
+        constexpr std::int64_t kWelcomeFrameMs = 110;
+
         const bool fine_anim_live =
             m.s.active()                              // spinner / streaming caret
-            || m.d.current.messages.empty()           // welcome wordmark bob
             || !m.ui.composer.queued.empty();         // queued-chip pulse
+        const bool welcome_live = m.d.current.messages.empty();
         // The composer caret blinks (maya composer.hpp, U+2588 toggled
         // via style every 265 ms) whenever the composer is idle. maya's
         // own gate is simply `!active`, so match it exactly — if a modal
@@ -529,6 +556,19 @@ struct AgenttyApp {
             mix(static_cast<std::uint64_t>(now_ms / kRevealBucketMs));
         } else if (fine_anim_live) {
             mix(static_cast<std::uint64_t>(now_ms / kFineAnimMs));
+        } else if (welcome_live) {
+            // Phase-locked to welcome_screen.hpp's settled cadence: it asks to
+            // be woken every kWelcomeFrameMs, so bucket at exactly that and
+            // each armed frame advances the hash exactly once — no beat, no
+            // skipped step.
+            //
+            // The 60 fps cascade at the start needs no special case here:
+            // during it the mount calls request_animation_frame() every
+            // frame AND the model is still changing (first paint, catalog
+            // load, focus), so frames render regardless. Trying to detect
+            // the cascade window from wall time alone would be wrong — this
+            // clock has no notion of when the screen was mounted.
+            mix(static_cast<std::uint64_t>(now_ms / kWelcomeFrameMs));
         } else if (caret_blinking) {
             // Phase-locked: feed the blink PARITY, not a time bucket, so
             // the hash advances on exactly the same boundary maya uses
