@@ -564,13 +564,21 @@ TEST_CASE("visual hash: an idle welcome screen is hash-stable") {
         CHECK(agentty::app::AgenttyApp::visual_hash(m) == h0);
     }
 
-    // Advancing the frozen clock must not move it either while nothing is
-    // animating on our side: the welcome screen is widget-paced, so maya
-    // owns its frames and we contribute no time term.
-    maya::request_animation_frame_after(110);
-    for (std::int64_t t = 0; t < 2000; t += 37) {
-        maya::testing::freeze_anim_clock(1000000 + t);
-        CHECK(agentty::app::AgenttyApp::visual_hash(m) == h0);
+    // Advancing the clock must not move the hash WHEN THE TERMINAL OWNS THE
+    // CARET. That is the case this exists to pin: with the hardware caret
+    // maya paints no caret cell and schedules no frames, so there is no
+    // visible step for a time bucket to track, and mixing one makes the loop
+    // repaint against the terminal's own blink.
+    //
+    // With the PAINTED caret the opposite is true — maya blinks it and asks
+    // for the frames — so a parity term is correct and the hash SHOULD move.
+    // Asserting time-independence unconditionally would be asserting a bug.
+    if (agentty::ui::composer_uses_hardware_caret(m)) {
+        maya::request_animation_frame_after(110);
+        for (std::int64_t t = 0; t < 2000; t += 37) {
+            maya::testing::freeze_anim_clock(1000000 + t);
+            CHECK(agentty::app::AgenttyApp::visual_hash(m) == h0);
+        }
     }
     maya::consume_animation_request_for_test();
     maya::testing::freeze_anim_clock(1000000);
