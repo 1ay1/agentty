@@ -168,13 +168,15 @@ TEST_CASE("composer_edit") {
     {
         Model m;
         m.ui.composer.queued.push_back({"queued msg", {}});
-        m.ui.composer.queue_peek_idx = 0;      // pretend we Alt+↑'d
+        m.ui.composer.browsing = agentty::ComposerState::QueuePeek{0};   // pretend we Alt+↑'d
         m.ui.composer.text = "queued msg";
         m.ui.composer.cursor = 10;
         m = step(std::move(m), ComposerCharInput{U'!'});
-        check_edit("typing while peeking drops queue_peek_idx",
-              m.ui.composer.queue_peek_idx == -1,
-              std::to_string(m.ui.composer.queue_peek_idx));
+        check_edit("typing while peeking returns the composer to Live",
+              m.ui.composer.is_live(),
+              m.ui.composer.queue_peek_index()
+                  ? "still peeking " + std::to_string(*m.ui.composer.queue_peek_index())
+                  : "history");
     }
 
     // ── Kill-to-end-of-line (Alt+K — reachable again after the Ctrl+K

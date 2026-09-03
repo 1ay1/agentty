@@ -346,7 +346,7 @@ void build_queued_previews(const Model& m, int& running_turn,
         synthetic.timestamp   = now;
         std::string meta = "queued #" + std::to_string(qi + 1)
                          + " / "     + std::to_string(m.ui.composer.queued.size());
-        if (static_cast<int>(qi) == m.ui.composer.queue_peek_idx)
+        if (m.ui.composer.queue_peek_index() == static_cast<int>(qi))
             meta = "\xe2\x9c\x8e editing \xe2\x80\x94 " + meta;   // ✎
         out.push_back(gap_row());
         auto cfg = turn_config(synthetic, base_idx + qi, running_turn, m,

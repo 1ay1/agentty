@@ -916,9 +916,9 @@ Sub<Msg> subscribe(const Model& m) {
     const ComposerKeyState composer_state{
         m.ui.composer.text.empty(),
         !m.ui.composer.queued.empty(),
-        m.ui.composer.history_idx >= 0,
+        m.ui.composer.history_index().has_value(),
         has_history,
-        m.ui.composer.queue_peek_idx >= 0,
+        m.ui.composer.queue_peek_index().has_value(),
     };
 
     auto key_sub = Sub<Msg>::on_key(

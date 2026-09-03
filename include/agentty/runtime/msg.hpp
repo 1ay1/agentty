@@ -546,7 +546,11 @@ struct SymbolPaletteSelect {};
 struct OpenCodeBlockPicker {};
 struct CloseCodeBlockPicker {};
 struct CodeBlockPickerMove { int delta; };
-struct CodeBlockPickerSelect { int index = -1; };
+// Select a code block. `index` absent = act on the row under the cursor
+// (Enter); engaged = a direct 1-9 number key naming a row. It was
+// `int = -1`, so "no override" and "row -1" were the same value and every
+// reader had to remember which one it meant.
+struct CodeBlockPickerSelect { std::optional<int> index; };
 struct CodeBlockPickerEdit {};
 struct CodeBlockPickerCopy {};
 struct CodeBlockRunFinished {

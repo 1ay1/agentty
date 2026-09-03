@@ -27,6 +27,7 @@
 #include <chrono>
 #include <functional>
 #include <optional>
+#include <variant>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -34,12 +35,35 @@
 namespace agentty::tools::util {
 
 struct SubprocessOptions {
-    // Exactly one of `shell_command` / `argv` must be set. Shell form goes
-    // through cmd.exe/sh and gets its quoting rules; argv form is exec'd
-    // directly so paths, refs, commit messages, and format strings survive
-    // intact.
-    std::optional<std::string>              shell_command;
-    std::optional<std::vector<std::string>> argv;
+    // WHAT to run — exactly one form, chosen by the type.
+    //
+    //   Argv{...}  exec'd directly, no shell: paths, refs, commit
+    //              messages and format strings survive intact.
+    //   Shell{...} goes through cmd.exe / sh and gets its quoting rules.
+    //
+    // This was two independent optionals with a comment saying "exactly
+    // one of shell_command / argv must be set". Two optionals describe
+    // FOUR states — both set and neither set are equally constructible —
+    // and nothing enforced the rule: the runner is an `if (shell) … else
+    // if (argv) …` chain, so "both" silently ran the shell form and
+    // "neither" fell out the bottom. For an API that spawns processes,
+    // the difference between shell and exec is a security boundary, and
+    // it should not be expressible ambiguously.
+    struct Argv  { std::vector<std::string> args; };
+    struct Shell { std::string command; };
+    using Command = std::variant<Argv, Shell>;
+    Command command{Argv{}};
+
+    // Convenience readers, so call sites that only care about one form
+    // don't unpack the variant by hand.
+    [[nodiscard]] const std::vector<std::string>* argv_if() const noexcept {
+        if (auto* a = std::get_if<Argv>(&command)) return &a->args;
+        return nullptr;
+    }
+    [[nodiscard]] const std::string* shell_if() const noexcept {
+        if (auto* s = std::get_if<Shell>(&command)) return &s->command;
+        return nullptr;
+    }
 
     std::chrono::seconds timeout{120};
     // Unsigned because a negative cap makes no sense and every compare

@@ -791,47 +791,49 @@ SubprocessResult Subprocess::run(SubprocessOptions opts) {
     // Build a final command line appropriate for this platform.
 #ifdef _WIN32
     std::string cmdline;
-    if (opts.shell_command) {
+    if (const std::string* sh = opts.shell_if()) {
         // cmd.exe /S /C "…" — /S strips just the outermost quotes and
         // leaves everything else (including embedded "...") intact.
-        cmdline = "cmd.exe /S /C \"" + *opts.shell_command + "\"";
-    } else if (opts.argv) {
-        if (opts.argv->empty()) {
+        cmdline = "cmd.exe /S /C \"" + *sh + "\"";
+    } else {
+        const std::vector<std::string>& av = *opts.argv_if();
+        if (av.empty()) {
             r.started = false; r.start_error = "empty command"; return r;
         }
         // If argv[0] is a .cmd / .bat on PATH, wrap through cmd.exe — raw
         // CreateProcess refuses batch files (they need the interpreter).
         // Checked once up-front so we don't quote twice on the happy path.
-        const bool needs_cmd_shell = resolves_to_batch((*opts.argv)[0]);
-        for (size_t i = 0; i < opts.argv->size(); ++i) {
+        const bool needs_cmd_shell = resolves_to_batch(av[0]);
+        for (size_t i = 0; i < av.size(); ++i) {
             if (i) cmdline.push_back(' ');
-            cmdline += win_quote_arg((*opts.argv)[i]);
+            cmdline += win_quote_arg(av[i]);
         }
         if (needs_cmd_shell)
             cmdline = "cmd.exe /S /C \"" + cmdline + "\"";
-    } else {
-        r.started = false; r.start_error = "no command specified"; return r;
     }
+    // No trailing "no command specified" arm: the variant has exactly two
+    // alternatives, so shell_if() being null means argv_if() is not.
     return run_win32_cmdline(cmdline, opts);
 #else
-    if (opts.shell_command) {
+    // Exactly two alternatives, so the null check on one IS the other:
+    // there is no "neither form set" arm to write, because that state no
+    // longer exists. The old chain ended in a `"no command specified"`
+    // runtime error for a condition the type now rules out.
+    if (const std::string* sh = opts.shell_if()) {
         // Shell form: pass the whole command string as the single sh -c
         // argument. The runner sets up sh "-c" "<cmd>" itself; no
         // additional quoting needed (and we don't want any — the user
         // passed shell syntax expecting it to be parsed verbatim).
-        return run_posix({*opts.shell_command}, /*use_shell=*/true, opts);
+        return run_posix({*sh}, /*use_shell=*/true, opts);
     }
-    if (opts.argv) {
-        if (opts.argv->empty()) {
-            r.started = false; r.start_error = "empty command"; return r;
-        }
-        // argv form: exec directly with no shell in the loop. Preserves
-        // every byte of every arg, which is what callers like git_commit
-        // (commit messages with $vars / quotes / newlines) actually need.
-        return run_posix(*opts.argv, /*use_shell=*/false, opts);
+    const std::vector<std::string>& av = *opts.argv_if();
+    if (av.empty()) {
+        r.started = false; r.start_error = "empty command"; return r;
     }
-    r.started = false; r.start_error = "no command specified";
-    return r;
+    // argv form: exec directly with no shell in the loop. Preserves
+    // every byte of every arg, which is what callers like git_commit
+    // (commit messages with $vars / quotes / newlines) actually need.
+    return run_posix(av, /*use_shell=*/false, opts);
 #endif
 }
 
@@ -846,7 +848,7 @@ SubprocessResult run_command_s(const std::string& cmd,
                                std::size_t max_bytes,
                                std::chrono::seconds timeout) {
     SubprocessOptions opts;
-    opts.shell_command = cmd;
+    opts.command     = SubprocessOptions::Shell{cmd};
     opts.max_bytes   = max_bytes;
     opts.timeout     = timeout;
     opts.on_progress = [](std::string_view snap) { progress::emit(snap); };
@@ -857,7 +859,7 @@ SubprocessResult run_argv_s(const std::vector<std::string>& argv,
                             std::size_t max_bytes,
                             std::chrono::seconds timeout) {
     SubprocessOptions opts;
-    opts.argv        = argv;
+    opts.command     = SubprocessOptions::Argv{argv};
     opts.max_bytes   = max_bytes;
     opts.timeout     = timeout;
     opts.on_progress = [](std::string_view snap) { progress::emit(snap); };

@@ -79,22 +79,36 @@ struct ComposerState {
     /// fresh snapshot — Ctrl+Z then rewinds word-runs, not characters.
     bool undo_coalescing = false;
 
-    /// History walking over previous USER messages in the current
-    /// thread.
-    ///   history_idx == -1 → live draft (composer is what the user is
-    ///                        currently typing).
-    ///   history_idx >=  0 → walking history; the value is the index
-    ///                        into the reverse-chronological list of
-    ///                        prior user messages. Press ↑ to walk
-    ///                        further into the past, ↓ to walk back
-    ///                        toward the live draft. The first ↑
-    ///                        snapshots the live text into draft_save
-    ///                        so the round-trip is non-destructive.
-    /// Any text-mutating op (CharInput / Backspace / Paste / Kill /
-    /// chip insertion) resets history_idx to -1 and discards
-    /// draft_save — at that point the user is editing what they pulled
-    /// from history, treating it as their new draft.
-    int                        history_idx = -1;
+    /// What the composer is currently SHOWING. Exactly one of three
+    /// things, so it is spelled as a variant rather than as two integers
+    /// that have to be kept mutually exclusive by hand:
+    ///
+    ///   Live        the user's own draft — the normal state.
+    ///   History{i}  walking past USER messages (↑/↓). `i` indexes the
+    ///               reverse-chronological list of prior user messages.
+    ///   QueuePeek{i} editing pending queued item `i` in place (Alt+↑/↓).
+    ///
+    /// This was `int history_idx = -1` plus `int queue_peek_idx = -1`,
+    /// with a comment on the second one stating the invariant in prose:
+    /// "Mutually exclusive with history_idx — you're either walking past
+    /// USER messages or editing a pending QUEUED one, never both." Two
+    /// independent ints cannot express that: `history_idx >= 0 &&
+    /// queue_peek_idx >= 0` was a perfectly constructible state that every
+    /// reader had to avoid producing, and -1 had to be remembered as "none"
+    /// at each of the ~20 sites that touched them. A variant states the
+    /// exclusion in the type, so the illegal combination has no spelling.
+    ///
+    /// The first ↑ (or Alt+↑) snapshots the live text/attachments into
+    /// draft_save so the round-trip is non-destructive. Any text-mutating
+    /// op (CharInput / Backspace / Paste / Kill / chip insertion) drops
+    /// back to Live and discards the snapshot — at that point the user is
+    /// editing what they pulled up, treating it as their new draft.
+    struct Live {};
+    struct History   { int index = 0; };   // into prior user messages
+    struct QueuePeek { int index = 0; };   // into `queued`
+    using Browsing = std::variant<Live, History, QueuePeek>;
+    Browsing                   browsing{Live{}};
+
     std::optional<std::string> draft_save;
     /// Companion to `draft_save`: the live draft's attachments[]
     /// captured at the same moment so a queue-peek round-trip
@@ -106,22 +120,22 @@ struct ComposerState {
     /// previous schemas). Cleared together with `draft_save`.
     std::vector<Attachment>    draft_save_attachments;
 
-    /// Per-item queue peek (Alt+↑ / Alt+↓). Mutually exclusive with
-    /// history_idx — you're either walking past USER messages or
-    /// editing a pending QUEUED one, never both.
-    ///   queue_peek_idx == -1 → not peeking; composer holds the live
-    ///                           draft (or history pick).
-    ///   queue_peek_idx >=  0 → composer is showing
-    ///                           m.ui.composer.queued[queue_peek_idx]
-    ///                           for in-place editing. Submit removes
-    ///                           that index from the queue and re-
-    ///                           queues the edited bytes at the tail;
-    ///                           Esc / Alt+↓ past the end restores the
-    ///                           live draft from draft_save.
-    /// Any text-mutating op while peeking is normal editing of the
-    /// peeked item — only the queue slot is treated as the new
-    /// pending content on submit.
-    int                        queue_peek_idx = -1;
+    // ── Browsing queries ─────────────────────────────────────────
+    // Small readers so call sites ask a question instead of unpacking a
+    // variant inline. Each returns the index only when that alternative is
+    // actually active, so "which mode" and "which item" cannot be answered
+    // separately — the pairing that -1 sentinels kept splitting apart.
+    [[nodiscard]] bool is_live() const noexcept {
+        return std::holds_alternative<Live>(browsing);
+    }
+    [[nodiscard]] std::optional<int> history_index() const noexcept {
+        if (auto* h = std::get_if<History>(&browsing)) return h->index;
+        return std::nullopt;
+    }
+    [[nodiscard]] std::optional<int> queue_peek_index() const noexcept {
+        if (auto* q = std::get_if<QueuePeek>(&browsing)) return q->index;
+        return std::nullopt;
+    }
 
     /// Wall-clock ms (maya anim clock) of the user's last composer
     /// interaction (any keystroke / edit / cursor move). Drives the

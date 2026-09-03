@@ -54,7 +54,7 @@ std::atomic<Backend> g_backend{Backend::None};
 // thrown away — exit code 0 just means the binary exists and starts.
 [[nodiscard]] bool can_invoke(const char* exe) {
     SubprocessOptions opts;
-    opts.argv = std::vector<std::string>{exe, "--version"};
+    opts.command = SubprocessOptions::Argv{{exe, "--version"}};
     opts.timeout = std::chrono::seconds{2};
     opts.max_bytes = 4096;
     auto r = Subprocess::run(std::move(opts));
@@ -280,7 +280,7 @@ std::atomic<Backend> g_backend{Backend::None};
                                            std::size_t max_bytes,
                                            std::chrono::seconds timeout) {
     SubprocessOptions opts;
-    opts.argv = build_bwrap_argv(cmd);
+    opts.command = SubprocessOptions::Argv{build_bwrap_argv(cmd)};
     opts.max_bytes = max_bytes;
     opts.timeout = timeout;
     opts.on_progress = [](std::string_view snap) { progress::emit(snap); };
@@ -307,7 +307,7 @@ std::atomic<Backend> g_backend{Backend::None};
     for (const auto& a : user_argv) wrapped.push_back(a);
 
     SubprocessOptions opts;
-    opts.argv = std::move(wrapped);
+    opts.command = SubprocessOptions::Argv{std::move(wrapped)};
     opts.max_bytes = max_bytes;
     opts.timeout = timeout;
     opts.on_progress = [](std::string_view snap) { progress::emit(snap); };
@@ -363,10 +363,10 @@ std::atomic<Backend> g_backend{Backend::None};
                                            std::chrono::seconds timeout) {
     SubprocessOptions opts;
     auto profile = build_profile(workspace_root().string());
-    opts.argv = std::vector<std::string>{
+    opts.command = SubprocessOptions::Argv{{
         "sandbox-exec", "-p", std::move(profile),
         "/bin/sh", "-c", std::string{cmd}
-    };
+    }};
     opts.max_bytes = max_bytes;
     opts.timeout = timeout;
     opts.on_progress = [](std::string_view snap) { progress::emit(snap); };
@@ -385,7 +385,7 @@ std::atomic<Backend> g_backend{Backend::None};
     auto profile = build_profile(workspace_root().string());
     std::vector<std::string> argv{"sandbox-exec", "-p", std::move(profile)};
     for (const auto& a : user_argv) argv.push_back(a);
-    opts.argv = std::move(argv);
+    opts.command = SubprocessOptions::Argv{std::move(argv)};
     opts.max_bytes = max_bytes;
     opts.timeout = timeout;
     opts.on_progress = [](std::string_view snap) { progress::emit(snap); };

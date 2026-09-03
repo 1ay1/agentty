@@ -85,26 +85,22 @@ void push_undo(ComposerState& cs, bool coalesce = false) {
     cs.undo_coalescing = coalesce;
 }
 
-// History walking is "current draft" until the user mutates; any text
-// edit after a walk treats the walked text as their new draft. Reset
-// history_idx + drop the saved draft so the next ↑ snapshots the new
-// state cleanly.
-void reset_history(ComposerState& cs) {
-    cs.history_idx = -1;
-    cs.draft_save.reset();
-    cs.draft_save_attachments.clear();
-}
-
-// A text-mutating edit that arrives while the composer is showing a
-// PEEKED queue slot (Alt+↑) is normal editing of that slot — but once
-// the user is just typing, the "press Enter re-queues the peeked slot,
-// removing its original" contract in submit_message no longer matches
-// their mental model: they think they're composing a fresh message.
-// History has the same hazard and is cleared in reset_history; do the
-// same for queue peek so a stray edit can't silently delete the wrong
-// queue entry on submit. The edited bytes simply become the live draft.
-void reset_queue_peek(ComposerState& cs) {
-    cs.queue_peek_idx = -1;
+// Drop back to the LIVE draft and discard the round-trip snapshot.
+//
+// This was two functions — reset_history and reset_queue_peek — that
+// differed only in which sentinel they set to -1; both cleared the same
+// snapshot. With browsing as a variant there is one "stop browsing"
+// transition, so there is one function.
+//
+// Why any text edit triggers it: while the composer shows a pulled-up
+// history item or a peeked queue slot, editing is still editing THAT
+// item. But once the user is simply typing, submit's "re-queue the peeked
+// slot, removing its original" contract no longer matches their mental
+// model — they think they are composing a fresh message. Returning to
+// Live makes the edited bytes the live draft, so a stray keystroke cannot
+// silently delete the wrong queue entry on submit.
+void reset_browsing(ComposerState& cs) {
+    cs.browsing = ComposerState::Live{};
     cs.draft_save.reset();
     cs.draft_save_attachments.clear();
 }
@@ -113,16 +109,16 @@ void reset_queue_peek(ComposerState& cs) {
 // a standalone undo snapshot that never coalesces with neighbours.
 void begin_edit(ComposerState& cs) {
     push_undo(cs);
-    reset_history(cs);
-    reset_queue_peek(cs);
+    reset_browsing(cs);
+    reset_browsing(cs);
 }
 
 // begin_edit for a self-inserting keystroke: coalesces consecutive
 // typing into a single undo unit (see push_undo).
 void begin_typing_edit(ComposerState& cs) {
     push_undo(cs, /*coalesce=*/true);
-    reset_history(cs);
-    reset_queue_peek(cs);
+    reset_browsing(cs);
+    reset_browsing(cs);
 }
 
 // Word-boundary cursor walks. Boundaries are runs of whitespace; chip
@@ -746,8 +742,8 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             m.ui.composer.cursor      = prev.cursor;
             m.ui.composer.attachments = std::move(prev.attachments);
             m.ui.composer.undo_coalescing = false;
-            reset_history(m.ui.composer);
-            reset_queue_peek(m.ui.composer);
+            reset_browsing(m.ui.composer);
+            reset_browsing(m.ui.composer);
             return done(std::move(m));
         },
         [&](ComposerRedo) -> Step {
@@ -765,49 +761,50 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             m.ui.composer.cursor      = next.cursor;
             m.ui.composer.attachments = std::move(next.attachments);
             m.ui.composer.undo_coalescing = false;
-            reset_history(m.ui.composer);
-            reset_queue_peek(m.ui.composer);
+            reset_browsing(m.ui.composer);
+            reset_browsing(m.ui.composer);
             return done(std::move(m));
         },
         [&](ComposerHistoryPrev) -> Step {
-            // First ↑ from the live draft — snapshot whatever the user
-            // had typed so ↓ all the way back restores it.
             auto texts = previous_user_texts(m);
             if (texts.empty()) return done(std::move(m));
-            int next_idx = m.ui.composer.history_idx + 1;
+            auto& cs = m.ui.composer;
+            // Where we are now: browsing history, or anywhere else (Live,
+            // or peeking the queue — ↑ leaves that and enters history).
+            const auto cur = cs.history_index();
+            int next_idx = cur.value_or(-1) + 1;
             if (next_idx >= static_cast<int>(texts.size()))
                 next_idx = static_cast<int>(texts.size()) - 1;
-            if (m.ui.composer.history_idx < 0) {
-                m.ui.composer.draft_save = m.ui.composer.text;
-            }
-            m.ui.composer.history_idx = next_idx;
-            m.ui.composer.undo_coalescing = false;
-            apply_history_entry(m.ui.composer, texts[
-                static_cast<std::size_t>(next_idx)]);
+            // First ↑ out of the live draft — snapshot whatever the user
+            // had typed so ↓ all the way back restores it.
+            if (!cur) cs.draft_save = cs.text;
+            cs.browsing = ComposerState::History{next_idx};
+            cs.undo_coalescing = false;
+            apply_history_entry(cs, texts[static_cast<std::size_t>(next_idx)]);
             // History walk does NOT push undo: ↑↓ alone are
             // non-destructive (they leave draft_save intact). Once
-            // the user edits, begin_edit fires reset_history and
+            // the user edits, begin_edit fires reset_browsing and
             // the walked text becomes the new live draft.
             return done(std::move(m));
         },
         [&](ComposerHistoryNext) -> Step {
-            if (m.ui.composer.history_idx < 0) return done(std::move(m));
-            m.ui.composer.undo_coalescing = false;
+            auto& cs = m.ui.composer;
+            const auto cur = cs.history_index();
+            if (!cur) return done(std::move(m));   // not walking history
+            cs.undo_coalescing = false;
             auto texts = previous_user_texts(m);
-            int next_idx = m.ui.composer.history_idx - 1;
+            const int next_idx = *cur - 1;
             if (next_idx < 0) {
                 // Walked all the way back to the live draft.
-                m.ui.composer.history_idx = -1;
-                m.ui.composer.text = m.ui.composer.draft_save.value_or(std::string{});
-                m.ui.composer.cursor = static_cast<int>(m.ui.composer.text.size());
-                m.ui.composer.draft_save.reset();
+                cs.browsing = ComposerState::Live{};
+                cs.text = cs.draft_save.value_or(std::string{});
+                cs.cursor = static_cast<int>(cs.text.size());
+                cs.draft_save.reset();
                 return done(std::move(m));
             }
-            m.ui.composer.history_idx = next_idx;
-            if (next_idx < static_cast<int>(texts.size())) {
-                apply_history_entry(m.ui.composer,
-                                    texts[static_cast<std::size_t>(next_idx)]);
-            }
+            cs.browsing = ComposerState::History{next_idx};
+            if (next_idx < static_cast<int>(texts.size()))
+                apply_history_entry(cs, texts[static_cast<std::size_t>(next_idx)]);
             return done(std::move(m));
         },
         [&](ComposerImagePasteFromClipboard) -> Step {
@@ -1232,85 +1229,83 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             // usually wants when correcting a typo in their last
             // queued message.
             if (m.ui.composer.queued.empty()) return done(std::move(m));
-            m.ui.composer.undo_coalescing = false;
-            // Mutually exclusive with history walking — abandon any
-            // history pick. (The composer text on screen WAS the
-            // history pick; saving it would conflate it with the
-            // live draft. Drop it.)
-            if (m.ui.composer.history_idx >= 0) {
-                m.ui.composer.history_idx = -1;
-                m.ui.composer.draft_save.reset();
-                m.ui.composer.draft_save_attachments.clear();
-            }
-            int n = static_cast<int>(m.ui.composer.queued.size());
+            auto& cs = m.ui.composer;
+            cs.undo_coalescing = false;
+            const int n = static_cast<int>(cs.queued.size());
             int next_idx;
-            if (m.ui.composer.queue_peek_idx < 0) {
-                // First press — snapshot the live draft (text +
-                // attachments) and start at the tail. Both fields
-                // are restored if the user walks back past the tail
-                // with Alt+↓.
-                m.ui.composer.draft_save             = m.ui.composer.text;
-                m.ui.composer.draft_save_attachments = m.ui.composer.attachments;
-                next_idx = n - 1;
-            } else {
-                // Already peeking — commit the user's edits back into
-                // the queue slot they came from before moving on.
-                // Without this, Alt+↑ → type → Alt+↑ would silently
-                // discard the typed correction.
-                m.ui.composer.queued[m.ui.composer.queue_peek_idx].text =
-                    std::move(m.ui.composer.text);
-                m.ui.composer.queued[m.ui.composer.queue_peek_idx].attachments =
-                    std::move(m.ui.composer.attachments);
-                next_idx = m.ui.composer.queue_peek_idx - 1;
+            // Entering the queue from history is just a state change now:
+            // assigning QueuePeek REPLACES History, so the "mutually
+            // exclusive — abandon any history pick" block that used to sit
+            // here is gone. The snapshot still has to be dropped, because
+            // the text on screen WAS the history pick and saving it would
+            // conflate it with the live draft.
+            if (const auto peek = cs.queue_peek_index()) {
+                // Already peeking — commit the user's edits back into the
+                // queue slot they came from before moving on. Without this,
+                // Alt+↑ → type → Alt+↑ would silently discard the typed
+                // correction.
+                auto& slot = cs.queued[static_cast<std::size_t>(*peek)];
+                slot.text        = std::move(cs.text);
+                slot.attachments = std::move(cs.attachments);
+                next_idx = *peek - 1;
                 if (next_idx < 0) next_idx = 0;   // clamp, no wrap
+            } else {
+                if (!cs.is_live()) {
+                    // Came from a history pick: drop its snapshot.
+                    cs.draft_save.reset();
+                    cs.draft_save_attachments.clear();
+                } else {
+                    // First press from the live draft — snapshot text +
+                    // attachments so Alt+↓ past the tail restores them.
+                    cs.draft_save             = cs.text;
+                    cs.draft_save_attachments = cs.attachments;
+                }
+                next_idx = n - 1;
             }
-            m.ui.composer.queue_peek_idx = next_idx;
+            cs.browsing = ComposerState::QueuePeek{next_idx};
             // Move the slot into the live composer (we'll write it
             // back on the next cycle / submit).
-            m.ui.composer.text        =
-                m.ui.composer.queued[static_cast<std::size_t>(next_idx)].text;
-            m.ui.composer.attachments =
-                m.ui.composer.queued[static_cast<std::size_t>(next_idx)].attachments;
-            m.ui.composer.cursor = static_cast<int>(m.ui.composer.text.size());
+            cs.text        = cs.queued[static_cast<std::size_t>(next_idx)].text;
+            cs.attachments = cs.queued[static_cast<std::size_t>(next_idx)].attachments;
+            cs.cursor = static_cast<int>(cs.text.size());
             // Peek doesn't snapshot undo (round-trip non-destructive).
             // Multi-line peeked content → honour expanded cap.
-            if (m.ui.composer.text.find('\n') != std::string::npos)
-                m.ui.composer.expanded = true;
+            if (cs.text.find('\n') != std::string::npos)
+                cs.expanded = true;
             return done(std::move(m));
         },
         [&](ComposerQueuePeekNext) -> Step {
             // Alt+↓ — walk back OUT of the queue toward the live draft.
             // No-op when not peeking.
-            if (m.ui.composer.queue_peek_idx < 0) return done(std::move(m));
-            m.ui.composer.undo_coalescing = false;
-            int n = static_cast<int>(m.ui.composer.queued.size());
+            auto& cs = m.ui.composer;
+            const auto peek = cs.queue_peek_index();
+            if (!peek) return done(std::move(m));
+            cs.undo_coalescing = false;
+            const int n = static_cast<int>(cs.queued.size());
             // Commit the current edit back into its slot first.
-            if (m.ui.composer.queue_peek_idx < n) {
-                m.ui.composer.queued[m.ui.composer.queue_peek_idx].text =
-                    std::move(m.ui.composer.text);
-                m.ui.composer.queued[m.ui.composer.queue_peek_idx].attachments =
-                    std::move(m.ui.composer.attachments);
+            if (*peek < n) {
+                auto& slot = cs.queued[static_cast<std::size_t>(*peek)];
+                slot.text        = std::move(cs.text);
+                slot.attachments = std::move(cs.attachments);
             }
-            int next_idx = m.ui.composer.queue_peek_idx + 1;
+            const int next_idx = *peek + 1;
             if (next_idx >= n) {
                 // Walked past the tail — restore the live draft
                 // (text + chips) and leave peek mode.
-                m.ui.composer.queue_peek_idx = -1;
-                m.ui.composer.text        = m.ui.composer.draft_save.value_or(std::string{});
-                m.ui.composer.attachments = std::move(m.ui.composer.draft_save_attachments);
-                m.ui.composer.draft_save_attachments.clear();
-                m.ui.composer.cursor = static_cast<int>(m.ui.composer.text.size());
-                m.ui.composer.draft_save.reset();
+                cs.browsing   = ComposerState::Live{};
+                cs.text        = cs.draft_save.value_or(std::string{});
+                cs.attachments = std::move(cs.draft_save_attachments);
+                cs.draft_save_attachments.clear();
+                cs.cursor = static_cast<int>(cs.text.size());
+                cs.draft_save.reset();
                 return done(std::move(m));
             }
-            m.ui.composer.queue_peek_idx = next_idx;
-            m.ui.composer.text        =
-                m.ui.composer.queued[static_cast<std::size_t>(next_idx)].text;
-            m.ui.composer.attachments =
-                m.ui.composer.queued[static_cast<std::size_t>(next_idx)].attachments;
-            m.ui.composer.cursor = static_cast<int>(m.ui.composer.text.size());
-            if (m.ui.composer.text.find('\n') != std::string::npos)
-                m.ui.composer.expanded = true;
+            cs.browsing    = ComposerState::QueuePeek{next_idx};
+            cs.text        = cs.queued[static_cast<std::size_t>(next_idx)].text;
+            cs.attachments = cs.queued[static_cast<std::size_t>(next_idx)].attachments;
+            cs.cursor      = static_cast<int>(cs.text.size());
+            if (cs.text.find('\n') != std::string::npos)
+                cs.expanded = true;
             return done(std::move(m));
         },
         [&](ComposerQueuePopLast) -> Step {
@@ -1324,11 +1319,11 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             if (m.ui.composer.queued.empty()) return done(std::move(m));
             m.ui.composer.queued.pop_back();
             // If the peek index pointed at or past the dropped tail,
-            // invalidate it. (Subscribe gates this Msg on
-            // queue_peek_idx == -1, but be defensive.)
-            int n = static_cast<int>(m.ui.composer.queued.size());
-            if (m.ui.composer.queue_peek_idx >= n) {
-                m.ui.composer.queue_peek_idx = -1;
+            // invalidate it. (Subscribe gates this Msg on the composer
+            // being live, but be defensive.)
+            if (const auto peek = m.ui.composer.queue_peek_index();
+                peek && *peek >= static_cast<int>(m.ui.composer.queued.size())) {
+                m.ui.composer.browsing = ComposerState::Live{};
                 m.ui.composer.draft_save.reset();
                 m.ui.composer.draft_save_attachments.clear();
             }

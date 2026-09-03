@@ -153,9 +153,8 @@ Step submit_message(Model m) {
         // produce surprising "Ctrl+Z restores half of last turn".
         mm.ui.composer.undo_stack.clear();
         mm.ui.composer.redo_stack.clear();
-        mm.ui.composer.history_idx = -1;
+        mm.ui.composer.browsing = ComposerState::Live{};
         mm.ui.composer.draft_save.reset();
-        mm.ui.composer.queue_peek_idx = -1;
         return out;
     };
 
@@ -167,11 +166,10 @@ Step submit_message(Model m) {
     // while the agent was busy, then have it finish before they hit
     // Enter), the edited bytes go straight to the wire and the queue
     // just shrinks by one.
-    if (m.ui.composer.queue_peek_idx >= 0
-        && m.ui.composer.queue_peek_idx
-               < static_cast<int>(m.ui.composer.queued.size())) {
+    if (const auto peek = m.ui.composer.queue_peek_index();
+        peek && *peek < static_cast<int>(m.ui.composer.queued.size())) {
         m.ui.composer.queued.erase(
-            m.ui.composer.queued.begin() + m.ui.composer.queue_peek_idx);
+            m.ui.composer.queued.begin() + *peek);
         // draft_save (if any) is the live draft the user was typing
         // before they pressed Alt+↑. They've explicitly committed the
         // peeked item by submitting it, so the saved draft is now
@@ -180,7 +178,7 @@ Step submit_message(Model m) {
         // the bail-out paths above tidy.)
         m.ui.composer.draft_save.reset();
         m.ui.composer.draft_save_attachments.clear();
-        m.ui.composer.queue_peek_idx = -1;
+        m.ui.composer.browsing = ComposerState::Live{};
     }
 
     // Belt-and-suspenders: queue if any non-Idle phase is in flight.
@@ -660,10 +658,9 @@ void reset_composer_draft(ComposerState& c) {
     c.attachments.clear();
     c.undo_stack.clear();
     c.redo_stack.clear();
-    c.history_idx = -1;
+    c.browsing = ComposerState::Live{};
     c.draft_save.reset();
     c.draft_save_attachments.clear();
-    c.queue_peek_idx = -1;
     c.queued.clear();
 }
 

@@ -646,7 +646,7 @@ int main() {
         m.s.phase = agentty::phase::Idle{};
         m.ui.composer.text.clear();
         m.ui.composer.cursor = 0;
-        m.ui.composer.history_idx = -1;
+        m.ui.composer.browsing = agentty::ComposerState::Live{};
         m.ui.composer.draft_save.reset();
         frame("cleared");
 
@@ -764,7 +764,7 @@ int main() {
         m.s.phase = agentty::phase::Idle{};
         m.ui.composer.text.clear();
         m.ui.composer.cursor = 0;
-        m.ui.composer.history_idx = -1;
+        m.ui.composer.browsing = agentty::ComposerState::Live{};
         m.ui.composer.draft_save.reset();
         frame("welcome-fresh");
         dump(emu, "welcome (first start)");

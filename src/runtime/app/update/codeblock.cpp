@@ -599,7 +599,7 @@ Step codeblock_update(Model m, msg::CodeBlockMsg cm) {
         [&](CodeBlockPickerSelect& e) -> Step {
             auto* o = m.ui.overlay.get<ov::CodeBlocks>();
             if (!o) return done(std::move(m));
-            const int idx = (e.index >= 0) ? e.index : o->index;
+            const int idx = e.index.value_or(o->index);
             if (idx < 0 || idx >= static_cast<int>(o->blocks.size()))
                 return done(std::move(m));
             CodeBlock block = o->blocks[static_cast<std::size_t>(idx)];
