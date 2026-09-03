@@ -746,16 +746,12 @@ TEST_CASE("pickers: primary labels are not dimmed, trailing yields first") {
     // Rule 3: badge padding measures columns, not bytes.
     CHECK(src.find("maya::string_width(r.label)") != std::string::npos);
 
-    // Rule 4: the "other providers" header is CONDITIONAL. "from all OTHER
-    // providers" only reads correctly when a "from this provider" section is
-    // on screen to be other than. With no active model (fresh install) every
-    // row lands in that section, and the header pointed at a section that
-    // does not exist. Assert both titles are present and gated on
-    // has_this_provider, so a future edit can't collapse it back to one
-    // unconditional string.
-    CHECK(src.find("has_this_provider") != std::string::npos);
-    CHECK(src.find("\"from all other providers\"") != std::string::npos);
-    CHECK(src.find("\"all providers\"") != std::string::npos);
+    // NOTE: the conditional "from all other providers" / "all providers"
+    // section header is NOT asserted here. Grepping this file would only
+    // prove the branch was TYPED — not that it renders, that the row it
+    // titles is on screen, or that the fallback fires for the right input.
+    // picker_sections_render_test renders the real picker and reads the
+    // header back off the canvas, which is strictly stronger.
 }
 
 
