@@ -144,6 +144,7 @@ struct FusedRow {
     bool        authed = true;
     bool        active = false;           // == current provider + model
     bool        recent = false;           // belongs in the RECENT section
+    bool        provider_group = false;     // set on non-recent rows of the active provider's catalog while BROWSING (so the view can title section 2); false while filtering and on offers
     bool        reasons = false;          // model can reason (precomputed at
                                           // build so the view never decodes
     // Capability tier, precomputed alongside `reasons` for the same reason:

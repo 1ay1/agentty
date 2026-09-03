@@ -426,17 +426,18 @@ Element fused_picker(const Model& m) {
     // Section dividers: RECENT vs ALL PROVIDERS, plus a query-gated SIGN IN
     // section — an un-authed provider whose name matches the query renders as
     // one dim actionable row so searching for it is never a dead end.
-    enum class Section { Recent, All, SignIn };
+    enum class Section { Recent, ThisProvider, Others, SignIn };
     auto section_of = [](const FusedRow& r) {
         if (r.is_signin_offer()) return Section::SignIn;
-        return r.recent ? Section::Recent : Section::All;
+        if (r.recent) return Section::Recent;
+        return r.provider_group ? Section::ThisProvider : Section::Others;
     };
     std::optional<Section> cur;
     int visual_selected = 0;
     // Size of the "all providers" section, for the header count below.
     int all_count = 0;
     for (const auto& r : rows)
-        if (section_of(r) == Section::All) ++all_count;
+        if (section_of(r) == Section::Others) ++all_count;
 
     // ── Badge column width ──────────────────────────────────────────
     // maya's Picker asks callers to "pad badges to a common width" for column
@@ -463,17 +464,11 @@ Element fused_picker(const Model& m) {
             cur = sec;
             Picker::Config::Row hdr;
             hdr.is_header = true;
-            hdr.leading = sec == Section::Recent ? "recent"
-                        : sec == Section::All    ? "all providers"
-                                                  : "not signed in";
-            // Name the size of the browse list. An aggregator (OpenRouter et
-            // al.) contributes hundreds of models to a 14-row viewport, and
-            // without a count a tiny scrollbar is the only hint that the list
-            // runs far past the screen — which reads as "my model is missing"
-            // rather than "type to narrow". Browse-only: with a query active
-            // the row count is the answer to the query, and a total would
-            // just be noise next to it.
-            if (sec == Section::All && picker->query.empty() && all_count > 0) {
+            hdr.leading = sec == Section::Recent      ? "recent"
+                        : sec == Section::ThisProvider ? "from this provider"
+                        : sec == Section::Others       ? "from all other providers"
+                                                       : "not signed in";
+            if (sec == Section::Others && picker->query.empty() && all_count > 0) {
                 hdr.trailing = std::to_string(all_count) + " models \xc2\xb7 "
                                "type to filter";
                 hdr.trailing_style = fg_italic(muted);

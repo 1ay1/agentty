@@ -111,7 +111,13 @@ TEST_CASE("fused: MRU section then all-providers, deduped") {
     int recent_rows = 0;
     for (auto& r : rows) if (r.recent) ++recent_rows;
     CHECK(recent_rows == 3);
-    CHECK(rows[0].active);                     // active pinned first
+    // The ACTIVE provider's recents lead the section (alphabetical within).
+    // Here the active provider is anthropic; its two recents sort by label:
+    // "Claude Opus 4" < "Claude Sonnet 4.6", and the openai recent follows.
+    CHECK(rows[0].model.id.value == "claude-opus-4");
+    CHECK(rows[1].model.id.value == "claude-sonnet-4-6");
+    CHECK(rows[1].active);                     // the active model is flagged
+    CHECK(rows[2].model.id.value == "gpt-4o");
     // Total distinct models = 3 (no dupes between RECENT and all-providers).
     CHECK(rows.size() == 3);
 }
@@ -259,36 +265,40 @@ TEST_CASE("fused: browse ranks by tier, search stays relevance-ordered") {
              mk("claude-opus-4-5",     "Claude Opus",    "openrouter")}),
     };
 
-    // ── Browse: strongest first ──────────────────────────────────────
+    // ── Browse: alphabetical by model label within the section ──────
     {
         ui::FusedInputs in;
         in.catalogs = &cats;
         const auto rows = ui::build_fused_rows(in);
         REQUIRE(rows.size() >= 5);
-        // Tier is non-increasing down the list.
-        int prev = 4;   // above Flagship(3)
+        // Collect the browsed model labels and confirm they are in
+        // normalized alphabetical order (the capkey fold the sort uses).
+        std::vector<std::string> labels;
         for (const auto& r : rows) {
             if (r.is_signin_offer()) continue;
-            const int t = static_cast<int>(
-                ModelCapabilities::tier_for(r.model.id.value));
-            INFO("browse list is ordered strongest-first");
-        CHECK(t <= prev);
-            prev = t;
+            labels.push_back(r.model_label);
         }
-        // Concretely: the flagship outranks the 1B local model that the
-        // catalog listed first.
-        int opus = -1, tiny = -1;
+        std::vector<std::string> sorted = labels;
+        std::sort(sorted.begin(), sorted.end(),
+                  [](const std::string& a, const std::string& b) {
+                      return capkey::norm_row_id(a) < capkey::norm_row_id(b);
+                  });
+        INFO("browse list is ordered alphabetically, not by tier");
+        CHECK(labels == sorted);
+        // Concretely: alphabetical by label — "Claude Haiku" precedes
+        // "Qwen2.5 Coder" regardless of capability.
+        int haiku = -1, qwen = -1;
         for (int i = 0; i < static_cast<int>(rows.size()); ++i) {
-            if (rows[static_cast<std::size_t>(i)].model.id.value == "claude-opus-4-5") opus = i;
-            if (rows[static_cast<std::size_t>(i)].model.id.value == "tinyllama:1b")    tiny = i;
+            if (rows[static_cast<std::size_t>(i)].model.id.value == "claude-haiku-4-5")  haiku = i;
+            if (rows[static_cast<std::size_t>(i)].model.id.value == "qwen2.5-coder:7b") qwen  = i;
         }
-        REQUIRE(opus >= 0);
-        REQUIRE(tiny >= 0);
-        INFO("a flagship outranks a 1B local model when browsing");
-        CHECK(opus < tiny);
+        REQUIRE(haiku >= 0);
+        REQUIRE(qwen  >= 0);
+        INFO("labels sort alphabetically: \"Claude Haiku\" before \"Qwen2.5 Coder\"");
+        CHECK(haiku < qwen);
     }
 
-    // ── Search: relevance wins, tier does NOT reorder behind it ──────
+    // ── Search: relevance wins, no alphabetical re-rank behind it ────
     {
         ui::FusedInputs in;
         in.catalogs = &cats;
@@ -314,9 +324,9 @@ TEST_CASE("fused: browse ranks by tier, search stays relevance-ordered") {
         CHECK(rows.front().model.id.value == "tinyllama:1b");
     }
 
-    // ── The ACTIVE model stays pinned to the top of RECENT ───────────
-    // Tier ranking applies to section 2 only; it must not disturb the
-    // recents section's meaning.
+    // ── The ACTIVE model is still reachable within RECENT ────────────
+    // Ordering changes apply to the browse sections only; the recents
+    // section's meaning (and the active flag) must not be disturbed by tier.
     {
         ui::FusedInputs in;
         in.catalogs = &cats;
@@ -328,6 +338,75 @@ TEST_CASE("fused: browse ranks by tier, search stays relevance-ordered") {
         INFO("tier ranking does not evict the active model from the top");
         CHECK(rows.front().model.id.value == "tinyllama:1b");
     }
+}
+
+// Browsing splits into three titled sections — "recent", "from this
+// provider", "from all other providers" — each alphabetical by model label.
+// The ACTIVE provider is deliberately named LAST alphabetically so its block
+// is proven to be pinned by IDENTITY, not by where its label happens to sort.
+TEST_CASE("fused: browse is recent, then this provider, then all others") {
+    std::vector<ProviderCatalog> cats = {
+        cat("zeta", "ZetaCo",
+            {mk("zeta-2",  "Zeta Two",  "zeta"),
+             mk("zeta-1",  "Zeta One",  "zeta")}),
+        cat("alpha", "AlphaCo",
+            {mk("alpha-2", "Alpha Two", "alpha"),
+             mk("alpha-1", "Alpha One", "alpha")}),
+        cat("mid",   "MidCo",
+            {mk("mid-1",   "Mid One",   "mid")}),
+    };
+    std::vector<ModelRef> recents = {ModelRef{"alpha", "alpha-1"}};
+    ui::FusedInputs in;
+    in.catalogs = &cats;
+    in.recents  = &recents;
+    in.active   = ModelRef{"zeta", "zeta-1"};   // active provider = "zeta" (last!)
+    in.recent_cap = 5;
+
+    const auto rows = ui::build_fused_rows(in);
+
+    // Section 1 — recent: the ACTIVE model is pinned first (and flagged), the
+    // MRU row follows. The active model is de-duped out of its own provider's
+    // group below, so it is not repeated there.
+    REQUIRE(rows.size() >= 2);
+    CHECK(rows[0].recent);
+    CHECK(rows[0].active);
+    CHECK(rows[0].provider_id == "zeta");
+    CHECK(rows[0].model.id.value == "zeta-1");
+    CHECK(rows[1].recent);
+    CHECK(rows[1].provider_id == "alpha");
+
+    // Section 2 — "from this provider": the remaining zeta rows (active's
+    // provider), alphabetical by label, flagged provider_group, NOT recent.
+    // The active model (zeta-1) is pinned in RECENT, so only zeta-2 remains.
+    std::vector<const FusedRow*> mine;
+    for (const auto& r : rows)
+        if (!r.recent && r.provider_group) mine.push_back(&r);
+    REQUIRE(mine.size() == 1);
+    CHECK(mine[0]->provider_id == "zeta");
+    CHECK(mine[0]->model.id.value == "zeta-2");
+
+    // Section 3 — "from all other providers": alpha + mid rows, alphabetical
+    // by model label across providers. alpha-1 was consumed by RECENT.
+    std::vector<const FusedRow*> others;
+    for (const auto& r : rows)
+        if (!r.recent && !r.provider_group && !r.is_signin_offer())
+            others.push_back(&r);
+    REQUIRE(others.size() == 2);
+    CHECK(others[0]->model.id.value == "alpha-2");   // "Alpha Two" < "Mid One"
+    CHECK(others[1]->model.id.value == "mid-1");
+
+    // Section order in the flat list: recent < this-provider < others.
+    // Find the index of the first this-provider and first other row.
+    int first_mine = -1, first_other = -1;
+    for (int i = 0; i < static_cast<int>(rows.size()); ++i) {
+        const auto& r = rows[static_cast<std::size_t>(i)];
+        if (!r.recent && r.provider_group && first_mine < 0)  first_mine  = i;
+        if (!r.recent && !r.provider_group && !r.is_signin_offer() && first_other < 0)
+            first_other = i;
+    }
+    REQUIRE(first_mine >= 0);
+    REQUIRE(first_other >= 0);
+    CHECK(first_mine < first_other);
 }
 
 // Row-layout arithmetic: the picker aligns three columns —
@@ -526,20 +605,19 @@ TEST_CASE("fused: rows carry a precomputed capability tier") {
         CHECK(static_cast<int>(rows.front().tier) == 3);
     }
 
-    // ── Colour is never the SOLE carrier of the tier signal ─────────
-    // The badge hue is an accessibility hazard if it is the only way to tell
-    // a flagship from a 3B local model. It is not: the browse ORDER encodes
-    // the same fact (strongest first), and every row still shows its model
-    // name and context window. This asserts the redundancy holds.
+    // ── Tier survives the alphabetical re-order (badge hue stays true) ──
+    // Browse no longer ranks by tier — it is alphabetical — but the badge
+    // hue is still computed from the precomputed tier, so a flagship and a
+    // 3B local model must keep their DISTINCT hues wherever they now sit.
+    // Assert the precomputed field still matches the live computation.
     {
         ui::FusedInputs in;
         in.catalogs = &cats;
         const auto rows = ui::build_fused_rows(in);
-        int prev = 4;
         for (const auto& r : rows) {
             if (r.is_signin_offer()) continue;
-            CHECK(static_cast<int>(r.tier) <= prev);   // order says it too
-            prev = static_cast<int>(r.tier);
+            CHECK(static_cast<int>(r.tier) ==
+                  static_cast<int>(ModelCapabilities::tier_for(r.model.id.value)));
             CHECK(!r.model_label.empty());             // and the name is there
         }
     }
