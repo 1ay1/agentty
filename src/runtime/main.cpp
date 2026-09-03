@@ -218,8 +218,45 @@ extern "C" void agentty_release_crash_handler(int sig) {
     std::raise(sig);   // re-raise for the default disposition (core dump etc.)
 }
 void install_crash_handler() {
+#if defined(_WIN32)
     (void)std::signal(SIGSEGV, agentty_release_crash_handler);
     (void)std::signal(SIGABRT, agentty_release_crash_handler);
+#else
+    // sigaction, not std::signal: we need SA_ONSTACK, and std::signal has
+    // no way to ask for it.
+    //
+    // A handler installed the plain way runs on the FAULTING stack. That is
+    // fine for a null-deref and useless for a stack overflow — there is no
+    // room left to push the handler's frame, so it faults on entry and the
+    // crash report this function exists to print never appears. Measured:
+    // 0 diagnostic lines on a stack-overflow SIGSEGV without an alternate
+    // stack, 1 with one.
+    //
+    // maya installs its own altstack for the tty-restore handler; a second
+    // sigaltstack() call would replace it, so ask for one only if nobody
+    // has already provided it. SA_ONSTACK is then safe either way — it just
+    // means "use whatever alternate stack this thread has".
+    struct sigaction sa{};
+    sa.sa_handler = agentty_release_crash_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+
+    stack_t cur{};
+    const bool have_alt =
+        ::sigaltstack(nullptr, &cur) == 0 && !(cur.ss_flags & SS_DISABLE);
+    if (have_alt) {
+        sa.sa_flags |= SA_ONSTACK;
+    } else {
+        static char alt_stack[256 * 1024];
+        stack_t ss{};
+        ss.ss_sp    = alt_stack;
+        ss.ss_size  = sizeof(alt_stack);
+        ss.ss_flags = 0;
+        if (::sigaltstack(&ss, nullptr) == 0) sa.sa_flags |= SA_ONSTACK;
+    }
+    (void)::sigaction(SIGSEGV, &sa, nullptr);
+    (void)::sigaction(SIGABRT, &sa, nullptr);
+#endif
 }
 #endif
 
