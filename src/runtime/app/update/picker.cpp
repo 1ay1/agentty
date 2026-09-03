@@ -27,6 +27,7 @@
 #include "agentty/provider/auth_state.hpp"
 #include "agentty/provider/acp_agents.hpp"
 #include "agentty/provider/selection.hpp"
+#include "agentty/provider/catalog_sources.hpp"
 #include "agentty/auth/vault.hpp"
 #include "agentty/provider/credentials.hpp"
 #include "agentty/auth/auth.hpp"
@@ -587,36 +588,46 @@ void refresh_fused_sources(Model& m) {
     };
     m.d.fused_offers.clear();
 
-    for (const auto& p : provider::providers()) {
-        const std::string id{p.id};
-        if (!provider::provider_is_authed(p, settings)) {
-            // Un-authed providers become QUERY-GATED sign-in offers: they
-            // never clutter the browse view (build_fused_rows hides them
-            // while the query is empty), but typing "mistral" with no Mistral
+    // ONE pass over ONE enumeration. provider::catalog_sources() is the
+    // single statement of "every backend that can answer a models query" —
+    // registry presets plus saved custom hosts (raw host:port, Ollama,
+    // llama.cpp, a private gateway), with adoption already resolved so a
+    // spec that names a known backend appears once, as that backend.
+    //
+    // This used to be two hand-written loops, and for a while it was one:
+    // only presets were enumerated, so a saved custom host never got a
+    // catalog and its models simply never appeared. Splitting the list
+    // across call sites is what let a whole source be forgotten, so the
+    // list now lives in one place and every consumer reads it from there.
+    for (const auto& src : provider::catalog_sources(settings)) {
+        if (src.needs_signin) {
+            // Un-authed preset → a QUERY-GATED sign-in offer: it never
+            // clutters the browse view (build_fused_rows hides offers while
+            // the query is empty), but typing "mistral" with no Mistral
             // account surfaces one "Mistral — sign in" row instead of a DEAD
             // END. Enter routes into its auth flow (origin::FusedPicker) and
             // returns here with the catalog loading — search is the single
             // verb: find model → maybe sign in → pick.
-            m.d.fused_offers.push_back(
-                SigninOffer{id, std::string{p.label}});
+            m.d.fused_offers.push_back(SigninOffer{src.id, src.label});
             continue;
         }
-        ProviderCatalog* c = find_cat(id);
+        ProviderCatalog* c = find_cat(src.id);
         if (!c) {
             m.d.provider_catalogs.push_back(ProviderCatalog{
-                id, std::string{p.label}, ProviderCatalog::State::Idle, {}, {}});
+                src.id, src.label, ProviderCatalog::State::Idle, {}, {}});
             c = &m.d.provider_catalogs.back();
         }
-        // Active provider: MIRROR the live catalog we already hold
+        // Active backend: MIRROR the live catalog we already hold
         // (available_models is the SSOT for the active provider). Re-seed on
         // EVERY refresh, not just when empty — otherwise the fused catalog
         // freezes on whatever available_models was at the FIRST open (often
-        // the bundled seed, before the live /v1/models fetch landed), and
-        // then diverges from the old model picker as available_models grows
-        // (e.g. a newly-listed flagship never appears in the fused list).
-        // Everyone else stays empty + Idle so Open fires a background fetch;
-        // the row list simply grows as each resolves.
-        if (id == active_pid && !m.d.available_models.empty()) {
+        // the bundled seed, before the live /v1/models fetch landed) and
+        // then diverges as available_models grows (a newly-listed flagship
+        // would never appear). Everyone else stays empty + Idle so Open
+        // fires a background fetch through cmd::fetch_models_for(id), which
+        // resolves a preset's auth or a custom host's saved key alike; the
+        // row list simply grows as each resolves.
+        if (src.id == active_pid && !m.d.available_models.empty()) {
             if (c->models != m.d.available_models) {
                 c->models = m.d.available_models;
                 c->invalidate_derived();    // model set changed — all caches stale
@@ -625,6 +636,7 @@ void refresh_fused_sources(Model& m) {
         }
     }
 }
+
 
 } // namespace
 

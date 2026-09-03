@@ -215,15 +215,36 @@ void prewarm_active_provider();
 [[nodiscard]] std::vector<int> filter_provider_indices(std::string_view query);
 
 // The user's saved custom OpenAI-compatible hosts, sorted. These are the
-// Settings.provider_keys entries that are NOT built-in presets (e.g. a raw
-// "host:port" endpoint). Both the provider-picker VIEW and its reducer build
-// this list; keeping it here guarantees they render and index the SAME rows in
-// the SAME order (a drift here would map a selection to the wrong host).
+// Settings.provider_keys entries that do not resolve onto a built-in preset
+// row — a raw "host:port", an Ollama/llama.cpp endpoint, a private gateway.
+// Both the provider-picker VIEW and its reducer build this list, and the
+// fused picker's catalog refresh consumes it; keeping it here guarantees
+// they render and index the SAME rows in the SAME order (a drift here would
+// map a selection to the wrong host).
+//
+// ADOPTION is why the test is on the RESOLVED id, not the raw spec.
+// parse_selection() folds a spec that names a known backend onto that
+// backend's row: "api.githubcopilot.com" resolves to provider_id "copilot",
+// which is what makes the Copilot endpoint/auth apply instead of the generic
+// /v1/models path (see provider_identity_test). But `preset_for(spec)` asks a
+// DIFFERENT question — "is this string a preset id?" — and answers nullptr
+// for that host, so it used to come back as a "custom" host as well as being
+// a preset. Every consumer then listed it twice: the provider picker showed
+// two "GitHub Copilot" rows, and once the fused picker gained custom-host
+// catalogs it grew a duplicate catalog and duplicate models with it.
+//
+// Ask the question that matters: does this spec RESOLVE to a preset row? If
+// so it is already covered by the preset enumeration and must not be listed
+// again here.
 [[nodiscard]] inline std::vector<std::string> saved_custom_hosts(
     const std::map<std::string, std::string>& provider_keys) {
     std::vector<std::string> hosts;
-    for (const auto& [spec, key] : provider_keys)
-        if (!preset_for(spec)) hosts.push_back(spec);
+    for (const auto& [spec, key] : provider_keys) {
+        if (preset_for(spec)) continue;                     // literally a preset id
+        if (preset_for(parse_selection(spec).provider_id()))
+            continue;                                       // adopted onto a preset row
+        hosts.push_back(spec);
+    }
     std::sort(hosts.begin(), hosts.end());
     return hosts;
 }

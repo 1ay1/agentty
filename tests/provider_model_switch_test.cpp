@@ -23,6 +23,7 @@
 #include "agentty/runtime/app/deps.hpp"
 #include "agentty/runtime/provider_rows.hpp"
 #include "agentty/provider/selection.hpp"
+#include "agentty/provider/catalog_sources.hpp"
 #include "agentty/domain/bundled_catalog.hpp"
 #include "agentty/auth/accounts.hpp"
 #include "agentty/io/persistence.hpp"
@@ -1159,4 +1160,170 @@ TEST_CASE("SignOut with no saved fallback opens sign-in") {
     const bool switched_away =
         provider::active().openai_endpoint.label != "openrouter";
     CHECK((opened_signin || switched_away));
+}
+
+// ── Regression: custom-host models in the fused picker ───────────────────────
+// cb5847aa retired the classic per-provider model picker (which read the
+// active provider's list straight out of available_models) and made the
+// fused cross-provider picker the ONLY models menu. But the fused picker
+// reads provider_catalogs, and refresh_fused_sources enumerated ONLY
+// registry presets — a saved custom host never got a catalog, so its live
+// /v1/models fetch landed in available_models and the menu still showed
+// nothing. These cases pin the restored behaviour through the REAL reducer:
+// the active custom host's catalog mirrors available_models (rows appear),
+// and a non-active saved custom host gets a catalog that a FusedCatalogLoaded
+// can merge into.
+TEST_CASE("fused picker shows an active custom host's models") {
+    using namespace agentty::msg;
+    install_stub_deps();
+    g_settings = store::Settings{};
+    // A saved custom host (provider_keys key that is not a registry preset)
+    // is the ACTIVE provider, with a live catalog already in hand.
+    g_settings.provider_keys["my-box.lan:8080"] = "";   // keyless local host
+    provider::select(provider::parse_selection("my-box.lan:8080"));
+
+    Model m;
+    m.d.model_id = ModelId{"qwen3:32b"};
+    m.d.available_models = {mi("qwen3:32b", "my-box.lan:8080"),
+                            mi("llama3.3:70b", "my-box.lan:8080")};
+
+    auto [m1, c1] = app::update(std::move(m), Msg{OpenFusedPicker{}});
+    CHECK(m1.ui.overlay.is<ov::FusedPicker>());
+
+    // The custom host has a catalog, it is the ACTIVE one, and it mirrors
+    // the live list (Ready, non-empty) — the exact seeding contract the
+    // presets get on open.
+    bool host_ready = false;
+    for (const auto& c : m1.d.provider_catalogs) {
+        if (c.provider_id == "my-box.lan:8080") {
+            host_ready = c.state == ProviderCatalog::State::Ready
+                       && c.models.size() == 2;
+        }
+    }
+    CHECK(host_ready, "active custom host catalog mirrors available_models");
+
+    // …and therefore ROWS: the models menu actually lists the host's models.
+    CHECK(!m1.d.fused_rows.empty());
+    bool saw_qwen = false, saw_llama = false;
+    for (const auto& r : m1.d.fused_rows) {
+        if (r.provider_id == "my-box.lan:8080") {
+            if (r.model.id.value == "qwen3:32b") saw_qwen = true;
+            if (r.model.id.value == "llama3.3:70b") saw_llama = true;
+        }
+    }
+    CHECK(saw_qwen);
+    CHECK(saw_llama);
+}
+
+TEST_CASE("fused picker gives a non-active saved custom host a mergeable catalog") {
+    using namespace agentty::msg;
+    install_stub_deps();
+    g_settings = store::Settings{};
+    // Anthropic active; the custom host is saved but NOT active. provider_keys
+    // membership is the auth test for a custom host, so it must appear as a
+    // source — Idle, empty, ready for cmd::fetch_models_for to fill.
+    g_settings.provider_keys["anthropic"]     = "sk-test";
+    g_settings.provider_keys["api.my-gw.com"] = "sk-gw";
+    provider::select(provider::parse_selection("anthropic"));
+
+    Model m;
+    m.d.model_id = ModelId{"claude-sonnet-4-6"};
+    m.d.available_models = {mi("claude-sonnet-4-6", "anthropic")};
+
+    auto [m1, c1] = app::update(std::move(m), Msg{OpenFusedPicker{}});
+    bool gw_idle = false;
+    for (const auto& c : m1.d.provider_catalogs) {
+        if (c.provider_id == "api.my-gw.com")
+            gw_idle = c.state == ProviderCatalog::State::Idle
+                   && c.models.empty();
+    }
+    CHECK(gw_idle, "saved non-active custom host has an Idle catalog");
+
+    // The deferred wave's fetch lands: merge by provider_id, then rows show.
+    FusedCatalogLoaded gw;
+    gw.provider_id = "api.my-gw.com";
+    gw.models = {mi("some-model-x", "api.my-gw.com")};
+    gw.ok = true;
+    auto [m2, c2] = app::update(std::move(m1), Msg{std::move(gw)});
+    bool gw_ready = false;
+    for (const auto& c : m2.d.provider_catalogs)
+        if (c.provider_id == "api.my-gw.com")
+            gw_ready = c.state == ProviderCatalog::State::Ready
+                    && c.models.size() == 1;
+    CHECK(gw_ready);
+    bool saw_gw_model = false;
+    for (const auto& r : m2.d.fused_rows)
+        if (r.provider_id == "api.my-gw.com"
+            && r.model.id.value == "some-model-x") saw_gw_model = true;
+    CHECK(saw_gw_model, "merged custom-host catalog yields rows");
+}
+
+// ── One enumeration: adoption cannot produce a duplicate ─────────────────
+// "api.githubcopilot.com" is a provider_keys entry with no preset SPEC, but
+// parse_selection() adopts it onto the copilot ROW so the Copilot endpoint
+// and auth apply. saved_custom_hosts() used to test the raw spec, so the
+// host came back as "custom" AS WELL AS being a preset — and every consumer
+// listed it twice. The provider picker showed two "GitHub Copilot" rows, and
+// once the fused picker gained custom-host catalogs it grew a second catalog
+// and duplicate models with it.
+//
+// The test is on the RESOLVED id now. These pin that, at both consumers.
+TEST_CASE("an adopted host is not also a custom host") {
+    store::Settings s;
+    s.provider_keys["api.githubcopilot.com"] = "tok";
+    s.provider_keys["api.my-gw.com"]         = "k";   // genuinely custom
+
+    const auto hosts = provider::saved_custom_hosts(s.provider_keys);
+    CHECK(hosts.size() == 1, "only the genuine custom host is 'custom'");
+    CHECK(hosts.front() == "api.my-gw.com");
+
+    // The provider picker lists it once, as the preset it resolves to.
+    const auto rows = ui::build_provider_rows(hosts, "");
+    int copilot_rows = 0, gw_rows = 0;
+    for (const auto& r : rows) {
+        if (auto* p = std::get_if<ui::ProviderRow::Preset>(&r.kind))
+            if (std::string_view{p->preset->id} == "copilot") ++copilot_rows;
+        if (auto* c = std::get_if<ui::ProviderRow::CustomHost>(&r.kind)) {
+            if (provider::parse_selection(c->spec).provider_id() == "copilot")
+                ++copilot_rows;
+            if (c->spec == "api.my-gw.com") ++gw_rows;
+        }
+    }
+    CHECK(copilot_rows == 1, "provider picker shows Copilot exactly once");
+    CHECK(gw_rows == 1, "the genuine custom host still gets its row");
+}
+
+// The catalog enumeration is the SAME list, so it cannot disagree with the
+// picker about which backends exist. This is the property that makes
+// "we forgot to enumerate X" unrepresentable rather than merely fixed.
+TEST_CASE("catalog_sources enumerates presets and custom hosts, once each") {
+    store::Settings s;
+    s.provider_keys["api.githubcopilot.com"] = "tok";   // adopted → copilot
+    s.provider_keys["api.my-gw.com"]         = "k";     // genuine custom
+    s.provider_keys["localhost:11434"]       = "x";     // local endpoint
+
+    const auto srcs = provider::catalog_sources(s);
+
+    auto count_id = [&](std::string_view id) {
+        int n = 0;
+        for (const auto& c : srcs) if (c.id == id) ++n;
+        return n;
+    };
+    CHECK(count_id("copilot") == 1, "adopted host does not double the preset");
+    CHECK(count_id("api.githubcopilot.com") == 0, "adopted spec is not its own source");
+    CHECK(count_id("api.my-gw.com") == 1, "a custom gateway is a source");
+    CHECK(count_id("localhost:11434") == 1, "a LOCAL endpoint is a source too");
+
+    // Every id is unique — the property a per-caller enumeration kept losing.
+    std::set<std::string> ids;
+    for (const auto& c : srcs) {
+        CHECK(ids.insert(c.id).second, "catalog source ids are unique");
+        CHECK(!c.label.empty(), "every source has a label to render");
+    }
+    // Presets are still all present (the enumeration didn't drop the easy half).
+    for (const auto& p : provider::providers())
+        CHECK(count_id(p.id) == 1);
+    // Custom hosts are never sign-in offers: holding a saved key IS auth.
+    for (const auto& c : srcs)
+        if (!c.is_preset) CHECK(!c.needs_signin);
 }
