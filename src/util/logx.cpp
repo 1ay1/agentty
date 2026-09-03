@@ -6,6 +6,7 @@
 
 #include <array>
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -42,7 +43,13 @@ std::atomic<bool>         g_ring_all{false};
 namespace {
 
 // ── File sink state (written once by init, read-only after) ───────────
-int         g_fd = -1;               // O_APPEND fd, -1 = file logging off
+// The log fd. ATOMIC because writers read it without the rotate mutex —
+// diagnostics must never take a lock on the caller's hot path. Rotation now
+// re-points this fd via dup2 rather than replacing it, so the VALUE is
+// stable for the process lifetime once opened; the atomic covers the
+// open/close transitions and makes the concurrent access well-defined
+// instead of a data race the compiler may assume away.
+std::atomic<int> g_fd{-1};           // O_APPEND fd, -1 = file logging off
 std::string g_path;                  // resolved path for log_file()
 // Mid-run rotation: bytes written since open. Startup-only rotation is not
 // enough for the dev workflow (trace-by-default + long-lived sessions):
@@ -51,7 +58,26 @@ std::string g_path;                  // resolved path for log_file()
 // and re-checked under the lock, so concurrent writers rotate exactly once.
 std::atomic<std::int64_t> g_bytes{0};
 std::mutex g_rotate_mu;
-constexpr std::int64_t kRotateBytes = 32ll * 1024 * 1024;
+constexpr std::int64_t kRotateBytesDefault = 32ll * 1024 * 1024;
+
+// Resolved once at init. 32 MB is the right SHIPPING value and the wrong
+// TEST value: a regression test for the rotation seam would have to write
+// 32 MB to reach it, so before this seam existed the swap path had no
+// coverage at all — which is exactly how the fd-reuse bug below survived.
+// AGENTTY_LOG_ROTATE_BYTES lets a test rotate after a few KB. Clamped to a
+// floor so a stray small value can't turn the logger into a rename storm.
+std::atomic<std::int64_t> g_rotate_bytes{kRotateBytesDefault};
+
+std::int64_t resolve_rotate_bytes() noexcept {
+    const char* ev = std::getenv("AGENTTY_LOG_ROTATE_BYTES");
+    if (ev == nullptr || *ev == '\0') return kRotateBytesDefault;
+    errno = 0;
+    char*             end = nullptr;
+    const long long   v   = std::strtoll(ev, &end, 10);
+    if (errno != 0 || end == ev || v <= 0) return kRotateBytesDefault;
+    constexpr std::int64_t kFloor = 4096;
+    return v < kFloor ? kFloor : static_cast<std::int64_t>(v);
+}
 
 // ── Secret redaction ──────────────────────────────────────────────────
 //
@@ -291,41 +317,46 @@ void parse_filter(std::string_view spec) noexcept {
 
 void open_sink(const char* path) noexcept {
     if (!path || !*path) return;
+    g_rotate_bytes.store(resolve_rotate_bytes(), std::memory_order_relaxed);
+    const std::int64_t limit = g_rotate_bytes.load(std::memory_order_relaxed);
     // Rotate once at startup if oversized — rename to .old (best-effort).
     struct stat st{};
-    if (::stat(path, &st) == 0 && st.st_size > kRotateBytes) {
+    if (::stat(path, &st) == 0 && st.st_size > limit) {
         std::string old = std::string{path} + ".old";
         std::remove(old.c_str());
         std::rename(path, old.c_str());
     }
 #if defined(_WIN32)
-    g_fd = AGT_OPEN(path, _O_WRONLY | _O_APPEND | _O_CREAT | _O_BINARY,
-                    _S_IREAD | _S_IWRITE);
+    g_fd.store(AGT_OPEN(path, _O_WRONLY | _O_APPEND | _O_CREAT | _O_BINARY,
+                        _S_IREAD | _S_IWRITE),
+               std::memory_order_relaxed);
 #else
-    g_fd = AGT_OPEN(path, O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0600);
+    g_fd.store(AGT_OPEN(path, O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0600),
+               std::memory_order_relaxed);
 #endif
-    if (g_fd >= 0) g_path = path;
+    if (g_fd.load(std::memory_order_relaxed) >= 0) g_path = path;
     // Seed the rotation counter with the existing size so an appended-to
     // file still rotates at the same absolute threshold.
-    if (g_fd >= 0) {
+    if (g_fd.load(std::memory_order_relaxed) >= 0) {
         struct stat st2{};
         g_bytes.store(::stat(path, &st2) == 0 ? st2.st_size : 0,
                       std::memory_order_relaxed);
     }
 }
 
-// Rotate the live sink once it exceeds kRotateBytes: rename to .old (the
-// previous .old is dropped) and reopen fresh. Called from emit() on the
-// writer that crosses the threshold; safe for concurrent writers — the
+// Rotate the live sink once it exceeds the rotation threshold: rename to
+// .old (the previous .old is dropped) and reopen fresh. Called from emit()
+// on the writer that crosses the threshold; safe for concurrent writers — the
 // mutex serializes, the re-check under the lock makes it idempotent, and
 // writers racing the swap at worst land a line in the pre-rotation file
 // (O_APPEND keeps every write intact either way). Not async-signal-safe;
 // never called from the crash path.
 void rotate_if_needed() noexcept {
-    if (g_bytes.load(std::memory_order_relaxed) <= kRotateBytes) return;
+    const std::int64_t limit = g_rotate_bytes.load(std::memory_order_relaxed);
+    if (g_bytes.load(std::memory_order_relaxed) <= limit) return;
     std::lock_guard<std::mutex> lk(g_rotate_mu);
-    if (g_bytes.load(std::memory_order_relaxed) <= kRotateBytes) return;
-    if (g_fd < 0 || g_path.empty()) return;
+    if (g_bytes.load(std::memory_order_relaxed) <= limit) return;
+    if (g_fd.load(std::memory_order_relaxed) < 0 || g_path.empty()) return;
     const std::string old = g_path + ".old";
     std::remove(old.c_str());
     if (std::rename(g_path.c_str(), old.c_str()) != 0) {
@@ -334,19 +365,41 @@ void rotate_if_needed() noexcept {
         g_bytes.store(0, std::memory_order_relaxed);
         return;
     }
-    const int oldfd = g_fd;
+    // Rotate by re-pointing the SAME fd number, not by swapping in a new one.
+    //
+    // The old code did `g_fd = nfd; close(oldfd);` while other threads were
+    // reading g_fd unlocked and writing to it. Two ways that loses:
+    //
+    //   * a writer that read oldfd before the swap writes to a CLOSED fd —
+    //     the line is dropped, silently, exactly when a rotating log means
+    //     the app is busy and the diagnostics matter most;
+    //   * worse, fd numbers are reused. Between close(oldfd) and that
+    //     writer's write(), any thread opening a socket, a thread file or a
+    //     tool pipe can be handed the same number — and we then write log
+    //     bytes into it. A corrupted peer connection whose cause is a
+    //     LOGGER is close to undiagnosable.
+    //
+    // dup2(nfd, g_fd) atomically makes the existing descriptor refer to the
+    // new file, so g_fd is never closed, never reused, and never stale. A
+    // writer racing the rotation lands its line in either the old file or
+    // the new one — both correct, neither lost. Only the temporary nfd is
+    // closed, and nothing else has ever seen it.
 #if defined(_WIN32)
-    const int nfd = AGT_OPEN(g_path.c_str(), _O_WRONLY | _O_APPEND | _O_CREAT | _O_BINARY,
+    const int nfd = AGT_OPEN(g_path.c_str(),
+                             _O_WRONLY | _O_APPEND | _O_CREAT | _O_BINARY,
                              _S_IREAD | _S_IWRITE);
 #else
-    const int nfd = AGT_OPEN(g_path.c_str(), O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0600);
+    const int nfd = AGT_OPEN(g_path.c_str(),
+                             O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0600);
 #endif
     if (nfd >= 0) {
-        g_fd = nfd;
 #if defined(_WIN32)
-        ::_close(oldfd);
+        (void)::_dup2(nfd, g_fd.load(std::memory_order_relaxed));
+        ::_close(nfd);
 #else
-        ::close(oldfd);
+        while (::dup2(nfd, g_fd.load(std::memory_order_relaxed)) < 0
+               && errno == EINTR) {}
+        ::close(nfd);
 #endif
     }
     g_bytes.store(0, std::memory_order_relaxed);
@@ -408,7 +461,7 @@ bool init() {
     // Deliberately hand-rolled env reads (no <filesystem>, no user_root
     // dependency): logx must stay linkable from the narrow sanitizer
     // test TUs and be crash-handler-safe.
-    if (g_fd < 0 && want_file) {
+    if (g_fd.load(std::memory_order_relaxed) < 0 && want_file) {
         std::string root;
         if (const char* ah = std::getenv("AGENTTY_HOME"); ah && *ah)
             root = ah;
@@ -451,7 +504,7 @@ void emit(Channel ch, Level lv, std::string_view site,
           std::string_view msg) noexcept {
     (void)detail::inited();
 
-    const bool to_file = (g_fd >= 0) && enabled(ch, lv);
+    const bool to_file = (g_fd.load(std::memory_order_relaxed) >= 0) && enabled(ch, lv);
     const bool to_ring = lv >= Level::Warn
                       || detail::g_ring_all.load(std::memory_order_relaxed);
     if (!to_file && !to_ring) return;
@@ -545,7 +598,7 @@ void emit(Channel ch, Level lv, std::string_view site,
         // (void)) marks the result used: glibc declares write() __wur under
         // _FORTIFY_SOURCE, and GCC ignores a plain void-cast for
         // warn_unused_result functions.
-        (void)!AGT_WRITE(g_fd, line, static_cast<unsigned>(n));
+        (void)!AGT_WRITE(g_fd.load(std::memory_order_relaxed), line, static_cast<unsigned>(n));
         g_bytes.fetch_add(static_cast<std::int64_t>(n),
                           std::memory_order_relaxed);
         rotate_if_needed();
@@ -600,24 +653,24 @@ void signal_mark() noexcept {
     // live log from outside (`kill -USR1 $(pgrep agentty)`) the moment they
     // SEE a bug, without touching the TUI: the marker line plus a flight-
     // recorder snapshot land at the exact observation point.
-    if (g_fd < 0) return;
+    if (g_fd.load(std::memory_order_relaxed) < 0) return;
     static const char m[] =
         "\n=== MARK (SIGUSR1) — user flagged this moment ===\n";
-    (void)!AGT_WRITE(g_fd, m, sizeof(m) - 1);
-    (void)dump_flight_recorder(g_fd);
+    (void)!AGT_WRITE(g_fd.load(std::memory_order_relaxed), m, sizeof(m) - 1);
+    (void)dump_flight_recorder(g_fd.load(std::memory_order_relaxed));
     static const char e[] = "=== END MARK ===\n\n";
-    (void)!AGT_WRITE(g_fd, e, sizeof(e) - 1);
+    (void)!AGT_WRITE(g_fd.load(std::memory_order_relaxed), e, sizeof(e) - 1);
 }
 
 void session_banner(std::string_view info) noexcept {
     (void)detail::inited();   // resolve the sink first — may open g_fd
-    if (g_fd < 0) return;
+    if (g_fd.load(std::memory_order_relaxed) < 0) return;
     std::string line;
     line.reserve(info.size() + 32);
     line += "\n=== agentty session: ";
     line += info;
     line += " ===\n";
-    (void)!AGT_WRITE(g_fd, line.data(), static_cast<unsigned>(line.size()));
+    (void)!AGT_WRITE(g_fd.load(std::memory_order_relaxed), line.data(), static_cast<unsigned>(line.size()));
     g_bytes.fetch_add(static_cast<std::int64_t>(line.size()),
                       std::memory_order_relaxed);
 }
