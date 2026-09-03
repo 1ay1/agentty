@@ -13,7 +13,8 @@
 #include <utility>
 
 #include <maya/core/overload.hpp>
-#include <maya/app/app.hpp>   // maya::request_animation_frame
+#include <maya/core/cmd.hpp>      // maya::Cmd
+#include <maya/core/motion.hpp>   // anim::keep_animating — frame requests
 #include <nlohmann/json.hpp>
 
 #include "agentty/runtime/app/cmd_factory.hpp"
@@ -118,7 +119,7 @@ void arm_reconcile_cooldown(Model& m) {
     constexpr int kReconcileTicks = 6;
     if (m.ui.settle_cooldown_ticks < kReconcileTicks)
         m.ui.settle_cooldown_ticks = kReconcileTicks;
-    ::maya::request_animation_frame();
+    ::maya::anim::keep_animating();
 }
 
 // Build the tool-output-viewer entry list: every settled tool call in the

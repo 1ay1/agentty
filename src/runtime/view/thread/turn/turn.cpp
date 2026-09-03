@@ -22,7 +22,7 @@
 #include <maya/layout/yoga.hpp>     // maya::layout::compute / LayoutNode
 #include <maya/platform/io.hpp>
 #include <maya/style/theme.hpp>
-#include <maya/app/app.hpp>
+#include <maya/core/motion.hpp>   // anim::keep_animating — frame requests
 
 #include "agentty/domain/catalog.hpp"
 #include "agentty/domain/model_name.hpp"
@@ -1001,7 +1001,7 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m,
                 cache.defer_exit_finished = false;
                 cache.card_defer_since_ms = 0;
                 cache.streaming->request_finalize(/*ramp_ms=*/160);
-                ::maya::request_animation_frame();
+                ::maya::anim::keep_animating();
             } else {
                 // Exit (glide done / cap hit / bail-out). Instead of an
                 // INSTANT snap+finish (which pasted the whole typed-but-
@@ -1029,7 +1029,7 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m,
                     cache.streaming->snap_reveal_to_edge(/*glide_ms=*/150);
                     cache.defer_tool_panel    = true;
                     cache.defer_exit_finished = false;
-                    ::maya::request_animation_frame();
+                    ::maya::anim::keep_animating();
                 } else {
                     cache.streaming->snap_reveal_to_edge();   // no-op / instant
                     cache.streaming->set_reveal_fx(false);
@@ -1037,7 +1037,7 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m,
                     cache.card_defer_since_ms = 0;
                     if (was_deferring) {
                         cache.defer_exit_finished = true;   // unhide next frame
-                        ::maya::request_animation_frame();
+                        ::maya::anim::keep_animating();
                     } else {
                         cache.defer_tool_panel = false;
                     }
@@ -1056,7 +1056,7 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m,
                 cache.streaming->set_reveal_fx(false);
                 cache.streaming->finish();
                 cache.defer_exit_finished = true;
-                ::maya::request_animation_frame();
+                ::maya::anim::keep_animating();
             } else {
                 // Phase 2: the finish-mutation frame has painted; the
                 // panel now appears as a pure bottom-append grow.
@@ -1135,7 +1135,7 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m,
     if (stream_in_motion
         || live_caret
         || cache.streaming->is_animating()) {
-        ::maya::request_animation_frame();
+        ::maya::anim::keep_animating();
     }
 
     if (stream_prof) {

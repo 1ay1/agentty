@@ -12,7 +12,8 @@
 #include <utility>
 
 #include <maya/core/overload.hpp>
-#include <maya/app/app.hpp>   // maya::request_animation_frame
+#include <maya/core/cmd.hpp>      // maya::Cmd
+#include <maya/core/motion.hpp>   // anim::keep_animating — frame requests
 
 #include "agentty/runtime/app/cmd_factory.hpp"
 #include "agentty/runtime/app/deps.hpp"
@@ -482,12 +483,12 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                     // completes at fps=0, mirroring agent_session's
                     // always-on clock.
                     m.ui.settle_cooldown_ticks = 6;
-                    ::maya::request_animation_frame();
+                    ::maya::anim::keep_animating();
                 } else {
                     // Reveal still draining — keep the frame armed so the
                     // typewriter animates and we re-test the gate next
                     // tick. Never freeze a still-animating turn.
-                    ::maya::request_animation_frame();
+                    ::maya::anim::keep_animating();
                 }
             } else if (m.ui.pending_settle_freeze) {
                 // Armed to freeze, but the FSM is not yet Idle (a trailing
@@ -504,7 +505,7 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                 // duplicated / late-committed turn). Self-perpetuate a frame
                 // as long as the flag is pending so the gate is always
                 // re-tested on a real frame once is_idle() flips true.
-                ::maya::request_animation_frame();
+                ::maya::anim::keep_animating();
             }
 
             // ── pending_stream → streaming_text ──────────────────────

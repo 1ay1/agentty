@@ -14,7 +14,7 @@
 #include "agentty/provider/selection.hpp"
 #include <maya/core/anim_clock.hpp>
 #include <maya/terminal/tmux.hpp>
-#include <maya/app/app.hpp>   // request_animation_frame_after (typing-window lapse wake)
+#include <maya/core/motion.hpp>   // anim::keep_animating_after (typing-window lapse wake)
 
 namespace agentty::ui {
 
@@ -320,7 +320,7 @@ maya::Composer::Config composer_config(const Model& m) {
             const auto until_lapse = kTypingWindowMs
                 - (maya::anim::default_clock().now_ms() - m.ui.composer.last_edit_ms);
             if (until_lapse > 0)
-                maya::request_animation_frame_after(until_lapse + 30);
+                maya::anim::keep_animating_after(until_lapse + 30);
         }
     }
 
