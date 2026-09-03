@@ -180,6 +180,33 @@ void install_crash_handler() {
 // Windows: std::signal(SIGSEGV/SIGABRT) is supported by the CRT; write()
 // maps via io.h in logx.cpp.
 extern "C" void agentty_release_crash_handler(int sig) {
+    // RE-ENTRANCY GUARD — see the matching one in maya's
+    // emergency_signal_handler. maya installs its tty-restore handler for the
+    // same fatal signals with SA_NODEFER and, on the way out, restores the
+    // PRIOR sigaction (this function) before re-raising. So the
+    // `signal(sig, SIG_DFL)` below can be overwritten by that restore, and
+    // the re-raise lands back in maya's handler, which lands back here:
+    // a two-handler ping-pong that never reaches the default action.
+    //
+    // The symptom is unmistakable and was seen in the field: thousands of
+    // "=== agentty crash ===" headers sharing ONE pid and ONE timestamp,
+    // each followed by another full flight-recorder dump, burying the actual
+    // first crash under megabytes of duplicates.
+    //
+    // On the second entry, stop cooperating: take the default action
+    // immediately so the process dies with the right status and can dump
+    // core.
+    static volatile std::sig_atomic_t in_handler = 0;
+    if (in_handler) {
+        std::signal(sig, SIG_DFL);
+        std::raise(sig);
+#if !defined(_WIN32)
+        _exit(128 + sig);   // if the default was ignored, do not spin
+#endif
+        return;
+    }
+    in_handler = 1;
+
     static const char hdr[] = "\n=== agentty crash ===\n";
 #if defined(_WIN32)
     (void)agentty::logx::dump_flight_recorder(2);
