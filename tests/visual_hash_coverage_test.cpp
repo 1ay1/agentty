@@ -312,14 +312,14 @@ const std::vector<Axis>& visual_axes() {
         }},
         {"rag picker cursor move", [](Model& m) {
             agentty::rag_settings::Open o;
-            o.index = 2;
+            o.cursor = agentty::store::RagMode::Off;
             m.ui.overlay = agentty::ui::overlay::RagSettings{o};
         }},
         {"fork picker opens", [](Model& m) {
-            m.ui.overlay = ov::Fork{{0}};
+            m.ui.overlay = ov::Fork{{agentty::fork_picker::Choice::RagPerTurn}};
         }},
         {"fork picker cursor move", [](Model& m) {
-            m.ui.overlay = ov::Fork{{2}};
+            m.ui.overlay = ov::Fork{{agentty::fork_picker::Choice::RagOff}};
         }},
     };
     return axes;

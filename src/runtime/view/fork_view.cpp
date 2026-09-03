@@ -27,11 +27,20 @@ namespace {
 
 struct RowSpec { const char* label; const char* help; };
 
-const RowSpec kRows[fp::kChoiceCount] = {
-    {"RAG per turn",   "fresh thread · retrieve context before every turn"},
-    {"First-turn RAG", "fresh thread · retrieve once, up front"},
-    {"RAG off",        "fresh thread · no retrieval"},
-};
+// Labels keyed BY CHOICE, not by position. A positional table has to be
+// kept in the same order as the enum by hand; a total switch cannot drift,
+// and adding a Choice makes the compiler demand its label.
+[[nodiscard]] constexpr RowSpec row_spec(fp::Choice c) noexcept {
+    switch (c) {
+        case fp::Choice::RagPerTurn:
+            return {"RAG per turn",   "fresh thread · retrieve context before every turn"};
+        case fp::Choice::FirstTurnRag:
+            return {"First-turn RAG", "fresh thread · retrieve once, up front"};
+        case fp::Choice::RagOff:
+            return {"RAG off",        "fresh thread · no retrieval"};
+    }
+    return {"RAG off", "fresh thread · no retrieval"};
+}
 
 } // namespace
 
@@ -45,15 +54,18 @@ Element fork_picker_view(const Model& m) {
     cfg.min_width  = 52;
     cfg.viewport_h = fp::kChoiceCount + 2;
     cfg.scroll     = nullptr;
-    cfg.selected   = o->index;
+    cfg.selected   = static_cast<int>(o->choice);
 
-    for (int i = 0; i < fp::kChoiceCount; ++i) {
+    // Walk the enumeration the cursor moves through — one list, no parallel
+    // table to keep in order.
+    for (const fp::Choice c : fp::kChoices) {
+        const RowSpec spec = row_spec(c);
         Picker::Config::Row row;
-        row.leading       = kRows[i].label;
+        row.leading       = spec.label;
         row.leading_style = fg_of(fg);
-        row.trailing      = kRows[i].help;
+        row.trailing      = spec.help;
         row.trailing_style = fg_dim(muted);
-        row.selected      = (i == o->index);
+        row.selected      = (c == o->choice);
         cfg.rows.push_back(std::move(row));
     }
 

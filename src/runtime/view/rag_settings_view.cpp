@@ -37,10 +37,15 @@ Element rag_settings_picker(const Model& m) {
     cfg.min_width  = 46;
     cfg.viewport_h = rs::kModeCount + 2;
     cfg.scroll     = nullptr;
-    cfg.selected   = o->index;
+    // Selected index is derived for the widget only; identity is by VALUE.
+    {
+        int sel = 0;
+        for (int i = 0; i < rs::kModeCount; ++i)
+            if (rs::kModes[i] == o->cursor) { sel = i; break; }
+        cfg.selected = sel;
+    }
 
-    for (int i = 0; i < rs::kModeCount; ++i) {
-        const store::RagMode mode = rs::kModes[i];
+    for (const store::RagMode mode : rs::kModes) {
         const bool is_active = (mode == active);
 
         Picker::Config::Row row;
@@ -50,7 +55,7 @@ Element rag_settings_picker(const Model& m) {
         row.leading_style = fg_of(fg);
         row.trailing      = std::string{store::describe(mode)};
         row.trailing_style = fg_dim(muted);
-        row.selected      = (i == o->index);
+        row.selected      = (mode == o->cursor);
         cfg.rows.push_back(std::move(row));
     }
 

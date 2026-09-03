@@ -33,13 +33,33 @@ enum class Choice {
     RagPerTurn,     // fresh fork + RAG every turn
     FirstTurnRag,   // fresh fork + RAG first turn only
     RagOff,         // fresh fork, no RAG
-    Count_,
 };
 
-inline constexpr int kChoiceCount = static_cast<int>(Choice::Count_);
+// Display order. The ONE place the layout is written down: the view walks
+// it and the cursor moves through it, so there is no second list to drift.
+// (This replaces a `Count_` sentinel inside the enum — a fake member every
+// switch had to remember not to handle, and which made `Choice` a set that
+// contains a non-choice.)
+inline constexpr Choice kChoices[] = {
+    Choice::RagPerTurn, Choice::FirstTurnRag, Choice::RagOff,
+};
+inline constexpr int kChoiceCount =
+    static_cast<int>(sizeof(kChoices) / sizeof(kChoices[0]));
+
+// Cursor movement closed over the enumeration: wrapping is a property of
+// the type, so no call site owns a modulus it can get wrong.
+[[nodiscard]] constexpr Choice next_choice(Choice c, int delta) noexcept {
+    const int n = kChoiceCount;
+    const int i = ((static_cast<int>(c) + delta) % n + n) % n;
+    return kChoices[i];
+}
 
 struct Closed {};
-struct Open { int index = 0; };   // cursor row in [0, kChoiceCount)
+// The cursor is the CHOICE, not an index into a list someone has to keep in
+// step. An int here is one refactor away from the Smart Mode bug: reorder or
+// resize the rows and every `static_cast<Choice>(index)` silently means
+// something else.
+struct Open { Choice choice = Choice::RagPerTurn; };
 
 } // namespace fork_picker
 

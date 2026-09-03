@@ -37,19 +37,13 @@ void commit_mode(store::RagMode mode) {
     tools::rag_apply_settings(s.rag);
 }
 
-int index_of(store::RagMode mode) {
-    for (int i = 0; i < rs::kModeCount; ++i)
-        if (rs::kModes[i] == mode) return i;
-    return 0;
-}
-
 } // namespace
 
 Step rag_settings_update(Model m, msg::RagSettingsMsg rm) {
     return std::visit(overload{
         [&](OpenRagSettings) -> Step {
             const store::RagMode cur = deps().load_settings().rag.mode;
-            m.ui.overlay = ov::RagSettings{{index_of(cur), cur}};
+            m.ui.overlay = ov::RagSettings{{cur, cur}};
             return {std::move(m), Cmd<Msg>::none()};
         },
         [&](CloseRagSettings) -> Step {
@@ -62,17 +56,17 @@ Step rag_settings_update(Model m, msg::RagSettingsMsg rm) {
             return {std::move(m), Cmd<Msg>::none()};
         },
         [&](RagSettingsMove& e) -> Step {
-            if (auto* o = m.ui.overlay.get<ov::RagSettings>()) {
-                int n = rs::kModeCount;
-                o->index = ((o->index + e.delta) % n + n) % n;
-            }
+            if (auto* o = m.ui.overlay.get<ov::RagSettings>())
+                o->cursor = rs::next_mode(o->cursor, e.delta);
             return {std::move(m), Cmd<Msg>::none()};
         },
         // Select the highlighted mode and close.
         [&](RagSettingsAdjust&) -> Step {
             if (auto* o = m.ui.overlay.get<ov::RagSettings>()) {
-                commit_mode(rs::kModes[o->index]);
-                std::string label{store::to_string(rs::kModes[o->index])};
+                // The cursor IS the mode — no kModes[i] subscript to get
+                // wrong if the row list is ever reordered.
+                commit_mode(o->cursor);
+                std::string label{store::to_string(o->cursor)};
                 m.ui.overlay.close<ov::RagSettings>();
                 return {std::move(m),
                         set_status_toast(m, "RAG: " + label, std::chrono::seconds{3})};
@@ -82,7 +76,7 @@ Step rag_settings_update(Model m, msg::RagSettingsMsg rm) {
         [&](RagSettingsReset) -> Step {
             commit_mode(store::RagMode::On);
             if (auto* o = m.ui.overlay.get<ov::RagSettings>())
-                o->index = index_of(store::RagMode::On);
+                o->cursor = store::RagMode::On;
             return {std::move(m), Cmd<Msg>::none()};
         },
     }, rm);

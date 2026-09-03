@@ -23,15 +23,30 @@ namespace rag_settings {
 
 struct Closed {};
 struct Open {
-    int index = 0;              // cursor over the 3 RagMode rows
+    // The cursor is the MODE itself, not an index into kModes. Storing an
+    // index means every read is `kModes[i]` — an unchecked array subscript
+    // whose meaning silently changes if the list is reordered or resized.
+    store::RagMode cursor = store::RagMode::On;
     store::RagMode active = store::RagMode::On;   // persisted mode (row marker)
 };
 
-// The rows, in display order — 1:1 with store::RagMode.
+// The rows, in display order — 1:1 with store::RagMode. The ONE place the
+// layout is written down: the view walks it and the cursor moves through it.
 inline constexpr store::RagMode kModes[] = {
     store::RagMode::On, store::RagMode::FirstTurnOnly, store::RagMode::Off,
 };
-inline constexpr int kModeCount = 3;
+inline constexpr int kModeCount =
+    static_cast<int>(sizeof(kModes) / sizeof(kModes[0]));
+
+// Cursor movement closed over the enumeration — no call site owns a modulus.
+[[nodiscard]] constexpr store::RagMode next_mode(store::RagMode mmode,
+                                                 int delta) noexcept {
+    int i = 0;
+    for (int k = 0; k < kModeCount; ++k)
+        if (kModes[k] == mmode) { i = k; break; }
+    const int n = kModeCount;
+    return kModes[((i + delta) % n + n) % n];
+}
 
 } // namespace rag_settings
 

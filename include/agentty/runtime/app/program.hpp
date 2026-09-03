@@ -304,12 +304,12 @@ struct AgenttyApp {
         //   • Smart Mode config overlay (Ctrl+S) — a OneAxis like the pickers.
         //   • RAG picker (Ctrl+K → RAG) — 3 rows; active marks the persisted mode.
         if (auto* o = m.ui.overlay.get<ov::RagSettings>()) {
-            mix(static_cast<std::uint64_t>(o->index));
+            mix(static_cast<std::uint64_t>(o->cursor));
             mix(static_cast<std::uint64_t>(o->active));
         }
         //   • Fork picker (Ctrl+K → Fork thread) — 3 RAG-mode rows.
         if (auto* o = m.ui.overlay.get<ov::Fork>())
-            mix(static_cast<std::uint64_t>(o->index));
+            mix(static_cast<std::uint64_t>(o->choice));
 
         // Time-driven animation buckets. Each bucket flip forces a
         // render via hash advance. The bucket size is the FLOOR on
