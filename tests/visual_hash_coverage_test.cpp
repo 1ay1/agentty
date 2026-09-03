@@ -539,3 +539,39 @@ TEST_CASE("visual hash: a widget-paced frame gets no host time bucket") {
 
     maya::testing::freeze_anim_clock(1000000);
 }
+
+// ── An idle WELCOME screen must be hash-stable ───────────────────────
+//
+// The welcome screen is the one state with no messages, so it exercises a
+// different set of hash terms than baseline() (which has two). It is also
+// the state a user stares at longest before typing, and the one where a
+// repaint they didn't ask for is most visible.
+//
+// With the animation clock frozen, visual_hash must be a PURE function of
+// the model: two calls on an untouched Model must agree, and must keep
+// agreeing. A difference here means the hash is reading something outside
+// the model — which the run loop then sees as "the screen changed", so it
+// repaints, and the caret is redrawn under the user for no reason.
+TEST_CASE("visual hash: an idle welcome screen is hash-stable") {
+    maya::testing::freeze_anim_clock(1000000);
+
+    Model m;                          // no messages: the welcome screen
+    REQUIRE(!m.s.active());
+    REQUIRE(m.d.current.messages.empty());
+
+    const auto h0 = agentty::app::AgenttyApp::visual_hash(m);
+    for (int i = 0; i < 16; ++i) {
+        CHECK(agentty::app::AgenttyApp::visual_hash(m) == h0);
+    }
+
+    // Advancing the frozen clock must not move it either while nothing is
+    // animating on our side: the welcome screen is widget-paced, so maya
+    // owns its frames and we contribute no time term.
+    maya::request_animation_frame_after(110);
+    for (std::int64_t t = 0; t < 2000; t += 37) {
+        maya::testing::freeze_anim_clock(1000000 + t);
+        CHECK(agentty::app::AgenttyApp::visual_hash(m) == h0);
+    }
+    maya::consume_animation_request_for_test();
+    maya::testing::freeze_anim_clock(1000000);
+}

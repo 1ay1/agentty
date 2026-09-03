@@ -13,6 +13,7 @@
 #include "agentty/runtime/app/subscribe.hpp"
 #include "agentty/runtime/app/update.hpp"
 #include "agentty/runtime/app/update/internal.hpp"  // detail::live_tail_reveal_settled
+#include "agentty/runtime/view/composer.hpp"        // composer_uses_hardware_caret
 #include "agentty/runtime/model.hpp"
 #include "agentty/runtime/msg.hpp"
 #include "agentty/runtime/view/view.hpp"
@@ -413,14 +414,29 @@ struct AgenttyApp {
         const bool fine_anim_live =
             m.s.active()                              // spinner / streaming caret
             || !m.ui.composer.queued.empty();         // queued-chip pulse
-        // The composer caret blinks (maya composer.hpp, U+2588 toggled
-        // via style every 265 ms) whenever the composer is idle. maya's
-        // own gate is simply `!active`, so match it exactly — if a modal
-        // happens to cover the composer the extra ~4 renders/sec are
-        // harmless, whereas UNDER-animating would reintroduce the
-        // freeze-until-keypress bug. Bias toward animating.
+        // The composer caret: ask, don't re-derive.
+        //
+        // This used to be `caret_blinking = !m.s.active()`, with a comment
+        // claiming "maya's own gate is simply !active, so match it
+        // exactly". That was wrong, and it is the last instance of the bug
+        // that ran through this whole file: a host restating a condition
+        // that belongs to a widget.
+        //
+        // maya's real gate is `!active && !hardware_caret` — with the
+        // HARDWARE caret the terminal owns the blink, so maya paints
+        // nothing, schedules nothing, and there is no visible step for the
+        // hash to track. Mixing a 265 ms parity anyway meant the hash
+        // flipped ~4x/sec on a screen where nothing moved. The run loop
+        // dutifully repainted each time, redrawing the composer under a
+        // caret the terminal was blinking on its own schedule — the two
+        // clocks beat, and the caret visibly flickered.
+        //
+        // The composer config already carries the resolved answer (it is
+        // what we hand maya), so read it instead of guessing: blink only
+        // when maya will actually PAINT a blinking caret.
         constexpr std::int64_t kBlinkHalfMs = 265;
-        const bool caret_blinking = !m.s.active();
+        const bool caret_blinking =
+            !m.s.active() && !ui::composer_uses_hardware_caret(m);
         // Fine-animation bucket period. PHASE-LOCKED to the Tick
         // subscription by construction: it is the SAME value
         // streaming_tick_period() hands subscribe.cpp for the

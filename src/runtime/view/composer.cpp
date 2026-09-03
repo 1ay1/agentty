@@ -148,6 +148,39 @@ DisplayText clip_long_lines(DisplayText in) {
 
 } // namespace
 
+// One definition of "does the terminal own the caret this frame". See the
+// declaration in composer.hpp for why this is shared rather than inlined:
+// the config builder and visual_hash must agree, and they live in different
+// files. Pure over the model, and cheap — visual_hash calls it every frame.
+bool composer_uses_hardware_caret(const Model& m) noexcept {
+    // AGENTTY_PAINTED_CARET=1 opts out wholesale (broken-DECTCEM terminals,
+    // or users who prefer the painted block).
+    static const bool painted_caret_env =
+        std::getenv("AGENTTY_PAINTED_CARET") != nullptr;
+    constexpr std::int64_t kTypingWindowMs = 4000;
+    const auto state = composer_state(m);
+    const bool agent_active =
+        state == maya::Composer::State::Streaming ||
+        state == maya::Composer::State::ExecutingTool;
+    const bool typing_recently =
+        m.ui.composer.last_edit_ms > 0 &&
+        (maya::anim::default_clock().now_ms() - m.ui.composer.last_edit_ms)
+            < kTypingWindowMs;
+    return !painted_caret_env
+        && ui::overlay::top(m) == ui::overlay::Kind::None
+        && m.ui.terminal_focused
+        && (!agent_active || typing_recently)
+        // Inside tmux, only claim the hardware caret when tmux will
+        // actually FORWARD the cursor-style escape (its `cstyle`
+        // feature). Without it our DECSCUSR is swallowed and the caret
+        // silently reverts to whatever shape the outer terminal had —
+        // the painted fallback is honest about that instead. Outside
+        // tmux has_feature() is false for everything, so the check is
+        // scoped to the tmux case only.
+        && (!maya::tmux::active()
+            || maya::tmux::has_feature(maya::tmux::Feature::CursorStyle));
+}
+
 maya::Composer::Config composer_config(const Model& m) {
     maya::Composer::Config cfg;
     auto disp = clip_long_lines(render_chips(m.ui.composer.text,
@@ -245,29 +278,7 @@ maya::Composer::Config composer_config(const Model& m) {
     //     streaming tick re-evaluates this window every frame.
     // AGENTTY_PAINTED_CARET=1 opts out wholesale (broken-DECTCEM
     // terminals or users who prefer the block).
-    static const bool painted_caret_env =
-        std::getenv("AGENTTY_PAINTED_CARET") != nullptr;
-    constexpr std::int64_t kTypingWindowMs = 4000;
-    const bool agent_active =
-        cfg.state == maya::Composer::State::Streaming ||
-        cfg.state == maya::Composer::State::ExecutingTool;
-    const bool typing_recently =
-        m.ui.composer.last_edit_ms > 0 &&
-        (maya::anim::default_clock().now_ms() - m.ui.composer.last_edit_ms)
-            < kTypingWindowMs;
-    cfg.hardware_caret = !painted_caret_env
-        && ui::overlay::top(m) == ui::overlay::Kind::None
-        && m.ui.terminal_focused
-        && (!agent_active || typing_recently)
-        // Inside tmux, only claim the hardware caret when tmux will
-        // actually FORWARD the cursor-style escape (its `cstyle`
-        // feature). Without it our DECSCUSR is swallowed and the caret
-        // silently reverts to whatever shape the outer terminal had —
-        // the painted fallback is honest about that instead. Outside
-        // tmux has_feature() is false for everything, so the check is
-        // scoped to the tmux case only.
-        && (!maya::tmux::active()
-            || maya::tmux::has_feature(maya::tmux::Feature::CursorStyle));
+    cfg.hardware_caret = composer_uses_hardware_caret(m);
     // Rationale for the (!agent_active || typing_recently) gate — the
     // SAME rule with and without tmux:
     //   • idle (agent not streaming): the screen is STATIC, so tmux's
@@ -292,11 +303,25 @@ maya::Composer::Config composer_config(const Model& m) {
     // the next keystroke or stream tick. Request one wake at the lapse
     // boundary so the flip happens on time. Idle-with-no-window frames
     // request nothing (zero-wake idle preserved).
-    if (cfg.hardware_caret && typing_recently && agent_active) {
-        const auto until_lapse = kTypingWindowMs
-            - (maya::anim::default_clock().now_ms() - m.ui.composer.last_edit_ms);
-        if (until_lapse > 0)
-            maya::request_animation_frame_after(until_lapse + 30);
+    // Recomputed here rather than threaded out of
+    // composer_uses_hardware_caret: this block needs the WINDOW, not the
+    // caret decision, and duplicating two cheap comparisons is better than
+    // widening that predicate's return type for one caller.
+    {
+        constexpr std::int64_t kTypingWindowMs = 4000;
+        const bool agent_active =
+            cfg.state == maya::Composer::State::Streaming ||
+            cfg.state == maya::Composer::State::ExecutingTool;
+        const bool typing_recently =
+            m.ui.composer.last_edit_ms > 0 &&
+            (maya::anim::default_clock().now_ms() - m.ui.composer.last_edit_ms)
+                < kTypingWindowMs;
+        if (cfg.hardware_caret && typing_recently && agent_active) {
+            const auto until_lapse = kTypingWindowMs
+                - (maya::anim::default_clock().now_ms() - m.ui.composer.last_edit_ms);
+            if (until_lapse > 0)
+                maya::request_animation_frame_after(until_lapse + 30);
+        }
     }
 
     // ── Cross-frame cache key (streaming anti-flicker) ───────────────
