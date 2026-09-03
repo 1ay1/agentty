@@ -72,6 +72,15 @@ int main() {
              / ("agentty_disabled_tools_" + std::to_string(::getpid()));
     fs::remove_all(tmp);
     fs::create_directories(tmp / ".agentty");
+    // Isolate via AGENTTY_HOME, NOT $HOME. user_root() resolves
+    // $AGENTTY_HOME FIRST and only falls back to $HOME — and the folded
+    // standalone main sets $AGENTTY_HOME to its own sandbox for the whole
+    // binary. So a test that repoints only $HOME writes its mcp.json into a
+    // directory nothing ever reads: the server never appears in the model,
+    // and every assertion here reports the "server absent" sentinel
+    // (size_t)-1 rather than a real tool count. Set both, so the test is
+    // correct whether or not the harness pins AGENTTY_HOME.
+    ::setenv("AGENTTY_HOME", (tmp / ".agentty").c_str(), 1);
     ::setenv("HOME", tmp.c_str(), 1);
     ::unsetenv("USERPROFILE");
 
