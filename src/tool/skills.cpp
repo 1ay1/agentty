@@ -7,9 +7,12 @@
 
 #include "agentty/scope/scope.hpp"
 #include "agentty/tool/util/fs_helpers.hpp"
+#include "agentty/util/dbglog.hpp"
 
 #include <algorithm>
+#include <charconv>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
@@ -21,6 +24,43 @@ namespace agentty::tools::skills {
 namespace fs = std::filesystem;
 
 namespace {
+
+// ── Catalog cap: default + env override ─────────────────────────────
+//
+// kMaxSkills (header) is the default tier-1 catalog cap;
+// AGENTTY_MAX_SKILLS overrides it — for small-context models (a
+// 100-skill library would eat the system prompt) or libraries that
+// legitimately exceed the default. Re-read on every call, not cached:
+// matches the house style of env knobs (bridge.cpp call_timeout et al.)
+// and keeps the knob testable. all() caches its result keyed on root +
+// file mtimes, so a mid-session env change takes effect on the next
+// rescan either way; real processes don't change env mid-session.
+//
+// Clamped to [8, 4096]: below 8 the catalog loses the trade that
+// motivated the cap (the listing is worth its context), above 4096 it
+// no longer protects the system prompt at all. A malformed value keeps
+// the default (matches bridge.cpp's env parsing) with a dbglog
+// breadcrumb.
+//
+// BOTH bound sites go through this — scan_root's candidate collection
+// and the catalog slice in all() — so a raised cap lifts the scan-side
+// WORK bound too; capping only the slice would truncate discovery of
+// large libraries (the bug scan_root's comment documents).
+[[nodiscard]] std::size_t catalog_cap() noexcept {
+    if (const char* e = std::getenv("AGENTTY_MAX_SKILLS"); e && e[0]) {
+        const char* end = e + std::strlen(e);
+        std::size_t v   = 0;
+        const auto [ptr, ec] = std::from_chars(e, end, v);
+        if (ec == std::errc{} && ptr == end) {
+            if (v < 8)    return std::size_t{8};
+            if (v > 4096) return std::size_t{4096};
+            return v;
+        }
+        agentty::util::dbglog("skills.catalog_cap.env",
+                              "AGENTTY_MAX_SKILLS: not a positive integer — using default");
+    }
+    return kMaxSkills;
+}
 
 [[nodiscard]] fs::path home_dir() noexcept {
     return agentty::util::home_dir_or_empty();
@@ -300,7 +340,7 @@ void scan_root(const fs::path& root, const std::string& source,
         // need visiting.
         if (it.depth() >= static_cast<int>(kMaxSkillDepth))
             it.disable_recursion_pending();
-        if (mds.size() >= kMaxSkills) break;
+        if (mds.size() >= catalog_cap()) break;
         if (it->is_directory(ec)) {
             auto fname = it->path().filename().string();
             if (!fname.empty() && fname.front() == '.') {
@@ -344,7 +384,7 @@ void scan_root(const fs::path& root, const std::string& source,
     mds.erase(std::unique(mds.begin(), mds.end()), mds.end());
 
     for (const auto& md : mds) {
-        if (out.size() >= kMaxSkills) break;
+        if (out.size() >= catalog_cap()) break;
         // Slug = path below the root, sanitized to the spec's charset. A
         // SKILL.md sitting directly in the root has no directory of its
         // own — same as the flat scan, it is not a skill (a skill is a

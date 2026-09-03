@@ -43,6 +43,7 @@ channel list and line format.
 | `AGENTTY_OLLAMA_HOST` | Ollama base URL. Default `http://localhost:11434`. |
 | `AGENTTY_OLLAMA_NUM_CTX` · `AGENTTY_OLLAMA_NUM_PREDICT` · `AGENTTY_OLLAMA_TEMPERATURE` | Override Ollama's context window, output cap, and sampling temperature. Otherwise agentty picks per model. |
 | `AGENTTY_MAX_OUTPUT_TOKENS` | Cap `max_tokens` on every request (mirrors Claude Code's knob). Useful against a provider that rejects large output budgets. |
+| `AGENTTY_MAX_SKILLS` | Override the tier-1 skill catalog cap (default 64, clamped to 8–4096). Lower it for small-context models, raise it for large skill libraries. |
 | `AGENTTY_FORCE_EFFORT` | Force a reasoning-effort tier for every turn, overriding what the model's capabilities imply. For A/B-ing effort, not everyday use. |
 | `AGENTTY_CHATGPT_DEVICE_AUTH` | Use the device-code flow for ChatGPT sign-in instead of the loopback browser flow — for headless or remote machines. |
 | `AGENTTY_NO_PREWARM` | Skip the TLS/connection prewarm at startup. |
