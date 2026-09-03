@@ -503,6 +503,34 @@ TEST_CASE("skills catalog cap: AGENTTY_MAX_SKILLS override") {
     set_env("not-a-number");
     CHECK(skills::all().size() == skills::kMaxSkills);
 
+    // ── ONE resolution per discovery pass ───────────────────────────
+    // The cap bounds scan_root's WALK, so it used to be consulted per
+    // directory entry — and on the malformed path that emitted the
+    // dbglog breadcrumb per entry: measured 120 ERROR-level lines for a
+    // single pass over 40 skills. all() runs every turn and dbglog feeds
+    // the crash flight recorder, so one typo'd env var displaced the
+    // diagnostics a crash dump exists to preserve.
+    //
+    // Assert the property at its source rather than counting log lines
+    // (logx's file sink latches on first use, so sink-based counting is
+    // unreliable inside the shared test binary): a discovery pass must
+    // resolve the cap EXACTLY once, no matter how many entries it walks
+    // or how many roots it visits.
+    {
+        // Force a rescan — the cache is keyed on mtimes, so touch a file.
+        write_file_at(home / ".agentty/skills/cap-skill-0/SKILL.md",
+            "---\nname: cap-skill-0\ndescription: touched\n---\nB\n");
+        set_env("not-a-number");          // the path that used to spam
+        const auto before = skills::debug_cap_resolutions();
+        (void)skills::all();
+        const auto after = skills::debug_cap_resolutions();
+        CHECK_MESSAGE(after - before == 1,
+            "a discovery pass resolved the cap " << (after - before)
+            << " times; it must resolve exactly once (a malformed value "
+            "logs an ERROR-level breadcrumb per resolution, into the "
+            "crash flight recorder)");
+    }
+
     fs::current_path(base, ec);
     fs::remove_all(base, ec);
 }

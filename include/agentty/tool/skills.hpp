@@ -172,4 +172,19 @@ inline constexpr std::size_t kMaxSkillDepth = 4;
 // cannot be typed is not a name.
 inline constexpr std::size_t kMaxSlugLen    = 64;
 
+// Test seam: how many times the catalog cap has been resolved from the
+// environment since process start.
+//
+// The cap bounds scan_root's walk, so it was once consulted per DIRECTORY
+// ENTRY — which made a malformed AGENTTY_MAX_SKILLS log its breadcrumb per
+// entry (measured: 120 ERROR-level lines for a single pass over 40 skills,
+// every turn, into the crash flight recorder). It is now resolved ONCE per
+// all() pass and threaded through.
+//
+// A test can assert that directly: log-line counting would need logx's file
+// sink, which latches on first use and so is unreliable inside the shared
+// test binary. Counting resolutions asserts the same property at its
+// source, without depending on sink state.
+[[nodiscard]] std::size_t debug_cap_resolutions() noexcept;
+
 } // namespace agentty::tools::skills

@@ -10,6 +10,7 @@
 #include "agentty/util/dbglog.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <charconv>
 #include <cstdio>
 #include <cstring>
@@ -25,16 +26,20 @@ namespace fs = std::filesystem;
 
 namespace {
 
-// ── Catalog cap: default + env override ─────────────────────────────
+// Resolution counter behind debug_cap_resolutions() (see skills.hpp).
+// Atomic because all() is mutex-guarded but the counter is read from a
+// test thread without that lock.
+std::atomic<std::size_t>& cap_resolutions() noexcept {
+    static std::atomic<std::size_t> n{0};
+    return n;
+}
+
+// ── Catalog cap: default + env override ────────────────────────
 //
 // kMaxSkills (header) is the default tier-1 catalog cap;
 // AGENTTY_MAX_SKILLS overrides it — for small-context models (a
 // 100-skill library would eat the system prompt) or libraries that
-// legitimately exceed the default. Re-read on every call, not cached:
-// matches the house style of env knobs (bridge.cpp call_timeout et al.)
-// and keeps the knob testable. all() caches its result keyed on root +
-// file mtimes, so a mid-session env change takes effect on the next
-// rescan either way; real processes don't change env mid-session.
+// legitimately exceed the default.
 //
 // Clamped to [8, 4096]: below 8 the catalog loses the trade that
 // motivated the cap (the listing is worth its context), above 4096 it
@@ -42,11 +47,33 @@ namespace {
 // the default (matches bridge.cpp's env parsing) with a dbglog
 // breadcrumb.
 //
-// BOTH bound sites go through this — scan_root's candidate collection
-// and the catalog slice in all() — so a raised cap lifts the scan-side
-// WORK bound too; capping only the slice would truncate discovery of
-// large libraries (the bug scan_root's comment documents).
-[[nodiscard]] std::size_t catalog_cap() noexcept {
+// RESOLVED ONCE PER DISCOVERY PASS, then threaded through — not read
+// per call. Two reasons, in order of weight:
+//
+//   1. The breadcrumb. This is consulted inside scan_root's walk, once
+//      per DIRECTORY ENTRY. Re-reading there logged the malformed-value
+//      message once per entry: measured 120 lines for a single pass over
+//      40 skills. all() runs every turn and dbglog emits at ERROR level,
+//      which also enters the crash-time flight recorder — so one typo'd
+//      env var floods the recorder with a repeated message and displaces
+//      the diagnostics a crash dump exists to preserve.
+//
+//   2. Stability. A pass that re-read the env could observe two
+//      different caps for its own scan bound and its own catalog slice
+//      if the environment changed underneath it. One resolution per pass
+//      makes that unrepresentable rather than merely unlikely.
+//
+// Still re-read per PASS (not latched in a function-local static): a
+// subagent, a --workspace switch, or a test may legitimately run with a
+// different value in the same process, and a process-lifetime latch
+// would silently serve the first caller's cap to everyone after.
+//
+// BOTH bound sites take the resolved value — scan_root's candidate
+// collection and the catalog slice in all() — so a raised cap lifts the
+// scan-side WORK bound too; capping only the slice would truncate
+// discovery of large libraries (the bug scan_root's comment documents).
+[[nodiscard]] std::size_t resolve_catalog_cap() noexcept {
+    cap_resolutions().fetch_add(1, std::memory_order_relaxed);
     if (const char* e = std::getenv("AGENTTY_MAX_SKILLS"); e && e[0]) {
         const char* end = e + std::strlen(e);
         std::size_t v   = 0;
@@ -305,7 +332,7 @@ void enumerate_resources(const fs::path& dir, std::vector<std::string>& out) {
 // Appends each found SKILL.md's mtime into `sig` so an in-place edit
 // (same dir mtime) still invalidates the cache.
 void scan_root(const fs::path& root, const std::string& source,
-               std::vector<Skill>& out, std::string& sig) {
+               std::size_t cap, std::vector<Skill>& out, std::string& sig) {
     std::error_code ec;
     if (!fs::is_directory(root, ec) || ec) return;
     auto mt = fs::last_write_time(root, ec);
@@ -340,7 +367,7 @@ void scan_root(const fs::path& root, const std::string& source,
         // need visiting.
         if (it.depth() >= static_cast<int>(kMaxSkillDepth))
             it.disable_recursion_pending();
-        if (mds.size() >= catalog_cap()) break;
+        if (mds.size() >= cap) break;
         if (it->is_directory(ec)) {
             auto fname = it->path().filename().string();
             if (!fname.empty() && fname.front() == '.') {
@@ -384,7 +411,7 @@ void scan_root(const fs::path& root, const std::string& source,
     mds.erase(std::unique(mds.begin(), mds.end()), mds.end());
 
     for (const auto& md : mds) {
-        if (out.size() >= catalog_cap()) break;
+        if (out.size() >= cap) break;
         // Slug = path below the root, sanitized to the spec's charset. A
         // SKILL.md sitting directly in the root has no directory of its
         // own — same as the flat scan, it is not a skill (a skill is a
@@ -440,6 +467,10 @@ std::vector<Skill>& cache() {
 
 } // namespace
 
+std::size_t debug_cap_resolutions() noexcept {
+    return cap_resolutions().load(std::memory_order_relaxed);
+}
+
 const std::vector<Skill>& all() {
     static std::mutex mu;
     static std::string cached_sig = "\x01uninit";
@@ -449,6 +480,13 @@ const std::vector<Skill>& all() {
     // rescan only when it changed (cheap stat vs full parse per turn).
     std::string sig;
     std::vector<Skill> fresh;
+
+    // Resolve the cap ONCE for this pass — every root's scan bound and
+    // every catalog slice below share this value, so the environment
+    // cannot change the answer part-way through a discovery, and a
+    // malformed value logs its breadcrumb exactly once.
+    const std::size_t cap = resolve_catalog_cap();
+
     // Precedence order comes from scope::plan (Locus-major, Dialect-minor):
     // project .agentty ▷ .agents ▷ .claude ▷ user .agentty ▷ .agents ▷
     // .claude — exactly the ladder this used to hand-write. scan_root does the
@@ -464,7 +502,7 @@ const std::vector<Skill>& all() {
     const scope::Layout layout{.leaf = "skills"};
     for (const scope::Source& src : scope::plan(layout, env)) {
         scan_root(src.base / layout.leaf, std::string{scope::to_string(src.locus)},
-                  fresh, sig);
+                  cap, fresh, sig);
     }
 
     if (sig != cached_sig) {
