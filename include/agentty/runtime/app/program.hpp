@@ -388,36 +388,31 @@ struct AgenttyApp {
         // path.
         const auto now_ms = maya::anim_now_ms();
 
-        // The WELCOME screen animates on maya's schedule, not ours.
+        // The WELCOME screen paces ITSELF, so we add no time term for it.
         //
-        // It is RAF-driven: welcome_screen.hpp runs the cascade at 60 fps
-        // for the first 1200 ms, then paces itself with
-        // request_animation_frame_after(110) — ~9 fps, chosen because the
-        // 2200 ms bob only crosses a handful of integer rows and finer
-        // wakes are pure cost. There is no Tick subscription in this state
-        // (subscribe.cpp does not arm one for an empty thread): the frames
-        // come from RAF alone.
+        // welcome_screen.hpp is RAF-driven: it runs its cascade at 60 fps,
+        // then calls request_animation_frame_after(110) to step the bob at
+        // ~9 fps. maya's run loop already guarantees those frames render —
+        // its RAF override bypasses this hash precisely so a widget can
+        // never be stranded by a host's bucket coverage gap.
         //
-        // Bucketing it at the streaming tick period was therefore wrong in
-        // both directions. Over ssh that period is 80 ms against maya's
-        // 110 ms request, so the two BEAT: some RAF wakes found the hash
-        // unchanged and were skipped by the render gate, others advanced it
-        // twice. The bob and the caret stepped irregularly — visible as
-        // flicker on an otherwise idle welcome screen.
+        // So a bucket here is not just redundant, it is harmful: it is a
+        // SECOND clock for one visual. This used to bucket at the streaming
+        // tick (80 ms over ssh) against the widget's 110 ms — 42 hash
+        // values per 30 requested frames, with the extra renders landing
+        // part-way through an animation step. That is what made an idle
+        // welcome screen flicker instead of bobbing.
         //
-        // Lock to maya's own number instead: bucket at exactly the interval
-        // it asks to be woken on, so each armed frame advances the hash
-        // once.
-        // Welcome-screen frame interval. welcome_screen.hpp paces itself
-        // with request_animation_frame_after(110) once its opening cascade
-        // settles; matching that number here is what keeps the two in
-        // phase. Kept next to the gate that uses it.
-        constexpr std::int64_t kWelcomeFrameMs = 110;
+        // maya::animation_pending() reports whether a widget already asked
+        // for the next frame. When it has, the loop is scheduled on ITS
+        // cadence and will render regardless of what we return — so we stay
+        // out of the way. Asking maya beats hard-coding its interval: the
+        // widget can change its pacing and this stays correct.
+        const bool widget_paced = maya::animation_pending();
 
         const bool fine_anim_live =
             m.s.active()                              // spinner / streaming caret
             || !m.ui.composer.queued.empty();         // queued-chip pulse
-        const bool welcome_live = m.d.current.messages.empty();
         // The composer caret blinks (maya composer.hpp, U+2588 toggled
         // via style every 265 ms) whenever the composer is idle. maya's
         // own gate is simply `!active`, so match it exactly — if a modal
@@ -554,21 +549,12 @@ struct AgenttyApp {
 
         if (revealing_text || draining_reveal) {
             mix(static_cast<std::uint64_t>(now_ms / kRevealBucketMs));
+        } else if (widget_paced) {
+            // A widget owns the next frame. maya will render it on that
+            // widget's schedule regardless of this hash, so contribute NO
+            // time term — a second clock here is what produces the beat.
         } else if (fine_anim_live) {
             mix(static_cast<std::uint64_t>(now_ms / kFineAnimMs));
-        } else if (welcome_live) {
-            // Phase-locked to welcome_screen.hpp's settled cadence: it asks to
-            // be woken every kWelcomeFrameMs, so bucket at exactly that and
-            // each armed frame advances the hash exactly once — no beat, no
-            // skipped step.
-            //
-            // The 60 fps cascade at the start needs no special case here:
-            // during it the mount calls request_animation_frame() every
-            // frame AND the model is still changing (first paint, catalog
-            // load, focus), so frames render regardless. Trying to detect
-            // the cascade window from wall time alone would be wrong — this
-            // clock has no notion of when the screen was mounted.
-            mix(static_cast<std::uint64_t>(now_ms / kWelcomeFrameMs));
         } else if (caret_blinking) {
             // Phase-locked: feed the blink PARITY, not a time bucket, so
             // the hash advances on exactly the same boundary maya uses

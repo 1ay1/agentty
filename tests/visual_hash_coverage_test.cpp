@@ -486,53 +486,56 @@ TEST_CASE("visual hash: a READY catalog does not animate") {
     CHECK(agentty::app::AgenttyApp::visual_hash(m) == h0);
 }
 
-// ── The welcome screen must be PHASE-LOCKED to maya's frame requests ──
-//
-// The welcome screen is RAF-driven, not Tick-driven: subscribe.cpp arms no
-// Tick for an empty thread, and welcome_screen.hpp paces itself with
-// request_animation_frame_after(110) once its opening cascade settles.
-//
-// visual_hash used to bucket this state at the STREAMING tick period, which
-// over ssh is 80 ms. 80 against 110 beats: some frames maya asked for found
-// the hash unchanged and were dropped by the render gate (a skipped
-// animation step), and some 110 ms windows contained two hash changes (a
-// render with nothing new to show). On screen that is an idle welcome that
-// flickers instead of bobbing smoothly.
-//
-// The contract: over any span, the hash advances EXACTLY ONCE per frame maya
-// requests. One render per requested frame — no drops, no waste.
-TEST_CASE("visual hash: welcome animation is phase-locked to maya's cadence") {
-    // maya's settled welcome cadence (welcome_screen.hpp kSettledFrameMs).
-    constexpr std::int64_t kMayaFrameMs = 110;
-    constexpr std::int64_t kSpanMs      = 3300;   // 30 requested frames
 
+// ── A widget-paced visual gets NO time term from the host ────────────
+//
+// The design rule, enforced here rather than remembered: a visual is EITHER
+// host-paced (we arm a timer and bucket the hash at that period) OR
+// widget-paced (it calls request_animation_frame(_after) and maya's run loop
+// renders it on its own schedule). Never both.
+//
+// Both is what broke: agentty bucketed the RAF-driven welcome screen at its
+// streaming-tick period (80 ms over ssh) while welcome_screen.hpp was asking
+// for 110 ms. Two independent clocks for one visual, so renders landed
+// part-way through animation steps — 42 hash values per 30 requested frames,
+// and an idle welcome screen that visibly flickered instead of bobbing.
+//
+// maya::animation_pending() reports "a widget already owns the next frame".
+// While that holds, visual_hash must contribute no time term at all: maya's
+// RAF override renders those frames regardless of this hash, so any bucket
+// we add is purely a second, out-of-phase clock.
+TEST_CASE("visual hash: a widget-paced frame gets no host time bucket") {
     Model m;
-    m.d.current.messages.clear();          // welcome screen
+    m.d.current.messages.clear();          // welcome screen: RAF-driven
     REQUIRE(!m.s.active());
 
-    // Walk the span at maya's cadence and count how many wakes see a NEW
-    // hash. Every one must, or that frame is a dropped animation step.
-    std::uint64_t last = 0;
-    bool have = false;
-    int wakes = 0, advanced = 0;
-    for (std::int64_t t = 0; t < kSpanMs; t += kMayaFrameMs) {
-        maya::testing::freeze_anim_clock(1000000 + t);
-        const auto h = agentty::app::AgenttyApp::visual_hash(m);
-        ++wakes;
-        if (!have || h != last) { ++advanced; last = h; have = true; }
-    }
-    CHECK(wakes == advanced);
+    // Simulate a widget having asked for the next frame, exactly as
+    // welcome_screen.hpp's mount does during build().
+    maya::request_animation_frame_after(110);
+    REQUIRE(maya::animation_pending());
 
-    // And the converse: no MORE hash values than frames requested, or the
-    // loop renders on wakes maya never asked for. Sampled at 1 ms so a
-    // finer bucket than kMayaFrameMs would show up as extra values.
+    // With a frame pending, the hash must be time-INDEPENDENT: sweep a span
+    // far wider than any plausible bucket and demand a single value.
     std::set<std::uint64_t> distinct;
-    for (std::int64_t t = 0; t < kSpanMs; ++t) {
+    for (std::int64_t t = 0; t < 3300; t += 7) {
         maya::testing::freeze_anim_clock(1000000 + t);
         distinct.insert(agentty::app::AgenttyApp::visual_hash(m));
     }
-    const std::size_t requested = static_cast<std::size_t>(kSpanMs / kMayaFrameMs);
-    CHECK(distinct.size() <= requested + 1);   // +1: partial bucket at the edge
+    CHECK(distinct.size() == 1);
+
+    // And the converse: with NO widget-paced frame pending, a host-paced
+    // animation still gets its bucket — the deferral must not disable the
+    // hash's own animations. An active turn is host-paced (Tick-driven).
+    maya::consume_animation_request_for_test();
+    REQUIRE(!maya::animation_pending());
+    m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
+    REQUIRE(m.s.active());
+    std::set<std::uint64_t> active_hashes;
+    for (std::int64_t t = 0; t < 3300; t += 7) {
+        maya::testing::freeze_anim_clock(1000000 + t);
+        active_hashes.insert(agentty::app::AgenttyApp::visual_hash(m));
+    }
+    CHECK(active_hashes.size() > 1);
 
     maya::testing::freeze_anim_clock(1000000);
 }
