@@ -413,3 +413,96 @@ TEST_CASE("skills engine") {
     fs::remove_all(base, ec);
 
 }
+
+TEST_CASE("skills catalog cap: AGENTTY_MAX_SKILLS override") {
+    agtest::ScopedEnvSandbox _env_guard;
+    std::error_code ec;
+    fs::path base = fs::temp_directory_path(ec) / "agentty_skills_cap_test";
+    fs::remove_all(base, ec);
+    fs::path home = base / "home";
+    fs::path work = base / "work";
+    fs::create_directories(home);
+    fs::create_directories(work);
+
+#if defined(_WIN32)
+    _putenv_s("HOME", home.string().c_str());
+    _putenv_s("AGENTTY_HOME", "");
+#else
+    setenv("HOME", home.string().c_str(), 1);
+    unsetenv("AGENTTY_HOME");
+#endif
+    fs::current_path(work);
+    util::set_workspace_root(work);
+
+    // The knob is read per discovery pass, and all() rescans only when its
+    // mtime signature changes — so each sub-case below shifts the sig by
+    // changing how many SKILL.md mtimes the (cap-bounded) walk collects.
+    // Adjacent sub-cases never share a signature while expecting different
+    // results, so no forced cache-buster writes are needed.
+
+    // RAII on the knob itself: restore (or clear) even if a CHECK throws.
+    const char* old_raw = std::getenv("AGENTTY_MAX_SKILLS");
+    const bool  had_old = old_raw != nullptr;
+    const std::string old_val = had_old ? old_raw : "";
+    struct Restore {
+        const bool had; const std::string val;
+        ~Restore() {
+#if defined(_WIN32)
+            if (had) _putenv_s("AGENTTY_MAX_SKILLS", val.c_str());
+            else     _putenv_s("AGENTTY_MAX_SKILLS", "");
+#else
+            if (had) setenv("AGENTTY_MAX_SKILLS", val.c_str(), 1);
+            else     unsetenv("AGENTTY_MAX_SKILLS");
+#endif
+        }
+    } _restore{had_old, old_val};
+
+    auto set_env = [](const char* v) {
+#if defined(_WIN32)
+        _putenv_s("AGENTTY_MAX_SKILLS", v);   // empty value removes (CRT)
+#else
+        setenv("AGENTTY_MAX_SKILLS", v, 1);
+#endif
+    };
+    auto unset_env = []() {
+#if defined(_WIN32)
+        _putenv_s("AGENTTY_MAX_SKILLS", "");
+#else
+        unsetenv("AGENTTY_MAX_SKILLS");
+#endif
+    };
+
+    // 80 skills — over the default cap in every scenario below.
+    constexpr std::size_t kSkills = 80;
+    for (std::size_t i = 0; i < kSkills; ++i) {
+        const std::string slug = "cap-skill-" + std::to_string(i);
+        write_file_at(home / ".agentty/skills" / slug / "SKILL.md",
+            "---\nname: " + slug + "\ndescription: cap test\n---\nB\n");
+    }
+
+    // ── Default (unset): kMaxSkills entries survive the walk AND the
+    // catalog slice — the cap applies to the WORK as well as the RESULT.
+    unset_env();
+    CHECK(skills::all().size() == skills::kMaxSkills);
+
+    // ── Raised: every discovered skill is catalogued, including the ones
+    // the default-capped walk never even visited.
+    set_env("200");
+    CHECK(skills::all().size() == kSkills);
+    CHECK(skills::find("cap-skill-79") != nullptr);
+
+    // ── Lowered: the catalog truncates to the override.
+    set_env("10");
+    CHECK(skills::all().size() == 10);
+
+    // ── Clamp floor: below the floor pins to it.
+    set_env("2");
+    CHECK(skills::all().size() == 8);
+
+    // ── Malformed: garbage keeps the default cap.
+    set_env("not-a-number");
+    CHECK(skills::all().size() == skills::kMaxSkills);
+
+    fs::current_path(base, ec);
+    fs::remove_all(base, ec);
+}

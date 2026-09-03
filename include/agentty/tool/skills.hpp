@@ -98,7 +98,9 @@ struct Skill {
 };
 
 // Discover + parse every skill under the project + user roots. Bounded:
-// at most kMaxSkills entries, each body capped at kMaxBodyBytes. Result
+// at most the catalog cap (kMaxSkills by default; the AGENTTY_MAX_SKILLS
+// env var overrides it per discovery pass — see catalog_cap() in
+// skills.cpp), each body capped at kMaxBodyBytes. Result
 // is cached process-wide keyed by the roots' AND each SKILL.md's mtime
 // (an in-place edit to a skill is picked up next turn). Project skills
 // shadow user skills with the same name.
