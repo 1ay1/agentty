@@ -144,9 +144,9 @@ const std::vector<Axis>& visual_axes() {
         }},
         {"spinner frame (while active)", [](Model& m) {
             m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
-            // Advance the spinner past a full frame-interval so
-            // frame_index() changes.
-            m.s.spinner.advance(1.0f);
+            // The spinner is clock-driven: advance the shared animation
+            // clock past a full frame-interval so frame_index() changes.
+            maya::testing::advance_anim_clock_ms(1000);
         }},
         {"composer text", [](Model& m) {
             m.ui.composer.text = "typing";
@@ -422,35 +422,47 @@ TEST_CASE("idle settled is stable") {
 // three while `models_loading` is set — a frozen glyph reads as a hang,
 // which is the exact opposite of what it exists to say.
 TEST_CASE("visual hash: spinner advances the hash while models load") {
+    // Frozen so the ONLY time motion is the explicit advance below.
+    maya::testing::freeze_anim_clock(2000000);
     Model m;
     REQUIRE(!m.s.active());          // idle: the streaming gate is off
     m.s.models_loading = true;
 
     const auto h0 = agentty::app::AgenttyApp::visual_hash(m);
-    m.s.spinner.advance(0.5f);       // enough for a new frame index
+    // The spinner derives its frame from the shared clock; move it past a
+    // full frame-interval so frame_index() changes.
+    maya::testing::advance_anim_clock_ms(1000);
     const auto h1 = agentty::app::AgenttyApp::visual_hash(m);
     CHECK(h0 != h1);
+    maya::testing::unfreeze_anim_clock();
 }
 
 TEST_CASE("visual hash: an idle picker with no load does NOT animate") {
-    maya::testing::freeze_anim_clock(1000000);
+    maya::testing::freeze_anim_clock(2000000);
     // The complement: without models_loading (and not streaming) the
     // spinner must stay out of the hash, or an idle agentty repaints
-    // forever for a glyph nobody is looking at.
+    // forever for a glyph nobody is looking at. STRONGER than the old
+    // advance()-based check: with a clock-driven spinner we assert the
+    // hash is time-independent outright — moving the clock (which moves
+    // the spinner's frame) must not move the hash.
     Model m;
     REQUIRE(!m.s.active());
     m.s.models_loading = false;
 
     const auto h0 = agentty::app::AgenttyApp::visual_hash(m);
-    m.s.spinner.advance(0.5f);
+    // Parity-neutral advance: a multiple of the 530 ms blink period so the
+    // caret parity bucket (now/265 & 1) is unchanged, while the spinner
+    // (80 ms/frame) moves through ~13 frames. Isolates the axis under test.
+    maya::testing::advance_anim_clock_ms(1060);
     CHECK(agentty::app::AgenttyApp::visual_hash(m) == h0);
+    maya::testing::unfreeze_anim_clock();
 }
 
 TEST_CASE("visual hash: spinner animates while a PICKER catalog loads") {
-    // Frozen here too: this asserts the hash CHANGES for one spinner step,
-    // which a live clock could satisfy by accident (a bucket flip) instead
-    // of by the spinner advance the case is actually about.
-    maya::testing::freeze_anim_clock(1000000);
+    // Frozen: this asserts the hash CHANGES for one spinner step, which a
+    // live clock could satisfy by accident (a bucket flip) instead of by
+    // the spinner frame the case is actually about.
+    maya::testing::freeze_anim_clock(2000000);
     // The picker fans out to every authed provider and tracks each fetch on
     // ProviderCatalog::state — it never sets Session::models_loading (that
     // covers the ACTIVE provider only: provider switch / startup). Gating
@@ -467,12 +479,13 @@ TEST_CASE("visual hash: spinner animates while a PICKER catalog loads") {
     REQUIRE(m.loading_spinner_visible());
 
     const auto h0 = agentty::app::AgenttyApp::visual_hash(m);
-    m.s.spinner.advance(0.5f);
+    maya::testing::advance_anim_clock_ms(1000);   // move the spinner's frame
     CHECK(agentty::app::AgenttyApp::visual_hash(m) != h0);
+    maya::testing::unfreeze_anim_clock();
 }
 
 TEST_CASE("visual hash: a READY catalog does not animate") {
-    maya::testing::freeze_anim_clock(1000000);
+    maya::testing::freeze_anim_clock(2000000);
     Model m;
     agentty::ProviderCatalog c;
     c.provider_id = "openai";
@@ -482,10 +495,13 @@ TEST_CASE("visual hash: a READY catalog does not animate") {
     REQUIRE(!m.loading_spinner_visible());
 
     const auto h0 = agentty::app::AgenttyApp::visual_hash(m);
-    m.s.spinner.advance(0.5f);
+    // Parity-neutral advance (multiple of the 530 ms blink period) — see
+    // the idle-picker case above; moves the spinner ~13 frames while the
+    // caret parity bucket stays put.
+    maya::testing::advance_anim_clock_ms(1060);
     CHECK(agentty::app::AgenttyApp::visual_hash(m) == h0);
+    maya::testing::unfreeze_anim_clock();
 }
-
 
 // ── A widget-paced visual gets NO time term from the host ────────────
 //

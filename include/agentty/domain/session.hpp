@@ -15,6 +15,7 @@
 #include <variant>
 
 #include <maya/core/animation.hpp>
+#include <maya/core/motion.hpp>   // anim::Motion (self-ticking disp_rate)
 #include <maya/widget/spinner.hpp>
 
 #include "agentty/domain/compaction_style.hpp"
@@ -718,11 +719,13 @@ struct StreamState {
 
     // Spring-smoothed version of the BIG displayed tok/s readout. The raw
     // instantaneous rate (live_delta_bytes/4 ÷ elapsed) is recomputed every
-    // frame and jitters hard — the number visibly flickers. We retarget this
-    // spring at the raw value each frame and display its settled value, so
-    // the readout glides instead of strobing. Ticked in the Tick handler
-    // alongside the spinner; reset to 0 when no stream is in flight.
-    maya::anim::Spring<double> disp_rate_spring{0.0, maya::anim::spring_presets::gentle};
+    // frame and jitters hard — the number visibly flickers. The Tick reducer
+    // retargets this Motion at the raw value; the VIEW reads .get(), which
+    // self-ticks against the shared frame clock and re-requests frames while
+    // gliding — no hand-fed dt, and the glide advances at render cadence
+    // (where smoothing belongs), not at the coarser Tick cadence.
+    maya::anim::Motion<double> disp_rate =
+        maya::anim::Motion<double>::spring(0.0, maya::anim::spring_presets::gentle);
 
     // ── Phase predicates ─────────────────────────────────────────────
     [[nodiscard]] bool is_idle()                const noexcept { return std::holds_alternative<phase::Idle>(phase); }

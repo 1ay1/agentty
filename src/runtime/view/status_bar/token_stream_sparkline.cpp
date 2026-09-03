@@ -49,11 +49,12 @@ maya::TokenStreamSparkline::Config token_stream_sparkline_config(const Model& m)
     // warm-up so the first frame isn't a divide-by-tiny-time spike),
     // freeze on most recent sample otherwise (so the number doesn't
     // decay during tool execution), 0 before any data. While streaming
-    // we show the Spring-smoothed value (ticked in the Tick handler) so
-    // the readout glides instead of strobing frame-to-frame.
+    // we show the Motion-smoothed value — .get() self-ticks on the shared
+    // frame clock and keeps frames armed while gliding — so the readout
+    // glides instead of strobing frame-to-frame.
     float disp_rate;
     if (is_streaming && ts_ms >= 250) {
-        disp_rate = static_cast<float>(m.s.disp_rate_spring.value());
+        disp_rate = static_cast<float>(m.s.disp_rate.get());
     } else if (!hist.empty()) {
         disp_rate = hist.back();
     } else {

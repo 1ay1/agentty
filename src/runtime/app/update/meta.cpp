@@ -318,43 +318,24 @@ Step meta_update(Model m, msg::MetaMsg mm) {
         },
         [&](Tick) -> Step {
             auto now = std::chrono::steady_clock::now();
-            // Wall-clock gap since the previous Tick. This is the ONE true dt
-            // for everything the TICK subscription drives (the spinner, the
-            // tok/s smoothing spring): those advance once per Tick, so their
-            // per-step delta is exactly the inter-Tick interval.
-            //
-            // Do NOT route this through maya::anim::default_clock().dt(): that
-            // clock is the VIEW-loop frame clock, and its `last_` is bumped by
-            // every view() read (the reveal pulse, every Motion). During an
-            // active turn view() reads it at ~60fps, so by the time the Tick
-            // reducer reads dt() the "frame" gap has already been consumed —
-            // the reducer sees a few stray ms instead of the real 33-100ms
-            // Tick interval, and the spinner crawls / advances unevenly. That
-            // coupling is exactly what made tools "feel slower". The Tick gap
-            // is self-contained and correct; keep the two clocks separate.
+            // Wall-clock gap since the previous Tick — kept for the
+            // suspend-recovery rebase below (last_event_at += tick_gap).
+            // NOTE: no animation dt is derived here any more. Every
+            // Tick-era animation (spinner, tok/s smoothing) is now
+            // clock-driven inside maya's animation framework: the spinner
+            // reads its frame off the shared animation clock, and the
+            // disp_rate Motion self-ticks on the view-loop frame clock.
+            // The old hand-fed dt — and the subtle bug class where the
+            // two clocks disagreed ("spinner crawls when view() consumed
+            // the frame gap first") — is gone with it.
             if (m.s.last_tick.time_since_epoch().count() == 0) m.s.last_tick = now;
             const auto tick_gap = now - m.s.last_tick;
             m.s.last_tick = now;
 
-            // dt for Tick-driven animations: the real inter-Tick interval,
-            // clamped so a slow-frame / stall recovery can't teleport the
-            // spinner or spring on the first Tick back.
-            float dt = std::chrono::duration<float>(tick_gap).count();
-            if (dt < 0.0f)  dt = 0.0f;
-            if (dt > 0.25f) dt = 0.25f;   // dropped-frame clamp (250ms)
-            // Advance while a turn is streaming OR while the fused picker
-            // is waiting on provider catalogs. The picker's "loading X…"
-            // header used a STATIC glyph, which is the visual signature of a
-            // hang — precisely wrong for the slow-backend case it exists to
-            // explain (Ollama / a custom host can take seconds). Gating the
-            // advance on `active()` alone froze it there.
-            if (m.s.active() || m.s.models_loading || m.loading_spinner_visible())
-                m.s.spinner.advance(dt);
-
-            // Glide the BIG tok/s readout. Retarget the smoothing spring at
-            // the same raw instantaneous rate the status bar would show, then
-            // advance it by dt. The view reads disp_rate_spring.value() so the
-            // number eases between samples instead of strobing frame-to-frame.
+            // Glide the BIG tok/s readout. Retarget the smoothing Motion at
+            // the same raw instantaneous rate the status bar would show. The
+            // VIEW reads disp_rate.get(), which self-ticks on the shared
+            // frame clock and keeps frames armed while gliding — no dt here.
             // When nothing is in flight, pull it to rest at 0.
             {
                 double raw_target = 0.0;
@@ -367,11 +348,11 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                         double sec = std::max(0.001, static_cast<double>(ms) / 1000.0);
                         raw_target = (static_cast<double>(ra->live_delta_bytes) / 4.0) / sec;
                     } else {
-                        raw_target = m.s.disp_rate_spring.target();  // hold during warm-up
+                        raw_target = m.s.disp_rate.target();  // hold during warm-up
                     }
                 }
-                m.s.disp_rate_spring.set_target(raw_target);
-                m.s.disp_rate_spring.tick(dt);
+                if (raw_target != m.s.disp_rate.target())
+                    m.s.disp_rate.spring_to(raw_target);
             }
 
             // Post-freeze settling window countdown. Keeps the tick
