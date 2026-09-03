@@ -139,7 +139,7 @@ Step fork_update(Model m, msg::ForkMsg fm) {
             Thread fork;
             fork.id = deps().new_thread_id();
             fork.forked_from = parent_id;
-            fork.rag_mode_override = static_cast<int>(rag_mode_of(choice));
+            fork.rag_mode_override = rag_mode_of(choice);
             fork.created_at = fork.updated_at = std::chrono::system_clock::now();
             fork.title = m.d.current.title.rfind("Fork: ", 0) == 0
                              ? m.d.current.title

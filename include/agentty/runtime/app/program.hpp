@@ -176,7 +176,12 @@ struct AgenttyApp {
             // hints and scopes the row list to the active provider, so it
             // is part of the visible state — not hashing it would freeze
             // stale chrome when Smart Mode descends into the picker.
-            mix(static_cast<std::uint64_t>(m.ui.smart_assign_slot + 1));
+            // 0 = no assignment in flight, else the role + 1. The `+ 1`
+            // used to exist to lift a -1 sentinel out of negative range;
+            // now it just keeps "absent" distinct from role 0.
+            mix(m.ui.smart_assign_slot
+                    ? static_cast<std::uint64_t>(*m.ui.smart_assign_slot) + 1
+                    : 0u);
         }
         // The fused list also changes as async provider catalogs resolve
         // (each FusedCatalogLoaded grows/updates provider_catalogs), so mix a

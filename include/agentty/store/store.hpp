@@ -23,20 +23,12 @@ namespace agentty::store {
 // means the user never touched the picker, so the adapter keeps its
 // env-derived defaults; once the picker commits it flips true and `mode`
 // becomes authoritative for the proactive/pre-turn behaviour.
-enum class RagMode : std::uint8_t {
-    On = 0,        // proactive pre-turn retrieval on every turn
-    FirstTurnOnly, // proactive retrieval only on a thread's first turn
-    Off,           // no proactive injection (search_docs/search_code still work)
-};
-
-[[nodiscard]] constexpr std::string_view to_string(RagMode m) noexcept {
-    switch (m) {
-        case RagMode::On:            return "On";
-        case RagMode::FirstTurnOnly: return "First turn only";
-        case RagMode::Off:           return "Off";
-    }
-    return "?";
-}
+// RagMode is DOMAIN vocabulary, defined in domain/rag_mode.hpp — a Thread
+// carries a per-thread override, and this header includes conversation.hpp,
+// so defining it here made the field unable to name its own type without a
+// cycle. Aliased so every existing `store::RagMode` spelling still compiles.
+using RagMode = agentty::RagMode;
+using agentty::to_string;
 
 [[nodiscard]] constexpr std::string_view describe(RagMode m) noexcept {
     switch (m) {

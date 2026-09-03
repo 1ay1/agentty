@@ -338,20 +338,23 @@ Step submit_message(Model m) {
         // AGENTTY_RAG_PROACTIVE override still wins inside proactive_enabled().
         bool proactive_on = false;
         {
-            const int ov = m.d.current.rag_mode_override;   // -1 = inherit global
             const bool first_turn = std::none_of(
                 m.d.current.messages.begin(), m.d.current.messages.end(),
                 [](const Message& mm) {
                     return mm.role == Role::Assistant && !mm.text.empty();
                 });
-            if (ov == static_cast<int>(store::RagMode::Off)) {
-                proactive_on = false;
-            } else if (ov == static_cast<int>(store::RagMode::On)) {
-                proactive_on = true;
-            } else if (ov == static_cast<int>(store::RagMode::FirstTurnOnly)) {
-                proactive_on = first_turn;
+            // Absent = inherit the global mode; engaged = this thread's own.
+            // A total switch over the enum, so adding a RagMode is a compile
+            // error here rather than a silent fall into "inherit" — which is
+            // what the old chain of int comparisons did with any value it
+            // didn't recognise.
+            if (const auto ov = m.d.current.rag_mode_override) {
+                switch (*ov) {
+                    case store::RagMode::Off:           proactive_on = false;      break;
+                    case store::RagMode::On:            proactive_on = true;       break;
+                    case store::RagMode::FirstTurnOnly: proactive_on = first_turn; break;
+                }
             } else {
-                // Inherit the global mode (via the live retriever config).
                 proactive_on = tools::proactive_enabled();
                 if (proactive_on && tools::proactive_first_turn_only())
                     proactive_on = first_turn;

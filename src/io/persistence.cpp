@@ -624,7 +624,16 @@ parse_thread_meta_only(const json& j) {
     t.id = ThreadId{std::move(id_str)};
     t.title = j.value("title", "");
     t.forked_from = j.value("forked_from", "");
-    t.rag_mode_override = j.value("rag_mode_override", -1);
+    // On-disk form is unchanged: key absent = inherit, else the RagMode's
+    // integer. Anything outside the enum is treated as "inherit" rather than
+    // cast blindly — a corrupt or future value must not become a mode.
+    if (const auto it = j.find("rag_mode_override");
+        it != j.end() && it->is_number_integer()) {
+        const int v = it->get<int>();
+        if (v >= static_cast<int>(store::RagMode::On)
+            && v <= static_cast<int>(store::RagMode::Off))
+            t.rag_mode_override = static_cast<store::RagMode>(v);
+    }
     if (j.contains("created_at"))
         t.created_at = std::chrono::system_clock::time_point{
             std::chrono::seconds{j["created_at"].get<long long>()}};
@@ -1060,7 +1069,8 @@ static void save_thread_sync(const Thread& t) {
     j["id"] = t.id;
     j["title"] = t.title;
     if (!t.forked_from.empty()) j["forked_from"] = t.forked_from;
-    if (t.rag_mode_override >= 0) j["rag_mode_override"] = t.rag_mode_override;
+    if (t.rag_mode_override)
+        j["rag_mode_override"] = static_cast<int>(*t.rag_mode_override);
     j["created_at"] = std::chrono::duration_cast<std::chrono::seconds>(
         t.created_at.time_since_epoch()).count();
     j["updated_at"] = std::chrono::duration_cast<std::chrono::seconds>(

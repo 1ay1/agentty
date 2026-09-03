@@ -116,20 +116,26 @@ void fresh_cheap_fork(int choice, const char* name) {
           "fork records forked_from=parent");
     check(forked.d.current.title.rfind("Fork: ", 0) == 0,
           "fork title is prefixed (got '" + forked.d.current.title + "')");
-    check(forked.d.current.rag_mode_override >= 0,
+    check(forked.d.current.rag_mode_override.has_value(),
           "fork carries a RAG-mode override");
     std::println("PASS\n");
 }
 
 void distinct_rag_modes() {
     std::println("--- distinct_rag_modes ---");
-    int m0 = fork_with(make_parent(), 0).d.current.rag_mode_override;
-    int m1 = fork_with(make_parent(), 1).d.current.rag_mode_override;
-    int m2 = fork_with(make_parent(), 2).d.current.rag_mode_override;
+    // Each picker choice must map to a DIFFERENT mode. Compared as values,
+    // not as integers: the override is an optional<RagMode>, so "absent"
+    // and "a mode" are distinguishable without a sentinel.
+    const auto m0 = fork_with(make_parent(), 0).d.current.rag_mode_override;
+    const auto m1 = fork_with(make_parent(), 1).d.current.rag_mode_override;
+    const auto m2 = fork_with(make_parent(), 2).d.current.rag_mode_override;
+    check(m0 && m1 && m2, "every choice sets an override");
+    auto name = [](const std::optional<agentty::RagMode>& v) {
+        return v ? std::string{agentty::to_string(*v)} : std::string{"inherit"};
+    };
     check(m0 != m1 && m1 != m2 && m0 != m2,
           "each RAG choice sets a distinct override (" +
-          std::to_string(m0) + "," + std::to_string(m1) + "," +
-          std::to_string(m2) + ")");
+          name(m0) + "," + name(m1) + "," + name(m2) + ")");
     std::println("PASS\n");
 }
 

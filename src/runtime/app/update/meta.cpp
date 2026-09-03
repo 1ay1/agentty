@@ -149,7 +149,7 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             // A slot row → open the model picker in slot-assign mode. The
             // picker scopes itself to the active provider and writes the
             // slot on Enter (see fused_picker_update's Select arm).
-            m.ui.smart_assign_slot = static_cast<int>(*role);
+            m.ui.smart_assign_slot = *role;
             m.ui.overlay.close<ov::SmartMode>();
             return agentty::app::update(std::move(m), Msg{OpenFusedPicker{}});
         },

@@ -69,7 +69,7 @@ Model in_slot_assign(int slot) {
     m.d.model_id = ModelId{"claude-opus-4-5"};
     m.d.available_models = { mi("claude-opus-4-5", "anthropic"),
                              mi("claude-haiku-4-5", "anthropic") };
-    m.ui.smart_assign_slot = slot;
+    m.ui.smart_assign_slot = static_cast<smart::ModelRole>(slot);
     auto [m1, _] = app::update(std::move(m), Msg{OpenFusedPicker{}});
     return std::move(m1);
 }
@@ -99,7 +99,7 @@ TEST_CASE("smart slot picker stack") {
               "Esc closes the model picker");
         CHECK(m2.ui.overlay.is<ov::SmartMode>(),
               "Esc RE-OPENS Smart Mode — navigation is a stack, not a trapdoor");
-        CHECK(m2.ui.smart_assign_slot == -1,
+        CHECK(!m2.ui.smart_assign_slot,
               "the pending slot-assign is cleared on back-out");
         if (auto* o = m2.ui.overlay.get<ov::SmartMode>()) {
             CHECK(o->row == smart::row_of(static_cast<smart::ModelRole>(slot)),
@@ -135,7 +135,7 @@ TEST_CASE("smart slot picker stack") {
               "Enter closes the model picker");
         CHECK(m2.ui.overlay.is<ov::SmartMode>(),
               "Enter returns to Smart Mode so sibling slots stay one step away");
-        CHECK(m2.ui.smart_assign_slot == -1, "slot-assign consumed");
+        CHECK(!m2.ui.smart_assign_slot, "slot-assign consumed");
         if (auto* o = m2.ui.overlay.get<ov::SmartMode>()) {
             CHECK(o->row == smart::row_of(static_cast<smart::ModelRole>(slot)),
                   "cursor on the slot just set");
@@ -180,7 +180,7 @@ TEST_CASE("smart slot picker stack") {
             m.d.model_id = ModelId{"claude-opus-4-5"};
             m.d.available_models = { mi("claude-opus-4-5", "anthropic"),
                                      mi("claude-haiku-4-5", "anthropic") };
-            m.ui.smart_assign_slot = slot;
+            m.ui.smart_assign_slot = static_cast<smart::ModelRole>(slot);
             auto [m1, _] = app::update(std::move(m), Msg{OpenFusedPicker{}});
             return app::detail::fused_rows_for_model(m1);
         };
@@ -204,7 +204,7 @@ TEST_CASE("smart slot picker stack") {
     {
         Model m;
         m.d.available_models = { mi("claude-opus-4-5", "anthropic") };
-        m.ui.smart_assign_slot = -1;          // ordinary model switch
+        m.ui.smart_assign_slot.reset();       // ordinary model switch
         auto [m1, _] = app::update(std::move(m), Msg{OpenFusedPicker{}});
         auto [m2, cmd] = app::update(std::move(m1), Msg{CloseFusedPicker{}});
         CHECK(!m2.ui.overlay.is<ov::FusedPicker>(), "ordinary Esc closes picker");

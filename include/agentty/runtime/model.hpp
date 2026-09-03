@@ -266,8 +266,13 @@ struct Model {
         // When the model picker was opened to ASSIGN a Smart Mode role slot
         // (not to switch the active model), this names the target slot.
         // FusedPickerSelect writes the chosen model into that slot and
-        // clears this instead of switching models. -1 = normal model switch.
-        int                 smart_assign_slot = -1;   // -1 | 0=Strategic 1=Impl 2=Utility
+        // clears this instead of switching models. Absent = normal switch.
+        //
+        // Was `int = -1` with the roles encoded as 0/1/2, so it was cast to
+        // ModelRole on the way out and back to int on the way in — two casts
+        // around a value that is a role the whole time, and a -1 that had to
+        // be remembered as "none" at every read.
+        std::optional<smart::ModelRole> smart_assign_slot;
         // Effort tier changed via ←/→ in the model picker but not yet
         // flushed to disk. Persisting per keystroke is a synchronous
         // load+fsync+rename on the UI thread; instead the CycleEffort arm

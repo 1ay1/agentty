@@ -178,7 +178,7 @@ Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
             // the model picker mid-assign must not leave the armed slot
             // behind, or the NEXT regular model pick silently lands in the
             // smart slot instead of switching the model.
-            m.ui.smart_assign_slot = -1;
+            m.ui.smart_assign_slot.reset();
             m.ui.overlay.close<ov::FusedPicker>();
             // Open at the row matching the currently-active provider. Fresh
             // rows with an empty query (so every provider is present to match).
@@ -645,7 +645,7 @@ std::vector<FusedRow> fused_rows_for_model(const Model& m) {
     in.label_fn   = &ui::model_display_label;
     // Smart Mode slot-assign pins a model that will be dispatched to the
     // ACTIVE provider, so only its models may appear. See the Select arm.
-    if (m.ui.smart_assign_slot >= 0) in.only_provider = active_provider_id();
+    if (m.ui.smart_assign_slot) in.only_provider = active_provider_id();
     if (auto* c = m.ui.overlay.get<ov::FusedPicker>()) in.query = c->query;
     return ui::build_fused_rows(in);
 }
@@ -935,13 +935,11 @@ Step fused_picker_update(Model m, msg::FusedPickerMsg pm) {
             // picker stack — re-open Smart Mode at the slot row we descended
             // from — instead of closing every overlay. Navigating into a
             // setting and hitting Esc should return you to the parent picker.
-            if (m.ui.smart_assign_slot >= 0) {
-                const auto role =
-                    static_cast<smart::ModelRole>(m.ui.smart_assign_slot);
-                m.ui.smart_assign_slot = -1;
+            if (const auto role = m.ui.smart_assign_slot) {
+                m.ui.smart_assign_slot.reset();
                 // row_of is the total inverse of role_of — no `1 + slot`
                 // offset to keep in step with the overlay's layout.
-                m.ui.overlay = ov::SmartMode{smart::row_of(role)};
+                m.ui.overlay = ov::SmartMode{smart::row_of(*role)};
             }
             return done(std::move(m));
         },
@@ -1197,30 +1195,27 @@ Step fused_picker_update(Model m, msg::FusedPickerMsg pm) {
             // the active provider (see rebuild_fused_rows) so such a row is
             // never selectable in the first place — unrepresentable beats
             // validated.
-            if (m.ui.smart_assign_slot >= 0) {
-                smart::SlotOverride* slot = nullptr;
-                switch (m.ui.smart_assign_slot) {
-                    case 0: slot = &m.d.smart.strategic;      break;
-                    case 1: slot = &m.d.smart.implementation; break;
-                    case 2: slot = &m.d.smart.utility;        break;
-                }
-                if (slot) {
-                    slot->model = row.model.id.value;
-                    slot->set   = true;
-                    // Stamp the provider this pin was made under. A model id
-                    // only means something to the endpoint that serves it, so
-                    // resolve_role replays the pin ONLY under this provider
-                    // (see SlotOverride::provider). Prefer the row's own
-                    // provider — in slot-assign mode the list is already
-                    // filtered to the active one, so they agree, but the row
-                    // is the more direct truth.
-                    slot->provider = row.provider_id.empty()
-                                       ? active_provider_id()
-                                       : row.provider_id;
-                    m.d.smart.enabled = true;   // pinning a slot means "on"
-                }
-                const int assigned = m.ui.smart_assign_slot;
-                m.ui.smart_assign_slot = -1;
+            if (const auto assigning = m.ui.smart_assign_slot) {
+                // One role->field mapping, shared with every other reader
+                // and writer (RoleConfig::slot). The switch on 0/1/2 that
+                // used to live here was a third copy of it.
+                smart::SlotOverride& slot = m.d.smart.slot(*assigning);
+                slot.model = row.model.id.value;
+                slot.set   = true;
+                // Stamp the provider this pin was made under. A model id
+                // only means something to the endpoint that serves it, so
+                // resolve_role replays the pin ONLY under this provider
+                // (see SlotOverride::provider). Prefer the row's own
+                // provider — in slot-assign mode the list is already
+                // filtered to the active one, so they agree, but the row
+                // is the more direct truth.
+                slot.provider = row.provider_id.empty()
+                                  ? active_provider_id()
+                                  : row.provider_id;
+                m.d.smart.enabled = true;   // pinning a slot means "on"
+
+                const smart::ModelRole assigned = *assigning;
+                m.ui.smart_assign_slot.reset();
                 persist_settings(m);
                 m.ui.overlay.close<ov::FusedPicker>();
                 m.d.fused_rows.clear();
@@ -1229,8 +1224,7 @@ Step fused_picker_update(Model m, msg::FusedPickerMsg pm) {
                 // there and probably want to set the sibling slots too;
                 // forcing a re-open of Smart Mode after every slot is the
                 // exact tedium this fixes.
-                m.ui.overlay = ov::SmartMode{smart::row_of(
-                    static_cast<smart::ModelRole>(assigned))};
+                m.ui.overlay = ov::SmartMode{smart::row_of(assigned)};
                 auto toast = set_status_toast(m, "Smart Mode slot set");
                 return {std::move(m), std::move(toast)};
             }

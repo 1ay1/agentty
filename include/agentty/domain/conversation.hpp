@@ -17,6 +17,7 @@
 #include <nlohmann/json.hpp>
 
 #include "agentty/domain/id.hpp"
+#include "agentty/domain/rag_mode.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
 
 namespace agentty {
@@ -590,10 +591,22 @@ struct Thread {
     // parent thread's id. Empty for a normal thread. Persisted so the thread
     // list can show a "forked from …" hint and the history stays traceable.
     std::string forked_from;
-    // Per-thread proactive-RAG override. -1 = inherit the global RAG mode;
-    // otherwise a store::RagMode value (0 On, 1 FirstTurnOnly, 2 Off). Set by
-    // the fork picker so a fork can carry its own RAG behaviour. Persisted.
-    int rag_mode_override = -1;
+    // Per-thread proactive-RAG override. Absent = inherit the global RAG
+    // mode; engaged = this thread's own behaviour. Set by the fork picker.
+    //
+    // This was `int rag_mode_override = -1`, with the comment obliged to
+    // spell out the encoding ("-1 inherit, 0 On, 1 FirstTurnOnly, 2 Off") —
+    // which is the tell: a comment documenting which integers are legal is a
+    // type that has not been written down. Consumers cast back to compare,
+    // so a value outside the enum was representable and silently meant
+    // "inherit". optional says both halves in the type: whether there is an
+    // override at all, and — if so — that it is a RagMode and nothing else.
+    //
+    // The enum lives in domain/rag_mode.hpp rather than store/, because
+    // store/store.hpp includes THIS header — depending on it from here would
+    // be a cycle. It is vocabulary, not storage, so domain/ is where it
+    // belongs; store:: keeps an alias so existing spellings still compile.
+    std::optional<RagMode> rag_mode_override;
     std::chrono::system_clock::time_point created_at = std::chrono::system_clock::now();
     std::chrono::system_clock::time_point updated_at = std::chrono::system_clock::now();
 
