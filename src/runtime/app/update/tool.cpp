@@ -178,7 +178,7 @@ void arm_reconcile_cooldown(Model& m) {
         // viewer's plain-text (line-numbered) body path: the default-
         // constructed ToolUse `call` has no structured kind, so the body
         // stage falls through to the raw-text branch automatically.
-        if (mit->proactive_context && !mit->text.empty()) {
+        if (mit->is_proactive_context() && !mit->text.empty()) {
             // Strip the <retrieved-context> … </retrieved-context> fence and
             // the lead-in preamble so the body is just the passages.
             std::string body = mit->text;

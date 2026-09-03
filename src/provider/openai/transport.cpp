@@ -1802,7 +1802,7 @@ http::Headers build_request_headers(const AuthHeader& auth,
 void set_memory_salvage_intent(StreamCtx& ctx, const Request& req) {
     std::string text;
     for (auto it = req.messages.rbegin(); it != req.messages.rend(); ++it) {
-        if (it->role == Role::User && !it->proactive_context) {
+        if (it->role == Role::User && !it->is_proactive_context()) {
             text = it->text;
             break;
         }

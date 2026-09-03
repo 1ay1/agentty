@@ -323,10 +323,10 @@ static json message_to_json(const Message& m) {
     // so a reloaded thread still renders the quiet "Retrieved context" card
     // (with its source list + confidence bar) instead of surfacing the raw
     // <retrieved-context> block as if the user had typed it.
-    if (m.proactive_context) {
+    if (m.proactive) {
         j["proactive_context"] = true;
-        if (m.proactive_confidence >= 0.0)
-            j["proactive_confidence"] = m.proactive_confidence;
+        if (m.proactive->confidence)
+            j["proactive_confidence"] = *m.proactive->confidence;
     }
     // Fork provenance card. Persisted so a reloaded fork still renders the
     // "\u2443 Forked" event card and the model still sees the transcript pointer
@@ -550,12 +550,19 @@ static std::expected<Message, DeserializeError> parse_message(const json& j) {
         const auto& v = j["is_compact_summary"];
         if (v.is_boolean()) m.is_compact_summary = v.get<bool>();
     }
+    // The on-disk shape is nested (confidence only inside a proactive
+    // message), and now the in-memory shape matches it. Reading them as two
+    // independent keys used to allow a stray `proactive_confidence` with no
+    // `proactive_context` to land a confidence on an ordinary message; the
+    // grouping makes that unrepresentable rather than merely unlikely.
     if (auto it = j.find("proactive_context");
-        it != j.end() && it->is_boolean())
-        m.proactive_context = it->get<bool>();
-    if (auto it = j.find("proactive_confidence");
-        it != j.end() && it->is_number())
-        m.proactive_confidence = it->get<double>();
+        it != j.end() && it->is_boolean() && it->get<bool>()) {
+        Message::ProactiveContext pc;
+        if (auto ct = j.find("proactive_confidence");
+            ct != j.end() && ct->is_number())
+            pc.confidence = ct->get<double>();
+        m.proactive = std::move(pc);
+    }
     if (auto it = j.find("fork_note");
         it != j.end() && it->is_boolean())
         m.fork_note = it->get<bool>();

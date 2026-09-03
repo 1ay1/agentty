@@ -102,11 +102,13 @@ TEST_CASE("proactive deferred") {
         check(msgs.size() >= 3, "deferred: at least 3 messages");
         const auto& ctx = msgs[msgs.size() - 2];
         const auto& tail = msgs.back();
-        check(ctx.role == Role::User && ctx.proactive_context,
+        check(ctx.role == Role::User && ctx.is_proactive_context(),
               "deferred: context msg is a proactive User message");
         check(ctx.text.find("retrieved-context") != std::string::npos,
               "deferred: context msg carries the retrieved block");
-        check(ctx.proactive_confidence > 0.81 && ctx.proactive_confidence < 0.83,
+        check(ctx.proactive && ctx.proactive->confidence
+           && *ctx.proactive->confidence > 0.81
+           && *ctx.proactive->confidence < 0.83,
               "deferred: retrieval confidence threaded onto the message");
         check(tail.role == Role::Assistant && tail.text.empty(),
               "deferred: trailing placeholder preserved (live tail)");

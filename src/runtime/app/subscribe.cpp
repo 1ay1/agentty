@@ -908,7 +908,7 @@ Sub<Msg> subscribe(const Model& m) {
     // cards' full passages are viewed via the Ctrl+O overlay instead.
     std::optional<MessageId> live_retrieved_id;
     for (std::size_t i = m.d.current.messages.size(); i-- > m.ui.frozen_through; ) {
-        if (m.d.current.messages[i].proactive_context) {
+        if (m.d.current.messages[i].is_proactive_context()) {
             live_retrieved_id = m.d.current.messages[i].id;
             break;
         }

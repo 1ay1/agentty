@@ -47,8 +47,7 @@ TEST_CASE("persistence proactive") {
     Message ctx;
     ctx.id                   = MessageId{"m-ctx"};
     ctx.role                 = Role::User;
-    ctx.proactive_context    = true;
-    ctx.proactive_confidence = 0.82;
+    ctx.proactive = Message::ProactiveContext{.confidence = 0.82};
     ctx.text = "<retrieved-context>\n[docs:http/retry.md:12]\n"
                "exponential backoff with full jitter\n</retrieved-context>";
     t.messages.push_back(ctx);
@@ -89,18 +88,22 @@ TEST_CASE("persistence proactive") {
     if (msgs.size() != 4) { REQUIRE(msgs.size() == 4); return; }
 
     // The proactive turn kept its identity.
-    check(msgs[1].proactive_context, "proactive_context flag survived reload");
-    check(msgs[1].proactive_confidence > 0.81
-       && msgs[1].proactive_confidence < 0.83,
-          "proactive_confidence (0.82) survived reload");
+    check(msgs[1].is_proactive_context(),
+          "proactive-context identity survived reload");
+    check(msgs[1].proactive && msgs[1].proactive->confidence
+       && *msgs[1].proactive->confidence > 0.81
+       && *msgs[1].proactive->confidence < 0.83,
+          "proactive confidence (0.82) survived reload");
 
-    // Neither the plain user nor the assistant turn picked up the flag,
-    // and their confidence stays at the -1 "unknown" sentinel.
-    check(!msgs[0].proactive_context && !msgs[2].proactive_context,
-          "flag did not leak onto normal turns");
-    check(msgs[0].proactive_confidence < 0.0
-       && msgs[2].proactive_confidence < 0.0,
-          "confidence sentinel (-1) preserved on normal turns");
+    // Neither the plain user nor the assistant turn picked up the marker.
+    // A normal turn simply has no proactive block — there is no sentinel to
+    // preserve, which is the point: "not a proactive message" and "a
+    // proactive message with an odd confidence" are no longer the same
+    // shape.
+    check(!msgs[0].is_proactive_context() && !msgs[2].is_proactive_context(),
+          "proactive identity did not leak onto normal turns");
+    check(!msgs[0].proactive && !msgs[2].proactive,
+          "normal turns carry no proactive block at all");
 
     // The fork note kept its identity and its transcript pointer.
     check(msgs[3].fork_note, "fork_note flag survived reload");

@@ -308,8 +308,8 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             // canvas.
             auto& msgs = m.d.current.messages;
             for (std::size_t i = m.ui.frozen_through; i < msgs.size(); ++i) {
-                if (msgs[i].id == e.id && msgs[i].proactive_context) {
-                    msgs[i].proactive_expanded = !msgs[i].proactive_expanded;
+                if (msgs[i].id == e.id && msgs[i].proactive) {
+                    msgs[i].proactive->expanded = !msgs[i].proactive->expanded;
                     break;
                 }
             }

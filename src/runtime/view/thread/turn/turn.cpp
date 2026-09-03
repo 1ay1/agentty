@@ -1694,7 +1694,7 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
     // one-liner so the raw passages don't dominate the user's view. Its
     // own muted identity (a book glyph, "Retrieved context" label) marks
     // it as auto-injected reference, not the user's words.
-    if (msg.proactive_context) {
+    if (const auto& pc = msg.proactive) {
         // Parse the [source:path:line] headers out of the block so the
         // card can show the user WHAT grounded the answer — not just how
         // many passages. Each header is a line of the form
@@ -1872,9 +1872,10 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
                 meta.append(s);
             };
 
-            if (msg.proactive_confidence >= 0.0) {
-                const double c = msg.proactive_confidence > 1.0
-                                     ? 1.0 : msg.proactive_confidence;
+            // Inside the `pc` guard, so the confidence is reachable only
+            // on a message that actually has one — no sentinel compare.
+            if (pc->confidence) {
+                const double c = std::clamp(*pc->confidence, 0.0, 1.0);
                 constexpr int kCells = 8;
                 const int filled = static_cast<int>(c * kCells + 0.5);
                 // One hue = one meaning: strength maps to the status axis
@@ -1947,7 +1948,7 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
             using namespace maya::dsl;
             constexpr std::size_t kMaxSources = 5;
             const std::size_t total = sources.size();
-            const bool expanded = msg.proactive_expanded;
+            const bool expanded = pc->expanded;
             // Collect every provenance row into ONE gap-0 vstack pushed as a
             // single BodySlot. maya::Turn inserts a blank gap between adjacent
             // non-blank body slots, so emitting each source as its own slot

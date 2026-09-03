@@ -1656,7 +1656,7 @@ StopReason AgentServer::stream_completion(Session& sess, bool& out_cancelled,
     if (!suppress_tools) {
         std::string_view newest_user;
         for (auto it = req.messages.rbegin(); it != req.messages.rend(); ++it) {
-            if (it->role == Role::User && !it->proactive_context) {
+            if (it->role == Role::User && !it->is_proactive_context()) {
                 newest_user = it->text;
                 break;
             }

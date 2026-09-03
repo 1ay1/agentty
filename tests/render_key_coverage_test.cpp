@@ -84,11 +84,13 @@ const std::vector<Axis>& render_axes() {
         {"is_compact_summary toggles", [](Message& m) {
             m.is_compact_summary = !m.is_compact_summary;
         }},
-        {"proactive_context toggles", [](Message& m) {
-            m.proactive_context = !m.proactive_context;
+        {"proactive identity toggles", [](Message& m) {
+            if (m.proactive) m.proactive.reset();
+            else             m.proactive = Message::ProactiveContext{};
         }},
-        {"proactive_expanded toggles", [](Message& m) {
-            m.proactive_expanded = !m.proactive_expanded;
+        {"proactive expanded toggles", [](Message& m) {
+            if (!m.proactive) m.proactive = Message::ProactiveContext{};
+            m.proactive->expanded = !m.proactive->expanded;
         }},
         {"reasoning text (thinking) changes length", [](Message& m) {
             // Drives Message::reasoning_display_text(), which the reasoning
@@ -121,8 +123,10 @@ const std::vector<Axis>& render_axes() {
         {"fork_transcript changes length", [](Message& m) {
             m.fork_transcript += "/deeper.md";
         }},
-        {"proactive_confidence bucket", [](Message& m) {
-            m.proactive_confidence = m.proactive_confidence < 0.5 ? 0.9 : 0.1;
+        {"proactive confidence bucket", [](Message& m) {
+            if (!m.proactive) m.proactive = Message::ProactiveContext{};
+            const double cur = m.proactive->confidence.value_or(0.0);
+            m.proactive->confidence = cur < 0.5 ? 0.9 : 0.1;
         }},
     };
     return axes;

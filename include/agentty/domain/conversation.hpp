@@ -442,31 +442,52 @@ struct Message {
     // post-compact message (binary near offset 92759504).
     bool is_compact_summary = false;
 
-    // True for the synthetic User message that carries PROACTIVELY RETRIEVED
-    // context (SOTA "active retrieval", FLARE/Self-RAG family): when the user
-    // submits a knowledge-shaped question, submit_message silently runs the
-    // RAG pipeline and, only on a HIGH-confidence hit, inserts one of these
-    // just before the assistant placeholder. On the wire it's a normal User
-    // message whose text is a fenced <retrieved-context> block the model can
-    // ground on; in the transcript the view renders a compact one-line
-    // "retrieved context" affordance instead of the raw block. Never shown
-    // as the user's own words. Skipped by the doom-loop / run-start walk
-    // (it's not a real human turn boundary — see agent_loop_should_break).
-    bool proactive_context = false;
+    // Proactive RETRIEVED-CONTEXT injection, if this message is one.
+    //
+    // Set on the synthetic User message that carries PROACTIVELY RETRIEVED
+    // context (SOTA "active retrieval", FLARE/Self-RAG family): when the
+    // user submits a knowledge-shaped question, submit_message silently
+    // runs the RAG pipeline and, only on a HIGH-confidence hit, inserts one
+    // of these just before the assistant placeholder. On the wire it is a
+    // normal User message whose text is a fenced <retrieved-context> block
+    // the model can ground on; in the transcript the view renders a compact
+    // one-line "retrieved context" affordance instead of the raw block.
+    // Never shown as the user's own words, and skipped by the doom-loop /
+    // run-start walk (not a real human turn boundary — see
+    // agent_loop_should_break).
+    //
+    // This was three independent fields — `bool proactive_context`, plus a
+    // `double proactive_confidence = -1.0` and a `bool proactive_expanded`
+    // documented as "only meaningful when proactive_context is true". Three
+    // fields describe eight states when only two shapes are real, and the
+    // confidence carried a sentinel INSIDE its own domain: the field is a
+    // probability in [0,1], so -1.0 was a value the type said was a
+    // confidence and the reader had to know was not. Grouping them says it
+    // once: absent = an ordinary message, engaged = these facts are real.
+    //
+    // The persisted shape is unchanged — it was already nested this way
+    // (`if (proactive_context) { … confidence … }`), so on-disk the sum
+    // type existed and only the in-memory type disagreed.
+    struct ProactiveContext {
+        // Retrieval confidence that gated the injection, from the RAG funnel
+        // (ProactiveHit.confidence), so the transcript card can render a
+        // real bar. Absent when the funnel did not report one. Wire-inert.
+        std::optional<double> confidence;
+        // View-only: show each source's FULL passage text instead of the
+        // one-line snippet. Toggled by Ctrl+U (ToggleRetrievedExpanded) on
+        // the newest such card. Wire-inert and NOT persisted — a display
+        // preference that resets to collapsed on reload. Folded into
+        // compute_render_key so flipping it invalidates the cached Element.
+        bool expanded = false;
+    };
+    std::optional<ProactiveContext> proactive;
 
-    // Retrieval confidence [0,1] that gated the proactive injection, carried
-    // from the RAG funnel (ProactiveHit.confidence) so the transcript card
-    // can render a real confidence bar. -1 means "unknown / not a proactive
-    // message"; only meaningful when proactive_context is true. Wire-inert.
-    double proactive_confidence = -1.0;
-
-    // View-only: when true, the transcript's retrieved-context card shows
-    // each source's FULL passage text instead of the one-line snippet.
-    // Toggled by Ctrl+U (ToggleRetrievedExpanded) on the newest such card.
-    // Wire-inert and not persisted — a pure display preference that resets
-    // to collapsed on reload. Folded into compute_render_key so flipping
-    // it invalidates the cached Element.
-    bool proactive_expanded = false;
+    // Is this a retrieved-context message? The question every consumer
+    // actually asks; reads better than `.proactive.has_value()` at the ~8
+    // sites that only need the boolean.
+    [[nodiscard]] bool is_proactive_context() const noexcept {
+        return proactive.has_value();
+    }
 
     // Smart Mode routing telemetry (view-only, wire-inert, not persisted).
     // When `smart_routing` is set, this is a synthetic zero-text card that
@@ -547,8 +568,8 @@ struct Message {
         for (const auto& tc : tool_calls) mix(tc.compute_render_key());
         mix(error ? error->size() + 1 : 0ULL);   // distinguish empty vs absent
         mix(is_compact_summary ? 1ULL : 0ULL);
-        mix(proactive_context ? 2ULL : 0ULL);
-        mix(proactive_expanded ? 4ULL : 0ULL);
+        mix(proactive ? 2ULL : 0ULL);
+        mix(proactive && proactive->expanded ? 4ULL : 0ULL);
         // Reasoning block: its text grows during streaming, and the block
         // switches from the live thought stream to a settled one-line summary
         // once the answer starts. Mixing the length + a "has answer body"
@@ -577,8 +598,8 @@ struct Message {
         // Quantize confidence to a bar-relevant bucket so a card whose
         // confidence changed (re-injection) invalidates the cache, without
         // churning on float noise. Only proactive messages carry it.
-        if (proactive_confidence >= 0.0)
-            mix(static_cast<std::uint64_t>(proactive_confidence * 100.0) + 1ULL);
+        if (proactive && proactive->confidence)
+            mix(static_cast<std::uint64_t>(*proactive->confidence * 100.0) + 1ULL);
         return k;
     }
 };

@@ -608,7 +608,7 @@ std::optional<Message> build_smart_routing_card(const Model& m) {
         // keeps this scan IDENTICAL to launch_stream's so the card's shown
         // route can never disagree with the wire. !fork_note: the fork
         // provenance card is not the user's prompt either.
-        if (it->role == Role::User && !it->proactive_context
+        if (it->role == Role::User && !it->is_proactive_context()
             && !it->smart_routing && !it->fork_note) {
             newest_user = it->text;
             for (const auto& a : it->attachments) nu_attach_bytes += a.body.size();
@@ -800,7 +800,7 @@ Cmd<Msg> launch_stream(Model& m) {
             // submit_message inserts it AFTER the real user message, so
             // without this guard the scan classifies an empty string — wrong
             // effort on the wire and a card that disagrees with it.
-            if (it->role == Role::User && !it->proactive_context
+            if (it->role == Role::User && !it->is_proactive_context()
                 && !it->smart_routing && !it->fork_note) {
                 newest_user = it->text;
                 for (const auto& a : it->attachments)
@@ -1031,14 +1031,14 @@ Cmd<Msg> launch_stream(Model& m) {
             std::size_t newest_user = 0;
             bool have_user = false;
             for (std::size_t i = 0; i < messages.size(); ++i)
-                if (messages[i].role == Role::User && !messages[i].proactive_context
+                if (messages[i].role == Role::User && !messages[i].is_proactive_context()
                     && !messages[i].fork_note) {
                     newest_user = i;
                     have_user = true;
                 }
             if (!have_user) return;
             for (std::size_t i = 0; i < newest_user;) {
-                if (messages[i].proactive_context) {
+                if (messages[i].is_proactive_context()) {
                     messages.erase(messages.begin() + static_cast<std::ptrdiff_t>(i));
                     --newest_user;
                 } else {
@@ -1089,7 +1089,7 @@ Cmd<Msg> launch_stream(Model& m) {
                 };
                 std::string_view newest_user;
                 for (auto it = req.messages.rbegin(); it != req.messages.rend(); ++it) {
-                    if (it->role == Role::User && !it->proactive_context && !it->fork_note) {
+                    if (it->role == Role::User && !it->is_proactive_context() && !it->fork_note) {
                         newest_user = it->text;
                         break;
                     }
@@ -1381,7 +1381,7 @@ std::optional<LoopBreak> agent_loop_should_break(
         // A proactively-retrieved context message is a synthetic User turn,
         // NOT a human turn boundary — skip it so the run-start lands on the
         // real user message it was injected after.
-        if (messages[i].role == Role::User && !messages[i].proactive_context
+        if (messages[i].role == Role::User && !messages[i].is_proactive_context()
             && !messages[i].smart_routing && !messages[i].fork_note) {
             run_start = i + 1; break;
         }
