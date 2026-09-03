@@ -49,6 +49,8 @@
 #include <string>
 #include <vector>
 
+#include <maya/core/anim_clock.hpp>
+
 #include "agtest.hpp"
 
 #include "agentty/runtime/app/program.hpp"
@@ -382,6 +384,15 @@ TEST_CASE("invariant axes preserve hash") {
 // Sanity: the baseline itself is stable across two calls (no time term
 // leaking for a settled/idle model — regime (c): nothing animating).
 TEST_CASE("idle settled is stable") {
+    // Pin the animation clock. These cases assert that two hashes of an
+    // UNCHANGED model agree, which is only meaningful if time cannot move
+    // between the two calls. visual_hash mixes a time BUCKET whenever
+    // anything animates — and a bare Model has no messages, so the welcome
+    // bob counts as animating. Unfrozen, the two calls could straddle a
+    // bucket edge and disagree: reliably so under `ctest -j12`, where load
+    // widens the gap between them. The clock is frozen, not merely read
+    // once, so the assertion tests the MODEL rather than the scheduler.
+    maya::testing::freeze_anim_clock(1000000);
     std::printf("visual_hash: settled idle model is hash-stable across calls\n");
     Model m = baseline();
     const std::uint64_t a = hash_of(m);
@@ -421,6 +432,7 @@ TEST_CASE("visual hash: spinner advances the hash while models load") {
 }
 
 TEST_CASE("visual hash: an idle picker with no load does NOT animate") {
+    maya::testing::freeze_anim_clock(1000000);
     // The complement: without models_loading (and not streaming) the
     // spinner must stay out of the hash, or an idle agentty repaints
     // forever for a glyph nobody is looking at.
@@ -434,6 +446,10 @@ TEST_CASE("visual hash: an idle picker with no load does NOT animate") {
 }
 
 TEST_CASE("visual hash: spinner animates while a PICKER catalog loads") {
+    // Frozen here too: this asserts the hash CHANGES for one spinner step,
+    // which a live clock could satisfy by accident (a bucket flip) instead
+    // of by the spinner advance the case is actually about.
+    maya::testing::freeze_anim_clock(1000000);
     // The picker fans out to every authed provider and tracks each fetch on
     // ProviderCatalog::state — it never sets Session::models_loading (that
     // covers the ACTIVE provider only: provider switch / startup). Gating
@@ -455,6 +471,7 @@ TEST_CASE("visual hash: spinner animates while a PICKER catalog loads") {
 }
 
 TEST_CASE("visual hash: a READY catalog does not animate") {
+    maya::testing::freeze_anim_clock(1000000);
     Model m;
     agentty::ProviderCatalog c;
     c.provider_id = "openai";

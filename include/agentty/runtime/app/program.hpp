@@ -368,9 +368,25 @@ struct AgenttyApp {
         //   (c) nothing animating at all (no caret — e.g. a modal owns
         //       focus): no time bucket, so a settled screen does ZERO
         //       idle renders until an event arrives.
-        const auto now_ms =
-            std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now().time_since_epoch()).count();
+        // Read the ANIMATION clock, not steady_clock directly.
+        //
+        // Every time-driven phase in this app reads maya::anim_now_ms() — it
+        // is documented as the only clock they may use — because it carries
+        // the test seams: advance_anim_clock_ms() to move time on purpose,
+        // and a FREEZE that pins it so a synchronous render sequence is a
+        // pure function of the model.
+        //
+        // Reading steady_clock here bypassed both. The buckets below then
+        // sampled real wall time, so two visual_hash() calls on an
+        // unchanged model could straddle a bucket boundary and disagree —
+        // an invariant test asserting "an idle picker does NOT animate"
+        // fails whenever the scheduler puts a bucket edge between its two
+        // calls. That is why those cases only flaked under `ctest -j12`:
+        // load widens the gap between the calls, it does not change the
+        // logic. Same class of bug as the reveal-timing one already fixed
+        // in turn.cpp; this was the last direct clock read in the render
+        // path.
+        const auto now_ms = maya::anim_now_ms();
         const bool fine_anim_live =
             m.s.active()                              // spinner / streaming caret
             || m.d.current.messages.empty()           // welcome wordmark bob
