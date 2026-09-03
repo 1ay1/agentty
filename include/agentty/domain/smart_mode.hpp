@@ -397,4 +397,14 @@ namespace detail {
                                   ModelCapabilities::Tier::Cheap);
 }
 
+// Rows in the Smart Mode overlay: the master switch, then the three role
+// slots (Strategic / Implementation / Utility).
+//
+// Shared so the RENDERER and the cursor arithmetic cannot disagree. They
+// did: the overlay was cut from eleven rows to four, the view followed, and
+// the move handler kept wrapping modulo 11 — so ↑/↓ drove the selection
+// through seven rows that are never drawn, and the highlight appeared to
+// escape past the top and bottom of the list.
+inline constexpr int kSmartModeRows = 4;
+
 } // namespace agentty::smart

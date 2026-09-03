@@ -1,6 +1,8 @@
 #include "agentty/runtime/view/pickers.hpp"
+#include "agentty/domain/smart_mode.hpp"   // kSmartModeRows
 
 #include <algorithm>
+#include <cassert>
 #include <cctype>
 #include <chrono>
 #include <cstdlib>
@@ -966,6 +968,12 @@ Element smart_mode_overlay(const Model& m) {
         {"  Implementation", on ? shown(smart::ModelRole::Implementation) + slot_suffix(sm.implementation) : std::string{"\xe2\x80\x94"}},
         {"  Utility",        on ? shown(smart::ModelRole::Utility)        + slot_suffix(sm.utility)        : std::string{"\xe2\x80\x94"}},
     };
+    // The cursor arithmetic in the SmartModeMove reducer wraps modulo
+    // smart::kSmartModeRows. If this list and that constant ever disagree the
+    // selection walks off the drawn rows (or cannot reach the last one), so
+    // tie them together here rather than discovering it in the UI.
+    assert(static_cast<int>(rows.size()) == smart::kSmartModeRows
+           && "Smart Mode row count must match smart::kSmartModeRows");
     for (int i = 0; i < static_cast<int>(rows.size()); ++i) {
         Picker::Config::Row r;
         r.leading        = rows[static_cast<std::size_t>(i)].lead;

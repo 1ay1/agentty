@@ -22,6 +22,7 @@
 #include "agentty/runtime/app/deps.hpp"
 #include "agentty/runtime/app/update/internal.hpp"  // app::detail::fused_rows_for_model
 #include "agentty/runtime/picker.hpp"
+#include "agentty/domain/smart_mode.hpp"   // kSmartModeRows
 #include "agentty/provider/selection.hpp"
 
 #include <optional>
@@ -101,7 +102,7 @@ TEST_CASE("smart slot picker stack") {
         CHECK(m2.ui.smart_assign_slot == -1,
               "the pending slot-assign is cleared on back-out");
         if (auto* o = m2.ui.overlay.get<ov::SmartMode>()) {
-            CHECK(o->index == 8 + slot,
+            CHECK(o->index == 1 + slot,
                   "cursor lands back on the slot row you descended from");
         } else {
             CHECK(false, "smart_mode must be OpenAt after Esc");
@@ -136,7 +137,7 @@ TEST_CASE("smart slot picker stack") {
               "Enter returns to Smart Mode so sibling slots stay one step away");
         CHECK(m2.ui.smart_assign_slot == -1, "slot-assign consumed");
         if (auto* o = m2.ui.overlay.get<ov::SmartMode>()) {
-            CHECK(o->index == 8 + slot, "cursor on the slot just set");
+            CHECK(o->index == 1 + slot, "cursor on the slot just set");
         }
 
         const smart::SlotOverride& s =
@@ -208,5 +209,40 @@ TEST_CASE("smart slot picker stack") {
         CHECK(!m2.ui.overlay.is<ov::FusedPicker>(), "ordinary Esc closes picker");
         CHECK(!m2.ui.overlay.is<ov::SmartMode>(),
               "ordinary model-switch Esc does NOT spuriously open Smart Mode");
+    }
+
+    // ── The cursor never leaves the rows that are DRAWN ─────────────
+    // The overlay was cut from eleven rows to four, but SmartModeMove kept
+    // wrapping modulo 11 — so ↑/↓ drove the selection through seven rows
+    // that are never rendered and the highlight appeared to run off the top
+    // and bottom of the list. Walking a full lap in each direction pins the
+    // invariant that matters: every index is a real row.
+    {
+        Model m;
+        auto [m1, _] = app::update(std::move(m), Msg{OpenSmartMode{}});
+        Model cur = std::move(m1);
+
+        // Down a full lap plus one: must visit 0..3 then wrap to 0.
+        for (int step = 1; step <= smart::kSmartModeRows + 1; ++step) {
+            auto [next, c] = app::update(std::move(cur), Msg{SmartModeMove{+1}});
+            cur = std::move(next);
+            auto* o = cur.ui.overlay.get<ov::SmartMode>();
+            CHECK(o != nullptr, "Smart Mode stays open while navigating");
+            if (!o) break;
+            CHECK(o->index >= 0 && o->index < smart::kSmartModeRows,
+                  "cursor stays on a drawn row moving DOWN");
+            CHECK(o->index == step % smart::kSmartModeRows,
+                  "down wraps at the last row, not seven rows later");
+        }
+
+        // Up from row 0 must land on the LAST row, not a phantom.
+        {
+            auto [m0, c0] = app::update(std::move(cur), Msg{OpenSmartMode{}});
+            auto [up, c1] = app::update(std::move(m0), Msg{SmartModeMove{-1}});
+            cur = std::move(up);
+            auto* o = cur.ui.overlay.get<ov::SmartMode>();
+            CHECK(o && o->index == smart::kSmartModeRows - 1,
+                  "up from the first row wraps to the last DRAWN row");
+        }
     }
 }

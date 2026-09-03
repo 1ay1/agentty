@@ -5,6 +5,7 @@
 
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/runtime/app/update.hpp"
+#include "agentty/domain/smart_mode.hpp"   // kSmartModeRows
 
 #include <algorithm>
 #include <chrono>
@@ -120,7 +121,15 @@ Step meta_update(Model m, msg::MetaMsg mm) {
         },
         [&](SmartModeMove& e) -> Step {
             if (auto* o = m.ui.overlay.get<ov::SmartMode>()) {
-                const int rows = 11;  // Enabled + 3 layers + 4 learning + 3 slots
+                // FOUR rows: master switch + Strategic/Implementation/Utility.
+                // This said 11 ("Enabled + 3 layers + 4 learning + 3 slots")
+                // long after those seven toggles were deleted, so ↑/↓ walked
+                // the cursor through seven rows that are not drawn: the
+                // selection appeared to run off the top and bottom of the
+                // list and the highlight vanished until you wrapped past the
+                // phantoms. Derived from the same constant the view uses so
+                // the two cannot drift again.
+                const int rows = smart::kSmartModeRows;
                 o->index = ((o->index + e.delta) % rows + rows) % rows;
             }
             return done(std::move(m));
@@ -158,6 +167,11 @@ Step meta_update(Model m, msg::MetaMsg mm) {
         [&](SmartModeClearSlot) -> Step {
             auto* o = m.ui.overlay.get<ov::SmartMode>();
             if (!o || o->index < 1) return done(std::move(m));   // row 0 = master
+            // Map ONLY the three slot rows. The trailing else used to catch
+            // every index ≥ 3, so any out-of-range cursor silently reset
+            // Utility — a destructive action attributed to a row the user
+            // was not on.
+            if (o->index > 3) return done(std::move(m));
             smart::SlotOverride* slot =
                   o->index == 1  ? &m.d.smart.strategic
                 : o->index == 2  ? &m.d.smart.implementation
