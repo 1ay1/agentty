@@ -151,12 +151,13 @@ foreach(_logx_t logx_redaction_test logx_format_test logx_lifecycle_test)
         ENVIRONMENT "AGENTTY_LOG=trace;AGENTTY_LOG_FILE=${CMAKE_CURRENT_BINARY_DIR}/${_logx_t}.log")
 endforeach()
 
-# logx rotation: same standalone-process reason, plus one more — it needs a
-# rotation threshold small enough to actually CROSS. At the shipping 32 MB
-# the mid-run rotation seam is unreachable from a test, which is precisely
-# how a use-after-close in it survived: writers read the sink fd without the
-# rotate lock, so the old swap-then-close published a descriptor the kernel
-# could recycle under them. 64 KB makes the seam testable in milliseconds.
+# logx rotation: same standalone-process reason as the block above. It also
+# needs a rotation threshold small enough to actually CROSS — at the
+# shipping 32 MB the mid-run rotation seam takes minutes to reach, which is
+# precisely how a use-after-close in it survived: writers read the sink fd
+# without the rotate lock, so the old swap-then-close published a descriptor
+# the kernel could recycle under them. The test lowers the threshold itself
+# via an internal symbol, so there is no env knob to configure here.
 agentty_test(logx_rotation_test MODE raw)
 add_executable(logx_rotation_test EXCLUDE_FROM_ALL
     tests/logx_rotation_test.cpp tests/test_main.cpp
@@ -165,7 +166,7 @@ target_include_directories(logx_rotation_test PRIVATE include tests)
 target_link_libraries(logx_rotation_test PRIVATE doctest::doctest maya::maya)
 add_test(NAME logx_rotation_test COMMAND logx_rotation_test)
 set_tests_properties(logx_rotation_test PROPERTIES TIMEOUT 30
-    ENVIRONMENT "AGENTTY_LOG=trace;AGENTTY_LOG_FILE=${CMAKE_CURRENT_BINARY_DIR}/logx_rotation_test.log;AGENTTY_LOG_ROTATE_BYTES=65536")
+    ENVIRONMENT "AGENTTY_LOG=trace;AGENTTY_LOG_FILE=${CMAKE_CURRENT_BINARY_DIR}/logx_rotation_test.log")
 
 agentty_test(keystore_test MODE raw LABELS sanitizer)
 add_executable(keystore_test EXCLUDE_FROM_ALL

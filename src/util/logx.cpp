@@ -60,24 +60,20 @@ std::atomic<std::int64_t> g_bytes{0};
 std::mutex g_rotate_mu;
 constexpr std::int64_t kRotateBytesDefault = 32ll * 1024 * 1024;
 
-// Resolved once at init. 32 MB is the right SHIPPING value and the wrong
-// TEST value: a regression test for the rotation seam would have to write
-// 32 MB to reach it, so before this seam existed the swap path had no
-// coverage at all — which is exactly how the fd-reuse bug below survived.
-// AGENTTY_LOG_ROTATE_BYTES lets a test rotate after a few KB. Clamped to a
-// floor so a stray small value can't turn the logger into a rename storm.
-std::atomic<std::int64_t> g_rotate_bytes{kRotateBytesDefault};
+}  // namespace
 
-std::int64_t resolve_rotate_bytes() noexcept {
-    const char* ev = std::getenv("AGENTTY_LOG_ROTATE_BYTES");
-    if (ev == nullptr || *ev == '\0') return kRotateBytesDefault;
-    errno = 0;
-    char*             end = nullptr;
-    const long long   v   = std::strtoll(ev, &end, 10);
-    if (errno != 0 || end == ev || v <= 0) return kRotateBytesDefault;
-    constexpr std::int64_t kFloor = 4096;
-    return v < kFloor ? kFloor : static_cast<std::int64_t>(v);
+// The rotation threshold. Deliberately NOT an env var and not in the public
+// header: nobody configures this, and logging should stay a thing you don't
+// have to set up. It lives here only because the rotation seam is otherwise
+// untestable — a test would have to write 32 MB to reach it (measured: over
+// three minutes), which is exactly why the fd-reuse bug below shipped with
+// no coverage. logx_rotation_test compiles this TU directly and lowers it;
+// nothing else references it.
+namespace detail {
+std::atomic<std::int64_t> g_rotate_bytes{kRotateBytesDefault};
 }
+
+namespace {
 
 // ── Secret redaction ──────────────────────────────────────────────────
 //
@@ -317,8 +313,8 @@ void parse_filter(std::string_view spec) noexcept {
 
 void open_sink(const char* path) noexcept {
     if (!path || !*path) return;
-    g_rotate_bytes.store(resolve_rotate_bytes(), std::memory_order_relaxed);
-    const std::int64_t limit = g_rotate_bytes.load(std::memory_order_relaxed);
+    const std::int64_t limit =
+        detail::g_rotate_bytes.load(std::memory_order_relaxed);
     // Rotate once at startup if oversized — rename to .old (best-effort).
     struct stat st{};
     if (::stat(path, &st) == 0 && st.st_size > limit) {
@@ -352,7 +348,8 @@ void open_sink(const char* path) noexcept {
 // (O_APPEND keeps every write intact either way). Not async-signal-safe;
 // never called from the crash path.
 void rotate_if_needed() noexcept {
-    const std::int64_t limit = g_rotate_bytes.load(std::memory_order_relaxed);
+    const std::int64_t limit =
+        detail::g_rotate_bytes.load(std::memory_order_relaxed);
     if (g_bytes.load(std::memory_order_relaxed) <= limit) return;
     std::lock_guard<std::mutex> lk(g_rotate_mu);
     if (g_bytes.load(std::memory_order_relaxed) <= limit) return;

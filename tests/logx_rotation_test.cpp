@@ -13,9 +13,10 @@
 // value writers hold stays valid across a rotation and there is no window
 // in which it can be reused. These tests pin both halves of that contract.
 //
-// Reaching rotation needs AGENTTY_LOG_ROTATE_BYTES (ctest sets it small);
-// at the shipping 32 MB threshold this seam is untestable, which is how the
-// original swap-based bug survived.
+// Reaching rotation needs the threshold lowered: at the shipping 32 MB a
+// test would have to write 32 MB (measured: over three minutes). This TU
+// is linked against logx.cpp directly, so it sets the internal knob rather
+// than requiring an env var — logging stays something nobody configures.
 
 #include <atomic>
 #include <cstdlib>
@@ -31,7 +32,26 @@
 
 using namespace agentty;
 
+// The internal rotation threshold (src/util/logx.cpp). Not public API; this
+// test is the only thing that touches it.
+namespace agentty::logx::detail {
+extern std::atomic<std::int64_t> g_rotate_bytes;
+}
+
 namespace {
+
+// Rotate after 64 KB so the seam is reachable in milliseconds. Set before
+// anything logs: the sink latches on first use.
+constexpr long long kRotateBytes = 64 * 1024;
+
+struct SetRotateBytes {
+    SetRotateBytes() {
+        logx::detail::g_rotate_bytes.store(kRotateBytes,
+                                           std::memory_order_relaxed);
+    }
+} const g_set_rotate_bytes;
+
+long long rotate_limit() { return kRotateBytes; }
 
 std::string read_file(const std::string& p) {
     std::ifstream in{p, std::ios::binary};
@@ -51,9 +71,6 @@ void require_logging() {
     REQUIRE_MESSAGE(!logx::log_file().empty(),
                     "AGENTTY_LOG/_FILE must be set for this binary "
                     "(ctest sets them; see cmake/AgenttyTests.cmake)");
-    REQUIRE_MESSAGE(std::getenv("AGENTTY_LOG_ROTATE_BYTES") != nullptr,
-                    "AGENTTY_LOG_ROTATE_BYTES must be set small enough for "
-                    "rotation to be reachable in-test");
 }
 
 // A payload wide enough that a few hundred lines cross a KB-scale
@@ -66,11 +83,6 @@ constexpr const char* kPad =
 // approximation is fine — every assertion below verifies against the file's
 // real contents, never against this estimate.
 constexpr long long kLineCost = 64 + 80;
-
-long long rotate_limit() {
-    const char* ev = std::getenv("AGENTTY_LOG_ROTATE_BYTES");
-    return ev ? std::strtoll(ev, nullptr, 10) : 0;
-}
 
 long long live_size() {
     return static_cast<long long>(read_file(std::string{logx::log_file()}).size());
@@ -255,12 +267,10 @@ TEST_CASE("logx: rotation bounds the live file") {
     // The point of rotating is that the live file stays small. Give it a
     // generous ceiling (threshold + one burst) so this pins the guarantee
     // without being sensitive to exactly where the crossing landed.
-    const char* ev = std::getenv("AGENTTY_LOG_ROTATE_BYTES");
-    const long long limit = ev ? std::strtoll(ev, nullptr, 10) : 0;
-    REQUIRE(limit > 0);
+    const long long limit = rotate_limit();
 
-    for (int i = 0; i < 400; ++i)
-        AGT_LOG(General, Warn, "rotation.test", "bound {} {}", i, kPad);
+    for (long long w = 0; w < 4 * limit; w += kLineCost)
+        AGT_LOG(General, Warn, "rotation.test", "bound {} {}", w, kPad);
 
     const auto live = read_file(std::string{logx::log_file()});
     CHECK_MESSAGE(static_cast<long long>(live.size()) <= limit * 4,
