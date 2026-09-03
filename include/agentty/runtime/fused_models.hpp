@@ -180,6 +180,7 @@ find_catalog(const std::vector<ProviderCatalog>& cats, std::string_view pid) {
     // precomputed c.row_keys fold when present.
     std::unordered_set<std::string> seen;
     int emitted_recent = 0;
+    std::vector<FusedRow> recent_rows;
     // One scratch buffer for probe keys — contains() takes it by const ref,
     // so probing never allocates once the buffer's capacity is warm.
     std::string probe;
@@ -194,14 +195,14 @@ find_catalog(const std::vector<ProviderCatalog>& cats, std::string_view pid) {
         return seen.contains(seen_key(r.provider_id,
                                       capkey::norm_row_id(r.model_id)));
     };
-    auto push_recent = [&](const ModelRef& r) {
-        if (already(r)) return;
-        if (!in_scope(r.provider_id)) return;
+    auto push_recent = [&](const ModelRef& r) -> bool {
+        if (already(r)) return false;
+        if (!in_scope(r.provider_id)) return false;
         const ProviderCatalog* c = find_catalog(catalogs, r.provider_id);
-        if (!c) return;                              // provider signed out
+        if (!c) return false;                              // provider signed out
         const ModelInfo* mi = find_model(*c, r.model_id);
-        if (!mi) return;                             // model gone from catalog
-        if (!matches(c->label, *mi)) return;
+        if (!mi) return false;                             // model gone from catalog
+        if (!matches(c->label, *mi)) return false;
         FusedRow row;
         row.provider_id = r.provider_id;
         row.label       = c->label;
@@ -216,15 +217,34 @@ find_catalog(const std::vector<ProviderCatalog>& cats, std::string_view pid) {
             ModelCapabilities::tier_for(mi->id.value));
         row.tool_capable  = mi->supports_tools.value_or(true);
         row.match_positions = name_positions(row.model_label);
-        out.push_back(std::move(row));
+        recent_rows.push_back(std::move(row));
         seen.insert(seen_key(r.provider_id, capkey::norm_row_id(r.model_id)));
         ++emitted_recent;
+        return true;
     };
 
     if (!in.active.empty()) push_recent(in.active);
     for (const auto& r : recents) {
         if (emitted_recent >= in.recent_cap) break;
         push_recent(r);
+    }
+
+    // Browsing: "recent" section is alphabetical, active provider's recents
+    // first, then the rest. Filtering: keep MRU order.
+    if (no_query) {
+        const std::string& ap = in.active.provider_id;
+        std::vector<FusedRow*> active_rec, other_rec;
+        for (auto& r : recent_rows)
+            (r.provider_id == ap ? active_rec : other_rec).push_back(&r);
+        auto by_label = [](const FusedRow* x, const FusedRow* y) {
+            return capkey::norm_row_id(x->model_label)
+                 < capkey::norm_row_id(y->model_label); };
+        std::stable_sort(active_rec.begin(), active_rec.end(), by_label);
+        std::stable_sort(other_rec.begin(), other_rec.end(), by_label);
+        for (auto* p : active_rec) out.push_back(std::move(*p));
+        for (auto* p : other_rec) out.push_back(std::move(*p));
+    } else {
+        for (auto& r : recent_rows) out.push_back(std::move(r));
     }
 
     // ── Section 2: all providers, fuzzy-ranked ───────────────────────
@@ -245,12 +265,13 @@ find_catalog(const std::vector<ProviderCatalog>& cats, std::string_view pid) {
     // several substring scans, and a comparator is called O(n log n) times.
     // On an aggregator's few-hundred-model catalog that was thousands of
     // redundant scans per keystroke. 0 when browsing is off (unused).
-    struct Scored { FusedRow row; int score; int prov_ord; int tier; };
+    struct Scored { FusedRow row; int score; int prov_ord; int tier; int group; std::string akey; };
     std::vector<Scored> scored;
     scored.reserve(64);
     int prov_ord = 0;
     for (const auto& c : catalogs) {
         if (!in_scope(c.provider_id)) continue;
+        const int grp = (one_provider || c.provider_id == in.active.provider_id) ? 0 : 1;
         const std::size_t nkeys = c.search_keys.size();
         for (std::size_t i = 0; i < c.models.size(); ++i) {
             const auto& mi = c.models[i];
@@ -327,6 +348,7 @@ find_catalog(const std::vector<ProviderCatalog>& cats, std::string_view pid) {
             row.active      = (c.provider_id == in.active.provider_id
                                && mi.id.value == in.active.model_id);
             row.recent      = false;
+            row.provider_group = (no_query && grp == 0);
             // Prefer the catalog's MEMOISED reasoning flag (built once per
             // catalog/capability change); resolve live only when the cache
             // isn't populated (unit tests calling build_fused_rows raw).
@@ -345,40 +367,37 @@ find_catalog(const std::vector<ProviderCatalog>& cats, std::string_view pid) {
             // Register AFTER the query gate: a filtered-out twin must not
             // suppress its matching sibling.
             seen.insert(seen_key(c.provider_id, folded));
-            scored.push_back({std::move(row), mscore, prov_ord, tier});
+            scored.push_back({std::move(row), mscore, prov_ord, tier, grp,
+                              no_query ? capkey::norm_row_id(model_label)
+                                       : std::string{}});
         }
         ++prov_ord;
     }
     std::stable_sort(scored.begin(), scored.end(),
         [no_query](const Scored& a, const Scored& b) {
-            // favorite first, then fuzzy score, then — when BROWSING — model
-            // strength, then provider registry order, then wider context.
+            // Pinned favourites always come first, regardless of mode.
             if (a.row.model.favorite != b.row.model.favorite)
                 return a.row.model.favorite;
-            if (a.score != b.score) return a.score > b.score;
             // CAN'T-DO-THE-JOB SINKS. A model the provider says has no tool
             // support cannot drive the agent at all, so it must never
             // outrank a model that can — ranking is about "what should I
-            // pick", and these are only pickable for plain chat. Below the
-            // score gate so an explicit search still finds one immediately
-            // (you asked for it by name), above tier so it sinks past every
-            // usable row while browsing.
+            // pick", and these are only pickable for plain chat.
             if (a.row.tool_capable != b.row.tool_capable)
                 return a.row.tool_capable;
-            // TIER, browse-only. With no query the list is whatever every
-            // provider happens to serve — on an aggregator that is hundreds of
-            // rows, and provider-registry order alone put an arbitrary slice in
-            // the viewport. Ranking by capability tier makes the first screen
-            // the models you would plausibly pick (flagships, then mid, then
-            // cheap, then weak), so scrolling is a choice rather than a
-            // requirement.
-            //
-            // Deliberately NOT applied while filtering: once the user types,
-            // fuzzy score is the intent signal and re-ranking behind it would
-            // move the row they are aiming at. Search stays purely
-            // relevance-ordered.
-            if (no_query && a.tier != b.tier)
-                return a.tier > b.tier;         // Flagship(3) … Weak(0)
+            if (no_query) {
+                // Browsing: three titled sections —
+                //   0 = active / single provider ("from this provider")
+                //   1 = all other providers.
+                // Within a section sort alphabetically by normalized model
+                // label; context window is the final tie-break.
+                if (a.group != b.group) return a.group < b.group;
+                if (a.akey  != b.akey)  return a.akey < b.akey;
+                return a.row.model.context_window > b.row.model.context_window;
+            }
+            // FILTERING: relevance order — fuzzy score is the intent signal
+            // and must not be re-ranked behind anything else. Provider
+            // registry order then wider context break ties.
+            if (a.score != b.score) return a.score > b.score;
             if (a.prov_ord != b.prov_ord) return a.prov_ord < b.prov_ord;
             return a.row.model.context_window > b.row.model.context_window;
         });
