@@ -438,6 +438,15 @@ Element fused_picker(const Model& m) {
     int all_count = 0;
     for (const auto& r : rows)
         if (section_of(r) == Section::Others) ++all_count;
+    // "from all OTHER providers" only means something when a "from this
+    // provider" section exists to be other THAN. On a fresh install no model
+    // is active, so no catalog is the active one, every row lands in Others
+    // — and the header asked the user to contrast against a section that
+    // isn't on screen. Title it by what the section actually holds instead
+    // of by a relationship that may not exist.
+    bool has_this_provider = false;
+    for (const auto& r : rows)
+        if (section_of(r) == Section::ThisProvider) { has_this_provider = true; break; }
 
     // ── Badge column width ──────────────────────────────────────────
     // maya's Picker asks callers to "pad badges to a common width" for column
@@ -466,7 +475,9 @@ Element fused_picker(const Model& m) {
             hdr.is_header = true;
             hdr.leading = sec == Section::Recent      ? "recent"
                         : sec == Section::ThisProvider ? "from this provider"
-                        : sec == Section::Others       ? "from all other providers"
+                        : sec == Section::Others
+                            ? (has_this_provider ? "from all other providers"
+                                                 : "all providers")
                                                        : "not signed in";
             if (sec == Section::Others && picker->query.empty() && all_count > 0) {
                 hdr.trailing = std::to_string(all_count) + " models \xc2\xb7 "

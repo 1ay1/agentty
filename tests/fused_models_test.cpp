@@ -111,12 +111,18 @@ TEST_CASE("fused: MRU section then all-providers, deduped") {
     int recent_rows = 0;
     for (auto& r : rows) if (r.recent) ++recent_rows;
     CHECK(recent_rows == 3);
-    // The ACTIVE provider's recents lead the section (alphabetical within).
-    // Here the active provider is anthropic; its two recents sort by label:
-    // "Claude Opus 4" < "Claude Sonnet 4.6", and the openai recent follows.
-    CHECK(rows[0].model.id.value == "claude-opus-4");
-    CHECK(rows[1].model.id.value == "claude-sonnet-4-6");
-    CHECK(rows[1].active);                     // the active model is flagged
+    // ● LEADS, ALWAYS. The active model is pinned to row 0 by construction,
+    // ahead of the alphabetical browse order — "Claude Opus 4" sorts before
+    // "Claude Sonnet 4.6", but Sonnet is active, so Sonnet leads and Opus
+    // follows it. (This assertion was briefly inverted to expect Opus first,
+    // which encoded a regression as the contract: the picker pre-selects
+    // row 0, so a displaced ● means opening the menu no longer highlights
+    // the model you are actually using.)
+    CHECK(rows[0].model.id.value == "claude-sonnet-4-6");
+    CHECK(rows[0].active);                     // active pinned first
+    // Behind the pin, the active provider's remaining recents lead the
+    // section, alphabetical within, and the openai recent follows.
+    CHECK(rows[1].model.id.value == "claude-opus-4");
     CHECK(rows[2].model.id.value == "gpt-4o");
     // Total distinct models = 3 (no dupes between RECENT and all-providers).
     CHECK(rows.size() == 3);
@@ -337,6 +343,75 @@ TEST_CASE("fused: browse ranks by tier, search stays relevance-ordered") {
         CHECK(rows.front().active);
         INFO("tier ranking does not evict the active model from the top");
         CHECK(rows.front().model.id.value == "tinyllama:1b");
+    }
+
+    // ── ● LEADS EVEN WITH A COMPETING RECENT ────────────────────────
+    // The case above (and "active pinned first") each have the active model
+    // as the ONLY recent, so a browse sort has nothing to reorder and both
+    // pass whether or not the pin actually holds. That blind spot let an
+    // alphabetical RECENT sort ship that dropped the active row behind any
+    // earlier-sorting recent from the same provider.
+    //
+    // So: give the active provider TWO recents and make the active one sort
+    // alphabetically LAST. Any ordering that treats `active` as just another
+    // sort key fails here; only a pin that the sort cannot reach passes.
+    {
+        std::vector<ProviderCatalog> two = {
+            cat("anthropic", "Anthropic",
+                {mk("claude-opus-4-5",  "Claude Opus 4.5",  "anthropic"),
+                 mk("claude-haiku-4-5", "Claude Haiku 4.5", "anthropic")}),
+        };
+        // "Claude Haiku" < "Claude Opus" alphabetically, and Haiku is the
+        // newer MRU entry — both orderings would put it first.
+        std::vector<ModelRef> recents{
+            ModelRef{"anthropic", "claude-haiku-4-5"},
+            ModelRef{"anthropic", "claude-opus-4-5"},
+        };
+        ui::FusedInputs in;
+        in.catalogs = &two;
+        in.recents  = &recents;
+        in.active   = ModelRef{"anthropic", "claude-opus-4-5"};
+        const auto rows = ui::build_fused_rows(in);
+        REQUIRE(!rows.empty());
+        INFO("● leads RECENT even when another recent sorts before it");
+        CHECK(rows.front().active);
+        CHECK(rows.front().model.id.value == "claude-opus-4-5");
+        // ...and the rest of RECENT is still alphabetical behind the pin.
+        std::vector<std::string> rest;
+        for (const auto& r : rows)
+            if (r.recent && !r.active) rest.push_back(r.model_label);
+        std::vector<std::string> sorted_rest = rest;
+        std::sort(sorted_rest.begin(), sorted_rest.end(),
+                  [](const std::string& a, const std::string& b) {
+                      return capkey::norm_row_id(a) < capkey::norm_row_id(b);
+                  });
+        INFO("the pin does not disturb alphabetical order below it");
+        CHECK(rest == sorted_rest);
+    }
+
+    // ── FILTERING keeps MRU order, pin included ──────────────────────
+    // Alphabetical ordering is a BROWSE affordance. With a query the list is
+    // relevance-ordered, and RECENT stays MRU — assert the pin logic didn't
+    // leak into the filtered path.
+    {
+        std::vector<ProviderCatalog> two = {
+            cat("anthropic", "Anthropic",
+                {mk("claude-opus-4-5",  "Claude Opus 4.5",  "anthropic"),
+                 mk("claude-haiku-4-5", "Claude Haiku 4.5", "anthropic")}),
+        };
+        std::vector<ModelRef> recents{
+            ModelRef{"anthropic", "claude-haiku-4-5"},
+            ModelRef{"anthropic", "claude-opus-4-5"},
+        };
+        ui::FusedInputs in;
+        in.catalogs = &two;
+        in.recents  = &recents;
+        in.active   = ModelRef{"anthropic", "claude-opus-4-5"};
+        in.query    = "claude";
+        const auto rows = ui::build_fused_rows(in);
+        REQUIRE(!rows.empty());
+        INFO("the active model still leads RECENT while filtering");
+        CHECK(rows.front().active);
     }
 }
 
@@ -670,6 +745,17 @@ TEST_CASE("pickers: primary labels are not dimmed, trailing yields first") {
 
     // Rule 3: badge padding measures columns, not bytes.
     CHECK(src.find("maya::string_width(r.label)") != std::string::npos);
+
+    // Rule 4: the "other providers" header is CONDITIONAL. "from all OTHER
+    // providers" only reads correctly when a "from this provider" section is
+    // on screen to be other than. With no active model (fresh install) every
+    // row lands in that section, and the header pointed at a section that
+    // does not exist. Assert both titles are present and gated on
+    // has_this_provider, so a future edit can't collapse it back to one
+    // unconditional string.
+    CHECK(src.find("has_this_provider") != std::string::npos);
+    CHECK(src.find("\"from all other providers\"") != std::string::npos);
+    CHECK(src.find("\"all providers\"") != std::string::npos);
 }
 
 
