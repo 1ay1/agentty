@@ -840,6 +840,17 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
     // so the transcript and the input agree about what is being sent, and so
     // disarming leaves the prompt in hand rather than an empty box.
     if (m.s.is_idle() && m.ui.composer.looping()) {
+        // Backoff gate. A failed iteration armed loop_wait_until_ms; until
+        // it passes the loop is armed but SLEEPING, not sending. A Tick
+        // brings us back here (subscribe arms one while a wait is pending),
+        // so nothing is lost by simply declining to fire now.
+        if (!m.ui.composer.loop_ready(
+                maya::anim::default_clock().now_ms())) {
+            return kp;
+        }
+        // This iteration is starting from a healthy state — the previous
+        // turn ended normally, so forget any earlier failure streak.
+        m.ui.composer.loop_note_success();
         ++m.ui.composer.loop_iterations;
         m.ui.composer.text        = m.ui.composer.loop_text;
         m.ui.composer.attachments = m.ui.composer.loop_attachments;
@@ -2325,6 +2336,30 @@ Step stream_update(Model m, msg::StreamMsg sm) {
 
             // Terminal path — discard the source ctx and drop to Idle.
             m.s.phase = phase::Idle{};
+            // LOOP: this turn failed. The loop does NOT die (the user asked
+            // it to keep going) and does NOT re-fire immediately — an
+            // instant re-send with no backoff is how a 429 deepens its own
+            // rate limit. Instead it BACKS OFF: see loop_backoff_for below,
+            // which honours the provider's Retry-After when it sent one and
+            // otherwise escalates a per-class delay. Cancel is the one class
+            // that stops it outright — Esc means stop, unambiguously.
+            if (m.ui.composer.looping()) {
+                if (klass == provider::ErrorClass::Cancelled) {
+                    m.ui.composer.disarm_loop();
+                } else {
+                    // Rate-limit and auth failures earn the slow schedule:
+                    // both mean "you are asking too hard / wrongly", and
+                    // retrying either quickly makes it worse.
+                    const int rank =
+                        (klass == provider::ErrorClass::RateLimit
+                         || klass == provider::ErrorClass::Auth) ? 1 : 0;
+                    m.ui.composer.loop_backoff(
+                        rank,
+                        e.retry_after ? static_cast<int>(e.retry_after->count())
+                                      : 0,
+                        maya::anim::default_clock().now_ms());
+                }
+            }
             if (klass == provider::ErrorClass::Cancelled) {
                 m.s.status = "cancelled";
             } else if (no_progress_latched) {

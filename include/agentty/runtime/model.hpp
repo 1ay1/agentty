@@ -137,13 +137,90 @@ struct ComposerState {
     /// `loop_iterations` counts completed auto-sends (the first, manual
     /// send is 0) purely so the UI can show ⟳ ×N — an unbounded loop
     /// with no visible progress is indistinguishable from a hang.
+    ///
+    /// LOOP IS A REPEAT-ON-SUCCESS CONSTRUCT WITH ADAPTIVE BACKOFF.
+    /// It re-sends after a turn that ended normally — immediately, since
+    /// a completed turn already took real wall-clock time. When a turn
+    /// FAILS the loop does not die (the user asked it to keep going) but
+    /// it must not re-fire instantly either: a 429 answered by an instant
+    /// re-send is how a rate limit deepens into a ban. So a failure arms
+    /// `loop_wait_until_ms` and the next send waits.
+    ///
+    /// The delay is chosen by the provider's own signal where one exists:
+    /// a `Retry-After` header is obeyed verbatim (the server told us when
+    /// to come back — guessing anything else is strictly worse). Absent
+    /// that, `loop_failures` escalates a per-class schedule and resets to
+    /// 0 on the next success, so a transient blip costs seconds while a
+    /// sustained outage decays to minutes instead of spinning.
+    ///
+    /// Only Cancelled stops the loop outright: Esc means stop.
     bool                    loop_armed = false;
     std::string             loop_text;
     std::vector<Attachment> loop_attachments;
     int                     loop_iterations = 0;
+    /// Consecutive failed iterations; drives the backoff schedule and
+    /// resets to 0 on any success.
+    int                     loop_failures = 0;
+    /// Wall-clock ms before which the loop must not re-send. 0 = ready now.
+    std::int64_t            loop_wait_until_ms = 0;
 
     [[nodiscard]] bool looping() const noexcept {
         return loop_armed && !loop_text.empty();
+    }
+
+    /// Stop the loop and forget what it was repeating. Called on cancel
+    /// and by the ^B toggle. Idempotent.
+    void disarm_loop() noexcept {
+        loop_armed = false;
+        loop_text.clear();
+        loop_attachments.clear();
+        loop_iterations = 0;
+        loop_failures = 0;
+        loop_wait_until_ms = 0;
+    }
+
+    /// A turn ended normally: clear the failure streak so the next hiccup
+    /// starts from the bottom of the schedule again.
+    void loop_note_success() noexcept {
+        loop_failures = 0;
+        loop_wait_until_ms = 0;
+    }
+
+    /// May the loop send right now? False while a backoff is pending.
+    [[nodiscard]] bool loop_ready(std::int64_t now_ms) const noexcept {
+        return looping() && now_ms >= loop_wait_until_ms;
+    }
+
+    /// Seconds still to wait, for the UI countdown (0 when ready).
+    [[nodiscard]] int loop_wait_secs(std::int64_t now_ms) const noexcept {
+        if (loop_wait_until_ms <= now_ms) return 0;
+        return static_cast<int>((loop_wait_until_ms - now_ms + 999) / 1000);
+    }
+
+    /// Record a failed iteration and arm the next delay.
+    ///
+    /// `retry_after` (the provider's own Retry-After) wins outright when
+    /// present: the server stated when to return, and any guess we make
+    /// is either rude or needlessly slow. Otherwise escalate by class —
+    /// rate limits get a much longer floor than a transient blip, because
+    /// retrying a 429 early is what turns it into a longer one. Capped so
+    /// a long outage settles at a slow poll instead of growing unbounded.
+    void loop_backoff(int error_class_rank, int retry_after_secs,
+                      std::int64_t now_ms) noexcept {
+        ++loop_failures;
+        int secs;
+        if (retry_after_secs > 0) {
+            secs = retry_after_secs;
+        } else {
+            // rank: 0 = transient/other, 1 = rate-limit/auth (slower).
+            const int base = error_class_rank >= 1 ? 30 : 5;
+            const int cap  = error_class_rank >= 1 ? 600 : 120;
+            // Double per consecutive failure: 5,10,20,40… / 30,60,120…
+            secs = base;
+            for (int i = 1; i < loop_failures && secs < cap; ++i) secs *= 2;
+            if (secs > cap) secs = cap;
+        }
+        loop_wait_until_ms = now_ms + static_cast<std::int64_t>(secs) * 1000;
     }
 
     // ── Browsing queries ─────────────────────────────────────────

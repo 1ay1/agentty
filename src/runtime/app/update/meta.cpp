@@ -332,6 +332,33 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             const auto tick_gap = now - m.s.last_tick;
             m.s.last_tick = now;
 
+            // ── LOOP resume ───────────────────────────────────────
+            // A failed iteration parked the loop behind a backoff deadline.
+            // finalize_turn is the normal re-send site, but it only runs when
+            // a turn ENDS — a sleeping loop has no turn to end, so the Tick
+            // (kept armed by animation_demand while a wait is pending) is what
+            // brings it back. Fire the moment the deadline passes and the
+            // session is genuinely idle.
+            if (m.ui.composer.loop_wait_until_ms > 0 && m.s.is_idle()) {
+                const auto now_ms = maya::anim::default_clock().now_ms();
+                if (m.ui.composer.loop_ready(now_ms)) {
+                    m.ui.composer.loop_note_success();   // clears the deadline
+                    ++m.ui.composer.loop_iterations;
+                    m.ui.composer.text        = m.ui.composer.loop_text;
+                    m.ui.composer.attachments = m.ui.composer.loop_attachments;
+                    m.ui.composer.cursor =
+                        static_cast<int>(m.ui.composer.text.size());
+                    auto step = detail::submit_message(std::move(m));
+                    // Keep the prompt on screen (the box is read-only while
+                    // looping) — same restore finalize_turn does.
+                    auto& sc = step.first.ui.composer;
+                    sc.text        = sc.loop_text;
+                    sc.attachments = sc.loop_attachments;
+                    sc.cursor      = static_cast<int>(sc.text.size());
+                    return step;
+                }
+            }
+
             // Glide the BIG tok/s readout. Retarget the smoothing Motion at
             // the same raw instantaneous rate the status bar would show. The
             // VIEW reads disp_rate.get(), which self-ticks on the shared

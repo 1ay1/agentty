@@ -271,4 +271,68 @@ TEST_CASE("composer_edit") {
                    edit_ok.ui.composer.text != "run the tests",
                    edit_ok.ui.composer.text);
     }
+
+    // ── Loop backoff ────────────────────────────────────────────
+    // The property that keeps a loop from turning into a DoS on the user's
+    // own rate limit: a failed iteration must never re-send immediately.
+    {
+        agentty::ComposerState c;
+        c.loop_armed = true;
+        c.loop_text  = "go";
+        const std::int64_t t0 = 1'000'000;
+
+        check_edit("a healthy loop is ready immediately",
+                   c.loop_ready(t0), "not ready");
+
+        // Transient failure → short backoff, and NOT ready right after.
+        c.loop_backoff(/*rank=*/0, /*retry_after=*/0, t0);
+        check_edit("a failed iteration is not ready immediately",
+                   !c.loop_ready(t0), "re-fired with no backoff");
+        check_edit("transient backoff is seconds, not minutes",
+                   c.loop_wait_secs(t0) > 0 && c.loop_wait_secs(t0) <= 10,
+                   std::to_string(c.loop_wait_secs(t0)));
+        check_edit("ready again once the deadline passes",
+                   c.loop_ready(t0 + 60'000), "still waiting");
+
+        // Consecutive failures escalate.
+        const int first = c.loop_wait_secs(t0);
+        c.loop_backoff(0, 0, t0);
+        check_edit("consecutive failures back off further",
+                   c.loop_wait_secs(t0) > first,
+                   std::to_string(c.loop_wait_secs(t0)));
+
+        // Success resets the streak so the next blip starts cheap again.
+        c.loop_note_success();
+        check_edit("success clears the wait", c.loop_ready(t0), "still waiting");
+        c.loop_backoff(0, 0, t0);
+        check_edit("success reset the escalation",
+                   c.loop_wait_secs(t0) == first,
+                   std::to_string(c.loop_wait_secs(t0)));
+    }
+    {
+        // A rate limit must back off HARDER than a transient blip — retrying
+        // a 429 quickly is what deepens it.
+        agentty::ComposerState a, b;
+        a.loop_armed = b.loop_armed = true;
+        a.loop_text  = b.loop_text  = "go";
+        const std::int64_t t0 = 1'000'000;
+        a.loop_backoff(/*rank=*/0, 0, t0);   // transient
+        b.loop_backoff(/*rank=*/1, 0, t0);   // rate limit / auth
+        check_edit("rate-limit backoff exceeds transient backoff",
+                   b.loop_wait_secs(t0) > a.loop_wait_secs(t0),
+                   std::to_string(b.loop_wait_secs(t0)) + " vs "
+                       + std::to_string(a.loop_wait_secs(t0)));
+    }
+    {
+        // The server's own Retry-After wins outright: it stated when to come
+        // back, and any guess of ours is either rude or needlessly slow.
+        agentty::ComposerState c;
+        c.loop_armed = true;
+        c.loop_text  = "go";
+        const std::int64_t t0 = 1'000'000;
+        c.loop_backoff(/*rank=*/1, /*retry_after=*/42, t0);
+        check_edit("Retry-After is honoured verbatim",
+                   c.loop_wait_secs(t0) == 42,
+                   std::to_string(c.loop_wait_secs(t0)));
+    }
 }

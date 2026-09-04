@@ -200,6 +200,8 @@ maya::Composer::Config composer_config(const Model& m) {
     // never fire.
     cfg.loop            = m.ui.composer.looping();
     cfg.loop_iterations = m.ui.composer.loop_iterations;
+    cfg.loop_wait_secs  = m.ui.composer.loop_wait_secs(
+        maya::anim::default_clock().now_ms());
     cfg.loop_color      = role_brand_alt;   // distinct from the cyan queue chip
     // While looping the box is a readout of the prompt being re-sent, not an
     // editable draft (the reducer drops every mutating message), so render it
@@ -361,6 +363,9 @@ maya::Composer::Config composer_config(const Model& m) {
         .add(static_cast<std::uint64_t>(cfg.loop ? 1 : 0))
         .add(static_cast<std::uint64_t>(
             static_cast<std::uint32_t>(cfg.loop_iterations)))
+        // The countdown ticks every second and must repaint with it.
+        .add(static_cast<std::uint64_t>(
+            static_cast<std::uint32_t>(cfg.loop_wait_secs)))
         .add(std::string_view{cfg.profile.label})
         .add(cfg.profile.color)
         .add(static_cast<std::uint64_t>(cfg.expanded ? 1 : 0))

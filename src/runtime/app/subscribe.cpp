@@ -113,6 +113,11 @@ bool animation_demand(const Model& m) noexcept {
         || m.loading_spinner_visible()
         || tail_has_live_bytes(m)
         || m.ui.pending_rehydrate_trim
+        // A LOOP waiting out a backoff must keep the frame clock alive: the
+        // re-send fires from the settle path, and the countdown chip has to
+        // tick down. Without this the app goes fully idle after a failed
+        // iteration and the loop silently never resumes until a keystroke.
+        || m.ui.composer.loop_wait_until_ms > 0
         || reveal_draining(m);
 }
 
