@@ -8,7 +8,7 @@
 // Env:
 //   WEBHOOK_SECRET  (required) shared secret configured on the GitHub webhook
 //   PORT            (default 9099)
-//   AUTODEPLOY      (default /home/ayush/projects/agentpp-site/deploy/autodeploy.sh)
+//   AUTODEPLOY      (default /home/ayush/projects/agentty/site/deploy/autodeploy.sh)
 
 import { createServer } from "node:http";
 import { createHmac, timingSafeEqual } from "node:crypto";
