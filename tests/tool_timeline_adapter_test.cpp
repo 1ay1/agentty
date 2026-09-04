@@ -705,3 +705,22 @@ TEST_CASE("edit diff card strips model budget marker + caps huge diffs") {
               "the windowed diff keeps a bounded head");
     }
 }
+
+TEST_CASE("tool_display_name always capitalises") {
+    using agentty::ui::tool_display_name;
+    // Mapped built-ins keep their curated brand labels.
+    check(tool_display_name("shell") == "Shell", "shell -> Shell");
+    check(tool_display_name("read")  == "Read",  "read -> Read");
+    check(tool_display_name("git_diff") == "Git Diff", "git_diff -> Git Diff");
+
+    // UNMAPPED names (MCP tools, a raw model name) must still Title-Case — no
+    // card ever renders a bare lowercase token. This is the fix for `Bash` /
+    // any tool showing uncapitalised.
+    check(tool_display_name("bash") == "Bash", "bash -> Bash (fallback)");
+    check(tool_display_name("Bash") == "Bash", "Bash stays Bash");
+    check(tool_display_name("github_create_issue") == "Github Create Issue",
+          "snake_case MCP tool -> Title Case words");
+    check(tool_display_name("do-thing") == "Do Thing", "dash-separated -> words");
+    check(!tool_display_name("x").empty() && tool_display_name("x") == "X",
+          "single char capitalises");
+}

@@ -67,7 +67,28 @@ std::string tool_display_name(const std::string& n) {
     if (n == "search_code")     return "Code Search";
     if (n == "mcp_search_tools") return "MCP Tool Search";
     if (n == "mcp_call")         return "MCP Call";
-    return n;
+    // Fallback for any UNMAPPED tool name (MCP-provided tools, a raw name the
+    // model emitted, future built-ins not yet in the table above): Title-Case
+    // it so the timeline is visually consistent — no tool ever renders as a
+    // bare lowercase token. Splits on '_'/'-'/space, upcases each word's first
+    // letter, and turns the separators into spaces (e.g. "foo_bar" -> "Foo Bar").
+    if (n.empty()) return n;
+    std::string out;
+    out.reserve(n.size());
+    bool at_word_start = true;
+    for (char c : n) {
+        if (c == '_' || c == '-' || c == ' ') {
+            if (!out.empty() && out.back() != ' ') out.push_back(' ');
+            at_word_start = true;
+            continue;
+        }
+        if (at_word_start && c >= 'a' && c <= 'z')
+            out.push_back(static_cast<char>(c - 'a' + 'A'));
+        else
+            out.push_back(c);
+        at_word_start = false;
+    }
+    return out;
 }
 
 // Tool category — semantic grouping for color + stats badge.
