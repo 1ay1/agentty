@@ -14,8 +14,8 @@
 // doesn't have the binary installed.
 
 import { execFileSync, spawnSync } from "node:child_process";
-import { statSync, existsSync, writeFileSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { statSync, existsSync, writeFileSync, readFileSync, chmodSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -23,16 +23,21 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const OUT = join(__dirname, "..", "lib", "stats.generated.ts");
 
 // ── locate the binary ────────────────────────────────────────────────────
-function findBinary() {
-  // explicit override wins
-  if (process.env.AGENTTY_BIN && existsSync(process.env.AGENTTY_BIN)) {
+async function findBinary() {
+  // A real agentty binary is ~18MB; anything under this is a wrapper script or
+  // stub that would produce garbage stats (0MB / v0.1.0). Reject those.
+  const isReal = (p) => {
+    try { return existsSync(p) && statSync(p).size > 1_000_000; } catch { return false; }
+  };
+  // explicit override wins (still sanity-checked)
+  if (process.env.AGENTTY_BIN && isReal(process.env.AGENTTY_BIN)) {
     return process.env.AGENTTY_BIN;
   }
   // PATH lookup (avoid shell:true; scan PATH entries directly)
   for (const dir of (process.env.PATH || "").split(":")) {
     if (!dir) continue;
     const p = join(dir, "agentty");
-    if (existsSync(p)) return p;
+    if (isReal(p)) return p;
   }
   // common install locations
   for (const p of [
@@ -41,9 +46,40 @@ function findBinary() {
     "/usr/local/bin/agentty",
     "/usr/bin/agentty",
   ]) {
-    if (existsSync(p)) return p;
+    if (isReal(p)) return p;
   }
-  return null;
+  // NOTHING real installed → auto-download the latest release binary so the
+  // deploy never depends on a hand-installed binary. This is the last piece that
+  // makes the stats fully hands-off: the site measures whatever's on Releases.
+  return await downloadLatestBinary();
+}
+
+// Download the current platform's release binary to a temp path, chmod +x, and
+// return it. Linux x86_64 only (the box the site deploys on); returns null on
+// any failure so the deploy falls back to committed stats.
+async function downloadLatestBinary() {
+  try {
+    const asset =
+      process.platform === "linux" && process.arch === "x64"
+        ? "agentty-linux-x86_64"
+        : process.platform === "linux" && process.arch === "arm64"
+          ? "agentty-linux-aarch64"
+          : null;
+    if (!asset) return null;
+    const url = `https://github.com/1ay1/agentty/releases/latest/download/${asset}`;
+    const dest = join(tmpdir(), "agentty-measure-bin");
+    console.log(`[measure-stats] no local binary — downloading ${asset} from releases/latest`);
+    const res = await fetch(url, { redirect: "follow" });
+    if (!res.ok) throw new Error(`download ${res.status}`);
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (buf.length < 1_000_000) throw new Error(`suspiciously small (${buf.length}b)`);
+    writeFileSync(dest, buf);
+    chmodSync(dest, 0o755);
+    return dest;
+  } catch (err) {
+    console.warn(`[measure-stats] auto-download failed (${err.message})`);
+    return null;
+  }
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────
@@ -88,7 +124,7 @@ function msLabel(ms) {
 }
 
 // ── run ──────────────────────────────────────────────────────────────────
-const bin = findBinary();
+const bin = await findBinary();
 if (!bin) {
   console.warn("[measure-stats] agentty binary not found — keeping existing generated stats.");
   process.exit(0);
