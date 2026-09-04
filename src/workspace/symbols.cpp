@@ -1,4 +1,5 @@
 #include "agentty/workspace/symbols.hpp"
+#include "agentty/workspace/files.hpp"   // prewarm_cancelled (shared shutdown flag)
 
 #include <algorithm>
 #include <atomic>
@@ -146,6 +147,7 @@ std::vector<SymbolEntry> build_symbol_list(std::size_t cap) {
                  root, fs::directory_options::skip_permission_denied, ec);
              it != fs::recursive_directory_iterator() && src.size() < kFileCap;
              it.increment(ec)) {
+            if (prewarm_cancelled()) return {};   // bail early on shutdown
             if (ec) { ec.clear(); continue; }
             const auto& entry = *it;
             auto fn = entry.path().filename().string();
@@ -181,6 +183,7 @@ std::vector<SymbolEntry> build_symbol_list(std::size_t cap) {
             pool.emplace_back([&, t] {
                 auto& local = partials[t];
                 for (;;) {
+                    if (prewarm_cancelled()) return;   // drain on shutdown
                     std::size_t i = next.fetch_add(1, std::memory_order_relaxed);
                     if (i >= src.size()) return;
                     if (local.size() >= cap) return;
@@ -231,6 +234,7 @@ void prewarm_workspace_symbols(std::size_t cap) {
 }
 
 void join_workspace_symbols_prewarm() {
+    request_prewarm_cancel();   // stop the scan before blocking on it
     auto& t = sym_prewarm_thread();
     if (t.joinable()) t.join();
 }

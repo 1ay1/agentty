@@ -35,6 +35,15 @@ void prewarm_workspace_files(std::size_t cap = 5000);
 // already finished.
 void join_workspace_prewarm();
 
+// Cooperative shutdown for BOTH prewarm walks (files here + symbols). The
+// full-tree file scan and the multi-threaded symbol regex pass are otherwise
+// uncancellable, so join_workspace_*_prewarm() at teardown would block ^C
+// until they finish on a large repo. Teardown calls request_prewarm_cancel()
+// before the joins; the walk loops poll prewarm_cancelled() and bail early, so
+// the join still runs (keeping the Windows UAF guard) but returns promptly.
+void request_prewarm_cancel() noexcept;
+[[nodiscard]] bool prewarm_cancelled() noexcept;
+
 // Non-blocking: has the file list been built yet? The composer opens the
 // `@` picker INSTANTLY and shows an "indexing…" hint until this is true.
 [[nodiscard]] bool files_ready();

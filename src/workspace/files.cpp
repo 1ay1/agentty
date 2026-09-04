@@ -353,10 +353,15 @@ std::vector<std::string> build_file_list(std::size_t cap) {
     const auto root = tools::util::project_root();
     if (root.empty()) return out;
     std::error_code ec;
+    std::size_t tick = 0;
     for (auto it = fs::recursive_directory_iterator(
              root, fs::directory_options::skip_permission_denied, ec);
          it != fs::recursive_directory_iterator() && out.size() < cap;
          it.increment(ec)) {
+        // Bail promptly on shutdown: this walk is joined at teardown, so an
+        // uncancellable full-tree scan would stall ^C on a large repo. Check
+        // every 64 entries (cheap; the flag is only set on quit).
+        if ((++tick & 63) == 0 && prewarm_cancelled()) return out;
         if (ec) { ec.clear(); continue; }
         const auto& entry = *it;
         auto fn = entry.path().filename().string();
@@ -420,7 +425,22 @@ void prewarm_workspace_files(std::size_t cap) {
     });
 }
 
+// Shared cooperative-cancel flag for BOTH prewarm walks. A single process-wide
+// atomic (defined here, declared in files.hpp) so files.cpp and symbols.cpp
+// observe the same request. Set once at teardown; never reset.
+std::atomic<bool> g_prewarm_cancel{false};
+
+void request_prewarm_cancel() noexcept {
+    g_prewarm_cancel.store(true, std::memory_order_relaxed);
+}
+bool prewarm_cancelled() noexcept {
+    return g_prewarm_cancel.load(std::memory_order_relaxed);
+}
+
 void join_workspace_prewarm() {
+    // Ask the walk to stop before we block on it, so a big-repo scan doesn't
+    // stall teardown. Idempotent with an explicit request_prewarm_cancel().
+    request_prewarm_cancel();
     auto& t = files_prewarm_thread();
     if (t.joinable()) t.join();
 }

@@ -88,6 +88,7 @@ TEST_CASE("filter_files: frecency floats referenced files to the top") {
 }
 
 #include "agentty/tool/util/fs_helpers.hpp"
+#include "agentty/workspace/symbols.hpp"
 #include "agentty/tool/util/subprocess.hpp"
 #include <chrono>
 #include <cstdlib>
@@ -142,4 +143,39 @@ TEST_CASE("filter_files: git-dirty files lead the working set") {
     fs::current_path(prev);
     std::error_code ec;
     fs::remove_all(repo, ec);
+}
+
+TEST_CASE("prewarm walk bails promptly when cancelled") {
+    namespace fs = std::filesystem;
+    // A directory with enough files that an uncancelled full scan is
+    // measurable, so a prompt return proves the cancel actually short-circuits.
+    auto root = fs::temp_directory_path() /
+        ("agentty_prewarm_cancel_" + std::to_string(
+            std::chrono::steady_clock::now().time_since_epoch().count()));
+    fs::create_directories(root);
+    for (int i = 0; i < 3000; ++i) {
+        std::ofstream(root / ("f" + std::to_string(i) + ".cpp"))
+            << "int f" << i << "(){return " << i << ";}\n";
+    }
+    auto prev = fs::current_path();
+    fs::current_path(root);
+    agentty::tools::util::set_workspace_root(root);
+
+    // Request cancel BEFORE kicking the walk: the loop's first cancel check
+    // fires and it bails almost immediately. join must not scan all 3000 files.
+    agentty::request_prewarm_cancel();
+    CHECK(agentty::prewarm_cancelled());
+
+    const auto t0 = std::chrono::steady_clock::now();
+    agentty::prewarm_workspace_files();
+    agentty::prewarm_workspace_symbols();
+    agentty::join_workspace_prewarm();
+    agentty::join_workspace_symbols_prewarm();
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - t0).count();
+    CHECK(ms < 1000);   // generous; a full 3000-file scan is far slower
+
+    fs::current_path(prev);
+    std::error_code ec;
+    fs::remove_all(root, ec);
 }
