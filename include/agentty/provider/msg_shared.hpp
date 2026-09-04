@@ -23,6 +23,7 @@
 
 #include "agentty/domain/conversation.hpp"
 #include "agentty/provider/provider.hpp"   // provider::ToolSpec
+#include "agentty/util/image_dims.hpp"      // util::image_within_wire_limits
 #include "agentty/util/user_root.hpp"      // single per-user root (~/.agentty)
 
 namespace agentty::provider::wire {
@@ -92,11 +93,18 @@ namespace agentty::provider::wire {
                                   : std::string_view{img.media_type};
 }
 
-// True iff the image has real bytes. An empty-bytes ImageContent (a drained
-// draft attachment that leaked into a thread) must never reach the wire: it
-// serializes to an empty base64 "data" that 400s the whole request.
+// True iff the image has real bytes AND fits the wire's pixel-dimension limit.
+// An empty-bytes ImageContent (a drained draft attachment that leaked into a
+// thread) serializes to an empty base64 "data" that 400s the whole request;
+// an oversized image (>2000 px/side) 400s a MANY-image request the same way
+// ("image dimensions exceed max allowed size"). Both are dropped from the wire
+// here — the ONE gate every dialect's image selector funnels through — so one
+// bad image can't kill an otherwise-valid turn. A 48 KB screenshot can still be
+// 3000+ px wide, so file size is no proxy; image_dimensions() reads the real
+// pixels from the header bytes.
 [[nodiscard]] inline bool wire_image_sendable(const ImageContent& img) noexcept {
-    return !img.bytes.empty();
+    if (img.bytes.empty()) return false;
+    return util::image_within_wire_limits(img.bytes);
 }
 
 // The images a USER message contributes to the wire (skipping empties).

@@ -30,6 +30,7 @@
 #include "agentty/provider/selection.hpp"   // prewarm_active_provider
 #include "agentty/util/home_dir.hpp"
 #include "agentty/util/env.hpp"
+#include "agentty/util/image_dims.hpp"
 #include "agentty/runtime/command_palette.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
 #include "agentty/runtime/mention_palette.hpp"
@@ -373,6 +374,13 @@ Step smart_paste_from_clipboard(Model m) {
     std::string img_err;
     if (auto img = read_clipboard_image(&img_err)) {
         begin_edit(m.ui.composer);
+        // Read the real pixel dimensions from the header. A hi-DPI screenshot
+        // is a tiny file but can be 3000+ px wide, which Anthropic rejects in
+        // a many-image request — the wire drops it, so warn NOW rather than let
+        // the turn silently lose the image (or, pre-gate, 400 outright).
+        const auto dims = util::image_dimensions(img->bytes);
+        const bool oversized = dims.known()
+                            && dims.longest() > util::kMaxWireImageSide;
         Attachment att;
         att.kind       = Attachment::Kind::Image;
         att.path       = "<clipboard>";
@@ -385,6 +393,14 @@ Step smart_paste_from_clipboard(Model m) {
         m.ui.composer.text.insert(m.ui.composer.cursor, placeholder);
         m.ui.composer.cursor += static_cast<int>(placeholder.size());
         m.ui.composer.expanded = true;
+        if (oversized) {
+            return {std::move(m), set_status_toast(
+                m, "Image is " + std::to_string(dims.w) + "\xc3\x97"
+                + std::to_string(dims.h) + " px — over the "
+                + std::to_string(util::kMaxWireImageSide)
+                + " px limit, it won't be sent. Resize it first.",
+                std::chrono::seconds{8})};
+        }
         return done(std::move(m));
     }
 
