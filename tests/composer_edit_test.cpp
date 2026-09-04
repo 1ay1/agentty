@@ -198,4 +198,44 @@ TEST_CASE("composer_edit") {
         check_edit("kill-to-end at EOL is a no-op", m.ui.composer.text == "foo",
               m.ui.composer.text);
     }
+
+    // ── Loop mode (^B) ───────────────────────────────────────────────
+    // ARMING submits immediately (that's the point of ^B: "send this, and
+    // keep sending it"), which needs the deps() seam — out of scope for this
+    // pure-editing test. What IS pinned here is every transition the reducer
+    // owns without touching the network: the empty-payload refusal, and the
+    // disarm that must fully clear the snapshot.
+    {
+        // An EMPTY composer cannot arm a loop — a loop with no payload would
+        // never fire, so the state is refused rather than entered. (No submit
+        // happens on this path, so no deps() are needed.)
+        auto m = step(with_text("", 0), agentty::ComposerToggleLoop{});
+        check_edit("^B on an empty composer does not arm",
+                   !m.ui.composer.loop_armed, "armed with no payload");
+        check_edit("empty arm leaves looping() false",
+                   !m.ui.composer.looping(), "looping with no payload");
+    }
+    {
+        // Disarm clears EVERYTHING. A stale snapshot left behind would make
+        // a later re-arm silently repeat the wrong prompt, and a stale count
+        // would render ⟳ ×N for a loop that never ran.
+        Model m;
+        m.ui.composer.text            = "live text";
+        m.ui.composer.loop_armed      = true;
+        m.ui.composer.loop_text       = "run the tests";
+        m.ui.composer.loop_iterations = 3;
+        check_edit("precondition: looping", m.ui.composer.looping(), "not looping");
+
+        auto off = step(std::move(m), agentty::ComposerToggleLoop{});
+        check_edit("^B disarms", !off.ui.composer.loop_armed, "still armed");
+        check_edit("disarm clears the snapshot",
+                   off.ui.composer.loop_text.empty(), off.ui.composer.loop_text);
+        check_edit("disarm resets the counter",
+                   off.ui.composer.loop_iterations == 0,
+                   std::to_string(off.ui.composer.loop_iterations));
+        check_edit("disarm leaves looping() false",
+                   !off.ui.composer.looping(), "still looping");
+        check_edit("disarm does not touch the live composer text",
+                   off.ui.composer.text == "live text", off.ui.composer.text);
+    }
 }

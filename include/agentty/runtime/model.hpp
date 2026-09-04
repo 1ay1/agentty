@@ -120,6 +120,32 @@ struct ComposerState {
     /// previous schemas). Cleared together with `draft_save`.
     std::vector<Attachment>    draft_save_attachments;
 
+    /// ── Loop mode (^B) ───────────────────────────────────────────
+    /// When armed, the message that armed it is RE-SENT automatically
+    /// every time the agent finishes a turn, until the user toggles it
+    /// off (^B again, or Esc). This is the "keep hammering on this
+    /// prompt" workflow — iterate on a refactor, re-run a failing test,
+    /// poll until something converges — without retyping or holding
+    /// Enter.
+    ///
+    /// `loop_text` / `loop_attachments` snapshot the payload at ARM time
+    /// rather than re-reading the live composer, so the user can keep
+    /// typing a follow-up while the loop runs its own fixed prompt: the
+    /// thing that repeats is the thing you armed, which is the only
+    /// reading that stays true once the composer has moved on.
+    ///
+    /// `loop_iterations` counts completed auto-sends (the first, manual
+    /// send is 0) purely so the UI can show ⟳ ×N — an unbounded loop
+    /// with no visible progress is indistinguishable from a hang.
+    bool                    loop_armed = false;
+    std::string             loop_text;
+    std::vector<Attachment> loop_attachments;
+    int                     loop_iterations = 0;
+
+    [[nodiscard]] bool looping() const noexcept {
+        return loop_armed && !loop_text.empty();
+    }
+
     // ── Browsing queries ─────────────────────────────────────────
     // Small readers so call sites ask a question instead of unpacking a
     // variant inline. Each returns the index only when that alternative is

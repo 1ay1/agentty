@@ -830,6 +830,25 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
         return Cmd<Msg>::batch(std::vector<Cmd<Msg>>{std::move(kp), std::move(sub_cmd)});
     }
 
+    // LOOP mode (^B): the turn finished and the user armed a message to
+    // repeat — re-send the ARMED snapshot, not whatever is in the composer
+    // now (they may have typed a follow-up meanwhile; see loop_text).
+    //
+    // Ordered AFTER the queue drain on purpose: an explicitly queued message
+    // is a fresh instruction and outranks the standing loop, which will fire
+    // again on the turn after it. The composer is restored to the armed text
+    // so the transcript and the input agree about what is being sent, and so
+    // disarming leaves the prompt in hand rather than an empty box.
+    if (m.s.is_idle() && m.ui.composer.looping()) {
+        ++m.ui.composer.loop_iterations;
+        m.ui.composer.text        = m.ui.composer.loop_text;
+        m.ui.composer.attachments = m.ui.composer.loop_attachments;
+        m.ui.composer.cursor      = static_cast<int>(m.ui.composer.text.size());
+        auto [mm, sub_cmd] = submit_message(std::move(m));
+        m = std::move(mm);
+        return Cmd<Msg>::batch(std::vector<Cmd<Msg>>{std::move(kp), std::move(sub_cmd)});
+    }
+
     // Settle freeze. agent_session pushes the assistant Turn into
     // m.frozen at MessageStop; we do the same — once the stream is
     // truly idle (no pending tools, no queued message), commit every

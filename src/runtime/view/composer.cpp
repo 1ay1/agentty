@@ -195,6 +195,12 @@ maya::Composer::Config composer_config(const Model& m) {
     cfg.warn_color      = warn;
     cfg.highlight_color = highlight;
     cfg.queued          = m.ui.composer.queued.size();
+    // LOOP (^B): armed → ⟳ chip + tinted border. `looping()` (not the raw
+    // flag) so an armed-but-empty payload can't paint a loop that will
+    // never fire.
+    cfg.loop            = m.ui.composer.looping();
+    cfg.loop_iterations = m.ui.composer.loop_iterations;
+    cfg.loop_color      = role_brand_alt;   // distinct from the cyan queue chip
     cfg.profile         = {.label = std::string{profile_label(m.d.profile)},
                            .color = profile_color(m.d.profile)};
     cfg.expanded        = m.ui.composer.expanded;
@@ -343,6 +349,12 @@ maya::Composer::Config composer_config(const Model& m) {
         .add(static_cast<std::uint64_t>(cfg.state))
         .add(cfg.active_color)
         .add(static_cast<std::uint64_t>(cfg.queued))
+        // Loop mode changes the border hue AND adds a chip whose label
+        // carries the iteration count — both must move the hash or an
+        // auto-send would repaint nothing.
+        .add(static_cast<std::uint64_t>(cfg.loop ? 1 : 0))
+        .add(static_cast<std::uint64_t>(
+            static_cast<std::uint32_t>(cfg.loop_iterations)))
         .add(std::string_view{cfg.profile.label})
         .add(cfg.profile.color)
         .add(static_cast<std::uint64_t>(cfg.expanded ? 1 : 0))

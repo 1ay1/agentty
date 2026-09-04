@@ -56,6 +56,11 @@ struct ComposerEnter {};
 struct ComposerNewline {};
 struct ComposerSubmit {};
 struct ComposerToggleExpand {};
+// ^B — arm/disarm LOOP mode: re-send the armed message automatically after
+// every completed turn until toggled off. Arming snapshots the composer's
+// current text+attachments (see ComposerState::loop_text) and submits it
+// immediately, so ^B reads as "send this, and keep sending it".
+struct ComposerToggleLoop {};
 struct ComposerCursorLeft {};
 struct ComposerCursorRight {};
 struct ComposerCursorHome {};
@@ -909,7 +914,7 @@ namespace msg {
 
 using ComposerMsg = std::variant<
     ComposerCharInput, ComposerBackspace, ComposerEnter, ComposerNewline,
-    ComposerSubmit, ComposerToggleExpand,
+    ComposerSubmit, ComposerToggleExpand, ComposerToggleLoop,
     ComposerCursorLeft, ComposerCursorRight, ComposerCursorHome, ComposerCursorEnd,
     ComposerCursorWordLeft, ComposerCursorWordRight,
     ComposerKillToEndOfLine, ComposerKillToBeginningOfLine,

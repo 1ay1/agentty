@@ -734,6 +734,11 @@ std::optional<Msg> on_global(const KeyEvent& ev) {
                 case U'n': case U'N': return NewThread{};
                 case U't': case U'T': return OpenTodoModal{};
                 case U'e': case U'E': return ComposerToggleExpand{};
+                // ^B — LOOP: send this message, then keep re-sending it after
+                // every completed turn until toggled off. Global (not
+                // composer-local) so it can also be disarmed mid-stream,
+                // when the composer isn't the thing taking keys.
+                case U'b': case U'B': return ComposerToggleLoop{};
                 case U'g': case U'G': return OpenCodeBlockPicker{};
                 case U'o': case U'O': return OpenToolOutputViewer{};
                 case U's': case U'S': return OpenSmartMode{};

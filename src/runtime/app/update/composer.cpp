@@ -640,6 +640,38 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             m.ui.composer.expanded = !m.ui.composer.expanded;
             return done(std::move(m));
         },
+        [&](ComposerToggleLoop) -> Step {
+            auto& c = m.ui.composer;
+            // Already looping → disarm. Deliberately does NOT cancel the
+            // in-flight turn: you're saying "stop after this one", which is
+            // the non-destructive reading. Esc still cancels the turn itself.
+            if (c.loop_armed) {
+                const int n = c.loop_iterations;
+                c.loop_armed = false;
+                c.loop_text.clear();
+                c.loop_attachments.clear();
+                c.loop_iterations = 0;
+                auto toast = set_status_toast(
+                    m, n > 0 ? "loop off \xc2\xb7 " + std::to_string(n) + " sent"
+                             : std::string{"loop off"});
+                return {std::move(m), std::move(toast)};
+            }
+            // Arming needs something to repeat. An empty composer would arm a
+            // loop with no payload — make that unrepresentable rather than
+            // silently no-op later.
+            if (c.text.empty()) {
+                auto toast = set_status_toast(
+                    m, "loop: type a message first");
+                return {std::move(m), std::move(toast)};
+            }
+            // Snapshot the payload, then submit it. The snapshot (not the
+            // live composer) is what repeats, so the user can keep typing.
+            c.loop_armed       = true;
+            c.loop_text        = c.text;
+            c.loop_attachments = c.attachments;
+            c.loop_iterations  = 0;
+            return submit_message(std::move(m));
+        },
         [&](ComposerCursorLeft) -> Step {
             m.ui.composer.undo_coalescing = false;
             m.ui.composer.cursor = ui::chip_prev(m.ui.composer.text, m.ui.composer.cursor);
