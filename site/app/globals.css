@@ -661,10 +661,19 @@ pre.code code { color: var(--text); background: none; border: none; padding: 0; 
 .note .label { font-weight: 700; font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; margin-right: 6px; }
 
 /* doc page nav */
-.docnav { display: flex; justify-content: space-between; gap: 16px; margin-top: 48px; padding-top: 24px; border-top: 1px solid var(--border-soft); }
-.docnav a { flex: 1; border: 1px solid var(--border); border-radius: 10px; padding: 14px 18px; color: var(--text); }
-.docnav a:hover { border-color: var(--accent); text-decoration: none; }
-.docnav .dir { color: var(--text-faint); font-size: 12px; display: block; margin-bottom: 3px; }
+.docnav { display: flex; justify-content: space-between; gap: 16px; margin-top: 56px; padding-top: 28px; border-top: 1px solid var(--border-soft); }
+.docnav a {
+  flex: 1; position: relative; overflow: hidden;
+  border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 16px 20px; color: var(--text);
+  background: var(--bg-card);
+  transition: border-color .22s ease, transform .22s cubic-bezier(.2,.8,.2,1), box-shadow .22s ease, background .22s ease;
+}
+.docnav a:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: var(--bg-soft); text-decoration: none; transform: translateY(-2px);
+  box-shadow: var(--shadow-md);
+}
+.docnav .dir { color: var(--accent-2); font-size: 11.5px; font-weight: 600; letter-spacing: 0.02em; display: block; margin-bottom: 5px; }
 .docnav a.next { text-align: right; }
 
 /* kbd */
@@ -717,8 +726,8 @@ html[data-theme="light"] .theme-icon.moon { display: block; }
 .breadcrumb a { color: var(--text-dim); }
 .breadcrumb a:hover { color: var(--text); text-decoration: none; }
 .breadcrumb .cur { color: var(--text); }
-.edit-page { margin-top: 28px; font-size: 13px; }
-.edit-page a { color: var(--text-dim); }
+.edit-page { margin-top: 32px; font-size: 13px; }
+.edit-page a { color: var(--text-faint); display: inline-flex; align-items: center; gap: 6px; transition: color .18s ease; }
 .edit-page a:hover { color: var(--accent); }
 .docs-main h2, .docs-main h3 { scroll-margin-top: calc(var(--nav-h) + 20px); }
 .docs-side-toggle { display: none; }
@@ -1268,7 +1277,18 @@ html[data-theme="light"] .cmdk { background: #fff; }
 
 /* Aurora pass: gradient headlines + tinted stat numbers are back — they're the
    signature, not a tell, when used with intent. */
-.hero h1 .grad, .section-title .grad {
+.hero h1 .grad {
+  background: var(--grad-aurora); background-size: 220% 100%;
+  -webkit-background-clip: text; background-clip: text;
+  -webkit-text-fill-color: transparent; color: transparent;
+  animation: grad-shimmer 8s ease-in-out infinite;
+}
+@keyframes grad-shimmer {
+  0%, 100% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+}
+@media (prefers-reduced-motion: reduce) { .hero h1 .grad { animation: none; } }
+.section-title .grad {
   background: var(--grad-text); -webkit-background-clip: text; background-clip: text;
   -webkit-text-fill-color: transparent; color: transparent;
 }
