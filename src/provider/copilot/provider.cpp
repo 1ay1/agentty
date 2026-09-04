@@ -146,20 +146,6 @@ std::set<std::string>& responses_only_set() {
     return responses_only_set().count(model) > 0;
 }
 
-// Does this model return reasoning TEXT on /responses?
-//
-// MEASURED against a live Auto session: gpt-5-* answers /responses with a
-// `reasoning` output item carrying real summary text (and streams
-// response.reasoning_summary_text.delta), while the same model on
-// /chat/completions returns none — which is the whole reason this fork
-// exists. Claude and GPT-4.x reject /responses outright, so they are never
-// candidates. Kept as a narrow prefix test rather than a hardcoded model
-// list so new gpt-5 spellings are picked up without a release; anything
-// wrong here degrades to "stay on chat", never to a broken turn.
-[[nodiscard]] bool wants_reasoning_text(const std::string& model) {
-    return model.rfind("gpt-5", 0) == 0;
-}
-
 // Which concrete model will the Auto session stream?
 //
 // ONE implementation, used by BOTH dialect paths — the Responses fork must
