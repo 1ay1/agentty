@@ -67,7 +67,7 @@ void unapproved_never_runs(const fs::path& sandbox) {
                }.dump());
 
     check(hooks::pending_approval(), "unapproved file reports pending");
-    auto d = hooks::run_pre_tool("bash", "{}");
+    auto d = hooks::run_pre_tool("shell", "{}");
     check(!d.blocked, "unapproved hooks never block");
     check(!fs::exists(marker), "unapproved hook COMMAND NEVER EXECUTED");
     std::println("PASS\n");
@@ -81,25 +81,25 @@ void approved_runs_and_blocks(const fs::path& sandbox, const fs::path& home) {
     write_file(sandbox / ".agentty" / "hooks.json",
                nlohmann::json{
                    {"pre_tool",
-                    {{{"match", "bash"},
+                    {{{"match", "shell"},
                       {"run",
                        "grep -q 'rm -rf' \"$AGENTTY_HOOK_PAYLOAD_FILE\" "
                        "&& { echo 'dangerous command blocked'; exit 1; } "
                        "|| exit 0"}}}},
-                   {"post_tool", {{{"match", "bash"},
+                   {"post_tool", {{{"match", "shell"},
                                    {"run", "touch " + marker.string()}}}},
                }.dump());
     approve_current(sandbox / ".agentty" / "hooks.json", home);
     check(!hooks::pending_approval(), "approved file no longer pending");
 
     // Benign call: allowed, post fires.
-    auto ok = hooks::run_pre_tool("bash", R"({"command":"ls -la"})");
+    auto ok = hooks::run_pre_tool("shell", R"({"command":"ls -la"})");
     check(!ok.blocked, "benign bash allowed");
-    hooks::run_post_tool("bash", R"({"command":"ls"})", "listing…");
+    hooks::run_post_tool("shell", R"({"command":"ls"})", "listing…");
     check(fs::exists(marker), "post_tool hook executed for approved file");
 
     // Dangerous call: blocked with the hook's stdout as reason.
-    auto bad = hooks::run_pre_tool("bash", R"({"command":"rm -rf /tmp/x"})");
+    auto bad = hooks::run_pre_tool("shell", R"({"command":"rm -rf /tmp/x"})");
     check(bad.blocked, "matching pre_tool guard blocks");
     check(bad.reason.find("dangerous command blocked") != std::string::npos,
           "hook stdout becomes the block reason (got '" + bad.reason + "')");
@@ -121,7 +121,7 @@ void byte_change_regates(const fs::path& sandbox) {
                    }.dump() + " ");
     check(hooks::pending_approval(),
           "byte change to an approved file re-gates (pending again)");
-    (void)hooks::run_pre_tool("bash", "{}");
+    (void)hooks::run_pre_tool("shell", "{}");
     check(!fs::exists(marker), "re-gated hook did not execute");
     std::println("PASS\n");
 }
@@ -139,7 +139,7 @@ void kill_switch(const fs::path& sandbox, const fs::path& home) {
     ::setenv("AGENTTY_NO_HOOKS", "1", 1);
 #endif
     check(!hooks::pending_approval(), "kill switch silences pending notice");
-    (void)hooks::run_pre_tool("bash", "{}");
+    (void)hooks::run_pre_tool("shell", "{}");
     check(!fs::exists(marker), "AGENTTY_NO_HOOKS=1 disables approved hooks");
 #ifndef _WIN32
     ::unsetenv("AGENTTY_NO_HOOKS");

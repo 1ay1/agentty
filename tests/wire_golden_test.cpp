@@ -84,7 +84,7 @@ Thread golden_thread() {
     Message a3; a3.role = Role::Assistant; a3.text = "build";
     ToolUse fail_tc;
     fail_tc.id = ToolCallId{"toolu_b1"};
-    fail_tc.name = ToolName{"bash"};
+    fail_tc.name = ToolName{"shell"};
     fail_tc.args = nlohmann::json{{"command", "make"}};
     fail_tc.status = ToolUse::Failed{{}, {}, "make: *** no rule"};
     a3.tool_calls.push_back(std::move(fail_tc));
@@ -141,7 +141,7 @@ TEST_CASE("wire_golden") {
     // 3. Byte-identity: the exact serialization is pinned. A refactor that
     //    changes even one byte trips this. Update kGoldenHash ONLY after
     //    confirming the change is intentional.
-    const std::uint64_t kGoldenHash = 0x6a4fc9657b4ab5d1ull;
+    const std::uint64_t kGoldenHash = 0xe611b19d855369f5ull;
     const std::uint64_t got = fnv1a(wire);
 
     if (kGoldenHash == 0) {

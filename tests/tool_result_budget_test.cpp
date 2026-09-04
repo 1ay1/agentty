@@ -268,7 +268,7 @@ TEST_CASE("tool result budget") {
         for (int i = 0; i < 20; ++i) {
             ToolUse tc;
             tc.id   = ToolCallId{"toolu_e" + std::to_string(i)};
-            tc.name = ToolName{"bash"};
+            tc.name = ToolName{"shell"};
             if (i == 0) {
                 tc.status = ToolUse::Failed{
                     std::chrono::steady_clock::now(),

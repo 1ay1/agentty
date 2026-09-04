@@ -54,14 +54,14 @@ TEST_CASE("build body") {
     Message a; a.role = Role::Assistant; a.text = "";
     ToolUse tc;
     tc.id   = ToolCallId{"call_abc"};
-    tc.name = ToolName{"bash"};
+    tc.name = ToolName{"shell"};
     tc.args = json{{"command", "ls"}};
     tc.status = ToolUse::Done{.output = "file1\nfile2"};
     a.tool_calls.push_back(tc);
     req.messages.push_back(a);
 
     provider::ToolSpec ts;
-    ts.name         = "bash";
+    ts.name         = "shell";
     ts.description  = "run a shell command";
     ts.input_schema = json{{"type", "object"},
                            {"properties", {{"command", {{"type", "string"}}}}}};
@@ -79,7 +79,7 @@ TEST_CASE("build body") {
     // Tools are FLAT (name/description/parameters at top level).
     CHECK(body["tools"].is_array() && body["tools"].size() == 1);
     CHECK(body["tools"][0]["type"] == "function");
-    CHECK(body["tools"][0]["name"] == "bash");
+    CHECK(body["tools"][0]["name"] == "shell");
     CHECK(body["tools"][0].contains("parameters"));
     CHECK(!body["tools"][0].contains("function"));  // NOT nested
 
@@ -93,7 +93,7 @@ TEST_CASE("build body") {
 
     CHECK(in[1]["type"] == "function_call");
     CHECK(in[1]["call_id"] == "call_abc");
-    CHECK(in[1]["name"] == "bash");
+    CHECK(in[1]["name"] == "shell");
     CHECK(json::parse(in[1]["arguments"].get<std::string>())["command"] == "ls");
 
     CHECK(in[2]["type"] == "function_call_output");
@@ -205,7 +205,7 @@ TEST_CASE("sse parallel tool calls are id addressed") {
     std::vector<std::string> sse = {
         R"({"type":"response.output_item.added","item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"edit"}})",
         R"({"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"{\"path\":\"a.cpp\","})",
-        R"({"type":"response.output_item.added","item":{"type":"function_call","id":"fc_2","call_id":"call_2","name":"bash"}})",
+        R"({"type":"response.output_item.added","item":{"type":"function_call","id":"fc_2","call_id":"call_2","name":"shell"}})",
         R"({"type":"response.function_call_arguments.delta","item_id":"fc_2","delta":"{\"command\":\"true\"}"})",
         R"({"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"\"old_text\":\"x\",\"new_text\":\"y\"}"})",
         R"({"type":"response.output_item.done","item":{"type":"function_call","id":"fc_2"}})",
@@ -282,7 +282,7 @@ TEST_CASE("build input replays reasoning") {
     Message a; a.role = Role::Assistant; a.text = "";
     a.reasoning_encrypted = "BLOB_A\nBLOB_B";   // two items in one turn
     ToolUse tc;
-    tc.id = ToolCallId{"call_1"}; tc.name = ToolName{"bash"};
+    tc.id = ToolCallId{"call_1"}; tc.name = ToolName{"shell"};
     tc.args = json{{"command", "ls"}};
     tc.status = ToolUse::Done{.output = "ok"};
     a.tool_calls.push_back(tc);
@@ -402,7 +402,7 @@ TEST_CASE("stale tool result is budget capped") {
         Message a; a.role = Role::Assistant;
         ToolUse tc;
         tc.id = ToolCallId{"call_" + std::to_string(i)};
-        tc.name = ToolName{"bash"};
+        tc.name = ToolName{"shell"};
         tc.args = json::object();
         tc.status = ToolUse::Done{.output = "ok"};
         a.tool_calls.push_back(tc);

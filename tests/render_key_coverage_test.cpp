@@ -73,7 +73,7 @@ const std::vector<Axis>& render_axes() {
         {"pending_stream grows", [](Message& m) { m.pending_stream += " y"; }},
         {"error appears", [](Message& m) { m.error = "boom"; }},
         {"tool_calls appended", [](Message& m) {
-            agentty::ToolUse tc; tc.name = agentty::ToolName{"bash"};
+            agentty::ToolUse tc; tc.name = agentty::ToolName{"shell"};
             m.tool_calls.push_back(tc);
         }},
         {"attachment appended", [](Message& m) {

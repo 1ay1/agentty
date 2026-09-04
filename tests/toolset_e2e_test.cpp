@@ -345,14 +345,14 @@ int main() {
 
     // ── bash (sandbox off) ──────────────────────────────────────────────────
     {
-        auto r = run("bash", {{"command", "echo e2e-bash-ok"},
+        auto r = run("shell", {{"command", "echo e2e-bash-ok"},
                               {"cd", root.string()}});
         check(has(r, "e2e-bash-ok"), "bash: runs and captures stdout");
     }
     // ── bash failure feedback: exit-code decode + error-line digest ──────────
     {
         // 127 = command not found — the decode hint must appear.
-        auto r = run("bash", {{"command", "this_binary_does_not_exist_e2e"},
+        auto r = run("shell", {{"command", "this_binary_does_not_exist_e2e"},
                               {"cd", root.string()}});
         check(has(r, "127"), "bash: reports the numeric exit code");
         check(has(r, "not found"), "bash: decodes exit 127 as command-not-found");
@@ -360,7 +360,7 @@ int main() {
     {
         // A failing command whose output contains an error: line should get a
         // leading digest so the model sees the cause before the full dump.
-        auto r = run("bash", {{"command",
+        auto r = run("shell", {{"command",
                                "echo 'warming up'; echo 'error: something broke'; exit 2"},
                               {"cd", root.string()}});
         check(has(r, "exit code 2"), "bash: reports non-zero exit");
@@ -375,7 +375,7 @@ int main() {
     // and commit to scrollback — the "r r" corruption report), SGR text
     // preserved, and the CR progress line collapsed to its final state.
     {
-        auto r = run("bash",
+        auto r = run("shell",
             {{"command",
               "printf 'p 1\\r'; printf 'p 2\\n';"
               " printf '\\033[1;32mgreen-e2e\\033[0m\\n';"

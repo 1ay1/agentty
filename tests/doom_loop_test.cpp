@@ -125,7 +125,7 @@ TEST_CASE("runaway step cap breaks") {
     std::vector<Message> msgs;
     msgs.push_back(user());
     for (int i = 0; i < 25; ++i)
-        msgs.push_back(asst_call("bash", json{{"command", "echo " + std::to_string(i)}},
+        msgs.push_back(asst_call("shell", json{{"command", "echo " + std::to_string(i)}},
                                  Term::Done));
     auto brk = agent_loop_should_break(msgs);
     check(brk.has_value(), "25 tool turns → runaway break");
@@ -140,7 +140,7 @@ TEST_CASE("runaway step cap skipped for capable") {
     std::vector<Message> msgs;
     msgs.push_back(user());
     for (int i = 0; i < 40; ++i)
-        msgs.push_back(asst_call("bash", json{{"command", "echo " + std::to_string(i)}},
+        msgs.push_back(asst_call("shell", json{{"command", "echo " + std::to_string(i)}},
                                  Term::Done));
     check(!agent_loop_should_break(msgs, /*enforce_step_cap=*/false).has_value(),
           "40 healthy turns with step cap OFF (Claude) does NOT break");
@@ -188,9 +188,9 @@ TEST_CASE("rejection streak breaks") {
     std::vector<Message> msgs;
     msgs.push_back(user());
     json a = {{"command", "dangerous"}};
-    msgs.push_back(asst_call("bash", a, Term::Rejected));
-    msgs.push_back(asst_call("bash", a, Term::Rejected));
-    msgs.push_back(asst_call("bash", a, Term::Rejected));
+    msgs.push_back(asst_call("shell", a, Term::Rejected));
+    msgs.push_back(asst_call("shell", a, Term::Rejected));
+    msgs.push_back(asst_call("shell", a, Term::Rejected));
     check(agent_loop_should_break(msgs).has_value(),
           "3x identical rejection streak breaks");
 }
@@ -199,10 +199,10 @@ TEST_CASE("rejection streak breaks") {
 TEST_CASE("healthy progress no break") {
     std::vector<Message> msgs;
     msgs.push_back(user());
-    msgs.push_back(asst_call("bash",  json{{"command", "ls"}}, Term::Done));
+    msgs.push_back(asst_call("shell",  json{{"command", "ls"}}, Term::Done));
     msgs.push_back(asst_call("read",  json{{"path", "a.cpp"}}, Term::Done));
     msgs.push_back(asst_call("edit",  json{{"path", "a.cpp"}}, Term::Done));
-    msgs.push_back(asst_call("bash",  json{{"command", "make"}}, Term::Done));
+    msgs.push_back(asst_call("shell",  json{{"command", "make"}}, Term::Done));
     check(!agent_loop_should_break(msgs).has_value(),
           "4-step search→read→edit→verify does NOT break");
 }
@@ -219,7 +219,7 @@ TEST_CASE("user boundary resets run") {
     msgs.push_back(asst_call("read", a, Term::Failed));
     // New user turn starts a FRESH run with one healthy call.
     msgs.push_back(user("second"));
-    msgs.push_back(asst_call("bash", json{{"command", "pwd"}}, Term::Done));
+    msgs.push_back(asst_call("shell", json{{"command", "pwd"}}, Term::Done));
     check(!agent_loop_should_break(msgs).has_value(),
           "doom loop in a PRIOR run doesn't break the current fresh run");
 }

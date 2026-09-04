@@ -1341,7 +1341,7 @@ TEST_CASE("overflowed shrink stays synced") {
 // AND the commit count was not clamped (no under-commit).
 static ToolUse settled_bash(const std::string& tag, int n_lines) {
     ToolUse t;
-    t.id = ToolCallId{"bash_" + tag}; t.name = ToolName{"bash"};
+    t.id = ToolCallId{"bash_" + tag}; t.name = ToolName{"shell"};
     t.args = {{"command", "grep -rn x src # " + tag}};
     std::string out;
     for (int i = 0; i < n_lines; ++i)

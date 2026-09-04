@@ -661,7 +661,7 @@ const AgentType& resolve_agent_type(std::string_view t) {
          "file:line that produced it. Prefer running over guessing. Do NOT "
          "rewrite production code \xe2\x80\x94 only run, read, and diagnose.",
          {"read", "grep", "glob", "list_dir", "find_definition", "repo_map",
-          "bash", "diagnostics", "git_diff", "git_status"}, MR::Implementation},
+          "shell", "diagnostics", "git_diff", "git_status"}, MR::Implementation},
         {"coder", false,
          "Your role: CODER. Implement the change the task names end-to-end: "
          "read the relevant code first, make the edits, and verify they build/"

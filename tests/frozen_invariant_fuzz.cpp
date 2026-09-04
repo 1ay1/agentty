@@ -125,7 +125,7 @@ static ToolUse settled_write(const std::string& tag, int lines) {
 static ToolUse settled_bash(const std::string& tag, int out_lines) {
     ToolUse t;
     t.id   = ToolCallId{"bash_" + tag};
-    t.name = ToolName{"bash"};
+    t.name = ToolName{"shell"};
     t.args = {{"command", "grep -rn pattern src # " + tag}};
     std::string output;
     for (int i = 0; i < out_lines; ++i)

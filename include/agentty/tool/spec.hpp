@@ -178,7 +178,7 @@ inline constexpr std::array kCatalog = {
     ToolSpec{"write",           Kind::Write,          {Effect::WriteFs},                    true,    detail::sec{20},   40000,  ToolSpec::TruncStrategy::Head},
     ToolSpec{"move",            Kind::Move,           {Effect::ReadFs, Effect::WriteFs},    false,   detail::sec{20},   4000,   ToolSpec::TruncStrategy::Head},
     ToolSpec{"remove",          Kind::Remove,         {Effect::ReadFs, Effect::WriteFs},    false,   detail::sec{20},   4000,   ToolSpec::TruncStrategy::Head},
-    ToolSpec{"bash",            Kind::Bash,           {Effect::Exec},                       true,    detail::sec{0},    30000,  ToolSpec::TruncStrategy::Tail},
+    ToolSpec{"shell",           Kind::Bash,           {Effect::Exec},                       true,    detail::sec{0},    30000,  ToolSpec::TruncStrategy::Tail},
     ToolSpec{"process_start",   Kind::ProcessStart,   {Effect::Exec},                       false,   detail::sec{30},   4000,   ToolSpec::TruncStrategy::Tail},
     ToolSpec{"process_poll",    Kind::ProcessPoll,    {},                                   false,   detail::sec{5},    30000,  ToolSpec::TruncStrategy::HeadTail},
     ToolSpec{"process_stop",    Kind::ProcessStop,    {Effect::Exec},                       false,   detail::sec{10},   30000,  ToolSpec::TruncStrategy::Tail},   // subprocess-managed; tail-only matches log-stream usage
@@ -391,7 +391,7 @@ consteval bool all_names_present() {
 static_assert(all_names_present(), "every tool needs a non-empty name");
 
 // Lookup works for every catalog entry.
-static_assert(lookup("bash")     != nullptr);
+static_assert(lookup("shell")    != nullptr);
 static_assert(lookup("git_commit") != nullptr);
 static_assert(lookup("nonexistent") == nullptr);
 
@@ -402,7 +402,7 @@ static_assert(lookup("nonexistent") == nullptr);
 consteval bool only_known_exec_tools() {
     for (const auto& s : kCatalog) {
         if (!s.effects.has(Effect::Exec)) continue;
-        if (s.name != "bash" && s.name != "diagnostics" && s.name != "test"
+        if (s.name != "shell" && s.name != "diagnostics" && s.name != "test"
             && s.name != "process_start" && s.name != "process_stop"
             && s.name != "task")
             return false;
@@ -468,7 +468,7 @@ static_assert(only_web_is_net(),
 // timeout in `subprocess.cpp`; the overlay watchdog must be 0 to
 // avoid double-gating.
 consteval bool subprocess_tools_have_no_overlay_timeout() {
-    auto* b = lookup("bash");
+    auto* b = lookup("shell");
     auto* d = lookup("diagnostics");
     return b && d && b->max_seconds == std::chrono::seconds{0}
                   && d->max_seconds == std::chrono::seconds{0};
@@ -486,7 +486,7 @@ consteval bool other_tools_have_bounded_timeout() {
         // bash/diagnostics own their subprocess timeout; `task` owns its
         // budget via a bounded sub-agent turn count (no single syscall to
         // watchdog). All three set max_seconds=0 deliberately.
-        if (s.name == "bash" || s.name == "diagnostics" || s.name == "test"
+        if (s.name == "shell" || s.name == "diagnostics" || s.name == "test"
             || s.name == "task")
             continue;
         if (s.max_seconds < seconds{1} || s.max_seconds > seconds{300}) return false;

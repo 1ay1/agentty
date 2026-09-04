@@ -79,7 +79,7 @@ TEST_CASE("acp integration end-to-end") {
             const ag::ToolCallId call_id{tcid};
             sink(ag::Msg{ag::StreamStarted{}});
             sink(ag::Msg{ag::StreamTextDelta{"Running. "}});
-            sink(ag::Msg{ag::StreamToolUseStart{call_id, ag::ToolName{"bash"}}});
+            sink(ag::Msg{ag::StreamToolUseStart{call_id, ag::ToolName{"shell"}}});
             sink(ag::Msg{ag::StreamToolUseDelta{call_id,
                 "{\"command\":\"printf 'hello-stdout\\\\n'\"}"}});
             sink(ag::Msg{ag::StreamToolUseEnd{call_id}});

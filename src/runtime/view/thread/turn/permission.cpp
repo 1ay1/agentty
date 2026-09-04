@@ -9,7 +9,7 @@ maya::Permission::Config inline_permission_config(const PendingPermission& pp,
     std::string desc;
     if (!tc.args.is_object()) {
         desc = pp.reason;
-    } else if (tc.name == "bash" || tc.name == "diagnostics") {
+    } else if (tc.name == "shell" || tc.name == "diagnostics") {
         desc = tc.args.value("command", "");
     } else if (tc.name == "read" || tc.name == "edit"
             || tc.name == "write" || tc.name == "list_dir") {

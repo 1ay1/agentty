@@ -149,7 +149,7 @@ static ToolUse settled_tool(Rng& rng, const std::string& tag) {
         t.status = ToolUse::Done{now - milliseconds{5}, now, "edited"};
     } else if (kind == 2) {
         t.id = ToolCallId{"bash_" + tag};
-        t.name = ToolName{"bash"};
+        t.name = ToolName{"shell"};
         t.args = {{"command", "grep -rn pattern src # " + tag}};
         std::string out;
         const int n = 20 + rng.below(250);

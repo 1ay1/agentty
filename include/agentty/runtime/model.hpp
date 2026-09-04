@@ -322,7 +322,7 @@ struct Model {
         std::optional<PendingPermission> pending_permission;
 
         // Session-scoped "always allow" grants, keyed by tool name
-        // (e.g. "bash", "write"). Set by PermissionApproveAlways;
+        // (e.g. "shell", "write"). Set by PermissionApproveAlways;
         // consulted in kick_pending_tools BEFORE prompting. NOT
         // persisted — a grant lives for the lifetime of the process
         // run, mirroring Zed's per-session allow-list. Cleared on

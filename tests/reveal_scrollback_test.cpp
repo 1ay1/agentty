@@ -954,7 +954,7 @@ static ToolUse running_tool(const std::string& tag) {
     ToolUse t;
     auto now = std::chrono::steady_clock::now();
     t.id   = agentty::ToolCallId{"bash_" + tag};
-    t.name = agentty::ToolName{"bash"};
+    t.name = agentty::ToolName{"shell"};
     t.args = nlohmann::json{{"command", "git commit -m " + tag}};
     t.status = ToolUse::Running{now - std::chrono::milliseconds{5}};
     return t;

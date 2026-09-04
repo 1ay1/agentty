@@ -112,7 +112,7 @@ TEST_CASE("transcript bound") {
         t.title = "tools";
         Message a = asst_msg("running a command");
         ToolUse tc;
-        tc.name = ToolName{"bash"};
+        tc.name = ToolName{"shell"};
         tc.args = nlohmann::json{{"command", "ls"}};
         // Simulate a huge captured output — must NOT appear in the transcript.
         tc.status = ToolUse::Done{ {}, {}, std::string(100 * 1024, 'O') };
@@ -121,7 +121,7 @@ TEST_CASE("transcript bound") {
 
         auto path = persistence::write_thread_transcript_md(t);
         std::string md = slurp(path);
-        check(md.find("› tool(bash)") != std::string::npos,
+        check(md.find("\xe2\x80\xba tool(shell)") != std::string::npos,
               "tool call collapses to one line");
         check(md.find(std::string(200, 'O')) == std::string::npos,
               "tool OUTPUT is never written to the transcript");

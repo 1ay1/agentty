@@ -335,7 +335,7 @@ TEST_CASE("ndjson rescue tool from prose") {
         "{\\\"command\\\":\\\"mv /a /b\\\"}}\\n```\\nDone.\"}}\n"
         "{\"message\":{\"role\":\"assistant\",\"content\":\"\"},"
         "\"done\":true,\"done_reason\":\"stop\"}\n";
-    auto msgs = oll::parse_ndjson_for_test(nd, {"bash", "write"});
+    auto msgs = oll::parse_ndjson_for_test(nd, {"shell", "write"});
     CHECK(count_leaf<StreamToolUseStart>(msgs) == 1);
     bool saw_args = false;
     for (const auto& m : msgs)
@@ -353,7 +353,7 @@ TEST_CASE("ndjson unknown tool in prose not salvaged") {
         "{\\\"command\\\":\\\"mv /a /b\\\"}}\\n```\"}}\n"
         "{\"message\":{\"role\":\"assistant\",\"content\":\"\"},"
         "\"done\":true,\"done_reason\":\"stop\"}\n";
-    auto msgs = oll::parse_ndjson_for_test(nd, {"bash", "write"});
+    auto msgs = oll::parse_ndjson_for_test(nd, {"shell", "write"});
     CHECK(count_leaf<StreamToolUseStart>(msgs) == 0);
 }
 
@@ -389,9 +389,9 @@ TEST_CASE("jp clean object") {
         "\"{\\\"thoughts\\\":[\\\"list files\\\"],\\\"tool_name\\\":"
         "\\\"bash\\\",\\\"tool_args\\\":{\\\"command\\\":\\\"ls -la\\\"}}\"},"
         "\"done\":true,\"done_reason\":\"stop\"}\n";
-    auto msgs = oll::parse_ndjson_for_test(nd, {"bash", "write"}, /*json_protocol=*/true);
+    auto msgs = oll::parse_ndjson_for_test(nd, {"shell", "write"}, /*json_protocol=*/true);
     CHECK(count_leaf<StreamToolUseStart>(msgs) == 1);
-    CHECK(first_tool_name(msgs) == "bash");
+    CHECK(first_tool_name(msgs) == "shell");
     CHECK(joined_tool_args(msgs).find("ls -la") != std::string::npos);
     // The reasoning JSON must NOT be emitted as prose.
     CHECK(joined_text(msgs).find("thoughts") == std::string::npos);
@@ -404,9 +404,9 @@ TEST_CASE("jp object with leading prose") {
         "\"Sure, here goes: {\\\"tool_name\\\":\\\"bash\\\","
         "\\\"tool_args\\\":{\\\"command\\\":\\\"pwd\\\"}} done!\"},"
         "\"done\":true,\"done_reason\":\"stop\"}\n";
-    auto msgs = oll::parse_ndjson_for_test(nd, {"bash"}, /*json_protocol=*/true);
+    auto msgs = oll::parse_ndjson_for_test(nd, {"shell"}, /*json_protocol=*/true);
     CHECK(count_leaf<StreamToolUseStart>(msgs) == 1);
-    CHECK(first_tool_name(msgs) == "bash");
+    CHECK(first_tool_name(msgs) == "shell");
     CHECK(joined_tool_args(msgs).find("pwd") != std::string::npos);
 }
 
@@ -417,7 +417,7 @@ TEST_CASE("jp tool args aliases") {
         "\"{\\\"tool\\\":\\\"write\\\",\\\"args\\\":"
         "{\\\"file_path\\\":\\\"/tmp/x\\\",\\\"content\\\":\\\"hi\\\"}}\"},"
         "\"done\":true,\"done_reason\":\"stop\"}\n";
-    auto msgs = oll::parse_ndjson_for_test(nd, {"write", "bash"}, /*json_protocol=*/true);
+    auto msgs = oll::parse_ndjson_for_test(nd, {"write", "shell"}, /*json_protocol=*/true);
     CHECK(count_leaf<StreamToolUseStart>(msgs) == 1);
     CHECK(first_tool_name(msgs) == "write");
     CHECK(joined_tool_args(msgs).find("/tmp/x") != std::string::npos);
@@ -430,9 +430,9 @@ TEST_CASE("jp action suffix") {
         "\"{\\\"tool_name\\\":\\\"bash:run\\\",\\\"tool_args\\\":"
         "{\\\"command\\\":\\\"echo hi\\\"}}\"},"
         "\"done\":true,\"done_reason\":\"stop\"}\n";
-    auto msgs = oll::parse_ndjson_for_test(nd, {"bash"}, /*json_protocol=*/true);
+    auto msgs = oll::parse_ndjson_for_test(nd, {"shell"}, /*json_protocol=*/true);
     CHECK(count_leaf<StreamToolUseStart>(msgs) == 1);
-    CHECK(first_tool_name(msgs) == "bash");
+    CHECK(first_tool_name(msgs) == "shell");
     CHECK(joined_tool_args(msgs).find("\"action\":\"run\"") != std::string::npos);
 }
 
@@ -441,7 +441,7 @@ TEST_CASE("jp plain chat no tool") {
     std::string nd =
         "{\"message\":{\"role\":\"assistant\",\"content\":\"Hello! How can I help?\"},"
         "\"done\":true,\"done_reason\":\"stop\"}\n";
-    auto msgs = oll::parse_ndjson_for_test(nd, {"bash"}, /*json_protocol=*/true);
+    auto msgs = oll::parse_ndjson_for_test(nd, {"shell"}, /*json_protocol=*/true);
     CHECK(count_leaf<StreamToolUseStart>(msgs) == 0);
     CHECK(joined_text(msgs).find("How can I help") != std::string::npos);
 }
@@ -454,7 +454,7 @@ TEST_CASE("jp brace in string value") {
         "\"{\\\"tool_name\\\":\\\"bash\\\",\\\"tool_args\\\":"
         "{\\\"command\\\":\\\"echo '}'\\\"}}\"},"
         "\"done\":true,\"done_reason\":\"stop\"}\n";
-    auto msgs = oll::parse_ndjson_for_test(nd, {"bash"}, /*json_protocol=*/true);
+    auto msgs = oll::parse_ndjson_for_test(nd, {"shell"}, /*json_protocol=*/true);
     CHECK(count_leaf<StreamToolUseStart>(msgs) == 1);
     CHECK(joined_tool_args(msgs).find("echo '}'") != std::string::npos);
 }
@@ -465,7 +465,7 @@ TEST_CASE("jp unknown tool not salvaged") {
         "{\"message\":{\"role\":\"assistant\",\"content\":"
         "\"{\\\"tool_name\\\":\\\"frobnicate\\\",\\\"tool_args\\\":{}}\"},"
         "\"done\":true,\"done_reason\":\"stop\"}\n";
-    auto msgs = oll::parse_ndjson_for_test(nd, {"bash", "write"}, /*json_protocol=*/true);
+    auto msgs = oll::parse_ndjson_for_test(nd, {"shell", "write"}, /*json_protocol=*/true);
     CHECK(count_leaf<StreamToolUseStart>(msgs) == 0);
 }
 
@@ -477,14 +477,14 @@ TEST_CASE("jp response pseudo tool") {
         "\"{\\\"thoughts\\\":[\\\"hi\\\"],\\\"tool_name\\\":\\\"response\\\","
         "\\\"tool_args\\\":{\\\"text\\\":\\\"Hello there!\\\"}}\"},"
         "\"done\":true,\"done_reason\":\"stop\"}\n";
-    auto msgs = oll::parse_ndjson_for_test(nd, {"bash"}, /*json_protocol=*/true);
+    auto msgs = oll::parse_ndjson_for_test(nd, {"shell"}, /*json_protocol=*/true);
     CHECK(joined_text(msgs).find("Hello there!") != std::string::npos);
     CHECK(count_leaf<StreamToolUseStart>(msgs) == 0);
     // The raw protocol JSON must NOT leak into the prose.
     CHECK(joined_text(msgs).find("tool_name") == std::string::npos);
 }
 
-// Grammar-forced tool call: tool_name=="bash" with command in tool_args fires
+// Grammar-forced tool call: tool_name=="shell" with command in tool_args fires
 // a real bash tool-use start/delta/end carrying the args.
 TEST_CASE("jp grammar tool call") {
     std::string nd =
@@ -492,10 +492,10 @@ TEST_CASE("jp grammar tool call") {
         "\"{\\\"thoughts\\\":[\\\"list files\\\"],\\\"tool_name\\\":\\\"bash\\\","
         "\\\"tool_args\\\":{\\\"command\\\":\\\"ls\\\"}}\"},"
         "\"done\":true,\"done_reason\":\"stop\"}\n";
-    auto msgs = oll::parse_ndjson_for_test(nd, {"bash"}, /*json_protocol=*/true);
+    auto msgs = oll::parse_ndjson_for_test(nd, {"shell"}, /*json_protocol=*/true);
     CHECK(count_leaf<StreamToolUseStart>(msgs) == 1);
     CHECK(count_leaf<StreamToolUseEnd>(msgs) == 1);
-    CHECK(first_tool_name(msgs) == "bash");
+    CHECK(first_tool_name(msgs) == "shell");
     CHECK(joined_tool_args(msgs).find("ls") != std::string::npos);
 }
 
@@ -507,7 +507,7 @@ TEST_CASE("jp response alias key") {
         "\"{\\\"tool_name\\\":\\\"response\\\","
         "\\\"tool_args\\\":{\\\"response\\\":\\\"hey\\\"}}\"},"
         "\"done\":true,\"done_reason\":\"stop\"}\n";
-    auto msgs = oll::parse_ndjson_for_test(nd, {"bash"}, /*json_protocol=*/true);
+    auto msgs = oll::parse_ndjson_for_test(nd, {"shell"}, /*json_protocol=*/true);
     CHECK(joined_text(msgs).find("hey") != std::string::npos);
     CHECK(count_leaf<StreamToolUseStart>(msgs) == 0);
 }
@@ -544,7 +544,7 @@ TEST_CASE("jp response streamed incrementally") {
     nd += "{\"message\":{\"role\":\"assistant\",\"content\":\"\"},"
           "\"done\":true,\"done_reason\":\"stop\"}\n";
 
-    auto msgs = oll::parse_ndjson_for_test(nd, {"bash"}, /*json_protocol=*/true);
+    auto msgs = oll::parse_ndjson_for_test(nd, {"shell"}, /*json_protocol=*/true);
     // Full reply, exactly once — no duplication.
     std::string txt = joined_text(msgs);
     CHECK(txt == "Hello Ayush!");
@@ -568,7 +568,7 @@ TEST_CASE("jp response streamed escapes") {
         "{\\\"text\\\":\\\"line1\\\\nsay \\\\\\\"hi\\\\\\\"\\\"}}\"}}\n"
         "{\"message\":{\"role\":\"assistant\",\"content\":\"\"},"
         "\"done\":true,\"done_reason\":\"stop\"}\n";
-    auto msgs = oll::parse_ndjson_for_test(nd, {"bash"}, /*json_protocol=*/true);
+    auto msgs = oll::parse_ndjson_for_test(nd, {"shell"}, /*json_protocol=*/true);
     std::string txt = joined_text(msgs);
     CHECK(txt == "line1\nsay \"hi\"");
     CHECK(count_leaf<StreamToolUseStart>(msgs) == 0);
@@ -587,9 +587,9 @@ TEST_CASE("jp streamed tool call not hijacked") {
     nd += frame("{\\\"command\\\":\\\"ls\\\"}}");
     nd += "{\"message\":{\"role\":\"assistant\",\"content\":\"\"},"
           "\"done\":true,\"done_reason\":\"stop\"}\n";
-    auto msgs = oll::parse_ndjson_for_test(nd, {"bash"}, /*json_protocol=*/true);
+    auto msgs = oll::parse_ndjson_for_test(nd, {"shell"}, /*json_protocol=*/true);
     CHECK(count_leaf<StreamToolUseStart>(msgs) == 1);
-    CHECK(first_tool_name(msgs) == "bash");
+    CHECK(first_tool_name(msgs) == "shell");
     CHECK(joined_tool_args(msgs).find("ls") != std::string::npos);
     CHECK(joined_text(msgs).find("tool_name") == std::string::npos);
 }
@@ -632,7 +632,7 @@ TEST_CASE("jp live capture qwen") {
     std::string nd;
     for (const char* f : kFrames) { nd += f; nd += '\n'; }
 
-    auto msgs = oll::parse_ndjson_for_test(nd, {"bash"}, /*json_protocol=*/true);
+    auto msgs = oll::parse_ndjson_for_test(nd, {"shell"}, /*json_protocol=*/true);
     std::string txt = joined_text(msgs);
     CHECK(txt == "Hi Ayush!");                       // exact, ONCE (no dup)
     CHECK(txt.find('{') == std::string::npos);        // no scaffolding leak
@@ -727,9 +727,9 @@ TEST_CASE("think then tool call salvaged") {
         "{\\\"command\\\":\\\"ls\\\"}}\"}}\n"
         "{\"message\":{\"role\":\"assistant\",\"content\":\"\"},"
         "\"done\":true,\"done_reason\":\"stop\"}\n";
-    auto msgs = oll::parse_ndjson_for_test(nd, {"bash", "write"});
+    auto msgs = oll::parse_ndjson_for_test(nd, {"shell", "write"});
     CHECK(count_leaf<StreamToolUseStart>(msgs) == 1);
-    CHECK(first_tool_name(msgs) == "bash");
+    CHECK(first_tool_name(msgs) == "shell");
     CHECK(joined_text(msgs).find("should list files") == std::string::npos);
 }
 
@@ -754,7 +754,7 @@ TEST_CASE("build messages json protocol roundtrip") {
     Message a; a.role = Role::Assistant; a.text = "";
     ToolUse tc;
     tc.id   = ToolCallId{"call_1"};
-    tc.name = ToolName{"bash"};
+    tc.name = ToolName{"shell"};
     tc.args = nlohmann::json{{"command", "ls -la"}};
     tc.status = ToolUse::Done{{}, {}, "file1\nfile2"};
     a.tool_calls.push_back(std::move(tc));
@@ -767,25 +767,26 @@ TEST_CASE("build messages json protocol roundtrip") {
     CHECK(!arr[0].contains("tool_calls"));               // NOT native
     {
         auto obj = nlohmann::json::parse(arr[0]["content"].get<std::string>());
-        CHECK(obj["tool_name"] == "bash");
+        CHECK(obj["tool_name"] == "shell");
         CHECK(obj["tool_args"]["command"] == "ls -la");
     }
     CHECK(arr[1]["role"] == "user");                     // NOT role:"tool"
-    CHECK(arr[1]["content"].get<std::string>().find("TOOL RESULT (bash)")
+    CHECK(arr[1]["content"].get<std::string>().find("TOOL RESULT (shell)")
           != std::string::npos);
     CHECK(arr[1]["content"].get<std::string>().find("file1") != std::string::npos);
 }
 
 // ── NEW: arg-key repair on the NATIVE structured channel ─────────────────────
-// A weak model on the native channel emits `bash` with {"cmd":...} instead of
-// {"command":...}; the parser must remap it to the canonical key.
+// A weak model on the native channel emits the legacy `bash` name (still an
+// alias for `shell`) with {"cmd":...} instead of {"command":...}; the parser
+// must both accept the alias and remap the key to the canonical `command`.
 TEST_CASE("ndjson native arg key repair") {
     const char* nd =
         "{\"message\":{\"role\":\"assistant\",\"content\":\"\","
         "\"tool_calls\":[{\"function\":{\"name\":\"bash\","
         "\"arguments\":{\"cmd\":\"ls\"}}}]}}\n"
         "{\"done\":true,\"done_reason\":\"stop\"}\n";
-    auto msgs = oll::parse_ndjson_for_test(nd, {"bash"}, /*json_protocol=*/false);
+    auto msgs = oll::parse_ndjson_for_test(nd, {"shell", "bash"}, /*json_protocol=*/false);
     std::string args;
     for (const auto& m : msgs)
         if (const auto* d = get_leaf<StreamToolUseDelta>(m)) args += d->partial_json;
@@ -827,7 +828,7 @@ TEST_CASE("jp response empty text falls back to thoughts") {
         "\\\"response\\\",\\\"tool_args\\\":{\\\"text\\\":\\\"\\\"}}\"}}\n"
         "{\"message\":{\"role\":\"assistant\",\"content\":\"\"},"
         "\"done\":true,\"done_reason\":\"stop\"}\n";
-    auto msgs = oll::parse_ndjson_for_test(nd, {"bash"}, /*json_protocol=*/true);
+    auto msgs = oll::parse_ndjson_for_test(nd, {"shell"}, /*json_protocol=*/true);
     std::string txt = joined_text(msgs);
     CHECK(txt.find("You are Ayush") != std::string::npos);
     CHECK(txt.find("tool_name") == std::string::npos);
@@ -842,7 +843,7 @@ TEST_CASE("jp truly empty shows placeholder") {
         "{\"message\":{\"role\":\"assistant\",\"content\":\"   \"}}\n"
         "{\"message\":{\"role\":\"assistant\",\"content\":\"\"},"
         "\"done\":true,\"done_reason\":\"stop\"}\n";
-    auto msgs = oll::parse_ndjson_for_test(nd, {"bash"}, /*json_protocol=*/true);
+    auto msgs = oll::parse_ndjson_for_test(nd, {"shell"}, /*json_protocol=*/true);
     CHECK(joined_text(msgs).find("(empty response)") != std::string::npos);
     CHECK(count_leaf<StreamFinished>(msgs) == 1);
 }
@@ -855,7 +856,7 @@ TEST_CASE("prose starting with brace not dropped") {
         "\"Here is the answer: 42.\"}}\n"
         "{\"message\":{\"role\":\"assistant\",\"content\":\"\"},"
         "\"done\":true,\"done_reason\":\"stop\"}\n";
-    auto msgs = oll::parse_ndjson_for_test(nd, {"bash"});
+    auto msgs = oll::parse_ndjson_for_test(nd, {"shell"});
     CHECK(joined_text(msgs).find("42") != std::string::npos);
 }
 

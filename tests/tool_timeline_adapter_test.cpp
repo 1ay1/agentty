@@ -47,7 +47,7 @@ static bool visible(const maya::ToolBodyPreview::Config& body) {
 
 TEST_CASE("tool timeline adapter") {
     static constexpr std::array<const char*, 33> native_tools = {
-        "read", "edit", "write", "move", "remove", "bash",
+        "read", "edit", "write", "move", "remove", "shell",
         "process_start", "process_poll", "process_stop",
         "grep", "glob", "list_dir", "repo_map", "todo",
         "web_fetch", "web_search", "find_definition", "search_structural",
@@ -304,7 +304,7 @@ TEST_CASE("tool timeline adapter") {
               "[not found] old_text did not match"},
               {{"path", "x.cpp"}})).find("not found") != std::string::npos,
           "failed edit surfaces the error kind in the header");
-    check(U::tool_timeline_detail(make_tool("bash", A::ToolUse::Failed{{}, {},
+    check(U::tool_timeline_detail(make_tool("shell", A::ToolUse::Failed{{}, {},
               "boom\n[exit code 1]"},
               {{"command", "false"}})).find("exit code 1") != std::string::npos,
           "failed bash surfaces the exit code in the header");
@@ -428,7 +428,7 @@ TEST_CASE("tool timeline adapter") {
     // command/pattern/query shows the moment its bytes arrive, before the
     // parsed-args reparse. (Same mechanism, applied uniformly via safe().)
     {
-        auto tc = make_tool("bash", A::ToolUse::Pending{});
+        auto tc = make_tool("shell", A::ToolUse::Pending{});
         tc.args_streaming = R"({"command":"npm run build)";  // truncated
         check(U::tool_timeline_detail(tc).find("npm run build") != std::string::npos,
               "bash command shows while streaming");
@@ -476,13 +476,13 @@ TEST_CASE("tool timeline adapter") {
     // 60-column floor overflowed phone/SSH terminals before flex could help.
     A::Model viewer_model;
     A::tool_viewer::Entry viewer_entry;
-    viewer_entry.name = "bash";
+    viewer_entry.name = "shell";
     viewer_entry.title = "Diagnostics";
     viewer_entry.detail = "cmake --build a-very-long-target-name";
     viewer_entry.trailing = "running · 41.2s · 1 MB";
     viewer_entry.output = "line one\nline two\nline three";
     viewer_entry.is_live = true;
-    viewer_entry.call = make_tool("bash", A::ToolUse::Running{});
+    viewer_entry.call = make_tool("shell", A::ToolUse::Running{});
     viewer_model.ui.overlay = A::ui::overlay::ToolViewer{{{viewer_entry}, 0, false}};
     int list_height = -1;
     for (int width = 8; width <= 120; ++width) {
@@ -586,13 +586,13 @@ TEST_CASE("tool timeline adapter") {
     const char* old_lines_raw = std::getenv("LINES");
     const std::string old_lines = old_lines_raw ? old_lines_raw : "";
     A::tool_viewer::Entry long_entry;
-    long_entry.name = "bash";
+    long_entry.name = "shell";
     long_entry.title = "Bash";
     long_entry.detail = "long output";
     long_entry.trailing = "ok · 20 rows";
     for (int i = 0; i < 20; ++i)
         long_entry.output += "output row " + std::to_string(i) + "\n";
-    long_entry.call = make_tool("bash",
+    long_entry.call = make_tool("shell",
         A::ToolUse::Done{{}, {}, long_entry.output});
     A::Model short_terminal_model;
     short_terminal_model.ui.overlay =
@@ -616,11 +616,11 @@ TEST_CASE("tool timeline adapter") {
     std::vector<A::tool_viewer::Entry> short_list_entries;
     for (int i = 0; i < 4; ++i) {
         A::tool_viewer::Entry entry;
-        entry.name = "bash";
+        entry.name = "shell";
         entry.title = "Diagnostics";
         entry.detail = "operation " + std::to_string(i);
         entry.trailing = "ok";
-        entry.call = make_tool("bash", A::ToolUse::Done{});
+        entry.call = make_tool("shell", A::ToolUse::Done{});
         short_list_entries.push_back(std::move(entry));
     }
     A::Model short_list_model;

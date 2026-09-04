@@ -276,7 +276,7 @@ void update_stream_preview(ToolUse& tc) {
                 try_set_partial("new_string", kNewStrAliases);
         }
     }
-    else if (n == "bash")  { try_set("command"); pull_desc(); }
+    else if (n == "shell") { try_set("command"); pull_desc(); }
     else if (n == "grep")  { try_set("pattern"); try_set("path", kPathAliases); pull_desc(); }
     else if (n == "glob")  { try_set("pattern"); pull_desc(); }
     else if (n == "find_definition") { try_set("symbol"); pull_desc(); }

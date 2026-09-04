@@ -482,7 +482,7 @@ TEST_CASE("output elided tool row estimate matches render") {
     Message a; a.role = Role::Assistant;
     agentty::ToolUse tb;
     tb.id   = agentty::ToolCallId{"bash_noisy"};
-    tb.name = agentty::ToolName{"bash"};
+    tb.name = agentty::ToolName{"shell"};
     tb.args = {{"command", "grep -rn pattern src"}};
     std::string output;
     for (int i = 0; i < 200; ++i)
@@ -528,7 +528,7 @@ TEST_CASE("output elided tool row estimate matches render") {
 //      a matter of remembering to add a case per tool.
 TEST_CASE("output elided row estimate matches render for every such tool") {
     const char* kTools[] = {
-        "bash", "diagnostics", "read", "find_definition",
+        "shell", "diagnostics", "read", "find_definition",
         "grep", "glob", "list_dir", "web_search",
         "git_status", "git_diff", "git_log", "git_show", "git_blame",
         "git_commit", "git_branch", "git_stash", "git_rebase",

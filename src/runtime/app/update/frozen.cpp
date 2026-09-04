@@ -273,7 +273,7 @@ std::size_t estimate_json_string_rows(const nlohmann::json& j, int cols) {
 // strand a committed-scrollback ghost. Returns 0 when the tool renders
 // its full body (write/edit args path) so the caller counts it whole.
 std::size_t tool_output_render_cap(std::string_view name) {
-    if (name == "bash" || name == "diagnostics")          return 4;
+    if (name == "shell" || name == "diagnostics")          return 4;
     if (name == "read" || name == "find_definition")      return 5;
     // EVERY git_* tool elides to code_head+code_tail. Three of them used to
     // be listed by name here, which silently left the other seven

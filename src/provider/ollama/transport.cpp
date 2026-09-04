@@ -181,7 +181,11 @@ void repair_arg_keys(const std::string& tool, json& args) {
             }
         }
     };
-    if (tool == "bash" || tool == "diagnostics") {
+    // `bash` is kept as a LEGACY ALIAS for `shell`: the tool is registered as
+    // `shell`, but the name `bash` is so overwhelmingly common in model
+    // training data that a weak local model will emit it — accept it here so
+    // its args still get canonicalised (and dispatch resolves it downstream).
+    if (tool == "shell" || tool == "bash" || tool == "diagnostics") {
         remap({{"command", {"cmd", "shell", "script", "run", "cmdline"}}});
     } else if (tool == "read" || tool == "list_dir" || tool == "find_definition") {
         remap({{"path", {"file", "filepath", "file_path", "filename", "dir",
@@ -333,6 +337,15 @@ using wire::could_be_tool_json;
             && colon > 0 && colon + 1 < name.size()) {
         action_suffix = name.substr(colon + 1);
         name = name.substr(0, colon);
+    }
+
+    // Legacy alias: the tool is registered as `shell`, but `bash` is so
+    // common in model training data that weak local models emit it. If the
+    // model said `bash` and `shell` is advertised, canonicalise the name so
+    // the salvaged call targets the real tool (and downstream sees `shell`).
+    if (name == "bash") {
+        for (const auto& t : ctx.known_tools)
+            if (t == "shell") { name = "shell"; break; }
     }
 
     bool known = false;

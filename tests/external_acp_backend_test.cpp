@@ -148,7 +148,7 @@ std::unique_ptr<Harness> make_harness(AgentScript script,
             send(SU_AgentThoughtChunk{TextContent{"thinking", Nothing, Json::object()}, Nothing});
             ToolCall tc;
             tc.toolCallId = ToolCallId{std::string("tc_1")};
-            tc.title      = "bash";
+            tc.title      = "shell";
             send(SU_ToolCall{tc});
             send(SU_Usage{/*used*/123, /*size*/200000, Nothing});
         }

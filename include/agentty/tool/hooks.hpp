@@ -17,7 +17,7 @@
 // ~/.agentty/hooks.json:
 //
 //   {
-//     "pre_tool":  [ {"match": "bash",        "run": "./scripts/guard.sh"} ],
+//     "pre_tool":  [ {"match": "shell",       "run": "./scripts/guard.sh"} ],
 //     "post_tool": [ {"match": "edit|write",  "run": "clang-format -i $FILE"} ]
 //   }
 //

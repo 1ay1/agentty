@@ -25,7 +25,7 @@ std::string tool_display_name(const std::string& n) {
     if (n == "edit")            return "Edit";
     if (n == "move")            return "Move";
     if (n == "remove")          return "Remove";
-    if (n == "bash")            return "Bash";
+    if (n == "shell")           return "Shell";
     if (n == "process_start")   return "Process Start";
     if (n == "process_poll")    return "Process Poll";
     if (n == "process_stop")    return "Process Stop";
@@ -91,7 +91,7 @@ std::string tool_display_name(const std::string& n) {
 maya::Color tool_category_color(const std::string& n) {
     if (n == "edit" || n == "write" || n == "move" || n == "remove")
         return role_brand;
-    if (n == "bash" || n == "diagnostics" || n == "test"
+    if (n == "shell" || n == "diagnostics" || n == "test"
         || n.rfind("process_", 0) == 0)
         return code_text;
     if (n == "todo")                  return status_warn;
@@ -103,7 +103,7 @@ maya::Color tool_category_color(const std::string& n) {
 std::string_view tool_category_label(const std::string& n) {
     if (n == "edit" || n == "write" || n == "move" || n == "remove")
         return "mutate";
-    if (n == "bash" || n == "diagnostics" || n == "test"
+    if (n == "shell" || n == "diagnostics" || n == "test"
         || n.rfind("process_", 0) == 0)
         return "execute";
     if (n == "todo")                  return "plan";
@@ -337,7 +337,7 @@ static std::string tool_timeline_detail_base(const ToolUse& tc) {
             detail += "  \xc2\xb7  recursive";
         return detail;
     }
-    if (n == "bash" || n == "diagnostics") {
+    if (n == "shell" || n == "diagnostics") {
         auto cmd = safe("command");
         if (cmd.empty()) return "\xe2\x80\xa6";
         if (auto nl = cmd.find('\n'); nl != std::string::npos)

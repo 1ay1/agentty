@@ -285,7 +285,7 @@ int s_id_counter = 0;
 
 [[nodiscard]] ToolUse bash_tool(std::string_view cmd, int n_lines) {
     nlohmann::json args = {{"command", std::string{cmd}}};
-    return done("bash", std::move(args), gen::bash_output(n_lines));
+    return done("shell", std::move(args), gen::bash_output(n_lines));
 }
 
 [[nodiscard]] ToolUse read_tool(std::string_view path, int n_lines) {

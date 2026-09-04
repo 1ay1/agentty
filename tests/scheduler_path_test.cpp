@@ -144,7 +144,7 @@ TEST_CASE("scheduler path") {
     {
         std::vector<ToolUse> b = {
             pending("read", {{"path", "a.cpp"}}),
-            pending("bash", {{"command", "rm -rf build"}}),
+            pending("shell", {{"command", "rm -rf build"}}),
             pending("read", {{"path", "b.cpp"}}),
         };
         auto d = schedule_parallel_batch(b);
@@ -221,7 +221,7 @@ TEST_CASE("scheduler path") {
     //     sched view still carries ReadFs/Net which conflict with Exec.
     {
         std::vector<ToolUse> b = {
-            pending("bash", {{"command", "make -j8"}}),
+            pending("shell", {{"command", "make -j8"}}),
             pending("task", {{"prompt", "explore while building"}}),
         };
         auto d = schedule_parallel_batch(b);

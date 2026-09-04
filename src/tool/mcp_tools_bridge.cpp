@@ -487,7 +487,7 @@ std::vector<ToolDef> build_mcp_tool_defs() {
     // provider lists host-coupled shells first (registration order), so
     // without this the working tools sink to the bottom of the wire payload.
     static const std::vector<std::string_view> kOrder = {
-        "read", "edit", "apply_patch", "write", "move", "remove", "bash",
+        "read", "edit", "apply_patch", "write", "move", "remove", "shell",
         "process_start", "process_poll", "process_stop",
         "grep", "glob", "list_dir",
         "search_structural",

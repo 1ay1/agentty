@@ -163,7 +163,7 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
         generic_lifecycle_body(tc, out);
         return out;
     }
-    if (n == "bash" || n == "diagnostics" || n == "test"
+    if (n == "shell" || n == "diagnostics" || n == "test"
         || n == "process_start" || n == "process_poll"
         || n == "process_stop") {
         // The process_* trio IS terminal output — tail-heavy, ANSI-laden,

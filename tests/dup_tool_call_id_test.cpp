@@ -98,7 +98,7 @@ static void sub_turn_start(Model& m) {
 static ToolUse make_call(const std::string& id, ToolUse::Status st) {
     ToolUse tc;
     tc.id     = ToolCallId{id};
-    tc.name   = ToolName{"bash"};
+    tc.name   = ToolName{"shell"};
     tc.status = std::move(st);
     return tc;
 }
@@ -143,7 +143,7 @@ TEST_CASE("result routes across sub turns") {
     Model m;
     // Turn 1: stream bash:0, finish it, drive it Done with its own output.
     m.d.current.messages.push_back(asst_placeholder());
-    Step s = start(std::move(m), "bash:0", "bash");
+    Step s = start(std::move(m), "bash:0", "shell");
     s = delta(std::move(s.first), "bash:0", "{\"cmd\":\"one\"}");
     s = end(std::move(s.first), "bash:0");
     m = std::move(s.first);
@@ -151,7 +151,7 @@ TEST_CASE("result routes across sub turns") {
 
     // Turn 2: new sub-turn placeholder, same wire id replays.
     sub_turn_start(m);
-    s = start(std::move(m), "bash:0", "bash");
+    s = start(std::move(m), "bash:0", "shell");
     s = delta(std::move(s.first), "bash:0", "{\"cmd\":\"two\"}");
     s = end(std::move(s.first), "bash:0");
     // The observed result for turn 2 must land on turn 2's live call.
@@ -175,7 +175,7 @@ TEST_CASE("streaming isolated to current sub turn") {
     Model m;
     // Turn 1: a fully-streamed bash:0 with args "{A}".
     m.d.current.messages.push_back(asst_placeholder());
-    Step s = start(std::move(m), "bash:0", "bash");
+    Step s = start(std::move(m), "bash:0", "shell");
     s = delta(std::move(s.first), "bash:0", "{A}");
     s = end(std::move(s.first), "bash:0");
     m = std::move(s.first);
@@ -183,7 +183,7 @@ TEST_CASE("streaming isolated to current sub turn") {
 
     // Turn 2: new placeholder, same id, DIFFERENT args stream.
     sub_turn_start(m);
-    s = start(std::move(m), "bash:0", "bash");
+    s = start(std::move(m), "bash:0", "shell");
     s = delta(std::move(s.first), "bash:0", "{B}");
     m = std::move(s.first);
 
@@ -201,8 +201,8 @@ TEST_CASE("hanging first call does not swallow") {
     // One message, two DISTINCT ids (normal parallel calls). The first never
     // terminates; the second gets its own result.
     m.d.current.messages.push_back(asst_placeholder());
-    Step s = start(std::move(m), "bash:0", "bash");   // never ended → hangs
-    s = start(std::move(s.first), "bash:1", "bash");
+    Step s = start(std::move(m), "bash:0", "shell");   // never ended → hangs
+    s = start(std::move(s.first), "bash:1", "shell");
     s = end(std::move(s.first), "bash:1");
     s = observed(std::move(s.first), "bash:1", "b1-out");
     m = std::move(s.first);
@@ -218,7 +218,7 @@ TEST_CASE("hanging first call does not swallow") {
 TEST_CASE("unique ids untouched") {
     Model m;
     m.d.current.messages.push_back(asst_placeholder());
-    Step s = start(std::move(m), "call_a", "bash");
+    Step s = start(std::move(m), "call_a", "shell");
     s = start(std::move(s.first), "call_b", "read");
     s = delta(std::move(s.first), "call_a", "{\"x\":1}");
     s = delta(std::move(s.first), "call_b", "{\"y\":2}");

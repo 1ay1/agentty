@@ -271,7 +271,7 @@ json salvage_args(const ToolUse& tc) {
     else if (n == "edit")  { pick("path", kPathAliases);
                              pick("old_string", kOldStrAliases);
                              pick("new_string", kNewStrAliases); }
-    else if (n == "bash")  { pick("command"); }
+    else if (n == "shell") { pick("command"); }
     else if (n == "grep")  { pick("pattern"); pick("path", kPathAliases); }
     else if (n == "glob")  { pick("pattern"); }
     else if (n == "find_definition") { pick("symbol"); }
@@ -756,7 +756,7 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
                 // A failed build / test / diagnostics call in this turn is a
                 // ground-truth "the cheap route may have been wrong" signal.
                 if (std::holds_alternative<ToolUse::Failed>(tc.status)
-                    && (tc.name == "bash" || tc.name == "diagnostics"
+                    && (tc.name == "shell" || tc.name == "diagnostics"
                         || tc.name == "test" || tc.name == "edit"))
                     tool_failure = true;
             }

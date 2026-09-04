@@ -113,7 +113,7 @@ TEST_CASE("tool stream snapshot") {
     m = apply(std::move(m), A::StreamToolUseStart{
         A::ToolCallId{"call-c"}, A::ToolName{"write"}});
     m = apply(std::move(m), A::StreamToolUseStart{
-        A::ToolCallId{"call-d"}, A::ToolName{"bash"}});
+        A::ToolCallId{"call-d"}, A::ToolName{"shell"}});
     m = apply(std::move(m), A::StreamToolUseDelta{
         A::ToolCallId{"call-c"}, R"({"path":"c.cpp",")"});
     m = apply(std::move(m), A::StreamToolUseDelta{
