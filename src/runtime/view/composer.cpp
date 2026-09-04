@@ -157,19 +157,28 @@ bool composer_uses_hardware_caret(const Model& m) noexcept {
     // or users who prefer the painted block).
     static const bool painted_caret_env =
         std::getenv("AGENTTY_PAINTED_CARET") != nullptr;
-    constexpr std::int64_t kTypingWindowMs = 4000;
     const auto state = composer_state(m);
     const bool agent_active =
         state == maya::Composer::State::Streaming ||
         state == maya::Composer::State::ExecutingTool;
-    const bool typing_recently =
-        m.ui.composer.last_edit_ms > 0 &&
-        (maya::anim::default_clock().now_ms() - m.ui.composer.last_edit_ms)
-            < kTypingWindowMs;
+    // Whenever a widget-paced animation is on screen the frame repaints at
+    // ~30 fps, and the hardware caret's per-frame ?25l→move→?25h dance makes
+    // cursor-animating terminals (WezTerm, Windows Terminal) replay their fade
+    // on EVERY frame: a caret flicker (confirmed — AGENTTY_PAINTED_CARET=1
+    // removes it). The painted block caret is a plain cell, immune to that.
+    // Two on-screen animations drive this:
+    //   • the welcome-screen letter bob (shown when the thread is empty), and
+    //   • a live stream / tool run (agent_active).
+    // Use the painted caret for both. Streaming already preferred painted
+    // EXCEPT within the recent-typing window; drop that exception so a stream
+    // right after a keystroke doesn't flicker. Idle without animation keeps the
+    // native hardware caret + terminal-side blink.
+    const bool welcome_bob = m.d.current.messages.empty();
     return !painted_caret_env
+        && !welcome_bob
+        && !agent_active
         && ui::overlay::top(m) == ui::overlay::Kind::None
         && m.ui.terminal_focused
-        && (!agent_active || typing_recently)
         // Inside tmux, only claim the hardware caret when tmux will
         // actually FORWARD the cursor-style escape (its `cstyle`
         // feature). Without it our DECSCUSR is swallowed and the caret
