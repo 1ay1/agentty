@@ -33,9 +33,15 @@ agentty --sandbox on                   # require an OS sandbox for bash/diagnost
 | `agentty airgap user@host` | Run the agent on a remote host through an SSH SOCKS tunnel. |
 | `agentty acp` | Run headless as an [Agent Client Protocol](/docs/acp) agent for Zed (JSON-RPC over stdio). |
 | `agentty mcp-serve` | Serve agentty's native tools over [MCP](/docs/mcp) (stdio). Point any MCP client at it. |
+| `agentty mcp-login <server>` | Authorize an OAuth-gated MCP server from `mcp.json` (OAuth 2.1 + PKCE via your browser). |
+| `agentty mcp-logout <server>` | Remove a stored MCP server token. |
+| `agentty mcp-status` | List configured MCP servers and their authorization state. |
+| `agentty plugin add\|list\|remove\|approve` | Manage [plugins](/docs/plugins) — a plugin *is* an MCP server (any language). e.g. `agentty plugin add today --python today.py`, `--uvx pkg`, `--npx pkg`, `--http <url>`, or `-- cmd args`; `--project` targets the repo config. Plugins never run until approved. |
+| `agentty hooks [list]` | Show configured lifecycle [hooks](/docs/hooks) + approval state. `agentty hooks approve` inspects and approves the active hooks file (hooks never run unapproved; any change re-gates). |
 | `agentty skills` | List discovered [Agent Skills](/docs/skills) with spec-lint diagnostics (exit 1 on warnings — CI-friendly). |
 | `agentty diagnostics` | Collect a redacted bug-report bundle (build info, provider, log tail) to `~/.agentty/logs/agentty-diagnostics.txt`. See [Logging](/docs/logging#reporting-a-bug). |
 | `agentty rag-bench [dir]` | Benchmark [`search_docs` retrieval](/docs/retrieval#measure-it-agentty-rag-bench) on your own corpus — recall@k / MRR / nDCG per pipeline stage. Defaults to the auto-discovered docs folder; pass a directory to override. |
+| `agentty update` | Update agentty in place to the latest release. `--check` reports whether an update is available without installing it. |
 | `agentty --version` | Print `agentty <version>` and exit. |
 | `agentty --help` | Print usage and exit. |
 
