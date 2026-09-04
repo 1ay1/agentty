@@ -19,6 +19,7 @@ set(_AGENTTY_CONSOLIDATED
     custom_host_key_prompt_test dispatch_route_test
     model_label_test cache_anchor_test composer_edit_test hooks_gate_test
     tool_result_image_test
+    quit_cancels_stream_test
     midrun_freeze_test smart_mode_test stream_liveness_test wire_golden_test
     wire_shared_test complexity_test copilot_token_test kimi_token_test
     chatgpt_bundled_models_test settings_default_test

@@ -756,6 +756,18 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             return done(std::move(m));
         },
         [&](Quit) -> Step {
+            // Trip the active turn's cancel token FIRST. If a stream (or a tool)
+            // is in flight — exactly when the spinner/typewriter is animating —
+            // its worker is blocked in the HTTP poll/SSL_read. Nothing else
+            // signals it on Quit, so without this the loop exits but
+            // ~BackgroundQueue's join waits for that worker to notice
+            // cancellation the slow way (the next server byte or the idle
+            // timeout) — the 4–10 s "^C doesn't quit during an animation" hang.
+            // Esc/CancelStream already does this; Quit must too. The token is
+            // atomic and the worker's poll loop checks it every ~200 ms, so the
+            // join returns promptly.
+            if (auto* a = active_ctx(m.s.phase); a && a->cancel) a->cancel->cancel();
+
             if (!m.d.current.messages.empty()) deps().save_thread(m.d.current);
             // Always file the model the user is CURRENTLY on under the active
             // provider before exit, so a relaunch (or a later switch back to
