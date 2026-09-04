@@ -42,7 +42,7 @@ redeploy → the version badge updates itself.
 
 | File | Role |
 |------|------|
-| `webhook.mjs` | Zero-dep HTTP listener on `127.0.0.1:9099`; HMAC-verifies GitHub, triggers deploy. Watches `1ay1/agentty` (docs/website only) + `1ay1/agentty.org`. |
+| `webhook.mjs` | Zero-dep HTTP listener on `127.0.0.1:9099`; HMAC-verifies GitHub, triggers deploy. Watches `1ay1/agentty` (rebuilds on `docs/website/`, `site/`, or `CHANGELOG.md` pushes). |
 | `autodeploy.sh` | Headless deploy driver: `git reset --hard origin/master` → `deploy.sh`. `flock` prevents overlap; coalesces bursts. |
 | `agentty-deploy-hook.service` | systemd unit for the webhook listener (always on). |
 | `agentty-deploy.service` + `.timer` | 30-min backstop that runs `autodeploy.sh`. |
@@ -78,7 +78,7 @@ sudo systemctl enable --now agentty-deploy-hook.service agentty-deploy.timer
 
 ## The GitHub webhooks (the only GitHub-side step)
 
-Add the SAME webhook to **both** repos (`1ay1/agentty` and `1ay1/agentty.org`):
+Add the webhook to **`1ay1/agentty`** (the one and only repo):
 
 - **Settings → Webhooks → Add webhook**
 - Payload URL: `https://agentty.org/_deploy-hook`

@@ -5,13 +5,13 @@ After=network.target
 [Service]
 Type=simple
 User=ayush
-WorkingDirectory=/home/ayush/projects/agentpp-site/deploy/live
+WorkingDirectory=/home/ayush/projects/agentty/site/deploy/live
 Environment=LIVE_PORT=8790
 Environment=AGENTTY_BIN=/home/ayush/.local/bin/agentty
 Environment=LIVE_MAX_SESSIONS=12
 Environment=LIVE_SESSION_MS=600000
 Environment=LIVE_IDLE_MS=180000
-ExecStart=/usr/bin/node /home/ayush/projects/agentpp-site/deploy/live/server.mjs
+ExecStart=/usr/bin/node /home/ayush/projects/agentty/site/deploy/live/server.mjs
 Restart=always
 RestartSec=2
 # hardening

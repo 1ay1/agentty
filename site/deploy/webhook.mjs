@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Minimal, zero-dependency GitHub webhook listener for agentty.org auto-deploy.
 // Listens on 127.0.0.1:$PORT (nginx proxies /_deploy-hook to it). On a verified
-// `push` event to master of either 1ay1/agentty or 1ay1/agentty.org, it kicks
+// `push` event to master of 1ay1/agentty (docs/website, site/, or CHANGELOG), it kicks
 // autodeploy.sh. HMAC-SHA256 verified against $WEBHOOK_SECRET — unsigned or
 // mismatched requests are rejected.
 //

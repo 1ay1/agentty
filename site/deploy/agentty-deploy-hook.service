@@ -10,7 +10,7 @@ User=ayush
 # Create /etc/agentty-deploy.env with:  WEBHOOK_SECRET=<random-hex>
 EnvironmentFile=/etc/agentty-deploy.env
 Environment=PORT=9099
-ExecStart=/usr/bin/node /home/ayush/projects/agentpp-site/deploy/webhook.mjs
+ExecStart=/usr/bin/node /home/ayush/projects/agentty/site/deploy/webhook.mjs
 Restart=always
 RestartSec=3
 # Light hardening — it only needs to listen locally and spawn autodeploy.
