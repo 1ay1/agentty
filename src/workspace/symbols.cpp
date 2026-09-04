@@ -203,6 +203,15 @@ std::vector<SymbolEntry> build_symbol_list(std::size_t cap) {
 }
 } // namespace
 
+namespace {
+// Owned, not detached — see files.cpp: a detached symbol scan racing CRT
+// atexit teardown on a fast pipe-EOF exit faults on Windows (0xC0000005).
+std::thread& sym_prewarm_thread() {
+    static std::thread t;
+    return t;
+}
+}  // namespace
+
 void prewarm_workspace_symbols(std::size_t cap) {
     bool expected = false;
     if (!sym_building().compare_exchange_strong(expected, true)) return;
@@ -210,14 +219,20 @@ void prewarm_workspace_symbols(std::size_t cap) {
         std::lock_guard<std::mutex> lk(sym_mu());
         if (sym_cache()) { sym_building() = false; return; }
     }
-    std::thread([cap] {
+    if (sym_prewarm_thread().joinable()) sym_prewarm_thread().join();
+    sym_prewarm_thread() = std::thread([cap] {
         auto built = std::make_shared<std::vector<SymbolEntry>>(build_symbol_list(cap));
         {
             std::lock_guard<std::mutex> lk(sym_mu());
             sym_cache() = std::move(built);
         }
         sym_building() = false;
-    }).detach();
+    });
+}
+
+void join_workspace_symbols_prewarm() {
+    auto& t = sym_prewarm_thread();
+    if (t.joinable()) t.join();
 }
 
 bool symbols_ready() {

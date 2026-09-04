@@ -93,6 +93,8 @@
 #include "agentty/tool/hooks.hpp"
 #include "agentty/tool/plugin.hpp"
 #include "agentty/tool/util/fs_helpers.hpp"
+#include "agentty/workspace/files.hpp"     // join_workspace_prewarm
+#include "agentty/workspace/symbols.hpp"   // join_workspace_symbols_prewarm
 #include "agentty/tool/util/sandbox.hpp"
 #include "agentty/tool/subagent.hpp"
 #include "agentty/tool/mcp_tools_bridge.hpp"
@@ -1390,6 +1392,14 @@ int main(int argc, char** argv) {
     // static state is freed, corrupting the heap (Windows 0xC0000374). Trips
     // the dial's cancel token then joins; a no-op if no prewarm ran.
     http::default_client().join_prewarm();
+
+    // Same fast-exit race for the workspace `@`/`#` prewarms: init() kicks a
+    // filesystem walk and a symbol scan on background threads. On an immediate
+    // pipe-EOF exit (MSYS2/mintty smoke test) they'd still be running when the
+    // CRT/mimalloc atexit handlers free their captured state — a use-after-
+    // free that faults on Windows (0xC0000005). Join them before teardown.
+    join_workspace_prewarm();
+    join_workspace_symbols_prewarm();
 
     // Drain the async persistence queue. The Quit reducer arm enqueues
     // a final save_thread() right before maya returns; this blocks

@@ -35,6 +35,10 @@ list_workspace_symbols(std::size_t cap = 50000);
 // instant instead of freezing the UI for a multi-second regex scan.
 void prewarm_workspace_symbols(std::size_t cap = 50000);
 
+// Join the prewarm scan if still running — see join_workspace_prewarm() in
+// files.hpp for the fast-exit UAF this closes.
+void join_workspace_symbols_prewarm();
+
 // Non-blocking: is the symbol index built yet? The composer opens the
 // `#` picker INSTANTLY and shows "indexing…" until this returns true.
 [[nodiscard]] bool symbols_ready();

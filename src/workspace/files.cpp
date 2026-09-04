@@ -380,6 +380,19 @@ std::vector<std::string> build_file_list(std::size_t cap) {
 }
 } // namespace
 
+namespace {
+// The prewarm walk is OWNED, not detached. A detached FS walk still touching
+// its captured statics (and the mimalloc heap) when a fast pipe-EOF exit runs
+// the CRT atexit handlers is a use-after-free that faults on Windows
+// (0xC0000005) — the same class of bug join_prewarm() closed for TLS dials.
+// main() calls join_workspace_prewarm() before teardown; the thread is kept
+// joinable here so it can.
+std::thread& files_prewarm_thread() {
+    static std::thread t;
+    return t;
+}
+}  // namespace
+
 void prewarm_workspace_files(std::size_t cap) {
     // Single-flight: only the first caller spawns the walk.
     bool expected = false;
@@ -388,7 +401,12 @@ void prewarm_workspace_files(std::size_t cap) {
         std::lock_guard<std::mutex> lk(files_mu());
         if (files_cache()) { files_building() = false; return; }   // already warm
     }
-    std::thread([cap] {
+    // A prior prewarm thread may have finished but not yet been joined;
+    // assigning over a joinable std::thread calls std::terminate, so reap it
+    // first. (Single-flight above makes a second LIVE walk impossible, so
+    // this join returns immediately.)
+    if (files_prewarm_thread().joinable()) files_prewarm_thread().join();
+    files_prewarm_thread() = std::thread([cap] {
         // Git signals first (fast, ~two git invocations) so the file list is
         // already git-aware the instant it publishes — a blank `@` leads
         // with your dirty files from the very first open.
@@ -399,7 +417,12 @@ void prewarm_workspace_files(std::size_t cap) {
             files_cache() = std::move(built);
         }
         files_building() = false;
-    }).detach();
+    });
+}
+
+void join_workspace_prewarm() {
+    auto& t = files_prewarm_thread();
+    if (t.joinable()) t.join();
 }
 
 bool files_ready() {

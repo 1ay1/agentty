@@ -29,6 +29,12 @@ list_workspace_files(std::size_t cap = 5000);
 // picker's first open are instant. Call at startup.
 void prewarm_workspace_files(std::size_t cap = 5000);
 
+// Join the prewarm walk if it is still running. Called from main()'s teardown
+// before CRT/heap destruction so a fast pipe-EOF exit can't leave the detached
+// walk touching freed state (Windows 0xC0000005). No-op if it never ran or
+// already finished.
+void join_workspace_prewarm();
+
 // Non-blocking: has the file list been built yet? The composer opens the
 // `@` picker INSTANTLY and shows an "indexing…" hint until this is true.
 [[nodiscard]] bool files_ready();
