@@ -201,6 +201,10 @@ maya::Composer::Config composer_config(const Model& m) {
     cfg.loop            = m.ui.composer.looping();
     cfg.loop_iterations = m.ui.composer.loop_iterations;
     cfg.loop_color      = role_brand_alt;   // distinct from the cyan queue chip
+    // While looping the box is a readout of the prompt being re-sent, not an
+    // editable draft (the reducer drops every mutating message), so render it
+    // as read-only: dimmed text, parked caret.
+    cfg.read_only       = cfg.loop;
     cfg.profile         = {.label = std::string{profile_label(m.d.profile)},
                            .color = profile_color(m.d.profile)};
     cfg.expanded        = m.ui.composer.expanded;
@@ -284,7 +288,9 @@ maya::Composer::Config composer_config(const Model& m) {
     //     streaming tick re-evaluates this window every frame.
     // AGENTTY_PAINTED_CARET=1 opts out wholesale (broken-DECTCEM
     // terminals or users who prefer the block).
-    cfg.hardware_caret = composer_uses_hardware_caret(m);
+    // Read-only (loop mode) parks the caret: there is nothing to type into,
+    // and a hardware caret would sit blinking in a buffer that ignores keys.
+    cfg.hardware_caret = composer_uses_hardware_caret(m) && !cfg.read_only;
     // Rationale for the (!agent_active || typing_recently) gate — the
     // SAME rule with and without tmux:
     //   • idle (agent not streaming): the screen is STATIC, so tmux's

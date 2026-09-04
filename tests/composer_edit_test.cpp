@@ -238,4 +238,37 @@ TEST_CASE("composer_edit") {
         check_edit("disarm does not touch the live composer text",
                    off.ui.composer.text == "live text", off.ui.composer.text);
     }
+    {
+        // While looping the composer is READ-ONLY: the box displays the
+        // prompt being re-sent, so a keystroke must not let the display
+        // diverge from loop_text (the user would read one thing while
+        // agentty sends another).
+        Model m;
+        m.ui.composer.text            = "run the tests";
+        m.ui.composer.cursor          = 13;
+        m.ui.composer.loop_armed      = true;
+        m.ui.composer.loop_text       = "run the tests";
+
+        auto typed = step(std::move(m), ComposerCharInput{U'X'});
+        check_edit("typing is ignored while looping",
+                   typed.ui.composer.text == "run the tests",
+                   typed.ui.composer.text);
+
+        auto bsp = step(std::move(typed), agentty::ComposerBackspace{});
+        check_edit("backspace is ignored while looping",
+                   bsp.ui.composer.text == "run the tests", bsp.ui.composer.text);
+
+        // ...but ^B still works, or the mode would be a trap.
+        auto out = step(std::move(bsp), agentty::ComposerToggleLoop{});
+        check_edit("^B still disarms from inside the locked state",
+                   !out.ui.composer.loop_armed, "still armed");
+        check_edit("the text survives the unlock",
+                   out.ui.composer.text == "run the tests", out.ui.composer.text);
+
+        // Once unlocked, editing works again.
+        auto edit_ok = step(std::move(out), ComposerCharInput{U'!'});
+        check_edit("editing resumes after disarm",
+                   edit_ok.ui.composer.text != "run the tests",
+                   edit_ok.ui.composer.text);
+    }
 }

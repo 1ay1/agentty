@@ -483,6 +483,23 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
     // (the single entry point for all composer msgs) covers every path
     // without touching each arm.
     m.ui.composer.last_edit_ms = maya::anim::default_clock().now_ms();
+
+    // ── LOOP mode makes the composer READ-ONLY ───────────────────────
+    // While ^B is armed the box DISPLAYS the prompt that is being re-sent
+    // every turn. That display must stay identical to loop_text, or the
+    // user is reading one thing while agentty sends another — so every
+    // mutating message is dropped rather than allowed to diverge it.
+    //
+    // ComposerToggleLoop is the deliberate exception: the way out has to
+    // keep working from inside the locked state, or the mode is a trap.
+    // (Cursor moves are harmless but pointless on a frozen buffer, and
+    // dropping them keeps the rule one line instead of an allow-list that
+    // rots.) Esc-to-cancel and every global chord live outside this
+    // reducer and are unaffected.
+    if (m.ui.composer.looping()
+        && !std::holds_alternative<ComposerToggleLoop>(cm)) {
+        return done(std::move(m));
+    }
     // ── Idle-lapse connection re-warm ──────────────────────────
     // The pool's warm socket dies after ~90 s idle (http idle_ttl), so a
     // submit after any longer pause pays a cold TCP+TLS+H2 dial (~150-400
@@ -670,7 +687,17 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             c.loop_text        = c.text;
             c.loop_attachments = c.attachments;
             c.loop_iterations  = 0;
-            return submit_message(std::move(m));
+            auto step = submit_message(std::move(m));
+            // submit drains the composer; put the armed payload BACK so the
+            // box keeps showing what is on repeat. While looping the composer
+            // is read-only (see the editing guard), so this is a display of
+            // the armed prompt rather than an editable draft — without it the
+            // user watches an empty box auto-send something they can't see.
+            auto& sc = step.first.ui.composer;
+            sc.text        = sc.loop_text;
+            sc.attachments = sc.loop_attachments;
+            sc.cursor      = static_cast<int>(sc.text.size());
+            return step;
         },
         [&](ComposerCursorLeft) -> Step {
             m.ui.composer.undo_coalescing = false;

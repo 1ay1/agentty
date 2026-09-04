@@ -846,6 +846,13 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
         m.ui.composer.cursor      = static_cast<int>(m.ui.composer.text.size());
         auto [mm, sub_cmd] = submit_message(std::move(m));
         m = std::move(mm);
+        // submit drained the composer — restore the armed payload so the box
+        // keeps DISPLAYING what is on repeat between iterations. The composer
+        // is read-only while looping, so this is a status readout, not a
+        // draft the user could accidentally diverge from loop_text.
+        m.ui.composer.text        = m.ui.composer.loop_text;
+        m.ui.composer.attachments = m.ui.composer.loop_attachments;
+        m.ui.composer.cursor      = static_cast<int>(m.ui.composer.text.size());
         return Cmd<Msg>::batch(std::vector<Cmd<Msg>>{std::move(kp), std::move(sub_cmd)});
     }
 
