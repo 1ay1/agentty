@@ -183,7 +183,35 @@ lambda. The Responses dialect goes one step further with `Site`
 (`responses/responses.hpp`): ChatGPT and Copilot share one codec and differ
 only in `authorize` (where + which credentials), `decorate_body` (host
 extras on the neutral body), and `explain_http_error` (host-phrased
-failures). A third Responses host is one `Site`, zero codec changes.
+failures). A third Responses host is one `Site`, zero codec changes — a
+claim since exercised: `openai/responses_site.cpp` added api.openai.com to
+the dialect without touching the codec.
+
+### Which dialect does a turn use?
+
+A row's `wire` is its DEFAULT, not its only dialect. The same OpenAI key
+reaches `/v1/chat/completions` and `/v1/responses`; the same Copilot session
+serves `claude-*` on chat and `mai-code-*` on Responses only. So the dialect
+is a property of the **(provider, model) pair**, and `provider::dialect_for()`
+(`provider/dialect.hpp`) is its single authority — consulted both by the
+transport picking a URL and by the UI deciding whether the thinking pane may
+promise output. Those were once two separate guesses, and they drifted: the
+`openai` row claimed `Wire::OpenAIResponses` while dialling chat, so the UI
+advertised reasoning the wire never sent.
+
+This is not a preference. Per OpenAI's reasoning guide, Chat Completions
+rejects tool calling for GPT-5.4+ at any `reasoning_effort` other than `none`,
+and GPT-6-class models drop chat function calling entirely — agentty always
+sends tools, so for those models the dialect decides whether a turn runs at
+all.
+
+A row advertises its second dialect with `responses_path`, checked by
+`endpoints_consistent()` exactly like `path`. Because the model-family tables
+are a prior about names — and names move — `note_dialect_rejected()` lets a
+live 404 demote one (provider, model) for the rest of the process, so a stale
+guess self-corrects instead of stranding the user. There is deliberately **no
+user-facing surface**: no picker row, no flag, no config key. The user selects
+a model; the protocol is agentty's problem.
 
 When the scaffold migration ran, it *found* drift, which is the argument
 for it: Ollama had never wired `on_buffered_wait` (buffered sends showed
@@ -234,6 +262,7 @@ how it gets found and promoted into one.
 | an OpenAI-compat host (llama.cpp, vLLM, a gateway) | **one registry row** | `endpoints_consistent` build error |
 | a long-lived OAuth provider | RouteSlot enumerator + `.route` on the row + one `router` bind in `main()` | `routing_consistent` build error |
 | a Responses-dialect host | one `Site` (authorize / decorate_body / explain_http_error) | conformance suite failure |
+| a second dialect on an EXISTING host | one `responses_path` column | `endpoints_consistent` build error |
 | a model family with a reasoning quirk | one line in the relevant catalog function | `static_assert` on the family |
 | a new failure kind | one enum entry + one `classify` arm (`error_class.hpp`) | exhaustive-switch build error |
 

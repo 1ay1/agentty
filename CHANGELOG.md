@@ -4,6 +4,14 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **GPT-5.4 and newer reasoning models work on `api.openai.com` again — and finally show their thinking.** agentty dialled `/v1/chat/completions` for the API-key OpenAI provider, but OpenAI has been narrowing what that endpoint will do for reasoning models: from **GPT-5.4** Chat Completions refuses tool calling at any `reasoning_effort` other than `none`, and **GPT-6-class** models drop chat function calling entirely. agentty always sends tools, so on those models a turn was not merely missing its thinking pane — it was a `400`. Reasoning turns now go out over **`/v1/responses`**, which also means the model's chain-of-thought **survives across tool rounds** (carried as encrypted reasoning state) instead of being re-derived from scratch on every hop, and reasoning summaries stream into the [[Ctrl+R]] pane for the first time on this provider. OpenRouter's Responses endpoint is wired up the same way.
+
+  **Nothing to configure.** There is no new picker row, flag, or config key: pick `gpt-5.4` and it routes to Responses, pick `gpt-4o` and it stays on chat. Models that are chat-only (`claude-*`, `gpt-4.x`) are never dragged onto Responses, where they would `400`. If a host turns out not to serve `/responses` after all, that exact model falls back to chat **by itself** and stays there for the session — so a model line-up that shifts under us degrades quietly instead of stranding you in a failure loop.
+
+### Internal
+- The wire dialect is now a property of the **(provider, model) pair** rather than a static field on the provider row, with `provider::dialect_for()` (`provider/dialect.hpp`) as its single authority. The same question used to be answered in three places that disagreed — the row's `wire` field, Copilot's private `prefers_responses_dialect()`, and the UI's `wire_streams_reasoning_text()` — which is how the `openai` row once shipped labelled `Wire::OpenAIResponses` while dialling chat, teaching the thinking pane to promise output the wire never sent. The transport picking a URL and the UI deciding whether to offer [[Ctrl+R]] now call the *same* function, so that class of drift is unrepresentable. A host advertises its second dialect with one `responses_path` column, checked by `endpoints_consistent()` at compile time exactly like `path`; Copilot's hardcoded table became a thin forward. `api.openai.com` joined the Responses dialect as **one `Site`, zero codec changes**, exercising the claim in `docs/PROVIDER_HETEROGENEITY.md`.
+
 ## [0.7.0] - 2026-09-04
 
 ### Added
