@@ -554,8 +554,8 @@ int main() {
     // just inflates its billed, cached prefix. The lean variant must drop
     // them while keeping the operational discipline it needs.
     {
-        const std::string full = provider::anthropic::default_system_prompt(false);
-        const std::string lean = provider::anthropic::default_system_prompt(true);
+        const std::string full = provider::default_system_prompt(false);
+        const std::string lean = provider::default_system_prompt(true);
         auto has = [](const std::string& s, const char* n) {
             return s.find(n) != std::string::npos;
         };

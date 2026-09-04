@@ -748,7 +748,7 @@ const AgentType& resolve_agent_type(std::string_view t) {
 }
 
 std::string subagent_system_prompt(const AgentType& type) {
-    std::string base = provider::anthropic::default_system_prompt(/*lean=*/true);
+    std::string base = provider::default_system_prompt(/*lean=*/true);
     base += "\n\n<subagent>\n";
     base += std::string{type.role};
     base +=

@@ -1,5 +1,5 @@
 #include "agentty/provider/anthropic/transport.hpp"
-#include "agentty/provider/anthropic/prompt.hpp"
+#include "agentty/provider/prompt.hpp"
 #include "agentty/provider/anthropic/sse.hpp"
 
 

@@ -57,7 +57,7 @@ set(AGENTTY_PROVIDER_SOURCES
     src/provider/anthropic/transport.cpp
     src/provider/anthropic/sse.cpp
     src/provider/anthropic/wire_body.cpp
-    src/provider/anthropic/prompt.cpp
+    src/provider/prompt.cpp
     src/provider/chatgpt/provider.cpp
     src/provider/chatgpt/codex_oauth.cpp
     src/provider/chatgpt/responses.cpp

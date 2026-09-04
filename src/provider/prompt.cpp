@@ -1,9 +1,10 @@
-// agentty::provider::anthropic — system-prompt + memory assembly.
-// Extracted verbatim from transport.cpp; see prompt.hpp for the rationale.
-// Pure string building: CLAUDE.md tiers, learned-memory blocks, the OS/shell
-// environment stanza, and the full vs lean (subagent) instruction text.
+// agentty::provider — the SHARED system-prompt + memory assembly (SSOT for
+// every provider). Moved out of provider::anthropic, where it was misfiled as
+// a Claude-only asset. Pure string building: CLAUDE.md tiers, learned-memory
+// blocks, the OS/shell environment stanza, and the full vs lean (subagent)
+// instruction text, plus the per-provider overlay seam. Baked into the binary.
 
-#include "agentty/provider/anthropic/prompt.hpp"
+#include "agentty/provider/prompt.hpp"
 
 #include "agentty/provider/msg_shared.hpp"   // wire::home_dir / read_capped_file
 #include "agentty/tool/memory_store.hpp"
@@ -18,10 +19,11 @@
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
-namespace agentty::provider::anthropic {
+namespace agentty::provider {
 
 namespace {
 
@@ -515,6 +517,48 @@ std::string default_system_prompt(bool lean) {
     return oss.str();
 }
 
+// ---------------------------------------------------------------------------
+// Per-provider overlay seam.
+//
+// The base prompt above is the single source of truth for every provider. When
+// a specific model needs a divergent nudge (a "pedantic" model that mishandles
+// a construct, a provider whose tool-call dialect wants an extra reminder), add
+// its delta here keyed by canonical provider id — do NOT fork the whole base.
+// The delta is APPENDED after the base, so it always wins on any conflicting
+// instruction (last-writer semantics in a system prompt). Everything stays
+// baked into the binary: no file is read from disk, so there is no
+// prompt-injection surface.
+//
+// To add one, return a non-empty block for the id, e.g.:
+//
+//   if (provider_id == "openai")
+//       return "<provider-notes>\n  - Emit tool arguments as a single JSON "
+//              "object; never wrap them in a markdown code fence.\n"
+//              "</provider-notes>\n";
+//
+// Keep overlays SMALL and additive. If you find yourself rewriting whole
+// sections per provider, that's the signal to promote this to a templated
+// base rather than growing the deltas.
+// ---------------------------------------------------------------------------
+std::string prompt_overlay(std::string_view provider_id) {
+    (void)provider_id;
+    // No provider currently diverges from the shared base. New overlays plug
+    // in here; the seam + composition are already wired so adding one is a
+    // one-line change with no call-site churn.
+    return {};
+}
+
+std::string system_prompt_with_overlay(std::string_view provider_id, bool lean) {
+    std::string base = default_system_prompt(lean);
+    std::string overlay = prompt_overlay(provider_id);
+    if (overlay.empty()) return base;
+    // Ensure a clean seam between the base and the appended delta.
+    if (!base.empty() && base.back() != '\n') base.push_back('\n');
+    base.push_back('\n');
+    base += overlay;
+    return base;
+}
+
 std::vector<ToolSpec> default_tools() {
     std::vector<ToolSpec> out;
     for (const auto& td : tools::wire_tools()) {
@@ -523,4 +567,4 @@ std::vector<ToolSpec> default_tools() {
     return out;
 }
 
-} // namespace agentty::provider::anthropic
+} // namespace agentty::provider

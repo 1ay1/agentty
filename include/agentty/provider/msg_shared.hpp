@@ -180,7 +180,7 @@ namespace agentty::provider::wire {
 // `workspace_root` is passed in (rather than resolved here) so this helper
 // stays self-contained: msg_shared.hpp does NOT pull in the util/fs_helpers
 // machinery, leaving the wire layer free of the ToolError/registry surface.
-// Callers (anthropic/prompt.cpp, openai/transport.cpp, ollama/transport.cpp)
+// Callers (provider/prompt.cpp, openai/transport.cpp, ollama/transport.cpp)
 // already link util and resolve workspace_root() / project_root() from there.
 //
 // Returns "" when ALL tiers (global + root) are missing/empty so callers

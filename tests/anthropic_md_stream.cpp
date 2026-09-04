@@ -99,7 +99,7 @@ int do_capture(const std::string& out_path,
 
     provider::anthropic::Request req;
     req.model         = model.empty() ? std::string{"claude-sonnet-4-5"} : model;
-    req.system_prompt = provider::anthropic::default_system_prompt();
+    req.system_prompt = provider::default_system_prompt();
     req.messages      = t.messages;
     req.max_tokens    = provider::kSafeMaxTokens;
     req.auth          = hdr;

@@ -14,7 +14,7 @@
 #include "agentty/domain/catalog.hpp"
 #include "agentty/domain/conversation.hpp"
 #include "agentty/io/http.hpp"
-#include "agentty/provider/anthropic/prompt.hpp"  // default_system_prompt / default_tools (split out)
+#include "agentty/provider/prompt.hpp"  // default_system_prompt / default_tools (provider-neutral)
 #include "agentty/provider/provider.hpp"   // provider::ToolSpec, provider::Request, lower_shared
 #include "agentty/runtime/msg.hpp"
 
@@ -92,10 +92,10 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink,
 [[nodiscard]] std::string messages_json_string(const Thread& t,
                                                bool include_thinking = false);
 
-// default_system_prompt() + default_tools() now live in prompt.hpp (impl in
+// default_system_prompt() + default_tools() now live in the provider-neutral
 // prompt.cpp). Re-included here so every existing `transport.hpp` consumer
 // still sees the same public surface — the split is internal.
-// (see agentty/provider/anthropic/prompt.hpp)
+// (see agentty/provider/prompt.hpp)
 
 // Fetch available models from Anthropic API. Takes the typed AuthHeader
 // so the model-list endpoint shares the same header-vs-token discipline
