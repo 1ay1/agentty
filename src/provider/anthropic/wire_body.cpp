@@ -260,6 +260,34 @@ void write_tool_result_block(std::string& out, const ToolUse& tc,
         // superseded read always serialises identically — no cache churn.
         json_write_field(out, "content",
             std::string{wire::kSupersededReadPointer}, first);
+    } else if (!tc.done_images().empty()) {
+        // Vision tool_result: Anthropic accepts an ARRAY of content blocks for a
+        // tool_result, so emit the text (aged-budgeted) followed by one image
+        // block per surfaced image. The model reads them in order — text note
+        // first, then the picture(s). Image bytes never fade (they're the
+        // point of the call), only the text does.
+        std::string capped = wire::cap_tool_result_aged(raw_output, recency_rank, is_error);
+        scrubbed = scrub_utf8(capped);
+        if (!first) out.push_back(',');
+        first = false;
+        out.append("\"content\":[");
+        bool block_first = true;
+        // Text block (skip if the tool produced no text at all).
+        if (!scrubbed.empty()) {
+            out.push_back('{');
+            bool tf = true;
+            json_write_field(out, "type", "text", tf);
+            json_write_field(out, "text", scrubbed, tf);
+            out.push_back('}');
+            block_first = false;
+        }
+        for (const auto& img : tc.done_images()) {
+            if (img.bytes.empty()) continue;
+            if (!block_first) out.push_back(',');
+            block_first = false;
+            write_image_block(out, img, CachePin::NotPinned);
+        }
+        out.push_back(']');
     } else {
         // Pick the wire budget from recency. Recent results (and ALL error
         // results, at any age) keep the full budget so the model can act on

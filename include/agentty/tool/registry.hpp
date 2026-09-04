@@ -24,6 +24,9 @@ struct ToolOutput {
     // Additional file changes for MULTI-FILE tools (replace); `change` above is
     // the single-file case. Both feed the diff-review queue.
     std::vector<FileChange> changes;
+    // Images a tool surfaced for a vision model (read on an image file). These
+    // become image blocks in the turn's tool_result; empty for text tools.
+    std::vector<ImageContent> images;
 };
 
 // Typed error kind. Lets the UI color / retry / suggest based on category

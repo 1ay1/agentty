@@ -1205,7 +1205,8 @@ Cmd<Msg> run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args,
                     // changes — into the reducer for diff-review.
                     dispatch(ToolExecOutput{id, std::move(result->text),
                                             std::move(result->change),
-                                            std::move(result->changes)});
+                                            std::move(result->changes),
+                                            std::move(result->images)});
                 } else {
                     dispatch(ToolExecOutput{id,
                         std::unexpected(std::move(result).error())});

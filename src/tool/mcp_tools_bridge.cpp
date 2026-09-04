@@ -377,6 +377,17 @@ ExecResult decode_result(const std::string& tool_name, ::mcp::cap::Result r) {
         out.changes.push_back(std::move(fc));
     }
     if (!out.changes.empty()) out.change = out.changes.front();
+
+    // Images the tool surfaced (read on an image file): decode the base64 the
+    // tool body stashed in structured meta back to raw bytes and map onto the
+    // host ImageContent. These become image blocks in this call's tool_result
+    // for a vision model; a non-vision model just sees the [image ...] note in
+    // out.text, so nothing here needs a capability check — the wire layer drops
+    // them for models that can't see (see the vision gate at send time).
+    for (auto& im : mt::read_images(r))
+        out.images.push_back(ImageContent{std::move(im.media_type),
+                                          std::move(im.bytes)});
+
     (void)tool_name;
     return out;
 }

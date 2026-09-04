@@ -352,8 +352,11 @@ struct ToolExecOutput {
     // it supersedes `change` for queuing; `change` remains its first element
     // for single-file compatibility.
     std::vector<FileChange> changes;
+    // Images a tool surfaced for a vision model (read on an image file). The
+    // reducer stores them on ToolUse::Done so the wire renders them as image
+    // blocks in this call's tool_result. Empty for text-only tools.
+    std::vector<ImageContent> images;
 };
-// Live progress snapshot from a running tool (e.g. bash stdout+stderr so far).
 // Contains the FULL accumulated output, not a delta — the update handler can
 // assign unconditionally without maintaining append state. Coalesced at the
 // subprocess boundary (~100 ms) so a chatty command doesn't flood the event

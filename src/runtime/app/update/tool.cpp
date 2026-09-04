@@ -286,7 +286,8 @@ void resync_live_tool_viewer(Model& m) {
 void apply_tool_output(Model& m, const ToolCallId& id,
                        std::expected<std::string, tools::ToolError>&& result,
                        std::optional<FileChange>&& change,
-                       std::vector<FileChange>&& changes) {
+                       std::vector<FileChange>&& changes,
+                       std::vector<ImageContent>&& images) {
     with_live_tool(m, id, [&](ToolUse& tc) {
         // Idempotent: a tool already in a terminal state
         // (Done / Failed / Rejected) keeps that state. Realistic
@@ -315,7 +316,7 @@ void apply_tool_output(Model& m, const ToolCallId& id,
         auto started = tc.started_at();
         if (result) {
             tc.status = ToolUse::Done{started, now,
-                clamp_output(std::move(*result))};
+                clamp_output(std::move(*result)), std::move(images)};
         } else {
             // Render typed error as "[kind] detail" so the category
             // is visible in tool-card / history without losing the
@@ -501,7 +502,7 @@ Step tool_update(Model m, msg::ToolMsg tm) {
                             sync_todo_state_from_args(m, tc.args);
             }
             apply_tool_output(m, e.id, std::move(e.result), std::move(e.change),
-                              std::move(e.changes));
+                              std::move(e.changes), std::move(e.images));
             // If the Ctrl+O viewer is open, refresh it so the Live row settles
             // into a finished entry the instant this tool completes.
             resync_live_tool_viewer(m);

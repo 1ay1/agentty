@@ -33,6 +33,15 @@ enum class Role : std::uint8_t { User, Assistant, System };
     return "?";
 }
 
+// A vision image carried by a User message OR a tool_result. Bytes are held
+// RAW (not base64) so the in-memory Thread stays compact; encoding happens at
+// the JSON write boundary. Persisted on disk as base64 so a loaded thread can
+// be re-sent on a follow-up turn without re-reading the source file.
+struct ImageContent {
+    std::string media_type;  // "image/png", "image/jpeg", "image/webp", "image/gif"
+    std::string bytes;       // raw image bytes, NOT base64
+};
+
 // `ToolUse::Status` is a sum type. Each alternative owns the data that is
 // actually meaningful in that state — `Running` holds the live progress
 // buffer, `Done`/`Failed` hold the final output, terminal states hold the
@@ -72,6 +81,10 @@ struct ToolUse {
         std::chrono::steady_clock::time_point started_at{};
         std::chrono::steady_clock::time_point finished_at{};
         std::string output;
+        // Images a tool chose to surface to a vision model (e.g. `read` on an
+        // image file). Raw bytes; the wire encodes them as image blocks inside
+        // this call's tool_result, right after the text. Empty for text tools.
+        std::vector<ImageContent> images;
     };
     struct Failed {
         std::chrono::steady_clock::time_point started_at{};
@@ -183,6 +196,14 @@ struct ToolUse {
         if (auto* f = std::get_if<Failed>(&status)) return f->output;
         return empty;
     }
+    // Images a completed tool surfaced (read on an image file). Empty for
+    // every non-Done state and every text tool. The wire renders these as
+    // image blocks inside this call's tool_result.
+    [[nodiscard]] const std::vector<ImageContent>& done_images() const noexcept {
+        static const std::vector<ImageContent> empty;
+        if (auto* d = std::get_if<Done>(&status)) return d->images;
+        return empty;
+    }
     [[nodiscard]] const std::string& progress_text() const noexcept {
         static const std::string empty;
         if (auto* r = std::get_if<Running>(&status)) return r->progress_text;
@@ -254,18 +275,6 @@ struct ToolUse {
         mix(static_cast<std::uint64_t>(status.index()));
         return k;
     }
-};
-
-/// Image content attached to a User message. Serialized on the wire
-/// as an Anthropic image content block — `{"type":"image","source":
-/// {"type":"base64","media_type":"...","data":"..."}}`. Bytes are
-/// stored raw in memory (NOT base64) so the in-RAM representation
-/// stays compact; encoding happens at the JSON write boundary.
-/// Persisted on disk as base64 so a loaded thread can be re-sent on
-/// a follow-up turn without re-asking the user for the file.
-struct ImageContent {
-    std::string media_type;  // "image/png", "image/jpeg", "image/webp", "image/gif"
-    std::string bytes;       // raw image bytes, NOT base64
 };
 
 struct Message {
