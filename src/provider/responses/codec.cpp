@@ -101,15 +101,12 @@ json build_input(const provider::Request& req) {
                 content.push_back({
                     {"type", "input_text"}, {"text", scrub_utf8(text)},
                 });
-            for (const auto& img : m.images) {
-                if (img.bytes.empty()) continue;
-                const std::string_view media_type = img.media_type.empty()
-                    ? std::string_view{"image/png"}
-                    : std::string_view{img.media_type};
+            for (const auto* imgp : wire::wire_message_images(m)) {
+                const auto& img = *imgp;
                 content.push_back({
                     {"type", "input_image"},
-                    {"image_url", "data:" + std::string{media_type} + ";base64,"
-                                    + util::base64_encode(img.bytes)},
+                    {"image_url", "data:" + std::string{wire::wire_media_type(img)}
+                                    + ";base64," + util::base64_encode(img.bytes)},
                 });
             }
             if (content.empty()) continue;
@@ -174,11 +171,38 @@ json build_input(const provider::Request& req) {
                     ? std::string{wire::kSupersededReadPointer}
                     : wire::cap_tool_result_aged(
                           tc.output(), recency_rank, is_error);
-                input.push_back({
-                    {"type", "function_call_output"},
-                    {"call_id", tc.id.value},
-                    {"output", scrub_utf8(out)},
-                });
+                // Vision tool_result: when the tool surfaced images (read on an
+                // image file), the Responses API accepts `output` as an ARRAY
+                // of content parts — the text followed by input_image parts —
+                // instead of a plain string. Same SSOT selector as every other
+                // dialect; only the JSON shape here is OpenAI-specific.
+                auto imgs = wire::wire_tool_result_images(tc);
+                if (imgs.empty()) {
+                    input.push_back({
+                        {"type", "function_call_output"},
+                        {"call_id", tc.id.value},
+                        {"output", scrub_utf8(out)},
+                    });
+                } else {
+                    json parts = json::array();
+                    if (!out.empty())
+                        parts.push_back({{"type", "output_text"},
+                                         {"text", scrub_utf8(out)}});
+                    for (const auto* imgp : imgs) {
+                        const auto& img = *imgp;
+                        parts.push_back({
+                            {"type", "input_image"},
+                            {"image_url",
+                             "data:" + std::string{wire::wire_media_type(img)}
+                                 + ";base64," + util::base64_encode(img.bytes)},
+                        });
+                    }
+                    input.push_back({
+                        {"type", "function_call_output"},
+                        {"call_id", tc.id.value},
+                        {"output", std::move(parts)},
+                    });
+                }
             }
         }
     }

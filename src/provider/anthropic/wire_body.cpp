@@ -71,14 +71,10 @@ namespace {
 }
 
 // True iff the message carries at least one image with non-empty bytes.
-// An empty-bytes ImageContent (e.g. a draft attachment whose body was
-// already drained, leaked into a thread it doesn't belong to) must NOT
-// drive the message-emission decision: serializing it produces an empty
-// base64 "data" field that 400s the whole request.
+// Delegates to the shared SSOT (wire::has_wire_message_image) so the
+// empty-bytes skip + role gate live in ONE place across all dialects.
 [[nodiscard]] inline bool has_wire_image(const Message& m) noexcept {
-    for (const auto& img : m.images)
-        if (!img.bytes.empty()) return true;
-    return false;
+    return wire::has_wire_message_image(m);
 }
 
 void json_write_escaped_string(std::string& out, std::string_view s) {
@@ -185,9 +181,7 @@ void write_image_block(std::string& out, const ImageContent& img,
     first = false;
     out.append(R"("source":{"type":"base64",)");
     out.append(R"("media_type":)");
-    json_write_escaped_string(out,
-        img.media_type.empty() ? std::string_view{"image/png"}
-                               : std::string_view{img.media_type});
+    json_write_escaped_string(out, wire::wire_media_type(img));
     out.append(R"(,"data":)");
     json_write_escaped_string(out, util::base64_encode(img.bytes));
     out.push_back('}');
@@ -260,7 +254,7 @@ void write_tool_result_block(std::string& out, const ToolUse& tc,
         // superseded read always serialises identically — no cache churn.
         json_write_field(out, "content",
             std::string{wire::kSupersededReadPointer}, first);
-    } else if (!tc.done_images().empty()) {
+    } else if (!wire::wire_tool_result_images(tc).empty()) {
         // Vision tool_result: Anthropic accepts an ARRAY of content blocks for a
         // tool_result, so emit the text (aged-budgeted) followed by one image
         // block per surfaced image. The model reads them in order — text note

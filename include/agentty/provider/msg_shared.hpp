@@ -68,6 +68,66 @@ namespace agentty::provider::wire {
     return m.role == Role::Assistant && !m.tool_calls.empty();
 }
 
+// ── Wire IMAGE policy — the single source of truth ──────────────────────────
+//
+// Every wire dialect (Anthropic Messages, OpenAI Responses, OpenAI-chat/NDJSON)
+// encodes images in its OWN JSON shape — that difference is legitimate and
+// stays per-dialect. What must NOT diverge is the POLICY around the bytes:
+// which images a message/tool contributes, the empty-bytes skip, and the
+// media-type default. Those decisions lived (badly) as copy-pasted lines in
+// three files, which is exactly how tool-result images shipped on the Anthropic
+// wire but silently not the other two. These helpers are that policy, once.
+//
+//   wire_media_type   — the media_type to emit ('' → the safe image/png default)
+//   wire_message_images   — the images a USER message contributes
+//   wire_tool_result_images — the images a COMPLETED tool contributes
+//                             (read on an image file → ToolUse::Done.images)
+//
+// Pointers (never copies) so a multi-MiB screenshot isn't duplicated per turn.
+// A dialect that forgets tool-result images is now a VISIBLE omission (it
+// doesn't call wire_tool_result_images) rather than a silent drift.
+
+[[nodiscard]] inline std::string_view wire_media_type(const ImageContent& img) noexcept {
+    return img.media_type.empty() ? std::string_view{"image/png"}
+                                  : std::string_view{img.media_type};
+}
+
+// True iff the image has real bytes. An empty-bytes ImageContent (a drained
+// draft attachment that leaked into a thread) must never reach the wire: it
+// serializes to an empty base64 "data" that 400s the whole request.
+[[nodiscard]] inline bool wire_image_sendable(const ImageContent& img) noexcept {
+    return !img.bytes.empty();
+}
+
+// The images a USER message contributes to the wire (skipping empties).
+[[nodiscard]] inline std::vector<const ImageContent*>
+wire_message_images(const Message& m) {
+    std::vector<const ImageContent*> out;
+    if (m.role != Role::User) return out;
+    for (const auto& img : m.images)
+        if (wire_image_sendable(img)) out.push_back(&img);
+    return out;
+}
+
+// The images a COMPLETED tool contributes to its tool_result (skipping
+// empties). Non-empty only when a tool surfaced a picture (read on an image).
+[[nodiscard]] inline std::vector<const ImageContent*>
+wire_tool_result_images(const ToolUse& tc) {
+    std::vector<const ImageContent*> out;
+    for (const auto& img : tc.done_images())
+        if (wire_image_sendable(img)) out.push_back(&img);
+    return out;
+}
+
+// True iff the message has at least one sendable USER image — the message-
+// emission gate every dialect used to open-code as a `has_images` loop.
+[[nodiscard]] inline bool has_wire_message_image(const Message& m) noexcept {
+    if (m.role != Role::User) return false;
+    for (const auto& img : m.images)
+        if (wire_image_sendable(img)) return true;
+    return false;
+}
+
 // User home directory, portably. HOME (POSIX) first, USERPROFILE (Windows)
 // second; empty path when neither is set.
 [[nodiscard]] inline std::filesystem::path home_dir() noexcept {

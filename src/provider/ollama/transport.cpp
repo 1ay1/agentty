@@ -1209,10 +1209,7 @@ json build_messages(const std::vector<Message>& msgs, bool json_protocol) {
     for (const auto& m : msgs) {
         const bool has_text  = !m.text.empty();
         const bool has_tools = is_assistant_with_results(m);
-        bool has_images = false;
-        if (m.role == Role::User)
-            for (const auto& img : m.images)
-                if (!img.bytes.empty()) { has_images = true; break; }
+        const bool has_images = wire::has_wire_message_image(m);
 
         // ── JSON-protocol round-trip: assistant tool call rendered as the
         //    model's own {tool_name,tool_args} object, result as a user turn.
@@ -1258,9 +1255,8 @@ json build_messages(const std::vector<Message>& msgs, bool json_protocol) {
             msg["content"] = scrub_utf8(wire_text);
             if (has_images) {
                 json imgs = json::array();
-                for (const auto& img : m.images)
-                    if (!img.bytes.empty())
-                        imgs.push_back(agentty::util::base64_encode(img.bytes));
+                for (const auto* imgp : wire::wire_message_images(m))
+                    imgs.push_back(agentty::util::base64_encode(imgp->bytes));
                 if (!imgs.empty()) msg["images"] = std::move(imgs);
             }
             if (has_tools) {
@@ -1293,11 +1289,20 @@ json build_messages(const std::vector<Message>& msgs, bool json_protocol) {
                 } else {
                     out = wire::cap_tool_result_aged(out, recency_rank, is_error);
                 }
-                arr.push_back({
+                json tool_msg{
                     {"role", "tool"},
                     {"tool_name", tc.name.value},
                     {"content", scrub_utf8(out)},
-                });
+                };
+                // Vision tool_result: ollama's /api/chat accepts an `images`
+                // array on ANY message, including a tool result. Same SSOT
+                // selector as the other dialects; the base64 array shape is
+                // ollama-specific.
+                json tool_imgs = json::array();
+                for (const auto* imgp : wire::wire_tool_result_images(tc))
+                    tool_imgs.push_back(agentty::util::base64_encode(imgp->bytes));
+                if (!tool_imgs.empty()) tool_msg["images"] = std::move(tool_imgs);
+                arr.push_back(std::move(tool_msg));
             }
         }
     }
