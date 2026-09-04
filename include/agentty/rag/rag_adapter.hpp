@@ -166,6 +166,11 @@ public:
     // Single-flight; returns immediately.
     void warm_async();
 
+    // Stop any in-flight background warm PROMPTLY and join it. Call this early
+    // in process teardown (before static destruction) so ^C doesn't stall on
+    // a multi-second embed pass. Idempotent; safe if no warm is running.
+    void shutdown();
+
     // Replace the live configuration. Sources/pipeline/fusion changes that
     // alter the corpus or persisted-index identity force a rebuild on the next
     // retrieve(); pure ranking toggles take effect immediately. Thread-safe;

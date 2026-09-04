@@ -313,6 +313,14 @@ void rag_apply_settings(const store::RagConfig& s) {
     } catch (...) { /* best-effort */ }
 }
 
+// Prompt teardown of the retriever's background warm. Without this the warm
+// jthread is only joined when the function-local `static Retriever` is
+// destroyed at process exit (after main returns), which blocked ^C for 4–10 s
+// while an in-flight embed pass finished. Called early in main()'s teardown.
+void rag_shutdown() {
+    try { shared_retriever().shutdown(); } catch (...) { /* best-effort */ }
+}
+
 bool proactive_enabled() {
     // Shell override wins for one-off runs; otherwise the live config (which
     // folds in the persisted RAG picker) is the source of truth. Default off

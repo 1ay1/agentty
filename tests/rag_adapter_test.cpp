@@ -376,3 +376,56 @@ TEST_CASE("rag adapter") {
     fs::current_path(old_cwd);
     fs::remove_all(tmp);
 }
+
+// Regression: Retriever::shutdown() must interrupt an in-flight background
+// warm PROMPTLY. Before the cooperative-cancel fix, the warm jthread ignored
+// its stop_token (captured [state], not [stop_token]) and was only joined at
+// static destruction, blocking ^C for 4–10 s while the embed pass finished.
+TEST_CASE("rag shutdown interrupts warm promptly") {
+    namespace fs = std::filesystem;
+    auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+    auto tmp = fs::temp_directory_path() /
+               ("agentty_rag_shutdown_" + std::to_string(nonce));
+    fs::remove_all(tmp);
+    fs::create_directories(tmp);
+    auto old_cwd = fs::current_path();
+    fs::current_path(tmp);
+
+    // A large-ish corpus so a real warm has work to do (and thus a window in
+    // which cancellation matters).
+    fs::create_directories(tmp / "docs");
+    for (int f = 0; f < 8; ++f) {
+        std::ofstream o(tmp / "docs" / ("doc" + std::to_string(f) + ".md"));
+        for (int i = 0; i < 400; ++i)
+            o << "# section " << f << "-" << i
+              << "\nsome searchable prose about topic " << (i % 7) << ".\n\n";
+    }
+
+    {
+        agentty::rag::Retriever r;
+        agentty::rag::Config cfg;
+        cfg.docs_root = (tmp / "docs").string();
+        r.apply_config(cfg);
+
+        // Kick the background warm, then immediately ask it to stop. The join
+        // inside shutdown() must return quickly because the worker now polls
+        // the cancel flag between files / before the embed build.
+        r.warm_async();
+        const auto t0 = std::chrono::steady_clock::now();
+        r.shutdown();
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - t0).count();
+        // Generous ceiling: even one in-flight embed batch is well under this;
+        // the OLD bug blocked for the whole multi-second corpus embed.
+        check(ms < 2500, "shutdown() returns promptly, not after a full warm");
+
+        // shutdown() is idempotent and leaves the retriever usable.
+        r.shutdown();
+        r.warm_async();
+        r.shutdown();
+        check(true, "re-warm + re-shutdown after a cancel is safe");
+    }
+
+    fs::current_path(old_cwd);
+    fs::remove_all(tmp);
+}

@@ -105,6 +105,8 @@ namespace agentty::tools {
 std::string run_one_shot(const std::string& prompt,
                          const std::string& agent_type,
                          bool& is_error);
+// Stops the RAG retriever's background warm at teardown (see call site below).
+void rag_shutdown();
 }
 
 namespace {
@@ -1385,6 +1387,14 @@ int main(int argc, char** argv) {
     // destruction) is what makes quit feel instant instead of hanging until
     // the second Ctrl-C.
     mcp::release_servers();
+
+    // Stop the RAG retriever's background warm NOW, not at static destruction.
+    // Its warm worker (a jthread that embeds the whole corpus) is otherwise
+    // joined when the function-local `static Retriever` in mcp_tools_backends
+    // is destroyed AFTER main returns — blocking ^C for 4–10 s on a large
+    // corpus. rag_shutdown() trips the cooperative cancel flag + joins the
+    // now-interruptible worker, so exit stays instant.
+    tools::rag_shutdown();
 
     // Join any in-flight TLS prewarm dial BEFORE the process tears down. On a
     // fast exit (e.g. immediate pipe-stdin EOF under MSYS2/mintty) the detached

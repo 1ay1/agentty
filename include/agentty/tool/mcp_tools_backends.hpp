@@ -38,6 +38,12 @@ void install_host_backends(::mcp::tools::HostServices& svc);
 // to the process-wide retriever. Rebuilds indexes lazily. Never throws.
 void rag_apply_settings(const store::RagConfig& cfg);
 
+// Stop the process-wide retriever's in-flight background warm and reclaim its
+// worker. Call EARLY in teardown (before static destruction) so ^C is prompt:
+// otherwise the retriever's warm jthread is joined at static-dtor time, after
+// main() returns, and blocks the exit on a multi-second embed pass. Idempotent.
+void rag_shutdown();
+
 // Whether the proactive pre-turn injection is enabled, per the live config
 // (persisted RAG picker), with AGENTTY_RAG_PROACTIVE as a shell override.
 [[nodiscard]] bool proactive_enabled();

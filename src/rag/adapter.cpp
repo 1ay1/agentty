@@ -669,6 +669,17 @@ struct Retriever::Impl {
 
     std::atomic<bool> warming{false};
 
+    // Cooperative-cancellation flag for the warm worker. Set by the worker's
+    // std::stop_token (tripped when the jthread is re-seated or destroyed) AND
+    // by Retriever::shutdown() at process teardown. refresh_docs()/reindex()
+    // poll warm_cancelled() at every loop boundary so a multi-second embed
+    // pass unwinds PROMPTLY instead of blocking warmer.join() — which used to
+    // run at STATIC destruction (after main returns) and stall ^C for 4–10 s.
+    std::atomic<bool> warm_stop{false};
+    [[nodiscard]] bool warm_cancelled() const noexcept {
+        return warm_stop.load(std::memory_order_relaxed);
+    }
+
     // Optional LLM seam for HyDE / multi-query (agentty's provider).
     Retriever::Generator generator;
 
@@ -958,6 +969,7 @@ struct Retriever::Impl {
         // may involve server I/O. Failures are isolated per resource.
         if (cfg.mcp_resources) {
             for (const auto& r : ::agentty::mcp::mcp_resources()) {
+                if (warm_cancelled()) return;
                 std::string err;
                 auto text = ::agentty::mcp::mcp_read_resource(r.uri, err);
                 if (!text || text->empty()) continue;
@@ -967,6 +979,9 @@ struct Retriever::Impl {
             }
         }
 
+        // The embed pass below can take seconds on a large corpus; bail here
+        // so process teardown / a re-seated warm doesn't block on it.
+        if (warm_cancelled()) return;
         auto built = engine.build();
         if (!built)
             ::agentty::util::dbglog("rag.build", std::string(::rag::to_string(built.error().code)));
@@ -1275,6 +1290,7 @@ struct Retriever::Impl {
             if (now == manifest.end() || now->second != old_stamp) remove_uri(path);
         }
         for (const auto& [path, stamp] : manifest) {
+            if (warm_cancelled()) return;
             auto old = docs_files.find(path);
             if (old != docs_files.end() && old->second == stamp) continue;
             auto loaded = ::rag::loaders::load_file(root / fs::path{path});
@@ -1287,6 +1303,7 @@ struct Retriever::Impl {
                              std::move(loaded->text),
                              loaded->meta, loaded->title);
         }
+        if (warm_cancelled()) return;
         auto built = engine.build();
         if (!built) {
             reindex(root, /*skip_docs=*/false);
@@ -1837,7 +1854,15 @@ void Retriever::warm_async() {
     {
         std::lock_guard<std::mutex> lk(impl_->mu);
         if (impl_->warmer.joinable()) impl_->warmer.join();
-        impl_->warmer = std::jthread([state] {
+        // Fresh warm pass: clear any stale cancellation from a prior worker.
+        impl_->warm_stop.store(false, std::memory_order_relaxed);
+        impl_->warmer = std::jthread([state](std::stop_token st) {
+            // Bridge the jthread's stop_token to the atomic flag the deep
+            // index functions poll. request_stop() (on re-seat or ~Impl) now
+            // actually interrupts the embed pass instead of being ignored.
+            std::stop_callback on_stop(st, [state] {
+                state->warm_stop.store(true, std::memory_order_relaxed);
+            });
             try {
                 std::lock_guard<std::mutex> lock(state->mu);
                 auto root = resolve_docs_root(state->cfg.docs_root);
@@ -1847,6 +1872,25 @@ void Retriever::warm_async() {
             } catch (...) { /* best-effort */ }
             state->warming.store(false);
         });
+    }
+}
+
+// Stop any in-flight warm promptly and reclaim the worker. Called early in
+// process teardown so ^C is instant. Deliberately does NOT take state->mu: the
+// warm worker holds mu for its whole run, so locking here would DEADLOCK — we
+// only touch the atomics + the jthread handle, both safe to poke concurrently.
+void Retriever::shutdown() {
+    // 1. Trip the cooperative flag so refresh_docs()/reindex() bail at their
+    //    next loop boundary (and before the expensive engine.build()).
+    impl_->warm_stop.store(true, std::memory_order_relaxed);
+    // 2. Ask the jthread to stop (fires the stop_callback too) and reclaim it.
+    //    request_stop() + join is bounded now that the worker observes the
+    //    flag; a wedged blocking embed can't stall teardown because the flag
+    //    is checked between network batches, and the worst case is one
+    //    in-flight batch — far short of the old full-corpus 4–10 s hang.
+    if (impl_->warmer.joinable()) {
+        impl_->warmer.request_stop();
+        impl_->warmer.join();
     }
 }
 
@@ -2248,6 +2292,7 @@ Retrieval Retriever::retrieve_code(const std::string& /*query*/, int /*k*/) {
 
 bool Retriever::warm() const { return true; }  // nothing to build → always warm
 void Retriever::warm_async() {}
+void Retriever::shutdown() {}
 void Retriever::apply_config(const Config& /*cfg*/) {}
 Config Retriever::snapshot_config() const { return Config{}; }
 
