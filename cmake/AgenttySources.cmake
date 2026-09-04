@@ -75,6 +75,7 @@ set(AGENTTY_PROVIDER_SOURCES
     # Registry predicates that need a provider's own knowledge (the
     # model-aware reasoning-text answer consults Copilot's dialect table).
     src/provider/registry.cpp
+    src/provider/dialect.cpp
     src/provider/credentials.cpp
     src/provider/auth_state.cpp
     src/provider/prompt_policy.cpp

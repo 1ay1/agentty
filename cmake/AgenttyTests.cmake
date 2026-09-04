@@ -35,6 +35,7 @@ set(_AGENTTY_CONSOLIDATED
     capability_conformance_test
     ollama_transport_test openai_transport_test code_block_extract_test
     command_palette_test compaction_threshold_test fsm_test model_caps_test
+    dialect_test
     param_tag_repair_test sandbox_escape_test scope_test table_render_test
     ssrf_guard_test render_key_coverage_test reasoning_render_test
     plugin_config_test skills_engine_test slash_commands_test fuzzy_match_smoke

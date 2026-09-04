@@ -181,6 +181,26 @@ struct ProviderDescriptor {
     std::uint16_t    port = 443;
     bool             use_tls = true;
 
+    // ── The SECOND dialect (optional) ────────────────────────────────
+    // A host is not always ONE dialect. `wire`/`path` above is the row's
+    // DEFAULT; this is the Responses path on the SAME host, when it has
+    // one. Empty = this host speaks its default dialect only.
+    //
+    // Why this column has to exist: OpenAI's own docs now say that from
+    // GPT-5.4 on, Chat Completions does NOT support tool calling with a
+    // reasoning_effort other than `none` — and GPT-6-class models drop
+    // chat function-calling entirely. So for a reasoning agent the
+    // dialect is not a style preference, it is the difference between a
+    // working turn and a 400. A host therefore needs to advertise BOTH
+    // paths and let the per-model predicate choose.
+    //
+    // Copilot proved the shape before it was a column: its row says
+    // OpenAIChat while `prefers_responses_dialect()` quietly re-routed
+    // gpt-5* and mai-code-* to /responses — the row was lying again, just
+    // in a function instead of a field. With this column the lie has
+    // somewhere true to live, and `endpoints_consistent()` checks it.
+    std::string_view responses_path;   // "" = no Responses endpoint here.
+
     // Ollama's NATIVE /api/chat protocol (NDJSON, structured tool_calls)
     // instead of its OpenAI-compat shim, which makes weak local models
     // leak tool calls as raw JSON in `content`.
@@ -269,15 +289,20 @@ inline constexpr std::array<ProviderDescriptor, 15> kProviders{{
      .route = RouteSlot::Anthropic},
 
     {.id = "openai", .label = "OpenAI", .blurb = "GPT / Codex — api.openai.com",
-     // Chat Completions, NOT Responses. The row used to claim
-     // Wire::OpenAIResponses while dialling /v1/chat/completions — the label
-     // was decorative (nothing dispatched on it) so the lie went unnoticed and
-     // made the reasoning-text UI over-promise. Wire and path must agree.
+     // DEFAULT is Chat Completions; `responses_path` below carries the second
+     // dialect. The row once claimed Wire::OpenAIResponses while dialling
+     // /v1/chat/completions — the label was decorative (nothing dispatched on
+     // it) so the lie went unnoticed and made the reasoning-text UI
+     // over-promise. Wire and path must agree; the SECOND path is now a
+     // column of its own rather than a fib in the first one.
      .wire = Wire::OpenAIChat, .lifetime = Lifetime::PerCall,
      .auth = AuthStyle::ApiKey,
      .auth_env = {"OPENAI_API_KEY", "CODEX_API_KEY", ""},
      .host = "api.openai.com", .path = "/v1/chat/completions",
      .models_path = "/v1/models",
+     // Reasoning models are routed here by dialect_for(). Not cosmetic:
+     // GPT-5.4+ rejects tool calls on chat with a real reasoning effort.
+     .responses_path = "/v1/responses",
      .default_model = "gpt-4o"},
 
     {.id = "chatgpt", .label = "ChatGPT",
@@ -302,6 +327,12 @@ inline constexpr std::array<ProviderDescriptor, 15> kProviders{{
      .prewarm_host = "api.githubcopilot.com", .oauth_native = true,
      .host = "api.githubcopilot.com", .path = "/chat/completions",
      .models_path = "/models",
+     // Copilot was ALWAYS mixed — gpt-5*/mai-code-* only work on /responses.
+     // That fact used to live solely inside prefers_responses_dialect();
+     // now the endpoint it implies is on the row where it can be checked.
+     // (The live host is overridden per-session from endpoints.api; this is
+     // the path, which is stable across Individual/Business/Enterprise.)
+     .responses_path = "/responses",
      .device_login = true, .token_in_transport = true,
      .default_model = "gpt-4o",
      .route = RouteSlot::Copilot},
@@ -332,7 +363,10 @@ inline constexpr std::array<ProviderDescriptor, 15> kProviders{{
      .auth = AuthStyle::ApiKey,
      .auth_env = {"OPENROUTER_API_KEY", "OPENAI_API_KEY", ""},
      .host = "openrouter.ai", .path = "/api/v1/chat/completions",
-     .models_path = "/api/v1/models"},
+     .models_path = "/api/v1/models",
+     // OpenRouter shipped an OpenAI-compatible Responses endpoint; upstream
+     // reasoning models behind it need the same routing as first-party.
+     .responses_path = "/api/v1/responses"},
 
     {.id = "together", .label = "Together",
      .blurb = "Open models on together.ai",
@@ -452,6 +486,20 @@ namespace detail {
             && !ends_with(p.path, "/chat/completions")) return false;
         if (p.wire == Wire::OpenAIResponses
             && !ends_with(p.path, "/responses")) return false;
+        // The second dialect gets the SAME treatment as the first: if a row
+        // advertises a Responses path it must actually end in /responses,
+        // and it must not duplicate the primary path (a row claiming both
+        // dialects on one URL is the drift this column exists to kill).
+        if (!p.responses_path.empty()) {
+            if (!ends_with(p.responses_path, "/responses")) return false;
+            if (p.responses_path == p.path) return false;
+            // Only meaningful on a host we actually dial over HTTP.
+            if (p.host.empty()) return false;
+        }
+        // A row whose DEFAULT is already Responses must not also carry a
+        // secondary Responses path — there'd be two answers to one question.
+        if (p.wire == Wire::OpenAIResponses && !p.responses_path.empty())
+            return false;
     }
     return true;
 }

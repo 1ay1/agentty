@@ -18,6 +18,7 @@
 #include <nlohmann/json.hpp>
 
 #include "agentty/provider/copilot/copilot_oauth.hpp"
+#include "agentty/provider/dialect.hpp"
 #include "agentty/provider/openai/transport.hpp"
 #include "agentty/provider/responses/responses.hpp"
 #include "agentty/io/http.hpp"
@@ -121,7 +122,9 @@ bool auto_chat_compatible(const std::string& id) {
 // So Responses is used when we hold an Auto session that blesses the model.
 // Everything else keeps the Chat path — no guessing, no hardcoded allowlist
 // beyond what the SERVER told us it can route.
-enum class Dialect { Chat, Responses };
+//
+// The Chat/Responses enum itself now lives in provider/dialect.hpp — it was
+// duplicated here back when Copilot was the only mixed-dialect host.
 
 [[nodiscard]] bool session_lists_model(const AutoSession& as,
                                        const std::string& model) {
@@ -639,9 +642,18 @@ std::string default_model() {
 // learned support (called after a turn records a 400/200 outcome).
 // ── Dialect selection (public; see provider.hpp for the measured table) ──
 bool prefers_responses_dialect(const std::string& model) {
-    // Responses-only models must use it; gpt-5* should, because that is the
-    // only dialect on which Copilot returns reasoning TEXT.
-    return chat_dialect_unsupported(model) || wants_reasoning_text(model);
+    // Copilot no longer owns this answer. It was the FIRST mixed-dialect host,
+    // so the table lived here — but "which dialect does this model speak" is
+    // a question about OpenAI-family models generally, and keeping a private
+    // copy meant the registry row said OpenAIChat while this function quietly
+    // routed gpt-5* elsewhere. That is the same drift the mislabelled `openai`
+    // row shipped, just hidden in a function instead of a field.
+    //
+    // The shared predicate knows the model families; what remains genuinely
+    // Copilot-specific is the RUNTIME fact that this account's chat endpoint
+    // rejected a model (learned from a live 400), so that is OR-ed on top.
+    if (chat_dialect_unsupported(model)) return true;
+    return dialect_for("copilot", model) == Dialect::Responses;
 }
 
 bool chat_dialect_unsupported(const std::string& model) {

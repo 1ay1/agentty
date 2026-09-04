@@ -905,16 +905,26 @@ TEST_CASE("wire dialect reasoning-text transmissibility") {
     // No model named ⇒ the coarse provider-level question ("could ANY model
     // here show reasoning?"), which for Copilot is now yes.
     CHECK(wire_streams_reasoning_text("copilot"));
-    // agentty's `openai` row dials api.openai.com/v1/chat/completions — the
-    // SAME Chat Completions dialect — so it hides reasoning text for the
-    // same reason. This assertion used to say the opposite: the row was
-    // mislabelled Wire::OpenAIResponses, and since the predicate only
-    // checked the dialect it answered "yes" by accident. The row now
-    // carries its real path (registry.hpp), a static_assert pins wire and
-    // path together, and this test pins the user-visible consequence.
-    // The genuinely-Responses path is `chatgpt`, which has its own
-    // transport (/backend-api/codex/responses) — asserted below.
-    CHECK(!wire_streams_reasoning_text("openai"));
+    // agentty's `openai` row DEFAULTS to api.openai.com/v1/chat/completions,
+    // but the row now also advertises /v1/responses, so — exactly like
+    // Copilot above — the answer became per MODEL rather than per row.
+    //
+    // This assertion used to be a flat `!...("openai")`. That was right when
+    // the row could ONLY dial chat (and before that it was wrong for the
+    // opposite reason: the row was mislabelled Wire::OpenAIResponses and the
+    // dialect-only predicate answered "yes" by accident). Now the honest
+    // answer is split:
+    //   gpt-4o     → chat, no reasoning on the wire
+    //   gpt-5+     → routed to /responses precisely so thinking is visible
+    CHECK(!wire_streams_reasoning_text("openai", "gpt-4o"));
+    CHECK(wire_streams_reasoning_text("openai", "gpt-5"));
+    // GPT-5.4+ is not merely preferred on Responses — chat REJECTS tool calls
+    // at any real reasoning effort, so an agent turn must go there.
+    CHECK(wire_streams_reasoning_text("openai", "gpt-5.4"));
+    // No model named ⇒ the coarse provider-level question, which for openai
+    // is now yes for the same reason it is yes for Copilot: SOME model here
+    // can show reasoning. (The picker asks this before a model is chosen.)
+    CHECK(wire_streams_reasoning_text("openai"));
     CHECK(wire_streams_reasoning_text("chatgpt"));
     // Anthropic streams thinking blocks natively.
     CHECK(wire_streams_reasoning_text("anthropic"));
