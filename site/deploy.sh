@@ -4,7 +4,9 @@
 # Umami stack runs in Docker, so neither is touched by this deploy.
 set -euo pipefail
 
-PROJECT="/home/ayush/projects/agentpp-site"
+# Self-locating: the site is wherever this script's parent dir is (site/ inside
+# the agentty repo). No hardcoded path — works from any checkout location.
+PROJECT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WEBROOT="/var/www/agentty.org"
 DOMAIN="agentty.org"
 
