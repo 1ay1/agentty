@@ -219,9 +219,11 @@ Full write-up: [`docs/website/smart-mode.md`](docs/website/smart-mode.md).
 | `Esc` | Cancel / reject | `^J` | Thread list |
 | `S-Tab` | Cycle profile | `^P` | Provider picker |
 | `Alt+Enter` | Newline | `^/` | Model picker |
-| `^G` | Run code block | `^N` | New thread |
-| `^R` | Review changes | `^S` | Smart Mode |
-| `^O` | Inspect tool outputs | `^T` | Plan / todo |
+| `^B` | Loop: resend until off | `^N` | New thread |
+| `^G` | Run code block | `^S` | Smart Mode |
+| `^R` | Review changes | `^T` | Plan / todo |
+| `^O` | Inspect tool outputs | `^E` | Expand composer |
+| `^C` | Quit (from anywhere) | | |
 | `^←/→` or `Alt+←/→` | Cycle threads | | |
 
 The composer is a full readline-style editor:
@@ -355,6 +357,34 @@ agentty speaks the [Agent Client Protocol](https://agentclientprotocol.com) — 
   }
 }
 ```
+
+</details>
+
+<details>
+<summary><b>Loop a prompt until it's done (Ctrl+B)</b></summary>
+
+Some prompts are worth sending more than once — *"fix the next failing test"*,
+*"keep refactoring until the build is clean"*, *"check if the deploy finished"*.
+`^B` sends the composer's message and then **re-sends it automatically after
+every completed turn**, until you press `^B` again.
+
+While armed, the composer keeps showing the prompt on repeat and becomes
+read-only (dimmed text, parked caret) — so the box can never say one thing
+while agentty sends another. A `⟳ LOOP ×N` chip and a tinted border make an
+auto-sending session impossible to mistake for an idle one, and the count
+makes it distinguishable from a hang.
+
+The model can't tell: an auto-sent turn goes through the same submit path as
+one you typed, with no marker on the wire, in the transcript, or in the saved
+thread.
+
+If a turn **fails**, the loop doesn't hammer the endpoint — re-sending a
+rate-limited turn instantly is how a 429 becomes a longer one. It waits: the
+provider's own `Retry-After` is obeyed verbatim when it sends one, otherwise
+the delay escalates per error class (rate-limit/auth from 30 s, transient
+blips from 5 s) and resets after the next success. The chip counts down
+(`⟳ RETRY 24s`) so a paused loop reads as waiting, not wedged. `Esc` cancels
+the turn; `^B` stops the loop.
 
 </details>
 

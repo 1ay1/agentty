@@ -412,6 +412,19 @@ struct Composer::Config {
     Color       highlight_color = Color::cyan();      // queue chip
 
     std::size_t queued = 0;
+
+    // LOOP mode: the host re-sends one armed message after every completed
+    // turn until the user toggles it off (agentty: ^B). Paints a ⟳ chip and
+    // tints the border, so a session auto-sending on the user's behalf can
+    // never render as an idle one.
+    bool        loop = false;
+    int         loop_iterations = 0;   // ⟳ LOOP ×N once it has re-fired
+    int         loop_wait_secs  = 0;   // >0 → ⟳ RETRY 24s countdown
+    Color       loop_color = Color::cyan();
+
+    // Render the body as a READ-ONLY readout: dimmed text, parked caret.
+    bool        read_only = false;
+
     ProfileChip profile;        // { label, color }
 
     bool expanded = false;
@@ -420,15 +433,24 @@ struct Composer::Config {
 
 State drives:
 
-- Border + prompt color (idle/streaming/awaiting/has-text → muted/active/warn/accent)
+- Border + prompt color (idle/streaming/awaiting/has-text → muted/active/warn/accent).
+  `loop` outranks the idle colors but **not** the live-phase ones: while a turn
+  is actually streaming the phase color is the more urgent fact, and the ⟳ chip
+  already says the loop is armed.
 - Placeholder text ("type a message…" / "running tool — type to queue…")
 - Prompt boldness (active/has-text → bold; empty-idle → dim)
 - Height pin (during activity, height pins to `min_rows=3` to prevent
   vertical bobbing as layout reflows above)
 
 Hint row is width-adaptive (drops `expand` then `newline` keys on
-narrow widths). Right-side ambient indicators: queue depth, words /
-~tokens counters, profile chip.
+narrow widths). Right-side ambient indicators: the loop chip, queue depth,
+words / ~tokens counters, profile chip. Shed order runs counters → queued →
+loop → profile chip: the loop chip is the only optional segment reporting that
+the app will act on its own, so it outlives the others.
+
+`read_only` exists so a buffer the user cannot currently edit *looks* that way
+(agentty sets it while looping, where the box displays the prompt on repeat)
+rather than being discovered by pressing a key and watching nothing happen.
 
 Adapter: `composer.cpp::composer_config(m)`.
 
@@ -765,7 +787,7 @@ src/runtime/view/
 ├── changes_strip.cpp                 # ChangesStrip
 ├── composer.cpp                      # Composer
 ├── cache.cpp · helpers.cpp           # shared (not adapters)
-├── login.cpp · pickers.cpp · diff_review.cpp   # legacy modals (§26)
+├── login.cpp · pickers/ · diff_review.cpp   # legacy modals (§26)
 ├── thread/
 │   ├── thread.cpp                    # Thread
 │   ├── welcome_screen.cpp            # WelcomeScreen      (empty branch)
@@ -867,7 +889,7 @@ anymore — they only build Configs. But:
 
 1. **Widget authors** use it inside `maya/include/maya/widget/*.hpp`
    when implementing `build()`.
-2. **Overlay modals** in agentty (`login.cpp`, `pickers.cpp`,
+2. **Overlay modals** in agentty (`login.cpp`, `pickers/`,
    `diff_review.cpp`) still construct elements via DSL; they predate
    the controller-only refactor and will be widgetized next.
 
@@ -907,7 +929,11 @@ Three host files still build elements directly — overlay modals that
 predate the strict controller-only rule:
 
 - `src/runtime/view/login.cpp` — login modal
-- `src/runtime/view/pickers.cpp` — model picker, thread list, command palette, todo modal, code-block picker + run-result card (Ctrl+G — see `docs/RUN_CODE_BLOCK.md`), checkpoint rewind picker
+- `src/runtime/view/pickers/` — the overlay pickers, split by family over a shared `pickers_common.hpp` (viewport sizing, capability-tier hue, the reasoning footer, `section_header()`) and `pickers_prologue.hpp` (the common include block):
+  - `model_picker.cpp` — fused cross-provider model picker (`^/`, incl. provider scoping) + provider picker
+  - `nav_pickers.cpp` — thread list, Smart Mode overlay, command palette, `@`-mention and `#`-symbol palettes
+  - `tool_pickers.cpp` — code-block picker + run-result card (Ctrl+G — see `docs/RUN_CODE_BLOCK.md`), tool-output viewer
+  - `misc_pickers.cpp` — checkpoint rewind picker, todo modal
 - `src/runtime/view/diff_review.cpp` — pending-changes review modal
 
 Future widgets to absorb them:

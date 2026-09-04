@@ -71,7 +71,8 @@ types and inline logic; `src/` carries the heavier implementations.
   content-bound `Trust`). One pure primitive that memory, skills, agents, and
   slash-command discovery all fold through instead of hand-rolling roots. See
   [`design/scope-model.md`](design/scope-model.md).
-- **`io/`** — `http`, `tls` (certificate pinning), `auth` (OAuth + PKCE),
+- **`io/`** — `http`, `inflate` (gzip/deflate response decoding — self-contained,
+  no zlib dependency), `tls` (certificate pinning), `auth` (OAuth + PKCE),
   `persistence` (atomic writes), `clipboard`.
 - **`airgap/`** — SOCKS5-over-SSH so the agent can run on a host with no direct
   internet while the laptop relays the bytes.

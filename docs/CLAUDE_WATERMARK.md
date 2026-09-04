@@ -474,7 +474,7 @@ you may inherit the destination provider's watermark instead.
      *"local/open-weight backends (ollama, llama.cpp) carry no provider
      watermark; hosted Claude output is watermarked per EU AI Act."*
    - Optionally surface a short hint in the provider picker
-     (`src/runtime/view/pickers.cpp`) tagging Anthropic/OpenAI/Google rows
+     (`src/runtime/view/pickers/model_picker.cpp`) tagging Anthropic/OpenAI/Google rows
      as "watermarked (EU AI Act)" and local rows as "no watermark".
 3. **If you truly want a scrub stage** (strongly discouraged for a coding
    agent): it would be a *post-response text transform* on assistant prose

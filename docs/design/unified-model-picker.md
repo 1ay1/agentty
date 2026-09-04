@@ -3,7 +3,7 @@
 Status: **SHIPPED**. `^/` opens the one and only model surface; the old
 single-provider picker has been deleted.
 Author: agentty
-Scope: `runtime/app/update/picker.cpp`, `runtime/view/pickers.cpp`, `domain/catalog.hpp`, `provider/selection.*`, `runtime/msg.hpp`
+Scope: `runtime/app/update/picker.cpp`, `runtime/view/pickers/`, `domain/catalog.hpp`, `provider/selection.*`, `runtime/msg.hpp`
 
 ## The problem
 
@@ -191,20 +191,44 @@ the instant it opens; other providers' rows fill in within a frame or two.
 
 ## Ranking & sections
 
-The list is one fuzzy-scored stream with lightweight section headers:
+The list is one fuzzy-scored stream with lightweight section headers, each an
+uppercased label in its own hue with a dim right-pinned count:
 
 1. **RECENT** (MRU) — up to 6 `(provider,model)` you actually switch between,
    most-recent first. This is what makes the common A↔B toggle a two-keystroke
-   action. The active row is marked `●` and pinned at the top of RECENT.
-2. **all providers** — every authed provider's catalog, fuzzy-ranked by the
-   query. Ties break by: favorite → provider registry order → context window.
-3. **sign in to …** — un-authed providers as dim offers at the bottom (only
+   action. The active row is marked `●` and pinned at the top of RECENT —
+   structurally (the builder emits it first), not via a sort key, so no future
+   comparator can displace it.
+2. **ALL PROVIDERS** — every authed provider's catalog in ONE flat list. While
+   browsing (empty query) it is alphabetical by model label **across**
+   providers; there is deliberately no "from this provider" / "from all other
+   providers" split, because finding a model should not depend on knowing
+   which provider you happen to be on. With a query the fuzzy score leads and
+   ties break by: favorite → provider registry order → context window.
+3. **NOT SIGNED IN** — un-authed providers as dim offers at the bottom (only
    when the query is empty or matches the provider name), so discovery is
    present but never noisy.
 
 Favorites (`^F`) float within their section. The existing shared fuzzy scorer
 (`filter_provider_indices`'s ranker, generalized to score `label + model`)
 keeps reducer and view in agreement — the SSOT discipline this codebase holds.
+
+Digits are ordinary filter input: typing `4` searches for `4`. An earlier
+`1-9` jump-to-row shortcut was removed because it made `glm-4`, `gpt5` and
+`o3` unsearchable on an empty query for a shortcut arrow keys already cover.
+
+## Scoping to one provider (`^/`)
+
+Inside the picker, `^/` collapses the list to just the **highlighted row's
+provider** — the title reads `Models · GitHub Copilot only`, the browse band
+retitles to `<PROVIDER> MODELS`, and that provider's RECENT rows are kept.
+Press `^/` again to go back to every provider.
+
+This reuses the builder's existing `only_provider` input (added for Smart
+Mode's slot-assign, which may only pin models the active provider can
+dispatch), so scoping is one field on `FusedInputs` rather than a second
+filtering path. Smart-assign scoping still wins when both apply: a slot
+constraint is stronger than a user's drill-in.
 
 ## Quick-swap (`^Tab`)
 

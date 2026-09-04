@@ -230,7 +230,7 @@ thing — and without a 48 KB wall of text ever cluttering your composer.
 | Extraction + picker state (pure) | `include/agentty/runtime/code_block_picker.hpp` |
 | Reducer + tty runner | `src/runtime/app/update/codeblock.cpp` |
 | Key dispatch | `src/runtime/app/subscribe.cpp` (`on_code_block_picker`, `on_code_block_result`) |
-| Picker + Result card views | `src/runtime/view/pickers.cpp` |
+| Picker + Result card views | `src/runtime/view/pickers/tool_pickers.cpp` |
 | Output chip kind + wire expansion | `include/agentty/runtime/composer_attachment.hpp`, `src/runtime/composer_attachment.cpp` |
 | TUI suspend primitive | maya: `Runtime::suspend` (`app.cpp`), `Terminal::suspend` (`terminal.hpp`), `Cmd::suspend` (`cmd.hpp`) |
 
