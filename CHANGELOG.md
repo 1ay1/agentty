@@ -4,6 +4,8 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-04
+
 ### Added
 - **[[Ctrl+B]] — loop mode: send a message, and keep sending it until you stop.** The "keep hammering on this prompt" workflow — iterate a refactor until it builds, re-run a failing test, poll until something converges — without retyping or holding [[Enter]]. [[Ctrl+B]] sends the composer's message and re-sends it automatically after **every completed turn**, until you press [[Ctrl+B]] again. Arming **snapshots** the payload rather than re-reading the live composer, so what repeats is what you armed. While armed the composer **keeps displaying that prompt** and becomes **read-only** — dimmed text, parked caret, every mutating keystroke dropped at the reducer's single entry point — because a box you could edit would let the display say one thing while agentty sent another; [[Ctrl+B]] is the deliberate exception so the mode is never a trap ([[Esc]] still cancels the turn). The composer grows a `⟳ LOOP ×N` chip and takes a brand-tinted border while armed, so the gap between auto-sent turns never looks like nothing is happening, and an unbounded loop stays distinguishable from a hang. Arming on an empty composer is refused rather than entering a state that can never fire, and an explicitly queued message still outranks the standing loop.
 
