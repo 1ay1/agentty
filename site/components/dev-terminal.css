@@ -1,0 +1,218 @@
+/* dev.agentty.org — a fullscreen, INTERACTIVE agentty terminal.
+   Every glyph / color / layout is lifted from the real source:
+     palette   → include/agentty/runtime/view/palette.hpp
+     commands  → include/agentty/runtime/command_palette.hpp
+     spinner   → maya's braille frame set
+   Shares the ANSI palette naming with agentty-tui.css. */
+
+.devt-root {
+  position: fixed;
+  inset: 0;
+  background: #010409;
+  color: #e6edf3;
+  font-family: var(--font-mono), ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 14px;
+  line-height: 1.65;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  cursor: text;
+}
+
+/* scanline / vignette sheen for the CRT feel — very subtle */
+.devt-root::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 50;
+  background:
+    radial-gradient(120% 120% at 50% 0%, transparent 55%, rgba(0, 0, 0, 0.35) 100%),
+    repeating-linear-gradient(
+      0deg,
+      rgba(255, 255, 255, 0.012) 0px,
+      rgba(255, 255, 255, 0.012) 1px,
+      transparent 1px,
+      transparent 3px
+    );
+}
+
+/* ── top chrome: window dots + title ── */
+.devt-titlebar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 16px;
+  background: #0b0d12;
+  border-bottom: 1px solid #21262d;
+  user-select: none;
+  z-index: 20;
+}
+.devt-dots { display: flex; gap: 7px; }
+.devt-dot { width: 11px; height: 11px; border-radius: 50%; }
+.devt-dot.r { background: #ff5f57; }
+.devt-dot.y { background: #febc2e; }
+.devt-dot.g { background: #28c840; }
+.devt-title {
+  flex: 1;
+  text-align: center;
+  font-size: 12.5px;
+  color: #e879f9;
+  letter-spacing: 0.02em;
+}
+.devt-title .devt-count { color: #656d76; }
+.devt-title-right {
+  font-size: 11.5px;
+  color: #656d76;
+}
+.devt-title-right a { color: #6fe0ee; text-decoration: none; }
+.devt-title-right a:hover { text-decoration: underline; }
+
+/* ── scrollback ── */
+.devt-scroll {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 18px 20px 6px;
+  scrollbar-width: thin;
+  scrollbar-color: #2a2e38 transparent;
+}
+.devt-scroll::-webkit-scrollbar { width: 9px; }
+.devt-scroll::-webkit-scrollbar-thumb { background: #2a2e38; border-radius: 5px; }
+.devt-scroll::-webkit-scrollbar-track { background: transparent; }
+
+.devt-line { white-space: pre-wrap; word-break: break-word; }
+.devt-blank { height: 0.7em; }
+
+/* banner */
+.devt-banner { color: #e879f9; white-space: pre; line-height: 1.25; font-size: 13px; }
+@media (max-width: 560px) { .devt-banner { font-size: 9px; } }
+
+/* user turn — magenta accent bar + text */
+.devt-user { display: flex; align-items: baseline; margin: 6px 0 2px; }
+.devt-user .bar { color: #e29be0; font-weight: 700; }
+.devt-user .txt { color: #e6edf3; padding-left: 6px; }
+
+/* assistant header */
+.devt-asst-head { color: #e29be0; font-weight: 700; margin: 8px 0 2px; }
+
+/* ── agent timeline (tool calls) card ── */
+.devt-panel { margin: 2px 0 4px; font-size: 13.5px; }
+.devt-prow { display: flex; white-space: pre; align-items: baseline; }
+.devt-edge { color: #656d76; flex: none; }
+.devt-pad { flex: 1; padding: 0 8px; min-width: 0; display: flex; align-items: baseline; overflow: hidden; }
+.devt-top, .devt-bot { display: flex; white-space: pre; align-items: center; }
+.devt-fill { flex: 1; border-top: 1px solid #656d76; opacity: 0.55; height: 0; align-self: center; }
+.devt-elapsed { margin-left: auto; padding-left: 14px; white-space: pre; }
+
+/* ── composer ── */
+.devt-composer { flex: none; padding: 4px 16px 0; }
+.devt-comp-box {
+  border: 1px solid #2a2e38;
+  border-radius: 8px;
+  padding: 7px 12px;
+  display: flex;
+  align-items: center;
+  background: #140f1d;
+}
+.devt-comp-box.focus { border-color: #d946ef; box-shadow: 0 0 0 1px rgba(217, 70, 239, 0.30); }
+.devt-prompt { color: #e29be0; font-weight: 700; flex: none; }
+.devt-input-wrap { flex: 1; position: relative; display: flex; align-items: center; min-width: 0; }
+.devt-input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: transparent;
+  caret-color: transparent;
+  font: inherit;
+  padding: 0;
+  margin: 0;
+}
+.devt-shadow { white-space: pre; color: #e6edf3; pointer-events: none; }
+.devt-placeholder { color: #656d76; pointer-events: none; }
+.devt-caret {
+  display: inline-block;
+  width: 8px;
+  height: 1.15em;
+  background: #6fe0ee;
+  vertical-align: text-bottom;
+  animation: devt-blink 1.05s step-end infinite;
+}
+.devt-caret.hidden { animation: none; opacity: 0; }
+@keyframes devt-blink { 0%, 50% { opacity: 1; } 50.01%, 100% { opacity: 0; } }
+
+.term-cursor { background: #6fe0ee; color: #08060d; }
+
+/* ── slash palette ── */
+.devt-palette {
+  margin: 4px 16px 0;
+  border: 1px solid #2a2e38;
+  border-radius: 8px;
+  background: #140f1d;
+  overflow: hidden;
+  max-height: 260px;
+  overflow-y: auto;
+}
+.devt-pitem {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 4px 14px;
+  white-space: pre;
+}
+.devt-pitem.sel { background: #16171f; }
+.devt-pitem .pcmd { color: #e29be0; font-weight: 700; flex: none; min-width: 150px; }
+.devt-pitem.sel .pcmd { color: #f0b6ee; }
+.devt-pitem .pdesc { color: #8b93a0; overflow: hidden; text-overflow: ellipsis; }
+
+/* ── status bar ── */
+.devt-accent { height: 0; border-top: 1px solid currentColor; opacity: 0.4; margin: 3px 0; }
+.devt-status {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 16px 6px;
+  font-size: 12.5px;
+  white-space: pre;
+  overflow: hidden;
+}
+.devt-status-left, .devt-status-right { display: flex; align-items: center; white-space: pre; flex: none; }
+.devt-status-right { margin-left: auto; }
+.devt-hint { color: #656d76; font-size: 11.5px; }
+.devt-hint kbd {
+  font: inherit;
+  color: #aab1bd;
+  background: #16171f;
+  border: 1px solid #2a2e38;
+  border-radius: 4px;
+  padding: 0 5px;
+}
+
+/* ── ANSI palette (matches agentty-tui.css) ── */
+.devt-root .mag     { color: #c586c0; }
+.devt-root .bmag    { color: #e29be0; }
+.devt-root .cyan    { color: #4ec9d8; }
+.devt-root .bcyan   { color: #6fe0ee; }
+.devt-root .blue    { color: #61afef; }
+.devt-root .green   { color: #98c379; }
+.devt-root .bgreen  { color: #7ee787; }
+.devt-root .yellow  { color: #e5c07b; }
+.devt-root .byellow { color: #f0d98c; }
+.devt-root .red     { color: #e06c75; }
+.devt-root .white   { color: #aab1bd; }
+.devt-root .bwhite  { color: #e6edf3; }
+.devt-root .dim     { color: #656d76; }
+.devt-root .b       { font-weight: 700; }
+.devt-root .i       { font-style: italic; }
+
+@media (max-width: 640px) {
+  .devt-root { font-size: 12px; }
+  .devt-status, .devt-title-right { font-size: 10.5px; }
+  .devt-pitem .pcmd { min-width: 110px; }
+}

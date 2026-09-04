@@ -1,0 +1,15 @@
+{
+  "name": "agentty-live",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Live agentty backend: spawns the real agentty binary in a PTY, pointed at a built-in mock Ollama server, and streams it to the browser over WebSocket.",
+  "main": "server.mjs",
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "dependencies": {
+    "node-pty": "1.1.0",
+    "ws": "8.18.0"
+  }
+}

@@ -1,0 +1,93 @@
+/* ── Geeky hero backdrop: digital rain + grid lattice + glow + scanlines ── */
+.hero-bg {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  z-index: 0;
+  pointer-events: none;
+  /* fade the whole effect out toward the bottom so content below stays clean */
+  -webkit-mask-image: linear-gradient(180deg, #000 0%, #000 62%, transparent 100%);
+  mask-image: linear-gradient(180deg, #000 0%, #000 62%, transparent 100%);
+}
+
+/* falling code glyphs */
+.hero-bg-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0.34;
+}
+
+/* faint dot/line lattice — the "blueprint" plane, slowly drifting */
+.hero-bg-grid {
+  position: absolute;
+  inset: -2px;
+  background-image:
+    linear-gradient(rgba(217, 70, 239, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(45, 212, 212, 0.045) 1px, transparent 1px);
+  background-size: 46px 46px;
+  -webkit-mask-image: radial-gradient(900px 520px at 78% 4%, #000, transparent 72%);
+  mask-image: radial-gradient(900px 520px at 78% 4%, #000, transparent 72%);
+  animation: hero-grid-pan 40s linear infinite;
+}
+@keyframes hero-grid-pan {
+  from { background-position: 0 0; }
+  to   { background-position: 46px 46px; }
+}
+
+/* breathing brand glow that drifts behind the hero text */
+.hero-bg-glow {
+  position: absolute;
+  width: 720px;
+  height: 720px;
+  top: -260px;
+  left: 8%;
+  background: radial-gradient(circle, rgba(217, 70, 239, 0.20), transparent 62%);
+  filter: blur(10px);
+  will-change: transform, opacity;
+  transform: translateZ(0);
+  animation: hero-glow-drift 14s ease-in-out infinite alternate;
+}
+/* second, cooler aurora orb for depth on the opposite side */
+.hero-bg-glow::after {
+  content: "";
+  position: absolute;
+  width: 560px; height: 560px;
+  top: 120px; left: 620px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(45, 212, 212, 0.14), transparent 64%);
+  filter: blur(12px);
+  animation: hero-glow-drift2 18s ease-in-out infinite alternate;
+}
+
+@keyframes hero-glow-drift {
+  from { transform: translate(0, 0) scale(1); opacity: 0.75; }
+  to   { transform: translate(120px, 60px) scale(1.14); opacity: 1; }
+}
+@keyframes hero-glow-drift2 {
+  from { transform: translate(0, 0) scale(1.05); opacity: 0.6; }
+  to   { transform: translate(-90px, 40px) scale(0.9); opacity: 0.95; }
+}
+
+/* CRT scanlines — subtle, only visible against the glyph rain */
+.hero-bg-scan {
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.015) 0px,
+    rgba(255, 255, 255, 0.015) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+  mix-blend-mode: overlay;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hero-bg-glow, .hero-bg-glow::after, .hero-bg-grid { animation: none; }
+}
+
+@media (max-width: 640px) {
+  .hero-bg-canvas { opacity: 0.32; }
+}

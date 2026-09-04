@@ -44,3 +44,17 @@ AGENTTY_ASSISTANT_USAGE.md
 # a public commit; the ignore makes that structurally impossible).
 hand/
 resume/
+
+# agentty.org site runtime (Next.js) — build artifacts + synced content
+site/node_modules/
+site/.next/
+site/out/
+site/tsconfig.tsbuildinfo
+site/content/docs/
+site/content/blog/
+site/content/compare/
+site/content/guides/
+site/content/alternatives/
+site/content/pages/
+site/content/changelog.md
+site/deploy/live/node_modules/

@@ -1,0 +1,8 @@
+# agentty security policy — https://agentty.org/security/
+# RFC 9116 (https://www.rfc-editor.org/rfc/rfc9116)
+
+Contact: https://github.com/1ay1/agentty/security/advisories/new
+Policy: https://agentty.org/security/
+Preferred-Languages: en
+Canonical: https://agentty.org/.well-known/security.txt
+Expires: 2027-01-01T00:00:00.000Z

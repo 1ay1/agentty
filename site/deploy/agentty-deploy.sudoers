@@ -1,0 +1,18 @@
+# /etc/sudoers.d/agentty-deploy   (install with: sudo visudo -cf, mode 0440)
+#
+# Lets the deploy user run ONLY the specific privileged steps deploy.sh needs,
+# with no password, so the webhook/timer can deploy headless. Nothing else.
+#
+# Install:
+#   sudo cp deploy/agentty-deploy.sudoers /etc/sudoers.d/agentty-deploy
+#   sudo chmod 0440 /etc/sudoers.d/agentty-deploy
+#   sudo visudo -cf /etc/sudoers.d/agentty-deploy   # syntax check
+
+ayush ALL=(root) NOPASSWD: /usr/bin/mkdir -p /var/www/agentty.org
+ayush ALL=(root) NOPASSWD: /usr/bin/rsync -a --delete /home/ayush/projects/agentpp-site/out/ /var/www/agentty.org/
+ayush ALL=(root) NOPASSWD: /usr/bin/chown -R http\:http /var/www/agentty.org
+ayush ALL=(root) NOPASSWD: /usr/bin/chown -R nginx\:nginx /var/www/agentty.org
+ayush ALL=(root) NOPASSWD: /usr/bin/cp /home/ayush/projects/agentpp-site/agentty.org.nginx /etc/nginx/sites-available/agentty.org
+ayush ALL=(root) NOPASSWD: /usr/bin/ln -sf /etc/nginx/sites-available/agentty.org /etc/nginx/sites-enabled/agentty.org
+ayush ALL=(root) NOPASSWD: /usr/bin/nginx -t
+ayush ALL=(root) NOPASSWD: /usr/bin/systemctl reload nginx

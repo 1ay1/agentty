@@ -1,0 +1,31 @@
+.page { max-width: 820px; margin: 0 auto; padding: 48px 24px 80px; }
+.page h1 { font-size: clamp(28px, 7vw, 38px); margin: 0 0 10px; letter-spacing: -0.03em; overflow-wrap: break-word; }
+/* long words / URLs in body copy can't push the page wider than the viewport */
+.page h2, .page h3, .page p, .page li { overflow-wrap: break-word; }
+.page .lead { color: var(--text-dim); font-size: 19px; margin: 0 0 36px; }
+.page h2 { font-size: 24px; margin: 40px 0 14px; }
+.page h3 { font-size: 18px; margin: 26px 0 10px; }
+.page p, .page li { color: var(--text); }
+.page p { margin: 0 0 16px; }
+.page ul, .page ol { padding-left: 22px; margin: 0 0 16px; }
+.page li { margin: 6px 0; }
+.page li::marker { color: var(--text-faint); }
+.page a { color: var(--accent-2); }
+.page p code, .page li code { background: var(--bg-elev); border: 1px solid var(--border-soft); border-radius: 6px; padding: 1.5px 6px; font-size: 0.88em; color: var(--accent); }
+.cl-entry { border-left: 2px solid var(--border); padding-left: 22px; margin-bottom: 36px; }
+.cl-ver { display: flex; align-items: baseline; gap: 12px; margin-bottom: 6px; }
+.cl-ver h2 { margin: 0; font-size: 22px; }
+.cl-date { color: var(--text-faint); font-size: 14px; }
+.cl-tag { display: inline-block; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; padding: 2px 9px; border-radius: 999px; margin-bottom: 10px; }
+.cl-tag.added { background: rgba(63, 185, 80,0.12); color: var(--green); }
+.cl-tag.changed { background: rgba(45, 212, 212,0.12); color: var(--accent-2); }
+.cl-tag.fixed { background: rgba(210, 153, 34,0.12); color: var(--accent-warm); }
+.cl-tag.stub { background: rgba(248, 81, 73,0.12); color: var(--red); }
+
+/* tighter gutters on phones so content + headings never crowd the edges */
+@media (max-width: 560px) {
+  .page { padding: 32px 18px 64px; }
+}
+@media (max-width: 380px) {
+  .page { padding: 28px 15px 56px; }
+}

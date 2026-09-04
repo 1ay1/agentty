@@ -1,0 +1,21 @@
+[Unit]
+Description=agentty.org deploy webhook listener (GitHub push -> autodeploy)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ayush
+# The webhook shared secret is read from an env file that is NOT in git.
+# Create /etc/agentty-deploy.env with:  WEBHOOK_SECRET=<random-hex>
+EnvironmentFile=/etc/agentty-deploy.env
+Environment=PORT=9099
+ExecStart=/usr/bin/node /home/ayush/projects/agentpp-site/deploy/webhook.mjs
+Restart=always
+RestartSec=3
+# Light hardening — it only needs to listen locally and spawn autodeploy.
+NoNewPrivileges=false
+ProtectSystem=false
+
+[Install]
+WantedBy=multi-user.target

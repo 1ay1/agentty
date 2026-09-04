@@ -1,0 +1,179 @@
+/* agentty TUI replica — faithful to src/runtime/view/* + maya widgets */
+
+/* 3D stage: gives the window perspective so it can lean toward the cursor.
+   The host (.hero-tui) controls outer margin; the stage just adds depth. */
+.ttui-stage {
+  perspective: 1600px;
+  perspective-origin: 50% 30%;
+}
+
+.ttui {
+  position: relative;
+  z-index: 9999;
+  background: #010409;
+  border: 1px solid #30363d;
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 40px 100px -24px rgba(0, 0, 0, 0.75), 0 0 0 1px rgba(255, 255, 255, 0.02);
+  max-width: 780px;
+  margin: 56px auto 0;
+  /* cursor-driven lean — vars default to flat, JS streams them in */
+  transform:
+    rotateX(var(--rx, 0deg))
+    rotateY(var(--ry, 0deg))
+    translateZ(0);
+  transform-style: preserve-3d;
+  transition: transform 0.45s cubic-bezier(.2, .8, .2, 1), box-shadow 0.45s ease;
+  will-change: transform;
+}
+.ttui-stage:hover .ttui {
+  box-shadow:
+    0 50px 120px -30px rgba(0, 0, 0, 0.85),
+    0 0 0 1px rgba(217, 70, 239, 0.18),
+    0 0 60px -20px rgba(217, 70, 239, 0.35);
+}
+
+/* glare sheen — a soft radial highlight that tracks the pointer and only
+   fades in while hovering, selling the "glass panel" feel. */
+.ttui-glare {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  pointer-events: none;
+  border-radius: inherit;
+  opacity: var(--glare, 0);
+  transition: opacity 0.4s ease;
+  background: radial-gradient(
+    520px circle at var(--gx, 50%) var(--gy, 0%),
+    rgba(255, 255, 255, 0.10),
+    rgba(217, 70, 239, 0.06) 35%,
+    transparent 60%
+  );
+  mix-blend-mode: screen;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ttui { transition: none; transform: none; }
+  .ttui-glare { display: none; }
+}
+.ttui-bar {
+  display: flex; align-items: center; gap: 7px;
+  padding: 10px 14px; background: #140f1d; border-bottom: 1px solid #322843;
+}
+.ttui-dot { width: 11px; height: 11px; border-radius: 50%; }
+.ttui-dot.r { background: #ff5f56; }
+.ttui-dot.y { background: #ffbd2e; }
+.ttui-dot.g { background: #27c93f; }
+.ttui-title { margin-left: 8px; color: #656d76; font-family: var(--mono); font-size: 12px; }
+
+.ttui-body {
+  padding: 18px 20px 14px;
+  font-family: var(--font-mono), "JetBrains Mono", ui-monospace, monospace;
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: #e6edf3;
+  /* FIXED height — the window never grows or jumps as the session
+     streams in. The conversation area scrolls internally; composer +
+     status bar stay pinned to the bottom. */
+  height: 540px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.ttui-body .row { white-space: pre-wrap; word-break: break-word; }
+.ttui-blank { height: 0.7em; }
+
+/* conversation scrollback — grows from the top, pinned to the bottom so
+   new lines push older ones up instead of resizing the card. */
+.ttui-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+}
+.ttui-turn { flex: none; }
+
+/* composer + status pinned to the bottom, fixed in place */
+.ttui-chrome { flex: none; margin-top: auto; padding-top: 12px; }
+
+/* fade/slide-in for streamed-in blocks — the "a new line just landed" feel */
+@keyframes ttui-in {
+  from { opacity: 0; transform: translateY(3px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.ttui-fade { animation: ttui-in 0.22s ease-out both; }
+.ttui-evgroup { animation: ttui-in 0.18s ease-out both; }
+
+@media (prefers-reduced-motion: reduce) {
+  .ttui-fade, .ttui-evgroup { animation: none; }
+}
+
+/* ── speaker turn: maya::Turn rail — Bold left border, padding-left 2 ── */
+.ttui-turn { border-left: 2px solid transparent; padding-left: 16px; margin-bottom: 2px; }
+.ttui-turn.rail-mag  { border-color: #c586c0; }   /* role_brand (magenta) */
+.ttui-turn.rail-bmag { border-color: #e29be0; }   /* role_brand_alt (bright_magenta) */
+
+/* header row: glyph + label … spacer … meta (dim) */
+.ttui-head { display: flex; align-items: baseline; white-space: pre; }
+.ttui-meta { margin-left: auto; padding-left: 18px; }
+.ttui-prose { }
+
+/* ── AgentTimeline panel: rounded bordered card, padding(0,1,0,1) ── */
+.ttui-panel { font-size: 12px; line-height: 1.7; }
+.ttui-panel-top, .ttui-panel-bot { display: flex; white-space: pre; align-items: center; }
+.ttui-panel-top .ttui-fill { flex: 1; border-top: 1px solid #656d76; align-self: center; height: 0; opacity: 0.55; }
+.ttui-panel-bot .ttui-fill-bot,
+.ttui-comp-top .ttui-fill-bot,
+.ttui-comp-bot .ttui-fill-bot { flex: 1; border-top: 1px solid #656d76; align-self: center; height: 0; opacity: 0.55; }
+.ttui-panel-line { display: flex; white-space: pre; align-items: baseline; }
+.ttui-panel-line .ttui-pad { flex: 1; padding: 0 8px; min-width: 0; display: flex; align-items: baseline; overflow: hidden; }
+.ttui-edge { flex: none; }
+.ttui-elapsed { margin-left: auto; padding-left: 16px; white-space: pre; }
+
+/* ── composer: maya::Composer bordered, 2-row body ── */
+.ttui-composer { font-size: 12px; }
+.ttui-comp-top, .ttui-comp-bot { display: flex; white-space: pre; align-items: center; }
+.ttui-comp-mid { display: flex; align-items: baseline; white-space: pre; }
+.ttui-comp-right { flex: 1; }
+
+/* ── status bar: PhaseAccent (─ full-width) / activity / PhaseAccent ── */
+.ttui-accent {
+  height: 0;
+  border-top: 1px solid currentColor;
+  opacity: 0.4;
+  margin: 2px 0;
+}
+.ttui-status {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; font-size: 12px; white-space: pre;
+  overflow: hidden;
+}
+.ttui-status-left, .ttui-status-right {
+  display: flex; align-items: center; white-space: pre; flex: none;
+  min-width: 0;
+}
+.ttui-status-right { margin-left: auto; }
+
+/* ── ANSI palette (xterm-ish mapping of agentty's named colors) ── */
+.ttui .mag     { color: #c586c0; }   /* magenta  (role_brand) */
+.ttui .bmag    { color: #e29be0; }   /* bright_magenta (role_brand_alt) */
+.ttui .cyan    { color: #4ec9d8; }   /* bright_cyan (code_path) */
+.ttui .bcyan   { color: #6fe0ee; }
+.ttui .blue    { color: #61afef; }
+.ttui .green   { color: #98c379; }
+.ttui .bgreen  { color: #7ee787; }   /* bright_green (status_ok ✓) */
+.ttui .yellow  { color: #e5c07b; }
+.ttui .byellow { color: #f0d98c; }
+.ttui .red     { color: #e06c75; }
+.ttui .white   { color: #aab1bd; }   /* ANSI 7 — mid gray (counts/summary) */
+.ttui .bwhite  { color: #e6edf3; }   /* ANSI 15 — prose */
+.ttui .dim     { color: #656d76; }   /* bright_black — chrome */
+.ttui .b       { font-weight: 700; }
+.ttui .i       { font-style: italic; }
+.term-cursor   { background: #6fe0ee; color: #010409; }
+
+/* Mobile scaling for the TUI window lives in app/globals.css (alongside the
+   other .hero-tui .ttui rules) so source order + specificity are controlled
+   in one place — see the "TUI MOBILE FIT" block there. */

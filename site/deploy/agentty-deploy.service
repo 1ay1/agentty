@@ -1,0 +1,7 @@
+[Unit]
+Description=agentty.org autodeploy (backstop reconcile — pulls latest and rebuilds)
+
+[Service]
+Type=oneshot
+User=ayush
+ExecStart=/usr/bin/bash /home/ayush/projects/agentpp-site/deploy/autodeploy.sh

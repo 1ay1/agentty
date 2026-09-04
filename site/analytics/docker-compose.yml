@@ -1,0 +1,50 @@
+# Self-hosted Umami analytics for agentty.org
+#
+#   cp .env.example .env   # then fill in secrets
+#   docker compose up -d
+#
+# Umami listens on 127.0.0.1:3001 (nginx reverse-proxies analytics.agentty.org
+# to it). Postgres data persists in the named volume `umami-db`. Secrets are
+# read from .env (git-ignored) — never hard-code them here.
+#
+# After first boot, log in at https://analytics.agentty.org with the default
+# credentials admin / umami and CHANGE THE PASSWORD immediately.
+
+services:
+  umami:
+    image: ghcr.io/umami-software/umami:postgresql-latest
+    container_name: umami
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3001:3000"
+    environment:
+      DATABASE_URL: postgresql://umami:${POSTGRES_PASSWORD}@umami-db:5432/umami
+      DATABASE_TYPE: postgresql
+      APP_SECRET: ${UMAMI_APP_SECRET}
+    depends_on:
+      umami-db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:3000/api/heartbeat || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  umami-db:
+    image: postgres:16-alpine
+    container_name: umami-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: umami
+      POSTGRES_USER: umami
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - umami-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U umami -d umami"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+volumes:
+  umami-db:

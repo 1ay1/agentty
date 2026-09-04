@@ -1,0 +1,13 @@
+[Unit]
+Description=agentty.org autodeploy backstop timer (reconcile every 30 min)
+
+[Timer]
+# Runs 5 min after boot, then every 30 min. This is the self-healing net: even
+# if a webhook is ever missed, the site converges to the latest docs + live
+# GitHub data within half an hour with zero human involvement.
+OnBootSec=5min
+OnUnitActiveSec=30min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
