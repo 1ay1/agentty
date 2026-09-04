@@ -433,9 +433,9 @@ Element tool_output_viewer(const Model& m) {
         // For a command-running tool (shell / diagnostics / process_*), show
         // the FULL command at the top of the body — the one-line `detail` in
         // the header is clipped, so a long or multi-line command was otherwise
-        // unreadable. Rendered as `$ `-prefixed rows (continuations aligned
-        // under the first), followed by a separator, then the output. This
-        // mirrors the Run Result card's `$ command` header.
+        // unreadable. The command is WRAPPED (not clipped): a long single-line
+        // one-liner flows onto as many rows as it needs, indented under the
+        // `$ ` gutter. A separator then divides it from the output.
         if (e.call.args.is_object()) {
             std::string command;
             if (auto it = e.call.args.find("command");
@@ -443,22 +443,18 @@ Element tool_output_viewer(const Model& m) {
                 command = it->get<std::string>();
             if (!command.empty()) {
                 const Color cmd_hue = e.failed ? danger : tool_hue;
-                bool first_line = true;
-                std::size_t start = 0;
-                while (start <= command.size()) {
-                    std::size_t nl = command.find('\n', start);
-                    std::string_view line = std::string_view{command}.substr(
-                        start,
-                        nl == std::string::npos ? std::string::npos : nl - start);
-                    cache.rows.push_back(
-                        hstack()(
-                            text(first_line ? "$ " : "  ", fg_bold(cmd_hue)),
-                            text(std::string{line}, fg_of(fg)) | clip)
-                        | height(1) | overflow(Overflow::Hidden));
-                    first_line = false;
-                    if (nl == std::string::npos) break;
-                    start = nl + 1;
-                }
+                // hstack: a fixed 2-col "$ " gutter + the command as a WRAPPING
+                // text that takes the remaining width. maya grows the row to
+                // however many visual lines the wrap produces; continuation
+                // lines sit under the gutter. Embedded newlines wrap too.
+                cache.rows.push_back(
+                    hstack()(
+                        text("$ ", fg_bold(cmd_hue)),
+                        maya::Element{maya::TextElement{
+                            .content = command,
+                            .style   = fg_of(fg),
+                            .wrap    = maya::TextWrap::Wrap,
+                        }} | grow(1.0f)));
                 cache.rows.push_back(sep | height(1));
             }
         }
