@@ -176,14 +176,33 @@ const std::vector<ToolDef>& registry() { return wire_tools(); }
 
 // Legacy tool-name aliases → canonical registry name. The exec tool was renamed
 // bash → shell, but `bash` is so dominant in model training data (it is Claude
-// Code's actual tool name) that a model reliably calls it by the old name on
-// the FIRST turn, before it internalises our schema. Without this the call
-// 404s ("unknown tool: bash"), the model burns a wasted failed call, then
-// retries as `shell`. Canonicalising here — the ONE lookup every dispatch path
-// (agent loop, subagent, ACP, mcp-serve, permission check) funnels through —
-// absorbs that misfire so the legacy name just works.
+// Code's actual tool name — commonly emitted as "Bash", capital B) that a model
+// reliably calls it by the old name on the FIRST turn, before it internalises
+// our schema. Without this the call 404s ("unknown tool: Bash"), the model
+// burns a wasted failed call, then retries as `shell`. Canonicalising here —
+// the ONE lookup every dispatch path (agent loop, subagent, ACP, mcp-serve,
+// permission check) funnels through — absorbs that misfire so the legacy name
+// just works.
+//
+// The match is CASE-INSENSITIVE and whitespace-trimmed: models emit "bash",
+// "Bash", and "BASH" interchangeably, and the exact-case check was the bug that
+// let "Bash" slip through to a hard failure.
 [[nodiscard]] static std::string_view canonical_tool_name(std::string_view name) noexcept {
-    if (name == "bash") return "shell";
+    // Trim surrounding whitespace without allocating.
+    auto b = name.find_first_not_of(" \t\r\n");
+    if (b == std::string_view::npos) return name;
+    auto e = name.find_last_not_of(" \t\r\n");
+    std::string_view trimmed = name.substr(b, e - b + 1);
+    auto ieq = [](std::string_view s, std::string_view lit) {
+        if (s.size() != lit.size()) return false;
+        for (std::size_t i = 0; i < s.size(); ++i) {
+            char c = s[i];
+            if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+            if (c != lit[i]) return false;
+        }
+        return true;
+    };
+    if (ieq(trimmed, "bash")) return "shell";
     return name;
 }
 

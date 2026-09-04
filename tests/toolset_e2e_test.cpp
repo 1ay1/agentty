@@ -352,11 +352,18 @@ int main() {
     // ── legacy `bash` name canonicalises to the `shell` tool ────────────────
     // Models call the exec tool `bash` (training prior) before internalising
     // our `shell` schema; tools::find aliases it so the first-turn call works
-    // instead of 404-ing and forcing a wasted retry.
+    // instead of 404-ing and forcing a wasted retry. The match is
+    // case-insensitive — Claude emits "Bash" (capital B) most often, which the
+    // original exact-case alias let slip through to a hard failure.
     {
         auto r = run("bash", {{"command", "echo e2e-alias-ok"},
                               {"cd", root.string()}});
-        check(has(r, "e2e-alias-ok"), "bash alias: resolves to shell and runs");
+        check(has(r, "e2e-alias-ok"), "bash alias: lowercase resolves to shell");
+    }
+    {
+        auto r = run("Bash", {{"command", "echo e2e-Bash-ok"},
+                              {"cd", root.string()}});
+        check(has(r, "e2e-Bash-ok"), "bash alias: capital 'Bash' resolves to shell");
     }
     // ── bash failure feedback: exit-code decode + error-line digest ──────────
     {
