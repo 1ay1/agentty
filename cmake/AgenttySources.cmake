@@ -70,6 +70,7 @@ set(AGENTTY_PROVIDER_SOURCES
     src/provider/kimi/provider.cpp
     src/provider/kimi/kimi_oauth.cpp
     src/provider/openai/transport.cpp
+    src/provider/openai/responses_site.cpp
     src/provider/ollama/transport.cpp
     src/provider/selection.cpp
     # Registry predicates that need a provider's own knowledge (the

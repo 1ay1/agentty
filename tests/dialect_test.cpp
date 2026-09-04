@@ -10,6 +10,7 @@
 #include <doctest/doctest.h>
 
 #include "agentty/provider/dialect.hpp"
+#include "agentty/provider/openai/responses_site.hpp"
 #include "agentty/provider/registry.hpp"
 
 using namespace agentty::provider;
@@ -155,6 +156,45 @@ TEST_CASE("dialect: the UI predicate and the URL agree") {
     // UI following the URL is the entire point of the shared authority.
     REQUIRE(wire_streams_reasoning_text("openai", "gpt-5"));
     note_dialect_rejected("openai", "gpt-5", Dialect::Responses);
+    CHECK(!wire_streams_reasoning_text("openai", "gpt-5"));
+}
+
+TEST_CASE("dialect: the Responses endpoint resolves from the row") {
+    CleanSlate _;
+    openai::ResponsesEndpoint ep;
+    // Rows that advertise the second dialect hand back a complete destination.
+    REQUIRE(openai::responses_endpoint_for("openai", ep));
+    CHECK(ep.host == std::string{"api.openai.com"});
+    CHECK(ep.path == std::string{"/v1/responses"});
+    CHECK(ep.use_tls);
+
+    REQUIRE(openai::responses_endpoint_for("openrouter", ep));
+    CHECK(ep.path == std::string{"/api/v1/responses"});
+
+    // Rows without the column must REFUSE rather than invent a URL — the
+    // caller's contract is "false means stay on chat", and a fabricated
+    // /responses on a host that has none is a guaranteed 404 mid-turn.
+    CHECK(!openai::responses_endpoint_for("deepseek", ep));
+    CHECK(!openai::responses_endpoint_for("groq", ep));
+    // ChatGPT is Responses-native but rides its OWN OAuth transport and
+    // carries no endpoint columns; it must not be reachable through here.
+    CHECK(!openai::responses_endpoint_for("chatgpt", ep));
+    // A custom host spec (from_spec puts the raw URL in `label`) matches no
+    // row, so it stays on chat — we cannot know it speaks Responses.
+    CHECK(!openai::responses_endpoint_for("https://gw.example.com/api", ep));
+}
+
+TEST_CASE("dialect: routing survives an endpoint that isn't there") {
+    CleanSlate _;
+    // The end-to-end anti-rot story, at the level the transport fork sees it:
+    // a reasoning model routes to Responses, the host 404s, and the NEXT turn
+    // must go out on chat by itself. Without this the user would sit in a
+    // failure loop with no setting to change — the dialect has no UI.
+    REQUIRE(dialect_for("openai", "gpt-5") == Dialect::Responses);
+    note_dialect_rejected("openai", "gpt-5", Dialect::Responses);
+    CHECK(dialect_for("openai", "gpt-5") == Dialect::Chat);
+    // And the UI stops advertising thinking for it in the same instant, so
+    // the pane never waits on a channel this turn will not carry.
     CHECK(!wire_streams_reasoning_text("openai", "gpt-5"));
 }
 

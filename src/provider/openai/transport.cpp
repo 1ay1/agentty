@@ -38,6 +38,8 @@
 #include <simdjson.h>
 
 #include "agentty/provider/debug.hpp"   // wire dump → logx `wire` channel
+#include "agentty/provider/dialect.hpp"  // chat-vs-Responses routing (SSOT)
+#include "agentty/provider/openai/responses_site.hpp"
 #include "agentty/provider/registry.hpp" // endpoint columns: from_spec's SSOT
 #include "agentty/provider/stream_epilogue.hpp"
 #include "agentty/provider/stream_scaffold.hpp"
@@ -1832,6 +1834,49 @@ void set_memory_salvage_intent(StreamCtx& ctx, const Request& req) {
 
 // ── Streaming entry point ────────────────────────────────────────────────────
 provider::StreamResult run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
+    // ── Dialect fork ─────────────────────────────────────────────────────
+    // This is the ONE chokepoint every OpenAI-family turn passes through
+    // (Copilot and Kimi delegate here too), so the chat-vs-Responses choice
+    // belongs here rather than duplicated in each caller.
+    //
+    // It is not an optimisation. Per OpenAI's reasoning guide, Chat
+    // Completions rejects tool calling for GPT-5.4+ at any reasoning_effort
+    // other than `none`, and GPT-6-class models drop chat function calling
+    // entirely — agentty always sends tools, so for those models this fork is
+    // the difference between a working turn and a 400. dialect_for() owns the
+    // decision (see provider/dialect.hpp) and self-corrects from live 404s.
+    //
+    // Deliberately AFTER nothing and BEFORE the auth check: the Responses
+    // path does its own credential resolution with its own host-phrased
+    // error, so falling through to the chat check first would report the
+    // wrong endpoint in the message.
+    if (dialect_for(req.endpoint.label, req.model) == Dialect::Responses) {
+        openai::ResponsesEndpoint rep;
+        if (responses_endpoint_for(req.endpoint.label, rep)) {
+            rep.provider_id   = req.endpoint.label;
+            rep.extra_headers = req.endpoint.extra_headers;
+            // openai::Request and provider::Request are distinct types (the
+            // former carries chat-only fields like weak_model/native_api), so
+            // project across explicitly rather than assuming layout overlap.
+            provider::Request rreq;
+            rreq.model          = std::move(req.model);
+            rreq.system_prompt  = std::move(req.system_prompt);
+            rreq.messages       = std::move(req.messages);
+            rreq.tools          = std::move(req.tools);
+            rreq.max_tokens     = req.max_tokens;
+            rreq.context_window = req.context_window;
+            rreq.auth           = std::move(req.auth);
+            rreq.retry_count    = req.retry_count;
+            rreq.cancel         = std::move(cancel);
+            rreq.effort         = req.effort;
+            rreq.show_reasoning = req.show_reasoning;
+            rreq.session_key    = req.session_key;
+            return stream_responses(rep, std::move(rreq), std::move(sink));
+        }
+        // Row advertises no /responses (a custom host, or the user overrode
+        // the endpoint). Fall through to chat: a degraded turn beats none.
+    }
+
     // Ollama and other local servers accept an empty key. Only error out when
     // the endpoint is a TLS/hosted one that needs auth.
     if (req.endpoint.use_tls && is_empty(req.auth)) {
