@@ -4,6 +4,8 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-09-04
+
 ### Added
 - **The shell tool now reads images.** Running `read` on an image file (PNG/JPEG/GIF/WebP, sniffed by magic bytes, not extension) returns the actual picture to a vision-capable model instead of refusing it as binary — so the agent can *see* a screenshot it found via `shell`/`glob`. Images flow through a new tool-result image channel and are rendered as image blocks in the tool_result on **every** wire dialect (Anthropic, OpenAI Responses/ChatGPT, ollama), governed by a single image-policy SSOT so no provider silently drops them.
 - **The shell tool got more powerful and robust.** `cd` is now a real `chdir` in the child process (correct `$PWD` and relative paths) rather than a fragile `cd '<dir>' &&` string prefix; a new `env` argument lets a command set/override environment variables; and every command runs in a clean, non-interactive environment by default (`NO_COLOR`, `PAGER=cat`, `GIT_TERMINAL_PROMPT=0`, `TERM=dumb`, …) so output stays quiet and nothing blocks on a TTY prompt.

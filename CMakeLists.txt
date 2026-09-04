@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.28...3.31)
 project(agentty
-    VERSION     0.7.0
+    VERSION     0.8.0
     DESCRIPTION "A fast terminal coding agent (TUI) in modern C++"
     LANGUAGES   CXX)
 
