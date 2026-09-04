@@ -430,6 +430,39 @@ Element tool_output_viewer(const Model& m) {
         cache.call_key    = call_key;
         cache.rows.clear();
 
+        // For a command-running tool (shell / diagnostics / process_*), show
+        // the FULL command at the top of the body — the one-line `detail` in
+        // the header is clipped, so a long or multi-line command was otherwise
+        // unreadable. Rendered as `$ `-prefixed rows (continuations aligned
+        // under the first), followed by a separator, then the output. This
+        // mirrors the Run Result card's `$ command` header.
+        if (e.call.args.is_object()) {
+            std::string command;
+            if (auto it = e.call.args.find("command");
+                it != e.call.args.end() && it->is_string())
+                command = it->get<std::string>();
+            if (!command.empty()) {
+                const Color cmd_hue = e.failed ? danger : tool_hue;
+                bool first_line = true;
+                std::size_t start = 0;
+                while (start <= command.size()) {
+                    std::size_t nl = command.find('\n', start);
+                    std::string_view line = std::string_view{command}.substr(
+                        start,
+                        nl == std::string::npos ? std::string::npos : nl - start);
+                    cache.rows.push_back(
+                        hstack()(
+                            text(first_line ? "$ " : "  ", fg_bold(cmd_hue)),
+                            text(std::string{line}, fg_of(fg)) | clip)
+                        | height(1) | overflow(Overflow::Hidden));
+                    first_line = false;
+                    if (nl == std::string::npos) break;
+                    start = nl + 1;
+                }
+                cache.rows.push_back(sep | height(1));
+            }
+        }
+
         using Kind = maya::ToolBodyPreview::Kind;
         auto bp = tool_body_preview_config(e.call);
         const bool structured =
