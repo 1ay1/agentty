@@ -1,20 +1,11 @@
 // picker_sections_render_test — the fused model picker's SECTION HEADERS,
 // asserted against real rendered cells.
 //
-// The three-section browse layout ("recent" / "from this provider" / "from
-// all other providers") is decided in the builder but SPELLED in the view,
-// and the spelling is conditional: "from all OTHER providers" only reads
-// correctly when a "from this provider" section is on screen to be other
-// than. On a fresh install no model is active, so no catalog is the active
-// one, every row lands in that section — and the header pointed the user at
-// a section that does not exist.
-//
-// That was previously guarded by grepping pickers.cpp for the string, which
-// proves the branch was TYPED, not that it RENDERS. A source-text assertion
-// cannot tell you the header is reachable, that the row it titles is on
-// screen, or that the fallback fires for the right input. This renders the
+// Browse is a two-section layout ("recent" / "all providers"); there is no
+// per-provider split. The header is SPELLED in the view, so this renders the
 // picker through the real view + maya and reads the header back off the
-// canvas.
+// canvas rather than grepping the source — a source-text assertion cannot
+// tell you the header is reachable or that the rows it titles are on screen.
 
 #include "agtest.hpp"
 
@@ -99,10 +90,10 @@ Model picker_model(const std::vector<ProviderCatalog>& cats,
 
 }  // namespace
 
-TEST_CASE("picker: with an active provider, sections are titled by contrast") {
-    // The active provider needs a SECOND model: the active one is pinned
-    // into RECENT, so a single-model catalog contributes no non-recent rows
-    // and the "from this provider" section would legitimately be absent.
+TEST_CASE("picker: browse lists every provider under one 'all providers' header") {
+    // With an active provider set, its non-recent rows are NOT broken out
+    // into a "from this provider" block — every non-recent model, regardless
+    // of provider, lives under a single "all providers" header.
     const std::vector<ProviderCatalog> cats{
         cat("anthropic", "Anthropic",
             {mk("claude-opus-4-5",  "Claude Opus 4.5",  "anthropic"),
@@ -113,17 +104,18 @@ TEST_CASE("picker: with an active provider, sections are titled by contrast") {
     const std::string screen = render_picker(m);
 
     INFO(screen);
-    // Both halves of the contrast are on screen, so "other" has a referent.
-    CHECK(has(screen, "from this provider"));
-    CHECK(has(screen, "from all other providers"));
-    // And the rows they title actually rendered.
-    CHECK(has(screen, "Claude Haiku 4.5"));   // this provider, non-recent
+    // One flat section — no per-provider split.
+    CHECK(has(screen, "ALL PROVIDERS"));
+    CHECK_FALSE(has(screen, "from this provider"));
+    CHECK_FALSE(has(screen, "from all other providers"));
+    // Rows from BOTH providers render under it.
+    CHECK(has(screen, "Claude Haiku 4.5"));   // active provider, non-recent
     CHECK(has(screen, "GPT-5"));              // another provider
 }
 
-TEST_CASE("picker: with NO active provider, the header drops the contrast") {
-    // The fresh-install shape: nothing active, so no catalog is "this"
-    // provider and every row lands in the others section.
+TEST_CASE("picker: with NO active provider, the header is still 'all providers'") {
+    // The fresh-install shape: nothing active. The header is unchanged —
+    // there was never a contrast to drop.
     const std::vector<ProviderCatalog> cats{
         cat("anthropic", "Anthropic",
             {mk("claude-opus-4-5", "Claude Opus 4.5", "anthropic")}),
@@ -133,13 +125,10 @@ TEST_CASE("picker: with NO active provider, the header drops the contrast") {
     const std::string screen = render_picker(m);
 
     INFO(screen);
-    // There is no "this provider" block...
     CHECK_FALSE(has(screen, "from this provider"));
-    // ...so the header must NOT ask the user to contrast against one.
     CHECK_FALSE(has(screen, "from all other providers"));
-    // It says what the section actually holds instead.
-    CHECK(has(screen, "all providers"));
-    // The models are still listed — the fallback titles them, not hides them.
+    CHECK(has(screen, "ALL PROVIDERS"));
+    // The models are still listed under it.
     CHECK(has(screen, "Claude Opus 4.5"));
     CHECK(has(screen, "GPT-5"));
 }
@@ -167,10 +156,10 @@ TEST_CASE("picker: the active model leads, and its row is on screen") {
 
     const std::string screen = render_picker(m);
     INFO(screen);
-    CHECK(has(screen, "recent"));
+    CHECK(has(screen, "RECENT"));   // ┌─ RECENT divider (^K-style, uppercased)
     // Haiku sorts before Opus alphabetically; the active Opus must still be
     // the first RECENT row, because the picker pre-selects row 0.
-    const auto recent_hdr = screen.find("recent");
+    const auto recent_hdr = screen.find("RECENT");
     const auto opus       = screen.find("Claude Opus 4.5");
     const auto haiku      = screen.find("Claude Haiku 4.5");
     REQUIRE(recent_hdr != std::string::npos);

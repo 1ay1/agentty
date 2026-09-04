@@ -41,6 +41,10 @@ struct OpenAt {
     int index = 0;
     std::string query;
     std::string confirm_remove;
+    // Fused model picker only: when non-empty, the browse/filter list is
+    // scoped to THIS provider id (^/ scopes to the selected row's provider;
+    // pressing ^/ again clears it). Empty = every provider, the default.
+    std::string provider_scope;
 };
 using OneAxis = std::variant<Closed, OpenAt>;
 

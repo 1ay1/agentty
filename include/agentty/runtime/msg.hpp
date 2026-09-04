@@ -429,6 +429,11 @@ struct FusedPickerToggleReasoning {};
 // FusedPickerToggleReasoning above, which flips a single model's effort
 // CAPABILITY override.
 struct FusedPickerToggleShowReasoning {};
+// ^/ — scope the browse/filter list to ONLY the provider of the currently
+// highlighted row (so you can drill into "just this provider's models").
+// Pressing it again when already scoped clears the scope (back to all
+// providers). A no-op when the highlighted row has no provider (offers).
+struct FusedPickerScopeProvider {};
 struct FusedPickerFilterInput { char32_t ch; };
 struct FusedPickerFilterBackspace {};
 // One authed provider's catalog resolved (async, one per provider on open).
@@ -946,6 +951,7 @@ using FusedPickerMsg = std::variant<
     FusedPickerSelect, FusedPickerToggleFavorite,
     FusedPickerCycleEffort, FusedPickerToggleReasoning,
     FusedPickerToggleShowReasoning,
+    FusedPickerScopeProvider,
     FusedPickerFilterInput, FusedPickerFilterBackspace,
     ModelsLoaded, FusedCatalogLoaded, SwitchToPreviousModel, FusedRefreshOthers,
     FusedPickerRefresh>;

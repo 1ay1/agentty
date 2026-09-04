@@ -442,9 +442,9 @@ TEST_CASE("fused picker caches rows and clears them on close") {
     CHECK(m3.d.fused_rows.empty());
 }
 
-// A digit 1-9 on the UNFILTERED fused list jumps to the Nth row; once a
-// query is being typed, digits are search text (so "gpt5" still works).
-TEST_CASE("fused picker number quick-select") {
+// Digits are ordinary filter input on the fused list — there is no number
+// quick-select. Typing "3" searches for "3", never jumps to the 3rd row.
+TEST_CASE("fused picker digits type into the filter") {
     using namespace agentty::msg;
     install_stub_deps();
     g_settings = store::Settings{};
@@ -464,19 +464,17 @@ TEST_CASE("fused picker number quick-select") {
     auto [m2, c2] = app::update(std::move(m1), Msg{std::move(xai)});
     REQUIRE(m2.d.fused_rows.size() >= 3);
 
-    // '3' on the empty query jumps to the 3rd row (index 2), not into search.
+    // '3' on the empty query enters the query — it does NOT jump to a row.
     auto [m3, c3] = app::update(std::move(m2), Msg{FusedPickerFilterInput{U'3'}});
     const auto* c = m3.ui.overlay.get<ov::FusedPicker>();
     REQUIRE(c != nullptr);
-    CHECK(c->index == 2);
-    CHECK(c->query.empty());          // digit did NOT enter the query
+    CHECK(c->query == "3");           // digit went into the query
 
-    // Once a query exists, a digit is search text (jump is disabled).
+    // Digits keep appending like any other search text (so "g3" still works).
     auto [m4, c4] = app::update(std::move(m3), Msg{FusedPickerFilterInput{U'g'}});
-    auto [m5, c5] = app::update(std::move(m4), Msg{FusedPickerFilterInput{U'3'}});
-    const auto* c2p = m5.ui.overlay.get<ov::FusedPicker>();
+    const auto* c2p = m4.ui.overlay.get<ov::FusedPicker>();
     REQUIRE(c2p != nullptr);
-    CHECK(c2p->query == "g3");        // digit appended, not a jump
+    CHECK(c2p->query == "3g");        // both chars appended in order
 }
 
 // A filtered fused list carries per-row fuzzy-match byte offsets into the

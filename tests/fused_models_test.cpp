@@ -7,6 +7,7 @@
 
 #include <fstream>
 #include <sstream>
+#include <filesystem>
 
 #include <doctest/doctest.h>
 
@@ -415,11 +416,12 @@ TEST_CASE("fused: browse ranks by tier, search stays relevance-ordered") {
     }
 }
 
-// Browsing splits into three titled sections — "recent", "from this
-// provider", "from all other providers" — each alphabetical by model label.
-// The ACTIVE provider is deliberately named LAST alphabetically so its block
-// is proven to be pinned by IDENTITY, not by where its label happens to sort.
-TEST_CASE("fused: browse is recent, then this provider, then all others") {
+// Browsing splits into two titled sections — "recent" and "all providers"
+// — the second alphabetical by model label across EVERY provider (the active
+// provider is no longer broken out into its own "from this provider" block).
+// The ACTIVE provider is named LAST alphabetically to prove it is NOT pinned
+// above the others by identity anymore.
+TEST_CASE("fused: browse is recent, then a flat all-providers list") {
     std::vector<ProviderCatalog> cats = {
         cat("zeta", "ZetaCo",
             {mk("zeta-2",  "Zeta Two",  "zeta"),
@@ -441,7 +443,7 @@ TEST_CASE("fused: browse is recent, then this provider, then all others") {
 
     // Section 1 — recent: the ACTIVE model is pinned first (and flagged), the
     // MRU row follows. The active model is de-duped out of its own provider's
-    // group below, so it is not repeated there.
+    // catalog below, so it is not repeated there.
     REQUIRE(rows.size() >= 2);
     CHECK(rows[0].recent);
     CHECK(rows[0].active);
@@ -450,38 +452,27 @@ TEST_CASE("fused: browse is recent, then this provider, then all others") {
     CHECK(rows[1].recent);
     CHECK(rows[1].provider_id == "alpha");
 
-    // Section 2 — "from this provider": the remaining zeta rows (active's
-    // provider), alphabetical by label, flagged provider_group, NOT recent.
-    // The active model (zeta-1) is pinned in RECENT, so only zeta-2 remains.
-    std::vector<const FusedRow*> mine;
+    // Section 2 — "all providers": every remaining non-recent row, alphabetical
+    // by model label ACROSS providers. zeta-1 (active) and alpha-1 (recent)
+    // were consumed above, so: "Alpha Two" < "Mid One" < "Zeta Two".
+    std::vector<const FusedRow*> browse;
     for (const auto& r : rows)
-        if (!r.recent && r.provider_group) mine.push_back(&r);
-    REQUIRE(mine.size() == 1);
-    CHECK(mine[0]->provider_id == "zeta");
-    CHECK(mine[0]->model.id.value == "zeta-2");
+        if (!r.recent && !r.is_signin_offer()) browse.push_back(&r);
+    REQUIRE(browse.size() == 3);
+    CHECK(browse[0]->model.id.value == "alpha-2");
+    CHECK(browse[1]->model.id.value == "mid-1");
+    CHECK(browse[2]->model.id.value == "zeta-2");   // active provider NOT pinned up
 
-    // Section 3 — "from all other providers": alpha + mid rows, alphabetical
-    // by model label across providers. alpha-1 was consumed by RECENT.
-    std::vector<const FusedRow*> others;
-    for (const auto& r : rows)
-        if (!r.recent && !r.provider_group && !r.is_signin_offer())
-            others.push_back(&r);
-    REQUIRE(others.size() == 2);
-    CHECK(others[0]->model.id.value == "alpha-2");   // "Alpha Two" < "Mid One"
-    CHECK(others[1]->model.id.value == "mid-1");
-
-    // Section order in the flat list: recent < this-provider < others.
-    // Find the index of the first this-provider and first other row.
-    int first_mine = -1, first_other = -1;
+    // All non-recent rows are one contiguous block after the recent rows.
+    int last_recent = -1, first_browse = -1;
     for (int i = 0; i < static_cast<int>(rows.size()); ++i) {
         const auto& r = rows[static_cast<std::size_t>(i)];
-        if (!r.recent && r.provider_group && first_mine < 0)  first_mine  = i;
-        if (!r.recent && !r.provider_group && !r.is_signin_offer() && first_other < 0)
-            first_other = i;
+        if (r.recent) last_recent = i;
+        if (!r.recent && !r.is_signin_offer() && first_browse < 0)
+            first_browse = i;
     }
-    REQUIRE(first_mine >= 0);
-    REQUIRE(first_other >= 0);
-    CHECK(first_mine < first_other);
+    REQUIRE(first_browse >= 0);
+    CHECK(last_recent < first_browse);
 }
 
 // Row-layout arithmetic: the picker aligns three columns —
@@ -719,12 +710,21 @@ TEST_CASE("fused: rows carry a precomputed capability tier") {
 // alternative is a convention that silently rots — which is exactly what
 // happened to rules 1 and 2 across four pickers.
 TEST_CASE("pickers: primary labels are not dimmed, trailing yields first") {
-    const char* path = AGENTTY_PICKERS_SRC;
-    std::ifstream in(path);
-    REQUIRE_MESSAGE(in.good(), "cannot open " << path);
-    std::stringstream ss;
-    ss << in.rdbuf();
-    const std::string src = ss.str();
+    // The picker views live in several .cpp files under this dir — read and
+    // concatenate them all so the convention guard covers every picker.
+    namespace fs = std::filesystem;
+    std::string src;
+    const fs::path dir{AGENTTY_PICKERS_SRC_DIR};
+    REQUIRE_MESSAGE(fs::is_directory(dir), "no picker src dir: " << dir);
+    for (const auto& ent : fs::directory_iterator(dir)) {
+        if (ent.path().extension() != ".cpp") continue;
+        std::ifstream in(ent.path());
+        REQUIRE_MESSAGE(in.good(), "cannot open " << ent.path());
+        std::stringstream ss;
+        ss << in.rdbuf();
+        src += ss.str();
+        src += '\n';
+    }
     REQUIRE(!src.empty());
 
     auto count = [&](std::string_view needle) {
@@ -746,10 +746,9 @@ TEST_CASE("pickers: primary labels are not dimmed, trailing yields first") {
     // Rule 3: badge padding measures columns, not bytes.
     CHECK(src.find("maya::string_width(r.label)") != std::string::npos);
 
-    // NOTE: the conditional "from all other providers" / "all providers"
-    // section header is NOT asserted here. Grepping this file would only
-    // prove the branch was TYPED — not that it renders, that the row it
-    // titles is on screen, or that the fallback fires for the right input.
+    // NOTE: the browse "all providers" section header is NOT asserted here.
+    // Grepping this file would only prove the branch was TYPED — not that it
+    // renders or that the rows it titles are on screen.
     // picker_sections_render_test renders the real picker and reads the
     // header back off the canvas, which is strictly stronger.
 }

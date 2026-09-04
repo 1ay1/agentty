@@ -284,13 +284,12 @@ find_catalog(const std::vector<ProviderCatalog>& cats, std::string_view pid) {
     // several substring scans, and a comparator is called O(n log n) times.
     // On an aggregator's few-hundred-model catalog that was thousands of
     // redundant scans per keystroke. 0 when browsing is off (unused).
-    struct Scored { FusedRow row; int score; int prov_ord; int tier; int group; std::string akey; };
+    struct Scored { FusedRow row; int score; int prov_ord; int tier; std::string akey; };
     std::vector<Scored> scored;
     scored.reserve(64);
     int prov_ord = 0;
     for (const auto& c : catalogs) {
         if (!in_scope(c.provider_id)) continue;
-        const int grp = (one_provider || c.provider_id == in.active.provider_id) ? 0 : 1;
         const std::size_t nkeys = c.search_keys.size();
         for (std::size_t i = 0; i < c.models.size(); ++i) {
             const auto& mi = c.models[i];
@@ -367,7 +366,6 @@ find_catalog(const std::vector<ProviderCatalog>& cats, std::string_view pid) {
             row.active      = (c.provider_id == in.active.provider_id
                                && mi.id.value == in.active.model_id);
             row.recent      = false;
-            row.provider_group = (no_query && grp == 0);
             // Prefer the catalog's MEMOISED reasoning flag (built once per
             // catalog/capability change); resolve live only when the cache
             // isn't populated (unit tests calling build_fused_rows raw).
@@ -386,7 +384,7 @@ find_catalog(const std::vector<ProviderCatalog>& cats, std::string_view pid) {
             // Register AFTER the query gate: a filtered-out twin must not
             // suppress its matching sibling.
             seen.insert(seen_key(c.provider_id, folded));
-            scored.push_back({std::move(row), mscore, prov_ord, tier, grp,
+            scored.push_back({std::move(row), mscore, prov_ord, tier,
                               no_query ? capkey::norm_row_id(model_label)
                                        : std::string{}});
         }
@@ -404,12 +402,9 @@ find_catalog(const std::vector<ProviderCatalog>& cats, std::string_view pid) {
             if (a.row.tool_capable != b.row.tool_capable)
                 return a.row.tool_capable;
             if (no_query) {
-                // Browsing: three titled sections —
-                //   0 = active / single provider ("from this provider")
-                //   1 = all other providers.
-                // Within a section sort alphabetically by normalized model
-                // label; context window is the final tie-break.
-                if (a.group != b.group) return a.group < b.group;
+                // Browsing: one flat "all providers" section, sorted
+                // alphabetically by normalized model label; context window
+                // is the final tie-break.
                 if (a.akey  != b.akey)  return a.akey < b.akey;
                 return a.row.model.context_window > b.row.model.context_window;
             }

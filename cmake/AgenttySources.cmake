@@ -202,7 +202,10 @@ set(AGENTTY_RUNTIME_NOMAIN_SOURCES
     src/runtime/view/status_bar/model_badge.cpp
     src/runtime/view/status_bar/status_bar.cpp
     src/runtime/view/changes_strip.cpp
-    src/runtime/view/pickers.cpp
+    src/runtime/view/pickers/model_picker.cpp
+    src/runtime/view/pickers/nav_pickers.cpp
+    src/runtime/view/pickers/tool_pickers.cpp
+    src/runtime/view/pickers/misc_pickers.cpp
     src/runtime/view/rag_settings_view.cpp
     src/runtime/view/settings_list_view.cpp
     src/runtime/view/fork_view.cpp

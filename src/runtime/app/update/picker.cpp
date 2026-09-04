@@ -658,7 +658,14 @@ std::vector<FusedRow> fused_rows_for_model(const Model& m) {
     // Smart Mode slot-assign pins a model that will be dispatched to the
     // ACTIVE provider, so only its models may appear. See the Select arm.
     if (m.ui.smart_assign_slot) in.only_provider = active_provider_id();
-    if (auto* c = m.ui.overlay.get<ov::FusedPicker>()) in.query = c->query;
+    if (auto* c = m.ui.overlay.get<ov::FusedPicker>()) {
+        in.query = c->query;
+        // ^/ scope: restrict the list to one provider's models. Smart-assign
+        // scoping (above) wins when both are set — the slot constraint is
+        // stronger than a user's drill-in.
+        if (!c->provider_scope.empty() && in.only_provider.empty())
+            in.only_provider = c->provider_scope;
+    }
     return ui::build_fused_rows(in);
 }
 
@@ -982,20 +989,7 @@ Step fused_picker_update(Model m, msg::FusedPickerMsg pm) {
         },
         [&](FusedPickerFilterInput e) -> Step {
             if (auto* c = m.ui.overlay.get<ov::FusedPicker>()) {
-                // Quick-select: on the UNFILTERED list (empty query), a digit
-                // 1-9 jumps straight to the Nth row — the top rows are RECENT,
-                // so "2" hits the 2nd model you alternate with, no arrowing.
-                // Gated on an empty query so typing an id with digits ("o3",
-                // "gpt5") still searches normally.
-                if (c->query.empty() && e.ch >= '1' && e.ch <= '9') {
-                    const int n = static_cast<int>(m.d.fused_rows.size());
-                    const int want = e.ch - '1';
-                    if (want < n) {
-                        c->index = want;
-                        clamp_cursor(m);
-                    }
-                    return done(std::move(m));
-                }
+                // Every printable — digits included — types into the query.
                 // ASCII only — model/provider ids are ASCII in practice.
                 if (e.ch >= 0x20 && e.ch < 0x7f) {
                     c->query.push_back(static_cast<char>(e.ch));
@@ -1389,6 +1383,39 @@ Step fused_picker_update(Model m, msg::FusedPickerMsg pm) {
                     ? "reasoning: shown — needs an effort tier on this model "
                       "(\xe2\x86\x90/\xe2\x86\x92 in the picker)"
                     : "reasoning: shown (live thinking + \xe2\x9c\xa6 summary)");
+            return {std::move(m), std::move(toast)};
+        },
+        [&](FusedPickerScopeProvider&) -> Step {
+            // ^/ — restrict the list to ONLY the highlighted row's provider,
+            // or clear the scope if it is already active. The selected row's
+            // provider is "the current selection's provider" the user means.
+            auto* c = m.ui.overlay.get<ov::FusedPicker>();
+            if (!c) return done(std::move(m));
+            if (!c->provider_scope.empty()) {
+                // Already scoped — toggle back to all providers.
+                c->provider_scope.clear();
+                rebuild_fused_rows(m);
+                clamp_cursor(m);
+                auto toast = set_status_toast(m, "scope: all providers");
+                return {std::move(m), std::move(toast)};
+            }
+            const int n = static_cast<int>(m.d.fused_rows.size());
+            if (c->index < 0 || c->index >= n) return done(std::move(m));
+            const auto& row = m.d.fused_rows[static_cast<std::size_t>(c->index)];
+            // Sign-in offers / rows without a provider can't be scoped to.
+            if (row.provider_id.empty()) return done(std::move(m));
+            const std::string pid   = row.provider_id;
+            const std::string label = row.label.empty() ? pid : row.label;
+            // (row is now dangling once rebuild_fused_rows reallocates the
+            // vector — pid/label are copies, so we no longer touch it.)
+            c->provider_scope = pid;
+            // Scoping shrinks the list — the old cursor may now point past the
+            // end. Land on the first row so the selection is always valid.
+            c->index = 0;
+            rebuild_fused_rows(m);
+            clamp_cursor(m);
+            auto toast = set_status_toast(
+                m, "scope: " + label + " only (^/ to clear)");
             return {std::move(m), std::move(toast)};
         },
     }, pm);

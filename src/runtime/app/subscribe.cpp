@@ -331,11 +331,12 @@ std::optional<Msg> on_fused_picker(const KeyEvent& ev) {
         }
         const auto v = nav::char_view(e);
         if (!v) return std::nullopt;
-        // ^/ is the picker's own key — pressing it again closes it (raw
-        // 0x1F carries no ctrl flag). Previously it toggled to a second,
-        // near-identical picker; there is only one now.
+        // ^/ (also arrives as raw 0x1F, which carries no ctrl flag) scopes
+        // the list to the highlighted row's provider — press again to clear.
+        // Close is Esc (the fused picker is the only model surface now, so ^/
+        // no longer needs to toggle a second one shut).
         if (v->raw == 0x1F || (v->ctrl && v->c == U'/'))
-            return Msg{CloseFusedPicker{}};
+            return Msg{FusedPickerScopeProvider{}};
         if (v->ctrl) {
             switch (v->c) {
                 case U'p': return Msg{OpenProviderPicker{}};   // cross-hop
@@ -962,6 +963,18 @@ Sub<Msg> subscribe(const Model& m) {
 
     auto key_sub = Sub<Msg>::on_key(
         [=, login_state = m.ui.login](const KeyEvent& ev) -> std::optional<Msg> {
+            // ^C quits from ANYWHERE, before overlay routing. Every modal
+            // picker's handler returns UNCONDITIONALLY (the dispatch below
+            // never falls through for them), so without this a ^C pressed
+            // while a picker/thread-list/palette is open would be swallowed
+            // and the app would feel unquittable until you Esc'd out first.
+            // on_permission already did this locally; hoisting it here makes
+            // it uniform. Legacy terminals send raw 0x03.
+            if (auto* ck = std::get_if<CharKey>(&ev.key)) {
+                const char32_t c = ck->codepoint;
+                if (c == 0x03 || (ev.mods.ctrl && (c == U'c' || c == U'C')))
+                    return Quit{};
+            }
             // Login modal owns the whole keyboard — auth is the gating
             // step, no other UI is reachable until the user finishes
             // (or Escs out, which is allowed but leaves agentty unauth'd).
