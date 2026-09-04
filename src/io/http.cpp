@@ -2,6 +2,7 @@
 
 #include "agentty/util/logx.hpp"
 #include "agentty/io/fsm.hpp"
+#include "agentty/io/inflate.hpp"
 #include "agentty/io/tls.hpp"
 #include "agentty/util/env.hpp"
 
@@ -1716,6 +1717,33 @@ enum class TransferFraming { Identity, Chunked, Invalid };
     return saw ? TransferFraming::Chunked : TransferFraming::Identity;
 }
 
+// Decode a response body in place per its `content-encoding`. agentty asks for
+// `identity`, but a gateway can gzip anyway (z.ai's /models does — issue #30);
+// without this the compressed bytes reach the JSON parser as garbage and the
+// model list silently comes back empty. On success the body is replaced with
+// the inflated bytes and the header is rewritten to `identity` so no consumer
+// double-decodes or mis-reports the length. On failure (unknown encoding or
+// corrupt stream) the raw body is LEFT UNTOUCHED and a warning is logged —
+// degrading to the previous behaviour rather than dropping the response. The
+// 64 MiB cap bounds a decompression bomb (API JSON is far smaller).
+void content_decode_body(Headers& headers, std::string& body) {
+    constexpr std::size_t kMaxInflated = 64ull * 1024 * 1024;
+    for (auto& h : headers) {
+        if (h.name != "content-encoding") continue;
+        if (h.value.empty()) return;
+        auto decoded = io::compress::decode_content_encoding(
+            h.value, body, kMaxInflated);
+        if (!decoded) {
+            AGT_LOG(Net, Warn, "http.content_encoding.undecodable",
+                    "encoding={} bytes={}", h.value, body.size());
+            return;   // keep the raw body — caller may still salvage it
+        }
+        body = std::move(*decoded);
+        h.value = "identity";   // downstream sees plain, correctly-sized bytes
+        return;
+    }
+}
+
 [[nodiscard]] bool parse_content_length(const Headers& headers,
                                         std::optional<size_t>& out) {
     out.reset();
@@ -2066,6 +2094,7 @@ plain_unary_send(const Endpoint& ep, const Request& req, Timeouts tos,
                 "h1 plain malformed or truncated chunk framing"));
         body = std::move(decoded);
     }
+    content_decode_body(headers, body);
     return Response{ status, std::move(headers), std::move(body) };
 }
 
@@ -2252,6 +2281,7 @@ h1_unary_send(const Endpoint& ep, const Request& req, Timeouts tos,
             "h1 unary Content-Length body was truncated"));
     }
 
+    content_decode_body(headers, body);
     return Response{ status, std::move(headers), std::move(body) };
 }
 
@@ -2829,6 +2859,7 @@ Client::send(const Request& req, Timeouts tos, CancelTokenPtr cancel) {
         auto ok = conn->run(req, sctx, tos, cancel);
         if (ok) {
             impl_->pool.release(std::move(conn));
+            content_decode_body(sctx.headers, sctx.buffered_body);
             return Response{ sctx.status, std::move(sctx.headers),
                              std::move(sctx.buffered_body) };
         }

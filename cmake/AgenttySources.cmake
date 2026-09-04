@@ -22,6 +22,7 @@
 
 set(AGENTTY_IO_SOURCES
     src/io/http.cpp
+    src/io/inflate.cpp
     src/io/tls.cpp
     src/io/auth.cpp
     src/io/accounts.cpp

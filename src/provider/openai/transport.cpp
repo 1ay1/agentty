@@ -1760,6 +1760,17 @@ http::Headers build_request_headers(const AuthHeader& auth,
     h.push_back({"accept", "application/json"});
     h.push_back({"content-type", "application/json"});
     h.push_back({"user-agent", "agentty/" AGENTTY_VERSION});
+    // Ask for an UNCOMPRESSED body. agentty's HTTP client does not decode
+    // content-encodings (no gzip/deflate/br inflater), so a gateway that
+    // gzips its JSON response — z.ai's GLM Coding Plan does this on /models
+    // even with no Accept-Encoding sent — hands us bytes we can't parse: the
+    // model list comes back empty and the picker shows nothing (issue #30).
+    // The streaming path already forced `identity` via append_sse_no_buffer;
+    // emitting it HERE makes every OpenAI-family request (models listing,
+    // /api/show, the /v1 probe, the stream) uniformly safe — no request can
+    // forget it. Harmless duplicate with append_sse_no_buffer on the stream
+    // (same name+value; servers honour the first/identical directive).
+    h.push_back({"accept-encoding", "identity"});
     // Both arms carry a plain secret; the OpenAI family sends it as a Bearer
     // token (or a custom raw header). See auth::bearer_token — the single
     // source of truth for OpenAI-family token extraction.

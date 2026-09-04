@@ -1299,6 +1299,10 @@ TEST_CASE("catalog_sources enumerates presets and custom hosts, once each") {
     s.provider_keys["api.githubcopilot.com"] = "tok";   // adopted → copilot
     s.provider_keys["api.my-gw.com"]         = "k";     // genuine custom
     s.provider_keys["localhost:11434"]       = "x";     // local endpoint
+    // Regression (issue #30): a FULL-URL custom host with a multi-segment
+    // path (z.ai's GLM Coding Plan) must be its own catalog source — it is
+    // not a preset and does not adopt onto one, so the picker showed nothing.
+    s.provider_keys["https://api.z.ai/api/coding/paas/v4"] = "zkey";
 
     const auto srcs = provider::catalog_sources(s);
 
@@ -1311,6 +1315,8 @@ TEST_CASE("catalog_sources enumerates presets and custom hosts, once each") {
     CHECK(count_id("api.githubcopilot.com") == 0, "adopted spec is not its own source");
     CHECK(count_id("api.my-gw.com") == 1, "a custom gateway is a source");
     CHECK(count_id("localhost:11434") == 1, "a LOCAL endpoint is a source too");
+    CHECK(count_id("https://api.z.ai/api/coding/paas/v4") == 1,
+          "a full-URL custom host is a source");
 
     // Every id is unique — the property a per-caller enumeration kept losing.
     std::set<std::string> ids;

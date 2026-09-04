@@ -802,6 +802,21 @@ TEST_CASE("test_endpoint_presets") {
         CHECK(url.label == "https://chat.example.org/api");
     }
     {
+        // Regression (issue #30): a multi-segment custom path prefix must be
+        // kept VERBATIM and have /chat/completions + /models appended to it,
+        // not collapsed to /v1. z.ai's GLM Coding Plan serves under
+        // /api/coding/paas/v4, and its /models lives there — the picker came
+        // up empty because the models fetch was expected to hit the wrong URL.
+        auto url = oai::Endpoint::from_spec(
+            "https://api.z.ai/api/coding/paas/v4");
+        CHECK(url.host == "api.z.ai");
+        CHECK(url.port == 443);
+        CHECK(url.use_tls);
+        CHECK(url.path == "/api/coding/paas/v4/chat/completions");
+        CHECK(url.models_path == "/api/coding/paas/v4/models");
+        CHECK(!url.native_api);
+    }
+    {
         auto url = oai::Endpoint::from_spec("http://localhost:8080/custom");
         CHECK(url.host == "localhost");
         CHECK(url.port == 8080);
@@ -1126,6 +1141,12 @@ TEST_CASE("test_build_request_headers") {
     auto hs = oai::build_request_headers(oai::AuthHeader{oai::ApiKeyHeader{"k1"}}, def);
     find_header(hs, "authorization", &h);
     CHECK(h && h->value == "Bearer k1");
+    // Every OpenAI-family request asks for an uncompressed body — agentty's
+    // HTTP client has no content-encoding inflater on the request-build side,
+    // and a gateway that gzips anyway (z.ai, issue #30) is handled by the
+    // client's decoder. Pinned so a non-SSE request can never omit it.
+    find_header(hs, "accept-encoding", &h);
+    CHECK(h && h->value == "identity");
 
     hs = oai::build_request_headers(oai::AuthHeader{oai::BearerHeader{"k2"}}, def);
     find_header(hs, "authorization", &h);
