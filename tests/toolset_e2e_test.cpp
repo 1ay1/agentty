@@ -343,11 +343,20 @@ int main() {
         check(has(r, "answer"), "repo_map: shows definition signatures");
     }
 
-    // ── bash (sandbox off) ──────────────────────────────────────────────────
+    // ── shell (sandbox off) ────────────────────────────────────────
     {
         auto r = run("shell", {{"command", "echo e2e-bash-ok"},
                               {"cd", root.string()}});
-        check(has(r, "e2e-bash-ok"), "bash: runs and captures stdout");
+        check(has(r, "e2e-bash-ok"), "shell: runs and captures stdout");
+    }
+    // ── legacy `bash` name canonicalises to the `shell` tool ────────────────
+    // Models call the exec tool `bash` (training prior) before internalising
+    // our `shell` schema; tools::find aliases it so the first-turn call works
+    // instead of 404-ing and forcing a wasted retry.
+    {
+        auto r = run("bash", {{"command", "echo e2e-alias-ok"},
+                              {"cd", root.string()}});
+        check(has(r, "e2e-alias-ok"), "bash alias: resolves to shell and runs");
     }
     // ── bash failure feedback: exit-code decode + error-line digest ──────────
     {

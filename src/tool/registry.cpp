@@ -174,6 +174,19 @@ std::shared_ptr<const Snapshot> refresh_wire_cache_locked(WireCache& c) {
 
 const std::vector<ToolDef>& registry() { return wire_tools(); }
 
+// Legacy tool-name aliases → canonical registry name. The exec tool was renamed
+// bash → shell, but `bash` is so dominant in model training data (it is Claude
+// Code's actual tool name) that a model reliably calls it by the old name on
+// the FIRST turn, before it internalises our schema. Without this the call
+// 404s ("unknown tool: bash"), the model burns a wasted failed call, then
+// retries as `shell`. Canonicalising here — the ONE lookup every dispatch path
+// (agent loop, subagent, ACP, mcp-serve, permission check) funnels through —
+// absorbs that misfire so the legacy name just works.
+[[nodiscard]] static std::string_view canonical_tool_name(std::string_view name) noexcept {
+    if (name == "bash") return "shell";
+    return name;
+}
+
 const ToolDef* find(std::string_view name) {
     auto& cache = wire_cache();
     std::shared_ptr<const Snapshot> snapshot;
@@ -183,6 +196,10 @@ const ToolDef* find(std::string_view name) {
     }
     if (auto it = snapshot->idx.find(std::string{name}); it != snapshot->idx.end())
         return it->second;
+    // Miss: retry once under the canonical name so a legacy alias resolves.
+    if (auto canon = canonical_tool_name(name); canon != name)
+        if (auto it = snapshot->idx.find(std::string{canon}); it != snapshot->idx.end())
+            return it->second;
     return nullptr;
 }
 
