@@ -627,9 +627,14 @@ void refresh_fused_sources(Model& m) {
                 if (auto h = src.id.rfind('#'); h != std::string::npos
                                                 && h + 1 < src.id.size()) {
                     const std::string tag = src.id.substr(h + 1);
-                    // Only append when the tag is not already part of the
-                    // visible label (URL-form specs keep "#tag" verbatim).
-                    if (label.find(tag) == std::string::npos)
+                    // Only append when the label doesn't ALREADY show this
+                    // fragment. URL-form specs keep the "#tag" verbatim, so
+                    // look for that exact "#tag" token — not a bare substring
+                    // of the tag, which would wrongly suppress the bracket
+                    // when the tag text also appears in the HOST (e.g.
+                    // "main.ollama.com#main", where a plain find("main") hits
+                    // the host and leaves the row ambiguous).
+                    if (label.find('#' + tag) == std::string::npos)
                         label += " [" + tag + "]";
                 }
             }

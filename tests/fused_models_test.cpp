@@ -616,11 +616,54 @@ TEST_CASE("fused: badge column scales with terminal width") {
     // the model column's alignment. The dynamic cap must accept it on any
     // terminal wide enough for a picker to be useful (≥ 48 cols).
     CHECK(badge_max(80) >= 24);    // "ollama.com [seaventures]" is 24
-    CHECK(badge_max(80) >= 24);    // "ollama.com [liferaft]" is 21
+    CHECK(badge_max(80) >= 21);    // "ollama.com [liferaft]" is 21
     // …and is abbreviated, not permitted to eat the row, on a phone/SSH pane.
     CHECK(badge_max(40) <= 8);
     // The widest real preset label still fits once there is room.
     CHECK(badge_max(120) >= 14);   // "GitHub Copilot"
+}
+
+// The other half of the shared-hostname fix (commit "disambiguate custom-host
+// rows by their #tag"): refresh_fused_sources() surfaces a saved host's
+// "#tag" in its picker label so accounts on one hostname stay distinct. This
+// mirrors that derivation exactly — id is the raw saved spec, label is what
+// provider_display_name() produced from it — and pins the guard that decides
+// when to append " [tag]".
+TEST_CASE("fused: custom-host #tag disambiguates the picker label") {
+    // Same rule as the non-preset branch in refresh_fused_sources().
+    auto derive = [](std::string_view id, std::string label) {
+        if (auto h = id.rfind('#'); h != std::string_view::npos
+                                    && h + 1 < id.size()) {
+            const std::string tag{id.substr(h + 1)};
+            if (label.find('#' + tag) == std::string::npos)
+                label += " [" + tag + "]";
+        }
+        return label;
+    };
+
+    // Host-form specs: provider_display_name() returns the bare host, dropping
+    // the fragment — so the tag must be re-exposed, and two accounts on one
+    // host end up with DISTINCT labels.
+    CHECK(derive("ollama.com#main",        "ollama.com") == "ollama.com [main]");
+    CHECK(derive("ollama.com#seaventures", "ollama.com") == "ollama.com [seaventures]");
+    CHECK(derive("ollama.com#main", "ollama.com")
+          != derive("ollama.com#work", "ollama.com"));
+
+    // URL-form specs keep "#tag" verbatim in the label already; don't
+    // double-tag them.
+    CHECK(derive("https://ollama.com/v1#main", "ollama.com#main") == "ollama.com#main");
+
+    // The guard keys on the EXACT "#tag" fragment, not a bare substring of the
+    // tag. A tag whose text also appears in the HOST must still be bracketed —
+    // otherwise "main.ollama.com#main" would collide with a sibling account.
+    CHECK(derive("main.ollama.com#main", "main.ollama.com") == "main.ollama.com [main]");
+    CHECK(derive("main.ollama.com#main", "main.ollama.com")
+          != derive("main.ollama.com#work", "main.ollama.com"));
+
+    // Degenerate specs: no fragment, or a trailing '#' with an empty tag —
+    // leave the label untouched (no stray " []").
+    CHECK(derive("ollama.com",  "ollama.com") == "ollama.com");
+    CHECK(derive("ollama.com#", "ollama.com") == "ollama.com");
 }
 
 // The row carries its capability tier, precomputed. Two consumers need it —
