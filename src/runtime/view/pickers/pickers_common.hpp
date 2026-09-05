@@ -128,13 +128,27 @@ inline constexpr int kPickerChromeRows = 7;
 
 // How many columns the provider badge may occupy. The badge is the grouping
 // signal in a flat cross-provider list, so it must stay legible — but it
-// competes with the model NAME the user is actually reading. Scales with the
-// terminal instead of a magic constant.
+// competes with the model NAME the user is actually reading.
+//
+// The cap used to be a fixed 8/12/16 columns by terminal width, which broke
+// the whole layout the moment a custom host grew its label past 16 columns
+// (e.g. `ollama.com [seaventures]` at 24): the widget renders the badge at
+// its natural width, so that one row was wider than the rest and the model
+// column went ragged. Derive the cap from the terminal width instead — let
+// the column grow to fit the longest actual label, but never let it eat
+// more than half the picker's horizontal space so the model name column
+// still has usable room on narrow terminals.
 [[nodiscard]] inline int picker_badge_max_cols() {
     const int cols = picker_terminal_cols();
-    if (cols < 70)  return 8;    // narrow split: abbreviate hard
-    if (cols < 100) return 12;   // typical 80-col terminal
-    return 16;                   // wide: full labels fit
+    // Reserve at least ~half the width for the model NAME column. On a very
+    // narrow terminal (≤ 40 cols) the badge cap bottoms out at 8 (the old
+    // "abbreviate hard" floor); on wider terminals it tracks half the
+    // terminal, so a long custom-host label is never the cause of ragged
+    // alignment — the alignment breaks only when a pathologically wide host
+    // (≥ half the terminal) would leave no room for a model name at all.
+    if (cols <= 40) return 8;            // tiny: abbreviate hard
+    const int cap = cols / 2;
+    return cap < 8 ? 8 : cap;            // never below the tiny-terminal floor
 }
 
 // ── Capability-tier hue (model picker badges) ─────────────────────────────
