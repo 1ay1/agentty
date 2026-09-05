@@ -348,19 +348,27 @@ int main() {
             return 1;
         }
         set_tmux(false);
-        // …but a RECENT edit during streaming keeps it on (you're typing
-        // a queued message, not scrolled up reading). tmux-free for this
-        // one so an outer `env TMUX=…` can't mask it.
+        // …and a RECENT edit during streaming does NOT bring it back:
+        // composer_uses_hardware_caret() drops the hardware caret for the
+        // whole duration of an on-screen animation (a live stream repaints
+        // at ~30 fps, and the caret's per-frame ?25l→move→?25h dance makes
+        // cursor-animating terminals replay their fade every frame — a
+        // visible flicker). The painted block caret is used instead, so
+        // typing a queued message mid-stream stays flicker-free. tmux-free
+        // for this one so an outer `env TMUX=…` can't mask it.
+        // (Behaviour set by f7ced849 — the recent-typing exception was
+        // deliberately removed.)
         g.ui.composer.last_edit_ms = maya::anim::default_clock().now_ms();
         maya::testing::advance_anim_clock_ms(500);      // 0.5 s later
-        if (!agentty::ui::composer_config(g).hardware_caret) {
-            std::fprintf(stderr, "FAIL(gate): hardware caret OFF while "
-                         "streaming but actively typing\n");
+        if (agentty::ui::composer_config(g).hardware_caret) {
+            std::fprintf(stderr, "FAIL(gate): hardware caret ON while "
+                         "streaming (painted caret expected, even when "
+                         "actively typing)\n");
             return 1;
         }
-        std::fprintf(stderr, "PASS(gate): caret on when idle (incl. tmux) "
-                     "and while typing; off when unfocused or "
-                     "streaming-idle.\n");
+        std::fprintf(stderr, "PASS(gate): caret on when idle (incl. tmux); "
+                     "painted (off) while streaming, even when typing; "
+                     "off when unfocused.\n");
     }
 
     // Small terminal so the composer text wraps at a reachable edge AND
