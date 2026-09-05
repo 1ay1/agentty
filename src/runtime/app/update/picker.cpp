@@ -613,8 +613,28 @@ void refresh_fused_sources(Model& m) {
         }
         ProviderCatalog* c = find_cat(src.id);
         if (!c) {
+            // Several SAVED custom hosts can share one hostname and differ
+            // only in their "#name" account tag ("ollama.com#main" vs
+            // "ollama.com#work"). provider_display_name() strips the URL
+            // path — and with it any tag that sits past a "/" — so their
+            // labels would come out IDENTICAL in the picker. Surface the
+            // tag in brackets so every row stays unique and the user can
+            // tell which account it points at. Preset sources skip this:
+            // their id carries no tag and their registry label is already
+            // unambiguous.
+            std::string label = src.label;
+            if (!src.is_preset) {
+                if (auto h = src.id.rfind('#'); h != std::string::npos
+                                                && h + 1 < src.id.size()) {
+                    const std::string tag = src.id.substr(h + 1);
+                    // Only append when the tag is not already part of the
+                    // visible label (URL-form specs keep "#tag" verbatim).
+                    if (label.find(tag) == std::string::npos)
+                        label += " [" + tag + "]";
+                }
+            }
             m.d.provider_catalogs.push_back(ProviderCatalog{
-                src.id, src.label, ProviderCatalog::State::Idle, {}, {}});
+                src.id, std::move(label), ProviderCatalog::State::Idle, {}, {}});
             c = &m.d.provider_catalogs.back();
         }
         // Active backend: MIRROR the live catalog we already hold
