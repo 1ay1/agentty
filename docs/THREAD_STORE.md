@@ -104,32 +104,66 @@ I prototyped the alternatives against the real 29 MB / 2519-message
 thread rather than reasoning about them. Measured (Python — a pessimistic
 floor; the C++ path is faster):
 
-| approach | thread switch | notes |
-|---|---:|---|
-| today: one JSON document | 233 ms | parses 29 MB to draw 60 messages |
-| **JSONL + offset index** | **1.4 ms** | seek to `ofs[-60]`, parse 60 lines |
-| JSONL, no index (scan last 1 MB) | 4.5 ms | works, but 3× slower and fiddly |
-| hot/cold split file | 29 ms | *worse* — see below |
-| SQLite | 1.3 ms | same speed, new dependency |
+| approach | file | full load | switch (tail 60) |
+|---|---:|---:|---:|
+| today: one JSON document | 29.2 MB | 226 ms | 226 ms |
+| **JSONL + offset index** | 29.2 MB | 49 ms | **1.4 ms** |
+| JSONL + zlib per line | 17.7 MB | 173 ms | — |
+| whole-file gzip | 17.0 MB | 173 ms | — |
+| **JSONL + payloads >4 KB in blobs** | **6.3 MB** | **20 ms** | **0.6 ms** |
 
-Two of those results changed the design:
+Four conclusions, three of which killed an idea:
 
-**The hot/cold split lost.** My §2 draft proposed extracting the
+**Compression is a trap.** It halves the file and *triples* the load
+(173 ms vs 49 ms). We are not short of disk; we are short of
+milliseconds. It also destroys `grep`-ability and random access — you
+cannot seek into a gzip stream. Rejected.
+
+**Externalising big payloads dominates everything else.** Moving the 576
+payloads over 4 KB into the blob store takes the file from 29.2 MB to
+**6.3 MB** and the full load from 49 ms to **20 ms** — better than
+compression on both axes at once, because those 22.2 MB are never parsed
+rather than merely stored smaller.
+
+**The blob threshold has a floor.** Lowering it below 4 KB buys little
+and costs many files: 4 KB → 576 blobs / 2.6 MB inline; 1 KB → 1533 blobs
+for 0.6 MB inline. Below ~4 KB an inode, an open and a read cost more
+than they save. The existing `kOutputBlobMin` is 8 KB, which is in the
+right region; 4 KB is a marginal improvement worth measuring in C++
+before changing.
+
+**Most of the win is already implemented and simply not applied.** The
+current code already externalises tool output ≥ 8 KB and images — but
+only when a thread is *written*. Across the 539 real threads: **14 are
+fully blob-backed, 232 still carry 255 MB of legacy inline payload**,
+re-parsed on every single open, because they have not been rewritten
+since the blob store landed.
+
+So the single highest-value change is not a new format at all. It is
+**rewriting old threads into the format we already have** — which the log
+migration (§6) does anyway, for free, the first time each thread is
+opened.
+
+#### Also rejected
+
+**A hot/cold split file.** An earlier draft proposed extracting the
 render-relevant fields into a separate index file. Built, it is 6 MB and
 takes **29 ms** to parse — twenty times slower than seeking into the raw
-log. The reason is obvious in hindsight: a thread switch renders ~60
-messages, so *any* design that reads a whole-thread structure has already
-lost to one that reads only 60 messages. Separating hot from cold fields
-optimises the wrong axis. Separating *recent* from *old* is the axis that
-matters, and a byte offset does that for 8 bytes per message.
+log. A switch renders ~60 messages, so *any* design that reads a
+whole-thread structure has already lost to one that reads 60 messages.
+Hot-vs-cold is the wrong axis; recent-vs-old is the right one, and a byte
+offset does that for 8 bytes per message.
 
-**SQLite is exactly as fast and costs a dependency.** It measured 1.3 ms
-against JSONL's 1.4 ms — within noise. It would also give us transactions
-and SQL, neither of which this problem needs: there are no joins, no
-queries beyond "give me messages N..M", and one writer per thread. Paying
-a 250 KB C dependency and losing `grep`-ability for 0.1 ms is a bad
-trade. (Worth noting Claude Code and Codex both store sessions as JSONL;
-Zed uses SQLite, but for workspace state with genuinely relational shape.)
+**SQLite.** Measured **1.3 ms** against JSONL's 1.4 ms — within noise. It
+would add transactions and SQL, neither of which this problem has: no
+joins, no query beyond "messages N..M", one writer per thread. Paying a
+250 KB C dependency and losing `grep`/`jq` for 0.1 ms is a bad trade.
+(Zed uses SQLite, but for workspace state with genuinely relational
+shape. Claude Code and Codex both store sessions as JSONL.)
+
+**No index at all** (scan the last 1 MB backwards for newlines). Works,
+but 4.5 ms vs 1.4 ms and fiddlier to get right at the boundary. The
+offset file is 20 KB and rebuilds in 12 ms; it earns its place.
 
 ### 3.2 What each file does
 

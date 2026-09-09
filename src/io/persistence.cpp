@@ -1,4 +1,5 @@
 #include "agentty/io/persistence.hpp"
+#include "agentty/io/blob_store.hpp"
 #include "agentty/runtime/settings_registry.hpp"
 
 #include "agentty/util/logx.hpp"
@@ -121,71 +122,15 @@ fs::path threads_dir() {
 
 // ---- Image blob store ------------------------------------------------
 //
-// Image bytes used to be base64'd INTO the thread JSON. A screenshot is
-// ~1 MB, base64 inflates it to ~1.3 MB, and every one of them is then
-// re-read and re-decoded on every thread load — forever. One real thread
-// here reached 31 MB, of which 10.8 MB was images and only 0.7 MB was
-// actual conversation text; switching to it stalls the UI for well over a
-// second before a single row is drawn.
+// MOVED to io/blob_store.{hpp,cpp}. The store is content-agnostic (bytes
+// in, name out) and the thread log needs it without dragging in this
+// whole file. Call sites below use blobs::put / blobs::get directly — no
+// forwarding wrappers, so there is exactly one name for each operation.
 //
-// Blobs fix the growth at the source: the bytes are written ONCE to
-// threads/blobs/<hash>, and the message keeps a reference. Identical
-// images (the same screenshot pasted twice, or a retried turn) collapse
-// to one file for free because the name IS the content hash.
-//
-// Old threads keep working: the loader still accepts an inline "data"
-// field, so nothing needs migrating and a downgrade only loses the
-// dedup, not the images.
-fs::path blobs_dir() {
-    auto p = threads_dir() / "blobs";
-    std::error_code ec;
-    fs::create_directories(p, ec);
-    return p;
-}
-
-// FNV-1a over the bytes. Not cryptographic — this names a local cache
-// entry, it doesn't authenticate anything. 64 bits over a few thousand
-// images is a collision probability far below the disk's own error rate,
-// and the length is mixed into the name as a cheap second dimension.
-[[nodiscard]] std::string blob_name(std::string_view bytes) {
-    std::uint64_t h = 1469598103934665603ull;
-    for (unsigned char c : bytes) {
-        h ^= c;
-        h *= 1099511628211ull;
-    }
-    char buf[40];
-    std::snprintf(buf, sizeof(buf), "%016llx-%zx",
-                  static_cast<unsigned long long>(h), bytes.size());
-    return buf;
-}
-
-// Write bytes to the blob store, returning the name to reference them by.
-// Empty on failure so the caller can fall back to inlining rather than
-// silently losing the image.
-[[nodiscard]] std::string put_blob(const std::string& bytes) {
-    if (bytes.empty()) return {};
-    const std::string name = blob_name(bytes);
-    const fs::path out = blobs_dir() / name;
-    std::error_code ec;
-    // Content-addressed: if it's already there it is byte-identical by
-    // construction, so rewriting it would be pure I/O for no change.
-    if (fs::exists(out, ec)) return name;
-    if (!write_json_atomic(out, bytes)) return {};
-    return name;
-}
-
-[[nodiscard]] std::string get_blob(const std::string& name) {
-    if (name.empty()) return {};
-    // Defend the join: a thread file is user-writable, and a crafted
-    // "../../" name must not read outside the blob directory.
-    if (name.find('/') != std::string::npos
-        || name.find('\\') != std::string::npos
-        || name.find("..") != std::string::npos) return {};
-    std::ifstream in(blobs_dir() / name, std::ios::binary);
-    if (!in) return {};
-    return std::string{std::istreambuf_iterator<char>(in),
-                       std::istreambuf_iterator<char>()};
-}
+// The hash and on-disk layout are unchanged, so every blob written before
+// the move still resolves. Old threads keep working: the loader still
+// accepts an inline "data" field, so nothing needs migrating and a
+// downgrade only loses the dedup, not the images.
 
 // Resolve a lazy ImageContent's bytes. Installed into the domain type at
 // startup (see the initialiser below) so conversation.hpp — a pure data
@@ -195,7 +140,7 @@ fs::path blobs_dir() {
 // mode: a missing blob or corrupt base64 yields empty bytes, and every wire
 // path already skips empty-byte images.
 static std::string resolve_image_source(const ImageContent::Source& s) {
-    if (!s.blob.empty()) return get_blob(s.blob);
+    if (!s.blob.empty()) return blobs::get(s.blob);
     if (!s.b64.empty())  return util::base64_decode(s.b64);
     return {};
 }
@@ -397,7 +342,7 @@ static json message_to_json(const Message& m) {
         constexpr std::size_t kOutputBlobMin = 8u * 1024u;
         auto out = tools::util::to_valid_utf8(tc.output()); // empty unless terminal
         if (out.size() >= kOutputBlobMin) {
-            if (auto name = put_blob(out); !name.empty())
+            if (auto name = blobs::put(out); !name.empty())
                 t["output_blob"] = std::move(name);
             else
                 t["output"] = std::move(out);
@@ -439,7 +384,7 @@ static json message_to_json(const Message& m) {
                     //
                     // Falls back to writing the base64 through untouched if
                     // the blob write fails — a slow thread beats a lost image.
-                    if (auto name = put_blob(util::base64_decode(s.b64));
+                    if (auto name = blobs::put(util::base64_decode(s.b64));
                         !name.empty())
                         e["blob"] = std::move(name);
                     else
@@ -449,7 +394,7 @@ static json message_to_json(const Message& m) {
                 continue;
             }
             if (img.bytes().empty()) continue;
-            if (auto name = put_blob(img.bytes()); !name.empty())
+            if (auto name = blobs::put(img.bytes()); !name.empty())
                 e["blob"] = std::move(name);
             else
                 e["data"] = util::base64_encode(img.bytes());
@@ -498,7 +443,7 @@ static json message_to_json(const Message& m) {
     constexpr std::size_t kTextBlobMin = 8u * 1024u;
     auto put_or_inline = [&](json& obj, const char* key, std::string text) {
         if (text.size() >= kTextBlobMin) {
-            if (auto name = put_blob(text); !name.empty()) {
+            if (auto name = blobs::put(text); !name.empty()) {
                 obj[std::string{key} + "_blob"] = std::move(name);
                 return;
             }
@@ -647,7 +592,7 @@ static std::expected<Message, DeserializeError> parse_message(const json& j) {
     auto text_or_blob = [](const json& obj, const char* key) -> std::string {
         if (auto it = obj.find(std::string{key} + "_blob");
             it != obj.end() && it->is_string())
-            return get_blob(it->get<std::string>());
+            return blobs::get(it->get<std::string>());
         return obj.value(key, "");
     };
     m.thinking = text_or_blob(j, "thinking");
@@ -691,7 +636,7 @@ static std::expected<Message, DeserializeError> parse_message(const json& j) {
             // Blob reference (current) or inline (older threads / fallback).
             std::string output = t.value("output", "");
             if (auto ob = t.value("output_blob", std::string{}); !ob.empty())
-                output = get_blob(ob);
+                output = blobs::get(ob);
             if (auto it = t.find("status"); it != t.end()) {
                 if (it->is_string()) {
                     status_tag = it->get<std::string>();
