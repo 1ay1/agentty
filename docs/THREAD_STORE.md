@@ -210,18 +210,25 @@ messages of tail is a few hundred KB of parse.
 
 ## 4. Expected result
 
-| | today | designed |
-|---|---:|---:|
-| thread switch (29 MB thread) | 233 ms | **1.4 ms** (measured) |
-| per-turn save | rewrite 29 MB | **0.01 ms** append |
-| index size | — | 20 KB |
-| index rebuild if lost | — | 12 ms |
-| attach a 2 GB file | impossible | ~100 B in the log |
-| new dependencies | — | none |
-| still `grep`-able / `jq`-able | yes | yes (better: per-line) |
+| | today | §3 alone | + windowed read |
+|---|---:|---:|---:|
+| thread switch (29 MB thread) | 226 ms | **58 ms** | **1.4 ms** |
+| per-turn save | rewrite 29 MB | **0.01 ms** append | same |
+| index size | — | 20 KB | 20 KB |
+| index rebuild if lost | — | 12 ms | 12 ms |
+| attach a 2 GB file | impossible | ~100 B in the log | same |
+| new dependencies | — | none | none |
+| still `grep`-able / `jq`-able | yes | yes (better: per-line) | same |
+| view files touched | — | **zero** | many (see §9.0) |
 
-The 1.4 ms is a real measurement on your largest real thread, not a
-projection. Render stays ~4 ms and was never the problem.
+Every number is measured on your largest real thread, not projected.
+Render stays ~4 ms and was never the problem.
+
+The two columns matter: **§3 alone is a self-contained change** that makes
+switching 4× faster and saving O(1), without touching a single view file.
+The 1.4 ms column additionally requires unpicking the assumption that a
+thread is fully resident in memory — 500+ call sites across 46 files.
+§9.0 is honest about that being a separate project.
 
 ---
 
@@ -293,9 +300,16 @@ public:
 
     [[nodiscard]] std::size_t size() const noexcept;   // message count
 
-    // Parse messages [from, to). This is the ONLY read path: the view
-    // asks for the visible window, the wire asks for everything.
-    // Synchronous and cheap by construction — 60 messages is ~1.4 ms.
+    // Parse messages [from, to). This is the ONLY read path.
+    //
+    // Phase 1 uses range(0, size()) exclusively — the app still wants a
+    // whole resident Thread (see §9.0), and even that is 4x faster than
+    // today because 2519 small parses beat one 29 MB parse.
+    //
+    // The windowed call, range(size()-60, size()), is what reaches
+    // 1.4 ms. The API is shaped for it from day one so the storage layer
+    // never has to change again — but nothing calls it until the view
+    // stops requiring residency, which is its own project.
     [[nodiscard]] std::vector<Message> range(std::size_t from,
                                              std::size_t to) const;
 
@@ -309,14 +323,16 @@ public:
 ```
 
 Four methods. No async machinery, no completion messages, no cache
-invalidation, no re-entrancy — because at 1.4 ms there is nothing to hide
-behind a background thread. That is the main advantage of the measurement
-in §3.1: it deletes an entire subsystem the earlier draft needed.
+invalidation, no re-entrancy — because at 1.4 ms (windowed) or 58 ms
+(whole thread) there is nothing worth hiding behind a background thread.
+That is the main practical benefit of the measurements in §3.1: they
+delete an entire subsystem the earlier draft needed.
 
 `range()` is synchronous on purpose. A background loader would add a
 threading model, a `Msg` round-trip, and a "content not here yet" state
-to every render path, to save a millisecond. The previous draft proposed
-exactly that; the measurement says don't.
+to every render path — to save tens of milliseconds on an operation the
+user explicitly initiated. The previous draft proposed exactly that; the
+measurement says don't.
 
 ### 7.1 How it plugs into the app
 
@@ -328,12 +344,13 @@ The seam already exists: `Deps` holds `std::function` store callbacks and
 std::function<std::optional<Thread>(const ThreadId&)> load_thread;
 ```
 
-Phases 0–1 change nothing here — `FsStore::load_thread` keeps returning a
-whole `Thread`, now assembled from the log. Phase 2 adds one dep
-*alongside* it, so the view can migrate one surface at a time:
+Phases 0–1 change nothing here: `FsStore::load_thread` keeps returning a
+whole `Thread`, now assembled from the log via `range(0, size())`. The
+windowed dep below is what a future residency project would add — listed
+so the API shape is already right, not because phase 1 needs it:
 
 ```cpp
-// "give me messages [from,to)" — the windowed read
+// "give me messages [from,to)" — NOT used in phase 1; see §9.0
 std::function<std::vector<Message>(const ThreadId&, std::size_t, std::size_t)>
     load_range;
 ```
@@ -432,26 +449,92 @@ Each lands green and revertible:
    it yet.
 3. `FsStore` reads `.jsonl` when present, `.json` otherwise.
 4. Save writes the log; keep `.json` until the pair reads back identical.
-5. View switches to windowed `range()` reads.
-6. Attachments.
+5. Attachments.
 
-Steps 1–2 change no on-disk bytes and no behaviour.
+Steps 1–2 change no on-disk bytes and no behaviour. Steps 1–5 touch no
+view code and deliver the 58 ms switch + O(1) save.
+
+The windowed read — which takes 58 ms to 1.4 ms — is deliberately **not**
+on this list. It is a separate project with its own design doc; see
+§9.0.
 
 ---
 
 ## 9. Open questions
 
-1. **Window size.** 60 messages is "two screens" — it should be derived
-   from the terminal height and the scroll position rather than fixed.
-2. **Scroll-up.** Reading further back is `range(from-60, from)`, but the
-   view currently assumes the whole `Thread` is resident. That assumption
-   is what phase 5 has to unpick, and it is the only genuinely invasive
-   part of this plan.
-3. **Compaction / edit / fork.** These rewrite history, so they call
-   `rewrite()` — O(thread), but rare and user-initiated. Worth confirming
-   no *frequent* path needs it.
-4. **Blob GC.** Deleting a thread should release blobs nothing else
+### 9.0 The one that gates implementation: residency
+
+The design above quietly assumes the app can render from a *window* of
+messages. It cannot, today. Two hard facts, both checked:
+
+- **`m.d.current.messages` is read in 500+ places across 46 files** as a
+  resident `std::vector<Message>`. Indexing, `erase`, `remove_if`,
+  reverse iteration, `.back()`, range-for — all of it assumes the whole
+  thread is in RAM.
+- **Every turn already needs the whole thread anyway.**
+  `launch_stream()` does `Thread thread_snapshot = m.d.current;` and
+  hands it to `wire_messages_for_impl()`, which walks all messages to
+  build the request. The comment there even calls the copy "the one
+  unavoidable cost".
+
+So the honest position is:
+
+> The **storage** change (§3) is ready to implement and delivers the
+> per-turn append win on its own. The **windowed read** (§5 of the commit
+> sequence) is a separate, much larger project, and the 1.4 ms figure is
+> only realised once it lands.
+
+That is not an argument against the design — the log is a prerequisite
+for windowing either way, and it stands on its own merits (append instead
+of rewriting 29 MB per turn, crash safety, attachments). It is an
+argument against pretending phase 5 is a step rather than a project.
+
+What the intermediate state actually buys, with no view changes at all
+— measured, not estimated:
+
+| | today | after §3 only | + windowed read |
+|---|---:|---:|---:|
+| thread switch (29 MB) | 226 ms | **58 ms** | **1.4 ms** |
+| per-turn save | rewrite 29 MB | 0.01 ms append | same |
+| crash mid-save | risks whole thread | loses partial last line | same |
+| attachments | impossible | ✓ | ✓ |
+
+The 58 ms is the pleasant surprise: parsing 2519 small documents beats
+parsing one 29 MB document by **4×**, even loading every message. Line
+delimiters let the parser start fresh per message instead of maintaining
+one deep nesting context across 29 MB, and each line's allocations are
+small and short-lived.
+
+So §3 alone is worth doing on its own merits: a 4× faster switch, an
+O(1) per-turn save, real crash safety, and attachments — without touching
+a single view file. The remaining 58 → 1.4 ms needs the residency work
+below.
+
+Three candidate routes, in increasing order of honesty and cost:
+
+1. **Wire-only residency.** Keep `messages` resident for the wire, render
+   from a window. Saves nothing on switch, since loading still parses
+   everything.
+2. **Lazy `Thread`.** Make `messages` a type that materialises on
+   demand behind the existing `operator[]` / iterator surface. Touches
+   few call sites, but hides I/O behind innocuous-looking indexing —
+   exactly the class of bug that caused the crash in `1f7cdc3`.
+3. **Explicit windows.** The view asks for `range(from,to)`; the wire
+   asks for everything. Most invasive, and the only one that is honest
+   about where I/O happens.
+
+(3) is right, and it should be its own design document with its own
+measurements. It is not a bullet in a commit list.
+
+### 9.1 Smaller open questions
+
+1. **Window size.** 60 messages is "two screens" — derive it from
+   terminal height and scroll position rather than fixing it.
+2. **Compaction / edit / fork.** These rewrite history, so they call
+   `rewrite()` — O(thread), but rare and user-initiated. Confirm no
+   *frequent* path needs it.
+3. **Blob GC.** Deleting a thread should release blobs nothing else
    references. Deferrable, but it is how the store slowly leaks.
-5. **`.ofs` endianness.** Fixed little-endian, so a thread directory
-   stays portable across machines; worth an explicit test on a big-endian
-   target if one is ever supported.
+4. **`.ofs` endianness.** Fixed little-endian so a thread directory stays
+   portable; worth an explicit test if a big-endian target is ever
+   supported.
