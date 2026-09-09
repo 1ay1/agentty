@@ -306,7 +306,7 @@ static Role role_from_string(const std::string& s) {
     return Role::User;
 }
 
-static json message_to_json(const Message& m) {
+json message_to_json(const Message& m) {
     // Belt-and-suspenders UTF-8 scrub. Tool output and freeform text can
     // contain raw bytes from arbitrary files (Latin-1 .htm, Shift-JIS logs)
     // that nlohmann::json::dump() refuses to serialise — it throws
@@ -568,7 +568,7 @@ parse_tool_status(std::string_view status_tag, std::string&& output) {
         std::string{"unknown status tag: "} + std::string{status_tag}});
 }
 
-static std::expected<Message, DeserializeError> parse_message(const json& j) {
+std::expected<Message, DeserializeError> message_from_json(const json& j) {
     if (!j.is_object())
         return std::unexpected(DeserializeError{
             DeserializeErrorKind::InvalidValue, "messages[*]",
@@ -779,7 +779,7 @@ static std::expected<Thread, DeserializeError> parse_thread(const json& j) {
     if (!meta) return meta;
     Thread t = std::move(*meta);
     for (const auto& mj : j.value("messages", json::array())) {
-        auto msg = parse_message(mj);
+        auto msg = message_from_json(mj);
         if (!msg) return std::unexpected(std::move(msg).error());
         t.messages.push_back(std::move(*msg));
     }

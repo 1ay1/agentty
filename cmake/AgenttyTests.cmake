@@ -51,7 +51,7 @@ set(_AGENTTY_CONSOLIDATED
     panel_sections_render_test
     credentials_test entitlement_test inflate_test
     settings_list_scroll_test visual_walk_test activity_tape_test
-    md_robustness_test thread_blob_test lazy_image_test)
+    md_robustness_test thread_blob_test lazy_image_test thread_log_test)
 foreach(_t ${_AGENTTY_CONSOLIDATED})
     agentty_test(${_t} MODE consolidated)
 endforeach()
@@ -88,6 +88,10 @@ agentty_fold_test(streaming_markdown_lifetime_test TIMEOUT 60)
 # the point is running it BY HAND against ~/.agentty/threads/<id>.json when
 # a user reports a render crash the synthetic bench doesn't reproduce.
 agentty_fold_test(real_thread_render_probe TIMEOUT 60 ARGS)
+# Round-trips every REAL thread in ~/.agentty/threads through ThreadLog.
+# ARGS + no-op when the corpus is absent, so CI passes trivially; the
+# value is running it BY HAND before trusting the migration with history.
+agentty_fold_test(thread_log_corpus_probe TIMEOUT 300 ARGS)
 if(UNIX)
     # PTY-driven (openpty); full-runtime ghost-caret repro — see the
     # header of tests/test_ghost_caret_runtime.cpp (credit: davidwed).

@@ -13,6 +13,8 @@
 #include <string_view>
 #include <vector>
 
+#include <nlohmann/json_fwd.hpp>
+
 #include "agentty/domain/conversation.hpp"
 #include "agentty/store/store.hpp"
 
@@ -90,6 +92,23 @@ void save_settings(const store::Settings& s);
 // crash-safety guarantee as threads/settings.
 bool write_json_atomic(const std::filesystem::path& target,
                        const std::string& content);
+
+// ── Per-message codec ────────────────────────────────────────────────
+//
+// The single definition of "a Message on disk". Exposed because the
+// thread LOG (io/thread_log.hpp) stores one of these per line and must
+// produce byte-identical output to the whole-document writer — two
+// codecs would drift, and the drift would only show up as silently
+// mangled history in whichever format was written less often.
+//
+// Both sides carry real behaviour worth not duplicating: the writer
+// scrubs to valid UTF-8 (arbitrary tool output can hold Latin-1 or
+// Shift-JIS bytes that nlohmann refuses to dump) and lifts large
+// payloads into the blob store; the reader accepts every historical
+// shape, including inline payloads written before blobs existed.
+[[nodiscard]] nlohmann::json message_to_json(const Message& m);
+[[nodiscard]] std::expected<Message, DeserializeError>
+message_from_json(const nlohmann::json& j);
 
 } // namespace agentty::persistence
 
