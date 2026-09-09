@@ -175,7 +175,7 @@ TEST_CASE("build messages age tiering") {
 TEST_CASE("build messages images") {
     std::vector<Message> msgs;
     Message u; u.role = Role::User; u.text = "what is this?";
-    ImageContent img; img.media_type = "image/png"; img.bytes = "abc";
+    ImageContent img; img.media_type = "image/png"; img.set_bytes("abc");
     u.images.push_back(std::move(img));
     msgs.push_back(std::move(u));
 

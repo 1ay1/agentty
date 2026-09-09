@@ -1325,7 +1325,7 @@ void feed_sse(StreamCtx& ctx, const char* data, size_t len) {
         bool has_images = false;
         if (m.role == Role::User)
             for (const auto& img : m.images)
-                if (!img.bytes.empty()) { has_images = true; break; }
+                if (!img.bytes().empty()) { has_images = true; break; }
 
         if (has_text || has_images || has_tools) {
             json msg;
@@ -1337,8 +1337,8 @@ void feed_sse(StreamCtx& ctx, const char* data, size_t len) {
                 // Ollama native: images is an array of base64 strings.
                 json imgs = json::array();
                 for (const auto& img : m.images)
-                    if (!img.bytes.empty())
-                        imgs.push_back(agentty::util::base64_encode(img.bytes));
+                    if (!img.bytes().empty())
+                        imgs.push_back(agentty::util::base64_encode(img.bytes()));
                 if (!imgs.empty()) msg["images"] = std::move(imgs);
             }
             if (has_tools) {
@@ -1672,7 +1672,7 @@ json build_messages(const Thread& t) {
         bool has_images = false;
         if (m.role == Role::User)
             for (const auto& img : m.images)
-                if (!img.bytes.empty()) { has_images = true; break; }
+                if (!img.bytes().empty()) { has_images = true; break; }
         const bool has_tools  = is_assistant_with_results(m);
 
         if (has_text || has_images || has_tools) {
@@ -1691,9 +1691,9 @@ json build_messages(const Thread& t) {
                 if (!wire_text.empty())
                     content.push_back({{"type", "text"}, {"text", wire_text}});
                 for (const auto& img : m.images) {
-                    if (img.bytes.empty()) continue;
+                    if (img.bytes().empty()) continue;
                     std::string url = "data:" + img.media_type + ";base64,"
-                                    + agentty::util::base64_encode(img.bytes);
+                                    + agentty::util::base64_encode(img.bytes());
                     content.push_back({{"type", "image_url"},
                                        {"image_url", {{"url", url}}}});
                 }

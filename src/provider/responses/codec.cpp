@@ -113,7 +113,7 @@ json build_input(const provider::Request& req) {
                 content.push_back({
                     {"type", "input_image"},
                     {"image_url", "data:" + std::string{wire::wire_media_type(img)}
-                                    + ";base64," + util::base64_encode(img.bytes)},
+                                    + ";base64," + util::base64_encode(img.bytes())},
                 });
             }
             if (content.empty()) continue;
@@ -201,7 +201,7 @@ json build_input(const provider::Request& req) {
                             {"type", "input_image"},
                             {"image_url",
                              "data:" + std::string{wire::wire_media_type(img)}
-                                 + ";base64," + util::base64_encode(img.bytes)},
+                                 + ";base64," + util::base64_encode(img.bytes())},
                         });
                     }
                     input.push_back({

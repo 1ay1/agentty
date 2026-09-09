@@ -1260,7 +1260,7 @@ json build_messages(const std::vector<Message>& msgs, bool json_protocol) {
             if (has_images) {
                 json imgs = json::array();
                 for (const auto* imgp : wire::wire_message_images(m, max_side))
-                    imgs.push_back(agentty::util::base64_encode(imgp->bytes));
+                    imgs.push_back(agentty::util::base64_encode(imgp->bytes()));
                 if (!imgs.empty()) msg["images"] = std::move(imgs);
             }
             if (has_tools) {
@@ -1304,7 +1304,7 @@ json build_messages(const std::vector<Message>& msgs, bool json_protocol) {
                 // ollama-specific.
                 json tool_imgs = json::array();
                 for (const auto* imgp : wire::wire_tool_result_images(tc, max_side))
-                    tool_imgs.push_back(agentty::util::base64_encode(imgp->bytes));
+                    tool_imgs.push_back(agentty::util::base64_encode(imgp->bytes()));
                 if (!tool_imgs.empty()) tool_msg["images"] = std::move(tool_imgs);
                 arr.push_back(std::move(tool_msg));
             }

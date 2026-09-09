@@ -48,7 +48,7 @@ namespace {
     auto has_image = [](const agentty::Message& m) {
         return std::any_of(m.images.begin(), m.images.end(),
                            [](const agentty::ImageContent& image) {
-                               return !image.bytes.empty();
+                               return !image.bytes().empty();
                            });
     };
 
@@ -69,9 +69,9 @@ namespace {
             out.emplace_back(std::move(text));
         }
         for (const auto& image : message.images) {
-            if (image.bytes.empty()) continue;
+            if (image.bytes().empty()) continue;
             acp::ImageContent block;
-            block.data = agentty::util::base64_encode(image.bytes);
+            block.data = agentty::util::base64_encode(image.bytes());
             block.mimeType = image.media_type.empty() ? "image/png" : image.media_type;
             out.emplace_back(std::move(block));
         }

@@ -110,16 +110,16 @@ namespace agentty::provider::wire {
     // present and shown nothing, and the user sees a turn that silently
     // ignored their screenshot. Name the reason once per drop so the log
     // answers "why didn't it see my image" without bisecting the pipeline.
-    if (img.bytes.empty()) {
+    if (img.bytes().empty()) {
         AGT_LOG(Wire, Warn, "wire.image_dropped",
                 "reason=empty_bytes media_type={}", wire_media_type(img));
         return false;
     }
-    if (!util::image_within_wire_limits(img.bytes, max_side)) {
-        const auto d = util::image_dimensions(img.bytes);
+    if (!util::image_within_wire_limits(img.bytes(), max_side)) {
+        const auto d = util::image_dimensions(img.bytes());
         AGT_LOG(Wire, Warn, "wire.image_dropped",
                 "reason=oversize dims={}x{} max_side={} bytes={}",
-                d.w, d.h, max_side, img.bytes.size());
+                d.w, d.h, max_side, img.bytes().size());
         return false;
     }
     return true;
@@ -139,10 +139,10 @@ wire_image_count(const std::vector<Message>& msgs) noexcept {
     for (const auto& m : msgs) {
         if (m.role == Role::User)
             for (const auto& img : m.images)
-                if (!img.bytes.empty()) ++n;
+                if (!img.bytes().empty()) ++n;
         for (const auto& tc : m.tool_calls)
             for (const auto& img : tc.done_images())
-                if (!img.bytes.empty()) ++n;
+                if (!img.bytes().empty()) ++n;
     }
     return n;
 }

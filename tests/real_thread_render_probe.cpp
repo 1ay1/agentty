@@ -22,7 +22,9 @@
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <string>
+#include <nlohmann/json.hpp>
 
 using namespace agentty;
 
@@ -62,6 +64,30 @@ int main(int argc, char** argv) {
 
     auto t0 = std::chrono::steady_clock::now();
     std::printf("stage: load\n"); std::fflush(stdout);
+    // Sub-time the load so the probe says WHERE the thread-switch latency
+    // is: raw I/O, the JSON DOM parse, or our own DOM->Thread walk.
+    {
+        auto a = std::chrono::steady_clock::now();
+        std::ifstream ifs(p, std::ios::binary);
+        std::string buf;
+        {
+            std::error_code ec;
+            auto sz = std::filesystem::file_size(p, ec);
+            if (!ec && sz > 0) {
+                buf.resize(static_cast<std::size_t>(sz));
+                ifs.read(buf.data(), static_cast<std::streamsize>(sz));
+                buf.resize(static_cast<std::size_t>(ifs.gcount()));
+            }
+        }
+        auto b = std::chrono::steady_clock::now();
+        auto io_ms = std::chrono::duration_cast<std::chrono::milliseconds>(b - a).count();
+        nlohmann::json j = nlohmann::json::parse(buf, nullptr, false);
+        auto c = std::chrono::steady_clock::now();
+        auto dom_ms = std::chrono::duration_cast<std::chrono::milliseconds>(c - b).count();
+        std::printf("  io: %lld ms (%zu bytes)  json-dom: %lld ms\n",
+                    (long long)io_ms, buf.size(), (long long)dom_ms);
+        std::fflush(stdout);
+    }
     auto loaded = persistence::load_thread_file(p);
     std::printf("stage: load returned\n"); std::fflush(stdout);
     if (!loaded) {
@@ -78,6 +104,25 @@ int main(int argc, char** argv) {
 
     Model m;
     m.d.current = std::move(*loaded);
+
+    // MIGRATE=1: load then save straight back (what the first autosave after
+    // a thread switch does) and report the file-size change. Legacy inline
+    // base64 images become blob references, so an old image-heavy thread
+    // shrinks once and loads fast forever after.
+    if (std::getenv("MIGRATE")) {
+        const auto before = std::filesystem::file_size(p);
+        persistence::save_thread(m.d.current);
+        persistence::flush_pending_saves();
+        const auto after_path =
+            persistence::threads_dir() / (m.d.current.id.value + ".json");
+        std::error_code ec;
+        const auto after = std::filesystem::file_size(after_path, ec);
+        std::printf("migrate: %.1f MB -> %.1f MB (%s)\n",
+                    before / 1e6, ec ? 0.0 : after / 1e6,
+                    after_path.string().c_str());
+        std::fflush(stdout);
+        return 0;
+    }
 
     // BISECT=1: binary-search the message prefix that first corrupts, so a
     // 1700-message thread names the ONE message that breaks the renderer

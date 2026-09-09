@@ -108,19 +108,13 @@ TEST_CASE("build body with images") {
     Message with_text;
     with_text.role = Role::User;
     with_text.text = "what is this?";
-    with_text.images.push_back(ImageContent{
-        .media_type = "image/png",
-        .bytes = std::string{"\x89PNG", 4},
-    });
+    with_text.images.push_back(ImageContent{"image/png", std::string{"\x89PNG", 4}});
     req.messages.push_back(std::move(with_text));
 
     // Image-only messages must not be discarded just because text is empty.
     Message image_only;
     image_only.role = Role::User;
-    image_only.images.push_back(ImageContent{
-        .media_type = "image/jpeg",
-        .bytes = std::string{"\xff\xd8\xff", 3},
-    });
+    image_only.images.push_back(ImageContent{"image/jpeg", std::string{"\xff\xd8\xff", 3}});
     req.messages.push_back(std::move(image_only));
 
     const json body = cc::build_body_for_test(req);

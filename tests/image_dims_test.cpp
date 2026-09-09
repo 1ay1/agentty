@@ -55,7 +55,7 @@ TEST_CASE("wire drops oversized images, keeps in-range ones") {
     {
         ImageContent img;
         img.media_type = "image/png";
-        img.bytes = png_with_dims(1600, 900);
+        img.set_bytes(png_with_dims(1600, 900));
         check(wire::wire_image_sendable(img),
               "1600x900 is well under the cap → sendable");
     }
@@ -68,7 +68,7 @@ TEST_CASE("wire drops oversized images, keeps in-range ones") {
     {
         ImageContent img;
         img.media_type = "image/png";
-        img.bytes = png_with_dims(3024, 1200);
+        img.set_bytes(png_with_dims(3024, 1200));
         check(wire::wire_image_sendable(img),
               "3024 px retina capture is sent, not dropped");
     }
@@ -100,7 +100,7 @@ TEST_CASE("wire drops oversized images, keeps in-range ones") {
     {
         ImageContent img;
         img.media_type = "image/png";
-        img.bytes = std::string("\xff\xd8\xffno-valid-sof-here", 18);
+        img.set_bytes(std::string("\xff\xd8\xffno-valid-sof-here", 18));
         check(wire::wire_image_sendable(img),
               "unreadable dims → allowed (provider is the backstop)");
     }

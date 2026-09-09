@@ -187,6 +187,27 @@ fs::path blobs_dir() {
                        std::istreambuf_iterator<char>()};
 }
 
+// Resolve a lazy ImageContent's bytes. Installed into the domain type at
+// startup (see the initialiser below) so conversation.hpp — a pure data
+// header — needs no knowledge of the blob directory or of base64.
+//
+// Mirrors what the eager loader used to do inline, including its failure
+// mode: a missing blob or corrupt base64 yields empty bytes, and every wire
+// path already skips empty-byte images.
+static std::string resolve_image_source(const ImageContent::Source& s) {
+    if (!s.blob.empty()) return get_blob(s.blob);
+    if (!s.b64.empty())  return util::base64_decode(s.b64);
+    return {};
+}
+
+// Run before main() so ANY entry point (TUI, headless run, ACP server, a
+// unit test that loads a thread) gets working lazy images without having to
+// remember an init call.
+const bool g_image_resolver_installed = [] {
+    ImageContent::set_resolver(&resolve_image_source);
+    return true;
+}();
+
 static std::string role_to_string(Role r);
 
 namespace {
@@ -398,10 +419,40 @@ static json message_to_json(const Message& m) {
         for (const auto& img : m.images) {
             json e;
             e["media_type"] = img.media_type;
-            if (auto name = put_blob(img.bytes); !name.empty())
+            // An image we loaded but never materialised is re-persisted by
+            // REFERENCE: no blob read, no decode, no re-encode. This is what
+            // keeps a lazy load from turning into an eager save the first
+            // time the thread is written back (every turn).
+            if (!img.materialised()) {
+                const auto& s = img.source();
+                if (!s.blob.empty()) {
+                    e["blob"] = s.blob;
+                    imgs.push_back(std::move(e));
+                    continue;
+                }
+                if (!s.b64.empty()) {
+                    // Legacy inline base64 (written before the blob store).
+                    // Migrate it ONCE: decode, store as a blob, and from now
+                    // on this thread carries a 64-char reference instead of a
+                    // megabyte of base64. Without this the file never shrinks
+                    // and every future load re-tokenizes the whole payload.
+                    //
+                    // Falls back to writing the base64 through untouched if
+                    // the blob write fails — a slow thread beats a lost image.
+                    if (auto name = put_blob(util::base64_decode(s.b64));
+                        !name.empty())
+                        e["blob"] = std::move(name);
+                    else
+                        e["data"] = s.b64;
+                    imgs.push_back(std::move(e));
+                }
+                continue;
+            }
+            if (img.bytes().empty()) continue;
+            if (auto name = put_blob(img.bytes()); !name.empty())
                 e["blob"] = std::move(name);
             else
-                e["data"] = util::base64_encode(img.bytes);
+                e["data"] = util::base64_encode(img.bytes());
             imgs.push_back(std::move(e));
         }
         j["images"] = std::move(imgs);
@@ -700,15 +751,18 @@ static std::expected<Message, DeserializeError> parse_message(const json& j) {
             ImageContent img;
             img.media_type = e.value("media_type", "image/png");
             auto data_b64 = e.value("data", std::string{});
-            // Blob reference (current format) or inline base64 (threads
-            // written before the blob store, and the fallback path).
-            if (auto blob = e.value("blob", std::string{}); !blob.empty())
-                img.bytes = get_blob(blob);
-            else
-                img.bytes = util::base64_decode(data_b64);
-            // Drop entries that decode to nothing — corrupted base64
-            // shouldn't kill the whole thread load.
-            if (!img.bytes.empty()) m.images.push_back(std::move(img));
+            // LAZY: record HOW to get the bytes, don't get them. Decoding
+            // every image here is the bulk of an image-heavy thread switch,
+            // and produces bytes the view never reads (it only wants sizes);
+            // the wire materialises them if and when the message is re-sent.
+            ImageContent::Source src;
+            src.blob = e.value("blob", std::string{});
+            if (src.blob.empty()) src.b64 = data_b64;
+            // An entry with neither a blob nor base64 carries nothing —
+            // same as the old "decoded to empty" case, so drop it.
+            if (src.empty()) continue;
+            img = ImageContent::lazy(std::move(img.media_type), std::move(src));
+            m.images.push_back(std::move(img));
         }
     }
     if (j.contains("attachments")) {

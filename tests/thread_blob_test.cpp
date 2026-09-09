@@ -60,8 +60,8 @@ TEST_CASE("thread blobs: images round-trip byte-exact and shrink the JSON") {
     user.text = "look at this";
     ImageContent img;
     img.media_type = "image/png";
-    img.bytes = binary_payload(300u * 1024u);   // a realistic screenshot
-    const std::string original = img.bytes;
+    img.set_bytes(binary_payload(300u * 1024u));   // a realistic screenshot
+    const std::string original = img.bytes();
     user.images.push_back(std::move(img));
 
     Thread t{ThreadId{"blobtest"}, "blob round-trip", {user}, {}, {}};
@@ -81,7 +81,7 @@ TEST_CASE("thread blobs: images round-trip byte-exact and shrink the JSON") {
     REQUIRE(loaded.has_value());
     REQUIRE(loaded->messages.size() == 1u);
     REQUIRE(loaded->messages[0].images.size() == 1u);
-    CHECK_MESSAGE(loaded->messages[0].images[0].bytes == original,
+    CHECK_MESSAGE(loaded->messages[0].images[0].bytes() == original,
                   "image bytes must survive verbatim, NUls and all");
     CHECK(loaded->messages[0].images[0].media_type == "image/png");
 
@@ -135,7 +135,7 @@ TEST_CASE("thread blobs: identical payloads share one file") {
         m.text = "same image";
         ImageContent img;
         img.media_type = "image/png";
-        img.bytes = payload;
+        img.set_bytes(payload);
         m.images.push_back(std::move(img));
         Thread t{ThreadId{id}, "dedup", {m}, {}, {}};
         persistence::save_thread(t);
@@ -164,7 +164,7 @@ TEST_CASE("thread blobs: identical payloads share one file") {
         auto loaded = load_t(ThreadId{id});
         REQUIRE(loaded.has_value());
         REQUIRE(loaded->messages[0].images.size() == 1u);
-        CHECK(loaded->messages[0].images[0].bytes == payload);
+        CHECK(loaded->messages[0].images[0].bytes() == payload);
         persistence::delete_thread(ThreadId{id});
     }
 }
@@ -220,7 +220,7 @@ TEST_CASE("thread blobs: a legacy inline thread still loads") {
     m.text = "legacy";
     ImageContent img;
     img.media_type = "image/png";
-    img.bytes = bytes;
+    img.set_bytes(bytes);
     m.images.push_back(std::move(img));
     Thread t{ThreadId{"legacyimg"}, "legacy", {m}, {}, {}};
     persistence::save_thread(t);
@@ -241,7 +241,7 @@ TEST_CASE("thread blobs: a legacy inline thread still loads") {
     auto loaded = load_t(ThreadId{"legacyimg"});
     REQUIRE(loaded.has_value());
     REQUIRE(loaded->messages[0].images.size() == 1u);
-    CHECK_MESSAGE(loaded->messages[0].images[0].bytes == bytes,
+    CHECK_MESSAGE(loaded->messages[0].images[0].bytes() == bytes,
                   "inline legacy images must still decode");
 
     persistence::delete_thread(ThreadId{"legacyimg"});

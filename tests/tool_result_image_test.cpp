@@ -30,7 +30,7 @@ namespace {
 ImageContent png() {
     ImageContent img;
     img.media_type = "image/png";
-    img.bytes = std::string("\x89PNG\x0D\x0A\x1A\x0A", 8) + std::string(32, '\x00');
+    img.set_bytes(std::string("\x89PNG\x0D\x0A\x1A\x0A", 8) + std::string(32, '\x00'));
     return img;
 }
 

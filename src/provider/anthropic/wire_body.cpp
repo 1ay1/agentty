@@ -184,7 +184,7 @@ void write_image_block(std::string& out, const ImageContent& img,
     out.append(R"("media_type":)");
     json_write_escaped_string(out, wire::wire_media_type(img));
     out.append(R"(,"data":)");
-    json_write_escaped_string(out, util::base64_encode(img.bytes));
+    json_write_escaped_string(out, util::base64_encode(img.bytes()));
     out.push_back('}');
     json_write_cache_control(out, pin, first);
     out.push_back('}');

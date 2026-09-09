@@ -200,7 +200,7 @@ TEST_CASE("tool result budget") {
         user2.text = "two images";
         ImageContent empty2; empty2.media_type = "image/png";
         ImageContent real2;  real2.media_type = "image/png";
-        real2.bytes = "\x89PNG\r\n\x1a\n realbytes";
+        real2.set_bytes("\x89PNG\r\n\x1a\n realbytes");
         user2.images.push_back(std::move(empty2));
         user2.images.push_back(std::move(real2));
         Thread t2{ThreadId{"t"}, "", {user2}, {}, {}};
