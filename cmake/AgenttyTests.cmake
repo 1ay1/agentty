@@ -78,6 +78,16 @@ agentty_fold_test(settings_add_render_probe TIMEOUT 30 ARGS)
 agentty_fold_test(thread_delete_test       TIMEOUT 30)
 agentty_fold_test(diff_review_test         TIMEOUT 30)
 agentty_fold_test(reveal_freeze_gate_probe TIMEOUT 30)
+# Regression for maya 54ad00d: the settled markdown tree outlives its widget
+# (frozen scrollback stashes it), so its layout lambda must not write through
+# a captured `this`. Standalone because it deliberately destroys widgets and
+# renders the orphaned trees.
+agentty_fold_test(streaming_markdown_lifetime_test TIMEOUT 60)
+# Crash probe: renders a REAL thread file passed on the command line.
+# ARGS so ctest runs it with none (it exits 2 and passes trivially there);
+# the point is running it BY HAND against ~/.agentty/threads/<id>.json when
+# a user reports a render crash the synthetic bench doesn't reproduce.
+agentty_fold_test(real_thread_render_probe TIMEOUT 60 ARGS)
 if(UNIX)
     # PTY-driven (openpty); full-runtime ghost-caret repro — see the
     # header of tests/test_ghost_caret_runtime.cpp (credit: davidwed).

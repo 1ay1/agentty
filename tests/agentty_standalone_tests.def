@@ -11,6 +11,7 @@ FOLD_NOARGS(thread_delete_test)
 FOLD_NOARGS(diff_review_test)
 FOLD_NOARGS(cross_process_lock_test)
 FOLD_NOARGS(reveal_freeze_gate_probe)
+FOLD_NOARGS(streaming_markdown_lifetime_test)
 #if !defined(_WIN32)
 FOLD_NOARGS(test_ghost_caret_runtime)   // PTY-driven (openpty) — POSIX only
 #endif
@@ -34,3 +35,4 @@ FOLD_ARGS(md_cache_probe)
 FOLD_NOARGS(form_edit_nav_test)
 FOLD_ARGS(login_render_probe)
 FOLD_ARGS(settings_add_render_probe)
+FOLD_ARGS(real_thread_render_probe)
