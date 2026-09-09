@@ -387,7 +387,7 @@ Step smart_paste_from_clipboard(Model m) {
         att.path       = "<clipboard>";
         att.media_type = std::move(img->media_type);
         att.byte_count = img->bytes.size();
-        att.body       = std::move(img->bytes);
+        att.body.set_bytes(std::move(img->bytes));
         std::size_t idx = m.ui.composer.attachments.size();
         m.ui.composer.attachments.push_back(std::move(att));
         auto placeholder = attachment::make_placeholder(idx);
@@ -941,7 +941,7 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
                 att.path       = "<paste>";
                 att.media_type = mt;
                 att.byte_count = e.text.size();
-                att.body       = std::move(e.text);
+                att.body.set_bytes(std::move(e.text));
                 std::size_t idx = m.ui.composer.attachments.size();
                 m.ui.composer.attachments.push_back(std::move(att));
                 auto placeholder = attachment::make_placeholder(idx);
@@ -963,7 +963,7 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
                 att.path       = std::move(img.path);
                 att.media_type = img.media_type;
                 att.byte_count = img.body.size();
-                att.body       = std::move(img.body);
+                att.body.set_bytes(std::move(img.body));
                 std::size_t idx = m.ui.composer.attachments.size();
                 m.ui.composer.attachments.push_back(std::move(att));
                 auto placeholder = attachment::make_placeholder(idx);
@@ -1025,7 +1025,7 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             att.kind       = Attachment::Kind::Paste;
             att.line_count = lines;
             att.byte_count = e.text.size();
-            att.body       = std::move(e.text);
+            att.body.set_bytes(std::move(e.text));
             std::size_t idx = m.ui.composer.attachments.size();
             m.ui.composer.attachments.push_back(std::move(att));
             auto placeholder = attachment::make_placeholder(idx);

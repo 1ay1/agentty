@@ -244,7 +244,7 @@ Step submit_message(Model m) {
         if (att.kind == Attachment::Kind::Image) {
             ImageContent img;
             img.media_type = att.media_type;     // copy: path/type stays on Attachment
-            img.set_bytes(std::move(att.body));
+            img.set_bytes(att.body.bytes());
             // Trace the hand-off. An image that is captured correctly but
             // never reaches the wire looks IDENTICAL to one that was never
             // captured — the prose marker goes out either way, so the model

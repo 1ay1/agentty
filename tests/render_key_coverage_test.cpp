@@ -78,7 +78,10 @@ const std::vector<Axis>& render_axes() {
         }},
         {"attachment appended", [](Message& m) {
             agentty::Attachment a; a.kind = agentty::Attachment::Kind::FileRef;
-            a.name = "f.txt"; a.body = "data";
+            // byte_count is what compute_render_key mixes (NOT the body,
+            // which may be an unmaterialised blob ref), so it has to be set
+            // for this axis to actually move the hash.
+            a.name = "f.txt"; a.body.set_bytes("data"); a.byte_count = 4;
             m.attachments.push_back(a);
         }},
         {"is_compact_summary toggles", [](Message& m) {

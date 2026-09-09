@@ -617,7 +617,7 @@ TurnRouting resolve_turn_routing(const Model& m) {
         if (it->role == Role::User && !it->is_proactive_context()
             && !it->smart_routing && !it->fork_note) {
             newest_user = it->text;
-            for (const auto& a : it->attachments) nu_attach_bytes += a.body.size();
+            for (const auto& a : it->attachments) nu_attach_bytes += a.body.bytes().size();
             nu_images = static_cast<int>(it->images.size());
             break;
         }

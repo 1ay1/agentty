@@ -103,7 +103,7 @@ TEST_CASE("composer_edit") {
         att.kind       = agentty::Attachment::Kind::Paste;
         att.line_count = 3;
         att.byte_count = 42;
-        att.body       = "x\ny\nz";
+        att.body.set_bytes("x\ny\nz");
         m.ui.composer.attachments.push_back(std::move(att));
         std::string ph = agentty::attachment::make_placeholder(0);
         m.ui.composer.text   = "see " + ph;

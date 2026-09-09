@@ -81,7 +81,7 @@ std::string render_attachment_body(const Attachment& a) {
         // Lazy body load. Caller may have pre-filled `body` (test
         // harness, paste-of-a-file path, etc.); honour that. Otherwise
         // resolve the path against the workspace root and slurp it.
-        std::string body = a.body;
+        std::string body = a.body.bytes();
         if (body.empty() && !a.path.empty()) {
             namespace fs = std::filesystem;
             fs::path p{a.path};
@@ -121,7 +121,7 @@ std::string render_attachment_body(const Attachment& a) {
         // / submit-time wire-up) sees this as a code-fenced excerpt
         // with a `// symbol:` header so it's clearly anchored.
         constexpr int kSymbolWindow = 20;
-        std::string body = a.body;
+        std::string body = a.body.bytes();
         if (body.empty() && !a.path.empty()) {
             namespace fs = std::filesystem;
             fs::path p{a.path};
@@ -182,16 +182,17 @@ std::string render_attachment_body(const Attachment& a) {
         // chose to attach; the composer already shows it as a compact
         // chip, so the size cost is a deliberate, visible act.
         std::string out;
-        out.reserve(a.body.size() + a.name.size() + 32);
+        out.reserve(a.body.bytes().size() + a.name.size() + 32);
         out.append("I ran:\n```sh\n");
         out.append(a.name);
         out.append("\n```\noutput:\n```\n");
-        out.append(a.body);
-        if (!a.body.empty() && a.body.back() != '\n') out.push_back('\n');
+        out.append(a.body.bytes());
+        if (!a.body.bytes().empty() && a.body.bytes().back() != '\n')
+            out.push_back('\n');
         out.append("```");
         return out;
     }
-    return a.body;
+    return a.body.bytes();
 }
 
 } // namespace
@@ -332,7 +333,7 @@ std::string chip_label(const Attachment& a) {
         preview.reserve(60);
         constexpr std::size_t kPreviewMax = 50;
         bool truncated = false;
-        for (char c : a.body) {
+        for (char c : a.body.bytes()) {
             if (preview.size() >= kPreviewMax) { truncated = true; break; }
             if (c == '\n' || c == '\t' || c == '\r') {
                 if (preview.empty() || preview.back() != ' ') preview.push_back(' ');

@@ -18,6 +18,7 @@
 
 #include "agentty/domain/id.hpp"
 #include "agentty/domain/rag_mode.hpp"
+#include "agentty/domain/lazy_bytes.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
 
 namespace agentty {
@@ -33,100 +34,39 @@ enum class Role : std::uint8_t { User, Assistant, System };
     return "?";
 }
 
-// A vision image carried by a User message OR a tool_result. Bytes are held
-// RAW (not base64) so the in-memory Thread stays compact; encoding happens at
-// the JSON write boundary. Persisted on disk as base64 so a loaded thread can
-// be re-sent on a follow-up turn without re-reading the source file.
-//
-// LAZY. Decoding the bytes at load time is the single most expensive part of
-// switching to an image-heavy thread: one real 29 MB thread here is 17 MB of
-// image payload, and materialising all of it costs ~115 ms of the ~230 ms
-// switch — to produce bytes NOTHING on the render path ever looks at. The view
-// only ever asks for `size()` (token math, chip labels); the only true consumer
-// is the wire, when that message is actually re-sent.
-//
-// So a loaded image starts as a `source` (a blob name, or base64 text) and
-// materialises on the first `bytes()` call. Freshly captured images (paste,
-// tool result) are constructed with their bytes already present and never
-// touch the lazy path.
-//
-// Correctness notes, because "lazy" is where bugs hide:
-//   - bytes() is the ONLY reader. There is no public raw field, so no caller
-//     can accidentally observe an unmaterialised image as empty.
-//   - Materialisation is idempotent and value-preserving: same bytes on every
-//     call, and a copy of a lazy image copies the source (so the copy resolves
-//     to the same bytes rather than to nothing).
-//   - A source that fails to resolve (deleted blob, corrupt base64) yields
-//     empty bytes — exactly what the eager loader produced for the same input,
-//     and every wire path already skips empty-byte images.
-//   - `mutable` cache + const bytes(): materialising is not a logical mutation.
+// A vision image carried by a User message OR a tool_result. Bytes are
+// held RAW (not base64) and lazily — see LazyBytes above for why, and for
+// the correctness rules that make it safe.
 class ImageContent {
 public:
-    // How to obtain the bytes when they're first needed. Empty `blob` means
-    // the payload is inline base64 in `b64`.
-    struct Source {
-        std::string blob;   // content-addressed blob name (preferred)
-        std::string b64;    // legacy inline base64 fallback
-        [[nodiscard]] bool empty() const noexcept {
-            return blob.empty() && b64.empty();
-        }
-    };
+    using Source = LazyBytes::Source;
 
     std::string media_type;  // "image/png", "image/jpeg", "image/webp", "image/gif"
 
     ImageContent() = default;
     ImageContent(std::string mt, std::string raw_bytes)
-        : media_type(std::move(mt)), bytes_(std::move(raw_bytes)),
-          resolved_(true) {}
+        : media_type(std::move(mt)), data_(std::move(raw_bytes)) {}
 
-    // Build a lazy image. `resolver` turns a Source into raw bytes; it is
-    // supplied by the persistence layer (which owns the blob directory) so
-    // this header stays free of any I/O dependency.
     static ImageContent lazy(std::string mt, Source src) {
         ImageContent img;
         img.media_type = std::move(mt);
-        img.source_    = std::move(src);
-        img.resolved_  = img.source_.empty();   // nothing to resolve => done
+        img.data_      = LazyBytes::lazy(std::move(src));
         return img;
     }
 
-    // The raw bytes, materialising them on first use.
-    [[nodiscard]] const std::string& bytes() const {
-        if (!resolved_) {
-            bytes_    = resolve(source_);
-            resolved_ = true;
-        }
-        return bytes_;
-    }
+    [[nodiscard]] const std::string& bytes() const { return data_.bytes(); }
+    void set_bytes(std::string raw) { data_.set_bytes(std::move(raw)); }
+    [[nodiscard]] const Source& source() const noexcept { return data_.source(); }
+    [[nodiscard]] bool materialised() const noexcept { return data_.materialised(); }
 
-    // Replace the payload outright (clipboard capture, tool result).
-    void set_bytes(std::string raw) {
-        bytes_    = std::move(raw);
-        source_   = {};
-        resolved_ = true;
-    }
-
-    // The pending source, for the writer: an image that was never
-    // materialised can be re-persisted by REFERENCE, with no decode and no
-    // re-encode. Empty once the bytes have been materialised or set.
-    [[nodiscard]] const Source& source() const noexcept { return source_; }
-    [[nodiscard]] bool materialised() const noexcept { return resolved_; }
-
-    // Installed once at startup by the persistence layer. A null resolver
-    // (unit tests that never load from disk) makes every lazy image resolve
-    // to empty, which is the same as a missing blob.
-    using Resolver = std::string (*)(const Source&);
-    static void set_resolver(Resolver r) noexcept { resolver_ = r; }
+    // Kept so existing call sites that installed the image resolver still
+    // compile; both types share one resolver, since both resolve the same
+    // kind of Source against the same blob store.
+    using Resolver = LazyBytes::Resolver;
+    static void set_resolver(Resolver r) noexcept { LazyBytes::set_resolver(r); }
 
 private:
-    static std::string resolve(const Source& s) {
-        return resolver_ ? resolver_(s) : std::string{};
-    }
-    inline static Resolver resolver_ = nullptr;
-
-    Source              source_;
-    mutable std::string bytes_;
-    mutable bool        resolved_ = true;
+    LazyBytes data_;
 };
 
 // `ToolUse::Status` is a sum type. Each alternative owns the data that is
@@ -651,11 +591,19 @@ struct Message {
         mix(images.size());
         mix(attachments.size());
         for (const auto& a : attachments) {
-            // Body bytes don't change after submit; mixing size is
-            // enough to invalidate the render cache on a hypothetical
+            // Body bytes don't change after submit; mixing the byte count
+            // is enough to invalidate the render cache on a hypothetical
             // future edit and cheap enough to keep here.
+            //
+            // `byte_count` and NOT `body.bytes().size()`: this runs on
+            // every frame that rebuilds a turn, and the body may be an
+            // unmaterialised blob reference. Asking it for its size would
+            // read a 2 MB build log off disk to compute a hash — turning
+            // the render path into exactly the eager load LazyBytes
+            // exists to avoid. byte_count is stored metadata and is
+            // already what the chip displays.
             mix(static_cast<std::uint64_t>(a.kind));
-            mix(a.body.size());
+            mix(a.byte_count);
             mix(a.path.size());
             mix(a.name.size());
             mix(static_cast<std::uint64_t>(a.line_count));

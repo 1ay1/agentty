@@ -501,7 +501,46 @@ json message_to_json(const Message& m) {
                 case Attachment::Kind::Image:   e["kind"] = "image";   break;
                 case Attachment::Kind::Output:  e["kind"] = "output";  break;
             }
-            e["body"]        = util::base64_encode(a.body);
+            // The BODY is the payload, and for an Output attachment it can
+            // be a 2 MB build log — measured across a real store, 26 Output
+            // attachments held 4.2 MB of base64, re-decoded on every load,
+            // to render a one-line chip that only reads `name` and
+            // `byte_count`. Images solved this by moving their bytes to the
+            // blob store; every other kind gets the same treatment here, so
+            // "any file type" costs the thread file ~40 bytes regardless of
+            // payload size.
+            //
+            // Same threshold and same fallback as tool output: below it a
+            // separate file costs more than it saves, and a failed blob
+            // write falls back to inlining rather than losing the body.
+            constexpr std::size_t kAttachmentBlobMin = 8u * 1024u;
+            // An attachment loaded but never materialised is re-persisted
+            // BY REFERENCE — no blob read, no decode, no re-encode. Same
+            // rule as images: a lazy load must not become an eager save
+            // the first time the thread is written back, which is every
+            // turn.
+            if (!a.body.materialised() && !a.body.source().blob.empty()) {
+                e["body_blob"] = a.body.source().blob;
+            } else if (!a.body.materialised() && !a.body.source().b64.empty()) {
+                // Legacy inline base64: migrate it once, so the thread
+                // file stops carrying the payload forever after.
+                const std::string raw = a.body.bytes();
+                if (raw.size() >= kAttachmentBlobMin) {
+                    if (auto name = blobs::put(raw); !name.empty())
+                        e["body_blob"] = std::move(name);
+                    else
+                        e["body"] = a.body.source().b64;
+                } else {
+                    e["body"] = a.body.source().b64;
+                }
+            } else if (a.body.bytes().size() >= kAttachmentBlobMin) {
+                if (auto name = blobs::put(a.body.bytes()); !name.empty())
+                    e["body_blob"] = std::move(name);
+                else
+                    e["body"] = util::base64_encode(a.body.bytes());
+            } else {
+                e["body"] = util::base64_encode(a.body.bytes());
+            }
             if (!a.path.empty())       e["path"]        = a.path;
             if (!a.media_type.empty()) e["media_type"] = a.media_type;
             if (!a.name.empty())       e["name"]        = a.name;
@@ -727,7 +766,20 @@ std::expected<Message, DeserializeError> message_from_json(const json& j) {
             else if (kind == "image")   a.kind = Attachment::Kind::Image;
             else if (kind == "output")  a.kind = Attachment::Kind::Output;
             else                        a.kind = Attachment::Kind::Paste;
-            a.body        = util::base64_decode(e.value("body", std::string{}));
+            // Blob reference (current) or inline base64 (threads written
+            // before attachments used the blob store). Both are read
+            // forever — an old thread must not need migrating to open.
+            //
+            // LAZY, for the same reason images are: the chip the renderer
+            // draws reads `name`, `path`, `byte_count` and `line_count`
+            // and NEVER the body (see attachment::chip_label). The only
+            // consumer of the bytes is attachment::expand() at
+            // request-build time, so a 2 MB build log costs nothing until
+            // the turn it belongs to is actually re-sent.
+            if (auto ref = e.value("body_blob", std::string{}); !ref.empty())
+                a.body = LazyBytes::from_blob(std::move(ref));
+            else
+                a.body = LazyBytes::from_base64(e.value("body", std::string{}));
             a.path        = e.value("path", std::string{});
             a.media_type  = e.value("media_type", std::string{});
             a.name        = e.value("name", std::string{});

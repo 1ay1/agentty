@@ -77,7 +77,10 @@ bool compare(const Message& a, const Message& b, std::string& why) {
     for (std::size_t i = 0; i < a.attachments.size(); ++i) {
         if (a.attachments[i].kind != b.attachments[i].kind)
             return fail("attachment.kind");
-        if (a.attachments[i].body != b.attachments[i].body)
+        // Materialise both: this is where a lost blob reference or a
+        // broken lazy source would show up, and it is exactly the failure
+        // that stays invisible until the turn is re-sent.
+        if (a.attachments[i].body.bytes() != b.attachments[i].body.bytes())
             return fail("attachment.body");
     }
     return true;

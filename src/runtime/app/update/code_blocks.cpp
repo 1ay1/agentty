@@ -714,7 +714,7 @@ Step codeblock_update(Model m, msg::CodeBlockMsg cm) {
             att.name       = std::move(r->command);   // chip caption
             att.line_count = lines;
             att.byte_count = out.size();
-            att.body       = std::move(out);
+            att.body.set_bytes(std::move(out));
             std::size_t idx = m.ui.composer.attachments.size();
             m.ui.composer.attachments.push_back(std::move(att));
             auto placeholder = attachment::make_placeholder(idx);
