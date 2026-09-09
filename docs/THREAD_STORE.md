@@ -94,9 +94,15 @@ The whole design is two files per thread and one idea:
   blobs/<hash>    images + attachments (exists today, unchanged)
 ```
 
-That is it. No database, no dependency, no segments, no container format,
-no CRC, no schema migration. The `.jsonl` line is exactly the per-message
-JSON `message_to_json()` already produces.
+That is it. **No database, no new dependency**, no segments, no container
+format, no CRC, no schema migration. The `.jsonl` line is exactly the
+per-message JSON `message_to_json()` already produces.
+
+> **Constraint, not a preference: this subsystem adds no third-party
+> dependency.** It is built from `<fstream>`, `<filesystem>` and the
+> nlohmann codec already in the tree. SQLite was measured (§3.1) and
+> rejected — same speed, real cost. If a future change to this design
+> starts by adding a library, that is the signal it has gone wrong.
 
 ### 3.1 Why this and not the alternatives
 
