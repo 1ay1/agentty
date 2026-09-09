@@ -102,6 +102,9 @@ agentty_fold_test(thread_migration_probe  TIMEOUT 300 ARGS)
 # Migrates a whole threads/ directory (a COPY) and proves every thread's
 # content is identical afterwards. The rehearsal before touching real data.
 agentty_fold_test(thread_migration_bulk_probe TIMEOUT 900 ARGS)
+# Splits a thread switch into worker-thread vs UI-thread cost, so the next
+# optimisation targets what the user actually waits on.
+agentty_fold_test(thread_switch_prof_probe TIMEOUT 120 ARGS)
 if(UNIX)
     # PTY-driven (openpty); full-runtime ghost-caret repro — see the
     # header of tests/test_ghost_caret_runtime.cpp (credit: davidwed).

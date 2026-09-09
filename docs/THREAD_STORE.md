@@ -563,132 +563,101 @@ on this list. It is a separate project with its own design doc; see
 
 ## 9. What's next, measured
 
-Commits 1–4 shipped. This section is the profile of what is left, taken
-after the log landed rather than before — the earlier numbers in this
-document are pre-migration and no longer describe the system.
+Commits 1–4 shipped, plus the O(1) append fix. This section is the
+profile of what is left — and it retires the windowed-read project.
 
-### 9.1 Where the remaining time goes
+### 9.1 The switch is already O(1) on the UI thread
 
-The 29 MB thread, migrated (7.5 MB log), RelWithDebInfo:
+Every earlier number in this document measured *load*, which is the wrong
+thing. `cmd_factory::load_thread_async` runs the parse on an isolated
+worker (`task_isolated`) and dispatches `ThreadLoaded` when it finishes,
+so **the user never waits for it**. What they wait for is the reducer and
+the first frame, both on the UI thread.
 
-```
-load   36 ms      ← all of it is parsing 2519 messages
-render  6 ms      ← bounded by rehydrate_frozen, already constant
-```
+Split apart on the migrated 29 MB / 2519-message thread
+(RelWithDebInfo):
 
-Breaking the load down further:
-
-| stage | cost |
+| | |
 |---|---:|
-| read the file | 8 ms |
-| split into lines | 15 ms |
-| **JSON-parse every message** | **30 ms** |
+| **worker thread** — load + parse | 37–43 ms |
+| model swap + cache drop | 0.00 ms |
+| `rehydrate_frozen` | 1.71 ms |
+| `conversation_config` | 0.00 ms |
+| element build | 0.01 ms |
+| render | 1.13 ms |
+| **UI thread total — the perceived cost** | **2.85 ms** |
 
-And what is still inline in those 7.5 MB:
+And it does not scale with thread length:
 
-| field | MB |
-|---|---:|
-| `tool_calls` | 6.34 |
-| `thinking_signature` | 0.75 |
-| `text` | 0.67 |
-| everything else | 0.11 |
+| messages | worker load | **UI thread** |
+|---:|---:|---:|
+| 2519 | 37 ms | **1.85 ms** |
+| 1238 | 20 ms | **0.12 ms** |
+| 1172 | 13 ms | **0.17 ms** |
 
-### 9.2 Two candidate directions, both measured
+The UI cost is uncorrelated with thread size, because
+`rehydrate_frozen` is bounded to ~1500 rows and everything downstream is
+per-visible-row. **A switch is already O(screen), not O(thread).**
 
-**A. Lower the blob threshold.** `kOutputBlobMin` is 8 KB, and the
-remaining inline tool output is 3.37 MB across 2164 calls (p50 930 B,
-p99 7.3 KB). Pushing more of it into blobs:
+### 9.2 So the windowed read is not worth building
 
-| threshold | log size | parse | new blob files |
-|---|---:|---:|---:|
-| 8 KB (today) | 7.97 MB | 28.7 ms | — |
-| 4 KB | 6.49 MB | 24.8 ms | +232 |
-| 2 KB | 5.15 MB | 20.1 ms | +588 |
-| 1 KB | 4.32 MB | 19.1 ms | +1035 |
+§9.5 argued for making the view read a window instead of the whole
+thread, projecting 36 ms → 7 ms. That projection was against the wrong
+baseline. The real UI-thread cost is 2.85 ms, and a windowed read would
+take it to perhaps 1.5 ms — a saving nobody can perceive, in exchange for
+unpicking a residency assumption held in 500+ places and introducing the
+exact hazard (I/O behind innocuous-looking indexing) that caused the
+`1f7cdc3` crash.
 
-**Verdict: not worth it.** 28.7 → 19.1 ms costs 1035 extra files *per
-thread* — tens of thousands across the corpus, each an inode and an open
-when the wire needs it. It also inverts the blob store's own rule of
-thumb (SQLite's measurement: payloads under ~100 KB belong inline). A
-modest 8 KB → 4 KB move is defensible (+232 files for 4 ms) but it is a
-rounding error, not a design.
+**Recommendation: don't.** The design is written down in §9.5 if the
+situation ever changes; the trigger would be the UI-thread number
+growing, not the load number.
 
-**B. Parse only what is displayed.** The same log, parsing a suffix:
+What the load time still buys, and why it was worth fixing anyway:
 
-| messages parsed | time |
-|---:|---:|
-| 60 (one switch's worth) | **0.61 ms** |
-| 200 | 1.9 ms |
-| 500 | 5.2 ms |
-| 2519 (today) | 29.0 ms |
+- it is the window in which a switch can be *cancelled* or feel
+  unresponsive on a slow disk;
+- it is CPU and allocator pressure on a shared machine;
+- it bounds how fast the thread PICKER can preview things;
+- and it is the same parse the wire pays before every turn.
 
-**47×**, and it is the only direction with real headroom. Everything
-else is trimming a constant.
+Going 226 ms → 37 ms was real. Going 37 → 5 would also be real, and it
+is available cheaply (§9.3) without touching residency at all.
 
-### 9.3 The obstacle, and why it is smaller than it looks
+### 9.3 If more is wanted, it is on the worker
 
-The app holds `m.d.current.messages` as a resident `std::vector<Message>`
-and reads it in 500+ places. But the reason is narrower than that number
-suggests: **the WIRE needs every message** (`wire_messages_for_impl`
-walks the whole transcript to build a request), and the view is simply
-helping itself to the same vector.
+The remaining 37 ms is: 8 ms read, 15 ms line-split, ~30 ms parse
+(overlapping). Three options, in order of value per unit of risk:
 
-So the split is not "500 call sites" — it is two consumers with genuinely
-different needs:
+1. **Parse lazily per message.** The log already stores one JSON document
+   per line, so a `Message` could keep its line as bytes and parse on
+   first access. The wire touches every message, so it would pay the same
+   total — but spread across the turn rather than in one burst.
+2. **A faster parser on this path.** simdjson is already a dependency
+   (the SSE reader uses it) and is typically 2–4× nlohmann on documents
+   like these. Contained: one function, no format change.
+3. **Parallel parse.** Lines are independent, so a parallel-for over the
+   2519 of them is embarrassingly parallel. More machinery than (2) for
+   a similar win.
 
-| consumer | needs | frequency |
-|---|---|---|
-| view | ~60 messages | every switch, every frame |
-| wire | all of them | once per turn you send |
+None of these change the file format, and none touch the UI thread.
 
-And the wire already does its work **on a background thread**:
-`launch_stream` copies the Thread into a worker ("the Thread copy is the
-one unavoidable cost") and builds the request there. That is the part
-that makes this tractable — the expensive read is already off the UI
-thread, so it can become an expensive *load* without anyone waiting.
+### 9.4 Smaller items
 
-### 9.4 The shape that follows
-
-Not "make the view async". The measurement says the opposite: at 0.61 ms
-for a screenful, the view should stay **synchronous** and simply ask for
-less.
-
-```
-switch:  meta() + range(size()-N, size())      0.6 ms, on the UI thread
-send:    range(0, size()) on the worker        30 ms, nobody waiting
-scroll:  range(from-N, from)                   sub-ms, on demand
-```
-
-The storage layer already supports all three — `ThreadLog::range` was
-shaped for it in commit 2. What is missing is a `Thread` that can hold a
-window instead of everything, and that is where the care goes: the
-tempting version (make `messages` lazily materialise behind `operator[]`)
-hides I/O behind innocuous indexing, which is precisely the class of bug
-that produced the crash in `1f7cdc3`. The honest version is an explicit
-window the view asks for and the wire bypasses.
-
-That is a separate project with its own design pass. The numbers that
-justify it: **36 ms → ~7 ms** on a switch (0.6 ms parse + the io/split
-floor), against render's 6 ms — at which point the two are balanced and
-there is nothing left worth chasing.
-
-### 9.5 Smaller items
-
-1. **`kOutputBlobMin` 8 KB → 4 KB.** +232 files, −4 ms. Marginal; do it
-   only if something else touches that path anyway.
+1. **`kOutputBlobMin` 8 KB → 4 KB.** +232 files, −4 ms of parse.
+   Marginal; do it only if something else touches that path.
 2. **Compaction / edit / fork call `rewrite()`** — O(thread), but rare
    and user-initiated. Confirm no *frequent* path does.
 3. **Blob GC.** Deleting a thread should release blobs nothing else
    references. Deferrable, but it is how the store slowly leaks.
 4. **`.ofs` endianness** is fixed little-endian so a threads directory
    stays portable; worth a test if a big-endian target ever appears.
-5. **Window size.** "60 messages" is a stand-in for two screens — derive
-   it from terminal height and scroll position rather than fixing it.
 
-### 9.6 The residency obstacle, in full
+### 9.5 The residency obstacle, for the record
 
-The design above quietly assumes the app can render from a *window* of
-messages. It cannot, today. Two hard facts, both checked:
+Kept because §9.2 decides against acting on it, and the reasoning should
+outlive the decision. The design below assumes the app can render from a
+*window* of messages. It cannot, today. Two hard facts, both checked:
 
 - **`m.d.current.messages` is read in 500+ places across 46 files** as a
   resident `std::vector<Message>`. Indexing, `erase`, `remove_if`,
@@ -747,5 +716,5 @@ Three candidate routes, in increasing order of honesty and cost:
    about where I/O happens.
 
 (3) is right, and it should be its own design document with its own
-measurements. It is not a bullet in a commit list. §9.4 sketches the
-shape; §9.5 holds the smaller items.
+measurements. It is not a bullet in a commit list — and §9.2 explains why
+it is not on any commit list at all.
