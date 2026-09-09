@@ -12,6 +12,7 @@
 
 #include <agentty/domain/session.hpp>
 #include <agentty/io/persistence.hpp>
+#include <agentty/io/thread_log.hpp>
 #include <agentty/runtime/model.hpp>
 #include <agentty/runtime/view/thread/conversation.hpp>
 #include <agentty/runtime/app/update/internal.hpp>
@@ -64,9 +65,17 @@ int main(int argc, char** argv) {
 
     auto t0 = std::chrono::steady_clock::now();
     std::printf("stage: load\n"); std::fflush(stdout);
-    // Sub-time the load so the probe says WHERE the thread-switch latency
-    // is: raw I/O, the JSON DOM parse, or our own DOM->Thread walk.
-    {
+
+    // A migrated thread is <id>.jsonl + .ofs + .meta.json; a legacy one is
+    // a single <id>.json. Accept either, so the same probe measures the
+    // same thread before and after migration.
+    std::optional<Thread> loaded;
+    if (p.extension() == ".jsonl") {
+        auto log = ThreadLog::open_path(p);
+        if (log) loaded = log->load_thread();
+    } else {
+        // Sub-time the load so the probe says WHERE the thread-switch
+        // latency is: raw I/O, the JSON DOM parse, or the DOM->Thread walk.
         auto a = std::chrono::steady_clock::now();
         std::ifstream ifs(p, std::ios::binary);
         std::string buf;
@@ -87,8 +96,8 @@ int main(int argc, char** argv) {
         std::printf("  io: %lld ms (%zu bytes)  json-dom: %lld ms\n",
                     (long long)io_ms, buf.size(), (long long)dom_ms);
         std::fflush(stdout);
+        if (auto r = persistence::load_thread_file(p)) loaded = std::move(*r);
     }
-    auto loaded = persistence::load_thread_file(p);
     std::printf("stage: load returned\n"); std::fflush(stdout);
     if (!loaded) {
         std::fprintf(stderr, "load failed: %s\n", p.c_str());
