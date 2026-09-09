@@ -270,6 +270,7 @@ TEST_CASE("thread log: append is O(1) in thread size") {
     // "simplified" back into rewriting the file. Measured in BYTES
     // written, not time, so it is deterministic on any machine.
     const auto path = fresh_log("append_cost");
+    auto idx = path; idx.replace_extension(".ofs");
     const auto sent = make_messages(500);
     {
         auto log = ThreadLog::open_path(path);
@@ -279,7 +280,8 @@ TEST_CASE("thread log: append is O(1) in thread size") {
 
     auto log = ThreadLog::open_path(path);
     REQUIRE(log.has_value());
-    const auto before = fs::file_size(path);
+    const auto before     = fs::file_size(path);
+    const auto idx_before = fs::file_size(idx);
 
     Message extra = make_message(1000);
     CHECK(log->append(extra));
@@ -289,12 +291,79 @@ TEST_CASE("thread log: append is O(1) in thread size") {
     CHECK_MESSAGE(grew < 1024u,
                   "appending one message must add roughly one line, "
                   "not rewrite the log");
+    // The INDEX has to be O(1) too. Rewriting it whole is only 8 bytes per
+    // message — invisible at 500, but 400 KB per turn at 50k messages, and
+    // unbounded after that. Exactly 8 bytes is the whole point.
+    CHECK_MESSAGE(fs::file_size(idx) - idx_before == 8u,
+                  "appending one message must add exactly one 8-byte offset");
     CHECK(log->size() == sent.size() + 1);
 
     auto reopened = ThreadLog::open_path(path);
     REQUIRE(reopened.has_value());
     CHECK(reopened->size() == sent.size() + 1);
     CHECK(same(reopened->all().back(), extra));
+}
+
+TEST_CASE("thread log: many appends stay O(1) each") {
+    // The shape a long conversation actually takes: one append per turn,
+    // hundreds of times. Each must add exactly one line and exactly one
+    // 8-byte offset, no matter how long the thread already is — if either
+    // file is rewritten per turn the total work is quadratic in thread
+    // length, which is invisible in a short test and fatal in a long one.
+    // (The companion test below observes the rewrite directly.)
+    const auto path = fresh_log("append_scaling");
+    auto idx = path; idx.replace_extension(".ofs");
+    auto log = ThreadLog::open_path(path);
+    REQUIRE(log.has_value());
+    CHECK(log->rewrite(make_messages(200)));
+
+    std::error_code ec;
+    const auto before_size = fs::file_size(idx, ec);
+    for (int i = 0; i < 50; ++i) CHECK(log->append(make_message(1000 + i)));
+    CHECK_MESSAGE(fs::file_size(idx, ec) == before_size + 50u * 8u,
+                  "50 appends must add exactly 50 offsets");
+
+    for (int i = 0; i < 400; ++i) CHECK(log->append(make_message(2000 + i)));
+
+    CHECK(fs::file_size(idx, ec) == log->size() * 8u);
+    CHECK(log->size() == 650u);
+
+    auto reopened = ThreadLog::open_path(path);
+    REQUIRE(reopened.has_value());
+    CHECK_MESSAGE(reopened->size() == 650u,
+                  "and every appended message must still be there");
+    CHECK(same(reopened->all().back(), make_message(2399)));
+}
+
+TEST_CASE("thread log: appending does not rewrite the index") {
+    // The O(1) guarantee, observed directly. write_json_atomic publishes
+    // by RENAME, so a whole-index write replaces the file; an append
+    // modifies it in place. fs::equivalent against a hard link taken
+    // beforehand tells the two apart with no timing and no counters.
+    const auto path = fresh_log("append_inplace");
+    auto idx = path; idx.replace_extension(".ofs");
+    auto log = ThreadLog::open_path(path);
+    REQUIRE(log.has_value());
+    CHECK(log->rewrite(make_messages(300)));
+    REQUIRE(fs::exists(idx));
+
+    // A hard link pins the CURRENT file object. If append rewrites the
+    // index, `idx` becomes a different object and equivalence breaks.
+    const auto pin = idx;
+    auto pinned = scratch_dir() / "append_inplace.pin";
+    std::error_code ec;
+    fs::remove(pinned, ec);
+    fs::create_hard_link(pin, pinned, ec);
+    REQUIRE_MESSAGE(!ec, "test needs hard links on the scratch filesystem");
+
+    CHECK(log->append(make_message(9999)));
+
+    const bool same_file = fs::equivalent(pin, pinned, ec) && !ec;
+    CHECK_MESSAGE(same_file,
+                  "append must write the index IN PLACE — a rewrite is "
+                  "O(messages) per turn and unbounded in thread length");
+
+    fs::remove(pinned, ec);
 }
 
 TEST_CASE("thread log: rewrite replaces history atomically") {

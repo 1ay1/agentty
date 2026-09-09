@@ -169,7 +169,10 @@ private:
     // Scan the log counting line starts. The recovery path for a missing
     // or inconsistent index, and how a legacy thread gets its first one.
     void rebuild_index_();
+    // Write the whole index. O(messages) — only for rewrite() and repair.
     [[nodiscard]] bool write_index_() const;
+    // Append one offset. O(1), and the only index write a turn performs.
+    [[nodiscard]] bool append_offset_(std::uint64_t at) const;
 
     // Offset of a final line that has no terminating newline — i.e. a
     // crash between writing a message and writing its '\n'. kNoTear when

@@ -225,6 +225,21 @@ bool ThreadLog::write_index_() const {
     return persistence::write_json_atomic(idx_, buf);
 }
 
+bool ThreadLog::append_offset_(std::uint64_t at) const {
+    // 8 bytes, O_APPEND. Not atomic in the temp+rename sense, and it does
+    // not need to be: a partial write leaves the index a non-multiple of 8
+    // (or short against the log), which open() detects and repairs by
+    // rescanning. The index is a cache — it is allowed to be wrong, it is
+    // not allowed to be believed when it is.
+    char b[kOffsetWidth];
+    put_u64_le(b, at);
+    std::ofstream out(idx_, std::ios::binary | std::ios::app);
+    if (!out) return false;
+    out.write(b, static_cast<std::streamsize>(sizeof b));
+    out.flush();
+    return static_cast<bool>(out);
+}
+
 bool ThreadLog::set_meta(const Thread& t) {
     // Store the header only — the messages live in the log, and keeping a
     // second copy here is how the two would drift.
@@ -350,13 +365,20 @@ bool ThreadLog::append(const Message& m) {
 
     offsets_.push_back(at);
 
-    // The index is rewritten whole rather than appended to. It is 8 bytes
-    // per message — 20 KB for a 2519-message thread — so a full atomic
-    // rewrite is microseconds, and it keeps the crash story trivial: the
-    // index is either the old one or the new one, never a torn mix.
-    if (!write_index_()) {
+    // APPEND the one new offset — 8 bytes — rather than rewriting the whole
+    // index. The index is append-only for exactly the same reason the log
+    // is, so a turn costs O(1) bytes on both files and stays that way at
+    // any thread length. Rewriting it was O(messages) per turn: 20 KB on a
+    // 2519-message thread (unmeasurable) but 400 KB at 50k, growing
+    // without bound — the shape this whole design exists to avoid.
+    //
+    // If the append fails the in-memory offsets are still correct for this
+    // session, and open() repairs the file next time: it validates the
+    // index against the log and rebuilds on any mismatch. That is the same
+    // self-healing path a crash between the two writes takes.
+    if (!append_offset_(at)) {
         AGT_LOG(General, Warn, "thread_log.append",
-                "index write failed for {} (will rebuild on next open)",
+                "index append failed for {} (will rebuild on next open)",
                 log_.string());
     }
     return true;
