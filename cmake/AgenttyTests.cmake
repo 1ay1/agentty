@@ -108,6 +108,9 @@ agentty_fold_test(thread_switch_prof_probe TIMEOUT 120 ARGS)
 # Mark-and-sweep the blob store of a real threads dir. DRY RUN unless
 # --apply, because the files at stake hold images and tool output.
 agentty_fold_test(blob_gc_probe TIMEOUT 300 ARGS)
+# What a terminal RESIZE costs: a width change invalidates every cached
+# layout, so the whole frozen canvas re-lays-out at the new width.
+agentty_fold_test(resize_prof_probe TIMEOUT 120 ARGS)
 if(UNIX)
     # PTY-driven (openpty); full-runtime ghost-caret repro — see the
     # header of tests/test_ghost_caret_runtime.cpp (credit: davidwed).

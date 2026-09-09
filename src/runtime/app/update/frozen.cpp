@@ -785,15 +785,39 @@ void rehydrate_frozen(Model& m) {
         for (std::size_t k = j; k < cursor; ++k)
             run_rows += estimate_msg_rows_auto(msgs[k]);
 
-        if (units == 0 && run_rows > kRehydrateRowBudget
-            && (cursor - j) > 1) {
+        // Cut INSIDE a run that would overshoot what is left of the
+        // budget, keeping its newest sub-turns.
+        //
+        // The condition used to be `units == 0`, i.e. only the FIRST
+        // (newest) run could be cut. That bounded the common case and
+        // left a hole: a large run reached second or later was taken
+        // WHOLE, and only then did the budget check fire. One real
+        // thread ended up with 2247 frozen rows against a 180-row
+        // budget — 12x over — because run #2 was 2100 rows on its own.
+        //
+        // That matters most on RESIZE. A width change invalidates every
+        // cached layout (wrap points move), so the whole frozen canvas
+        // re-lays-out: measured 4.44 ms per resize at 2247 rows against
+        // 0.43 ms warm, and a drag emits one resize per column.
+        //
+        // `remaining` rather than the full budget, so runs already taken
+        // count against it — otherwise the same overshoot returns one
+        // level down.
+        const std::size_t remaining = kRehydrateRowBudget > row_budget
+                                        ? kRehydrateRowBudget - row_budget
+                                        : 0;
+        if (run_rows > remaining && (cursor - j) > 1) {
             std::size_t kept = 0;
             std::size_t cut  = cursor;
             for (std::size_t k = cursor; k-- > j; ) {
                 kept += estimate_msg_rows_auto(msgs[k]);
                 cut = k;
-                if (kept >= kRehydrateRowBudget) break;
+                if (kept >= remaining) break;
             }
+            // A single sub-turn can still exceed `remaining` on its own;
+            // that is deliberate. Cutting below one message would show a
+            // half-rendered turn, and the collapse pass below is what
+            // bounds a genuinely oversized single body.
             ++units;
             start = cut;
             row_budget += kept;

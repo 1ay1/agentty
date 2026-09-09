@@ -474,6 +474,63 @@ TEST_CASE("trim commits exact dropped rows") {
 //     entry and stranding a committed-scrollback ghost band (the bash-card
 //     overlap bug). Assert the stored estimate stays close to the real
 //     rendered height for a bash card with a huge output.
+TEST_CASE("rehydrate bounds a LATER oversized run") {
+    // The keep-loop walks newest-first and used to cut inside a run only
+    // when it was the FIRST one considered (`units == 0`). A big run
+    // reached second or later was therefore taken WHOLE, and the budget
+    // check fired only afterwards — by which point the rows were already
+    // in. One real thread ended up with 2247 frozen rows against a
+    // 180-row budget because run #2 was 2100 rows on its own.
+    //
+    // It matters most on RESIZE: a width change invalidates every cached
+    // layout, so the whole frozen canvas re-lays-out. Measured on that
+    // thread, 4.44 ms per resize against 0.43 ms warm — and a drag emits
+    // one resize per column.
+    //
+    // Shape: a SMALL newest run (so the first iteration does not trip the
+    // old cut), then a huge one behind it.
+    Model m;
+    m.d.current.id = agentty::ThreadId{"laterbig"};
+
+    for (int t = 0; t < 4; ++t) {
+        Message u; u.role = Role::User;
+        u.text = "early " + std::to_string(t);
+        m.d.current.messages.push_back(std::move(u));
+        Message a; a.role = Role::Assistant;
+        a.text = "reply " + std::to_string(t);
+        m.d.current.messages.push_back(std::move(a));
+    }
+    // The huge run — second-newest once the small one is appended.
+    Message gu; gu.role = Role::User; gu.text = "do a huge refactor";
+    m.d.current.messages.push_back(std::move(gu));
+    for (int e = 0; e < 60; ++e) {
+        Message a; a.role = Role::Assistant;
+        a.tool_calls.push_back(settled_edit("big" + std::to_string(e)));
+        m.d.current.messages.push_back(std::move(a));
+    }
+    // A small NEWEST run in front of it.
+    Message lu; lu.role = Role::User; lu.text = "thanks";
+    m.d.current.messages.push_back(std::move(lu));
+    Message la; la.role = Role::Assistant; la.text = "you're welcome";
+    m.d.current.messages.push_back(std::move(la));
+    m.s.phase = agentty::phase::Idle{};
+
+    agentty::app::detail::rehydrate_frozen(m);
+
+    // frozen_row_budget() is internal, but its contract is "~3 viewports"
+    // and it floors at 48 — so on any terminal this test could run on it
+    // is at most a few hundred rows. 1000 is far above the legitimate
+    // bound and far below the 2247 this test exists to catch.
+    const std::size_t rows = m.ui.frozen.row_total();
+    CHECK_MESSAGE(rows < 1000,
+                  "frozen canvas is " << rows << " rows — an oversized run "
+                  "behind the newest one was taken whole instead of cut");
+
+    // And the canvas must still be usable: bounding it must not empty it.
+    CHECK_MESSAGE(rows > 0, "the bound must keep SOME history, not none");
+    CHECK(m.ui.frozen.size() > 0);
+}
+
 TEST_CASE("output elided tool row estimate matches render") {
     Model m;
     m.d.current.id = agentty::ThreadId{"bashcap"};
