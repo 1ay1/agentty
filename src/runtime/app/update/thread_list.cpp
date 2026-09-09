@@ -409,6 +409,31 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
                 std::fflush(prof_out);
             };
             m.d.current = std::move(e.thread);
+            // The loaded thread has no live turn, so any run state still
+            // standing belongs to the thread we just left. Dropping it is
+            // not housekeeping — it is a crash fix.
+            //
+            // Switching threads mid-stream (the load is async, so the wire
+            // can very much still be running) left `phase` non-Idle and
+            // `pending_permission` set, both pointing at a transcript that
+            // no longer exists. The view then walks the NEW thread's
+            // messages looking for the old thread's ToolUse id, and the
+            // in-flight row reads active_ctx() for a run whose messages are
+            // gone. NewThread has always done this via reset_to_fresh_thread
+            // (see "a fresh empty thread has no live turn"); ThreadLoaded is
+            // the same situation and was simply missing it.
+            //
+            // Order matters: hand the kernel back BEFORE the transcript is
+            // rehydrated so a late delta can't land against a half-swapped
+            // model.
+            m.s.phase = phase::Idle{};
+            m.d.pending_permission.reset();
+            // Modals framed the OLD thread's content (the palette and
+            // code-block pickers hold indices into the departing thread's
+            // last reply), so they'd index into the wrong transcript.
+            m.ui.panel.close<pn::Palette>();
+            m.ui.panel.close<pn::CodeBlocks>();
+            m.ui.panel.close<pn::CodeBlockResult>();
             // Drop the whole render cache — same rationale as NewThread:
             // the entries belong to the thread being left, which won't
             // freeze again. The loaded thread rebuilds its frozen prefix
