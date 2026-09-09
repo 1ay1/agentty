@@ -174,37 +174,95 @@ Compare with today, where every turn rewrites the whole file: a crash
 mid-write risks the entire thread, which is why `write_json_atomic` has
 to do temp+rename of 29 MB.
 
-### 3.4 Attachments
+### 3.4 Attachments — any file type, not just images
 
-Unchanged from the existing blob store, which already works: payloads
-live in `threads/blobs/<hash>`, content-addressed and deduped. A message
-line references them by name.
+**Arbitrary files already attach today.** `Attachment::Kind` covers
+`Paste`, `FileRef` (`@path`), `Symbol`, `Output` (captured command
+output) and `Image`, and non-image kinds are persisted on the message.
+So this is not a new feature to invent — it is an existing feature with a
+storage problem.
+
+The problem is that images and everything else took different paths:
+
+| | images | every other kind |
+|---|---|---|
+| bytes live in | `blobs/<hash>` (since `3d976a39`) | **base64 inline in the thread JSON** |
+| deduped | yes (content-addressed) | no |
+| lazy | yes | no — decoded on every load |
+| reaches the model as | a real image block | text spliced into the prompt |
+
+Measured across the 539 real threads: 407 pastes (1.0 MB) and 26 captured
+outputs (**4.2 MB**), all base64-inline. The largest single attachment is
+a **2.0 MB build log** sitting in the middle of a thread file, re-decoded
+on every open. That is precisely the cost this design exists to remove,
+and it is already being paid — just by `Output` and `Paste` rather than
+by images.
+
+So the design does not need a new attachment concept. It needs the
+**existing** one to use the same blob path images already use:
 
 ```json
-{"id":"m47","role":"user","text":"look at this",
- "images":[{"media_type":"image/png","blob":"a3f2…","w":1600,"h":900}],
- "attachments":[{"name":"build.log","media_type":"text/plain",
-                 "byte_len":2147483648,"blob":"91cc…"}]}
+{"id":"m47","role":"user","text":"look at \u0001ATT:0\u0001",
+ "attachments":[
+   {"kind":"output","name":"cargo build","media_type":"text/plain",
+    "byte_count":2097152,"line_count":18422,"blob":"91cc…"}]}
 ```
 
-An attachment costs ~100 bytes in the log regardless of payload size, and
-no render path opens the blob. Attaching a 2 GB file cannot slow a thread
-switch, because switching only reads 60 lines of `.jsonl`.
+The only change to the on-disk shape is `"body": "<base64>"` becoming
+`"blob": "<hash>"`, with `body` still accepted for old threads — exactly
+the migration images already went through. Everything else (the
+placeholder protocol, `attachment::expand()`, the chip caption) is
+unchanged.
 
-Images already work this way as of `3d976a39`; attachments are the same
-mechanism with a name and a media type.
+**What this buys, per kind:**
+
+- **Any file type works**, because a blob is bytes plus a `media_type`.
+  A PDF, a video, a 2 GB core dump — the log line is ~100 bytes either
+  way. Nothing in the store inspects the content.
+- **Lazy by the same mechanism as images.** `Attachment::body` becomes a
+  lazy handle like `ImageContent`: the chip renders from `name`,
+  `media_type`, `line_count` and `byte_count`, all of which are already
+  stored and are all the renderer ever reads. Bytes materialise only when
+  `attachment::expand()` runs at request-build time.
+- **Dedup for free.** The blob name is the content hash, so pasting the
+  same log twice, or forking a thread, costs one copy.
+
+**What is deliberately NOT solved here.** Whether the model can *use* a
+given file type is a wire question, not a storage question, and the two
+should not be conflated:
+
+- Text-ish kinds (`Paste`, `FileRef`, `Symbol`, `Output`) are spliced
+  into the prompt as text by `attachment::expand()`. That works for
+  anything UTF-8 and is what ships today.
+- Images go out as native image blocks, per dialect.
+- A PDF or a video can be **stored and attached** by this design, but
+  sending it to a model needs either a provider that accepts that
+  content type (e.g. Anthropic's document blocks) or a local extraction
+  step. That is a separate piece of work, and the storage layer is
+  deliberately agnostic to it — it holds bytes and a media type, and lets
+  the wire layer decide what it can do with them.
+
+The useful consequence: attaching a 2 GB file cannot slow a thread switch
+down, because switching reads log lines and no render path opens a blob.
 
 ### 3.5 What stays lazy
 
 `ImageContent`'s lazy materialisation (shipped in `3d976a39`) stays as
-is, and generalises to attachments: the log line carries the reference
-and the metadata, and bytes are fetched only when the wire or an explicit
-open needs them.
+is, and `Attachment` gets the same treatment: the log line carries the
+reference plus the metadata the chip renders from (`name`, `media_type`,
+`line_count`, `byte_count` — all already stored), and bytes are fetched
+only when `attachment::expand()` builds a request or the user explicitly
+opens the file.
+
+One shared mechanism, two callers. `ImageContent::Source` already models
+"a blob name or legacy inline base64, resolved on first use"; attachments
+need exactly that, so the sensible move is to lift it into a small shared
+`LazyBytes` type rather than write it twice.
 
 Tool output does **not** need a separate mechanism. It lives in the
-message line, and the line is only parsed when that message is on screen
-— which is the whole point of seeking. p99 tool output is 8.3 KB, so 60
-messages of tail is a few hundred KB of parse.
+message line, and the line is only parsed when that message is loaded.
+p99 tool output is 8.3 KB, so even a whole-thread load is dominated by
+line count, not by any single output.
 
 ---
 
@@ -449,7 +507,10 @@ Each lands green and revertible:
    it yet.
 3. `FsStore` reads `.jsonl` when present, `.json` otherwise.
 4. Save writes the log; keep `.json` until the pair reads back identical.
-5. Attachments.
+5. Attachment bodies move to blobs (`body` → `blob`), reusing the lazy
+   mechanism images already have. This is where "any file type" lands,
+   and it removes the 4.2 MB of base64-inline captured output currently
+   sitting in real threads.
 
 Steps 1–2 change no on-disk bytes and no behaviour. Steps 1–5 touch no
 view code and deliver the 58 ms switch + O(1) save.
