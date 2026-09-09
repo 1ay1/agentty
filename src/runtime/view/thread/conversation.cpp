@@ -32,8 +32,8 @@
 #include <maya/widget/permission.hpp>
 #include <maya/widget/turn.hpp>
 
-#include "agentty/runtime/view/helpers.hpp"
 #include "agentty/runtime/view/palette.hpp"
+#include "agentty/runtime/view/thread/activity_indicator.hpp"
 #include "agentty/runtime/view/thread/seam.hpp"
 #include "agentty/runtime/view/thread/turn/permission.hpp"
 #include "agentty/runtime/view/thread/turn/turn.hpp"
@@ -171,30 +171,38 @@ void build_live_tail(const Model& m, int& running_turn,
             const bool show_indicator = reserve_slot && tail_is_empty_placeholder;
             if (show_indicator) {
                 using namespace maya::dsl;
-                // The tape/status row is NOT a body slot — it lives at
-                // conversation level (see in_flight_tape_config). It used
-                // to ALSO be reserved here as a muted "thinking…"
-                // placeholder, which meant that during the pre-first-token
-                // window BOTH rows were on screen at once: the body
-                // placeholder AND the conversation-level indicator, saying
-                // the same thing twice with the same elapsed clock.
-                //
-                // Reserving height here is unnecessary because the
-                // conversation-level row is unconditional for the whole
-                // active phase (and persists blank after it), so the slot
-                // never collapses at the indicator→content flip. Emit an
-                // EMPTY spacer instead: same one-row height contract, no
-                // duplicated text.
-                //
-                // Everything that used to run here — the read-mode
-                // context scan, the elapsed/tok-s math, the 512-byte
-                // tail splice — was computed every frame and then
-                // thrown away once the tape moved to conversation
-                // level. Deleted rather than left dead: the splice in
-                // particular built a frame-local scratch string and
-                // handed a string_view of it to a Config that outlived
-                // the buffer.
-                cfg.body.emplace_back(h(text("")).build());
+                maya::ActivityIndicator::Config ind;
+                ind.edge_color    = cfg.rail_color;
+                ind.spinner_glyph = std::string{m.s.spinner.current_frame()};
+                ind.label         = "thinking";
+                ind.words         = activity_indicator_words();
+
+                if (const auto* a = active_ctx(m.s.phase)) {
+                    ind.stream_bytes = a->live_delta_bytes;
+                    if (a->first_delta_at.time_since_epoch().count() != 0) {
+                        auto now = std::chrono::steady_clock::now();
+                        auto ts_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                         now - a->first_delta_at).count();
+                        if (ts_ms >= 250) {
+                            double sec = static_cast<double>(ts_ms) / 1000.0;
+                            double tok = static_cast<double>(a->live_delta_bytes) / 4.0;
+                            ind.stream_rate = static_cast<float>(tok / sec);
+                        }
+                    }
+                }
+
+                constexpr std::size_t kEntropyTail = 512;
+                const std::string& a_text = head.streaming_text;
+                const std::string& a_pend = head.pending_stream;
+                const std::string& src = !a_pend.empty() ? a_pend : a_text;
+                if (!src.empty()) {
+                    std::size_t n = std::min(kEntropyTail, src.size());
+                    ind.entropy_window = std::string_view{
+                        src.data() + src.size() - n, n};
+                }
+
+                cfg.body.emplace_back(
+                    maya::ActivityIndicator{std::move(ind)}.build());
             }
             // NOTE: no trailing spacer once real content exists. The
             // indicator occupies the body ONLY while the tail is an
@@ -376,137 +384,6 @@ std::optional<maya::Element> build_permission_row(const Model& m) {
         *m.d.pending_permission, *tc)}.build();
 }
 
-// The in-flight activity tape, at CONVERSATION level rather than as a body
-// slot on the assistant Turn.
-//
-// The tape used to be a Turn body slot gated on that Turn being an EMPTY
-// PLACEHOLDER (no text, no streaming_text, no tool calls). That made it a
-// pre-first-token indicator with exactly one reachable mode: READ, scanning
-// the user's prompt. Its WRITE branch — the one that narrates the model's
-// arriving output — could never run for a normal reply, because the gate
-// guaranteed streaming_text was empty whenever the tape existed. Symptom:
-// "the tape keeps showing just my input".
-//
-// Relaxing that gate in place does NOT work, and the failure is
-// instructive: a body slot lives inside the Turn, so its rows are part of
-// the live tail. When the run freezes, freeze_range rebuilds that run
-// through the frozen path — which has no tape — so the frame SHRINKS by the
-// tape's height exactly when maya commits it. maya's shrink-guard answers
-// with commit + demote_to_stale: a case-(B) repaint that strands a
-// DUPLICATE turn in native scrollback. midrun_wire_test's "write idle
-// finalize freeze" and "text turn finish shrink" pin precisely that, and no
-// live-tail spacer can fix it — once frozen, the run is not in the live tail
-// at all.
-//
-// Conversation::in_flight is the structurally correct home: it renders after
-// the live tail and belongs to no turn, frozen or live, so the tape can
-// narrate the whole stream and vanish at end-of-turn without its height ever
-// entering the freeze diff.
-//
-// The row owns every string it renders (see the NOTE in the body), so
-// unlike the old tape form there is no caller-provided scratch buffer and
-// no lifetime coupling between this Config and the model.
-[[nodiscard]] std::optional<maya::ActivityIndicator::Config>
-in_flight_tape_config(const Model& m) {
-    static const bool tape_enabled = [] {
-        const char* off = std::getenv("AGENTTY_NO_TAPE");
-        return !(off && off[0] && off[0] != '0');
-    }();
-    // HEIGHT CONTRACT. The tape adds exactly one row while it exists, and
-    // maya's frame height must never DECREASE while rows are overflowing
-    // into native scrollback — a shrink there fires the shrink-guard, which
-    // commits + demotes to stale and strands a DUPLICATE turn
-    // (midrun_wire_test: "write idle finalize freeze", "text turn finish
-    // shrink").
-    //
-    // End-of-turn is exactly such a moment: phase flips to Idle and the run
-    // freezes in the SAME update, so a tape gated purely on "is the stream
-    // active" vanishes precisely as its rows commit. The row must therefore
-    // OUTLIVE the stream. It is surrendered only once the whole thread is
-    // settled AND frozen — at which point nothing is mid-commit, the frame
-    // is not overflowing on account of this turn, and losing one row is
-    // safe.
-    //
-    // So: while active, the tape narrates. After the turn ends but before
-    // the next one starts, the same row persists as an invisible spacer
-    // (empty Config => the widget's STATIC mode, which we suppress to blank
-    // by leaving both sources empty). Height is monotone across the seam.
-    const auto& msgs = m.d.current.messages;
-    if (msgs.empty()) return std::nullopt;
-    if (!tape_enabled) return std::nullopt;
-
-    const Message& tail = msgs.back();
-    const bool assistant_tail = tail.role == Role::Assistant;
-    if (!m.s.active()) {
-        // Settled: hold the row (blank) so the active->settled transition
-        // is height-neutral. Only drop it once a NEW user turn begins, when
-        // the frame is growing anyway and a lost row cannot shrink it.
-        if (!assistant_tail) return std::nullopt;
-        // Blank spacer: simple mode with no verb and no spinner renders an
-        // empty row. (An empty *tape* Config renders STATIC mode — a row of
-        // `0x000000` zero bytes — which is why this must opt into simple.)
-        maya::ActivityIndicator::Config blank;
-        blank.simple = true;
-        return blank;
-    }
-    if (!assistant_tail) return std::nullopt;
-
-    maya::ActivityIndicator::Config ind;
-
-    // ONE calm row, not a byte tape. The hexdump narration was honest but
-    // read as noise/fault to anyone not debugging the transport, so the
-    // default is now the simple form: spinner + verb + elapsed. The verb
-    // comes from the SAME phase source the status chip uses, so the two
-    // never disagree about what the model is doing.
-    ind.simple  = true;
-    ind.spinner = std::string{m.s.spinner.current_frame()};
-    ind.verb    = std::string{phase_verb(m.s.phase)};
-    if (ind.verb.empty()) ind.verb = "working";
-
-    // NOTE: `simple` mode reads NOTHING by reference. The tape modes fed
-    // the widget `string_view`s into live message buffers (streaming_text /
-    // pending_stream / thinking) and into `scratch`. Those buffers are
-    // mutated by the very stream deltas that trigger the next frame, and
-    // maya's component() measure callback re-enters the built Element
-    // during layout — so any view that outlived one frame was a
-    // use-after-free. (Both crash backtraces in ~/.agentty/logs/stderr.log
-    // land in ComponentElement measure -> TextElement/WrappedLine
-    // destruction with a corrupted heap.) Simple mode copies its three
-    // small strings and owns them, which is why it is crash-free by
-    // construction rather than by careful lifetime bookkeeping.
-
-    // Elapsed since the phase began (the same clock the settled turn header
-    // prints) plus a live tok/s once the stream has proven a rate worth
-    // quoting. This is the ONLY part of the row that changes per frame
-    // besides the spinner glyph.
-    if (const auto* a = active_ctx(m.s.phase)) {
-        const auto now = std::chrono::steady_clock::now();
-        const auto el_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                               now - a->started).count();
-        if (el_ms >= 1000) {
-            std::string e = format_elapsed_5(static_cast<float>(el_ms) / 1000.0f);
-            const std::size_t sp = e.find_first_not_of(' ');
-            if (sp != std::string::npos) e.erase(0, sp);
-            ind.detail = std::move(e);
-        }
-        if (a->first_delta_at.time_since_epoch().count() != 0) {
-            const auto ts_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                   now - a->first_delta_at).count();
-            if (ts_ms >= 250) {
-                const double sec = static_cast<double>(ts_ms) / 1000.0;
-                const double tok = static_cast<double>(a->live_delta_bytes) / 4.0;
-                const int r = static_cast<int>(tok / sec);
-                if (r > 0) {
-                    if (!ind.detail.empty()) ind.detail += " \xc2\xb7 ";
-                    ind.detail += std::to_string(r) + " tok/s";
-                }
-            }
-        }
-    }
-
-    return ind;
-}
-
 } // namespace
 
 maya::Conversation::Config conversation_config(const Model& m) {
@@ -579,14 +456,12 @@ maya::Conversation::Config conversation_config(const Model& m) {
         }
     }
 
-    // The activity row lives HERE, not in the assistant Turn's body — see
-    // in_flight_tape_config for why (short version: a body slot's rows are
-    // part of the live tail, so the row's height would vanish when the run
-    // freezes and strand a duplicate turn in scrollback).
-    //
-    // No scratch buffer any more: the row copies the three short strings it
-    // renders, so nothing in the returned Config points into the model.
-    cfg.in_flight = in_flight_tape_config(m);
+    // No separate in_flight indicator — the empty-placeholder
+    // assistant Turn carries its own "thinking…" body slot during
+    // streaming (see build_live_tail), matching agent_session where
+    // m.thinking_active produces a body slot inside the assistant
+    // Turn rather than a free-floating indicator below it.
+    cfg.in_flight = std::nullopt;
     return cfg;
 }
 

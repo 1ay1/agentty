@@ -50,8 +50,8 @@ set(_AGENTTY_CONSOLIDATED
     smart_slot_panel_stack_test account_switch_refresh_test fused_models_test
     panel_sections_render_test
     credentials_test entitlement_test inflate_test
-    settings_list_scroll_test visual_walk_test activity_tape_test
-    md_robustness_test thread_blob_test lazy_image_test thread_log_test
+    settings_list_scroll_test visual_walk_test md_robustness_test
+    thread_blob_test lazy_image_test thread_log_test
     thread_migration_test blob_gc_test)
 foreach(_t ${_AGENTTY_CONSOLIDATED})
     agentty_test(${_t} MODE consolidated)
