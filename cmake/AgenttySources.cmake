@@ -33,6 +33,7 @@ set(AGENTTY_IO_SOURCES
     src/io/persistence.cpp
     src/io/blob_store.cpp
     src/io/thread_log.cpp
+    src/io/blob_gc.cpp
     src/io/clipboard.cpp
     src/util/base64.cpp
     src/util/dbglog.cpp

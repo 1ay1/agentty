@@ -52,7 +52,7 @@ set(_AGENTTY_CONSOLIDATED
     credentials_test entitlement_test inflate_test
     settings_list_scroll_test visual_walk_test activity_tape_test
     md_robustness_test thread_blob_test lazy_image_test thread_log_test
-    thread_migration_test)
+    thread_migration_test blob_gc_test)
 foreach(_t ${_AGENTTY_CONSOLIDATED})
     agentty_test(${_t} MODE consolidated)
 endforeach()
@@ -105,6 +105,9 @@ agentty_fold_test(thread_migration_bulk_probe TIMEOUT 900 ARGS)
 # Splits a thread switch into worker-thread vs UI-thread cost, so the next
 # optimisation targets what the user actually waits on.
 agentty_fold_test(thread_switch_prof_probe TIMEOUT 120 ARGS)
+# Mark-and-sweep the blob store of a real threads dir. DRY RUN unless
+# --apply, because the files at stake hold images and tool output.
+agentty_fold_test(blob_gc_probe TIMEOUT 300 ARGS)
 if(UNIX)
     # PTY-driven (openpty); full-runtime ghost-caret repro — see the
     # header of tests/test_ghost_caret_runtime.cpp (credit: davidwed).
