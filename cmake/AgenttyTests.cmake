@@ -99,6 +99,9 @@ agentty_fold_test(thread_log_seam_probe   TIMEOUT 120 ARGS)
 # Runs the REAL save path over a REAL thread and proves the legacy file is
 # retired only after every message, tool output and image byte reads back.
 agentty_fold_test(thread_migration_probe  TIMEOUT 300 ARGS)
+# Migrates a whole threads/ directory (a COPY) and proves every thread's
+# content is identical afterwards. The rehearsal before touching real data.
+agentty_fold_test(thread_migration_bulk_probe TIMEOUT 900 ARGS)
 if(UNIX)
     # PTY-driven (openpty); full-runtime ghost-caret repro — see the
     # header of tests/test_ghost_caret_runtime.cpp (credit: davidwed).
