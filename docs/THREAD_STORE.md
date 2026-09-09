@@ -373,7 +373,177 @@ format has shipped.
 
 ---
 
-## 8. Open questions
+## 8. Code layout
+
+The repo's convention is `include/agentty/<subsys>/` mirroring
+`src/<subsys>/`, one concern per file, with a subdirectory once a
+subsystem grows past a few files (`provider/anthropic/`,
+`runtime/view/thread/turn/`). `ThreadStore` follows it exactly.
+
+### 8.1 What exists today
+
+```
+include/agentty/io/persistence.hpp    5 KB    free functions + FsStore
+src/io/persistence.cpp               86 KB    EVERYTHING below, one file
+```
+
+That one file currently holds: atomic writes, path resolution, the blob
+store, transcript-markdown export, message↔JSON, typed deserializers, the
+SAX metadata parser, the `index.json` sidecar, the async writer, and
+settings load/save. Ten concerns. This design does not get to add an
+eleventh to it.
+
+### 8.2 Target layout
+
+```
+include/agentty/store/
+  store.hpp             (exists) the Store concept — UNCHANGED
+  thread_store.hpp      NEW  ThreadStore: open/index/body/blob/append
+  index.hpp             NEW  MessageIndex, ToolIndex, ImageIndex,
+                             AttachmentIndex — pure data, no I/O
+  refs.hpp              NEW  BlobRef, SegmentRef, BodyResult, BlobResult
+
+include/agentty/io/
+  persistence.hpp       (exists) free functions + FsStore — UNCHANGED
+  blob_store.hpp        NEW  put/get/exists over blobs/<hash>
+
+src/io/thread_store/
+  store.cpp             open(), index(), body(), blob(), append()
+  index_codec.cpp       MessageIndex ↔ JSON  (<id>.idx.json)
+  index_build.cpp       Message → MessageIndex  (previews, refs, caps)
+  segment.cpp           segment read/append   (<id>.seg/NNNN)
+  loader.cpp            the async load queue + Msg completion
+  legacy.cpp            phase 0: build an index from TODAY's <id>.json
+
+src/io/
+  blob_store.cpp        NEW  extracted from persistence.cpp
+  persistence.cpp       SHRINKS — blob code moves out; the rest stays
+```
+
+Why this split, file by file:
+
+- **`store/index.hpp` is pure data with no I/O.** The view includes it;
+  it must not drag in `<filesystem>` or nlohmann. Same discipline
+  `domain/conversation.hpp` already keeps — and the reason the lazy-image
+  resolver is a function pointer installed by persistence rather than a
+  direct call.
+- **`index_codec` is separate from `index_build`.** Reading an index is a
+  format concern that must stay backward-compatible forever; building one
+  is a policy concern (what the preview cap is, which fields are hot)
+  that will change as the renderer changes. Fusing them is how a policy
+  tweak silently becomes a format break.
+- **`legacy.cpp` is the phase-0 shim and is deletable.** It builds a
+  `MessageIndex` from today's `<id>.json` so the whole API can ship and
+  be tested before the on-disk format moves. After phase 1 it stays only
+  to read old threads, and it is the one file that knows the old shape.
+- **`blob_store.cpp` comes out of `persistence.cpp` first.** It is
+  self-contained (~70 lines), already content-addressed, and both the old
+  and new paths need it. Extracting it is a pure refactor with no
+  behaviour change — a good first commit.
+
+### 8.3 On-disk layout
+
+```
+~/.agentty/threads/
+  index.json              (exists) picker metadata: id → title, mtime
+  <id>.json               (exists) whole thread — legacy, still readable
+  <id>.idx.json           NEW  the render index
+  <id>.seg/0000.json      NEW  message bodies, ~256 per segment
+  <id>.seg/0001.json
+  <id>.transcript.md      (exists) fork's human-readable export
+  blobs/<fnv1a>           (exists) images today; +tool output, attachments
+```
+
+Note that `<id>.idx.json` is a **different index from
+`threads/index.json`**, which already exists and caches *picker* metadata
+(title, timestamps) for the thread LIST. The new file is per-thread and
+serves the *transcript*. The two names are close enough to confuse a
+reader, so state it plainly: `index.json` answers "what threads exist",
+`<id>.idx.json` answers "what does this thread render as".
+
+The precedent matters more than the name. `threads/index.json` already
+solves exactly this class of problem — metadata stranded behind multi-MB
+arrays — with exactly this technique: a sidecar, validated by
+mtime + size, that self-heals by falling back to the full parse when
+stale or deleted. `<id>.idx.json` inherits that contract verbatim:
+**the index is a cache, the bodies are truth.** Delete every `.idx.json`
+and the app rebuilds them — slowly, and correctly.
+
+### 8.4 How it plugs into the app
+
+The seam already exists and does not need widening. `Deps` holds
+`std::function` store callbacks, and `store::Store` is a concept with
+`FsStore` as today's model:
+
+```cpp
+// include/agentty/runtime/app/deps.hpp — today
+std::function<std::optional<Thread>(const ThreadId&)> load_thread;
+```
+
+Phases 0–1 change nothing here: `FsStore::load_thread` keeps returning a
+whole `Thread`, now assembled by `ThreadStore`. Phase 2 adds one dep
+*alongside* it — not replacing it — so the migration is never
+all-or-nothing:
+
+```cpp
+std::function<const ThreadIndex&(const ThreadId&)> thread_index;
+```
+
+The view then moves onto `thread_index` one surface at a time (frozen
+turns first, then the live tail, then the panels), and anything not yet
+moved keeps calling `load_thread`. Two Msg variants carry completion:
+
+```cpp
+struct ThreadBodyReady { ThreadId thread; MessageId message; };
+struct ThreadBlobReady { ThreadId thread; BlobRef  ref;     };
+```
+
+Both land in `src/runtime/app/update/thread_store.cpp` (new, beside the
+existing `thread_list.cpp` / `frozen.cpp`), whose only job is to drop the
+matching `view_cache` entry so the next frame re-renders with real
+content.
+
+### 8.5 Tests
+
+Mirroring the `tests/` convention, one file per property:
+
+```
+tests/thread_store_roundtrip_test.cpp   open→materialise→serialise
+                                        ≡ today, over all real threads
+tests/thread_store_index_test.cpp       index codec + build, caps, refs
+tests/thread_store_segment_test.cpp     append, read-back, torn writes
+tests/thread_store_async_test.cpp       body()/blob() never block;
+                                        Ready msgs arrive; no re-entrancy
+tests/thread_store_migration_test.cpp   legacy → new, byte-identical
+                                        payloads; save-without-materialise
+                                        is a disk no-op
+```
+
+`real_thread_render_probe` already covers the end-to-end case and should
+gain a `--store` flag that renders both paths and diffs the frames — that
+is correctness property #2 from §5, run against the 539 real threads
+rather than fixtures.
+
+### 8.6 Commit sequence
+
+Each lands green and independently revertible:
+
+1. `blob_store` extracted from `persistence.cpp` — pure refactor.
+2. `store/index.hpp` + `refs.hpp` — types only, no behaviour.
+3. `index_build` + `index_codec` + `legacy` — build an index from today's
+   files; round-trip test over all 539 threads.
+4. `ThreadStore::open/index` + the `thread_index` dep — nothing consumes
+   it yet.
+5. View moves onto `index()`, surface by surface.
+6. Segments + async bodies.
+7. Attachments.
+
+Steps 1–4 change no on-disk bytes and no user-visible behaviour, which is
+where the risk actually is.
+
+---
+
+## 9. Open questions
 
 1. **Segment size.** 256 messages is a guess. Should be measured against
    real scroll patterns before it is fixed.
