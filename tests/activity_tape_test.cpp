@@ -201,6 +201,85 @@ TEST_CASE("activity tape: STATIC is pinned at zero and modes differ") {
     CHECK(rr != rw);
 }
 
+TEST_CASE("activity row: simple mode is one calm row, no hex") {
+    FrozenClock fc{100000};
+
+    maya::ActivityIndicator::Config cfg;
+    cfg.simple  = true;
+    cfg.verb    = "thinking";
+    cfg.spinner = "*";
+    cfg.detail  = "1.3s";
+
+    const std::string row = render_row(cfg);
+
+    // Says what it's doing, in words.
+    CHECK(row.find("thinking") != std::string::npos);
+    CHECK(row.find("1.3s") != std::string::npos);
+    CHECK(row.find("*") != std::string::npos);
+    // And carries NONE of the byte narration — that's the whole point.
+    CHECK(row.find("0x") == std::string::npos);
+    CHECK(row.find("|") == std::string::npos);
+
+    // Pure function of its config: same config, same bytes. (The tape
+    // modes deliberately mutate every frame; this row must not, or a
+    // static "thinking" row would repaint forever.)
+    CHECK(render_row(cfg) == row);
+}
+
+TEST_CASE("activity row: simple mode degrades detail before the verb") {
+    FrozenClock fc{100000};
+
+    maya::ActivityIndicator::Config cfg;
+    cfg.simple  = true;
+    cfg.verb    = "running shell";
+    cfg.spinner = "*";
+    cfg.detail  = "12.5s \xc2\xb7 340 tok/s";
+
+    // Wide: everything fits.
+    const std::string wide = render_row(cfg, 120);
+    CHECK(wide.find("running shell") != std::string::npos);
+    CHECK(wide.find("340 tok/s") != std::string::npos);
+
+    // Narrow: the DETAIL is what goes; the verb (the answer to "what is
+    // it doing") survives. This is the responsiveness contract.
+    const std::string narrow = render_row(cfg, 24);
+    CHECK(narrow.find("running shell") != std::string::npos);
+    CHECK(narrow.find("340 tok/s") == std::string::npos);
+}
+
+TEST_CASE("activity row: simple mode never wraps, and blank is blank") {
+    FrozenClock fc{100000};
+
+    maya::ActivityIndicator::Config cfg;
+    cfg.simple  = true;
+    cfg.verb    = "summarising the conversation so far";
+    cfg.spinner = "*";
+    cfg.detail  = "9.9s";
+
+    for (int w : {12, 20, 30, 44, 60, 80, 120}) {
+        const std::string out = render_row(cfg, w);
+        int lines = 0;
+        std::size_t pos = 0;
+        while (pos < out.size()) {
+            std::size_t nl = out.find('\n', pos);
+            if (nl == std::string::npos) nl = out.size();
+            std::string_view line{out.data() + pos, nl - pos};
+            if (line.find_first_not_of(' ') != std::string_view::npos) ++lines;
+            pos = nl + 1;
+        }
+        CHECK(lines <= 1);
+    }
+
+    // The spacer form: simple + no verb + no spinner renders NOTHING.
+    // (An empty non-simple Config renders STATIC — a row of 0x000000 — so
+    // the host must opt into simple for a blank height-holder.)
+    maya::ActivityIndicator::Config blank;
+    blank.simple = true;
+    const std::string b = render_row(blank);
+    CHECK(b.find("0x") == std::string::npos);
+    CHECK(b.find_first_not_of(" \n") == std::string::npos);
+}
+
 TEST_CASE("activity tape: narrow widths never wrap the row") {
     FrozenClock fc{100000};
 
