@@ -51,7 +51,8 @@ set(_AGENTTY_CONSOLIDATED
     panel_sections_render_test
     credentials_test entitlement_test inflate_test
     settings_list_scroll_test visual_walk_test activity_tape_test
-    md_robustness_test thread_blob_test lazy_image_test thread_log_test)
+    md_robustness_test thread_blob_test lazy_image_test thread_log_test
+    thread_migration_test)
 foreach(_t ${_AGENTTY_CONSOLIDATED})
     agentty_test(${_t} MODE consolidated)
 endforeach()
@@ -95,6 +96,9 @@ agentty_fold_test(thread_log_corpus_probe TIMEOUT 300 ARGS)
 # Proves the STORE SEAM prefers the log: converts a real thread, reads it
 # back through load_thread_by_id, and compares. Needs AGENTTY_HOME + an id.
 agentty_fold_test(thread_log_seam_probe   TIMEOUT 120 ARGS)
+# Runs the REAL save path over a REAL thread and proves the legacy file is
+# retired only after every message, tool output and image byte reads back.
+agentty_fold_test(thread_migration_probe  TIMEOUT 300 ARGS)
 if(UNIX)
     # PTY-driven (openpty); full-runtime ghost-caret repro — see the
     # header of tests/test_ghost_caret_runtime.cpp (credit: davidwed).

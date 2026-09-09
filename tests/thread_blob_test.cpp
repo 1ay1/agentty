@@ -27,10 +27,9 @@ using namespace agentty;
 
 // load_thread lives on io::FsStore; persistence exposes the file-level form.
 static std::optional<Thread> load_t(const ThreadId& id) {
-    auto p = persistence::threads_dir() / (id.value + ".json");
-    auto loaded = persistence::load_thread_file(p);
-    if (!loaded) return std::nullopt;
-    return std::move(*loaded);
+    // Through the STORE SEAM, not a hardcoded path: a saved thread now
+    // lives in the log format, and <id>.json is retired once it verifies.
+    return persistence::load_thread_by_id(id);
 }
 
 namespace {
@@ -223,11 +222,20 @@ TEST_CASE("thread blobs: a legacy inline thread still loads") {
     img.set_bytes(bytes);
     m.images.push_back(std::move(img));
     Thread t{ThreadId{"legacyimg"}, "legacy", {m}, {}, {}};
-    persistence::save_thread(t);
-    persistence::flush_pending_saves();
+    // Seed a LEGACY whole-document file directly. save_thread() migrates
+    // to the log format and retires the .json, so it can no longer be
+    // used to manufacture the old shape this test is about.
+    const fs::path file = persistence::threads_dir() / "legacyimg.json";
+    {
+        auto j = persistence::thread_meta_to_json(t);
+        nlohmann::json arr = nlohmann::json::array();
+        for (const auto& mm : t.messages)
+            arr.push_back(persistence::message_to_json(mm));
+        j["messages"] = std::move(arr);
+        persistence::write_json_atomic(file, j.dump(2));
+    }
 
     // Rewrite the file in the OLD shape: inline data, no blob reference.
-    const fs::path file = persistence::threads_dir() / "legacyimg.json";
     std::string text = read_file(file);
     const auto pos = text.find("\"blob\"");
     REQUIRE(pos != std::string::npos);

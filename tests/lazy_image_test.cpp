@@ -25,6 +25,8 @@
 #include <agentty/io/persistence.hpp>
 #include <agentty/util/base64.hpp>
 
+#include <nlohmann/json.hpp>
+
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -67,8 +69,7 @@ TEST_CASE("lazy image: save → load round-trips the exact bytes") {
     persistence::save_thread(t);
     persistence::flush_pending_saves();
 
-    auto loaded = persistence::load_thread_file(
-        persistence::threads_dir() / (t.id.value + ".json"));
+    auto loaded = persistence::load_thread_by_id(t.id);
     REQUIRE(loaded.has_value());
     REQUIRE(loaded->messages.size() == 1);
     REQUIRE(loaded->messages[0].images.size() == 1);
@@ -84,8 +85,7 @@ TEST_CASE("lazy image: loading does NOT materialise the bytes") {
     persistence::save_thread(t);
     persistence::flush_pending_saves();
 
-    auto loaded = persistence::load_thread_file(
-        persistence::threads_dir() / (t.id.value + ".json"));
+    auto loaded = persistence::load_thread_by_id(t.id);
     REQUIRE(loaded.has_value());
     const auto& img = loaded->messages[0].images[0];
 
@@ -106,8 +106,7 @@ TEST_CASE("lazy image: a copy of an unmaterialised image still resolves") {
     persistence::save_thread(t);
     persistence::flush_pending_saves();
 
-    auto loaded = persistence::load_thread_file(
-        persistence::threads_dir() / (t.id.value + ".json"));
+    auto loaded = persistence::load_thread_by_id(t.id);
     REQUIRE(loaded.has_value());
 
     // Threads are copied around freely (checkpoints, forks, the view cache).
@@ -125,9 +124,7 @@ TEST_CASE("lazy image: re-saving an unmaterialised image keeps the payload") {
     Thread t = thread_with_image(original);
     persistence::save_thread(t);
     persistence::flush_pending_saves();
-    const auto path = persistence::threads_dir() / (t.id.value + ".json");
-
-    auto loaded = persistence::load_thread_file(path);
+    auto loaded = persistence::load_thread_by_id(t.id);
     REQUIRE(loaded.has_value());
     CHECK(!loaded->messages[0].images[0].materialised());
 
@@ -135,7 +132,7 @@ TEST_CASE("lazy image: re-saving an unmaterialised image keeps the payload") {
     persistence::save_thread(*loaded);
     persistence::flush_pending_saves();
 
-    auto again = persistence::load_thread_file(path);
+    auto again = persistence::load_thread_by_id(t.id);
     REQUIRE(again.has_value());
     REQUIRE(again->messages[0].images.size() == 1);
     CHECK_MESSAGE(again->messages[0].images[0].bytes() == original,
@@ -152,8 +149,18 @@ TEST_CASE("lazy image: legacy inline base64 still loads") {
     m.role = Role::User;
     m.text = "legacy";
     t.messages.push_back(std::move(m));
-    persistence::save_thread(t);
-    persistence::flush_pending_saves();
+    // Seed a LEGACY whole-document file directly. save_thread() now
+    // migrates to the log format and retires the .json, so it can no
+    // longer be used to manufacture the old shape this test is about.
+    const auto seed_path = persistence::threads_dir() / (t.id.value + ".json");
+    {
+        auto j = persistence::thread_meta_to_json(t);
+        nlohmann::json arr = nlohmann::json::array();
+        for (const auto& mm : t.messages)
+            arr.push_back(persistence::message_to_json(mm));
+        j["messages"] = std::move(arr);
+        persistence::write_json_atomic(seed_path, j.dump(2));
+    }
 
     // Hand-write the legacy shape into the saved file.
     const auto path = persistence::threads_dir() / (t.id.value + ".json");
@@ -194,10 +201,17 @@ TEST_CASE("lazy image: a legacy inline image migrates to a blob on save") {
     m.role = Role::User;
     m.text = "legacy";
     t.messages.push_back(std::move(m));
-    persistence::save_thread(t);
-    persistence::flush_pending_saves();
-
+    // Seed a LEGACY whole-document file directly (see the note above).
     const auto path = persistence::threads_dir() / (t.id.value + ".json");
+    {
+        auto j = persistence::thread_meta_to_json(t);
+        nlohmann::json arr = nlohmann::json::array();
+        for (const auto& mm : t.messages)
+            arr.push_back(persistence::message_to_json(mm));
+        j["messages"] = std::move(arr);
+        persistence::write_json_atomic(path, j.dump(2));
+    }
+
     std::string doc;
     {
         std::ifstream in(path, std::ios::binary);
@@ -223,19 +237,25 @@ TEST_CASE("lazy image: a legacy inline image migrates to a blob on save") {
     persistence::save_thread(*legacy);
     persistence::flush_pending_saves();
 
-    // The base64 is gone from the file, and it got smaller.
+    // The save rewrote the thread in the LOG format, so the legacy
+    // document is gone and the payload now lives in the blob store.
+    const auto log_path = persistence::threads_dir() / (t.id.value + ".jsonl");
+    REQUIRE(fs::exists(log_path));
+    CHECK_FALSE(fs::exists(path));
+
     std::string after;
     {
-        std::ifstream in(path, std::ios::binary);
+        std::ifstream in(log_path, std::ios::binary);
         after.assign(std::istreambuf_iterator<char>(in),
                      std::istreambuf_iterator<char>());
     }
     CHECK_MESSAGE(after.find(b64) == std::string::npos,
                   "the inline base64 must be replaced by a blob reference");
-    CHECK(fs::file_size(path) < legacy_size);
+    CHECK_MESSAGE(fs::file_size(log_path) < legacy_size,
+                  "and the thread file must shrink by the payload size");
 
     // And the image still reads back byte-for-byte.
-    auto migrated = persistence::load_thread_file(path);
+    auto migrated = persistence::load_thread_by_id(t.id);
     REQUIRE(migrated.has_value());
     REQUIRE(migrated->messages[0].images.size() == 1);
     CHECK(migrated->messages[0].images[0].bytes() == original);

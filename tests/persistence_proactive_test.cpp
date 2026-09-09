@@ -76,10 +76,12 @@ TEST_CASE("persistence proactive") {
     persistence::save_thread(t);
     persistence::flush_pending_saves();
 
-    auto path = persistence::threads_dir() / (t.id.value + ".json");
-    check(fs::exists(path), "thread file written to disk");
+    // Through the store seam: a saved thread now lives in the log format
+    // and <id>.json is retired once it verifies.
+    auto log_path = persistence::threads_dir() / (t.id.value + ".jsonl");
+    check(fs::exists(log_path), "thread written to disk");
 
-    auto loaded = persistence::load_thread_file(path);
+    auto loaded = persistence::load_thread_by_id(t.id);
     check(loaded.has_value(), "thread reloaded without error");
     if (!loaded) { REQUIRE(loaded.has_value()); return; }
 

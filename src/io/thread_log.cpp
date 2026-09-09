@@ -56,6 +56,16 @@ void put_u64_le(char* dst, std::uint64_t v) noexcept {
     }
 }
 
+// Smart Mode routing cards are view-only telemetry: they carry no wire
+// content, are never sent to the model, and are never persisted. The
+// whole-document writer has always skipped them, so the log must too —
+// otherwise a migrated thread grows a row on every reload, and the
+// save-time verification (which compares against the persistable set)
+// fails and correctly refuses to retire the legacy file.
+[[nodiscard]] bool persistable(const Message& m) noexcept {
+    return !m.smart_routing;
+}
+
 } // namespace
 
 // ── open ─────────────────────────────────────────────────────────────
@@ -291,6 +301,7 @@ std::vector<Message> ThreadLog::range(std::size_t from, std::size_t to) const {
 // ── write ────────────────────────────────────────────────────────────
 
 bool ThreadLog::append(const Message& m) {
+    if (!persistable(m)) return true;   // silently not-persisted, as designed
     const std::string line = encode_line(m);
     if (line.empty()) return false;
 
@@ -356,6 +367,7 @@ bool ThreadLog::rewrite(const std::vector<Message>& msgs) {
     std::vector<std::uint64_t> offs;
     offs.reserve(msgs.size());
     for (const auto& m : msgs) {
+        if (!persistable(m)) continue;
         const std::string line = encode_line(m);
         if (line.empty()) continue;      // see encode_line: logged, skipped
         offs.push_back(static_cast<std::uint64_t>(body.size()));
@@ -380,8 +392,12 @@ bool ThreadLog::rewrite(const std::vector<Message>& msgs) {
 // ── whole-thread convenience ────────────────────────────────────
 
 bool ThreadLog::exists() const noexcept {
+    // is_regular_file, not exists: a directory (or a socket, or anything
+    // else) sitting at the log path is NOT a log. Treating it as one made
+    // the loader take the log branch, find no messages, and hand back an
+    // empty thread while a perfectly good legacy document sat beside it.
     std::error_code ec;
-    return fs::exists(log_, ec);
+    return fs::is_regular_file(log_, ec);
 }
 
 Thread ThreadLog::load_thread() const {

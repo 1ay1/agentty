@@ -1107,7 +1107,16 @@ Thread thread_from_index(const std::string& id, const IndexEntry& e) {
 // path for this thread instead of re-parsing it. Best-effort: a failed
 // index update just means one slow parse next launch, then self-heals.
 void reindex_thread(const Thread& t) {
-    const auto file = threads_dir() / (t.id.value + ".json");
+    // Stat whichever file this thread actually lives in. A migrated thread
+    // has no <id>.json, so statting that unconditionally would cache
+    // mtime=0/size=0 — and load_all_threads treats mt==0 as "cache miss",
+    // making every startup re-parse every migrated thread's metadata.
+    // The .meta.json sidecar is what the directory walk stats for a log
+    // thread, so it must be what we record here too.
+    const auto meta_file   = threads_dir() / (t.id.value + ".meta.json");
+    const auto legacy_file = threads_dir() / (t.id.value + ".json");
+    std::error_code ec;
+    const auto file = fs::exists(meta_file, ec) ? meta_file : legacy_file;
     // Stat OUTSIDE the lock, then read-modify-write inside it, so the
     // whole update is atomic with respect to delete_thread().
     const long long mt = file_mtime_ns(file);
@@ -1274,10 +1283,9 @@ json thread_meta_to_json(const Thread& t) {
 }
 
 // Serialise a thread to the legacy WHOLE-DOCUMENT form: metadata plus an
-// inline "messages" array. Still the format on disk today; the log format
-// splits these two halves into separate files.
-static void save_thread_sync(const Thread& t) {
-    if (t.id.empty() || t.messages.empty()) return;
+// inline "messages" array. Kept for threads that have not yet moved to
+// the log, and as the fallback when a log write fails.
+static bool save_thread_legacy(const Thread& t) {
     json j = thread_meta_to_json(t);
     json msgs = json::array();
     for (const auto& m : t.messages) {
@@ -1292,26 +1300,126 @@ static void save_thread_sync(const Thread& t) {
     // exception as a belt-and-suspenders guard against future regressions —
     // a silently-skipped save beats a process-terminating uncaught throw.
     try {
-        const bool ok = write_json_atomic(
-            threads_dir() / (t.id.value + ".json"), j.dump(2));
-        // A failed save loses the user's conversation with nothing on screen
-        // to say so — the worst kind of silent failure, and previously
-        // invisible because the result was discarded.
-        if (!ok)
-            AGT_LOG(Persist, Error, "thread.save",
-                    "result=write_failed id={} messages={}",
-                    t.id.value, t.messages.size());
-        else
-            AGT_LOG(Persist, Debug, "thread.save", "result=ok id={} messages={}",
-                    t.id.value, t.messages.size());
-        // Keep the metadata index in lock-step with the file we just
-        // wrote so the next startup's fast path picks it up.
-        reindex_thread(t);
+        return write_json_atomic(threads_dir() / (t.id.value + ".json"),
+                                 j.dump(2));
     } catch (const nlohmann::json::exception& e) {
-        // caller can't react; best-effort persistence is acceptable here.
         AGT_LOG(Persist, Error, "thread.save", "result=json_error id={} err={}",
                 t.id.value, e.what());
+        return false;
     }
+}
+
+// The messages a save is responsible for — i.e. minus the view-only Smart
+// Mode routing cards, which are never persisted and never sent.
+static std::vector<Message> persistable(const std::vector<Message>& in) {
+    std::vector<Message> out;
+    out.reserve(in.size());
+    for (const auto& m : in)
+        if (!m.smart_routing) out.push_back(m);
+    return out;
+}
+
+// Does what was just written read back as what we meant to write?
+//
+// This is the gate that lets a save DELETE the legacy file. A save runs
+// every turn, and a bug in the writer that silently dropped or mangled a
+// message would be unrecoverable once the .json is gone — so the log is
+// re-read from disk and compared before anything is removed.
+//
+// Deliberately compares the fields a user would notice losing, not a byte
+// diff: re-serialising is not guaranteed stable (blob promotion can move
+// a payload out of line on the way in), and a byte comparison would fail
+// on differences that are not data loss.
+static bool log_matches(const ThreadLog& log, const std::vector<Message>& want) {
+    const auto got = log.all();
+    if (got.size() != want.size()) return false;
+    for (std::size_t i = 0; i < got.size(); ++i) {
+        const auto& a = want[i];
+        const auto& b = got[i];
+        if (a.id.value != b.id.value)   return false;
+        if (a.role     != b.role)       return false;
+        if (a.text     != b.text)       return false;
+        if (a.thinking != b.thinking)   return false;
+        if (a.tool_calls.size() != b.tool_calls.size()) return false;
+        for (std::size_t k = 0; k < a.tool_calls.size(); ++k)
+            if (a.tool_calls[k].output() != b.tool_calls[k].output())
+                return false;
+        if (a.images.size() != b.images.size()) return false;
+    }
+    return true;
+}
+
+static void save_thread_sync(const Thread& t) {
+    if (t.id.empty() || t.messages.empty()) return;
+
+    // ── Write the log, and only then retire the legacy document ──────
+    //
+    // Threads move one at a time, as they are used: there is no migration
+    // pass and no flag day, so 597 MB of history is never in flight at
+    // once. A thread the user never opens again stays legacy forever and
+    // still loads — the reader keeps both paths permanently (~105 lines,
+    // frozen), which is a trivial price for not being able to lose
+    // history.
+    //
+    // Order: write the pair → read it BACK off disk → compare → only then
+    // remove the .json. Any failure at any step leaves the legacy file
+    // exactly where it was, so the worst case is a thread that did not
+    // migrate this turn, not a thread that was damaged.
+    const auto legacy_path = threads_dir() / (t.id.value + ".json");
+    std::error_code ec;
+
+    auto log = ThreadLog::open(t.id);
+    if (log && log->store_thread(t)) {
+        // Re-open from scratch so the verification reads the FILES, not
+        // the in-memory state that just wrote them.
+        auto check = ThreadLog::open(t.id);
+        if (check && log_matches(*check, persistable(t.messages))) {
+            if (fs::exists(legacy_path, ec)) {
+                fs::remove(legacy_path, ec);
+                AGT_LOG(Persist, Info, "thread.save",
+                        "migrated id={} messages={} (legacy document retired)",
+                        t.id.value, t.messages.size());
+            } else {
+                AGT_LOG(Persist, Debug, "thread.save",
+                        "result=ok format=log id={} messages={}",
+                        t.id.value, t.messages.size());
+            }
+            reindex_thread(t);
+            return;
+        }
+        // Wrote, but it did not read back correctly. Keep the legacy file
+        // (written below) and say so loudly — this is a bug in the log
+        // writer, and the user's history is the thing that must not pay
+        // for it.
+        AGT_LOG(Persist, Error, "thread.save",
+                "log verification FAILED id={} messages={} — keeping the "
+                "legacy document", t.id.value, t.messages.size());
+    } else if (!log) {
+        AGT_LOG(Persist, Warn, "thread.save",
+                "could not open a log for id={} — falling back to legacy",
+                t.id.value);
+    } else {
+        AGT_LOG(Persist, Warn, "thread.save",
+                "log write failed for id={} — falling back to legacy",
+                t.id.value);
+    }
+
+    // Fallback: the historical whole-document write.
+    const bool ok = save_thread_legacy(t);
+    // A failed save loses the user's conversation with nothing on screen
+    // to say so — the worst kind of silent failure, and previously
+    // invisible because the result was discarded.
+    if (!ok)
+        AGT_LOG(Persist, Error, "thread.save",
+                "result=write_failed id={} messages={}",
+                t.id.value, t.messages.size());
+    else
+        AGT_LOG(Persist, Debug, "thread.save",
+                "result=ok format=legacy id={} messages={}",
+                t.id.value, t.messages.size());
+    // Keep the metadata index in lock-step with the file we just
+    // wrote so the next startup's fast path picks it up.
+    reindex_thread(t);
 }
 
 // ── Async writer ─────────────────────────────────────────────────────
@@ -1421,12 +1529,26 @@ std::optional<Thread> load_thread_by_id(const ThreadId& id) {
     // the format landed, so this is a per-thread migration front rather
     // than a flag day — both readers stay live indefinitely.
     if (auto log = ThreadLog::open(id); log && log->exists()) {
-        Thread t = log->load_thread();
-        // A log whose metadata sidecar was lost still knows its own id.
-        if (t.id.value.empty()) t.id = id;
-        AGT_LOG(Persist, Debug, "thread.load", "format=log id={} messages={}",
-                id.value, t.messages.size());
-        return t;
+        // ...unless the log is EMPTY and a legacy document still has
+        // content. That combination means something went wrong (a
+        // truncated log, an interrupted migration, a stray file), and
+        // silently returning an empty thread would look exactly like the
+        // user's history being erased. Falling back costs one parse and
+        // cannot lose anything.
+        std::error_code ec;
+        const auto legacy = threads_dir() / (id.value + ".json");
+        if (log->empty() && fs::exists(legacy, ec)) {
+            AGT_LOG(Persist, Warn, "thread.load",
+                    "empty log for id={} but a legacy document exists — "
+                    "using the legacy document", id.value);
+        } else {
+            Thread t = log->load_thread();
+            // A log whose metadata sidecar was lost still knows its own id.
+            if (t.id.value.empty()) t.id = id;
+            AGT_LOG(Persist, Debug, "thread.load",
+                    "format=log id={} messages={}", id.value, t.messages.size());
+            return t;
+        }
     }
 
     auto p = threads_dir() / (id.value + ".json");
