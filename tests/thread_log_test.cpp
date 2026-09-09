@@ -336,3 +336,103 @@ TEST_CASE("thread log: an empty or absent log is a valid empty thread") {
     CHECK(again->append(make_message(0)));
     CHECK(again->size() == 1u);
 }
+
+TEST_CASE("thread log: metadata round-trips beside the messages") {
+    // A Thread is more than its messages. The header is mutable and the
+    // log is append-only, so it lives in a sidecar — and every field of
+    // it has to survive, or a reloaded thread quietly loses its title,
+    // its fork provenance, or the compaction record that keeps the wire
+    // payload small.
+    const auto path = fresh_log("meta");
+    auto meta = path; meta.replace_extension(".meta.json");
+    std::error_code ec; fs::remove(meta, ec);
+
+    Thread t;
+    t.id          = ThreadId{"meta_thread"};
+    t.title       = "a thread with a title";
+    t.forked_from = "some_parent_id";
+    t.rag_mode_override = store::RagMode::FirstTurnOnly;
+    t.messages    = make_messages(30);
+    Thread::CompactionRecord rec;
+    rec.up_to_index = 10;
+    rec.summary     = "summary of the first ten";
+    t.compactions.push_back(rec);
+
+    {
+        auto log = ThreadLog::open_path(path);
+        REQUIRE(log.has_value());
+        CHECK(log->store_thread(t));
+    }
+
+    auto log = ThreadLog::open_path(path);
+    REQUIRE(log.has_value());
+    const Thread back = log->load_thread();
+
+    CHECK(back.id.value     == t.id.value);
+    CHECK(back.title        == t.title);
+    CHECK(back.forked_from  == t.forked_from);
+    REQUIRE(back.rag_mode_override.has_value());
+    CHECK(*back.rag_mode_override == store::RagMode::FirstTurnOnly);
+    REQUIRE(back.compactions.size() == 1u);
+    CHECK(back.compactions[0].up_to_index == 10u);
+    CHECK(back.compactions[0].summary     == rec.summary);
+    CHECK(same_all(back.messages, t.messages));
+
+    // meta() alone must NOT drag the transcript in — that is the whole
+    // point of splitting the files.
+    CHECK_MESSAGE(log->meta().messages.empty(),
+                  "metadata must not carry messages");
+    CHECK(log->meta().title == t.title);
+}
+
+TEST_CASE("thread log: a compaction past the end of history is dropped") {
+    // Only reachable via a save interrupted mid-compaction. The record
+    // would make the wire summarise a prefix that no longer exists, so
+    // the loader has to bound it — and in the log format the metadata is
+    // read BEFORE the message count is known, which is exactly why the
+    // clamp is a separate step rather than part of parsing.
+    const auto path = fresh_log("stale_compaction");
+    Thread t;
+    t.id       = ThreadId{"stale"};
+    t.messages = make_messages(5);
+    Thread::CompactionRecord good; good.up_to_index = 3;
+    Thread::CompactionRecord bad;  bad.up_to_index  = 999;
+    t.compactions = {good, bad};
+
+    auto log = ThreadLog::open_path(path);
+    REQUIRE(log.has_value());
+    CHECK(log->store_thread(t));
+
+    auto reopened = ThreadLog::open_path(path);
+    REQUIRE(reopened.has_value());
+    const Thread back = reopened->load_thread();
+    REQUIRE(back.compactions.size() == 1u);
+    CHECK(back.compactions[0].up_to_index == 3u);
+}
+
+TEST_CASE("thread log: remove() clears every file of the thread") {
+    // The log format is three files. Deleting a thread must take all of
+    // them, or the thread reappears on the next directory walk.
+    const auto path = fresh_log("removal");
+    auto idx  = path; idx.replace_extension(".ofs");
+    auto meta = path; meta.replace_extension(".meta.json");
+
+    Thread t;
+    t.id       = ThreadId{"removal"};
+    t.title    = "doomed";
+    t.messages = make_messages(5);
+
+    auto log = ThreadLog::open_path(path);
+    REQUIRE(log.has_value());
+    CHECK(log->store_thread(t));
+    REQUIRE(fs::exists(path));
+    REQUIRE(fs::exists(idx));
+    REQUIRE(fs::exists(meta));
+
+    log->remove();
+    CHECK_FALSE(fs::exists(path));
+    CHECK_FALSE(fs::exists(idx));
+    CHECK_FALSE(fs::exists(meta));
+    CHECK(log->empty());
+    CHECK_FALSE(log->exists());
+}

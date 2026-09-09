@@ -110,6 +110,38 @@ bool write_json_atomic(const std::filesystem::path& target,
 [[nodiscard]] std::expected<Message, DeserializeError>
 message_from_json(const nlohmann::json& j);
 
+// The same, for everything a Thread carries EXCEPT its messages: title,
+// fork provenance, RAG override, timestamps, compaction records.
+//
+// Split out because the two halves have different lifetimes on disk. The
+// messages are append-only; the metadata is mutable and rewritten whole.
+// The thread log stores them in separate files for exactly that reason,
+// and reuses these so there is still ONE definition of each field's
+// on-disk form.
+//
+// `thread_meta_to_json` never emits a "messages" key;
+// `thread_meta_from_json` ignores one if present, so it can also be
+// pointed at a legacy whole-thread document to read just the header.
+[[nodiscard]] nlohmann::json thread_meta_to_json(const Thread& t);
+[[nodiscard]] std::expected<Thread, DeserializeError>
+thread_meta_from_json(const nlohmann::json& j);
+
+// Drop compaction records whose boundary lies past the end of
+// `t.messages`. `thread_meta_from_json` cannot do this itself — in the
+// log format the metadata is read before any message is — so the caller
+// applies it once the transcript is attached. A stale record survives
+// only an interrupted save, and would otherwise make the wire summarise
+// a prefix that no longer exists.
+void clamp_compactions(Thread& t);
+
+// Load one thread by id, preferring the LOG format and falling back to
+// the legacy whole-document `<id>.json`.
+//
+// This is the seam where the new format becomes load-bearing. Both
+// formats are read forever: a user's history predates the log, and
+// nothing is rewritten until that thread is next saved.
+[[nodiscard]] std::optional<Thread> load_thread_by_id(const ThreadId& id);
+
 } // namespace agentty::persistence
 
 namespace agentty::io {
@@ -121,10 +153,7 @@ public:
         return persistence::load_all_threads();
     }
     [[nodiscard]] std::optional<Thread> load_thread(const ThreadId& id) {
-        auto p = persistence::threads_dir() / (id.value + ".json");
-        auto loaded = persistence::load_thread_file(p);
-        if (!loaded) return std::nullopt;
-        return std::move(*loaded);
+        return persistence::load_thread_by_id(id);
     }
     void save_thread(const Thread& t)            { persistence::save_thread(t); }
     void delete_thread(const ThreadId& id)         { persistence::delete_thread(id); }

@@ -66,9 +66,34 @@ ThreadLog::open_path(fs::path log_path) {
     t.log_ = std::move(log_path);
     t.idx_ = t.log_;
     t.idx_.replace_extension(".ofs");
+    t.meta_ = t.log_;
+    t.meta_.replace_extension(".meta.json");
 
     std::error_code ec;
     fs::create_directories(t.log_.parent_path(), ec);
+
+    // Metadata first: it is small, it is read exactly once, and a thread
+    // with no messages yet still has a title and timestamps. A missing or
+    // unreadable sidecar leaves a default-constructed Thread rather than
+    // failing the open — the messages are the irreplaceable part, and a
+    // thread that comes back untitled beats one that won't open.
+    {
+        std::ifstream in(t.meta_, std::ios::binary);
+        if (in) {
+            std::string buf{std::istreambuf_iterator<char>(in),
+                            std::istreambuf_iterator<char>()};
+            json mj = json::parse(buf, nullptr, /*allow_exceptions=*/false);
+            if (!mj.is_discarded()) {
+                if (auto m = persistence::thread_meta_from_json(mj)) {
+                    t.meta_thread_ = std::move(*m);
+                } else {
+                    AGT_LOG(General, Warn, "thread_log.meta",
+                            "unreadable metadata for {}: {}",
+                            t.log_.string(), m.error().render());
+                }
+            }
+        }
+    }
 
     const auto log_bytes = file_size_or_zero(t.log_);
     if (log_bytes == 0) {
@@ -188,6 +213,22 @@ bool ThreadLog::write_index_() const {
     for (std::size_t i = 0; i < offsets_.size(); ++i)
         put_u64_le(buf.data() + i * kOffsetWidth, offsets_[i]);
     return persistence::write_json_atomic(idx_, buf);
+}
+
+bool ThreadLog::set_meta(const Thread& t) {
+    // Store the header only — the messages live in the log, and keeping a
+    // second copy here is how the two would drift.
+    meta_thread_ = t;
+    meta_thread_.messages.clear();
+    try {
+        return persistence::write_json_atomic(
+            meta_, persistence::thread_meta_to_json(meta_thread_).dump(2));
+    } catch (const std::exception& e) {
+        AGT_LOG(General, Error, "thread_log.meta",
+                "could not serialise metadata for {}: {}",
+                log_.string(), e.what());
+        return false;
+    }
 }
 
 // ── read ─────────────────────────────────────────────────────────────
@@ -334,6 +375,42 @@ bool ThreadLog::rewrite(const std::vector<Message>& msgs) {
                 log_.string());
     }
     return true;
+}
+
+// ── whole-thread convenience ────────────────────────────────────
+
+bool ThreadLog::exists() const noexcept {
+    std::error_code ec;
+    return fs::exists(log_, ec);
+}
+
+Thread ThreadLog::load_thread() const {
+    Thread t = meta_thread_;
+    t.messages = all();
+    // The compaction records were read before the message count was
+    // known (metadata is a separate file), so apply the same bound the
+    // whole-document loader applies: a record pointing past the end of
+    // the transcript is from an interrupted save and must not survive.
+    persistence::clamp_compactions(t);
+    return t;
+}
+
+bool ThreadLog::store_thread(const Thread& t) {
+    // Messages first. If the log write fails the metadata is left alone,
+    // so the pair on disk stays the one that was last written whole —
+    // rather than new metadata describing old history.
+    if (!rewrite(t.messages)) return false;
+    return set_meta(t);
+}
+
+void ThreadLog::remove() {
+    std::error_code ec;
+    fs::remove(log_, ec);
+    fs::remove(idx_, ec);
+    fs::remove(meta_, ec);
+    offsets_.clear();
+    torn_tail_at_ = kNoTear;
+    meta_thread_ = Thread{};
 }
 
 } // namespace agentty

@@ -92,6 +92,9 @@ agentty_fold_test(real_thread_render_probe TIMEOUT 60 ARGS)
 # ARGS + no-op when the corpus is absent, so CI passes trivially; the
 # value is running it BY HAND before trusting the migration with history.
 agentty_fold_test(thread_log_corpus_probe TIMEOUT 300 ARGS)
+# Proves the STORE SEAM prefers the log: converts a real thread, reads it
+# back through load_thread_by_id, and compares. Needs AGENTTY_HOME + an id.
+agentty_fold_test(thread_log_seam_probe   TIMEOUT 120 ARGS)
 if(UNIX)
     # PTY-driven (openpty); full-runtime ghost-caret repro — see the
     # header of tests/test_ghost_caret_runtime.cpp (credit: davidwed).

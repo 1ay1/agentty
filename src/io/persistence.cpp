@@ -1,5 +1,6 @@
 #include "agentty/io/persistence.hpp"
 #include "agentty/io/blob_store.hpp"
+#include "agentty/io/thread_log.hpp"
 #include "agentty/runtime/settings_registry.hpp"
 
 #include "agentty/util/logx.hpp"
@@ -774,15 +775,10 @@ parse_thread_meta_only(const json& j) {
     return t;
 }
 
-static std::expected<Thread, DeserializeError> parse_thread(const json& j) {
+std::expected<Thread, DeserializeError> thread_meta_from_json(const json& j) {
     auto meta = parse_thread_meta_only(j);
     if (!meta) return meta;
     Thread t = std::move(*meta);
-    for (const auto& mj : j.value("messages", json::array())) {
-        auto msg = message_from_json(mj);
-        if (!msg) return std::unexpected(std::move(msg).error());
-        t.messages.push_back(std::move(*msg));
-    }
     // Compactions: optional. Missing on threads from before the feature
     // existed and on threads that simply haven't been compacted yet —
     // both indistinguishable from on-disk and both correctly default to
@@ -792,6 +788,12 @@ static std::expected<Thread, DeserializeError> parse_thread(const json& j) {
     // already validates `up_to_index <= messages.size()` and gracefully
     // falls back to "no compaction" when it doesn't — worst case the
     // user re-compacts manually, vs. losing the entire thread.
+    //
+    // NOTE: records are NOT range-checked here, because this function
+    // deliberately doesn't know how many messages the thread has — that
+    // is the caller's business, and in the log format the metadata is
+    // read before a single message is. `clamp_compactions` below applies
+    // the bound once the message count is known.
     if (j.contains("compactions") && j["compactions"].is_array()) {
         for (const auto& cj : j["compactions"]) {
             if (!cj.is_object()) continue;
@@ -810,14 +812,32 @@ static std::expected<Thread, DeserializeError> parse_thread(const json& j) {
                 rec.created_at = std::chrono::system_clock::time_point{
                     std::chrono::seconds{cj["created_at"].get<int64_t>()}};
             }
-            // Discard records whose boundary doesn't fit the loaded
-            // transcript — typically only happens when a save was
-            // interrupted mid-compaction.
-            if (rec.up_to_index <= t.messages.size()) {
-                t.compactions.push_back(std::move(rec));
-            }
+            t.compactions.push_back(std::move(rec));
         }
     }
+    return t;
+}
+
+// Drop compaction records whose boundary doesn't fit the transcript that
+// was actually loaded — typically only after a save interrupted
+// mid-compaction. Applied once the message count is known, so both the
+// whole-document and log formats get the same guarantee.
+void clamp_compactions(Thread& t) {
+    std::erase_if(t.compactions, [&](const Thread::CompactionRecord& r) {
+        return r.up_to_index > t.messages.size();
+    });
+}
+
+static std::expected<Thread, DeserializeError> parse_thread(const json& j) {
+    auto meta = thread_meta_from_json(j);
+    if (!meta) return meta;
+    Thread t = std::move(*meta);
+    for (const auto& mj : j.value("messages", json::array())) {
+        auto msg = message_from_json(mj);
+        if (!msg) return std::unexpected(std::move(msg).error());
+        t.messages.push_back(std::move(*msg));
+    }
+    clamp_compactions(t);
     return t;
 }
 
@@ -1140,7 +1160,27 @@ std::vector<Thread> load_all_threads() {
         const auto fname = e.path().filename();
         if (fname == "acp_sessions.json" || fname == "index.json") continue;
 
-        const std::string id = e.path().stem().string();
+        // A log-format thread is <id>.jsonl + <id>.ofs + <id>.meta.json.
+        // The metadata sidecar is what this walk wants — it holds exactly
+        // the title and timestamps the picker shows, and it is small — so
+        // it is picked up here by its .json extension. `stem()` on
+        // "abc.meta.json" yields "abc.meta", so the suffix is stripped to
+        // recover the thread id; without that, every migrated thread
+        // would appear in the picker under a bogus "<id>.meta" name.
+        std::string id = e.path().stem().string();
+        static constexpr std::string_view kMetaSuffix = ".meta";
+        const bool is_meta = id.size() > kMetaSuffix.size()
+                          && id.ends_with(kMetaSuffix);
+        if (is_meta) id.resize(id.size() - kMetaSuffix.size());
+
+        // Both forms can exist at once, mid-migration: the log is written
+        // and the legacy document is left until it is confirmed readable.
+        // When both are present the legacy one is skipped, so the picker
+        // shows the same thread the loader will return — and one
+        // conversation never produces two rows.
+        if (!is_meta && fs::exists(threads_dir() / (id + ".meta.json"), ec))
+            continue;
+
         const long long   mt = file_mtime_ns(e.path());
         const long long   sz = file_size_bytes(e.path());
 
@@ -1199,8 +1239,7 @@ std::vector<Thread> load_all_threads() {
 // the UI at every turn-finalize. Called only by the worker below; the
 // worker holds at most one pending Thread per id (newer save wins),
 // so two finalize-back-to-back calls do at most one disk write.
-static void save_thread_sync(const Thread& t) {
-    if (t.id.empty() || t.messages.empty()) return;
+json thread_meta_to_json(const Thread& t) {
     json j;
     j["id"] = t.id;
     j["title"] = t.title;
@@ -1211,21 +1250,13 @@ static void save_thread_sync(const Thread& t) {
         t.created_at.time_since_epoch()).count();
     j["updated_at"] = std::chrono::duration_cast<std::chrono::seconds>(
         t.updated_at.time_since_epoch()).count();
-    json msgs = json::array();
-    for (const auto& m : t.messages) {
-        // Smart Mode routing cards are view-only telemetry (no wire content) —
-        // never persist them, exactly like they're never sent to the model.
-        if (m.smart_routing) continue;
-        msgs.push_back(message_to_json(m));
-    }
-    j["messages"] = std::move(msgs);
     // Wire-only compaction records. Persisting these lets a reloaded
     // thread keep sending the SAME wire payload it was sending before
     // shutdown — if the user compacted at turn 40 then closed the app,
     // the next request after reload still summarises the [0, 40) prefix
     // instead of resending all 40 raw turns and blowing context. Empty
     // for threads that have never been compacted (the common case);
-    // older on-disk threads predate the field and parse_thread defaults
+    // older on-disk threads predate the field and the reader defaults
     // it to empty, so upgrade is transparent.
     if (!t.compactions.empty()) {
         json comps = json::array();
@@ -1239,6 +1270,23 @@ static void save_thread_sync(const Thread& t) {
         }
         j["compactions"] = std::move(comps);
     }
+    return j;
+}
+
+// Serialise a thread to the legacy WHOLE-DOCUMENT form: metadata plus an
+// inline "messages" array. Still the format on disk today; the log format
+// splits these two halves into separate files.
+static void save_thread_sync(const Thread& t) {
+    if (t.id.empty() || t.messages.empty()) return;
+    json j = thread_meta_to_json(t);
+    json msgs = json::array();
+    for (const auto& m : t.messages) {
+        // Smart Mode routing cards are view-only telemetry (no wire content) —
+        // never persist them, exactly like they're never sent to the model.
+        if (m.smart_routing) continue;
+        msgs.push_back(message_to_json(m));
+    }
+    j["messages"] = std::move(msgs);
     // dump() throws type_error.316 on non-UTF-8 bytes. Scrubbing in
     // message_to_json should have caught everything, but swallow the
     // exception as a belt-and-suspenders guard against future regressions —
@@ -1366,9 +1414,37 @@ void flush_pending_saves() {
     async_writer().flush_and_stop();
 }
 
+std::optional<Thread> load_thread_by_id(const ThreadId& id) {
+    if (id.value.empty()) return std::nullopt;
+
+    // Prefer the log. A thread has one only after it has been saved since
+    // the format landed, so this is a per-thread migration front rather
+    // than a flag day — both readers stay live indefinitely.
+    if (auto log = ThreadLog::open(id); log && log->exists()) {
+        Thread t = log->load_thread();
+        // A log whose metadata sidecar was lost still knows its own id.
+        if (t.id.value.empty()) t.id = id;
+        AGT_LOG(Persist, Debug, "thread.load", "format=log id={} messages={}",
+                id.value, t.messages.size());
+        return t;
+    }
+
+    auto p = threads_dir() / (id.value + ".json");
+    auto loaded = load_thread_file(p);
+    if (!loaded) return std::nullopt;
+    AGT_LOG(Persist, Debug, "thread.load", "format=legacy id={} messages={}",
+            id.value, loaded->messages.size());
+    return std::move(*loaded);
+}
+
 void delete_thread(const ThreadId& id) {
     std::error_code ec;
     fs::remove(threads_dir() / (id.value + ".json"), ec);
+    // The log format is three files (.jsonl, .ofs, .meta.json). A thread
+    // that has been saved since the migration lives in those and NOT in
+    // the .json above, so missing this would leave a deleted thread fully
+    // intact on disk — and it would come back on the next directory walk.
+    if (auto log = ThreadLog::open(id)) log->remove();
     // Blobs are deliberately NOT removed here. They are content-addressed
     // and therefore SHARED: the same screenshot pasted in two threads, or
     // an identical tool output, is one file referenced from both. Deleting

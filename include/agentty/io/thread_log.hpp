@@ -91,6 +91,24 @@ public:
 
     [[nodiscard]] const std::filesystem::path& path()       const noexcept { return log_; }
     [[nodiscard]] const std::filesystem::path& index_path() const noexcept { return idx_; }
+    [[nodiscard]] const std::filesystem::path& meta_path()  const noexcept { return meta_; }
+
+    // ── Thread metadata ─────────────────────────────────────────────
+    //
+    // A Thread is not only its messages: it carries a title, fork
+    // provenance, a per-thread RAG override, timestamps, and the wire-only
+    // compaction records. None of that belongs IN the message log — it is
+    // mutable (a title is renamed; `updated_at` moves every turn) and the
+    // log is append-only — so it lives in a small sidecar written whole.
+    //
+    // It is tiny (a few hundred bytes, plus compaction summaries) and
+    // rewritten on save, which is the right trade for something that
+    // changes as a unit and is read exactly once per open.
+    //
+    // `meta()` returns a Thread with `messages` EMPTY — the caller decides
+    // how much history to attach, which is the whole point of the log.
+    [[nodiscard]] Thread meta() const { return meta_thread_; }
+    bool set_meta(const Thread& t);
 
     // Parse messages [from, to). Clamped to the log; from >= to yields {}.
     //
@@ -123,6 +141,28 @@ public:
     // previous history intact rather than a half-written one.
     bool rewrite(const std::vector<Message>& msgs);
 
+    // ── Whole-thread convenience ─────────────────────────────────────
+    //
+    // Metadata + every message, in one call. This is what the store seam
+    // wants today, because the app still expects a fully resident Thread
+    // (see docs/THREAD_STORE.md §9.0). It is not the fast path — that is
+    // meta() plus a windowed range() — but it is already ~4x faster than
+    // parsing one whole-document JSON, so it is worth having first.
+    [[nodiscard]] Thread load_thread() const;
+
+    // Metadata + full history, written together. Used by save and by the
+    // migration from the legacy format.
+    bool store_thread(const Thread& t);
+
+    // True when this thread has a log on disk. Lets a caller prefer the
+    // log and fall back to the legacy document without guessing.
+    [[nodiscard]] bool exists() const noexcept;
+
+    // Delete the log, its index and its metadata. Blobs are NOT touched:
+    // they are shared across threads by content hash, so reclaiming them
+    // is a separate sweep, not this function's business.
+    void remove();
+
 private:
     ThreadLog() = default;
 
@@ -144,8 +184,10 @@ private:
 
     std::filesystem::path      log_;
     std::filesystem::path      idx_;
+    std::filesystem::path      meta_;
     std::vector<std::uint64_t> offsets_;
     std::uint64_t              torn_tail_at_ = kNoTear;
+    Thread                     meta_thread_;   // messages always empty
 };
 
 } // namespace agentty
