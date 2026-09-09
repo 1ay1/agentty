@@ -199,7 +199,12 @@ void check_contract() {
         //    What must not change is the VALUE. A double-appended stream
         //    (`{...}{...}`) fails to parse at all, so this still catches the
         //    duplicate-emission bug it was written for.
-        REQUIRE_NOTHROW(json::parse(d.args));
+        //
+        //    The (void) cast is load-bearing: REQUIRE_NOTHROW evaluates the
+        //    expression for its THROW behaviour only, so the nodiscard
+        //    return would otherwise warn (-Wunused-result) once per dialect
+        //    instantiation of this template.
+        REQUIRE_NOTHROW((void)json::parse(d.args));
         CHECK(json::parse(d.args) == json::parse(kArgs));
 
         // 3. The call is announced once and closed once — the reducer pairs

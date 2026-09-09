@@ -54,6 +54,26 @@
 #include <type_traits>
 #include <utility>
 
+// Scoped opt-out for the ONE C++26 construct this header needs (the P1061
+// structured-binding pack below). See the comment at its use site: the
+// C++23 fallback is deliberate, so the extension diagnostic is expected
+// noise there and only there. Kept as a macro pair so the pragma push/pop
+// stays balanced and the compiler-specific spelling lives in one place.
+#if defined(__clang__)
+#define AGENTTY_BEGIN_ALLOW_CXX26                                              \
+    _Pragma("clang diagnostic push")                                           \
+    _Pragma("clang diagnostic ignored \"-Wc++26-extensions\"")
+#define AGENTTY_END_ALLOW_CXX26 _Pragma("clang diagnostic pop")
+#elif defined(__GNUC__)
+#define AGENTTY_BEGIN_ALLOW_CXX26                                              \
+    _Pragma("GCC diagnostic push")                                             \
+    _Pragma("GCC diagnostic ignored \"-Wc++26-extensions\"")
+#define AGENTTY_END_ALLOW_CXX26 _Pragma("GCC diagnostic pop")
+#else
+#define AGENTTY_BEGIN_ALLOW_CXX26
+#define AGENTTY_END_ALLOW_CXX26
+#endif
+
 namespace agentty::visual {
 
 // ── Facet markers ────────────────────────────────────────────────────────
@@ -79,9 +99,21 @@ struct AnyInit {
     // The Exclude guard stops the copy/move constructor from satisfying
     // T{AnyInit} on non-aggregates, which would report arity 1 for
     // everything copyable.
+    //
+    // DEFINED, not merely declared, even though it is only ever named in
+    // the unevaluated operand of brace_constructible's requires-expression.
+    // The classic idiom leaves it undefined; clang then reports
+    // -Wundefined-inline for every probed type whose member initialization
+    // routes through a constexpr callee it decides to instantiate
+    // (std::optional's converting constructor is the usual culprit). The
+    // std::unreachable() body is well-formed for ANY return type, costs
+    // nothing, and makes the "never called" contract explicit instead of
+    // making it the linker's problem.
     template <class T>
         requires(!std::is_same_v<std::remove_cvref_t<T>, Exclude>)
-    constexpr operator T() const noexcept;
+    constexpr operator T() const noexcept {
+        std::unreachable();
+    }
 };
 template <class T, std::size_t... I>
 constexpr bool brace_constructible(std::index_sequence<I...>) {
@@ -137,7 +169,16 @@ constexpr void mix_decomposed(H&& h, const T& v) {
     // bases and members, or private members — which is the DESIGN: such a
     // type must declare visual_parts, making its visibility decisions
     // explicit.
+    //
+    // P1061 is C++26. This tree asks for C++26 but falls back to C++23 on
+    // toolchains CMake doesn't yet see as cxx_std_26 (Apple clang), where
+    // the pack is accepted as an EXTENSION and diagnosed. The fallback is
+    // deliberate and load-bearing (see cmake/AgenttyToolchain.cmake), so
+    // the diagnostic is noise at exactly one line — silenced here, not
+    // project-wide, so a genuine C++26-ism anywhere else still shows up.
+    AGENTTY_BEGIN_ALLOW_CXX26
     auto&& [... xs] = v;
+    AGENTTY_END_ALLOW_CXX26
     (mix_any(h, xs), ...);
 }
 template <class>

@@ -770,7 +770,6 @@ void rehydrate_frozen(Model& m) {
     // trailing sub-turns that fit) so even a giant final auto-pilot run
     // resumes fast.
     const std::size_t kRehydrateRowBudget = frozen_row_budget();
-    std::size_t units      = 0;
     std::size_t row_budget = 0;
     std::size_t start      = total;
     std::size_t cursor     = total;
@@ -788,9 +787,9 @@ void rehydrate_frozen(Model& m) {
         // Cut INSIDE a run that would overshoot what is left of the
         // budget, keeping its newest sub-turns.
         //
-        // The condition used to be `units == 0`, i.e. only the FIRST
-        // (newest) run could be cut. That bounded the common case and
-        // left a hole: a large run reached second or later was taken
+        // The condition used to be a `units == 0` guard, i.e. only the
+        // FIRST (newest) run could be cut. That bounded the common case
+        // and left a hole: a large run reached second or later was taken
         // WHOLE, and only then did the budget check fire. One real
         // thread ended up with 2247 frozen rows against a 180-row
         // budget — 12x over — because run #2 was 2100 rows on its own.
@@ -818,13 +817,11 @@ void rehydrate_frozen(Model& m) {
             // that is deliberate. Cutting below one message would show a
             // half-rendered turn, and the collapse pass below is what
             // bounds a genuinely oversized single body.
-            ++units;
             start = cut;
             row_budget += kept;
             break;
         }
 
-        ++units;
         start = j;
         row_budget += run_rows;
         if (row_budget >= kRehydrateRowBudget) break;

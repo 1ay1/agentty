@@ -204,7 +204,7 @@ Step plugin_edit_update(Model m, msg::PluginEditMsg pm) {
         },
 
         [&](ClosePluginEdit) -> Step {
-            m.ui.panel.ascend();
+            ascend(m);   // Esc: back to the pane that opened this, or close
             return done(std::move(m));
         },
 
@@ -319,7 +319,7 @@ Step plugin_edit_update(Model m, msg::PluginEditMsg pm) {
                 const std::string name = o->server;
                 auto r = tools::plugin::remove_server(path, name);
                 if (r == tools::plugin::EditResult::Ok) {
-                    m.ui.panel.ascend();
+                    ascend(m);
                     return {std::move(m), Cmd<Msg>::batch(std::vector<Cmd<Msg>>{
                         cmdf::load_plugins_async(/*reconnect=*/true),
                         set_status_toast(m, "removed '" + name + "'")})};
@@ -359,7 +359,7 @@ Step plugin_edit_update(Model m, msg::PluginEditMsg pm) {
                 }
                 const std::string toast = (add ? "added '" : "saved '")
                     + spec.name + "'";
-                m.ui.panel.ascend();
+                ascend(m);
                 return {std::move(m), Cmd<Msg>::batch(std::vector<Cmd<Msg>>{
                     cmdf::load_plugins_async(/*reconnect=*/true),
                     set_status_toast(m, toast)})};
