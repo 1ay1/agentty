@@ -19,6 +19,7 @@
 #include "agentty/domain/id.hpp"
 #include "agentty/domain/rag_mode.hpp"
 #include "agentty/domain/lazy_bytes.hpp"
+#include "agentty/domain/smart_mode.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
 
 namespace agentty {
@@ -348,11 +349,20 @@ struct Message {
     // every byte came from GLM. It also lied retroactively: switching models
     // relabelled every turn already in the transcript. A turn's provenance is
     // a property OF THE TURN, so it lives on the turn.
-    std::string served_model;
-    // Which role slot produced it: "strategic" | "implementation" |
-    // "utility". Drives the accent colour on the turn header so delegation
-    // is visible at a glance. Empty when Smart Mode was off.
-    std::string served_role;
+    ModelId served_model;
+    // Which role slot produced it. Drives the accent colour on the turn
+    // header so delegation is visible at a glance. Absent when Smart Mode
+    // was off — which is a different statement from "the empty role", and
+    // is why this is optional rather than a sentinel enumerator.
+    //
+    // ModelRole, not a string, and the drift this prevents had ALREADY
+    // happened: the writer emitted only "strategic", the view matched
+    // "strategic"/"implementation"/"utility" (two dead branches), and the
+    // existing role_label() helper produces "impl" — three spellings of
+    // one concept, none checked by the compiler. Using role_label() at
+    // the writer, the obvious tidy-up, would have silently broken the
+    // accent colour. See docs/STRONG_TYPES_AUDIT.md §Finding 2.
+    std::optional<smart::ModelRole> served_role;
     // ── Extended/adaptive thinking (Assistant turns only) ──────────────
     // When effort is on, the Claude provider enables adaptive thinking and
     // the model emits a leading `thinking` content block (text — usually
@@ -584,6 +594,16 @@ struct Message {
     [[nodiscard]] std::uint64_t compute_render_key() const {
         std::uint64_t k = 1469598103934665603ULL;
         auto mix = [&](std::uint64_t v) { k = (k ^ v) * 1099511628211ULL; };
+        // Mix a string's CONTENT, not just its length. Length alone is a
+        // fine proxy for "did this large body change" (a streaming text
+        // buffer only ever grows), but it is wrong for short identifiers
+        // drawn from a small set: two model ids of equal length would
+        // collide and one turn's header would reuse the other's cached
+        // Element. FNV-1a over the bytes, same constant as `mix`.
+        auto mix_str = [&](std::string_view s) {
+            for (unsigned char c : s) k = (k ^ c) * 1099511628211ULL;
+            mix(s.size());
+        };
         mix(static_cast<std::uint64_t>(role));
         mix(text.size());
         mix(streaming_text.size());
@@ -622,10 +642,16 @@ struct Message {
         mix(reasoning_display_text().size());
         // Turn provenance drives the header label + role tag, so a message
         // whose served_model differs from another's must not reuse its
-        // cached Element. Sizes suffice: the pair is written once, at
-        // StreamStarted, and never mutates afterwards.
-        mix(served_model.size());
-        mix(served_role.size());
+        // cached Element.
+        //
+        // The VALUE, not its size. Mixing sizes distinguished the three
+        // roles only by luck — "strategic" is 9 characters, and any
+        // future 9-character role would have collided with it, leaving a
+        // cached header painted in the wrong accent colour. Same hazard
+        // for two model ids of equal length. An enum has no such
+        // ambiguity, and the model id is hashed properly.
+        mix_str(served_model.value);
+        mix(served_role ? static_cast<std::uint64_t>(*served_role) + 1ULL : 0ULL);
         if (smart_routing) {
             mix(8ULL);
             mix(smart_route_model.size());

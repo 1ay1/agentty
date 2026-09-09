@@ -82,6 +82,10 @@ one writer, one reader, one view function.
 
 ## Finding 2 — adjacent same-typed strings that can be swapped
 
+**SHIPPED.** `served_model` is now `ModelId`, `served_role` is
+`std::optional<smart::ModelRole>`, and the same for the session's
+`smart_turn_model` / `smart_turn_role`.
+
 ```cpp
 // domain/session.hpp
 std::string smart_turn_model;
@@ -128,6 +132,35 @@ type.
 **Recommendation:** `served_model` → `ModelId`, `served_role` →
 `std::optional<ModelRole>`. The view switches on the enum, and the three
 spellings collapse into one `role_label()` used by both sides.
+
+### What implementing it turned up
+
+A second bug, in the same fields, that the audit had not predicted.
+`compute_render_key` mixed **sizes**:
+
+```cpp
+mix(served_model.size());
+mix(served_role.size());
+```
+
+The three roles are distinguished by length — 9, 14, 7 — **by luck**. Any
+future 9-character role would have collided with `"strategic"`, and two
+model ids of equal length collide today: one turn's header would reuse
+another's cached Element and paint the wrong accent colour. It now mixes
+an enum ordinal (no ambiguity possible) and hashes the model id's bytes
+via a new `mix_str`.
+
+That is the third time in this session that giving a value a type exposed
+a latent bug in code that read it — `body.size()` reading a blob off the
+render path, the three role spellings, and now this. The pattern is
+consistent: **the bug is never in the field, it is in something that
+quietly assumed the field was just a string.**
+
+The persisted spelling is now `role_wire_name` / `role_from_wire_name`, a
+proven bijection (`turn_provenance_test`), deliberately separate from
+`role_label()` — which stays a UI abbreviation. An unknown role reads as
+"no role tag" rather than failing the load, so a thread written by a
+newer build still opens.
 
 ---
 
@@ -189,8 +222,8 @@ By that rule: Findings 1 and 2 are worth doing, 3 and 4 are not.
 
 ## Suggested order
 
-1. **Finding 2** first — mechanical, `ModelId`/`ModelRole` both exist,
-   no format change (JSON already stores the string form).
+1. ~~**Finding 2** first~~ — **done.** Mechanical, as predicted; the only
+   surprise was the render-key size collision it exposed.
 2. **Finding 1** next — slightly larger because the view switches from
    string comparison to a `switch`, which is the actual win.
 

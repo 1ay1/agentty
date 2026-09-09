@@ -19,7 +19,7 @@ maya::Element model_badge_config(const Model& m) {
     // claimed "Mistral" while every token came from the Strategic model. The
     // selection reappears the moment the turn settles.
     const std::string& model = !m.s.smart_turn_model.empty()
-                                   ? m.s.smart_turn_model
+                                   ? m.s.smart_turn_model.value
                                    : m.d.model_id.value;
 
     // ONE decode, from the domain SSOT (domain/model_name.hpp). Every surface

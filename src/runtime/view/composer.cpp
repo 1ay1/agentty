@@ -384,7 +384,7 @@ maya::Composer::Config composer_config(const Model& m) {
         // visually identical and the chip keeps naming the old model
         // until some other hashed axis happens to move.
         .add(std::string_view{m.d.model_id.value})
-        .add(std::string_view{m.s.smart_turn_model})
+        .add(std::string_view{m.s.smart_turn_model.value})
         .add(provider::active().provider_id())
         .add(static_cast<std::uint64_t>(cfg.hardware_caret ? 1 : 0))
         .add(static_cast<std::uint64_t>(cfg.min_body_rows))

@@ -61,6 +61,41 @@ enum class ModelRole : std::uint8_t {
     return "strategic";
 }
 
+// The PERSISTED spelling of a role, and its inverse.
+//
+// Deliberately separate from role_label(), which is a UI abbreviation
+// ("impl") chosen to fit a status bar. Reusing it on disk would have been
+// the obvious tidy-up and would have silently broken every reader that
+// expects "implementation" — which is exactly the drift that motivated
+// typing this field at all (docs/STRONG_TYPES_AUDIT.md §Finding 2).
+//
+// These two are inverses by construction: role_wire_name is a total
+// switch (so -Wswitch catches a new enumerator) and role_from_wire_name
+// accepts precisely what it emits, plus the historical spellings.
+[[nodiscard]] constexpr std::string_view role_wire_name(ModelRole r) noexcept {
+    switch (r) {
+        case ModelRole::Strategic:      return "strategic";
+        case ModelRole::Implementation: return "implementation";
+        case ModelRole::Utility:        return "utility";
+    }
+    return "strategic";
+}
+
+// nullopt for an absent or unrecognised role — "Smart Mode was off" and
+// "this thread was written by a newer build that knows a role we don't"
+// are both correctly rendered as "no role tag" rather than guessed at.
+//
+// "impl" is accepted because role_label() has always produced it and
+// something may have persisted that spelling.
+[[nodiscard]] inline std::optional<ModelRole>
+role_from_wire_name(std::string_view s) noexcept {
+    if (s == "strategic")      return ModelRole::Strategic;
+    if (s == "implementation") return ModelRole::Implementation;
+    if (s == "impl")           return ModelRole::Implementation;
+    if (s == "utility")        return ModelRole::Utility;
+    return std::nullopt;
+}
+
 // The resolved (model, effort) a role runs on. `model` is a WIRE id (picker
 // markers already stripped by the catalog helpers), safe to hand to a request.
 struct RoleProfile {

@@ -20,6 +20,8 @@
 
 #include "agentty/domain/compaction_style.hpp"
 #include "agentty/domain/complexity.hpp"
+#include "agentty/domain/id.hpp"
+#include "agentty/domain/smart_mode.hpp"
 
 namespace agentty::http { class CancelToken; }
 
@@ -604,8 +606,8 @@ struct StreamState {
     // message settles so the turn header can name its true author (see
     // Message::served_model). Empty when Smart Mode is off — the turn ran on
     // the plain selection and the header falls back to it.
-    std::string smart_turn_model;
-    std::string smart_turn_role;
+    ModelId                         smart_turn_model;
+    std::optional<smart::ModelRole> smart_turn_role;
     // Which summary shape the in-flight compaction is producing. Set at
     // CompactContext / fork kickoff, read by the wire builder to choose the
     // summarisation prompt. Defaults to Recoverable (the original behaviour).

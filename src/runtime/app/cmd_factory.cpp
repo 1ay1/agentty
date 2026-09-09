@@ -837,11 +837,11 @@ Cmd<Msg> launch_stream(Model& m) {
     // orchestrate=false means the plain selection serves the turn, and an
     // empty string tells the view to fall back to it.
     if (!compacting && orchestrate && !strategic_profile.model.empty()) {
-        m.s.smart_turn_model = strategic_profile.model;
-        m.s.smart_turn_role  = "strategic";
+        m.s.smart_turn_model = ModelId{strategic_profile.model};
+        m.s.smart_turn_role  = smart::ModelRole::Strategic;
     } else {
-        m.s.smart_turn_model.clear();
-        m.s.smart_turn_role.clear();
+        m.s.smart_turn_model = ModelId{};
+        m.s.smart_turn_role.reset();
     }
 
     // Smart-channel telemetry. The `smart` log channel existed but NOTHING
@@ -854,8 +854,10 @@ Cmd<Msg> launch_stream(Model& m) {
     AGT_LOG(Smart, Debug, "route.turn",
             "role={} model={} effort={} complexity={} orchestrate={} "
             "subagents={} compacting={}",
-            m.s.smart_turn_role.empty() ? "none" : m.s.smart_turn_role,
-            m.s.smart_turn_model.empty() ? model_id : m.s.smart_turn_model,
+            m.s.smart_turn_role ? smart::role_wire_name(*m.s.smart_turn_role)
+                                : std::string_view{"none"},
+            m.s.smart_turn_model.empty() ? std::string_view{model_id}
+                                         : std::string_view{m.s.smart_turn_model.value},
             effort_label(strategic_profile.effort),
             smart::to_string(turn_complexity),
             orchestrate ? 1 : 0,

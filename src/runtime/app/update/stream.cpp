@@ -742,8 +742,8 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
     // The stamp already lives on each assistant Message, so the transcript
     // keeps its provenance — this only clears the LIVE indicator.
     if (!tools_pending) {
-        m.s.smart_turn_model.clear();
-        m.s.smart_turn_role.clear();
+        m.s.smart_turn_model = ModelId{};
+        m.s.smart_turn_role.reset();
     }
     if (!tools_pending && m.d.smart.orchestration() && !m.d.current.messages.empty()) {
         int delegations = 0;

@@ -1270,11 +1270,21 @@ struct SpeakerStyle {
 // transcript reads as a delegation trace at a glance: who did the thinking,
 // who did the work, who did the grunt task.
 struct RoleAccent { std::string label; maya::Color color; };
-[[nodiscard]] std::optional<RoleAccent> role_accent_for(std::string_view role) {
-    if (role == "strategic")      return RoleAccent{"strategist",  role_brand_alt};
-    if (role == "implementation") return RoleAccent{"implementer", role_info};
-    if (role == "utility")        return RoleAccent{"utility",     code_path};
-    return std::nullopt;
+// Exhaustive over ModelRole rather than a chain of string compares. The
+// difference is not style: the old form silently returned nullopt for
+// anything it didn't recognise, so a role added to the enum would have
+// lost its accent with no warning and no failing test. A total switch
+// makes -Wswitch say so at compile time.
+[[nodiscard]] RoleAccent role_accent_for(smart::ModelRole role) {
+    switch (role) {
+        case smart::ModelRole::Strategic:
+            return RoleAccent{"strategist",  role_brand_alt};
+        case smart::ModelRole::Implementation:
+            return RoleAccent{"implementer", role_info};
+        case smart::ModelRole::Utility:
+            return RoleAccent{"utility",     code_path};
+    }
+    return RoleAccent{"strategist", role_brand_alt};
 }
 
 // `msg` is the message being titled: an assistant turn is labelled by the
@@ -1292,7 +1302,7 @@ SpeakerStyle speaker_style_for(Role role, const Model& m, const Message* msg) {
     // Prefer the turn's own provenance; fall back to the live selection for
     // turns that predate the field (or ran with Smart Mode off).
     const std::string& id = (msg && !msg->served_model.empty())
-                                ? msg->served_model
+                                ? msg->served_model.value
                                 : m.d.model_id.value;
 
     // ONE decode, from the domain SSOT (domain/model_name.hpp). This used to
@@ -1314,9 +1324,10 @@ SpeakerStyle speaker_style_for(Role role, const Model& m, const Message* msg) {
     const auto name = model_name::decode(id);
     SpeakerStyle out{name.color, "\xe2\x9c\xa6", name.medium()};     // ✦
     if (msg)
-        if (auto ra = role_accent_for(msg->served_role)) {
-            out.role_label = std::move(ra->label);
-            out.role_color = ra->color;
+        if (msg->served_role) {
+            auto ra = role_accent_for(*msg->served_role);
+            out.role_label = std::move(ra.label);
+            out.role_color = ra.color;
         }
     return out;
 }

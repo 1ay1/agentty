@@ -429,9 +429,9 @@ json message_to_json(const Message& m) {
     // routes it away from the picker selection) and the role it played.
     // Only written when set, so non-Smart-Mode threads gain no bytes.
     if (!m.served_model.empty())
-        j["served_model"] = m.served_model;
-    if (!m.served_role.empty())
-        j["served_role"] = m.served_role;
+        j["served_model"] = m.served_model.value;
+    if (m.served_role)
+        j["served_role"] = std::string{smart::role_wire_name(*m.served_role)};
     // Adaptive-thinking block (Assistant turns under an effort setting).
     // Persisted so a reloaded thread can replay it on a follow-up turn —
     // Anthropic 400s a tool_use turn whose thinking block was dropped.
@@ -626,8 +626,11 @@ std::expected<Message, DeserializeError> message_from_json(const json& j) {
     // Turn provenance (which model/role actually served it). Absent on
     // threads written before the field existed — the view falls back to the
     // live selection, which is what those turns used to render anyway.
-    m.served_model = j.value("served_model", "");
-    m.served_role  = j.value("served_role", "");
+    m.served_model = ModelId{j.value("served_model", "")};
+    // An unrecognised role reads as "no role" rather than failing the
+    // load: a thread written by a build that knows a role this one
+    // doesn't must still open, just without the accent tag.
+    m.served_role  = smart::role_from_wire_name(j.value("served_role", ""));
     // Blob reference (current) or inline (older threads / fallback).
     auto text_or_blob = [](const json& obj, const char* key) -> std::string {
         if (auto it = obj.find(std::string{key} + "_blob");
