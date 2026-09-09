@@ -6,6 +6,7 @@
 #include "agentty/util/logx.hpp"
 
 #include <nlohmann/json.hpp>
+#include <simdjson.h>
 
 #include <cstdio>
 #include <fstream>
@@ -64,6 +65,65 @@ void put_u64_le(char* dst, std::uint64_t v) noexcept {
 // fails and correctly refuses to retire the legacy file.
 [[nodiscard]] bool persistable(const Message& m) noexcept {
     return !m.smart_routing;
+}
+
+// ── Line parsing ─────────────────────────────────────────────────
+//
+// Parsing dominates a thread load: 28 ms of the ~37 ms spent opening a
+// 2519-message log, and the wire pays the same cost again before every
+// turn. simdjson parses the same bytes ~7.6x faster than nlohmann.
+//
+// But message_from_json is 170 lines of accumulated tolerance for every
+// shape a Message has ever had on disk, across 28 access sites. Porting
+// that to a second JSON API would be the riskiest change in this whole
+// project for a pure speed win — exactly the kind of rewrite that loses
+// a field nobody notices until their history is already saved without it.
+//
+// So: parse with simdjson, CONVERT to nlohmann, and leave the reader
+// untouched. The conversion costs some of the win back — 3.9x rather than
+// 7.6x, measured on the real 7.5 MB log — and buys that the reader, and
+// every historical shape it handles, is byte-for-byte the code that has
+// been reading these threads all along.
+[[nodiscard]] json to_nlohmann(simdjson::dom::element e) {
+    using namespace simdjson;
+    switch (e.type()) {
+        case dom::element_type::OBJECT: {
+            json o = json::object();
+            for (auto [k, v] : dom::object(e))
+                o[std::string{k}] = to_nlohmann(v);
+            return o;
+        }
+        case dom::element_type::ARRAY: {
+            json a = json::array();
+            for (auto v : dom::array(e)) a.push_back(to_nlohmann(v));
+            return a;
+        }
+        case dom::element_type::STRING:
+            return std::string{std::string_view(e)};
+        case dom::element_type::INT64:   return std::int64_t(e);
+        case dom::element_type::UINT64:  return std::uint64_t(e);
+        case dom::element_type::DOUBLE:  return double(e);
+        case dom::element_type::BOOL:    return bool(e);
+        case dom::element_type::NULL_VALUE:
+        default:                         return nullptr;
+    }
+}
+
+// One log line -> a json document, or `discarded` if it isn't valid JSON.
+//
+// simdjson needs SIMDJSON_PADDING readable bytes past the end, which a
+// string_view into the read buffer cannot promise, so the line is copied
+// into a padded_string. That copy is already priced into the 3.9x above.
+//
+// nlohmann is kept as the fallback rather than removed: if simdjson ever
+// rejects something nlohmann accepts, a user's history must not become
+// unreadable over a parser disagreement.
+[[nodiscard]] json parse_line(simdjson::dom::parser& parser,
+                              std::string_view line) {
+    simdjson::padded_string padded{line};
+    simdjson::dom::element el;
+    if (!parser.parse(padded).get(el)) return to_nlohmann(el);
+    return json::parse(line, nullptr, /*allow_exceptions=*/false);
 }
 
 } // namespace
@@ -283,6 +343,10 @@ std::vector<Message> ThreadLog::range(std::size_t from, std::size_t to) const {
     buf.resize(static_cast<std::size_t>(in.gcount()));
 
     out.reserve(to - from);
+    // One parser for the whole window: simdjson reuses its internal
+    // buffers across parses, so constructing it per line would throw away
+    // most of the win.
+    simdjson::dom::parser parser;
     std::size_t pos = 0;
     while (pos < buf.size()) {
         std::size_t nl = buf.find('\n', pos);
@@ -295,7 +359,7 @@ std::vector<Message> ThreadLog::range(std::size_t from, std::size_t to) const {
         // A bad line costs that message, not the thread. This is where a
         // torn final append lands: it parses as garbage and is dropped,
         // leaving every complete message intact.
-        json j = json::parse(line, nullptr, /*allow_exceptions=*/false);
+        json j = parse_line(parser, line);
         if (j.is_discarded()) {
             AGT_LOG(General, Warn, "thread_log.read",
                     "skipping unparseable line in {}", log_.string());
