@@ -159,6 +159,25 @@ Model realistic_thread() {
                       120, 700);
         push("commit it", std::move(a));
     }
+    // A long tail of DISTINCT tools with realistic names.
+    //
+    // Four tools all called "read"/"edit"/"grep"/"bash" is not what a real
+    // session looks like, and the difference is load-bearing for layout:
+    // the By-tool table's label column is as wide as its widest name, so a
+    // fixture whose names are all four characters cannot exercise the case
+    // where that column crowds the track and value out of a half-width
+    // split. `git_status` is ten.
+    {
+        auto a = turn("claude-sonnet-4-5", R::Implementation, 900, 700,
+                      16100, 0, 260, 2400);
+        add_tool(a, "git_status", 120);
+        add_tool(a, "outline", 64);
+        add_tool(a, "todo", 12);
+        add_tool(a, "write", 210);
+        add_tool(a, "shell", 4400);
+        add_tool(a, "shell", 880);
+        push("check the tree", std::move(a));
+    }
 
     // A proactive-retrieval injection on the last question.
     auto& q = m.d.current.messages.emplace_back(user_turn("why is it slow?"));
