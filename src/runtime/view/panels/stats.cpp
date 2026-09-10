@@ -456,6 +456,13 @@ Element stats_panel(const Model& m) {
     // and a stack of unrelated tables.
     StatSheet sheet;
     sheet.indent(1);
+    // The chrome the sheet cannot see. Panel accounts for its own frame
+    // when it lays out `items`; a `prebuilt` element is pushed into the
+    // body as-is and measured against the body width, so it never learns
+    // about the border, the padding or the scrollbar gutter. 7 = the 4
+    // columns of left chrome indent(1) does not cover, plus the 3 on the
+    // right. Deleted by the port, not by an argument.
+    sheet.reserve_right(7);
     // No reserve. maya::Panel subtracts its own chrome -- border, padding
     // and the scrollbar gutter -- before the body is laid out, so the width
     // the sheet is handed is a width it may actually paint in.
