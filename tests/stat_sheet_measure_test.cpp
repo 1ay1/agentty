@@ -196,7 +196,7 @@ TEST_CASE("stat sheet: columns answer vertical pressure, not available width") {
             s.indent(1);
             s.reserve_right(7);
             s.columns(max_cols);
-            s.height_budget(budget);
+            if (budget) s.height_budget(budget);
             for (int section = 0; section < 4; ++section) {
                 if (section) s.blank();
                 s.heading("Section " + std::to_string(section));
@@ -208,10 +208,75 @@ TEST_CASE("stat sheet: columns answer vertical pressure, not available width") {
             return s.build();
         };
 
+        // Baseline: splitting forbidden outright. "No budget" would not
+        // do, because no budget means the host has no opinion and the
+        // sheet falls back to splitting on width.
         const int unsplit = rows_painted(bulky(0, 1), 200);
-        const int split   = rows_painted(bulky(6, 2), 200);
+
+        // A budget a two-column layout can actually reach. Roughly half
+        // the unsplit height is what a balanced split produces, so ask for
+        // a little more than that.
+        const int split = rows_painted(bulky(unsplit / 2 + 2, 2), 200);
         INFO("unsplit=", unsplit, " split=", split);
         CHECK(split < unsplit);
+    }
+
+    SUBCASE("a split that cannot reach the budget is not taken") {
+        // The cost/benefit rule. Splitting is not free -- it makes the
+        // reader's eye travel sideways -- so it is only worth taking when
+        // it actually achieves the FIT.
+        //
+        // "Any shortening is progress" is the tempting rule and it is
+        // wrong: a sheet that goes from 33 rows to 29 against an 18-row
+        // viewport still scrolls, and now scrolls a two-column layout.
+        // That is strictly worse than one honest column, and it is what
+        // put a Tools tab into two columns AND left a scrollbar on screen.
+        auto rows_painted = [](const Element& el, int w) {
+            StylePool pool;
+            Canvas canvas(w, 120, &pool);
+            render_tree(el, canvas, pool, theme::dark, /*auto_height=*/true);
+            int last = -1;
+            for (int y = 0; y < 120; ++y)
+                for (int x = 0; x < w; ++x) {
+                    const auto ch = canvas.get(x, y).character;
+                    if (ch != 0 && ch != U' ') { last = y; break; }
+                }
+            return last + 1;
+        };
+
+        auto tall = [](int budget, int max_cols) {
+            StatSheet s;
+            s.indent(1);
+            s.reserve_right(7);
+            s.columns(max_cols);
+            if (budget) s.height_budget(budget);
+            for (int section = 0; section < 6; ++section) {
+                if (section) s.blank();
+                s.heading("Section " + std::to_string(section));
+                for (int row = 0; row < 6; ++row)
+                    s.entry({.label = "metric " + std::to_string(row),
+                             .value = "42",
+                             .share = 0.5});
+            }
+            return s.build();
+        };
+
+        // The true single-column height, from a sheet that is not allowed
+        // to split at all. Using "no budget" as the baseline would not
+        // work: no budget means the host has no opinion, and the sheet
+        // then splits on width like it always did.
+        const int unsplit = rows_painted(tall(0, 1), 200);
+
+        // A budget so small that no two-column layout can reach it. The
+        // sheet must decline to split rather than take a partial win.
+        const int hopeless = rows_painted(tall(3, 2), 200);
+        INFO("unsplit=", unsplit, " with-hopeless-budget=", hopeless);
+        CHECK(hopeless == unsplit);
+
+        // And a budget a split CAN reach is still taken.
+        const int reachable = rows_painted(tall(unsplit / 2 + 2, 2), 200);
+        INFO("unsplit=", unsplit, " reachable=", reachable);
+        CHECK(reachable < unsplit);
     }
 
     SUBCASE("more width never costs a column's worth of content") {

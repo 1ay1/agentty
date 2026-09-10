@@ -402,11 +402,17 @@ Element stats_panel(const Model& m) {
     // columns on a phone-sized pane just because it would fit, while a tab
     // that genuinely overflows wants them at any width that can hold them.
     //
-    // So the panel now supplies the two things it actually knows — how
-    // tall the body is, and that two columns is the most a reader should
-    // be asked to scan — and the sheet supplies the judgement.
+    // The budget is the viewport MINUS this panel's own in-body chrome.
+    // The sheet is not the whole body: a subtitle, a blank, the tab strip
+    // and its rule, and a trailing blank all sit above and below it inside
+    // the same viewport. Handing the sheet the raw viewport told it it had
+    // five more rows than it does, so it accepted splits that came out
+    // just over the real limit — which is how the Tools tab ended up in
+    // two columns AND still showing a scrollbar, paying the sideways cost
+    // without buying the fit.
+    constexpr int kSheetChromeRows = 5;
     sheet.columns(2);
-    sheet.height_budget(viewport_h);
+    sheet.height_budget(std::max(4, viewport_h - kSheetChromeRows));
     sheet.theme.label   = fg;
     sheet.theme.value   = fg;
     sheet.theme.detail  = muted;
