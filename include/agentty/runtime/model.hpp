@@ -591,7 +591,12 @@ struct Model {
         mutable maya::ScrollState code_blocks_scroll      = routed_scroll();
         mutable maya::ScrollState checkpoints_scroll      = routed_scroll();
         mutable maya::ScrollState rag_settings_scroll     = routed_scroll();
-        mutable maya::ScrollState stats_scroll            = routed_scroll();
+        // NB: the stats viewer's offset is NOT here. It lives on
+        // pn::Stats, which is what makes the frame gate see it (the slot
+        // walk covers panel members; this bag is reachable only by a
+        // hand-written mix() in program.hpp) and what ties its lifetime to
+        // the panel instead of to the session. Prefer that shape for new
+        // panels; this list is the older one.
         mutable maya::ScrollState smart_mode_scroll       = routed_scroll();
         mutable maya::ScrollState plugin_edit_scroll      = routed_scroll();
         mutable maya::ScrollState fork_scroll              = routed_scroll();

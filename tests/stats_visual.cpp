@@ -184,14 +184,17 @@ void dump(const Model& m, int w, int scroll) {
     // the pass, restore what it asked for, and then paint.
     maya::render_tree(ui::stats_panel(m), canvas, pool, maya::theme::dark,
                       /*auto_height=*/true);
-    m.ui.stats_scroll.y = scroll;
-    m.ui.stats_scroll.clamp();
+    if (auto* o = m.ui.panel.get<pn::Stats>()) {
+        o->scroll.y = scroll;
+        o->scroll.clamp();
+    }
     maya::render_tree(ui::stats_panel(m), canvas, pool, maya::theme::dark,
                       /*auto_height=*/true);
     if (std::getenv("STATS_VISUAL_DEBUG")) {
         const auto el = ui::stats_panel(m);
         std::fprintf(stderr, "[scroll y=%d max_y=%d  measured(1<<14)=%d measured(w)=%d]\n",
-                     m.ui.stats_scroll.y, m.ui.stats_scroll.max_y,
+                     m.ui.panel.get<pn::Stats>()->scroll.y,
+                     m.ui.panel.get<pn::Stats>()->scroll.max_y,
                      maya::measure_element(el, 1 << 14).height.value,
                      maya::measure_element(el, w).height.value);
     }
@@ -261,7 +264,7 @@ int main(int argc, char** argv) {
     for (auto t : stats::visible_tabs(f)) {
         if (!only.empty() && stats::tab_title(t) != only) continue;
         o->tab = t;
-        m.ui.stats_scroll.y = scroll;
+        o->scroll.y = scroll;
         std::printf("\n\x1b[1m── %s ──\x1b[0m  %s\n\n",
                     std::string{stats::tab_title(t)}.c_str(),
                     std::string{stats::tab_subtitle(t)}.c_str());

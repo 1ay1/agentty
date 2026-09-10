@@ -146,15 +146,26 @@ concept HasParts = requires(const T& t) { visual_parts(t); };
 //
 // NON-AGGREGATES (custom ctor/dtor — e.g. maya::ScrollState's
 // unregistering destructor) have arity 0: brace-probing cannot count
-// their members, so the proof CANNOT hold them to a count and any parts
-// list passes. Their lists are trusted, reviewed prose — the same
-// standing as the old hand-mix, but at least colocated and named. Prefer
-// aggregates for state types precisely so the proof can bind.
+// their members, so no count can be checked. That used to make the proof
+// pass VACUOUSLY, which is the worst possible failure mode for a safety
+// net — it is silent, and it fires precisely on the types most likely to
+// need it. maya::ScrollState is the case in point: it is the single most
+// common piece of view state in the app and the proof could not hold it
+// to anything.
+//
+// So arity 0 now fails CLOSED. A non-aggregate must opt in by
+// specialising visual::trusted_parts, which is a deliberate, greppable,
+// reviewed statement that its parts list was checked by a human — rather
+// than an accident of how the type happens to be declared.
+template <class T>
+inline constexpr bool trusted_parts = false;
+
 template <class T>
 inline constexpr bool parts_cover_all =
-    arity<T> == 0   // non-aggregate: unprovable, trusted (see above)
-    || std::tuple_size_v<std::remove_cvref_t<
-           decltype(visual_parts(std::declval<const T&>()))>> == arity<T>;
+    (arity<T> == 0 && trusted_parts<std::remove_cvref_t<T>>)
+    || (arity<T> != 0
+        && std::tuple_size_v<std::remove_cvref_t<
+               decltype(visual_parts(std::declval<const T&>()))>> == arity<T>);
 
 // ── The walk ─────────────────────────────────────────────────────────────
 // H is any callable taking std::uint64_t (the accumulating mixer).

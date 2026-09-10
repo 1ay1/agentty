@@ -20,9 +20,9 @@
 // ── stats viewer: the derived cache is the load-bearing exemption ──────
 namespace agentty::stats_panel {
 
-// The only VISUAL input is which tab is selected. The projection is
-// exempt, and this is the interesting case for the frame hash, so it is
-// worth stating precisely:
+// The VISUAL inputs are which tab is selected and where the body is
+// scrolled to. The projection is exempt, and this is the interesting case
+// for the frame hash, so it is worth stating precisely:
 //
 // `projection` is a DERIVED cache of the transcript, refreshed lazily
 // during render. Hashing it would be wrong in both directions. Wrong for
@@ -37,8 +37,17 @@ namespace agentty::stats_panel {
 // own parts. A message landing bumps the frame hash by that route, the
 // panel then folds the new tail — so the display still updates without the
 // cache ever being an input to the hash.
+//
+// `scroll` is here because the panel OWNS it. While it lived on
+// Model::UI, the only route into the gate was a hand-written mix() line
+// in program.hpp — and the line for this panel was never written, so
+// every StatsScroll produced a model the gate called identical and the
+// frame was skipped. The offset only reached the screen when an unrelated
+// hashed axis flipped: the caret blink, or the next keystroke. Owning it
+// makes the omission unrepresentable — parts_cover_all counts the members.
 inline auto visual_parts(const Open& p) {
     return std::make_tuple(static_cast<std::uint8_t>(p.tab),
+                           visual::ref(p.scroll),
                            visual::exempt);  // projection: derived from messages
 }
 static_assert(visual::parts_cover_all<Open>);
@@ -133,14 +142,27 @@ namespace maya {
 // render plumbing — writeback maxima and painted-bar rects the RENDERER
 // refills every frame (hashing them would read last frame's paint into
 // this frame's gate: a feedback loop, not state), step sizes, drag
-// bookkeeping, the paint-generation counter. NON-AGGREGATE (unregistering
-// destructor), so parts_cover_all cannot bind a count — this list is
-// trusted prose; keep it in sync if ScrollState ever grows another
-// reducer-driven field. Defined agentty-side: maya has no reason to know
-// our frame gate exists.
+// bookkeeping, the paint-generation counter. Defined agentty-side: maya
+// has no reason to know our frame gate exists.
+//
+// NON-AGGREGATE (unregistering destructor), so brace-probing cannot count
+// the members and the proof cannot check this list against them. That is
+// exactly why the opt-in below is explicit: arity-0 types fail CLOSED, so
+// this list is a REVIEWED CLAIM rather than a silent pass. If ScrollState
+// ever grows another reducer-driven field, add it here — nothing else
+// will tell you.
 inline auto visual_parts(const ScrollState& s) {
     return std::make_tuple(s.x, s.y);
 }
+
+} // namespace maya
+
+namespace agentty::visual {
+// The reviewed claim, in the namespace that owns the concept.
+template <> inline constexpr bool trusted_parts<maya::ScrollState> = true;
+} // namespace agentty::visual
+
+namespace maya {
 static_assert(agentty::visual::parts_cover_all<ScrollState>);
 
 } // namespace maya

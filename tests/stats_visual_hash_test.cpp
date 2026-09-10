@@ -64,7 +64,7 @@ Model open_viewer() {
     auto [opened, _] = app::update(std::move(m), Msg{OpenStats{}});
     // A bound to scroll within: the renderer publishes this after a paint,
     // and the reducer clamps against it.
-    opened.ui.stats_scroll.max_y = 20;
+    opened.ui.panel.get<pn::Stats>()->scroll.max_y = 20;
     return opened;
 }
 
@@ -75,7 +75,7 @@ TEST_CASE("stats gate: scrolling advances the render hash") {
     const std::uint64_t before = AgenttyApp::visual_hash(m);
 
     auto [after, _] = app::update(std::move(m), Msg{StatsScroll{+3}});
-    REQUIRE(after.ui.stats_scroll.y == 3);      // the model really moved
+    REQUIRE(after.ui.panel.get<pn::Stats>()->scroll.y == 3);  // really moved
 
     CHECK(AgenttyApp::visual_hash(after) != before);
 }
@@ -117,11 +117,11 @@ TEST_CASE("stats gate: a scroll that changes nothing does not advance it") {
     // the same y, and hashing it differently would burn a frame per
     // keypress for no pixels.
     Model m = open_viewer();
-    REQUIRE(m.ui.stats_scroll.y == 0);
+    REQUIRE(m.ui.panel.get<pn::Stats>()->scroll.y == 0);
     const std::uint64_t before = AgenttyApp::visual_hash(m);
 
     auto [after, _] = app::update(std::move(m), Msg{StatsScroll{-5}});
-    REQUIRE(after.ui.stats_scroll.y == 0);      // clamped, nothing moved
+    REQUIRE(after.ui.panel.get<pn::Stats>()->scroll.y == 0);  // clamped
 
     CHECK(AgenttyApp::visual_hash(after) == before);
 }

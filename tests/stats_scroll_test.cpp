@@ -42,8 +42,19 @@ namespace {
 Model with_stats_open(int max_y) {
     Model m;
     auto [opened, _] = app::update(std::move(m), Msg{OpenStats{}});
-    opened.ui.stats_scroll.max_y = max_y;
+    // The offset lives ON the panel now, so the bound does too.
+    opened.ui.panel.get<pn::Stats>()->scroll.max_y = max_y;
     return opened;
+}
+
+// The panel-owned offset, or -1 when the viewer is closed.
+int scroll_y(const Model& m) {
+    const auto* o = m.ui.panel.get<pn::Stats>();
+    return o ? o->scroll.y : -1;
+}
+
+void set_max_y(Model& m, int v) {
+    if (auto* o = m.ui.panel.get<pn::Stats>()) o->scroll.max_y = v;
 }
 
 int scroll_after(Model m, std::initializer_list<Msg> msgs) {
@@ -51,7 +62,7 @@ int scroll_after(Model m, std::initializer_list<Msg> msgs) {
         auto [next, _] = app::update(std::move(m), msg);
         m = std::move(next);
     }
-    return m.ui.stats_scroll.y;
+    return scroll_y(m);
 }
 
 }  // namespace
@@ -85,15 +96,15 @@ TEST_CASE("stats scroll: the offset stays in range through any sequence") {
         auto [next, _] = app::update(std::move(m), Msg{StatsScroll{d}});
         m = std::move(next);
         INFO("after delta[", i++, "] = ", d);
-        CHECK(m.ui.stats_scroll.y >= 0);
-        CHECK(m.ui.stats_scroll.y <= max_y);
+        CHECK(scroll_y(m) >= 0);
+        CHECK(scroll_y(m) <= max_y);
 
         // A tab switch between scrolls: this is the same-input-batch case,
         // and it must not leave the offset stranded either.
         auto [tabbed, __] = app::update(std::move(m), Msg{StatsTab{+1}});
         m = std::move(tabbed);
-        CHECK(m.ui.stats_scroll.y == 0);
-        m.ui.stats_scroll.max_y = max_y;
+        CHECK(scroll_y(m) == 0);
+        set_max_y(m, max_y);
     }
 }
 
@@ -114,5 +125,5 @@ TEST_CASE("stats scroll: reopening the viewer starts at the top") {
     auto [scrolled, _]  = app::update(std::move(m), Msg{StatsScroll{+15}});
     auto [closed, __]   = app::update(std::move(scrolled), Msg{CloseStats{}});
     auto [reopened, ___] = app::update(std::move(closed), Msg{OpenStats{}});
-    CHECK(reopened.ui.stats_scroll.y == 0);
+    CHECK(scroll_y(reopened) == 0);
 }

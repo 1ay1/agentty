@@ -32,13 +32,12 @@ Step stats_update(Model m, msg::StatsMsg sm) {
             // wrapper handles that on the way out.
             pn::Stats pane{};
             m.ui.panel.descend(std::move(pane));
-            // Open at the top. The panel state is fresh on every open (a
-            // new pn::Stats, so a new projection) but the SCROLL is not:
-            // it lives on Model::UI and outlives the panel, so without
-            // this a reopen restored the offset from the last time the
-            // viewer was closed — against a different tab, a different
-            // transcript length, and a max_y describing neither.
-            m.ui.stats_scroll.scroll_to_origin();
+            // No scroll reset needed: the offset lives ON the panel, and
+            // the panel is fresh. While it lived on Model::UI it outlived
+            // every open/close, so reopening restored the offset from the
+            // last close against a different tab and a max_y describing
+            // neither — a bug that needed an explicit reset here to fix,
+            // and that ownership makes unwritable.
             return done(std::move(m));
         },
 
@@ -70,12 +69,14 @@ Step stats_update(Model m, msg::StatsMsg sm) {
             // the new one's; the paint then clamps it. Zeroing it here to
             // "be safe" would swallow that keystroke entirely, which is a
             // worse trade than a transient the user cannot see.
-            m.ui.stats_scroll.scroll_to_origin();
+            o->scroll.scroll_to_origin();
             // The projection is per-transcript, not per-tab, so switching
             // views re-folds nothing.
             return done(std::move(m));
         },
         [&](StatsScroll e) -> Step {
+            auto* o = m.ui.panel.get<pn::Stats>();
+            if (!o) return done(std::move(m));
             // Scroll the body directly. scroll_by() clamps against BOTH
             // ends, so a delta past either settles at the edge rather than
             // scrolling into blank rows — which is what the ±1000000 that
@@ -97,7 +98,7 @@ Step stats_update(Model m, msg::StatsMsg sm) {
             // tab switch it describes the PREVIOUS tab. Clamping against a
             // stale bound is bounded and self-correcting; not clamping at
             // all is not. StatsTab resets y to 0 for the same reason.
-            m.ui.stats_scroll.scroll_by(0, e.delta);
+            o->scroll.scroll_by(0, e.delta);
             return done(std::move(m));
         },
     }, std::move(sm));

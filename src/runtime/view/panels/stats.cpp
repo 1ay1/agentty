@@ -403,7 +403,7 @@ Element stats_panel(const Model& m) {
     // Read-only: no cursor. A selection highlight on rows nothing can be
     // done to is a promise the panel cannot keep.
     cfg.selected   = -1;
-    cfg.scroll     = &m.ui.stats_scroll;
+    cfg.scroll     = &o->scroll;
     // Body height. panel_viewport_h() is clamped to kViewportH (14) — the
     // right ceiling for a PICKER, whose rows are interchangeable and where
     // 14 of them is plenty to choose from. This panel is a document: its
