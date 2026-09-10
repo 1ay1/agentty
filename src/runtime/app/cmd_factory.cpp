@@ -592,14 +592,6 @@ TurnRouting resolve_turn_routing(const Model& m) {
     r.subagents   = m.d.smart.subagent_routing();
     if (!r.orchestrate) return r;
 
-    // Layer 3a (orchestration): the MAIN turn runs on the Strategic role's
-    // (model, effort) so the flagship orchestrates and delegates grunt work.
-    // Needs the live catalog, so this is UI-thread work.
-    smart::RoleProfile prof =
-        smart::resolve_role(smart::ModelRole::Strategic, m.d.model_id.value,
-                            m.d.effort, m.d.available_models, m.d.smart,
-                            detail::active_provider_id());
-
     // The newest REAL user turn. Skips three things that can sit after it:
     // the zero-text 🧠 routing card (submit inserts it before the assistant
     // placeholder, so classifying it would score an empty string), a
@@ -635,6 +627,26 @@ TurnRouting resolve_turn_routing(const Model& m) {
     r.cx = smart::classify_turn(newest_user, m.s.smart_turn_complexity,
                                 nu_attach_bytes, nu_images,
                                 m.d.smart.complex_threshold);
+
+    // Layer 3a (orchestration): the main turn's role FOLLOWS its classified
+    // complexity, clamped by the user's floor. This is the whole point of
+    // Smart Mode on the main conversation, and it used to be missing: the
+    // role was hardcoded Strategic here, so the flagship served every turn
+    // and the classifier's verdict only ever moved the EFFORT dial. A user's
+    // 577-turn trace showed 142 turns (25%) scored trivial/simple and every
+    // one of them billed at flagship rate.
+    //
+    // Ordering is load-bearing: the role depends on the complexity, so the
+    // classification below must happen BEFORE resolve_role. The catalog read
+    // makes this UI-thread work either way.
+    const smart::ModelRole role =
+        smart::main_turn_role(r.cx.tier, m.d.smart.main_turn_floor_role(),
+                              m.d.smart.route_main_turn);
+    r.role = role;
+    smart::RoleProfile prof =
+        smart::resolve_role(role, m.d.model_id.value,
+                            m.d.effort, m.d.available_models, m.d.smart,
+                            detail::active_provider_id());
 
     // Session cascade bias only. The per-workspace learned prior, the regret
     // denominator it needed and the plan-recall few-shot all went with the
@@ -823,7 +835,7 @@ Cmd<Msg> launch_stream(Model& m) {
     const bool orchestrate = routing.orchestrate;
     // A no-op profile == (model_id, effort) when orchestration is off, so the
     // captured values below are always valid.
-    smart::RoleProfile strategic_profile{
+    smart::RoleProfile turn_profile{
         .model  = orchestrate ? routing.model  : model_id,
         .effort = orchestrate ? routing.effort : m.d.effort};
     const smart::Complexity turn_complexity =
@@ -836,9 +848,14 @@ Cmd<Msg> launch_stream(Model& m) {
     // Smart Mode routinely overrides). Mirrors the req.model choice below;
     // orchestrate=false means the plain selection serves the turn, and an
     // empty string tells the view to fall back to it.
-    if (!compacting && orchestrate && !strategic_profile.model.empty()) {
-        m.s.smart_turn_model = ModelId{strategic_profile.model};
-        m.s.smart_turn_role  = smart::ModelRole::Strategic;
+    if (!compacting && orchestrate && !turn_profile.model.empty()) {
+        m.s.smart_turn_model = ModelId{turn_profile.model};
+        // The role the router ACTUALLY chose for this turn. Hardcoding
+        // Strategic here made the log and the turn header assert a role the
+        // wire had not necessarily used — and while the main turn was pinned
+        // to Strategic it was self-fulfilling, which is precisely why the
+        // 577-turn trace read "strategic 501" and looked correct.
+        m.s.smart_turn_role  = routing.role;
     } else {
         m.s.smart_turn_model = ModelId{};
         m.s.smart_turn_role.reset();
@@ -858,7 +875,7 @@ Cmd<Msg> launch_stream(Model& m) {
                                 : std::string_view{"none"},
             m.s.smart_turn_model.empty() ? std::string_view{model_id}
                                          : std::string_view{m.s.smart_turn_model.value},
-            effort_label(strategic_profile.effort),
+            effort_label(turn_profile.effort),
             smart::to_string(turn_complexity),
             orchestrate ? 1 : 0,
             m.d.smart.subagent_routing() ? 1 : 0,
@@ -867,7 +884,7 @@ Cmd<Msg> launch_stream(Model& m) {
     return Cmd<Msg>::task(
         [thread = std::move(thread_snapshot),
          compacting, compaction_style, compaction_ceiling, context_max, retry_count,
-         orchestrate, strategic_profile, turn_complexity,
+         orchestrate, turn_profile, turn_complexity,
          session_key = std::move(session_key),
          model_id = std::move(model_id),
          compaction_model = std::move(compaction_model),
@@ -881,7 +898,7 @@ Cmd<Msg> launch_stream(Model& m) {
         // Build wire payload off the UI thread.
         provider::Request req;
         req.model         = compacting ? std::move(compaction_model)
-                                       : (orchestrate ? strategic_profile.model
+                                       : (orchestrate ? turn_profile.model
                                                       : std::move(model_id));
         // Compaction NEVER needs the 1M/2M extended-context window: it
         // summarises a transcript trimmed to ~65% of the BASE window into a
@@ -994,7 +1011,7 @@ Cmd<Msg> launch_stream(Model& m) {
         // task — and the cheap compaction model may not even support the
         // parent's effort tier, so force it OFF (no wasted thinking tokens).
         req.effort        = compacting ? std::string{}
-                          : (orchestrate ? std::string{effort_wire(strategic_profile.effort)}
+                          : (orchestrate ? std::string{effort_wire(turn_profile.effort)}
                                          : std::move(effort));
         // Reasoning display: never for compaction (a mechanical summarise);
         // otherwise carry the user's global "show reasoning" preference so the

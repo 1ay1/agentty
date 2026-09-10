@@ -263,6 +263,24 @@ inline constexpr std::array kSettings = std::to_array<SettingDef>({
      Group::Routing, Tier::Advanced, Type::Int,
      &smart::RoleConfig::bias_clamp,
      smart::tuning::kBiasClampMin, smart::tuning::kBiasClampMax, 1},
+
+    // The two rows that decide whether Smart Mode saves you money at all.
+    //
+    // Basic tier, unlike the three above: "should a one-word turn run on my
+    // most expensive model" IS a question a user can answer cold, and it is
+    // the difference between Smart Mode working and Smart Mode being
+    // decoration. Before these existed the main turn was pinned to Strategic
+    // in the dispatch path with no way to change it — a user's 577-turn
+    // trace had 142 trivial/simple turns all billed at flagship rate.
+    {"smart.route_main_turn", "AGENTTY_SMART_ROUTE_MAIN", "Route the main turn",
+     "let a turn's complexity choose its model, not just its effort",
+     Group::Routing, Tier::Basic, Type::Bool,
+     &smart::RoleConfig::route_main_turn},
+    {"smart.main_turn_floor", "AGENTTY_SMART_MAIN_FLOOR", "Cheapest main-turn role",
+     "how far down a simple turn may be routed; strategic = never route down",
+     Group::Routing, Tier::Basic, Type::Enum,
+     &smart::RoleConfig::main_turn_floor,
+     0.0, 0.0, 0.0, "utility|implementation|strategic"},
 });
 
 inline constexpr int kCount = static_cast<int>(kSettings.size());

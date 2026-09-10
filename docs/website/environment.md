@@ -61,6 +61,8 @@ Off by default and a byte-for-byte no-op when off — see
 | `AGENTTY_SMART_NO_INTERNAL` | Keep engine-internal calls (compaction summary, thread title) on the main model instead of the Utility slot. |
 | `AGENTTY_SMART_NO_SUBAGENTS` · `AGENTTY_SMART_NO_ORCHESTRATE` | Disable subagent delegation / orchestration independently. For bisecting a routing problem. |
 | `AGENTTY_SMART_COMPLEX_THRESHOLD` · `AGENTTY_SMART_DEEP_MARGIN` · `AGENTTY_SMART_BIAS_CLAMP` | Router tuning: complexity cut-off, deep-work margin, and the clamp on learned bias. Defaults are measured; change them only with a benchmark. |
+| `AGENTTY_SMART_ROUTE_MAIN` | `0` stops the main conversation turn from being routed by complexity — every turn runs on the Strategic model and only its *effort* varies. On by default. Before this existed that was the only behaviour: the flagship served every turn, including ones the classifier had already scored trivial. |
+| `AGENTTY_SMART_MAIN_FLOOR` | The cheapest role the main turn may be routed to: `utility` (default — the full ladder), `implementation` (never cheaper than the mid model), or `strategic` (never route down; equivalent to `AGENTTY_SMART_ROUTE_MAIN=0`). Raise it if simple turns are being answered too thinly. |
 
 ## Retrieval (RAG)
 

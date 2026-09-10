@@ -46,6 +46,16 @@ struct TurnRouting {
     smart::ComplexityScore  cx_text{};  // text-only score, for lift provenance
     bool                    subagents = false;
 
+    // The role this turn resolved to. Smart Mode used to pin the main turn to
+    // Strategic unconditionally, so the flagship served every turn including
+    // the ones the classifier had already scored Trivial — Implementation and
+    // Utility were reachable only via a `task` subagent, which many sessions
+    // never spawn. The role now follows the complexity tier (clamped by
+    // RoleConfig::main_turn_floor), and `model`/`effort` above are that
+    // role's profile. Recorded so the card, the log line and the turn header
+    // all name the same role the wire actually used.
+    smart::ModelRole        role = smart::ModelRole::Strategic;
+
     // The prompt the decision was made about. Held so the card can NAME why a
     // tier was lifted (payload / continuation / correction) without re-walking
     // the transcript and risking a scan that drifts from the one above.

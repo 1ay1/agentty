@@ -139,8 +139,21 @@ TEST_CASE("smart tuning: rows bind to the config struct that owns them") {
     int settings_rows = 0, rag_rows = 0;
     for (const auto& d : reg::kSettings)
         (d.owner() == reg::Owner::Smart ? settings_rows : rag_rows)++;
-    CHECK(settings_rows == 3);      // the three routing knobs
+    // Both halves non-empty is the actual invariant — an owner() that
+    // answered `Rag` for everything would still compile and would silently
+    // drop every routing row from save, load and apply_env. The exact count
+    // is NOT the invariant: it was pinned at 3 and had to be edited the
+    // first time a routing knob was added, which is a test that fails for
+    // being right. Name the rows that must exist instead.
+    CHECK(settings_rows > 0);
     CHECK(rag_rows > 0);
+    for (auto id : {"smart.complex_threshold", "smart.deep_margin",
+                    "smart.bias_clamp", "smart.route_main_turn",
+                    "smart.main_turn_floor"}) {
+        const auto* row = reg::find(id);
+        REQUIRE(row != nullptr);
+        CHECK(row->owner() == reg::Owner::Smart, id);
+    }
 }
 
 TEST_CASE("smart tuning: every entry point clamps to the row's range") {

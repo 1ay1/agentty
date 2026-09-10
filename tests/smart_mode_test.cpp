@@ -506,6 +506,76 @@ TEST_CASE("smart_mode") {
     }
 }
 
+// ── Main-turn routing: the ladder and its floor ───────────────────────────
+//
+// Before this existed the main turn was pinned to Strategic in the dispatch
+// path, so the classifier's verdict could only move the EFFORT dial and
+// never the model. A 577-turn trace: role=strategic 501, role=none 76,
+// Implementation and Utility never, ZERO `task` calls (the only other way to
+// reach them) — while 142 of those turns (25%) were scored trivial/simple.
+TEST_CASE("smart_mode: the main turn follows its complexity") {
+    using sm::Complexity;
+    using sm::ModelRole;
+
+    // The ladder itself.
+    CHECK(sm::role_for_complexity(Complexity::Trivial)  == ModelRole::Utility);
+    CHECK(sm::role_for_complexity(Complexity::Simple)   == ModelRole::Utility);
+    CHECK(sm::role_for_complexity(Complexity::Standard) == ModelRole::Implementation);
+    CHECK(sm::role_for_complexity(Complexity::Complex)  == ModelRole::Strategic);
+
+    // Default floor (Utility) lets the full ladder through.
+    {
+        const auto f = ModelRole::Utility;
+        CHECK(sm::main_turn_role(Complexity::Trivial,  f, true) == ModelRole::Utility);
+        CHECK(sm::main_turn_role(Complexity::Standard, f, true) == ModelRole::Implementation);
+        CHECK(sm::main_turn_role(Complexity::Complex,  f, true) == ModelRole::Strategic);
+    }
+
+    // A floor of Implementation refuses to go cheaper than Implementation —
+    // for someone who wants a capable model on even a one-word turn.
+    {
+        const auto f = ModelRole::Implementation;
+        CHECK(sm::main_turn_role(Complexity::Trivial,  f, true) == ModelRole::Implementation,
+              "floor clamps a trivial turn UP to the floor");
+        CHECK(sm::main_turn_role(Complexity::Simple,   f, true) == ModelRole::Implementation);
+        CHECK(sm::main_turn_role(Complexity::Complex,  f, true) == ModelRole::Strategic,
+              "the floor never clamps DOWN");
+    }
+
+    // A floor of Strategic restores the old behaviour exactly.
+    {
+        const auto f = ModelRole::Strategic;
+        for (auto c : {Complexity::Trivial, Complexity::Simple,
+                       Complexity::Standard, Complexity::Complex})
+            CHECK(sm::main_turn_role(c, f, true) == ModelRole::Strategic,
+                  "strategic floor = every turn on the flagship");
+    }
+
+    // The master switch beats the floor.
+    for (auto c : {Complexity::Trivial, Complexity::Complex})
+        CHECK(sm::main_turn_role(c, ModelRole::Utility, /*route=*/false)
+                  == ModelRole::Strategic,
+              "routing off pins the main turn to Strategic");
+}
+
+TEST_CASE("smart_mode: main-turn floor parses from settings") {
+    sm::RoleConfig cfg;
+    CHECK(cfg.main_turn_floor_role() == sm::ModelRole::Utility,
+          "default is the full ladder");
+
+    cfg.main_turn_floor = "implementation";
+    CHECK(cfg.main_turn_floor_role() == sm::ModelRole::Implementation);
+    cfg.main_turn_floor = "strategic";
+    CHECK(cfg.main_turn_floor_role() == sm::ModelRole::Strategic);
+
+    // A hand-edited settings file must not silently disable routing.
+    cfg.main_turn_floor = "nonsense";
+    CHECK(cfg.main_turn_floor_role() == sm::ModelRole::Utility,
+          "an unrecognised floor falls back to the full ladder");
+    cfg.main_turn_floor.clear();
+    CHECK(cfg.main_turn_floor_role() == sm::ModelRole::Utility);
+}
+
 // ── Custom hosts (Ollama / OpenAI-compat): the field bug ──────────────────
 //
 // Reported by a user who burned through two Ollama accounts in a week:

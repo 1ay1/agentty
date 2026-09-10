@@ -270,21 +270,39 @@ TEST_CASE("smart slot picker stack") {
         CHECK(n > 1, "the pane has a switch plus its slots");
 
         // A full lap down returns to the start, visiting each row once.
+        //
+        // Step until we come back rather than for a FIXED count:
+        // fields.size() counts group headers and the footer note, which the
+        // cursor skips, so it is an upper bound on the navigable rows and
+        // not the lap length. Pinning the count made this a test of how many
+        // non-navigable decorations the pane happens to emit — it broke when
+        // a Basic-tier routing row added a group header.
+        const std::string first_id = row_id(cur);
         std::set<std::string> seen;
-        for (int i = 0; i < n; ++i) {
+        std::string last_seen = first_id;
+        int steps = 0;
+        for (; steps < n + 1; ++steps) {
             auto [next, c] = move(std::move(cur), +1);
             cur = std::move(next);
+            if (row_id(cur) == first_id) break;   // wrapped
             seen.insert(row_id(cur));
+            last_seen = row_id(cur);
         }
-        CHECK(row_id(cur) == smart_form::kFieldEnabled,
+        CHECK(row_id(cur) == first_id,
               "a full lap down returns to the first row");
-        CHECK(seen.size() == static_cast<std::size_t>(n),
+        CHECK(seen.size() == static_cast<std::size_t>(steps),
               "one distinct row per step");
+        CHECK(steps > 0, "the lap visits at least one row");
 
         // Up from the first row lands on the last — no phantom rows between.
+        // The LAST row is whatever the registry walk ends on, not a named
+        // field: this used to assert kFieldUtility, which made it a test of
+        // the row ORDER rather than of wrap-around, and it broke the first
+        // time a routing knob was appended after the slots. `last_seen` is
+        // the row the lap above visited just before wrapping.
         auto [up, c1] = move(std::move(cur), -1);
         cur = std::move(up);
-        CHECK(row_id(cur) == smart_form::kFieldUtility,
+        CHECK(row_id(cur) == last_seen,
               "up from the master switch wraps to the last row");
     }
 }

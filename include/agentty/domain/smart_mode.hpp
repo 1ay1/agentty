@@ -172,6 +172,48 @@ struct RoleConfig {
     int bias_clamp        = tuning::kBiasClampDefault;
     int complex_threshold = tuning::kComplexDefault;
 
+    // ── Main-turn role floor ──────────────────────────────────────
+    //
+    // The CHEAPEST role the main conversation turn may run as. The turn's
+    // classified Complexity picks a role (see role_for_complexity); this
+    // clamps how far down that pick is allowed to go.
+    //
+    // Why this exists. Smart Mode used to route the main turn as Strategic
+    // UNCONDITIONALLY — Implementation and Utility were reachable only when
+    // the model chose to spawn a subagent via the `task` tool. A user's
+    // 577-turn trace showed the consequence: role=strategic on 501 turns,
+    // role=none on 76, Implementation and Utility literally never, and ZERO
+    // task calls. Meanwhile the classifier had correctly identified 142 of
+    // those turns (25%) as trivial or simple. It was right, and nothing
+    // could act on it: two Ollama accounts burned through in a week with
+    // every trivial turn billed at flagship rate, and no env var could
+    // change it because the role was a constant in the dispatch path.
+    //
+    // Strategic here restores exactly the old behaviour, which is why it is
+    // NOT the default: the old behaviour is the bug. Utility is the default
+    // — the full ladder, every tier routed where the classifier says it
+    // belongs. A user who wants the flagship to see everything sets
+    // Strategic and gets the previous semantics back, deliberately.
+    //
+    // Stored as the WIRE NAME rather than the enum so it rides the existing
+    // settings machinery (Type::Enum binds a std::string member) and so the
+    // settings.json value is self-describing. main_turn_floor_role() below
+    // is the typed read; an unrecognised string falls back to Utility, which
+    // keeps a hand-edited settings file from silently disabling routing.
+    std::string main_turn_floor = "utility";
+
+    [[nodiscard]] ModelRole main_turn_floor_role() const noexcept {
+        if (auto r = role_from_wire_name(main_turn_floor)) return *r;
+        return ModelRole::Utility;
+    }
+
+    // Whether the main turn's role follows the classifier at all. Off makes
+    // every main turn Strategic regardless of the floor above — the same
+    // escape hatch main_turn_floor=Strategic gives, kept separate so the
+    // settings UI can express "don't route my main turn" as a switch rather
+    // than as a floor the user has to reason about.
+    bool route_main_turn = true;
+
     // Whether a given layer is active right now. All three are simply the
     // master switch (kept as named accessors so call sites read as intent
     // — "is orchestration on" — rather than a bare bool, and so an env
@@ -224,6 +266,57 @@ inline bool RoleConfig::orchestration() const noexcept {
 }
 inline bool RoleConfig::subagent_routing() const noexcept {
     return enabled && !tuning::no_subagents();
+}
+
+// ── Complexity → role ──────────────────────────────────────────
+//
+// Which role should serve a turn the classifier scored at this tier. ONE
+// total function — the ladder is stated once here rather than as an if-chain
+// at the dispatch site, so "what runs a Simple turn" has a single answer
+// that the router, the settings UI and the tests all read.
+//
+//   Trivial  → Utility         "yes", "run it", "commit"
+//   Simple   → Utility         a pointed lookup, a one-line fix
+//   Standard → Implementation  the default working turn
+//   Complex  → Strategic       architecture, debugging, "why"
+//
+// Standard maps to Implementation rather than Strategic deliberately: it is
+// the CONSERVATIVE FALLBACK tier (an unclassifiable turn lands here), and
+// "write the code I just described" is exactly what the Implementation role
+// is for. On the trace that motivated this, Standard was 183 turns — 32% of
+// the session — so sending it to the flagship by default is most of the
+// spend for the least of the reasoning.
+[[nodiscard]] constexpr ModelRole role_for_complexity(Complexity c) noexcept {
+    switch (c) {
+        case Complexity::Trivial:  return ModelRole::Utility;
+        case Complexity::Simple:   return ModelRole::Utility;
+        case Complexity::Standard: return ModelRole::Implementation;
+        case Complexity::Complex:  return ModelRole::Strategic;
+    }
+    return ModelRole::Strategic;   // unreachable; fail expensive, not cheap
+}
+
+// The role the MAIN turn should run as: the classifier's pick, clamped so it
+// never goes cheaper than the user's floor, and pinned to Strategic when
+// main-turn routing is off.
+//
+// Clamping is a max() on the role's ORDER, which is why the enum is declared
+// cheapest-last: Strategic(0) < Implementation(1) < Utility(2), so "no
+// cheaper than the floor" is min(pick, floor) on the underlying value.
+static_assert(static_cast<std::uint8_t>(ModelRole::Strategic) <
+                  static_cast<std::uint8_t>(ModelRole::Implementation) &&
+              static_cast<std::uint8_t>(ModelRole::Implementation) <
+                  static_cast<std::uint8_t>(ModelRole::Utility),
+              "main_turn_role clamps by comparing the enum's underlying "
+              "value, so ModelRole must stay ordered strongest-first. "
+              "Reordering it silently inverts the floor.");
+
+[[nodiscard]] constexpr ModelRole main_turn_role(
+        Complexity c, ModelRole floor, bool route) noexcept {
+    if (!route) return ModelRole::Strategic;
+    const auto pick = static_cast<std::uint8_t>(role_for_complexity(c));
+    const auto lim  = static_cast<std::uint8_t>(floor);
+    return static_cast<ModelRole>(pick < lim ? pick : lim);
 }
 
 namespace detail {
