@@ -56,6 +56,7 @@ set(_AGENTTY_CONSOLIDATED
     stats_visual_hash_test
     panel_overflow_probe
     panel_draw_budget_test
+    stats_golden_test
     stats_render_probe
     context_window_test
     thread_blob_test lazy_image_test thread_log_test
