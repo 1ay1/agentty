@@ -75,15 +75,21 @@ void session_where_time_went(const Facts& f, std::vector<Metric>& out) {
     const double ttft  = static_cast<double>(f.stream.ttft.sum());
     const double gen   = static_cast<double>(f.stream.stream_ms.sum());
     const double tools = static_cast<double>(f.tools.latency.sum());
-    if (ttft + gen + tools <= 0) return;
+    const double all   = ttft + gen + tools;
+    if (all <= 0) return;
     Metric m;
-    m.label = "where the time went";
-    m.unit  = Unit::Millis;
-    m.value = ttft + gen + tools;
+    m.label  = "where the time went";
+    m.unit   = Unit::Millis;
+    m.value  = all;
+    m.detail = format(Unit::Millis, all);
+    // Short legend labels: a donut's key sits beside the ring in whatever
+    // width is left, so a verbose label is a truncated one. The value is
+    // the useful half — "waiting 6.0s" survives where "waiting on the
+    // provider 6.0s" loses exactly the number.
     m.parts = {
-        {"waiting "    + format(Unit::Millis, ttft),  ttft,  kWarn},
-        {"generating " + format(Unit::Millis, gen),   gen,   kAccent},
-        {"tools "      + format(Unit::Millis, tools), tools, kGood},
+        {"wait " + format(Unit::Millis, ttft),  ttft,  kWarn},
+        {"gen "  + format(Unit::Millis, gen),   gen,   kAccent},
+        {"tools " + format(Unit::Millis, tools), tools, kGood},
     };
     out.push_back(std::move(m));
 }
@@ -185,12 +191,16 @@ void cache_band(const Facts& f, std::vector<Metric>& out) {
     m.label = "input tokens by origin";
     m.unit  = Unit::Tokens;
     m.value = total;
+    // The hit rate goes in the ring's centre: it is the tab's answer, and
+    // a reader looking at a ring is already looking at the hole.
+    m.detail = format(Unit::Ratio,
+                      static_cast<double>(f.cache.hits) / total) + " hit";
     m.parts = {
-        {"cache hit " + format(Unit::Tokens, static_cast<double>(f.cache.hits)),
+        {"hit "   + format(Unit::Tokens, static_cast<double>(f.cache.hits)),
          static_cast<double>(f.cache.hits),   kGood},
-        {"written "   + format(Unit::Tokens, static_cast<double>(f.cache.writes)),
+        {"write " + format(Unit::Tokens, static_cast<double>(f.cache.writes)),
          static_cast<double>(f.cache.writes), kWarn},
-        {"uncached "  + format(Unit::Tokens, static_cast<double>(f.cache.misses)),
+        {"miss "  + format(Unit::Tokens, static_cast<double>(f.cache.misses)),
          static_cast<double>(f.cache.misses), kBad},
     };
     out.push_back(std::move(m));
@@ -425,10 +435,10 @@ void retrieval_rows(const Facts& f, std::vector<Metric>& out) {
 namespace sections {
 
 const std::array<Section, 4> session{{
-    {"",          Viz::Hero, &session_hero},
-    {"Activity",  Viz::Kv,   &session_counts},
-    {"",          Viz::Band, &session_where_time_went},
-    {"Time",      Viz::Kv,   &session_time},
+    {"",          Viz::Hero,  &session_hero},
+    {"Activity",  Viz::Kv,    &session_counts},
+    {"",          Viz::Donut, &session_where_time_went},
+    {"Time",      Viz::Kv,    &session_time},
 }};
 
 const std::array<Section, 2> models{{
@@ -448,7 +458,7 @@ const std::array<Section, 2> tokens{{
 }};
 
 const std::array<Section, 2> cache{{
-    {"",      Viz::Band,  &cache_band},
+    {"",      Viz::Donut, &cache_band},
     {"Rates", Viz::Spark, &cache_rates},
 }};
 

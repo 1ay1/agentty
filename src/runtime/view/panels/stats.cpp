@@ -64,6 +64,7 @@ void emit_section(const stats::Section& sec, const stats::Facts& f,
     // read as broken rather than as small. The break is inert when the
     // sheet is not splitting.
     const bool full_width = sec.viz == stats::Viz::Band
+                         || sec.viz == stats::Viz::Donut
                          || sec.viz == stats::Viz::Plot;
     if (!sheet.empty()) {
         if (full_width) sheet.column_break();
@@ -158,6 +159,22 @@ void emit_section(const stats::Section& sec, const stats::Facts& f,
                              .detail = mt.detail,
                              .share  = mt.share(),
                              .hue    = accent});
+            break;
+
+        case stats::Viz::Donut:
+            for (const auto& mt : scratch) {
+                maya::StatDonut ring;
+                ring.caption = mt.label;
+                // The centre carries the headline. A donut with an empty
+                // hole wastes the one place the reader is already looking
+                // — and the figure the ring is decorating belongs there,
+                // not in a row underneath it.
+                ring.center     = mt.detail;
+                ring.center_sub = "";
+                for (const auto& p : mt.parts)
+                    ring.segments.push_back({p.label, p.value, hue_of(p.hue)});
+                sheet.donut(std::move(ring));
+            }
             break;
 
         case stats::Viz::Band:

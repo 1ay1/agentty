@@ -51,6 +51,13 @@ enum class Viz : std::uint8_t {
     Bars,   // label + value + share bar    (ranked)
     Spark,  // label + value + trend strip  (inline, one row)
     Band,   // one full-width composition bar + legend
+    // The same composition as a RING. Band and donut fail in opposite
+    // directions and that is why both exist: a band is exact and compact
+    // but a 1-column sliver is easy to miss, while a ring makes the eye
+    // compare ANGLES, where a thin wedge against a circle is obvious. Use
+    // the ring when the composition IS the tab's answer, the band when it
+    // is one fact among several.
+    Donut,
     Plot,   // a multi-row braille/block figure
     Hero,   // the headline figure and the sentence it answers
     // A DISTRIBUTION: one row per occupied latency bucket, so the SHAPE is
