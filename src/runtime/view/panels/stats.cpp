@@ -80,11 +80,17 @@ constexpr int kBarCells = 24;
 // plain Element list, and a bar chart's readability comes from its left
 // edges lining up, which padding gives directly.
 [[nodiscard]] Element tally_row(const stats::Row& r, int label_w,
-                                Color bar_color, bool dim_when_zero) {
+                               Color bar_color, bool dim_when_zero) {
+    // Pad to the widest label PLUS a fixed gutter. Padding to the widest
+    // alone leaves the longest row with zero space — "Implementation" ran
+    // straight into its own bar while every shorter row had a gap, which
+    // read as a rendering fault rather than as alignment.
+    constexpr int kGutter = 2;
+    const int col = label_w + kGutter;
     std::string label = r.label;
-    if (static_cast<int>(label.size()) > label_w)
-        label = label.substr(0, static_cast<std::size_t>(label_w));
-    label.append(static_cast<std::size_t>(label_w) - label.size(), ' ');
+    if (static_cast<int>(label.size()) > col)
+        label = label.substr(0, static_cast<std::size_t>(col));
+    label.append(static_cast<std::size_t>(col) - label.size(), ' ');
 
     const bool zero = r.count == 0;
     auto label_style = zero && dim_when_zero ? fg_dim(muted) : fg_of(fg);
