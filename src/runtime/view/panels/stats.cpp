@@ -334,10 +334,10 @@ bool emit_items(const stats::Section& sec, const stats::Facts& f,
     using maya::panel::Meter;
     using maya::panel::Spark;
 
-    if (sec.viz != stats::Viz::Kv && sec.viz != stats::Viz::Bars
-        && sec.viz != stats::Viz::Spark && sec.viz != stats::Viz::Hero
-        && sec.viz != stats::Viz::Band)
-        return false;
+    // Every Viz now has a panel Control. StatSheet's remaining job is
+    // flowing SECTIONS into columns -- a stats-only concern -- and even
+    // that goes once the panel can do it.
+    (void)0;
 
     scratch.clear();
     sec.extract(f, scratch);
@@ -372,6 +372,87 @@ bool emit_items(const stats::Section& sec, const stats::Facts& f,
             it.control = std::move(band);
             out.push_back(std::move(it));
         }
+        return true;
+    }
+
+    // A ring: the composition where the composition IS the answer.
+    if (sec.viz == stats::Viz::Donut) {
+        for (const auto& mt : scratch) {
+            maya::panel::Donut ring;
+            ring.caption = mt.label;
+            ring.center  = mt.detail;
+            std::size_t i = 0;
+            for (const auto& p : mt.parts) {
+                ring.segments.push_back(
+                    {p.label, p.value,
+                     mt.categorical ? series_hue(i) : hue_of(p.hue)});
+                ++i;
+            }
+            Item it;
+            it.control = std::move(ring);
+            out.push_back(std::move(it));
+        }
+        return true;
+    }
+
+    // A curve: a series over turns, where direction is the question.
+    if (sec.viz == stats::Viz::Plot) {
+        for (const auto& mt : scratch) {
+            if (mt.series.empty()) continue;
+            double hi = 0;
+            for (double v : mt.series) hi = std::max(hi, v);
+            maya::panel::Plot plot;
+            plot.series     = mt.series;
+            plot.rows       = 6;
+            plot.caption    = mt.label;
+            plot.peak_label = stats::format(mt.unit, hi);
+            plot.base_label = "0";
+            plot.hue        = accent;
+            Item it;
+            it.control = std::move(plot);
+            out.push_back(std::move(it));
+        }
+        return true;
+    }
+
+    // A distribution, drawn as columns. The Dist extractors already
+    // produce one Metric per bucket with the range as its label, so the
+    // vertical form reuses them rather than needing a second extractor.
+    if (sec.viz == stats::Viz::Hist || sec.viz == stats::Viz::Dist) {
+        maya::panel::Hist hist;
+        double peak = 0;
+        for (const auto& mt : scratch) {
+            // The label is a RANGE ("64ms-128ms"); the axis wants a tick,
+            // so take the lower bound -- a full range under every third
+            // column is unreadable at any width.
+            std::string tick = mt.label;
+            if (const auto dash = tick.find("\xe2\x80\x93");
+                dash != std::string::npos)
+                tick = tick.substr(0, dash);
+            hist.buckets.push_back({std::move(tick), mt.value});
+            peak = std::max(peak, mt.value);
+        }
+        if (hist.buckets.empty()) return true;
+        hist.rows      = 5;
+        hist.col_width = 4;
+        hist.caption   = std::string{sec.heading};
+        hist.hue       = accent;
+        // A tick per row, top-down, rounded to whole counts and
+        // de-duplicated: five rows over a peak of 3 would otherwise print
+        // "3 2 2 1 1" and the repeats read as a rendering fault.
+        std::string prev;
+        for (int r = 0; r < hist.rows; ++r) {
+            const double at = peak * static_cast<double>(hist.rows - r)
+                                   / static_cast<double>(hist.rows);
+            const double whole = std::floor(at + 0.5);
+            std::string lb = whole >= 1.0
+                ? stats::format(stats::Unit::Count, whole) : std::string{};
+            if (!lb.empty() && lb == prev) lb.clear(); else if (!lb.empty()) prev = lb;
+            hist.y_labels.push_back(std::move(lb));
+        }
+        Item it;
+        it.control = std::move(hist);
+        out.push_back(std::move(it));
         return true;
     }
 
@@ -551,14 +632,8 @@ Element stats_panel(const Model& m) {
     // each one whole and lets the migration proceed a tab at a time, each
     // diffed against the golden harness.
     const auto& sections = stats::tab_desc(active).sections;
-    const bool all_rows = [&] {
-        for (const auto& sec : sections)
-            if (sec.viz != stats::Viz::Kv && sec.viz != stats::Viz::Bars
-                && sec.viz != stats::Viz::Spark && sec.viz != stats::Viz::Hero
-                && sec.viz != stats::Viz::Band)
-                return false;
-        return true;
-    }();
+    // Every Viz has a panel Control now, so every tab takes the Item path.
+    constexpr bool all_rows = true;
 
     if (all_rows) {
         for (const auto& sec : sections)
