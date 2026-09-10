@@ -64,12 +64,40 @@ void emit_section(const stats::Section& sec, const stats::Facts& f,
                 sheet.hero(mt.label, mt.detail);
             break;
 
-        case stats::Viz::Kv:
+        case stats::Viz::Kv: {
+            // A key/value row still gets a BAR, scaled against the largest
+            // value in its own section. A column of bare numbers makes the
+            // reader compare digit strings; a column of bars makes the
+            // shape of the section visible without reading anything.
+            //
+            // Scaled per SECTION rather than per tab because a section is
+            // the set the author already decided belongs together — and
+            // mixing units on one scale (a token count against a duration)
+            // would draw a comparison that means nothing.
+            //
+            // Only when the section is homogeneous and has something to
+            // compare: one row has no shape, and a section spanning units
+            // would be measuring milliseconds against tokens.
+            bool same_unit = true;
+            double peak = 0;
+            for (const auto& mt : scratch) {
+                if (mt.unit != scratch.front().unit) same_unit = false;
+                if (mt.value > peak) peak = mt.value;
+            }
+            // A ratio is already a share of a known whole; bar-ing it
+            // against the section's largest ratio would rescale it into a
+            // number that is not the one printed beside it.
+            const bool ratio = scratch.front().unit == stats::Unit::Ratio;
+            const bool bar = same_unit && !ratio && scratch.size() > 1 && peak > 0;
             for (const auto& mt : scratch)
                 sheet.entry({.label  = mt.label,
                              .value  = stats::format(mt.unit, mt.value),
-                             .detail = mt.detail});
+                             .detail = mt.detail,
+                             .share  = bar ? mt.value / peak : -1.0,
+                             .hue    = bar ? std::optional<maya::Color>{muted}
+                                           : std::nullopt});
             break;
+        }
 
         case stats::Viz::Bars:
             for (const auto& mt : scratch)
@@ -209,8 +237,8 @@ Element stats_panel(const Model& m) {
     // bottom of a full tab is a figure the user only ever sees the top of.
     cfg.viewport_h = panel_detail::panel_viewport_h();
 
-    cfg.note = visible.size() > 1 ? "tab  switch view   esc  close"
-                                  : "esc  close";
+    cfg.note = visible.size() > 1 ? "tab  switch view   \xe2\x86\x91\xe2\x86\x93  scroll   esc  close"
+                                  : "\xe2\x86\x91\xe2\x86\x93  scroll   esc  close";
     return maya::Panel{std::move(cfg)}.build();
 }
 

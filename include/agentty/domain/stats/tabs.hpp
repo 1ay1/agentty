@@ -52,11 +52,11 @@ namespace sections {
 extern const std::array<Section, 3> session;
 extern const std::array<Section, 2> models;
 extern const std::array<Section, 3> smart;
-extern const std::array<Section, 3> tokens;
+extern const std::array<Section, 2> tokens;
 extern const std::array<Section, 2> cache;
 extern const std::array<Section, 3> tools;
 extern const std::array<Section, 1> reasoning;
-extern const std::array<Section, 2> stream;
+extern const std::array<Section, 3> stream;
 extern const std::array<Section, 2> context;
 extern const std::array<Section, 1> retrieval;
 }  // namespace sections

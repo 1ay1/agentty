@@ -135,14 +135,16 @@ void tokens_totals(const Facts& f, std::vector<Metric>& out) {
                                       / static_cast<double>(f.tokens.output)
                                   : 0.0));
     kv(out, "Total", Unit::Tokens, total);
-}
-
-void tokens_per_turn(const Facts& f, std::vector<Metric>& out) {
+    // Per-turn figures live in the SAME section as the totals: they share
+    // the unit, so they share the bar's scale, and seeing "largest turn"
+    // against "total" is the comparison that says whether one turn
+    // dominated the thread. Split across two sections each got its own
+    // scale and the relationship vanished.
     const auto& h = f.tokens.per_turn_output;
-    if (!h.count()) return;
-    kv(out, "Average out", Unit::Tokens, h.mean());
-    kv(out, "Median out",  Unit::Tokens, h.quantile(0.5));
-    kv(out, "Largest",     Unit::Tokens, static_cast<double>(h.max()));
+    if (h.count()) {
+        kv(out, "Average turn", Unit::Tokens, h.mean());
+        kv(out, "Largest turn", Unit::Tokens, static_cast<double>(h.max()));
+    }
 }
 
 void tokens_plot(const Facts& f, std::vector<Metric>& out) {
@@ -262,20 +264,31 @@ void stream_health(const Facts& f, std::vector<Metric>& out) {
 }
 
 void stream_timing(const Facts& f, std::vector<Metric>& out) {
+    // TTFT and generation time answer different questions — one is "did the
+    // provider make me wait", the other "was generation slow" — and they
+    // have different fixes, so they are never summed. They share a UNIT
+    // though, which is what lets the panel scale them on one bar and make
+    // the split visible at a glance.
     if (f.stream.ttft.count()) {
-        // TTFT and stream time answer different questions — one is "did
-        // the provider make me wait", the other "was generation slow" —
-        // and they have different fixes, so they are never summed here.
-        kv(out, "Time to first byte", Unit::Millis, f.stream.ttft.mean());
-        kv(out, "…p95",               Unit::Millis, f.stream.ttft.quantile(0.95));
+        kv(out, "First byte",     Unit::Millis, f.stream.ttft.mean());
+        kv(out, "First byte p95", Unit::Millis, f.stream.ttft.quantile(0.95));
     }
     if (f.stream.stream_ms.count()) {
-        kv(out, "Generation time", Unit::Millis, f.stream.stream_ms.mean());
-        const double secs = static_cast<double>(f.stream.stream_ms.sum()) / 1000.0;
-        if (secs > 0 && f.stream.wire_bytes)
-            kv(out, "Throughput", Unit::Rate,
-               static_cast<double>(f.stream.wire_bytes) / secs, "bytes/s");
+        kv(out, "Generation",     Unit::Millis, f.stream.stream_ms.mean());
+        kv(out, "Generation p95", Unit::Millis, f.stream.stream_ms.quantile(0.95));
     }
+}
+
+void stream_throughput(const Facts& f, std::vector<Metric>& out) {
+    // Its own section because it is a RATE: on the timing bar above it
+    // would be a bytes-per-second figure scaled against milliseconds,
+    // which is a comparison that means nothing.
+    const double secs = static_cast<double>(f.stream.stream_ms.sum()) / 1000.0;
+    if (secs <= 0 || !f.stream.wire_bytes) return;
+    kv(out, "Bytes delivered", Unit::Bytes,
+       static_cast<double>(f.stream.wire_bytes));
+    kv(out, "Throughput", Unit::Rate,
+       static_cast<double>(f.stream.wire_bytes) / secs);
 }
 
 // ── Context ─────────────────────────────────────────────────────────────
@@ -328,10 +341,9 @@ const std::array<Section, 3> smart{{
     {"By model", Viz::Bars, &smart_by_model},
 }};
 
-const std::array<Section, 3> tokens{{
-    {"Totals",   Viz::Kv,   &tokens_totals},
-    {"Per turn", Viz::Kv,   &tokens_per_turn},
-    {"Trend",    Viz::Plot, &tokens_plot},
+const std::array<Section, 2> tokens{{
+    {"Totals", Viz::Kv,   &tokens_totals},
+    {"Trend",  Viz::Plot, &tokens_plot},
 }};
 
 const std::array<Section, 2> cache{{
@@ -349,9 +361,10 @@ const std::array<Section, 1> reasoning{{
     {"", Viz::Kv, &reasoning_rows},
 }};
 
-const std::array<Section, 2> stream{{
-    {"Health", Viz::Kv, &stream_health},
-    {"Timing", Viz::Kv, &stream_timing},
+const std::array<Section, 3> stream{{
+    {"Health",     Viz::Kv, &stream_health},
+    {"Timing",     Viz::Kv, &stream_timing},
+    {"Throughput", Viz::Kv, &stream_throughput},
 }};
 
 const std::array<Section, 2> context{{

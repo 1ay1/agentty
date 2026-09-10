@@ -793,6 +793,11 @@ struct CloseStats {};
 // Step the tab selection, wrapping. Signed so one message serves Tab and
 // Shift-Tab (and ←/→) rather than two near-identical ones.
 struct StatsTab { int delta = +1; };
+// Scroll the stats body. The panel is READ-ONLY, so there is no cursor to
+// move and ↑/↓ act on the viewport directly — which is also why the delta
+// is in rows rather than in items: the body is a rendered sheet, not a
+// list, and "the next row" is the only unit that means anything on it.
+struct StatsScroll { int delta = +1; };
 
 // ── RAG mode picker ────────────────────────────────────────────────
 // One decision: how proactive (pre-turn) retrieval behaves — On / First turn
@@ -1068,7 +1073,7 @@ using RagMsg = std::variant<
 // and no reducer with retrieval, and folding unrelated panels into one
 // variant is how a reducer grows arms it has no business owning.
 using StatsMsg = std::variant<
-    OpenStats, CloseStats, StatsTab>;
+    OpenStats, CloseStats, StatsTab, StatsScroll>;
 
 using SettingsListMsg = std::variant<
     OpenSettingsList, CloseSettingsList, SettingsListMove,
@@ -1234,6 +1239,8 @@ static_assert(leaf_domain_count<OpenStats>()         == 1,
               "OpenStats must belong to exactly one Msg domain");
 static_assert(leaf_domain_count<StatsTab>()          == 1,
               "StatsTab must belong to exactly one Msg domain");
+static_assert(leaf_domain_count<StatsScroll>()       == 1,
+              "StatsScroll must belong to exactly one Msg domain");
 static_assert(leaf_domain_count<ForkThread>()                == 1,
               "ForkThread must belong to exactly one Msg domain");
 static_assert(leaf_domain_count<OpenTodoModal>()             == 1,

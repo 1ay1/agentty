@@ -262,6 +262,12 @@ std::optional<Msg> on_code_block_result(const KeyEvent& ev) {
 std::optional<Msg> on_stats_viewer(const KeyEvent& ev) {
     nav::NavSpec s;
     s.close     = [] { return Msg{CloseStats{}}; };
+    // A tab is TALLER than the panel viewport whenever it carries a figure
+    // (Tokens is ~22 rows against a 14-row body), so the panel scrolls it
+    // and the scrollbar appears — but without this the arrows did nothing
+    // and the plot at the bottom was unreachable. Read-only, so ↑/↓ scroll
+    // the BODY rather than moving a cursor; there is nothing to select.
+    s.move      = [](int d) { return Msg{StatsScroll{d}}; };
     s.page_step = 10;
     s.extra = [](const KeyEvent& e) -> std::optional<Msg> {
         const auto* sk = std::get_if<SpecialKey>(&e.key);

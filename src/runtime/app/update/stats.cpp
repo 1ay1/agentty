@@ -50,8 +50,23 @@ Step stats_update(Model m, msg::StatsMsg sm) {
             // projection is shared, so this costs nothing extra.
             const auto& f = o->projection.refresh(m.d.current);
             o->tab = stats::tab_step(o->tab, e.delta, f);
+            // A new tab starts at the top. Carrying the previous tab's
+            // offset means switching from a tall tab to a short one opens
+            // it scrolled past its own content — the user sees a blank
+            // body and no reason for it.
+            m.ui.stats_scroll.y = 0;
             // The projection is per-transcript, not per-tab, so switching
             // views re-folds nothing.
+            return done(std::move(m));
+        },
+        [&](StatsScroll e) -> Step {
+            // Scroll the body directly. maya's ScrollState clamps against
+            // the content height the panel measured, so a delta past
+            // either end settles at the edge rather than scrolling into
+            // blank rows — which is what the ±1000000 that nav sends for
+            // Home/End relies on.
+            m.ui.stats_scroll.y += e.delta;
+            if (m.ui.stats_scroll.y < 0) m.ui.stats_scroll.y = 0;
             return done(std::move(m));
         },
     }, std::move(sm));
