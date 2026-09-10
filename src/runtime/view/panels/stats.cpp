@@ -335,7 +335,8 @@ bool emit_items(const stats::Section& sec, const stats::Facts& f,
     using maya::panel::Spark;
 
     if (sec.viz != stats::Viz::Kv && sec.viz != stats::Viz::Bars
-        && sec.viz != stats::Viz::Spark && sec.viz != stats::Viz::Hero)
+        && sec.viz != stats::Viz::Spark && sec.viz != stats::Viz::Hero
+        && sec.viz != stats::Viz::Band)
         return false;
 
     scratch.clear();
@@ -353,6 +354,27 @@ bool emit_items(const stats::Section& sec, const stats::Facts& f,
     // below the Strategic model" to the far edge and left the number
     // stranded alone on the left. A headline is one phrase; it is laid out
     // as one string.
+    // A band is a composition: one full-width bar plus its key. It owns
+    // its row, so it needs no label lane -- the section heading above it is
+    // its title.
+    if (sec.viz == stats::Viz::Band) {
+        for (const auto& mt : scratch) {
+            maya::panel::Band band;
+            band.caption = mt.label;
+            std::size_t bi = 0;
+            for (const auto& p : mt.parts) {
+                band.segments.push_back(
+                    {p.label, p.value,
+                     mt.categorical ? series_hue(bi) : hue_of(p.hue)});
+                ++bi;
+            }
+            Item it;
+            it.control = std::move(band);
+            out.push_back(std::move(it));
+        }
+        return true;
+    }
+
     if (sec.viz == stats::Viz::Hero) {
         for (const auto& mt : scratch) {
             Item it;
@@ -532,7 +554,8 @@ Element stats_panel(const Model& m) {
     const bool all_rows = [&] {
         for (const auto& sec : sections)
             if (sec.viz != stats::Viz::Kv && sec.viz != stats::Viz::Bars
-                && sec.viz != stats::Viz::Spark && sec.viz != stats::Viz::Hero)
+                && sec.viz != stats::Viz::Spark && sec.viz != stats::Viz::Hero
+                && sec.viz != stats::Viz::Band)
                 return false;
         return true;
     }();
