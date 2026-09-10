@@ -32,6 +32,13 @@ Step stats_update(Model m, msg::StatsMsg sm) {
             // wrapper handles that on the way out.
             pn::Stats pane{};
             m.ui.panel.descend(std::move(pane));
+            // Open at the top. The panel state is fresh on every open (a
+            // new pn::Stats, so a new projection) but the SCROLL is not:
+            // it lives on Model::UI and outlives the panel, so without
+            // this a reopen restored the offset from the last time the
+            // viewer was closed — against a different tab, a different
+            // transcript length, and a max_y describing neither.
+            m.ui.stats_scroll.scroll_to_origin();
             return done(std::move(m));
         },
 
@@ -54,19 +61,43 @@ Step stats_update(Model m, msg::StatsMsg sm) {
             // offset means switching from a tall tab to a short one opens
             // it scrolled past its own content — the user sees a blank
             // body and no reason for it.
-            m.ui.stats_scroll.y = 0;
+            //
+            // max_y is deliberately NOT reset with it. That field is owned
+            // by the renderer's writeback, so the reducer has no honest
+            // value to put there — the new tab's height is not known until
+            // it is measured. It stays stale for exactly one frame, which
+            // bounds a same-batch scroll to the old tab's range instead of
+            // the new one's; the paint then clamps it. Zeroing it here to
+            // "be safe" would swallow that keystroke entirely, which is a
+            // worse trade than a transient the user cannot see.
+            m.ui.stats_scroll.scroll_to_origin();
             // The projection is per-transcript, not per-tab, so switching
             // views re-folds nothing.
             return done(std::move(m));
         },
         [&](StatsScroll e) -> Step {
-            // Scroll the body directly. maya's ScrollState clamps against
-            // the content height the panel measured, so a delta past
-            // either end settles at the edge rather than scrolling into
-            // blank rows — which is what the ±1000000 that nav sends for
-            // Home/End relies on.
-            m.ui.stats_scroll.y += e.delta;
-            if (m.ui.stats_scroll.y < 0) m.ui.stats_scroll.y = 0;
+            // Scroll the body directly. scroll_by() clamps against BOTH
+            // ends, so a delta past either settles at the edge rather than
+            // scrolling into blank rows — which is what the ±1000000 that
+            // nav sends for Home/End relies on.
+            //
+            // Through ScrollState rather than `y += delta` by hand. The
+            // hand-rolled version guarded only the lower bound, so End
+            // stored y = 1000000 and the model carried a value its own
+            // invariant forbids until the next paint clamped it. The panel
+            // does re-clamp on render, which is why nothing looked broken
+            // — but that makes the model's correctness depend on a frame
+            // happening, and any reducer reading y before then (a
+            // same-batch StatsScroll after a StatsTab, and a fast terminal
+            // delivers several keys in ONE read) reads a value that was
+            // never legal.
+            //
+            // max_y is still last frame's here: it is written by the
+            // renderer's writeback, so on the very first scroll after a
+            // tab switch it describes the PREVIOUS tab. Clamping against a
+            // stale bound is bounded and self-correcting; not clamping at
+            // all is not. StatsTab resets y to 0 for the same reason.
+            m.ui.stats_scroll.scroll_by(0, e.delta);
             return done(std::move(m));
         },
     }, std::move(sm));
