@@ -335,7 +335,7 @@ bool emit_items(const stats::Section& sec, const stats::Facts& f,
     using maya::panel::Spark;
 
     if (sec.viz != stats::Viz::Kv && sec.viz != stats::Viz::Bars
-        && sec.viz != stats::Viz::Spark)
+        && sec.viz != stats::Viz::Spark && sec.viz != stats::Viz::Hero)
         return false;
 
     scratch.clear();
@@ -343,6 +343,30 @@ bool emit_items(const stats::Section& sec, const stats::Facts& f,
     if (scratch.empty()) return true;   // handled: an empty section draws nothing
 
     if (!out.empty()) out.push_back(Item{});          // blank separator
+
+    // A hero is a headline, not a table row: a big number and the sentence
+    // that qualifies it, reading as one phrase.
+    //
+    // Both in `leading`, not number-in-leading + caption-in-origin. The
+    // origin cell is RIGHT-aligned — correct for a provenance tag on a
+    // settings row, wrong here, where it flung "of 8 routed turns ran
+    // below the Strategic model" to the far edge and left the number
+    // stranded alone on the left. A headline is one phrase; it is laid out
+    // as one string.
+    if (sec.viz == stats::Viz::Hero) {
+        for (const auto& mt : scratch) {
+            Item it;
+            it.leading = mt.detail.empty()
+                       ? mt.label
+                       : mt.label + "  " + mt.detail;
+            // The NUMBER carries the accent; the qualifier is prose. The
+            // panel paints `leading` in one style, so the emphasis that
+            // matters is the row's, not the number's alone.
+            it.leading_style = maya::Style{}.with_fg(accent).with_bold();
+            out.push_back(std::move(it));
+        }
+        return true;
+    }
     if (!sec.heading.empty()) {
         // Header is a MARKER kind: the text rides in `leading` and the
         // control says "render this as a section header".
@@ -508,7 +532,7 @@ Element stats_panel(const Model& m) {
     const bool all_rows = [&] {
         for (const auto& sec : sections)
             if (sec.viz != stats::Viz::Kv && sec.viz != stats::Viz::Bars
-                && sec.viz != stats::Viz::Spark)
+                && sec.viz != stats::Viz::Spark && sec.viz != stats::Viz::Hero)
                 return false;
         return true;
     }();
