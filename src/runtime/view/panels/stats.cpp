@@ -43,6 +43,30 @@ using maya::StatSheet;
     }
 }
 
+// A CATEGORICAL ramp, for charts whose slices are named things rather
+// than states. hue_of() is a SEMANTIC map — green means good, red means
+// failed — and a pie of seven tool names has no semantics to encode: it
+// needs seven distinguishable colours, and reusing the status palette
+// would imply `grep` is somehow the failure case.
+//
+// Ordered so ADJACENT slices contrast. A ramp that walks the spectrum
+// puts two blues next to each other, and neighbouring wedges are exactly
+// the pair a reader has to tell apart.
+[[nodiscard]] maya::Color series_hue(std::size_t i) {
+    static const maya::Color kRamp[] = {
+        accent,                       // magenta
+        info,                         // blue
+        success,                      // green
+        warn,                         // yellow
+        highlight,                    // cyan
+        maya::Color::bright_magenta(),
+        maya::Color::bright_blue(),
+        maya::Color::bright_green(),
+    };
+    constexpr std::size_t n = sizeof(kRamp) / sizeof(kRamp[0]);
+    return kRamp[i % n];
+}
+
 // One section → sheet rows. The Viz says which fields the extractor
 // filled, so this switch is over PRESENTATION, not over tabs — it does not
 // grow when a tab is added.
@@ -174,8 +198,21 @@ void emit_section(const stats::Section& sec, const stats::Facts& f,
                 // not in a row underneath it.
                 ring.center     = mt.detail;
                 ring.center_sub = "";
-                for (const auto& p : mt.parts)
-                    ring.segments.push_back({p.label, p.value, hue_of(p.hue)});
+                // Two palettes, and the METRIC says which. A state
+                // (cache hit / miss, waiting / generating) carries
+                // semantics worth encoding; a set of names (tools,
+                // models) carries none, and reusing the status palette
+                // for names would imply one of the tools is the failure
+                // case. Read off the flag rather than inferred from the
+                // values, so a categorical set whose first slot happens
+                // to be non-zero cannot silently pick the wrong table.
+                std::size_t i = 0;
+                for (const auto& p : mt.parts) {
+                    ring.segments.push_back(
+                        {p.label, p.value,
+                         mt.categorical ? series_hue(i) : hue_of(p.hue)});
+                    ++i;
+                }
                 sheet.donut(std::move(ring));
             }
             break;
@@ -237,8 +274,13 @@ void emit_section(const stats::Section& sec, const stats::Facts& f,
             for (const auto& mt : scratch) {
                 maya::StatBand band;
                 band.caption = mt.label;
-                for (const auto& p : mt.parts)
-                    band.segments.push_back({p.label, p.value, hue_of(p.hue)});
+                std::size_t bi = 0;
+                for (const auto& p : mt.parts) {
+                    band.segments.push_back(
+                        {p.label, p.value,
+                         mt.categorical ? series_hue(bi) : hue_of(p.hue)});
+                    ++bi;
+                }
                 sheet.band(std::move(band));
             }
             break;

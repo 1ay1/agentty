@@ -303,6 +303,29 @@ TEST_CASE("stats: a histogram reports quantiles without storing samples") {
     CHECK(h.quantile(0.95) >= 1024.0);
 }
 
+TEST_CASE("stats: quantiles separate within one octave") {
+    // Plain log2 buckets double at every step, so a p50 and a p95 that
+    // fall anywhere in the same octave report the SAME number — measured
+    // on a real thread as "Median 4.1s, p95 4.1s", which reads as a bug
+    // and tells the user nothing. Sub-buckets are what pull them apart.
+    st::Hist h;
+    for (int i = 0; i < 90; ++i) h.add(4200);    // just above 4096
+    for (int i = 0; i < 10; ++i) h.add(7900);    // still under 8192
+    CHECK(h.quantile(0.5) < h.quantile(0.95));
+}
+
+TEST_CASE("stats: a quantile never exceeds the observed maximum") {
+    // A bucket's upper EDGE is the honest reading — the histogram does
+    // not know where inside the bucket a sample sat — but an edge past
+    // the maximum prints a p95 larger than the slowest call, a number
+    // that cannot be true and that discredits every figure beside it.
+    st::Hist h;
+    h.add(10);
+    h.add(5200);
+    for (double q : {0.5, 0.9, 0.95, 0.99, 1.0})
+        CHECK(h.quantile(q) <= static_cast<double>(h.max()));
+}
+
 // ── The tab table ────────────────────────────────────────────────────────
 
 TEST_CASE("stats: tab metadata is derived from one table") {

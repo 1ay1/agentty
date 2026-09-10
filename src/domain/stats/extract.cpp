@@ -253,6 +253,43 @@ void tools_by_name(const Facts& f, std::vector<Metric>& out) {
     ranked_rows(f.tools.by_name, out);
 }
 
+// The same tally as a RING. The ranked bars answer "how many of each";
+// the ring answers "what is this session MADE of", which on a real
+// thread is the more useful reading — 448 shell calls against 40 reads
+// is a working style, and a column of numbers makes you compute it.
+//
+// Slices past the top few collapse into one "other": a ring's legend is
+// one entry per row, so a long tail of 1% wedges costs more height than
+// it carries information, and wedges that thin are indistinguishable
+// anyway. The ranked bars below still list every tool by name.
+void tools_mix(const Facts& f, std::vector<Metric>& out) {
+    const double total = static_cast<double>(f.tools.by_name.total());
+    if (total <= 0) return;
+    constexpr std::size_t kMaxSlices = 5;
+    const auto ranked = f.tools.by_name.ranked();
+
+    Metric m;
+    m.label  = "calls by tool";
+    m.unit   = Unit::Count;
+    m.value  = total;
+    m.detail = format(Unit::Count, total);
+    // Tool names, not states: the slices need distinguishable colours,
+    // not a good/bad reading.
+    m.categorical = true;
+
+    double shown = 0;
+    for (std::size_t i = 0; i < ranked.size() && i < kMaxSlices; ++i) {
+        const double v = static_cast<double>(ranked[i].second);
+        shown += v;
+        m.parts.push_back({ranked[i].first + " " + format(Unit::Ratio, v / total),
+                           v, static_cast<int>(i)});
+    }
+    if (const double rest = total - shown; rest > 0)
+        m.parts.push_back({"other " + format(Unit::Ratio, rest / total),
+                           rest, static_cast<int>(kMaxSlices)});
+    out.push_back(std::move(m));
+}
+
 void tools_status(const Facts& f, std::vector<Metric>& out) {
     const double total = static_cast<double>(f.tools.by_status.total());
     if (total <= 0) return;
@@ -563,11 +600,12 @@ const std::array<Section, 3> cache{{
     {"Rates",  Viz::Spark, &cache_rates},
 }};
 
-const std::array<Section, 4> tools{{
-    {"",             Viz::Band, &tools_status},
-    {"By tool",      Viz::Bars, &tools_by_name},
-    {"Latency",      Viz::Kv,   &tools_latency},
-    {"Distribution", Viz::Hist, &tools_latency_dist},
+const std::array<Section, 5> tools{{
+    {"",             Viz::Band,  &tools_status},
+    {"",             Viz::Donut, &tools_mix},
+    {"By tool",      Viz::Bars,  &tools_by_name},
+    {"Latency",      Viz::Kv,    &tools_latency},
+    {"Distribution", Viz::Hist,  &tools_latency_dist},
 }};
 
 const std::array<Section, 6> reasoning{{

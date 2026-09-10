@@ -91,15 +91,21 @@ private:
 // significant figures.
 class Hist {
 public:
-    static constexpr int kBuckets = 24;
+    // Four sub-buckets per power of two. Plain log2 doubles at every step,
+    // so a p50 and a p95 that sit anywhere in the same octave report the
+    // SAME number — measured on a real thread: "Median 4.1s, p95 4.1s",
+    // which reads as a bug and tells the user nothing. Quartering each
+    // octave puts the two apart wherever they genuinely differ, at the
+    // cost of 96 more bytes.
+    static constexpr int kSub     = 4;
+    static constexpr int kOctaves = 24;
+    static constexpr int kBuckets = kOctaves * kSub;
 
     void add(std::uint32_t ms) {
         ++count_;
         sum_ += ms;
         if (ms > max_) max_ = ms;
-        int b = 0;
-        for (std::uint32_t v = ms; v > 1 && b < kBuckets - 1; v >>= 1) ++b;
-        ++bucket_[static_cast<std::size_t>(b)];
+        ++bucket_[static_cast<std::size_t>(index_of(ms))];
     }
     [[nodiscard]] std::uint64_t count() const noexcept { return count_; }
     [[nodiscard]] std::uint64_t sum()   const noexcept { return sum_; }
@@ -123,8 +129,17 @@ public:
             // bucket, reporting that the slowest 5% were fast. The tail
             // is exactly what a p95 is asked for, so a rule that hides it
             // makes the number worse than not showing one.
-            if (seen > want && bucket_[static_cast<std::size_t>(b)])
-                return static_cast<double>(1u << b);
+            if (seen > want && bucket_[static_cast<std::size_t>(b)]) {
+                // The bucket's upper edge, capped at what was actually
+                // OBSERVED. Reporting the edge is honest — the histogram
+                // does not know where inside the bucket the sample sat —
+                // but an edge past the maximum prints a p95 LARGER than
+                // the slowest call, which is a number that cannot be true
+                // and destroys trust in every figure beside it.
+                const double edge = static_cast<double>(bucket_floor(b + 1));
+                const double top  = static_cast<double>(max_);
+                return edge < top ? edge : top;
+            }
         }
         return static_cast<double>(max_);
     }
@@ -146,8 +161,30 @@ public:
         const noexcept { return bucket_; }
 
     // Inclusive lower edge of bucket b, in the unit that was add()ed.
+    //
+    // Buckets are quarters of an octave: bucket b lives in octave
+    // b / kSub, and its lower edge is that octave's base plus b % kSub
+    // quarters of the octave's width.
     [[nodiscard]] static std::uint32_t bucket_floor(int b) noexcept {
-        return b <= 0 ? 0u : (1u << b);
+        if (b <= 0) return 0;
+        const int oct = b / kSub;
+        const int sub = b % kSub;
+        const std::uint64_t base = 1ull << oct;
+        return static_cast<std::uint32_t>(base + base * sub / kSub);
+    }
+
+    // Which bucket a sample lands in. The inverse of bucket_floor(), and
+    // kept beside it so the two cannot drift.
+    [[nodiscard]] static int index_of(std::uint32_t v) noexcept {
+        if (v <= 1) return 0;
+        int oct = 0;
+        for (std::uint32_t t = v; t > 1 && oct < kOctaves - 1; t >>= 1) ++oct;
+        const std::uint64_t base = 1ull << oct;
+        int sub = static_cast<int>((v - base) * kSub / base);
+        if (sub < 0) sub = 0;
+        if (sub >= kSub) sub = kSub - 1;
+        const int b = oct * kSub + sub;
+        return b >= kBuckets ? kBuckets - 1 : b;
     }
 
     // The occupied range, so a renderer can skip the empty head and tail

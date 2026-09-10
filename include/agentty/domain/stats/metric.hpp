@@ -32,9 +32,18 @@ struct Metric {
     // Trailing dim note. Its own column in the sheet, so notes align
     // instead of trailing raggedly off values of different widths.
     std::string detail;
-    // Segments for a Band section: the parts of a whole. Empty otherwise.
+    // Segments for a Band or Donut section: the parts of a whole.
+    //
+    // `hue` indexes ONE OF TWO palettes, and which one is a property of
+    // what the parts mean rather than of how many there are. A STATE
+    // (cache hit / miss, done / failed) has semantics worth encoding —
+    // green is good, red is not. A NAME (a tool, a model) has none, and
+    // painting `grep` red would claim it failed. `categorical` says which
+    // table the extractor is indexing into, so the view never has to
+    // guess from the values.
     struct Part { std::string label; double value = 0; int hue = 0; };
     std::vector<Part> parts;
+    bool categorical = false;
     // Samples for a Spark / Plot section.
     std::vector<double> series;
 

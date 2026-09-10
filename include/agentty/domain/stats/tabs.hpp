@@ -54,7 +54,7 @@ extern const std::array<Section, 2> models;
 extern const std::array<Section, 3> smart;
 extern const std::array<Section, 2> tokens;
 extern const std::array<Section, 3> cache;
-extern const std::array<Section, 4> tools;
+extern const std::array<Section, 5> tools;
 extern const std::array<Section, 6> reasoning;
 extern const std::array<Section, 6> stream;
 extern const std::array<Section, 2> context;
