@@ -774,6 +774,17 @@ struct TokenRefreshed   { agentty::auth::TokenResult result; };
 // turn's grounding is deferred by one turn instead of being dropped.
 struct ProactiveContextReady { std::string block; double confidence = -1.0; };
 
+// ── Stats viewer ───────────────────────────────────────
+// A read-only, tabbed projection of what the session actually did. Three
+// messages is the whole surface: it opens, it steps between tabs, it
+// closes. There is nothing to select and nothing to commit — which is the
+// point of a viewer, and why it needs no per-row message.
+struct OpenStats {};
+struct CloseStats {};
+// Step the tab selection, wrapping. Signed so one message serves Tab and
+// Shift-Tab (and ←/→) rather than two near-identical ones.
+struct StatsTab { int delta = +1; };
+
 // ── RAG mode picker ────────────────────────────────────────────────
 // One decision: how proactive (pre-turn) retrieval behaves — On / First turn
 // only / Off. Selecting commits the mode (persist + live-apply) and closes.
@@ -1044,6 +1055,12 @@ using RagMsg = std::variant<
     RagEmbedClose, RagEmbedKey, RagEmbedPaste,
     RagEmbedTest, RagEmbedTestDone, RagEmbedSave>;
 
+// Its own domain, not a corner of RagMsg: the stats viewer shares no state
+// and no reducer with retrieval, and folding unrelated panels into one
+// variant is how a reducer grows arms it has no business owning.
+using StatsMsg = std::variant<
+    OpenStats, CloseStats, StatsTab>;
+
 using SettingsListMsg = std::variant<
     OpenSettingsList, CloseSettingsList, SettingsListMove,
     SettingsListActivate, SettingsListAddStart, SettingsListRemove,
@@ -1113,6 +1130,7 @@ using Msg = std::variant<
     msg::CodeBlockMsg,
     msg::CheckpointMsg,
     msg::RagMsg,
+    msg::StatsMsg,
     msg::SettingsListMsg,
     msg::ForkMsg,
     msg::TodoMsg,
@@ -1159,6 +1177,7 @@ consteval int leaf_domain_count() {
          + int{in_variant_v<L, msg::CodeBlockMsg>}
          + int{in_variant_v<L, msg::CheckpointMsg>}
          + int{in_variant_v<L, msg::RagMsg>}
+         + int{in_variant_v<L, msg::StatsMsg>}
          + int{in_variant_v<L, msg::ForkMsg>}
          + int{in_variant_v<L, msg::TodoMsg>}
          + int{in_variant_v<L, msg::LoginMsg>}
@@ -1202,6 +1221,10 @@ static_assert(leaf_domain_count<CheckpointsSelect>()    == 1,
               "CheckpointsSelect must belong to exactly one Msg domain");
 static_assert(leaf_domain_count<OpenRag>()           == 1,
               "OpenRag must belong to exactly one Msg domain");
+static_assert(leaf_domain_count<OpenStats>()         == 1,
+              "OpenStats must belong to exactly one Msg domain");
+static_assert(leaf_domain_count<StatsTab>()          == 1,
+              "StatsTab must belong to exactly one Msg domain");
 static_assert(leaf_domain_count<ForkThread>()                == 1,
               "ForkThread must belong to exactly one Msg domain");
 static_assert(leaf_domain_count<OpenTodoModal>()             == 1,
@@ -1217,7 +1240,7 @@ static_assert(leaf_domain_count<Tick>()                      == 1,
 // they must also update the kDomains array used by the dispatcher in
 // update.cpp, which currently exhausts on 12 arms. Mismatch → dispatch
 // switch loses a domain silently.
-static_assert(std::variant_size_v<Msg> == 21,
+static_assert(std::variant_size_v<Msg> == 22,
               "Msg domain count changed — update the dispatcher in "
               "src/runtime/app/update.cpp and this proof to match");
 

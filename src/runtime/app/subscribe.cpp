@@ -250,6 +250,33 @@ std::optional<Msg> on_code_block_result(const KeyEvent& ev) {
     return nav::translate(s, ev);
 }
 
+// The stats viewer: a READ-ONLY tabbed pane.
+//
+// No `select` and no `move`: there is no cursor, because nothing in the
+// panel can be acted on. Wiring a selection into a viewer would light a
+// highlight that promises an Enter which does nothing.
+//
+// Tab / Shift-Tab step the tab set, and ←/→ do the same because a tab strip
+// reads as horizontal. Scrolling stays with the shared grammar via
+// page_step, so a long tally pages like every other panel.
+std::optional<Msg> on_stats_viewer(const KeyEvent& ev) {
+    nav::NavSpec s;
+    s.close     = [] { return Msg{CloseStats{}}; };
+    s.page_step = 10;
+    s.extra = [](const KeyEvent& e) -> std::optional<Msg> {
+        const auto* sk = std::get_if<SpecialKey>(&e.key);
+        if (!sk) return std::nullopt;
+        switch (*sk) {
+            case SpecialKey::Tab:     return Msg{StatsTab{+1}};
+            case SpecialKey::BackTab: return Msg{StatsTab{-1}};
+            case SpecialKey::Left:    return Msg{StatsTab{-1}};
+            case SpecialKey::Right:   return Msg{StatsTab{+1}};
+            default:                  return std::nullopt;
+        }
+    };
+    return nav::translate(s, ev);
+}
+
 // Rewind checkpoint picker: shared grammar + vim nav; read-only list.
 std::optional<Msg> on_checkpoint_picker(const KeyEvent& ev) {
     nav::NavSpec s;
@@ -1083,6 +1110,7 @@ Sub<Msg> subscribe(const Model& m) {
                     case OK::ToolOutput:     return on_tool_viewer(ev);
                     case OK::Checkpoints:    return on_checkpoint_picker(ev);
                     case OK::Rag:    return on_rag_settings(rag_form, ev);
+                    case OK::Stats:          return on_stats_viewer(ev);
                     case OK::SettingsList:
                         return on_settings_list(ev, settings_list_adding);
                     case OK::Fork:           return on_fork_picker(ev);

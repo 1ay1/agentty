@@ -51,6 +51,7 @@ set(_AGENTTY_CONSOLIDATED
     panel_sections_render_test
     credentials_test entitlement_test inflate_test
     settings_list_scroll_test visual_walk_test md_robustness_test
+    stats_test
     thread_blob_test lazy_image_test thread_log_test
     thread_migration_test blob_gc_test)
 foreach(_t ${_AGENTTY_CONSOLIDATED})

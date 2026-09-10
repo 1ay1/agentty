@@ -54,6 +54,7 @@
 #include "agentty/runtime/panel/mention.hpp"
 #include "agentty/runtime/panel/symbol.hpp"
 #include "agentty/runtime/panel/code_blocks.hpp"
+#include "agentty/runtime/panel/stats.hpp"
 #include "agentty/runtime/panel/tool_output.hpp"
 #include "agentty/runtime/panel/checkpoints.hpp"
 #include "agentty/runtime/panel/rag.hpp"
@@ -162,6 +163,7 @@ struct PluginEdit : WithFrom {
 };
 struct Fork            : agentty::fork_panel::Open, WithFrom {};
 struct DiffReview      : pick::OpenAtCell, WithFrom {};
+struct Stats           : agentty::stats_panel::Open, WithFrom {};
 
 using Variant = std::variant<
     None,
@@ -169,7 +171,7 @@ using Variant = std::variant<
     Palette, Mention, Symbol,
     CodeBlocks, CodeBlockResult, ToolOutput, Checkpoints,
     Rag, SettingsList, PluginEdit, Fork,
-    DiffReview>;
+    DiffReview, Stats>;
 
 // The one indirection that lets the type refer to itself: a stashed parent
 // is a whole slot value, from included.
@@ -298,6 +300,7 @@ enum class Kind {
     SmartMode,
     DiffReview,
     Todo,
+    Stats,
 };
 
 // Slot alternative → Kind. An exhaustive visitor: adding an alternative
@@ -321,6 +324,7 @@ enum class Kind {
         Kind operator()(const PluginEdit&)      const { return Kind::PluginEdit; }
         Kind operator()(const Fork&)            const { return Kind::Fork; }
         Kind operator()(const DiffReview&)      const { return Kind::DiffReview; }
+        Kind operator()(const Stats&)           const { return Kind::Stats; }
     };
     return std::visit(V{}, s.raw());
 }

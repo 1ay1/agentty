@@ -46,6 +46,7 @@ std::optional<maya::Element> pick_panel(const Model& m) {
         case OK::ToolOutput:     return tool_output_panel(m);
         case OK::Checkpoints:    return checkpoints_panel(m);
         case OK::Rag:    return rag_panel(m);
+        case OK::Stats:          return stats_panel(m);
         case OK::SettingsList:   return settings_list_panel(m);
         case OK::Fork:           return fork_panel(m);
         case OK::Models:    return models_panel(m);

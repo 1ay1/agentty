@@ -44,6 +44,7 @@ set(AGENTTY_IO_SOURCES
     src/util/modelsdev.cpp
     src/domain/complexity.cpp
     src/domain/model_name.cpp
+    src/domain/stats.cpp
 )
 
 set(AGENTTY_WORKSPACE_SOURCES
@@ -176,6 +177,7 @@ set(AGENTTY_RUNTIME_NOMAIN_SOURCES
     src/runtime/app/update/code_blocks.cpp
     src/runtime/app/update/checkpoints.cpp
     src/runtime/app/update/rag.cpp
+    src/runtime/app/update/stats.cpp
     src/runtime/app/update/settings_list.cpp
     src/runtime/panel/settings_items.cpp
     src/runtime/panel/form.cpp
@@ -238,6 +240,7 @@ set(AGENTTY_RUNTIME_NOMAIN_SOURCES
     src/runtime/view/panels/checkpoints.cpp
     src/runtime/view/panels/todo.cpp
     src/runtime/view/panels/rag.cpp
+    src/runtime/view/panels/stats.cpp
     src/runtime/view/panels/settings_list.cpp
     src/runtime/view/panels/fork.cpp
     src/runtime/view/diff_review.cpp

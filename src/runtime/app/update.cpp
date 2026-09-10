@@ -68,6 +68,7 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
         [&](msg::CodeBlockMsg cm)      { return detail::codeblock_update    (std::move(m), std::move(cm)); },
         [&](msg::CheckpointMsg cm)     { return detail::checkpoint_update   (std::move(m), std::move(cm)); },
         [&](msg::RagMsg rm)    { return detail::rag_settings_update (std::move(m), std::move(rm)); },
+        [&](msg::StatsMsg sm)  { return detail::stats_update         (std::move(m), std::move(sm)); },
         [&](msg::SettingsListMsg sm)   { return detail::settings_list_update(std::move(m), std::move(sm)); },
         [&](msg::ForkMsg fm)           { return detail::fork_update         (std::move(m), std::move(fm)); },
         [&](msg::TodoMsg tm)           { return detail::todo_update         (std::move(m), std::move(tm)); },

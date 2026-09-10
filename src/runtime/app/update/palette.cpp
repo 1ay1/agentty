@@ -104,6 +104,7 @@ template <class T, class V>
         add(Command::OpenProviders,    emit<OpenProviders>());
         add(Command::SmartMode,        emit<OpenSmartMode>());
         add(Command::OpenRag,  emit<OpenRag>());
+        add(Command::OpenStats,        emit<OpenStats>());
         add(Command::OpenPlugins,      emit_val<OpenSettingsList>(settings::Category::Plugins));
         add(Command::OpenCommands,     emit_val<OpenSettingsList>(settings::Category::Commands));
         add(Command::OpenAgents,       emit_val<OpenSettingsList>(settings::Category::Agents));

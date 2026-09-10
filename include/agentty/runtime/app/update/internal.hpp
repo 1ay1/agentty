@@ -346,6 +346,7 @@ Step symbol_update        (Model m, msg::SymbolMsg  sm);
 Step codeblock_update     (Model m, msg::CodeBlockMsg      cm);
 Step checkpoint_update    (Model m, msg::CheckpointMsg     cm);
 Step rag_settings_update  (Model m, msg::RagMsg    rm);
+Step stats_update         (Model m, msg::StatsMsg  sm);
 Step settings_list_update (Model m, msg::SettingsListMsg   sm);
 Step fork_update          (Model m, msg::ForkMsg           fm);
 Step todo_update          (Model m, msg::TodoMsg           tm);
