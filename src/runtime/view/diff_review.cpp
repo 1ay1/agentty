@@ -7,6 +7,7 @@
 #include <vector>
 
 #include <maya/widget/markdown/highlight.hpp>
+#include <maya/widget/tab_strip.hpp>
 
 #include "agentty/runtime/view/palette.hpp"
 #include "agentty/runtime/view/hints.hpp"
@@ -160,73 +161,40 @@ Element diff_review(const Model& m) {
 
     // ── File rail: every file, its net status + diffstat, current one lit ──
     // Shows the WHOLE changeset at a glance (SOTA: you never lose the forest).
-    // HORIZONTALLY SCROLLED: when the changeset is wider than the pane, the
-    // strip slides so the CURRENT file is always in view — leading files
-    // collapse into a "…" chip and the tail clips via TruncateEnd. Without
-    // this, h/l could move focus to a file rendered entirely off-screen.
+    //
+    // maya::TabStrip owns the hard part: when the changeset is wider than the
+    // pane the strip slides so the CURRENT file stays visible, and what it
+    // scrolled past collapses into a leading "…". That used to be ~60 lines
+    // of chunk-measuring and window-sliding here — the same logic the stats
+    // viewer's tabs need, so it moved into the widget rather than being
+    // written a second time. The per-file status dot and the +/- diffstat are
+    // first-class fields on a tab precisely BECAUSE they must participate in
+    // that width arithmetic; a host appending them itself would scroll by the
+    // wrong amount and push the current file off the edge.
     {
-        // Build per-file segment lists first (text + style pieces), so the
-        // width-aware component below can start the strip at any file.
-        struct RailChunk { std::vector<std::pair<std::string, Style>> pieces; int width = 0; };
-        std::vector<RailChunk> chunks;
-        chunks.reserve(m.d.pending_changes.size());
-        for (int i = 0; i < static_cast<int>(m.d.pending_changes.size()); ++i) {
-            const auto& f = m.d.pending_changes[static_cast<std::size_t>(i)];
+        TabStrip rail;
+        rail.marker(TabMark::Dot);
+        rail.theme.active = fg;
+        rail.theme.idle   = muted;
+        rail.theme.accent = accent;
+        for (const auto& f : m.d.pending_changes) {
             bool anyrej = false, anypend = false;
             for (const auto& hk : f.hunks) {
                 if (hk.status == Hunk::Status::Rejected) anyrej = true;
                 if (hk.status == Hunk::Status::Pending)  anypend = true;
             }
-            Hunk::Status roll = anypend ? Hunk::Status::Pending
-                              : anyrej  ? Hunk::Status::Rejected
-                                        : Hunk::Status::Accepted;
-            const bool cur = (i == fidx);
+            const Hunk::Status roll = anypend ? Hunk::Status::Pending
+                                    : anyrej  ? Hunk::Status::Rejected
+                                              : Hunk::Status::Accepted;
             std::string name = f.path;
-            if (auto sl = name.rfind('/'); sl != std::string::npos) name = name.substr(sl + 1);
-            RailChunk ck;
-            auto piece = [&](std::string s, Style st) {
-                ck.width += string_width(s);
-                ck.pieces.emplace_back(std::move(s), st);
-            };
-            piece(std::string(status_dot(roll)) + " ", Style{}.with_fg(status_color(roll)));
-            piece(std::move(name), cur ? Style{}.with_fg(fg).with_bold() : Style{}.with_fg(muted));
-            piece(std::format(" +{}", f.added), Style{}.with_fg(success).with_dim());
-            piece(std::format(" -{}", f.removed), Style{}.with_fg(danger).with_dim());
-            chunks.push_back(std::move(ck));
+            if (auto sl = name.rfind('/'); sl != std::string::npos)
+                name = name.substr(sl + 1);
+            rail.tab(std::move(name))
+                .dot(status_color(roll), std::string(status_dot(roll)))
+                .detail(std::format("+{} -{}", f.added, f.removed), success);
         }
-        rows.push_back(component(
-            [chunks = std::move(chunks), fidx](int w, int) -> Element {
-                constexpr int kSepW = 3;      // "   " between files
-                constexpr const char* kSep = "   ";
-                const int avail = std::max(0, w - 2);   // "  " lead-in
-            // First rail slot that keeps the CURRENT file's right edge
-            // inside the pane: slide the window right until it fits.
-            int start = 0;
-            auto span = [&](int lo, int hi) {  // width of chunks [lo, hi]
-                int t = 0;
-                for (int i = lo; i <= hi; ++i)
-                    t += chunks[static_cast<std::size_t>(i)].width
-                       + (i > lo ? kSepW : 0);
-                return t;
-            };
-            // 2 cols for the "… " chip once scrolled.
-            while (start < fidx && span(start, fidx) > avail - (start > 0 ? 2 : 0))
-                ++start;
-            std::string content = "  ";
-            std::vector<StyledRun> runs;
-            auto seg = [&](const std::string& s, Style st) {
-                runs.push_back({content.size(), s.size(), st}); content += s;
-            };
-            if (start > 0) seg("\xe2\x80\xa6 ", Style{}.with_fg(muted).with_dim());
-            for (int i = start; i < static_cast<int>(chunks.size()); ++i) {
-                if (i > start) seg(kSep, Style{});
-                for (const auto& [s, st] : chunks[static_cast<std::size_t>(i)].pieces)
-                    seg(s, st);
-            }
-            return Element{TextElement{.content = std::move(content),
-                                       .wrap = TextWrap::TruncateEnd,
-                                       .runs = std::move(runs)}};
-        }));
+        rail.active(fidx);
+        rows.push_back(rail.build());
     }
 
     // ── Progress bar + counts ──

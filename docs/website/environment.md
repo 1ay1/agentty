@@ -81,7 +81,7 @@ But a gateway is not obliged to say anything — OpenAI's own `/v1/models`
 schema is just `{id, object, created, owned_by}` — so when yours is silent or
 wrong, set it yourself:
 
-> In the model picker (**Ctrl+M**), highlight a model and press **^W** to step
+> In the model picker (**^/**), highlight a model and press **^W** to step
 > its window through `auto → 32k → 64k → 128k → 200k → 272k → 400k → 1M → 2M`
 > and back to `auto`. The choice is saved per **provider + model**, so the same
 > model id behind two gateways can carry two different windows.

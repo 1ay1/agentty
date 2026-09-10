@@ -732,9 +732,15 @@ Step models_update(Model m, msg::ModelsMsg pm) {
             const auto& row = m.d.fused_rows[static_cast<std::size_t>(c->index)];
             if (row.is_signin_offer()) return done(std::move(m));
 
+            // Copy what we need BEFORE any rebuild: `row` is a reference
+            // into m.d.fused_rows, and rebuild_fused_rows() below
+            // reallocates that vector.
+            const ModelId    row_model    = row.model.id;
+            const std::string row_provider = row.provider_id;
+
             auto settings = deps().load_settings();
             const std::string key =
-                ui::context_override_key(row.provider_id, row.model.id.value);
+                ui::context_override_key(row_provider, row_model.value);
             const auto it = settings.context_overrides.find(key);
             const int cur = it == settings.context_overrides.end() ? 0 : it->second;
 
@@ -749,15 +755,62 @@ Step models_update(Model m, msg::ModelsMsg pm) {
             else           settings.context_overrides[key] = next;
             deps().save_settings(settings);
 
+            // Reflect the change in the LIVE catalog, then rebuild the rows
+            // the view reads. Without this the setting is invisible until
+            // the next catalog fetch — the user presses ^W, the column does
+            // not move, and the feature looks broken. available_models is
+            // where the override is normally applied (at load), so it is the
+            // right place to keep in step.
+            //
+            // Only for rows on the ACTIVE provider: available_models holds
+            // that provider's catalog, so a row from another provider has no
+            // entry here to update (its override still persisted above, and
+            // lands when that provider's catalog loads).
+            const bool row_is_active = row_provider == active_provider_id();
+            if (row_is_active) {
+                for (auto& mi : m.d.available_models) {
+                    if (mi.id != row_model) continue;
+                    if (next > 0) {
+                        mi.context_window = next;
+                    } else {
+                        // Cleared: fall back to what the id implies. The
+                        // provider's advertised figure is not recoverable
+                        // here (it was overwritten at load), so it returns
+                        // on the next refresh — ^L, or the next switch.
+                        mi.context_window =
+                            ModelCapabilities::from_id(mi.id.value).context_window();
+                    }
+                    break;
+                }
+                rebuild_fused_rows(m, /*sync_sources=*/false);
+            }
+
             // Apply LIVE when the row is the model actually in use, so the
             // ctx-% gauge moves with the setting instead of after a restart.
-            if (row.model.id == m.d.model_id
-                && row.provider_id == active_provider_id())
-                m.s.context_max = resolved_context_max(m, row.provider_id);
+            if (row_is_active && row_model == m.d.model_id)
+                m.s.context_max = resolved_context_max(m, row_provider);
 
-            return {std::move(m),
-                    set_status_toast(m, "context " + row.model.id.value + " → "
-                                            + ui::context_window_label(next))};
+            // Name what the window will be AND where it now comes from.
+            // "auto" alone is ambiguous — it does not say what auto resolved
+            // to, which is the number the user is actually trying to check.
+            std::string note = ui::pretty_model_label(row_model.value)
+                             + " \xc2\xb7 context ";
+            if (next > 0) {
+                note += ui::context_window_label(next);
+            } else {
+                note += "auto";
+                // Resolve with advertised=0 rather than the row's window: the
+                // row already had the OLD override baked into it (applied at
+                // catalog load), so passing it would make "auto" report the
+                // very number that was just cleared. The id-inference and
+                // default layers are what auto falls back to here; the
+                // advertised figure returns on the next catalog load.
+                const int auto_win = ui::resolve_context_window(
+                    row_provider, row_model.value, 0, settings);
+                if (auto_win > 0)
+                    note += " (" + ui::context_window_label(auto_win) + ")";
+            }
+            return {std::move(m), set_status_toast(m, std::move(note))};
         },
         [&](ModelsToggleReasoning) -> Step {
             // ^E flips the highlighted model's per-model reasoning OVERRIDE

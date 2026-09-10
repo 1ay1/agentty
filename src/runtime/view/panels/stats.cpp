@@ -107,22 +107,6 @@ constexpr int kBarCells = 24;
 
 [[nodiscard]] Element blank_row() { return text("").build(); }
 
-// The tab strip. The SELECTED tab is filled, the others are dim — the same
-// affordance the rest of the app uses for "you are here".
-[[nodiscard]] Element tab_strip(stats::Tab active) {
-    std::vector<Element> cells;
-    cells.reserve(static_cast<std::size_t>(stats::kTabCount) * 2);
-    for (int i = 0; i < stats::kTabCount; ++i) {
-        const auto t = static_cast<stats::Tab>(i);
-        const bool on = t == active;
-        std::string label = "  " + std::string{stats::tab_title(t)} + "  ";
-        cells.push_back(text(std::move(label),
-                             on ? fg_bold(accent) : fg_dim(muted)).build());
-        if (i + 1 < stats::kTabCount) cells.push_back(text(" ").build());
-    }
-    return v(std::move(cells)).build();
-}
-
 // ── The Smart Mode tab ───────────────────────────────────────────────────
 //
 // Reads top-down as an answer to "is Smart Mode working?": the headline
@@ -226,7 +210,15 @@ Element stats_panel(const Model& m) {
     cfg.subtitle = std::string{stats::tab_subtitle(o->tab)};
     cfg.accent   = accent;
 
-    cfg.header.push_back(tab_strip(o->tab));
+    // Tabs are the WIDGET's chrome, not this host's: it owns the padding,
+    // the selected treatment and how the strip degrades on a narrow frame,
+    // so every tabbed panel looks the same by construction. This host only
+    // says which tabs exist and which one is live — both read straight off
+    // the stats::Tab enumeration, which is their SSOT.
+    cfg.tabs.reserve(static_cast<std::size_t>(stats::kTabCount));
+    for (int i = 0; i < stats::kTabCount; ++i)
+        cfg.tabs.emplace_back(stats::tab_title(static_cast<stats::Tab>(i)));
+    cfg.tab_active = static_cast<int>(o->tab);
 
     // Tab dispatch. A switch on the enum rather than a table of function
     // pointers: -Wswitch then names a new tab that forgot its body, which is
