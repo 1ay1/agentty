@@ -184,6 +184,9 @@ void dump(const Model& m, int w, int scroll) {
     // the pass, restore what it asked for, and then paint.
     maya::render_tree(ui::stats_panel(m), canvas, pool, maya::theme::dark,
                       /*auto_height=*/true);
+    // ONE_PASS=1 stops here: a diagnostic for telling a genuine layout bug
+    // apart from an artifact of this tool's own double render.
+    if (std::getenv("ONE_PASS")) return;
     if (auto* o = m.ui.panel.get<pn::Stats>()) {
         o->scroll.y = scroll;
         o->scroll.clamp();
