@@ -65,6 +65,7 @@ void emit_section(const stats::Section& sec, const stats::Facts& f,
     // sheet is not splitting.
     const bool full_width = sec.viz == stats::Viz::Band
                          || sec.viz == stats::Viz::Donut
+                         || sec.viz == stats::Viz::Hist
                          || sec.viz == stats::Viz::Plot;
     if (!sheet.empty()) {
         if (full_width) sheet.column_break();
@@ -176,6 +177,33 @@ void emit_section(const stats::Section& sec, const stats::Facts& f,
                 sheet.donut(std::move(ring));
             }
             break;
+
+        case stats::Viz::Hist: {
+            // The Dist extractors already produce one Metric per bucket
+            // with the range as its label — the vertical form is the same
+            // data turned ninety degrees, so it reuses them rather than
+            // needing a second extractor per histogram.
+            maya::StatHistogram hist;
+            double peak = 0;
+            for (const auto& mt : scratch) {
+                // The label is a RANGE ("64ms–128ms"); the axis wants a
+                // tick, so take the lower bound. A full range under every
+                // third column is unreadable at any width.
+                std::string tick = mt.label;
+                if (const auto dash = tick.find("\xe2\x80\x93");
+                    dash != std::string::npos)
+                    tick = tick.substr(0, dash);
+                hist.buckets.push_back({std::move(tick), mt.value});
+                if (mt.value > peak) peak = mt.value;
+            }
+            if (hist.buckets.empty()) break;
+            hist.rows       = 5;
+            hist.hue        = accent;
+            hist.col_width  = 4;
+            hist.peak_label = stats::format(stats::Unit::Count, peak);
+            sheet.histogram(std::move(hist));
+            break;
+        }
 
         case stats::Viz::Band:
             for (const auto& mt : scratch) {

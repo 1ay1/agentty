@@ -66,6 +66,13 @@ enum class Viz : std::uint8_t {
     // completely different — which is invisible in "p50 / p95" and obvious
     // the moment the buckets are drawn.
     Dist,
+    // The same distribution as a VERTICAL histogram: one column per
+    // bucket instead of one row. Dist is exact and scrolls forever, which
+    // is right when the bucket labels are worth reading; Hist is a single
+    // shape the eye takes in at once, which is right when the question is
+    // "what does this distribution look like" rather than "how many
+    // landed in 64-128ms".
+    Hist,
 };
 
 struct Section {

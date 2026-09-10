@@ -281,10 +281,16 @@ void tools_latency(const Facts& f, std::vector<Metric>& out) {
     kv(out, "Total",   Unit::Millis, static_cast<double>(h.sum()));
 }
 
-// One row per occupied bucket of a latency histogram. The bucket's RANGE
-// is the label, its count the value — so the reader sees where the calls
+// One row per occupied bucket of a histogram. The bucket's RANGE is the
+// label, its count the value — so the reader sees where the samples
 // actually landed instead of two quantiles standing in for a shape.
-void dist_rows(const Hist& h, std::vector<Metric>& out) {
+//
+// Takes the unit because a histogram is unit-agnostic: the same log2
+// buckets hold milliseconds, bytes or tokens, and only the caller knows
+// which. Hard-coding Millis here is how a byte spread ends up labelled
+// "16ms–32ms".
+void dist_rows(const Hist& h, std::vector<Metric>& out,
+               Unit u = Unit::Millis) {
     if (!h.count()) return;
     const auto [lo, hi] = h.occupied();
     if (hi < lo) return;
@@ -298,11 +304,10 @@ void dist_rows(const Hist& h, std::vector<Metric>& out) {
         // Empty buckets INSIDE the occupied range are kept: a gap is a
         // real feature of a bimodal distribution (fast local calls, slow
         // network ones) and closing it up hides exactly that.
-        const auto floor_ms = Hist::bucket_floor(b);
-        const auto ceil_ms  = Hist::bucket_floor(b + 1);
+        const auto floor_v = Hist::bucket_floor(b);
+        const auto ceil_v  = Hist::bucket_floor(b + 1);
         out.push_back(Metric{
-            .label  = format(Unit::Millis, floor_ms) + "\xe2\x80\x93"
-                    + format(Unit::Millis, ceil_ms),
+            .label  = format(u, floor_v) + "\xe2\x80\x93" + format(u, ceil_v),
             .unit   = Unit::Count,
             .value  = n,
             .of     = peak,
@@ -318,7 +323,33 @@ void stream_ttft_dist(const Facts& f, std::vector<Metric>& out) {
     dist_rows(f.stream.ttft, out);
 }
 
+// How big each turn's frame payload was. Bytes and TOKENS answer
+// different questions and only one of them is billed — a spread that is
+// tight says the provider frames consistently, a bimodal one says short
+// acknowledgements and long generations are arriving through the same
+// path, which is what a stalled-looking stream usually turns out to be.
+void stream_bytes_dist(const Facts& f, std::vector<Metric>& out) {
+    dist_rows(f.stream.bytes, out, Unit::Bytes);
+}
+
 // ── Reasoning ────────────────────────────────────────────────────────────
+
+// The verdict. "Is extended thinking earning its keep" is a question
+// about SHARE: what fraction of the output went to reasoning tokens the
+// user never reads. Under ~10% effort is barely engaging; over ~50% the
+// model is spending most of its budget deliberating.
+void reasoning_hero(const Facts& f, std::vector<Metric>& out) {
+    if (!f.reasoning.turns) return;
+    const double share = f.tokens.output
+        ? static_cast<double>(f.reasoning.tokens)
+            / static_cast<double>(f.tokens.output)
+        : 0.0;
+    out.push_back(Metric{
+        .label  = format(Unit::Ratio, share),
+        .unit   = Unit::Ratio,
+        .value  = share,
+        .detail = "of generated tokens were reasoning"});
+}
 
 void reasoning_rows(const Facts& f, std::vector<Metric>& out) {
     kv(out, "Turns that thought", Unit::Count,
@@ -328,16 +359,67 @@ void reasoning_rows(const Facts& f, std::vector<Metric>& out) {
                 ? static_cast<double>(f.reasoning.turns)
                     / static_cast<double>(f.session.assistant_turns)
                 : 0.0));
-    if (f.reasoning.ms)
-        kv(out, "Time thinking", Unit::Millis,
-           static_cast<double>(f.reasoning.ms));
-    if (f.reasoning.tokens)
-        kv(out, "Reasoning tokens", Unit::Tokens,
-           static_cast<double>(f.reasoning.tokens));
-    if (f.reasoning.turns && f.reasoning.ms)
-        kv(out, "Average per turn", Unit::Millis,
-           static_cast<double>(f.reasoning.ms)
-             / static_cast<double>(f.reasoning.turns));
+    // The split that says what the thinking was FOR. Deliberating and
+    // then calling a tool is reasoning about what to do; deliberating and
+    // only answering is reasoning instead of doing. Neither is wrong, but
+    // the ratio is the difference between effort buying decisions and
+    // effort buying prose.
+    if (f.reasoning.turns) {
+        kv(out, "…then acted", Unit::Count,
+           static_cast<double>(f.reasoning.thought_then_acted),
+           format(Unit::Ratio,
+                  static_cast<double>(f.reasoning.thought_then_acted)
+                    / static_cast<double>(f.reasoning.turns)));
+        kv(out, "…then answered", Unit::Count,
+           static_cast<double>(f.reasoning.turns
+                             - f.reasoning.thought_then_acted));
+    }
+    if (f.reasoning.blocks)
+        kv(out, "Thinking blocks", Unit::Count,
+           static_cast<double>(f.reasoning.blocks),
+           f.reasoning.turns
+             ? format(Unit::Count,
+                      static_cast<double>(f.reasoning.blocks)
+                        / static_cast<double>(f.reasoning.turns)) + " per turn"
+             : "");
+}
+
+void reasoning_time(const Facts& f, std::vector<Metric>& out) {
+    if (!f.reasoning.ms) return;
+    kv(out, "Total",   Unit::Millis, static_cast<double>(f.reasoning.ms));
+    kv(out, "Average", Unit::Millis, f.reasoning.per_turn_ms.mean());
+    kv(out, "Median",  Unit::Millis, f.reasoning.per_turn_ms.quantile(0.5));
+    kv(out, "Longest", Unit::Millis,
+       static_cast<double>(f.reasoning.longest_ms));
+}
+
+void reasoning_tokens(const Facts& f, std::vector<Metric>& out) {
+    if (!f.reasoning.tokens) return;
+    kv(out, "Reasoning tokens", Unit::Tokens,
+       static_cast<double>(f.reasoning.tokens));
+    if (f.reasoning.per_turn_tokens.count()) {
+        kv(out, "Average per turn", Unit::Tokens,
+           f.reasoning.per_turn_tokens.mean());
+        kv(out, "Deepest turn", Unit::Tokens,
+           static_cast<double>(f.reasoning.per_turn_tokens.max()));
+    }
+}
+
+// Effort is supposed to ADAPT: hard turns think longer, easy ones barely
+// at all. A flat line here means it is not adapting, which is the one
+// finding that would send a user to the Smart Mode settings.
+void reasoning_trend(const Facts& f, std::vector<Metric>& out) {
+    if (f.reasoning.ms_series.size() < 2) return;
+    out.push_back(Metric{.label  = "thinking time per turn",
+                         .unit   = Unit::Millis,
+                         .series = f.reasoning.ms_series});
+}
+
+// Where the thinking time actually landed. An average of 2.4s could be
+// two turns at 2.4s or one at 200ms and one at 4.6s, and only the second
+// shape says the effort setting is doing anything.
+void reasoning_dist(const Facts& f, std::vector<Metric>& out) {
+    dist_rows(f.reasoning.per_turn_ms, out);
 }
 
 // ── Stream ──────────────────────────────────────────────────────────────
@@ -485,19 +567,25 @@ const std::array<Section, 4> tools{{
     {"",             Viz::Band, &tools_status},
     {"By tool",      Viz::Bars, &tools_by_name},
     {"Latency",      Viz::Kv,   &tools_latency},
-    {"Distribution", Viz::Dist, &tools_latency_dist},
+    {"Distribution", Viz::Hist, &tools_latency_dist},
 }};
 
-const std::array<Section, 1> reasoning{{
-    {"", Viz::Kv, &reasoning_rows},
+const std::array<Section, 6> reasoning{{
+    {"",             Viz::Hero,  &reasoning_hero},
+    {"Turns",        Viz::Kv,    &reasoning_rows},
+    {"Time",         Viz::Kv,    &reasoning_time},
+    {"Tokens",       Viz::Kv,    &reasoning_tokens},
+    {"Trend",        Viz::Plot,  &reasoning_trend},
+    {"Spread",       Viz::Hist,  &reasoning_dist},
 }};
 
-const std::array<Section, 5> stream{{
-    {"Health",           Viz::Kv,    &stream_health},
-    {"Rates",            Viz::Spark, &stream_rates},
-    {"Timing",           Viz::Kv,    &stream_timing},
-    {"Throughput",       Viz::Kv,    &stream_throughput},
-    {"First byte spread", Viz::Dist, &stream_ttft_dist},
+const std::array<Section, 6> stream{{
+    {"Health",            Viz::Kv,    &stream_health},
+    {"Rates",             Viz::Spark, &stream_rates},
+    {"Timing",            Viz::Kv,    &stream_timing},
+    {"Throughput",        Viz::Kv,    &stream_throughput},
+    {"First byte spread", Viz::Hist,  &stream_ttft_dist},
+    {"Frame size spread", Viz::Hist,  &stream_bytes_dist},
 }};
 
 const std::array<Section, 2> context{{

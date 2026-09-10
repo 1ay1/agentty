@@ -237,6 +237,22 @@ struct Facts {
         std::uint64_t ms     = 0;
         std::uint64_t tokens = 0;
         std::size_t   blocks = 0;
+        // How LONG each thinking turn thought, and how many tokens it
+        // spent. Two turns averaging 2.4s might both have thought for
+        // 2.4s, or one for 200ms and one for 4.6s — and only the second
+        // shape tells you the effort setting is doing anything.
+        Hist          per_turn_ms;
+        Hist          per_turn_tokens;
+        // Turns that thought and then produced NO tool call — pure
+        // deliberation. Against turns that thought and then acted, this
+        // is the split between "reasoning about what to do" and
+        // "reasoning instead of doing".
+        std::size_t   thought_then_acted = 0;
+        std::size_t   longest_ms = 0;
+        // Per-turn thinking time, for the trend. Effort ramps up on hard
+        // turns and down on easy ones; a flat line means it is not
+        // adapting at all.
+        std::vector<double> ms_series;
     } reasoning;
 
     struct StreamF {
@@ -247,6 +263,11 @@ struct Facts {
         std::uint64_t wire_bytes      = 0;
         Hist          ttft;
         Hist          stream_ms;
+        // Frame payload per turn. Bytes and TOKENS answer different
+        // questions and only one of them is billed: a turn that streamed
+        // 40 KB in 200 frames and one that streamed 40 KB in 4000 have
+        // the same token count and very different transport behaviour.
+        Hist          bytes;
         // Per-turn series, for the inline trends. A mean answers "how
         // fast on average"; a sparkline answers "is it getting worse",
         // which is the question someone opens this tab with.

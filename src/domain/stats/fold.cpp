@@ -72,13 +72,26 @@ void Facts::fold(const Message& msg) {
         ++smart.unrouted;
     }
 
-    // ── Reasoning ───────────────────────────────────────────────────────
+    // ── Reasoning ─────────────────────────────────────────────
     if (msg.reasoning_ms > 0 || !msg.thinking_blocks.empty()
         || !msg.thinking.empty()) {
         ++reasoning.turns;
-        if (msg.reasoning_ms > 0)
-            reasoning.ms += static_cast<std::uint64_t>(msg.reasoning_ms);
+        if (msg.reasoning_ms > 0) {
+            const auto ms = static_cast<std::uint64_t>(msg.reasoning_ms);
+            reasoning.ms += ms;
+            reasoning.per_turn_ms.add(static_cast<std::uint32_t>(
+                ms > 0xFFFFFFFFull ? 0xFFFFFFFFull : ms));
+            push_capped(reasoning.ms_series, static_cast<double>(ms));
+            if (ms > reasoning.longest_ms)
+                reasoning.longest_ms = static_cast<std::size_t>(ms);
+        }
         reasoning.blocks += msg.thinking_blocks.size();
+        // Did the thinking lead to an ACTION? A turn that deliberated and
+        // then called a tool used its reasoning to decide what to do; one
+        // that deliberated and only answered reasoned instead of acting.
+        // Neither is wrong, but the ratio is what says whether effort is
+        // buying decisions or prose.
+        if (!msg.tool_calls.empty()) ++reasoning.thought_then_acted;
     }
 
     // ── Tools ───────────────────────────────────────────────────────────
@@ -126,6 +139,7 @@ void Facts::fold(const Message& msg) {
     tokens.cache_read     += t.cache_read;
     tokens.cache_creation += t.cache_creation;
     reasoning.tokens      += t.reasoning_tokens;
+    if (t.reasoning_tokens) reasoning.per_turn_tokens.add(t.reasoning_tokens);
     if (t.output_tokens) {
         tokens.per_turn_output.add(t.output_tokens);
         push_capped(tokens.output_series, static_cast<double>(t.output_tokens));
@@ -155,6 +169,7 @@ void Facts::fold(const Message& msg) {
     stream.wire_bytes += t.wire_bytes;
     if (t.ttft_ms)   stream.ttft.add(t.ttft_ms);
     if (t.stream_ms) stream.stream_ms.add(t.stream_ms);
+    if (t.wire_bytes) stream.bytes.add(t.wire_bytes);
     if (t.ttft_ms)   push_capped(stream.ttft_series,
                                  static_cast<double>(t.ttft_ms));
     // Output tokens per second of GENERATION time, not of wall time:
@@ -206,6 +221,12 @@ void Facts::merge(const Facts& o) {
     reasoning.ms     += o.reasoning.ms;
     reasoning.tokens += o.reasoning.tokens;
     reasoning.blocks += o.reasoning.blocks;
+    reasoning.thought_then_acted += o.reasoning.thought_then_acted;
+    if (o.reasoning.longest_ms > reasoning.longest_ms)
+        reasoning.longest_ms = o.reasoning.longest_ms;
+    reasoning.per_turn_ms.merge(o.reasoning.per_turn_ms);
+    reasoning.per_turn_tokens.merge(o.reasoning.per_turn_tokens);
+    for (double x : o.reasoning.ms_series) push_capped(reasoning.ms_series, x);
 
     stream.degraded_turns += o.stream.degraded_turns;
     stream.transient      += o.stream.transient;
@@ -214,6 +235,7 @@ void Facts::merge(const Facts& o) {
     stream.wire_bytes     += o.stream.wire_bytes;
     stream.ttft.merge(o.stream.ttft);
     stream.stream_ms.merge(o.stream.stream_ms);
+    stream.bytes.merge(o.stream.bytes);
     for (double x : o.stream.ttft_series) push_capped(stream.ttft_series, x);
     for (double x : o.stream.rate_series) push_capped(stream.rate_series, x);
 
