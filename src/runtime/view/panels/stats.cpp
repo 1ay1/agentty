@@ -16,6 +16,8 @@
 
 #include "panels_prologue.hpp"
 
+#include <cmath>
+
 #include <maya/widget/stat_sheet.hpp>
 #include <maya/widget/tab_strip.hpp>
 
@@ -200,7 +202,33 @@ void emit_section(const stats::Section& sec, const stats::Facts& f,
             hist.rows       = 5;
             hist.hue        = accent;
             hist.col_width  = 4;
-            hist.peak_label = stats::format(stats::Unit::Count, peak);
+            // A tick per row, top-down: the value a bar reaching that row
+            // represents. One peak label at the top gives you the ceiling
+            // and nothing else, so reading any other bar means estimating
+            // its fraction of a number at the far end of the figure.
+            //
+            // Rounded to whole counts and de-duplicated: on a histogram
+            // whose peak is 3, five rows would otherwise print "3 2 2 1 1"
+            // and the repeats read as a rendering fault rather than as
+            // rounding. A blank row is an honest "no new tick here".
+            //
+            // A tick labels its row's TOP edge, so the bottom row's edge
+            // can round to zero — and printing "0" there claims the row
+            // IS the zero line when the baseline rule below it is. Left
+            // blank instead: the axis already says where zero is.
+            hist.y_labels.reserve(static_cast<std::size_t>(hist.rows));
+            std::string prev;
+            for (int r = 0; r < hist.rows; ++r) {
+                const double at = peak * static_cast<double>(hist.rows - r)
+                                       / static_cast<double>(hist.rows);
+                const double whole = std::floor(at + 0.5);
+                std::string lb = whole >= 1.0
+                    ? stats::format(stats::Unit::Count, whole)
+                    : std::string{};
+                if (lb == prev) lb.clear();
+                else if (!lb.empty()) prev = lb;
+                hist.y_labels.push_back(std::move(lb));
+            }
             sheet.histogram(std::move(hist));
             break;
         }
