@@ -373,18 +373,22 @@ Element stats_panel(const Model& m) {
     // the viewport is a layout that shifts under the reader for no reason
     // they can see.
     sheet.reserve_right(7);
-    // Flow into columns once the surface can afford them. 46 columns is
-    // what a stat row needs to stay READABLE — label, a full-width track
-    // and a right-aligned value with its note — not the narrowest it can
-    // be squeezed to. At 34 an 80-column terminal split into two columns
-    // that each truncated their labels, which is worse than scrolling.
-    // Capped at 2: a third column on a very wide terminal makes the eye
-    // travel further than scrolling would have.
+    // Flow into columns once the surface can afford them — "afford"
+    // being the sheet's judgement, not this panel's. It used to be a
+    // number here (46 columns, eyeballed as label + track + value), and a
+    // caller-side guess at a widget's internal geometry is a guess that
+    // goes stale: it omitted the gaps and the detail note, so real need
+    // was ~62, and every width in 120..128 bought a second column the
+    // sheet then had to draw with no chart in it. Widening the terminal
+    // DELETED the bars.
     //
-    // The alternative was a fixed breakpoint. A minimum WIDTH is the
-    // honest spelling: it says what a column needs rather than guessing
-    // which terminal sizes exist.
-    sheet.columns(46, 2);
+    // Now the sheet searches the column count itself and only takes a
+    // split whose every slice still fits with its track and labels
+    // intact, so the count is monotonic in width by construction. What is
+    // left here is the one thing this panel legitimately knows: the CAP.
+    // Two, because a third column on a very wide terminal makes the eye
+    // travel further than scrolling would have.
+    sheet.columns(2);
     sheet.theme.label   = fg;
     sheet.theme.value   = fg;
     sheet.theme.detail  = muted;
