@@ -176,14 +176,18 @@ Element diff_review(const Model& m) {
         // Editor, not Dot: every tab already carries a status dot of its own
         // (pending / rejected / accepted), so Dot's leading ◆ selection
         // glyph put two dots on the same tab and the eye could not tell
-        // which one meant "current". Editor marks the live file by colour
-        // — bold in the accent against dim neighbours — and separates the
-        // files with │, leaving the per-file dot to mean status alone.
+        // which one meant "current". Editor separates the files with │ and
+        // marks the live one with a FILLED CHIP in the accent, leaving the
+        // per-file dot to mean status alone. A fill rather than weight
+        // because the neighbours here are real filenames the user still
+        // has to read — dimming them to make one look bright makes the
+        // rest look disabled, when they are simply not the current file.
         // Both marks are single-row, so the pane's line budget is unchanged.
         rail.marker(TabMark::Editor);
-        rail.theme.active = fg;
-        rail.theme.idle   = muted;
-        rail.theme.accent = accent;
+        rail.theme.active_bg = accent;
+        rail.theme.active    = maya::Color::black();
+        rail.theme.idle      = fg;
+        rail.theme.accent    = accent;
         for (const auto& f : m.d.pending_changes) {
             bool anyrej = false, anypend = false;
             for (const auto& hk : f.hunks) {

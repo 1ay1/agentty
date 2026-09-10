@@ -227,16 +227,20 @@ Element stats_panel(const Model& m) {
     // views of one underlying thing: each tab is a different statistic with
     // its own subtitle. That is the same relationship an open-file strip
     // has, so it gets the same treatment — " │ " dividers carrying the
-    // structure and the live tab bold in the accent, no underline rule.
-    // The panel is an overlay wide enough to afford the wider separators.
+    // structure and no underline rule.
+    //
+    // Filled, because today kTabCount == 1. A mark that works by CONTRAST
+    // (bold accent against dim neighbours) says nothing when there are no
+    // neighbours, and an underline under a lone tab reads as a stray rule
+    // rather than as a selection. A chip states "this is the live view"
+    // on its own, and keeps meaning the same thing once a second tab
+    // arrives. The panel is an overlay wide enough to afford both.
     cfg.tabs.reserve(static_cast<std::size_t>(stats::kTabCount));
     for (int i = 0; i < stats::kTabCount; ++i)
         cfg.tabs.emplace_back(stats::tab_title(static_cast<stats::Tab>(i)));
     cfg.tab_active = static_cast<int>(o->tab);
-    // Underline: these are VIEWS OF ONE THING (this session), not peers you
-    // switch between. Editor mode's │ dividers would claim the opposite,
-    // and its single row leaves the active tab marked by colour alone —
-    // which says nothing at all while there is only one tab.
+    cfg.tab_mark   = maya::TabMark::Editor;
+    cfg.tab_fill   = true;
 
     // Tab dispatch. A switch on the enum rather than a table of function
     // pointers: -Wswitch then names a new tab that forgot its body, which is
