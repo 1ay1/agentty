@@ -173,7 +173,14 @@ Element diff_review(const Model& m) {
     // wrong amount and push the current file off the edge.
     {
         TabStrip rail;
-        rail.marker(TabMark::Dot);
+        // Editor, not Dot: every tab already carries a status dot of its own
+        // (pending / rejected / accepted), so Dot's leading ◆ selection
+        // glyph put two dots on the same tab and the eye could not tell
+        // which one meant "current". Editor marks the live file by colour
+        // — bold in the accent against dim neighbours — and separates the
+        // files with │, leaving the per-file dot to mean status alone.
+        // Both marks are single-row, so the pane's line budget is unchanged.
+        rail.marker(TabMark::Editor);
         rail.theme.active = fg;
         rail.theme.idle   = muted;
         rail.theme.accent = accent;

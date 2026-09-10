@@ -25,6 +25,7 @@
 #include "panels_common.hpp"
 
 #include <maya/widget/panel.hpp>
+#include <maya/widget/tab_strip.hpp>   // TabMark, for cfg.tab_mark
 
 #include <algorithm>
 #include <string>
@@ -221,10 +222,21 @@ Element stats_panel(const Model& m) {
     // so every tabbed panel looks the same by construction. This host only
     // says which tabs exist and which one is live — both read straight off
     // the stats::Tab enumeration, which is their SSOT.
+    //
+    // Editor marking because these tabs are PEERS you switch between, not
+    // views of one underlying thing: each tab is a different statistic with
+    // its own subtitle. That is the same relationship an open-file strip
+    // has, so it gets the same treatment — " │ " dividers carrying the
+    // structure and the live tab bold in the accent, no underline rule.
+    // The panel is an overlay wide enough to afford the wider separators.
     cfg.tabs.reserve(static_cast<std::size_t>(stats::kTabCount));
     for (int i = 0; i < stats::kTabCount; ++i)
         cfg.tabs.emplace_back(stats::tab_title(static_cast<stats::Tab>(i)));
     cfg.tab_active = static_cast<int>(o->tab);
+    // Underline: these are VIEWS OF ONE THING (this session), not peers you
+    // switch between. Editor mode's │ dividers would claim the opposite,
+    // and its single row leaves the active tab marked by colour alone —
+    // which says nothing at all while there is only one tab.
 
     // Tab dispatch. A switch on the enum rather than a table of function
     // pointers: -Wswitch then names a new tab that forgot its body, which is
