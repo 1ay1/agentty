@@ -359,20 +359,17 @@ Element stats_panel(const Model& m) {
     // and a stack of unrelated tables.
     StatSheet sheet;
     sheet.indent(1);
-    // The panel wraps the sheet in its own chrome and hands it the OUTER
-    // width: a border column plus 3 columns of inner pad on the left, and
-    // 2 pad + 1 border on the right, with the scrollbar riding inside that
-    // right pad. The sheet can see none of it, so its full-width forms
-    // (bands, plots) run past the right border — measured at three widths,
-    // a band ran the full 76 columns of a 76-column panel, and a plot's
-    // peak label lost its last character to the clip.
+    // No reserve. maya::Panel subtracts its own chrome -- border, padding
+    // and the scrollbar gutter -- before the body is laid out, so the width
+    // the sheet is handed is a width it may actually paint in.
     //
-    // 7 = the 4 columns of left chrome the sheet's own indent(1) does not
-    // cover, plus the 3 on the right. Reserved unconditionally rather than
-    // only when scrolling: a band whose width changes as content grows past
-    // the viewport is a layout that shifts under the reader for no reason
-    // they can see.
-    sheet.reserve_right(7);
+    // This used to be `sheet.reserve_right(7)`: a hand-counted constant
+    // describing the CONTAINER's internals, living in the CONTENT. It was
+    // derived by measuring at three widths, and it was circular by
+    // construction -- the scrollbar appeared only when content exceeded the
+    // viewport, so the correct reserve was 6 or 7 depending on a condition
+    // that itself depended on the width the reserve decided. That is why it
+    // was right at 76 and wrong at 68.
     // Flow into columns once the surface can afford them. 46 columns is
     // what a stat row needs to stay READABLE — label, a full-width track
     // and a right-aligned value with its note — not the narrowest it can

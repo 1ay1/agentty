@@ -21,16 +21,21 @@
 // the scrollbar is conditional on content > vh, and vh depends on the width
 // the reserve determines.
 //
-// WHY A PROBE AND NOT A TEST
-// ==========================
-// This prints a table for a human. Making it a pass/fail assertion NOW
-// would pin whatever the current behaviour happens to be -- including the
-// overdraw. The sequence is: measure, fix Panel so chrome is subtracted
-// before layout rather than clawed back after, THEN turn the measurement
-// into an assertion. Asserting first would just enshrine the bug.
+// THE FIX, AND WHY THIS IS NOW A TEST
+// ===================================
+// Panel subtracts its own chrome instead of asking callers to. It clamps
+// min_width to the terminal (a floor wider than the screen is an overflow,
+// not a floor), reserves the scrollbar gutter unconditionally (a body that
+// reflows when content crosses the viewport shifts under the reader, and
+// the conditional made correct compensation impossible), and truncates its
+// note row rather than trusting a caller-supplied hint to fit.
 //
-// Run:  cmake --build build --target panel_overflow_probe
-//       ./build/panel_overflow_probe
+// This started as a NO_TEST probe printing a table, because asserting the
+// numbers before the fix would have enshrined the overdraw. It measured
+// 30 broken panel/width combinations across 13 of 14 panels. It now
+// measures 0, so the measurement becomes the guarantee.
+
+#include "agtest.hpp"
 
 #include "agentty/runtime/app/deps.hpp"
 #include "agentty/runtime/model.hpp"
@@ -41,7 +46,7 @@
 #include <maya/render/renderer.hpp>
 #include <maya/style/theme.hpp>
 
-#include <cstdio>
+#include <cstdlib>
 #include <functional>
 #include <optional>
 #include <string>
@@ -172,6 +177,12 @@ int rightmost_ink(const Case& c, const Model& m, int w, int h) {
 // Counting the rows that lost their border is the same measurement taken
 // from the only side it is observable from.
 int rows_missing_border(const Case& c, const Model& m, int w, int h) {
+    // Panel clamps its own min_width to the terminal, and with no tty it
+    // reads COLUMNS. Tell it the width we are actually rendering at, or it
+    // clamps against a fallback and the probe measures the wrong geometry.
+    const std::string cols = std::to_string(w);
+    setenv("COLUMNS", cols.c_str(), /*overwrite=*/1);
+
     maya::StylePool pool;
     maya::Canvas canvas(w, h, &pool);
     maya::render_tree(c.build(m), canvas, pool, maya::theme::dark,
@@ -195,34 +206,21 @@ int rows_missing_border(const Case& c, const Model& m, int w, int h) {
 
 }  // namespace
 
-int main() {
+TEST_CASE("panel: no panel paints over its own frame, at any width") {
     install_stub_deps();
 
+    // From a phone-sized split pane to an ultrawide terminal. The narrow
+    // end is where every one of these broke.
     const int widths[] = {40, 50, 60, 68, 76, 90, 120, 160, 200};
     constexpr int kRows = 60;
 
-    std::printf("Rows whose LEFT edge is the panel border but whose RIGHT\n"
-                "edge is not. A Canvas clips, so content laid out too wide\n"
-                "cannot paint past the frame -- it overwrites the frame's own\n"
-                "border and stops. A missing border IS the overdraw, seen\n"
-                "from the only side it is observable from.\n\n");
-    std::printf("%-18s", "panel");
-    for (int w : widths) std::printf("%6d", w);
-    std::printf("\n");
-
-    int offenders = 0;
-    for (const auto& c : cases()) {
-        std::printf("%-18s", c.name);
+    for (const auto& c : cases())
         for (int w : widths) {
             Model m = with_history();
             c.open(m);
             const int broken = rows_missing_border(c, m, w, kRows);
-            if (broken > 0) { std::printf("%5d!", broken); ++offenders; }
-            else            std::printf("%6d", 0);
+            INFO("panel=", c.name, " width=", w,
+                 " rows_missing_right_border=", broken);
+            CHECK(broken == 0);
         }
-        std::printf("\n");
-    }
-    std::printf("\n%d panel/width combination(s) paint over their own"
-                " frame ('!' marks them).\n", offenders);
-    return 0;
 }
