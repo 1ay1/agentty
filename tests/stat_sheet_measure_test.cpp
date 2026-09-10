@@ -151,18 +151,63 @@ TEST_CASE("stat sheet: columns answer vertical pressure, not available width") {
         return s.build();
     };
 
-    // Height with no budget at all -- the sheet's natural single column.
-    const int natural = measure_element(make(0), 200).height.value;
+    // Height with splitting forbidden -- the sheet's true single column.
+    const int natural = measure_element([] {
+        StatSheet s;
+        s.indent(1);
+        s.reserve_right(7);
+        s.columns(1);
+        s.heading("Activity");
+        s.entry({.label = "You asked", .value = "8", .share = 0.8});
+        s.entry({.label = "Agent replied", .value = "8", .share = 0.8});
+        s.entry({.label = "Tool calls", .value = "10", .share = 1.0});
+        s.blank();
+        s.heading("Time");
+        s.entry({.label = "Waiting", .value = "6.0s", .share = 0.1});
+        s.entry({.label = "Generating", .value = "59s", .share = 1.0});
+        s.entry({.label = "Tools", .value = "8.2s", .share = 0.14});
+        s.blank();
+        s.heading("Rates");
+        s.entry({.label = "Hit rate", .value = "80%", .share = 0.8});
+        s.entry({.label = "Turns using cache", .value = "8", .share = 1.0});
+        return s.build();
+    }(), 200).height.value;
     REQUIRE(natural > 4);
 
     SUBCASE("a sheet that fits its viewport does not split, however wide") {
         // Generous budget: there is no vertical pressure, so no amount of
         // width should buy a second column. This is the case from the bug
         // report -- a short tab in two columns on a narrow phone pane.
+        //
+        // Compared against a sheet forbidden to split at all. "No budget"
+        // is NOT the right baseline: it means the host has no opinion
+        // about height, and the sheet then falls back to splitting on
+        // width like it always did.
+        auto single = [] {
+            StatSheet s;
+            s.indent(1);
+            s.reserve_right(7);
+            s.columns(1);
+            s.heading("Activity");
+            s.entry({.label = "You asked", .value = "8", .share = 0.8});
+            s.entry({.label = "Agent replied", .value = "8", .share = 0.8});
+            s.entry({.label = "Tool calls", .value = "10", .share = 1.0});
+            s.blank();
+            s.heading("Time");
+            s.entry({.label = "Waiting", .value = "6.0s", .share = 0.1});
+            s.entry({.label = "Generating", .value = "59s", .share = 1.0});
+            s.entry({.label = "Tools", .value = "8.2s", .share = 0.14});
+            s.blank();
+            s.heading("Rates");
+            s.entry({.label = "Hit rate", .value = "80%", .share = 0.8});
+            s.entry({.label = "Turns using cache", .value = "8", .share = 1.0});
+            return s.build();
+        };
+
         for (int w = 60; w <= 300; w += 10) {
             INFO("width=", w);
             CHECK(measure_element(make(natural + 10), w).height.value
-                  == measure_element(make(0), w).height.value);
+                  == measure_element(single(), w).height.value);
         }
     }
 
