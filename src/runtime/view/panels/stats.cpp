@@ -303,16 +303,18 @@ Element stats_panel(const Model& m) {
     // the viewport is a layout that shifts under the reader for no reason
     // they can see.
     sheet.reserve_right(7);
-    // Flow into columns once the surface can afford them. 34 columns is the
-    // narrowest a stat row stays readable at — label, a shrunken track and
-    // a right-aligned value — so a 76-column panel stays single-column and
-    // a 110+ one splits. Capped at 2: a third column on a very wide
-    // terminal makes the eye travel further than scrolling would have.
+    // Flow into columns once the surface can afford them. 46 columns is
+    // what a stat row needs to stay READABLE — label, a full-width track
+    // and a right-aligned value with its note — not the narrowest it can
+    // be squeezed to. At 34 an 80-column terminal split into two columns
+    // that each truncated their labels, which is worse than scrolling.
+    // Capped at 2: a third column on a very wide terminal makes the eye
+    // travel further than scrolling would have.
     //
     // The alternative was a fixed breakpoint. A minimum WIDTH is the
     // honest spelling: it says what a column needs rather than guessing
     // which terminal sizes exist.
-    sheet.columns(34, 2);
+    sheet.columns(46, 2);
     sheet.theme.label   = fg;
     sheet.theme.value   = fg;
     sheet.theme.detail  = muted;
@@ -332,10 +334,18 @@ Element stats_panel(const Model& m) {
     // done to is a promise the panel cannot keep.
     cfg.selected   = -1;
     cfg.scroll     = &m.ui.stats_scroll;
-    // Body height. `viewport_h` is the panel's, and the plot rows have to
-    // fit inside it alongside everything else — a five-row figure at the
-    // bottom of a full tab is a figure the user only ever sees the top of.
-    cfg.viewport_h = panel_detail::panel_viewport_h();
+    // Body height. panel_viewport_h() is clamped to kViewportH (14) — the
+    // right ceiling for a PICKER, whose rows are interchangeable and where
+    // 14 of them is plenty to choose from. This panel is a document: its
+    // sections are not alternatives, and capping it at 14 dropped whole
+    // figures below the fold on an 80-row terminal that had room for all
+    // of them.
+    //
+    // So it takes what the terminal actually offers, with the same chrome
+    // reserve the shared helper uses. Content past that still scrolls.
+    cfg.viewport_h = std::max(panel_detail::panel_viewport_h(),
+                              panel_detail::panel_terminal_rows()
+                                  - panel_detail::kPickerChromeRows - 1);
 
     cfg.note = visible.size() > 1 ? "tab  switch view   \xe2\x86\x91\xe2\x86\x93  scroll   esc  close"
                                   : "\xe2\x86\x91\xe2\x86\x93  scroll   esc  close";

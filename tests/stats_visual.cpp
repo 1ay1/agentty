@@ -173,11 +173,28 @@ Model realistic_thread() {
 }
 
 // Render one panel and print it with real SGR.
-void dump(const Model& m, int w) {
+void dump(const Model& m, int w, int scroll) {
     maya::StylePool pool;
     maya::Canvas canvas(w, 60, &pool);
+    // TWICE, with the offset re-applied in between. maya's ScrollState
+    // clamps y against max_y, and max_y is only written back AFTER a
+    // layout pass — so on a cold state the first render clamps y to 0 and
+    // the offset is silently lost. The real app never notices (frame 2
+    // has the measurement from frame 1), but a one-shot dump has to run
+    // the pass, restore what it asked for, and then paint.
     maya::render_tree(ui::stats_panel(m), canvas, pool, maya::theme::dark,
                       /*auto_height=*/true);
+    m.ui.stats_scroll.y = scroll;
+    m.ui.stats_scroll.clamp();
+    maya::render_tree(ui::stats_panel(m), canvas, pool, maya::theme::dark,
+                      /*auto_height=*/true);
+    if (std::getenv("STATS_VISUAL_DEBUG")) {
+        const auto el = ui::stats_panel(m);
+        std::fprintf(stderr, "[scroll y=%d max_y=%d  measured(1<<14)=%d measured(w)=%d]\n",
+                     m.ui.stats_scroll.y, m.ui.stats_scroll.max_y,
+                     maya::measure_element(el, 1 << 14).height.value,
+                     maya::measure_element(el, w).height.value);
+    }
 
     int last = 0;
     for (int y = 0; y < 60; ++y)
@@ -248,7 +265,7 @@ int main(int argc, char** argv) {
         std::printf("\n\x1b[1m── %s ──\x1b[0m  %s\n\n",
                     std::string{stats::tab_title(t)}.c_str(),
                     std::string{stats::tab_subtitle(t)}.c_str());
-        dump(m, w);
+        dump(m, w, scroll);
     }
     std::printf("\n");
     return 0;
