@@ -160,6 +160,9 @@ agentty_test(checkpoint_test         MODE standalone TIMEOUT 60)
 # "this looks nice" asserts nothing. Build it explicitly:
 #   cmake --build build --target stats_visual && ./build/stats_visual
 agentty_test(stats_visual            MODE standalone NO_TEST)
+# NO_TEST too: it prints timings for a human. An assertion on microseconds
+# would be a flaky test of the machine it runs on, not of the code.
+agentty_test(stats_refresh_bench     MODE standalone NO_TEST)
 
 # ── Narrow-source sanitizer tests (raw: must NOT link the full shared set) ──
 # They exercise agentty's own logic and link cleanly under asan/ubsan without

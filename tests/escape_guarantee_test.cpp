@@ -76,6 +76,8 @@ const std::vector<Case>& cases() {
              smart_form::Inputs in;
              m.ui.panel = pn::SmartMode{{}, smart_form::build_form(in)};
          }},
+        {pn::Kind::Stats, "stats viewer",
+         [](Model& m) { m.ui.panel = pn::Stats{}; }},
         {pn::Kind::DiffReview, "diff review",
          [](Model& m) { m.ui.panel = pn::DiffReview{{}}; }},
     };
