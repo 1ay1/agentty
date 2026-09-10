@@ -51,7 +51,10 @@ void emit_section(const stats::Section& sec, const stats::Facts& f,
     if (scratch.empty()) return;   // a section with nothing to say draws nothing
 
     if (!sec.heading.empty()) {
-        sheet.blank();
+        // A blank SEPARATES sections; it does not precede the first one.
+        // Leading whitespace at the top of a panel reads as a rendering
+        // fault rather than as breathing room.
+        if (!sheet.empty()) sheet.blank();
         sheet.heading(std::string{sec.heading});
     }
 
@@ -101,7 +104,13 @@ void emit_section(const stats::Section& sec, const stats::Facts& f,
                 for (double v : mt.series) if (v > hi) hi = v;
                 sheet.plot({.caption    = mt.label,
                             .series     = mt.series,
-                            .rows       = 5,
+                            // 4 rows, not 5. The panel viewport is 14 rows
+                            // and a tab's tables already claim most of it;
+                            // a figure that pushes itself past the fold is
+                            // a figure nobody scrolls to. At 4 braille
+                            // rows the plot still carries 16 dot rows of
+                            // vertical resolution.
+                            .rows       = 4,
                             .hue        = accent,
                             .peak_label = stats::format(mt.unit, hi),
                             .base_label = "0"});
@@ -162,6 +171,20 @@ Element stats_panel(const Model& m) {
     // and a stack of unrelated tables.
     StatSheet sheet;
     sheet.indent(1);
+    // The panel wraps the sheet in its own chrome and hands it the OUTER
+    // width: a border column plus 3 columns of inner pad on the left, and
+    // 2 pad + 1 border on the right, with the scrollbar riding inside that
+    // right pad. The sheet can see none of it, so its full-width forms
+    // (bands, plots) run past the right border — measured at three widths,
+    // a band ran the full 76 columns of a 76-column panel, and a plot's
+    // peak label lost its last character to the clip.
+    //
+    // 7 = the 4 columns of left chrome the sheet's own indent(1) does not
+    // cover, plus the 3 on the right. Reserved unconditionally rather than
+    // only when scrolling: a band whose width changes as content grows past
+    // the viewport is a layout that shifts under the reader for no reason
+    // they can see.
+    sheet.reserve_right(7);
     sheet.theme.label   = fg;
     sheet.theme.value   = fg;
     sheet.theme.detail  = muted;
@@ -181,6 +204,9 @@ Element stats_panel(const Model& m) {
     // done to is a promise the panel cannot keep.
     cfg.selected   = -1;
     cfg.scroll     = &m.ui.stats_scroll;
+    // Body height. `viewport_h` is the panel's, and the plot rows have to
+    // fit inside it alongside everything else — a five-row figure at the
+    // bottom of a full tab is a figure the user only ever sees the top of.
     cfg.viewport_h = panel_detail::panel_viewport_h();
 
     cfg.note = visible.size() > 1 ? "tab  switch view   esc  close"

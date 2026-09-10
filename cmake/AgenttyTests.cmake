@@ -154,6 +154,12 @@ agentty_finalize_fold(
 agentty_test(agents_md_test          MODE standalone TIMEOUT 30)
 agentty_test(checkpoint_test         MODE standalone TIMEOUT 60)
 
+# stats_visual — dump every stats tab in real ANSI, for a human to LOOK at.
+# NO_TEST on purpose: its output is colour and layout, and a test asserting
+# "this looks nice" asserts nothing. Build it explicitly:
+#   cmake --build build --target stats_visual && ./build/stats_visual
+agentty_test(stats_visual            MODE standalone NO_TEST)
+
 # ── Narrow-source sanitizer tests (raw: must NOT link the full shared set) ──
 # They exercise agentty's own logic and link cleanly under asan/ubsan without
 # pulling maya's un-instrumented renderer. Registered raw + marked sanitizer.
