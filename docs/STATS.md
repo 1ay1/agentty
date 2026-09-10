@@ -206,7 +206,86 @@ argument for splitting them is not real either.
 
 ---
 
-## 6. Layer 4 — the tab table (the SSOT)
+## 6. The widget — `maya::StatSheet`
+
+**Status: SHIPPED**, maya `38d6dbb`. This is what §5's `Metric`s are
+drawn by, and it is one widget rather than three renderers because what
+makes a stats tab legible is not the bar — it is that every row lines up
+with every other row.
+
+The library already had `BarChart`, `Sparkline` and `Gauge`, and none of
+them could draw a stats tab. A tab is a dozen *heterogeneous* rows that
+must align **with each other**, and that property cannot live in a row
+widget: a row cannot right-align its number against the other rows'
+numbers, because it does not know they exist. So the sheet owns the
+measurement — it scans every entry, derives one label column, one track,
+one value column and one detail column, and paints all rows against that
+geometry. Digits line up on their right edge, which is what lets you
+compare two numbers without reading them.
+
+```cpp
+StatSheet s;
+s.hero("62%", "of routed turns ran below the Strategic model");
+s.heading("By role");
+s.entry({.label = "Strategic", .value = "12", .detail = "38%", .share = 0.38});
+s.entry({.label = "Output",    .value = "1.2k/s", .spark = rate_history});
+s.entry({.label = "Context",   .value = "62%", .share = 0.62, .wide = true});
+```
+
+```
+ 62% of routed turns ran below the Strategic model
+
+ By role
+ Strategic          █████▍────────      12  38%
+ Implementation     ██████▏───────      14  44%
+ Utility            ██▌───────────       6  18%
+
+ Throughput
+ Output rate        ▂▄▃▇▃▆█▅▆▇▄█    1.2k/s
+ Context            ███████████████▎──────────     62%
+```
+
+**One entry type, not four.** `label` / `value` / `detail` / `share` /
+`spark` / `wide`, where what is absent simply does not draw. A key-value
+row, a ranked bar, a trend strip and a full-width meter are one struct
+and one renderer instead of four of each. Bars and sparklines occupy the
+**same columns**, so a tab may mix them and still align.
+
+A `Section`'s `Viz` therefore maps onto sheet calls rather than onto
+separate widgets — `Bars` sets `share`, `Spark` sets `spark`, `Kv` sets
+neither. `extract` fills `Metric`s; the panel formats each through
+`format(Unit,…)` into a `StatEntry`. The view still has no per-tab
+branches.
+
+Two rendering rules that are corrections rather than decisions:
+
+- **A non-zero share never floors to an empty bar.** "Almost no work"
+  and "no work" are different readings; the eighth-block ramp keeps them
+  distinct, so a 1% share draws `▏`.
+- **The unfilled remainder is drawn** (`─`), because an empty tail makes
+  a short bar read as a *missing* bar rather than as a position on a
+  scale.
+
+**Degradation ladder.** Narrow surfaces shed in the order that loses
+least: `detail` first (redundant with the value), then the bar shrinks
+and only then vanishes (it is a comparison aid), and the label truncates
+rather than dropping. The value is never shed — a picture of a statistic
+with the statistic removed is not a fallback.
+
+**Units stay in the domain.** The sheet takes numbers pre-formatted; it
+never sees a token count or a duration, only `"12.4k"` and `"3.2s"`.
+Baking `format()` in would mean two owners of "how big is a kilotoken"
+and a widget enum growing every time a host learns a unit — which is
+exactly the `Unit` table in §5, one layer down where it belongs.
+
+Shipped alongside it: `unicode::truncate_to_width`, the column-safe cut
+every aligned layout needs and that `substr()` cannot do, since bytes
+are not columns and a sequence sliced in half renders as a replacement
+glyph — destroying the alignment the caller was truncating to preserve.
+
+---
+
+## 7. Layer 4 — the tab table (the SSOT)
 
 ```cpp
 enum class Viz : std::uint8_t { Kv, Bars, Spark };
@@ -245,7 +324,7 @@ Tab/Shift-Tab never lands on a dead view.
 
 ---
 
-## 7. The tabs
+## 8. The tabs
 
 Grouped by the *question the user is asking*, which is the only grouping
 that survives contact with a tenth statistic.
@@ -263,7 +342,7 @@ that survives contact with a tenth statistic.
 | **Context** | how close to the wall? | `est_prefix_tokens`, compactions |
 | **Retrieval** | is RAG helping? | `ProactiveContext` hits + confidence |
 
-### 7.1 Models and Smart are not the same tab
+### 8.1 Models and Smart are not the same tab
 
 They read the same two fields and answer different questions, and merging
 them loses information:
@@ -286,7 +365,7 @@ into one view.
 
 ---
 
-## 8. File layout
+## 9. File layout
 
 ```
 include/agentty/domain/stats/
@@ -311,7 +390,7 @@ number was counted. The existing single-file `domain/stats.hpp` +
 
 ---
 
-## 9. Cost model
+## 10. Cost model
 
 | event | cost |
 |---|---|
@@ -329,39 +408,50 @@ the way of speed" has to mean concretely.
 
 ---
 
-## 10. Rejected
+## 11. Rejected
 
-**10.1 An always-on `Metrics` accumulator updated from the stream.**
+**11.1 An always-on `Metrics` accumulator updated from the stream.**
 The obvious design, and it fails rule 1: every token pays for a
 statistic nobody is looking at, and the counters then need their own
 persistence, their own reset semantics on fork/rewind, and their own
 consistency story against the transcript. Deriving from the transcript
 means there is exactly one source of truth and it is already saved.
 
-**10.2 Keeping `smart_stats()` and adding nine siblings.** Ten walks, ten
+**11.2 Keeping `smart_stats()` and adding nine siblings.** Ten walks, ten
 caches, ten stamps. Rejected in §2.
 
-**10.3 A hash map for tallies.** Measured sizes are `< 20` models and
+**11.3 A hash map for tallies.** Measured sizes are `< 20` models and
 `< 40` tools. A map costs more per lookup at that size, and loses stable
 ordering — rows reshuffling frame to frame during a stream reads as a
 rendering fault.
 
-**10.4 Storing every tool-call duration for exact percentiles.** Unbounded
+**11.4 Storing every tool-call duration for exact percentiles.** Unbounded
 memory for a number nobody reads to three digits. A 96-byte log2
 histogram gives p50/p95 within a bucket, permanently.
 
-**10.5 Patching the fold in place after compaction.** Compaction rewrites
+**11.5 Patching the fold in place after compaction.** Compaction rewrites
 a prefix; reconciling that incrementally is the optimisation that
 produces numbers which are wrong *and* believed. A rare `O(n)` rebuild
 is correct and cheap.
 
-**10.6 A `Row` per tab.** One `Metric` + one `Unit` + one `format()` is
+**11.6 A `Row` per tab.** One `Metric` + one `Unit` + one `format()` is
 what stops the eleventh statistic arriving with its own spelling of
 `12.4k`.
 
+**11.7 A `StatRow` widget the host stacks itself.** The decomposition
+that looks right and cannot work: a row cannot align against rows it
+cannot see, so every host ends up measuring the columns and threading
+widths down — which is `StatSheet`, written once per host instead of
+once. See §6.
+
+**11.8 Reusing `BarChart` / `Sparkline` / `Gauge` directly.** Each draws
+its own chart against its own geometry, so a tab mixing them produces
+three unrelated column layouts stacked vertically. They remain right for
+what they are — a chart on its own — and wrong for a row in a sheet.
+
 ---
 
-## 11. Open questions
+## 12. Open questions
 
 - **Cost in USD.** `Unit::Usd` is in the vocabulary, but `catalog.hpp`
   carries no per-token pricing — only a coarse routing hint. Real dollar
@@ -373,7 +463,7 @@ what stops the eleventh statistic arriving with its own spelling of
 
 ---
 
-## 12. Build order
+## 13. Build order
 
 1. `Telemetry` on `Message` + the seal in `finalize_turn` (nothing reads
    it yet — it starts accumulating on real threads immediately).
