@@ -199,6 +199,28 @@ struct AgenttyApp {
         }
         if (m.ui.panel.is<pn::CodeBlockResult>())
             visual::mix_any(mix, m.ui.code_blocks_scroll);
+        //   • the stats viewer's scroll offset.
+        //
+        //     Same shape as the two above and the same reason: the offset
+        //     lives on Model::UI, outside the panel value the walk
+        //     covers, so StatsScroll produced a model this gate called
+        //     visually identical. skip_render fired and the new offset
+        //     only reached the screen when some UNRELATED hashed axis
+        //     flipped — the ~265 ms caret-blink parity, or the next
+        //     keystroke. That is the "press it four times, it moves once,
+        //     then catches up when I start typing" symptom, and it is why
+        //     Esc looked broken: the panel HAD closed, the screen just had
+        //     not been told.
+        //
+        //     Only on the tall tabs, because a tab that fits its viewport
+        //     clamps every scroll to the same y and genuinely is
+        //     unchanged — which is what made it look intermittent.
+        //
+        //     The TAB is not mixed here: stats_panel::Open::visual_parts
+        //     already covers it, so the slot walk above sees it. Mixing it
+        //     twice would be a second source of truth for the same fact.
+        if (m.ui.panel.is<pn::Stats>())
+            visual::mix_any(mix, m.ui.stats_scroll);
 
         // Login: its own variant outside the slot; same walk, same
         // guarantees (secret buffers digest length-only via parts lists).
