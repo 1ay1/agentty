@@ -77,6 +77,44 @@ TEST_CASE("stat sheet: reported height bounds painted height at every width") {
     }
 }
 
+TEST_CASE("stat sheet: reported width follows the surface it is given") {
+    // The measure() callback answers a question about HEIGHT. It must not
+    // smuggle a WIDTH decision into that answer.
+    //
+    // It used to probe several candidate widths to find the tallest layout
+    // and then return the probe width it had landed on, which told the
+    // layout engine the sheet's natural width was 40 columns. The engine
+    // duly sized it to 40 and left it there -- so on a 300-column terminal
+    // every bar was frozen at the same 16 cells with two thirds of the
+    // panel blank, and resizing changed nothing at all.
+    StatSheet s;
+    s.indent(1);
+    s.columns(2);
+    s.heading("By tool");
+    s.entry({.label = "read", .value = "3", .share = 1.0});
+    s.entry({.label = "edit", .value = "3", .share = 1.0});
+    s.entry({.label = "grep", .value = "2", .share = 0.66});
+    const auto el = s.build();
+
+    // Whatever width it is measured at, that is the width it reports.
+    for (int w = 40; w <= 300; w += 4) {
+        INFO("width=", w);
+        CHECK(measure_element(el, w).width.value == w);
+    }
+
+    // And the SENTINEL path is the one that actually broke. maya's Panel
+    // measures prebuilt content at 1<<14; the callback substitutes a small
+    // probe width internally to find the tallest layout, and it must not
+    // let that substitution escape into the reported width. Reporting the
+    // probe width here is exactly what pinned the sheet to 40 columns
+    // forever, so a width sweep that never reaches the sentinel -- like
+    // the loop above on its own -- sails straight past the bug.
+    for (int sentinel : {1 << 14, 1 << 20}) {
+        INFO("sentinel=", sentinel);
+        CHECK(measure_element(el, sentinel).width.value == sentinel);
+    }
+}
+
 TEST_CASE("stat sheet: a sheet that cannot split still reports its full height") {
     // The degenerate case the fix has to keep working: one section, so no
     // split is possible at any width and the reported height must simply
