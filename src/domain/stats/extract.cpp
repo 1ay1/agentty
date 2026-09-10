@@ -82,22 +82,27 @@ void session_where_time_went(const Facts& f, std::vector<Metric>& out) {
     m.unit   = Unit::Millis;
     m.value  = all;
     m.detail = format(Unit::Millis, all);
-    // Short legend labels: a donut's key sits beside the ring in whatever
-    // width is left, so a verbose label is a truncated one. The value is
-    // the useful half — "waiting 6.0s" survives where "waiting on the
-    // provider 6.0s" loses exactly the number.
+    // Same for the time ring: shares as percentages, durations below.
+    auto share = [&](double v) { return format(Unit::Ratio, v / all); };
     m.parts = {
-        {"wait " + format(Unit::Millis, ttft),  ttft,  kWarn},
-        {"gen "  + format(Unit::Millis, gen),   gen,   kAccent},
-        {"tools " + format(Unit::Millis, tools), tools, kGood},
+        {"wait "  + share(ttft),  ttft,  kWarn},
+        {"gen "   + share(gen),   gen,   kAccent},
+        {"tools " + share(tools), tools, kGood},
     };
     out.push_back(std::move(m));
 }
 
 void session_time(const Facts& f, std::vector<Metric>& out) {
     if (!f.session.measured_turns) return;
-    kv(out, "Time on the wire", Unit::Millis,
-       static_cast<double>(f.session.wall_ms));
+    // The absolute durations the ring above shows as shares. Kept as a
+    // separate section so the ring stays readable: a legend carrying both
+    // "48%" and "59s" is a legend nobody finishes reading.
+    if (f.stream.ttft.sum())
+        kv(out, "Waiting",    Unit::Millis, static_cast<double>(f.stream.ttft.sum()));
+    if (f.stream.stream_ms.sum())
+        kv(out, "Generating", Unit::Millis, static_cast<double>(f.stream.stream_ms.sum()));
+    if (f.tools.latency.sum())
+        kv(out, "Tools",      Unit::Millis, static_cast<double>(f.tools.latency.sum()));
     kv(out, "Average turn",     Unit::Millis,
        static_cast<double>(f.session.wall_ms)
          / static_cast<double>(f.session.measured_turns));
@@ -195,13 +200,17 @@ void cache_band(const Facts& f, std::vector<Metric>& out) {
     // a reader looking at a ring is already looking at the hole.
     m.detail = format(Unit::Ratio,
                       static_cast<double>(f.cache.hits) / total) + " hit";
+    // Percentages, not raw counts, in the legend. A ring already shows the
+    // proportions as ANGLES — restating them as token counts makes the
+    // reader do the division the chart just did for them. The absolute
+    // numbers live one section down, where they can be compared exactly.
+    auto pct = [&](std::uint64_t n) {
+        return format(Unit::Ratio, static_cast<double>(n) / total);
+    };
     m.parts = {
-        {"hit "   + format(Unit::Tokens, static_cast<double>(f.cache.hits)),
-         static_cast<double>(f.cache.hits),   kGood},
-        {"write " + format(Unit::Tokens, static_cast<double>(f.cache.writes)),
-         static_cast<double>(f.cache.writes), kWarn},
-        {"miss "  + format(Unit::Tokens, static_cast<double>(f.cache.misses)),
-         static_cast<double>(f.cache.misses), kBad},
+        {"hit "   + pct(f.cache.hits),   static_cast<double>(f.cache.hits),   kGood},
+        {"write " + pct(f.cache.writes), static_cast<double>(f.cache.writes), kWarn},
+        {"miss "  + pct(f.cache.misses), static_cast<double>(f.cache.misses), kBad},
     };
     out.push_back(std::move(m));
 }
@@ -222,11 +231,20 @@ void cache_rates(const Facts& f, std::vector<Metric>& out) {
         .series = f.cache.ratio_series});
     kv(out, "Turns using cache", Unit::Count,
        static_cast<double>(f.cache.turns_with_cache));
-    // The number this tab exists for: cache reads are ~10% the price of
-    // fresh input on every provider that offers them, so this is the
-    // single biggest lever on a long thread's cost.
-    kv(out, "Tokens served from cache", Unit::Tokens,
-       static_cast<double>(f.cache.hits));
+}
+
+// The absolute counts the ring shows as angles. Its own section because
+// the ring's legend carries percentages — a key holding both "80%" and
+// "93k" is one nobody finishes reading — and because these three share a
+// unit, so they get a common bar scale here and can be compared exactly.
+void cache_tokens(const Facts& f, std::vector<Metric>& out) {
+    if (f.cache.hits + f.cache.writes + f.cache.misses == 0) return;
+    // Cache reads are ~10% the price of fresh input on every provider that
+    // offers them, so this first row is the single biggest lever on a long
+    // thread's cost.
+    kv(out, "Served from cache", Unit::Tokens, static_cast<double>(f.cache.hits));
+    kv(out, "Written to cache",  Unit::Tokens, static_cast<double>(f.cache.writes));
+    kv(out, "Sent uncached",     Unit::Tokens, static_cast<double>(f.cache.misses));
 }
 
 // ── Tools ───────────────────────────────────────────────────────────────
@@ -457,9 +475,10 @@ const std::array<Section, 2> tokens{{
     {"Trend",  Viz::Plot, &tokens_plot},
 }};
 
-const std::array<Section, 2> cache{{
-    {"",      Viz::Donut, &cache_band},
-    {"Rates", Viz::Spark, &cache_rates},
+const std::array<Section, 3> cache{{
+    {"",       Viz::Donut, &cache_band},
+    {"Tokens", Viz::Kv,    &cache_tokens},
+    {"Rates",  Viz::Spark, &cache_rates},
 }};
 
 const std::array<Section, 4> tools{{

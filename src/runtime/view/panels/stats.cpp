@@ -194,13 +194,13 @@ void emit_section(const stats::Section& sec, const stats::Facts& f,
                 for (double v : mt.series) if (v > hi) hi = v;
                 sheet.plot({.caption    = mt.label,
                             .series     = mt.series,
-                            // 4 rows, not 5. The panel viewport is 14 rows
-                            // and a tab's tables already claim most of it;
-                            // a figure that pushes itself past the fold is
-                            // a figure nobody scrolls to. At 4 braille
-                            // rows the plot still carries 16 dot rows of
-                            // vertical resolution.
-                            .rows       = 4,
+                            // 6 rows. At 4 the filled area was a squat
+                            // band where every column looked the same
+                            // height — a chart needs vertical range for
+                            // the SHAPE to be the thing you see, and the
+                            // panel scrolls, so a figure worth reading is
+                            // worth two more rows.
+                            .rows       = 6,
                             .hue        = accent,
                             .peak_label = stats::format(mt.unit, hi),
                             .base_label = "0"});
