@@ -164,6 +164,11 @@ agentty_test(stats_visual            MODE standalone NO_TEST)
 # NO_TEST too: it prints timings for a human. An assertion on microseconds
 # would be a flaky test of the machine it runs on, not of the code.
 agentty_test(stats_refresh_bench     MODE standalone NO_TEST)
+# NO_TEST: a diagnostic, not an assertion. It reports which panels paint
+# past their own frame and at which widths -- measure first, fix Panel's
+# chrome accounting, and only THEN turn the measurement into a test.
+# Asserting today's numbers would enshrine the overdraw.
+agentty_test(panel_overflow_probe    MODE standalone NO_TEST)
 
 # ── Narrow-source sanitizer tests (raw: must NOT link the full shared set) ──
 # They exercise agentty's own logic and link cleanly under asan/ubsan without
