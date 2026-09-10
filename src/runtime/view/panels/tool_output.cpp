@@ -194,37 +194,18 @@ Element tool_output_panel(const Model& m) {
                 command = it->get<std::string>();
             if (!command.empty()) {
                 const Color cmd_hue = e.failed ? danger : tool_hue;
-                // hstack: a fixed 2-col "$ " gutter + the command taking the
-                // remaining width, pinned to ONE row.
-                //
-                // It used to WRAP, so a long shell one-liner flowed onto as
-                // many rows as it needed. That reads better in isolation and
-                // is wrong here, because the viewport accounting below is
-                // row-based: it counts cache.rows, derives max_y from that
-                // count and pushes exactly `vh` entries. An entry that paints
-                // three lines therefore costs two rows nothing budgeted for,
-                // and two rows of output at the bottom become unreachable --
-                // max_y says there is nothing left to scroll to. Every other
-                // row here is pinned to height(1) for exactly this reason,
-                // including the structured-preview children whose comment
-                // spells the hazard out; the command row simply escaped it,
-                // because a short command does not wrap and so nothing looked
-                // broken until someone ran a long one.
-                //
-                // One cached row, one visual line: the invariant the
-                // arithmetic depends on. The full command is still reachable
-                // -- the entry is what `y` yanks -- so what is lost is a
-                // second line of preview, against output the user cannot
-                // scroll to.
+                // hstack: a fixed 2-col "$ " gutter + the command as a WRAPPING
+                // text that takes the remaining width. maya grows the row to
+                // however many visual lines the wrap produces; continuation
+                // lines sit under the gutter. Embedded newlines wrap too.
                 cache.rows.push_back(
                     hstack()(
                         text("$ ", fg_bold(cmd_hue)),
                         maya::Element{maya::TextElement{
                             .content = command,
                             .style   = fg_of(fg),
-                            .wrap    = maya::TextWrap::TruncateEnd,
-                        }} | grow(1.0f))
-                    | height(1) | overflow(Overflow::Hidden));
+                            .wrap    = maya::TextWrap::Wrap,
+                        }} | grow(1.0f)));
                 cache.rows.push_back(sep);
             }
         }

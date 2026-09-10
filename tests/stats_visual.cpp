@@ -159,25 +159,6 @@ Model realistic_thread() {
                       120, 700);
         push("commit it", std::move(a));
     }
-    // A long tail of DISTINCT tools with realistic names.
-    //
-    // Four tools all called "read"/"edit"/"grep"/"bash" is not what a real
-    // session looks like, and the difference is load-bearing for layout:
-    // the By-tool table's label column is as wide as its widest name, so a
-    // fixture whose names are all four characters cannot exercise the case
-    // where that column crowds the track and value out of a half-width
-    // split. `git_status` is ten.
-    {
-        auto a = turn("claude-sonnet-4-5", R::Implementation, 900, 700,
-                      16100, 0, 260, 2400);
-        add_tool(a, "git_status", 120);
-        add_tool(a, "outline", 64);
-        add_tool(a, "todo", 12);
-        add_tool(a, "write", 210);
-        add_tool(a, "shell", 4400);
-        add_tool(a, "shell", 880);
-        push("check the tree", std::move(a));
-    }
 
     // A proactive-retrieval injection on the last question.
     auto& q = m.d.current.messages.emplace_back(user_turn("why is it slow?"));
@@ -262,16 +243,10 @@ int main(int argc, char** argv) {
 
     // Tall viewport so nothing scrolls out of the dump. panel_viewport_h()
     // reads LINES when there is no tty, which is exactly this case.
-    //
-    // Honoured as an OVERRIDE when the caller sets it, because the column
-    // count is now a function of available HEIGHT -- a sheet splits only
-    // when one column would overflow the viewport. Forcing 120 rows
-    // unconditionally would pin every dump to the roomiest case and hide
-    // exactly the behaviour this tool exists to show.
 #ifdef _WIN32
-    if (!std::getenv("LINES")) _putenv_s("LINES", "120");
+    _putenv_s("LINES", "120");
 #else
-    setenv("LINES", "120", /*overwrite=*/0);
+    setenv("LINES", "120", 1);
 #endif
 
     Model m = realistic_thread();

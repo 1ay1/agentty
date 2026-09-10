@@ -53,8 +53,6 @@ set(_AGENTTY_CONSOLIDATED
     settings_list_scroll_test visual_walk_test md_robustness_test
     stats_test
     stats_render_probe
-    stat_sheet_measure_test
-    tool_output_wrap_test
     context_window_test
     thread_blob_test lazy_image_test thread_log_test
     thread_migration_test blob_gc_test)
