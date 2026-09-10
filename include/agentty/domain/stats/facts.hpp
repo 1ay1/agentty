@@ -137,6 +137,31 @@ public:
     }
     void clear() { *this = Hist{}; }
 
+    // The buckets themselves. p50/p95 are two readings OF a distribution,
+    // and a distribution is not two numbers: 95 fast calls and 5 slow ones
+    // has the same mean as 100 medium ones and means something completely
+    // different. The shape is already stored — not showing it is throwing
+    // away the most informative thing the panel has.
+    [[nodiscard]] const std::array<std::uint32_t, kBuckets>& buckets()
+        const noexcept { return bucket_; }
+
+    // Inclusive lower edge of bucket b, in the unit that was add()ed.
+    [[nodiscard]] static std::uint32_t bucket_floor(int b) noexcept {
+        return b <= 0 ? 0u : (1u << b);
+    }
+
+    // The occupied range, so a renderer can skip the empty head and tail
+    // rather than drawing 24 buckets of which 20 are zero.
+    [[nodiscard]] std::pair<int, int> occupied() const noexcept {
+        int lo = kBuckets, hi = -1;
+        for (int b = 0; b < kBuckets; ++b)
+            if (bucket_[static_cast<std::size_t>(b)]) {
+                if (b < lo) lo = b;
+                hi = b;
+            }
+        return {lo, hi};
+    }
+
 private:
     std::array<std::uint32_t, kBuckets> bucket_{};
     std::uint64_t count_ = 0;

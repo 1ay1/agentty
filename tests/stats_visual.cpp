@@ -12,6 +12,7 @@
 //   ./build/stats_visual              every tab, 76 cols
 //   ./build/stats_visual 100          every tab, 100 cols
 //   ./build/stats_visual 76 Cache     one tab
+//   ./build/stats_visual 76 Tools 8   one tab, scrolled 8 rows
 //
 // A tab taller than the panel's viewport SCROLLS in the real app, which a
 // one-shot dump cannot do — so this tool sets a tall viewport and prints
@@ -221,6 +222,7 @@ void dump(const Model& m, int w) {
 int main(int argc, char** argv) {
     const int w = argc > 1 ? std::atoi(argv[1]) : 76;
     const std::string_view only = argc > 2 ? argv[2] : "";
+    const int scroll = argc > 3 ? std::atoi(argv[3]) : 0;
 
     // Tall viewport so nothing scrolls out of the dump. panel_viewport_h()
     // reads LINES when there is no tty, which is exactly this case.
@@ -242,6 +244,7 @@ int main(int argc, char** argv) {
     for (auto t : stats::visible_tabs(f)) {
         if (!only.empty() && stats::tab_title(t) != only) continue;
         o->tab = t;
+        m.ui.stats_scroll.y = scroll;
         std::printf("\n\x1b[1m── %s ──\x1b[0m  %s\n\n",
                     std::string{stats::tab_title(t)}.c_str(),
                     std::string{stats::tab_subtitle(t)}.c_str());

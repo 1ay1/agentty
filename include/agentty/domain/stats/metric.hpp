@@ -51,8 +51,14 @@ enum class Viz : std::uint8_t {
     Bars,   // label + value + share bar    (ranked)
     Spark,  // label + value + trend strip  (inline, one row)
     Band,   // one full-width composition bar + legend
-    Plot,   // a multi-row braille figure
+    Plot,   // a multi-row braille/block figure
     Hero,   // the headline figure and the sentence it answers
+    // A DISTRIBUTION: one row per occupied latency bucket, so the SHAPE is
+    // visible rather than two quantiles of it. 95 fast calls and 5 slow
+    // ones has the same mean as 100 medium ones and means something
+    // completely different — which is invisible in "p50 / p95" and obvious
+    // the moment the buckets are drawn.
+    Dist,
 };
 
 struct Section {

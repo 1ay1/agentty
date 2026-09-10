@@ -67,6 +67,27 @@ void session_counts(const Facts& f, std::vector<Metric>& out) {
            static_cast<double>(f.session.compact_summaries));
 }
 
+// Where the wall-clock actually went. A session's total time is the least
+// actionable number on the panel — "1m05s" tells you nothing you can fix.
+// The SPLIT does: waiting on the provider, generating, and running tools
+// have three different causes and three different remedies.
+void session_where_time_went(const Facts& f, std::vector<Metric>& out) {
+    const double ttft  = static_cast<double>(f.stream.ttft.sum());
+    const double gen   = static_cast<double>(f.stream.stream_ms.sum());
+    const double tools = static_cast<double>(f.tools.latency.sum());
+    if (ttft + gen + tools <= 0) return;
+    Metric m;
+    m.label = "where the time went";
+    m.unit  = Unit::Millis;
+    m.value = ttft + gen + tools;
+    m.parts = {
+        {"waiting "    + format(Unit::Millis, ttft),  ttft,  kWarn},
+        {"generating " + format(Unit::Millis, gen),   gen,   kAccent},
+        {"tools "      + format(Unit::Millis, tools), tools, kGood},
+    };
+    out.push_back(std::move(m));
+}
+
 void session_time(const Facts& f, std::vector<Metric>& out) {
     if (!f.session.measured_turns) return;
     kv(out, "Time on the wire", Unit::Millis,
@@ -218,13 +239,50 @@ void tools_status(const Facts& f, std::vector<Metric>& out) {
 void tools_latency(const Facts& f, std::vector<Metric>& out) {
     const auto& h = f.tools.latency;
     if (!h.count()) return;
-    kv(out, "Median", Unit::Millis, h.quantile(0.5));
-    kv(out, "p95",    Unit::Millis, h.quantile(0.95));
+    kv(out, "Median",  Unit::Millis, h.quantile(0.5));
+    kv(out, "p95",     Unit::Millis, h.quantile(0.95));
     kv(out, "Slowest", Unit::Millis, static_cast<double>(h.max()));
-    kv(out, "Total",  Unit::Millis, static_cast<double>(h.sum()));
+    kv(out, "Total",   Unit::Millis, static_cast<double>(h.sum()));
 }
 
-// ── Reasoning ───────────────────────────────────────────────────────────
+// One row per occupied bucket of a latency histogram. The bucket's RANGE
+// is the label, its count the value — so the reader sees where the calls
+// actually landed instead of two quantiles standing in for a shape.
+void dist_rows(const Hist& h, std::vector<Metric>& out) {
+    if (!h.count()) return;
+    const auto [lo, hi] = h.occupied();
+    if (hi < lo) return;
+    const double total = static_cast<double>(h.count());
+    double peak = 0;
+    for (int b = lo; b <= hi; ++b)
+        if (h.buckets()[static_cast<std::size_t>(b)] > peak)
+            peak = h.buckets()[static_cast<std::size_t>(b)];
+    for (int b = lo; b <= hi; ++b) {
+        const double n = h.buckets()[static_cast<std::size_t>(b)];
+        // Empty buckets INSIDE the occupied range are kept: a gap is a
+        // real feature of a bimodal distribution (fast local calls, slow
+        // network ones) and closing it up hides exactly that.
+        const auto floor_ms = Hist::bucket_floor(b);
+        const auto ceil_ms  = Hist::bucket_floor(b + 1);
+        out.push_back(Metric{
+            .label  = format(Unit::Millis, floor_ms) + "\xe2\x80\x93"
+                    + format(Unit::Millis, ceil_ms),
+            .unit   = Unit::Count,
+            .value  = n,
+            .of     = peak,
+            .detail = n > 0 ? format(Unit::Ratio, n / total) : ""});
+    }
+}
+
+void tools_latency_dist(const Facts& f, std::vector<Metric>& out) {
+    dist_rows(f.tools.latency, out);
+}
+
+void stream_ttft_dist(const Facts& f, std::vector<Metric>& out) {
+    dist_rows(f.stream.ttft, out);
+}
+
+// ── Reasoning ────────────────────────────────────────────────────────────
 
 void reasoning_rows(const Facts& f, std::vector<Metric>& out) {
     kv(out, "Turns that thought", Unit::Count,
@@ -314,19 +372,29 @@ void context_plot(const Facts& f, std::vector<Metric>& out) {
 void retrieval_rows(const Facts& f, std::vector<Metric>& out) {
     kv(out, "Context injections", Unit::Count,
        static_cast<double>(f.retrieval.injections));
-    if (f.retrieval.with_confidence)
-        kv(out, "Average confidence", Unit::Ratio,
-           f.retrieval.confidence_sum
-             / static_cast<double>(f.retrieval.with_confidence));
+    if (f.retrieval.with_confidence) {
+        const double avg = f.retrieval.confidence_sum
+                         / static_cast<double>(f.retrieval.with_confidence);
+        // A confidence is a share of a KNOWN whole (1.0), so unlike the
+        // section-scaled bars this one is measured against the real
+        // ceiling — "82% confident" against a full meter says whether the
+        // funnel was sure, where 82% of the section's largest ratio would
+        // always read as full.
+        out.push_back(Metric{.label = "Average confidence",
+                             .unit  = Unit::Ratio,
+                             .value = avg,
+                             .of    = 1.0});
+    }
 }
 
 }  // namespace
 
 namespace sections {
 
-const std::array<Section, 3> session{{
+const std::array<Section, 4> session{{
     {"",          Viz::Hero, &session_hero},
     {"Activity",  Viz::Kv,   &session_counts},
+    {"",          Viz::Band, &session_where_time_went},
     {"Time",      Viz::Kv,   &session_time},
 }};
 
@@ -351,20 +419,22 @@ const std::array<Section, 2> cache{{
     {"Rates", Viz::Kv,   &cache_rates},
 }};
 
-const std::array<Section, 3> tools{{
-    {"",         Viz::Band, &tools_status},
-    {"By tool",  Viz::Bars, &tools_by_name},
-    {"Latency",  Viz::Kv,   &tools_latency},
+const std::array<Section, 4> tools{{
+    {"",             Viz::Band, &tools_status},
+    {"By tool",      Viz::Bars, &tools_by_name},
+    {"Latency",      Viz::Kv,   &tools_latency},
+    {"Distribution", Viz::Dist, &tools_latency_dist},
 }};
 
 const std::array<Section, 1> reasoning{{
     {"", Viz::Kv, &reasoning_rows},
 }};
 
-const std::array<Section, 3> stream{{
-    {"Health",     Viz::Kv, &stream_health},
-    {"Timing",     Viz::Kv, &stream_timing},
-    {"Throughput", Viz::Kv, &stream_throughput},
+const std::array<Section, 4> stream{{
+    {"Health",           Viz::Kv,   &stream_health},
+    {"Timing",           Viz::Kv,   &stream_timing},
+    {"Throughput",       Viz::Kv,   &stream_throughput},
+    {"First byte spread", Viz::Dist, &stream_ttft_dist},
 }};
 
 const std::array<Section, 2> context{{
@@ -373,7 +443,7 @@ const std::array<Section, 2> context{{
 }};
 
 const std::array<Section, 1> retrieval{{
-    {"", Viz::Kv, &retrieval_rows},
+    {"", Viz::Bars, &retrieval_rows},
 }};
 
 }  // namespace sections

@@ -49,14 +49,14 @@ struct TabDesc {
 // Sections per tab. Declared out-of-line so kTabs stays readable as a
 // table; each `extract` is one function in extract.cpp.
 namespace sections {
-extern const std::array<Section, 3> session;
+extern const std::array<Section, 4> session;
 extern const std::array<Section, 2> models;
 extern const std::array<Section, 3> smart;
 extern const std::array<Section, 2> tokens;
 extern const std::array<Section, 2> cache;
-extern const std::array<Section, 3> tools;
+extern const std::array<Section, 4> tools;
 extern const std::array<Section, 1> reasoning;
-extern const std::array<Section, 3> stream;
+extern const std::array<Section, 4> stream;
 extern const std::array<Section, 2> context;
 extern const std::array<Section, 1> retrieval;
 }  // namespace sections

@@ -50,13 +50,15 @@ void emit_section(const stats::Section& sec, const stats::Facts& f,
     sec.extract(f, scratch);
     if (scratch.empty()) return;   // a section with nothing to say draws nothing
 
-    if (!sec.heading.empty()) {
-        // A blank SEPARATES sections; it does not precede the first one.
-        // Leading whitespace at the top of a panel reads as a rendering
-        // fault rather than as breathing room.
-        if (!sheet.empty()) sheet.blank();
-        sheet.heading(std::string{sec.heading});
-    }
+    // A blank SEPARATES sections; it does not precede the first one.
+    // Leading whitespace at the top of a panel reads as a rendering fault
+    // rather than as breathing room.
+    //
+    // Applied whether or not the section has a HEADING: a headingless
+    // band butted straight against the table above it reads as one more
+    // row of that table, which is the opposite of what a band says.
+    if (!sheet.empty()) sheet.blank();
+    if (!sec.heading.empty()) sheet.heading(std::string{sec.heading});
 
     switch (sec.viz) {
         case stats::Viz::Hero:
@@ -113,6 +115,23 @@ void emit_section(const stats::Section& sec, const stats::Facts& f,
                              .value  = stats::format(mt.unit, mt.value),
                              .detail = mt.detail,
                              .spark  = mt.series});
+            break;
+
+        case stats::Viz::Dist:
+            // A distribution reads as a histogram lying on its side: the
+            // bucket range is the label and the bar is how many landed
+            // there, so the SHAPE is the thing you see. Scaled against the
+            // tallest bucket (Metric::of) rather than the total, because
+            // the question is "where did they cluster", and against a
+            // total every bucket of a wide spread is a stub.
+            for (const auto& mt : scratch)
+                sheet.entry({.label  = mt.label,
+                             .value  = mt.value > 0
+                                         ? stats::format(mt.unit, mt.value)
+                                         : "",
+                             .detail = mt.detail,
+                             .share  = mt.share(),
+                             .hue    = accent});
             break;
 
         case stats::Viz::Band:
