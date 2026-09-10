@@ -43,12 +43,15 @@ Step stats_update(Model m, msg::StatsMsg sm) {
         [&](StatsTab e) -> Step {
             auto* o = m.ui.panel.get<pn::Stats>();
             if (!o) return done(std::move(m));
-            // Stepping is total on the enum (stats::tab_step wraps), so a
-            // new tab joins the cycle with no change here.
-            o->tab = stats::tab_step(o->tab, e.delta);
-            // The cached projection is per-transcript, not per-tab, so the
-            // stamp stays valid across a tab switch — switching views costs
-            // nothing.
+            // Step within the VISIBLE set, so Tab never lands on a view
+            // the strip is not drawing. That needs the Facts, because
+            // availability is a question about the data — refresh() is
+            // the same amortised-O(1) call the view makes, and the
+            // projection is shared, so this costs nothing extra.
+            const auto& f = o->projection.refresh(m.d.current);
+            o->tab = stats::tab_step(o->tab, e.delta, f);
+            // The projection is per-transcript, not per-tab, so switching
+            // views re-folds nothing.
             return done(std::move(m));
         },
     }, std::move(sm));

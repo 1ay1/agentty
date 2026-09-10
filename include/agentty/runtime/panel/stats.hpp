@@ -1,68 +1,51 @@
 #pragma once
-// Stats viewer — a tabbed, read-only window onto what the session actually
-// did.
+// Stats viewer — a tabbed, read-only window onto what the session did.
 //
 // Open it from the command palette (Ctrl+K → "Stats"). Tab/Shift-Tab (or
-// ←/→) switch tabs, Esc closes. Nothing here mutates anything: the panel is
-// a projection of the transcript, so there is no state to get wrong and no
-// confirmation to design.
+// ←/→) switch tabs, Esc closes. Nothing here mutates anything: the panel
+// is a projection of the transcript, so there is no state to get wrong
+// and no confirmation to design.
 //
-// ── Why tabbed from day one ──────────────────────────────────────────────
+// ── What lives where ─────────────────────────────────────────────────────
 //
-// Smart Mode is the only tab today. It is still built as a tab set, because
-// the alternative is a single-purpose panel that someone later has to
-// generalise — and that refactor is the one that never happens, so the
-// second stat lands as a second panel instead, with its own key handling and
-// its own chrome. The tab enumeration lives in domain/stats.hpp
-// (stats::Tab), which is the SSOT for order, titles and subtitles; adding a
-// tab is an enumerator plus a render arm, and the compiler names both.
+//   domain/stats/facts.hpp   the counters + the incremental fold
+//   domain/stats/unit.hpp    the ONE number→text function
+//   domain/stats/metric.hpp  the row vocabulary
+//   domain/stats/tabs.hpp    kTabs — THE SSOT for order/titles/availability
+//   view/panels/stats.cpp    the panel: table-driven, no per-tab branches
 //
-// ── Why the stats are cached here ────────────────────────────────────────
+// Adding a tab is an enumerator, a row in kTabs, and an extractor. It
+// touches no view code, no key handling and no panel code.
 //
-// stats::smart_stats() is pure and O(turns). The view builds every frame, and
-// on a long thread an O(turns) walk plus a map and a sort per frame is real
-// work on the same thread as the streaming reveal — exactly the class of
-// cost that regressed maya's glide (see the COST CONTRACT in
-// maya/include/maya/element/builder.hpp).
+// ── Why the projection lives on the open panel ───────────────────────────
 //
-// So the panel holds the computed result and a `stamp` of the input it was
-// computed from. The view compares stamps and recomputes only when the
-// transcript actually changed. That keeps the panel a pure projection —
-// the cache is an optimisation, never a second source of truth: throw it
-// away and you get the same numbers back.
+// It is a CACHE, not a second source of truth: every number in it is
+// derived from the transcript and can be rebuilt from it at any time. It
+// sits here because its lifetime is exactly the panel's — opening the
+// panel starts folding, closing it frees everything — and because a
+// projection that outlived the panel would be a background cost paid by
+// users who never open it.
+//
+// `mutable` because the view refreshes it during render, which is a const
+// operation on the model by construction: refresh() only ever recomputes
+// what the transcript already says.
 
-#include <cstddef>
-
-#include "agentty/domain/stats.hpp"
+#include "agentty/domain/stats/facts.hpp"
+#include "agentty/domain/stats/tabs.hpp"
 
 namespace agentty::stats_panel {
 
-// The cache-validity stamp.
-//
-// Message count is the whole signal, and it is sufficient rather than merely
-// convenient: a served turn's provenance is stamped once at dispatch and is
-// immutable afterwards, so the tally can only change when a message is
-// APPENDED. Streaming text growing on the in-flight turn does not affect any
-// number here (that turn has no served_model until it dispatches), which is
-// what makes a cheap stamp correct instead of a heuristic.
-//
-// Thread switches also change the count in practice, and the thread id is
-// carried anyway so an unlucky same-length thread cannot alias.
-struct Stamp {
-    std::size_t message_count = 0;
-    std::string thread_id;
-
-    [[nodiscard]] bool operator==(const Stamp&) const = default;
-};
-
 struct Open {
-    stats::Tab tab = stats::Tab::Smart;
+    // Which tab is live. Mutable because the view corrects it when the
+    // selected tab becomes unavailable (the last tool call was rewound
+    // away) — landing on a tab that is no longer drawn would show an
+    // empty panel with no way to understand why.
+    mutable stats::Tab tab = stats::Tab::Session;
 
-    // Cached projection + the input it came from. Mutable because the view
-    // refreshes it lazily during render; see the header note on why that is
-    // an optimisation and not shared state.
-    mutable stats::SmartStats smart{};
-    mutable Stamp             stamp{};
+    // The incremental fold. Amortised O(1) per frame: a settled thread
+    // folds nothing, a streaming one folds exactly the live tail. See
+    // domain/stats/facts.hpp for the cursor and the epoch guard.
+    mutable stats::Projection projection;
 };
 
 }  // namespace agentty::stats_panel

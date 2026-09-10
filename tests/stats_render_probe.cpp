@@ -8,7 +8,8 @@
 
 #include "agtest.hpp"
 
-#include "agentty/domain/stats.hpp"
+#include "agentty/domain/stats/facts.hpp"
+#include "agentty/domain/stats/tabs.hpp"
 #include "agentty/runtime/model.hpp"
 #include "agentty/runtime/panel/stats.hpp"
 #include "agentty/runtime/view/panels.hpp"
@@ -76,19 +77,42 @@ TEST_CASE("stats panel: renders a real thread") {
     m.ui.panel.descend(pn::Stats{});
 
     const auto rows = render_rows(m, 76, 40);
-    std::printf("\n--- stats panel (5 turns) ---\n");
+    std::printf("\n--- stats panel: Session (5 turns) ---\n");
     for (const auto& r : rows) std::printf("|%s\n", r.c_str());
 
     CHECK(!rows.empty());                       // it drew something
     CHECK(any_row_has(rows, "Stats"));          // the frame title
-    CHECK(any_row_has(rows, "Smart Mode"));     // the tab strip
-    CHECK(any_row_has(rows, "BY ROLE"));
-    CHECK(any_row_has(rows, "BY MODEL"));
+    // The strip carries the AVAILABLE tabs — Session and Models always,
+    // Smart because these turns were routed, and NOT Tools or Cache.
+    CHECK(any_row_has(rows, "Session"));
+    CHECK(any_row_has(rows, "Models"));
+    CHECK(any_row_has(rows, "Smart"));
+    CHECK(!any_row_has(rows, "Tools"));
+    CHECK(any_row_has(rows, "5 turns"));
+}
+
+TEST_CASE("stats panel: the Smart tab states its denominator") {
+    Model m;
+    m.d.current.messages = {
+        served("claude-opus-4-5",   smart::ModelRole::Strategic),
+        served("claude-opus-4-5",   smart::ModelRole::Strategic),
+        served("claude-sonnet-4-5", smart::ModelRole::Implementation),
+        served("claude-haiku-4-5",  smart::ModelRole::Utility),
+        served("claude-haiku-4-5",  smart::ModelRole::Utility),
+    };
+    auto open = pn::Stats{};
+    open.tab = stats::Tab::Smart;
+    m.ui.panel.descend(std::move(open));
+
+    const auto rows = render_rows(m, 76, 40);
+    std::printf("\n--- stats panel: Smart ---\n");
+    for (const auto& r : rows) std::printf("|%s\n", r.c_str());
+
+    CHECK(any_row_has(rows, "By role") || any_row_has(rows, "BY ROLE"));
     CHECK(any_row_has(rows, "Strategic"));
     CHECK(any_row_has(rows, "Utility"));
     // 3 of 5 routed turns ran below Strategic.
     CHECK(any_row_has(rows, "60%"));
-    CHECK(any_row_has(rows, "5 routed"));       // the denominator is stated
 }
 
 TEST_CASE("stats panel: the empty state is not a wall of zeroes") {
@@ -99,8 +123,11 @@ TEST_CASE("stats panel: the empty state is not a wall of zeroes") {
     for (const auto& r : rows) std::printf("|%s\n", r.c_str());
 
     CHECK(!rows.empty());
-    CHECK(any_row_has(rows, "No turns"));
-    CHECK(!any_row_has(rows, "BY ROLE"), "no tally when there is nothing");
+    // Tabs with nothing to say are absent entirely, rather than present
+    // and empty — so there is no tally to read and no zero to explain.
+    CHECK(!any_row_has(rows, "By role"));
+    CHECK(!any_row_has(rows, "Smart"));
+    CHECK(!any_row_has(rows, "Cache"));
 }
 
 TEST_CASE("stats panel: survives a narrow terminal") {

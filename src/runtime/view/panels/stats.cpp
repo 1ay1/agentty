@@ -1,200 +1,113 @@
-// stats.cpp — the stats viewer overlay.
+// stats.cpp — the stats panel. Table-driven: no per-tab branches.
 //
-// A tabbed, read-only projection of the session. Today one tab (Smart Mode);
-// the tab strip and the dispatch are built for N from the start so a second
-// tab is an enumerator plus an arm, not a refactor.
+// The whole view is:
 //
-// ── Where the numbers come from ──────────────────────────────────────────
+//   for each Section in the active tab's TabDesc
+//       extract() its Metrics
+//       emit them onto one maya::StatSheet
 //
-// stats::smart_stats() over the transcript. Nothing here counts anything —
-// see domain/stats.hpp for why the projection is derived rather than
-// accumulated. This file is presentation only: it turns Rows into bars.
+// Adding a tab touches this file NOT AT ALL. That is the design's claim,
+// and this file is where it either holds or does not.
 //
-// The one non-obvious thing it does is REFRESH THE PANEL'S CACHE (the stamp
-// comparison below). That is deliberate and it is why the cache fields are
-// `mutable`: the alternative is an O(turns) walk plus a map and a sort on
-// every frame, on the same thread as the streaming reveal. See the note in
-// panel/stats.hpp.
+// Formatting lives in domain/stats/unit.hpp (one format() for the whole
+// panel) and alignment lives in maya::StatSheet (one measurement for the
+// whole sheet), so this file owns exactly one thing: which theme colour a
+// domain hue slot maps to.
 
-#include "agentty/runtime/view/panels.hpp"
+#include "panels_prologue.hpp"
 
-#include "agentty/domain/stats.hpp"
+#include <maya/widget/stat_sheet.hpp>
+#include <maya/widget/tab_strip.hpp>
+
+#include "agentty/domain/stats/tabs.hpp"
 #include "agentty/runtime/panel/stats.hpp"
-#include "agentty/runtime/view/helpers.hpp"
-#include "agentty/runtime/view/palette.hpp"
-#include "panels_common.hpp"
-
-#include <maya/widget/panel.hpp>
-#include <maya/widget/tab_strip.hpp>   // TabMark, for cfg.tab_mark
-
-#include <algorithm>
-#include <string>
-#include <vector>
-
-namespace pn = agentty::ui::panel;
 
 namespace agentty::ui {
-
-using namespace maya;
-using namespace maya::dsl;
-
 namespace {
 
-// ── Bar geometry ─────────────────────────────────────────────────────────
-// One width for every bar in the pane. A share is only readable against its
-// neighbours if they all measure the same, so this is a constant rather than
-// a per-row fit.
-constexpr int kBarCells = 24;
+using maya::StatEntry;
+using maya::StatSheet;
 
-// A proportional bar. Uses eighth-block glyphs so a share smaller than one
-// cell is still VISIBLE — the whole point of the panel is spotting a role
-// that got almost no work, and a bar that rounds to empty hides exactly
-// that. A non-zero share therefore always paints at least the narrowest
-// partial block.
-[[nodiscard]] std::string bar_of(double share, int cells = kBarCells) {
-    static constexpr const char* kEighths[] = {
-        "", "\xe2\x96\x8f", "\xe2\x96\x8e", "\xe2\x96\x8d", "\xe2\x96\x8c",
-        "\xe2\x96\x8b", "\xe2\x96\x8a", "\xe2\x96\x89",
-    };
-    if (share <= 0.0) return {};
-    const double exact = std::clamp(share, 0.0, 1.0) * cells;
-    int full = static_cast<int>(exact);
-    int rem  = static_cast<int>((exact - full) * 8.0);
-    if (full == 0 && rem == 0) rem = 1;      // never round a real share away
-    std::string s;
-    s.reserve(static_cast<std::size_t>(full) * 3 + 3);
-    for (int i = 0; i < full; ++i) s += "\xe2\x96\x88";   // █
-    if (rem > 0 && full < cells) s += kEighths[rem];
-    return s;
+// The ONE place a domain hue slot becomes a colour. domain/ deliberately
+// does not know about the theme, so the mapping lives here — and lives
+// once, rather than in each extractor.
+[[nodiscard]] maya::Color hue_of(int slot) {
+    switch (slot) {
+        case 1:  return success;
+        case 2:  return warn;
+        case 3:  return danger;
+        case 4:  return accent;
+        default: return muted;
+    }
 }
 
-// "42%" — one integer, no decimals. A share is a glance, not a measurement;
-// two decimals invite the reader to compare digits that the sample size does
-// not support.
-[[nodiscard]] std::string pct_of(double share) {
-    return std::to_string(static_cast<int>(share * 100.0 + 0.5)) + "%";
-}
+// One section → sheet rows. The Viz says which fields the extractor
+// filled, so this switch is over PRESENTATION, not over tabs — it does not
+// grow when a tab is added.
+void emit_section(const stats::Section& sec, const stats::Facts& f,
+                  StatSheet& sheet, std::vector<stats::Metric>& scratch) {
+    scratch.clear();
+    sec.extract(f, scratch);
+    if (scratch.empty()) return;   // a section with nothing to say draws nothing
 
-// A tally row: label, bar, count and share, column-aligned.
-//
-// Aligned by PADDING rather than by a table widget: the panel body is a
-// plain Element list, and a bar chart's readability comes from its left
-// edges lining up, which padding gives directly.
-[[nodiscard]] Element tally_row(const stats::Row& r, int label_w,
-                               Color bar_color, bool dim_when_zero) {
-    // Pad to the widest label PLUS a fixed gutter. Padding to the widest
-    // alone leaves the longest row with zero space — "Implementation" ran
-    // straight into its own bar while every shorter row had a gap, which
-    // read as a rendering fault rather than as alignment.
-    constexpr int kGutter = 2;
-    const int col = label_w + kGutter;
-    std::string label = r.label;
-    if (static_cast<int>(label.size()) > col)
-        label = label.substr(0, static_cast<std::size_t>(col));
-    label.append(static_cast<std::size_t>(col) - label.size(), ' ');
-
-    const bool zero = r.count == 0;
-    auto label_style = zero && dim_when_zero ? fg_dim(muted) : fg_of(fg);
-
-    std::string tail = "  " + std::to_string(r.count);
-    // A zero row says so in words. "0" alone reads as a rendering failure;
-    // "0 turns" is a finding.
-    tail += r.count == 1 ? " turn" : " turns";
-    tail += "  \xc2\xb7  " + pct_of(r.share);
-
-    return h(text(label, label_style),
-             text(bar_of(r.share), fg_of(bar_color)),
-             text(tail, fg_dim(muted))).build();
-}
-
-// A section heading inside the body.
-[[nodiscard]] Element section(std::string_view title) {
-    return text(std::string{title}, fg_dim(muted)).build();
-}
-
-[[nodiscard]] Element blank_row() { return text("").build(); }
-
-// ── The Smart Mode tab ───────────────────────────────────────────────────
-//
-// Reads top-down as an answer to "is Smart Mode working?": the headline
-// first, then the role split that justifies it, then the models that
-// actually served turns.
-[[nodiscard]] std::vector<Element> smart_tab(const stats::SmartStats& s) {
-    std::vector<Element> rows;
-
-    if (s.empty()) {
-        // An empty state, not a wall of zeroes. Zeroes here would read as
-        // "Smart Mode is broken" when they only mean "no turns yet".
-        rows.push_back(text("No turns in this thread yet.", fg_of(fg)).build());
-        rows.push_back(blank_row());
-        rows.push_back(text("Ask something and this fills in — it reports "
-                            "which model served each turn.",
-                            fg_dim(muted)).build());
-        return rows;
+    if (!sec.heading.empty()) {
+        sheet.blank();
+        sheet.heading(std::string{sec.heading});
     }
 
-    if (s.routed_turns == 0) {
-        rows.push_back(text("Smart Mode was off for every turn in this thread.",
-                            fg_of(fg)).build());
-        rows.push_back(blank_row());
-        rows.push_back(
-            text("Turn it on with ^S to route each turn to the cheapest "
-                 "model that can do it.", fg_dim(muted)).build());
-        return rows;
+    switch (sec.viz) {
+        case stats::Viz::Hero:
+            for (const auto& mt : scratch)
+                sheet.hero(mt.label, mt.detail);
+            break;
+
+        case stats::Viz::Kv:
+            for (const auto& mt : scratch)
+                sheet.entry({.label  = mt.label,
+                             .value  = stats::format(mt.unit, mt.value),
+                             .detail = mt.detail});
+            break;
+
+        case stats::Viz::Bars:
+            for (const auto& mt : scratch)
+                sheet.entry({.label  = mt.label,
+                             .value  = stats::format(mt.unit, mt.value),
+                             .detail = mt.detail,
+                             .share  = mt.share()});
+            break;
+
+        case stats::Viz::Spark:
+            for (const auto& mt : scratch)
+                sheet.entry({.label  = mt.label,
+                             .value  = stats::format(mt.unit, mt.value),
+                             .detail = mt.detail,
+                             .spark  = mt.series});
+            break;
+
+        case stats::Viz::Band:
+            for (const auto& mt : scratch) {
+                maya::StatBand band;
+                band.caption = mt.label;
+                for (const auto& p : mt.parts)
+                    band.segments.push_back({p.label, p.value, hue_of(p.hue)});
+                sheet.band(std::move(band));
+            }
+            break;
+
+        case stats::Viz::Plot:
+            for (const auto& mt : scratch) {
+                if (mt.series.size() < 2) continue;
+                double hi = 0;
+                for (double v : mt.series) if (v > hi) hi = v;
+                sheet.plot({.caption    = mt.label,
+                            .series     = mt.series,
+                            .rows       = 5,
+                            .hue        = accent,
+                            .peak_label = stats::format(mt.unit, hi),
+                            .base_label = "0"});
+            }
+            break;
     }
-
-    // ── Headline ─────────────────────────────────────
-    // Delegated share is the number that was structurally 0% before the main
-    // turn was routed by complexity, so it is the direct answer to "is it
-    // working?". Coloured by outcome: green when work is leaving the
-    // flagship, amber when none is.
-    const bool delegating = s.delegated_share > 0.0;
-    rows.push_back(h(
-        text(pct_of(s.delegated_share),
-             fg_bold(delegating ? success : warn)),
-        text(" of routed turns ran BELOW the Strategic model", fg_of(fg))
-    ).build());
-    rows.push_back(blank_row());
-
-    // ── By role ──────────────────────────────────────
-    rows.push_back(section("BY ROLE"));
-    int label_w = 0;
-    for (const auto& r : s.by_role)
-        label_w = std::max(label_w, static_cast<int>(r.label.size()));
-    for (const auto& r : s.by_role)
-        rows.push_back(tally_row(r, label_w, accent, /*dim_when_zero=*/true));
-
-    rows.push_back(blank_row());
-
-    // ── By model ────────────────────────────────────
-    // The row a user checks against their provider's billing page, so it
-    // shows the id as dispatched (pretty label, but never a renamed model).
-    rows.push_back(section("BY MODEL"));
-    int mlabel_w = 0;
-    std::vector<stats::Row> pretty;
-    pretty.reserve(s.by_model.size());
-    for (const auto& r : s.by_model) {
-        stats::Row p = r;
-        std::string label = pretty_model_label(r.label);
-        if (!label.empty()) p.label = std::move(label);
-        mlabel_w = std::max(mlabel_w, static_cast<int>(p.label.size()));
-        pretty.push_back(std::move(p));
-    }
-    for (const auto& r : pretty)
-        rows.push_back(tally_row(r, mlabel_w, info, /*dim_when_zero=*/false));
-
-    // ── Denominator ─────────────────────────────────
-    // Always state what the percentages are OF. A share without its
-    // denominator is the classic way a stats panel misleads honestly.
-    rows.push_back(blank_row());
-    std::string denom = std::to_string(s.routed_turns) + " routed";
-    if (s.unrouted_turns > 0)
-        denom += "  \xc2\xb7  " + std::to_string(s.unrouted_turns) +
-                 " ran with Smart Mode off";
-    denom += "  \xc2\xb7  " + std::to_string(s.total_turns) + " total";
-    rows.push_back(text(std::move(denom), fg_dim(muted)).build());
-
-    return rows;
 }
 
 }  // namespace
@@ -203,62 +116,75 @@ Element stats_panel(const Model& m) {
     const auto* o = m.ui.panel.get<pn::Stats>();
     if (!o) return nothing();
 
-    // Refresh the cached projection when the transcript has moved. See
-    // panel/stats.hpp: the cache is an optimisation over a pure function,
-    // never a second source of truth.
-    stats_panel::Stamp now{m.d.current.messages.size(), m.d.current.id.value};
-    if (!(o->stamp == now)) {
-        o->smart = stats::smart_stats(m.d.current.messages);
-        o->stamp = std::move(now);
-    }
+    // One incremental refresh. On a settled thread this folds nothing; while
+    // streaming it folds exactly the live tail. See domain/stats/facts.hpp
+    // for why the cursor and the epoch guard are shaped the way they are.
+    const stats::Facts& f = o->projection.refresh(m.d.current);
+
+    // A tab can become unavailable under the user (the last tool call was
+    // rewound away). Landing on it would show an empty panel with no way to
+    // understand why, so the selection is corrected here rather than
+    // defended in every extractor.
+    const auto visible = stats::visible_tabs(f);
+    stats::Tab active = o->tab;
+    if (!stats::tab_available(active, f)) active = visible.front();
+    o->tab = active;
 
     maya::panel::Config cfg;
     cfg.title    = "Stats";
-    cfg.subtitle = std::string{stats::tab_subtitle(o->tab)};
+    cfg.subtitle = std::string{stats::tab_subtitle(active)};
     cfg.accent   = accent;
 
     // Tabs are the WIDGET's chrome, not this host's: it owns the padding,
     // the selected treatment and how the strip degrades on a narrow frame,
-    // so every tabbed panel looks the same by construction. This host only
-    // says which tabs exist and which one is live — both read straight off
-    // the stats::Tab enumeration, which is their SSOT.
+    // so every tabbed panel looks the same by construction.
     //
     // Editor marking because these tabs are PEERS you switch between, not
-    // views of one underlying thing: each tab is a different statistic with
-    // its own subtitle. That is the same relationship an open-file strip
-    // has, so it gets the same treatment — " │ " dividers carrying the
-    // structure and no underline rule.
+    // views of one underlying thing — " │ " dividers carry the structure
+    // and there is no underline rule. Filled because a mark that works by
+    // CONTRAST says nothing about the first tab in the strip; a chip
+    // states "this is the live view" on its own.
     //
-    // Filled, because today kTabCount == 1. A mark that works by CONTRAST
-    // (bold accent against dim neighbours) says nothing when there are no
-    // neighbours, and an underline under a lone tab reads as a stray rule
-    // rather than as a selection. A chip states "this is the live view"
-    // on its own, and keeps meaning the same thing once a second tab
-    // arrives. The panel is an overlay wide enough to afford both.
-    cfg.tabs.reserve(static_cast<std::size_t>(stats::kTabCount));
-    for (int i = 0; i < stats::kTabCount; ++i)
-        cfg.tabs.emplace_back(stats::tab_title(static_cast<stats::Tab>(i)));
-    cfg.tab_active = static_cast<int>(o->tab);
-    cfg.tab_mark   = maya::TabMark::Editor;
-    cfg.tab_fill   = true;
+    // The strip shows only the AVAILABLE tabs, so a session that never ran
+    // a tool has no Tools chip to land on — an empty tab is a tab admitting
+    // it should not have been drawn.
+    cfg.tabs.reserve(visible.size());
+    for (auto t : visible) cfg.tabs.emplace_back(stats::tab_title(t));
+    cfg.tab_active = 0;
+    for (std::size_t i = 0; i < visible.size(); ++i)
+        if (visible[i] == active) { cfg.tab_active = static_cast<int>(i); break; }
+    cfg.tab_mark = maya::TabMark::Editor;
+    cfg.tab_fill = true;
 
-    // Tab dispatch. A switch on the enum rather than a table of function
-    // pointers: -Wswitch then names a new tab that forgot its body, which is
-    // the same guarantee the panel Kind dispatch relies on.
-    switch (o->tab) {
-        case stats::Tab::Smart:
-            cfg.prebuilt = smart_tab(o->smart);
-            break;
-    }
+    // The panel body: one sheet, every section on it. Because it is ONE
+    // sheet rather than one per section, every row on the tab is measured
+    // against the same columns — which is the difference between a readout
+    // and a stack of unrelated tables.
+    StatSheet sheet;
+    sheet.indent(1);
+    sheet.theme.label   = fg;
+    sheet.theme.value   = fg;
+    sheet.theme.detail  = muted;
+    sheet.theme.heading = accent;
+    sheet.theme.bar     = accent;
+    sheet.theme.track   = muted;
+    sheet.theme.hero    = accent;
+
+    std::vector<stats::Metric> scratch;
+    scratch.reserve(32);
+    for (const auto& sec : stats::tab_desc(active).sections)
+        emit_section(sec, f, sheet, scratch);
+
+    cfg.prebuilt.push_back(sheet.build());
 
     // Read-only: no cursor. A selection highlight on rows nothing can be
     // done to is a promise the panel cannot keep.
-    cfg.selected = -1;
+    cfg.selected   = -1;
     cfg.scroll     = &m.ui.stats_scroll;
     cfg.viewport_h = panel_detail::panel_viewport_h();
 
-    cfg.note = stats::kTabCount > 1 ? "tab  switch view   esc  close"
-                                    : "esc  close";
+    cfg.note = visible.size() > 1 ? "tab  switch view   esc  close"
+                                  : "esc  close";
     return maya::Panel{std::move(cfg)}.build();
 }
 

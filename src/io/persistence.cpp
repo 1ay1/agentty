@@ -432,6 +432,33 @@ json message_to_json(const Message& m) {
         j["served_model"] = m.served_model.value;
     if (m.served_role)
         j["served_role"] = std::string{smart::role_wire_name(*m.served_role)};
+    // Per-turn telemetry. One compact object, only when measured — a user
+    // turn and a pre-telemetry assistant turn gain no bytes, and absence
+    // stays distinguishable from a measured zero on reload.
+    //
+    // Zero-valued members are omitted individually for the same reason:
+    // most turns have no retries and no cache, so writing every field
+    // would cost more than the numbers are worth on a long thread.
+    if (m.telemetry) {
+        const auto& t = *m.telemetry;
+        json tj;
+        if (t.ttft_ms)             tj["ttft_ms"]   = t.ttft_ms;
+        if (t.stream_ms)           tj["stream_ms"] = t.stream_ms;
+        if (t.input_tokens)        tj["in"]        = t.input_tokens;
+        if (t.output_tokens)       tj["out"]       = t.output_tokens;
+        if (t.reasoning_tokens)    tj["reasoning"] = t.reasoning_tokens;
+        if (t.cache_read)          tj["cache_r"]   = t.cache_read;
+        if (t.cache_creation)      tj["cache_w"]   = t.cache_creation;
+        if (t.transient_retries)   tj["retries"]   = t.transient_retries;
+        if (t.mid_stream_failures) tj["mid_fail"]  = t.mid_stream_failures;
+        if (t.no_progress_failures) tj["stall"]    = t.no_progress_failures;
+        if (t.wire_bytes)          tj["bytes"]     = t.wire_bytes;
+        // An all-zero telemetry is still a MEASUREMENT (a turn that ran
+        // and cost nothing recordable), so the key is written even when
+        // every member was omitted. Dropping it would silently turn a
+        // measured turn into an unmeasured one on the next reload.
+        j["telemetry"] = std::move(tj);
+    }
     // Adaptive-thinking block (Assistant turns under an effort setting).
     // Persisted so a reloaded thread can replay it on a follow-up turn —
     // Anthropic 400s a tool_use turn whose thinking block was dropped.
@@ -631,6 +658,34 @@ std::expected<Message, DeserializeError> message_from_json(const json& j) {
     // load: a thread written by a build that knows a role this one
     // doesn't must still open, just without the accent tag.
     m.served_role  = smart::role_from_wire_name(j.value("served_role", ""));
+    // Per-turn telemetry. Absent on user turns and on anything written
+    // before the field existed — which stays distinguishable from a
+    // measured zero, so the stats fold can exclude unmeasured turns from
+    // its denominators instead of averaging fake zeroes into them.
+    if (auto it = j.find("telemetry"); it != j.end() && it->is_object()) {
+        const auto& tj = *it;
+        Message::Telemetry t;
+        auto u32 = [&](const char* k) {
+            return static_cast<std::uint32_t>(
+                tj.value(k, static_cast<std::uint64_t>(0)));
+        };
+        auto u16 = [&](const char* k) {
+            return static_cast<std::uint16_t>(
+                tj.value(k, static_cast<std::uint64_t>(0)));
+        };
+        t.ttft_ms             = u32("ttft_ms");
+        t.stream_ms           = u32("stream_ms");
+        t.input_tokens        = u32("in");
+        t.output_tokens       = u32("out");
+        t.reasoning_tokens    = u32("reasoning");
+        t.cache_read          = u32("cache_r");
+        t.cache_creation      = u32("cache_w");
+        t.transient_retries   = u16("retries");
+        t.mid_stream_failures = u16("mid_fail");
+        t.no_progress_failures = u16("stall");
+        t.wire_bytes          = u32("bytes");
+        m.telemetry = t;
+    }
     // Blob reference (current) or inline (older threads / fallback).
     auto text_or_blob = [](const json& obj, const char* key) -> std::string {
         if (auto it = obj.find(std::string{key} + "_blob");

@@ -455,6 +455,44 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
     const bool max_tokens_hit = (stop_reason == StopReason::MaxTokens);
     if (!m.d.current.messages.empty()) {
         auto& last = m.d.current.messages.back();
+        // Seal the turn's telemetry while phase::Active still exists. This
+        // is the LAST moment these numbers are readable: the ctx is dropped
+        // on the transition to Idle, and every retry counter on it is reset
+        // at the start of the next turn. Usage arrived earlier via
+        // StreamUsage; timings and transport health are only knowable here.
+        if (last.role == Role::Assistant) {
+            if (const auto* a = active_ctx(m.s.phase)) {
+                if (!last.telemetry) last.telemetry.emplace();
+                auto& t = *last.telemetry;
+                const auto now_st = std::chrono::steady_clock::now();
+                auto ms_between = [](auto from, auto to) -> std::uint32_t {
+                    if (from.time_since_epoch().count() == 0) return 0;
+                    if (to <= from) return 0;
+                    const auto d = std::chrono::duration_cast<
+                        std::chrono::milliseconds>(to - from).count();
+                    // Clamp rather than wrap: a clock that jumped is a
+                    // corrupt reading, and a corrupt reading that looks
+                    // plausible is worse than one that is obviously capped.
+                    return d > 0xFFFFFFFFLL ? 0xFFFFFFFFu
+                                            : static_cast<std::uint32_t>(d);
+                };
+                // Split at the first content byte. Before it the provider
+                // was thinking or queueing; after it we were receiving.
+                t.ttft_ms   = ms_between(a->started, a->first_delta_at);
+                t.stream_ms = a->first_delta_at.time_since_epoch().count()
+                                ? ms_between(a->first_delta_at, now_st)
+                                : 0;
+                t.transient_retries =
+                    static_cast<std::uint16_t>(a->transient_retries);
+                t.mid_stream_failures =
+                    static_cast<std::uint16_t>(a->mid_stream_failures);
+                t.no_progress_failures =
+                    static_cast<std::uint16_t>(a->no_progress_failures);
+                t.wire_bytes = a->live_delta_bytes > 0xFFFFFFFFull
+                                 ? 0xFFFFFFFFu
+                                 : static_cast<std::uint32_t>(a->live_delta_bytes);
+            }
+        }
         // Drain any text still in the smoothing buffer before committing
         // — message_stop should leave no in-flight bytes invisible.
         if (last.role == Role::Assistant && !last.pending_stream.empty()) {
@@ -1667,6 +1705,36 @@ Step stream_update(Model m, msg::StreamMsg sm) {
             // reports it so the last real turn's value stays visible.
             if (e.reasoning_output_tokens)
                 m.s.reasoning_tokens = e.reasoning_output_tokens;
+            // Mirror the usage onto the TURN as well as the session. The
+            // session fields are a live gauge — replaced every turn, and
+            // gone the moment the next one starts. The stats subsystem
+            // needs the per-turn history, and a usage frame is the only
+            // place these numbers ever exist.
+            //
+            // Written here rather than at finalize_turn because a turn can
+            // emit several usage frames (retries, continuation); taking
+            // the latest is what the session gauge already does, so the
+            // two cannot disagree about the same turn.
+            if (!m.d.current.messages.empty()) {
+                auto& last = m.d.current.messages.back();
+                if (last.role == Role::Assistant) {
+                    if (!last.telemetry) last.telemetry.emplace();
+                    auto& t = *last.telemetry;
+                    if (e.input_tokens)
+                        t.input_tokens = static_cast<std::uint32_t>(e.input_tokens);
+                    if (e.output_tokens)
+                        t.output_tokens = static_cast<std::uint32_t>(e.output_tokens);
+                    if (e.reasoning_output_tokens)
+                        t.reasoning_tokens =
+                            static_cast<std::uint32_t>(e.reasoning_output_tokens);
+                    if (e.cache_read_input_tokens)
+                        t.cache_read =
+                            static_cast<std::uint32_t>(e.cache_read_input_tokens);
+                    if (e.cache_creation_input_tokens)
+                        t.cache_creation =
+                            static_cast<std::uint32_t>(e.cache_creation_input_tokens);
+                }
+            }
             return done(std::move(m));
         },
         [&](StreamHeartbeat e) -> Step {

@@ -469,6 +469,74 @@ struct Message {
     bool text_block_closed = false;
     std::vector<ToolUse> tool_calls;
     std::chrono::system_clock::time_point timestamp = std::chrono::system_clock::now();
+
+    // ── Per-turn telemetry (Assistant turns only) ──────────────────────
+    //
+    // Sealed once at finalize_turn, then never touched. This is the same
+    // argument `served_model` won: a turn's provenance is a property OF
+    // THE TURN, so it lives on the turn rather than being recomputed from
+    // session state that has already been thrown away.
+    //
+    // It has to be stored, because the counters it captures are VOLATILE.
+    // `transient_retries`, `mid_stream_failures` and friends live on
+    // phase::Active, which is reset at the start of every turn — by the
+    // time a stats panel opens they are gone, so no amount of walking the
+    // transcript can recover them. Same for the cache split: the ratio is
+    // computed on every turn today and discarded.
+    //
+    // Cost is one struct write per turn. Nothing per token, nothing per
+    // frame: ~50 bytes on a message that already carries kilobytes.
+    struct Telemetry {
+        // Wall-clock, in two halves that answer different questions.
+        // ttft is "did the provider make me wait", stream is "was
+        // generation slow" — a single total conflates a queueing problem
+        // with a throughput one, and they have different fixes.
+        std::uint32_t ttft_ms   = 0;   // request launch → first content byte
+        std::uint32_t stream_ms = 0;   // first byte → stop
+
+        // Usage as the wire reported it. input_tokens EXCLUDES the cache
+        // fields (Anthropic's convention), so the true prefix size is
+        // input + cache_read + cache_creation — see cache_hit_ratio().
+        std::uint32_t input_tokens     = 0;
+        std::uint32_t output_tokens    = 0;
+        // Billed WITHIN output_tokens, never added to it.
+        std::uint32_t reasoning_tokens = 0;
+        std::uint32_t cache_read       = 0;
+        std::uint32_t cache_creation   = 0;
+
+        // Transport health. Non-zero means the turn survived something.
+        std::uint16_t transient_retries    = 0;
+        std::uint16_t mid_stream_failures  = 0;
+        std::uint16_t no_progress_failures = 0;
+
+        // Bytes the transport actually delivered. Divided by stream_ms
+        // this is the honest throughput, which token counts are not:
+        // tokens arrive in bursts and only settle at the usage frame.
+        std::uint32_t wire_bytes = 0;
+
+        // Share of the prefix served from cache, or -1 when this turn
+        // reported no prefix at all. A sentinel rather than 0.0 because
+        // "no cache hit" and "nothing to hit" are different readings and
+        // averaging them together understates every session.
+        [[nodiscard]] double cache_hit_ratio() const noexcept {
+            const double prefix = static_cast<double>(input_tokens)
+                                + static_cast<double>(cache_read)
+                                + static_cast<double>(cache_creation);
+            if (prefix <= 0.0) return -1.0;
+            return static_cast<double>(cache_read) / prefix;
+        }
+        [[nodiscard]] bool degraded() const noexcept {
+            return transient_retries || mid_stream_failures
+                || no_progress_failures;
+        }
+    };
+    // Absent on user messages, on assistant turns that predate this field,
+    // and on turns that never reached finalize_turn. optional rather than a
+    // zeroed struct because "not measured" and "measured as zero" are
+    // different, and a sentinel that conflates them puts fake zeroes in
+    // every denominator that averages over turns.
+    std::optional<Telemetry> telemetry;
+
     std::optional<CheckpointId> checkpoint_id;
     // Set when the turn ended in a stream-level error (overloaded, 5xx,
     // network drop, mid-stream parse failure, etc.). Carries just the

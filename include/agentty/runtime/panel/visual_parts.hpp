@@ -20,27 +20,26 @@
 // ── stats viewer: the derived cache is the load-bearing exemption ──────
 namespace agentty::stats_panel {
 
-// The only VISUAL input is which tab is selected. The cached projection is
+// The only VISUAL input is which tab is selected. The projection is
 // exempt, and this is the interesting case for the frame hash, so it is
 // worth stating precisely:
 //
-// `smart` and `stamp` are a DERIVED cache of the transcript, refreshed
-// lazily during render. Hashing them would be wrong in both directions.
-// Wrong for correctness: the hash would change when the cache REFRESHES
-// rather than when the display changes — and since the refresh happens
-// during render, that is a hash chasing its own tail. Wrong for cost:
-// walking a whole tally per frame is precisely the per-frame work the cache
+// `projection` is a DERIVED cache of the transcript, refreshed lazily
+// during render. Hashing it would be wrong in both directions. Wrong for
+// correctness: the hash would change when the cache REFRESHES rather than
+// when the display changes — and since the refresh happens during render,
+// that is a hash chasing its own tail. Wrong for cost: walking every
+// tally per frame is precisely the per-frame work the incremental fold
 // exists to avoid.
 //
-// Nothing is lost, because the cache is a pure function of the transcript
-// and the transcript is already hashed via the conversation's own parts. A
-// message landing bumps the frame hash by that route, the panel then sees a
-// stale stamp and recomputes — so the display still updates without the
+// Nothing is lost, because the projection is a pure function of the
+// transcript and the transcript is already hashed via the conversation's
+// own parts. A message landing bumps the frame hash by that route, the
+// panel then folds the new tail — so the display still updates without the
 // cache ever being an input to the hash.
 inline auto visual_parts(const Open& p) {
     return std::make_tuple(static_cast<std::uint8_t>(p.tab),
-                           visual::exempt,   // smart: derived from messages
-                           visual::exempt);  // stamp: cache validity key
+                           visual::exempt);  // projection: derived from messages
 }
 static_assert(visual::parts_cover_all<Open>);
 
