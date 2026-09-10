@@ -2341,6 +2341,77 @@ HostProbe probe_host(const AuthHeader& auth, const Endpoint& endpoint) {
     return out;   // dialect None; http_status carries the last error seen
 }
 
+namespace detail {
+
+// The context window a gateway ADVERTISES for one /v1/models row, or 0 when
+// it says nothing.
+//
+// There is no standard field here — OpenAI's own /v1/models returns only
+// {id, object, created, owned_by}, so every gateway that wants to publish a
+// window invented its own place to put it. Reading all of them is the
+// difference between a 1M-token model working out of the box and it being
+// silently clamped to a default:
+//
+//   LiteLLM     model_info.max_input_tokens  (also .max_tokens as a
+//               fallback; a config's `model_info:` block passes straight
+//               through to /v1/models and /model/info)
+//   OpenRouter  context_length, and top_provider.context_length — the
+//               latter is the window of the endpoint that will actually
+//               serve the request, so it wins when the two disagree
+//   vLLM        max_model_len (added to /v1/models in vllm#4643)
+//   llama.cpp / n_ctx, and the meta.n_ctx_train an ollama-style probe
+//   others      reports
+//
+// Order matters where a row carries more than one: prefer the field that
+// describes THIS deployment (top_provider, max_model_len) over a catalog
+// figure for the model family, because a gateway routinely serves a model
+// at less than its theoretical maximum.
+//
+// Returns 0 rather than a default so the caller can distinguish "the
+// gateway told us" from "nobody knows" — those deserve different
+// treatment, and conflating them is what pinned every custom-host model to
+// the built-in default.
+[[nodiscard]] inline int advertised_context_window(const nlohmann::json& m) {
+    auto as_int = [](const nlohmann::json& v) -> int {
+        if (v.is_number_integer())  return v.get<int>();
+        if (v.is_number_unsigned()) return static_cast<int>(v.get<std::uint64_t>());
+        if (v.is_number_float())    return static_cast<int>(v.get<double>());
+        // Some proxies stringify numeric metadata.
+        if (v.is_string()) {
+            try { return std::stoi(v.get<std::string>()); } catch (...) {}
+        }
+        return 0;
+    };
+    auto pick = [&](const nlohmann::json& obj, const char* key) -> int {
+        if (!obj.is_object()) return 0;
+        const auto it = obj.find(key);
+        return it == obj.end() ? 0 : as_int(*it);
+    };
+
+    // Deployment-specific first.
+    if (const auto tp = m.find("top_provider");
+        tp != m.end() && tp->is_object())
+        if (const int w = pick(*tp, "context_length"); w > 0) return w;
+    if (const int w = pick(m, "max_model_len"); w > 0) return w;
+
+    // LiteLLM's model_info block.
+    if (const auto mi = m.find("model_info");
+        mi != m.end() && mi->is_object()) {
+        if (const int w = pick(*mi, "max_input_tokens"); w > 0) return w;
+        if (const int w = pick(*mi, "max_tokens");       w > 0) return w;
+        if (const int w = pick(*mi, "context_window");   w > 0) return w;
+    }
+
+    // Flat spellings.
+    for (const char* key : {"context_length", "context_window",
+                            "max_input_tokens", "n_ctx", "n_ctx_train"})
+        if (const int w = pick(m, key); w > 0) return w;
+
+    return 0;
+}
+
+}  // namespace detail
+
 std::vector<ModelInfo> list_models(const AuthHeader& auth, const Endpoint& endpoint) {
     std::vector<ModelInfo> result;
     if (endpoint.use_tls && is_empty(auth)) return result;
@@ -2456,8 +2527,9 @@ std::vector<ModelInfo> list_models(const AuthHeader& auth, const Endpoint& endpo
                 }
                 result.push_back(ModelInfo{
                     .id           = ModelId{id},
-                    .display_name = id,
+                    .display_name = m.value("display_name", id),
                     .provider     = endpoint.label,
+                    .context_window = detail::advertised_context_window(m),
                 });
             }
         }

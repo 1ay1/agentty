@@ -281,17 +281,13 @@ Element models_panel(const Model& m) {
         // always land in the same place: a row without a favourite leaves a
         // hole rather than sliding its ✦ left into the ★ column, which is what
         // made the old list look jittery as you scrolled.
+        // The context column shows what will ACTUALLY be used. The row's
+        // context_window already carries any user override (applied when the
+        // rows are built), because a settings value the surface that sets it
+        // does not display is a value the user cannot verify.
         std::string ctx;
-        if (const int win = r.model.context_window; win > 0) {
-            if (win >= 1'000'000) {
-                ctx = std::to_string(win / 1'000'000) + "M";
-                if (win % 1'000'000 != 0) ctx += "+";        // 1.x M → "1M+"
-            } else if (win >= 1000) {
-                ctx = std::to_string(win / 1'000) + "k";
-            } else {
-                ctx = std::to_string(win);
-            }
-        }
+        if (const int win = r.model.context_window; win > 0)
+            ctx = ui::context_window_label(win);
         // Widest realistic context label is 5 columns ("200k", "1M+").
         std::string trailing = ctx.size() < 5
             ? std::string(5 - ctx.size(), ' ') + ctx

@@ -138,6 +138,26 @@ struct Settings {
     // model id that doesn't exist on the new provider. The global `model_id`
     // above stays the active model; this map is just the per-provider recall.
     std::map<std::string, std::string> provider_models;
+
+    // User overrides for a model's CONTEXT WINDOW, in tokens, keyed
+    // "<provider_id>\t<model_id>" — the same composite key the MRU uses,
+    // because a bare model id is not unique across providers (the same name
+    // behind two gateways can be served with different windows).
+    //
+    // Why this has to exist. agentty learns a window from three places: the
+    // model id (Claude/GPT families), an Ollama /api/show probe, or the
+    // fields a gateway advertises in /v1/models. A plain OpenAI-compatible
+    // proxy may publish NONE of them — OpenAI's own /v1/models schema is
+    // just {id, object, created, owned_by}, so a gateway is not obliged to
+    // say anything — and then the window falls back to a default that can be
+    // 5x wrong. A user running 1M-token models behind LiteLLM had no way to
+    // correct it; even Claude Code needs an explicit override for the same
+    // reason (LiteLLM documents setting one for non-Anthropic models).
+    //
+    // An override always WINS. It is the most specific statement available
+    // — the person who configured the gateway knows what it serves — and a
+    // setting that a heuristic can quietly overrule is not a setting.
+    std::map<std::string, int> context_overrides;
     // MRU of recently-active (provider,model) pairs, MOST-RECENT-FIRST and
     // bounded. Drives the fused model picker's RECENT section and the ^Tab
     // quick-swap (jump to the previous provider+model). Each entry is

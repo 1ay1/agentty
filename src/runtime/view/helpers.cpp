@@ -194,15 +194,66 @@ std::string utf8_encode(char32_t cp) {
     return out;
 }
 
+std::string context_window_label(int tokens) {
+    if (tokens <= 0) return "auto";
+    if (tokens >= 1'000'000) {
+        std::string s = std::to_string(tokens / 1'000'000) + "M";
+        if (tokens % 1'000'000 != 0) s += "+";
+        return s;
+    }
+    if (tokens >= 1000) return std::to_string(tokens / 1000) + "k";
+    return std::to_string(tokens);
+}
+
+std::string context_override_key(std::string_view provider_id,
+                                std::string_view model_id) {
+    // Tab-separated, matching the recent-models MRU on disk. A model id can
+    // contain '/' (openrouter) and ':' (ollama), so a tab is the one
+    // separator no id carries.
+    std::string k;
+    k.reserve(provider_id.size() + model_id.size() + 1);
+    k.append(provider_id);
+    k.push_back('\t');
+    k.append(model_id);
+    return k;
+}
+
+int resolve_context_window(std::string_view provider_id,
+                           std::string_view model_id,
+                           int advertised,
+                           const store::Settings& settings) noexcept {
+    // 1. The user's override wins outright. They configured the gateway;
+    //    nothing we can infer is better evidence than that.
+    try {
+        const auto it =
+            settings.context_overrides.find(context_override_key(provider_id, model_id));
+        if (it != settings.context_overrides.end() && it->second > 0)
+            return it->second;
+    } catch (...) {
+        // A lookup must never take down a turn; fall through to inference.
+    }
+
+    // 2. What the endpoint actually told us, from a probe or a /v1/models
+    //    row. Beats an id guess: only the gateway knows how IT serves the
+    //    model, and the same name elsewhere may differ.
+    if (advertised > 0) return advertised;
+
+    // 3. The id. Claude/GPT families are known, `[1m]` forces the wide
+    //    window, unknown families report 0.
+    if (const int w = ModelCapabilities::from_id(model_id).context_window(); w > 0)
+        return w;
+
+    // 4. Nothing is known. Stay conservative: an over-estimate fails the
+    //    turn on the wire, an under-estimate only compacts sooner than it
+    //    had to.
+    return kDefaultContextWindow;
+}
+
 int context_max_for_model(std::string_view model_id) noexcept {
-    // ModelCapabilities owns the model-id parsing; this consumes the typed
-    // window. Sonnet-4+ auto-detects the 1M window (the `context-1m` beta the
-    // transport already sends), Opus/Haiku stay 200k, and the `[1m]` suffix
-    // still forces 1M for any model. Unknown families (local / OpenAI-compat)
-    // report 0 here — the caller prefers a real probed window in that case, so
-    // fall back to the historical 200k default only when nothing is known.
+    // The id-only path, for the call sites that have no catalog or settings
+    // in hand. Prefer resolve_context_window() wherever both are available.
     const int w = ModelCapabilities::from_id(model_id).context_window();
-    return w > 0 ? w : 200'000;
+    return w > 0 ? w : kDefaultContextWindow;
 }
 
 int utf8_prev(std::string_view s, int byte_pos) noexcept {

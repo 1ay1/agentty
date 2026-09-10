@@ -423,6 +423,15 @@ struct ModelsToggleFavorite {};
 // thinking on/off. The fused picker is the COMPLETE "pick + tune your model"
 // surface — there is no second picker.
 struct ModelsCycleEffort { int delta; };
+// Step the highlighted model's CONTEXT WINDOW override through a ladder of
+// common sizes (^W in the model picker), wrapping back to "auto".
+//
+// A cycle rather than a text prompt on purpose: the picker is a list with a
+// live filter, so a numeric entry mode would have to steal the keyboard from
+// the filter and then hand it back. The ladder covers what gateways actually
+// serve, and "auto" (no override) is a rung on it — so the control is
+// reversible without a separate clear action.
+struct ModelsCycleContext { int delta = +1; };
 struct ModelsToggleReasoning {};
 // Toggle whether the model's reasoning/thinking is SHOWN (^R). Flips the
 // persisted Settings.show_reasoning / Model.show_reasoning: renders the
@@ -1017,7 +1026,7 @@ using ProvidersMsg = std::variant<
 using ModelsMsg = std::variant<
     OpenModels, CloseModels, ModelsMove, ModelsJump,
     ModelsSelect, ModelsToggleFavorite,
-    ModelsCycleEffort, ModelsToggleReasoning,
+    ModelsCycleEffort, ModelsCycleContext, ModelsToggleReasoning,
     ModelsToggleShowReasoning,
     ModelsScopeProvider,
     ModelsFilterInput, ModelsFilterBackspace,

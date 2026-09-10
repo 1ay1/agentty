@@ -763,7 +763,7 @@ commit_provider_switch(Model m, std::string_view spec,
     if (next.empty()) next = model_for_provider(spec_s);
     if (!next.empty()) {
         m.d.model_id    = ModelId{next};
-        m.s.context_max = ui::context_max_for_model(m.d.model_id.value);
+        m.s.context_max = resolved_context_max(m, detail::active_provider_id());
         tools::subagent::set_model(m.d.model_id.value);
     } else {
         // No model resolvable for the new backend yet (ChatGPT catalog not

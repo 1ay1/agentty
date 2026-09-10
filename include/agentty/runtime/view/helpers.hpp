@@ -111,6 +111,69 @@ namespace agentty::ui {
 // triggers the `context-1m-2025-08-07` beta on the wire). Used by the
 // status-bar ctx % calculation so the bar doesn't read "180 %" after
 // switching to a 1 M-window model with the old 200 K cap baked in.
+// The rungs ^W steps through in the model picker. 0 == "auto" (no override;
+// fall back to what the provider advertised or the id implies), and it is
+// deliberately FIRST so the cycle starts from "let agentty decide" and one
+// full lap always returns there.
+//
+// The sizes are the ones gateways actually serve rather than round numbers
+// for their own sake: 32k/64k local builds, 128k the common vLLM and
+// OpenAI-compat default, 200k Claude-class, 272k Codex, 400k GPT-5-class,
+// 1M the wide tier LiteLLM users hit most often, 2M the Gemini ceiling.
+inline constexpr int kContextLadder[] = {
+    0, 32'000, 64'000, 128'000, 200'000, 272'000, 400'000, 1'000'000, 2'000'000,
+};
+
+// A human label for a window, matching the picker's own formatting
+// ("auto", "128k", "1M").
+[[nodiscard]] std::string context_window_label(int tokens);
+
+// The window assumed when NOTHING is known about a model — no user
+// override, no advertised figure, no recognised id family.
+//
+// 200k is deliberately conservative rather than optimistic. The two failure
+// modes are not symmetric: guessing too HIGH lets the prefix grow past what
+// the endpoint accepts and the turn dies on the wire mid-conversation,
+// while guessing too LOW only compacts earlier than strictly necessary. So
+// the unknown case takes the recoverable error.
+inline constexpr int kDefaultContextWindow = 200'000;
+
+// ── Context window resolution ──────────────────────────────────
+//
+// The window drives the ctx-% readout, the auto-compaction trigger and the
+// compaction slice ceiling, so getting it wrong is expensive in both
+// directions: too small silently truncates a model that could hold the whole
+// transcript, too large lets the prefix run past what the endpoint accepts
+// and the turn fails on the wire.
+//
+// FOUR sources, most-specific first. The layering is the whole design — a
+// single source cannot be right for every deployment:
+//
+//   1. the user's per-model override         (they configured the gateway)
+//   2. what the provider ADVERTISED          (probed /api/show, or the
+//                                             window in a /v1/models row)
+//   3. what the model id implies             (Claude/GPT families, `[1m]`)
+//   4. the conservative default              (nothing is known)
+//
+// Note the order of 2 and 3: a LIVE figure from the endpoint that will serve
+// the request outranks a guess from the id. The same name behind two
+// gateways can be served with two different windows, and only the gateway
+// knows which.
+//
+// `advertised` is 0 when nothing was reported — which is why ModelInfo's
+// context_window defaults to 0 rather than a number: "unknown" and "200k"
+// must not be the same value, or a real 1M model gets clamped by a default
+// nobody chose.
+[[nodiscard]] int resolve_context_window(std::string_view provider_id,
+                                        std::string_view model_id,
+                                        int advertised,
+                                        const store::Settings& settings) noexcept;
+
+// The composite key an override is stored under. Exposed so the settings
+// writer and the resolver cannot disagree about the spelling.
+[[nodiscard]] std::string context_override_key(std::string_view provider_id,
+                                               std::string_view model_id);
+
 [[nodiscard]] int context_max_for_model(std::string_view model_id) noexcept;
 
 // UTF-8 helpers.

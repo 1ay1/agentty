@@ -432,11 +432,7 @@ Step switch_to_model_ref(Model m, const ModelRef& ref, bool record = true) {
     if (ref.provider_id == cur_pid) {
         // Same provider — pure model change.
         m.d.model_id    = ModelId{ref.model_id};
-        m.s.context_max = ui::context_max_for_model(m.d.model_id.value);
-        for (const auto& mi : m.d.available_models)
-            if (mi.id == m.d.model_id && mi.context_window > 0) {
-                m.s.context_max = mi.context_window; break;
-            }
+        m.s.context_max = resolved_context_max(m, ref.provider_id);
         if (!m.d.model_id.value.empty())
             m.d.effort = clamp_effort(m.d.effort,
                                       resolved_caps(m.d.model_id.value,
@@ -720,6 +716,49 @@ Step models_update(Model m, msg::ModelsMsg pm) {
             m.ui.effort_dirty = true;
             return done(std::move(m));
         },
+        [&](ModelsCycleContext e) -> Step {
+            // ^W steps the HIGHLIGHTED model's context-window override along
+            // kContextLadder, wrapping. "auto" is rung 0, so a full lap
+            // always returns to "let agentty decide" — the control clears
+            // itself and needs no separate reset.
+            //
+            // Scoped to the ROW's provider, not the active one: the same
+            // model id behind two gateways can be served with two different
+            // windows, and the override has to name which.
+            auto* c = m.ui.panel.get<pn::Models>();
+            if (!c || c->index < 0
+                || c->index >= static_cast<int>(m.d.fused_rows.size()))
+                return done(std::move(m));
+            const auto& row = m.d.fused_rows[static_cast<std::size_t>(c->index)];
+            if (row.is_signin_offer()) return done(std::move(m));
+
+            auto settings = deps().load_settings();
+            const std::string key =
+                ui::context_override_key(row.provider_id, row.model.id.value);
+            const auto it = settings.context_overrides.find(key);
+            const int cur = it == settings.context_overrides.end() ? 0 : it->second;
+
+            constexpr int n = static_cast<int>(std::size(ui::kContextLadder));
+            int idx = 0;
+            for (int i = 0; i < n; ++i)
+                if (ui::kContextLadder[i] == cur) { idx = i; break; }
+            idx = ((idx + e.delta) % n + n) % n;
+            const int next = ui::kContextLadder[idx];
+
+            if (next <= 0) settings.context_overrides.erase(key);
+            else           settings.context_overrides[key] = next;
+            deps().save_settings(settings);
+
+            // Apply LIVE when the row is the model actually in use, so the
+            // ctx-% gauge moves with the setting instead of after a restart.
+            if (row.model.id == m.d.model_id
+                && row.provider_id == active_provider_id())
+                m.s.context_max = resolved_context_max(m, row.provider_id);
+
+            return {std::move(m),
+                    set_status_toast(m, "context " + row.model.id.value + " → "
+                                            + ui::context_window_label(next))};
+        },
         [&](ModelsToggleReasoning) -> Step {
             // ^E flips the highlighted model's per-model reasoning OVERRIDE
             // through its tri-state (auto → ON → OFF → auto). Mirrors the
@@ -943,6 +982,18 @@ Step models_update(Model m, msg::ModelsMsg pm) {
                     continue;
                 for (const auto& fav : settings.favorite_models)
                     if (mi.id == fav) mi.favorite = true;
+                // A user override outranks whatever the gateway advertised
+                // (or did not). Applied ONCE here, so every downstream
+                // reader — the picker column, the fused rows, the routing
+                // candidate pool — sees the effective window without each
+                // having to remember to consult the settings map.
+                if (const auto ov = settings.context_overrides.find(
+                        ui::context_override_key(e.provider_id.empty()
+                                                     ? active_provider_id()
+                                                     : e.provider_id,
+                                                 mi.id.value));
+                    ov != settings.context_overrides.end() && ov->second > 0)
+                    mi.context_window = ov->second;
                 m.d.available_models.push_back(std::move(mi));
             }
             // Refresh the subagent router's candidate pool so read-only roles
@@ -963,8 +1014,7 @@ Step models_update(Model m, msg::ModelsMsg pm) {
                 if (mi.id == m.d.model_id) { active_present = true; break; }
             if (!active_present && !m.d.available_models.empty()) {
                 m.d.model_id = m.d.available_models.front().id;
-                m.s.context_max =
-                    ui::context_max_for_model(m.d.model_id.value);
+                m.s.context_max = resolved_context_max(m, active_provider_id());
                 // The auto-selected model may not support the effort tier that
                 // rode over from the previous provider — clamp it so the picker
                 // chip and the wire agree (commit_provider_switch couldn't do
@@ -984,13 +1034,11 @@ Step models_update(Model m, msg::ModelsMsg pm) {
             // The active model may have remained valid, in which case the
             // old branch did not refresh its context cap. Codex publishes a
             // 272K window (rather than Agentty's generic 200K fallback), and
-            // the status-bar gauge must reflect that immediately.
-            for (const auto& mi : m.d.available_models) {
-                if (mi.id == m.d.model_id && mi.context_window > 0) {
-                    m.s.context_max = mi.context_window;
-                    break;
-                }
-            }
+            // the status-bar gauge must reflect that immediately. Routed
+            // through the resolver so a user override outranks the catalog:
+            // a gateway that under-reports (or reports nothing) must not
+            // overwrite what the user explicitly set.
+            m.s.context_max = resolved_context_max(m, active_provider_id());
             // If the FUSED picker is open, the active provider's catalog just
             // changed (available_models is its source), so its rows are stale
             // — rebuild them. rebuild_fused_rows re-mirrors available_models

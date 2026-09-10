@@ -421,6 +421,7 @@ std::optional<Msg> on_fused_picker(const KeyEvent& ev) {
             switch (v->c) {
                 case U'p': return Msg{OpenProviders{}};   // cross-hop
                 case U'f': return Msg{ModelsToggleFavorite{}};
+                case U'w': return Msg{ModelsCycleContext{+1}};   // context window
                 case U'r': return Msg{ModelsToggleShowReasoning{}};
                 case U'l': return Msg{ModelsRefresh{}};
                 default:   break;

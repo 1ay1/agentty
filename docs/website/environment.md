@@ -64,6 +64,31 @@ Off by default and a byte-for-byte no-op when off — see
 | `AGENTTY_SMART_ROUTE_MAIN` | `0` stops the main conversation turn from being routed by complexity — every turn runs on the Strategic model and only its *effort* varies. On by default. Before this existed that was the only behaviour: the flagship served every turn, including ones the classifier had already scored trivial. |
 | `AGENTTY_SMART_MAIN_FLOOR` | The cheapest role the main turn may be routed to: `utility` (default — the full ladder), `implementation` (never cheaper than the mid model), or `strategic` (never route down; equivalent to `AGENTTY_SMART_ROUTE_MAIN=0`). Raise it if simple turns are being answered too thinly. |
 
+## Context window
+
+agentty learns a model's context window from three places, most specific
+first: **your override**, then what the provider **advertised**, then what the
+**model id** implies. Nothing known falls back to a conservative 200k.
+
+That middle layer is why most setups need no configuration — the
+`/v1/models` listing is read for `model_info.max_input_tokens` (LiteLLM),
+`context_length` and `top_provider.context_length` (OpenRouter),
+`max_model_len` (vLLM), and `n_ctx` (llama.cpp). Where a row advertises both
+a catalog window and the serving endpoint's, the **serving** one wins: it is
+the one that will reject an over-long prompt.
+
+But a gateway is not obliged to say anything — OpenAI's own `/v1/models`
+schema is just `{id, object, created, owned_by}` — so when yours is silent or
+wrong, set it yourself:
+
+> In the model picker (**Ctrl+M**), highlight a model and press **^W** to step
+> its window through `auto → 32k → 64k → 128k → 200k → 272k → 400k → 1M → 2M`
+> and back to `auto`. The choice is saved per **provider + model**, so the same
+> model id behind two gateways can carry two different windows.
+
+An override always wins, including over a gateway that advertises a smaller
+window than it actually serves.
+
 ## Retrieval (RAG)
 
 Full detail in **[Retrieval](/docs/retrieval)**. Most default sensibly; the

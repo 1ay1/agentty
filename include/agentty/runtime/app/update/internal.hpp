@@ -249,6 +249,16 @@ maya::Cmd<Msg> set_status_toast(Model& m, std::string text,
 // (declared at module scope above — `update_stream_preview`, `salvage_args`,
 // `finalize_turn`. The stream_update reducer below uses them.)
 
+// The resolved context window for the model this Model is pointed at.
+//
+// ONE place that assembles the three inputs resolve_context_window layers
+// (user override, advertised window, id inference). Four call sites used to
+// open-code "context_max_for_model, then scan available_models and overwrite
+// if a probe reported something" — which had no override step at all, and
+// would have needed the same fix four times.
+[[nodiscard]] int resolved_context_max(const Model& m,
+                                       std::string_view provider_id);
+
 // Rebuild the open Ctrl+O snapshot from current live tool state. Called by
 // both argument-stream and execution reducers; no-op while the viewer is closed.
 void resync_live_tool_viewer(Model& m);

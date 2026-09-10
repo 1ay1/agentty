@@ -1657,6 +1657,14 @@ store::Settings load_settings() {
             for (auto& [k, v] : j["provider_models"].items())
                 if (v.is_string()) s.provider_models[k] = v.get<std::string>();
         }
+        // Per-model context-window overrides. Non-positive values are
+        // dropped on read rather than clamped: 0 means "no override", so
+        // storing one would be a way to express "override with nothing".
+        if (j.contains("context_overrides") && j["context_overrides"].is_object()) {
+            for (auto& [k, v] : j["context_overrides"].items())
+                if (v.is_number_integer() && v.get<int>() > 0)
+                    s.context_overrides[k] = v.get<int>();
+        }
         if (j.contains("recent_models") && j["recent_models"].is_array()) {
             for (auto& v : j["recent_models"])
                 if (v.is_string()) s.recent_models.push_back(v.get<std::string>());
@@ -1836,6 +1844,12 @@ void save_settings(const store::Settings& s) {
         json pm = json::object();
         for (const auto& [k, v] : s.provider_models) pm[k] = v;
         j["provider_models"] = std::move(pm);
+    }
+    if (!s.context_overrides.empty()) {
+        json co = json::object();
+        for (const auto& [k, v] : s.context_overrides)
+            if (v > 0) co[k] = v;
+        if (!co.empty()) j["context_overrides"] = std::move(co);
     }
     if (!s.recent_models.empty()) {
         json rm = json::array();

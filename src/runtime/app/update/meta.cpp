@@ -80,6 +80,18 @@ form::Form build_smart_form(const Model& m, bool advanced) {
     return smart_form::build_form(in);
 }
 
+int resolved_context_max(const Model& m, std::string_view provider_id) {
+    // The window the provider advertised for THIS model, if the catalog
+    // carries one. 0 means nothing was reported — a probe never ran, or the
+    // gateway's /v1/models row said nothing about size.
+    int advertised = 0;
+    for (const auto& mi : m.d.available_models) {
+        if (mi.id == m.d.model_id) { advertised = mi.context_window; break; }
+    }
+    return ui::resolve_context_window(provider_id, m.d.model_id.value,
+                                      advertised, deps().load_settings());
+}
+
 Step meta_update(Model m, msg::MetaMsg mm) {
     return std::visit(overload{
         [&](CompactContext) -> Step {

@@ -23,7 +23,16 @@ struct ModelInfo {
     ModelId     id;
     std::string display_name;
     std::string provider;
-    int  context_window = 200000;
+    // The model's context window in TOKENS, as reported by the provider.
+    //
+    // 0 = UNKNOWN, and that distinction is load-bearing. This used to
+    // default to 200000, which made "the gateway told us 200k" and "nobody
+    // said anything" the same value — so a LiteLLM/vLLM/OpenRouter model
+    // serving a 1M window was silently clamped to 200k with no way to tell
+    // that a default had been substituted. Callers now resolve an unknown
+    // window explicitly (see ui::context_max_for_model), and can prefer a
+    // user override or a probed value over a guess.
+    int  context_window = 0;
     bool favorite       = false;
     // Ollama-specific: the model reports "tools" in its capabilities list.
     // When false (or unset), agentty skips advertising tools entirely —
