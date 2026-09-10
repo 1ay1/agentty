@@ -505,3 +505,99 @@ TEST_CASE("smart_mode") {
         }
     }
 }
+
+// ── Custom hosts (Ollama / OpenAI-compat): the field bug ──────────────────
+//
+// Reported by a user who burned through two Ollama accounts in a week:
+// "Neither Utility nor Implementation models got used, so the grunt of the
+// work was done by my most expensive model, no matter how much I tweaked the
+// envs." Two independent causes, both here:
+//
+//   1. tier() returned Tier::Mid for EVERY unknown family, so a 480B and a
+//      4B were the same tier. Utility asks for a model strictly below the
+//      parent's tier; nothing was below Mid, so it fell back to the parent.
+//   2. Implementation required a strictly-Mid model and returned empty
+//      otherwise, which the caller reads as "use the parent". A catalog of
+//      one big model plus small ones (no 14-69B band) had no reachable
+//      de-escalation path at all.
+TEST_CASE("smart_mode: custom hosts de-escalate") {
+    using Tier = ModelCapabilities::Tier;
+
+    // The id's size tag is the only strength signal a custom host gives us.
+    CHECK(ModelCapabilities::tier_for("qwen3-coder:480b") == Tier::Flagship,
+          "480b is flagship-class");
+    CHECK(ModelCapabilities::tier_for("kimi-k2:1t") == Tier::Flagship,
+          "trillion-scale tags parse (1t == 1000b)");
+    CHECK(ModelCapabilities::tier_for("qwen3:32b") == Tier::Mid,
+          "32b is the mid workhorse lane");
+    CHECK(ModelCapabilities::tier_for("qwen3:8b") == Tier::Cheap,
+          "8b is the cheap lane");
+    // Hosted ids carry no size tag and must be unaffected by all of this.
+    CHECK(ModelCapabilities::tier_for("claude-opus-4-5") == Tier::Flagship,
+          "hosted flagship unchanged");
+    CHECK(ModelCapabilities::tier_for("claude-sonnet-4-5") == Tier::Mid,
+          "hosted mid unchanged");
+
+    sm::RoleConfig cfg;
+    cfg.enabled = true;
+
+    // A: big parent + a genuine mid + smaller models.
+    {
+        std::vector<ModelInfo> cat = {
+            mi("qwen3-coder:480b", 128000), mi("qwen3:32b", 128000),
+            mi("qwen3:8b", 128000),
+        };
+        const char* parent = "qwen3-coder:480b";
+        auto s = sm::resolve_role(sm::ModelRole::Strategic, parent, Effort::High, cat, cfg);
+        auto i = sm::resolve_role(sm::ModelRole::Implementation, parent, Effort::High, cat, cfg);
+        auto u = sm::resolve_role(sm::ModelRole::Utility, parent, Effort::High, cat, cfg);
+        CHECK(s.model == parent, "strategic stays on the parent");
+        CHECK(i.model != parent, "implementation DE-ESCALATES off the parent");
+        CHECK(u.model != parent, "utility DE-ESCALATES off the parent");
+        CHECK(i.model == "qwen3:32b", "implementation takes the mid tier");
+    }
+
+    // B: no mid tier at all — the shape that had no de-escalation path.
+    {
+        std::vector<ModelInfo> cat = {
+            mi("qwen3-coder:480b", 128000), mi("qwen3:8b", 128000),
+            mi("qwen3:4b", 128000),
+        };
+        const char* parent = "qwen3-coder:480b";
+        auto i = sm::resolve_role(sm::ModelRole::Implementation, parent, Effort::High, cat, cfg);
+        auto u = sm::resolve_role(sm::ModelRole::Utility, parent, Effort::High, cat, cfg);
+        CHECK(i.model != parent, "no mid tier still de-escalates implementation");
+        CHECK(u.model != parent, "no mid tier still de-escalates utility");
+        // Implementation must never be WEAKER than Utility. Same-tier ties
+        // used to fall to an alphabetical compare, which put `4b` before
+        // `8b` and inverted the two roles.
+        CHECK(i.model == "qwen3:8b", "implementation takes the STRONGEST below parent");
+    }
+
+    // C: a single pinned model must still degrade to "everything on the
+    // parent" — no invented routes, no regression.
+    {
+        std::vector<ModelInfo> cat = { mi("qwen3-coder:480b", 128000) };
+        const char* parent = "qwen3-coder:480b";
+        for (auto r : {sm::ModelRole::Strategic, sm::ModelRole::Implementation,
+                       sm::ModelRole::Utility}) {
+            auto p = sm::resolve_role(r, parent, Effort::High, cat, cfg);
+            CHECK(p.model == parent, "single-model catalog pins every role");
+        }
+    }
+
+    // D: a role may never route UP. This is the invariant that makes the
+    // Implementation fallback safe.
+    {
+        std::vector<ModelInfo> cat = {
+            mi("deepseek-v3.1:671b", 128000), mi("qwen3:32b", 128000),
+        };
+        // Parent is the SMALLER model; the bigger one must never be chosen.
+        auto i = sm::resolve_role(sm::ModelRole::Implementation, "qwen3:32b",
+                                  Effort::High, cat, cfg);
+        auto u = sm::resolve_role(sm::ModelRole::Utility, "qwen3:32b",
+                                  Effort::High, cat, cfg);
+        CHECK(i.model != "deepseek-v3.1:671b", "implementation never routes up");
+        CHECK(u.model != "deepseek-v3.1:671b", "utility never routes up");
+    }
+}

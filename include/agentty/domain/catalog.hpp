@@ -262,6 +262,14 @@ struct ModelCapabilities {
     // Inference lives entirely in from_id (no network probe exists).
     bool weak_tool_use = false;
 
+    // Parameter count in BILLIONS parsed from the id's size tag
+    // (qwen3-coder:480b -> 480, qwen3:8b -> 8), 0 when the id carries none
+    // (every hosted Claude/GPT id, and local ids that name a version like
+    // `glm-4.6`). Set by from_id; the only capability signal a custom host
+    // reliably gives us, and what lets tier() grade an unknown family
+    // instead of calling everything Mid.
+    int params_b = 0;
+
     // This is an OpenAI-Chat-wire model that exposes configurable reasoning
     // via the top-level `reasoning_effort` enum (low|medium|high) — it is NOT
     // in the Claude/GPT `Family` ladder but still supports effort control.
@@ -459,9 +467,39 @@ struct ModelCapabilities {
         if (is_haiku()) return Tier::Cheap;
         // Mid lane: Sonnet and the plain gpt-5.x workhorse line.
         if (is_sonnet() || is_gpt()) return Tier::Mid;
-        // Unknown family (local Ollama / OpenAI-compat): fall back to the
-        // params-in-B signal the weak-model inference already computes. A
-        // non-weak unknown with no size hint is assumed mid-capable.
+        // Unknown family (local Ollama / OpenAI-compat / any custom host).
+        //
+        // Use the params-in-B tag the id carries. This is the difference
+        // between Smart Mode working and Smart Mode being a no-op on a
+        // custom host: EVERY unknown model used to return Tier::Mid, so a
+        // 480B and a 4B were the same tier. The consequences, all reported
+        // in the field:
+        //
+        //   • Utility asks cheapest_capable_model for something strictly
+        //     BELOW the parent's tier. With everything Mid, nothing is
+        //     below Mid, so it fell back to the parent — the flagship ran
+        //     every trivial turn.
+        //   • Implementation asks for the strongest MID model. With
+        //     everything Mid that is a free-for-all over the whole
+        //     catalog, so it could pick a model BIGGER than the parent
+        //     (measured: parent qwen3-coder:480b -> deepseek-v3.1:671b).
+        //   • De-escalation from Strategic could therefore never happen,
+        //     no matter how the env knobs were tuned.
+        //
+        // Thresholds follow the sizes the local ecosystem actually ships,
+        // and are deliberately coarse — this is a cost-routing hint, not a
+        // benchmark. 70B+ is the flagship lane (llama-70b, qwen3-coder:480b,
+        // kimi-k2:1t, deepseek 671b); 14-69B is the mid workhorse lane
+        // (qwen3:32b, mistral-small:24b); anything smaller that survived
+        // the weak check is the cheap lane (qwen3:8b, 4b).
+        const int pb = params_b;
+        if (pb >= 70) return Tier::Flagship;
+        if (pb >= 14) return Tier::Mid;
+        if (pb >  0)  return Tier::Cheap;
+        // No size tag at all (`glm-4.6`, `minimax-m2`, a bare custom name).
+        // Assume mid-capable: it is the safe middle — it never silently
+        // promotes an unknown to flagship, and never demotes a capable
+        // model into the cheap lane where it would run trivial turns only.
         return Tier::Mid;
     }
 
@@ -606,6 +644,9 @@ struct ModelCapabilities {
             }
             start = i + 1;
         }
+        // Parse the size tag BEFORE the weak inference — both read it, and
+        // tier() reads it later off the stored field.
+        caps.params_b          = params_b_from_id(id);
         caps.weak_tool_use     = infer_weak_tool_use(id, caps);
         caps.reasoning_compat  = infer_reasoning_compat(id, caps);
         caps.effort_high_only  = infer_effort_high_only(id);
@@ -629,36 +670,29 @@ private:
     //     codellama, deepseek-coder, phi, gemma <= 9b, starcoder, stable-code).
     //   - Unknown ids default to NOT weak (assume capable) UNLESS the id
     //     carries a small-parameter tag.
-    [[nodiscard]] static constexpr bool infer_weak_tool_use(
-            std::string_view id, const ModelCapabilities& caps) noexcept {
-        // Known Claude family → always strong.
-        if (caps.is_known_family()) return false;
-
-        auto contains = [](std::string_view hay, std::string_view needle) {
-            if (needle.size() > hay.size()) return false;
-            for (std::size_t i = 0; i + needle.size() <= hay.size(); ++i) {
-                bool eq = true;
-                for (std::size_t j = 0; j < needle.size(); ++j) {
-                    char a = hay[i + j], b = needle[j];
-                    if (a >= 'A' && a <= 'Z') a = static_cast<char>(a + 32);
-                    if (b >= 'A' && b <= 'Z') b = static_cast<char>(b + 32);
-                    if (a != b) { eq = false; break; }
-                }
-                if (eq) return true;
-            }
-            return false;
-        };
-
-        // Parameter size in billions, parsed from a `<N>[.<M>]b` token (e.g.
-        // qwen2.5-coder:7b, llama3.1:70b, mistral-small:24b, phi3:3.8b). The
-        // integer part is used (floor) — 1.7b counts as 1, 6.7b as 6. 0 =
-        // unknown. We scan for 'b'/'B' preceded by a numeric run (with an
-        // optional single '.' fraction) that starts at a separator.
+    //
+    // Parameter size in billions, parsed from a `<N>[.<M>]b` token in the id
+    // (qwen2.5-coder:7b, llama3.1:70b, qwen3-coder:480b, phi3:3.8b). The
+    // integer part is used (floor) — 1.7b counts as 1, 6.7b as 6. Returns 0
+    // when the id carries no size tag (every hosted Claude/GPT id, and local
+    // ids like `glm-4.6` that name a version rather than a size).
+    //
+    // Hoisted out of infer_weak_tool_use so the TIER can use it too. It used
+    // to be a local in that one function, which is why size only ever
+    // produced a binary weak/not-weak answer and never a tier gradient — the
+    // bug that made every Ollama model land in Tier::Mid.
+    [[nodiscard]] static constexpr int params_b_from_id(
+            std::string_view id) noexcept {
         int params_b = 0;
         for (std::size_t i = 0; i < id.size(); ++i) {
             const char c = id[i];
+            // 'b' = billions, 't' = TRILLIONS. The frontier open-weight
+            // models tag themselves in T (kimi-k2:1t), and without this they
+            // parsed as 0 == "no size tag" and fell to the Mid default — the
+            // largest models in the ecosystem landing in the middle lane.
             const bool is_b = (c == 'b' || c == 'B');
-            if (!is_b || i == 0) continue;
+            const bool is_t = (c == 't' || c == 'T');
+            if ((!is_b && !is_t) || i == 0) continue;
             // char after 'b' must not be a letter (so "bf16" etc. is skipped)
             if (i + 1 < id.size()) {
                 char n = id[i + 1];
@@ -686,8 +720,35 @@ private:
                 if (id[k] == '.') break;
                 v = v * 10 + (id[k] - '0');
             }
+            if (is_t) v *= 1000;                  // 1t == 1000b
             if (v > params_b) params_b = v;       // take the largest match
         }
+        return params_b;
+    }
+
+    [[nodiscard]] static constexpr bool infer_weak_tool_use(
+            std::string_view id, const ModelCapabilities& caps) noexcept {
+        // Known Claude family → always strong.
+        if (caps.is_known_family()) return false;
+
+        auto contains = [](std::string_view hay, std::string_view needle) {
+            if (needle.size() > hay.size()) return false;
+            for (std::size_t i = 0; i + needle.size() <= hay.size(); ++i) {
+                bool eq = true;
+                for (std::size_t j = 0; j < needle.size(); ++j) {
+                    char a = hay[i + j], b = needle[j];
+                    if (a >= 'A' && a <= 'Z') a = static_cast<char>(a + 32);
+                    if (b >= 'A' && b <= 'Z') b = static_cast<char>(b + 32);
+                    if (a != b) { eq = false; break; }
+                }
+                if (eq) return true;
+            }
+            return false;
+        };
+
+        // Parameter size in billions (0 = the id carries no size tag).
+        // Already parsed by from_id before this runs.
+        const int params_b = caps.params_b;
 
         // Tool-trained / instruction-strong local families → strong even at
         // smaller sizes.
@@ -1425,8 +1486,16 @@ static_assert(!reasons_by_default("qwen3:32b"));   // explicit-tag family
                                             const ModelInfo& b) noexcept {
     const auto ca = ModelCapabilities::from_id(a.id.value);
     const auto cb = ModelCapabilities::from_id(b.id.value);
-    const auto ta = ca.tier(), tb = cb.tier();
+    const auto ta = ModelCapabilities::tier_for(a.id.value);
+    const auto tb = ModelCapabilities::tier_for(b.id.value);
     if (ta != tb) return ta > tb;                       // higher tier first
+    // Same tier: for unknown families the id's size tag is the only strength
+    // signal we have, and it must beat the alphabetical tie-break below.
+    // Without this `qwen3:4b` sorted before `qwen3:8b` ("4" < "8"), so
+    // "strongest below the parent" picked the SMALLER model — and
+    // Implementation could end up weaker than Utility.
+    if (ca.params_b != cb.params_b && (ca.params_b || cb.params_b))
+        return ca.params_b > cb.params_b;               // bigger first
     if (ca.generation != cb.generation)
         return ca.generation > cb.generation;           // newest gen first
     if (ca.revision != cb.revision)

@@ -231,9 +231,25 @@ namespace detail {
 // Strongest MID-tier candidate on this provider (for Implementation): the
 // most capable model that is NOT flagship-priced. Reuses model_picker_less
 // (tier desc, then newest) restricted to Mid, and refuses non-dispatchable /
-// weak / no-tools assets. Empty when the provider has no distinct mid tier.
+// weak / no-tools assets.
+//
+// The strongest model in the MID tier, or — when no Mid model exists — the
+// strongest model strictly BELOW the parent's tier.
+//
+// The fallback is the fix for "Implementation never de-escalates". This used
+// to require tier == Mid exactly and return empty otherwise, and the caller
+// reads empty as "route to the parent". So a catalog with a Flagship parent
+// and only Cheap models under it (very common on a custom host: one big model
+// plus a couple of small ones, nothing in the 14-69B band) had NO reachable
+// de-escalation path at all — Implementation silently ran on the flagship for
+// every turn, which is how a week of work billed at the top rate.
+//
+// `parent_model` is what makes the fallback safe: we only ever consider
+// models in a tier strictly below the parent's, so this can never route
+// Implementation UP, which is the invariant resolve_role documents.
 [[nodiscard]] inline std::string strongest_mid(
-        const std::vector<ModelInfo>& candidates) {
+        const std::vector<ModelInfo>& candidates,
+        std::string_view parent_model = {}) {
     using Tier = ModelCapabilities::Tier;
     const ModelInfo* best = nullptr;
     for (const auto& mi : candidates) {
@@ -241,6 +257,24 @@ namespace detail {
         if (mi.supports_tools.has_value() && !*mi.supports_tools) continue;
         if (!is_dispatchable_model(id)) continue;
         if (ModelCapabilities::tier_for(id) != Tier::Mid) continue;
+        if (!best || model_picker_less(mi, *best)) best = &mi;
+    }
+    if (best) return wire_model_id(std::string_view{best->id.value});
+    if (parent_model.empty()) return std::string{};
+
+    // No Mid tier. Take the strongest model in ANY tier below the parent's;
+    // a Cheap model at one effort step down is still a real de-escalation,
+    // and it is unambiguously better than billing the flagship for
+    // mechanical edits. Weak models stay excluded — a role whose job is
+    // multi-file tool work cannot run on a model that leaks tool JSON.
+    const Tier parent_tier = ModelCapabilities::tier_for(parent_model);
+    for (const auto& mi : candidates) {
+        const std::string_view id = mi.id.value;
+        if (mi.supports_tools.has_value() && !*mi.supports_tools) continue;
+        if (!is_dispatchable_model(id)) continue;
+        const Tier t = ModelCapabilities::tier_for(id);
+        if (t == Tier::Weak) continue;
+        if (t >= parent_tier) continue;         // never route Implementation up
         if (!best || model_picker_less(mi, *best)) best = &mi;
     }
     return best ? wire_model_id(std::string_view{best->id.value}) : std::string{};
@@ -427,8 +461,8 @@ namespace detail {
             return pass;
 
         case ModelRole::Implementation: {
-            std::string mid = detail::strongest_mid(candidates);
-            if (mid.empty()) return pass;   // no distinct mid tier → parent
+            std::string mid = detail::strongest_mid(candidates, parent_wire);
+            if (mid.empty()) return pass;   // nothing below the parent → parent
             const auto caps = resolved_caps(mid);
             return RoleProfile{std::move(mid),
                                detail::effort_step_down(parent_effort, caps)};
