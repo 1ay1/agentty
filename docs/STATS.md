@@ -251,11 +251,70 @@ row, a ranked bar, a trend strip and a full-width meter are one struct
 and one renderer instead of four of each. Bars and sparklines occupy the
 **same columns**, so a tab may mix them and still align.
 
+### 6.1 Two more graph forms
+
+Shipped in maya `1ec853d`. Each answers a question ranked bars answer
+badly, which is why each is a row kind rather than a flag.
+
+**`band`** — one full-width track split into coloured segments that sum
+to the whole, with a one-line legend.
+
+```
+ input tokens by origin
+ ████████████████████████████████████████████████████
+ ■ read   ■ write   ■ miss
+```
+
+Ranked bars answer *how big is each one* — you compare lengths. A band
+answers *what is this made of* — one bar, proportions read directly.
+Cache read/write/miss and accepted/rejected/pending are band questions:
+the parts **are** a whole, and three separate bars hide that they sum to
+one.
+
+Segments are apportioned by **largest remainder**, never by rounding each
+independently — independent rounding leaves the total a column or two
+short, so the right edge wobbles with the data and the bar visibly is not
+the whole it claims to be. A non-zero segment always gets at least one
+column, the same rule that stops a 1% bar rounding to empty.
+
+**`plot`** — a braille line chart over the full width.
+
+```
+ output tokens, last 40 turns
+ ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠸⠧⡄⠀⠀⠀⠀⠖⡆⡀⠀⠀⠀⠀⠰⠲⡀⠀⠀⠀⠀⠀⠠⠤⠀⠀ 1.5k
+ ⠀⠀⠀⠀⠀⠁⠸⠹⠀⠀⠀⠀⠸⠀⠇⠀⠀⠀⠖⠃⠀⠇⡀⠀⠀⠸⠉⠀⠸⡀⠀⠀⠀⠠⠼⠉⠹⠀
+ ⠀⠀⠸⠹⠁⠸⠀⠘⠲⠀⠀⠸⠉⠀⠉⠇⡀⠤⠇⠀⠀⠀⠇⡀⠀⠞⠀⠀⠀⠸⠤⠀⠠⠼⠀⠀⠈⠹
+ ⠁⡀⠸⠘⠚⠀⠀⠀⠈⠹⠠⠼⠀⠀⠀⠀⠓⠃⠀⠀⠀⠀⠀⠇⠏⠁⠀⠀⠀⠀⠈⠹⠼⠀⠀⠀⠀⠀
+ ⠚⠈⠉⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀    0
+```
+
+A sparkline is one row and answers *is it going up*; a plot is several
+rows with a labelled scale and answers *by how much, and when*. One
+braille cell is a 2×4 dot matrix, so it carries **eight times** a block
+chart's resolution — a real 40-turn curve fits in five terminal rows.
+
+Consecutive samples are **joined** by a vertical stroke. Without it a
+steep move leaves a gap and the eye reads two unrelated marks instead of
+one falling line — a scatter plot nobody asked for. The join asserts
+continuity *between samples*, not values between them: resampling stays
+nearest-neighbour, because these are measured points and interpolating
+invents a curve the data never had.
+
+Scale labels ride the first and last rows, in a gutter reserved *before*
+the plot is sized — a curve with no peak label is a shape without units,
+and a plot that overruns its labels is worse than one two columns
+narrower.
+
+Both degrade to **nothing** on degenerate input (no segments, all-zero,
+no samples) rather than to a divide-by-zero or a stripe of garbage.
+
+### 6.2 Mapping `Viz` onto the sheet
+
 A `Section`'s `Viz` therefore maps onto sheet calls rather than onto
 separate widgets — `Bars` sets `share`, `Spark` sets `spark`, `Kv` sets
-neither. `extract` fills `Metric`s; the panel formats each through
-`format(Unit,…)` into a `StatEntry`. The view still has no per-tab
-branches.
+neither, `Band` and `Plot` emit their own row kinds. `extract` fills
+`Metric`s; the panel formats each through `format(Unit,…)` into a
+`StatEntry`. The view still has no per-tab branches.
 
 Two rendering rules that are corrections rather than decisions:
 
@@ -288,7 +347,7 @@ glyph — destroying the alignment the caller was truncating to preserve.
 ## 7. Layer 4 — the tab table (the SSOT)
 
 ```cpp
-enum class Viz : std::uint8_t { Kv, Bars, Spark };
+enum class Viz : std::uint8_t { Kv, Bars, Spark, Band, Plot };
 
 struct Section {
     std::string_view heading;
@@ -335,11 +394,11 @@ that survives contact with a tenth statistic.
 | **Models** | who served my turns? | `served_model` (descriptive tally) |
 | **Smart** | is routing delegating? | `served_role`, routed vs unrouted |
 | **Tokens** | what am I paying? | `Telemetry` in/out/reasoning |
-| **Cache** | why is it slow? | `Telemetry` cache read/creation |
+| **Cache** | why is it slow? | `Telemetry` cache read/creation — **band** |
 | **Tools** | what did the agent *do*? | `ToolUse` name × status, latency `Hist` |
 | **Reasoning** | is thinking earning its keep? | `reasoning_ms`, reasoning tokens |
 | **Stream** | is the transport healthy? | retry / failure counters |
-| **Context** | how close to the wall? | `est_prefix_tokens`, compactions |
+| **Context** | how close to the wall? | `est_prefix_tokens`, compactions — **plot** |
 | **Retrieval** | is RAG helping? | `ProactiveContext` hits + confidence |
 
 ### 8.1 Models and Smart are not the same tab
