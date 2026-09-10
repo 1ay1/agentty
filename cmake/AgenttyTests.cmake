@@ -54,6 +54,7 @@ set(_AGENTTY_CONSOLIDATED
     stats_test
     stats_render_probe
     stat_sheet_measure_test
+    tool_output_wrap_test
     context_window_test
     thread_blob_test lazy_image_test thread_log_test
     thread_migration_test blob_gc_test)
