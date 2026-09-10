@@ -309,6 +309,103 @@ void emit_section(const stats::Section& sec, const stats::Facts& f,
 
 }  // namespace
 
+namespace {
+
+// ── The Item path ────────────────────────────────────────────────────────
+//
+// A stats ROW is a panel Item: label · drawn control · note. That
+// vocabulary already exists, and with it the frame, the viewport, the
+// scrollbar and the row geometry — all of which StatSheet re-implements
+// and then hands Panel one opaque prebuilt blob so none of it applies.
+// Every sizing bug in this subsystem came from that duplication.
+//
+// What stays with StatSheet is the thing Panel genuinely does not do:
+// flowing SECTIONS side by side when the surface is wide. That is a
+// stats-only concern, and pushing it into a widget fourteen panels share
+// would be the same mistake in the other direction.
+//
+// Returns false when the section is not a row kind, so the caller falls
+// through to the sheet and the migration proceeds one Viz at a time.
+bool emit_items(const stats::Section& sec, const stats::Facts& f,
+                std::vector<maya::panel::Item>& out,
+                std::vector<stats::Metric>& scratch,
+                maya::Color accent, maya::Color muted) {
+    using maya::panel::Item;
+    using maya::panel::Meter;
+    using maya::panel::Spark;
+
+    if (sec.viz != stats::Viz::Kv && sec.viz != stats::Viz::Bars
+        && sec.viz != stats::Viz::Spark)
+        return false;
+
+    scratch.clear();
+    sec.extract(f, scratch);
+    if (scratch.empty()) return true;   // handled: an empty section draws nothing
+
+    if (!out.empty()) out.push_back(Item{});          // blank separator
+    if (!sec.heading.empty()) {
+        // Header is a MARKER kind: the text rides in `leading` and the
+        // control says "render this as a section header".
+        Item h;
+        h.leading = std::string{sec.heading};
+        h.control = maya::panel::Header{};
+        out.push_back(std::move(h));
+    }
+
+    // The share each row's bar encodes — the ONE place the three row kinds
+    // differ, decided once here rather than in three branches that drift.
+    //
+    // Kv scales against its section's largest value: a column of bare
+    // numbers makes the reader compare digit strings, a column of bars
+    // makes the section's shape visible without reading anything. Only
+    // when the section is homogeneous and has something to compare — one
+    // row has no shape, mixed units would measure milliseconds against
+    // tokens, and a ratio is already a share of a known whole.
+    double peak = 0;
+    bool   scaled = false;
+    if (sec.viz == stats::Viz::Kv) {
+        bool same_unit = true;
+        for (const auto& mt : scratch) {
+            if (mt.unit != scratch.front().unit) same_unit = false;
+            if (mt.value > peak) peak = mt.value;
+        }
+        scaled = same_unit && scratch.front().unit != stats::Unit::Ratio
+              && scratch.size() > 1 && peak > 0;
+    } else if (sec.viz == stats::Viz::Spark) {
+        for (const auto& mt : scratch)
+            if (mt.series.empty() && mt.value > peak) peak = mt.value;
+        scaled = peak > 0;
+    }
+
+    for (const auto& mt : scratch) {
+        Item it;
+        it.leading = mt.label;
+        it.origin  = mt.detail;
+        const std::string value = stats::format(mt.unit, mt.value);
+
+        // The value travels WITH the control, not in `trailing`: a control
+        // replaces that cell rather than sitting beside it, so a row that
+        // set both silently lost its number.
+        if (!mt.series.empty()) {
+            it.control = Spark{.series = mt.series, .value = value,
+                               .hue = accent};
+        } else {
+            const double share =
+                sec.viz == stats::Viz::Bars ? mt.share()
+              : (scaled ? mt.value / peak : -1.0);
+            if (share >= 0.0)
+                it.control = Meter{.share = share, .value = value,
+                                   .hue = muted};
+            else
+                it.trailing = value;   // no picture: the plain value cell
+        }
+        out.push_back(std::move(it));
+    }
+    return true;
+}
+
+}  // namespace
+
 Element stats_panel(const Model& m) {
     const auto* o = m.ui.panel.get<pn::Stats>();
     if (!o) return nothing();
@@ -392,10 +489,31 @@ Element stats_panel(const Model& m) {
 
     std::vector<stats::Metric> scratch;
     scratch.reserve(32);
-    for (const auto& sec : stats::tab_desc(active).sections)
-        emit_section(sec, f, sheet, scratch);
 
-    cfg.prebuilt.push_back(sheet.build());
+    // A tab whose sections are ALL row kinds goes through the panel's own
+    // Item vocabulary; anything carrying a figure still builds a sheet.
+    //
+    // Per-tab rather than per-section because items and prebuilt are
+    // ALTERNATIVES in Config, not a sequence. Splitting on the tab keeps
+    // each one whole and lets the migration proceed a tab at a time, each
+    // diffed against the golden harness.
+    const auto& sections = stats::tab_desc(active).sections;
+    const bool all_rows = [&] {
+        for (const auto& sec : sections)
+            if (sec.viz != stats::Viz::Kv && sec.viz != stats::Viz::Bars
+                && sec.viz != stats::Viz::Spark)
+                return false;
+        return true;
+    }();
+
+    if (all_rows) {
+        for (const auto& sec : sections)
+            emit_items(sec, f, cfg.items, scratch, accent, muted);
+    } else {
+        for (const auto& sec : sections)
+            emit_section(sec, f, sheet, scratch);
+        cfg.prebuilt.push_back(sheet.build());
+    }
 
     // Read-only: no cursor. A selection highlight on rows nothing can be
     // done to is a promise the panel cannot keep.
