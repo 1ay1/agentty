@@ -57,7 +57,18 @@ void emit_section(const stats::Section& sec, const stats::Facts& f,
     // Applied whether or not the section has a HEADING: a headingless
     // band butted straight against the table above it reads as one more
     // row of that table, which is the opposite of what a band says.
-    if (!sheet.empty()) sheet.blank();
+    //
+    // Bands and plots also take a COLUMN BREAK. They are full-width forms
+    // — a band claims its segments are a whole, a plot needs horizontal
+    // room to be a curve — and squeezed into a half-width column both
+    // read as broken rather than as small. The break is inert when the
+    // sheet is not splitting.
+    const bool full_width = sec.viz == stats::Viz::Band
+                         || sec.viz == stats::Viz::Plot;
+    if (!sheet.empty()) {
+        if (full_width) sheet.column_break();
+        sheet.blank();
+    }
     if (!sec.heading.empty()) sheet.heading(std::string{sec.heading});
 
     switch (sec.viz) {
@@ -109,13 +120,28 @@ void emit_section(const stats::Section& sec, const stats::Facts& f,
                              .share  = mt.share()});
             break;
 
-        case stats::Viz::Spark:
+        case stats::Viz::Spark: {
+            // A trend strip where the metric has one, a section-scaled bar
+            // where it does not — so a Spark section can mix a rate that
+            // has history with a plain count and still have every row
+            // carry a visual. The blocks are filled by construction
+            // (▁▂▃▄▅▆▇█ are solid from the baseline up), which is what makes
+            // an eight-sample strip read as an area rather than as dots.
+            double peak = 0;
+            for (const auto& mt : scratch)
+                if (mt.series.empty() && mt.value > peak) peak = mt.value;
             for (const auto& mt : scratch)
                 sheet.entry({.label  = mt.label,
                              .value  = stats::format(mt.unit, mt.value),
                              .detail = mt.detail,
-                             .spark  = mt.series});
+                             .share  = mt.series.empty() && peak > 0
+                                         ? mt.value / peak : -1.0,
+                             .spark  = mt.series,
+                             .hue    = mt.series.empty()
+                                         ? std::optional<maya::Color>{muted}
+                                         : std::optional<maya::Color>{accent}});
             break;
+        }
 
         case stats::Viz::Dist:
             // A distribution reads as a histogram lying on its side: the
@@ -232,6 +258,16 @@ Element stats_panel(const Model& m) {
     // the viewport is a layout that shifts under the reader for no reason
     // they can see.
     sheet.reserve_right(7);
+    // Flow into columns once the surface can afford them. 34 columns is the
+    // narrowest a stat row stays readable at — label, a shrunken track and
+    // a right-aligned value — so a 76-column panel stays single-column and
+    // a 110+ one splits. Capped at 2: a third column on a very wide
+    // terminal makes the eye travel further than scrolling would have.
+    //
+    // The alternative was a fixed breakpoint. A minimum WIDTH is the
+    // honest spelling: it says what a column needs rather than guessing
+    // which terminal sizes exist.
+    sheet.columns(34, 2);
     sheet.theme.label   = fg;
     sheet.theme.value   = fg;
     sheet.theme.detail  = muted;

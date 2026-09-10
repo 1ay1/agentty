@@ -200,8 +200,16 @@ void cache_rates(const Facts& f, std::vector<Metric>& out) {
     const double prefix = static_cast<double>(f.cache.hits + f.cache.writes
                                             + f.cache.misses);
     if (prefix <= 0) return;
-    kv(out, "Hit rate", Unit::Ratio, static_cast<double>(f.cache.hits) / prefix,
-       "of every prefix byte sent");
+    // The hit rate carries its own per-turn trend. A session average hides
+    // the shape that decides what to do about it: a cache that WARMED (low
+    // then high, the healthy case) and one that keeps missing on every
+    // turn can report the same number.
+    out.push_back(Metric{
+        .label  = "Hit rate",
+        .unit   = Unit::Ratio,
+        .value  = static_cast<double>(f.cache.hits) / prefix,
+        .detail = "per turn \xe2\x86\x92",
+        .series = f.cache.ratio_series});
     kv(out, "Turns using cache", Unit::Count,
        static_cast<double>(f.cache.turns_with_cache));
     // The number this tab exists for: cache reads are ~10% the price of
@@ -321,6 +329,31 @@ void stream_health(const Facts& f, std::vector<Metric>& out) {
         kv(out, "Stalls",         Unit::Count, static_cast<double>(f.stream.stalls));
 }
 
+// The RATES, each with its own per-turn trend. A rate is the one kind of
+// number where the average is actively misleading: "1.0k/s" over a
+// session that started fast and degraded is a figure that never happened,
+// and the sparkline is what shows it.
+void stream_rates(const Facts& f, std::vector<Metric>& out) {
+    if (!f.stream.ttft_series.empty()) {
+        out.push_back(Metric{
+            .label  = "First byte",
+            .unit   = Unit::Millis,
+            .value  = f.stream.ttft.mean(),
+            .detail = "avg",
+            .series = f.stream.ttft_series});
+    }
+    if (!f.stream.rate_series.empty()) {
+        double sum = 0;
+        for (double v : f.stream.rate_series) sum += v;
+        out.push_back(Metric{
+            .label  = "Output rate",
+            .unit   = Unit::Rate,
+            .value  = sum / static_cast<double>(f.stream.rate_series.size()),
+            .detail = "tok/s",
+            .series = f.stream.rate_series});
+    }
+}
+
 void stream_timing(const Facts& f, std::vector<Metric>& out) {
     // TTFT and generation time answer different questions — one is "did the
     // provider make me wait", the other "was generation slow" — and they
@@ -415,8 +448,8 @@ const std::array<Section, 2> tokens{{
 }};
 
 const std::array<Section, 2> cache{{
-    {"",      Viz::Band, &cache_band},
-    {"Rates", Viz::Kv,   &cache_rates},
+    {"",      Viz::Band,  &cache_band},
+    {"Rates", Viz::Spark, &cache_rates},
 }};
 
 const std::array<Section, 4> tools{{
@@ -430,10 +463,11 @@ const std::array<Section, 1> reasoning{{
     {"", Viz::Kv, &reasoning_rows},
 }};
 
-const std::array<Section, 4> stream{{
-    {"Health",           Viz::Kv,   &stream_health},
-    {"Timing",           Viz::Kv,   &stream_timing},
-    {"Throughput",       Viz::Kv,   &stream_throughput},
+const std::array<Section, 5> stream{{
+    {"Health",           Viz::Kv,    &stream_health},
+    {"Rates",            Viz::Spark, &stream_rates},
+    {"Timing",           Viz::Kv,    &stream_timing},
+    {"Throughput",       Viz::Kv,    &stream_throughput},
     {"First byte spread", Viz::Dist, &stream_ttft_dist},
 }};
 

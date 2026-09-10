@@ -56,7 +56,7 @@ extern const std::array<Section, 2> tokens;
 extern const std::array<Section, 2> cache;
 extern const std::array<Section, 4> tools;
 extern const std::array<Section, 1> reasoning;
-extern const std::array<Section, 4> stream;
+extern const std::array<Section, 5> stream;
 extern const std::array<Section, 2> context;
 extern const std::array<Section, 1> retrieval;
 }  // namespace sections

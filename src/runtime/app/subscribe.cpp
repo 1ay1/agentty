@@ -817,7 +817,12 @@ std::optional<Msg> on_global(const KeyEvent& ev) {
                 case U'j': case U'J': return OpenThreadList{};
                 case U'k': case U'K': return OpenPalette{};
                 case U'p': case U'P': return OpenProviders{};
-                case U'l': case U'L': return RedrawScreen{};
+                case U'l': case U'L': return OpenStats{};
+                // Redraw moved off ^L when Stats took it. ^Y is free, and
+                // a manual repaint is a recovery gesture for a corrupted
+                // screen — reached rarely, and never the key a user is
+                // hunting for while the screen looks fine.
+                case U'y': case U'Y': return RedrawScreen{};
                 case U'r': case U'R': return OpenDiffReview{};
                 case U'n': case U'N': return NewThread{};
                 case U't': case U'T': return OpenTodoModal{};

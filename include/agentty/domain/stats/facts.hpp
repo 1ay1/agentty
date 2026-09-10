@@ -219,6 +219,10 @@ struct Facts {
         std::uint64_t hits   = 0;          // cache_read tokens
         std::uint64_t writes = 0;          // cache_creation tokens
         std::uint64_t misses = 0;          // uncached input tokens
+        // Per-turn hit ratio. The headline rate is a session average and
+        // hides the shape that matters: a cache that WARMED (low then
+        // high) and one that keeps missing average the same.
+        std::vector<double> ratio_series;
     } cache;
 
     struct ToolsF {
@@ -243,6 +247,11 @@ struct Facts {
         std::uint64_t wire_bytes      = 0;
         Hist          ttft;
         Hist          stream_ms;
+        // Per-turn series, for the inline trends. A mean answers "how
+        // fast on average"; a sparkline answers "is it getting worse",
+        // which is the question someone opens this tab with.
+        std::vector<double> ttft_series;
+        std::vector<double> rate_series;    // output tokens per second
     } stream;
 
     struct ContextF {

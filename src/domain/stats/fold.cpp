@@ -138,6 +138,8 @@ void Facts::fold(const Message& msg) {
     cache.hits   += t.cache_read;
     cache.writes += t.cache_creation;
     cache.misses += t.input_tokens;
+    if (const double r = t.cache_hit_ratio(); r >= 0.0)
+        push_capped(cache.ratio_series, r);
 
     // Context: the true prefix is input + both cache terms.
     const std::uint64_t prefix = static_cast<std::uint64_t>(t.input_tokens)
@@ -153,6 +155,15 @@ void Facts::fold(const Message& msg) {
     stream.wire_bytes += t.wire_bytes;
     if (t.ttft_ms)   stream.ttft.add(t.ttft_ms);
     if (t.stream_ms) stream.stream_ms.add(t.stream_ms);
+    if (t.ttft_ms)   push_capped(stream.ttft_series,
+                                 static_cast<double>(t.ttft_ms));
+    // Output tokens per second of GENERATION time, not of wall time:
+    // including the wait would fold the provider's queueing into a number
+    // that is supposed to be about how fast it writes.
+    if (t.stream_ms && t.output_tokens)
+        push_capped(stream.rate_series,
+                    static_cast<double>(t.output_tokens)
+                      / (static_cast<double>(t.stream_ms) / 1000.0));
 }
 
 void Facts::merge(const Facts& o) {
@@ -184,6 +195,7 @@ void Facts::merge(const Facts& o) {
     cache.hits   += o.cache.hits;
     cache.writes += o.cache.writes;
     cache.misses += o.cache.misses;
+    for (double x : o.cache.ratio_series) push_capped(cache.ratio_series, x);
 
     tools.total += o.tools.total;
     tools.by_name.merge(o.tools.by_name);
@@ -202,6 +214,8 @@ void Facts::merge(const Facts& o) {
     stream.wire_bytes     += o.stream.wire_bytes;
     stream.ttft.merge(o.stream.ttft);
     stream.stream_ms.merge(o.stream.stream_ms);
+    for (double x : o.stream.ttft_series) push_capped(stream.ttft_series, x);
+    for (double x : o.stream.rate_series) push_capped(stream.rate_series, x);
 
     context.compactions += o.context.compactions;
     if (o.context.peak_input > context.peak_input)
