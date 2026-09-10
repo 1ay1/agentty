@@ -21,6 +21,9 @@
 #include <doctest/doctest.h>
 
 #include "maya/element/builder.hpp"
+#include "maya/render/canvas.hpp"
+#include "maya/render/renderer.hpp"
+#include "maya/style/theme.hpp"
 #include "maya/widget/stat_sheet.hpp"
 
 using namespace maya;
@@ -112,6 +115,115 @@ TEST_CASE("stat sheet: reported width follows the surface it is given") {
     for (int sentinel : {1 << 14, 1 << 20}) {
         INFO("sentinel=", sentinel);
         CHECK(measure_element(el, sentinel).width.value == sentinel);
+    }
+}
+
+TEST_CASE("stat sheet: columns answer vertical pressure, not available width") {
+    // The principle: columns exist to relieve VERTICAL pressure. Width is
+    // a constraint on splitting (a column too narrow to draw is damage);
+    // height is the REASON for it.
+    //
+    // The sheet used to know only about width, so it split whenever it
+    // COULD -- which put a short Session tab into two columns on a
+    // phone-sized pane while a genuinely overflowing tab sat in one
+    // because a slice came up a few cells short. Both are the same bug
+    // seen from opposite ends: the layout was answering a question nobody
+    // asked.
+    auto make = [](int budget) {
+        StatSheet s;
+        s.indent(1);
+        s.reserve_right(7);
+        s.columns(2);
+        s.height_budget(budget);
+        s.heading("Activity");
+        s.entry({.label = "You asked", .value = "8", .share = 0.8});
+        s.entry({.label = "Agent replied", .value = "8", .share = 0.8});
+        s.entry({.label = "Tool calls", .value = "10", .share = 1.0});
+        s.blank();
+        s.heading("Time");
+        s.entry({.label = "Waiting", .value = "6.0s", .share = 0.1});
+        s.entry({.label = "Generating", .value = "59s", .share = 1.0});
+        s.entry({.label = "Tools", .value = "8.2s", .share = 0.14});
+        s.blank();
+        s.heading("Rates");
+        s.entry({.label = "Hit rate", .value = "80%", .share = 0.8});
+        s.entry({.label = "Turns using cache", .value = "8", .share = 1.0});
+        return s.build();
+    };
+
+    // Height with no budget at all -- the sheet's natural single column.
+    const int natural = measure_element(make(0), 200).height.value;
+    REQUIRE(natural > 4);
+
+    SUBCASE("a sheet that fits its viewport does not split, however wide") {
+        // Generous budget: there is no vertical pressure, so no amount of
+        // width should buy a second column. This is the case from the bug
+        // report -- a short tab in two columns on a narrow phone pane.
+        for (int w = 60; w <= 300; w += 10) {
+            INFO("width=", w);
+            CHECK(measure_element(make(natural + 10), w).height.value
+                  == measure_element(make(0), w).height.value);
+        }
+    }
+
+    SUBCASE("a sheet that overflows splits, and gets shorter for it") {
+        // Tight budget on a surface wide enough to hold two real columns.
+        // The split has to actually BUY something -- a split that does not
+        // shorten the sheet has charged the reader a sideways journey for
+        // nothing, and decide() declines those.
+        //
+        // Asserted on the PAINTED layout, not on measure_element(). The
+        // measure callback deliberately reports a CEILING -- the tallest
+        // layout the sheet has, so a scrolling host can never under-budget
+        // -- so it reads the same whether or not a split happened. Using
+        // it here would be asking the wrong oracle: it is doing its job by
+        // not varying.
+        auto rows_painted = [](const Element& el, int w) {
+            StylePool pool;
+            Canvas canvas(w, 80, &pool);
+            render_tree(el, canvas, pool, theme::dark, /*auto_height=*/true);
+            int last = -1;
+            for (int y = 0; y < 80; ++y)
+                for (int x = 0; x < w; ++x) {
+                    const auto ch = canvas.get(x, y).character;
+                    if (ch != 0 && ch != U' ') { last = y; break; }
+                }
+            return last + 1;
+        };
+
+        auto bulky = [](int budget, int max_cols) {
+            StatSheet s;
+            s.indent(1);
+            s.reserve_right(7);
+            s.columns(max_cols);
+            s.height_budget(budget);
+            for (int section = 0; section < 4; ++section) {
+                if (section) s.blank();
+                s.heading("Section " + std::to_string(section));
+                for (int row = 0; row < 5; ++row)
+                    s.entry({.label = "metric " + std::to_string(row),
+                             .value = "42",
+                             .share = 0.5});
+            }
+            return s.build();
+        };
+
+        const int unsplit = rows_painted(bulky(0, 1), 200);
+        const int split   = rows_painted(bulky(6, 2), 200);
+        INFO("unsplit=", unsplit, " split=", split);
+        CHECK(split < unsplit);
+    }
+
+    SUBCASE("more width never costs a column's worth of content") {
+        // Monotonicity, for the right reason: width is no longer what
+        // decides, so a wider surface can only ever need FEWER columns.
+        int prev = 1 << 30;
+        for (int w = 80; w <= 300; w += 10) {
+            const int h = measure_element(make(4), w).height.value;
+            INFO("width=", w, " height=", h, " prev=", prev);
+            CHECK(h <= prev);
+            prev = h;
+        }
     }
 }
 

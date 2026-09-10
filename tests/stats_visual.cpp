@@ -243,10 +243,16 @@ int main(int argc, char** argv) {
 
     // Tall viewport so nothing scrolls out of the dump. panel_viewport_h()
     // reads LINES when there is no tty, which is exactly this case.
+    //
+    // Honoured as an OVERRIDE when the caller sets it, because the column
+    // count is now a function of available HEIGHT -- a sheet splits only
+    // when one column would overflow the viewport. Forcing 120 rows
+    // unconditionally would pin every dump to the roomiest case and hide
+    // exactly the behaviour this tool exists to show.
 #ifdef _WIN32
-    _putenv_s("LINES", "120");
+    if (!std::getenv("LINES")) _putenv_s("LINES", "120");
 #else
-    setenv("LINES", "120", 1);
+    setenv("LINES", "120", /*overwrite=*/0);
 #endif
 
     Model m = realistic_thread();
