@@ -18,6 +18,7 @@ FOLD_NOARGS(test_ghost_caret_runtime)   // PTY-driven (openpty) — POSIX only
 FOLD_NOARGS(toolset_e2e_test)
 FOLD_NOARGS(subagent_report_test)
 FOLD_NOARGS(plugin_disabled_tools_test)
+FOLD_NOARGS(tool_budget_env_test)
 FOLD_NOARGS(frozen_invariant_fuzz)
 FOLD_NOARGS(scrollback_wire_fuzz)
 FOLD_NOARGS(reveal_scrollback_test)

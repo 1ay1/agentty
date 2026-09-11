@@ -97,7 +97,23 @@ struct ConnectionPool {
 // this, the projection trims MCP tools (native always ship) and the model
 // reports over_budget so the picker can warn. Sized generously — the point
 // is to catch runaway plugin sets, not to police a healthy toolset.
-inline constexpr std::size_t kToolBudget = 100;
+//
+// Configurable via $AGENTTY_MCP_TOOL_BUDGET: a positive value sets the cap,
+// 0 disables the cap entirely, anything unparsable or negative keeps the
+// default. Same env pattern as call_timeout() below — read live, never
+// cached, so tests (and a restarted session) pick changes up immediately.
+std::size_t tool_budget() {
+    constexpr std::size_t kDefaultToolBudget = 100;
+    if (const char* e = std::getenv("AGENTTY_MCP_TOOL_BUDGET"); e && e[0]) {
+        try {
+            const long v = std::stol(e);
+            if (v >= 0) return static_cast<std::size_t>(v);
+        } catch (const std::exception& ex) {
+            util::dbglog("mcp.tool_budget.env", ex.what());
+        }
+    }
+    return kDefaultToolBudget;
+}
 
 namespace {
 
@@ -1129,17 +1145,20 @@ std::vector<tools::ToolDef> project_tools(PoolHandle pool) {
     if (any_resources) out.push_back(make_read_resource_tool(pool));
     if (any_prompts)   out.push_back(make_get_prompt_tool(pool));
 
-    // Budget enforcement: the wire must never carry more than kToolBudget
-    // total tools (native + MCP). Native tools are the core toolset and
+    // Budget enforcement: the wire must never carry more than the
+    // configured budget (AGENTTY_MCP_TOOL_BUDGET, default 100) total
+    // tools (native + MCP). Native tools are the core toolset and
     // always ship; if native + these MCP tools exceed the cap, TRIM the MCP
     // tail so the request stays within provider limits. The picker surfaces
     // the same over-budget count (plugin_model) and lets the user disable
     // some to make room — so a runaway plugin set degrades gracefully
     // (fewer MCP tools) instead of failing the whole turn.
     const std::size_t native = tools::native_registry().size();
-    if (native + out.size() > kToolBudget) {
-        const std::size_t room =
-            kToolBudget > native ? kToolBudget - native : 0;
+    const std::size_t budget = tool_budget();
+    // budget == 0 means "no cap" (same as the plugin_model guard below) —
+    // never trim, or env var 0 would silently drop every MCP tool.
+    if (budget > 0 && native + out.size() > budget) {
+        const std::size_t room = budget > native ? budget - native : 0;
         if (out.size() > room) out.resize(room);
     }
     // Passthrough tools ride OUTSIDE the budget trim: they are few,
@@ -1455,7 +1474,7 @@ std::vector<std::string> mcp_server_tools(const std::string& server) {
 
 PluginModel plugin_model() {
     PluginModel model;
-    model.tool_budget = kToolBudget;
+    model.tool_budget = tool_budget();
 
     // Native tools always ship — count them for the budget math.
     model.native_tool_count = tools::native_registry().size();

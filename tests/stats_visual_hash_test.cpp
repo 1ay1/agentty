@@ -65,8 +65,10 @@ Model open_viewer() {
     // A bound to scroll within: the renderer publishes this after a paint,
     // and the reducer clamps against it.
     opened.ui.panel.get<pn::Stats>()->scroll.max_y = 20;
-    // Model is move-only (it owns the panel slot and the scroll state), so
-    // the local has to be moved out rather than copied.
+    // A structured-binding name is an LVALUE of the member's type — there is
+    // no implicit move on return for it (unlike a named local). Model is
+    // move-only (its frozen ScrollbackLedger is non-copyable), so the move
+    // must be explicit.
     return std::move(opened);
 }
 

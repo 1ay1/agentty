@@ -117,6 +117,7 @@ common ones are `AGENTTY_DOCS_DIR` and `AGENTTY_EMBED_MODEL`.
 | `AGENTTY_MCP_CONFIG` | Path to the MCP server config. Otherwise `~/.agentty` then `./.agentty`. |
 | `AGENTTY_MCP_ALLOW_PROJECT` | Allow a project-local `.agentty/mcp.json` to add servers. Off by default — a repo you clone should not silently gain tool servers. |
 | `AGENTTY_MCP_TIMEOUT_MS` · `AGENTTY_MCP_CONNECT_TIMEOUT_MS` | Per-call and initial-connect timeouts for MCP servers. |
+| `AGENTTY_MCP_TOOL_BUDGET` | Soft cap on total tools on the wire (native + enabled MCP), default 100. Past it, MCP tools are trimmed and the picker warns. `0` disables the cap; unparsable values keep the default. |
 | `AGENTTY_MCP_CLIENT_ID` | OAuth client id for MCP servers that require one. |
 | `AGENTTY_ACP_AGENTS` | Path to the ACP agent config (same precedence chain as MCP). |
 | `AGENTTY_ACP_ALLOW_PROJECT` | Allow a project-local ACP agent config. Off by default, same reasoning as MCP. |

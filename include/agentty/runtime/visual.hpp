@@ -53,26 +53,7 @@
 #include <tuple>
 #include <type_traits>
 #include <utility>
-
-// Scoped opt-out for the ONE C++26 construct this header needs (the P1061
-// structured-binding pack below). See the comment at its use site: the
-// C++23 fallback is deliberate, so the extension diagnostic is expected
-// noise there and only there. Kept as a macro pair so the pragma push/pop
-// stays balanced and the compiler-specific spelling lives in one place.
-#if defined(__clang__)
-#define AGENTTY_BEGIN_ALLOW_CXX26                                              \
-    _Pragma("clang diagnostic push")                                           \
-    _Pragma("clang diagnostic ignored \"-Wc++26-extensions\"")
-#define AGENTTY_END_ALLOW_CXX26 _Pragma("clang diagnostic pop")
-#elif defined(__GNUC__)
-#define AGENTTY_BEGIN_ALLOW_CXX26                                              \
-    _Pragma("GCC diagnostic push")                                             \
-    _Pragma("GCC diagnostic ignored \"-Wc++26-extensions\"")
-#define AGENTTY_END_ALLOW_CXX26 _Pragma("GCC diagnostic pop")
-#else
-#define AGENTTY_BEGIN_ALLOW_CXX26
-#define AGENTTY_END_ALLOW_CXX26
-#endif
+#include <variant>
 
 namespace agentty::visual {
 
@@ -174,24 +155,57 @@ template <class H, class T>
 constexpr void mix_any(H&& h, const T& v);
 
 namespace detail {
+// P1061's pack structured binding (`auto&& [... xs] = v;`) used to live
+// here. It is C++26 — g++-14, this repo's primary CI toolchain, cannot parse
+// it, so the linux gcc + sanitizer gates have been red since it landed.
+//
+// The replacement is a fixed-arity structured-binding ladder, dispatched on
+// the `arity<T>` already computed above. Each rung names exactly the members
+// a brace-init of T would take, IN BRACE-INIT ORDER — the same order P1061
+// decomposed in — so the hash stream is bit-identical to the pack's.
+//
+// The old form's failure modes are preserved by construction:
+//   - a type with bases AND members, or private members, does not satisfy
+//     any rung (or fails inside one) — it must declare visual_parts, making
+//     its visibility decisions explicit;
+//   - the arity-0 rung hard-fails with instructions, so a non-decomposable
+//     type (custom ctors) can never silently contribute nothing to the hash.
+//     Fail closed, as before — now with a message that says what to do.
+//
+// A rung per arity is boilerplate but dead obvious; a type larger than the
+// ladder trips the static_assert at the dispatch site, not a silent skip.
 template <class H, class T>
-constexpr void mix_decomposed(H&& h, const T& v) {
-    // P1061 structured-binding pack. Fails to compile for types with both
-    // bases and members, or private members — which is the DESIGN: such a
-    // type must declare visual_parts, making its visibility decisions
-    // explicit.
-    //
-    // P1061 is C++26. This tree asks for C++26 but falls back to C++23 on
-    // toolchains CMake doesn't yet see as cxx_std_26 (Apple clang), where
-    // the pack is accepted as an EXTENSION and diagnosed. The fallback is
-    // deliberate and load-bearing (see cmake/AgenttyToolchain.cmake), so
-    // the diagnostic is noise at exactly one line — silenced here, not
-    // project-wide, so a genuine C++26-ism anywhere else still shows up.
-    AGENTTY_BEGIN_ALLOW_CXX26
-    auto&& [... xs] = v;
-    AGENTTY_END_ALLOW_CXX26
-    (mix_any(h, xs), ...);
+constexpr void mix_decomposed(H&&, const T&, std::integral_constant<std::size_t, 0>) {
+    static_assert(std::is_aggregate_v<T>,   // always false when it fires
+                  "type reached the visual hash walk but cannot be brace-"
+                  "decomposed (custom ctors, or bases+members / private "
+                  "members): declare visual_parts(T) for it — see the "
+                  "customization point above");
+    // An EMPTY aggregate decomposes to an empty pack: contributes nothing,
+    // exactly like the P1061 pack it replaces. (The marker structs —
+    // ui::panel::None & co. — live here by design.)
 }
+#define AGENTTY_VISUAL_MIX_RUNG(n, ...)                                        \
+    template <class H, class T>                                                \
+    constexpr void mix_decomposed(H&& h, const T& v,                           \
+                                  std::integral_constant<std::size_t, n>) {    \
+        auto& [__VA_ARGS__] = v;                                               \
+        std::apply([&](const auto&... xs) { (mix_any(h, xs), ...); },          \
+                   std::forward_as_tuple(__VA_ARGS__));                        \
+    }
+AGENTTY_VISUAL_MIX_RUNG(1,  m0)
+AGENTTY_VISUAL_MIX_RUNG(2,  m0, m1)
+AGENTTY_VISUAL_MIX_RUNG(3,  m0, m1, m2)
+AGENTTY_VISUAL_MIX_RUNG(4,  m0, m1, m2, m3)
+AGENTTY_VISUAL_MIX_RUNG(5,  m0, m1, m2, m3, m4)
+AGENTTY_VISUAL_MIX_RUNG(6,  m0, m1, m2, m3, m4, m5)
+AGENTTY_VISUAL_MIX_RUNG(7,  m0, m1, m2, m3, m4, m5, m6)
+AGENTTY_VISUAL_MIX_RUNG(8,  m0, m1, m2, m3, m4, m5, m6, m7)
+AGENTTY_VISUAL_MIX_RUNG(9,  m0, m1, m2, m3, m4, m5, m6, m7, m8)
+AGENTTY_VISUAL_MIX_RUNG(10, m0, m1, m2, m3, m4, m5, m6, m7, m8, m9)
+AGENTTY_VISUAL_MIX_RUNG(11, m0, m1, m2, m3, m4, m5, m6, m7, m8, m9, m10)
+AGENTTY_VISUAL_MIX_RUNG(12, m0, m1, m2, m3, m4, m5, m6, m7, m8, m9, m10, m11)
+#undef AGENTTY_VISUAL_MIX_RUNG
 template <class>
 inline constexpr bool is_ref = false;
 template <class T>
@@ -249,7 +263,12 @@ constexpr void mix_any(H&& h, const T& v) {
         h(static_cast<std::uint64_t>(v.size()) + 0xC0ull);
         for (const auto& e : v) mix_any(h, e);
     } else {
-        detail::mix_decomposed(h, v);
+        static_assert(arity<T> <= 12,
+                      "aggregate with more than 12 members hit the visual hash "
+                      "walk: extend the mix_decomposed ladder in this header, "
+                      "or declare visual_parts(T) for the type");
+        detail::mix_decomposed(h, v,
+                               std::integral_constant<std::size_t, arity<T>>{});
     }
 }
 

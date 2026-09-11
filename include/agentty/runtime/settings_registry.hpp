@@ -93,17 +93,29 @@ enum class Owner : std::uint8_t { Rag, Smart };
 
 // Pointer-to-member into the persisted config. The row's read/write binding.
 // One alternative per (type, owner) pair; `Owner` says which half is live.
+//
+// The member-pointer TYPE is always spelled through the alias below, never
+// inline: MSVC cannot parse a namespace-qualified pointer-to-member written
+// directly as a template argument — `std::variant<bool store::RagConfig::*>`
+// dies with C3083/C2059 at the `*` (it only knows `<tag>::*` in declarator
+// context, which is why the `&store::RagConfig::field` initializers further
+// down compile everywhere). Routing every use through a named alias turns
+// each into a plain type argument: identical type, parseable by all three
+// compilers.
+template <class C, class M>
+using MemberPtr = M C::*;
+
 using Slot = std::variant<
-    bool          store::RagConfig::*,
-    int           store::RagConfig::*,
-    float         store::RagConfig::*,
-    double        store::RagConfig::*,
-    std::string   store::RagConfig::*,
-    bool          smart::RoleConfig::*,
-    int           smart::RoleConfig::*,
-    float         smart::RoleConfig::*,
-    double        smart::RoleConfig::*,
-    std::string   smart::RoleConfig::*>;
+    MemberPtr<store::RagConfig, bool>,
+    MemberPtr<store::RagConfig, int>,
+    MemberPtr<store::RagConfig, float>,
+    MemberPtr<store::RagConfig, double>,
+    MemberPtr<store::RagConfig, std::string>,
+    MemberPtr<smart::RoleConfig, bool>,
+    MemberPtr<smart::RoleConfig, int>,
+    MemberPtr<smart::RoleConfig, float>,
+    MemberPtr<smart::RoleConfig, double>,
+    MemberPtr<smart::RoleConfig, std::string>>;
 
 struct SettingDef {
     std::string_view id;      // settings.json key AND form field id ("rag.mmr")
@@ -132,11 +144,11 @@ struct SettingDef {
     // was reachable or visit one that was not.
     [[nodiscard]] constexpr Owner owner() const noexcept {
         return std::visit([]<class M>(M) constexpr {
-            if constexpr (std::is_same_v<M, bool        store::RagConfig::*>
-                       || std::is_same_v<M, int         store::RagConfig::*>
-                       || std::is_same_v<M, float       store::RagConfig::*>
-                       || std::is_same_v<M, double      store::RagConfig::*>
-                       || std::is_same_v<M, std::string store::RagConfig::*>)
+            if constexpr (std::is_same_v<M, MemberPtr<store::RagConfig, bool>>
+                       || std::is_same_v<M, MemberPtr<store::RagConfig, int>>
+                       || std::is_same_v<M, MemberPtr<store::RagConfig, float>>
+                       || std::is_same_v<M, MemberPtr<store::RagConfig, double>>
+                       || std::is_same_v<M, MemberPtr<store::RagConfig, std::string>>)
                 return Owner::Rag;
             else
                 return Owner::Smart;
@@ -337,25 +349,25 @@ consteval bool slots_match_types() {
     for (const auto& s : kSettings) {
         switch (s.type) {
             case Type::Bool:
-                if (!std::holds_alternative<bool store::RagConfig::*>(s.slot)
-                 && !std::holds_alternative<bool smart::RoleConfig::*>(s.slot))
+                if (!std::holds_alternative<MemberPtr<store::RagConfig, bool>>(s.slot)
+                 && !std::holds_alternative<MemberPtr<smart::RoleConfig, bool>>(s.slot))
                     return false;
                 break;
             case Type::Real:
-                if (!std::holds_alternative<float store::RagConfig::*>(s.slot)
-                 && !std::holds_alternative<double store::RagConfig::*>(s.slot)
-                 && !std::holds_alternative<float smart::RoleConfig::*>(s.slot)
-                 && !std::holds_alternative<double smart::RoleConfig::*>(s.slot))
+                if (!std::holds_alternative<MemberPtr<store::RagConfig, float>>(s.slot)
+                 && !std::holds_alternative<MemberPtr<store::RagConfig, double>>(s.slot)
+                 && !std::holds_alternative<MemberPtr<smart::RoleConfig, float>>(s.slot)
+                 && !std::holds_alternative<MemberPtr<smart::RoleConfig, double>>(s.slot))
                     return false;
                 break;
             case Type::Int:
-                if (!std::holds_alternative<int store::RagConfig::*>(s.slot)
-                 && !std::holds_alternative<int smart::RoleConfig::*>(s.slot))
+                if (!std::holds_alternative<MemberPtr<store::RagConfig, int>>(s.slot)
+                 && !std::holds_alternative<MemberPtr<smart::RoleConfig, int>>(s.slot))
                     return false;
                 break;
             case Type::Enum:
-                if (!std::holds_alternative<std::string store::RagConfig::*>(s.slot)
-                 && !std::holds_alternative<std::string smart::RoleConfig::*>(s.slot))
+                if (!std::holds_alternative<MemberPtr<store::RagConfig, std::string>>(s.slot)
+                 && !std::holds_alternative<MemberPtr<smart::RoleConfig, std::string>>(s.slot))
                     return false;
                 break;
         }
