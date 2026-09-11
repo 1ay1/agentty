@@ -693,6 +693,18 @@ Element stats_panel(const Model& m) {
                               panel_detail::panel_terminal_rows()
                                   - panel_detail::kPickerChromeRows - 1);
 
+    // ...and HOLD that height, whatever the tab contains.
+    //
+    // The viewport above is a request; by default the panel treats it as a
+    // ceiling and shrink-wraps anything shorter. That is right for a picker
+    // and wrong here: these tabs differ in length, so the frame resized
+    // every time the reader pressed tab — 13 rows on Cache, 30 on Session,
+    // the whole box jumping under the cursor.
+    //
+    // A document should hold still while you read it. What changes when
+    // you switch view is the writing, not the page.
+    cfg.fixed_viewport = true;
+
     cfg.note = visible.size() > 1 ? "tab  switch view   \xe2\x86\x91\xe2\x86\x93  scroll   esc  close"
                                   : "\xe2\x86\x91\xe2\x86\x93  scroll   esc  close";
     return maya::Panel{std::move(cfg)}.build();
