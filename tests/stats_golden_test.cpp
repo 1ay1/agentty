@@ -124,6 +124,61 @@ Model golden_model() {
     return m;
 }
 
+// A LONG session, the shape a real one reaches.
+//
+// The fixture above is four turns with tidy numbers, and every value it
+// produces is short: "4 turns", "16s", "2.1k". Real threads are not like
+// that — a screenshot of a working session showed 2223 turns and 3h33m,
+// where the counts are four digits, the durations carry two units, and
+// every string in the panel is wider than anything this file had ever
+// rendered.
+//
+// That matters because width bugs are triggered by CONTENT width, not by
+// terminal width, and a fixture whose values are all short cannot reach
+// them. A tidy fixture does not test a layout; it tests the layout's
+// easiest case and reports that as a pass.
+//
+// Deliberately awkward: four-digit counts, hour-scale durations, a model
+// name long enough to compete for the label lane, and reasoning tokens so
+// the "of which reasoning" sub-row appears.
+Model heavy_model() {
+    Model m;
+    m.d.current.id = ThreadId{"heavy-stats"};
+
+    auto turn = [&](const char* model, std::uint32_t in, std::uint32_t out,
+                    std::uint32_t cache_r, std::uint32_t cache_w,
+                    std::uint32_t ttft, std::uint32_t stream,
+                    std::uint32_t think) {
+        Message u;
+        u.role = Role::User;
+        u.text = "a question";
+        m.d.current.messages.push_back(std::move(u));
+
+        Message a;
+        a.role         = Role::Assistant;
+        a.served_model = ModelId{model};
+        a.text         = "an answer with some prose in it";
+        Message::Telemetry t;
+        t.input_tokens     = in;
+        t.output_tokens    = out;
+        t.cache_read       = cache_r;
+        t.cache_creation   = cache_w;
+        t.ttft_ms          = ttft;
+        t.stream_ms        = stream;
+        t.reasoning_tokens = think;
+        a.telemetry = t;
+        return &m.d.current.messages.emplace_back(std::move(a));
+    };
+
+    // Enough turns for four-digit counts and hour-scale totals.
+    for (int i = 0; i < 400; ++i) {
+        turn("claude-opus-4-5",    9100, 2300, 48000, 9100, 2400, 31000, 4100);
+        turn("claude-sonnet-4-5",  7400, 1900, 52000,    0, 1100, 18000,    0);
+        turn("claude-haiku-4-5",   3300,  850, 41000,    0,  420,  6200,    0);
+    }
+    return m;
+}
+
 // Flatten the panel to text at a given width and height.
 // Text the stats panel had CLIPPED AWAY, across every tab and width.
 //
@@ -281,6 +336,43 @@ TEST_CASE("stats_golden: every tab renders byte-identically") {
     }
     check(g_clipped.empty(),
           "no stats text is cut off without an ellipsis");
+
+    // The same question asked of a LONG session.
+    //
+    // Width bugs are triggered by content width, not terminal width, so a
+    // fixture whose every value is short ("4 turns", "16s") cannot reach
+    // them — it exercises the layout's easiest case and reports that as a
+    // pass. A real thread carries four-digit counts and hour-scale
+    // durations, which is where the strings actually compete for the row.
+    //
+    // Not hashed, deliberately. Pinning the bytes of a 1200-turn fixture
+    // would make every unrelated formatting change a re-pin chore for no
+    // extra safety; what is worth asserting is the property, and the
+    // property is that nothing is lost without the reader being told.
+    g_clipped.clear();
+    for (const auto& desc : stats::kTabs) {
+        for (int w : {40, 60, 76, 90, 120, 200}) {
+            auto [opened, _] = app::update(heavy_model(), Msg{OpenStats{}});
+            if (auto* o = opened.ui.panel.get<pn::Stats>())
+                o->tab = desc.id;
+            (void)render_at(opened, w, 40);
+        }
+    }
+    if (!g_clipped.empty()) {
+        std::fprintf(stderr, "\nstats (heavy session): %zu clipped write(s)\n",
+                     g_clipped.size());
+        std::size_t shown = 0;
+        for (const auto& c : g_clipped) {
+            if (shown++ >= 12) {
+                std::fprintf(stderr, "  … and %zu more\n",
+                             g_clipped.size() - 12);
+                break;
+            }
+            std::fprintf(stderr, "  %s\n", c.c_str());
+        }
+    }
+    check(g_clipped.empty(),
+          "a long session loses no text either");
 
     // ── Feature assertions ──────────────────────────────────
     //
