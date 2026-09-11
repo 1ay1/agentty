@@ -571,10 +571,19 @@ void retrieval_rows(const Facts& f, std::vector<Metric>& out) {
 
 namespace sections {
 
+// The DONUT LEADS, everywhere it appears.
+//
+// A ring is the one figure on a tab that answers "what is this made of"
+// at a glance, and a reader who has to scroll past three tables to reach
+// it has already read the tables the hard way. It also has a fixed height
+// while the tables around it grow with the thread, so anywhere but the
+// top it moves down the page as the session runs.
+//
+// Same rule on every tab that has one: Session, Cache, Tools.
 const std::array<Section, 4> session{{
+    {"",          Viz::Donut, &session_where_time_went},
     {"",          Viz::Hero,  &session_hero},
     {"Activity",  Viz::Kv,    &session_counts},
-    {"",          Viz::Donut, &session_where_time_went},
     {"Time",      Viz::Kv,    &session_time},
 }};
 
@@ -601,8 +610,8 @@ const std::array<Section, 3> cache{{
 }};
 
 const std::array<Section, 5> tools{{
-    {"",             Viz::Band,  &tools_status},
     {"",             Viz::Donut, &tools_mix},
+    {"",             Viz::Band,  &tools_status},
     {"By tool",      Viz::Bars,  &tools_by_name},
     {"Latency",      Viz::Kv,    &tools_latency},
     {"Distribution", Viz::Hist,  &tools_latency_dist},
