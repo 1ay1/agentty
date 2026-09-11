@@ -125,6 +125,17 @@ Model golden_model() {
 }
 
 // Flatten the panel to text at a given width and height.
+// Text the stats panel had CLIPPED AWAY, across every tab and width.
+//
+// Filled by render_at while the frames are painted, asserted once at the
+// end. This is the one fact about a frame that cannot be recovered from
+// the frame: the golden hash, the overflow scan and every feature check
+// read what LANDED on the canvas, and a canvas cannot show you what was
+// never drawn. A row whose value was clipped leaves a tidy-looking frame
+// that is missing a number — which is precisely how a week of width bugs
+// stayed invisible to this file while being obvious in a screenshot.
+std::vector<std::string> g_clipped;
+
 std::string render_at(const Model& m, int w, int rows) {
     // Panel clamps its own min_width to the terminal and reads COLUMNS when
     // there is no tty; LINES drives the viewport the same way. Both must be
@@ -136,6 +147,12 @@ std::string render_at(const Model& m, int w, int rows) {
 
     maya::StylePool pool;
     maya::Canvas canvas(w, rows, &pool);
+    canvas.on_clip_overflow([w, rows](const maya::Canvas::ClipOverflow& o) {
+        g_clipped.push_back(std::to_string(w) + "x" + std::to_string(rows)
+                            + " dropped '" + std::string(o.text)
+                            + "' (wanted " + std::to_string(o.wanted)
+                            + " cols, edge at " + std::to_string(o.edge) + ")");
+    });
     maya::render_tree(ui::stats_panel(m), canvas, pool, maya::theme::dark,
                       /*auto_height=*/true);
 
@@ -231,7 +248,41 @@ TEST_CASE("stats_golden: every tab renders byte-identically") {
         }
     }
 
-    // ── Feature assertions ───────────────────────────────────────────
+    // ── What the panel threw away ────────────────────────────────
+    //
+    // Every other check in this file reads the painted frames, so none of
+    // them can see a cell that was never painted. A clipped value leaves a
+    // frame that looks right and is missing a number, which is how a week
+    // of width bugs survived a green suite here.
+    //
+    // ASSERTED, not merely reported, because the panel is clip-clean and
+    // that is worth keeping. The first run of this check found nine drops
+    // the golden hash had been happily pinning — three subtitles cut dead
+    // at 40 columns with no ellipsis, so the sentence just stopped and the
+    // reader had no reason to think a word was missing.
+    //
+    // A deliberate truncation does NOT trip this: an ellipsised label has
+    // already shortened itself to fit, so nothing reaches the clip edge.
+    // That is the distinction this assertion is built on — it fires on
+    // information lost WITHOUT the reader being told, and stays quiet on
+    // information the panel chose to abbreviate.
+    if (!g_clipped.empty()) {
+        std::fprintf(stderr, "\nstats: %zu clipped write(s) across the sweep\n",
+                     g_clipped.size());
+        std::size_t shown = 0;
+        for (const auto& c : g_clipped) {
+            if (shown++ >= 12) {
+                std::fprintf(stderr, "  … and %zu more\n",
+                             g_clipped.size() - 12);
+                break;
+            }
+            std::fprintf(stderr, "  %s\n", c.c_str());
+        }
+    }
+    check(g_clipped.empty(),
+          "no stats text is cut off without an ellipsis");
+
+    // ── Feature assertions ──────────────────────────────────
     //
     // What the output must CONTAIN, regardless of its exact bytes. These
     // are what survives a deliberate re-pin: a new hash cannot quietly
@@ -285,7 +336,7 @@ TEST_CASE("stats_golden: every tab renders byte-identically") {
     //
     // Set to 0 to bootstrap: the run prints the hash to stderr, paste it
     // back IN THE SAME COMMIT as the change that moved it.
-    const std::uint64_t kGoldenHash = 0x283381c38340566bull;
+    const std::uint64_t kGoldenHash = 0xfac8a2b11f28139dull;
     const std::uint64_t got = fnv1a(out);
 
     if (kGoldenHash == 0) {
