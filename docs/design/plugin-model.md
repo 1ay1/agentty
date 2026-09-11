@@ -72,7 +72,9 @@ paths reject some client-defined tools entirely — the mcp_search_tools
 400 already handled). Beyond that, a very large tool set bloats every
 request. So the model exposes a **budget**:
 
-- `kToolBudget` — soft cap on total wire tools (native + enabled MCP).
+- `kToolBudget` — soft cap on total wire tools (native + enabled MCP),
+  configurable via `$AGENTTY_MCP_TOOL_BUDGET` (default 100; `0` lifts the
+  cap; unparsable values keep the default).
 - The projection trims *MCP* tools past the budget (native tools always
   ship; they're the core toolset), lowest-priority first, and records how
   many were trimmed.
