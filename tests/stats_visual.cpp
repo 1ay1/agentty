@@ -266,10 +266,21 @@ int main(int argc, char** argv) {
 
     // Tall viewport so nothing scrolls out of the dump. panel_viewport_h()
     // reads LINES when there is no tty, which is exactly this case.
+    //
+    // COLUMNS for the same reason, and it is load-bearing rather than
+    // tidy: the panel decides its COLUMN COUNT from the terminal width,
+    // not from the width its component is offered — the offer arrives
+    // before flex has taken the border, the padding and the scrollbar,
+    // so it cannot be trusted for a layout decision. With COLUMNS unset
+    // that lookup silently answered 80, and every dump wider than 80
+    // rendered single-column while the real app split into two. The tool
+    // was lying, not the panel.
 #ifdef _WIN32
     _putenv_s("LINES", "120");
+    _putenv_s("COLUMNS", std::to_string(w).c_str());
 #else
     setenv("LINES", "120", 1);
+    setenv("COLUMNS", std::to_string(w).c_str(), 1);
 #endif
 
     Model m = realistic_thread();

@@ -508,11 +508,35 @@ bool emit_items(const stats::Section& sec, const stats::Facts& f,
         scaled = peak > 0;
     }
 
+    // The label column, sized to the widest label in the SECTION.
+    //
+    // value_primary stops the label cell eating the slack, which is what
+    // keeps a bar beside its label — but it also stops the cell being
+    // padded, so every row began its bar at a different column and the
+    // bars no longer shared a baseline to be compared against. A bar
+    // chart whose bars start in different places is a list of unrelated
+    // lines.
+    //
+    // Padded here rather than by a layout rule because only this loop
+    // knows the set: the section is the group whose rows are meant to be
+    // read against each other, and the next section may want a different
+    // width entirely.
+    int label_w = 0;
+    for (const auto& mt : scratch)
+        label_w = std::max(label_w, maya::unicode::str_width(mt.label));
+
     for (const auto& mt : scratch) {
         Item it;
         it.leading = mt.label;
         it.origin  = mt.detail;
         const std::string value = stats::format(mt.unit, mt.value);
+        const bool pictured = !mt.series.empty()
+                           || (sec.viz == stats::Viz::Bars ? mt.share() >= 0.0
+                                                           : scaled);
+        if (pictured) {
+            const int pad = label_w - maya::unicode::str_width(mt.label);
+            if (pad > 0) it.leading.append(static_cast<std::size_t>(pad), ' ');
+        }
 
         // The value travels WITH the control, not in `trailing`: a control
         // replaces that cell rather than sitting beside it, so a row that
@@ -520,13 +544,27 @@ bool emit_items(const stats::Section& sec, const stats::Facts& f,
         if (!mt.series.empty()) {
             it.control = Spark{.series = mt.series, .value = value,
                                .hue = accent};
+            // Same reasoning as the meter: a trend is read against the
+            // row it belongs to, not against the pane's right edge.
+            it.value_primary = true;
         } else {
             const double share =
                 sec.viz == stats::Viz::Bars ? mt.share()
               : (scaled ? mt.value / peak : -1.0);
-            if (share >= 0.0)
+            if (share >= 0.0) {
                 it.control = Meter{.share = share, .value = value,
                                    .hue = muted};
+                // The bar hugs its label; the SLACK goes after the number.
+                //
+                // The default row layout gives every spare column to the
+                // label cell, which right-aligns the control against the
+                // far edge — correct for a settings pane, where the value
+                // is a lone word and the eye tracks down a column of them.
+                // Wrong here: a meter is read AGAINST its label, and on a
+                // wide pane the two ended up a screen apart with the eye
+                // crossing forty columns of nothing to pair them.
+                it.value_primary = true;
+            }
             else
                 it.trailing = value;   // no picture: the plain value cell
         }
@@ -682,6 +720,12 @@ Element stats_panel(const Model& m) {
     // would otherwise split into two columns of 36, which is worse than the
     // single wide column it was trying to improve on.
     cfg.col_min_width = 52;
+    // No rule off the headings. The sections here are separated by blank
+    // rows and by the column split already, and a rule across every
+    // heading turns a page of figures into a form — doubly so in two
+    // columns, where each rule runs to its own column's edge and the eye
+    // reads four horizontal lines where there are two groups.
+    cfg.header_rule = false;
 
     cfg.scroll     = &o->scroll;
     // Body height: the same one every other panel uses.
