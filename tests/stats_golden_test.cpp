@@ -350,6 +350,19 @@ TEST_CASE("stats_golden: every tab renders byte-identically") {
     // extra safety; what is worth asserting is the property, and the
     // property is that nothing is lost without the reader being told.
     g_clipped.clear();
+    // HEAVY_DUMP=<width> prints the heavy fixture at one width, which is
+    // the shape a real session has: four-digit counts, hour-scale
+    // durations, values wide enough to compete for the row.
+    if (const char* hw = std::getenv("HEAVY_DUMP")) {
+        const int w = std::atoi(hw);
+        for (const auto& desc : stats::kTabs) {
+            auto [opened, _] = app::update(heavy_model(), Msg{OpenStats{}});
+            if (auto* o = opened.ui.panel.get<pn::Stats>()) o->tab = desc.id;
+            std::fprintf(stderr, "== %s %dx40 ==\n",
+                         std::string{stats::tab_title(desc.id)}.c_str(), w);
+            std::fprintf(stderr, "%s", render_at(opened, w, 40).c_str());
+        }
+    }
     for (const auto& desc : stats::kTabs) {
         for (int w : {40, 60, 76, 90, 120, 200}) {
             auto [opened, _] = app::update(heavy_model(), Msg{OpenStats{}});
@@ -428,7 +441,7 @@ TEST_CASE("stats_golden: every tab renders byte-identically") {
     //
     // Set to 0 to bootstrap: the run prints the hash to stderr, paste it
     // back IN THE SAME COMMIT as the change that moved it.
-    const std::uint64_t kGoldenHash = 0x969b9b0ca33a997aull;
+    const std::uint64_t kGoldenHash = 0x7a6f8e0dd799e04aull;
     const std::uint64_t got = fnv1a(out);
 
     if (kGoldenHash == 0) {
