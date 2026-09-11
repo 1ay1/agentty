@@ -332,29 +332,48 @@ void tools_latency(const Facts& f, std::vector<Metric>& out) {
 // buckets hold milliseconds, bytes or tokens, and only the caller knows
 // which. Hard-coding Millis here is how a byte spread ends up labelled
 // "16ms–32ms".
+//
+// `stride` merges adjacent sub-buckets. Hist stores QUARTER-octaves so
+// that a p50 and a p95 in the same octave report different numbers — but
+// a chart wants coarser bins than a quantile does: thirty of them across
+// a pane leaves each bar two cells wide, which is a texture rather than
+// a distribution. Merging back to whole octaves for display keeps the
+// quantiles precise and the picture legible, which is the whole reason
+// the two are computed separately.
 void dist_rows(const Hist& h, std::vector<Metric>& out,
-               Unit u = Unit::Millis) {
+               Unit u = Unit::Millis, int stride = Hist::kSub) {
     if (!h.count()) return;
     const auto [lo, hi] = h.occupied();
     if (hi < lo) return;
+    if (stride < 1) stride = 1;
+    // Align the first bin to an octave boundary so a bar's range is a
+    // round number — "64ms–128ms", not "80ms–160ms".
+    const int first = (lo / stride) * stride;
     const double total = static_cast<double>(h.count());
+
+    struct Bin { double n; int lo_b; };
+    std::vector<Bin> bins;
+    for (int b = first; b <= hi; b += stride) {
+        double n = 0;
+        for (int k = b; k < b + stride && k <= hi; ++k)
+            n += h.buckets()[static_cast<std::size_t>(k)];
+        bins.push_back({n, b});
+    }
     double peak = 0;
-    for (int b = lo; b <= hi; ++b)
-        if (h.buckets()[static_cast<std::size_t>(b)] > peak)
-            peak = h.buckets()[static_cast<std::size_t>(b)];
-    for (int b = lo; b <= hi; ++b) {
-        const double n = h.buckets()[static_cast<std::size_t>(b)];
-        // Empty buckets INSIDE the occupied range are kept: a gap is a
-        // real feature of a bimodal distribution (fast local calls, slow
+    for (const auto& bn : bins) peak = std::max(peak, bn.n);
+
+    for (const auto& bn : bins) {
+        // Empty bins INSIDE the occupied range are kept: a gap is a real
+        // feature of a bimodal distribution (fast local calls, slow
         // network ones) and closing it up hides exactly that.
-        const auto floor_v = Hist::bucket_floor(b);
-        const auto ceil_v  = Hist::bucket_floor(b + 1);
+        const auto floor_v = Hist::bucket_floor(bn.lo_b);
+        const auto ceil_v  = Hist::bucket_floor(bn.lo_b + stride);
         out.push_back(Metric{
             .label  = format(u, floor_v) + "\xe2\x80\x93" + format(u, ceil_v),
             .unit   = Unit::Count,
-            .value  = n,
+            .value  = bn.n,
             .of     = peak,
-            .detail = n > 0 ? format(Unit::Ratio, n / total) : ""});
+            .detail = bn.n > 0 ? format(Unit::Ratio, bn.n / total) : ""});
     }
 }
 
