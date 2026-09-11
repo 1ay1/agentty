@@ -531,6 +531,44 @@ bool emit_items(const stats::Section& sec, const stats::Facts& f,
     return true;
 }
 
+// Painted rows of the TALLEST visible tab.
+//
+// The stats frame holds ONE height for every tab (see the note at the
+// cfg.fixed_viewport assignment below), and this is the number it holds.
+// Taking the maximum rather than the terminal's height is what keeps a
+// short tab out of a mostly-empty box: the frame is as tall as the fullest
+// thing it will ever have to show, and no taller.
+//
+// Counted from the emitted items rather than by rendering them. An item is
+// one row unless its control paints a picture, which is exactly what
+// panel::control_rows answers. Cheap enough per frame — a handful of tabs,
+// a few dozen metrics — and it HAS to be per frame, because which tab is
+// tallest changes as the thread grows.
+[[nodiscard]] int tallest_tab_rows(const stats::Facts& f,
+                                   const std::vector<stats::Tab>& visible) {
+    std::vector<stats::Metric> scratch;
+    scratch.reserve(32);
+    int tallest = 1;
+    for (auto tab : visible) {
+        std::vector<maya::panel::Item> items;
+        for (const auto& sec : stats::tab_desc(tab).sections)
+            emit_items(sec, f, items, scratch,
+                       maya::Color::blue(), maya::Color::bright_black());
+        int rows = 0;
+        for (const auto& it : items) {
+            // The ItemCtx only has to be plausible: control_rows asks about
+            // the KIND, and a picture's height does not depend on the theme
+            // or on where the caret is.
+            const maya::panel::Theme th{};
+            const maya::panel::ItemCtx ctx{.theme = th};
+            rows += maya::panel::control_rows(it.control, ctx);
+            if (!it.error.empty()) ++rows;
+        }
+        tallest = std::max(tallest, rows);
+    }
+    return tallest;
+}
+
 }  // namespace
 
 Element stats_panel(const Model& m) {
@@ -693,17 +731,26 @@ Element stats_panel(const Model& m) {
                               panel_detail::panel_terminal_rows()
                                   - panel_detail::kPickerChromeRows - 1);
 
-    // ...and HOLD that height, whatever the tab contains.
+    // ...and HOLD a height, so the frame does not resize under the reader.
     //
-    // The viewport above is a request; by default the panel treats it as a
-    // ceiling and shrink-wraps anything shorter. That is right for a picker
-    // and wrong here: these tabs differ in length, so the frame resized
-    // every time the reader pressed tab — 13 rows on Cache, 30 on Session,
-    // the whole box jumping under the cursor.
+    // Two failure modes, and the fix has to avoid both.
     //
-    // A document should hold still while you read it. What changes when
-    // you switch view is the writing, not the page.
+    // Shrink-wrapping (the default) sizes the body to whatever tab is
+    // showing, so the frame jumped between 13 and 30 rows as the reader
+    // pressed tab — the box moving under the cursor while they read.
+    //
+    // Pinning to the VIEWPORT is worse. That is the terminal's height, not
+    // the content's, so every short tab gained a large empty box below it:
+    // a five-row Cache summary in a forty-row frame. A document that holds
+    // still is right; a document padded to the screen is not.
+    //
+    // So the height is the TALLEST tab's, measured once. Every tab then
+    // gets the same frame, that frame is only as big as the content
+    // actually needs, and nothing moves when the reader switches view. The
+    // viewport still caps it, because a tab taller than the terminal has
+    // to scroll rather than overflow.
     cfg.fixed_viewport = true;
+    cfg.viewport_h = std::min(cfg.viewport_h, tallest_tab_rows(f, visible));
 
     cfg.note = visible.size() > 1 ? "tab  switch view   \xe2\x86\x91\xe2\x86\x93  scroll   esc  close"
                                   : "\xe2\x86\x91\xe2\x86\x93  scroll   esc  close";
