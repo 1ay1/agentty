@@ -13,7 +13,11 @@ namespace {
 // Hue slots. An int on Metric::Part rather than a maya::Color, because
 // domain/ does not depend on the renderer — the panel maps these onto the
 // theme. Named so a reader of an extractor can see what the band means.
-enum Hue { kNeutral = 0, kGood = 1, kWarn = 2, kBad = 3, kAccent = 4 };
+enum Hue { kNeutral = 0, kGood = 1, kWarn = 2, kBad = 3, kAccent = 4,
+           // The catch-all slice of a categorical chart. Its own slot
+           // because "other" is the ABSENCE of a category — it must not
+           // draw in a colour that makes it look like one more of them.
+           kOther = -1 };
 
 void ranked_rows(const Tally& t, std::vector<Metric>& out, Unit u = Unit::Count) {
     const double total = static_cast<double>(t.total());
@@ -249,19 +253,16 @@ void cache_tokens(const Facts& f, std::vector<Metric>& out) {
 
 // ── Tools ───────────────────────────────────────────────────────────────
 
-void tools_by_name(const Facts& f, std::vector<Metric>& out) {
-    ranked_rows(f.tools.by_name, out);
-}
-
-// The same tally as a RING. The ranked bars answer "how many of each";
-// the ring answers "what is this session MADE of", which on a real
-// thread is the more useful reading — 448 shell calls against 40 reads
-// is a working style, and a column of numbers makes you compute it.
+// The same tally as a RING. A ring answers "what is this session MADE
+// of", which on a real thread is the reading that matters — 458 shell
+// calls against 40 reads is a working style, and it is legible as two
+// wedges where a column of numbers has to be computed.
 //
-// Slices past the top few collapse into one "other": a ring's legend is
-// one entry per row, so a long tail of 1% wedges costs more height than
-// it carries information, and wedges that thin are indistinguishable
-// anyway. The ranked bars below still list every tool by name.
+// The ranked bars that used to sit beneath this said the same thing
+// twice: same tally, same percentages, three times the height. The ring
+// carries the top slices with their shares in the legend, and the tail
+// collapses — a wedge under a percent is not distinguishable from its
+// neighbour anyway, so listing it individually buys nothing.
 void tools_mix(const Facts& f, std::vector<Metric>& out) {
     const double total = static_cast<double>(f.tools.by_name.total());
     if (total <= 0) return;
@@ -285,8 +286,12 @@ void tools_mix(const Facts& f, std::vector<Metric>& out) {
                            v, static_cast<int>(i)});
     }
     if (const double rest = total - shown; rest > 0)
+        // kOther, not the next ramp slot. "other" is the ABSENCE of a
+        // category, and giving it a category's colour makes it look like
+        // one more tool — which it demonstrably did: it drew in the same
+        // magenta as the largest slice.
         m.parts.push_back({"other " + format(Unit::Ratio, rest / total),
-                           rest, static_cast<int>(kMaxSlices)});
+                           rest, kOther});
     out.push_back(std::move(m));
 }
 
@@ -294,16 +299,17 @@ void tools_status(const Facts& f, std::vector<Metric>& out) {
     const double total = static_cast<double>(f.tools.by_status.total());
     if (total <= 0) return;
     Metric m;
-    m.label = "calls by outcome";
-    m.unit  = Unit::Count;
-    m.value = total;
+    m.label  = "calls by outcome";
+    m.unit   = Unit::Count;
+    m.value  = total;
+    m.detail = format(Unit::Count, total);
     for (const auto& [label, n] : f.tools.by_status.rows()) {
         const int hue = label == "done"     ? kGood
                       : label == "failed"   ? kBad
                       : label == "rejected" ? kWarn
                                             : kNeutral;
-        m.parts.push_back({label + " " + format(Unit::Count,
-                                                static_cast<double>(n)),
+        m.parts.push_back({label + " " + format(Unit::Ratio,
+                                               static_cast<double>(n) / total),
                            static_cast<double>(n), hue});
     }
     out.push_back(std::move(m));
@@ -609,10 +615,16 @@ const std::array<Section, 3> cache{{
     {"Rates",  Viz::Spark, &cache_rates},
 }};
 
-const std::array<Section, 5> tools{{
+// Both tool breakdowns are RINGS, and the mix leads.
+//
+// The ranked bars that used to sit here said the same thing as the mix
+// ring twice over: same tally, same percentages, three times the height.
+// And `calls by outcome` is a composition of two or three states, which
+// is what a ring shows best — a band spends the full width to draw a
+// 4% sliver that a wedge makes obvious.
+const std::array<Section, 4> tools{{
     {"",             Viz::Donut, &tools_mix},
-    {"",             Viz::Band,  &tools_status},
-    {"By tool",      Viz::Bars,  &tools_by_name},
+    {"",             Viz::Donut, &tools_status},
     {"Latency",      Viz::Kv,    &tools_latency},
     {"Distribution", Viz::Hist,  &tools_latency_dist},
 }};

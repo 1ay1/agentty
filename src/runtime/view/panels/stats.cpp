@@ -52,7 +52,11 @@ using maya::StatSheet;
 // Ordered so ADJACENT slices contrast. A ramp that walks the spectrum
 // puts two blues next to each other, and neighbouring wedges are exactly
 // the pair a reader has to tell apart.
-[[nodiscard]] maya::Color series_hue(std::size_t i) {
+[[nodiscard]] maya::Color series_hue(int slot, std::size_t i) {
+    // The catch-all slice draws muted. "other" is the ABSENCE of a
+    // category, so giving it a category's colour makes it read as one
+    // more of them — which it did: it collided with the largest slice.
+    if (slot < 0) return muted;
     static const maya::Color kRamp[] = {
         accent,                       // magenta
         info,                         // blue
@@ -210,7 +214,7 @@ void emit_section(const stats::Section& sec, const stats::Facts& f,
                 for (const auto& p : mt.parts) {
                     ring.segments.push_back(
                         {p.label, p.value,
-                         mt.categorical ? series_hue(i) : hue_of(p.hue)});
+                         mt.categorical ? series_hue(p.hue, i) : hue_of(p.hue)});
                     ++i;
                 }
                 sheet.donut(std::move(ring));
@@ -278,7 +282,7 @@ void emit_section(const stats::Section& sec, const stats::Facts& f,
                 for (const auto& p : mt.parts) {
                     band.segments.push_back(
                         {p.label, p.value,
-                         mt.categorical ? series_hue(bi) : hue_of(p.hue)});
+                         mt.categorical ? series_hue(p.hue, bi) : hue_of(p.hue)});
                     ++bi;
                 }
                 sheet.band(std::move(band));
@@ -365,7 +369,7 @@ bool emit_items(const stats::Section& sec, const stats::Facts& f,
             for (const auto& p : mt.parts) {
                 band.segments.push_back(
                     {p.label, p.value,
-                     mt.categorical ? series_hue(bi) : hue_of(p.hue)});
+                     mt.categorical ? series_hue(p.hue, bi) : hue_of(p.hue)});
                 ++bi;
             }
             Item it;
@@ -385,7 +389,7 @@ bool emit_items(const stats::Section& sec, const stats::Facts& f,
             for (const auto& p : mt.parts) {
                 ring.segments.push_back(
                     {p.label, p.value,
-                     mt.categorical ? series_hue(i) : hue_of(p.hue)});
+                     mt.categorical ? series_hue(p.hue, i) : hue_of(p.hue)});
                 ++i;
             }
             Item it;

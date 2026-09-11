@@ -79,7 +79,9 @@ Model with_stats_open(int max_y) {
     auto [opened, _] = app::update(std::move(m), Msg{OpenStats{}});
     // The offset lives ON the panel now, so the bound does too.
     opened.ui.panel.get<pn::Stats>()->scroll.max_y = max_y;
-    return opened;
+    // Model is move-only (it owns the panel slot and the scroll state), so
+    // the local has to be moved out rather than copied.
+    return std::move(opened);
 }
 
 // The panel-owned offset, or -1 when the viewer is closed.

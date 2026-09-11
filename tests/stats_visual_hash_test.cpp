@@ -65,7 +65,9 @@ Model open_viewer() {
     // A bound to scroll within: the renderer publishes this after a paint,
     // and the reducer clamps against it.
     opened.ui.panel.get<pn::Stats>()->scroll.max_y = 20;
-    return opened;
+    // Model is move-only (it owns the panel slot and the scroll state), so
+    // the local has to be moved out rather than copied.
+    return std::move(opened);
 }
 
 }  // namespace

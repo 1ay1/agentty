@@ -169,6 +169,23 @@ Model realistic_thread() {
         turn("claude-sonnet-4-5", R::Implementation, 1000, 1600, 16400, 0,
              300, 4400));
 
+    // A long tail of tool calls, shaped like a real coding session: a
+    // dominant shell/edit pair, a handful of reads, and several tools
+    // used once or twice. This is what exercises the ring's "other"
+    // bucket and its categorical palette — a tidy 4-tool thread does not.
+    {
+        auto a = turn("claude-sonnet-4-5", R::Implementation, 1200, 1900,
+                      15100, 0, 280, 5600);
+        for (int i = 0; i < 22; ++i) add_tool(a, "shell", 40 + i * 7);
+        for (int i = 0; i < 9;  ++i) add_tool(a, "edit",  90 + i * 11);
+        for (int i = 0; i < 4;  ++i) add_tool(a, "read",  25 + i * 5);
+        add_tool(a, "write", 130);
+        add_tool(a, "git_commit", 260);
+        add_tool(a, "list_dir", 18);
+        add_tool(a, "shell", 4400, /*ok=*/false);
+        push("land the whole change", std::move(a));
+    }
+
     return m;
 }
 
