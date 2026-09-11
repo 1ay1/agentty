@@ -441,7 +441,7 @@ TEST_CASE("stats_golden: every tab renders byte-identically") {
     //
     // Set to 0 to bootstrap: the run prints the hash to stderr, paste it
     // back IN THE SAME COMMIT as the change that moved it.
-    const std::uint64_t kGoldenHash = 0xd1e1547ec6648691ull;
+    const std::uint64_t kGoldenHash = 0x13d69415436828e6ull;
     const std::uint64_t got = fnv1a(out);
 
     if (kGoldenHash == 0) {

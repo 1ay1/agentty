@@ -333,7 +333,8 @@ namespace {
 bool emit_items(const stats::Section& sec, const stats::Facts& f,
                 std::vector<maya::panel::Item>& out,
                 std::vector<stats::Metric>& scratch,
-                maya::Color accent, maya::Color muted) {
+                maya::Color accent, maya::Color muted,
+                std::size_t lead_rows) {
     using maya::panel::Item;
     using maya::panel::Meter;
     using maya::panel::Spark;
@@ -347,7 +348,19 @@ bool emit_items(const stats::Section& sec, const stats::Facts& f,
     sec.extract(f, scratch);
     if (scratch.empty()) return true;   // handled: an empty section draws nothing
 
-    if (!out.empty()) out.push_back(Item{});          // blank separator
+    // The blank goes with the section it PRECEDES, not after the one it
+    // follows.
+    //
+    // A trailing blank is the last row of the previous section's cell, so
+    // in a two-column layout it rides to whichever column that section
+    // landed in — and the other column starts a row higher, which reads
+    // as a misalignment rather than as spacing. A leading blank belongs
+    // to the new cell, so every column begins at the same line.
+    //
+    // The banner is the exception: it emits its own trailing blank and is
+    // held above the split, so a leading blank here would double it.
+    const bool after_banner = out.size() == lead_rows && lead_rows > 0;
+    if (!out.empty() && !after_banner) out.push_back(Item{});
 
     // A hero is a headline, not a table row: a big number and the sentence
     // that qualifies it, reading as one phrase.
@@ -462,15 +475,32 @@ bool emit_items(const stats::Section& sec, const stats::Facts& f,
 
     if (sec.viz == stats::Viz::Hero) {
         for (const auto& mt : scratch) {
-            Item it;
-            it.leading = mt.detail.empty()
-                       ? mt.label
-                       : mt.label + "  " + mt.detail;
-            // The NUMBER carries the accent; the qualifier is prose. The
-            // panel paints `leading` in one style, so the emphasis that
-            // matters is the row's, not the number's alone.
-            it.leading_style = maya::Style{}.with_fg(accent).with_bold();
-            out.push_back(std::move(it));
+            // TWO rows, not one.
+            //
+            // The figure and its sentence on one line made a string that
+            // outgrew any column — "78%  of 9 routed turns ran below the
+            // Strategic mod…" is the tab's whole answer, cut a word short.
+            // Splitting them lets the number be large and unmissable and
+            // the sentence wrap into whatever width it gets, which is what
+            // a headline is: a thing you read first, then the gloss.
+            Item fig;
+            fig.leading = mt.label;
+            fig.leading_style = maya::Style{}.with_fg(accent).with_bold();
+            out.push_back(std::move(fig));
+
+            if (!mt.detail.empty()) {
+                Item cap;
+                cap.leading = mt.detail;
+                // Prose, not a datum: the number above already has the
+                // emphasis, and repeating it on the caption would leave
+                // the row with two things shouting and no hierarchy.
+                cap.leading_style = maya::Style{}.with_fg(muted);
+                out.push_back(std::move(cap));
+            }
+            // A blank after the banner. The hero is an answer and what
+            // follows is its working; without the gap the first table row
+            // reads as part of the sentence.
+            out.push_back(Item{});
         }
         return true;
     }
@@ -678,8 +708,15 @@ Element stats_panel(const Model& m) {
     constexpr bool all_rows = true;
 
     if (all_rows) {
-        for (const auto& sec : sections)
-            emit_items(sec, f, cfg.items, scratch, accent, muted);
+        for (const auto& sec : sections) {
+            emit_items(sec, f, cfg.items, scratch, accent, muted,
+                       static_cast<std::size_t>(cfg.lead_items));
+            // Whatever the leading HERO section emitted stays above the
+            // column split. Counted rather than assumed, because a hero
+            // is two rows plus a blank and the emitter owns that shape.
+            if (&sec == &sections.front() && sec.viz == stats::Viz::Hero)
+                cfg.lead_items = static_cast<int>(cfg.items.size());
+        }
     } else {
         for (const auto& sec : sections)
             emit_section(sec, f, sheet, scratch);

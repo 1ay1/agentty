@@ -43,15 +43,18 @@ void session_hero(const Facts& f, std::vector<Metric>& out) {
     // The hero is a SENTENCE, not a row: figure first, then the clause
     // that says what it means. "5 turns" alone makes the reader look for
     // the verdict; "— no errors" is the verdict.
+    // The caption is its own LINE now, not a clause trailing the figure,
+    // so it starts with a word rather than an em dash — a line that opens
+    // with punctuation reads as a fragment that lost its first half.
     std::string caption;
     if (f.session.errors)
-        caption = "\xe2\x80\x94 " + std::to_string(f.session.errors)
+        caption = std::to_string(f.session.errors)
                 + (f.session.errors == 1 ? " ended in an error"
                                          : " ended in errors");
     else if (turns)
-        caption = "\xe2\x80\x94 none ended in an error";
+        caption = "none ended in an error";
     else
-        caption = "\xe2\x80\x94 nothing has run in this thread yet";
+        caption = "nothing has run in this thread yet";
     out.push_back(Metric{
         .label = turns == 1 ? "1 turn" : std::to_string(turns) + " turns",
         .unit  = Unit::Count,
@@ -605,9 +608,15 @@ namespace sections {
 // top it moves down the page as the session runs.
 //
 // Same rule on every tab that has one: Session, Cache, Tools.
+// The HERO leads. It is the tab's answer, and a reader who takes one
+// glance should take it from the top-left — the figure below is the
+// working, not the headline. It also has to come first structurally: the
+// panel holds the leading hero out of the column flow, and a hero that
+// is not first flows like any other cell and lands wherever balancing
+// puts it, which on this tab was the FOOT of the left column.
 const std::array<Section, 4> session{{
-    {"",          Viz::Donut, &session_where_time_went},
     {"",          Viz::Hero,  &session_hero},
+    {"",          Viz::Donut, &session_where_time_went},
     {"Activity",  Viz::Kv,    &session_counts},
     {"Time",      Viz::Kv,    &session_time},
 }};
