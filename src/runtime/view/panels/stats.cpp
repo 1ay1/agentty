@@ -647,6 +647,38 @@ Element stats_panel(const Model& m) {
     // Read-only: no cursor. A selection highlight on rows nothing can be
     // done to is a promise the panel cannot keep.
     cfg.selected   = -1;
+
+    // Flow into columns once one would be wider than this.
+    //
+    // A stats tab is a DOCUMENT — sections you read, not alternatives you
+    // pick between — which is exactly the shape column flow is for, and is
+    // why the cursor above being absent is a precondition rather than a
+    // coincidence. On a 200-column terminal a single column of rows is a
+    // narrow ribbon with two thirds of the screen blank and figures below
+    // the fold that would have fitted on it.
+    //
+    // 64 because that is about where a label─→value row stops being easy to
+    // track across: past it the eye loses the line on the way to the
+    // number. It is a READING measure, not a fitting one — which is the
+    // point of stating a ceiling rather than a minimum.
+    //
+    // Everything else is maya's: how many columns that implies, dividing
+    // the body exactly so no strip is left over, balancing the columns by
+    // height, and keeping each figure sized to ITS COLUMN rather than to
+    // the screen. This host supplies one number and no geometry — the
+    // arithmetic it used to do here is what clipped "6.0s" to "6".
+    cfg.col_max_width = 64;
+
+    // ...but never split below what a stats row needs. A row is a label, a
+    // meter and a value; at 36 columns the labels truncate ("Waiti…",
+    // "Genera…") and the split has traded a too-wide line for a lossy one.
+    // 52 is where the longest label in the fixture still lands whole.
+    //
+    // This is why a ceiling alone is not enough: 64 on a 76-column terminal
+    // would otherwise split into two columns of 36, which is worse than the
+    // single wide column it was trying to improve on.
+    cfg.col_min_width = 52;
+
     cfg.scroll     = &o->scroll;
     // Body height. panel_viewport_h() is clamped to kViewportH (14) — the
     // right ceiling for a PICKER, whose rows are interchangeable and where

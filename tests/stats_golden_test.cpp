@@ -206,6 +206,31 @@ TEST_CASE("stats_golden: every tab renders byte-identically") {
     install_stub_deps();
     const std::string out = render_all();
 
+    // STATS_DUMP=<tab> prints the rendered frames for a tab and stops.
+    //
+    // The hash says THAT the rendering changed; this says WHAT it changed
+    // to, which is the question you actually have when it fails. It reuses
+    // this harness rather than living in stats_visual because the fixture
+    // here is the one the assertions are written against — a second fixture
+    // is a second thing to keep true.
+    //
+    //   STATS_DUMP=Tools ctest -R stats_golden --output-on-failure
+    //   STATS_DUMP=all   …            every tab
+    if (const char* want = std::getenv("STATS_DUMP")) {
+        const std::string sel = want;
+        std::size_t pos = 0;
+        bool on = false;
+        while (pos < out.size()) {
+            const std::size_t nl = out.find('\n', pos);
+            if (nl == std::string::npos) break;
+            const std::string line = out.substr(pos, nl - pos);
+            pos = nl + 1;
+            if (line.rfind("== ", 0) == 0)
+                on = (sel == "all") || line.find(sel) != std::string::npos;
+            if (on) std::fprintf(stderr, "%s\n", line.c_str());
+        }
+    }
+
     // ── Feature assertions ───────────────────────────────────────────
     //
     // What the output must CONTAIN, regardless of its exact bytes. These
@@ -260,7 +285,7 @@ TEST_CASE("stats_golden: every tab renders byte-identically") {
     //
     // Set to 0 to bootstrap: the run prints the hash to stderr, paste it
     // back IN THE SAME COMMIT as the change that moved it.
-    const std::uint64_t kGoldenHash = 0x7daa6b64591a8981ull;
+    const std::uint64_t kGoldenHash = 0x2d51aafd480e1039ull;
     const std::uint64_t got = fnv1a(out);
 
     if (kGoldenHash == 0) {
