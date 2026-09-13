@@ -238,12 +238,51 @@ int resolve_context_window(std::string_view provider_id,
     //    model, and the same name elsewhere may differ.
     if (advertised > 0) return advertised;
 
-    // 3. The id. Claude/GPT families are known, `[1m]` forces the wide
+    // 3. The models.dev snapshot: the community metadata DB already
+    //    refreshed in the background. The endpoint said nothing about size
+    //    (custom-host/localhost /v1/models rows rarely carry a window), so
+    //    instead of falling through to the conservative default, trust the
+    //    community declaration for the model FAMILY. Scoped-first
+    //    ("provider/model"), bare-name fallback; cross-provider
+    //    disagreements are poisoned at write time (see
+    //    merge_catalog_context_window). A gateway serving less than the
+    //    declared window will simply fail the turn on the wire at the true
+    //    limit — the same behavior every provider got before
+    //    advertised-context reporting existed — while the common case
+    //    (local host serving the full window) stops clamping to 200k.
+    //
+    // Beats id inference: the names models.dev carries are exactly the
+    //    ones from_id doesn't know.
+    if (int w = catalog_context_window_for(model_id, provider_id); w > 0)
+        return w;
+    //    Endpoint-origin declarations: the CUSTOM-HOST seam. A session's
+    //    provider id is the endpoint spec itself, which the scoped lookup
+    //    above can never resolve — but models.dev declares entries by api
+    //    URL, so the same declaration is reachable keyed by origin. Port
+    //    is a user definition, not identity (loopback entries live at
+    //    whatever port the user picked); the second qualifier between the
+    //    several same-host entries is the model id itself, with
+    //    disagreement → no claim. Only consulted here, after the scoped
+    //    hit, because a preset's own identity outranks its URL's.
+    {
+        std::uint16_t port = 0;
+        const std::string host =
+            context_endpoint_origin(provider_id, port);
+        if (!host.empty())
+            if (const int w = endpoint_context_window_for(model_id, host,
+                                                          port);
+                w > 0)
+                return w;
+    }
+    if (int w = catalog_context_window_for(model_id); w > 0)
+        return w;
+
+    // 4. The id. Claude/GPT families are known, `[1m]` forces the wide
     //    window, unknown families report 0.
     if (const int w = ModelCapabilities::from_id(model_id).context_window(); w > 0)
         return w;
 
-    // 4. Nothing is known. Stay conservative: an over-estimate fails the
+    // 5. Nothing is known. Stay conservative: an over-estimate fails the
     //    turn on the wire, an under-estimate only compacts sooner than it
     //    had to.
     return kDefaultContextWindow;

@@ -2267,13 +2267,27 @@ OllamaProbe probe_ollama_model(const AuthHeader& auth,
         // The arch prefix varies per model, so scan for any key ending in
         // ".context_length" rather than hard-coding the architecture.
         if (j.contains("model_info") && j["model_info"].is_object()) {
+            // Same numeric tolerance as advertised_context_window: ollama
+            // emits an integer here, but a proxy / stringified value must
+            // not silently drop the window (the exact llama.cpp failure mode
+            // was a wrong-TYPE read, not a wrong field).
+            auto as_window = [](const nlohmann::json& v) -> int {
+                if (v.is_number_integer())  return v.get<int>();
+                if (v.is_number_unsigned()) return static_cast<int>(v.get<std::uint64_t>());
+                if (v.is_number_float())    return static_cast<int>(v.get<double>());
+                if (v.is_string()) {
+                    try { return std::stoi(v.get<std::string>()); } catch (...) {}
+                }
+                return 0;
+            };
             for (auto it = j["model_info"].begin(); it != j["model_info"].end(); ++it) {
                 const std::string& key = it.key();
                 if (key.size() >= 15
-                    && key.compare(key.size() - 15, 15, ".context_length") == 0
-                    && it.value().is_number_integer()) {
-                    out.context_window = it.value().get<int>();
-                    break;
+                    && key.compare(key.size() - 15, 15, ".context_length") == 0) {
+                    if (const int w = as_window(it.value()); w > 0) {
+                        out.context_window = w;
+                        break;
+                    }
                 }
             }
         }
@@ -2359,7 +2373,8 @@ namespace detail {
 //               latter is the window of the endpoint that will actually
 //               serve the request, so it wins when the two disagree
 //   vLLM        max_model_len (added to /v1/models in vllm#4643)
-//   llama.cpp / n_ctx, and the meta.n_ctx_train an ollama-style probe
+//   llama.cpp   meta.n_ctx (runtime window) and meta.n_ctx_train (trained
+//               maximum) — nested, unlike the flat spellings below
 //   others      reports
 //
 // Order matters where a row carries more than one: prefer the field that
@@ -2393,6 +2408,18 @@ namespace detail {
         tp != m.end() && tp->is_object())
         if (const int w = pick(*tp, "context_length"); w > 0) return w;
     if (const int w = pick(m, "max_model_len"); w > 0) return w;
+
+    // llama.cpp nests its window under "meta": n_ctx is the RUNTIME
+    // context the server is actually serving (e.g. 32768), n_ctx_train the
+    // model's trained maximum (e.g. 131072). Prefer n_ctx — it is the
+    // number this deployment will honour, and advertising the trained max
+    // would silently over-commit the prefix budget (rung 2 must outrank the
+    // static catalog, but only with the figure the gateway itself uses).
+    if (const auto meta = m.find("meta");
+        meta != m.end() && meta->is_object()) {
+        if (const int w = pick(*meta, "n_ctx"); w > 0) return w;
+        if (const int w = pick(*meta, "n_ctx_train"); w > 0) return w;
+    }
 
     // LiteLLM's model_info block.
     if (const auto mi = m.find("model_info");

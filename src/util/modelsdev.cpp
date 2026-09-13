@@ -126,6 +126,32 @@ void register_model(const std::string& dev_provider,
                                    static_cast<std::uint8_t>(set));
     }
 
+    // The declared context window (models.dev "limit.context") feeds the
+    // same keying: scoped records for the resolved provider (and
+    // "dev:<id>" for unknown ones — only useful for tests), bare-tail
+    // merge-or-poison across providers.
+    int ctx_tokens = 0;
+    if (auto lim = m.find("limit"); lim != m.end() && lim->is_object()) {
+        if (auto c = lim->find("context");
+            c != lim->end() && c->is_number_integer())
+            ctx_tokens = c->get<int>();
+    }
+    if (ctx_tokens > 0) {
+        set_catalog_context_window(scope + "/" + mid, ctx_tokens);
+        if (tail != capkey::norm_model(mid))
+            set_catalog_context_window(scope + "/" + tail, ctx_tokens);
+        if (!tail.empty())
+            merge_catalog_context_window(tail, ctx_tokens);
+        // CUSTOM-HOST seam: a session's provider id IS its endpoint spec,
+        // which no dev_scope can resolve to — index the declaration under
+        // the entry's api ORIGIN as well, so
+        // claim_context_windows_for_endpoint can hand the figure to a live
+        // localhost / custom-host catalog whose URL matches. The provider-
+        // scoped write above stays the primary channel for presets.
+        if (!dev_api.empty())
+            merge_endpoint_context_window(dev_api, mid, ctx_tokens);
+    }
+
     // Bare key: SHARED across every provider — merge-or-poison only
     // (agree → keep, disagree → no-info; RULE 3 in capkey.hpp).
     if (!tail.empty()) {

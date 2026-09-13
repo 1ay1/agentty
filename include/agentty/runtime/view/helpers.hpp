@@ -146,19 +146,27 @@ inline constexpr int kDefaultContextWindow = 200'000;
 // transcript, too large lets the prefix run past what the endpoint accepts
 // and the turn fails on the wire.
 //
-// FOUR sources, most-specific first. The layering is the whole design — a
+// FIVE sources, most-specific first. The layering is the whole design — a
 // single source cannot be right for every deployment:
 //
 //   1. the user's per-model override         (they configured the gateway)
 //   2. what the provider ADVERTISED          (probed /api/show, or the
 //                                             window in a /v1/models row)
-//   3. what the model id implies             (Claude/GPT families, `[1m]`)
-//   4. the conservative default              (nothing is known)
+//   3. the models.dev declaration            (limit.context from the cached
+//                                             community snapshot; fills
+//                                             the gap when the endpoint
+//                                             said nothing)
+//   4. what the model id implies             (Claude/GPT families, `[1m]`)
+//   5. the conservative default              (nothing is known)
 //
 // Note the order of 2 and 3: a LIVE figure from the endpoint that will serve
-// the request outranks a guess from the id. The same name behind two
-// gateways can be served with two different windows, and only the gateway
-// knows which.
+// the request outranks third-party metadata — only the gateway can 400 on
+// overflow. Step 3 exists because custom-host/localhost /v1/models rows
+// rarely carry a window at all; without it every such model fell through to
+// the id guess (step 4), which knows only the Claude/GPT families and
+// clamped everything else to the 200k default. The same name behind two
+// gateways can still be served with two different windows, and only the
+// gateway knows which.
 //
 // `advertised` is 0 when nothing was reported — which is why ModelInfo's
 // context_window defaults to 0 rather than a number: "unknown" and "200k"

@@ -75,6 +75,34 @@ TEST_CASE("context: vLLM max_model_len is read") {
     CHECK(det::advertised_context_window(row) == 32768);
 }
 
+TEST_CASE("context: llama.cpp meta.n_ctx is read") {
+    // llama.cpp /v1/models (OpenAI-compat) nests the size under "meta",
+    // NOT flat on the row like vLLM/LiteLLM. This is the exact shape a
+    // llama.cpp server returns; rung 2 must read it or a 32k model falls
+    // through to the 200k default (rung 5) and over-commits the budget.
+    const auto row = json::parse(R"({
+        "id": "gpt-oss-20b", "object": "model", "owned_by": "llamacpp",
+        "meta": {"n_ctx": 32768, "n_ctx_train": 131072}
+    })");
+    CHECK(det::advertised_context_window(row) == 32768,
+          "meta.n_ctx is the runtime window and must win");
+
+    // Without a runtime n_ctx, fall back to the trained maximum.
+    const auto train_only = json::parse(
+        R"({"id": "m", "meta": {"n_ctx_train": 131072}})");
+    CHECK(det::advertised_context_window(train_only) == 131072);
+
+    // Same stringification tolerance as the flat spellings.
+    const auto stringified = json::parse(
+        R"({"id": "m", "meta": {"n_ctx": "32768"}})");
+    CHECK(det::advertised_context_window(stringified) == 32768);
+
+    // A malformed meta object must not throw, and must not mask the flat
+    // fallbacks a row may also carry.
+    CHECK(det::advertised_context_window(
+              json::parse(R"({"id":"m","meta":"not an object"})")) == 0);
+}
+
 TEST_CASE("context: a stringified window still parses") {
     // Some proxies stringify numeric metadata. Dropping those would silently
     // clamp the model, which is the whole failure this guards.
@@ -115,6 +143,76 @@ TEST_CASE("context: resolution order is override > advertised > id") {
     s.context_overrides[ui::context_override_key(prov, model)] = 2'000'000;
     CHECK(ui::resolve_context_window(prov, model, 1'000'000, s) == 2'000'000,
           "an override a heuristic can overrule is not a setting");
+}
+
+TEST_CASE("context: models.dev declaration beats nothing, loses to advertised") {
+    using agentty::set_catalog_context_window;
+    using agentty::merge_catalog_context_window;
+
+    Settings s;
+    const char* prov = "ollama-cloud";   // a custom-host label
+
+    // A bare-named declaration (no provider scope) is the fallback any host
+    // can use when its /v1/models row is size-less.
+    merge_catalog_context_window("glm-5.3-flash", 1'000'000);
+    CHECK(ui::resolve_context_window(prov, "glm-5.3-flash", 0, s)
+              == 1'000'000,
+          "models.dev should fill the gap when the endpoint says nothing");
+
+    // A live advertisement still outranks the community figure — the
+    // gateway actually serving the request is the one that will 400 on
+    // overflow, so its number wins.
+    CHECK(ui::resolve_context_window(prov, "glm-5.3-flash", 262'144, s)
+              == 262'144,
+          "a live probe beats a static declaration");
+
+    // A scoped declaration names one host; an unrelated bare tail does not
+    // bleed into it if the scoped one disagrees.
+    set_catalog_context_window("ollama-cloud/deepseek-v4.1-flash", 1'048'576);
+    CHECK(ui::resolve_context_window(prov, "deepseek-v4.1-flash", 0, s)
+              == 1'048'576);
+
+    // …and a user override still wins over the declaration.
+    s.context_overrides[ui::context_override_key(prov, "glm-5.3-flash")]
+        = 512'000;
+    CHECK(ui::resolve_context_window(prov, "glm-5.3-flash", 0, s)
+              == 512'000,
+          "user override outranks models.dev declaration");
+}
+
+TEST_CASE("context: endpoint declaration reaches a custom-host provider id") {
+    using agentty::merge_endpoint_context_window;
+
+    Settings s;
+    // A session whose provider id is the endpoint spec itself — the string
+    // no dev_scope can ever resolve, so the provider-scoped ladder can
+    // never fill it.
+    const char* prov = "http://localhost:1234";
+
+    merge_endpoint_context_window("http://127.0.0.1:1234/v1",
+                                  "qwen/qwen3-coder-30b", 262'144);
+    CHECK(ui::resolve_context_window(prov, "qwen3-coder-30b", 0, s)
+              == 262'144,
+          "a custom-host session claims the models.dev entry for its URL");
+
+    // The port is the user's own choice: the same host on another port
+    // still meets the declaration when the model-id qualifier is
+    // unambiguous (only one same-host entry declares this model).
+    CHECK(ui::resolve_context_window("http://localhost:3000",
+                                     "qwen3-coder-30b", 0, s)
+              == 262'144,
+          "port is user config, not identity (single declaring entry)");
+
+    // Live advertisement and user override still outrank the URL claim.
+    CHECK(ui::resolve_context_window(prov, "qwen3-coder-30b", 128'000, s)
+              == 128'000,
+          "a live probe beats the endpoint declaration");
+    s.context_overrides[ui::context_override_key(prov,
+                                                 "qwen3-coder-30b")]
+        = 64'000;
+    CHECK(ui::resolve_context_window(prov, "qwen3-coder-30b", 0, s)
+              == 64'000,
+          "user override beats the endpoint declaration");
 }
 
 TEST_CASE("context: overrides are per provider AND model") {

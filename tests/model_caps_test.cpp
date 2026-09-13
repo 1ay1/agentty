@@ -936,3 +936,110 @@ TEST_CASE("wire dialect reasoning-text transmissibility") {
     // Unknown / custom host: assume yes rather than hiding a real feature.
     CHECK(wire_streams_reasoning_text("localhost:8080"));
 }
+
+TEST_CASE("catalog context-window declarations") {
+    using agentty::set_catalog_context_window;
+    using agentty::merge_catalog_context_window;
+    using agentty::catalog_context_window_for;
+
+    // Scoped declarations are per-host: the same bare id can be served at
+    // different windows by different providers without collision.
+    set_catalog_context_window("localhost/big-ctx-model", 128000);
+    set_catalog_context_window("custom-host/big-ctx-model", 32000);
+    CHECK(catalog_context_window_for("big-ctx-model", "localhost") == 128000);
+    CHECK(catalog_context_window_for("big-ctx-model", "custom-host") == 32000);
+
+    // Bare-tail merge: two providers serving the SAME model at the SAME
+    // window agree → the bare spelling resolves for anyone (this is the
+    // custom-host fix: an unknown host has no scoped entry of its own).
+    merge_catalog_context_window("qwen3-coder-next", 262144);
+    merge_catalog_context_window("vendor-prefix/qwen3-coder-next", 262144);
+    CHECK(catalog_context_window_for("qwen3-coder-next") == 262144);
+    CHECK(catalog_context_window_for("qwen3-coder-next",
+                                     "localhost:11434") == 262144);
+
+    // …but a cross-provider DISAGREEMENT poisons the bare key ("no info")
+    // rather than letting one host's figure bleed onto another.
+    merge_catalog_context_window("ambiguous-model", 128000);
+    CHECK(catalog_context_window_for("ambiguous-model") == 128000);
+    merge_catalog_context_window("elsewhere/ambiguous-model", 32768);
+    CHECK(catalog_context_window_for("ambiguous-model") == 0);
+    // Poison is permanent for the session: a later agreeing write is
+    // dropped.
+    merge_catalog_context_window("ambiguous-model", 128000);
+    CHECK(catalog_context_window_for("ambiguous-model") == 0);
+
+    // Scoped entries are unaffected by bare-tail confusion, and win over it.
+    set_catalog_context_window("custom-host/ambiguous-model", 65536);
+    CHECK(catalog_context_window_for("ambiguous-model", "custom-host")
+          == 65536);
+}
+
+TEST_CASE("endpoint-keyed context declarations reach custom hosts") {
+    using agentty::merge_endpoint_context_window;
+    using agentty::endpoint_context_window_for;
+    using agentty::context_endpoint_origin;
+
+    // Origin parsing: scheme/path/userinfo drop, loopback spellings fold.
+    std::uint16_t port = 0;
+    CHECK(context_endpoint_origin("http://127.0.0.1:1234/v1", port)
+          == "127.0.0.1");
+    CHECK(port == 1234);
+    CHECK(context_endpoint_origin("http://localhost:11434", port)
+          == "127.0.0.1");
+    CHECK(port == 11434);
+    CHECK(context_endpoint_origin("https://api.my-gw.com", port)
+          == "api.my-gw.com");
+    CHECK(port == 443);   // scheme default counts as HOST-tier evidence,
+                          // not as an explicit port claim
+
+    // The three-siblings case: same loopback host, three dev entries on
+    // different ports — the port is the first qualifier.
+    merge_endpoint_context_window("http://127.0.0.1:1337/v1",
+                                  "Qwen3_5-9B-Q4_K_M", 32768);   // atomic-chat
+    merge_endpoint_context_window("http://127.0.0.1:1234/v1",
+                                  "qwen/qwen3-coder-30b", 262144);  // lmstudio
+    CHECK(endpoint_context_window_for("qwen3-coder-30b", "127.0.0.1", 1234)
+          == 262144);
+    CHECK(endpoint_context_window_for("qwen3-5-9b-q4-k-m", "127.0.0.1",
+                                      1337) == 32768);
+    // A wrong-port model id is NOT a claim: atomic-chat's Qwen3_5 must not
+    // bleed onto a session pointed at :1234.
+    CHECK(endpoint_context_window_for("qwen3-5-9b-q4-k-m", "127.0.0.1",
+                                      1234) == 0);
+
+    // The port is a USER definition, not identity: LM Studio on a custom
+    // port still meets the one lmstudio entry, because the model-id
+    // qualifier says unambiguous (only one same-host entry declares it).
+    CHECK(endpoint_context_window_for("qwen3-coder-30b", "127.0.0.1", 3000)
+          == 262144);
+    // Any localhost ALIAS meets it too — "localhost:3000" is "127.0.0.1".
+    {
+        std::uint16_t p2 = 0;
+        const std::string h = context_endpoint_origin("localhost:3000", p2);
+        CHECK(h == "127.0.0.1");
+        CHECK(p2 == 3000);
+        CHECK(endpoint_context_window_for("qwen3-coder-30b", h, p2)
+              == 262144);
+    }
+
+    // Second qualifier refuses AMBIGUITY: two same-host entries declaring
+    // the same model id at different windows on different ports → no claim
+    // for a third port, while each own-port claim still lands.
+    merge_endpoint_context_window("http://127.0.0.1:2001/v1", "shared-model",
+                                  100000);
+    merge_endpoint_context_window("http://127.0.0.1:2002/v1", "shared-model",
+                                  200000);
+    CHECK(endpoint_context_window_for("shared-model", "127.0.0.1", 2001)
+          == 100000);
+    CHECK(endpoint_context_window_for("shared-model", "127.0.0.1", 2002)
+          == 200000);
+    CHECK(endpoint_context_window_for("shared-model", "127.0.0.1", 2999)
+          == 0);
+
+    // A REMOTE custom host works the same — origin match, no poisoning.
+    merge_endpoint_context_window("https://api.my-gw.com/v1",
+                                  "glm-5.3-flash", 1048576);
+    CHECK(endpoint_context_window_for("glm-5-3-flash", "api.my-gw.com", 443)
+          == 1048576);
+}
