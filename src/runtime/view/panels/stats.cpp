@@ -35,11 +35,21 @@
 namespace agentty::ui {
 namespace {
 
-// The card accent for the active tab. Kept fixed rather than per-tab: the
-// panel already tells you which tab you are on via the strip, so tinting
-// the cards a different colour per tab would be a second, redundant, and
-// slower-to-read signal.
-[[nodiscard]] maya::Color card_accent() { return maya::Color::rgb(120, 180, 255); }
+// The card accent ramp — the agent_stats palette, verbatim. These are the
+// soft high-value hues the example's dashboard is built on; the agentty
+// theme's status colours (green=good, red=failed) are a SEMANTIC map and
+// carry the wrong meaning for a grid of named categories.
+namespace hue {
+const maya::Color cyan   = maya::Color::rgb(120, 220, 232);
+const maya::Color green  = maya::Color::rgb(150, 230, 160);
+const maya::Color amber  = maya::Color::rgb(245, 200, 110);
+const maya::Color red    = maya::Color::rgb(255, 130, 130);
+const maya::Color violet = maya::Color::rgb(190, 160, 255);
+const maya::Color blue   = maya::Color::rgb(120, 180, 255);
+const maya::Color pink   = maya::Color::rgb(240, 150, 200);
+const maya::Color teal   = maya::Color::rgb(120, 220, 200);
+const maya::Color dim    = maya::Color::rgb(140, 150, 170);
+}  // namespace hue
 
 // The ONE place a domain hue slot becomes a colour. domain/ deliberately
 // does not know about the theme, so the mapping lives here — and lives
@@ -55,28 +65,17 @@ namespace {
 }
 
 // A CATEGORICAL ramp, for charts whose slices are named things rather
-// than states. hue_of() is a SEMANTIC map — green means good, red means
-// failed — and a pie of seven tool names has no semantics to encode: it
-// needs seven distinguishable colours, and reusing the status palette
-// would imply `grep` is somehow the failure case.
-//
-// Ordered so ADJACENT slices contrast. A ramp that walks the spectrum
-// puts two blues next to each other, and neighbouring wedges are exactly
-// the pair a reader has to tell apart.
+// than states — the example's palette in its cycling order, so adjacent
+// slices contrast instead of walking the spectrum into two neighbouring
+// blues.
 [[nodiscard]] maya::Color series_hue(int slot, std::size_t i) {
     // The catch-all slice draws muted. "other" is the ABSENCE of a
     // category, so giving it a category's colour makes it read as one
     // more of them — which it did: it collided with the largest slice.
-    if (slot < 0) return muted;
+    if (slot < 0) return hue::dim;
     static const maya::Color kRamp[] = {
-        accent,                       // magenta
-        info,                         // blue
-        success,                      // green
-        warn,                         // yellow
-        highlight,                    // cyan
-        maya::Color::bright_magenta(),
-        maya::Color::bright_blue(),
-        maya::Color::bright_green(),
+        hue::cyan, hue::blue, hue::amber, hue::green,
+        hue::violet, hue::teal, hue::red, hue::pink,
     };
     constexpr std::size_t n = sizeof(kRamp) / sizeof(kRamp[0]);
     return kRamp[i % n];
@@ -96,16 +95,12 @@ namespace {
 [[nodiscard]] Element card(std::string_view heading, maya::Color accent,
                            std::vector<Element> body) {
     std::vector<Element> rows;
-    rows.reserve(body.size() + 3);
+    rows.reserve(body.size() + 2);
     if (!heading.empty()) {
         rows.push_back(text(std::string{heading}, fg_bold(accent)));
         rows.push_back(blank());
     }
     for (auto& e : body) rows.push_back(std::move(e));
-    // Trailing blank: with no border, the gap between cards IS the
-    // separator. Without it the next card's heading butts against this
-    // card's last figure and the two read as one section.
-    rows.push_back(blank());
     return (dsl::v(std::move(rows)) | padding(0, 1)).build();
 }
 
@@ -113,7 +108,7 @@ namespace {
 // silently drop a section the reader expected — the dim dash says "measured,
 // empty" rather than "forgot to render".
 [[nodiscard]] Element empty_placeholder() {
-    return text("\xe2\x80\x94", fg_dim(muted));   // — em dash
+    return text("\xe2\x80\x94", fg_dim(hue::dim));   // — em dash
 }
 
 // ── Viz builders ──────────────────────────────────────────────────────────
@@ -132,8 +127,8 @@ namespace {
     for (std::size_t i = 0; i < ms.size(); ++i) {
         const auto& mt = ms[i];
         out.push_back(text(stats::format(mt.unit, mt.value), fg_bold(accent)));
-        if (!mt.label.empty())  out.push_back(text(mt.label, fg_dim(muted)));
-        if (!mt.detail.empty()) out.push_back(text(mt.detail, fg_dim(muted)));
+        if (!mt.label.empty())  out.push_back(text(mt.label, fg_dim(hue::dim)));
+        if (!mt.detail.empty()) out.push_back(text(mt.detail, fg_dim(hue::dim)));
         // Hero's lead figure gets extra air under it so it reads as the
         // headline of the tab.
         if (hero && i == 0) out.push_back(blank());
@@ -200,7 +195,7 @@ namespace {
         maya::LineChart chart{std::move(series), 6};
         chart.set_color(series_hue(0, i));
         out.push_back(chart.build());
-        if (!mt.label.empty()) out.push_back(text(mt.label, fg_dim(muted)));
+        if (!mt.label.empty()) out.push_back(text(mt.label, fg_dim(hue::dim)));
     }
     return out;
 }
@@ -340,7 +335,7 @@ Element stats_panel(const Model& m) {
     maya::panel::Config cfg;
     cfg.title    = "Stats";
     cfg.subtitle = std::string{stats::tab_subtitle(active)};
-    cfg.accent   = card_accent();
+    cfg.accent   = hue::cyan;
 
     // Tabs are the WIDGET's chrome, not this host's: it owns the padding,
     // the selected treatment and how the strip degrades on a narrow frame,
@@ -395,7 +390,7 @@ Element stats_panel(const Model& m) {
                                           // the grid stays ONE column instead.
                                           .min_width = 30,
                                           .gap       = 3,
-                                          .gap_y     = 1,
+                                          .gap_y     = 2,
                                           .width     = body_width(),
                                           .flow      = maya::Flow::Row})
             .build());
