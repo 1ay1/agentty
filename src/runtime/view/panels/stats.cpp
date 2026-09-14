@@ -333,7 +333,8 @@ const maya::Color dim    = maya::Color::rgb(140, 150, 170);
 void build_cards(const stats::Section& sec, const stats::Facts& f,
                  std::vector<stats::Metric>& scratch,
                  std::vector<std::vector<Element>>& text_groups,
-                 std::vector<Element>& out) {
+                 std::vector<Element>& out,
+                 std::vector<bool>& tall) {
     scratch.clear();
     sec.extract(f, scratch);
 
@@ -362,6 +363,7 @@ void build_cards(const stats::Section& sec, const stats::Facts& f,
 
     if (scratch.empty()) {
         out.push_back(card(sec.heading, accent, {empty_placeholder()}));
+        tall.push_back(false);
         return;
     }
 
@@ -402,6 +404,7 @@ void build_cards(const stats::Section& sec, const stats::Facts& f,
 
     if (body.empty()) body.push_back(empty_placeholder());
     out.push_back(card(sec.heading, accent, std::move(body)));
+    tall.push_back(sec.viz == stats::Viz::Donut);
 }
 
 }  // namespace
@@ -471,8 +474,46 @@ Element stats_panel(const Model& m) {
     std::vector<Element> pictures;                   // one card per chart
     text_groups.reserve(sections.size());
     pictures.reserve(sections.size());
+    std::vector<bool> tall_picture;
     for (const auto& sec : sections)
-        build_cards(sec, f, scratch, text_groups, pictures);
+        build_cards(sec, f, scratch, text_groups, pictures, tall_picture);
+
+    // Past two charts, share a cell — but only with one that FITS.
+    //
+    // Every chart as its own cell makes a chart-heavy tab too many columns
+    // wide, and a cell that wraps lands on a grid row that starts below the
+    // body: a section the reader never sees. A spark and a histogram share
+    // a column comfortably.
+    //
+    // Two DONUTS do not — a dozen rows each against a fourteen-row body —
+    // and pairing them blind to height is what cost the Tools tab "calls by
+    // outcome". A chart joins the open cell only while the running height
+    // leaves room; otherwise it starts its own.
+    //
+    // NOMINAL heights, not a live measure: sizing the pack from the terminal
+    // makes one thread group its charts differently between renders.
+    if (pictures.size() > 2) {
+        constexpr int kCellRows  = 13;
+        constexpr int kDonutRows = 12;
+        constexpr int kShortRows = 7;
+        std::vector<Element> packed;
+        std::vector<Element> cur;
+        int cur_rows = 0;
+        for (std::size_t i = 0; i < pictures.size(); ++i) {
+            const int h = (i < tall_picture.size() && tall_picture[i])
+                              ? kDonutRows : kShortRows;
+            if (!cur.empty() && cur_rows + 1 + h > kCellRows) {
+                packed.push_back(dsl::v(std::move(cur)).build());
+                cur.clear();
+                cur_rows = 0;
+            }
+            if (!cur.empty()) { cur.push_back(blank()); ++cur_rows; }
+            cur_rows += h;
+            cur.push_back(std::move(pictures[i]));
+        }
+        if (!cur.empty()) packed.push_back(dsl::v(std::move(cur)).build());
+        pictures = std::move(packed);
+    }
 
     // Deal the scalar figures into TWO columns, balanced by LINE COUNT, so
     // a tab is a readout plus its pictures — cells that divide a wide panel
@@ -549,29 +590,6 @@ Element stats_panel(const Model& m) {
                           .build();
             has_readout = true;
         }
-    }
-
-    // Past TWO charts, stack them two-to-a-cell.
-    //
-    // Every chart as its own cell makes a chart-heavy tab too many columns
-    // wide: the Stream tab's three left each one narrow and pushed "Frame
-    // size spread" onto a second grid row, which starts below the body — so
-    // it was a section the reader never saw. A spark and a histogram share
-    // a column comfortably, and a visible half-height chart beats an
-    // invisible full-height one.
-    constexpr std::size_t kMaxChartCells = 2;
-    if (pictures.size() > kMaxChartCells) {
-        const std::size_t per = (pictures.size() + kMaxChartCells - 1) / kMaxChartCells;
-        std::vector<Element> packed;
-        for (std::size_t i = 0; i < pictures.size(); i += per) {
-            std::vector<Element> group;
-            for (std::size_t k = i; k < std::min(pictures.size(), i + per); ++k) {
-                if (!group.empty()) group.push_back(blank());
-                group.push_back(std::move(pictures[k]));
-            }
-            packed.push_back(dsl::v(std::move(group)).build());
-        }
-        pictures = std::move(packed);
     }
 
     // The readout LEADS — the figures are what must be readable first, and
