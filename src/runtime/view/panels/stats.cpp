@@ -21,6 +21,7 @@
 #include <cmath>
 
 #include <maya/widget/bar_chart.hpp>
+#include <maya/element/grid.hpp>
 #include <maya/widget/donut.hpp>
 #include <maya/widget/gauge.hpp>
 #include <maya/widget/histogram.hpp>
@@ -88,11 +89,16 @@ namespace {
 // forms, and in two columns the boxes double up along the gutter. The
 // vstack + padding(0,1) gives the breathing room a border would have,
 // without the ink.
-[[nodiscard]] Element card(std::string_view heading, std::vector<Element> body) {
+//
+// Each card carries its OWN accent, cycling the ramp, so a grid of them
+// reads as distinct panels rather than one wall of the same colour — the
+// thing that makes the example's dashboard legible at a glance.
+[[nodiscard]] Element card(std::string_view heading, maya::Color accent,
+                           std::vector<Element> body) {
     std::vector<Element> rows;
     rows.reserve(body.size() + 3);
     if (!heading.empty()) {
-        rows.push_back(text(std::string{heading}, fg_bold(card_accent())));
+        rows.push_back(text(std::string{heading}, fg_bold(accent)));
         rows.push_back(blank());
     }
     for (auto& e : body) rows.push_back(std::move(e));
@@ -116,43 +122,21 @@ namespace {
 // under the heading). One function per PRESENTATION, so this file grows a
 // case when a Viz is added, never when a tab is.
 
-// Kv / Hero — stat tiles. A tile is one line, "value  label", so a column
-// of them reads as a list of facts rather than a ladder of alternating
-// bold/dim rows the eye has to re-pair. Hero promotes the FIRST metric to
-// a headline: value on its own line with the label beneath it.
+// Kv / Hero — stat tiles, the agent_stats shape: a big accented VALUE with
+// its caption dim on the line beneath, and a blank between tiles. The value
+// is what the eye should land on, so it gets the line to itself.
 [[nodiscard]] std::vector<Element> build_tiles(
-    const std::vector<stats::Metric>& ms, bool hero) {
+    const std::vector<stats::Metric>& ms, bool hero, maya::Color accent) {
     std::vector<Element> out;
-    out.reserve(ms.size() * 3);
+    out.reserve(ms.size() * 4);
     for (std::size_t i = 0; i < ms.size(); ++i) {
         const auto& mt = ms[i];
-        const std::string val = stats::format(mt.unit, mt.value);
-        const bool headline = hero && i == 0;
-
-        if (headline) {
-            // The lead figure of a Hero tab is the headline: big value on
-            // its own line, label beneath it.
-            out.push_back(text(val, fg_bold(card_accent())));
-            if (!mt.label.empty()) out.push_back(text(mt.label, fg_dim(muted)));
-            if (!mt.detail.empty()) out.push_back(text(mt.detail, fg_dim(muted)));
-        } else {
-            // A tile is one line: the accented value, then its label, so a
-            // column of tiles reads as "number — what it is" rather than a
-            // ladder of alternating bold/dim rows the eye has to re-pair.
-            std::string line = val;
-            std::vector<maya::StyledRun> runs;
-            runs.push_back({0, line.size(),
-                            maya::Style{}.with_fg(card_accent()).with_bold()});
-            if (!mt.label.empty()) {
-                const std::size_t at = line.size();
-                line += "  " + mt.label;
-                runs.push_back({at, line.size() - at, maya::Style{}.with_fg(muted)});
-            }
-            out.push_back(Element{maya::TextElement{.content = std::move(line),
-                                                    .runs = std::move(runs)}});
-            if (!mt.detail.empty()) out.push_back(text("  " + mt.detail, fg_dim(muted)));
-        }
-        // Space tiles apart so each number+label pair is its own block.
+        out.push_back(text(stats::format(mt.unit, mt.value), fg_bold(accent)));
+        if (!mt.label.empty())  out.push_back(text(mt.label, fg_dim(muted)));
+        if (!mt.detail.empty()) out.push_back(text(mt.detail, fg_dim(muted)));
+        // Hero's lead figure gets extra air under it so it reads as the
+        // headline of the tab.
+        if (hero && i == 0) out.push_back(blank());
         if (i + 1 < ms.size()) out.push_back(blank());
     }
     return out;
@@ -292,7 +276,10 @@ namespace {
 // frame will really be painted at; Config::content_width() takes off the
 // border and padding, and the scrollbar gutter comes off too because
 // build() puts the body and the gutter side by side.
-[[nodiscard]] int card_width() {
+// The width the card GRID is laid out in — the real body width, so
+// viewport() divides a true number into columns and the unbounded measure
+// probe cannot inflate a self-sizing chart past the slot it paints in.
+[[nodiscard]] int body_width() {
     const int frame = maya::panel::detail::terminal_cols() > 0
                           ? maya::panel::detail::terminal_cols()
                           : 80;
@@ -304,41 +291,30 @@ namespace {
 // One section → one card. Runs the extractor, then dispatches on the Viz to
 // the builder that knows which fields the extractor filled.
 [[nodiscard]] Element build_card(const stats::Section& sec, const stats::Facts& f,
-                                 std::vector<stats::Metric>& scratch) {
+                                 std::vector<stats::Metric>& scratch,
+                                 std::size_t slot) {
     scratch.clear();
     sec.extract(f, scratch);
 
-    Element el = [&] {
-        if (scratch.empty())
-            return card(sec.heading, {empty_placeholder()});
+    const maya::Color accent = series_hue(0, slot);
 
-        std::vector<Element> body;
-        switch (sec.viz) {
-            case stats::Viz::Kv:    body = build_tiles(scratch, /*hero=*/false); break;
-            case stats::Viz::Hero:  body = build_tiles(scratch, /*hero=*/true);  break;
-            case stats::Viz::Bars:  body = build_bars(scratch);                  break;
-            case stats::Viz::Spark: body = build_sparks(scratch);                break;
-            case stats::Viz::Plot:  body = build_plots(scratch);                 break;
-            case stats::Viz::Band:  body = build_band(scratch);                  break;
-            case stats::Viz::Donut: body = build_donuts(scratch);               break;
-            case stats::Viz::Hist:
-            case stats::Viz::Dist:  body = build_hist(sec.heading, scratch);     break;
-        }
-        if (body.empty()) body.push_back(empty_placeholder());
-        return card(sec.heading, std::move(body));
-    }();
+    if (scratch.empty())
+        return card(sec.heading, accent, {empty_placeholder()});
 
-    // Pin the card to the real body width. max_width alone was not enough:
-    // a child component's own measure can still answer the unbounded probe
-    // with a bigger number, and the parent honours it. A FIXED width is the
-    // offer its children are measured against, so measure and paint agree
-    // and a self-sizing chart sizes to the slot it will be painted in.
-    if (auto* bx = maya::as_box(el)) {
-        const int w = card_width();
-        bx->layout.width     = maya::Dimension::fixed(w);
-        bx->layout.max_width = maya::Dimension::fixed(w);
+    std::vector<Element> body;
+    switch (sec.viz) {
+        case stats::Viz::Kv:    body = build_tiles(scratch, false, accent); break;
+        case stats::Viz::Hero:  body = build_tiles(scratch, true,  accent); break;
+        case stats::Viz::Bars:  body = build_bars(scratch);                 break;
+        case stats::Viz::Spark: body = build_sparks(scratch);               break;
+        case stats::Viz::Plot:  body = build_plots(scratch);                break;
+        case stats::Viz::Band:  body = build_band(scratch);                 break;
+        case stats::Viz::Donut: body = build_donuts(scratch);               break;
+        case stats::Viz::Hist:
+        case stats::Viz::Dist:  body = build_hist(sec.heading, scratch);    break;
     }
-    return el;
+    if (body.empty()) body.push_back(empty_placeholder());
+    return card(sec.heading, accent, std::move(body));
 }
 
 }  // namespace
@@ -387,17 +363,42 @@ Element stats_panel(const Model& m) {
     cfg.tab_mark = maya::TabMark::Editor;
     cfg.tab_fill = true;
 
-    // The panel body: one card per section, flowed into columns. Each card
-    // is a prebuilt Element — Panel accounts for its own frame (border,
-    // padding, scrollbar gutter) before laying the body out, so a card is
-    // measured against a width it may actually paint in.
+    // The panel body: one card per section, fanned into responsive columns
+    // by maya::viewport() — the same layout the agent_stats example is built
+    // around. viewport() picks the column count from a width CEILING (a slot
+    // at or under max_width is one column, over it two, over twice it
+    // three…), fills left-to-right then wraps, and keeps every card
+    // responsive to its OWN column rather than the screen.
+    //
+    // The whole grid goes in as ONE prebuilt Element. Panel only runs its
+    // own column flow for `items`, and it measures a prebuilt body against
+    // an unbounded probe (1<<14) — so the grid is handed the REAL width via
+    // .width, which is both what makes the columns come out right and what
+    // stops a self-sizing chart from sizing itself to sixteen thousand
+    // columns and then losing its tail when painted in the real body.
     std::vector<stats::Metric> scratch;
     scratch.reserve(32);
 
     const auto& sections = stats::tab_desc(active).sections;
-    cfg.prebuilt.reserve(sections.size());
-    for (const auto& sec : sections)
-        cfg.prebuilt.push_back(build_card(sec, f, scratch));
+    std::vector<Element> cards;
+    cards.reserve(sections.size());
+    for (std::size_t i = 0; i < sections.size(); ++i)
+        cards.push_back(build_card(sections[i], f, scratch, i));
+
+    cfg.prebuilt.push_back(
+        maya::viewport(std::move(cards),
+                       maya::ViewportOpts{.max_width = 34,
+                                          // A chart needs room for its label,
+                                          // a bar worth looking at and the
+                                          // value. Splitting below that gives
+                                          // two columns that both truncate, so
+                                          // the grid stays ONE column instead.
+                                          .min_width = 30,
+                                          .gap       = 3,
+                                          .gap_y     = 1,
+                                          .width     = body_width(),
+                                          .flow      = maya::Flow::Row})
+            .build());
 
     // No row selection: this is a document, not a picker.
     cfg.selected = -1;
@@ -407,9 +408,8 @@ Element stats_panel(const Model& m) {
     // does not stretch a two-value tile across half the screen. The gap
     // keeps neighbouring cards from reading as one.
     // NOTE: col_max_width/col_min_width/col_gap are NOT set. Panel only runs
-    // its column flow for `items`; a `prebuilt` body is one opaque stack. The
-    // cards cap their own width (card_width()) so the unbounded measure probe
-    // cannot inflate a self-sizing chart past the slot it is painted in.
+    // its column flow for `items`; a `prebuilt` body is one opaque stack —
+    // here, the single viewport() grid above, which does the columns itself.
 
     // No rule off the headings. The accent heading and the column split
     // already separate the sections; a rule across every heading turns a
