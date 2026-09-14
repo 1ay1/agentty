@@ -131,14 +131,36 @@ const maya::Color dim    = maya::Color::rgb(140, 150, 170);
 // reconcile "280" with "702ms".
 [[nodiscard]] std::vector<Element> build_sparks(const std::vector<stats::Metric>& ms) {
     std::vector<Element> out;
-    out.reserve(ms.size());
+    out.reserve(ms.size() * 2);
     for (std::size_t i = 0; i < ms.size(); ++i) {
         const auto& mt = ms[i];
+
+        // A metric with NO series is not a trend — it is a figure that
+        // happens to sit in a Spark section ("Turns using cache" beside
+        // "Hit rate"). Drawing it as a sparkline printed the widget's
+        // "(no data)" fallback next to a real number, which reads as a
+        // failure rather than as the count it is. Render it as a figure.
+        if (mt.series.empty()) {
+            if (i > 0) out.push_back(blank());
+            out.push_back(text(stats::format(mt.unit, mt.value),
+                               fg_bold(series_hue(0, i))));
+            if (!mt.label.empty()) out.push_back(text(mt.label, fg_dim(hue::dim)));
+            continue;
+        }
+
         std::vector<float> series;
         series.reserve(mt.series.size());
         for (double d : mt.series) series.push_back(static_cast<float>(d));
         maya::Sparkline spark{std::move(series),
                               {.color = series_hue(0, i), .show_last = false}};
+        // A ratio series lives in 0..1, and a spark auto-scales to its own
+        // min/max — so a steady 93% cache rate drew every block at full
+        // height and looked like a solid bar rather than a flat trend.
+        // Pinning the scale to 0..1 makes the height mean the RATE.
+        if (mt.unit == stats::Unit::Ratio) {
+            spark.set_min(0.0f);
+            spark.set_max(1.0f);
+        }
         // The value rides in the LABEL so it sits on the trace's line.
         std::string label = mt.label;
         if (mt.value != 0 || mt.of != 0)
