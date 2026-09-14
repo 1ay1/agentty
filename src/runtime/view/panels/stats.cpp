@@ -266,11 +266,17 @@ const maya::Color dim    = maya::Color::rgb(140, 150, 170);
 // example. So the scalar kinds SPLIT: every metric becomes its own card,
 // titled with its label and showing its value.
 //
-// The picture kinds (Bars/Spark/Plot/Band/Donut/Hist) stay one card per
-// section — their metrics are SERIES OF ONE chart, not separate figures,
-// and splitting them would draw one bar per card.
+// The picture kinds (Bars/Spark/Plot/Band/Donut/Hist) get a card each —
+// their metrics are SERIES OF ONE chart, not separate figures.
+//
+// The scalar kinds do NOT get a card each. Every figure a tab has is
+// appended to ONE text column, handed in as `text_body`: a tab is then two
+// or three cells — the readout, and a picture beside it — which is the
+// shape that fills a wide panel instead of scattering four short cards
+// across it with whitespace under each.
 void build_cards(const stats::Section& sec, const stats::Facts& f,
                  std::vector<stats::Metric>& scratch,
+                 std::vector<Element>& text_body,
                  std::vector<Element>& out) {
     scratch.clear();
     sec.extract(f, scratch);
@@ -278,30 +284,28 @@ void build_cards(const stats::Section& sec, const stats::Facts& f,
     const std::size_t slot = out.size();
     const maya::Color accent = series_hue(0, slot);
 
-    if (scratch.empty()) {
-        out.push_back(card(sec.heading, accent, {empty_placeholder()}));
+    // ── scalar kinds: append to the shared text column ──────────────
+    if (sec.viz == stats::Viz::Kv || sec.viz == stats::Viz::Hero) {
+        if (scratch.empty()) return;
+        // A heading between groups, so the figures of one section still
+        // read as a group inside the shared column.
+        if (!text_body.empty()) text_body.push_back(blank());
+        if (!sec.heading.empty()) {
+            text_body.push_back(text(std::string{sec.heading}, fg_bold(accent)));
+            text_body.push_back(blank());
+        }
+        for (std::size_t i = 0; i < scratch.size(); ++i) {
+            const auto& mt = scratch[i];
+            text_body.push_back(text(stats::format(mt.unit, mt.value), fg_bold(accent)));
+            if (!mt.label.empty())  text_body.push_back(text(mt.label, fg_dim(hue::dim)));
+            if (!mt.detail.empty()) text_body.push_back(text(mt.detail, fg_dim(hue::dim)));
+            if (i + 1 < scratch.size()) text_body.push_back(blank());
+        }
         return;
     }
 
-    // ── scalar kinds: ONE card holding the section's figures ─────────
-    //
-    // A figure is two short lines, so a card per figure left every column
-    // three lines deep and mostly empty — five columns of whitespace. The
-    // figures of a section belong together anyway ("You asked" / "Agent
-    // replied" / "Tool calls" are one readout), so they stack in one card
-    // that FILLS its column, and the grid places that card beside the
-    // pictures instead of shredding it across the row.
-    if (sec.viz == stats::Viz::Kv || sec.viz == stats::Viz::Hero) {
-        std::vector<Element> body;
-        body.reserve(scratch.size() * 4);
-        for (std::size_t i = 0; i < scratch.size(); ++i) {
-            const auto& mt = scratch[i];
-            body.push_back(text(stats::format(mt.unit, mt.value), fg_bold(accent)));
-            if (!mt.label.empty())  body.push_back(text(mt.label, fg_dim(hue::dim)));
-            if (!mt.detail.empty()) body.push_back(text(mt.detail, fg_dim(hue::dim)));
-            if (i + 1 < scratch.size()) body.push_back(blank());
-        }
-        out.push_back(card(sec.heading, accent, std::move(body)));
+    if (scratch.empty()) {
+        out.push_back(card(sec.heading, accent, {empty_placeholder()}));
         return;
     }
 
@@ -385,17 +389,34 @@ Element stats_panel(const Model& m) {
     scratch.reserve(32);
 
     const auto& sections = stats::tab_desc(active).sections;
-    std::vector<Element> cards;
-    cards.reserve(sections.size() * 4);
+    std::vector<Element> text_body;   // every scalar figure, one column
+    std::vector<Element> pictures;    // one card per chart
+    text_body.reserve(32);
+    pictures.reserve(sections.size());
     for (const auto& sec : sections)
-        build_cards(sec, f, scratch, cards);
+        build_cards(sec, f, scratch, text_body, pictures);
+
+    // The readout leads, the pictures follow — so a tab reads left to right
+    // as "the numbers, then what they look like".
+    std::vector<Element> cards;
+    cards.reserve(pictures.size() + 1);
+    if (!text_body.empty())
+        cards.push_back(card({}, hue::cyan, std::move(text_body)));
+    for (auto& p : pictures) cards.push_back(std::move(p));
 
     cfg.prebuilt.push_back(
         maya::viewport(std::move(cards),
-                       maya::ViewportOpts{// Cards hold a section's worth of
-                                          // figures or one chart, so give a
-                                          // column enough room to read them.
-                                          .max_width = 34,
+                       maya::ViewportOpts{// A tab is usually the readout plus
+                                          // one or two pictures, so let a
+                                          // column get wide: capping it small
+                                          // left a 120-column panel with two
+                                          // narrow cards and dead space to
+                                          // the right. viewport() divides the
+                                          // slot exactly, so a generous
+                                          // ceiling means the cards FILL it
+                                          // and still split again when the
+                                          // panel is wide enough for three.
+                                          .max_width = 56,
                                           // A chart still needs its label, a
                                           // bar and the value; below this the
                                           // grid stays one column rather than
