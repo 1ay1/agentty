@@ -190,7 +190,12 @@ const maya::Color dim    = maya::Color::rgb(140, 150, 170);
         if (mt.value != 0 || mt.of != 0)
             label += "  " + stats::format(mt.unit, mt.value);
         spark.set_label(label);
-        out.push_back(spark.build());
+        // Claim the column. A component reports a natural width and flex
+        // leaves it there, so a nine-point trace sat as a stub in a column
+        // three times its width while the histogram beside it filled the
+        // same space. grow() hands it the slack, and the widget stretches
+        // each sample across the cells it gets.
+        out.push_back(spark.build() | dsl::grow(1.0f));
     }
     return out;
 }
