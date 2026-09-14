@@ -203,7 +203,13 @@ const maya::Color dim    = maya::Color::rgb(140, 150, 170);
         }
         if (!mt.detail.empty()) d.center(mt.detail);
         d.caption(mt.label);
-        d.rows(7);
+        // Fill the height the panel actually has rather than a fixed 7 rows.
+        // The body is panel_viewport_h() tall; take off the caption, the
+        // card's heading and its blank, and a row of slack so the ring never
+        // pushes the card into the scroll. One donut is the whole card, so
+        // the height it does not use is dead space in the column.
+        const int avail = panel_detail::panel_viewport_h() - 4;
+        d.rows(std::clamp(avail, 5, 16));
         out.push_back(d.build());
     }
     if (out.empty()) out.push_back(empty_placeholder());
