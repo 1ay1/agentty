@@ -151,13 +151,17 @@ const maya::Color dim    = maya::Color::rgb(140, 150, 170);
         std::vector<float> series;
         series.reserve(mt.series.size());
         for (double d : mt.series) series.push_back(static_cast<float>(d));
-        maya::Sparkline spark{std::move(series),
-                              {.color = series_hue(0, i), .show_last = false}};
+        maya::SparklineConfig scfg{.color = series_hue(0, i), .show_last = false};
         // A ratio series lives in 0..1, and a spark auto-scales to its own
         // min/max — so a steady 93% cache rate drew every block at full
         // height and looked like a solid bar rather than a flat trend.
-        // Pinning the scale to 0..1 makes the height mean the RATE.
-        if (mt.unit == stats::Unit::Ratio) {
+        // Pinning the scale to 0..1 makes the height mean the RATE, and
+        // colouring the REMAINDER makes each column read as the two parts
+        // of the whole (hit against miss) rather than a bar in space.
+        const bool is_ratio = (mt.unit == stats::Unit::Ratio);
+        if (is_ratio) scfg.rest_color = maya::Color::rgb(70, 48, 60);
+        maya::Sparkline spark{std::move(series), scfg};
+        if (is_ratio) {
             spark.set_min(0.0f);
             spark.set_max(1.0f);
         }
