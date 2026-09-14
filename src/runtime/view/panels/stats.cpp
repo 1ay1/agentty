@@ -158,7 +158,15 @@ const maya::Color dim    = maya::Color::rgb(140, 150, 170);
         // connected line, and carries an axis, so the shape and the level are
         // both legible.
         if (mt.unit == stats::Unit::Ratio) {
-            const int h = std::clamp(panel_detail::panel_viewport_h() - 5, 4, 14);
+            // Leave room for whatever else the section carries. "Hit rate"
+            // is followed by "Turns using cache", and a plot sized to the
+            // whole body pushed that figure's LABEL off the bottom — a
+            // number with no caption is worse than a shorter chart. Three
+            // rows per following metric (value, label, spacer) is what they
+            // need; the plot takes the rest.
+            const int after = static_cast<int>(ms.size() - i - 1) * 3;
+            const int h = std::clamp(panel_detail::panel_viewport_h() - 5 - after,
+                                     4, 14);
             maya::LineChart chart{std::move(series), h};
             chart.set_color(series_hue(0, i));
             if (i > 0) out.push_back(blank());
