@@ -51,19 +51,6 @@ const maya::Color teal   = maya::Color::rgb(120, 220, 200);
 const maya::Color dim    = maya::Color::rgb(140, 150, 170);
 }  // namespace hue
 
-// The ONE place a domain hue slot becomes a colour. domain/ deliberately
-// does not know about the theme, so the mapping lives here — and lives
-// once, rather than in each extractor.
-[[nodiscard]] maya::Color hue_of(int slot) {
-    switch (slot) {
-        case 1:  return success;
-        case 2:  return warn;
-        case 3:  return danger;
-        case 4:  return accent;
-        default: return muted;
-    }
-}
-
 // A CATEGORICAL ramp, for charts whose slices are named things rather
 // than states — the example's palette in its cycling order, so adjacent
 // slices contrast instead of walking the spectrum into two neighbouring
@@ -116,26 +103,6 @@ const maya::Color dim    = maya::Color::rgb(140, 150, 170);
 // Each takes the extracted metrics and returns the card body (the elements
 // under the heading). One function per PRESENTATION, so this file grows a
 // case when a Viz is added, never when a tab is.
-
-// Kv / Hero — stat tiles, the agent_stats shape: a big accented VALUE with
-// its caption dim on the line beneath, and a blank between tiles. The value
-// is what the eye should land on, so it gets the line to itself.
-[[nodiscard]] std::vector<Element> build_tiles(
-    const std::vector<stats::Metric>& ms, bool hero, maya::Color accent) {
-    std::vector<Element> out;
-    out.reserve(ms.size() * 4);
-    for (std::size_t i = 0; i < ms.size(); ++i) {
-        const auto& mt = ms[i];
-        out.push_back(text(stats::format(mt.unit, mt.value), fg_bold(accent)));
-        if (!mt.label.empty())  out.push_back(text(mt.label, fg_dim(hue::dim)));
-        if (!mt.detail.empty()) out.push_back(text(mt.detail, fg_dim(hue::dim)));
-        // Hero's lead figure gets extra air under it so it reads as the
-        // headline of the tab.
-        if (hero && i == 0) out.push_back(blank());
-        if (i + 1 < ms.size()) out.push_back(blank());
-    }
-    return out;
-}
 
 // Bars — one horizontal bar per metric, coloured by a hue cycle. Scaled to
 // the largest value, or to `of` when the metrics carry a shared denominator
@@ -278,38 +245,75 @@ const maya::Color dim    = maya::Color::rgb(140, 150, 170);
     const int frame = maya::panel::detail::terminal_cols() > 0
                           ? maya::panel::detail::terminal_cols()
                           : 80;
+    // Frame + padding + the scrollbar gutter come off via content_width and
+    // kScrollbarCols. card() then pads each cell one cell either side, and
+    // THAT is what the grid must also leave room for — without it the last
+    // column's content runs under the gutter by exactly those two cells.
+    constexpr int kCardPadCols = 2;
     const int inner = maya::panel::Config::content_width(frame)
-                      - maya::panel::Config::kScrollbarCols;
+                      - maya::panel::Config::kScrollbarCols
+                      - kCardPadCols;
     return std::max(16, inner);
 }
 
-// One section → one card. Runs the extractor, then dispatches on the Viz to
-// the builder that knows which fields the extractor filled.
-[[nodiscard]] Element build_card(const stats::Section& sec, const stats::Facts& f,
-                                 std::vector<stats::Metric>& scratch,
-                                 std::size_t slot) {
+// One section → one or MANY cards.
+//
+// A Kv/Hero section is a LIST of independent figures, and the example's
+// dashboard is a grid of small cards — one figure each — which is what
+// gives viewport() enough cells to fan into three and four columns. Folding
+// a whole section's figures into one tall card leaves the grid two wide
+// with half the screen empty, which is exactly how this looked against the
+// example. So the scalar kinds SPLIT: every metric becomes its own card,
+// titled with its label and showing its value.
+//
+// The picture kinds (Bars/Spark/Plot/Band/Donut/Hist) stay one card per
+// section — their metrics are SERIES OF ONE chart, not separate figures,
+// and splitting them would draw one bar per card.
+void build_cards(const stats::Section& sec, const stats::Facts& f,
+                 std::vector<stats::Metric>& scratch,
+                 std::vector<Element>& out) {
     scratch.clear();
     sec.extract(f, scratch);
 
+    const std::size_t slot = out.size();
     const maya::Color accent = series_hue(0, slot);
 
-    if (scratch.empty())
-        return card(sec.heading, accent, {empty_placeholder()});
+    if (scratch.empty()) {
+        out.push_back(card(sec.heading, accent, {empty_placeholder()}));
+        return;
+    }
 
+    // ── scalar kinds: one card per figure ────────────────────────────
+    if (sec.viz == stats::Viz::Kv || sec.viz == stats::Viz::Hero) {
+        for (std::size_t i = 0; i < scratch.size(); ++i) {
+            const auto& mt = scratch[i];
+            const maya::Color hue = series_hue(0, slot + i);
+            std::vector<Element> body;
+            body.push_back(text(stats::format(mt.unit, mt.value), fg_bold(hue)));
+            if (!mt.detail.empty())
+                body.push_back(text(mt.detail, fg_dim(hue::dim)));
+            // The metric's label IS the card title — the heading slot the
+            // example gives every card.
+            out.push_back(card(mt.label, hue, std::move(body)));
+        }
+        return;
+    }
+
+    // ── picture kinds: one card for the whole section ──────────────────
     std::vector<Element> body;
     switch (sec.viz) {
-        case stats::Viz::Kv:    body = build_tiles(scratch, false, accent); break;
-        case stats::Viz::Hero:  body = build_tiles(scratch, true,  accent); break;
-        case stats::Viz::Bars:  body = build_bars(scratch);                 break;
-        case stats::Viz::Spark: body = build_sparks(scratch);               break;
-        case stats::Viz::Plot:  body = build_plots(scratch);                break;
-        case stats::Viz::Band:  body = build_band(scratch);                 break;
-        case stats::Viz::Donut: body = build_donuts(scratch);               break;
+        case stats::Viz::Bars:  body = build_bars(scratch);              break;
+        case stats::Viz::Spark: body = build_sparks(scratch);            break;
+        case stats::Viz::Plot:  body = build_plots(scratch);             break;
+        case stats::Viz::Band:  body = build_band(scratch);              break;
+        case stats::Viz::Donut: body = build_donuts(scratch);            break;
         case stats::Viz::Hist:
-        case stats::Viz::Dist:  body = build_hist(sec.heading, scratch);    break;
+        case stats::Viz::Dist:  body = build_hist(sec.heading, scratch); break;
+        case stats::Viz::Kv:
+        case stats::Viz::Hero:  break;   // handled above
     }
     if (body.empty()) body.push_back(empty_placeholder());
-    return card(sec.heading, accent, std::move(body));
+    out.push_back(card(sec.heading, accent, std::move(body)));
 }
 
 }  // namespace
@@ -376,19 +380,22 @@ Element stats_panel(const Model& m) {
 
     const auto& sections = stats::tab_desc(active).sections;
     std::vector<Element> cards;
-    cards.reserve(sections.size());
-    for (std::size_t i = 0; i < sections.size(); ++i)
-        cards.push_back(build_card(sections[i], f, scratch, i));
+    cards.reserve(sections.size() * 4);
+    for (const auto& sec : sections)
+        build_cards(sec, f, scratch, cards);
 
     cfg.prebuilt.push_back(
         maya::viewport(std::move(cards),
-                       maya::ViewportOpts{.max_width = 34,
-                                          // A chart needs room for its label,
-                                          // a bar worth looking at and the
-                                          // value. Splitting below that gives
-                                          // two columns that both truncate, so
-                                          // the grid stays ONE column instead.
-                                          .min_width = 30,
+                       maya::ViewportOpts{// Small cards — one figure each — so
+                                          // a wide panel fans to three and
+                                          // four columns like the example
+                                          // rather than sitting at two.
+                                          .max_width = 26,
+                                          // A chart still needs room for its
+                                          // label, a bar and the value; below
+                                          // this the grid stays one column
+                                          // instead of truncating in two.
+                                          .min_width = 24,
                                           .gap       = 3,
                                           .gap_y     = 2,
                                           .width     = body_width(),
