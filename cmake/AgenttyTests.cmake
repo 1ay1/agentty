@@ -56,7 +56,6 @@ set(_AGENTTY_CONSOLIDATED
     stats_visual_hash_test
     panel_overflow_probe
     panel_draw_budget_test
-    panel_meter_spark_test
     stats_golden_test
     stats_render_probe
     context_window_test
@@ -169,7 +168,6 @@ agentty_test(stats_visual            MODE standalone NO_TEST)
 # NO_TEST too: it prints timings for a human. An assertion on microseconds
 # would be a flaky test of the machine it runs on, not of the code.
 agentty_test(stats_refresh_bench     MODE standalone NO_TEST)
-agentty_test(slice_width_probe       MODE standalone NO_TEST)
 
 
 # ── Narrow-source sanitizer tests (raw: must NOT link the full shared set) ──
