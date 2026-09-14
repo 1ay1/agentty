@@ -269,14 +269,13 @@ const maya::Color dim    = maya::Color::rgb(140, 150, 170);
 // The picture kinds (Bars/Spark/Plot/Band/Donut/Hist) get a card each —
 // their metrics are SERIES OF ONE chart, not separate figures.
 //
-// The scalar kinds do NOT get a card each. Every figure a tab has is
-// appended to ONE text column, handed in as `text_body`: a tab is then two
-// or three cells — the readout, and a picture beside it — which is the
-// shape that fills a wide panel instead of scattering four short cards
-// across it with whitespace under each.
+// The scalar kinds do NOT get a card each. Each scalar SECTION becomes a
+// group of lines appended to `text_groups`; the caller then deals those
+// groups into a couple of text columns, so a tab is a picture plus two
+// readout columns rather than one tall column beside a chart.
 void build_cards(const stats::Section& sec, const stats::Facts& f,
                  std::vector<stats::Metric>& scratch,
-                 std::vector<Element>& text_body,
+                 std::vector<std::vector<Element>>& text_groups,
                  std::vector<Element>& out) {
     scratch.clear();
     sec.extract(f, scratch);
@@ -284,23 +283,23 @@ void build_cards(const stats::Section& sec, const stats::Facts& f,
     const std::size_t slot = out.size();
     const maya::Color accent = series_hue(0, slot);
 
-    // ── scalar kinds: append to the shared text column ──────────────
+    // ── scalar kinds: one GROUP of lines, dealt into a column later ───
     if (sec.viz == stats::Viz::Kv || sec.viz == stats::Viz::Hero) {
         if (scratch.empty()) return;
-        // A heading between groups, so the figures of one section still
-        // read as a group inside the shared column.
-        if (!text_body.empty()) text_body.push_back(blank());
+        std::vector<Element> group;
+        group.reserve(scratch.size() * 4 + 2);
         if (!sec.heading.empty()) {
-            text_body.push_back(text(std::string{sec.heading}, fg_bold(accent)));
-            text_body.push_back(blank());
+            group.push_back(text(std::string{sec.heading}, fg_bold(accent)));
+            group.push_back(blank());
         }
         for (std::size_t i = 0; i < scratch.size(); ++i) {
             const auto& mt = scratch[i];
-            text_body.push_back(text(stats::format(mt.unit, mt.value), fg_bold(accent)));
-            if (!mt.label.empty())  text_body.push_back(text(mt.label, fg_dim(hue::dim)));
-            if (!mt.detail.empty()) text_body.push_back(text(mt.detail, fg_dim(hue::dim)));
-            if (i + 1 < scratch.size()) text_body.push_back(blank());
+            group.push_back(text(stats::format(mt.unit, mt.value), fg_bold(accent)));
+            if (!mt.label.empty())  group.push_back(text(mt.label, fg_dim(hue::dim)));
+            if (!mt.detail.empty()) group.push_back(text(mt.detail, fg_dim(hue::dim)));
+            if (i + 1 < scratch.size()) group.push_back(blank());
         }
+        text_groups.push_back(std::move(group));
         return;
     }
 
@@ -389,21 +388,40 @@ Element stats_panel(const Model& m) {
     scratch.reserve(32);
 
     const auto& sections = stats::tab_desc(active).sections;
-    std::vector<Element> text_body;   // every scalar figure, one column
-    std::vector<Element> pictures;    // one card per chart
-    text_body.reserve(32);
+    std::vector<std::vector<Element>> text_groups;   // one per scalar section
+    std::vector<Element> pictures;                   // one card per chart
+    text_groups.reserve(sections.size());
     pictures.reserve(sections.size());
     for (const auto& sec : sections)
-        build_cards(sec, f, scratch, text_body, pictures);
+        build_cards(sec, f, scratch, text_groups, pictures);
 
-    // The picture leads and the readout follows — the chart is the thing
-    // that carries the shape of the answer, so it gets the first column and
-    // the numbers sit beside it.
+    // Deal the scalar groups into TWO columns, balanced by line count, so a
+    // tab is a picture plus two readouts — three cells that divide a wide
+    // panel evenly — rather than one very tall column beside a chart. Whole
+    // groups move together: a section's figures splitting across columns
+    // would break the heading away from what it heads.
+    std::vector<Element> text_a, text_b;
+    {
+        std::size_t total = 0;
+        for (const auto& g : text_groups) total += g.size();
+        std::size_t taken = 0;
+        for (auto& g : text_groups) {
+            // Fill the first column until it holds about half the lines,
+            // then everything else goes to the second.
+            auto& dst = (taken * 2 < total) ? text_a : text_b;
+            if (!dst.empty()) dst.push_back(blank());
+            taken += g.size();
+            for (auto& e : g) dst.push_back(std::move(e));
+        }
+    }
+
+    // The picture leads and the readouts follow — the chart carries the
+    // shape of the answer, so it gets the first column.
     std::vector<Element> cards;
-    cards.reserve(pictures.size() + 1);
+    cards.reserve(pictures.size() + 2);
     for (auto& p : pictures) cards.push_back(std::move(p));
-    if (!text_body.empty())
-        cards.push_back(card({}, hue::cyan, std::move(text_body)));
+    if (!text_a.empty()) cards.push_back(card({}, hue::cyan, std::move(text_a)));
+    if (!text_b.empty()) cards.push_back(card({}, hue::cyan, std::move(text_b)));
 
     const int ncards = static_cast<int>(cards.size());
     cfg.prebuilt.push_back(
