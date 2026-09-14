@@ -129,22 +129,31 @@ const maya::Color dim    = maya::Color::rgb(140, 150, 170);
 // because it prints the raw last SAMPLE, which is a different number from
 // the metric's formatted value — showing both invited the reader to
 // reconcile "280" with "702ms".
-[[nodiscard]] std::vector<Element> build_sparks(const std::vector<stats::Metric>& ms) {
+// Spark — the trends of a section. A metric with NO series is not a trend:
+// it is a plain figure that happens to share the section ("Turns using
+// cache" beside "Hit rate"). Those are handed back through `figures` so
+// the caller can put them in the READOUT column, where there is room for
+// them — squeezing them under the chart cost the chart height and left the
+// readout column half empty.
+[[nodiscard]] std::vector<Element> build_sparks(const std::vector<stats::Metric>& ms,
+                                               std::vector<stats::Metric>* figures) {
     std::vector<Element> out;
     out.reserve(ms.size() * 2);
+    // How many metrics will actually draw here — the ones with a series.
+    std::size_t drawn = 0;
+    for (const auto& mt : ms) if (!mt.series.empty()) ++drawn;
+
     for (std::size_t i = 0; i < ms.size(); ++i) {
         const auto& mt = ms[i];
 
-        // A metric with NO series is not a trend — it is a figure that
-        // happens to sit in a Spark section ("Turns using cache" beside
-        // "Hit rate"). Drawing it as a sparkline printed the widget's
-        // "(no data)" fallback next to a real number, which reads as a
-        // failure rather than as the count it is. Render it as a figure.
         if (mt.series.empty()) {
-            if (i > 0) out.push_back(blank());
-            out.push_back(text(stats::format(mt.unit, mt.value),
-                               fg_bold(series_hue(0, i))));
-            if (!mt.label.empty()) out.push_back(text(mt.label, fg_dim(hue::dim)));
+            if (figures) figures->push_back(mt);
+            else {
+                if (!out.empty()) out.push_back(blank());
+                out.push_back(text(stats::format(mt.unit, mt.value),
+                                   fg_bold(series_hue(0, i))));
+                if (!mt.label.empty()) out.push_back(text(mt.label, fg_dim(hue::dim)));
+            }
             continue;
         }
 
@@ -158,18 +167,13 @@ const maya::Color dim    = maya::Color::rgb(140, 150, 170);
         // connected line, and carries an axis, so the shape and the level are
         // both legible.
         if (mt.unit == stats::Unit::Ratio) {
-            // Leave room for whatever else the section carries. "Hit rate"
-            // is followed by "Turns using cache", and a plot sized to the
-            // whole body pushed that figure's LABEL off the bottom — a
-            // number with no caption is worse than a shorter chart. Three
-            // rows per following metric (value, label, spacer) is what they
-            // need; the plot takes the rest.
-            const int after = static_cast<int>(ms.size() - i - 1) * 3;
-            const int h = std::clamp(panel_detail::panel_viewport_h() - 5 - after,
+            // Share the body between the charts that will actually draw.
+            const int n = static_cast<int>(std::max<std::size_t>(1, drawn));
+            const int h = std::clamp((panel_detail::panel_viewport_h() - 4) / n - 1,
                                      4, 14);
             maya::LineChart chart{std::move(series), h};
             chart.set_color(series_hue(0, i));
-            if (i > 0) out.push_back(blank());
+            if (!out.empty()) out.push_back(blank());
             out.push_back(chart.build());
             std::string cap = mt.label;
             if (mt.value != 0) cap += "  " + stats::format(mt.unit, mt.value);
@@ -361,18 +365,40 @@ void build_cards(const stats::Section& sec, const stats::Facts& f,
     }
 
     // ── picture kinds: one card for the whole section ──────────────────
+    //
+    // A Spark section can also carry plain figures (no series). Those go to
+    // the readout column rather than under the chart — there is room for
+    // them there, and the chart keeps its height.
+    std::vector<stats::Metric> figures;
     std::vector<Element> body;
     switch (sec.viz) {
-        case stats::Viz::Bars:  body = build_bars(scratch);              break;
-        case stats::Viz::Spark: body = build_sparks(scratch);            break;
-        case stats::Viz::Plot:  body = build_plots(scratch);             break;
-        case stats::Viz::Band:  body = build_band(scratch);              break;
-        case stats::Viz::Donut: body = build_donuts(scratch);            break;
+        case stats::Viz::Bars:  body = build_bars(scratch);               break;
+        case stats::Viz::Spark: body = build_sparks(scratch, &figures);   break;
+        case stats::Viz::Plot:  body = build_plots(scratch);              break;
+        case stats::Viz::Band:  body = build_band(scratch);               break;
+        case stats::Viz::Donut: body = build_donuts(scratch);             break;
         case stats::Viz::Hist:
-        case stats::Viz::Dist:  body = build_hist(sec.heading, scratch); break;
+        case stats::Viz::Dist:  body = build_hist(sec.heading, scratch);  break;
         case stats::Viz::Kv:
         case stats::Viz::Hero:  break;   // handled above
     }
+
+    if (!figures.empty()) {
+        std::vector<Element> group;
+        group.reserve(figures.size() * 4);
+        for (std::size_t i = 0; i < figures.size(); ++i) {
+            const auto& mt = figures[i];
+            group.push_back(text(stats::format(mt.unit, mt.value), fg_bold(accent)));
+            if (!mt.label.empty())  group.push_back(text(mt.label, fg_dim(hue::dim)));
+            if (!mt.detail.empty()) group.push_back(text(mt.detail, fg_dim(hue::dim)));
+            if (i + 1 < figures.size()) group.push_back(blank());
+        }
+        text_groups.push_back(std::move(group));
+    }
+
+    // Every metric was a figure — nothing left to draw, so no card.
+    if (body.empty() && !figures.empty()) return;
+
     if (body.empty()) body.push_back(empty_placeholder());
     out.push_back(card(sec.heading, accent, std::move(body)));
 }
