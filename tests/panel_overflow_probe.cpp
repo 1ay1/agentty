@@ -154,7 +154,7 @@ Model with_history() {
 int rightmost_ink(const Case& c, const Model& m, int w, int h) {
     maya::StylePool pool;
     maya::Canvas canvas(w, h, &pool);
-    maya::render_tree(c.build(m), canvas, pool, maya::theme::dark,
+    maya::render_tree(c.build(m), canvas, pool, maya::theme::native,
                       /*auto_height=*/true);
     int worst = -1;
     for (int y = 0; y < h; ++y)
@@ -217,7 +217,7 @@ Damage measure(const Case& c, const Model& m, int w, int h) {
                             + "' wanted " + std::to_string(o.wanted)
                             + " cols, edge at " + std::to_string(o.edge));
     });
-    maya::render_tree(c.build(m), canvas, pool, maya::theme::dark,
+    maya::render_tree(c.build(m), canvas, pool, maya::theme::native,
                       /*auto_height=*/true);
 
     // Which rows belong to the frame at all: those whose LEFT edge carries

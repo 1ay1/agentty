@@ -208,7 +208,7 @@ std::string render_at(const Model& m, int w, int rows) {
                             + "' (wanted " + std::to_string(o.wanted)
                             + " cols, edge at " + std::to_string(o.edge) + ")");
     });
-    maya::render_tree(ui::stats_panel(m), canvas, pool, maya::theme::dark,
+    maya::render_tree(ui::stats_panel(m), canvas, pool, maya::theme::native,
                       /*auto_height=*/true);
 
     std::string out;

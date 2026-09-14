@@ -62,7 +62,7 @@ std::string render_picker(const Model& m, int width = 100, int height = 48) {
     maya::StylePool pool;
     maya::Canvas canvas(width, height, &pool);
     canvas.clear();
-    maya::render_tree(root, canvas, pool, maya::theme::dark, true);
+    maya::render_tree(root, canvas, pool, maya::theme::native, true);
 
     std::string out;
     const int max_row = canvas.max_content_row();

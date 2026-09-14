@@ -108,7 +108,7 @@ static std::vector<std::string> render_rows(const Model& m,
     maya::StylePool pool;
     maya::Canvas canvas(width, height, &pool);
     canvas.clear();
-    maya::render_tree(root, canvas, pool, maya::theme::dark, true);
+    maya::render_tree(root, canvas, pool, maya::theme::native, true);
 
     std::vector<std::string> rows;
     const int max_row = canvas.max_content_row();

@@ -98,7 +98,7 @@ static Canvas paint_view(const Model& m, int width, int term_h,
     Canvas c(width, 8000, &pool);
     c.clear();
     std::vector<layout::LayoutNode> nodes;
-    maya::render_tree(agentty::ui::view(m), c, pool, maya::theme::dark, nodes,
+    maya::render_tree(agentty::ui::view(m), c, pool, maya::theme::native, nodes,
                       /*auto_height=*/true);
     return c;
 }

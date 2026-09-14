@@ -115,7 +115,7 @@ int scroll_after(Model m, std::initializer_list<Msg> msgs) {
     maya::StylePool pool;
     maya::Canvas canvas(100, 200, &pool);
     canvas.clear();
-    maya::render_tree(ui::stats_panel(m), canvas, pool, maya::theme::dark,
+    maya::render_tree(ui::stats_panel(m), canvas, pool, maya::theme::native,
                       /*auto_height=*/true);
     int top = -1, bottom = -1;
     for (int y = 0; y < 200; ++y) {

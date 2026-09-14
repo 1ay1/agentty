@@ -38,7 +38,7 @@ Message served(const char* model, smart::ModelRole role) {
 std::vector<std::string> render_rows(const Model& m, int w, int h) {
     maya::StylePool pool;
     maya::Canvas canvas(w, h, &pool);
-    maya::render_tree(ui::stats_panel(m), canvas, pool, maya::theme::dark,
+    maya::render_tree(ui::stats_panel(m), canvas, pool, maya::theme::native,
                       /*auto_height=*/true);
     std::vector<std::string> rows;
     for (int y = 0; y < h; ++y) {

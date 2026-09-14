@@ -108,7 +108,7 @@ static Canvas paint(const maya::Element& root, int width, StylePool& pool) {
     Canvas c(width, 4000, &pool);
     c.clear();
     std::vector<layout::LayoutNode> nodes;
-    maya::render_tree(root, c, pool, maya::theme::dark, nodes, /*auto_height=*/true);
+    maya::render_tree(root, c, pool, maya::theme::native, nodes, /*auto_height=*/true);
     return c;
 }
 

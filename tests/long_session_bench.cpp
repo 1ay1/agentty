@@ -490,7 +490,7 @@ struct RenderStats { Stats cold; Stats warm; };
         const std::uint64_t p0 = maya::render_detail::rt_paint_ns();
         const std::uint64_t rc0 = maya::render_detail::component_render_calls();
         auto t0 = Clock::now();
-        maya::render_tree(root, canvas, pool, maya::theme::dark,
+        maya::render_tree(root, canvas, pool, maya::theme::native,
                           /*auto_height=*/true);
         auto t1 = Clock::now();
         cold_samples.push_back(ms(t1 - t0));
@@ -507,7 +507,7 @@ struct RenderStats { Stats cold; Stats warm; };
         // Warm: same canvas + pool, same root → cache should blit.
         canvas.clear();
         auto t2 = Clock::now();
-        maya::render_tree(root, canvas, pool, maya::theme::dark,
+        maya::render_tree(root, canvas, pool, maya::theme::native,
                           /*auto_height=*/true);
         auto t3 = Clock::now();
         warm_samples.push_back(ms(t3 - t2));
@@ -584,7 +584,7 @@ struct MidrunStats { Stats frame; std::size_t frozen_rows_after = 0;
     maya::Canvas canvas(kCanvasW, kCanvasH, &pool);
     canvas.clear();
     // Prime once (cold) so the warm timings below are pure cache-hit.
-    maya::render_tree(root, canvas, pool, maya::theme::dark,
+    maya::render_tree(root, canvas, pool, maya::theme::native,
                       /*auto_height=*/true);
 
     std::vector<double> samples;
@@ -609,7 +609,7 @@ struct MidrunStats { Stats frame; std::size_t frozen_rows_after = 0;
         if (keep_top > 0) canvas.clear_below(keep_top);
         else              canvas.clear();
         auto tc1 = Clock::now();
-        maya::render_tree(root, canvas, pool, maya::theme::dark,
+        maya::render_tree(root, canvas, pool, maya::theme::native,
                           /*auto_height=*/true);
         auto t1 = Clock::now();
         clear_sum  += ms(tc1 - tc0);
@@ -721,7 +721,7 @@ struct StreamingStats { Stats frame; Stats build; Stats render;
             .status_bar    = agentty::ui::status_bar_config(m),
             .overlay       = std::nullopt,
         }}.build();
-        maya::render_tree(root, canvas, pool, maya::theme::dark, true);
+        maya::render_tree(root, canvas, pool, maya::theme::native, true);
     }
 
     for (int i = 0; i < iters; ++i) {
@@ -747,7 +747,7 @@ struct StreamingStats { Stats frame; Stats build; Stats render;
         else              canvas.clear();
 
         auto tr0 = Clock::now();
-        maya::render_tree(root, canvas, pool, maya::theme::dark, true);
+        maya::render_tree(root, canvas, pool, maya::theme::native, true);
         auto tr1 = Clock::now();
 
         build_s.push_back(ms(tb1 - tb0));
