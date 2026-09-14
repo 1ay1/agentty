@@ -266,15 +266,16 @@ const maya::Color dim    = maya::Color::rgb(140, 150, 170);
     return out;
 }
 
-// Hist / Dist — a distribution as block columns, one bucket per metric. The
-// section heading rides as the caption; six rows of height give the shape
-// room to read.
+// Hist / Dist — a distribution as block columns, one bucket per metric.
+//
+// No caption: the CARD's heading already names the section, and the
+// histogram repeating it printed "First byte spread" twice, one line under
+// the other. The card owns the title; the chart just draws.
 [[nodiscard]] std::vector<Element> build_hist(
-    std::string_view heading, const std::vector<stats::Metric>& ms) {
+    std::string_view /*heading*/, const std::vector<stats::Metric>& ms) {
     maya::Histogram h;
     for (const auto& mt : ms) h.bucket(mt.label, mt.value);
     h.rows(6);
-    if (!heading.empty()) h.caption(std::string{heading});
     std::vector<Element> out;
     out.push_back(h.build());
     return out;
@@ -548,6 +549,29 @@ Element stats_panel(const Model& m) {
                           .build();
             has_readout = true;
         }
+    }
+
+    // Past TWO charts, stack them two-to-a-cell.
+    //
+    // Every chart as its own cell makes a chart-heavy tab too many columns
+    // wide: the Stream tab's three left each one narrow and pushed "Frame
+    // size spread" onto a second grid row, which starts below the body — so
+    // it was a section the reader never saw. A spark and a histogram share
+    // a column comfortably, and a visible half-height chart beats an
+    // invisible full-height one.
+    constexpr std::size_t kMaxChartCells = 2;
+    if (pictures.size() > kMaxChartCells) {
+        const std::size_t per = (pictures.size() + kMaxChartCells - 1) / kMaxChartCells;
+        std::vector<Element> packed;
+        for (std::size_t i = 0; i < pictures.size(); i += per) {
+            std::vector<Element> group;
+            for (std::size_t k = i; k < std::min(pictures.size(), i + per); ++k) {
+                if (!group.empty()) group.push_back(blank());
+                group.push_back(std::move(pictures[k]));
+            }
+            packed.push_back(dsl::v(std::move(group)).build());
+        }
+        pictures = std::move(packed);
     }
 
     // The readout LEADS — the figures are what must be readable first, and
