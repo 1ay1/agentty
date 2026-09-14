@@ -174,6 +174,7 @@ const maya::Color dim    = maya::Color::rgb(140, 150, 170);
             const int h = std::clamp((panel_detail::panel_viewport_h() - 4) / n - 1,
                                      4, 14);
             maya::LineChart chart{std::move(series), h};
+            chart.set_fill(true);
             chart.set_color(series_hue(0, i));
             if (!out.empty()) out.push_back(blank());
             out.push_back(chart.build());
@@ -217,9 +218,22 @@ const maya::Color dim    = maya::Color::rgb(140, 150, 170);
         series.reserve(mt.series.size());
         for (double d : mt.series) series.push_back(static_cast<float>(d));
         maya::LineChart chart{std::move(series), height};
+        // Shade under the curve: a lone trace across a tall plot is mostly
+        // empty, and the eye reads the emptiness as the data.
+        chart.set_fill(true);
         chart.set_color(series_hue(0, i));
         out.push_back(chart.build());
-        if (!mt.label.empty()) out.push_back(text(mt.label, fg_dim(hue::dim)));
+        // The caption carries the PEAK. A plot's tallest point is the figure
+        // a reader reaches for ("largest prefix"), and it was living in its
+        // own card in another column — a number in one place and the shape
+        // that produced it in another. On the axis it is one reading.
+        if (!mt.label.empty()) {
+            std::string cap = mt.label;
+            double peak = 0;
+            for (double d : mt.series) peak = std::max(peak, d);
+            if (peak > 0) cap += "   peak " + stats::format(mt.unit, peak);
+            out.push_back(text(cap, fg_dim(hue::dim)));
+        }
     }
     return out;
 }
