@@ -151,20 +151,26 @@ const maya::Color dim    = maya::Color::rgb(140, 150, 170);
         std::vector<float> series;
         series.reserve(mt.series.size());
         for (double d : mt.series) series.push_back(static_cast<float>(d));
-        maya::SparklineConfig scfg{.color = series_hue(0, i), .show_last = false};
-        // A ratio series lives in 0..1, and a spark auto-scales to its own
-        // min/max — so a steady 93% cache rate drew every block at full
-        // height and looked like a solid bar rather than a flat trend.
-        // Pinning the scale to 0..1 makes the height mean the RATE, and
-        // colouring the REMAINDER makes each column read as the two parts
-        // of the whole (hit against miss) rather than a bar in space.
-        const bool is_ratio = (mt.unit == stats::Unit::Ratio);
-        if (is_ratio) scfg.rest_color = maya::Color::rgb(70, 48, 60);
-        maya::Sparkline spark{std::move(series), scfg};
-        if (is_ratio) {
-            spark.set_min(0.0f);
-            spark.set_max(1.0f);
+        // A RATE over turns is a curve, not a strip. A spark is one cell per
+        // sample, so a nine-turn history drew nine blocks — and with a steady
+        // ~93% every block was full height, which reads as a solid slab
+        // rather than a trend. The braille plot fills the card, draws a
+        // connected line, and carries an axis, so the shape and the level are
+        // both legible.
+        if (mt.unit == stats::Unit::Ratio) {
+            const int h = std::clamp(panel_detail::panel_viewport_h() - 5, 4, 14);
+            maya::LineChart chart{std::move(series), h};
+            chart.set_color(series_hue(0, i));
+            if (i > 0) out.push_back(blank());
+            out.push_back(chart.build());
+            std::string cap = mt.label;
+            if (mt.value != 0) cap += "  " + stats::format(mt.unit, mt.value);
+            out.push_back(text(cap, fg_dim(hue::dim)));
+            continue;
         }
+
+        maya::SparklineConfig scfg{.color = series_hue(0, i), .show_last = false};
+        maya::Sparkline spark{std::move(series), scfg};
         // The value rides in the LABEL so it sits on the trace's line.
         std::string label = mt.label;
         if (mt.value != 0 || mt.of != 0)
