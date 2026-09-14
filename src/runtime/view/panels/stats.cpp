@@ -283,19 +283,25 @@ void build_cards(const stats::Section& sec, const stats::Facts& f,
         return;
     }
 
-    // ── scalar kinds: one card per figure ────────────────────────────
+    // ── scalar kinds: ONE card holding the section's figures ─────────
+    //
+    // A figure is two short lines, so a card per figure left every column
+    // three lines deep and mostly empty — five columns of whitespace. The
+    // figures of a section belong together anyway ("You asked" / "Agent
+    // replied" / "Tool calls" are one readout), so they stack in one card
+    // that FILLS its column, and the grid places that card beside the
+    // pictures instead of shredding it across the row.
     if (sec.viz == stats::Viz::Kv || sec.viz == stats::Viz::Hero) {
+        std::vector<Element> body;
+        body.reserve(scratch.size() * 4);
         for (std::size_t i = 0; i < scratch.size(); ++i) {
             const auto& mt = scratch[i];
-            const maya::Color hue = series_hue(0, slot + i);
-            std::vector<Element> body;
-            body.push_back(text(stats::format(mt.unit, mt.value), fg_bold(hue)));
-            if (!mt.detail.empty())
-                body.push_back(text(mt.detail, fg_dim(hue::dim)));
-            // The metric's label IS the card title — the heading slot the
-            // example gives every card.
-            out.push_back(card(mt.label, hue, std::move(body)));
+            body.push_back(text(stats::format(mt.unit, mt.value), fg_bold(accent)));
+            if (!mt.label.empty())  body.push_back(text(mt.label, fg_dim(hue::dim)));
+            if (!mt.detail.empty()) body.push_back(text(mt.detail, fg_dim(hue::dim)));
+            if (i + 1 < scratch.size()) body.push_back(blank());
         }
+        out.push_back(card(sec.heading, accent, std::move(body)));
         return;
     }
 
@@ -386,16 +392,15 @@ Element stats_panel(const Model& m) {
 
     cfg.prebuilt.push_back(
         maya::viewport(std::move(cards),
-                       maya::ViewportOpts{// Small cards — one figure each — so
-                                          // a wide panel fans to three and
-                                          // four columns like the example
-                                          // rather than sitting at two.
-                                          .max_width = 26,
-                                          // A chart still needs room for its
-                                          // label, a bar and the value; below
-                                          // this the grid stays one column
-                                          // instead of truncating in two.
-                                          .min_width = 24,
+                       maya::ViewportOpts{// Cards hold a section's worth of
+                                          // figures or one chart, so give a
+                                          // column enough room to read them.
+                                          .max_width = 34,
+                                          // A chart still needs its label, a
+                                          // bar and the value; below this the
+                                          // grid stays one column rather than
+                                          // truncating in two.
+                                          .min_width = 30,
                                           .gap       = 3,
                                           .gap_y     = 2,
                                           .width     = body_width(),
