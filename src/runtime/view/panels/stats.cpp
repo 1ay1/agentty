@@ -396,13 +396,14 @@ Element stats_panel(const Model& m) {
     for (const auto& sec : sections)
         build_cards(sec, f, scratch, text_body, pictures);
 
-    // The readout leads, the pictures follow — so a tab reads left to right
-    // as "the numbers, then what they look like".
+    // The picture leads and the readout follows — the chart is the thing
+    // that carries the shape of the answer, so it gets the first column and
+    // the numbers sit beside it.
     std::vector<Element> cards;
     cards.reserve(pictures.size() + 1);
+    for (auto& p : pictures) cards.push_back(std::move(p));
     if (!text_body.empty())
         cards.push_back(card({}, hue::cyan, std::move(text_body)));
-    for (auto& p : pictures) cards.push_back(std::move(p));
 
     cfg.prebuilt.push_back(
         maya::viewport(std::move(cards),
