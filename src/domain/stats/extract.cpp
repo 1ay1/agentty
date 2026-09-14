@@ -572,8 +572,11 @@ void stream_throughput(const Facts& f, std::vector<Metric>& out) {
 // ── Context ─────────────────────────────────────────────────────────────
 
 void context_rows(const Facts& f, std::vector<Metric>& out) {
-    kv(out, "Largest prefix", Unit::Tokens,
-       static_cast<double>(f.context.peak_input));
+    // NOT "Largest prefix". It is the PEAK of the very series the Trend
+    // plots, and the plot's caption states it ("prefix tokens per turn
+    // peak 17k") — so as a row it was the same number twice, and it cost
+    // the tab a whole column to hold one figure beside a chart that had
+    // already said it.
     if (f.context.compactions)
         kv(out, "Compactions", Unit::Count,
            static_cast<double>(f.context.compactions),
