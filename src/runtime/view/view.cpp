@@ -10,6 +10,7 @@
 #include <maya/widget/app_layout.hpp>
 #include <maya/widget/overlay.hpp>
 
+#include "agentty/domain/ui_theme.hpp"
 #include "agentty/runtime/login.hpp"
 #include "agentty/runtime/panel/top.hpp"
 #include "agentty/runtime/view/changes_strip.hpp"
@@ -92,6 +93,27 @@ maya::Element compose_panel(maya::Element base, maya::Element overlay) {
 } // namespace
 
 maya::Element view(const Model& m) {
+    // Apply the appearance prefs before painting anything.
+    //
+    // The reducer is pure — it cannot reach the runtime — so the swap lands
+    // here, on the one path that sees both the Model and the frame. It is a
+    // no-op whenever the resolved theme has not changed, which is every
+    // frame but the one after a settings row is pressed.
+    //
+    // Resolving per frame rather than at startup is deliberate: `auto` is
+    // answered by the terminal, and the terminal changes under us — a tmux
+    // detach, an ssh hop, a COLORFGBG that only arrives late. Re-asking
+    // costs two getenvs and means the look follows the terminal it is
+    // actually on.
+    {
+        static const maya::Theme* applied = nullptr;
+        const auto r = ui_prefs::resolve(m.d.ui, /*tty=*/true);
+        if (r.theme != applied) {
+            applied = r.theme;
+            maya::app_set_theme(*r.theme);
+        }
+    }
+
     // ── Terminal dimensions for the BUILD phase ──
     // maya's run loop calls P::view(model) BEFORE Runtime::render
     // installs the sized RenderContext (the only guard site), so any

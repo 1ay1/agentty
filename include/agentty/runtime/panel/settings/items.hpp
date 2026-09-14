@@ -28,6 +28,27 @@ enum class Action : std::uint8_t {
     ToggleTool,    // Plugins: enable/disable one tool (arg=server, arg2=bare)
     ApprovePlugin, // Plugins: trust this project config so its servers connect
     ApproveHooks,  // Hooks: approve the active hooks file
+
+    // ── Appearance ──────────────────────────────────────────────────
+    //
+    // One action per knob rather than a single CycleUiField(index): the
+    // reducer then switches on a name instead of a number, so reordering
+    // the rows cannot silently repoint a row at another setting.
+    //
+    // Every one of these is LIVE. The reducer writes the pref, persists it
+    // and the next frame is already painted with it — there is no apply
+    // step, because a settings screen that needs one is a settings screen
+    // you cannot experiment in.
+    OpenThemePicker,   // Appearance: choose among the built-in schemes
+    CycleColorTier,    // Appearance: auto → truecolor → 256 → 16 → mono
+    CyclePolarity,     // Appearance: auto → dark → light
+    CycleDensity,      // Appearance: compact → normal → roomy
+    CycleMotion,       // Appearance: full → reduced → off
+    ToggleSyntax,      // Appearance: syntax highlighting in code fences
+    ToggleCompactTurns,// Appearance: drop the blank line between turns
+    CycleToolOutput,   // Appearance: collapsed → preview → full
+    CycleThinking,     // Appearance: shown → collapsed → hidden
+    CycleTimestamps,   // Appearance: off → relative → absolute
 };
 
 struct Item {

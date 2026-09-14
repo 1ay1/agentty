@@ -21,6 +21,7 @@
 #include "agentty/diff/diff.hpp"
 #include "agentty/domain/id.hpp"
 #include "agentty/domain/profile.hpp"
+#include "agentty/domain/ui_prefs.hpp"
 #include "agentty/domain/session.hpp"
 #include "agentty/domain/todo.hpp"
 #include "agentty/runtime/panel/slot.hpp"   // ui::panel::State (the exclusive slot)
@@ -272,6 +273,11 @@ struct Model {
         Thread              current;
         std::vector<Thread> threads;
         Profile             profile = Profile::Write;
+
+        // How agentty LOOKS. Domain, not ui, because it is persisted state
+        // the user chose — `ui` is this session's transient panels and
+        // cursors, which these outlive.
+        ui_prefs::Prefs     ui;
 
         std::vector<ModelInfo> available_models;
         ModelId                model_id{std::string{"claude-opus-4-5"}};

@@ -41,6 +41,7 @@ enum class Command : std::uint8_t {
     OpenAgents,
     OpenHooks,
     OpenGeneralSettings,
+    OpenUiSettings,
     OpenRag,
     OpenStats,
     OpenLogin,
@@ -112,6 +113,7 @@ inline constexpr std::array kCommands = std::array{
     CommandDef{Command::OpenAgents,    "Subagents",          "Task agent types — built-ins + your .agentty/agents/*.md", "", Category::Config},
     CommandDef{Command::OpenHooks,     "Hooks",              "Lifecycle hooks + approval state (.agentty/hooks.json)", "", Category::Config},
     CommandDef{Command::OpenGeneralSettings, "Settings",     "Permission profile, Smart Mode, retrieval — the live toggles", "", Category::Config},
+    CommandDef{Command::OpenUiSettings, "Appearance", "Theme, colors, density, motion — how agentty looks", "", Category::Config},
     // ── Account ─────────────────────────────────────────────────────────
     CommandDef{Command::OpenLogin,     "Sign in / add account", "Sign in — or add another OAuth / API-key account", "", Category::Account},
     CommandDef{Command::SignOut,       "Sign out",           "Remove saved credentials and re-open sign-in", "", Category::Account, /*danger=*/true},

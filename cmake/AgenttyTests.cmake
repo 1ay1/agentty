@@ -52,6 +52,7 @@ set(_AGENTTY_CONSOLIDATED
     credentials_test entitlement_test inflate_test
     settings_list_scroll_test visual_walk_test md_robustness_test
     stats_test
+    ui_prefs_test
     stats_scroll_test
     stats_visual_hash_test
     panel_overflow_probe
