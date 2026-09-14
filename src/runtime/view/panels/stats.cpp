@@ -473,61 +473,56 @@ Element stats_panel(const Model& m) {
     for (const auto& sec : sections)
         build_cards(sec, f, scratch, text_groups, pictures);
 
-    // Deal the scalar groups into TWO columns, balanced by line count, so a
-    // tab is a picture plus two readouts — cells that divide a wide panel
+    // Deal the scalar figures into TWO columns, balanced by LINE COUNT, so
+    // a tab is a readout plus its pictures — cells that divide a wide panel
     // evenly — rather than one very tall column beside a chart.
+    //
+    // Balancing by line rather than by group, because dealing whole groups
+    // only balances when the groups are of similar size: the Reasoning tab's
+    // are three lines against twelve, so whichever column took the big one
+    // was four times the other and the figures ran off the bottom.
+    //
+    // The cut lands on a BLANK, which is the only place a figure ends.
+    // Cutting mid-figure orphaned a detail ("16%") at the top of the second
+    // column, away from the value it qualifies.
     std::vector<Element> text_a, text_b;
-    if (text_groups.size() >= 2) {
-        // Several sections: whole groups move together, because splitting a
-        // section across columns would break a heading away from what it
-        // heads.
-        std::size_t total = 0;
-        for (const auto& g : text_groups) total += g.size();
-        std::size_t taken = 0;
+    if (!text_groups.empty()) {
+        std::vector<Element> all;
         for (auto& g : text_groups) {
-            auto& dst = (taken * 2 < total) ? text_a : text_b;
-            if (!dst.empty()) dst.push_back(blank());
-            taken += g.size();
-            for (auto& e : g) dst.push_back(std::move(e));
+            if (!all.empty()) all.push_back(blank());
+            for (auto& e : g) all.push_back(std::move(e));
         }
-    } else if (text_groups.size() == 1) {
-        // ONE section (Tokens' "Totals"): there are no groups to deal, so
-        // split the figures themselves down the middle — otherwise the
-        // readout is a single tall column and its half of the panel is
-        // mostly whitespace.
-        //
-        // The cut lands on a BLANK, which is the only place a figure ends:
-        // cutting mid-figure orphaned a detail line ("16%") at the top of
-        // the second column, away from the value it qualifies.
-        auto& g = text_groups[0];
-        const std::size_t half = g.size() / 2;
-        std::size_t cut = g.size();
-        for (std::size_t i = half; i < g.size(); ++i) {
-            const auto* t = maya::as_text(g[i]);
+
+        const std::size_t half = all.size() / 2;
+        std::size_t cut = all.size();
+        for (std::size_t i = half; i < all.size(); ++i) {
+            const auto* t = maya::as_text(all[i]);
             if (t && t->content.empty()) { cut = i; break; }
         }
-        if (cut >= g.size()) {
+        if (cut >= all.size()) {
             // No blank at or after the midpoint — look backwards instead.
             for (std::size_t i = half; i-- > 0;) {
-                const auto* t = maya::as_text(g[i]);
+                const auto* t = maya::as_text(all[i]);
                 if (t && t->content.empty()) { cut = i; break; }
             }
         }
-        for (std::size_t i = 0; i < g.size(); ++i) {
+        for (std::size_t i = 0; i < all.size(); ++i) {
             if (i == cut) continue;            // drop the blank we cut on
-            (i < cut ? text_a : text_b).push_back(std::move(g[i]));
+            (i < cut ? text_a : text_b).push_back(std::move(all[i]));
         }
     }
-
     // The readout is its OWN two-column grid, nested inside one outer cell.
     //
     // Flattening picture + text_a + text_b into three sibling cells makes
     // the chart just one column of three, so it shrinks as the readout
-    // grows. Nesting keeps the split at the top level to TWO — the picture,
-    // and the readout beside it — and lets the readout divide its own half
-    // again. Each level is a viewport(), so both stay responsive: the inner
-    // grid collapses to one column when its half is narrow, the outer one
-    // collapses when the panel is.
+    // grows. Nesting keeps the split at the top level to TWO — the readout,
+    // and the pictures beside it — and lets the readout divide its own half
+    // again.
+    //
+    // The inner grid is HANDED its width. It cannot see the outer split, so
+    // measured against the unbounded probe it either collapses back to one
+    // column (which is what kept the Reasoning tab's figures in a single
+    // tall stack) or divides a width it does not have and clips.
     Element readout;
     bool has_readout = false;
     {
@@ -536,24 +531,31 @@ Element stats_panel(const Model& m) {
         if (!text_b.empty()) text_cards.push_back(card({}, hue::cyan, std::move(text_b)));
         if (!text_cards.empty()) {
             const int n = static_cast<int>(text_cards.size());
+            // The readout is the LEAD cell and holds two columns of text, so
+            // it takes half the body — the charts divide the rest. Splitting
+            // the width evenly between every outer cell left the figures
+            // 20 columns each and wrapped their labels mid-phrase ("of
+            // generated / tokens were / reasoning").
+            const int share = std::max(34, body_width() / 2);
             readout = maya::viewport(std::move(text_cards),
-                                     maya::ViewportOpts{.max_width = 40,
+                                     maya::ViewportOpts{.max_width = std::max(16, share / n),
                                                         .max_cols  = n,
-                                                        .min_width = 18,
-                                                        .gap       = 3,
+                                                        .min_width = 14,
+                                                        .gap       = 2,
                                                         .gap_y     = 2,
+                                                        .width     = share,
                                                         .flow      = maya::Flow::Row})
                           .build();
             has_readout = true;
         }
     }
 
-    // The picture leads and the readout follows — the chart carries the
-    // shape of the answer, so it gets the first column.
+    // The readout LEADS — the figures are what must be readable first, and
+    // the charts illustrate them.
     std::vector<Element> cards;
     cards.reserve(pictures.size() + 1);
-    for (auto& p : pictures) cards.push_back(std::move(p));
     if (has_readout) cards.push_back(std::move(readout));
+    for (auto& p : pictures) cards.push_back(std::move(p));
 
     const int ncards = static_cast<int>(cards.size());
     cfg.prebuilt.push_back(
