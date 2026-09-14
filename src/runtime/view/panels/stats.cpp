@@ -405,19 +405,25 @@ Element stats_panel(const Model& m) {
     if (!text_body.empty())
         cards.push_back(card({}, hue::cyan, std::move(text_body)));
 
+    const int ncards = static_cast<int>(cards.size());
     cfg.prebuilt.push_back(
         maya::viewport(std::move(cards),
                        maya::ViewportOpts{// A tab is usually the readout plus
                                           // one or two pictures, so let a
-                                          // column get wide: capping it small
-                                          // left a 120-column panel with two
-                                          // narrow cards and dead space to
-                                          // the right. viewport() divides the
-                                          // slot exactly, so a generous
-                                          // ceiling means the cards FILL it
-                                          // and still split again when the
-                                          // panel is wide enough for three.
+                                          // column get wide.
                                           .max_width = 56,
+                                          // Never ask for more columns than
+                                          // there are cards. Without this the
+                                          // width can afford THREE columns
+                                          // while the tab has two cards, and
+                                          // viewport treats that as underfull
+                                          // — it holds both at max_width and
+                                          // leaves the surplus empty, which is
+                                          // the dead strip on the right. Capped
+                                          // at the card count the grid is full,
+                                          // so it divides the whole slot
+                                          // exactly and the cards FILL it.
+                                          .max_cols  = ncards,
                                           // A chart still needs its label, a
                                           // bar and the value; below this the
                                           // grid stays one column rather than
