@@ -149,17 +149,23 @@ const maya::Color dim    = maya::Color::rgb(140, 150, 170);
     return out;
 }
 
-// Plot — a braille line chart per metric from its series. Height 6 is tall
-// enough to show a trend's shape without dominating the card.
+// Plot — a braille line chart per metric from its series, sized to the
+// height the panel has rather than a fixed 6 rows: one plot is usually the
+// whole card, so the rows it does not take are dead space in the column.
 [[nodiscard]] std::vector<Element> build_plots(const std::vector<stats::Metric>& ms) {
     std::vector<Element> out;
     out.reserve(ms.size() * 2);
+    // Share the body between plots when a section carries several, and keep
+    // room for the card's heading, its blank and each plot's caption.
+    const int n = std::max<int>(1, static_cast<int>(ms.size()));
+    const int avail = (panel_detail::panel_viewport_h() - 3) / n - 1;
+    const int height = std::clamp(avail, 4, 20);
     for (std::size_t i = 0; i < ms.size(); ++i) {
         const auto& mt = ms[i];
         std::vector<float> series;
         series.reserve(mt.series.size());
         for (double d : mt.series) series.push_back(static_cast<float>(d));
-        maya::LineChart chart{std::move(series), 6};
+        maya::LineChart chart{std::move(series), height};
         chart.set_color(series_hue(0, i));
         out.push_back(chart.build());
         if (!mt.label.empty()) out.push_back(text(mt.label, fg_dim(hue::dim)));
