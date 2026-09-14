@@ -19,6 +19,8 @@
 #include "panels_prologue.hpp"
 
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 
 #include <maya/widget/bar_chart.hpp>
 #include <maya/element/grid.hpp>
@@ -334,7 +336,8 @@ void build_cards(const stats::Section& sec, const stats::Facts& f,
                  std::vector<stats::Metric>& scratch,
                  std::vector<std::vector<Element>>& text_groups,
                  std::vector<Element>& out,
-                 std::vector<bool>& tall) {
+                 std::vector<bool>& tall,
+                 std::vector<std::string>& titles) {
     scratch.clear();
     sec.extract(f, scratch);
 
@@ -364,6 +367,7 @@ void build_cards(const stats::Section& sec, const stats::Facts& f,
     if (scratch.empty()) {
         out.push_back(card(sec.heading, accent, {empty_placeholder()}));
         tall.push_back(false);
+        titles.push_back(std::string{sec.heading});
         return;
     }
 
@@ -373,10 +377,42 @@ void build_cards(const stats::Section& sec, const stats::Facts& f,
     // the readout column rather than under the chart — there is room for
     // them there, and the chart keeps its height.
     std::vector<stats::Metric> figures;
+
+    // A Spark section emits ONE CARD PER TRACE, not one card holding them
+    // all. Each trace then pairs with the distribution of the same
+    // quantity: the Stream tab reads as "first byte, and its spread" beside
+    // "output rate, and its spread" rather than both traces in one column
+    // and both spreads in another, which asks the reader to carry a number
+    // across the panel to meet its own histogram.
+    if (sec.viz == stats::Viz::Spark) {
+        for (const auto& mt : scratch) {
+            if (mt.series.empty()) { figures.push_back(mt); continue; }
+            std::vector<stats::Metric> one{mt};
+            auto one_body = build_sparks(one, nullptr);
+            if (one_body.empty()) continue;
+            out.push_back(card(mt.label, accent, std::move(one_body)));
+            tall.push_back(false);
+            titles.push_back(mt.label);
+        }
+        if (!figures.empty()) {
+            std::vector<Element> group;
+            group.reserve(figures.size() * 4);
+            for (std::size_t i = 0; i < figures.size(); ++i) {
+                const auto& mt = figures[i];
+                group.push_back(text(stats::format(mt.unit, mt.value), fg_bold(accent)));
+                if (!mt.label.empty())  group.push_back(text(mt.label, fg_dim(hue::dim)));
+                if (!mt.detail.empty()) group.push_back(text(mt.detail, fg_dim(hue::dim)));
+                if (i + 1 < figures.size()) group.push_back(blank());
+            }
+            text_groups.push_back(std::move(group));
+        }
+        return;
+    }
+
     std::vector<Element> body;
     switch (sec.viz) {
         case stats::Viz::Bars:  body = build_bars(scratch);               break;
-        case stats::Viz::Spark: body = build_sparks(scratch, &figures);   break;
+        case stats::Viz::Spark: body = {};                                break;
         case stats::Viz::Plot:  body = build_plots(scratch);              break;
         case stats::Viz::Band:  body = build_band(scratch);               break;
         case stats::Viz::Donut: body = build_donuts(scratch);             break;
@@ -405,6 +441,7 @@ void build_cards(const stats::Section& sec, const stats::Facts& f,
     if (body.empty()) body.push_back(empty_placeholder());
     out.push_back(card(sec.heading, accent, std::move(body)));
     tall.push_back(sec.viz == stats::Viz::Donut);
+    titles.push_back(std::string{sec.heading});
 }
 
 }  // namespace
@@ -475,8 +512,9 @@ Element stats_panel(const Model& m) {
     text_groups.reserve(sections.size());
     pictures.reserve(sections.size());
     std::vector<bool> tall_picture;
+    std::vector<std::string> picture_title;
     for (const auto& sec : sections)
-        build_cards(sec, f, scratch, text_groups, pictures, tall_picture);
+        build_cards(sec, f, scratch, text_groups, pictures, tall_picture, picture_title);
 
     // Past two charts, share a cell — but only with one that FITS.
     //
@@ -493,14 +531,47 @@ Element stats_panel(const Model& m) {
     // NOMINAL heights, not a live measure: sizing the pack from the terminal
     // makes one thread group its charts differently between renders.
     if (pictures.size() > 2) {
-        constexpr int kCellRows  = 13;
+        // A cell may run TALLER than the body: a paired trace-and-spread is
+        // the thing worth seeing together, and the second half of the pair
+        // being a scroll away still beats it being in another column with a
+        // number to carry across the panel. Two short charts fit; a donut
+        // still refuses to share, since two of those is twice the body.
+        constexpr int kCellRows  = 16;
         constexpr int kDonutRows = 12;
         constexpr int kShortRows = 7;
+
+        // Pair a trace with the SPREAD OF THE SAME QUANTITY first.
+        //
+        // Packing in section order puts both traces in one cell and both
+        // spreads in the next, so the reader carries "first byte 341ms"
+        // across the panel to meet its own histogram. Matching on the
+        // subject word keeps each story in one column: first byte and its
+        // spread, then output rate and its spread.
+        std::vector<std::size_t> order(pictures.size());
+        for (std::size_t i = 0; i < order.size(); ++i) order[i] = i;
+        std::vector<bool> taken(pictures.size(), false);
+        std::vector<std::size_t> seq;
+        for (std::size_t i = 0; i < pictures.size(); ++i) {
+            if (taken[i]) continue;
+            taken[i] = true;
+            seq.push_back(i);
+            // The partner is the next unpaired card whose title shares this
+            // one's leading word ("First byte" -> "First byte spread").
+            const std::string& mine = picture_title[i];
+            const std::size_t cut = mine.find(' ');
+            const std::string key = cut == std::string::npos ? mine : mine.substr(0, cut);
+            if (key.empty()) continue;
+            for (std::size_t k = i + 1; k < pictures.size(); ++k) {
+                if (taken[k]) continue;
+                if (picture_title[k].rfind(key, 0) == 0) { taken[k] = true; seq.push_back(k); break; }
+            }
+        }
+
         std::vector<Element> packed;
         std::vector<Element> cur;
         int cur_rows = 0;
-        for (std::size_t i = 0; i < pictures.size(); ++i) {
-            const int h = (i < tall_picture.size() && tall_picture[i])
+        for (std::size_t idx : seq) {
+            const int h = (idx < tall_picture.size() && tall_picture[idx])
                               ? kDonutRows : kShortRows;
             if (!cur.empty() && cur_rows + 1 + h > kCellRows) {
                 packed.push_back(dsl::v(std::move(cur)).build());
@@ -509,7 +580,7 @@ Element stats_panel(const Model& m) {
             }
             if (!cur.empty()) { cur.push_back(blank()); ++cur_rows; }
             cur_rows += h;
-            cur.push_back(std::move(pictures[i]));
+            cur.push_back(std::move(pictures[idx]));
         }
         if (!cur.empty()) packed.push_back(dsl::v(std::move(cur)).build());
         pictures = std::move(packed);
