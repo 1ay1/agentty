@@ -7,6 +7,7 @@
 #include "agentty/runtime/model.hpp"
 #include "agentty/runtime/panel/settings/items.hpp"
 #include "agentty/domain/ui_theme.hpp"
+#include "agentty/runtime/panel/appearance.hpp"
 
 #include <cstdio>
 #include <string>
@@ -122,5 +123,48 @@ TEST_CASE("appearance: resolution never leaves the user unable to read") {
     p.theme = "Nope";
     p.tier  = ui_prefs::ColorTier::TrueColor;
     CHECK(ui_prefs::resolve(p, true).theme == &maya::theme::native);
+}
+
+
+TEST_CASE("appearance form: rows, groups and provenance") {
+    install_stub_deps();
+    ui_prefs::Prefs p;
+    const auto f = ui::panel::build_appearance_form(p, /*tty=*/true);
+
+    // Every knob has a row, and the pane is grouped rather than a flat wall.
+    CHECK(f.fields.size() >= 11);
+    int headers = 0;
+    for (const auto& r : f.fields)
+        if (std::holds_alternative<form::field::Header>(r.value)) ++headers;
+    CHECK(headers >= 4);
+
+    // The theme row leads and is a Pick — 57 schemes is a searchable set,
+    // not a dropdown.
+    bool found_pick = false;
+    for (const auto& r : f.fields)
+        if (r.id == ui::panel::kApTheme)
+            found_pick = std::holds_alternative<form::field::Pick>(r.value);
+    CHECK(found_pick);
+}
+
+TEST_CASE("appearance: theme search is a fuzzy subsequence") {
+    using ui::panel::matching_themes;
+    // Empty query is a browsable catalogue, native first.
+    const auto all = matching_themes("");
+    CHECK(all.size() > 20);
+    CHECK(all.front().empty());              // native
+
+    // Subsequence, not substring: the point of a fuzzy picker.
+    const auto gvd = matching_themes("gvd");
+    bool has_gruvbox_dark = false;
+    for (const auto& n : gvd) if (n == "Gruvbox Dark") has_gruvbox_dark = true;
+    CHECK(has_gruvbox_dark);
+
+    // Case-insensitive.
+    CHECK(!matching_themes("DRACULA").empty());
+    // A query that means a scheme does not drag native along.
+    const auto dr = matching_themes("dracula");
+    CHECK(!dr.empty());
+    CHECK(!dr.front().empty());
 }
 

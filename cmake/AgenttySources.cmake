@@ -184,6 +184,7 @@ set(AGENTTY_RUNTIME_NOMAIN_SOURCES
     src/runtime/panel/form.cpp
     src/runtime/panel/form_keys.cpp
     src/runtime/view/panels/form_common.cpp
+    src/runtime/panel/appearance_form.cpp
     src/runtime/panel/rag_form.cpp
     src/runtime/settings_registry.cpp
     src/runtime/panel/smart_form.cpp
