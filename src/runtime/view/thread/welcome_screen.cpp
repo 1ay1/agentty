@@ -73,7 +73,17 @@ maya::WelcomeScreen::Config welcome_screen_config(const Model& m) {
     // for the whole build phase (real ioctl dims, or the harness's
     // simulated dims) — do NOT ioctl here, it would override test
     // harnesses that pin a simulated geometry.
-    constexpr int kIdleChromeRows = 11;
+    // The reserve is SPELLED OUT rather than a single magic number,
+    // because a number is a claim nobody can check. It was 11 against real
+    // chrome of 10, so the welcome was budgeted one row short and the frame
+    // ended one row above the terminal's bottom edge — the gap under the
+    // composer. Each term below is one visible band, countable on screen:
+    constexpr int kOuterPadding = 1;   // AppLayout padding(1), top only
+    constexpr int kComposerRows = 5;   // border + input + rule + meta + border
+    constexpr int kStatusRows   = 3;   // rule + status line + rule
+    constexpr int kWelcomeGap   = 1;   // blank row between welcome and composer
+    constexpr int kIdleChromeRows =
+        kOuterPadding + kComposerRows + kStatusRows + kWelcomeGap;
     const int term_rows = maya::available_height();
     if (term_rows > 0)
         cfg.max_rows = std::max(4, term_rows - kIdleChromeRows);
