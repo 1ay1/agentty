@@ -151,25 +151,34 @@ namespace agentty::model_name {
 [[nodiscard]] constexpr maya::Color color_of(
     ModelCapabilities::Family f) noexcept {
     using F = ModelCapabilities::Family;
+    using S = maya::ThemeSlot;
+    // SLOTS, not literals. A family hue is a ROLE ("flagship", "workhorse",
+    // "fast") and roles are exactly what a theme assigns colour to. As
+    // literals these were the last thing on screen still painting in named
+    // ANSI on an all-RGB scheme — a magenta badge that stayed magenta no
+    // matter what the user picked.
+    //
+    // A slot also keeps this file honest about its layer: domain code can
+    // now name a role without reaching for a pixel, and the resolution
+    // happens in maya at paint time.
     switch (f) {
-        // Flagship lane — the brightest role hue. Distinguishable from the
-        // user turn's plain magenta (same family, higher intensity).
-        case F::Opus:   return maya::Color::bright_magenta();
-        case F::Fable:  return maya::Color::bright_magenta();
-        case F::Mythos: return maya::Color::bright_magenta();
-        // Workhorse — role_info blue.
-        case F::Sonnet: return maya::Color::blue();
-        // Fast/agile — bright_cyan. NOT green: green is status_ok and
-        // collided with the ✓ done icon.
-        case F::Haiku:  return maya::Color::bright_cyan();
+        // Flagship lane — the accent hue, the theme's "this is special".
+        case F::Opus:   return maya::Color::slot(S::Accent);
+        case F::Fable:  return maya::Color::slot(S::Accent);
+        case F::Mythos: return maya::Color::slot(S::Accent);
+        // Workhorse — the primary hue.
+        case F::Sonnet: return maya::Color::slot(S::Primary);
+        // Fast/agile — link, a cyan-family slot in every scheme. NOT
+        // success: green is status_ok and collided with the ✓ done icon.
+        case F::Haiku:  return maya::Color::slot(S::Link);
         // OpenAI gpt-5.x Responses line.
-        case F::Gpt:    return maya::Color::cyan();
+        case F::Gpt:    return maya::Color::slot(S::Info);
         // Unknown family (local model, aggregator id, a line we don't know
-        // yet). Neutral cyan — it is still a model, just not one we can
+        // yet). Neutral info — it is still a model, just not one we can
         // place in a lane.
-        case F::Unknown: return maya::Color::cyan();
+        case F::Unknown: return maya::Color::slot(S::Info);
     }
-    return maya::Color::cyan();   // unreachable; switch is exhaustive
+    return maya::Color::slot(S::Info);   // unreachable; switch is exhaustive
 }
 
 // The canonical display spelling of a known family. Empty for Unknown —
@@ -289,14 +298,18 @@ consteval bool every_known_family_is_labelled() {
 static_assert(every_known_family_is_labelled(),
               "a Family enumerator has no display label — add it to family_label()");
 
-// No known family may borrow a STATUS hue. palette.hpp's discipline is "one
-// hue = one axis"; green/yellow/red mean ok/warn/error and nothing else.
+// No known family may borrow a STATUS slot. palette.hpp's discipline is "one
+// hue = one axis"; success/warning/error mean ok/warn/error and nothing else.
 // This is the rule Haiku-as-green violated.
+//
+// Compares SLOTS now that color_of() returns them. Left as literals this
+// check would have gone quietly vacuous — no slot ever equals a literal, so
+// it would pass no matter what, which is worse than not having it.
 consteval bool no_family_uses_a_status_hue() {
     const maya::Color banned[] = {
-        maya::Color::green(),  maya::Color::bright_green(),
-        maya::Color::yellow(), maya::Color::bright_yellow(),
-        maya::Color::red(),    maya::Color::bright_red(),
+        maya::Color::slot(maya::ThemeSlot::Success),
+        maya::Color::slot(maya::ThemeSlot::Warning),
+        maya::Color::slot(maya::ThemeSlot::Error),
     };
     for (auto f : kAllFamilies)
         for (const auto& b : banned)
@@ -304,8 +317,8 @@ consteval bool no_family_uses_a_status_hue() {
     return true;
 }
 static_assert(no_family_uses_a_status_hue(),
-              "a family colour collides with a status hue (green=ok / "
-              "yellow=warn / red=error) — pick a role hue instead");
+              "a family colour collides with a status slot (success=ok / "
+              "warning=warn / error=error) — pick a role slot instead");
 
 // Family labels are pairwise distinct, so two lanes can never render as the
 // same word.

@@ -144,7 +144,7 @@ maya::PhaseChip::Config phase_chip_config(const Model& m) {
                 && !sel.openai_endpoint.use_tls)
                 verb = "processing\xe2\x80\xa6";
         }
-        color     = maya::Color::bright_cyan();
+        color     = ui::status_info;
         breathing = true;
         elapsed   = phase_elapsed;
     }

@@ -55,13 +55,17 @@ maya::Color phase_color(const Phase& p) noexcept {
         using T = std::decay_t<decltype(v)>;
         // Use bright ANSI variants for active phases so the pulsing
         // spinner in the status-bar chip reads as "alive" on every
-        // palette, not just high-contrast dark themes. `highlight`
-        // and `success` alone were landing on the desaturated end of
-        // several popular light themes.
+        // palette, not just high-contrast dark themes.
+        //
+        // These were bright_* literals, chosen because `highlight` and
+        // `success` landed on the desaturated end of several light themes.
+        // The tokens are theme reads now, so the theme itself answers that
+        // — a literal here would be the same bet on someone else's palette
+        // that it always was, just in the other direction.
         if      constexpr (std::same_as<T, phase::Idle>)               return muted;
-        else if constexpr (std::same_as<T, phase::Streaming>)          return maya::Color::bright_cyan();
-        else if constexpr (std::same_as<T, phase::AwaitingPermission>) return maya::Color::bright_yellow();
-        else                                                           return maya::Color::bright_green();
+        else if constexpr (std::same_as<T, phase::Streaming>)          return status_info;
+        else if constexpr (std::same_as<T, phase::AwaitingPermission>) return status_warn;
+        else                                                           return status_ok;
     }, p);
 }
 

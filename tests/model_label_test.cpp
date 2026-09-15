@@ -377,13 +377,18 @@ TEST_CASE("model_name: every surface agrees on a model's colour") {
     // which widget is asking. Any surface re-deriving a hue locally will
     // disagree with this, because the family table is the only place the
     // mapping exists.
+    //
+    // These are SLOTS, not literals: a family hue is a role, and the theme
+    // decides what a role looks like. Asserting a literal here would pin
+    // the badge to one palette — which is exactly what it used to do.
+    using S = maya::ThemeSlot;
     struct Case { std::string_view id; maya::Color want; };
     const Case cases[] = {
-        {"claude-opus-4-8",   maya::Color::bright_magenta()},
-        {"claude-fable-5",    maya::Color::bright_magenta()},
-        {"claude-mythos-5",   maya::Color::bright_magenta()},
-        {"claude-sonnet-4-5", maya::Color::blue()},
-        {"claude-haiku-4-5",  maya::Color::bright_cyan()},
+        {"claude-opus-4-8",   maya::Color::slot(S::Accent)},
+        {"claude-fable-5",    maya::Color::slot(S::Accent)},
+        {"claude-mythos-5",   maya::Color::slot(S::Accent)},
+        {"claude-sonnet-4-5", maya::Color::slot(S::Primary)},
+        {"claude-haiku-4-5",  maya::Color::slot(S::Link)},
     };
     for (const auto& c : cases)
         CHECK_MESSAGE(decode(c.id).color == c.want,
@@ -397,7 +402,14 @@ TEST_CASE("model_name: every surface agrees on a model's colour") {
 
     // An unknown family still gets a colour — never a default-constructed
     // one that would render as an invisible or wrong-themed glyph.
-    CHECK(decode("some-local-model:7b").color == maya::Color::cyan());
+    CHECK(decode("some-local-model:7b").color == maya::Color::slot(S::Info));
+
+    // And every family hue actually follows the theme. This is the property
+    // the literals used to break: pick a scheme, and the badge moved with
+    // it instead of staying the colour it was compiled with.
+    maya::Theme t = maya::theme::native;
+    t.accent = maya::Color::rgb(0xBD, 0x93, 0xF9);
+    CHECK(t.resolve(decode("claude-opus-4-8").color) == t.accent);
 }
 
 // ── Graceful degradation: the model we have never seen ───────────────────

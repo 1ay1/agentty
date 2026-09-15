@@ -93,6 +93,10 @@ inline constexpr auto highlight = AGENTTY_THEME_SLOT(primary);  // command palet
 inline constexpr auto text_primary   = AGENTTY_THEME_SLOT(text);       // prose, headlines
 inline constexpr auto text_secondary = AGENTTY_THEME_SLOT(secondary);  // mid-tone metadata
 inline constexpr auto text_tertiary  = AGENTTY_THEME_SLOT(muted);      // footers, hints, blanks
+// Ink for text sitting ON a filled badge — the theme's own answer to
+// "what reads against my accent colours", rather than a literal black that
+// disappears the moment a scheme's badge hue is dark.
+inline constexpr auto text_inverse   = AGENTTY_THEME_SLOT(inverse_text);
 
 // Status — severity / outcome ONLY. Never a category color.
 inline constexpr auto status_ok    = AGENTTY_THEME_SLOT(success);

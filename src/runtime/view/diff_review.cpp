@@ -185,7 +185,7 @@ Element diff_review(const Model& m) {
         // Both marks are single-row, so the pane's line budget is unchanged.
         rail.marker(TabMark::Editor);
         rail.theme.active_bg = accent;
-        rail.theme.active    = maya::Color::black();
+        rail.theme.active    = ui::text_inverse;
         rail.theme.idle      = fg;
         rail.theme.accent    = accent;
         for (const auto& f : m.d.pending_changes) {

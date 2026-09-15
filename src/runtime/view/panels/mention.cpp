@@ -51,8 +51,8 @@ Element mention_panel(const Model& m) {
                 auto label = git_tag_label(tag);
                 row.badge = "● " + std::string{label};
                 row.badge_style =
-                    tag == GitTag::Modified          ? fg_of(maya::Color::yellow())
-                  : tag == GitTag::Staged            ? fg_of(maya::Color::green())
+                    tag == GitTag::Modified          ? fg_of(ui::status_warn)
+                  : tag == GitTag::Staged            ? fg_of(ui::status_ok)
                   : tag == GitTag::Untracked         ? fg_of(info)
                   : /* RecentlyCommitted */            fg_dim(muted);
             }
