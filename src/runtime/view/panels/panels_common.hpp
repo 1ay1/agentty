@@ -23,6 +23,7 @@
 #include <maya/platform/io.hpp>
 
 #include "agentty/runtime/model.hpp"
+#include "agentty/domain/ui_live.hpp"   // panel_rows(): density drives panel height
 #include "agentty/domain/catalog.hpp"   // resolved_caps, efforts, caps_provider_scope
 #include "agentty/runtime/view/helpers.hpp"
 #include "agentty/runtime/view/palette.hpp"
@@ -137,9 +138,12 @@ inline constexpr int kPickerChromeRows = 7;
     // Leave the chrome plus a small breathing margin so the picker's top
     // border sits strictly below the viewport top with the base behind it.
     const int avail = term_rows - kPickerChromeRows - 1;
-    // Floor of 4 list rows keeps the picker usable even on a tiny term (it
-    // scrolls); ceiling is the shared kViewportH.
-    return std::clamp(avail, 4, kViewportH);
+    // The ceiling is the user's DENSITY, not the compiled-in kViewportH:
+    // compact 10 / normal 14 / roomy 22. It stays a ceiling — a roomy
+    // setting on a 20-row terminal still yields what the terminal has, so
+    // the pref can never push a panel off-screen. Floor of 4 list rows
+    // keeps the picker usable on a tiny term (it scrolls).
+    return std::clamp(avail, 4, agentty::ui_prefs::panel_rows());
 }
 
 // Terminal WIDTH, resolved the same way panel_terminal_rows() resolves

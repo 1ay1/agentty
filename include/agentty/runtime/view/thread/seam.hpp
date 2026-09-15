@@ -27,6 +27,7 @@
 #include <maya/widget/turn.hpp>
 
 #include "agentty/domain/conversation.hpp"
+#include "agentty/domain/ui_live.hpp"   // compact_turns: the seam's height
 #include "agentty/runtime/view/palette.hpp"
 
 namespace agentty::ui {
@@ -34,12 +35,32 @@ namespace agentty::ui {
 // Inter-turn seam between every pair of adjacent turns — a blank row,
 // the dim ─ rule, then another blank row. Pushed before each settled
 // turn, between live-tail turns, and at the frozen↔live boundary.
+//
+// COMPACT drops the two blank rows and keeps the rule, so turns still
+// separate but cost one row instead of three. On a 30-row terminal a long
+// session spends a tenth of the screen on whitespace; that is a real
+// trade, not a cosmetic one, which is why it is a setting.
+//
+// ── The height and the element MUST agree ────────────────────────────
+// Frozen scrollback seals each element with an explicit row count
+// (push_frozen(m, gap_row(), kGapRows)); if the two disagree the ledger
+// drifts and the canvas tears. So the count is a FUNCTION of the same
+// pref the element reads — gap_rows(), never a constant that has to be
+// remembered — and both are evaluated at the same instant.
 inline maya::Element gap_row() {
     using namespace maya::dsl;
+    if (ui_prefs::current().compact_turns)
+        return maya::Conversation::divider();
     return v(blank(),
              maya::Conversation::divider(),
              blank()).build();
 }
+[[nodiscard]] inline int gap_rows() noexcept {
+    return ui_prefs::current().compact_turns ? 1 : 3;
+}
+// Retained as the NON-compact height for call sites that reason about the
+// roomy layout specifically. Anything sealing a gap_row() must use
+// gap_rows() instead — see above.
 inline constexpr int kGapRows = 3;
 
 // Compaction-boundary divider: a single-row centered labeled rule

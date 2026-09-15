@@ -8,6 +8,9 @@
 #include "agentty/runtime/panel/settings/items.hpp"
 #include "agentty/runtime/panel/form_keys.hpp"
 #include "agentty/domain/ui_theme.hpp"
+#include "agentty/domain/ui_live.hpp"
+#include "agentty/runtime/view/thread/seam.hpp"
+#include <maya/core/motion.hpp>
 #include "agentty/runtime/panel/appearance.hpp"
 
 #include <cstdio>
@@ -232,4 +235,85 @@ TEST_CASE("appearance: theme search is a fuzzy subsequence") {
     CHECK(!dr.empty());
     CHECK(!dr.front().empty());
 }
+
+// ── The knobs actually DO something ─────────────────────────────────
+//
+// A settings panel whose rows persist but change nothing is worse than no
+// panel: it is a promise the UI breaks silently. These assert the SEAM —
+// that a published pref reaches the code that reads it — rather than
+// re-testing each consumer's own rendering, which its own tests cover.
+
+TEST_CASE("appearance: publishing a pref reaches its consumers") {
+    ui_prefs::Prefs p;
+
+    p.density = ui_prefs::Density::Compact;
+    ui_prefs::publish(p);
+    CHECK(ui_prefs::panel_rows() == 10);
+    p.density = ui_prefs::Density::Roomy;
+    ui_prefs::publish(p);
+    CHECK(ui_prefs::panel_rows() == 22);
+
+    // Motion is two questions, not one: whether anything moves at all, and
+    // whether the DECORATIVE layer moves. Reduced keeps the progressive
+    // reveal (progress is information) and drops the glyph churn.
+    p.motion = ui_prefs::Motion::Full;
+    ui_prefs::publish(p);
+    CHECK(ui_prefs::animations_on());
+    CHECK(ui_prefs::reveal_decoration_on());
+
+    p.motion = ui_prefs::Motion::Reduced;
+    ui_prefs::publish(p);
+    CHECK(ui_prefs::animations_on());
+    CHECK(!ui_prefs::reveal_decoration_on());
+
+    p.motion = ui_prefs::Motion::Off;
+    ui_prefs::publish(p);
+    CHECK(!ui_prefs::animations_on());
+    CHECK(!ui_prefs::reveal_decoration_on());
+
+    ui_prefs::publish(ui_prefs::Prefs{});   // leave the slot clean
+}
+
+TEST_CASE("appearance: reduce-motion freezes maya's animation primitives") {
+    // The gate lives at the BOTTOM of maya's animation stack, under every
+    // spinner/blink/frame counter, so "nothing moves" is true of widgets
+    // that have never heard of this setting — including ones written later.
+    maya::anim::set_reduce_motion(false);
+    CHECK(!maya::anim::reduce_motion());
+
+    maya::anim::set_reduce_motion(true);
+    CHECK(maya::anim::reduce_motion());
+    // Frame 0 is the resting glyph of every frame set maya ships, so a
+    // frozen spinner shows a stable mark rather than whichever glyph the
+    // clock happened to be on when motion was switched off.
+    CHECK(maya::anim::frame_index(10, 90.0, /*request=*/false) == 0u);
+    // A caret held ON: stuck OFF would lose the cursor entirely, which is
+    // a worse outcome than not blinking.
+    CHECK(maya::anim::blink(530.0));
+    // A "breathing" value held at its MIDDLE — frozen at the trough it
+    // would read as a rendering bug.
+    CHECK(maya::anim::wave(1400.0) == doctest::Approx(0.5));
+
+    maya::anim::set_reduce_motion(false);   // leave the process clean
+}
+
+TEST_CASE("appearance: compact turns changes the seam's height AND its rows") {
+    // Frozen scrollback seals each element with an explicit row count; if
+    // the count and the element disagree the ledger drifts and the canvas
+    // tears. So these two must move together — that coupling is the whole
+    // reason gap_rows() is a function rather than a constant.
+    ui_prefs::Prefs p;
+
+    p.compact_turns = false;
+    ui_prefs::publish(p);
+    CHECK(ui::gap_rows() == 3);
+    CHECK(maya::render_to_string(ui::gap_row(), 40).find('\n') != std::string::npos);
+
+    p.compact_turns = true;
+    ui_prefs::publish(p);
+    CHECK(ui::gap_rows() == 1);
+
+    ui_prefs::publish(ui_prefs::Prefs{});
+}
+
 

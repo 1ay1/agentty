@@ -12,6 +12,7 @@
 #include <maya/core/render_context.hpp>   // available_height (tail-spinner gate)
 #include "agentty/runtime/view/thread/turn/agent_timeline/tool_args.hpp"
 #include "agentty/runtime/view/thread/turn/agent_timeline/tool_body_preview.hpp"
+#include "agentty/domain/ui_live.hpp"   // tool_output: how much body to show
 #include "agentty/runtime/view/thread/turn/agent_timeline/tool_helpers.hpp"
 
 namespace agentty::ui {
@@ -390,6 +391,30 @@ maya::AgentTimeline::Config agent_timeline_config(std::span<const ToolUse> tool_
         std::shared_ptr<const maya::ToolBodyPreview::Config> body_sp;
         std::string body_key;
         const bool cacheable = tc.is_terminal();
+        // How much of a tool's output to show. The pref is part of the
+        // cache KEY, not applied after the lookup — a cached body built
+        // under "preview" must not be handed back once the user asks for
+        // "full", which is exactly the bug an after-the-fact tweak would
+        // introduce (and only on the second render, which is worse).
+        const auto tool_out = agentty::ui_prefs::current().tool_output;
+        const auto apply_tool_output =
+            [tool_out](maya::ToolBodyPreview::Config c) {
+                switch (tool_out) {
+                    case agentty::ui_prefs::ToolOutput::Collapsed:
+                        // Header only. The card still says WHAT ran and
+                        // whether it failed; the body is what goes.
+                        c.code_head = c.code_tail = 0;
+                        c.bash_tail = c.read_head = 0;
+                        c.show_all  = false;
+                        break;
+                    case agentty::ui_prefs::ToolOutput::Preview:
+                        break;   // the tuned defaults ARE the preview
+                    case agentty::ui_prefs::ToolOutput::Full:
+                        c.show_all = true;
+                        break;
+                }
+                return c;
+            };
         if (cacheable) {
             body_key.reserve(tc.id.value.size() + grep_sig.size() + 48);
             body_key += "t:";
@@ -399,16 +424,18 @@ maya::AgentTimeline::Config agent_timeline_config(std::span<const ToolUse> tool_
             body_key.push_back('|');
             body_key += std::to_string(tc.output().size());
             body_key.push_back('|');
+            body_key += std::to_string(static_cast<int>(tool_out));
+            body_key.push_back('|');
             body_key += grep_sig;
             if (auto hit = g_body_cache.get(body_key)) {
                 body_sp = hit;  // SHARE the cached (immutable) build
             } else {
                 body_sp = std::make_shared<const maya::ToolBodyPreview::Config>(
-                    tool_body_preview_config(tc, &grep_hits));
+                    apply_tool_output(tool_body_preview_config(tc, &grep_hits)));
                 g_body_cache.put(body_key, body_sp);
             }
         } else {
-            body = tool_body_preview_config(tc, &grep_hits);
+            body = apply_tool_output(tool_body_preview_config(tc, &grep_hits));
         }
 
         // Event-hash / height inputs read from whichever body we have.
@@ -642,7 +669,12 @@ maya::AgentTimeline::Config agent_timeline_config(std::span<const ToolUse> tool_
               .add(static_cast<std::uint64_t>(rail_color.kind()))
               .add(static_cast<std::uint64_t>(rail_color.r()))
               .add(static_cast<std::uint64_t>(rail_color.g()))
-              .add(static_cast<std::uint64_t>(rail_color.b()));
+              .add(static_cast<std::uint64_t>(rail_color.b()))
+              // The tool-output pref changes the body's HEIGHT, so it has
+              // to key every layer that memoizes a built card — otherwise
+              // flipping it repaints nothing until the next status change.
+              .add(static_cast<std::uint64_t>(
+                  agentty::ui_prefs::current().tool_output));
             for (const auto& tc : tool_calls) {
                 kb.add(std::string_view{tc.id.value})
                   .add(static_cast<std::uint64_t>(tc.status.index()))
@@ -701,6 +733,9 @@ maya::Element agent_timeline_element(std::span<const ToolUse> tool_calls,
         key.push_back(':');
         key += std::to_string(tc.compute_render_key());
     }
+    key.push_back('#');
+    key += std::to_string(
+        static_cast<int>(agentty::ui_prefs::current().tool_output));
 
     if (const std::shared_ptr<const maya::Element>* hit = g_panel_cache.get(key))
         return maya::Element{*hit};   // shared handle: refcount bump, no tree copy

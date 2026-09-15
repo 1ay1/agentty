@@ -11,6 +11,7 @@
 #include <maya/widget/overlay.hpp>
 
 #include "agentty/domain/ui_theme.hpp"
+#include "agentty/domain/ui_live.hpp"
 #include "agentty/runtime/login.hpp"
 #include "agentty/runtime/panel/top.hpp"
 #include "agentty/runtime/view/changes_strip.hpp"
@@ -113,6 +114,19 @@ maya::Element view(const Model& m) {
             applied = r.theme;
             maya::app_set_theme(*r.theme);
         }
+        // The rest of the prefs reach their consumers the same way, and for
+        // the same reason: density is read by panel_viewport_h(), a free
+        // function twenty panel builders call without a Model in hand, and
+        // motion by the StreamingMarkdown setup deep in turn.cpp. Publishing
+        // here keeps them a pure projection of the Model — refreshed every
+        // frame, written nowhere else.
+        ui_prefs::publish(m.d.ui);
+        // Motion::Off freezes maya's stepped animations at their source —
+        // one gate under every spinner, blink and frame counter, including
+        // widgets that do not know this setting exists. It also stops the
+        // frame REQUESTS, so "off" means the render loop goes quiet rather
+        // than repainting an unchanging glyph 11× a second.
+        maya::anim::set_reduce_motion(m.d.ui.motion == ui_prefs::Motion::Off);
     }
 
     // ── Terminal dimensions for the BUILD phase ──

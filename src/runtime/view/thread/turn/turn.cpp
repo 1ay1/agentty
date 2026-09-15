@@ -15,6 +15,7 @@
 #include <maya/widget/markdown.hpp>
 #include <maya/widget/thinking.hpp>  // reasoning/thinking block
 #include <maya/widget/reasoning.hpp>  // ReasoningStream (streaming reasoning block)
+#include "agentty/domain/ui_live.hpp"  // motion / thinking / prose-width prefs
 #include <maya/core/render_context.hpp> // available_height (resize-shrink detect)
 #include <maya/core/anim_clock.hpp>     // maya::anim_now_ms (deterministic under a test clock)
 #include <maya/render/cache_id.hpp>
@@ -90,6 +91,34 @@ enum class MdView : std::uint8_t { Answer, Reasoning };
 // (dropped alongside the answer slot at freeze — see frozen.cpp).
 inline MessageId md_slot_id(const MessageId& mid, MdView view) {
     return view == MdView::Reasoning ? MessageId{mid.value + "#r"} : mid;
+}
+
+// Apply the prose-width cap to a built body.
+//
+// A reading measure: long lines are measurably harder to read because the
+// eye loses its place on the return sweep, and a maximised terminal is 200+
+// columns. 0 means no cap, which is why this is a Number and not a Choice —
+// the useful values are a continuum.
+//
+// Applied as a MAX, never a fixed width: a narrow terminal keeps every
+// column it has. And only to the BODY — tool panels, diffs and tables are
+// structured output whose columns mean something, so squeezing them to a
+// prose measure would be actively worse.
+[[nodiscard]] maya::Element prose_capped(maya::Element body) {
+    using namespace maya::dsl;
+    const int cap = agentty::ui_prefs::current().prose_width;
+    if (cap <= 0) return body;
+    // Constrain the column the markdown lays out into, and let a trailing
+    // flexible cell absorb the remainder. Left-aligned rather than centred:
+    // the rail, the glyph and every turn above start at the left margin,
+    // and prose that floats away from them reads as a different column of
+    // the page.
+    //
+    // `width` is a CEILING in practice because the row is inside an
+    // auto-width chain (Conversation → Turn → body): a terminal narrower
+    // than the cap gives the flex row less than `cap` to divide, and the
+    // fixed cell shrinks with it rather than overflowing.
+    return h(v(std::move(body)) | width(cap), v() | grow_<1>).build();
 }
 
 maya::Element cached_markdown_for(const Message& msg, const Model& m,
@@ -238,16 +267,37 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m,
         // this never clobbers.
         const bool fx_default = true;
         const bool master     = env_on("AGENTTY_REVEAL", fx_default);
+        // The MOTION pref gates both layers, under the env flags. Reduced
+        // keeps the progressive clip — text walking in is information about
+        // progress — and drops the decorative glyph churn, which is not.
+        // Off stops both: a typewriter reveal is genuinely unpleasant with a
+        // vestibular disorder, so this is an accessibility switch before it
+        // is a preference, and it must actually reach the widget.
+        const bool want_fx    = master && agentty::ui_prefs::animations_on();
+        const bool want_deco  = master && agentty::ui_prefs::reveal_decoration_on();
         // Written for each NEWLY CONSTRUCTED widget — not per frame, so a
         // caller that deliberately overrode the flag on an existing widget
         // (midrun_wire_test pre-seeds reveal_fx=false to measure settled
         // height) keeps its override; and not once per process, so every
         // message's widget gets the policy rather than only the first.
-        if (fresh_widget) {
+        //
+        // ... EXCEPT when the pref itself changed, which is the one case a
+        // live setting must beat that rule: a user who turns motion off
+        // mid-stream is telling us to stop NOW, not on the next message.
+        // `last_motion` is function-local and render-thread-only, so the
+        // re-apply costs one comparison per frame and fires on the frame
+        // the pref moves.
+        static agentty::ui_prefs::Motion last_motion =
+            agentty::ui_prefs::current().motion;
+        const auto motion_now = agentty::ui_prefs::current().motion;
+        const bool motion_changed = motion_now != last_motion;
+        last_motion = motion_now;
+
+        if (fresh_widget || motion_changed) {
             cache.streaming->set_reveal_fx(
-                master && env_on("AGENTTY_REVEAL_TYPEWRITER", fx_default));
+                want_fx && env_on("AGENTTY_REVEAL_TYPEWRITER", fx_default));
             cache.streaming->set_reveal_decorate(
-                master && env_on("AGENTTY_REVEAL_DECORATE", fx_default));
+                want_deco && env_on("AGENTTY_REVEAL_DECORATE", fx_default));
         }
     }
 
@@ -375,7 +425,9 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m,
         // can safely move the Entry. Idempotent: no-op once settled.
         if (want_pin)
             (void)m.ui.view_cache.message_md(m.d.current.id, slot_id);
-        return built;
+        // Reasoning has its own rail and its own measure; the cap is a
+        // READING measure for answer prose.
+        return reasoning_view ? built : prose_capped(std::move(built));
     }
 
     // ── Reveal: feed ALL arrived bytes, every frame ──
@@ -1249,7 +1301,7 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m,
     // transient dip, decaying once the shrink proves real so idle carries
     // no dead space. maya owns that mechanism end-to-end; this body
     // element just renders the revealed extent honestly.
-    return built;
+    return reasoning_view ? built : prose_capped(std::move(built));
 }
 
 // ── Per-speaker visual identity: rail color + glyph + display name.
@@ -1337,19 +1389,63 @@ SpeakerStyle speaker_style_for(Role role, const Model& m, const Message* msg) {
 // user turn reads as an ordinary turn carrying a marker, NOT a separate
 // full-width divider widget hanging above the rail (which looked like
 // chrome / a broken empty message).
+// "just now" / "4m ago" / "2h ago" / "3d ago" from a wall-clock stamp.
+//
+// Coarse ON PURPOSE: the question a relative stamp answers is "how long
+// ago, roughly", and a turn that reads "4m 12s ago" invites arithmetic
+// nobody wanted to do. One unit, no decimals.
+[[nodiscard]] inline std::string relative_time(
+        std::chrono::system_clock::time_point ts) {
+    if (ts.time_since_epoch().count() <= 0) return {};
+    const auto now = std::chrono::system_clock::now();
+    auto s = std::chrono::duration_cast<std::chrono::seconds>(now - ts).count();
+    // A stamp from the future is a clock skew, not a time to report; the
+    // honest rendering of "negative ago" is the present.
+    if (s < 0)  s = 0;
+    if (s < 45) return "just now";
+    if (s < 3600)  return std::to_string(s / 60)   + "m ago";
+    if (s < 86400) return std::to_string(s / 3600) + "h ago";
+    return std::to_string(s / 86400) + "d ago";
+}
+
 std::string format_turn_meta(const Message& msg, int turn_num,
                              std::optional<float> elapsed_secs,
                              bool checkpoint = false) {
-    std::string meta = timestamp_hh_mm(msg.timestamp);
+    // Timestamps, per the Appearance pref.
+    //
+    //   Off      — nothing. The default, and the right one: in a live
+    //              session "when" is always "just now", so the clock is
+    //              noise in the gutter of every single turn.
+    //   Relative — "4m ago". What you actually want when re-reading a long
+    //              thread: the distance between turns, not the hour.
+    //   Absolute — "14:32". For correlating with a log or a colleague.
+    std::string meta;
+    switch (agentty::ui_prefs::current().timestamps) {
+        case agentty::ui_prefs::Timestamps::Off:
+            break;
+        case agentty::ui_prefs::Timestamps::Relative:
+            meta = relative_time(msg.timestamp);
+            break;
+        case agentty::ui_prefs::Timestamps::Absolute:
+            meta = timestamp_hh_mm(msg.timestamp);
+            break;
+    }
+    // Every following part is " \xc2\xb7 "-joined, so the separator has to be
+    // conditional on something already being there — otherwise Off leaves a
+    // leading "\xc2\xb7" hanging where the clock used to be.
+    const auto join = [&meta](std::string part) {
+        if (!meta.empty()) meta += "  \xc2\xb7  ";
+        meta += std::move(part);
+    };
     // Only surface elapsed when it's meaningful. A near-instant local-model
     // reply yields ~0s wall-clock, which `format_duration_compact` renders
     // as a useless "0ms"/"12ms" — drop anything under 100ms.
     if (elapsed_secs && *elapsed_secs >= 0.1f)
-        meta += "  \xc2\xb7  " + format_duration_compact(*elapsed_secs);
+        join(format_duration_compact(*elapsed_secs));
     if (turn_num > 0)
-        meta += "  \xc2\xb7  turn " + std::to_string(turn_num);
+        join("turn " + std::to_string(turn_num));
     if (checkpoint)
-        meta += "  \xc2\xb7  \xe2\x86\xba checkpoint";   // ↺ checkpoint
+        join("\xe2\x86\xba checkpoint");   // ↺ checkpoint
     return meta;
 }
 
@@ -1475,6 +1571,13 @@ std::optional<maya::Element> reasoning_slot(const Message& msg, const Model& m) 
     // at all, for every provider. This is also what makes the Anthropic
     // transport request visible thinking, so "off" is a clean, cheap default.
     if (!m.d.show_reasoning) return std::nullopt;
+    // The Appearance pref is the OTHER half of the same question, and it is
+    // the durable one: ^R is a per-session peek, this is what you chose. Two
+    // switches over one block need a rule, and the rule is that either can
+    // hide it — hiding is the conservative outcome, and a user who set
+    // "never shown" should not have it reappear because a chord toggled.
+    if (agentty::ui_prefs::current().thinking == agentty::ui_prefs::Thinking::Hidden)
+        return std::nullopt;
     if (msg.reasoning_display_text().empty()) return std::nullopt;
 
     // "Actively reasoning" = this message is the LIVE tail AND it hasn't
@@ -1541,6 +1644,16 @@ std::optional<maya::Element> reasoning_slot(const Message& msg, const Model& m) 
     rcfg.accent      = ui::role_brand;                     // ┃ rail + sigil
     rcfg.header_word = maya::Color::rgb(0x9a, 0x9a, 0x9a);  // visible header/meter
     rcfg.body_fg     = maya::Color::rgb(0x9a, 0x9a, 0x9a);  // always-visible dim
+    // Thinking::Collapsed — "a line you can open". While the model is live
+    // this becomes a thought TICKER: the newest few lines only, so a long
+    // chain-of-thought stays a glance rather than a wall that shoves the
+    // composer down the screen. Settled reasoning still renders in full,
+    // which is the widget's own rule and the right one — the cost of a long
+    // block is that it moves things WHILE it grows, and a settled block
+    // doesn't move.
+    if (agentty::ui_prefs::current().thinking
+            == agentty::ui_prefs::Thinking::Collapsed)
+        rcfg.live_tail_lines = 3;
     maya::ReasoningStream rs{rcfg};
     rs.set_live(active);
     rs.set_char_hint(msg.reasoning_display_text().size());
