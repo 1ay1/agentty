@@ -22,6 +22,7 @@
 // the user store and follow you between checkouts, never to a project
 // .agentty/settings.json.
 
+#include "agentty/domain/ui_theme.hpp"
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/runtime/app/update.hpp"
 #include "agentty/runtime/app/deps.hpp"
@@ -67,6 +68,39 @@ void reproject(Model& m) {
     o->pane.form.cursor = std::clamp(cursor, 0,
                                 std::max(0, static_cast<int>(o->pane.form.fields.size()) - 1));
     o->pane.form.focus = focus;
+}
+
+// Rebuild the sealed transcript so a theme change reaches it.
+//
+// m.ui.frozen holds BUILT Elements — turns sealed once and never rebuilt,
+// because their height must stay byte-stable for the inline scrollback
+// ledger. Colour is resolved when an Element is built, so those turns keep
+// whatever theme was in force at seal time: pick a new scheme with a
+// conversation on screen and the chrome restyles while the transcript above
+// it does not. The taller the thread, the more of the screen stays wrong.
+//
+// rehydrate_frozen is the documented escape hatch for exactly this (see
+// frozen.cpp's lifecycle invariants: "if such a mutation becomes necessary
+// … call rehydrate_frozen() to rebuild from scratch"). It re-seals every
+// turn under the theme now in force.
+//
+// Safe because a theme change is HEIGHT-PRESERVING: only the colours of
+// each cell differ, so every rebuilt block lands at the height the ledger
+// already recorded. A STRUCTURAL pref (compact turns, density) must not do
+// this — it would re-seal at a new height and tear the ledger, which is why
+// those settings are documented as forward-only.
+void restyle_sealed_turns(Model& m) {
+    if (m.ui.frozen_through == 0) return;
+    // Publish FIRST. The reducer runs before view(), which is where the
+    // theme is normally resolved and published — so rebuilding here without
+    // this would re-seal every turn under the theme we are leaving, which
+    // is the exact bug being fixed, one frame later. The turn builders read
+    // `ui::` tokens, and those resolve through the live theme at BUILD time.
+    //
+    // Cheap and idempotent: view() publishes the same value again next
+    // frame, and publish is a pointer store.
+    ui_prefs::publish_theme(*ui_prefs::resolve(m.d.ui, /*tty=*/true).theme);
+    rehydrate_frozen(m);
 }
 
 // Apply a row's current form value back onto the prefs.
@@ -125,6 +159,7 @@ void move_highlight(Model& m, int delta) {
     // schemes should not be 56 keystrokes.
     o->pane.picker.index = ((o->pane.picker.index + delta) % n + n) % n;
     m.d.ui.theme = highlighted_theme(*o);
+    restyle_sealed_turns(m);
     reproject(m);
 }
 
@@ -227,6 +262,7 @@ Step appearance_update(Model m, msg::AppearanceMsg am) {
             // Live-apply the new top match. Typing narrows AND previews, so
             // "dra" shows you Dracula without a second keystroke.
             m.d.ui.theme = highlighted_theme(*o);
+            restyle_sealed_turns(m);
             reproject(m);
             return done(std::move(m));
         },
@@ -238,6 +274,7 @@ Step appearance_update(Model m, msg::AppearanceMsg am) {
             // only ends the browse and makes it durable.
             m.d.ui.theme = highlighted_theme(*o);
             o->pane.picking = false;
+            restyle_sealed_turns(m);
             persist(m);
             reproject(m);
             return done(std::move(m));
@@ -251,6 +288,7 @@ Step appearance_update(Model m, msg::AppearanceMsg am) {
             // model must not keep the last one we merely looked at.
             m.d.ui.theme = o->pane.picker.restore;
             o->pane.picking = false;
+            restyle_sealed_turns(m);
             persist(m);
             reproject(m);
             return done(std::move(m));
