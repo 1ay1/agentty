@@ -317,3 +317,19 @@ TEST_CASE("appearance: compact turns changes the seam's height AND its rows") {
 }
 
 
+
+TEST_CASE("appearance: Esc steps back, it does not close everything") {
+    install_stub_deps();
+    // Reached the way a user reaches it: Ctrl+K, then the Appearance row.
+    auto [m1, _1] = app::update(Model{}, Msg{OpenPalette{}});
+    REQUIRE(m1.ui.panel.get<ui::panel::Palette>() != nullptr);
+
+    auto [m2, _2] = app::update(std::move(m1),
+                                Msg{OpenSettingsList{agentty::settings::Category::Appearance}});
+    REQUIRE(m2.ui.panel.get<ui::panel::SettingsList>() != nullptr);
+
+    // Esc must land back on the palette — the step we came from — and only
+    // a second Esc should reach the thread.
+    auto [m3, _3] = app::update(std::move(m2), Msg{CloseSettingsList{}});
+    CHECK(m3.ui.panel.get<ui::panel::Palette>() != nullptr);
+}

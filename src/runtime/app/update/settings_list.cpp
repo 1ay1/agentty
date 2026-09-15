@@ -77,7 +77,17 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
             // wholly-informational / empty pane too.
             const int start =
                 first_actionable(se::items_for(m, e.concern), 0, +1);
-            m.ui.panel = pn::SettingsList{{e.concern, start}};
+            // descend(), not assignment.
+            //
+            // Assignment overwrites whatever was open, so the pane Esc came
+            // FROM is gone and Esc closes the whole stack instead of
+            // stepping back one. Reached from Ctrl+K the palette's adopt()
+            // used to paper over this; reached any other way — a direct
+            // key, another pane handing off — there was nothing to adopt and
+            // Esc dropped the user on the thread. descend() stashes the
+            // parent at the open site, which is the one place that always
+            // knows what it is replacing.
+            m.ui.panel.descend(pn::SettingsList{{e.concern, start}});
             // A fresh open starts at the top — don't inherit the scroll
             // offset of the last visit (the widget's keep-selection-in-view
             // would fight the stale offset for a frame). PR #34.
