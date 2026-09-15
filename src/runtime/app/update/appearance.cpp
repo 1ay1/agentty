@@ -90,7 +90,6 @@ void reproject(Model& m) {
 // this — it would re-seal at a new height and tear the ledger, which is why
 // those settings are documented as forward-only.
 void restyle_sealed_turns(Model& m) {
-    if (m.ui.frozen_through == 0) return;
     // Publish FIRST. The reducer runs before view(), which is where the
     // theme is normally resolved and published — so rebuilding here without
     // this would re-seal every turn under the theme we are leaving, which
@@ -100,6 +99,31 @@ void restyle_sealed_turns(Model& m) {
     // Cheap and idempotent: view() publishes the same value again next
     // frame, and publish is a pointer store.
     ui_prefs::publish_theme(*ui_prefs::resolve(m.d.ui, /*tty=*/true).theme);
+
+    // The LIVE tail is cached too, and for the same reason it is stale.
+    //
+    // ViewCache::finalized holds a built maya::Element per settled-but-not-
+    // yet-frozen message — colours already resolved, exactly like a frozen
+    // turn. It is keyed on message identity and nothing else, so a theme
+    // change does not perturb the key and every subsequent frame serves the
+    // old palette from cache. That is the last few turns of the
+    // conversation: the part the user is actually looking at while they
+    // cycle schemes.
+    //
+    // Cleared unconditionally, and BEFORE the early return below, because
+    // this is the case that early return got wrong: a thread with nothing
+    // frozen yet (a short conversation, or a fresh one) has no sealed rows
+    // to rebuild but does have a live tail to re-colour, and it used to
+    // return having done neither. Re-caching is one rebuild of the visible
+    // tail, which is what picking a theme asked for.
+    //
+    // Settled entries only: a PINNED entry holds the live reveal widget for
+    // the turn being streamed right now, and dropping that would restart
+    // its animation mid-word. It rebuilds from its widget every frame, so
+    // it picks up the new theme without being destroyed.
+    m.ui.view_cache.clear_settled();
+
+    if (m.ui.frozen_through == 0) return;
     rehydrate_frozen(m);
 }
 
@@ -109,7 +133,19 @@ void restyle_sealed_turns(Model& m) {
 // positional table would have to be kept in the builder's order by hand, and
 // an id that no row carries is a silently dead setting the compiler cannot
 // see. (Hence the named kAp* constants on both sides.)
-void pull_field(Model& m, const form::Field& f) {
+//
+// Returns whether the row that changed affects RESOLVED COLOUR, so the
+// caller knows to re-render what is already on screen. Theme is not the only
+// such row: tier decides whether a scheme renders as truecolor, 256, 16 or
+// not at all; polarity picks which side of the canvas the inks sit on; and
+// syntax highlighting repaints every code block. All three reach the same
+// already-built Elements the theme does, and all three used to change
+// nothing until the next turn redrew.
+//
+// The structural rows (density, compact turns) are deliberately NOT in this
+// set — see restyle_sealed_turns: they change row HEIGHTS, and re-sealing a
+// frozen turn at a new height tears the scrollback ledger.
+[[nodiscard]] bool pull_field(Model& m, const form::Field& f) {
     const auto idx = [&]() -> int {
         const auto* c = std::get_if<form::field::Choice>(&f.value);
         return c ? c->normalized(c->index) : 0;
@@ -120,19 +156,20 @@ void pull_field(Model& m, const form::Field& f) {
     };
 
     up::Prefs& p = m.d.ui;
-    if (f.id == pn::kApTier)            p.tier        = static_cast<up::ColorTier>(idx());
-    else if (f.id == pn::kApPolarity)   p.polarity    = static_cast<up::Polarity>(idx());
+    if (f.id == pn::kApTier)            { p.tier     = static_cast<up::ColorTier>(idx()); return true; }
+    else if (f.id == pn::kApPolarity)   { p.polarity = static_cast<up::Polarity>(idx());  return true; }
+    else if (f.id == pn::kApSyntax)     { p.syntax   = on();                              return true; }
     else if (f.id == pn::kApDensity)    p.density     = static_cast<up::Density>(idx());
     else if (f.id == pn::kApMotion)     p.motion      = static_cast<up::Motion>(idx());
     else if (f.id == pn::kApToolOutput) p.tool_output = static_cast<up::ToolOutput>(idx());
     else if (f.id == pn::kApThinking)   p.thinking    = static_cast<up::Thinking>(idx());
     else if (f.id == pn::kApTimestamps) p.timestamps  = static_cast<up::Timestamps>(idx());
-    else if (f.id == pn::kApSyntax)     p.syntax        = on();
     else if (f.id == pn::kApCompact)    p.compact_turns = on();
     else if (f.id == pn::kApProseWidth) {
         if (const auto* n = std::get_if<form::field::Number>(&f.value))
             p.prose_width = static_cast<int>(n->value);
     }
+    return false;
 }
 
 // The theme the browser is currently highlighting. Empty == native, which is
@@ -213,7 +250,15 @@ Step appearance_update(Model m, msg::AppearanceMsg am) {
             // write through. `changed` covers ←/→ in place and a dropdown
             // commit; `left_field` covers finishing a number edit.
             if (applied.changed || applied.left_field) {
-                if (const auto* row = o->pane.form.focused()) pull_field(m, *row);
+                bool recolour = false;
+                if (const auto* row = o->pane.form.focused())
+                    recolour = pull_field(m, *row);
+                // A colour-bearing knob has to reach the transcript that is
+                // already on screen, exactly as a theme change does —
+                // otherwise dropping to 16 colours or flipping polarity
+                // leaves every settled turn in the palette it was built
+                // under, and only new turns look right.
+                if (recolour) restyle_sealed_turns(m);
                 persist(m);
                 reproject(m);
             }

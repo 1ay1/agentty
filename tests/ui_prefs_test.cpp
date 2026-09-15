@@ -481,6 +481,61 @@ TEST_CASE("appearance: usable on the terminals issue #37 reported") {
     });
 }
 
+// Every knob that changes RESOLVED COLOUR must invalidate what is already
+// rendered — not just the theme row.
+//
+// The transcript is cached as BUILT Elements: settled turns memoized in
+// ViewCache, sealed ones in m.ui.frozen. Colour is resolved at build time,
+// and none of these caches are keyed on appearance, so a knob that changes
+// how a colour resolves without invalidating them leaves the entire visible
+// conversation painted in the palette it was built under. Only new turns
+// would look right — which is the "it only half-changed" report.
+//
+// Tier and polarity are the easy ones to miss: they never touch
+// `ui.theme`, so a check for "did the theme change" does not see them, but
+// tier decides whether a scheme renders as truecolor / 256 / 16 / mono and
+// polarity decides which side of the canvas the inks sit on.
+TEST_CASE("appearance: a colour knob invalidates what is already rendered") {
+    install_stub_deps();
+
+    // A settled entry stands in for the rendered transcript: it holds a
+    // built Element whose colours are already resolved.
+    const auto seed_cache = [](Model& m) {
+        m.ui.view_cache.message_md(ThreadId{"t"}, MessageId{"m1"}).finalized =
+            std::make_shared<maya::Element>();
+    };
+    const auto cached = [](Model& m) {
+        const auto* c = m.ui.view_cache.peek(ThreadId{"t"}, MessageId{"m1"});
+        return c != nullptr && c->finalized != nullptr;
+    };
+
+    struct Knob { std::string_view id; std::string what; };
+    for (const Knob k : {Knob{ui::panel::kApTier,     "colour tier"},
+                         Knob{ui::panel::kApPolarity, "background polarity"},
+                         Knob{ui::panel::kApSyntax,   "syntax highlighting"}}) {
+        Model m = opened();
+        seed_cache(m);
+        REQUIRE(cached(m));
+        m = press(std::move(m), k.id, form::keys::Action{form::keys::Intent::AdjustUp});
+        CHECK_MESSAGE(!cached(m),
+                      k.what << " changed but the rendered transcript was kept");
+    }
+
+    // The counterexample, and the reason this is a list rather than "always
+    // invalidate": a STRUCTURAL knob must NOT do this. Density and compact
+    // turns change row HEIGHTS, and a sealed turn's height is load-bearing
+    // for the inline scrollback ledger — re-sealing at a new height tears
+    // it. Those settings are forward-only by design.
+    for (const Knob k : {Knob{ui::panel::kApDensity, "density"},
+                         Knob{ui::panel::kApCompact, "compact turns"}}) {
+        Model m = opened();
+        seed_cache(m);
+        m = press(std::move(m), k.id, form::keys::Action{form::keys::Intent::AdjustUp});
+        CHECK_MESSAGE(cached(m),
+                      k.what << " is structural and must not re-seal the ledger");
+    }
+}
+
 TEST_CASE("appearance: Esc steps back, it does not close everything") {
     install_stub_deps();
     // Reached the way a user reaches it: Ctrl+K, then the Appearance row.

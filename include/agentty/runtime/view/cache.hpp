@@ -346,6 +346,20 @@ public:
     // first render.
     void clear() noexcept { entries_.clear(); pinned_.clear(); }
 
+    // Drop the SETTLED memos only, leaving pinned entries untouched.
+    //
+    // For invalidating rendered appearance without disturbing the stream.
+    // A settled entry is a pure memo — `finalized` is a built Element with
+    // its colours already resolved — so after a theme change it is simply
+    // wrong, and dropping it costs one rebuild. A PINNED entry is the
+    // opposite: it holds load-bearing animation state (the live reveal
+    // widget, an active defer machine) that cannot be reconstructed from
+    // the message, and dropping it mid-stream would restart the reveal of
+    // the turn currently being written. Those entries are rebuilt from
+    // their widget every frame anyway, so they follow a new theme on their
+    // own without being destroyed.
+    void clear_settled() noexcept { entries_.clear(); }
+
 private:
     // One payload type, two homes. A key lives in AT MOST ONE of these at
     // a time; migrate_() moves the Entry between them, preserving the

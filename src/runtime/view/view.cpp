@@ -108,12 +108,20 @@ maya::Element view(const Model& m) {
     // costs two getenvs and means the look follows the terminal it is
     // actually on.
     {
-        static const maya::Theme* applied = nullptr;
         const auto r = ui_prefs::resolve(m.d.ui, /*tty=*/true);
-        if (r.theme != applied) {
-            applied = r.theme;
-            maya::app_set_theme(*r.theme);
-        }
+        // Pushed UNCONDITIONALLY. There used to be a `static const Theme*
+        // applied` cache here that skipped the call when the pointer had not
+        // moved, which duplicated a guard maya already owns — app_set_theme()
+        // compares by value and returns early itself, because what a swap
+        // costs is maya's knowledge, not ours. Two caches for one fact is how
+        // they desync: a `static` outlives any Runtime, so after the runtime
+        // is torn down and rebuilt (suspend for a child process, a resize
+        // re-init) the fresh Runtime holds a default-constructed theme while
+        // this cache still claims the user's scheme was applied — and never
+        // pushes it again. That is a permanently mis-themed session with no
+        // way back short of picking a different scheme. The redundant guard
+        // bought one pointer compare per frame and cost correctness.
+        maya::app_set_theme(*r.theme);
         // maya's slot above is for the RENDERER. agentty's view builders
         // choose their colours while BUILDING the tree — `fg()` runs long
         // before a renderer ever sees a Theme — so the palette has to be
