@@ -194,6 +194,18 @@ to `maya::Conversation::divider()` (defined in
 function returns a width-aware indented `─` rule with a fixed
 `hash_id` of `"maya.conversation.divider"`.
 
+**The Appearance coupling.** `gap_row()` is 3 rows normally and 1 row
+under the *compact turns* setting, so its height is no longer a
+constant. The frozen builder therefore seals it with `gap_rows()` — a
+function of the same pref, evaluated at the same instant — rather than
+the old `kGapRows` literal. If the two ever disagree the ledger drifts
+and the canvas tears, which is the same failure mode this section
+exists to prevent. See `docs/APPEARANCE.md` §2.2.
+
+Changing the setting mid-session does **not** re-render already-frozen
+seams; they keep the height they were sealed with. Only future freezes
+use the new value, which is exactly what keeps the ledger consistent.
+
 **Why symmetry is the invariant.** At a freeze instant, rows
 N-1, N-2, … of the live tail are physically on the wire (some may
 already be in native scrollback). When `freeze_range` runs, those

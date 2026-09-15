@@ -2,7 +2,10 @@
 
 What every widget in agentty's UI accepts (Config schema) and what agentty
 fills in. Read this alongside [`RENDERING.md`](RENDERING.md), which
-walks the visual hierarchy and data flow.
+walks the visual hierarchy and data flow, and
+[`APPEARANCE.md`](APPEARANCE.md), which covers the user-facing settings
+that feed several of these Configs (density, motion, prose width, tool
+output, thinking, timestamps) and the forward-only rule they obey.
 
 The architectural rule:
 
