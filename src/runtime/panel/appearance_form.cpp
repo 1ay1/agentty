@@ -11,6 +11,7 @@
 
 #include <maya/style/schemes.hpp>
 
+#include <array>
 #include <cctype>
 #include <string>
 #include <vector>
