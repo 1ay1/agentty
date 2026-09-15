@@ -383,6 +383,104 @@ TEST_CASE("appearance: only a theme that names a background owns the canvas") {
     CHECK(owning > 0);
 }
 
+TEST_CASE("appearance: usable on the terminals issue #37 reported") {
+    // github.com/1ay1/agentty#37 — "Horrible look and feel in non-black
+    // terminals. Almost unusable." Light-grey background, black fonts, and
+    // a reasonable objection that TERM was being ignored.
+    //
+    // The defence is that the DEFAULT theme states no colours at all, so it
+    // cannot be wrong about a background it never assumed. This walks the
+    // reporter's actual environments and asserts exactly that.
+
+    struct Env { const char* term; const char* colorterm;
+                 const char* fgbg; const char* no_color; };
+
+    auto with_env = [](const Env& e, auto&& fn) {
+        ::unsetenv("TERM"); ::unsetenv("COLORTERM");
+        ::unsetenv("COLORFGBG"); ::unsetenv("NO_COLOR"); ::unsetenv("MAYA_COLOR");
+        if (e.term)      ::setenv("TERM", e.term, 1);
+        if (e.colorterm) ::setenv("COLORTERM", e.colorterm, 1);
+        if (e.fgbg)      ::setenv("COLORFGBG", e.fgbg, 1);
+        if (e.no_color)  ::setenv("NO_COLOR", e.no_color, 1);
+        fn();
+        ::unsetenv("TERM"); ::unsetenv("COLORTERM");
+        ::unsetenv("COLORFGBG"); ::unsetenv("NO_COLOR"); ::unsetenv("MAYA_COLOR");
+    };
+
+    const Env envs[] = {
+        {"rxvt-unicode",   nullptr,     "0;15", nullptr},  // the report: light bg
+        {"xterm",          nullptr,     "0;7",  nullptr},  // light bg, other index
+        {"vt100",          nullptr,     nullptr, nullptr}, // "TERM=vt100 solves it"
+        {"dumb",           nullptr,     nullptr, nullptr},
+        {"xterm-256color", "truecolor", nullptr, "1"},     // NO_COLOR
+        {"konsole",        nullptr,     nullptr, nullptr},
+        {"screen",         nullptr,     nullptr, nullptr},
+    };
+
+    for (const Env& e : envs) {
+        with_env(e, [&] {
+            // Defaults: native, tier auto, polarity auto.
+            const auto r = ui_prefs::resolve(ui_prefs::Prefs{}, /*tty=*/true);
+
+            // THE invariant. Whatever was detected, the default theme states
+            // neither a foreground nor a background, so it is legible on a
+            // light terminal, a dark one, and a monochrome one alike.
+            CHECK(r.theme->text.kind() == maya::Color::Kind::Default);
+            CHECK(r.theme->background.kind() == maya::Color::Kind::Default);
+            // And it never fills the canvas, so the user's own background
+            // (and its transparency) survives.
+            CHECK_FALSE(maya::theme::owns_canvas(*r.theme));
+        });
+    }
+
+    // TERM is genuinely consulted — the reporter's specific complaint.
+    // Different TERMs must produce different tiers, or detection is theatre.
+    with_env({"dumb", nullptr, nullptr, nullptr}, [&] {
+        CHECK(ui_prefs::resolve(ui_prefs::Prefs{}, true).tier
+              == maya::theme::ColorTier::Mono);
+    });
+    with_env({"vt100", nullptr, nullptr, nullptr}, [&] {
+        CHECK(ui_prefs::resolve(ui_prefs::Prefs{}, true).tier
+              == maya::theme::ColorTier::Ansi16);
+    });
+    with_env({"xterm-256color", nullptr, nullptr, nullptr}, [&] {
+        CHECK(ui_prefs::resolve(ui_prefs::Prefs{}, true).tier
+              == maya::theme::ColorTier::Ansi256);
+    });
+    with_env({"xterm-256color", "truecolor", nullptr, nullptr}, [&] {
+        CHECK(ui_prefs::resolve(ui_prefs::Prefs{}, true).tier
+              == maya::theme::ColorTier::TrueColor);
+    });
+    // konsole over ssh: COLORTERM does not survive the hop, TERM does.
+    with_env({"konsole", nullptr, nullptr, nullptr}, [&] {
+        CHECK(ui_prefs::resolve(ui_prefs::Prefs{}, true).tier
+              == maya::theme::ColorTier::TrueColor);
+    });
+
+    // A light background is DETECTED, not guessed, when COLORFGBG says so.
+    with_env({"xterm", nullptr, "0;15", nullptr}, [&] {
+        CHECK(ui_prefs::resolve(ui_prefs::Prefs{}, true).polarity
+              == maya::theme::Polarity::Light);
+    });
+
+    // "What if I need or want black&white terminal?" — an explicit mono
+    // request is honoured, and still leaves a readable, unpainted frame.
+    with_env({"xterm-256color", "truecolor", nullptr, nullptr}, [&] {
+        ::setenv("MAYA_COLOR", "none", 1);
+        const auto r = ui_prefs::resolve(ui_prefs::Prefs{}, true);
+        CHECK(r.tier == maya::theme::ColorTier::Mono);
+        CHECK_FALSE(maya::theme::owns_canvas(*r.theme));
+    });
+
+    // A named RGB scheme is NOT applied below 256 colours: quantising
+    // Dracula into sixteen is worse than the user's own palette.
+    with_env({"vt100", nullptr, nullptr, nullptr}, [&] {
+        ui_prefs::Prefs p; p.theme = "Dracula";
+        const auto r = ui_prefs::resolve(p, true);
+        CHECK(r.theme == &maya::theme::native);
+    });
+}
+
 TEST_CASE("appearance: Esc steps back, it does not close everything") {
     install_stub_deps();
     // Reached the way a user reaches it: Ctrl+K, then the Appearance row.

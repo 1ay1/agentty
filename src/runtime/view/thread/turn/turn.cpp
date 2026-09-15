@@ -1634,16 +1634,27 @@ std::optional<maya::Element> reasoning_slot(const Message& msg, const Model& m) 
     //           theme may map bright_black to near-black, or white to near-bg);
     //           a fixed mid-gray does. Still clearly recedes below the bright-
     //           white answer prose.
-    //   header→ a fixed gray (0x9a9a9a), same always-visible reasoning as the
-    //           body: ui::muted (bright_black) collapsed to near-invisible on
-    //           true-black themes, hiding the live "Thinking" word and the
-    //           settled "Reasoned · ~N tokens" meter. NOTE: the widget's
-    //           settled-rail dim(accent)=accent.darken() is a no-op on a named
-    //           ANSI color, so the magenta rail stays constant (fine — a
-    //           steady rail reads as one continuous aside).
-    rcfg.accent      = ui::role_brand;                     // ┃ rail + sigil
-    rcfg.header_word = maya::Color::rgb(0x9a, 0x9a, 0x9a);  // visible header/meter
-    rcfg.body_fg     = maya::Color::rgb(0x9a, 0x9a, 0x9a);  // always-visible dim
+    //   header→ the theme's secondary ink, same always-visible reasoning as
+    //           the body.
+    //
+    //   These were a FIXED grey (0x9a9a9a), chosen because ui::muted
+    //   (bright_black) collapsed to near-invisible on true-black themes and
+    //   hid the live "Thinking" word and the "Reasoned · ~N tokens" meter.
+    //   That traded one invisibility for another: a mid-grey pinned in RGB
+    //   is equally unreadable on a LIGHT terminal, which is precisely the
+    //   "almost unusable on a light background" report (issue #37).
+    //
+    //   The theme's own secondary/muted inks are the fix, because they are
+    //   contrast-checked against that theme's canvas — native resolves them
+    //   to the user's own ANSI palette, and a named scheme to hues picked
+    //   against its own background. Neither can be wrong the way a literal
+    //   always is on half the terminals in the world.
+    //           NOTE: the widget's settled-rail dim(accent)=accent.darken()
+    //           is a no-op on a named ANSI color, so the magenta rail stays
+    //           constant (fine — a steady rail reads as one continuous aside).
+    rcfg.accent      = ui::role_brand;          // ┃ rail + sigil
+    rcfg.header_word = ui::text_secondary;      // visible header/meter
+    rcfg.body_fg     = ui::text_secondary;      // always-visible dim
     // Thinking::Collapsed — "a line you can open". While the model is live
     // this becomes a thought TICKER: the newest few lines only, so a long
     // chain-of-thought stays a glance rather than a wall that shoves the
