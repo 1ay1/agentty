@@ -13,7 +13,9 @@ Vocabulary, in one sentence:
 
 > **Prefs** are what you asked for; **Resolved** is what the terminal
 > can give you; the **pane** shows both; the **seam** carries them to
-> the renderer.
+> the renderer. Color is applied at paint time, structure at build time
+> — which is the whole reason the theme behaves differently from every
+> other knob.
 
 ---
 
@@ -21,10 +23,12 @@ Vocabulary, in one sentence:
 
 Everything below follows from three constraints, in priority order.
 
-1. **Settings apply to FUTURE renderings only.** Anything already
-   committed to the terminal's scrollback is immutable and stays exactly
-   as it was drawn. This is not a limitation to work around — it is the
-   invariant that keeps scrollback uncorrupted.
+1. **Structural settings apply to FUTURE renderings only.** How tall an
+   element is, and what content it contains, is decided when it is built
+   and never revisited. The theme is the exception, and only because
+   color is applied at *paint* time rather than build time — see §2.
+   This is not a limitation to work around; it is the invariant that
+   keeps scrollback uncorrupted.
 2. **There is no apply step.** A theme is judged by *looking* at it, so
    every row writes through on the keystroke that changes it. Between
    choosing and seeing there must not be a restart.
@@ -38,50 +42,97 @@ Rule 3 is what stops the three copies disagreeing.
 
 ---
 
-## 2. Rule 1 in detail: why nothing ever re-renders
+## 2. Rule 1 in detail: what changes, and what cannot
 
 This is the rule that shapes every other decision, so it is worth being
-precise about.
+precise about — including about the one setting that behaves
+differently.
 
 agentty's transcript is **inline scrollback** (see
-`docs/INLINE_SCROLLBACK.md`): settled turns are rendered once, sealed as
-immutable `maya::Element` values with a recorded row count, and emitted
-into the terminal's own scrollback buffer. The terminal owns those rows
-from that moment on. agentty cannot reach back into them — nothing can,
-short of clearing the screen.
+`docs/INLINE_SCROLLBACK.md`): settled turns are rendered once and sealed
+as immutable `maya::Element` values in a `ScrollbackLedger`. Those
+elements are then either (a) still on screen, repainted from the ledger
+every frame, or (b) committed to the terminal's own scrollback and gone
+from agentty's reach forever.
 
-So a setting that changed already-rendered output would be a setting
-that *cannot work*. Worse, the attempt corrupts: the frozen ledger
-tracks how many rows each sealed entry occupies, and if a re-render
-disagrees with the recorded height, every subsequent row is off by the
-difference. The canvas tears.
+### 2.1 Structure is fixed at build time; color is not
 
-**Therefore:**
+The distinction that matters is **which part of a sealed element a
+setting touches**.
 
-| What changes | When you change a setting |
+A sealed `Element` is a tree of nodes carrying *semantic* color slots —
+`Color::red()`, `Color::default_color()`, `theme.muted`. It does **not**
+carry escape bytes. Those are produced by the paint pass, against the
+theme live *at paint time*.
+
+So:
+
+| A setting that changes… | Effect on a sealed, on-screen element |
 |---|---|
-| Turns already in scrollback | Nothing. They keep the look they were drawn with. |
-| The live tail (streaming turn) | Re-rendered next frame, so it changes immediately. |
-| Panels, pickers, the composer | Re-rendered every frame, so they change immediately. |
-| Every future turn | Drawn with the new setting. |
+| **Color** (theme) | Repaints in the new palette. The tree is unchanged; only the emitted bytes differ. |
+| **Structure** (height, width, what content exists) | Nothing. The tree was built once and is never rebuilt. |
 
-A session where you switch themes halfway will have two looks in its
-scrollback. **That is correct behaviour**, and the honest one: the
-alternative is not "one consistent look", it is a torn canvas.
+**The theme is the only setting in the color column.** Every other knob
+in this pane — density, compact turns, prose width, tool output,
+thinking, timestamps — changes *structure*: how many rows an element
+occupies, or what content it contains. Those are decided at build time
+and frozen there.
 
-### 2.1 The one exception, and why it is not one
+This is why a theme switch restyles the visible transcript and a
+compact-turns switch does not. It is not an inconsistency — the two act
+on different layers.
+
+### 2.2 Why structure must not change retroactively
+
+The ledger records each sealed block's **real laid-out height**, stamped
+by the paint pass every frame — same layout pass, same width, same frame
+as the bytes on the wire. Those recordings mint the `ScrollbackDebt`
+token that tells the terminal how many rows to commit.
+
+If a rebuild changed an element's height, the recorded height and the
+committed count would disagree, and every subsequent row would be off by
+the difference. The canvas tears. (`INLINE_SCROLLBACK.md` §2 lists three
+historical bugs of exactly this shape.)
+
+Color changes are safe against this machinery precisely because they are
+**height-preserving**: a repaint in a different palette lays out
+identically and re-stamps the same height.
+
+### 2.3 Rows already committed to the terminal
+
+Once `drop_front` + `harvest` commit a block to native scrollback,
+agentty cannot touch it at all — not its structure, not its colors. It
+belongs to the terminal now.
+
+So a long session that switches themes shows the new palette for
+everything still in the ledger, and the old palette for everything
+scrolled past the commit boundary. **That is correct behaviour**: the
+alternative is not "one consistent look", it is rewriting bytes we do
+not own.
+
+### 2.4 Summary
+
+| Surface | Theme change | Structural change |
+|---|---|---|
+| Committed to native scrollback | unchanged | unchanged |
+| Sealed in the ledger, on screen | **restyled next frame** | unchanged |
+| Live tail (streaming turn) | restyled | rebuilt → changes |
+| Panels, pickers, composer | restyled | rebuilt → changes |
+| Every future turn | new palette | new structure |
+
+### 2.5 The one exception, and why it is not one
 
 `rehydrate_frozen()` rebuilds the entire frozen prefix from the
 transcript. It runs *only* on a fresh full repaint — thread load, fork,
 rewind, `Ctrl-L` — never mid-session. At those moments there is no
 committed prefix that must stay byte-accurate, because the screen is
-being cleared and redrawn from scratch. So a reload of an old thread
-*does* pick up your current settings for the whole transcript.
+being cleared and redrawn from scratch. So reloading an old thread *does*
+pick up your current structural settings for the whole transcript.
 
-Mid-session freezing with different settings is forbidden for the same
-reason mid-stream freezing is forbidden (`INLINE_SCROLLBACK.md` §4).
+Mid-session rebuilding is forbidden for the same reason mid-stream
+freezing is forbidden (`INLINE_SCROLLBACK.md` §4).
 
-### 2.2 The height coupling
+### 2.6 The height coupling
 
 Two settings change how *tall* a rendered thing is, which is where the
 tearing risk concentrates:
@@ -89,18 +140,18 @@ tearing risk concentrates:
 - **Compact turns** changes the inter-turn seam from 3 rows to 1.
 - **Tool output** changes how many body lines a tool card shows.
 
-Frozen scrollback seals each element with an explicit row count:
+Frozen scrollback seals each element with an explicit row estimate:
 
 ```cpp
 push_frozen(m, gap_row(), static_cast<std::size_t>(gap_rows()), true);
 ```
 
-If `gap_row()` and `gap_rows()` ever disagree, the ledger drifts. They
-are therefore **a function of the same pref, evaluated at the same
-instant** — `gap_rows()` is a function, never a constant someone has to
-remember to update alongside the element. `kGapRows` survives only as
-the documented non-compact height for code that reasons about the roomy
-layout specifically.
+If `gap_row()` and `gap_rows()` ever disagree, the estimate and the
+element diverge. They are therefore **a function of the same pref,
+evaluated at the same instant** — `gap_rows()` is a function, never a
+constant someone has to remember to update alongside the element.
+`kGapRows` survives only as the documented non-compact height for code
+that reasons about the roomy layout specifically.
 
 The same hazard in a different costume: **tool output must enter the
 cache key**, not be applied after the lookup. A body built under
@@ -367,11 +418,12 @@ name every option in a header comment, it is a `Pick`.
 
 **Expandable settled content.** Rejected outright, and worth recording
 why: a "▸ click to expand" affordance on a settled reasoning block or
-tool card would have to *grow* an element already sealed in scrollback
-with a recorded height. That is the exact ledger drift §2.2 exists to
-prevent. Everything that collapses in agentty collapses at **build
-time**, as a property of how the element was constructed, and never
-changes afterward.
+tool card would have to *grow* an element already sealed in the ledger
+with a recorded height. That is the exact drift §2.2 exists to prevent —
+and note that it is a STRUCTURAL change, so the theme's paint-time
+escape hatch does not apply to it. Everything that collapses in agentty
+collapses at **build time**, as a property of how the element was
+constructed, and never changes afterward.
 
 **Per-project appearance.** Rejected: a light terminal is a property of
 your eyes, not of the repo. Appearance persists to the user store and
