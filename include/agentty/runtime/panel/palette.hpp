@@ -111,12 +111,18 @@ inline constexpr std::array kCommands = std::array{
     CommandDef{Command::OpenCommands,  "Slash commands",     "Discovered /commands — author in .agentty/commands/*.md", "", Category::Config},
     CommandDef{Command::OpenAgents,    "Subagents",          "Task agent types — built-ins + your .agentty/agents/*.md", "", Category::Config},
     CommandDef{Command::OpenHooks,     "Hooks",              "Lifecycle hooks + approval state (.agentty/hooks.json)", "", Category::Config},
-    CommandDef{Command::OpenGeneralSettings, "Settings",     "Permission profile, Smart Mode, retrieval — the live toggles", "", Category::Config},
+    CommandDef{Command::OpenGeneralSettings, "Settings",     "Permission profile, Smart Mode, retrieval — and Appearance: theme, colors, density, motion", "", Category::Config},
     // (No Appearance entry. It is one Enter deeper — Settings → Appearance —
     // because the palette is the list you scan when you know what you want,
     // and a theme is not something you reach for mid-turn. Two doors to one
     // pane also makes the palette the place people learn it from, which is
-    // the wrong place: Settings is where the rest of its neighbours live.)
+    // the wrong place: Settings is where the rest of its neighbours live.
+    //
+    // But one door you cannot FIND is no door. The filter spans label +
+    // description, so the words people actually type — theme, colors,
+    // appearance — are named in Settings' description above. That is the
+    // whole job of a description here: to be the search index for the rows
+    // that live one level down.)
     // ── Account ─────────────────────────────────────────────────────────
     CommandDef{Command::OpenLogin,     "Sign in / add account", "Sign in — or add another OAuth / API-key account", "", Category::Account},
     CommandDef{Command::SignOut,       "Sign out",           "Remove saved credentials and re-open sign-in", "", Category::Account, /*danger=*/true},

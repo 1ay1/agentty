@@ -100,6 +100,20 @@ TEST_CASE("command palette") {
         check(has_id(r, Command::Quit), "filter is case-insensitive");
     }
 
+    // ── 6b. a pane one level down is still FINDABLE ───────────────────────
+    // Appearance has no palette row on purpose (one door: Settings →
+    // Appearance). That only works if the words people type to look for it
+    // land on the door. If someone ever trims Settings' description back to
+    // "the live toggles", this fails — which is the point.
+    {
+        for (std::string_view q : {"theme", "appearance", "colors", "motion",
+                                   "density"}) {
+            auto r = filtered_commands(q);
+            check(has_id(r, Command::OpenGeneralSettings),
+                  "a word for the Appearance pane reaches Settings");
+        }
+    }
+
     // ── 7. label hits rank ABOVE description-only hits ────────────────────
     {
         // "changes" is in the LABELS of AcceptAll/RejectAll/ReviewChanges and
