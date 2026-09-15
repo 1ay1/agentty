@@ -1412,6 +1412,16 @@ int main(int argc, char** argv) {
                 backend = maya::RenderBackend::Grid;
         }
     }
+    // Markdown keeps its colours in a flat projected palette rather than
+    // reading the Theme per-frame (its render path is hot and the async
+    // parse worker touches it off-thread). So it has to be RE-DERIVED on
+    // every theme swap — otherwise picking a scheme repaints the chrome
+    // while prose, code spans and tables stay on the old palette, which is
+    // most of what is actually on screen.
+    maya::on_theme_changed([](const maya::Theme& t) {
+        maya::set_markdown_palette(maya::markdown_palette_from(t));
+    });
+
     maya::run<app::AgenttyApp>({.title = "agentty", .fps = 0,
                                .mode = maya::Mode::Inline, .backend = backend});
 
