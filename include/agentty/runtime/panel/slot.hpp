@@ -60,6 +60,7 @@
 #include "agentty/runtime/panel/rag.hpp"
 #include "agentty/runtime/panel/settings/list.hpp"
 #include "agentty/runtime/panel/fork.hpp"
+#include "agentty/runtime/panel/appearance.hpp"
 #include "agentty/runtime/panel/form.hpp"
 
 namespace agentty::ui::panel {
@@ -161,6 +162,17 @@ struct PluginEdit : WithFrom {
     // preserve pattern as SmartMode's advanced toggle.
     std::string built_kind;
 };
+// The Appearance pane. A form, like SmartMode/PluginEdit — grouped rows,
+// live on every keystroke. `picking` + `picker` are the theme browser
+// floating OVER it: a Pick row hands off rather than growing the dropdown
+// into a worse picker, and the pane stays painted behind so the list is
+// its own preview.
+//
+// Composed, not doubly-inherited: the visual gate decomposes a panel via
+// structured bindings, which two bases with members make ill-formed.
+struct Appearance : WithFrom {
+    agentty::ui::panel::AppearancePane pane;
+};
 struct Fork            : agentty::fork_panel::Open, WithFrom {};
 struct DiffReview      : pick::OpenAtCell, WithFrom {};
 struct Stats           : agentty::stats_panel::Open, WithFrom {};
@@ -170,7 +182,7 @@ using Variant = std::variant<
     Models, Providers, ThreadList, SmartMode,
     Palette, Mention, Symbol,
     CodeBlocks, CodeBlockResult, ToolOutput, Checkpoints,
-    Rag, SettingsList, PluginEdit, Fork,
+    Rag, SettingsList, PluginEdit, Appearance, Fork,
     DiffReview, Stats>;
 
 // The one indirection that lets the type refer to itself: a stashed parent
@@ -293,6 +305,7 @@ enum class Kind {
     Rag,
     SettingsList,
     PluginEdit,
+    Appearance,
     Fork,
     Models,
     Providers,
@@ -322,6 +335,7 @@ enum class Kind {
         Kind operator()(const Rag&)     const { return Kind::Rag; }
         Kind operator()(const SettingsList&)    const { return Kind::SettingsList; }
         Kind operator()(const PluginEdit&)      const { return Kind::PluginEdit; }
+        Kind operator()(const Appearance&)      const { return Kind::Appearance; }
         Kind operator()(const Fork&)            const { return Kind::Fork; }
         Kind operator()(const DiffReview&)      const { return Kind::DiffReview; }
         Kind operator()(const Stats&)           const { return Kind::Stats; }

@@ -111,8 +111,7 @@ template <class T, class V>
         add(Command::OpenHooks,        emit_val<OpenSettingsList>(settings::Category::Hooks));
         add(Command::OpenGeneralSettings,
             emit_val<OpenSettingsList>(settings::Category::General));
-        add(Command::OpenUiSettings,
-            emit_val<OpenSettingsList>(settings::Category::UI));
+        add(Command::OpenUiSettings,   emit<OpenAppearance>());
         // ── Account ──
         add(Command::OpenLogin,        emit<OpenLogin>());
         add(Command::SignOut,          emit<SignOut>());

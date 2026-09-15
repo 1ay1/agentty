@@ -30,21 +30,6 @@ namespace se = agentty::settings;
 namespace cmdf = agentty::app::cmd;   // cmd_factory (local vars named `cmd` shadow the ns)
 
 namespace {
-// Write the appearance prefs through to the user store, and hand the model
-// back unchanged otherwise.
-//
-// Appearance is a USER concern — a light terminal follows you between
-// checkouts — so it goes to the user settings, never a project .agentty.
-// Saving on every keystroke rather than on close is deliberate: the panel
-// has no apply step, so "what I see" and "what is saved" must never be two
-// different things.
-[[nodiscard]] Step persist_ui(Model m) {
-    auto s = deps().load_settings();
-    s.ui = m.d.ui;
-    deps().save_settings(s);
-    return done(std::move(m));
-}
-
 // The mcp.json an edit on THIS row should write. A server row carries the
 // .agentty dir it was read from (scope provenance from PluginModel), so a
 // remove/toggle lands in the RIGHT file — a project server edits the project
@@ -236,66 +221,16 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
                     return agentty::app::update(std::move(m),
                                                 Msg{OpenSmartMode{}});
                 }
+                case se::Action::OpenAppearance: {
+                    return agentty::app::update(std::move(m),
+                                                Msg{OpenAppearance{}});
+                }
                 // (There is deliberately NO Activate-arm for plugin removal.
                 // Removal is `d` → SettingsListRemove, which is TWO-step —
                 // arm, then confirm. An Enter-fired remove here would be a
                 // one-press destructive action; the old arm was unreachable
                 // — no row builder ever emitted it — but unreachable code
                 // with live side effects is a trap, not a feature.)
-                // ── Appearance ──────────────────────────────────
-                //
-                // Live, all of them: mutate the pref, persist, done. The
-                // next frame already renders with it because the view is a
-                // pure function of the Model — there is no theme to reload
-                // and no apply step to forget.
-                case se::Action::CycleColorTier:
-                    m.d.ui.tier = agentty::ui_prefs::next(m.d.ui.tier);
-                    return persist_ui(std::move(m));
-                case se::Action::CyclePolarity:
-                    m.d.ui.polarity = agentty::ui_prefs::next(m.d.ui.polarity);
-                    return persist_ui(std::move(m));
-                case se::Action::CycleDensity:
-                    m.d.ui.density = agentty::ui_prefs::next(m.d.ui.density);
-                    return persist_ui(std::move(m));
-                case se::Action::CycleMotion:
-                    m.d.ui.motion = agentty::ui_prefs::next(m.d.ui.motion);
-                    return persist_ui(std::move(m));
-                case se::Action::CycleToolOutput:
-                    m.d.ui.tool_output = agentty::ui_prefs::next(m.d.ui.tool_output);
-                    return persist_ui(std::move(m));
-                case se::Action::CycleThinking:
-                    m.d.ui.thinking = agentty::ui_prefs::next(m.d.ui.thinking);
-                    return persist_ui(std::move(m));
-                case se::Action::CycleTimestamps:
-                    m.d.ui.timestamps = agentty::ui_prefs::next(m.d.ui.timestamps);
-                    return persist_ui(std::move(m));
-                case se::Action::ToggleSyntax:
-                    m.d.ui.syntax = !m.d.ui.syntax;
-                    return persist_ui(std::move(m));
-                case se::Action::ToggleCompactTurns:
-                    m.d.ui.compact_turns = !m.d.ui.compact_turns;
-                    return persist_ui(std::move(m));
-                case se::Action::OpenThemePicker: {
-                    // Cycle rather than open a sub-picker.
-                    //
-                    // A theme is judged by LOOKING at it, and a modal picker
-                    // covers the very screen being judged — you would be
-                    // choosing Dracula by reading the word "Dracula". Enter
-                    // steps to the next scheme and the frame behind the row
-                    // repaints in it, so the list itself is the preview.
-                    // native leads the cycle, so the way back to "just my
-                    // terminal" is always forward.
-                    const auto& all = maya::theme::schemes;
-                    const int n = static_cast<int>(std::size(all));
-                    int at = -1;   // -1 == native
-                    for (int k = 0; k < n; ++k)
-                        if (m.d.ui.theme == all[static_cast<std::size_t>(k)].name) { at = k; break; }
-                    const int nxt = at + 1;
-                    m.d.ui.theme = (nxt >= n)
-                        ? std::string{}
-                        : std::string{all[static_cast<std::size_t>(nxt)].name};
-                    return persist_ui(std::move(m));
-                }
 
                 case se::Action::TogglePlugin: {
                     // Ignore a toggle while a connect/reload is already in

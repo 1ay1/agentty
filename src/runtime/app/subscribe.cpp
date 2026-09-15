@@ -536,6 +536,37 @@ std::optional<Msg> on_plugin_edit(const FormFocus& f, const KeyEvent& ev) {
     return on_form(f, ev, [](form::keys::Action a) { return Msg{PluginEditKey{a}}; });
 }
 
+// Appearance. A form pane, plus one modal child: the theme browser.
+//
+// The browser is a filtering LIST, so it gets the shared nav grammar rather
+// than a hand-rolled switch — that is the whole point of NavSpec, and it is
+// how the browser inherits PageUp/PageDn and Home/End without this file
+// knowing they exist. While it is up it owns the keyboard outright: it has
+// a `filter_ch`, so a printable is a query character and never a form verb.
+std::optional<Msg> on_appearance(const FormFocus& f, bool picking,
+                                 const KeyEvent& ev) {
+    if (picking) {
+        nav::NavSpec s;
+        s.close     = [] { return Msg{AppearanceThemeCancel{}}; };
+        s.select    = [] { return Msg{AppearanceThemeCommit{}}; };
+        s.move      = [](int d) { return Msg{AppearanceThemeMove{d}}; };
+        s.filter_ch = [](char32_t c) {
+            std::string t;
+            maya::detail::encode_utf8(t, c);
+            return Msg{AppearanceThemeQuery{std::move(t)}};
+        };
+        // Empty text IS the backspace signal — one message for "the query
+        // changed", so the reducer has one place to re-filter and re-preview.
+        s.filter_bs = [] { return Msg{AppearanceThemeQuery{""}}; };
+        s.page_step = 10;
+        // Modal: swallow anything the grammar doesn't claim, so a stray key
+        // cannot fall through to the pane painted behind the list.
+        if (auto msg = nav::translate(s, ev)) return msg;
+        return Msg{NoOp{}};
+    }
+    return on_form(f, ev, [](form::keys::Action a) { return Msg{AppearanceKey{a}}; });
+}
+
 std::optional<Msg> on_diff_review(const KeyEvent& ev) {
     if (std::holds_alternative<SpecialKey>(ev.key)) {
         auto sk = std::get<SpecialKey>(ev.key);
@@ -1061,13 +1092,18 @@ Sub<Msg> subscribe(const Model& m) {
 
     // Which mode each form-backed pane is in. Three bools per pane — NOT the
     // pane's rows, which would be a per-frame deep copy on the input path.
-    FormFocus rag_form, smart_form_snap, plugin_form_snap;
+    FormFocus rag_form, smart_form_snap, plugin_form_snap, appearance_form_snap;
+    bool appearance_picking = false;
     if (const auto* o = m.ui.panel.get<ui::panel::Rag>())
         rag_form = focus_of(o->embed.form);
     if (const auto* o = m.ui.panel.get<ui::panel::SmartMode>())
         smart_form_snap = focus_of(o->form);
     if (const auto* o = m.ui.panel.get<ui::panel::PluginEdit>())
         plugin_form_snap = focus_of(o->form);
+    if (const auto* o = m.ui.panel.get<ui::panel::Appearance>()) {
+        appearance_form_snap = focus_of(o->pane.form);
+        appearance_picking   = o->pane.picking;
+    }
 
     auto key_sub = Sub<Msg>::on_key(
         [=, login_state = m.ui.login](const KeyEvent& ev) -> std::optional<Msg> {
@@ -1131,6 +1167,9 @@ Sub<Msg> subscribe(const Model& m) {
                     case OK::ThreadList:     return on_thread_list(ev);
                     case OK::SmartMode:      return on_smart_mode(smart_form_snap, ev);
                     case OK::PluginEdit:     return on_plugin_edit(plugin_form_snap, ev);
+                    case OK::Appearance:
+                        return on_appearance(appearance_form_snap,
+                                             appearance_picking, ev);
                     case OK::DiffReview:     return on_diff_review(ev);
                     case OK::Todo:           return on_todo_modal(ev);
                     case OK::None:           break;

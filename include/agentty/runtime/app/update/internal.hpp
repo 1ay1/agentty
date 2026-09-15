@@ -364,6 +364,7 @@ Step login_update         (Model m, msg::LoginMsg          lm);
 Step diff_review_update   (Model m, msg::DiffReviewMsg     dm);
 Step smart_mode_update    (Model m, msg::SmartModeMsg      sm);
 Step plugin_edit_update   (Model m, msg::PluginEditMsg     pm);
+Step appearance_update    (Model m, msg::AppearanceMsg     am);
 Step meta_update          (Model m, msg::MetaMsg           mm);
 
 // ── Esc: back one level ───────────────────────────────────────────────

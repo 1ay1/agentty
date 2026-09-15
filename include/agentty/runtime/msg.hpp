@@ -640,6 +640,24 @@ struct ClosePluginEdit {};
 struct PluginEditKey { form::keys::Action action; };
 struct PluginEditPaste { std::string text; };
 
+// ── Appearance pane ──────────────────────────────────────────────────────
+// The look of the thing, as a form: theme, colour tier, density, motion,
+// chrome. Every row is LIVE — the reducer mutates the pref, persists it to
+// the user store and the next frame is painted with it. A settings screen
+// for appearance cannot have an apply step: a theme is judged by LOOKING at
+// it, and between choosing and seeing there must not be a restart.
+struct OpenAppearance {};
+struct CloseAppearance {};
+struct AppearanceKey { form::keys::Action action; };
+// The theme browser, floating over the pane. Its own messages because it is
+// a real picker (57 schemes and growing, fuzzy-searched) rather than a
+// dropdown — see form.hpp's Pick-vs-Choice rule.
+struct AppearancePickTheme {};        // open the browser on the Theme row
+struct AppearanceThemeMove { int delta = 0; };
+struct AppearanceThemeQuery { std::string text; };   // "" = backspace one
+struct AppearanceThemeCommit {};      // Enter: keep the highlighted scheme
+struct AppearanceThemeCancel {};      // Esc: restore the theme we came in on
+
 // ── In-app login modal ───────────────────────────────────────────────────
 // Shown when the user starts agentty with no valid credentials, OR
 // triggered explicitly in-app to sign in or add an account.
@@ -1110,6 +1128,12 @@ using SmartModeMsg = std::variant<
 using PluginEditMsg = std::variant<
     OpenPluginEdit, ClosePluginEdit, PluginEditKey, PluginEditPaste>;
 
+// ── Appearance (theme / density / motion) ──────────────────────
+using AppearanceMsg = std::variant<
+    OpenAppearance, CloseAppearance, AppearanceKey, AppearancePickTheme,
+    AppearanceThemeMove, AppearanceThemeQuery, AppearanceThemeCommit,
+    AppearanceThemeCancel>;
+
 using MetaMsg = std::variant<
     CompactContext, CycleProfile, RestoreCheckpoint, CheckpointRestored,
     ToggleRetrievedExpanded,
@@ -1152,6 +1176,7 @@ using Msg = std::variant<
     msg::DiffReviewMsg,
     msg::SmartModeMsg,
     msg::PluginEditMsg,
+    msg::AppearanceMsg,
     msg::MetaMsg
 >;
 
@@ -1198,6 +1223,7 @@ consteval int leaf_domain_count() {
          + int{in_variant_v<L, msg::DiffReviewMsg>}
          + int{in_variant_v<L, msg::SmartModeMsg>}
          + int{in_variant_v<L, msg::PluginEditMsg>}
+         + int{in_variant_v<L, msg::AppearanceMsg>}
          + int{in_variant_v<L, msg::ToolOutputMsg>}
          + int{in_variant_v<L, msg::MetaMsg>};
 }
@@ -1256,7 +1282,7 @@ static_assert(leaf_domain_count<Tick>()                      == 1,
 // they must also update the kDomains array used by the dispatcher in
 // update.cpp, which currently exhausts on 12 arms. Mismatch → dispatch
 // switch loses a domain silently.
-static_assert(std::variant_size_v<Msg> == 22,
+static_assert(std::variant_size_v<Msg> == 23,
               "Msg domain count changed — update the dispatcher in "
               "src/runtime/app/update.cpp and this proof to match");
 

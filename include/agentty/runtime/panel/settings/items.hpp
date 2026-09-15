@@ -20,6 +20,7 @@ enum class Action : std::uint8_t {
     None,          // informational row (no Enter action)
     CycleProfile,  // General: Write → Ask → Minimal
     OpenRag,       // General: open the RAG mode picker
+    OpenAppearance,// General: open the Appearance pane (theme, density, motion)
     OpenSmart,     // General: open Smart Mode config
     // (No RemovePlugin: removal is the two-step `d` → SettingsListRemove
     // flow, never an Enter action — a one-press destructive Enter and a
@@ -35,20 +36,12 @@ enum class Action : std::uint8_t {
     // reducer then switches on a name instead of a number, so reordering
     // the rows cannot silently repoint a row at another setting.
     //
-    // Every one of these is LIVE. The reducer writes the pref, persists it
-    // and the next frame is already painted with it — there is no apply
-    // step, because a settings screen that needs one is a settings screen
-    // you cannot experiment in.
-    OpenThemePicker,   // Appearance: choose among the built-in schemes
-    CycleColorTier,    // Appearance: auto → truecolor → 256 → 16 → mono
-    CyclePolarity,     // Appearance: auto → dark → light
-    CycleDensity,      // Appearance: compact → normal → roomy
-    CycleMotion,       // Appearance: full → reduced → off
-    ToggleSyntax,      // Appearance: syntax highlighting in code fences
-    ToggleCompactTurns,// Appearance: drop the blank line between turns
-    CycleToolOutput,   // Appearance: collapsed → preview → full
-    CycleThinking,     // Appearance: shown → collapsed → hidden
-    CycleTimestamps,   // Appearance: off → relative → absolute
+    // Appearance is NOT here. It was briefly a set of cyclic rows in this
+    // list — Enter to step an enum, eleven of them in a flat wall — and it
+    // was the wrong shape twice over: cycling four times to SEE the options
+    // is worse than a list of them, and eleven ungrouped toggles have no
+    // shape to read. It is a form pane now (panel/appearance.hpp), which is
+    // where grouping, per-row help and provenance already live.
 };
 
 struct Item {

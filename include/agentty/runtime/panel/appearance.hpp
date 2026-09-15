@@ -40,7 +40,12 @@ inline constexpr std::string_view kApToolOutput = "tool_output";
 inline constexpr std::string_view kApThinking   = "thinking";
 inline constexpr std::string_view kApTimestamps = "timestamps";
 
-struct Appearance {
+// The pane's state. Named `AppearancePane` rather than `Appearance` because
+// the panel SLOT type in slot.hpp is what the rest of the runtime says when
+// it means "the Appearance overlay" — that one inherits this and adds the
+// parent-snapshot mixin, and two types with one name in one namespace is a
+// redefinition, not a convenience.
+struct AppearancePane {
     form::Form form;
 
     // The theme picker, when open over this pane. A Pick row hands off to a
@@ -50,6 +55,11 @@ struct Appearance {
         std::string query;
         int         index  = 0;
         int         scroll = 0;
+        // The theme in use when the browser opened. Moving the highlight
+        // APPLIES a scheme (the list is its own preview), so Esc needs
+        // somewhere to put back — without this, cancelling would leave you
+        // wearing the last thing you merely looked at.
+        std::string restore;
     };
     bool        picking = false;
     ThemePicker picker;

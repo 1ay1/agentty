@@ -59,6 +59,20 @@ std::vector<Item> general(const Model& m) {
         i.action    = Action::OpenRag;
         out.push_back(std::move(i));
     }
+    // Appearance. A pane, not rows: it is grouped and has its own theme
+    // browser, neither of which this flat list can hold. The row shows the
+    // theme in use so the commonest reason to open it is answered without
+    // opening it.
+    {
+        Item i;
+        i.primary   = "Appearance";
+        i.secondary = m.d.ui.theme.empty()
+            ? "native \xc2\xb7 theme, density, motion"
+            : (m.d.ui.theme + " \xc2\xb7 theme, density, motion");
+        i.hint      = "Enter: configure";
+        i.action    = Action::OpenAppearance;
+        out.push_back(std::move(i));
+    }
     return out;
 }
 
@@ -256,132 +270,12 @@ std::vector<Item> hooks() {
 }
 
 
-// ── Appearance ──────────────────────────────────────────────────────────
-//
-// Every row here is LIVE: Enter cycles the value, the reducer persists it,
-// and the next frame is painted with it. No apply step — a settings screen
-// you cannot experiment in is one you have to be brave to open.
-//
-// A row reads "<what> — <current value>" with the effect as the dim detail,
-// because the question a reader has is never "what is this called" but
-// "what will change if I press Enter".
-std::vector<Item> ui(const Model& m) {
-    using namespace agentty::ui_prefs;
-    const Prefs& p = m.d.ui;
-    const bool tty = true;   // the panel only exists on a terminal
-    const Resolved r = resolve(p, tty);
-
-    std::vector<Item> out;
-    auto row = [&out](std::string name, std::string value, std::string detail,
-                      Action a, Item::Status st = Item::Status::Neutral) {
-        Item i;
-        i.primary   = std::move(name);
-        i.secondary = std::move(value);
-        i.hint      = std::move(detail);
-        i.action    = a;
-        i.status    = st;
-        out.push_back(std::move(i));
-    };
-
-    // ── Theme ───────────────────────────────────────────────────────
-    {
-        const bool native = p.theme.empty();
-        std::string val = native ? "native — your terminal's own colors"
-                                 : p.theme;
-        const std::string_view why = theme_override_reason(p, r);
-        if (!why.empty()) { val += "  ("; val += why; val += ")"; }
-        row("Theme", std::move(val), "Enter: browse",
-            Action::OpenThemePicker,
-            why.empty() ? Item::Status::Neutral : Item::Status::Bad);
-    }
-
-    // ── Colors ──────────────────────────────────────────────────────
-    //
-    // Both of these show the WISH and the RESOLVED value together
-    // ("auto — truecolor"), which is the only way to tell a working
-    // default from a detection that has gone wrong on this terminal.
-    {
-        std::string val{label(p.tier)};
-        if (p.tier == ColorTier::Auto) {
-            val += " — ";
-            switch (r.tier) {
-                case maya::theme::ColorTier::TrueColor: val += "truecolor"; break;
-                case maya::theme::ColorTier::Ansi256:   val += "256 colors"; break;
-                case maya::theme::ColorTier::Ansi16:    val += "16 colors"; break;
-                case maya::theme::ColorTier::Mono:      val += "monochrome"; break;
-            }
-        }
-        row("Colors", std::move(val), "Enter: cycle", Action::CycleColorTier);
-    }
-    {
-        std::string val{label(p.polarity)};
-        if (p.polarity == Polarity::Auto) {
-            val += " — ";
-            switch (r.polarity) {
-                case maya::theme::Polarity::Dark:    val += "dark"; break;
-                case maya::theme::Polarity::Light:   val += "light"; break;
-                case maya::theme::Polarity::Unknown: val += "not reported"; break;
-            }
-        }
-        row("Background", std::move(val),
-            "Enter: cycle", Action::CyclePolarity);
-    }
-
-    // ── Density ─────────────────────────────────────────────────────
-    {
-        std::string val{label(p.density)};
-        val += " — panels up to " + std::to_string(viewport_rows(p.density))
-             + " rows";
-        row("Density", std::move(val), "Enter: cycle", Action::CycleDensity);
-    }
-    row("Compact turns",
-        p.compact_turns ? "on — no blank line between turns" : "off",
-        "Enter: toggle", Action::ToggleCompactTurns);
-
-    // ── Motion ──────────────────────────────────────────────────────
-    {
-        std::string val{label(p.motion)};
-        switch (p.motion) {
-            case Motion::Full:    val += " — streaming reveal, spinners"; break;
-            case Motion::Reduced: val += " — no reveal, spinners kept"; break;
-            case Motion::Off:     val += " — nothing animates"; break;
-        }
-        row("Motion", std::move(val), "Enter: cycle", Action::CycleMotion);
-    }
-
-    // ── Chrome ──────────────────────────────────────────────────────
-    row("Syntax highlighting", p.syntax ? "on" : "off",
-        "Enter: toggle", Action::ToggleSyntax);
-    {
-        std::string val{label(p.tool_output)};
-        switch (p.tool_output) {
-            case ToolOutput::Collapsed: val += " — just the header"; break;
-            case ToolOutput::Preview:   val += " — first few lines"; break;
-            case ToolOutput::Full:      val += " — everything"; break;
-        }
-        row("Tool output", std::move(val), "Enter: cycle", Action::CycleToolOutput);
-    }
-    {
-        std::string val{label(p.thinking)};
-        switch (p.thinking) {
-            case Thinking::Shown:     val += " — reasoning inline"; break;
-            case Thinking::Collapsed: val += " — a line you can open"; break;
-            case Thinking::Hidden:    val += " — never shown"; break;
-        }
-        row("Thinking", std::move(val), "Enter: cycle", Action::CycleThinking);
-    }
-    row("Timestamps", std::string{label(p.timestamps)},
-        "Enter: cycle", Action::CycleTimestamps);
-
-    return out;
-}
 
 } // namespace
 
 std::vector<Item> items_for(const Model& m, Category cat) {
     switch (cat) {
         case Category::General:  return general(m);
-        case Category::UI:       return ui(m);
         case Category::Plugins:  return plugins(m.ui.plugins, m.ui.plugins_loading);
         case Category::Commands: return commands();
         case Category::Agents:   return agents();

@@ -605,6 +605,7 @@ struct Model {
         // panels; this list is the older one.
         mutable maya::ScrollState smart_mode_scroll       = routed_scroll();
         mutable maya::ScrollState plugin_edit_scroll      = routed_scroll();
+        mutable maya::ScrollState appearance_scroll       = routed_scroll();
         mutable maya::ScrollState fork_scroll              = routed_scroll();
         mutable maya::ScrollState todo_scroll             = routed_scroll();
         mutable maya::ScrollState tool_viewer_scroll      = routed_scroll();
