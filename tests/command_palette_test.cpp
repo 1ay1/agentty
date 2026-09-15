@@ -27,7 +27,6 @@ static constexpr std::array kAll = {
     Command::SwapModel,
     Command::OpenProviders, Command::OpenThreads, Command::OpenPlan,
     Command::RunCodeBlock, Command::InspectToolOutputs, Command::CompactContext,
-    Command::SmartMode,
     Command::RewindCheckpoint, Command::ForkThread,
     Command::OpenGeneralSettings,
     Command::OpenStats, Command::OpenLogin,
