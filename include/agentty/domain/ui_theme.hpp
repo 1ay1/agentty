@@ -7,6 +7,7 @@
 // the resolved value side by side ("auto — truecolor"), which is the only
 // way a user can tell a working default from a broken detection.
 
+#include <atomic>
 #include <string_view>
 
 #include <maya/style/schemes.hpp>
@@ -95,6 +96,44 @@ struct Resolved {
     if (r.theme == &maya::theme::native)
         return "needs 256 colors — using native";
     return {};
+}
+
+// ── The resolved theme, readable from the view ───────────────────────────
+//
+// Same seam, same reason as the prefs above. maya publishes its own theme
+// slot so the RENDERER can paint with it, but agentty's view builders pick
+// colours while BUILDING the tree — `fg_of(accent)` runs long before any
+// renderer sees a Theme — so they need the palette here, at build time.
+//
+// Without this, every colour in the app was an `inline constexpr` ANSI
+// literal and choosing a theme changed nothing you could see. The theme
+// browser repainted its own swatches from the scheme table and the other
+// 493 call sites went on painting bright_white.
+
+namespace detail {
+// A POINTER, not a copy: every Theme lives in a constexpr table with static
+// storage, so the slot is just a re-seated view of one of them — the read
+// side is a plain atomic load rather than a locked copy of 24 Colors on
+// every styled span. (Contrast Prefs, which holds a std::string and so
+// needs the mutex above.)
+inline std::atomic<const maya::Theme*>& theme_atom() noexcept {
+    static std::atomic<const maya::Theme*> t{&maya::theme::native};
+    return t;
+}
+}  // namespace detail
+
+// Publish the theme in force. Called once per frame by view(), beside
+// publish(Prefs). Never from a reducer.
+inline void publish_theme(const maya::Theme& t) noexcept {
+    detail::theme_atom().store(&t, std::memory_order_relaxed);
+}
+
+// The theme in force. Native until the first publish_theme(), so a
+// consumer that runs before the first frame (a unit test building an
+// element directly) gets the safe terminal-native palette rather than a
+// null deref.
+[[nodiscard]] inline const maya::Theme& theme() noexcept {
+    return *detail::theme_atom().load(std::memory_order_relaxed);
 }
 
 }  // namespace agentty::ui_prefs

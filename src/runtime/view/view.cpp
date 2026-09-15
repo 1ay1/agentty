@@ -114,6 +114,12 @@ maya::Element view(const Model& m) {
             applied = r.theme;
             maya::app_set_theme(*r.theme);
         }
+        // maya's slot above is for the RENDERER. agentty's view builders
+        // choose their colours while BUILDING the tree — `fg()` runs long
+        // before a renderer ever sees a Theme — so the palette has to be
+        // readable here too, at build time. Without this second publish the
+        // theme picker is a lie: the name changes and nothing repaints.
+        ui_prefs::publish_theme(*r.theme);
         // The rest of the prefs reach their consumers the same way, and for
         // the same reason: density is read by panel_viewport_h(), a free
         // function twenty panel builders call without a Model in hand, and

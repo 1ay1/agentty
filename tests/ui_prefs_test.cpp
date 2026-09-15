@@ -9,6 +9,8 @@
 #include "agentty/runtime/panel/form_keys.hpp"
 #include "agentty/domain/ui_theme.hpp"
 #include "agentty/domain/ui_live.hpp"
+#include "agentty/runtime/view/palette.hpp"
+#include <maya/style/schemes.hpp>
 #include "agentty/runtime/view/thread/seam.hpp"
 #include <maya/core/motion.hpp>
 #include "agentty/runtime/panel/appearance.hpp"
@@ -317,6 +319,69 @@ TEST_CASE("appearance: compact turns changes the seam's height AND its rows") {
 }
 
 
+
+TEST_CASE("appearance: the palette follows the chosen theme") {
+    // THE regression this file exists for. Every colour in agentty used to
+    // be an `inline constexpr` ANSI literal, so the theme browser was a
+    // lie: you could pick Dracula, watch the name change, and not one cell
+    // on screen moved. The tokens are theme reads now, and this asserts it
+    // by the only means that would have caught the original bug — comparing
+    // what the tokens RESOLVE TO across a theme change.
+
+    // Native: the terminal's own colours. Nothing literal, so `fg` is the
+    // terminal default rather than a colour we picked for the user.
+    ui_prefs::publish_theme(maya::theme::native);
+    const maya::Color native_fg     = ui::fg;
+    const maya::Color native_accent = ui::accent;
+    CHECK(native_fg.kind() == maya::Color::Kind::Default);
+
+    // Now a scheme with literal RGB. Same token, different colour.
+    const maya::Theme* dracula = nullptr;
+    for (const auto& s : maya::theme::schemes)
+        if (std::string_view{s.name} == "Dracula") dracula = s.theme;
+    REQUIRE(dracula != nullptr);
+
+    ui_prefs::publish_theme(*dracula);
+    CHECK(ui::fg != native_fg);
+    CHECK(ui::accent != native_accent);
+    CHECK(maya::Color{ui::fg}.kind() == maya::Color::Kind::Rgb);
+
+    // And every token tracks the SAME theme — not just the one we looked at.
+    CHECK(maya::Color{ui::danger}    == dracula->error);
+    CHECK(maya::Color{ui::success}   == dracula->success);
+    CHECK(maya::Color{ui::muted}     == dracula->muted);
+    CHECK(maya::Color{ui::highlight} == dracula->primary);
+    CHECK(maya::Color{ui::code_path} == dracula->link);
+
+    // Back to native, so the rest of the suite paints as it expects.
+    ui_prefs::publish_theme(maya::theme::native);
+    CHECK(maya::Color{ui::fg} == native_fg);
+}
+
+TEST_CASE("appearance: only a theme that names a background owns the canvas") {
+    // agentty is Mode::Inline — the frame is a window onto scrollback, not
+    // the whole screen. So "paint the theme's background" is a decision with
+    // real consequences, and it is keyed on DATA (does the theme state a
+    // background?) rather than on a name or a table index.
+
+    // native states none: there is nothing to paint, and painting a guess
+    // would destroy the terminal's own background — including transparency
+    // and background images. That is the entire point of native.
+    CHECK_FALSE(maya::theme::owns_canvas(maya::theme::native));
+    CHECK(maya::theme::native.background.kind()
+          == maya::Color::Kind::Default);
+
+    // Every shipped scheme states a real background, because its
+    // foregrounds were contrast-checked against THAT canvas. Half-applying
+    // one — Dracula's inks over the user's white terminal — is exactly the
+    // "theme looks broken" failure this replaces.
+    int owning = 0;
+    for (const auto& s : maya::theme::schemes) {
+        CHECK_MESSAGE(maya::theme::owns_canvas(*s.theme), s.name);
+        ++owning;
+    }
+    CHECK(owning > 0);
+}
 
 TEST_CASE("appearance: Esc steps back, it does not close everything") {
     install_stub_deps();
