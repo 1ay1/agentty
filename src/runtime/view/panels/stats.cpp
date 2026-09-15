@@ -37,20 +37,33 @@
 namespace agentty::ui {
 namespace {
 
-// The card accent ramp — the agent_stats palette, verbatim. These are the
-// soft high-value hues the example's dashboard is built on; the agentty
-// theme's status colours (green=good, red=failed) are a SEMANTIC map and
-// carry the wrong meaning for a grid of named categories.
+// The card accent ramp.
+//
+// These used to be nine hardcoded RGB values -- a private palette the theme
+// could not see, so the stats panel kept its own colours no matter what
+// scheme the user picked. The comment defending them had half a point: a
+// STATUS palette (green=good, red=failed) carries the wrong meaning for a
+// grid of named categories.
+//
+// But the answer to "status is the wrong axis" is a categorical ramp, not a
+// private one. maya::theme::series() is exactly that, derived from the
+// theme's own role slots in an alternating order so adjacent slices
+// contrast. Same argument, one layer down, and it follows the user.
 namespace hue {
-const maya::Color cyan   = maya::Color::rgb(120, 220, 232);
-const maya::Color green  = maya::Color::rgb(150, 230, 160);
-const maya::Color amber  = maya::Color::rgb(245, 200, 110);
-const maya::Color red    = maya::Color::rgb(255, 130, 130);
-const maya::Color violet = maya::Color::rgb(190, 160, 255);
-const maya::Color blue   = maya::Color::rgb(120, 180, 255);
-const maya::Color pink   = maya::Color::rgb(240, 150, 200);
-const maya::Color teal   = maya::Color::rgb(120, 220, 200);
-const maya::Color dim    = maya::Color::rgb(140, 150, 170);
+[[nodiscard]] inline maya::Color at(std::size_t i) {
+    return maya::theme::series(maya::theme::live(), i);
+}
+[[nodiscard]] inline maya::Color cyan()   { return at(0); }
+[[nodiscard]] inline maya::Color blue()   { return at(1); }
+[[nodiscard]] inline maya::Color amber()  { return at(2); }
+[[nodiscard]] inline maya::Color green()  { return at(3); }
+[[nodiscard]] inline maya::Color violet() { return at(4); }
+[[nodiscard]] inline maya::Color teal()   { return at(5); }
+[[nodiscard]] inline maya::Color red()    { return at(6); }
+[[nodiscard]] inline maya::Color pink()   { return at(7); }
+[[nodiscard]] inline maya::Color dim()    {
+    return maya::theme::series_other(maya::theme::live());
+}
 }  // namespace hue
 
 // A CATEGORICAL ramp, for charts whose slices are named things rather
@@ -61,13 +74,12 @@ const maya::Color dim    = maya::Color::rgb(140, 150, 170);
     // The catch-all slice draws muted. "other" is the ABSENCE of a
     // category, so giving it a category's colour makes it read as one
     // more of them — which it did: it collided with the largest slice.
-    if (slot < 0) return hue::dim;
-    static const maya::Color kRamp[] = {
-        hue::cyan, hue::blue, hue::amber, hue::green,
-        hue::violet, hue::teal, hue::red, hue::pink,
-    };
-    constexpr std::size_t n = sizeof(kRamp) / sizeof(kRamp[0]);
-    return kRamp[i % n];
+    //
+    // Straight through to maya rather than a local `static const` table:
+    // a static would be built on first call and then frozen for the
+    // process, which is precisely the bug the private ramp had.
+    if (slot < 0) return maya::theme::series_other(maya::theme::live());
+    return maya::theme::series(maya::theme::live(), i);
 }
 
 // ── card() — a bare titled section, matching the agent_stats look ─────────
@@ -97,7 +109,7 @@ const maya::Color dim    = maya::Color::rgb(140, 150, 170);
 // silently drop a section the reader expected — the dim dash says "measured,
 // empty" rather than "forgot to render".
 [[nodiscard]] Element empty_placeholder() {
-    return text("\xe2\x80\x94", fg_dim(hue::dim));   // — em dash
+    return text("\xe2\x80\x94", fg_dim(hue::dim()));   // — em dash
 }
 
 // ── Viz builders ──────────────────────────────────────────────────────────
@@ -154,7 +166,7 @@ const maya::Color dim    = maya::Color::rgb(140, 150, 170);
                 if (!out.empty()) out.push_back(blank());
                 out.push_back(text(stats::format(mt.unit, mt.value),
                                    fg_bold(series_hue(0, i))));
-                if (!mt.label.empty()) out.push_back(text(mt.label, fg_dim(hue::dim)));
+                if (!mt.label.empty()) out.push_back(text(mt.label, fg_dim(hue::dim())));
             }
             continue;
         }
@@ -180,7 +192,7 @@ const maya::Color dim    = maya::Color::rgb(140, 150, 170);
             out.push_back(chart.build());
             std::string cap = mt.label;
             if (mt.value != 0) cap += "  " + stats::format(mt.unit, mt.value);
-            out.push_back(text(cap, fg_dim(hue::dim)));
+            out.push_back(text(cap, fg_dim(hue::dim())));
             continue;
         }
 
@@ -232,7 +244,7 @@ const maya::Color dim    = maya::Color::rgb(140, 150, 170);
             double peak = 0;
             for (double d : mt.series) peak = std::max(peak, d);
             if (peak > 0) cap += "   peak " + stats::format(mt.unit, peak);
-            out.push_back(text(cap, fg_dim(hue::dim)));
+            out.push_back(text(cap, fg_dim(hue::dim())));
         }
     }
     return out;
@@ -375,8 +387,8 @@ void build_cards(const stats::Section& sec, const stats::Facts& f,
         for (std::size_t i = 0; i < scratch.size(); ++i) {
             const auto& mt = scratch[i];
             group.push_back(text(stats::format(mt.unit, mt.value), fg_bold(accent)));
-            if (!mt.label.empty())  group.push_back(text(mt.label, fg_dim(hue::dim)));
-            if (!mt.detail.empty()) group.push_back(text(mt.detail, fg_dim(hue::dim)));
+            if (!mt.label.empty())  group.push_back(text(mt.label, fg_dim(hue::dim())));
+            if (!mt.detail.empty()) group.push_back(text(mt.detail, fg_dim(hue::dim())));
             if (i + 1 < scratch.size()) group.push_back(blank());
         }
         text_groups.push_back(std::move(group));
@@ -419,8 +431,8 @@ void build_cards(const stats::Section& sec, const stats::Facts& f,
             for (std::size_t i = 0; i < figures.size(); ++i) {
                 const auto& mt = figures[i];
                 group.push_back(text(stats::format(mt.unit, mt.value), fg_bold(accent)));
-                if (!mt.label.empty())  group.push_back(text(mt.label, fg_dim(hue::dim)));
-                if (!mt.detail.empty()) group.push_back(text(mt.detail, fg_dim(hue::dim)));
+                if (!mt.label.empty())  group.push_back(text(mt.label, fg_dim(hue::dim())));
+                if (!mt.detail.empty()) group.push_back(text(mt.detail, fg_dim(hue::dim())));
                 if (i + 1 < figures.size()) group.push_back(blank());
             }
             text_groups.push_back(std::move(group));
@@ -447,8 +459,8 @@ void build_cards(const stats::Section& sec, const stats::Facts& f,
         for (std::size_t i = 0; i < figures.size(); ++i) {
             const auto& mt = figures[i];
             group.push_back(text(stats::format(mt.unit, mt.value), fg_bold(accent)));
-            if (!mt.label.empty())  group.push_back(text(mt.label, fg_dim(hue::dim)));
-            if (!mt.detail.empty()) group.push_back(text(mt.detail, fg_dim(hue::dim)));
+            if (!mt.label.empty())  group.push_back(text(mt.label, fg_dim(hue::dim())));
+            if (!mt.detail.empty()) group.push_back(text(mt.detail, fg_dim(hue::dim())));
             if (i + 1 < figures.size()) group.push_back(blank());
         }
         text_groups.push_back(std::move(group));
@@ -486,7 +498,7 @@ Element stats_panel(const Model& m) {
     maya::panel::Config cfg;
     cfg.title    = "Stats";
     cfg.subtitle = std::string{stats::tab_subtitle(active)};
-    cfg.accent   = hue::cyan;
+    cfg.accent   = hue::cyan();
 
     // Tabs are the WIDGET's chrome, not this host's: it owns the padding,
     // the selected treatment and how the strip degrades on a narrow frame,
@@ -659,8 +671,8 @@ Element stats_panel(const Model& m) {
     bool has_readout = false;
     {
         std::vector<Element> text_cards;
-        if (!text_a.empty()) text_cards.push_back(card({}, hue::cyan, std::move(text_a)));
-        if (!text_b.empty()) text_cards.push_back(card({}, hue::cyan, std::move(text_b)));
+        if (!text_a.empty()) text_cards.push_back(card({}, hue::cyan(), std::move(text_a)));
+        if (!text_b.empty()) text_cards.push_back(card({}, hue::cyan(), std::move(text_b)));
         if (!text_cards.empty()) {
             const int n = static_cast<int>(text_cards.size());
             // The readout is the LEAD cell and holds two columns of text, so

@@ -41,6 +41,7 @@ set(_AGENTTY_CONSOLIDATED
     command_palette_test compaction_threshold_test fsm_test model_caps_test
     dialect_test
     embed_backend_test form_test embed_form_test escape_guarantee_test
+    theme_discipline_test
     palette_nav_test panel_test
     param_tag_repair_test sandbox_escape_test scope_test table_render_test
     ssrf_guard_test render_key_coverage_test reasoning_render_test

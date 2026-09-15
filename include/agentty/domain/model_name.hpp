@@ -227,8 +227,10 @@ struct ModelName {
     // otherwise-identical rows distinguishably.
     std::string annotation;
 
-    // Family hue from the table above.
-    maya::Color color = maya::Color::cyan();
+    // Family hue from the table above. A theme SLOT, like everything
+    // color_of() returns — a default here that was a literal would quietly
+    // pin any un-decoded model to one palette.
+    maya::Color color = maya::Color::slot(maya::ThemeSlot::Info);
 
     // True when the id decoded to a KNOWN family. When false, `name` came
     // from the id/server-name normalizer rather than the family table, and

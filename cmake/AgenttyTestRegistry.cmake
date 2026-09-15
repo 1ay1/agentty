@@ -55,6 +55,10 @@ function(_agentty_test_link_full name)
         # against, so the test reads the source. The pickers were split into
         # several files under this dir; the test concatenates them all.
         AGENTTY_PICKERS_SRC_DIR="${CMAKE_SOURCE_DIR}/src/runtime/view/panels"
+        # Source root for the theme-discipline guard: "agentty has no UI of
+        # its own" is a rule about where colour may be SPELLED, which has no
+        # runtime seam either, so that test reads the tree as well.
+        AGENTTY_SRC_ROOT="${CMAKE_SOURCE_DIR}"
         AGENTTY_MCP=1)
     target_link_libraries(${name} PRIVATE
         maya::maya
