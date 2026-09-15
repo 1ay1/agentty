@@ -22,6 +22,7 @@ enum class Action : std::uint8_t {
     OpenRag,       // General: open the RAG mode picker
     OpenAppearance,// General: open the Appearance pane (theme, density, motion)
     OpenSmart,     // General: open Smart Mode config
+    ToggleChangesStrip, // General: show/hide the persistent "N changes" banner
     // (No RemovePlugin: removal is the two-step `d` → SettingsListRemove
     // flow, never an Enter action — a one-press destructive Enter and a
     // two-step d coexisting was a trap. See the reducer's Activate arm.)

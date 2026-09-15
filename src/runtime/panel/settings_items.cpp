@@ -59,6 +59,20 @@ std::vector<Item> general(const Model& m) {
         i.action    = Action::OpenRag;
         out.push_back(std::move(i));
     }
+    // Changes strip. A display preference, not an action — it decides
+    // whether a persistent banner sits above the composer after edits. It
+    // used to live in the palette beside "Accept all changes", which put a
+    // durable setting next to two irreversible verbs.
+    {
+        Item i;
+        i.primary   = "Changes strip";
+        i.secondary = m.d.show_changes_strip
+            ? "shown · persistent \"N changes\" banner after edits"
+            : "hidden · ^R still reviews";
+        i.hint      = "Enter: toggle";
+        i.action    = Action::ToggleChangesStrip;
+        out.push_back(std::move(i));
+    }
     // Appearance. A pane, not rows: it is grouped and has its own theme
     // browser, neither of which this flat list can hold. The row shows the
     // theme in use so the commonest reason to open it is answered without

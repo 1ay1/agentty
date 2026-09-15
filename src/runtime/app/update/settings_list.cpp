@@ -235,6 +235,10 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
                     return agentty::app::update(std::move(m),
                                                 Msg{OpenAppearance{}});
                 }
+                case se::Action::ToggleChangesStrip: {
+                    return agentty::app::update(std::move(m),
+                                                Msg{ToggleChangesStrip{}});
+                }
                 // (There is deliberately NO Activate-arm for plugin removal.
                 // Removal is `d` → SettingsListRemove, which is TWO-step —
                 // arm, then confirm. An Enter-fired remove here would be a

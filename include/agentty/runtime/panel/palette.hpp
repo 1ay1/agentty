@@ -21,7 +21,6 @@ namespace agentty {
 enum class Command : std::uint8_t {
     NewThread,
     ReviewChanges,
-    ToggleChangesStrip,
     AcceptAll,
     RejectAll,
     CycleProfile,
@@ -33,18 +32,11 @@ enum class Command : std::uint8_t {
     RunCodeBlock,
     InspectToolOutputs,
     CompactContext,
-    SmartMode,
     RewindCheckpoint,
     ForkThread,
-    OpenPlugins,
-    OpenCommands,
-    OpenAgents,
-    OpenHooks,
     OpenGeneralSettings,
-    OpenRag,
     OpenStats,
     OpenLogin,
-    SignOut,
     UpdateAgentty,
     Quit,
 };
@@ -91,7 +83,6 @@ inline constexpr std::array kCommands = std::array{
     CommandDef{Command::RewindCheckpoint,"Rewind to checkpoint","Restore files + conversation to any earlier turn", "", Category::Thread, /*danger=*/true},
     // ── Changes ─────────────────────────────────────────────────────────
     CommandDef{Command::ReviewChanges, "Review changes",     "Open the diff review pane", "Ctrl+R", Category::Changes},
-    CommandDef{Command::ToggleChangesStrip, "Changes strip",   "Show / hide the persistent \"N changes\" banner after edits", "", Category::Changes},
     CommandDef{Command::AcceptAll,     "Accept all changes", "Apply every pending hunk", "", Category::Changes},
     CommandDef{Command::RejectAll,     "Reject all changes", "Discard every pending hunk", "", Category::Changes, /*danger=*/true},
     // ── Go (navigate) ───────────────────────────────────────────────────
@@ -104,14 +95,21 @@ inline constexpr std::array kCommands = std::array{
     CommandDef{Command::OpenModels,    "Switch model",       "Switch model across every signed-in provider", "Ctrl+/", Category::Config},
     CommandDef{Command::SwapModel,     "Swap to previous model", "Jump back to the model you used before (cross-provider)", "Ctrl+Tab", Category::Config},
     CommandDef{Command::OpenProviders, "Switch provider",    "Choose the LLM backend (Anthropic, OpenAI, …)", "Ctrl+P", Category::Config},
-    CommandDef{Command::SmartMode,     "Smart Mode",         "Configure role-based routing — send cheap grunt work to a cheaper model", "Ctrl+S", Category::Config},
-    CommandDef{Command::OpenRag,"Retrieval (RAG)",   "Proactive retrieval on / first turn / off, and which embedding backend to use", "", Category::Config},
     CommandDef{Command::OpenStats, "Stats", "Tokens, cache, tools, latency, routing — what this thread actually did", "Ctrl+L", Category::Config},
-    CommandDef{Command::OpenPlugins,   "MCP servers",        "Plugins / MCP servers (mcp.json) — list & remove; add with `agentty plugin add`", "", Category::Config},
-    CommandDef{Command::OpenCommands,  "Slash commands",     "Discovered /commands — author in .agentty/commands/*.md", "", Category::Config},
-    CommandDef{Command::OpenAgents,    "Subagents",          "Task agent types — built-ins + your .agentty/agents/*.md", "", Category::Config},
-    CommandDef{Command::OpenHooks,     "Hooks",              "Lifecycle hooks + approval state (.agentty/hooks.json)", "", Category::Config},
-    CommandDef{Command::OpenGeneralSettings, "Settings",     "Permission profile, Smart Mode, retrieval — and Appearance: theme, colors, density, motion", "", Category::Config},
+    CommandDef{Command::OpenGeneralSettings, "Settings",     "Profile, Smart Mode, retrieval (RAG), changes strip, MCP servers / plugins, slash commands, subagents, hooks — and Appearance: theme, colors, density, motion", "", Category::Config},
+    // (No Smart Mode row either. ^S opens it and ^S closes it — a chord
+    // the pane itself owns — so the palette row was a third way to reach
+    // something already one keystroke away, and it is configuration: you
+    // set a routing policy once, you do not reach for it mid-turn.
+    //
+    // (No MCP servers / Slash commands / Subagents / Hooks / Retrieval /
+    // Changes strip entries either, for the same reason and by the same
+    // rule: each is a CONFIGURATION, each already has a Settings home, and
+    // a second door only makes the palette the place people learn it from.
+    // The palette is for verbs you reach for mid-turn — switch model, fork,
+    // compact, review. Settings is for nouns you set once. Settings'
+    // description names their words so the search still finds them.
+    //
     // (No Appearance entry. It is one Enter deeper — Settings → Appearance —
     // because the palette is the list you scan when you know what you want,
     // and a theme is not something you reach for mid-turn. Two doors to one
@@ -124,8 +122,14 @@ inline constexpr std::array kCommands = std::array{
     // whole job of a description here: to be the search index for the rows
     // that live one level down.)
     // ── Account ─────────────────────────────────────────────────────────
+    // (No "Sign out" row. It signed out whichever provider happened to be
+    // ACTIVE, named only in a toast after the fact — a destructive action
+    // whose target you could not see before pressing it. ^P shows every
+    // provider with its auth state and signs out the one you point at,
+    // behind a two-press confirm, and drills into per-account management
+    // for OAuth providers. A row that does a blind subset of that is not a
+    // shortcut, it is a worse door.)
     CommandDef{Command::OpenLogin,     "Sign in / add account", "Sign in — or add another OAuth / API-key account", "", Category::Account},
-    CommandDef{Command::SignOut,       "Sign out",           "Remove saved credentials and re-open sign-in", "", Category::Account, /*danger=*/true},
     // ── General ─────────────────────────────────────────────────────────
     CommandDef{Command::UpdateAgentty, "Update agentty",     "Download + install the new release (shown when one is available)", "", Category::General},
     CommandDef{Command::Quit,          "Quit",               "Exit agentty", "Ctrl+C", Category::General},

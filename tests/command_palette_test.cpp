@@ -21,7 +21,7 @@ using namespace agentty;
 
 // Every enum value, so we can assert the catalog covers each exactly once.
 static constexpr std::array kAll = {
-    Command::NewThread, Command::ReviewChanges, Command::ToggleChangesStrip,
+    Command::NewThread, Command::ReviewChanges,
     Command::AcceptAll,
     Command::RejectAll, Command::CycleProfile, Command::OpenModels,
     Command::SwapModel,
@@ -29,10 +29,9 @@ static constexpr std::array kAll = {
     Command::RunCodeBlock, Command::InspectToolOutputs, Command::CompactContext,
     Command::SmartMode,
     Command::RewindCheckpoint, Command::ForkThread,
-    Command::OpenPlugins, Command::OpenCommands, Command::OpenAgents, Command::OpenHooks,
     Command::OpenGeneralSettings,
-    Command::OpenRag, Command::OpenStats, Command::OpenLogin,
-    Command::SignOut, Command::UpdateAgentty, Command::Quit,
+    Command::OpenStats, Command::OpenLogin,
+    Command::UpdateAgentty, Command::Quit,
 };
 
 static bool has_id(const std::vector<const CommandDef*>& v, Command id) {
@@ -146,8 +145,7 @@ TEST_CASE("command palette — categories, gating, danger") {
     {
         // The commands that discard work or mutate the worktree.
         auto is_expected_danger = [](Command c) {
-            return c == Command::RejectAll || c == Command::RewindCheckpoint
-                || c == Command::SignOut;
+            return c == Command::RejectAll || c == Command::RewindCheckpoint;
         };
         for (const auto& c : kCommands) {
             check(c.danger == is_expected_danger(c.id),

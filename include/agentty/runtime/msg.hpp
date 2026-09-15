@@ -927,6 +927,11 @@ struct RejectAllChanges {};
 struct CompactContext {};
 
 struct CycleProfile {};
+// Show / hide the persistent "N changes" banner. A display PREFERENCE, so
+// it has its own message rather than living inline in the palette reducer:
+// Settings owns it now, and a setting reachable from one place only is a
+// setting that moves when that place does.
+struct ToggleChangesStrip {};
 struct RestoreCheckpoint { CheckpointId id; };
 // Completion of the async git-restore kicked off by RestoreCheckpoint.
 // `ok=false` carries a human-readable reason in `error`. The transcript
@@ -1135,7 +1140,8 @@ using AppearanceMsg = std::variant<
     AppearanceThemeCancel>;
 
 using MetaMsg = std::variant<
-    CompactContext, CycleProfile, RestoreCheckpoint, CheckpointRestored,
+    CompactContext, CycleProfile, ToggleChangesStrip,
+    RestoreCheckpoint, CheckpointRestored,
     ToggleRetrievedExpanded,
     TerminalFocus,
     Tick, Quit, NoOp, ClearStatus, RedrawScreen,

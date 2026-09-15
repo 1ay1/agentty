@@ -80,16 +80,6 @@ template <class T, class V>
         add(Command::RewindCheckpoint, emit<OpenCheckpoints>());
         // ── Changes ──
         add(Command::ReviewChanges,    emit<OpenDiffReview>());
-        add(Command::ToggleChangesStrip, [](Model m) -> Step {
-            m.d.show_changes_strip = !m.d.show_changes_strip;
-            // Persist so it survives restarts.
-            auto s = deps().load_settings();
-            s.show_changes_strip = m.d.show_changes_strip;
-            deps().save_settings(s);
-            auto cmd = set_status_toast(m, m.d.show_changes_strip
-                ? "changes strip: shown" : "changes strip: hidden (Ctrl+R still reviews)");
-            return {std::move(m), std::move(cmd)};
-        });
         add(Command::AcceptAll,        emit<AcceptAllChanges>());
         add(Command::RejectAll,        emit<RejectAllChanges>());
         // ── Go ──
@@ -102,18 +92,11 @@ template <class T, class V>
         add(Command::OpenModels,       emit<OpenModels>());
         add(Command::SwapModel,        emit<SwitchToPreviousModel>());
         add(Command::OpenProviders,    emit<OpenProviders>());
-        add(Command::SmartMode,        emit<OpenSmartMode>());
-        add(Command::OpenRag,  emit<OpenRag>());
         add(Command::OpenStats,        emit<OpenStats>());
-        add(Command::OpenPlugins,      emit_val<OpenSettingsList>(settings::Category::Plugins));
-        add(Command::OpenCommands,     emit_val<OpenSettingsList>(settings::Category::Commands));
-        add(Command::OpenAgents,       emit_val<OpenSettingsList>(settings::Category::Agents));
-        add(Command::OpenHooks,        emit_val<OpenSettingsList>(settings::Category::Hooks));
         add(Command::OpenGeneralSettings,
             emit_val<OpenSettingsList>(settings::Category::General));
         // ── Account ──
         add(Command::OpenLogin,        emit<OpenLogin>());
-        add(Command::SignOut,          emit<SignOut>());
         // ── General ──
         add(Command::UpdateAgentty, [](Model m) -> Step {
             if (m.s.update_latest.empty() || m.s.update_in_flight)
