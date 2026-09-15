@@ -132,6 +132,50 @@ const std::vector<Axis>& visual_axes() {
         {"pending_permission appears", [](Model& m) {
             m.d.pending_permission = agentty::PendingPermission{};
         }},
+
+        // ── Appearance ────────────────────────────────────────────────
+        //
+        // Every one of these repaints the screen, and this gate skips
+        // view() entirely when the hash does not move. They were ALL
+        // missing, which is why picking a theme looked like it did
+        // nothing: the model changed, the choice persisted, the right
+        // Theme resolved — and the frame was never rebuilt, so the old
+        // palette stayed up until an unrelated keystroke moved the hash.
+        // The panel's own footer promises "changes apply immediately";
+        // these rows are what hold it to that.
+        {"ui theme swap", [](Model& m) {
+            m.d.ui.theme = "Dracula";
+        }},
+        {"ui color tier override", [](Model& m) {
+            m.d.ui.tier = agentty::ui_prefs::ColorTier::Ansi16;
+        }},
+        {"ui background polarity override", [](Model& m) {
+            m.d.ui.polarity = agentty::ui_prefs::Polarity::Light;
+        }},
+        {"ui density", [](Model& m) {
+            m.d.ui.density = agentty::ui_prefs::Density::Compact;
+        }},
+        {"ui prose width cap", [](Model& m) {
+            m.d.ui.prose_width = 88;
+        }},
+        {"ui compact turns", [](Model& m) {
+            m.d.ui.compact_turns = true;
+        }},
+        {"ui motion", [](Model& m) {
+            m.d.ui.motion = agentty::ui_prefs::Motion::Off;
+        }},
+        {"ui syntax highlighting", [](Model& m) {
+            m.d.ui.syntax = false;
+        }},
+        {"ui tool output", [](Model& m) {
+            m.d.ui.tool_output = agentty::ui_prefs::ToolOutput::Collapsed;
+        }},
+        {"ui thinking", [](Model& m) {
+            m.d.ui.thinking = agentty::ui_prefs::Thinking::Hidden;
+        }},
+        {"ui timestamps", [](Model& m) {
+            m.d.ui.timestamps = agentty::ui_prefs::Timestamps::Absolute;
+        }},
         {"phase Idle -> Streaming", [](Model& m) {
             m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
         }},
