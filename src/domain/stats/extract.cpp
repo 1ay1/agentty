@@ -439,14 +439,21 @@ void reasoning_rows(const Facts& f, std::vector<Metric>& out) {
            static_cast<double>(f.reasoning.turns
                              - f.reasoning.thought_then_acted));
     }
-    if (f.reasoning.blocks)
+    if (f.reasoning.blocks) {
         kv(out, "Thinking blocks", Unit::Count,
-           static_cast<double>(f.reasoning.blocks),
-           f.reasoning.turns
-             ? format(Unit::Count,
-                      static_cast<double>(f.reasoning.blocks)
-                        / static_cast<double>(f.reasoning.turns)) + " per turn"
-             : "");
+           static_cast<double>(f.reasoning.blocks));
+        // Its own ROW, not a note on the one above.
+        //
+        // The note cell takes whatever is left past the value, which on a
+        // split column is a few cells — "1 per turn" truncated to "1 per…"
+        // and even "1/turn" to "1/tu…". A rate that cannot say its own
+        // unit is not worth the cell; as a row it gets a label, a bar and
+        // the full value column like everything else.
+        if (f.reasoning.turns)
+            kv(out, "Blocks per turn", Unit::Count,
+               static_cast<double>(f.reasoning.blocks)
+                 / static_cast<double>(f.reasoning.turns));
+    }
 }
 
 void reasoning_time(const Facts& f, std::vector<Metric>& out) {
@@ -492,8 +499,13 @@ void reasoning_dist(const Facts& f, std::vector<Metric>& out) {
 void stream_health(const Facts& f, std::vector<Metric>& out) {
     // Lead with the verdict. A list of zeroes is the answer "everything is
     // fine" spelled in a way that makes the reader work it out.
+    //
+    // "Troubled turns" rather than "Turns that hit trouble": a label has a
+    // column's worth of room beside its meter, and a sentence-length one
+    // spends it all then truncates. The noun phrase says the same thing
+    // and leaves the picture its width.
     const bool clean = f.stream.degraded_turns == 0;
-    kv(out, "Turns that hit trouble", Unit::Count,
+    kv(out, "Troubled turns", Unit::Count,
        static_cast<double>(f.stream.degraded_turns),
        clean ? "clean session" : "");
     if (f.stream.transient)
