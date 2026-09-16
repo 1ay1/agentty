@@ -7,7 +7,9 @@
 // the resolved value side by side ("auto — truecolor"), which is the only
 // way a user can tell a working default from a broken detection.
 
+#include <algorithm>
 #include <atomic>
+#include <iterator>
 #include <string_view>
 
 #include <maya/app/app.hpp>       // app_set_theme — the renderer-side sink
@@ -32,10 +34,23 @@ struct Resolved {
 // Look up a built-in scheme by name. Null when the name is unknown, which
 // is not an error: a config naming a scheme this build does not carry
 // should fall back to native rather than refuse to start.
+//
+// BINARY search, not linear. resolve() calls this and view() calls
+// resolve() every frame, so the scan ran once per frame over the whole
+// table — fine at 57 schemes, 1.25 us/frame at 615, for an answer that
+// cannot change between frames. schemes[] is emitted sorted and
+// static_asserts that it is, so the search is correct by construction
+// rather than by convention.
 [[nodiscard]] inline const maya::Theme* find_scheme(std::string_view name) {
     if (name.empty()) return nullptr;
-    for (const auto& s : maya::theme::schemes)
-        if (name == s.name) return s.theme;
+    const auto* first = std::begin(maya::theme::schemes);
+    const auto* last  = std::end(maya::theme::schemes);
+    const auto* it = std::lower_bound(
+        first, last, name,
+        [](const maya::theme::NamedTheme& s, std::string_view n) {
+            return std::string_view{s.name} < n;
+        });
+    if (it != last && name == std::string_view{it->name}) return it->theme;
     return nullptr;
 }
 
@@ -88,14 +103,48 @@ struct Resolved {
     return r;
 }
 
-// Why the chosen theme is not in use, for the settings row's detail line.
-// Empty when it IS in use.
+// Is this theme's own background light?
+//
+// A scheme states literal RGB, so its polarity is a FACT about it rather
+// than a preference — which is what lets resolve() notice when the scheme a
+// user picked disagrees with the terminal they are on.
+[[nodiscard]] inline bool scheme_is_light(const maya::Theme& t) noexcept {
+    const maya::LitColor bg = t.background.to_rgb();
+    return (0.2126 * bg.r() + 0.7152 * bg.g() + 0.0722 * bg.b()) / 255.0 > 0.5;
+}
+
+// Why the chosen theme is not in use, or a caveat about it, for the
+// settings row's detail line. Empty when it is in use and unremarkable.
 [[nodiscard]] inline std::string_view theme_override_reason(const Prefs& p,
                                                             const Resolved& r) {
     if (p.theme.empty()) return {};
     if (!find_scheme(p.theme)) return "unknown scheme — using native";
     if (r.theme == &maya::theme::native)
         return "needs 256 colors — using native";
+
+    // Polarity mismatch. A scheme that owns the canvas paints its own
+    // background over the terminal's, so a dark scheme on a light terminal
+    // is not "wrong" — it works, it just makes the surrounding terminal
+    // chrome (tab bar, split borders, anything agentty does not paint) clash
+    // with the pane.
+    //
+    // This is the ONLY thing the Background preference can honestly affect.
+    // It used to affect nothing at all: it was detected, resolved,
+    // persisted, and displayed — a complete round trip — while no consumer
+    // ever read it, and the row's own help promised it was "consulted by
+    // schemes that have both", which no scheme is. A setting that changes
+    // nothing is worse than a missing one, because the user reasonably
+    // concludes the thing they wanted is impossible.
+    //
+    // A NOTE, not an override: the user picked this scheme on this terminal
+    // and is allowed to mean it. Silently swapping their theme because a
+    // heuristic disagreed is exactly the kind of guess issue #37 is about.
+    if (r.polarity != maya::theme::Polarity::Unknown) {
+        const bool term_light = r.polarity == maya::theme::Polarity::Light;
+        if (scheme_is_light(*r.theme) != term_light)
+            return term_light ? "dark scheme on a light terminal"
+                              : "light scheme on a dark terminal";
+    }
     return {};
 }
 

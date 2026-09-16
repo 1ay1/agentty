@@ -122,7 +122,7 @@ form::Form build_appearance_form(const up::Prefs& p, bool tty) {
             "assume a light background",
         };
         enum_choice(b, kApPolarity, "Background", kPol, p.polarity,
-                    "only consulted by schemes that have both", kPolBlurbs);
+                    "flags a scheme that fights your terminal", kPolBlurbs);
         if (p.polarity == up::Polarity::Auto) {
             switch (r.polarity) {
                 case maya::theme::Polarity::Dark:    b.origin("detected: dark"); break;

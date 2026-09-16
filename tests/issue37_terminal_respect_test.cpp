@@ -200,3 +200,73 @@ TEST_CASE("issue 37: a low colour tier falls back to native, not a bad approxima
     const auto r = agentty::ui_prefs::resolve(p, /*tty=*/true);
     CHECK(r.theme == &maya::theme::native);
 }
+
+TEST_CASE("theming: every scheme in the picker is findable by name") {
+    // find_scheme() binary-searches schemes[], which is only correct while
+    // that table is sorted. If it ever is not, the search MISSES a scheme
+    // that is present — and the symptom is not a crash but "unknown scheme
+    // — using native" for a theme the user can see listed in front of them.
+    //
+    // schemes.hpp static_asserts the ordering, so this is the behavioural
+    // half: every name the picker can show must round-trip through the
+    // lookup the picker uses.
+    int checked = 0;
+    for (const auto& s : maya::theme::schemes) {
+        const maya::Theme* found = agentty::ui_prefs::find_scheme(s.name);
+        if (found != s.theme) {
+            CHECK(std::string_view{s.name} == "<round-tripped>");  // names it
+            break;
+        }
+        ++checked;
+    }
+    CHECK(checked == static_cast<int>(std::size(maya::theme::schemes)));
+    CHECK(checked > 600);
+
+    // A name that is not there is a miss, not a neighbour. A sloppy binary
+    // search returns the insertion point's entry, which would silently hand
+    // back the alphabetically-adjacent theme.
+    CHECK(agentty::ui_prefs::find_scheme("Dracul")  == nullptr);
+    CHECK(agentty::ui_prefs::find_scheme("Draculaa") == nullptr);
+    CHECK(agentty::ui_prefs::find_scheme("")         == nullptr);
+    CHECK(agentty::ui_prefs::find_scheme("zzzzzzz")  == nullptr);
+}
+
+TEST_CASE("theming: the Background preference actually does something") {
+    // It used to do nothing at all. Polarity was detected, resolved,
+    // persisted and displayed — a complete round trip — while no consumer
+    // read it, and the settings row's help claimed it was "consulted by
+    // schemes that have both", which no scheme is. A setting that changes
+    // nothing is worse than a missing one: the user concludes the thing
+    // they wanted is impossible.
+    agentty::ui_prefs::Prefs p;
+    p.theme    = "Dracula";                        // a dark scheme
+    p.tier     = agentty::ui_prefs::ColorTier::TrueColor;
+    p.polarity = agentty::ui_prefs::Polarity::Light;
+
+    const auto r = agentty::ui_prefs::resolve(p, /*tty=*/true);
+    REQUIRE(r.theme != nullptr);
+    CHECK(!agentty::ui_prefs::scheme_is_light(*r.theme));
+    CHECK(!agentty::ui_prefs::theme_override_reason(p, r).empty());
+
+    // A NOTE, not an override: the user picked this scheme on this terminal
+    // and is allowed to mean it. Swapping their theme because a heuristic
+    // disagreed is the kind of guess this whole pane exists to avoid.
+    CHECK(r.theme != &maya::theme::native);
+
+    // Matching polarity is unremarkable and says nothing.
+    agentty::ui_prefs::Prefs q = p;
+    q.polarity = agentty::ui_prefs::Polarity::Dark;
+    const auto rq = agentty::ui_prefs::resolve(q, /*tty=*/true);
+    CHECK(agentty::ui_prefs::theme_override_reason(q, rq).empty());
+
+    // And a light scheme on a light terminal is equally quiet — the check
+    // is symmetric, not "dark is suspicious".
+    agentty::ui_prefs::Prefs l;
+    l.theme    = "Catppuccin Latte";               // a light scheme
+    l.tier     = agentty::ui_prefs::ColorTier::TrueColor;
+    l.polarity = agentty::ui_prefs::Polarity::Light;
+    const auto rl = agentty::ui_prefs::resolve(l, /*tty=*/true);
+    REQUIRE(rl.theme != nullptr);
+    CHECK(agentty::ui_prefs::scheme_is_light(*rl.theme));
+    CHECK(agentty::ui_prefs::theme_override_reason(l, rl).empty());
+}
