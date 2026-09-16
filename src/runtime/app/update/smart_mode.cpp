@@ -9,7 +9,9 @@
 #include "agentty/runtime/app/update.hpp"
 
 #include <algorithm>
+#include <type_traits>
 #include <utility>
+#include <variant>
 
 #include <maya/core/overload.hpp>
 #include <maya/core/cmd.hpp>
@@ -82,16 +84,28 @@ Step smart_mode_update(Model m, msg::SmartModeMsg sm) {
             // pin is enforced by the form rather than by a toast after the
             // fact — the row renders read-only and names the variable.
             if (applied.changed && !role) {
-                // A tuning row — edit the config and hand it to apply_smart,
-                // which persists it, installs it on the UI thread and pushes
-                // it to the subagent router. The registry clamps on the way in.
+                // A registry row (routing or tuning) — edit the config and hand
+                // it to apply_smart, which persists it, installs it on the UI
+                // thread and pushes it to the subagent router. The registry
+                // clamps on the way in.
                 if (const auto* d = settings::registry::find(row_id)) {
                     smart::RoleConfig cfg = m.d.smart;
                     if (const auto* f = o->form.find(row_id))
-                        if (const auto* num =
-                                std::get_if<form::field::Number>(&f->value))
-                            (void)settings::registry::set(
-                                cfg, *d, std::to_string(num->value));
+                        std::visit([&](const auto& v) {
+                            using T = std::decay_t<decltype(v)>;
+                            if constexpr (std::is_same_v<T, form::field::Toggle>)
+                                (void)settings::registry::set(
+                                    cfg, *d, v.on ? "true" : "false");
+                            else if constexpr (std::is_same_v<T, form::field::Number>)
+                                (void)settings::registry::set(
+                                    cfg, *d, std::to_string(v.value));
+                            else if constexpr (std::is_same_v<T, form::field::Slider>)
+                                (void)settings::registry::set(
+                                    cfg, *d, std::to_string(v.value));
+                            else if constexpr (std::is_same_v<T, form::field::Choice>)
+                                (void)settings::registry::set(
+                                    cfg, *d, std::string{v.id()});
+                        }, f->value);
                     apply_smart(m, std::move(cfg));
                     const int cursor = o->form.cursor;
                     o->form = build_smart_form(m, o->advanced);
