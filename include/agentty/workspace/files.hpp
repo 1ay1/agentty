@@ -44,6 +44,18 @@ void join_workspace_prewarm();
 void request_prewarm_cancel() noexcept;
 [[nodiscard]] bool prewarm_cancelled() noexcept;
 
+// Drop the CALLING thread to the lowest scheduling priority the platform
+// offers (SCHED_IDLE on Linux, nice+19 elsewhere). For SPECULATIVE work
+// only — the `@`/`#` prewarms build caches for pickers the user may never
+// open, so they must run on cores nothing else wants.
+//
+// Exists because "background thread" was only ever true of the THREAD: the
+// symbol scan fanned out to min(cores, 12) workers at full priority and
+// pinned every core for ~6 s at launch (1129% measured on a 2864-file
+// tree), which is issue #38 and half of #36. Priority, not thread count,
+// is what makes work actually background.
+void deprioritize_prewarm_thread() noexcept;
+
 // Non-blocking: has the file list been built yet? The composer opens the
 // `@` picker INSTANTLY and shows an "indexing…" hint until this is true.
 [[nodiscard]] bool files_ready();

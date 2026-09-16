@@ -18,6 +18,14 @@
 #include "agentty/tool/util/fs_helpers.hpp"
 #include "agentty/tool/util/subprocess.hpp"
 
+#if defined(__linux__)
+#  include <pthread.h>
+#  include <sched.h>
+#endif
+#if defined(__unix__) || defined(__APPLE__)
+#  include <sys/resource.h>
+#endif
+
 namespace agentty {
 
 namespace {
@@ -412,6 +420,9 @@ void prewarm_workspace_files(std::size_t cap) {
     // this join returns immediately.)
     if (files_prewarm_thread().joinable()) files_prewarm_thread().join();
     files_prewarm_thread() = std::thread([cap] {
+        // Speculative: the `@` picker may never open, so this must lose
+        // every race against real work (see the header).
+        deprioritize_prewarm_thread();
         // Git signals first (fast, ~two git invocations) so the file list is
         // already git-aware the instant it publishes — a blank `@` leads
         // with your dirty files from the very first open.
@@ -435,6 +446,22 @@ void request_prewarm_cancel() noexcept {
 }
 bool prewarm_cancelled() noexcept {
     return g_prewarm_cancel.load(std::memory_order_relaxed);
+}
+
+void deprioritize_prewarm_thread() noexcept {
+#if defined(__linux__)
+    // SCHED_IDLE, not nice(19): a niced thread still competes for
+    // timeslices, while SCHED_IDLE only runs when the runqueue is otherwise
+    // empty. That is exactly the contract a speculative prewarm wants — use
+    // the idle machine, never the busy one.
+    sched_param p{};
+    p.sched_priority = 0;
+    if (::pthread_setschedparam(::pthread_self(), SCHED_IDLE, &p) == 0) return;
+    // Some containers refuse sched_setscheduler; fall through to nice().
+#endif
+#if defined(__unix__) || defined(__APPLE__)
+    (void)::setpriority(PRIO_PROCESS, 0, 19);
+#endif
 }
 
 void join_workspace_prewarm() {

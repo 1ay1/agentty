@@ -124,8 +124,28 @@ bool scan_file(const fs::path& root, const fs::path& file,
 // ── Cache + async prewarm (mirrors files.cpp) ─────────────────────
 // The symbol scan is the expensive one: std::regex across every line of up
 // to 5000 source files. Running that on the `#` keystroke froze the UI for
-// seconds on a large repo. Now the scan runs on a background thread pool
-// at startup, files fanned out across cores, published behind a swap.
+// seconds on a large repo, so it moved to a background pool at startup.
+//
+// But "background" was only true of the THREAD, not of the COST. The pool
+// took min(hardware_concurrency, 12) workers and ran them flat out, so
+// launching agentty in a real repo pinned every core for ~6 s: measured
+// 1129% CPU on this 2864-file tree, against 98% in a one-file directory.
+// On a laptop that is a fan spinning up and battery burned before the user
+// has typed anything (issue #38; #36 is the same complaint from the other
+// end — a high-latency mosh session where the launch burst is felt most).
+//
+// The work itself is worth doing; what was wrong is its PRIORITY. This is a
+// speculative cache for a picker the user may never open, so it must lose
+// every race against real work:
+//
+//   1. Fewer workers. Half the cores, capped at 4 — the scan is ~4x faster
+//      than serial, and the last 8 threads buy a fraction of a second
+//      while making the machine unusable.
+//   2. Lowest scheduler priority. SCHED_IDLE (Linux) / nice+19 elsewhere
+//      means the scan only runs on cores nothing else wants, so the burst
+//      becomes invisible to the foreground instead of competing with it.
+//   3. Yield between files, so even at equal priority the workers are
+//      interruptible rather than monopolising a core for their quantum.
 namespace {
 std::mutex& sym_mu() { static std::mutex m; return m; }
 std::shared_ptr<const std::vector<SymbolEntry>>& sym_cache() {
@@ -169,9 +189,18 @@ std::vector<SymbolEntry> build_symbol_list(std::size_t cap) {
     // 2. Scan files in parallel — each worker builds a local vector, then
     //    we merge. The regex pass is CPU-bound; fanning it out across cores
     //    turns a multi-second cold scan into a fraction of it.
-    unsigned nthreads = std::thread::hardware_concurrency();
-    if (nthreads == 0) nthreads = 4;
-    nthreads = std::min<unsigned>(nthreads, 12);
+    //
+    //    HALF the cores, capped at 4. This used to be min(cores, 12), which
+    //    on any modern laptop meant "all of them": measured 1129% CPU for
+    //    ~6 s at launch. The scan is sublinear in threads anyway (it is I/O
+    //    plus allocator-bound as much as CPU), so the last eight workers
+    //    bought a fraction of a second and cost the user their machine.
+    //    Leaving half the cores free also means the UI thread, the provider
+    //    dial and the RAG warm-up never queue behind this.
+    unsigned hw = std::thread::hardware_concurrency();
+    if (hw == 0) hw = 4;
+    unsigned nthreads = std::max(1u, hw / 2);
+    nthreads = std::min<unsigned>(nthreads, 4);
     nthreads = std::min<unsigned>(nthreads, (unsigned)src.size());
 
     std::atomic<std::size_t> next{0};
@@ -181,6 +210,10 @@ std::vector<SymbolEntry> build_symbol_list(std::size_t cap) {
         pool.reserve(nthreads);
         for (unsigned t = 0; t < nthreads; ++t) {
             pool.emplace_back([&, t] {
+                // Lowest priority: this is a speculative cache for a picker
+                // that may never open, so it must only use cores nothing
+                // else wants.
+                deprioritize_prewarm_thread();
                 auto& local = partials[t];
                 for (;;) {
                     if (prewarm_cancelled()) return;   // drain on shutdown
@@ -189,6 +222,11 @@ std::vector<SymbolEntry> build_symbol_list(std::size_t cap) {
                     if (local.size() >= cap) return;
                     try { (void)scan_file(root, src[i], local, cap); }
                     catch (...) { /* skip a file that trips the matcher */ }
+                    // Give the scheduler a seam between files. Belt and
+                    // braces for the case where SCHED_IDLE was refused (a
+                    // restricted container): without it a worker can hold a
+                    // core for its whole quantum mid-burst.
+                    std::this_thread::yield();
                 }
             });
         }
@@ -224,6 +262,10 @@ void prewarm_workspace_symbols(std::size_t cap) {
     }
     if (sym_prewarm_thread().joinable()) sym_prewarm_thread().join();
     sym_prewarm_thread() = std::thread([cap] {
+        // The directory walk before the pool is single-threaded but still
+        // thousands of stat() calls; it gets the same treatment so the
+        // whole prewarm — walk and scan — stays out of the foreground's way.
+        deprioritize_prewarm_thread();
         auto built = std::make_shared<std::vector<SymbolEntry>>(build_symbol_list(cap));
         {
             std::lock_guard<std::mutex> lk(sym_mu());
