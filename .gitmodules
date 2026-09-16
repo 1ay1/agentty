@@ -12,3 +12,7 @@
 	path = rag-cpp
 	url = https://github.com/1ay1/rag-cpp.git
 	branch = main
+[submodule "bastion"]
+	path = bastion
+	url = https://github.com/1ay1/bastion.git
+	branch = main
