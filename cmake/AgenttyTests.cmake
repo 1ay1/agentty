@@ -43,6 +43,7 @@ set(_AGENTTY_CONSOLIDATED
     embed_backend_test form_test embed_form_test escape_guarantee_test
     theme_discipline_test
     palette_nav_test panel_test panel_nav_test status_bar_cache_test
+    appearance_rows_test
     issue37_terminal_respect_test
     param_tag_repair_test sandbox_escape_test scope_test table_render_test
     ssrf_guard_test render_key_coverage_test reasoning_render_test

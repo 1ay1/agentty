@@ -783,10 +783,19 @@ Cmd<Msg> launch_stream(Model& m) {
     std::string effort = std::string{
         effort_wire_for(m.d.effort, resolved_caps(model_id))};
 
-    // Whether the user wants reasoning shown (global toggle, ^R in the model
-    // picker). Captured for the worker; the Anthropic transport uses it to
-    // request VISIBLE thinking so the reasoning block has text to render.
-    const bool show_reasoning = m.d.show_reasoning;
+    // Whether to ask the provider for visible reasoning at all.
+    //
+    // Gated on the DISPLAY preference, because requesting reasoning you have
+    // told us to hide is the worst of both: you pay for the tokens and never
+    // see them. Appearance's "Thinking" row is the one place that question
+    // is asked — the model picker used to carry a second ^R toggle for the
+    // same thing, and the two could disagree in exactly this direction.
+    //
+    // Collapsed still requests: a collapsed block is shown, just folded, and
+    // it cannot be unfolded if it was never sent.
+    const bool show_reasoning =
+        m.d.show_reasoning
+        && m.d.ui.thinking != ui_prefs::Thinking::Hidden;
 
     // Look up the selected model's supports_tools from available_models.
     // Ollama models have this set via /api/show probe at list time. If

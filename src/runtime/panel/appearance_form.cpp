@@ -197,10 +197,11 @@ form::Form build_appearance_form(const up::Prefs& p, bool tty) {
         static constexpr std::array<const char*, 3> kThinkBlurbs = {
             "reasoning inline",
             "a line you can open",
-            "never shown",
+            "never shown · not requested",
         };
         enum_choice(b, kApThinking, "Thinking", kThink, p.thinking,
-                    "whether the model's reasoning is shown", kThinkBlurbs);
+                    "whether the model's reasoning is shown — and asked for",
+                    kThinkBlurbs);
     }
     {
         static constexpr std::array kStamp = {

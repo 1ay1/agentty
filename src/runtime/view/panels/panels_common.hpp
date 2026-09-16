@@ -261,29 +261,18 @@ reasoning_effort_footer(const Model& m, std::string_view model_id,
     const std::string hi_id{model_id};
     const auto caps = resolved_caps(hi_id, scope);
 
-    // ── Show-reasoning toggle piece (^R), a global on/off display switch.
-    // Appended inline to the reasoning line so effort + show/hide live in ONE
-    // place. ✦ + accented when on, dim when off.
-    auto append_show_reasoning = [&](std::vector<Element>& parts) {
-        const bool on = m.d.show_reasoning;
-        parts.push_back(text("  ", fg_dim(muted)));
-        parts.push_back(text("^R ", fg_of(fg)));
-        // Honest label when the DIALECT can't carry reasoning text back for
-        // THIS model. First-party OpenAI uses Chat Completions, which does
-        // not transmit GPT-5 reasoning at all. Copilot is MIXED and therefore
-        // model-dependent (gpt-5*/mai-code-* stream reasoning; claude-*/
-        // gpt-4.x are chat-only) — so the answer is per ROW, not per provider.
-        // `scope` empty means the ACTIVE provider, which is what
-        // caps_provider_scope() publishes on every switch.
-        const std::string prov =
-            scope.empty() ? caps_provider_scope() : std::string{scope};
-        if (!provider::wire_streams_reasoning_text(prov, hi_id)) {
-            parts.push_back(text("n/a on this API", fg_dim(muted)));
-            return;
-        }
-        parts.push_back(text(on ? "\xe2\x9c\xa6 shown" : "hidden",
-                             on ? fg_bold(accent) : fg_dim(muted)));
-    };
+    // The ^R show/hide toggle used to live here too, inline on this line.
+    //
+    // It is gone because it was the SAME USER-FACING QUESTION as Appearance's
+    // "Thinking" row, asked in two places that could disagree: ^R said
+    // "shown" while Appearance said "Hidden", and the result was reasoning
+    // tokens requested, paid for, and then dropped on the floor — with two
+    // screens each confidently reporting the opposite.
+    //
+    // Effort STAYS. "How hard should this model think" is a property of the
+    // model you are picking, which is exactly what this picker is for.
+    // "Do I want to look at it" is a property of how you like your UI, which
+    // is what the Appearance pane is for. One question, one home.
 
     if (effort_capable(caps)) {
         // One line: the effort ladder (current tier bracketed ‹like this› and
@@ -300,15 +289,11 @@ reasoning_effort_footer(const Model& m, std::string_view model_id,
                 parts.push_back(text(lbl + " ", fg_dim(muted)));
             }
         }
-        append_show_reasoning(parts);
         out.push_back(h(std::move(parts)).build());
     } else {
-        // No effort control on this model — still show the global ^R toggle.
-        std::vector<Element> parts;
-        parts.push_back(text("reasoning ", fg_dim(muted)));
-        parts.push_back(text("off", fg_dim(muted)));
-        append_show_reasoning(parts);
-        out.push_back(h(std::move(parts)).build());
+        // No effort control on this model, and nothing else to say about
+        // reasoning here — display lives in Appearance. An empty footer row
+        // would just be chrome asserting that a feature is absent.
     }
     return out;
 }

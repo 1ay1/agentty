@@ -428,7 +428,12 @@ std::optional<Msg> on_fused_picker(const KeyEvent& ev) {
                 case U'p': return Msg{OpenProviders{}};   // cross-hop
                 case U'f': return Msg{ModelsToggleFavorite{}};
                 case U'w': return Msg{ModelsCycleContext{+1}};   // context window
-                case U'r': return Msg{ModelsToggleShowReasoning{}};
+                // ^R (toggle reasoning display) is deliberately NOT here.
+                // Whether reasoning is SHOWN is an Appearance setting — the
+                // "Thinking" row — and having a second, invisible keybinding
+                // for it in this picker is how the two came to disagree.
+                // A hidden control that contradicts a visible one is worse
+                // than no control.
                 case U'l': return Msg{ModelsRefresh{}};
                 default:   break;
             }
