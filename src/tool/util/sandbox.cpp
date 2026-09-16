@@ -98,8 +98,52 @@ std::atomic<Backend> g_backend{Backend::None};
     return r.started && !r.timed_out && r.exit_code == 0;
 }
 
+// bastion: Landlock path-set authority instead of mount topology.
+//
+// The same backend mcp-cpp's copy of this file selects, wired here too
+// because these two sandboxes cover DIFFERENT execution paths and only
+// both of them together is "agentty is sandboxed":
+//   mcp::…::sandbox  → the tools (shell, diagnostics, git, process_start)
+//   this file        → lifecycle hooks and external ACP agents
+// Porting one and not the other leaves hooks silently on bwrap while the
+// banner says bastion, which is the class of lie this project keeps
+// finding (issue #21: "sandbox: active" with no sandbox).
+//
+// Probed with `doctor`, NOT can_invoke(): can_invoke runs `<exe> --version`
+// and bastion has no such subcommand (exit 2 + usage), so that check would
+// report "unavailable" on a host where it works. doctor IS the capability
+// probe — it verifies the backend and asserts the ergonomic floor, and the
+// tier it prints is read so a kernel too old for Landlock is not mistaken
+// for containment.
+[[nodiscard]] bool bastion_can_sandbox() {
+    auto r = run_argv_s({"bastion", "doctor"}, /*max_bytes=*/8192,
+                        std::chrono::seconds{5});
+    if (!r.started || r.timed_out || r.exit_code != 0) return false;
+    return r.output.find("max tier:    T2") != std::string::npos
+        || r.output.find("max tier:    T3") != std::string::npos;
+}
+
 [[nodiscard]] Backend probe() {
+    // Opt-in: bastion is measured on one kernel so far and its own docs mark
+    // the ABI matrix below that unverified. Requesting it when unavailable
+    // falls back to bwrap rather than running unsandboxed.
+    if (const char* v = std::getenv("AGENTTY_SANDBOX_BACKEND");
+        v && std::string_view{v} == "bastion") {
+        if (bastion_can_sandbox()) return Backend::Bastion;
+    }
     return bwrap_can_sandbox() ? Backend::Bwrap : Backend::None;
+}
+
+// bastion argv: the workspace is the grant. No bind list to maintain — the
+// ergonomic floor ($TMPDIR, toolchain caches, /dev/null) is bastion's own
+// preflight. t2 matches what bwrap delivers today; t3 adds a kernel-denied
+// egress allowlist, selectable without a rebuild.
+[[nodiscard]] std::vector<std::string> build_bastion_argv(std::string_view shell_cmd) {
+    const char* tier = std::getenv("AGENTTY_SANDBOX_TIER");
+    return {"bastion", "run",
+            "-t", (tier && *tier) ? std::string{tier} : std::string{"t2"},
+            "-w", workspace_root().string(),
+            "--", "/bin/sh", "-c", std::string{shell_cmd}};
 }
 
 // Build the bwrap argv prefix. Workspace gets read-write bound to
@@ -280,7 +324,9 @@ std::atomic<Backend> g_backend{Backend::None};
                                            std::size_t max_bytes,
                                            std::chrono::seconds timeout) {
     SubprocessOptions opts;
-    opts.command = SubprocessOptions::Argv{build_bwrap_argv(cmd)};
+    opts.command = SubprocessOptions::Argv{
+        detected_backend() == Backend::Bastion ? build_bastion_argv(cmd)
+                                               : build_bwrap_argv(cmd)};
     opts.max_bytes = max_bytes;
     opts.timeout = timeout;
     opts.on_progress = [](std::string_view snap) { progress::emit(snap); };
@@ -299,7 +345,9 @@ std::atomic<Backend> g_backend{Backend::None};
         return r;
     }
     // Build prefix with no shell command, then splice the user's argv.
-    auto wrapped = build_bwrap_argv("");
+    auto wrapped = detected_backend() == Backend::Bastion
+                       ? build_bastion_argv("")
+                       : build_bwrap_argv("");
     // Pop the trailing 4 elements added by build_bwrap_argv ("--",
     // "/bin/sh", "-c", ""), then append user argv directly.
     wrapped.resize(wrapped.size() - 4);
@@ -441,6 +489,7 @@ std::string describe_state() {
     const char* tag = nullptr;
     switch (b) {
         case Backend::Bwrap:       tag = "bwrap";        break;
+        case Backend::Bastion:     tag = "bastion";      break;
         case Backend::SandboxExec: tag = "sandbox-exec"; break;
         case Backend::None:        tag = nullptr;        break;
     }

@@ -54,6 +54,7 @@ enum class Backend : std::uint8_t {
     None,         // no backend detected / sandbox disabled
     Bwrap,        // Linux bubblewrap
     SandboxExec,  // macOS sandbox-exec
+    Bastion,      // Linux Landlock via `bastion` (opt-in; see probe())
 };
 
 // Set the requested mode (from --sandbox CLI flag) and probe the
