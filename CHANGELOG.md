@@ -4,6 +4,9 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Removed
+- **The `bastion` sandbox backend.** Shipped in 0.9.0 as an opt-in alternative to bwrap (`AGENTTY_SANDBOX_BACKEND=bastion`); withdrawn while its embedding story is reworked. bwrap on Linux and sandbox-exec on macOS are unchanged and remain the default, so `--sandbox on` confines exactly as before. `AGENTTY_SANDBOX_BACKEND`, `AGENTTY_SANDBOX_TIER` and `AGENTTY_SANDBOX_NET` are no longer read, and `.agentty/bastion.toml` is ignored.
+
 ## [0.9.0] - 2026-09-16
 
 ### Security

@@ -54,7 +54,6 @@ enum class Backend : std::uint8_t {
     None,         // no backend detected / sandbox disabled
     Bwrap,        // Linux bubblewrap
     SandboxExec,  // macOS sandbox-exec
-    Bastion,      // Linux Landlock via `bastion` (opt-in; see probe())
 };
 
 // Set the requested mode (from --sandbox CLI flag) and probe the
@@ -114,18 +113,5 @@ enum class Backend : std::uint8_t {
 // user namespaces). Empty on non-Linux builds. Exposed for the unit test only;
 // production code calls run_shell_command / run_argv.
 [[nodiscard]] std::vector<std::string> bwrap_argv_for_test(std::string_view shell_cmd);
-
-// Testing hook: the paths this build would grant READ authority to under the
-// bastion backend, WITHOUT running anything.
-//
-// This exists because the two backends express the same boundary in different
-// vocabularies — bwrap binds mounts, bastion grants path rights — so asserting
-// bwrap's argv says nothing about bastion's policy. That gap shipped a real
-// credential leak: the bastion path granted read on "/", exposing ~/.ssh and
-// ~/.aws to any approved command (which also has the network), while the bwrap
-// test kept passing and both backends still reported "sandbox: active".
-//
-// Empty when built without bastion. Exposed for the unit test only.
-[[nodiscard]] std::vector<std::string> bastion_read_scopes_for_test();
 
 } // namespace agentty::tools::util::sandbox

@@ -208,35 +208,6 @@ if(NOT TARGET maya::maya)
     add_library(maya::maya ALIAS maya)
 endif()
 
-# ── bastion: the sandbox backend ────────────────────────────────────────
-#
-# Built WITH agentty rather than found on PATH. The CLI-shim approach that
-# preceded this meant `AGENTTY_SANDBOX_BACKEND=bastion` silently fell back to
-# bwrap for every user who had not separately cloned and installed bastion —
-# which is everyone who installs a release. A sandbox nobody can reach is not
-# a sandbox.
-#
-# bastion exists FOR agentty, so it ships in the same binary: no second
-# install step, no version skew between the policy engine and the host that
-# drives it, and no "works on the maintainer's box" gap.
-#
-# Unix only. bastion's own CMake selects Landlock on Linux and Seatbelt on
-# Apple; Windows is specified but unimplemented, and agentty must keep
-# building there (that platform's release job is gated on it).
-if(UNIX)
-    # agentty runs bastion's suite in its own CI, not here — each repo gates
-    # its own tests, the same rule mcp-cpp follows above.
-    set(BASTION_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-    add_subdirectory(bastion)
-    agentty_pull_submodule_latest(bastion main bastion)
-    if(TARGET bastion)
-        # Its headers are a dependency, not our code: warnings from them are
-        # not agentty's to fix, and -Werror here would make a bastion bump
-        # break agentty's build for a reason agentty cannot act on.
-        set_target_properties(bastion PROPERTIES SYSTEM TRUE)
-    endif()
-endif()
-
 # Treat maya's headers as system so its warnings don't surface in agentty builds.
 set_target_properties(maya PROPERTIES SYSTEM TRUE)
 

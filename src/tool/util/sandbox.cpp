@@ -9,13 +9,6 @@
 #include <string>
 #include <vector>
 
-#if AGENTTY_HAS_BASTION
-#  include "bastion/policy.hpp"
-#  include "bastion/policy_file.hpp"
-#  include "bastion/spawn.hpp"
-#  include "bastion/tier.hpp"
-#endif
-
 namespace agentty::tools::util::sandbox {
 
 namespace fs = std::filesystem;
@@ -105,81 +98,9 @@ std::atomic<Backend> g_backend{Backend::None};
     return r.started && !r.timed_out && r.exit_code == 0;
 }
 
-// bastion: Landlock path-set authority instead of mount topology.
-//
-// The same backend mcp-cpp's copy of this file selects, wired here too
-// because these two sandboxes cover DIFFERENT execution paths and only
-// both of them together is "agentty is sandboxed":
-//   mcp::…::sandbox  → the tools (shell, diagnostics, git, process_start)
-//   this file        → lifecycle hooks and external ACP agents
-// Porting one and not the other leaves hooks silently on bwrap while the
-// banner says bastion, which is the class of lie this project keeps
-// finding (issue #21: "sandbox: active" with no sandbox).
-//
-// Probed with `doctor`, NOT can_invoke(): can_invoke runs `<exe> --version`
-// and bastion has no such subcommand (exit 2 + usage), so that check would
-// report "unavailable" on a host where it works. doctor IS the capability
-// probe — it verifies the backend and asserts the ergonomic floor, and the
-// tier it prints is read so a kernel too old for Landlock is not mistaken
-// for containment.
-[[nodiscard]] bool bastion_can_sandbox() {
-#if AGENTTY_HAS_BASTION
-    // Linked in, so there is no binary to find and no version to skew: the
-    // policy engine and the host that drives it are the same build. What
-    // remains is a genuine capability question — this kernel may be too old
-    // for Landlock, or the container may forbid it — and bastion answers it
-    // directly rather than through a subprocess whose stdout we would parse.
-    //
-    // A tier that does not contain the filesystem is worse than bwrap here,
-    // so require Kernel (T2) or better. Isolate (T3) additionally brokers
-    // egress; both are acceptable, T0/T1 are not.
-    const auto caps = bastion::active_backend();
-    return caps.max_tier == bastion::Tier::Kernel
-        || caps.max_tier == bastion::Tier::Isolate;
-#else
-    return false;
-#endif
-}
-
 [[nodiscard]] Backend probe() {
-    // Opt-in: bastion is measured on one kernel so far and its own docs mark
-    // the ABI matrix below that unverified. Requesting it when unavailable
-    // falls back to bwrap rather than running unsandboxed.
-    if (const char* v = std::getenv("AGENTTY_SANDBOX_BACKEND");
-        v && std::string_view{v} == "bastion") {
-        if (bastion_can_sandbox()) return Backend::Bastion;
-    }
     return bwrap_can_sandbox() ? Backend::Bwrap : Backend::None;
 }
-
-// bastion argv: the workspace is the grant. No bind list to maintain — the
-// ergonomic floor ($TMPDIR, toolchain caches, /dev/null) is bastion's own
-// preflight.
-//
-// THREE knobs, in increasing order of how much they let a project say:
-//
-//   AGENTTY_SANDBOX_TIER   t0|t1|t2|t3, default t2. t2 matches what bwrap
-//                          delivers today (path containment, shared net);
-//                          t3 additionally denies egress in the kernel and
-//                          brokers a per-host allowlist.
-//   AGENTTY_SANDBOX_NET    host:port grants, comma-separated. Only MEANS
-//                          anything at t3 — at t2 the kernel matches sockets,
-//                          not hostnames, and bastion says so rather than
-//                          implying otherwise.
-//   .agentty/bastion.toml  a policy FILE, which is what `bastion synthesize`
-//                          writes after a `bastion observe` run. This is the
-//                          seam that scales: a project declares what its own
-//                          build actually reaches, from evidence, instead of
-//                          anyone hand-maintaining a host list here.
-//
-// The file is preferred because it is the only one that can be reviewed in a
-// diff. Flags still combine with it (bastion applies both), so the tier and
-// any extra grants remain available without editing the policy.
-//
-// Deliberately NOT hardcoding provider hosts: agentty's own API traffic is
-// in-process and never crosses this boundary — only SPAWNED TOOLS do. What
-// those need is a property of the project's toolchain (its package registry,
-// its git remote), which this layer cannot know and must not guess.
 
 // Build the bwrap argv prefix. Workspace gets read-write bound to
 // itself; system dirs are bound read-only so the shell can find
@@ -200,19 +121,18 @@ std::atomic<Backend> g_backend{Backend::None};
 // namespace so kills work cleanly. `--new-session` so the child can't
 // steal the controlling tty.
 // ---------------------------------------------------------------------------
-// THE READ SET — one list, both backends.
+// THE READ SET.
 //
-// This is shared rather than duplicated because it already drifted once, and
-// the drift was a credential leak rather than a cosmetic inconsistency. When
-// the bastion path was first ported it granted `FsRead "/"` — "system libs" —
-// which is every word of the bwrap comment below inverted: ~/.ssh, ~/.aws and
-// ~/.config became readable by any approved `bash` call, and that call has the
+// Named lists rather than an inline wall of --ro-bind-try, because this is the
+// security boundary and it should be readable as one. Each entry is here for a
+// stated reason; anything not listed is NOT readable from inside the sandbox.
+//
+// Kept as data rather than open-coded because a second backend once restated
+// this set by hand and got it wrong -- granting read on "/", which handed
+// ~/.ssh, ~/.aws and ~/.config to any approved `bash` call that also had the
 // network. Read + exfiltrate, exactly what the sandbox exists to close, and
-// invisible because both backends still reported "sandbox: active".
-//
-// Two hand-maintained copies of a security boundary is the bug. Below, one
-// list, and each backend expresses it in its own vocabulary (bwrap binds
-// mounts, bastion grants path rights).
+// invisible because it still reported "sandbox: active". One list, so a future
+// backend extends it instead of paraphrasing it.
 
 // System roots: the toolchain and shared libraries. Read-only, and no /etc —
 // see kEtcReadable.
@@ -368,161 +288,10 @@ constexpr const char* kHomeToolSubdirs[] = {
     return argv;
 }
 
-#if AGENTTY_HAS_BASTION
-// Run a command under bastion IN-PROCESS.
-//
-// Not `bastion run -t t2 -w … -- /bin/sh -c …`. That shim needed the binary
-// on PATH, which no agentty user has, so the backend silently fell back to
-// bwrap for everyone who installed a release. Linking the library removes
-// the binary, the PATH lookup, the version skew between engine and host, and
-// the argv-string round trip — and gives us the typed SpawnResult instead of
-// scraped stderr.
-//
-// The policy is built from the same inputs the CLI took, so behaviour is
-// unchanged: workspace read+write, tier from AGENTTY_SANDBOX_TIER, egress
-// grants from AGENTTY_SANDBOX_NET, and a project policy file when the repo
-// ships one.
-// The READ SET, not "/". This is the same list bwrap binds, expressed as path
-// rights — see kSystemReadRoots above for why it is shared rather than restated.
-//
-// The earlier `FsRead "/"` was a real credential leak, not a loose grant:
-// ~/.ssh, ~/.aws and ~/.config were readable by any approved `bash` call,
-// which also has the network. bwrap never allowed it, so switching backend
-// silently widened the boundary while both still reported "sandbox: active".
-//
-// FsExec stays "/" deliberately: execution of a path still requires READ
-// authority to reach it, so the narrow read set already bounds what can be
-// run, and a narrower exec rule would only add a second list to drift.
-//
-// Factored out of run_bastion() so the unit test can assert the rules that
-// actually ship. A test that rebuilt this list would only prove the copy in
-// the test matches itself.
-[[nodiscard]] bastion::Policy build_bastion_policy(const std::string& ws,
-                                                  bastion::Tier tier) {
-    auto policy = bastion::Policy{tier}
-                      .allow(bastion::Right::FsExec, "/", "toolchain");
-    for (const char* root : kSystemReadRoots)
-        policy = std::move(policy).allow(bastion::Right::FsRead, root,
-                                         "system libs and toolchain");
-    for (const char* f : kEtcReadable)
-        policy = std::move(policy).allow(bastion::Right::FsRead, f,
-                                         "name resolution / TLS trust / git");
-    if (const char* home = std::getenv("HOME"); home && *home) {
-        const std::string h = home;
-        for (const char* sub : kHomeToolSubdirs)
-            policy = std::move(policy).allow(bastion::Right::FsRead, h + sub,
-                                             "user-local toolchain");
-    }
-    return std::move(policy)
-               .allow(bastion::Right::FsWrite, ws,     "workspace")
-               .allow(bastion::Right::FsWrite, "/tmp", "ergonomic floor");
-}
-
-[[nodiscard]] SubprocessResult run_bastion(std::vector<std::string> argv,
-                                           std::size_t max_bytes,
-                                           std::chrono::seconds timeout) {
-    SubprocessResult r;
-    const std::string ws = workspace_root().string();
-
-    auto tier = bastion::Tier::Kernel;          // t2 — matches bwrap's posture
-    if (const char* t = std::getenv("AGENTTY_SANDBOX_TIER"); t && *t) {
-        const std::string v{t};
-        if      (v == "t0") tier = bastion::Tier::Observe;
-        else if (v == "t1") tier = bastion::Tier::Advisory;
-        else if (v == "t3") tier = bastion::Tier::Isolate;
-    }
-
-    auto policy = build_bastion_policy(ws, tier);
-
-    // Egress. At t3 this is a real per-host allowlist; below it the kernel
-    // matches sockets rather than hostnames and bastion says so rather than
-    // implying an allowlist it cannot enforce.
-    if (const char* net = std::getenv("AGENTTY_SANDBOX_NET"); net && *net) {
-        std::string_view rest{net};
-        while (!rest.empty()) {
-            const auto comma = rest.find(',');
-            auto one = rest.substr(0, comma);
-            while (!one.empty() && one.front() == ' ') one.remove_prefix(1);
-            while (!one.empty() && one.back()  == ' ') one.remove_suffix(1);
-            if (!one.empty())
-                policy = std::move(policy).allow(bastion::Right::NetEgress,
-                                                 std::string{one}, "AGENTTY_SANDBOX_NET");
-            if (comma == std::string_view::npos) break;
-            rest.remove_prefix(comma + 1);
-        }
-    } else {
-        // No allowlist named: keep the network, matching what bwrap does
-        // today. Narrowing this silently would break git/npm/curl for every
-        // user who never asked for egress control.
-        policy = std::move(policy).allow(bastion::Right::NetEgress, "*",
-                                         "default: unrestricted, as bwrap");
-    }
-
-    auto sealed = std::move(policy).seal();
-
-    // A project policy file, when the repo ships one — `.agentty/bastion.toml`,
-    // as written by `bastion synthesize` after a `bastion observe` run. This is
-    // the seam that scales: a project declares what its own build actually
-    // reaches, from evidence, instead of anyone hand-maintaining a host list
-    // here. It is also the only form that can be reviewed in a diff.
-    //
-    // It REPLACES the derived policy above rather than merging with it. The CLI
-    // combined the two, but the CLI's baseline was a workspace grant; ours is
-    // the full read set, and silently unioning that into a reviewed file would
-    // mean the file no longer describes the boundary that is enforced — the
-    // exact property it exists to provide.
-    //
-    // A malformed file FAILS CLOSED. Falling back to the derived policy would
-    // be worse than an error: the user would see a working sandbox and believe
-    // their file was in force.
-    {
-        std::error_code pec;
-        const auto pf = workspace_root() / ".agentty" / "bastion.toml";
-        if (fs::exists(pf, pec) && !pec) {
-            auto loaded = bastion::load_policy(pf.string());
-            if (!loaded) {
-                r.started = false;
-                r.start_error = "sandbox: " + pf.string() + " is malformed (" +
-                                loaded.error() + "); refusing to run";
-                return r;
-            }
-            sealed = bastion::to_sealed(loaded.value());
-        }
-    }
-
-    bastion::SpawnRequest req;
-    req.argv             = std::move(argv);
-    req.cwd              = ws;
-    req.inherit_env      = true;
-    req.capture_output   = true;          // the output IS the tool result
-    req.max_output_bytes = max_bytes;
-    // The deadline goes to bastion, which owns the capture pipe. The caller
-    // cannot enforce it from out here: with capture_output the read blocks
-    // until EOF, and a child that never exits never sends one — so dropping
-    // this on the floor (as the first port did) turned every tool timeout into
-    // a permanent hang of the agent.
-    req.timeout_seconds  = timeout.count() > 0
-                             ? static_cast<unsigned>(timeout.count()) : 0u;
-
-    auto res = bastion::spawn(sealed, req);
-    r.started    = res.launched();
-    r.exit_code  = res.exit_code;
-    r.output     = std::move(res.output);
-    r.truncated  = res.output_truncated;
-    r.timed_out  = res.timed_out;
-    if (!res.error.empty()) r.start_error = res.error;
-    return r;
-}
-#endif  // AGENTTY_HAS_BASTION
 
 [[nodiscard]] SubprocessResult run_wrapped(std::string_view cmd,
                                            std::size_t max_bytes,
                                            std::chrono::seconds timeout) {
-#if AGENTTY_HAS_BASTION
-    if (detected_backend() == Backend::Bastion)
-        return run_bastion({"/bin/sh", "-c", std::string{cmd}},
-                           max_bytes, timeout);
-#endif
     SubprocessOptions opts;
     opts.command = SubprocessOptions::Argv{build_bwrap_argv(cmd)};
     opts.max_bytes = max_bytes;
@@ -543,10 +312,6 @@ constexpr const char* kHomeToolSubdirs[] = {
         return r;
     }
     // Build prefix with no shell command, then splice the user's argv.
-#if AGENTTY_HAS_BASTION
-    if (detected_backend() == Backend::Bastion)
-        return run_bastion(user_argv, max_bytes, timeout);
-#endif
     auto wrapped = build_bwrap_argv("");
     // Pop the trailing 4 elements added by build_bwrap_argv ("--",
     // "/bin/sh", "-c", ""), then append user argv directly.
@@ -689,7 +454,6 @@ std::string describe_state() {
     const char* tag = nullptr;
     switch (b) {
         case Backend::Bwrap:       tag = "bwrap";        break;
-        case Backend::Bastion:     tag = "bastion";      break;
         case Backend::SandboxExec: tag = "sandbox-exec"; break;
         case Backend::None:        tag = nullptr;        break;
     }
@@ -751,21 +515,6 @@ SubprocessResult run_argv(const std::vector<std::string>& argv,
 std::vector<std::string> bwrap_argv_for_test([[maybe_unused]] std::string_view shell_cmd) {
 #if defined(__linux__)
     return build_bwrap_argv(shell_cmd);
-#else
-    return {};
-#endif
-}
-
-std::vector<std::string> bastion_read_scopes_for_test() {
-#if AGENTTY_HAS_BASTION
-    // Reads the REAL policy builder, not a restatement of it, so the test
-    // cannot pass against a list that production no longer uses.
-    std::vector<std::string> out;
-    const auto policy =
-        build_bastion_policy(workspace_root().string(), bastion::Tier::Kernel);
-    for (const auto& rule : policy.rules())
-        if (any(rule.right & bastion::Right::FsRead)) out.push_back(rule.scope);
-    return out;
 #else
     return {};
 #endif

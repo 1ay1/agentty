@@ -17,7 +17,6 @@ crosses this boundary. What the sandbox constrains is what a *tool* can do.
 |---|---|---|
 | `bwrap` (bubblewrap) | Linux | default |
 | `sandbox-exec` | macOS | default |
-| `bastion` (Landlock) | Linux | `AGENTTY_SANDBOX_BACKEND=bastion` |
 
 The startup banner names the one you actually got:
 
@@ -45,88 +44,32 @@ This is an accepted residual, not an oversight — but it is a residual.
 plus specific `/etc` files and `$HOME` toolchain caches (`.cargo`, `.npm`,
 `.dotnet`, `.sdkman`, …). A toolchain nobody anticipated needs a patch here.
 
-## bastion: path-set authority
-
-[bastion](https://github.com/1ay1/bastion) answers the same question with
-Landlock instead of mounts. Opt in:
-
-```sh
-AGENTTY_SANDBOX_BACKEND=bastion agentty
-```
-
-It is **opt-in rather than default** because it has been measured on one
-kernel (7.2.2, Landlock ABI v10) and its own documentation marks the ABI
-matrix below that unverified. Putting every user on a single measurement is
-not a trade agentty should make for them. If bastion is unavailable or the
-kernel is too old for a tier that actually contains anything, agentty falls
-back to bwrap — never to running unsandboxed.
-
-### Tiers
-
-```sh
-AGENTTY_SANDBOX_TIER=t3 AGENTTY_SANDBOX_BACKEND=bastion agentty
-```
-
-| tier | boundary |
-|---|---|
-| `t0`/`t1` | audit only — no enforcement is claimed |
-| `t2` | path containment, shared network (**default**; matches bwrap) |
-| `t3` | adds kernel-denied egress with a brokered per-host allowlist |
-
-### Network allowlist (t3 only)
-
-```sh
-AGENTTY_SANDBOX_NET='github.com:443,registry.npmjs.org:443'
-```
-
-At **t3** this is real: the kernel denies direct outbound and bastion brokers
-connections on loopback, so a compromised child cannot route around it. At
-t2 the kernel matches sockets rather than hostnames, and bastion says so
-instead of implying an allowlist it cannot enforce.
-
-A refused connection is legible rather than a bare `ECONNREFUSED`:
-
-```
-bastion: egress REFUSED api.github.com:443
-         remedy: bastion run -t t3 --net api.github.com:443 -- <cmd>
-```
-
-### Project policy
-
-For anything beyond a couple of hosts, commit a policy instead of exporting
-environment variables:
-
-```sh
-bastion observe -- ./your-build.sh     # run it once, record every access
-bastion synthesize > .agentty/bastion.toml
-```
-
-agentty passes `.agentty/bastion.toml` to bastion automatically when the file
-exists. Flags still combine with it, so the tier and ad-hoc grants remain
-available without editing the policy.
-
-This is deliberately the seam that scales. agentty **does not** ship a list
-of allowed hosts, because what a spawned tool legitimately needs is a
-property of *your* toolchain — your package registry, your git remote, your
-internal mirror — which this layer cannot know and should not guess. A
-synthesized policy is derived from evidence and reviewable in a diff.
-
 ## What is not covered
 
 - **agentty's own API traffic.** In-process; the sandbox never sees it.
-- **T0/T1.** No enforcement against a motivated adversary is claimed, and
-  `bastion explain` prints the real boundary rather than a reassuring one.
+- **The network.** The net namespace is shared, so an approved command can
+  reach any host. This is a deliberate trade — sandboxing egress would break
+  `git push`, `npm install` and `curl`, which are flows users expect to work —
+  but it means read access plus network is read plus exfiltrate. That is why
+  the read set above is narrow rather than convenient.
 - **Windows.** No backend. `--sandbox on` fails loudly rather than pretending.
 
 ## Verifying
 
+The banner states the backend, and it is a capability probe rather than a
+`which`, so "active" means a real confinement attempt succeeded:
+
 ```sh
-bastion doctor                      # backend, max tier, ergonomic floor
-bastion explain --tier t3           # the boundary actually enforced
+agentty --sandbox on            # refuses to start if no backend works
 ```
 
-`bastion doctor` also asserts an *ergonomic floor* — writable `$TMPDIR`,
-toolchain caches, `/dev/null`, DNS iff egress is granted — and refuses to
-hand over a profile while one is violated. That is a security property, not
-a convenience: a sandbox that breaks the toolchain makes agents thrash, and
-thrashing agents get their sandboxes switched off.
+To check the boundary rather than trust it, run something that should be
+denied and confirm it is:
+
+```sh
+agentty --sandbox on run 'run: cat ~/.ssh/id_rsa'
+```
+
+Paths outside the grant are not bound into the sandbox at all, so they report
+as **absent** rather than denied — `No such file or directory` is the expected
+answer there, not evidence that the file is missing.

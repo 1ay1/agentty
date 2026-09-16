@@ -321,16 +321,6 @@ function(agentty_objlib name)
     else()
         target_compile_definitions(${name} PRIVATE AGENTTY_HAS_RAGCPP=0)
     endif()
-    # bastion: the sandbox policy engine, linked rather than shelled out to.
-    # Unix only (its CMake has no Windows backend), and guarded on the target
-    # existing so a Windows build — where AgenttySubmodules skips the
-    # add_subdirectory entirely — still configures.
-    if(TARGET bastion)
-        target_link_libraries(${name} PRIVATE bastion)
-        target_compile_definitions(${name} PRIVATE AGENTTY_HAS_BASTION=1)
-    else()
-        target_compile_definitions(${name} PRIVATE AGENTTY_HAS_BASTION=0)
-    endif()
     # Header-only access to the linked libs (no actual linking for OBJECT).
     target_link_libraries(${name} PRIVATE
         maya::maya
@@ -433,11 +423,6 @@ if(AGENTTY_MCP AND TARGET mcp::mcp)
 endif()
 if(AGENTTY_MCP AND TARGET mcp::tools)
     target_link_libraries(agentty PRIVATE mcp::tools)
-endif()
-# bastion is linked into the objlibs for its headers; the EXECUTABLE needs the
-# archive itself or spawn()/active_backend() are undefined at link time.
-if(TARGET bastion)
-    target_link_libraries(agentty PRIVATE bastion)
 endif()
 if(AGENTTY_HAS_MIMALLOC)
     # The static target contains both C allocation and global C++ new/delete

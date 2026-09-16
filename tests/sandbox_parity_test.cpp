@@ -5,8 +5,8 @@
 //
 // They are initialized separately (main.cpp, then wire_mcp_runtime) and each
 // probes independently. Porting a backend into one and not the other is the
-// failure this pins: the banner would say "bastion" while every hook still
-// ran under bwrap — the same shape as issue #21, where "sandbox: active"
+// failure this pins: the banner would describe one engine while every hook
+// ran under another — the same shape as issue #21, where "sandbox: active"
 // was printed on a host with no working sandbox.
 //
 // So: whatever backend one selects, the other must select too, under every
@@ -33,7 +33,6 @@ std::string name_of(ag::Backend b) {
         case ag::Backend::None:        return "none";
         case ag::Backend::Bwrap:       return "bwrap";
         case ag::Backend::SandboxExec: return "sandbox-exec";
-        case ag::Backend::Bastion:     return "bastion";
     }
     return "?";
 }
@@ -42,7 +41,6 @@ std::string name_of(mc::Backend b) {
         case mc::Backend::None:        return "none";
         case mc::Backend::Bwrap:       return "bwrap";
         case mc::Backend::SandboxExec: return "sandbox-exec";
-        case mc::Backend::Bastion:     return "bastion";
     }
     return "?";
 }
@@ -51,12 +49,11 @@ std::string name_of(mc::Backend b) {
 
 TEST_CASE("sandbox: both implementations know the same backends") {
     // A backend added to one side only is the bug. This is a compile-time
-    // check in practice — if either enum lacks Bastion, name_of won't build —
-    // but assert the mapping too, so a silent renumbering is caught.
-    CHECK(name_of(ag::Backend::Bastion) == "bastion");
-    CHECK(name_of(mc::Backend::Bastion) == "bastion");
-    CHECK(name_of(ag::Backend::Bwrap)   == name_of(mc::Backend::Bwrap));
-    CHECK(name_of(ag::Backend::None)    == name_of(mc::Backend::None));
+    // check in practice — a backend missing from either enum won't build in
+    // name_of — but assert the mapping too, so a silent renumbering is caught.
+    CHECK(name_of(ag::Backend::Bwrap)       == name_of(mc::Backend::Bwrap));
+    CHECK(name_of(ag::Backend::SandboxExec) == name_of(mc::Backend::SandboxExec));
+    CHECK(name_of(ag::Backend::None)        == name_of(mc::Backend::None));
 }
 
 TEST_CASE("sandbox: the two implementations select the SAME backend") {
@@ -70,19 +67,12 @@ TEST_CASE("sandbox: the two implementations select the SAME backend") {
     // takes and miss the very wiring this case exists to check.
     agentty::tools::wire_mcp_runtime("auto");
 
-    // What actually CONFINES a command, which is not always what the local
-    // probe detected. agentty links bastion; mcp-cpp is a standalone library
-    // and cannot, so its probe finds only bwrap. The bridge closes that by
-    // installing agentty's runner as mcp-cpp's host sandbox — so mcp-cpp
-    // then executes under bastion while still REPORTING Backend::Bwrap from
-    // its own detection.
-    //
-    // Comparing detected_backend() alone would therefore fail on a correctly
-    // configured system and pass on a broken one. The invariant that matters
-    // is the engine a command ends up in, so compare that: the host sandbox
-    // when one is installed, else the detected backend.
+    // Compare what actually CONFINES a command, not merely what each side
+    // probed: if a host sandbox is ever installed again, the engine a command
+    // ends up in is the invariant that matters, and comparing detections
+    // alone would fail on a correct system and pass on a broken one.
     const std::string effective_mcp =
-        mc::has_host_sandbox() ? std::string{"bastion"} : name_of(mc::detected_backend());
+        mc::has_host_sandbox() ? std::string{"host"} : name_of(mc::detected_backend());
     const auto a = name_of(ag::detected_backend());
 
     if (a != effective_mcp)
