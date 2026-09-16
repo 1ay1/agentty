@@ -292,6 +292,14 @@ std::string default_system_prompt(bool lean) {
         << "a pipe is usually a PARAMETER you haven't found yet:\n"
         << "      `cmd | head -20`   → `limit: 20` (every search/read "
         << "tool bounds its own output)\n"
+        // The one idiom with no native TOOL answer: a real build/test
+        // command whose output you want to bound. The pipe filters at the
+        // wrong layer — it discards the rest before the terminal card sees
+        // it, so the USER loses output they were watching to save the
+        // model's context. head_lines/tail_lines bound only the boundary.
+        << "      `make | tail -20`  → shell's own `tail_lines: 20` — the "
+        << "pipe hides those lines from the USER too; the parameter bounds "
+        << "only what reaches you\n"
         << "      `tail -n 50 f`     → `read` with `offset: -50` — the "
         << "last 50 lines, no need to know the length\n"
         << "      `sed -n '10,40p'`  → `read` with start_line/end_line, or "
