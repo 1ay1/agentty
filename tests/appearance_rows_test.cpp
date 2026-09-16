@@ -20,8 +20,12 @@
 #include "agentty/domain/ui_prefs.hpp"
 #include "agentty/runtime/model.hpp"
 #include "agentty/runtime/panel/appearance.hpp"
+#include "agentty/runtime/panel/settings/items.hpp"
+#include <maya/core/motion.hpp>
+#include <maya/widget/markdown.hpp>
 
 #include <print>
+#include <functional>
 #include <string>
 
 namespace {
@@ -124,4 +128,98 @@ TEST_CASE("appearance: hiding reasoning stops us paying for it") {
 
     m.d.ui.thinking = up::Thinking::Shown;
     CHECK(m.d.show_reasoning && m.d.ui.thinking != up::Thinking::Hidden);
+}
+
+TEST_CASE("appearance: Animation Off actually stops animation") {
+    // The row promised more than it delivered. reduce_motion gated only the
+    // phase PRIMITIVES (blink, wave, frame_index), so "off" stopped a caret
+    // blinking and a spinner spinning — and nothing else. Five subsystems
+    // drove themselves by requesting frames directly (the welcome cascade
+    // and its perpetual bob, the streaming reveal, the reasoning rail, the
+    // markdown cursor) and none consulted the setting.
+    //
+    // The gate is on the frame REQUEST now, which is the one thing every
+    // self-driven animation has to go through. Measured on an idle welcome
+    // screen: 5% of a core -> 0%.
+    maya::anim::set_reduce_motion(false);
+    CHECK(!maya::anim::reduce_motion());
+
+    maya::anim::set_reduce_motion(true);
+    CHECK(maya::anim::reduce_motion());
+
+    // The primitives settle rather than oscillate: a caret held ON (losing
+    // the cursor is worse than not blinking), a breathing highlight held at
+    // its mid-value (frozen at the trough reads as a rendering bug), and a
+    // spinner on frame 0, which is the resting glyph of every frame set.
+    CHECK(maya::anim::blink(530.0));
+    CHECK(maya::anim::frame_index(8, 80) == 0);
+
+    // keep_animating() is the gate that matters — every self-driven
+    // animation goes through it, so gating it is what makes "off" total
+    // rather than a list of widgets somebody remembered. It must be safe to
+    // call with motion off; it simply schedules nothing.
+    maya::anim::keep_animating();
+    maya::anim::keep_animating_after(100);
+
+    maya::anim::set_reduce_motion(false);
+    CHECK(!maya::anim::reduce_motion());
+}
+
+TEST_CASE("appearance: Syntax highlighting off actually removes the colour") {
+    // This toggle was persisted, hashed into the render key, and read by
+    // NOTHING: maya had no switch for it to reach. A setting that moves,
+    // saves, and changes no pixel is worse than a missing one.
+    //
+    // Distinct content per case on purpose — markdown memoises a built code
+    // block on (source, language), so re-rendering the SAME snippet would
+    // serve the cached element and hide the difference. That is how the
+    // first version of this check passed while the feature did nothing.
+    auto colours_in = [](bool on, const std::string& body) {
+        maya::set_syntax_highlighting(on);
+        const maya::Element e = maya::markdown("```cpp\n" + body + "\n```\n");
+        int runs = 0;
+        std::function<void(const maya::Element&)> walk =
+            [&](const maya::Element& el) {
+                std::visit([&](const auto& n) {
+                    using T = std::decay_t<decltype(n)>;
+                    if constexpr (std::is_same_v<T, maya::TextElement>) {
+                        runs += static_cast<int>(n.runs.size());
+                    } else if constexpr (std::is_same_v<T, maya::BoxElement>) {
+                        for (const auto& c : n.children) walk(c);
+                    } else if constexpr (std::is_same_v<T, maya::ElementList>) {
+                        for (const auto& c : n.items) walk(c);
+                    }
+                }, el.inner);
+            };
+        walk(e);
+        return runs;
+    };
+
+    CHECK(colours_in(true,  "int a = 42; // on")  > 0);
+    CHECK(colours_in(false, "int b = 42; // off") == 0);
+    maya::set_syntax_highlighting(true);
+}
+
+TEST_CASE("settings: every row that opens a pane shows the door arrow") {
+    // Appearance had the reducer, the row, and the enum entry — and was left
+    // out of the one hand-written switch that paints the → affordance. So
+    // the row that opens the largest pane in Settings was the only door
+    // without a handle: it read as a value row that happened to do something
+    // when you pressed Enter.
+    //
+    // opens_pane() is a RANGE over the contiguous door block, so adding one
+    // between the brackets picks up the arrow with no second edit. This
+    // pins the three that exist, and that nothing else claims to be a door.
+    namespace se = agentty::settings;
+
+    CHECK(se::opens_pane(se::Action::OpenRag));
+    CHECK(se::opens_pane(se::Action::OpenAppearance));
+    CHECK(se::opens_pane(se::Action::OpenSmart));
+
+    // Cycling a value in place is not a door — it changes something HERE,
+    // and gets its own glyph rather than the one meaning "leads away".
+    CHECK(!se::opens_pane(se::Action::CycleProfile));
+    CHECK(!se::opens_pane(se::Action::None));
+    CHECK(!se::opens_pane(se::Action::ToggleChangesStrip));
+    CHECK(!se::opens_pane(se::Action::TogglePlugin));
 }

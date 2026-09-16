@@ -141,6 +141,12 @@ maya::Element view(const Model& m) {
         // frame REQUESTS, so "off" means the render loop goes quiet rather
         // than repainting an unchanging glyph 11× a second.
         maya::anim::set_reduce_motion(m.d.ui.motion == ui_prefs::Motion::Off);
+        // Syntax highlighting, same seam and same reason: the renderer
+        // decides per code block, far below any Model, so the preference has
+        // to be published rather than threaded. It was persisted and hashed
+        // into the render key but read by NOTHING until maya grew a switch
+        // for it — a toggle that moved, saved, and changed no pixel.
+        maya::set_syntax_highlighting(m.d.ui.syntax);
     }
 
     // ── Terminal dimensions for the BUILD phase ──

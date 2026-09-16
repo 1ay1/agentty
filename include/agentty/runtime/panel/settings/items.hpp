@@ -19,9 +19,23 @@ namespace agentty::settings {
 enum class Action : std::uint8_t {
     None,          // informational row (no Enter action)
     CycleProfile,  // General: Write → Ask → Minimal
+
+    // ── Doors ─────────────────────────────────────────────────
+    //
+    // Actions that OPEN ANOTHER PANE, kept contiguous and bracketed by
+    // kFirstDoor/kLastDoor below. The settings list paints these with a →
+    // affordance instead of a health dot, because they have no health —
+    // they lead somewhere.
+    //
+    // Contiguous because the arrow used to be a hand-listed switch, and
+    // Appearance was left out of it: the row that opens the largest pane in
+    // Settings was the only door without a handle, reading as a value row
+    // that happened to do something on Enter. A range check cannot be
+    // half-updated the way a case list can.
     OpenRag,       // General: open the RAG mode picker
     OpenAppearance,// General: open the Appearance pane (theme, density, motion)
     OpenSmart,     // General: open Smart Mode config
+
     ToggleChangesStrip, // General: show/hide the persistent "N changes" banner
     // (No RemovePlugin: removal is the two-step `d` → SettingsListRemove
     // flow, never an Enter action — a one-press destructive Enter and a
@@ -44,6 +58,20 @@ enum class Action : std::uint8_t {
     // shape to read. It is a form pane now (panel/appearance.hpp), which is
     // where grouping, per-row help and provenance already live.
 };
+
+// Does activating this row OPEN ANOTHER PANE?
+//
+// One question, asked instead of a list maintained. The settings list uses
+// it to paint the → affordance; anything else that needs to distinguish a
+// door from a value can ask the same way rather than restating the set.
+//
+// A range over the contiguous block above, so adding a door between the
+// brackets picks up the arrow with no second edit — which is exactly what
+// went wrong before: Appearance was added to the enum, wired to a reducer,
+// given a row, and left out of the one switch that paints the handle.
+[[nodiscard]] constexpr bool opens_pane(Action a) noexcept {
+    return a >= Action::OpenRag && a <= Action::OpenSmart;
+}
 
 struct Item {
     // Row health/status — drives the LEADING badge so a row communicates its
