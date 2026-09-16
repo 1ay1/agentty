@@ -475,13 +475,27 @@ Step account_select(Model m) {
             break;   // handled below (provider-specific launch)
         }
         // OAuth login, routed off REGISTRY CAPABILITIES rather than provider
-        // names. `oauth_native` marks the bespoke ChatGPT/Codex flow (it
-        // negotiates device-vs-browser at runtime); `device_login` marks the
-        // providers that share the generic launcher; `method_menu` marks the
-        // one that offers a choice of method. A new OAuth provider sets a
-        // flag on its row and lands here with no edit to this function.
+        // names. Order matters, and it is the SPECIFIC flag first:
+        //
+        //   device_login  — shares the generic device-code launcher
+        //                   (Copilot, Kimi).
+        //   oauth_native  — "backend authenticates by sign-in and rides its own
+        //                   long-lived transport". That is TRUE of Copilot and
+        //                   Kimi as well as ChatGPT (credentials.cpp reads it
+        //                   exactly that way), so it does NOT identify the
+        //                   Codex flow on its own.
+        //
+        // Checking oauth_native first made every device-flow provider launch
+        // the ChatGPT/Codex browser flow: picking "GitHub Copilot" or "Kimi"
+        // from the provider picker opened the OpenAI sign-in panel. The flag's
+        // own comment claimed "today only ChatGPT sets this", which stopped
+        // being true when Copilot and Kimi were added, and this branch trusted
+        // the comment rather than the rows.
         const auto* prow = provider::preset_for(provider);
-        if (prow && prow->oauth_native) {
+        if (prow && prow->device_login)
+            return launch_device_login(std::move(m), provider,
+                                       std::string{prow->label});
+        if (prow && prow->codex_login()) {
             const auto attempt_id = cmd::next_codex_login_attempt_id();
             auto cancel = std::make_shared<std::atomic_bool>(false);
             m.ui.login = login::ChatGptWaiting{
@@ -491,9 +505,6 @@ Step account_select(Model m) {
             };
             return {std::move(m), cmd::codex_login_async(attempt_id, std::move(cancel))};
         }
-        if (prow && prow->device_login)
-            return launch_device_login(std::move(m), provider,
-                                       std::string{prow->label});
         // Otherwise: the method menu (OAuth subscription vs API key).
         m.ui.login = login::Picking{
             .provider = provider,

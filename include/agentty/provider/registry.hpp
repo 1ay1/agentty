@@ -218,6 +218,23 @@ struct ProviderDescriptor {
     // flow negotiates device-vs-browser at runtime (see oauth_native).
     bool device_login = false;
 
+    // Does this row use the bespoke ChatGPT/Codex login flow?
+    //
+    // A PREDICATE rather than a raw flag test, because the obvious test is
+    // wrong and was wrong at two call sites. `oauth_native` reads as "the
+    // Codex one" but actually means "authenticates by sign-in and rides its
+    // own long-lived transport" — true of Copilot and Kimi as well, which is
+    // exactly how credentials.cpp uses it. So `if (p->oauth_native)` sent
+    // every device-flow provider into the ChatGPT browser flow: picking
+    // "GitHub Copilot" opened the OpenAI sign-in panel.
+    //
+    // The two flags are not independent — device_login is the more specific
+    // claim and wins — so the relationship belongs here, once, instead of
+    // being re-derived (and mis-ordered) by each caller.
+    [[nodiscard]] constexpr bool codex_login() const noexcept {
+        return oauth_native && !device_login;
+    }
+
     // The login modal offers a CHOICE of method (OAuth subscription vs
     // API key). Only Anthropic does today: everything else is either
     // key-only or OAuth-only, and showing a one-item menu is noise.

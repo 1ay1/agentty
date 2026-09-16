@@ -331,15 +331,20 @@ Step providers_update(Model m, msg::ProvidersMsg pm) {
             // than switching to a backend that would fail on the first turn.
             //
             // Routed off registry capabilities + the auth vault, not provider
-            // names. `oauth_native` picks the bespoke ChatGPT/Codex flow;
-            // `device_login` picks the shared device launcher; vault::signed_in
-            // answers "has this provider a live token" for every OAuth row
-            // through one table. A new OAuth provider needs no edit here.
+            // names. The SPECIFIC flag is tested first: `device_login` marks
+            // the providers that share the device-code launcher (Copilot,
+            // Kimi), while `oauth_native` only means "authenticates by sign-in
+            // and rides its own long-lived transport" — which is true of those
+            // two as well, so it cannot identify the Codex flow by itself.
+            // Testing it first sent Copilot and Kimi into the ChatGPT browser
+            // flow, i.e. picking either opened the OpenAI sign-in panel.
+            // vault::signed_in answers "has this provider a live token" for
+            // every OAuth row through one table.
             if (preset.token_in_transport
                 && !auth::vault::signed_in(std::string{spec})) {
                 const auto attempt_id = cmd::next_codex_login_attempt_id();
                 auto cancel = std::make_shared<std::atomic_bool>(false);
-                if (preset.oauth_native) {
+                if (preset.codex_login()) {
                     m.ui.login = ui::login::ChatGptWaiting{
                         .attempt_id = attempt_id,
                         .cancel = cancel,
