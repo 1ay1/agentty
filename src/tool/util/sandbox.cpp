@@ -136,14 +136,70 @@ std::atomic<Backend> g_backend{Backend::None};
 
 // bastion argv: the workspace is the grant. No bind list to maintain — the
 // ergonomic floor ($TMPDIR, toolchain caches, /dev/null) is bastion's own
-// preflight. t2 matches what bwrap delivers today; t3 adds a kernel-denied
-// egress allowlist, selectable without a rebuild.
+// preflight.
+//
+// THREE knobs, in increasing order of how much they let a project say:
+//
+//   AGENTTY_SANDBOX_TIER   t0|t1|t2|t3, default t2. t2 matches what bwrap
+//                          delivers today (path containment, shared net);
+//                          t3 additionally denies egress in the kernel and
+//                          brokers a per-host allowlist.
+//   AGENTTY_SANDBOX_NET    host:port grants, comma-separated. Only MEANS
+//                          anything at t3 — at t2 the kernel matches sockets,
+//                          not hostnames, and bastion says so rather than
+//                          implying otherwise.
+//   .agentty/bastion.toml  a policy FILE, which is what `bastion synthesize`
+//                          writes after a `bastion observe` run. This is the
+//                          seam that scales: a project declares what its own
+//                          build actually reaches, from evidence, instead of
+//                          anyone hand-maintaining a host list here.
+//
+// The file is preferred because it is the only one that can be reviewed in a
+// diff. Flags still combine with it (bastion applies both), so the tier and
+// any extra grants remain available without editing the policy.
+//
+// Deliberately NOT hardcoding provider hosts: agentty's own API traffic is
+// in-process and never crosses this boundary — only SPAWNED TOOLS do. What
+// those need is a property of the project's toolchain (its package registry,
+// its git remote), which this layer cannot know and must not guess.
 [[nodiscard]] std::vector<std::string> build_bastion_argv(std::string_view shell_cmd) {
     const char* tier = std::getenv("AGENTTY_SANDBOX_TIER");
-    return {"bastion", "run",
-            "-t", (tier && *tier) ? std::string{tier} : std::string{"t2"},
-            "-w", workspace_root().string(),
-            "--", "/bin/sh", "-c", std::string{shell_cmd}};
+    std::vector<std::string> argv{
+        "bastion", "run",
+        "-t", (tier && *tier) ? std::string{tier} : std::string{"t2"},
+        "-w", workspace_root().string()};
+
+    // Project policy, when the repo ships one.
+    std::error_code pec;
+    const auto policy = workspace_root() / ".agentty" / "bastion.toml";
+    if (fs::exists(policy, pec) && !pec) {
+        argv.emplace_back("-p");
+        argv.emplace_back(policy.string());
+    }
+
+    // Extra egress grants. Split on commas; empty entries are skipped so a
+    // trailing comma is not an error the user has to debug.
+    if (const char* net = std::getenv("AGENTTY_SANDBOX_NET"); net && *net) {
+        std::string_view rest{net};
+        while (!rest.empty()) {
+            const auto comma = rest.find(',');
+            auto one = rest.substr(0, comma);
+            while (!one.empty() && one.front() == ' ') one.remove_prefix(1);
+            while (!one.empty() && one.back()  == ' ') one.remove_suffix(1);
+            if (!one.empty()) {
+                argv.emplace_back("--net");
+                argv.emplace_back(std::string{one});
+            }
+            if (comma == std::string_view::npos) break;
+            rest.remove_prefix(comma + 1);
+        }
+    }
+
+    argv.emplace_back("--");
+    argv.emplace_back("/bin/sh");
+    argv.emplace_back("-c");
+    argv.emplace_back(std::string{shell_cmd});
+    return argv;
 }
 
 // Build the bwrap argv prefix. Workspace gets read-write bound to
