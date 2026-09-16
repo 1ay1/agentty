@@ -10,15 +10,22 @@
 //
 // Now every exclusive panel lives in ONE slot:
 //
-//     m.ui.panel = pn::Models{{.index = 3}};    // opens (closes rival)
-//     m.ui.panel.is<pn::Models>()               // open?
-//     m.ui.panel.get<pn::Models>()              // payload* or nullptr
-//     m.ui.panel.close<pn::Models>()            // close IF topmost
+//     m.ui.panel.descend(pn::Models{{.index = 3}});  // open OVER (Esc unwinds)
+//     m.ui.panel.replace(pn::Providers{{2}});         // hop SIDEWAYS (keep parent)
+//     m.ui.panel.is<pn::Models>()                     // open?
+//     m.ui.panel.get<pn::Models>()                    // payload* or nullptr
+//     m.ui.panel.close<pn::Models>()                  // close IF topmost
 //
-// Opening is assignment — it structurally closes whatever was open,
-// because a variant holds one alternative. "Two exclusive panels open"
-// is not a bug we guard against anymore; it is UNREPRESENTABLE. All the
-// rival-closing writes are deleted, not relocated.
+// One slot, one variant — so "two exclusive panels open" is not a bug we
+// guard against anymore, it is UNREPRESENTABLE. All the rival-closing
+// writes are deleted, not relocated.
+//
+// What a variant does NOT give you is the parent chain, and that is where
+// every navigation bug has lived. Assignment used to be the way to open,
+// and it discarded the chain silently — so Esc from a panel opened out of
+// another panel left the stack entirely. Assignment is now DELETED; see
+// the three moves (descend / replace / restore) on State below, which is
+// the single place that story is told.
 //
 // Deliberate NON-members (the exceptions that shape the design):
 //   • login      — a 9-state auth machine with Origin-frame navigation;
@@ -60,6 +67,7 @@
 #include "agentty/runtime/panel/rag.hpp"
 #include "agentty/runtime/panel/settings/list.hpp"
 #include "agentty/runtime/panel/fork.hpp"
+#include "agentty/runtime/panel/appearance.hpp"
 #include "agentty/runtime/panel/form.hpp"
 
 namespace agentty::ui::panel {
@@ -161,6 +169,17 @@ struct PluginEdit : WithFrom {
     // preserve pattern as SmartMode's advanced toggle.
     std::string built_kind;
 };
+// The Appearance pane. A form, like SmartMode/PluginEdit — grouped rows,
+// live on every keystroke. `picking` + `picker` are the theme browser
+// floating OVER it: a Pick row hands off rather than growing the dropdown
+// into a worse picker, and the pane stays painted behind so the list is
+// its own preview.
+//
+// Composed, not doubly-inherited: the visual gate decomposes a panel via
+// structured bindings, which two bases with members make ill-formed.
+struct Appearance : WithFrom {
+    agentty::ui::panel::AppearancePane pane;
+};
 struct Fork            : agentty::fork_panel::Open, WithFrom {};
 struct DiffReview      : pick::OpenAtCell, WithFrom {};
 struct Stats           : agentty::stats_panel::Open, WithFrom {};
@@ -170,7 +189,7 @@ using Variant = std::variant<
     Models, Providers, ThreadList, SmartMode,
     Palette, Mention, Symbol,
     CodeBlocks, CodeBlockResult, ToolOutput, Checkpoints,
-    Rag, SettingsList, PluginEdit, Fork,
+    Rag, SettingsList, PluginEdit, Appearance, Fork,
     DiffReview, Stats>;
 
 // The one indirection that lets the type refer to itself: a stashed parent
@@ -187,16 +206,47 @@ concept Alternative = requires(Variant v) { std::holds_alternative<K>(v); };
 
 // The slot itself: a thin wrapper so call sites read as intent
 // (`m.ui.panel.is<pn::Models>()`) rather than as variant plumbing.
+//
+// ── The three moves ────────────────────────────────────────────────
+//
+// Navigation is a STACK, and there are exactly three things you can do to
+// it. They differ ONLY in what happens to the parent chain, which is
+// precisely the part a call site kept getting wrong:
+//
+//   descend(k)  DOWN.     k.from snapshots what is open. Esc unwinds to it.
+//                         For an Open* handler: "open k over here".
+//   replace(k)  SIDEWAYS. k INHERITS the current panel's parent. For a hop
+//                         between siblings (^P from the model picker to the
+//                         provider picker) — the panel you leave is gone,
+//                         but where you CAME FROM is unchanged.
+//   restore(k)  UP.       k is put back verbatim, chain included. For
+//                         ascend(), and for rebuilding the panel you are
+//                         already inside.
+//
+// Every one of these has been a bug at least once, always the same shape:
+// a call site that meant one and spelled another, with no type to stop it.
+//
+//   • `operator=` was a fourth, unnamed move that DROPPED the chain. It
+//     was documented as "use descend at OPEN sites" — a comment, so it was
+//     not enforced: 13 Open* reducers assigned and 8 descended. palette →
+//     providers → Esc left the stack entirely. It is now DELETED.
+//   • The sideways hop was spelled `close<Old>(); descend(New);`, which
+//     reads like "swap panels" and means "drop the grandparent": close()
+//     leaves None, so descend() finds nothing to stash. palette → models →
+//     ^P → Esc exited instead of returning to the palette. That is what
+//     replace() exists to say.
+//
+// So the rule is: if you are changing what is in the slot, you must name
+// which of the three you mean. There is no unnamed way left.
 class State {
 public:
     State() = default;
 
-    // Open K (closing whatever was open) — plain assignment.
+    // Assignment is deleted: it silently discarded the parent chain. Say
+    // descend(k) to go DOWN, replace(k) to go SIDEWAYS, or restore(k) to
+    // put a panel back with the chain it already carries.
     template <Alternative K>
-    State& operator=(K k) {
-        v_ = std::move(k);
-        return *this;
-    }
+    State& operator=(K k) = delete;
 
     template <Alternative K>
     [[nodiscard]] bool is() const noexcept {
@@ -227,14 +277,75 @@ public:
     // nested from and all. Opening over None stashes nothing (from stays
     // empty) and Esc simply closes: "the thread" needs no snapshot.
     //
-    // Use `descend` at OPEN sites and plain assignment at RESTORE sites —
-    // a restore that descended would stash the child as its own parent's
-    // parent and Esc would cycle instead of unwinding.
+    // Re-opening the SAME kind is a rebuild, not a descent. Without that
+    // check, a reducer that reopens its own panel to refresh it (Smart Mode
+    // does this on every slot assignment) would stash the panel as its own
+    // parent, and Esc would peel identical copies one at a time instead of
+    // leaving. The new panel keeps the chain the old one had.
     template <Alternative K>
     void descend(K k) {
-        if (!std::holds_alternative<None>(v_))
+        if (std::holds_alternative<K>(v_)) {
+            k.from = std::move(std::get<K>(v_).from);
+        } else if (!std::holds_alternative<None>(v_)) {
             k.from = From::of(Snapshot{std::move(v_)});
+        }
         v_ = std::move(k);
+    }
+
+    // SIDEWAYS: swap the open panel for K, keeping ITS parent.
+    //
+    // A hop between siblings — ^P from the model picker to the provider
+    // picker, or any "leave this, open that at the same level". The panel
+    // you are leaving is discarded; where you CAME FROM is not.
+    //
+    // This used to be spelled `close<Old>(); descend(New);`, which reads
+    // like a swap and behaves like a truncation: close() leaves None, so
+    // the descend() that follows finds nothing to stash and silently drops
+    // the grandparent. palette → models → ^P → Esc then exited the stack
+    // instead of returning to the palette.
+    //
+    // Over None this is just an open with no parent, which is the same
+    // thing descend() would do — a hop from nothing lands on nothing.
+    template <Alternative K>
+    void replace(K k) {
+        k.from = std::visit(
+            [](auto& a) -> From {
+                if constexpr (requires { a.from; }) return std::move(a.from);
+                else return From{};
+            },
+            v_);
+        v_ = std::move(k);
+    }
+
+    // Put K back exactly as given — its `from` is already whatever it should
+    // be. For ascend() restoring a stashed parent, and for a reducer
+    // rebuilding the panel it is already inside.
+    //
+    // The counterpart to descend: a restore that descended would stash the
+    // child as its own parent and Esc would cycle instead of unwinding.
+    template <Alternative K>
+    void restore(K k) {
+        v_ = std::move(k);
+    }
+
+    // How many panels Esc would have to walk to leave. 0 = nothing open.
+    // Exposed for tests and diagnostics: the depth is the property the
+    // navigation contract is actually about.
+    [[nodiscard]] int depth() const noexcept {
+        int n = 0;
+        const Variant* cur = &v_;
+        while (!std::holds_alternative<None>(*cur)) {
+            ++n;
+            const From* f = std::visit(
+                [](const auto& a) -> const From* {
+                    if constexpr (requires { a.from; }) return &a.from;
+                    else return nullptr;
+                },
+                *cur);
+            if (!f || f->empty()) break;
+            cur = &f->get()->v;
+        }
+        return n;
     }
 
     // Give the CURRENTLY-OPEN overlay a parent, if it has none yet. The
@@ -293,6 +404,7 @@ enum class Kind {
     Rag,
     SettingsList,
     PluginEdit,
+    Appearance,
     Fork,
     Models,
     Providers,
@@ -322,6 +434,7 @@ enum class Kind {
         Kind operator()(const Rag&)     const { return Kind::Rag; }
         Kind operator()(const SettingsList&)    const { return Kind::SettingsList; }
         Kind operator()(const PluginEdit&)      const { return Kind::PluginEdit; }
+        Kind operator()(const Appearance&)      const { return Kind::Appearance; }
         Kind operator()(const Fork&)            const { return Kind::Fork; }
         Kind operator()(const DiffReview&)      const { return Kind::DiffReview; }
         Kind operator()(const Stats&)           const { return Kind::Stats; }

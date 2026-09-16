@@ -68,6 +68,8 @@ Model press_escape(Model m) {
     }
     if (m.ui.panel.is<pn::SettingsList>())
         return app::update(std::move(m), Msg{CloseSettingsList{}}).first;
+    if (m.ui.panel.is<pn::Stats>())
+        return app::update(std::move(m), Msg{CloseStats{}}).first;
     return m;
 }
 
@@ -107,15 +109,22 @@ TEST_CASE("settings nav: palette → pane → Esc returns to the palette") {
     // …with the FULL palette state the user left: the query they typed and
     // the cursor on the matching row. (The old origin-reconstruction reset
     // the query to "" and recomputed a cursor; the snapshot just restores.)
+    //
+    // Driven through the rows the palette STILL has. Smart Mode and
+    // Retrieval used to be tested here; they are Settings rows now (^S and
+    // Settings → General respectively), so the palette-origin contract is
+    // exercised with commands that remain: Stats and the settings list
+    // itself. What is under test is the snapshot/restore, not which pane
+    // happens to be on the far side of it.
     install_stub_deps();
     {
-        Model m = run_from_palette(Model{}, "smart mode", Command::SmartMode);
-        REQUIRE(m.ui.panel.is<pn::SmartMode>());
+        Model m = run_from_palette(Model{}, "stats", Command::OpenStats);
+        REQUIRE(m.ui.panel.is<pn::Stats>());
 
         m = press_escape(std::move(m));
         REQUIRE(m.ui.panel.is<pn::Palette>());
         const auto* p = m.ui.panel.get<pn::Palette>();
-        CHECK(p->query == "smart mode");
+        CHECK(p->query == "stats");
         // The cursor must still land on the command that was run — resolved
         // through the SAME filtered list the view renders, against the LIVE
         // context (revalidated by ascend(), in case gating changed while the
@@ -125,22 +134,23 @@ TEST_CASE("settings nav: palette → pane → Esc returns to the palette") {
         REQUIRE(p->index >= 0);
         REQUIRE(p->index < static_cast<int>(matches.size()));
         CHECK(matches[static_cast<std::size_t>(p->index)]->id
-              == Command::SmartMode);
+              == Command::OpenStats);
     }
     {
-        Model m = run_from_palette(Model{}, "retrieval", Command::OpenRag);
-        REQUIRE(m.ui.panel.is<pn::Rag>());
+        Model m = run_from_palette(Model{}, "settings",
+                                   Command::OpenGeneralSettings);
+        REQUIRE(m.ui.panel.is<pn::SettingsList>());
 
         m = press_escape(std::move(m));
         REQUIRE(m.ui.panel.is<pn::Palette>());
         const auto* p = m.ui.panel.get<pn::Palette>();
-        CHECK(p->query == "retrieval");
+        CHECK(p->query == "settings");
         const auto matches = filtered_commands(p->query, ui::palette_context(m));
         REQUIRE(!matches.empty());
         REQUIRE(p->index >= 0);
         REQUIRE(p->index < static_cast<int>(matches.size()));
         CHECK(matches[static_cast<std::size_t>(p->index)]->id
-              == Command::OpenRag);
+              == Command::OpenGeneralSettings);
     }
 }
 
@@ -151,7 +161,7 @@ TEST_CASE("settings nav: settings list → pane → Esc returns to the list") {
     // as a stack would not expect.
     install_stub_deps();
 
-    const auto descend = [](Command row) {
+    const auto descend = [](settings::Action want) {
         Model m;
         m = app::update(std::move(m),
                         Msg{OpenSettingsList{settings::Category::General}}).first;
@@ -163,12 +173,7 @@ TEST_CASE("settings nav: settings list → pane → Esc returns to the list") {
         const auto rows = settings::items_for(m, o->concern);
         int idx = -1;
         for (int i = 0; i < static_cast<int>(rows.size()); ++i)
-            if ((row == Command::OpenRag
-                    && rows[static_cast<std::size_t>(i)].action
-                           == settings::Action::OpenRag)
-             || (row == Command::SmartMode
-                    && rows[static_cast<std::size_t>(i)].action
-                           == settings::Action::OpenSmart))
+            if (rows[static_cast<std::size_t>(i)].action == want)
                 idx = i;
         REQUIRE(idx >= 0);
         // A row that is not the first, or "remembered the row" and "reset to
@@ -180,7 +185,7 @@ TEST_CASE("settings nav: settings list → pane → Esc returns to the list") {
     };
 
     {
-        auto [m, idx] = descend(Command::SmartMode);
+        auto [m, idx] = descend(settings::Action::OpenSmart);
         REQUIRE(m.ui.panel.is<pn::SmartMode>());
         m = press_escape(std::move(m));
         REQUIRE(m.ui.panel.is<pn::SettingsList>());
@@ -189,7 +194,7 @@ TEST_CASE("settings nav: settings list → pane → Esc returns to the list") {
         CHECK(m.ui.panel.get<pn::SettingsList>()->index == idx);
     }
     {
-        auto [m, idx] = descend(Command::OpenRag);
+        auto [m, idx] = descend(settings::Action::OpenRag);
         REQUIRE(m.ui.panel.is<pn::Rag>());
         m = press_escape(std::move(m));
         REQUIRE(m.ui.panel.is<pn::SettingsList>());
@@ -218,9 +223,28 @@ TEST_CASE("settings nav: the origin survives a slot round trip") {
     // Assigning a model slot hands off to the model picker: the WHOLE
     // SmartMode pane (form, advanced, its own parent chain) rides in the
     // assign-mode picker's `from` snapshot, and Esc restores it — with the
-    // pane still knowing it was opened from the palette.
+    // pane still knowing where it was opened FROM.
+    //
+    // Reached via the settings list, which is where Smart Mode lives now
+    // (^S is the other door). The origin under test is the one the pane
+    // records on the way in, whatever that origin happens to be.
     install_stub_deps();
-    Model m = run_from_palette(Model{}, "smart mode", Command::SmartMode);
+    Model m;
+    m = app::update(std::move(m),
+                    Msg{OpenSettingsList{settings::Category::General}}).first;
+    REQUIRE(m.ui.panel.is<pn::SettingsList>());
+    {
+        auto* o = m.ui.panel.get<pn::SettingsList>();
+        const auto rows = settings::items_for(m, o->concern);
+        int idx = -1;
+        for (int i = 0; i < static_cast<int>(rows.size()); ++i)
+            if (rows[static_cast<std::size_t>(i)].action
+                    == settings::Action::OpenSmart)
+                idx = i;
+        REQUIRE(idx >= 0);
+        o->index = idx;
+    }
+    m = app::update(std::move(m), Msg{SettingsListActivate{}}).first;
     REQUIRE(m.ui.panel.is<pn::SmartMode>());
 
     // Descend into the picker the REAL way: the hand-off descend()s an
@@ -235,8 +259,8 @@ TEST_CASE("settings nav: the origin survives a slot round trip") {
             == smart::ModelRole::Strategic);
     m = app::update(std::move(m), Msg{CloseModels{}}).first;
 
-    // Back on the pane — and Esc must still know it came from the palette.
+    // Back on the pane — and Esc must still know where it came from.
     REQUIRE(m.ui.panel.is<pn::SmartMode>());
     m = press_escape(std::move(m));
-    CHECK(m.ui.panel.is<pn::Palette>());
+    CHECK(m.ui.panel.is<pn::SettingsList>());
 }

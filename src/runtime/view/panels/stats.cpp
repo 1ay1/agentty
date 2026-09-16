@@ -19,6 +19,8 @@
 #include "panels_prologue.hpp"
 
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 
 #include <maya/widget/bar_chart.hpp>
 #include <maya/element/grid.hpp>
@@ -35,51 +37,49 @@
 namespace agentty::ui {
 namespace {
 
-// The card accent for the active tab. Kept fixed rather than per-tab: the
-// panel already tells you which tab you are on via the strip, so tinting
-// the cards a different colour per tab would be a second, redundant, and
-// slower-to-read signal.
-[[nodiscard]] maya::Color card_accent() { return maya::Color::rgb(120, 180, 255); }
-
-// The ONE place a domain hue slot becomes a colour. domain/ deliberately
-// does not know about the theme, so the mapping lives here — and lives
-// once, rather than in each extractor.
-[[nodiscard]] maya::Color hue_of(int slot) {
-    switch (slot) {
-        case 1:  return success;
-        case 2:  return warn;
-        case 3:  return danger;
-        case 4:  return accent;
-        default: return muted;
-    }
+// The card accent ramp.
+//
+// These used to be nine hardcoded RGB values -- a private palette the theme
+// could not see, so the stats panel kept its own colours no matter what
+// scheme the user picked. The comment defending them had half a point: a
+// STATUS palette (green=good, red=failed) carries the wrong meaning for a
+// grid of named categories.
+//
+// But the answer to "status is the wrong axis" is a categorical ramp, not a
+// private one. maya::theme::series() is exactly that, derived from the
+// theme's own role slots in an alternating order so adjacent slices
+// contrast. Same argument, one layer down, and it follows the user.
+namespace hue {
+[[nodiscard]] inline maya::Color at(std::size_t i) {
+    return maya::theme::series(maya::theme::live(), i);
 }
+[[nodiscard]] inline maya::Color cyan()   { return at(0); }
+[[nodiscard]] inline maya::Color blue()   { return at(1); }
+[[nodiscard]] inline maya::Color amber()  { return at(2); }
+[[nodiscard]] inline maya::Color green()  { return at(3); }
+[[nodiscard]] inline maya::Color violet() { return at(4); }
+[[nodiscard]] inline maya::Color teal()   { return at(5); }
+[[nodiscard]] inline maya::Color red()    { return at(6); }
+[[nodiscard]] inline maya::Color pink()   { return at(7); }
+[[nodiscard]] inline maya::Color dim()    {
+    return maya::theme::series_other(maya::theme::live());
+}
+}  // namespace hue
 
 // A CATEGORICAL ramp, for charts whose slices are named things rather
-// than states. hue_of() is a SEMANTIC map — green means good, red means
-// failed — and a pie of seven tool names has no semantics to encode: it
-// needs seven distinguishable colours, and reusing the status palette
-// would imply `grep` is somehow the failure case.
-//
-// Ordered so ADJACENT slices contrast. A ramp that walks the spectrum
-// puts two blues next to each other, and neighbouring wedges are exactly
-// the pair a reader has to tell apart.
+// than states — the example's palette in its cycling order, so adjacent
+// slices contrast instead of walking the spectrum into two neighbouring
+// blues.
 [[nodiscard]] maya::Color series_hue(int slot, std::size_t i) {
     // The catch-all slice draws muted. "other" is the ABSENCE of a
     // category, so giving it a category's colour makes it read as one
     // more of them — which it did: it collided with the largest slice.
-    if (slot < 0) return muted;
-    static const maya::Color kRamp[] = {
-        accent,                       // magenta
-        info,                         // blue
-        success,                      // green
-        warn,                         // yellow
-        highlight,                    // cyan
-        maya::Color::bright_magenta(),
-        maya::Color::bright_blue(),
-        maya::Color::bright_green(),
-    };
-    constexpr std::size_t n = sizeof(kRamp) / sizeof(kRamp[0]);
-    return kRamp[i % n];
+    //
+    // Straight through to maya rather than a local `static const` table:
+    // a static would be built on first call and then frozen for the
+    // process, which is precisely the bug the private ramp had.
+    if (slot < 0) return maya::theme::series_other(maya::theme::live());
+    return maya::theme::series(maya::theme::live(), i);
 }
 
 // ── card() — a bare titled section, matching the agent_stats look ─────────
@@ -96,16 +96,12 @@ namespace {
 [[nodiscard]] Element card(std::string_view heading, maya::Color accent,
                            std::vector<Element> body) {
     std::vector<Element> rows;
-    rows.reserve(body.size() + 3);
+    rows.reserve(body.size() + 2);
     if (!heading.empty()) {
         rows.push_back(text(std::string{heading}, fg_bold(accent)));
         rows.push_back(blank());
     }
     for (auto& e : body) rows.push_back(std::move(e));
-    // Trailing blank: with no border, the gap between cards IS the
-    // separator. Without it the next card's heading butts against this
-    // card's last figure and the two read as one section.
-    rows.push_back(blank());
     return (dsl::v(std::move(rows)) | padding(0, 1)).build();
 }
 
@@ -113,7 +109,7 @@ namespace {
 // silently drop a section the reader expected — the dim dash says "measured,
 // empty" rather than "forgot to render".
 [[nodiscard]] Element empty_placeholder() {
-    return text("\xe2\x80\x94", fg_dim(muted));   // — em dash
+    return text("\xe2\x80\x94", fg_dim(hue::dim()));   // — em dash
 }
 
 // ── Viz builders ──────────────────────────────────────────────────────────
@@ -121,26 +117,6 @@ namespace {
 // Each takes the extracted metrics and returns the card body (the elements
 // under the heading). One function per PRESENTATION, so this file grows a
 // case when a Viz is added, never when a tab is.
-
-// Kv / Hero — stat tiles, the agent_stats shape: a big accented VALUE with
-// its caption dim on the line beneath, and a blank between tiles. The value
-// is what the eye should land on, so it gets the line to itself.
-[[nodiscard]] std::vector<Element> build_tiles(
-    const std::vector<stats::Metric>& ms, bool hero, maya::Color accent) {
-    std::vector<Element> out;
-    out.reserve(ms.size() * 4);
-    for (std::size_t i = 0; i < ms.size(); ++i) {
-        const auto& mt = ms[i];
-        out.push_back(text(stats::format(mt.unit, mt.value), fg_bold(accent)));
-        if (!mt.label.empty())  out.push_back(text(mt.label, fg_dim(muted)));
-        if (!mt.detail.empty()) out.push_back(text(mt.detail, fg_dim(muted)));
-        // Hero's lead figure gets extra air under it so it reads as the
-        // headline of the tab.
-        if (hero && i == 0) out.push_back(blank());
-        if (i + 1 < ms.size()) out.push_back(blank());
-    }
-    return out;
-}
 
 // Bars — one horizontal bar per metric, coloured by a hue cycle. Scaled to
 // the largest value, or to `of` when the metrics carry a shared denominator
@@ -167,40 +143,109 @@ namespace {
 // because it prints the raw last SAMPLE, which is a different number from
 // the metric's formatted value — showing both invited the reader to
 // reconcile "280" with "702ms".
-[[nodiscard]] std::vector<Element> build_sparks(const std::vector<stats::Metric>& ms) {
+// Spark — the trends of a section. A metric with NO series is not a trend:
+// it is a plain figure that happens to share the section ("Turns using
+// cache" beside "Hit rate"). Those are handed back through `figures` so
+// the caller can put them in the READOUT column, where there is room for
+// them — squeezing them under the chart cost the chart height and left the
+// readout column half empty.
+[[nodiscard]] std::vector<Element> build_sparks(const std::vector<stats::Metric>& ms,
+                                               std::vector<stats::Metric>* figures) {
     std::vector<Element> out;
-    out.reserve(ms.size());
+    out.reserve(ms.size() * 2);
+    // How many metrics will actually draw here — the ones with a series.
+    std::size_t drawn = 0;
+    for (const auto& mt : ms) if (!mt.series.empty()) ++drawn;
+
     for (std::size_t i = 0; i < ms.size(); ++i) {
         const auto& mt = ms[i];
+
+        if (mt.series.empty()) {
+            if (figures) figures->push_back(mt);
+            else {
+                if (!out.empty()) out.push_back(blank());
+                out.push_back(text(stats::format(mt.unit, mt.value),
+                                   fg_bold(series_hue(0, i))));
+                if (!mt.label.empty()) out.push_back(text(mt.label, fg_dim(hue::dim())));
+            }
+            continue;
+        }
+
         std::vector<float> series;
         series.reserve(mt.series.size());
         for (double d : mt.series) series.push_back(static_cast<float>(d));
-        maya::Sparkline spark{std::move(series),
-                              {.color = series_hue(0, i), .show_last = false}};
+        // A RATE over turns is a curve, not a strip. A spark is one cell per
+        // sample, so a nine-turn history drew nine blocks — and with a steady
+        // ~93% every block was full height, which reads as a solid slab
+        // rather than a trend. The braille plot fills the card, draws a
+        // connected line, and carries an axis, so the shape and the level are
+        // both legible.
+        if (mt.unit == stats::Unit::Ratio) {
+            // Share the body between the charts that will actually draw.
+            const int n = static_cast<int>(std::max<std::size_t>(1, drawn));
+            const int h = std::clamp((panel_detail::panel_viewport_h() - 4) / n - 1,
+                                     4, 14);
+            maya::LineChart chart{std::move(series), h};
+            chart.set_fill(true);
+            chart.set_color(series_hue(0, i));
+            if (!out.empty()) out.push_back(blank());
+            out.push_back(chart.build());
+            std::string cap = mt.label;
+            if (mt.value != 0) cap += "  " + stats::format(mt.unit, mt.value);
+            out.push_back(text(cap, fg_dim(hue::dim())));
+            continue;
+        }
+
+        maya::SparklineConfig scfg{.color = series_hue(0, i), .show_last = false};
+        maya::Sparkline spark{std::move(series), scfg};
         // The value rides in the LABEL so it sits on the trace's line.
         std::string label = mt.label;
         if (mt.value != 0 || mt.of != 0)
             label += "  " + stats::format(mt.unit, mt.value);
         spark.set_label(label);
-        out.push_back(spark.build());
+        // Claim the column. A component reports a natural width and flex
+        // leaves it there, so a nine-point trace sat as a stub in a column
+        // three times its width while the histogram beside it filled the
+        // same space. grow() hands it the slack, and the widget stretches
+        // each sample across the cells it gets.
+        out.push_back(spark.build() | dsl::grow(1.0f));
     }
     return out;
 }
 
-// Plot — a braille line chart per metric from its series. Height 6 is tall
-// enough to show a trend's shape without dominating the card.
+// Plot — a braille line chart per metric from its series, sized to the
+// height the panel has rather than a fixed 6 rows: one plot is usually the
+// whole card, so the rows it does not take are dead space in the column.
 [[nodiscard]] std::vector<Element> build_plots(const std::vector<stats::Metric>& ms) {
     std::vector<Element> out;
     out.reserve(ms.size() * 2);
+    // Share the body between plots when a section carries several, and keep
+    // room for the card's heading, its blank and each plot's caption.
+    const int n = std::max<int>(1, static_cast<int>(ms.size()));
+    const int avail = (panel_detail::panel_viewport_h() - 3) / n - 1;
+    const int height = std::clamp(avail, 4, 20);
     for (std::size_t i = 0; i < ms.size(); ++i) {
         const auto& mt = ms[i];
         std::vector<float> series;
         series.reserve(mt.series.size());
         for (double d : mt.series) series.push_back(static_cast<float>(d));
-        maya::LineChart chart{std::move(series), 6};
+        maya::LineChart chart{std::move(series), height};
+        // Shade under the curve: a lone trace across a tall plot is mostly
+        // empty, and the eye reads the emptiness as the data.
+        chart.set_fill(true);
         chart.set_color(series_hue(0, i));
         out.push_back(chart.build());
-        if (!mt.label.empty()) out.push_back(text(mt.label, fg_dim(muted)));
+        // The caption carries the PEAK. A plot's tallest point is the figure
+        // a reader reaches for ("largest prefix"), and it was living in its
+        // own card in another column — a number in one place and the shape
+        // that produced it in another. On the axis it is one reading.
+        if (!mt.label.empty()) {
+            std::string cap = mt.label;
+            double peak = 0;
+            for (double d : mt.series) peak = std::max(peak, d);
+            if (peak > 0) cap += "   peak " + stats::format(mt.unit, peak);
+            out.push_back(text(cap, fg_dim(hue::dim())));
+        }
     }
     return out;
 }
@@ -241,22 +286,29 @@ namespace {
         }
         if (!mt.detail.empty()) d.center(mt.detail);
         d.caption(mt.label);
-        d.rows(7);
+        // Fill the height the panel actually has rather than a fixed 7 rows.
+        // The body is panel_viewport_h() tall; take off the caption, the
+        // card's heading and its blank, and a row of slack so the ring never
+        // pushes the card into the scroll. One donut is the whole card, so
+        // the height it does not use is dead space in the column.
+        const int avail = panel_detail::panel_viewport_h() - 4;
+        d.rows(std::clamp(avail, 5, 16));
         out.push_back(d.build());
     }
     if (out.empty()) out.push_back(empty_placeholder());
     return out;
 }
 
-// Hist / Dist — a distribution as block columns, one bucket per metric. The
-// section heading rides as the caption; six rows of height give the shape
-// room to read.
+// Hist / Dist — a distribution as block columns, one bucket per metric.
+//
+// No caption: the CARD's heading already names the section, and the
+// histogram repeating it printed "First byte spread" twice, one line under
+// the other. The card owns the title; the chart just draws.
 [[nodiscard]] std::vector<Element> build_hist(
-    std::string_view heading, const std::vector<stats::Metric>& ms) {
+    std::string_view /*heading*/, const std::vector<stats::Metric>& ms) {
     maya::Histogram h;
     for (const auto& mt : ms) h.bucket(mt.label, mt.value);
     h.rows(6);
-    if (!heading.empty()) h.caption(std::string{heading});
     std::vector<Element> out;
     out.push_back(h.build());
     return out;
@@ -283,38 +335,144 @@ namespace {
     const int frame = maya::panel::detail::terminal_cols() > 0
                           ? maya::panel::detail::terminal_cols()
                           : 80;
+    // Frame + padding + the scrollbar gutter come off via content_width and
+    // kScrollbarCols. card() then pads each cell one cell either side, and
+    // THAT is what the grid must also leave room for — without it the last
+    // column's content runs under the gutter by exactly those two cells.
+    constexpr int kCardPadCols = 2;
     const int inner = maya::panel::Config::content_width(frame)
-                      - maya::panel::Config::kScrollbarCols;
+                      - maya::panel::Config::kScrollbarCols
+                      - kCardPadCols;
     return std::max(16, inner);
 }
 
-// One section → one card. Runs the extractor, then dispatches on the Viz to
-// the builder that knows which fields the extractor filled.
-[[nodiscard]] Element build_card(const stats::Section& sec, const stats::Facts& f,
-                                 std::vector<stats::Metric>& scratch,
-                                 std::size_t slot) {
+// One section → one or MANY cards.
+//
+// A Kv/Hero section is a LIST of independent figures, and the example's
+// dashboard is a grid of small cards — one figure each — which is what
+// gives viewport() enough cells to fan into three and four columns. Folding
+// a whole section's figures into one tall card leaves the grid two wide
+// with half the screen empty, which is exactly how this looked against the
+// example. So the scalar kinds SPLIT: every metric becomes its own card,
+// titled with its label and showing its value.
+//
+// The picture kinds (Bars/Spark/Plot/Band/Donut/Hist) get a card each —
+// their metrics are SERIES OF ONE chart, not separate figures.
+//
+// The scalar kinds do NOT get a card each. Each scalar SECTION becomes a
+// group of lines appended to `text_groups`; the caller then deals those
+// groups into a couple of text columns, so a tab is a picture plus two
+// readout columns rather than one tall column beside a chart.
+void build_cards(const stats::Section& sec, const stats::Facts& f,
+                 std::vector<stats::Metric>& scratch,
+                 std::vector<std::vector<Element>>& text_groups,
+                 std::vector<Element>& out,
+                 std::vector<bool>& tall,
+                 std::vector<std::string>& titles) {
     scratch.clear();
     sec.extract(f, scratch);
 
+    const std::size_t slot = out.size();
     const maya::Color accent = series_hue(0, slot);
 
-    if (scratch.empty())
-        return card(sec.heading, accent, {empty_placeholder()});
+    // ── scalar kinds: one GROUP of lines, dealt into a column later ───
+    if (sec.viz == stats::Viz::Kv || sec.viz == stats::Viz::Hero) {
+        if (scratch.empty()) return;
+        std::vector<Element> group;
+        group.reserve(scratch.size() * 4 + 2);
+        if (!sec.heading.empty()) {
+            group.push_back(text(std::string{sec.heading}, fg_bold(accent)));
+            group.push_back(blank());
+        }
+        for (std::size_t i = 0; i < scratch.size(); ++i) {
+            const auto& mt = scratch[i];
+            group.push_back(text(stats::format(mt.unit, mt.value), fg_bold(accent)));
+            if (!mt.label.empty())  group.push_back(text(mt.label, fg_dim(hue::dim())));
+            if (!mt.detail.empty()) group.push_back(text(mt.detail, fg_dim(hue::dim())));
+            if (i + 1 < scratch.size()) group.push_back(blank());
+        }
+        text_groups.push_back(std::move(group));
+        return;
+    }
+
+    if (scratch.empty()) {
+        out.push_back(card(sec.heading, accent, {empty_placeholder()}));
+        tall.push_back(false);
+        titles.push_back(std::string{sec.heading});
+        return;
+    }
+
+    // ── picture kinds: one card for the whole section ──────────────────
+    //
+    // A Spark section can also carry plain figures (no series). Those go to
+    // the readout column rather than under the chart — there is room for
+    // them there, and the chart keeps its height.
+    std::vector<stats::Metric> figures;
+
+    // A Spark section emits ONE CARD PER TRACE, not one card holding them
+    // all. Each trace then pairs with the distribution of the same
+    // quantity: the Stream tab reads as "first byte, and its spread" beside
+    // "output rate, and its spread" rather than both traces in one column
+    // and both spreads in another, which asks the reader to carry a number
+    // across the panel to meet its own histogram.
+    if (sec.viz == stats::Viz::Spark) {
+        for (const auto& mt : scratch) {
+            if (mt.series.empty()) { figures.push_back(mt); continue; }
+            std::vector<stats::Metric> one{mt};
+            auto one_body = build_sparks(one, nullptr);
+            if (one_body.empty()) continue;
+            out.push_back(card(mt.label, accent, std::move(one_body)));
+            tall.push_back(false);
+            titles.push_back(mt.label);
+        }
+        if (!figures.empty()) {
+            std::vector<Element> group;
+            group.reserve(figures.size() * 4);
+            for (std::size_t i = 0; i < figures.size(); ++i) {
+                const auto& mt = figures[i];
+                group.push_back(text(stats::format(mt.unit, mt.value), fg_bold(accent)));
+                if (!mt.label.empty())  group.push_back(text(mt.label, fg_dim(hue::dim())));
+                if (!mt.detail.empty()) group.push_back(text(mt.detail, fg_dim(hue::dim())));
+                if (i + 1 < figures.size()) group.push_back(blank());
+            }
+            text_groups.push_back(std::move(group));
+        }
+        return;
+    }
 
     std::vector<Element> body;
     switch (sec.viz) {
-        case stats::Viz::Kv:    body = build_tiles(scratch, false, accent); break;
-        case stats::Viz::Hero:  body = build_tiles(scratch, true,  accent); break;
-        case stats::Viz::Bars:  body = build_bars(scratch);                 break;
-        case stats::Viz::Spark: body = build_sparks(scratch);               break;
-        case stats::Viz::Plot:  body = build_plots(scratch);                break;
-        case stats::Viz::Band:  body = build_band(scratch);                 break;
-        case stats::Viz::Donut: body = build_donuts(scratch);               break;
+        case stats::Viz::Bars:  body = build_bars(scratch);               break;
+        case stats::Viz::Spark: body = {};                                break;
+        case stats::Viz::Plot:  body = build_plots(scratch);              break;
+        case stats::Viz::Band:  body = build_band(scratch);               break;
+        case stats::Viz::Donut: body = build_donuts(scratch);             break;
         case stats::Viz::Hist:
-        case stats::Viz::Dist:  body = build_hist(sec.heading, scratch);    break;
+        case stats::Viz::Dist:  body = build_hist(sec.heading, scratch);  break;
+        case stats::Viz::Kv:
+        case stats::Viz::Hero:  break;   // handled above
     }
+
+    if (!figures.empty()) {
+        std::vector<Element> group;
+        group.reserve(figures.size() * 4);
+        for (std::size_t i = 0; i < figures.size(); ++i) {
+            const auto& mt = figures[i];
+            group.push_back(text(stats::format(mt.unit, mt.value), fg_bold(accent)));
+            if (!mt.label.empty())  group.push_back(text(mt.label, fg_dim(hue::dim())));
+            if (!mt.detail.empty()) group.push_back(text(mt.detail, fg_dim(hue::dim())));
+            if (i + 1 < figures.size()) group.push_back(blank());
+        }
+        text_groups.push_back(std::move(group));
+    }
+
+    // Every metric was a figure — nothing left to draw, so no card.
+    if (body.empty() && !figures.empty()) return;
+
     if (body.empty()) body.push_back(empty_placeholder());
-    return card(sec.heading, accent, std::move(body));
+    out.push_back(card(sec.heading, accent, std::move(body)));
+    tall.push_back(sec.viz == stats::Viz::Donut);
+    titles.push_back(std::string{sec.heading});
 }
 
 }  // namespace
@@ -340,7 +498,7 @@ Element stats_panel(const Model& m) {
     maya::panel::Config cfg;
     cfg.title    = "Stats";
     cfg.subtitle = std::string{stats::tab_subtitle(active)};
-    cfg.accent   = card_accent();
+    cfg.accent   = hue::cyan();
 
     // Tabs are the WIDGET's chrome, not this host's: it owns the padding,
     // the selected treatment and how the strip degrades on a narrow frame,
@@ -380,22 +538,195 @@ Element stats_panel(const Model& m) {
     scratch.reserve(32);
 
     const auto& sections = stats::tab_desc(active).sections;
-    std::vector<Element> cards;
-    cards.reserve(sections.size());
-    for (std::size_t i = 0; i < sections.size(); ++i)
-        cards.push_back(build_card(sections[i], f, scratch, i));
+    std::vector<std::vector<Element>> text_groups;   // one per scalar section
+    std::vector<Element> pictures;                   // one card per chart
+    text_groups.reserve(sections.size());
+    pictures.reserve(sections.size());
+    std::vector<bool> tall_picture;
+    std::vector<std::string> picture_title;
+    for (const auto& sec : sections)
+        build_cards(sec, f, scratch, text_groups, pictures, tall_picture, picture_title);
 
+    // Past two charts, share a cell — but only with one that FITS.
+    //
+    // Every chart as its own cell makes a chart-heavy tab too many columns
+    // wide, and a cell that wraps lands on a grid row that starts below the
+    // body: a section the reader never sees. A spark and a histogram share
+    // a column comfortably.
+    //
+    // Two DONUTS do not — a dozen rows each against a fourteen-row body —
+    // and pairing them blind to height is what cost the Tools tab "calls by
+    // outcome". A chart joins the open cell only while the running height
+    // leaves room; otherwise it starts its own.
+    //
+    // NOMINAL heights, not a live measure: sizing the pack from the terminal
+    // makes one thread group its charts differently between renders.
+    if (pictures.size() > 2) {
+        // A cell may run TALLER than the body: a paired trace-and-spread is
+        // the thing worth seeing together, and the second half of the pair
+        // being a scroll away still beats it being in another column with a
+        // number to carry across the panel. Two short charts fit; a donut
+        // still refuses to share, since two of those is twice the body.
+        constexpr int kCellRows  = 16;
+        constexpr int kDonutRows = 12;
+        constexpr int kShortRows = 7;
+
+        // Pair a trace with the SPREAD OF THE SAME QUANTITY first.
+        //
+        // Packing in section order puts both traces in one cell and both
+        // spreads in the next, so the reader carries "first byte 341ms"
+        // across the panel to meet its own histogram. Matching on the
+        // subject word keeps each story in one column: first byte and its
+        // spread, then output rate and its spread.
+        std::vector<std::size_t> order(pictures.size());
+        for (std::size_t i = 0; i < order.size(); ++i) order[i] = i;
+        std::vector<bool> taken(pictures.size(), false);
+        std::vector<std::size_t> seq;
+        for (std::size_t i = 0; i < pictures.size(); ++i) {
+            if (taken[i]) continue;
+            taken[i] = true;
+            seq.push_back(i);
+            // The partner is the next unpaired card whose title shares this
+            // one's leading word ("First byte" -> "First byte spread").
+            const std::string& mine = picture_title[i];
+            const std::size_t cut = mine.find(' ');
+            const std::string key = cut == std::string::npos ? mine : mine.substr(0, cut);
+            if (key.empty()) continue;
+            for (std::size_t k = i + 1; k < pictures.size(); ++k) {
+                if (taken[k]) continue;
+                if (picture_title[k].rfind(key, 0) == 0) { taken[k] = true; seq.push_back(k); break; }
+            }
+        }
+
+        std::vector<Element> packed;
+        std::vector<Element> cur;
+        int cur_rows = 0;
+        for (std::size_t idx : seq) {
+            const int h = (idx < tall_picture.size() && tall_picture[idx])
+                              ? kDonutRows : kShortRows;
+            if (!cur.empty() && cur_rows + 1 + h > kCellRows) {
+                packed.push_back(dsl::v(std::move(cur)).build());
+                cur.clear();
+                cur_rows = 0;
+            }
+            if (!cur.empty()) { cur.push_back(blank()); ++cur_rows; }
+            cur_rows += h;
+            cur.push_back(std::move(pictures[idx]));
+        }
+        if (!cur.empty()) packed.push_back(dsl::v(std::move(cur)).build());
+        pictures = std::move(packed);
+    }
+
+    // Deal the scalar figures into TWO columns, balanced by LINE COUNT, so
+    // a tab is a readout plus its pictures — cells that divide a wide panel
+    // evenly — rather than one very tall column beside a chart.
+    //
+    // Balancing by line rather than by group, because dealing whole groups
+    // only balances when the groups are of similar size: the Reasoning tab's
+    // are three lines against twelve, so whichever column took the big one
+    // was four times the other and the figures ran off the bottom.
+    //
+    // The cut lands on a BLANK, which is the only place a figure ends.
+    // Cutting mid-figure orphaned a detail ("16%") at the top of the second
+    // column, away from the value it qualifies.
+    std::vector<Element> text_a, text_b;
+    if (!text_groups.empty()) {
+        std::vector<Element> all;
+        for (auto& g : text_groups) {
+            if (!all.empty()) all.push_back(blank());
+            for (auto& e : g) all.push_back(std::move(e));
+        }
+
+        const std::size_t half = all.size() / 2;
+        std::size_t cut = all.size();
+        for (std::size_t i = half; i < all.size(); ++i) {
+            const auto* t = maya::as_text(all[i]);
+            if (t && t->content.empty()) { cut = i; break; }
+        }
+        if (cut >= all.size()) {
+            // No blank at or after the midpoint — look backwards instead.
+            for (std::size_t i = half; i-- > 0;) {
+                const auto* t = maya::as_text(all[i]);
+                if (t && t->content.empty()) { cut = i; break; }
+            }
+        }
+        for (std::size_t i = 0; i < all.size(); ++i) {
+            if (i == cut) continue;            // drop the blank we cut on
+            (i < cut ? text_a : text_b).push_back(std::move(all[i]));
+        }
+    }
+    // The readout is its OWN two-column grid, nested inside one outer cell.
+    //
+    // Flattening picture + text_a + text_b into three sibling cells makes
+    // the chart just one column of three, so it shrinks as the readout
+    // grows. Nesting keeps the split at the top level to TWO — the readout,
+    // and the pictures beside it — and lets the readout divide its own half
+    // again.
+    //
+    // The inner grid is HANDED its width. It cannot see the outer split, so
+    // measured against the unbounded probe it either collapses back to one
+    // column (which is what kept the Reasoning tab's figures in a single
+    // tall stack) or divides a width it does not have and clips.
+    Element readout;
+    bool has_readout = false;
+    {
+        std::vector<Element> text_cards;
+        if (!text_a.empty()) text_cards.push_back(card({}, hue::cyan(), std::move(text_a)));
+        if (!text_b.empty()) text_cards.push_back(card({}, hue::cyan(), std::move(text_b)));
+        if (!text_cards.empty()) {
+            const int n = static_cast<int>(text_cards.size());
+            // The readout is the LEAD cell and holds two columns of text, so
+            // it takes half the body — the charts divide the rest. Splitting
+            // the width evenly between every outer cell left the figures
+            // 20 columns each and wrapped their labels mid-phrase ("of
+            // generated / tokens were / reasoning").
+            const int share = std::max(34, body_width() / 2);
+            readout = maya::viewport(std::move(text_cards),
+                                     maya::ViewportOpts{.max_width = std::max(16, share / n),
+                                                        .max_cols  = n,
+                                                        .min_width = 14,
+                                                        .gap       = 2,
+                                                        .gap_y     = 2,
+                                                        .width     = share,
+                                                        .flow      = maya::Flow::Row})
+                          .build();
+            has_readout = true;
+        }
+    }
+
+    // The readout LEADS — the figures are what must be readable first, and
+    // the charts illustrate them.
+    std::vector<Element> cards;
+    cards.reserve(pictures.size() + 1);
+    if (has_readout) cards.push_back(std::move(readout));
+    for (auto& p : pictures) cards.push_back(std::move(p));
+
+    const int ncards = static_cast<int>(cards.size());
     cfg.prebuilt.push_back(
         maya::viewport(std::move(cards),
-                       maya::ViewportOpts{.max_width = 34,
-                                          // A chart needs room for its label,
-                                          // a bar worth looking at and the
-                                          // value. Splitting below that gives
-                                          // two columns that both truncate, so
-                                          // the grid stays ONE column instead.
+                       maya::ViewportOpts{// A tab is usually the readout plus
+                                          // one or two pictures, so let a
+                                          // column get wide.
+                                          .max_width = 56,
+                                          // Never ask for more columns than
+                                          // there are cards. Without this the
+                                          // width can afford THREE columns
+                                          // while the tab has two cards, and
+                                          // viewport treats that as underfull
+                                          // — it holds both at max_width and
+                                          // leaves the surplus empty, which is
+                                          // the dead strip on the right. Capped
+                                          // at the card count the grid is full,
+                                          // so it divides the whole slot
+                                          // exactly and the cards FILL it.
+                                          .max_cols  = ncards,
+                                          // A chart still needs its label, a
+                                          // bar and the value; below this the
+                                          // grid stays one column rather than
+                                          // truncating in two.
                                           .min_width = 30,
                                           .gap       = 3,
-                                          .gap_y     = 1,
+                                          .gap_y     = 2,
                                           .width     = body_width(),
                                           .flow      = maya::Flow::Row})
             .build());

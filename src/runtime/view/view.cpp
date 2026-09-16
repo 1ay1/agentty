@@ -10,6 +10,8 @@
 #include <maya/widget/app_layout.hpp>
 #include <maya/widget/overlay.hpp>
 
+#include "agentty/domain/ui_theme.hpp"
+#include "agentty/domain/ui_live.hpp"
 #include "agentty/runtime/login.hpp"
 #include "agentty/runtime/panel/top.hpp"
 #include "agentty/runtime/view/changes_strip.hpp"
@@ -54,6 +56,7 @@ std::optional<maya::Element> pick_panel(const Model& m) {
         case OK::ThreadList:     return thread_list_panel(m);
         case OK::SmartMode:      return smart_mode_panel(m);
         case OK::PluginEdit:     return plugin_edit_panel(m);
+        case OK::Appearance:     return appearance_panel(m);
         case OK::DiffReview:     return diff_review(m);
         case OK::Todo:           return todo_panel(m);
         case OK::None:           return std::nullopt;
@@ -92,6 +95,60 @@ maya::Element compose_panel(maya::Element base, maya::Element overlay) {
 } // namespace
 
 maya::Element view(const Model& m) {
+    // Apply the appearance prefs before painting anything.
+    //
+    // The reducer is pure — it cannot reach the runtime — so the swap lands
+    // here, on the one path that sees both the Model and the frame. It is a
+    // no-op whenever the resolved theme has not changed, which is every
+    // frame but the one after a settings row is pressed.
+    //
+    // Resolving per frame rather than at startup is deliberate: `auto` is
+    // answered by the terminal, and the terminal changes under us — a tmux
+    // detach, an ssh hop, a COLORFGBG that only arrives late. Re-asking
+    // costs two getenvs and means the look follows the terminal it is
+    // actually on.
+    {
+        const auto r = ui_prefs::resolve(m.d.ui, /*tty=*/true);
+        // ONE call, two sinks. There used to be a `static const Theme*
+        // applied` cache here that skipped the push when the pointer had not
+        // moved, which duplicated a guard maya already owns — app_set_theme()
+        // compares by value and returns early itself, because what a swap
+        // costs is maya's knowledge, not ours. Two caches for one fact is how
+        // they desync: a `static` outlives any Runtime, so after the runtime
+        // is torn down and rebuilt (suspend for a child process, a resize
+        // re-init) the fresh Runtime holds a default-constructed theme while
+        // this cache still claims the user's scheme was applied — and never
+        // pushes it again. That is a permanently mis-themed session with no
+        // way back short of picking a different scheme. The redundant guard
+        // bought one pointer compare per frame and cost correctness.
+        //
+        // The two sinks used to be two calls here as well — maya's renderer
+        // slot plus agentty's build-time palette — which is a pairing a
+        // caller has to remember. The appearance reducer did not, and re-
+        // sealed the transcript against a palette maya had not been told
+        // about. publish_theme owns both now, so there is nothing to forget.
+        ui_prefs::publish_theme(*r.theme);
+        // The rest of the prefs reach their consumers the same way, and for
+        // the same reason: density is read by panel_viewport_h(), a free
+        // function twenty panel builders call without a Model in hand, and
+        // motion by the StreamingMarkdown setup deep in turn.cpp. Publishing
+        // here keeps them a pure projection of the Model — refreshed every
+        // frame, written nowhere else.
+        ui_prefs::publish(m.d.ui);
+        // Motion::Off freezes maya's stepped animations at their source —
+        // one gate under every spinner, blink and frame counter, including
+        // widgets that do not know this setting exists. It also stops the
+        // frame REQUESTS, so "off" means the render loop goes quiet rather
+        // than repainting an unchanging glyph 11× a second.
+        maya::anim::set_reduce_motion(m.d.ui.motion == ui_prefs::Motion::Off);
+        // Syntax highlighting, same seam and same reason: the renderer
+        // decides per code block, far below any Model, so the preference has
+        // to be published rather than threaded. It was persisted and hashed
+        // into the render key but read by NOTHING until maya grew a switch
+        // for it — a toggle that moved, saved, and changed no pixel.
+        maya::set_syntax_highlighting(m.d.ui.syntax);
+    }
+
     // ── Terminal dimensions for the BUILD phase ──
     // maya's run loop calls P::view(model) BEFORE Runtime::render
     // installs the sized RenderContext (the only guard site), so any

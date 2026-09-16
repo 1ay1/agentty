@@ -163,6 +163,7 @@ set(AGENTTY_RUNTIME_NOMAIN_SOURCES
     src/runtime/app/update/stream.cpp
     src/runtime/app/update/stream_preview.cpp
     src/runtime/app/update/smart_mode.cpp
+    src/runtime/app/update/appearance.cpp
     src/runtime/app/update/plugin_edit.cpp
     src/runtime/app/update/submit.cpp
     src/runtime/app/update/frozen.cpp
@@ -184,6 +185,7 @@ set(AGENTTY_RUNTIME_NOMAIN_SOURCES
     src/runtime/panel/form.cpp
     src/runtime/panel/form_keys.cpp
     src/runtime/view/panels/form_common.cpp
+    src/runtime/panel/appearance_form.cpp
     src/runtime/panel/rag_form.cpp
     src/runtime/settings_registry.cpp
     src/runtime/panel/smart_form.cpp
@@ -235,6 +237,7 @@ set(AGENTTY_RUNTIME_NOMAIN_SOURCES
     src/runtime/view/panels/mention.cpp
     src/runtime/view/panels/symbol.cpp
     src/runtime/view/panels/smart_mode.cpp
+    src/runtime/view/panels/appearance.cpp
     src/runtime/view/panels/plugin_edit.cpp
     src/runtime/view/panels/code_blocks.cpp
     src/runtime/view/panels/tool_output.cpp

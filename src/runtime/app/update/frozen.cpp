@@ -135,7 +135,7 @@ std::size_t frozen_row_budget() { return frozen_row_budget(term_dims().rows); }
 // cannot drift byte-wise between the two builders.
 using ui::gap_row;
 using ui::compaction_divider_row;
-using ui::kGapRows;
+using ui::gap_rows;
 
 // Escape hatch for the rehydrate-time off-screen body collapse below.
 //
@@ -622,7 +622,7 @@ void freeze_range(Model& m, std::size_t from, std::size_t to) {
         // frozen and live rows stay byte-identical across the freeze seam.
         if (needs_compaction_divider(i)) {
             if (!first_overall)
-                push_frozen(m, gap_row(), kGapRows, /*separator=*/true);
+                push_frozen(m, gap_row(), static_cast<std::size_t>(gap_rows()), /*separator=*/true);
             push_frozen(m, compaction_divider_row(), 1, /*separator=*/true);
         }
 
@@ -631,7 +631,7 @@ void freeze_range(Model& m, std::size_t from, std::size_t to) {
         // Leading gap: one blank row before every turn except the
         // very first frozen row (avoid a top-of-thread gap).
         if (!first_overall) {
-            push_frozen(m, gap_row(), kGapRows, /*separator=*/true);
+            push_frozen(m, gap_row(), static_cast<std::size_t>(gap_rows()), /*separator=*/true);
         }
 
         if (head.role == Role::Assistant) {

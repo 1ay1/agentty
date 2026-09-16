@@ -199,7 +199,7 @@ void dump(const Model& m, int w, int scroll) {
     // the offset is silently lost. The real app never notices (frame 2
     // has the measurement from frame 1), but a one-shot dump has to run
     // the pass, restore what it asked for, and then paint.
-    maya::render_tree(ui::stats_panel(m), canvas, pool, maya::theme::dark,
+    maya::render_tree(ui::stats_panel(m), canvas, pool, maya::theme::native,
                       /*auto_height=*/true);
     // ONE_PASS=1 stops here: a diagnostic for telling a genuine layout bug
     // apart from an artifact of this tool's own double render.
@@ -208,7 +208,7 @@ void dump(const Model& m, int w, int scroll) {
         o->scroll.y = scroll;
         o->scroll.clamp();
     }
-    maya::render_tree(ui::stats_panel(m), canvas, pool, maya::theme::dark,
+    maya::render_tree(ui::stats_panel(m), canvas, pool, maya::theme::native,
                       /*auto_height=*/true);
     if (std::getenv("STATS_VISUAL_DEBUG")) {
         const auto el = ui::stats_panel(m);

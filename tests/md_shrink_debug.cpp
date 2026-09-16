@@ -77,7 +77,7 @@ int main(int argc, char** argv) {
         RenderContextGuard guard(ctx);
         Canvas c(kWidth, 2000, &pool);
         c.clear();
-        render_tree(md.build(), c, pool, theme::dark, nodes, true);
+        render_tree(md.build(), c, pool, theme::native, nodes, true);
         int rows = c.max_content_row() + 1;
         std::vector<std::string> dump;
         for (int y = 0; y < rows; ++y) dump.push_back(row_text(c, y));

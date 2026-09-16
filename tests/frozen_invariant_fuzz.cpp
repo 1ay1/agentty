@@ -250,7 +250,7 @@ static void render_smoke(const Model& m, int width) {
     maya::StylePool pool;
     maya::Canvas canvas(width, 600, &pool);
     canvas.clear();
-    maya::render_tree(root, canvas, pool, maya::theme::dark, true);
+    maya::render_tree(root, canvas, pool, maya::theme::native, true);
 }
 
 // ── One random walk ───────────────────────────────────────────────────────

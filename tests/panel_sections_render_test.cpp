@@ -52,7 +52,7 @@ std::string render_panel(const Model& m, int width = 100, int height = 200) {
     maya::StylePool pool;
     maya::Canvas canvas(width, height, &pool);
     canvas.clear();
-    maya::render_tree(root, canvas, pool, maya::theme::dark, true);
+    maya::render_tree(root, canvas, pool, maya::theme::native, true);
 
     std::string out;
     const int max_row = canvas.max_content_row();
@@ -84,7 +84,7 @@ Model picker_model(const std::vector<ProviderCatalog>& cats,
     in.catalogs = &cats;
     in.active   = active;
     m.d.fused_rows = ui::build_fused_rows(in);
-    m.ui.panel = pn::Models{};
+    m.ui.panel.descend(pn::Models{});
     return m;
 }
 
@@ -152,7 +152,7 @@ TEST_CASE("picker: the active model leads, and its row is on screen") {
     in.recents  = &recents;
     in.active   = ModelRef{"anthropic", "claude-opus-4-5"};
     m.d.fused_rows = ui::build_fused_rows(in);
-    m.ui.panel = pn::Models{};
+    m.ui.panel.descend(pn::Models{});
 
     const std::string screen = render_panel(m);
     INFO(screen);

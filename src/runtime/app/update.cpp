@@ -76,6 +76,7 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
         [&](msg::DiffReviewMsg dm)     { return detail::diff_review_update  (std::move(m), std::move(dm)); },
         [&](msg::SmartModeMsg sm)      { return detail::smart_mode_update   (std::move(m), std::move(sm)); },
         [&](msg::PluginEditMsg pm)     { return detail::plugin_edit_update  (std::move(m), std::move(pm)); },
+        [&](msg::AppearanceMsg am)     { return detail::appearance_update   (std::move(m), std::move(am)); },
         [&](msg::MetaMsg mm)           { return detail::meta_update         (std::move(m), std::move(mm)); },
     }, msg);
 

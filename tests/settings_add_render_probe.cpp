@@ -39,7 +39,7 @@ int main(int argc, char** argv) {
             o.cursor = static_cast<int>(o.input.size());
         }
     }
-    m.ui.panel = std::move(o);
+    m.ui.panel.descend(std::move(o));
 
     maya::RenderContext ctx{86, 40, maya::render_generation(), true};
     maya::RenderContextGuard g(ctx);

@@ -69,7 +69,7 @@ static bool frame_requests_animation(const Model& m,
     maya::StylePool pool;
     maya::Canvas canvas(width, height, &pool);
     canvas.clear();
-    maya::render_tree(root, canvas, pool, maya::theme::dark, true);
+    maya::render_tree(root, canvas, pool, maya::theme::native, true);
 
     return maya::detail::animation_requested_;
 }

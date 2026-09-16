@@ -61,7 +61,7 @@ maya::Element model_badge_config(const Model& m) {
     // glyph: the fill's edge IS the boundary.
     const std::string prov = provider::provider_display_name(provider::active());
     const Style prov_style =
-        Style{}.with_bg(name.color).with_fg(maya::Color::black()).with_bold();
+        Style{}.with_bg(name.color).with_fg(ui::text_inverse).with_bold();
 
     // Reasoning-effort chip: when a tier is active AND the model can reason,
     // ride a compact "· ◇high" so the current effort is visible at a glance
@@ -85,7 +85,7 @@ maya::Element model_badge_config(const Model& m) {
         // borrow here, so it stays muted.
         return text(" " + prov + " ",
                     Style{}.with_bg(muted)
-                           .with_fg(maya::Color::black()).with_bold());
+                           .with_fg(ui::text_inverse).with_bold());
     }
 
     // Update chip: when a newer release is known (background check), a
@@ -95,7 +95,7 @@ maya::Element model_badge_config(const Model& m) {
     Element update_chip = text("");
     if (!m.s.update_latest.empty())
         update_chip = text("  \xe2\xac\x86 v" + m.s.update_latest,
-                           fg_of(maya::Color::green()));
+                           fg_of(ui::status_ok));
 
     // One UNFILLED space between the chip and the model. The chip's own
     // trailing space is background-filled, so it reads as part of the chip

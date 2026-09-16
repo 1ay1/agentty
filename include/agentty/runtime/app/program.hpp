@@ -109,6 +109,30 @@ struct AgenttyApp {
         mix_str(m.d.model_id.value);
         mix(m.d.pending_permission ? 1ULL : 0ULL);
 
+        // ── Appearance.
+        //
+        // EVERY appearance pref, because every one of them changes pixels
+        // and this gate skips view() entirely when the hash doesn't move.
+        // Omitting them is the reason picking a theme appeared to do
+        // nothing: the reducer updated the model and persisted the choice,
+        // the resolver picked the right Theme — and then the frame was
+        // never rebuilt, so the screen kept the old palette until some
+        // unrelated event (a keystroke, a tick) happened to move the hash.
+        //
+        // "Changes apply immediately" is the promise this panel makes in
+        // its own footer; this is the line that keeps it.
+        mix_str(m.d.ui.theme);
+        mix(static_cast<std::uint64_t>(m.d.ui.tier));
+        mix(static_cast<std::uint64_t>(m.d.ui.polarity));
+        mix(static_cast<std::uint64_t>(m.d.ui.density));
+        mix(static_cast<std::uint64_t>(m.d.ui.motion));
+        mix(static_cast<std::uint64_t>(m.d.ui.tool_output));
+        mix(static_cast<std::uint64_t>(m.d.ui.thinking));
+        mix(static_cast<std::uint64_t>(m.d.ui.timestamps));
+        mix(static_cast<std::uint64_t>(m.d.ui.prose_width));
+        mix(m.d.ui.syntax ? 1ULL : 0ULL);
+        mix(m.d.ui.compact_turns ? 1ULL : 0ULL);
+
         // ── Session / phase.
         mix(static_cast<std::uint64_t>(m.s.phase.index()));
         mix_str(m.s.status);

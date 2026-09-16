@@ -132,6 +132,50 @@ const std::vector<Axis>& visual_axes() {
         {"pending_permission appears", [](Model& m) {
             m.d.pending_permission = agentty::PendingPermission{};
         }},
+
+        // ── Appearance ────────────────────────────────────────────────
+        //
+        // Every one of these repaints the screen, and this gate skips
+        // view() entirely when the hash does not move. They were ALL
+        // missing, which is why picking a theme looked like it did
+        // nothing: the model changed, the choice persisted, the right
+        // Theme resolved — and the frame was never rebuilt, so the old
+        // palette stayed up until an unrelated keystroke moved the hash.
+        // The panel's own footer promises "changes apply immediately";
+        // these rows are what hold it to that.
+        {"ui theme swap", [](Model& m) {
+            m.d.ui.theme = "Dracula";
+        }},
+        {"ui color tier override", [](Model& m) {
+            m.d.ui.tier = agentty::ui_prefs::ColorTier::Ansi16;
+        }},
+        {"ui background polarity override", [](Model& m) {
+            m.d.ui.polarity = agentty::ui_prefs::Polarity::Light;
+        }},
+        {"ui density", [](Model& m) {
+            m.d.ui.density = agentty::ui_prefs::Density::Compact;
+        }},
+        {"ui prose width cap", [](Model& m) {
+            m.d.ui.prose_width = 88;
+        }},
+        {"ui compact turns", [](Model& m) {
+            m.d.ui.compact_turns = true;
+        }},
+        {"ui motion", [](Model& m) {
+            m.d.ui.motion = agentty::ui_prefs::Motion::Off;
+        }},
+        {"ui syntax highlighting", [](Model& m) {
+            m.d.ui.syntax = false;
+        }},
+        {"ui tool output", [](Model& m) {
+            m.d.ui.tool_output = agentty::ui_prefs::ToolOutput::Collapsed;
+        }},
+        {"ui thinking", [](Model& m) {
+            m.d.ui.thinking = agentty::ui_prefs::Thinking::Hidden;
+        }},
+        {"ui timestamps", [](Model& m) {
+            m.d.ui.timestamps = agentty::ui_prefs::Timestamps::Absolute;
+        }},
         {"phase Idle -> Streaming", [](Model& m) {
             m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
         }},
@@ -172,95 +216,95 @@ const std::vector<Axis>& visual_axes() {
             m.ui.frozen_turn = 7;
         }},
         {"model_picker opens", [](Model& m) {
-            m.ui.panel = pn::Models{{0, ""}};
+            m.ui.panel.descend(pn::Models{{0, ""}});
         }},
         {"model_picker cursor move", [](Model& m) {
-            m.ui.panel = pn::Models{{3}};
+            m.ui.panel.descend(pn::Models{{3}});
         }},
         {"model_picker query", [](Model& m) {
             agentty::ui::pick::OpenAt o; o.index = 0; o.query = "free";
-            m.ui.panel = pn::Models{std::move(o)};
+            m.ui.panel.descend(pn::Models{std::move(o)});
         }},
         {"provider_picker opens", [](Model& m) {
-            m.ui.panel = pn::Providers{{0}};
+            m.ui.panel.descend(pn::Providers{{0}});
         }},
         {"provider_picker cursor move", [](Model& m) {
-            m.ui.panel = pn::Providers{{2}};
+            m.ui.panel.descend(pn::Providers{{2}});
         }},
         {"thread_list opens", [](Model& m) {
-            m.ui.panel = pn::ThreadList{{0}};
+            m.ui.panel.descend(pn::ThreadList{{0}});
         }},
         {"thread_list cursor move", [](Model& m) {
-            m.ui.panel = pn::ThreadList{{4}};
+            m.ui.panel.descend(pn::ThreadList{{4}});
         }},
         {"thread_list delete confirm", [](Model& m) {
             auto o = agentty::ui::pick::OpenAt{2};
             o.confirm_remove = "abc123";
-            m.ui.panel = agentty::ui::panel::ThreadList{std::move(o)};
+            m.ui.panel.descend(agentty::ui::panel::ThreadList{std::move(o)});
         }},
         {"diff_review opens at cell", [](Model& m) {
-            m.ui.panel = pn::DiffReview{{0, 0}};
+            m.ui.panel.descend(pn::DiffReview{{0, 0}});
         }},
         {"diff_review hunk move", [](Model& m) {
-            m.ui.panel = pn::DiffReview{{1, 2}};
+            m.ui.panel.descend(pn::DiffReview{{1, 2}});
         }},
         {"command_palette opens", [](Model& m) {
-            m.ui.panel = pn::Palette{{}};
+            m.ui.panel.descend(pn::Palette{{}});
         }},
         {"command_palette query", [](Model& m) {
-            m.ui.panel = pn::Palette{{"git", 0}};
+            m.ui.panel.descend(pn::Palette{{"git", 0}});
         }},
         {"command_palette index", [](Model& m) {
-            m.ui.panel = pn::Palette{{"git", 5}};
+            m.ui.panel.descend(pn::Palette{{"git", 5}});
         }},
         {"mention opens", [](Model& m) {
-            m.ui.panel = agentty::ui::panel::Mention{};
+            m.ui.panel.descend(agentty::ui::panel::Mention{});
         }},
         {"mention query", [](Model& m) {
             agentty::mention::Open o; o.query = "src"; o.index = 0;
-            m.ui.panel = pn::Mention{std::move(o)};
+            m.ui.panel.descend(pn::Mention{std::move(o)});
         }},
         {"mention index", [](Model& m) {
             agentty::mention::Open o; o.query = "src"; o.index = 3;
-            m.ui.panel = pn::Mention{std::move(o)};
+            m.ui.panel.descend(pn::Mention{std::move(o)});
         }},
         {"symbol opens", [](Model& m) {
-            m.ui.panel = agentty::ui::panel::Symbol{};
+            m.ui.panel.descend(agentty::ui::panel::Symbol{});
         }},
         {"symbol query", [](Model& m) {
             agentty::symbol::Open o; o.query = "foo"; o.index = 0;
-            m.ui.panel = pn::Symbol{std::move(o)};
+            m.ui.panel.descend(pn::Symbol{std::move(o)});
         }},
         {"symbol index", [](Model& m) {
             agentty::symbol::Open o; o.query = "foo"; o.index = 2;
-            m.ui.panel = pn::Symbol{std::move(o)};
+            m.ui.panel.descend(pn::Symbol{std::move(o)});
         }},
         {"todo modal opens", [](Model& m) {
             m.ui.todo.open = agentty::ui::pick::OpenModal{};
         }},
         {"tool viewer opens", [](Model& m) {
-            m.ui.panel = pn::ToolOutput{{{}, 0, false}};
+            m.ui.panel.descend(pn::ToolOutput{{{}, 0, false}});
         }},
         {"tool viewer list cursor move", [](Model& m) {
-            m.ui.panel = pn::ToolOutput{{{}, 2, false}};
+            m.ui.panel.descend(pn::ToolOutput{{{}, 2, false}});
         }},
         {"tool viewer list -> body stage", [](Model& m) {
-            m.ui.panel = pn::ToolOutput{{{}, 0, true}};
+            m.ui.panel.descend(pn::ToolOutput{{{}, 0, true}});
         }},
         {"tool viewer body scroll", [](Model& m) {
-            m.ui.panel = pn::ToolOutput{{{}, 0, true}};
+            m.ui.panel.descend(pn::ToolOutput{{{}, 0, true}});
             m.ui.tool_viewer_scroll.y = 5;
         }},
         {"tool viewer live tail toggled", [](Model& m) {
-            m.ui.panel = pn::ToolOutput{{
-                {agentty::tool_output::Entry{}}, 0, /*viewing=*/true}};
+            m.ui.panel.descend(pn::ToolOutput{{
+                {agentty::tool_output::Entry{}}, 0, /*viewing=*/true}});
             m.ui.tool_viewer_tail = false;
         }},
         {"code block picker opens", [](Model& m) {
-            m.ui.panel = pn::CodeBlocks{{{}, 0}};
+            m.ui.panel.descend(pn::CodeBlocks{{{}, 0}});
         }},
         {"code block picker cursor move", [](Model& m) {
-            m.ui.panel = pn::CodeBlocks{{{}, 3}};
+            m.ui.panel.descend(pn::CodeBlocks{{{}, 3}});
         }},
         {"login modal opens", [](Model& m) {
             m.ui.login = agentty::ui::login::Picking{};
@@ -271,13 +315,13 @@ const std::vector<Axis>& visual_axes() {
         {"settings_list opens (Plugins)", [](Model& m) {
             agentty::settings::ListOpen o;
             o.concern = agentty::settings::Category::Plugins;
-            m.ui.panel = agentty::ui::panel::SettingsList{o};
+            m.ui.panel.descend(agentty::ui::panel::SettingsList{o});
         }},
         {"settings_list cursor move", [](Model& m) {
             agentty::settings::ListOpen o;
             o.concern = agentty::settings::Category::Plugins;
             o.index = 3;
-            m.ui.panel = agentty::ui::panel::SettingsList{o};
+            m.ui.panel.descend(agentty::ui::panel::SettingsList{o});
         }},
         {"settings_list add-mode input", [](Model& m) {
             agentty::settings::ListOpen o;
@@ -285,7 +329,7 @@ const std::vector<Axis>& visual_axes() {
             o.input_active = true;
             o.input = "date -- /path/date_server";
             o.cursor = 4;
-            m.ui.panel = agentty::ui::panel::SettingsList{o};
+            m.ui.panel.descend(agentty::ui::panel::SettingsList{o});
         }},
         {"plugins loading flag", [](Model& m) {
             m.ui.plugins_loading = true;
@@ -307,29 +351,29 @@ const std::vector<Axis>& visual_axes() {
         {"smart_mode overlay opens", [](Model& m) {
             agentty::smart_form::Inputs in;
             in.enabled = true;
-            m.ui.panel = pn::SmartMode{{}, agentty::smart_form::build_form(in)};
+            m.ui.panel.descend(pn::SmartMode{{}, agentty::smart_form::build_form(in)});
         }},
         {"smart_mode cursor move", [](Model& m) {
             agentty::smart_form::Inputs in;
             in.enabled = true;
             auto f = agentty::smart_form::build_form(in);
             agentty::smart_form::focus_role(f, agentty::smart::ModelRole::Utility);
-            m.ui.panel = pn::SmartMode{{}, std::move(f)};
+            m.ui.panel.descend(pn::SmartMode{{}, std::move(f)});
         }},
         {"rag picker opens", [](Model& m) {
             agentty::rag_settings::Open o;
-            m.ui.panel = agentty::ui::panel::Rag{o};
+            m.ui.panel.descend(agentty::ui::panel::Rag{o});
         }},
         {"rag picker cursor move", [](Model& m) {
             agentty::rag_settings::Open o;
             o.cursor = agentty::store::RagMode::Off;
-            m.ui.panel = agentty::ui::panel::Rag{o};
+            m.ui.panel.descend(agentty::ui::panel::Rag{o});
         }},
         {"fork picker opens", [](Model& m) {
-            m.ui.panel = pn::Fork{{agentty::fork_panel::Choice::RagPerTurn}};
+            m.ui.panel.descend(pn::Fork{{agentty::fork_panel::Choice::RagPerTurn}});
         }},
         {"fork picker cursor move", [](Model& m) {
-            m.ui.panel = pn::Fork{{agentty::fork_panel::Choice::RagOff}};
+            m.ui.panel.descend(pn::Fork{{agentty::fork_panel::Choice::RagOff}});
         }},
     };
     return axes;
@@ -482,7 +526,7 @@ TEST_CASE("visual hash: spinner animates while a PICKER catalog loads") {
     c.provider_id = "openai";
     c.state = agentty::ProviderCatalog::State::Loading;
     m.d.provider_catalogs.push_back(std::move(c));
-    m.ui.panel = agentty::ui::panel::Models{};
+    m.ui.panel.descend(agentty::ui::panel::Models{});
     REQUIRE(m.loading_spinner_visible());
 
     const auto h0 = agentty::app::AgenttyApp::visual_hash(m);
@@ -498,7 +542,7 @@ TEST_CASE("visual hash: a READY catalog does not animate") {
     c.provider_id = "openai";
     c.state = agentty::ProviderCatalog::State::Ready;
     m.d.provider_catalogs.push_back(std::move(c));
-    m.ui.panel = agentty::ui::panel::Models{};
+    m.ui.panel.descend(agentty::ui::panel::Models{});
     REQUIRE(!m.loading_spinner_visible());
 
     const auto h0 = agentty::app::AgenttyApp::visual_hash(m);

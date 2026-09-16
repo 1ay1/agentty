@@ -13,6 +13,7 @@
 #include "agentty/domain/conversation.hpp"
 #include "agentty/domain/catalog.hpp"
 #include "agentty/domain/profile.hpp"
+#include "agentty/domain/ui_prefs.hpp"
 #include "agentty/domain/smart_mode.hpp"
 
 namespace agentty::store {
@@ -119,6 +120,11 @@ struct RagConfig {
 struct Settings {
     ModelId              model_id;
     Profile              profile = Profile::Write;
+
+    // Appearance. A USER concern, not a project one — a light terminal is a
+    // property of your eyes, not of the repo you happen to be in — so this
+    // rides in the user settings and follows you between checkouts.
+    ui_prefs::Prefs      ui;
     std::vector<ModelId> favorite_models;
     // Active LLM backend. Empty / "anthropic" = the default Claude path
     // (OAuth/Pro/Max). Any other value ("openai" | "groq" | "openrouter" |

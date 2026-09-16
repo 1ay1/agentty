@@ -21,11 +21,12 @@ Element mention_panel(const Model& m) {
     cfg.scroll     = &m.ui.mention_palette_scroll;
     cfg.selected   = matches.empty() ? -1 : o->index;
 
-    cfg.header.push_back(h(text("@", fg_bold(info)),
-        text(o->query.empty() ? " your changed files first · type to filter…"
-                              : (" " + o->query),
-             o->query.empty() ? fg_italic(muted) : fg_of(fg))
-    ).build());
+    // "@" is the trigger character, so the header continues what was typed
+    // in the composer. The noun says what the ORDER is rather than what the
+    // list contains — changed files sort first, which is the one thing worth
+    // knowing before you start typing.
+    cfg.header.push_back(
+        filter_header(o->query, "(changed files first)", info, "@ "));
     cfg.header.push_back(sep);
 
     if (o->files.empty()) {
@@ -51,8 +52,8 @@ Element mention_panel(const Model& m) {
                 auto label = git_tag_label(tag);
                 row.badge = "● " + std::string{label};
                 row.badge_style =
-                    tag == GitTag::Modified          ? fg_of(maya::Color::yellow())
-                  : tag == GitTag::Staged            ? fg_of(maya::Color::green())
+                    tag == GitTag::Modified          ? fg_of(ui::status_warn)
+                  : tag == GitTag::Staged            ? fg_of(ui::status_ok)
                   : tag == GitTag::Untracked         ? fg_of(info)
                   : /* RecentlyCommitted */            fg_dim(muted);
             }

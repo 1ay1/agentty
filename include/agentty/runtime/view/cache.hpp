@@ -346,6 +346,42 @@ public:
     // first render.
     void clear() noexcept { entries_.clear(); pinned_.clear(); }
 
+    // Drop the SETTLED memos only, leaving pinned entries untouched.
+    //
+    // For invalidating rendered appearance without disturbing the stream.
+    // A settled entry is a pure memo — `finalized` is a built Element with
+    // its colours already resolved — so after a theme change it is simply
+    // wrong, and dropping it costs one rebuild. A PINNED entry is the
+    // opposite: it holds load-bearing animation state (the live reveal
+    // widget, an active defer machine) that cannot be reconstructed from
+    // the message, and dropping it mid-stream would restart the reveal of
+    // the turn currently being written. Those entries are rebuilt from
+    // their widget every frame anyway, so they follow a new theme on their
+    // own without being destroyed.
+    void clear_settled() noexcept { entries_.clear(); }
+
+    // Drop only what a THEME change invalidates, keeping what it does not.
+    //
+    // A settled entry holds two things: `finalized`, a built Element with
+    // colours already resolved, and `streaming`, the StreamingMarkdown
+    // widget that produced it. A new theme invalidates the first and is
+    // irrelevant to the second — markdown structure does not depend on what
+    // colour a heading is.
+    //
+    // clear_settled() drops both, which forces settle_message_md() to
+    // re-parse every kept message from source on the next rebuild. That is
+    // the dominant cost of a theme swap (37-82 ms on a real transcript) and
+    // it is spent re-deriving something that did not change. Keeping the
+    // widget lets the rebuild go straight to build(), which resolves slots
+    // against the new theme and is the only work a recolour actually needs.
+    void invalidate_colours() noexcept {
+        for (auto& [key, entry] : entries_) entry.md.finalized.reset();
+        // Pinned entries are untouched on purpose: they hold the live reveal
+        // widget for the turn being streamed right now, and they rebuild from
+        // that widget every frame anyway, so they follow the new theme
+        // without being disturbed.
+    }
+
 private:
     // One payload type, two homes. A key lives in AT MOST ONE of these at
     // a time; migrate_() moves the Entry between them, preserving the

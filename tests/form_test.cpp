@@ -389,8 +389,19 @@ TEST_CASE("form view: the current row is tinted, the others are not") {
     //
     // The wash must be a real colour, not ANSI `black`: black IS the
     // terminal background on most dark themes, so the first attempt at this
-    // was invisible by construction. It uses the same value nib's code_view
-    // uses for its current-line shade.
+    // was invisible by construction.
+    //
+    // It is a theme SLOT now (panel::Theme::row_bg = Surface), so pin a
+    // known theme rather than a literal. Under `native` there would be no
+    // wash to assert at all, and correctly so: native states no surface
+    // colour, because inventing one punches a hole in someone's terminal.
+    static const maya::Theme kProbe = [] {
+        maya::Theme t = maya::theme::native;
+        t.surface = maya::Color::rgb(35, 38, 52);
+        return t;
+    }();
+    maya::theme::set_live(kProbe);
+
     auto f = Builder{"Tinted"}
         .toggle("a", "Alpha", true)
         .toggle("b", "Beta", false)
@@ -410,12 +421,11 @@ TEST_CASE("form view: the current row is tinted, the others are not") {
         return ansi.substr(from + 1, to - from - 1);
     };
 
-    // 0x232634 as an SGR true-colour background. Asserting the emitted code
-    // rather than "it looks nice" is the only version of this that can fail
-    // for the right reason -- and it is what caught the invisible black.
     const std::string wash = "48;2;35;38;52";
     CHECK(line_with("Alpha").find(wash) != std::string::npos);
     CHECK(line_with("Beta").find(wash)  == std::string::npos);
+
+    maya::theme::set_live(maya::theme::native);
 }
 
 TEST_CASE("form view: the panel is FRAMED like every other picker") {

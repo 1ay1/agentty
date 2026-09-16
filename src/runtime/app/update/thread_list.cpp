@@ -123,7 +123,7 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
                     at = i;
                     break;
                 }
-            m.ui.panel = pn::ThreadList{{at}};
+            m.ui.panel.descend(pn::ThreadList{{at}});
             return {std::move(m), std::move(cmd)};
         },
         [&](CloseThreadList) -> Step {

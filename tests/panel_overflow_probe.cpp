@@ -70,35 +70,35 @@ struct Case {
 // the fact that they are separate lists is its own smell.
 const std::vector<Case>& cases() {
     static const std::vector<Case> v = {
-        {"command palette",   [](Model& m) { m.ui.panel = pn::Palette{{}}; },
+        {"command palette",   [](Model& m) { m.ui.panel.descend(pn::Palette{{}}); },
          ui::palette_panel},
-        {"mention palette",   [](Model& m) { m.ui.panel = pn::Mention{{}}; },
+        {"mention palette",   [](Model& m) { m.ui.panel.descend(pn::Mention{{}}); },
          ui::mention_panel},
-        {"symbol palette",    [](Model& m) { m.ui.panel = pn::Symbol{{}}; },
+        {"symbol palette",    [](Model& m) { m.ui.panel.descend(pn::Symbol{{}}); },
          ui::symbol_panel},
-        {"code block picker", [](Model& m) { m.ui.panel = pn::CodeBlocks{{}}; },
+        {"code block picker", [](Model& m) { m.ui.panel.descend(pn::CodeBlocks{{}}); },
          ui::code_blocks_panel},
-        {"tool output",       [](Model& m) { m.ui.panel = pn::ToolOutput{{}}; },
+        {"tool output",       [](Model& m) { m.ui.panel.descend(pn::ToolOutput{{}}); },
          ui::tool_output_panel},
-        {"checkpoints",       [](Model& m) { m.ui.panel = pn::Checkpoints{{}}; },
+        {"checkpoints",       [](Model& m) { m.ui.panel.descend(pn::Checkpoints{{}}); },
          ui::checkpoints_panel},
-        {"retrieval pane",    [](Model& m) { m.ui.panel = pn::Rag{{}}; },
+        {"retrieval pane",    [](Model& m) { m.ui.panel.descend(pn::Rag{{}}); },
          ui::rag_panel},
-        {"settings list",     [](Model& m) { m.ui.panel = pn::SettingsList{{}}; },
+        {"settings list",     [](Model& m) { m.ui.panel.descend(pn::SettingsList{{}}); },
          ui::settings_list_panel},
-        {"fork picker",       [](Model& m) { m.ui.panel = pn::Fork{{}}; },
+        {"fork picker",       [](Model& m) { m.ui.panel.descend(pn::Fork{{}}); },
          ui::fork_panel},
-        {"model picker",      [](Model& m) { m.ui.panel = pn::Models{{}}; },
+        {"model picker",      [](Model& m) { m.ui.panel.descend(pn::Models{{}}); },
          ui::models_panel},
-        {"provider picker",   [](Model& m) { m.ui.panel = pn::Providers{{}}; },
+        {"provider picker",   [](Model& m) { m.ui.panel.descend(pn::Providers{{}}); },
          ui::providers_panel},
-        {"thread list",       [](Model& m) { m.ui.panel = pn::ThreadList{{}}; },
+        {"thread list",       [](Model& m) { m.ui.panel.descend(pn::ThreadList{{}}); },
          ui::thread_list_panel},
         {"smart mode",        [](Model& m) {
              smart_form::Inputs in;
-             m.ui.panel = pn::SmartMode{{}, smart_form::build_form(in)};
+             m.ui.panel.descend(pn::SmartMode{{}, smart_form::build_form(in)});
          }, ui::smart_mode_panel},
-        {"stats viewer",      [](Model& m) { m.ui.panel = pn::Stats{}; },
+        {"stats viewer",      [](Model& m) { m.ui.panel.descend(pn::Stats{}); },
          ui::stats_panel},
     };
     return v;
@@ -154,7 +154,7 @@ Model with_history() {
 int rightmost_ink(const Case& c, const Model& m, int w, int h) {
     maya::StylePool pool;
     maya::Canvas canvas(w, h, &pool);
-    maya::render_tree(c.build(m), canvas, pool, maya::theme::dark,
+    maya::render_tree(c.build(m), canvas, pool, maya::theme::native,
                       /*auto_height=*/true);
     int worst = -1;
     for (int y = 0; y < h; ++y)
@@ -217,7 +217,7 @@ Damage measure(const Case& c, const Model& m, int w, int h) {
                             + "' wanted " + std::to_string(o.wanted)
                             + " cols, edge at " + std::to_string(o.edge));
     });
-    maya::render_tree(c.build(m), canvas, pool, maya::theme::dark,
+    maya::render_tree(c.build(m), canvas, pool, maya::theme::native,
                       /*auto_height=*/true);
 
     // Which rows belong to the frame at all: those whose LEFT edge carries

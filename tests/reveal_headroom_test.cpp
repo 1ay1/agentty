@@ -138,7 +138,7 @@ void check_shape(const Shape& sh, int cols) {
     RenderContextGuard guard(ctx);
     Canvas c(cols, 4000, &pool);
     c.clear();
-    render_tree(md.build(), c, pool, theme::dark, nodes, true);
+    render_tree(md.build(), c, pool, theme::native, nodes, true);
     const int actual = rows_of(c);
 
     const int estimate = est_tail_rows(sh.body, cols);
@@ -190,7 +190,7 @@ void check_partial_resolve() {
     auto paint = [&] {
         Canvas c(80, 4000, &pool);
         c.clear();
-        render_tree(md.build(), c, pool, theme::dark, nodes, true);
+        render_tree(md.build(), c, pool, theme::native, nodes, true);
     };
     paint();
     maya::testing::advance_anim_clock_ms(16);

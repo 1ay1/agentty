@@ -1701,6 +1701,28 @@ store::Settings load_settings() {
         json j; ifs >> j;
         s.model_id = ModelId{j.value("model_id", "")};
         s.profile = static_cast<Profile>(j.value("profile", 0));
+        // Appearance. Read field by field with the struct's own defaults as
+        // the fallback, so a config written by an older build — or one a
+        // user hand-edited badly — degrades to the default look rather than
+        // refusing to load.
+        if (j.contains("ui") && j["ui"].is_object()) {
+            const auto& u = j["ui"];
+            auto en = [&u](const char* k, auto def) {
+                using E = decltype(def);
+                return static_cast<E>(u.value(k, static_cast<int>(def)));
+            };
+            s.ui.theme         = u.value("theme", std::string{});
+            s.ui.tier          = en("tier",       ui_prefs::ColorTier::Auto);
+            s.ui.polarity      = en("polarity",   ui_prefs::Polarity::Auto);
+            s.ui.density       = en("density",    ui_prefs::Density::Normal);
+            s.ui.motion        = en("motion",     ui_prefs::Motion::Full);
+            s.ui.tool_output   = en("tool_output",ui_prefs::ToolOutput::Preview);
+            s.ui.thinking      = en("thinking",   ui_prefs::Thinking::Collapsed);
+            s.ui.timestamps    = en("timestamps", ui_prefs::Timestamps::Off);
+            s.ui.prose_width   = u.value("prose_width", 0);
+            s.ui.syntax        = u.value("syntax", true);
+            s.ui.compact_turns = u.value("compact_turns", false);
+        }
         auto favs = j.value("favorite_models", std::vector<std::string>{});
         for (auto& f : favs) s.favorite_models.push_back(ModelId{std::move(f)});
         s.provider = j.value("provider", "");
@@ -1886,6 +1908,23 @@ void save_settings(const store::Settings& s) {
     json j;
     j["model_id"] = s.model_id;
     j["profile"] = static_cast<int>(s.profile);
+    // Only when it differs from the default look, so a settings file stays
+    // a record of what the user CHANGED rather than a dump of every default.
+    if (s.ui != ui_prefs::Prefs{}) {
+        json u;
+        if (!s.ui.theme.empty())  u["theme"] = s.ui.theme;
+        u["tier"]          = static_cast<int>(s.ui.tier);
+        u["polarity"]      = static_cast<int>(s.ui.polarity);
+        u["density"]       = static_cast<int>(s.ui.density);
+        u["motion"]        = static_cast<int>(s.ui.motion);
+        u["tool_output"]   = static_cast<int>(s.ui.tool_output);
+        u["thinking"]      = static_cast<int>(s.ui.thinking);
+        u["timestamps"]    = static_cast<int>(s.ui.timestamps);
+        u["prose_width"]   = s.ui.prose_width;
+        u["syntax"]        = s.ui.syntax;
+        u["compact_turns"] = s.ui.compact_turns;
+        j["ui"] = std::move(u);
+    }
     json favs = json::array();
     for (const auto& mid : s.favorite_models) favs.push_back(mid);
     j["favorite_models"] = std::move(favs);

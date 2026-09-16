@@ -21,10 +21,9 @@ Element symbol_panel(const Model& m) {
     cfg.scroll     = &m.ui.symbol_palette_scroll;
     cfg.selected   = matches.empty() ? -1 : o->index;
 
-    cfg.header.push_back(h(text("#", fg_bold(highlight)),
-        text(o->query.empty() ? " type to filter symbols…" : (" " + o->query),
-             o->query.empty() ? fg_italic(muted) : fg_of(fg))
-    ).build());
+    // The sigil is the trigger character, so the header reads as a
+    // continuation of what was typed in the composer.
+    cfg.header.push_back(filter_header(o->query, "symbols", highlight, "# "));
     cfg.header.push_back(sep);
 
     if (o->entries.empty()) {

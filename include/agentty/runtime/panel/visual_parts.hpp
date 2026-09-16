@@ -224,6 +224,28 @@ inline auto visual_parts(const PluginEdit& p) {
 }
 static_assert(visual::parts_cover_all<PluginEdit>);
 
+// Two parts, because the slot has two facets: the parent snapshot and the
+// pane. The pane's own fields are covered by its own visual_parts below,
+// which is where `restore` gets exempted — it is the Esc undo stash, never
+// drawn, so hashing it would wake a frame for something invisible.
+inline auto visual_parts(const Appearance& p) {
+    return std::make_tuple(visual::ref(static_cast<const WithFrom&>(p)),
+                           visual::ref(p.pane));
+}
+static_assert(visual::parts_cover_all<Appearance>);
+
+inline auto visual_parts(const AppearancePane& p) {
+    return std::make_tuple(visual::ref(p.form), p.picking,
+                           visual::ref(p.picker));
+}
+static_assert(visual::parts_cover_all<AppearancePane>);
+
+inline auto visual_parts(const AppearancePane::ThemePicker& p) {
+    return std::make_tuple(visual::ref(p.query), p.index, p.scroll,
+                           visual::exempt);
+}
+static_assert(visual::parts_cover_all<AppearancePane::ThemePicker>);
+
 inline auto visual_parts(const Palette& p) {
     return std::make_tuple(
         visual::ref(static_cast<const agentty::palette::Open&>(p)),

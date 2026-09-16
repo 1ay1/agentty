@@ -52,18 +52,10 @@ Element models_panel(const Model& m) {
     cfg.scroll     = &m.ui.fused_picker_scroll;
 
     cfg.header.push_back(
-        picker->query.empty()
-            ? h(text("\xf0\x9f\x94\x8d ", fg_of(muted)),
-                query_caret(accent),
-                text(std::string{picker->assign_slot
-                                     ? "type to filter this provider"
-                                     : "type to filter across providers"},
-                     fg_italic(muted))
-              ).build()
-            : h(text("\xf0\x9f\x94\x8d ", fg_of(muted)),
-                text(picker->query, fg_of(fg)),
-                query_caret(accent)
-              ).build());
+        filter_header(picker->query,
+                      picker->assign_slot ? "this provider"
+                                          : "across providers",
+                      accent));
     cfg.header.push_back(sep);
 
     // Lazy-load hint: while any provider's catalog is still streaming in,

@@ -54,6 +54,7 @@
 #endif
 
 #include <maya/core/overload.hpp>
+#include <maya/style/theme.hpp>
 
 #include "agentty/runtime/panel/code_blocks.hpp"
 #include "agentty/io/clipboard.hpp"
@@ -128,7 +129,24 @@ streaming_reply_closed_blocks(const Model& m, bool& saw_open) {
 // a real terminal. Colour/heartbeat are TTY-only (piped output stays clean
 // for `agentty ... | tee`), but the command echo + status always print.
 namespace runner_ui {
-    inline bool tty() { return ::isatty(STDOUT_FILENO) == 1; }
+    // Colour here cannot go through the theme, and that is not an oversight:
+    // maya is SUSPENDED at this point (cooked tty, TUI torn down) and we are
+    // writing bytes straight at the terminal, so there is no canvas, no
+    // style pool and no frame to paint into. These are the only hand-written
+    // escapes in agentty for exactly that reason.
+    //
+    // What they MUST still honour is whether the user wants colour at all.
+    // This used to be a bare isatty() check, which silently ignored NO_COLOR
+    // and TERM=dumb — so `NO_COLOR=1 agentty` stayed clean everywhere except
+    // here, which is the one place a user cannot theme their way out of.
+    // maya::theme::detect_tier() is the same detector the renderer uses, so
+    // the answer is consistent across the suspend boundary.
+    inline bool tty() {
+        static const bool on = ::isatty(STDOUT_FILENO) == 1
+            && maya::theme::detect_tier(/*tty=*/true)
+                   != maya::theme::ColorTier::Mono;
+        return on;
+    }
     inline const char* dim()   { return tty() ? "\x1b[2m"  : ""; }
     inline const char* bold()  { return tty() ? "\x1b[1m"  : ""; }
     inline const char* green() { return tty() ? "\x1b[32m" : ""; }
@@ -595,7 +613,7 @@ Step codeblock_update(Model m, msg::CodeBlockMsg cm) {
                     return {std::move(m), std::move(cmd)};
                 }
             }
-            m.ui.panel = pn::CodeBlocks{{std::move(blocks), 0}};
+            m.ui.panel.descend(pn::CodeBlocks{{std::move(blocks), 0}});
             m.ui.code_blocks_scroll.y = 0;
             return done(std::move(m));
         },

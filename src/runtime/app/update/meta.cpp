@@ -138,6 +138,17 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             return {std::move(m), cmd::launch_stream(m)};
         },
 
+        [&](ToggleChangesStrip) -> Step {
+            m.d.show_changes_strip = !m.d.show_changes_strip;
+            // Persist so it survives restarts.
+            auto s = deps().load_settings();
+            s.show_changes_strip = m.d.show_changes_strip;
+            deps().save_settings(s);
+            auto cmd = set_status_toast(m, m.d.show_changes_strip
+                ? "changes strip: shown" : "changes strip: hidden (Ctrl+R still reviews)");
+            return {std::move(m), std::move(cmd)};
+        },
+
         [&](CycleProfile) -> Step {
             m.d.profile = m.d.profile == Profile::Write   ? Profile::Ask
                       : m.d.profile == Profile::Ask     ? Profile::Minimal

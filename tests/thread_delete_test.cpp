@@ -69,7 +69,7 @@ Model make_model(int cursor, const std::string& current_id) {
     }
     m.d.current.id = ThreadId{current_id};
     m.d.current.title = "active";
-    m.ui.panel = pn::ThreadList{{cursor}};
+    m.ui.panel.descend(pn::ThreadList{{cursor}});
     return m;
 }
 

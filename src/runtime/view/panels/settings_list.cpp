@@ -52,16 +52,24 @@ Badge status_badge(se::Item::Status s) {
     }
 }
 
-// Navigation rows (RAG / Smart / profile) that jump elsewhere show a subtle
-// affordance arrow instead of a health dot — they have no health, they're
-// doors. Returns std::nullopt for rows that should use the status badge.
+// Navigation rows (RAG / Smart / Appearance / profile) that jump elsewhere
+// show a subtle affordance arrow instead of a health dot — they have no
+// health, they're doors. Returns std::nullopt for rows that should use the
+// status badge.
+//
+// Every action that OPENS A PANE belongs here. Appearance was missing, so
+// the one row that opens the biggest pane in Settings was the only door
+// without a handle — it read as a value row that happened to do something
+// when you pressed Enter. The arrow is the affordance that says "this leads
+// somewhere", and a door without it is just a surprise.
 std::optional<Badge> nav_badge(se::Action a) {
-    switch (a) {
-        case se::Action::CycleProfile: return Badge{"\xe2\x86\xbb", info};      // ↻
-        case se::Action::OpenRag:
-        case se::Action::OpenSmart:    return Badge{"\xe2\x86\x92", highlight};  // →
-        default:                       return std::nullopt;
-    }
+    // Every door, from the enum's own definition — not a list restated here
+    // and left to drift.
+    if (se::opens_pane(a)) return Badge{"\xe2\x86\x92", highlight};   // →
+    // Cycling a value in place is not a door: it changes something HERE, so
+    // it gets a distinct glyph rather than the one that means "leads away".
+    if (a == se::Action::CycleProfile) return Badge{"\xe2\x86\xbb", info};  // ↻
+    return std::nullopt;
 }
 
 // Whether this concern supports the inline `a`dd flow.
@@ -140,7 +148,8 @@ Element settings_list_panel(const Model& m) {
     for (int i = 0; i < static_cast<int>(rows.size()); ++i) {
         const auto& it = rows[static_cast<std::size_t>(i)];
         // Top-level rows lead with a HEALTH badge (status), except pure
-        // navigation rows (RAG/Smart/profile) which show an affordance arrow.
+        // navigation rows (RAG / Smart / Appearance / profile), which show an
+        // affordance arrow — see nav_badge, which owns that list.
         const Badge b = nav_badge(it.action).value_or(status_badge(it.status));
 
         Panel::Item row;

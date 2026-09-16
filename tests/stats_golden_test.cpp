@@ -208,7 +208,7 @@ std::string render_at(const Model& m, int w, int rows) {
                             + "' (wanted " + std::to_string(o.wanted)
                             + " cols, edge at " + std::to_string(o.edge) + ")");
     });
-    maya::render_tree(ui::stats_panel(m), canvas, pool, maya::theme::dark,
+    maya::render_tree(ui::stats_panel(m), canvas, pool, maya::theme::native,
                       /*auto_height=*/true);
 
     std::string out;
@@ -441,7 +441,7 @@ TEST_CASE("stats_golden: every tab renders byte-identically") {
     //
     // Set to 0 to bootstrap: the run prints the hash to stderr, paste it
     // back IN THE SAME COMMIT as the change that moved it.
-    const std::uint64_t kGoldenHash = 0x43c79b5eceb3c8c0ull;
+    const std::uint64_t kGoldenHash = 0x4b12a4c4d935549cull;
     const std::uint64_t got = fnv1a(out);
 
     if (kGoldenHash == 0) {

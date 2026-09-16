@@ -7,6 +7,8 @@
 
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/runtime/app/update.hpp"
+#include "agentty/runtime/app/deps.hpp"
+#include "agentty/domain/ui_theme.hpp"
 #include "agentty/runtime/app/cmd_factory.hpp"   // load_plugins_async
 
 #include <algorithm>
@@ -75,7 +77,17 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
             // wholly-informational / empty pane too.
             const int start =
                 first_actionable(se::items_for(m, e.concern), 0, +1);
-            m.ui.panel = pn::SettingsList{{e.concern, start}};
+            // descend(), not assignment.
+            //
+            // Assignment overwrites whatever was open, so the pane Esc came
+            // FROM is gone and Esc closes the whole stack instead of
+            // stepping back one. Reached from Ctrl+K the palette's adopt()
+            // used to paper over this; reached any other way — a direct
+            // key, another pane handing off — there was nothing to adopt and
+            // Esc dropped the user on the thread. descend() stashes the
+            // parent at the open site, which is the one place that always
+            // knows what it is replacing.
+            m.ui.panel.descend(pn::SettingsList{{e.concern, start}});
             // A fresh open starts at the top — don't inherit the scroll
             // offset of the last visit (the widget's keep-selection-in-view
             // would fight the stale offset for a frame). PR #34.
@@ -219,12 +231,21 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
                     return agentty::app::update(std::move(m),
                                                 Msg{OpenSmartMode{}});
                 }
+                case se::Action::OpenAppearance: {
+                    return agentty::app::update(std::move(m),
+                                                Msg{OpenAppearance{}});
+                }
+                case se::Action::ToggleChangesStrip: {
+                    return agentty::app::update(std::move(m),
+                                                Msg{ToggleChangesStrip{}});
+                }
                 // (There is deliberately NO Activate-arm for plugin removal.
                 // Removal is `d` → SettingsListRemove, which is TWO-step —
                 // arm, then confirm. An Enter-fired remove here would be a
                 // one-press destructive action; the old arm was unreachable
                 // — no row builder ever emitted it — but unreachable code
                 // with live side effects is a trap, not a feature.)
+
                 case se::Action::TogglePlugin: {
                     // Ignore a toggle while a connect/reload is already in
                     // flight — the snapshot (and this row's on/off) is mid-

@@ -109,7 +109,7 @@ int main(int argc, char** argv) {
                 RenderContextGuard guard(ctx);
                 Canvas c(kWidth, 6000, &pool);
                 c.clear();
-                render_tree(md.build(), c, pool, theme::dark, nodes, true);
+                render_tree(md.build(), c, pool, theme::native, nodes, true);
             }
             auto t1 = clk::now();
             frame_us.push_back(

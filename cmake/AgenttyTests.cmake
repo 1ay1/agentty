@@ -41,7 +41,10 @@ set(_AGENTTY_CONSOLIDATED
     command_palette_test compaction_threshold_test fsm_test model_caps_test
     dialect_test
     embed_backend_test form_test embed_form_test escape_guarantee_test
-    palette_nav_test panel_test
+    theme_discipline_test
+    palette_nav_test panel_test panel_nav_test status_bar_cache_test
+    appearance_rows_test
+    issue37_terminal_respect_test
     param_tag_repair_test sandbox_escape_test scope_test table_render_test
     ssrf_guard_test render_key_coverage_test reasoning_render_test
     plugin_config_test skills_engine_test slash_commands_test fuzzy_match_smoke
@@ -52,6 +55,7 @@ set(_AGENTTY_CONSOLIDATED
     credentials_test entitlement_test inflate_test
     settings_list_scroll_test visual_walk_test md_robustness_test
     stats_test
+    ui_prefs_test
     stats_scroll_test
     stats_visual_hash_test
     panel_overflow_probe

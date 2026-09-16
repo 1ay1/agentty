@@ -62,7 +62,7 @@ std::string render_picker(const Model& m, int width = 100, int height = 48) {
     maya::StylePool pool;
     maya::Canvas canvas(width, height, &pool);
     canvas.clear();
-    maya::render_tree(root, canvas, pool, maya::theme::dark, true);
+    maya::render_tree(root, canvas, pool, maya::theme::native, true);
 
     std::string out;
     const int max_row = canvas.max_content_row();
@@ -108,7 +108,7 @@ int count_tool_rows(const std::string& screen, int n) {
 
 TEST_CASE("settings list: bounded, clipped, and scrollable") {
     Model m = big_plugins_model(120);
-    m.ui.panel = pn::SettingsList{{settings::Category::Plugins, 2}};
+    m.ui.panel.descend(pn::SettingsList{{settings::Category::Plugins, 2}});
 
     const std::string screen = render_picker(m);
     INFO(screen);
@@ -148,7 +148,7 @@ TEST_CASE("settings list: bounded, clipped, and scrollable") {
     // Row 0 = info row, 1 = server row, 2..n+1 = tool_i — cursor 118 sits
     // on tool_116.
     const bool early_before = has(screen, "tool_0\xe2\x80\xa6") || has(screen, " tool_0");
-    m.ui.panel = pn::SettingsList{{settings::Category::Plugins, 118}};
+    m.ui.panel.descend(pn::SettingsList{{settings::Category::Plugins, 118}});
     const std::string deep = render_picker(m);
     INFO(deep);
     CHECK_MESSAGE(has(deep, "tool_116"), "deep row is reachable and rendered");

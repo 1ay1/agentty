@@ -91,7 +91,7 @@ TEST_CASE("palette nav: the cursor never lands on a section header") {
     install_stub_deps();
 
     Model m;
-    m.ui.panel = pn::Palette{{}};
+    m.ui.panel.descend(pn::Palette{{}});
     m.d.pending_changes.push_back(FileChange{});
 
     // Walk the whole list. Every stop must be a real, runnable row — the
@@ -115,7 +115,7 @@ TEST_CASE("palette nav: moving up also skips headers") {
     install_stub_deps();
 
     Model m;
-    m.ui.panel = pn::Palette{{}};
+    m.ui.panel.descend(pn::Palette{{}});
     m.d.pending_changes.push_back(FileChange{});
 
     const int rows = static_cast<int>(filtered_commands("").size());
@@ -139,7 +139,7 @@ TEST_CASE("palette nav: the cursor index addresses the header-free list") {
     install_stub_deps();
 
     Model m;
-    m.ui.panel = pn::Palette{{}};
+    m.ui.panel.descend(pn::Palette{{}});
     auto* o = m.ui.panel.get<pn::Palette>();
     REQUIRE(o != nullptr);
 

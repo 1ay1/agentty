@@ -91,7 +91,7 @@ int main() {
     auto t2 = steady_clock::now();
     for (int i = 0; i < kFrames; ++i) {
         auto el = ui::stats_panel(m);
-        maya::render_tree(el, canvas, pool, maya::theme::dark,
+        maya::render_tree(el, canvas, pool, maya::theme::native,
                           /*auto_height=*/true);
     }
     auto t3 = steady_clock::now();

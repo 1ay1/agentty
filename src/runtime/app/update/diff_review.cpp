@@ -94,7 +94,7 @@ Step diff_review_update(Model m, msg::DiffReviewMsg dm) {
                 auto cmd = set_status_toast(m, "no pending changes to review");
                 return {std::move(m), std::move(cmd)};
             }
-            m.ui.panel = pn::DiffReview{{0, 0}};
+            m.ui.panel.descend(pn::DiffReview{{0, 0}});
             return done(std::move(m));
         },
         [&](CloseDiffReview) -> Step {

@@ -48,38 +48,38 @@ struct Case {
 const std::vector<Case>& cases() {
     static const std::vector<Case> v = {
         {pn::Kind::Palette, "command palette",
-         [](Model& m) { m.ui.panel = pn::Palette{{}}; }},
+         [](Model& m) { m.ui.panel.descend(pn::Palette{{}}); }},
         {pn::Kind::Mention, "mention palette",
-         [](Model& m) { m.ui.panel = pn::Mention{{}}; }},
+         [](Model& m) { m.ui.panel.descend(pn::Mention{{}}); }},
         {pn::Kind::Symbol, "symbol palette",
-         [](Model& m) { m.ui.panel = pn::Symbol{{}}; }},
+         [](Model& m) { m.ui.panel.descend(pn::Symbol{{}}); }},
         {pn::Kind::CodeBlocks, "code block picker",
-         [](Model& m) { m.ui.panel = pn::CodeBlocks{{}}; }},
+         [](Model& m) { m.ui.panel.descend(pn::CodeBlocks{{}}); }},
         {pn::Kind::ToolOutput, "tool output viewer",
-         [](Model& m) { m.ui.panel = pn::ToolOutput{{}}; }},
+         [](Model& m) { m.ui.panel.descend(pn::ToolOutput{{}}); }},
         {pn::Kind::Checkpoints, "checkpoint picker",
-         [](Model& m) { m.ui.panel = pn::Checkpoints{{}}; }},
+         [](Model& m) { m.ui.panel.descend(pn::Checkpoints{{}}); }},
         {pn::Kind::Rag, "retrieval pane",
-         [](Model& m) { m.ui.panel = pn::Rag{{}}; }},
+         [](Model& m) { m.ui.panel.descend(pn::Rag{{}}); }},
         {pn::Kind::SettingsList, "settings list",
-         [](Model& m) { m.ui.panel = pn::SettingsList{{}}; }},
+         [](Model& m) { m.ui.panel.descend(pn::SettingsList{{}}); }},
         {pn::Kind::Fork, "fork picker",
-         [](Model& m) { m.ui.panel = pn::Fork{{}}; }},
+         [](Model& m) { m.ui.panel.descend(pn::Fork{{}}); }},
         {pn::Kind::Models, "model picker",
-         [](Model& m) { m.ui.panel = pn::Models{{}}; }},
+         [](Model& m) { m.ui.panel.descend(pn::Models{{}}); }},
         {pn::Kind::Providers, "provider picker",
-         [](Model& m) { m.ui.panel = pn::Providers{{}}; }},
+         [](Model& m) { m.ui.panel.descend(pn::Providers{{}}); }},
         {pn::Kind::ThreadList, "thread list",
-         [](Model& m) { m.ui.panel = pn::ThreadList{{}}; }},
+         [](Model& m) { m.ui.panel.descend(pn::ThreadList{{}}); }},
         {pn::Kind::SmartMode, "smart mode",
          [](Model& m) {
              smart_form::Inputs in;
-             m.ui.panel = pn::SmartMode{{}, smart_form::build_form(in)};
+             m.ui.panel.descend(pn::SmartMode{{}, smart_form::build_form(in)});
          }},
         {pn::Kind::Stats, "stats viewer",
-         [](Model& m) { m.ui.panel = pn::Stats{}; }},
+         [](Model& m) { m.ui.panel.descend(pn::Stats{}); }},
         {pn::Kind::DiffReview, "diff review",
-         [](Model& m) { m.ui.panel = pn::DiffReview{{}}; }},
+         [](Model& m) { m.ui.panel.descend(pn::DiffReview{{}}); }},
     };
     return v;
 }
