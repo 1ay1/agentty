@@ -1507,7 +1507,12 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                                tc2.name.value, m.d.profile);
                     if (read_only && !needs_perm) {
                         const auto now2 = std::chrono::steady_clock::now();
-                        tc2.status = ToolUse::Running{now2, {}};
+                        // No permission gate on this path, so card birth and
+                        // execution coincide — but record both anyway rather
+                        // than leaving the liveness clock to fall back. A
+                        // field that is only sometimes set is a field the
+                        // next reader has to reason about.
+                        tc2.status = ToolUse::Running{now2, {}, {}, now2};
                         auto cancel = active_ctx(m.s.phase)
                             ? active_ctx(m.s.phase)->cancel
                             : http::CancelTokenPtr{};

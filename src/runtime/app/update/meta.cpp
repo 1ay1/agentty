@@ -656,23 +656,39 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                     if (!tc.is_running()) continue;
                     any_running = true;
                     auto started = tc.started_at();
-                    // Liveness reference: the LATER of launch and the most
-                    // recent progress snapshot. A healthy long-runner (a
-                    // subagent working through tool calls, a streaming build)
-                    // keeps bumping last_progress_at, so the wedge cap resets
-                    // with every sign of life and never guillotines it at a
-                    // flat 330 s from launch. A tool truly hung on a blocking
-                    // syscall emits no progress, so last_progress_at stays put
-                    // (or zero) and the net trips exactly as before.
+                    // Liveness reference: the LATER of EXECUTION START and
+                    // the most recent progress snapshot — ToolUse::Running
+                    // owns that rule as liveness_origin(), so display time
+                    // and liveness time cannot drift apart again.
+                    //
+                    // Execution start, not card birth: a tool awaiting the
+                    // user's approval is not running, and billing the human's
+                    // think-time against the tool's budget meant approving
+                    // after a long pause failed the command instantly, before
+                    // it had executed a single instruction (issue #40).
+                    //
+                    // A healthy long-runner (a subagent working through tool
+                    // calls, a streaming build) keeps bumping
+                    // last_progress_at, so the wedge cap resets with every
+                    // sign of life and never guillotines it at a flat 330 s.
+                    // A tool truly hung on a blocking syscall emits no
+                    // progress, so the origin stays put and the net trips
+                    // exactly as before.
                     auto liveness = started;
-                    if (const auto* r = std::get_if<ToolUse::Running>(&tc.status);
-                        r && r->last_progress_at.time_since_epoch().count() != 0
-                        && r->last_progress_at > liveness)
-                        liveness = r->last_progress_at;
+                    if (const auto* r = std::get_if<ToolUse::Running>(&tc.status))
+                        liveness = r->liveness_origin();
                     if (started.time_since_epoch().count() != 0
                         && now - liveness >= kToolWedge) {
+                        // Report the time SPENT EXECUTING. Reporting card age
+                        // here is how the old message came to claim a tool
+                        // "ran 400s" when it had been waiting on a human for
+                        // most of that.
+                        auto exec_from = liveness;
+                        if (const auto* r = std::get_if<ToolUse::Running>(&tc.status);
+                            r && r->executing_since.time_since_epoch().count() != 0)
+                            exec_from = r->executing_since;
                         auto secs = std::chrono::duration_cast<std::chrono::seconds>(
-                                        now - started).count();
+                                        now - exec_from).count();
                         auto quiet = std::chrono::duration_cast<std::chrono::seconds>(
                                         now - liveness).count();
                         tc.status = ToolUse::Failed{started, now,

@@ -64,6 +64,34 @@ Model model_with_running_tool(seconds started_ago, seconds progress_ago) {
     return m;
 }
 
+// A tool that sat awaiting the user's approval for `waited` and has only just
+// been approved — execution begins NOW. Models issue #40: the card was
+// created when the model emitted the call, the human took their time, and
+// the question is whether that thinking time is billed against the tool.
+Model model_just_approved_after(seconds waited) {
+    Model m;
+    m.s.phase = phase::ExecutingTool{phase::Active{}};
+
+    Message asst;
+    asst.role = Role::Assistant;
+    ToolUse tc;
+    tc.id   = ToolCallId{"tc-1"};
+    tc.name = ToolName{"shell"};
+    tc.args = nlohmann::json{{"command", "make -j8"}};
+
+    const auto now = steady_clock::now();
+    ToolUse::Running run;
+    // The card was born when the model emitted the call — `waited` ago.
+    run.started_at = now - waited;
+    // Execution began just now, at approval. Before the fix there was
+    // nowhere to record this, which IS the bug.
+    run.executing_since = now;
+    tc.status = run;
+    asst.tool_calls.push_back(std::move(tc));
+    m.d.current.messages.push_back(std::move(asst));
+    return m;
+}
+
 bool tool_running(const Model& m) {
     for (const auto& msg : m.d.current.messages)
         for (const auto& tc : msg.tool_calls)
@@ -134,5 +162,49 @@ TEST_CASE("tool wedge liveness") {
         Model m = model_with_running_tool(seconds{300}, seconds{-1});
         m = tick(std::move(m));
         check(tool_running(m), "D: below the cap, a silent tool is left alone");
+    }
+
+    // ── E. The human's approval time is NOT the tool's time (issue #40) ──
+    //
+    // "Tool timeout timers start even when you haven't approved a tool yet,
+    // which means you can approve it and have it immediately fail due to
+    // 'taking too long' even though the tool run actually hasn't done
+    // anything yet."
+    //
+    // started_at is stamped when the model EMITS the call, deliberately: the
+    // card shows a live elapsed timer and freezing it during arg-streaming
+    // reads as stuck. But a tool awaiting permission is not running, and the
+    // wedge net measured from that same field — so time the HUMAN spent
+    // deciding was charged to the tool's 330s budget. Step away for six
+    // minutes, approve, and the very first Tick kills a command that has not
+    // executed a single instruction.
+    //
+    // The two clocks answer different questions and cannot be one field:
+    //   started_at      — "how long has this card existed?"  (display)
+    //   executing_since — "how long has this been RUNNING?"  (liveness)
+    {
+        Model m = model_just_approved_after(seconds{400});
+        m = tick(std::move(m));
+        check(tool_running(m),
+              "E: a just-approved tool is not wedged by the time spent "
+              "waiting for approval");
+        check(!tool_failed(m),
+              "E: approving after a long think does not instantly fail it");
+    }
+
+    // ── F. …but once EXECUTING, the cap still applies from that moment. ──
+    // The fix must not disarm the net: a tool approved long ago and silent
+    // ever since is still a hung tool.
+    {
+        Model m = model_just_approved_after(seconds{900});
+        // Approved 400s ago (> cap) rather than just now.
+        for (auto& msg : m.d.current.messages)
+            for (auto& tc : msg.tool_calls)
+                if (auto* r = std::get_if<ToolUse::Running>(&tc.status))
+                    r->executing_since = steady_clock::now() - seconds{400};
+        m = tick(std::move(m));
+        check(tool_failed(m),
+              "F: silent for longer than the cap SINCE EXECUTION began is "
+              "still wedged");
     }
 }

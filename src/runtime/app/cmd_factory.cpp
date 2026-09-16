@@ -1575,7 +1575,14 @@ Cmd<Msg> kick_pending_tools(Model& m) {
                 // started_at was stamped at StreamToolUseStart so the
                 // timer covers the full card lifetime (args streaming +
                 // execution). Preserve it as we move into Running.
-                tc.status = ToolUse::Running{tc.started_at(), {}};
+                //
+                // executing_since is stamped HERE, at actual dispatch,
+                // because this is the only point that knows when the work
+                // really begins — a tool that sat awaiting permission has a
+                // started_at minutes in the past, and charging that gap to
+                // the wedge budget killed freshly-approved tools (issue #40).
+                tc.status = ToolUse::Running{tc.started_at(), {}, {},
+                                             std::chrono::steady_clock::now()};
                 auto cancel = active_ctx(m.s.phase)
                     ? active_ctx(m.s.phase)->cancel
                     : http::CancelTokenPtr{};

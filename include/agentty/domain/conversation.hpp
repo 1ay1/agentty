@@ -104,6 +104,44 @@ struct ToolUse {
         // ToolExecProgress lands; the wedge net treats zero as "no progress
         // yet" and falls back to started_at.
         std::chrono::steady_clock::time_point last_progress_at{};
+        // When EXECUTION actually began — as distinct from when the card was
+        // born (started_at, above).
+        //
+        // These are two different questions and one field cannot answer
+        // both:
+        //
+        //   started_at      — "how long has this card existed?"  → DISPLAY.
+        //                     Stamped at StreamToolUseStart so the elapsed
+        //                     timer covers arg-streaming too; freezing it
+        //                     there reads as "stuck".
+        //   executing_since — "how long has this been RUNNING?"  → LIVENESS.
+        //                     Stamped when the tool is actually dispatched.
+        //
+        // Conflating them was issue #40: a tool awaiting permission is not
+        // running, but the wedge net measured from started_at, so the time a
+        // HUMAN spent deciding was billed against the tool's 330 s budget.
+        // Step away for six minutes, approve, and the first Tick killed a
+        // command that had not executed a single instruction — reported as
+        // "ran 400s with no progress", which was true of the card and false
+        // of the tool.
+        //
+        // Zero means "not recorded" (older threads, tests constructing
+        // Running directly); readers fall back to started_at, which is the
+        // pre-fix behaviour and correct whenever there was no approval gap.
+        std::chrono::steady_clock::time_point executing_since{};
+
+        // The instant from which "has this gone quiet?" should be measured.
+        // Every liveness consumer goes through this rather than reaching for
+        // a field, so a future third clock cannot be half-adopted.
+        [[nodiscard]] std::chrono::steady_clock::time_point
+        liveness_origin() const noexcept {
+            auto base = executing_since.time_since_epoch().count() != 0
+                      ? executing_since : started_at;
+            if (last_progress_at.time_since_epoch().count() != 0
+                && last_progress_at > base)
+                base = last_progress_at;
+            return base;
+        }
     };
     struct Done {
         std::chrono::steady_clock::time_point started_at{};
