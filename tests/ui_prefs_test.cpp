@@ -360,6 +360,55 @@ TEST_CASE("appearance: the palette follows the chosen theme") {
     CHECK(maya::Color{ui::fg} == native_fg);
 }
 
+TEST_CASE("appearance: publishing a theme reaches the PROJECTED palettes too") {
+    // The second half of the same regression, and the one that actually
+    // shipped broken.
+    //
+    // There are two theme sinks. agentty's atom feeds the `ui::` tokens,
+    // which are read while BUILDING an Element. maya's app_set_theme feeds
+    // the RENDERER — and, through on_theme_changed, every palette that is
+    // PROJECTED from the theme rather than read from it per-frame: markdown
+    // keeps its 37 colours flat (its render path is hot and its parse worker
+    // is off-thread), the component cache blits already-resolved pixels, and
+    // StylePool caches SGR bytes.
+    //
+    // The test above only ever exercised the first sink, so nothing caught
+    // the appearance reducer publishing one and not the other. The reducer
+    // re-seals the whole transcript IMMEDIATELY after publishing, so a
+    // stale projection is not a one-frame flicker — it is baked into the
+    // sealed Elements. On a dark→light swap that left every older turn in
+    // the outgoing theme's ink (washed-out prose, dark code-span slabs on a
+    // light canvas) while the newest message, built after view() caught up,
+    // looked correct.
+    //
+    // Assert the coupling at its source: ONE publish must move maya's live
+    // theme too. A future refactor that splits them again fails here.
+    const maya::Theme* dracula = nullptr;
+    const maya::Theme* rose = nullptr;
+    for (const auto& s : maya::theme::schemes) {
+        if (std::string_view{s.name} == "Dracula") dracula = s.theme;
+        if (std::string_view{s.name} == "Rose Pine Dawn") rose = s.theme;
+    }
+    REQUIRE(dracula != nullptr);
+
+    ui_prefs::publish_theme(*dracula);
+    CHECK(maya::theme::live() == *dracula);
+    CHECK(ui_prefs::theme() == *dracula);
+
+    // A light scheme, because polarity is what made the bug visible: light
+    // ink left over from a dark theme is unreadable on a light canvas.
+    if (rose != nullptr) {
+        ui_prefs::publish_theme(*rose);
+        CHECK(maya::theme::live() == *rose);
+        CHECK(ui_prefs::theme() == *rose);
+        // The two sinks agree with each other, which is the whole point.
+        CHECK(maya::theme::live() == ui_prefs::theme());
+    }
+
+    ui_prefs::publish_theme(maya::theme::native);
+    CHECK(maya::theme::live() == maya::theme::native);
+}
+
 TEST_CASE("appearance: only a theme that names a background owns the canvas") {
     // agentty is Mode::Inline — the frame is a window onto scrollback, not
     // the whole screen. So "paint the theme's background" is a decision with

@@ -96,8 +96,18 @@ void restyle_sealed_turns(Model& m) {
     // is the exact bug being fixed, one frame later. The turn builders read
     // `ui::` tokens, and those resolve through the live theme at BUILD time.
     //
+    // publish_theme drives BOTH sinks (see ui_theme.hpp). That matters here
+    // more than anywhere: rehydrate_frozen() below rebuilds sealed turns
+    // immediately, and markdown prose renders from a PROJECTED palette
+    // (~74 `colors::` reads in render_block.cpp alone) that is re-derived
+    // by maya's on_theme_changed hook. Publishing only agentty's half left
+    // that projection stale, so the rebuild baked the OUTGOING palette into
+    // the new Elements — on a dark→light swap, dark ink on a light canvas
+    // for the whole transcript, with only the newest unsealed message
+    // looking right.
+    //
     // Cheap and idempotent: view() publishes the same value again next
-    // frame, and publish is a pointer store.
+    // frame, and publish is a pointer store plus a value compare.
     ui_prefs::publish_theme(*ui_prefs::resolve(m.d.ui, /*tty=*/true).theme);
 
     // The LIVE tail is cached too, and for the same reason it is stale.

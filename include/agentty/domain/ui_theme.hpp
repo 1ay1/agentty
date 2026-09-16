@@ -10,6 +10,7 @@
 #include <atomic>
 #include <string_view>
 
+#include <maya/app/app.hpp>       // app_set_theme — the renderer-side sink
 #include <maya/style/schemes.hpp>
 #include <maya/style/theme.hpp>
 
@@ -122,10 +123,31 @@ inline std::atomic<const maya::Theme*>& theme_atom() noexcept {
 }
 }  // namespace detail
 
-// Publish the theme in force. Called once per frame by view(), beside
-// publish(Prefs). Never from a reducer.
+// Publish the theme in force — to BOTH sinks, always.
+//
+// There are two, and they feed different consumers:
+//
+//   • this atom       — agentty's `ui::` tokens, read while BUILDING an
+//                       Element tree (fg(), muted, accent …).
+//   • app_set_theme   — maya's renderer slot, and via on_theme_changed
+//                       every PROJECTED palette: markdown's 37 flat
+//                       colours, the cross-frame component cache,
+//                       StylePool's SGR cache.
+//
+// They used to be two calls at the call site, which is a rule nobody can
+// keep: the appearance reducer made one of them and re-sealed the whole
+// transcript against a palette maya had not been told about yet, so a
+// dark→light swap left every older turn in the outgoing theme's ink. One
+// entry point means the pair cannot come apart — the second sink is not
+// something a caller can forget, because there is no call to omit.
+//
+// Idempotent and cheap: the atom is a pointer store and app_set_theme
+// compares by value and returns early when nothing moved, which is the
+// common case (view() re-publishes the same theme every frame so `auto`
+// can follow a tmux detach or an ssh hop).
 inline void publish_theme(const maya::Theme& t) noexcept {
     detail::theme_atom().store(&t, std::memory_order_relaxed);
+    maya::app_set_theme(t);
 }
 
 // The theme in force. Native until the first publish_theme(), so a

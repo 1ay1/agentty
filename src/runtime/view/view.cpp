@@ -109,8 +109,8 @@ maya::Element view(const Model& m) {
     // actually on.
     {
         const auto r = ui_prefs::resolve(m.d.ui, /*tty=*/true);
-        // Pushed UNCONDITIONALLY. There used to be a `static const Theme*
-        // applied` cache here that skipped the call when the pointer had not
+        // ONE call, two sinks. There used to be a `static const Theme*
+        // applied` cache here that skipped the push when the pointer had not
         // moved, which duplicated a guard maya already owns — app_set_theme()
         // compares by value and returns early itself, because what a swap
         // costs is maya's knowledge, not ours. Two caches for one fact is how
@@ -121,12 +121,12 @@ maya::Element view(const Model& m) {
         // pushes it again. That is a permanently mis-themed session with no
         // way back short of picking a different scheme. The redundant guard
         // bought one pointer compare per frame and cost correctness.
-        maya::app_set_theme(*r.theme);
-        // maya's slot above is for the RENDERER. agentty's view builders
-        // choose their colours while BUILDING the tree — `fg()` runs long
-        // before a renderer ever sees a Theme — so the palette has to be
-        // readable here too, at build time. Without this second publish the
-        // theme picker is a lie: the name changes and nothing repaints.
+        //
+        // The two sinks used to be two calls here as well — maya's renderer
+        // slot plus agentty's build-time palette — which is a pairing a
+        // caller has to remember. The appearance reducer did not, and re-
+        // sealed the transcript against a palette maya had not been told
+        // about. publish_theme owns both now, so there is nothing to forget.
         ui_prefs::publish_theme(*r.theme);
         // The rest of the prefs reach their consumers the same way, and for
         // the same reason: density is read by panel_viewport_h(), a free
