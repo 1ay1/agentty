@@ -21,11 +21,12 @@ Element mention_panel(const Model& m) {
     cfg.scroll     = &m.ui.mention_palette_scroll;
     cfg.selected   = matches.empty() ? -1 : o->index;
 
-    cfg.header.push_back(h(text("@", fg_bold(info)),
-        text(o->query.empty() ? " your changed files first · type to filter…"
-                              : (" " + o->query),
-             o->query.empty() ? fg_italic(muted) : fg_of(fg))
-    ).build());
+    // "@" is the trigger character, so the header continues what was typed
+    // in the composer. The noun says what the ORDER is rather than what the
+    // list contains — changed files sort first, which is the one thing worth
+    // knowing before you start typing.
+    cfg.header.push_back(
+        filter_header(o->query, "(changed files first)", info, "@ "));
     cfg.header.push_back(sep);
 
     if (o->files.empty()) {

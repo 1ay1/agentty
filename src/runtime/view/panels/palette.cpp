@@ -29,15 +29,7 @@ Element palette_panel(const Model& m) {
     cfg.selected   = matches.empty() ? -1 : o->index;
 
     cfg.header.push_back(
-        o->query.empty()
-            ? h(text("\xe2\x8c\x98 ", fg_bold(highlight)),   // ⌘
-                query_caret(highlight),
-                text("type to filter\xe2\x80\xa6", fg_italic(muted))
-              ).build()
-            : h(text("\xe2\x8c\x98 ", fg_bold(highlight)),
-                text(o->query, fg_of(fg)),
-                query_caret(highlight)
-              ).build());
+        filter_header(o->query, {}, highlight, "\xe2\x8c\x98 "));   // ⌘
     // Rule under the filter — the same `sep` every other picker draws, so the
     // query box is separated from its results identically everywhere.
     cfg.header.push_back(sep);

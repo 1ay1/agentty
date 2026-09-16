@@ -37,11 +37,7 @@ Element providers_panel(const Model& m) {
 
     // Live search header (mirrors the model picker). Backspace trims; typing
     // narrows. Hidden ACP/custom rows return the moment the query is cleared.
-    cfg.header.push_back(h(text("\xf0\x9f\x94\x8d ", fg_of(muted)),
-        text(picker->query.empty() ? "type to filter providers\xe2\x80\xa6"
-                                   : picker->query,
-             picker->query.empty() ? fg_italic(muted) : fg_of(fg))
-    ).build());
+    cfg.header.push_back(filter_header(picker->query, "providers"));
     cfg.header.push_back(sep);
 
     // Trailing auth-status column for a built-in preset. One place, so every

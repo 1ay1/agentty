@@ -38,12 +38,7 @@ namespace {
     cfg.scroll     = &m.ui.appearance_scroll;
     cfg.selected   = names.empty() ? -1 : o.pane.picker.index;
 
-    cfg.header.push_back(h(
-        text("\xf0\x9f\x8e\xa8 ", fg_of(info)),
-        text(o.pane.picker.query.empty() ? " type to filter\xe2\x80\xa6"
-                                    : (" " + o.pane.picker.query),
-             o.pane.picker.query.empty() ? fg_italic(muted) : fg_of(fg))
-    ).build());
+    cfg.header.push_back(filter_header(o.pane.picker.query));
     cfg.header.push_back(sep);
 
     if (names.empty()) {
@@ -62,6 +57,22 @@ namespace {
             if (is_native) {
                 row.trailing       = "your terminal's own colours";
                 row.trailing_style = fg_dim(muted);
+            }
+            // The palette itself, which is the thing the row is actually
+            // about. A name is the least informative property of a colour
+            // scheme — "Rose Pine Dawn" does not tell you it is light, and
+            // "Spacedust" does not tell you it is warm — so the six slots
+            // that most characterise a scheme are painted next to it: the
+            // three accents you see constantly, then the status hues.
+            //
+            // native is deliberately left blank. Its colours are whatever
+            // the terminal's are, so a swatch would be a claim maya cannot
+            // make; the trailing text says that in words instead.
+            if (!is_native) {
+                if (const maya::Theme* t = ui_prefs::find_scheme(name)) {
+                    row.swatch = {t->primary, t->accent, t->info,
+                                  t->success, t->warning, t->error};
+                }
             }
             if (!o.pane.picker.query.empty() && !is_native) {
                 auto fm = fuzzy::score(name, o.pane.picker.query);
