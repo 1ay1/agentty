@@ -12,6 +12,8 @@
 #include "agentty/runtime/panel/appearance.hpp"
 #include "agentty/domain/ui_prefs.hpp"
 
+#include "agentty/runtime/app/update/internal.hpp"   // rehydrate_frozen
+
 #include <maya/style/schemes.hpp>
 #include <maya/core/render_context.hpp>
 #include <maya/app/inline.hpp>
@@ -74,13 +76,17 @@ int main(int argc, char** argv) {
     // the SAME reducer path as ↑/↓ in the theme list rather than a shortcut
     // that might skip the expensive part.
     //
-    // frozen_through matters: a theme change re-seals the frozen scrollback
-    // (rehydrate_frozen), and THAT is the expensive half. A probe that left
-    // it at 0 would exercise only the cheap tail and report "no problem" on
-    // a session that has one. Seed it the way a real conversation does —
-    // most of the transcript sealed, a live tail still building.
-    m.ui.frozen_through = m.d.current.messages.size() > 4
-                        ? m.d.current.messages.size() - 4 : 0;
+    // frozen_through matters, and it must be established the way the app
+    // establishes it: by rehydrate_frozen(), under its row budget.
+    //
+    // Hand-seeding the index is worse than useless — rehydrate_frozen()
+    // calls clear_frozen() first, so a seeded value is wiped on the first
+    // switch and the probe silently measures a transcript that is ENTIRELY
+    // live tail. That state does not exist in a real session, and it made
+    // per-switch cost look linear in conversation length (236 ms at 1000
+    // messages) when the real figure is flat at ~6 ms because only ~2
+    // screens are ever live.
+    app::detail::rehydrate_frozen(m);
 
     m = app::update(std::move(m), Msg{OpenAppearance{}}).first;
     m = app::update(std::move(m), Msg{AppearancePickTheme{}}).first;
