@@ -21,6 +21,7 @@
 
 #include "agentty/provider/openai/transport.hpp"
 
+#include <map>
 #include <algorithm>
 #include <cctype>
 #include <array>
@@ -2410,7 +2411,123 @@ namespace detail {
     return 0;
 }
 
+// ── Window probe: ask the gateway what its catalog did not say ──────────
+//
+// The /v1/models ladder above recovers a window from every shape that
+// CARRIES one (openrouter's top_provider, vLLM's max_model_len, LiteLLM's
+// max_input_tokens, llama.cpp's n_ctx, nested model_info, stringified
+// numbers). What it cannot do is invent one for a gateway whose rows are
+// bare `{"id":..,"object":"model"}` — and that is most of them: stock
+// LiteLLM before it grew max_input_tokens, Ollama's /v1 shim, LM Studio,
+// vanilla OpenAI-compat servers.
+//
+// Those models then fall all the way to kDefaultContextWindow (200k), which
+// is why a user behind LiteLLM serving 1M-context models sees 200k and
+// reasonably concludes 200k is a cap.
+//
+// Static data cannot fix this. A self-hosted gateway's URL is unknowable to
+// any third-party catalog: models.dev carries 7824 models and exactly 18 of
+// them sit behind a loopback origin, with no `litellm` entry at all. The
+// only thing that knows a private deployment's window is the deployment.
+//
+// So ASK it. Two endpoints, both cheap, both optional:
+//
+//   /v1/model/info   LiteLLM's management route. Returns per-model
+//                    max_input_tokens resolved from its own cost map —
+//                    authoritative, and the exact figure the proxy will
+//                    enforce.
+//   /props           llama.cpp's server introspection: default_generation_
+//                    settings.n_ctx is the window the server was STARTED
+//                    with, which beats the model's train-time n_ctx_train.
+//
+// Probed ONCE per endpoint per catalog load, not per model, and only when
+// at least one row came back window-less. A gateway that already answers in
+// /v1/models pays nothing; one that does not pays a single request.
+struct WindowProbe {
+    // model id -> window. Empty when the endpoint offers neither route.
+    std::map<std::string, int> per_model;
+    // A single window that applies to the whole server (llama.cpp serves one
+    // model). Used when per_model has no entry for an id.
+    int server_wide = 0;
+};
+
+[[nodiscard]] inline WindowProbe probe_endpoint_windows(const AuthHeader& auth,
+                                                       const Endpoint& ep) {
+    WindowProbe out;
+    http::Timeouts tos;
+    tos.connect = std::chrono::milliseconds(1'500);
+    tos.total   = std::chrono::milliseconds(4'000);
+
+    auto get = [&](const char* path) -> std::optional<std::string> {
+        http::Request hreq;
+        hreq.method    = http::HttpMethod::Get;
+        hreq.host      = ep.host;
+        hreq.port      = ep.port;
+        hreq.path      = path;
+        hreq.plaintext = !ep.use_tls;
+        hreq.headers   = build_request_headers(auth, ep);
+        hreq.max_body_bytes = 2ull * 1024 * 1024;
+        if (const auto& ov = http::agentty_api_host_override(); ov.active()) {
+            hreq.dial_host = ov.host;
+            hreq.dial_port = ov.port;
+        }
+        auto resp = http::default_client().send(hreq, tos);
+        if (!resp || resp->status != 200) return std::nullopt;
+        return resp->body;
+    };
+
+    // 1. LiteLLM /v1/model/info — {"data":[{"model_name":..,
+    //    "model_info":{"max_input_tokens":1048576}}, ...]}
+    if (auto body = get("/v1/model/info")) {
+        try {
+            auto j = json::parse(*body);
+            for (const auto& row : j.value("data", json::array())) {
+                if (!row.is_object()) continue;
+                // The id lives under model_name here (it is the PUBLIC alias,
+                // which is what /v1/models listed and what we dispatch on).
+                std::string id = row.value("model_name", std::string{});
+                if (id.empty()) id = row.value("id", std::string{});
+                if (id.empty()) continue;
+                // Reuse the same tolerant ladder as the catalog path: the
+                // window may be flat on the row or nested under model_info,
+                // and LiteLLM emits it as a FLOAT (16385.0).
+                int w = advertised_context_window(row);
+                if (w <= 0) continue;
+                out.per_model[id] = w;
+            }
+        } catch (const std::exception& e) {
+            util::dbglog("openai.window_probe.model_info", e.what());
+        } catch (...) {}
+    }
+    if (!out.per_model.empty()) return out;
+
+    // 2. llama.cpp /props — one model per server, so the answer is
+    //    server-wide. n_ctx here is the RUNTIME window (-c on the command
+    //    line), which is the number that actually applies; n_ctx_train is
+    //    the architectural ceiling and is often much larger.
+    if (auto body = get("/props")) {
+        try {
+            auto j = json::parse(*body);
+            if (auto dg = j.find("default_generation_settings");
+                dg != j.end() && dg->is_object()) {
+                if (const int w = advertised_context_window(*dg); w > 0)
+                    out.server_wide = w;
+            }
+            if (out.server_wide <= 0)
+                out.server_wide = advertised_context_window(j);
+        } catch (const std::exception& e) {
+            util::dbglog("openai.window_probe.props", e.what());
+        } catch (...) {}
+    }
+    return out;
+}
+
 }  // namespace detail
+
+// Public forwarder — see the header for why the 0 is a contract.
+int advertised_context_window(const nlohmann::json& model_row) {
+    return detail::advertised_context_window(model_row);
+}
 
 std::vector<ModelInfo> list_models(const AuthHeader& auth, const Endpoint& endpoint) {
     std::vector<ModelInfo> result;
@@ -2531,6 +2648,30 @@ std::vector<ModelInfo> list_models(const AuthHeader& auth, const Endpoint& endpo
                     .provider     = endpoint.label,
                     .context_window = detail::advertised_context_window(m),
                 });
+            }
+            // Any row the catalog said nothing about gets ONE chance to be
+            // answered by the gateway itself (LiteLLM /v1/model/info,
+            // llama.cpp /props). Deferred to here — after the whole list is
+            // parsed — so the probe fires once per load rather than per
+            // model, and not at all when every row already carried a window.
+            //
+            // This is the seam that fixes "my 1M-context models show 200k":
+            // a private gateway's window is knowable only from the gateway,
+            // never from a third-party catalog keyed by URL.
+            const bool any_unknown =
+                std::any_of(result.begin(), result.end(),
+                            [](const ModelInfo& mi) { return mi.context_window <= 0; });
+            if (any_unknown) {
+                const auto probe = detail::probe_endpoint_windows(auth, endpoint);
+                if (!probe.per_model.empty() || probe.server_wide > 0) {
+                    for (auto& mi : result) {
+                        if (mi.context_window > 0) continue;
+                        const auto it = probe.per_model.find(mi.id.value);
+                        if (it != probe.per_model.end()) mi.context_window = it->second;
+                        else if (probe.server_wide > 0)
+                            mi.context_window = probe.server_wide;
+                    }
+                }
             }
         }
     } catch (const std::exception& e) {

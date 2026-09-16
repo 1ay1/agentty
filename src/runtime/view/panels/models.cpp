@@ -278,8 +278,18 @@ Element models_panel(const Model& m) {
         // rows are built), because a settings value the surface that sets it
         // does not display is a value the user cannot verify.
         std::string ctx;
-        if (const int win = r.model.context_window; win > 0)
+        if (const int win = r.model.context_window; win > 0) {
             ctx = ui::context_window_label(win);
+        } else {
+            // UNKNOWN is not blank. A gateway that advertises nothing (stock
+            // LiteLLM, LM Studio, a bare OpenAI-compat server) leaves every
+            // row window-less, and a blank column reads as "this column does
+            // not apply to me" — so the user never learns the number is a
+            // guess, never finds ^W, and concludes the 200k they see in the
+            // status bar is a hard cap. Saying "auto" names the state and
+            // points at the footer's ^W, which cycles to 1M/2M.
+            ctx = "auto";
+        }
         // Widest realistic context label is 5 columns ("200k", "1M+").
         std::string trailing = ctx.size() < 5
             ? std::string(5 - ctx.size(), ' ') + ctx

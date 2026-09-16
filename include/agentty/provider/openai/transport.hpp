@@ -155,6 +155,17 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink,
 [[nodiscard]] std::vector<ModelInfo> list_models(const AuthHeader& auth,
                                                  const Endpoint& endpoint);
 
+// The context window a /v1/models row DECLARES, or 0 when it declares none.
+//
+// Exposed for tests because the 0 is a contract, not an implementation
+// detail: it is what distinguishes "the gateway told us" from "nobody
+// knows", and every downstream behaviour hangs off that distinction — the
+// window probe only fires on 0, the picker column only says "auto" on 0,
+// and resolve_context_window() only falls through to models.dev / id
+// inference / the 200k default on 0. A shape that silently resolves to a
+// number nobody declared is the bug this returns 0 to prevent.
+[[nodiscard]] int advertised_context_window(const nlohmann::json& model_row);
+
 // ── Custom-host dialect probe ───────────────────────────────────
 // One call answers "what is actually running at this endpoint?" before a
 // custom host is committed. Tries, in order:
