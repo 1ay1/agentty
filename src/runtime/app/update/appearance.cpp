@@ -131,7 +131,14 @@ void restyle_sealed_turns(Model& m) {
     // the turn being streamed right now, and dropping that would restart
     // its animation mid-word. It rebuilds from its widget every frame, so
     // it picks up the new theme without being destroyed.
-    m.ui.view_cache.clear_settled();
+    //
+    // COLOURS only, not the whole entry. A settled entry's built Element is
+    // stale under a new theme; the StreamingMarkdown widget that produced it
+    // is not, because markdown structure does not depend on what colour a
+    // heading is. Dropping both forced a full re-parse of every kept message
+    // — the dominant cost of a theme swap, and all of it spent re-deriving
+    // something that had not changed.
+    m.ui.view_cache.invalidate_colours();
 
     if (m.ui.frozen_through == 0) return;
     rehydrate_frozen(m);
@@ -196,16 +203,34 @@ void restyle_sealed_turns(Model& m) {
 // Move the browser's highlight and LIVE-APPLY what it lands on. The applying
 // is the point: a picker that only previews on commit makes you take the
 // scheme to find out what it looks like.
+//
+// Only the SEALED transcript is expensive to restyle — restyle_sealed_turns()
+// drops the settled view cache and re-parses each kept message's markdown,
+// measured at 37-82 ms on a real thread because the following render is then
+// necessarily cold. Everything else (the browser itself, the composer, the
+// status bar) repaints from the published theme for free.
+//
+// So the rebuild is skipped when there is nothing sealed to rebuild, which
+// is the common case people actually browse in: a fresh session, or one
+// short enough that nothing has frozen yet. The theme is published either
+// way, so the preview is identical — only the catch-up for already-built
+// rows is conditional.
 void move_highlight(Model& m, int delta) {
     auto* o = m.ui.panel.get<pn::Appearance>();
     if (!o) return;
     const auto names = pn::matching_themes(o->pane.picker.query);
     const int n = static_cast<int>(names.size());
     if (n == 0) return;
-    // Wraps, like every other list in the app: the way back to the top of 57
-    // schemes should not be 56 keystrokes.
+    // Wraps, like every other list in the app: the way back to the top of 615
+    // schemes should not be 614 keystrokes.
     o->pane.picker.index = ((o->pane.picker.index + delta) % n + n) % n;
-    m.d.ui.theme = highlighted_theme(*o);
+
+    std::string next = highlighted_theme(*o);
+    // Landing on the scheme already in force is a no-op, not a rebuild. With
+    // 615 rows a wrap or a repeated key hits this often enough to matter.
+    if (next == m.d.ui.theme) { reproject(m); return; }
+
+    m.d.ui.theme = std::move(next);
     restyle_sealed_turns(m);
     reproject(m);
 }

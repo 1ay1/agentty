@@ -235,6 +235,24 @@ form::Form build_appearance_form(const up::Prefs& p, bool tty) {
 // it is the absence of one — and the way back to your own terminal colors
 // must never be something you have to know the name of.
 std::vector<std::string> matching_themes(std::string_view query) {
+    // Memoised on the query.
+    //
+    // This walks 615 schemes and builds a std::string per match — ~330
+    // allocations and 11-34 us a call — and it is called two or three times
+    // for ONE arrow key: move_highlight() needs the count to wrap the index,
+    // highlighted_theme() needs the list to name the landing row, and the
+    // view needs it again to draw. Three identical answers to a question
+    // whose input did not change between them.
+    //
+    // The query is the entire input, so a one-entry cache is exact rather
+    // than approximate: browsing with ↑↓ holds the query fixed and hits every
+    // time, and typing changes it once per keystroke and pays once.
+    static std::string   cached_query;
+    static bool          cached_valid = false;
+    static std::vector<std::string> cached;
+
+    if (cached_valid && cached_query == query) return cached;
+
     auto lower = [](std::string_view s) {
         std::string o; o.reserve(s.size());
         for (char c : s) o.push_back(static_cast<char>(std::tolower(
@@ -243,7 +261,7 @@ std::vector<std::string> matching_themes(std::string_view query) {
     };
     const std::string q = lower(query);
 
-    auto subseq = [](const std::string& hay, const std::string& needle) {
+    auto subseq = [](std::string_view hay, std::string_view needle) {
         std::size_t k = 0;
         for (char c : hay) if (k < needle.size() && c == needle[k]) ++k;
         return k == needle.size();
@@ -254,10 +272,26 @@ std::vector<std::string> matching_themes(std::string_view query) {
     // a scheme does not carry it along at the top.
     if (q.empty() || subseq("native", q)) out.emplace_back();
 
+    // One reusable buffer for the lowercased name, instead of a fresh
+    // std::string per scheme: at 615 entries that was most of the
+    // allocations, and every one of them was discarded immediately.
+    std::string folded;
     for (const auto& s : maya::theme::schemes) {
-        const std::string name{s.name};
-        if (q.empty() || subseq(lower(name), q)) out.push_back(name);
+        const std::string_view name{s.name};
+        if (!q.empty()) {
+            folded.clear();
+            folded.reserve(name.size());
+            for (char c : name)
+                folded.push_back(static_cast<char>(std::tolower(
+                    static_cast<unsigned char>(c))));
+            if (!subseq(folded, q)) continue;
+        }
+        out.emplace_back(name);
     }
+
+    cached_query = std::string{query};
+    cached       = out;
+    cached_valid = true;
     return out;
 }
 
