@@ -1412,15 +1412,19 @@ int main(int argc, char** argv) {
                 backend = maya::RenderBackend::Grid;
         }
     }
+    // No markdown-palette subscriber here any more, deliberately.
+    //
     // Markdown keeps its colours in a flat projected palette rather than
     // reading the Theme per-frame (its render path is hot and the async
-    // parse worker touches it off-thread). So it has to be RE-DERIVED on
-    // every theme swap — otherwise picking a scheme repaints the chrome
-    // while prose, code spans and tables stay on the old palette, which is
-    // most of what is actually on screen.
-    maya::on_theme_changed([](const maya::Theme& t) {
-        maya::set_markdown_palette(maya::markdown_palette_from(t));
-    });
+    // parse worker touches it off-thread), so it has to be re-derived on
+    // every theme swap. That used to be an on_theme_changed() registration
+    // — and the registration was the bug: forgetting it looks exactly like
+    // a theme that never changed, which is why picking a scheme repainted
+    // the chrome while prose, code spans and tables kept the old palette.
+    //
+    // maya re-derives it on read now (theme::projected), so subscribing
+    // would be worse than redundant: set_markdown_palette() OVERRIDES the
+    // projection with an explicit palette, pinning it until the next swap.
 
     maya::run<app::AgenttyApp>({.title = "agentty", .fps = 0,
                                .mode = maya::Mode::Inline, .backend = backend});
