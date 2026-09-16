@@ -155,6 +155,75 @@ TEST_CASE("panel nav: restore puts a panel back without re-stashing it") {
     CHECK(!s.ascend());
 }
 
+TEST_CASE("panel nav: a sideways hop keeps where you came from") {
+    // The second chain-dropping bug, and a subtler one than assignment.
+    //
+    // Hopping between sibling pickers (^P from the model picker to the
+    // provider picker) was spelled `close<Models>(); descend(Providers{});`.
+    // That reads like a swap and behaves like a truncation: close() leaves
+    // the slot empty, so the descend() that follows has nothing to stash and
+    // silently drops the GRANDparent. palette → models → ^P → Esc then left
+    // the panel stack entirely instead of returning to the palette.
+    //
+    // replace() is the move that says "sideways": the panel you leave goes,
+    // the one underneath does not.
+    pn::State s;
+    s.descend(pn::Palette{});
+    s.descend(pn::Models{{0, ""}});
+    CHECK(s.depth() == 2);
+
+    s.replace(pn::Providers{{4}});
+    CHECK(s.is<pn::Providers>());
+    CHECK(s.depth() == 2);                   // NOT 1 — the palette survives
+    CHECK(s.get<pn::Providers>()->index == 4);
+
+    CHECK(s.ascend());
+    CHECK(s.is<pn::Palette>());
+}
+
+TEST_CASE("panel nav: a hop from nothing is just an open") {
+    // replace() over None has no parent to inherit, so it lands exactly
+    // where descend() would: one level deep, Esc closes. A hop has to work
+    // when the sibling was opened cold, not only mid-stack.
+    pn::State s;
+    s.replace(pn::Providers{{0}});
+    CHECK(s.is<pn::Providers>());
+    CHECK(s.depth() == 1);
+    CHECK(!s.ascend());                      // nothing to unwind to
+}
+
+TEST_CASE("panel nav: the three moves are distinguishable") {
+    // descend / replace / restore differ ONLY in what happens to the parent
+    // chain, which is exactly the part call sites kept getting wrong. Pin
+    // all three against the same starting stack so the difference is the
+    // subject of the test rather than a side effect of it.
+    auto two_deep = [] {
+        pn::State s;
+        s.descend(pn::Palette{});
+        s.descend(pn::Models{{1, ""}});
+        return s;
+    };
+
+    auto down = two_deep();
+    down.descend(pn::Providers{{0}});
+    CHECK(down.depth() == 3);                // DOWN: one deeper
+
+    auto side = two_deep();
+    side.replace(pn::Providers{{0}});
+    CHECK(side.depth() == 2);                // SIDEWAYS: same depth
+
+    auto up = two_deep();
+    auto same = *up.get<pn::Models>();
+    up.restore(std::move(same));
+    CHECK(up.depth() == 2);                  // UP/in-place: unchanged
+
+    // And all three leave a stack that still unwinds to the palette.
+    for (auto* s : {&down, &side, &up}) {
+        while (s->depth() > 1) CHECK(s->ascend());
+        CHECK(s->is<pn::Palette>());
+    }
+}
+
 TEST_CASE("panel nav: opening is spelled, never implied") {
     // The syntactic half. Assignment used to be a third way in that silently
     // dropped the chain; it is deleted, so a call site has to name which of

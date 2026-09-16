@@ -10,15 +10,22 @@
 //
 // Now every exclusive panel lives in ONE slot:
 //
-//     m.ui.panel = pn::Models{{.index = 3}};    // opens (closes rival)
-//     m.ui.panel.is<pn::Models>()               // open?
-//     m.ui.panel.get<pn::Models>()              // payload* or nullptr
-//     m.ui.panel.close<pn::Models>()            // close IF topmost
+//     m.ui.panel.descend(pn::Models{{.index = 3}});  // open OVER (Esc unwinds)
+//     m.ui.panel.replace(pn::Providers{{2}});         // hop SIDEWAYS (keep parent)
+//     m.ui.panel.is<pn::Models>()                     // open?
+//     m.ui.panel.get<pn::Models>()                    // payload* or nullptr
+//     m.ui.panel.close<pn::Models>()                  // close IF topmost
 //
-// Opening is assignment — it structurally closes whatever was open,
-// because a variant holds one alternative. "Two exclusive panels open"
-// is not a bug we guard against anymore; it is UNREPRESENTABLE. All the
-// rival-closing writes are deleted, not relocated.
+// One slot, one variant — so "two exclusive panels open" is not a bug we
+// guard against anymore, it is UNREPRESENTABLE. All the rival-closing
+// writes are deleted, not relocated.
+//
+// What a variant does NOT give you is the parent chain, and that is where
+// every navigation bug has lived. Assignment used to be the way to open,
+// and it discarded the chain silently — so Esc from a panel opened out of
+// another panel left the stack entirely. Assignment is now DELETED; see
+// the three moves (descend / replace / restore) on State below, which is
+// the single place that story is told.
 //
 // Deliberate NON-members (the exceptions that shape the design):
 //   • login      — a 9-state auth machine with Origin-frame navigation;
@@ -200,34 +207,44 @@ concept Alternative = requires(Variant v) { std::holds_alternative<K>(v); };
 // The slot itself: a thin wrapper so call sites read as intent
 // (`m.ui.panel.is<pn::Models>()`) rather than as variant plumbing.
 //
-// ── Opening is DESCEND, never assignment ───────────────────────────────
+// ── The three moves ────────────────────────────────────────────────
 //
-// There are exactly two ways to put a panel in the slot, and they differ in
-// what happens to the parent chain:
+// Navigation is a STACK, and there are exactly three things you can do to
+// it. They differ ONLY in what happens to the parent chain, which is
+// precisely the part a call site kept getting wrong:
 //
-//   descend(k)  — OPEN k over what is there. k.from snapshots the current
-//                 panel, so Esc unwinds one level.
-//   restore(k)  — put k back as it already was, chain included. For ascend()
-//                 and for a reducer rebuilding the open panel in place.
+//   descend(k)  DOWN.     k.from snapshots what is open. Esc unwinds to it.
+//                         For an Open* handler: "open k over here".
+//   replace(k)  SIDEWAYS. k INHERITS the current panel's parent. For a hop
+//                         between siblings (^P from the model picker to the
+//                         provider picker) — the panel you leave is gone,
+//                         but where you CAME FROM is unchanged.
+//   restore(k)  UP.       k is put back verbatim, chain included. For
+//                         ascend(), and for rebuilding the panel you are
+//                         already inside.
 //
-// `operator=` used to be the third way, spelled as plain assignment and
-// documented as "use descend at OPEN sites". A comment cannot enforce that,
-// and it was not enforced: twelve Open* reducers assigned, which DROPS the
-// parent — so palette → providers → Esc left the panel stack entirely
-// instead of going back to the palette, while the eight that used descend
-// behaved correctly. Same gesture, two behaviours, decided by which opener
-// you happened to be in.
+// Every one of these has been a bug at least once, always the same shape:
+// a call site that meant one and spelled another, with no type to stop it.
 //
-// So assignment is DELETED. A call site must now say which it means, and
-// "open without stashing the parent" is not a thing you can write by
-// accident — only by writing restore(), which names what it does.
+//   • `operator=` was a fourth, unnamed move that DROPPED the chain. It
+//     was documented as "use descend at OPEN sites" — a comment, so it was
+//     not enforced: 13 Open* reducers assigned and 8 descended. palette →
+//     providers → Esc left the stack entirely. It is now DELETED.
+//   • The sideways hop was spelled `close<Old>(); descend(New);`, which
+//     reads like "swap panels" and means "drop the grandparent": close()
+//     leaves None, so descend() finds nothing to stash. palette → models →
+//     ^P → Esc exited instead of returning to the palette. That is what
+//     replace() exists to say.
+//
+// So the rule is: if you are changing what is in the slot, you must name
+// which of the three you mean. There is no unnamed way left.
 class State {
 public:
     State() = default;
 
     // Assignment is deleted: it silently discarded the parent chain. Say
-    // descend(k) to OPEN k over the current panel, or restore(k) to put a
-    // panel back with its chain already inside it.
+    // descend(k) to go DOWN, replace(k) to go SIDEWAYS, or restore(k) to
+    // put a panel back with the chain it already carries.
     template <Alternative K>
     State& operator=(K k) = delete;
 
@@ -272,6 +289,31 @@ public:
         } else if (!std::holds_alternative<None>(v_)) {
             k.from = From::of(Snapshot{std::move(v_)});
         }
+        v_ = std::move(k);
+    }
+
+    // SIDEWAYS: swap the open panel for K, keeping ITS parent.
+    //
+    // A hop between siblings — ^P from the model picker to the provider
+    // picker, or any "leave this, open that at the same level". The panel
+    // you are leaving is discarded; where you CAME FROM is not.
+    //
+    // This used to be spelled `close<Old>(); descend(New);`, which reads
+    // like a swap and behaves like a truncation: close() leaves None, so
+    // the descend() that follows finds nothing to stash and silently drops
+    // the grandparent. palette → models → ^P → Esc then exited the stack
+    // instead of returning to the palette.
+    //
+    // Over None this is just an open with no parent, which is the same
+    // thing descend() would do — a hop from nothing lands on nothing.
+    template <Alternative K>
+    void replace(K k) {
+        k.from = std::visit(
+            [](auto& a) -> From {
+                if constexpr (requires { a.from; }) return std::move(a.from);
+                else return From{};
+            },
+            v_);
         v_ = std::move(k);
     }
 

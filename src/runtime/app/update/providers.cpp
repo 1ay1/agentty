@@ -70,11 +70,17 @@ Step providers_update(Model m, msg::ProvidersMsg pm) {
             }
             // Abandon a pending Smart-Mode slot assignment: hopping away from
             // the model picker mid-assign must not leave the mode armed. The
-            // mode lives ON the picker value now, so closing it is the reset
-            // — nothing separate to clear. (The SmartMode snapshot in its
-            // `from` is dropped with it: hopping to providers is a deliberate
-            // exit from the assign flow.)
-            m.ui.panel.close<pn::Models>();
+            // mode lives ON the picker value now, so replacing it is the reset
+            // — nothing separate to clear.
+            //
+            // ONE move, not close<Models>() + descend(). The pair reads like a
+            // swap and behaved like a truncation: close() leaves the slot
+            // empty, so the descend() that followed had no parent to stash and
+            // silently dropped the GRANDparent. palette → models → ^P → Esc
+            // then left the stack entirely instead of returning to the
+            // palette. replace() says "sideways": the picker we are leaving
+            // goes, whatever opened IT stays.
+            //
             // Open at the row matching the currently-active provider. Fresh
             // rows with an empty query (so every provider is present to match).
             const auto fresh = ui::build_provider_rows(saved_custom_hosts, "");
@@ -90,7 +96,10 @@ Step providers_update(Model m, msg::ProvidersMsg pm) {
                 if (const auto* ag = row.acp();    ag && ag->id == active_label) { idx = i; break; }
                 if (const auto* ch = row.custom_host(); ch && *ch == active_label) { idx = i; break; }
             }
-            m.ui.panel.descend(pn::Providers{{idx}});
+            // A hop REPLACES the picker we came from; opening cold DESCENDS
+            // over whatever is there (usually nothing).
+            if (m.ui.panel.is<pn::Models>()) m.ui.panel.replace(pn::Providers{{idx}});
+            else                             m.ui.panel.descend(pn::Providers{{idx}});
             return done(std::move(m));
         },
         [&](CloseProviders) -> Step {

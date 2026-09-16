@@ -84,8 +84,13 @@ Step fork_update(Model m, msg::ForkMsg fm) {
             if (!m.s.is_idle() || m.s.compacting || m.s.thread_loading)
                 return {std::move(m),
                         set_status_toast(m, "cannot fork while the agent is working")};
+            // descend() already replaced whatever was open (the palette, if
+            // ^F came from there) and stashed it as this panel's parent, so
+            // Esc unwinds back to it. A close<Palette>() here used to follow,
+            // left over from when opening was an assignment: it is a no-op
+            // now (the slot holds Fork), and if it ever stopped being one it
+            // would be deleting the parent we just saved.
             m.ui.panel.descend(pn::Fork{{fp::Choice::RagPerTurn}});
-            m.ui.panel.close<pn::Palette>();
             return {std::move(m), Cmd<Msg>::none()};
         },
         [&](CloseFork) -> Step {
