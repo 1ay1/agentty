@@ -62,17 +62,26 @@ form::Form build_appearance_form(const up::Prefs& p, bool tty) {
     {
         // A Pick, not a Choice: 57 schemes and growing, which is precisely
         // the case form.hpp says belongs in a searchable picker rather than
-        // a dropdown. The row shows what is IN USE, with the reason when
-        // that differs from what was asked for.
-        std::string shown = p.theme.empty() ? "native" : p.theme;
-        const std::string_view why = up::theme_override_reason(p, r);
-        if (!why.empty()) { shown += "  \xe2\x80\x94  "; shown += why; }
-        b.pick(std::string{kApTheme}, "Scheme", std::move(shown),
+        // a dropdown.
+        //
+        // The VALUE is just the scheme name. It used to carry the override
+        // reason too ("Dracula — needs 256 colors — using native"), which
+        // broke the row three ways at once: the trailing → that marks "this
+        // opens a picker" was shoved off the right edge, so this row alone
+        // looked unlike every other Pick in Settings; the value column no
+        // longer lined up with the rows above and below it; and on a narrow
+        // terminal the whole thing ellipsised, hiding the scheme name itself
+        // — the one fact the row exists to show.
+        //
+        // The reason belongs in `origin`, which is the field for "where this
+        // value came from / why it is what it is", and which every other row
+        // already uses for exactly that.
+        b.pick(std::string{kApTheme}, "Scheme",
+               p.theme.empty() ? "native" : p.theme,
                "native keeps your terminal's own colors \xc2\xb7 Enter to browse");
-        if (p.theme.empty())
-            b.origin("your terminal");
-        else if (!why.empty())
-            b.origin("not applied");
+        const std::string_view why = up::theme_override_reason(p, r);
+        if (!why.empty())          b.origin(std::string{why});
+        else if (p.theme.empty())  b.origin("your terminal");
     }
 
     // ── Color ───────────────────────────────────────────────────────
