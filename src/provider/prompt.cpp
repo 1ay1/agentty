@@ -281,6 +281,23 @@ std::string default_system_prompt(bool lean) {
         << "  - For listing/searching files, prefer the dedicated tools "
         << "(`list_dir`, `glob`, `grep`, `find_definition`) over shelling "
         << "out — they give the UI structured cards.\n"
+        // Naming the PARAMETER is what makes this stick. "Prefer the
+        // native tool" is abstract advice the model already agrees with
+        // and then ignores under pressure; it reaches for `| head -20`
+        // because it does not believe the tool can bound itself. Measured
+        // on one real session, every missed detour was a pipe or a
+        // redirect, so these four lines name the exact replacement for the
+        // four idioms that produced them.
+        << "  - The shell idioms you reach for have native equivalents — "
+        << "a pipe is usually a PARAMETER you haven't found yet:\n"
+        << "      `cmd | head -20`   → `limit: 20` (every search/read "
+        << "tool bounds its own output)\n"
+        << "      `tail -n 50 f`     → `read` with `offset: -50` — the "
+        << "last 50 lines, no need to know the length\n"
+        << "      `sed -n '10,40p'`  → `read` with start_line/end_line, or "
+        << "`symbol: \"name\"` for one function's body\n"
+        << "      `cmd 2>/dev/null`  → nothing: native tools report "
+        << "\"no matches\" instead of shouting\n"
         << "</shell>\n\n"
         << "<tool-batching>\n"
         << "  - Every model round-trip costs seconds. When your next "
