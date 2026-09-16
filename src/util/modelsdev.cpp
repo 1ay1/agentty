@@ -11,6 +11,7 @@
 #include <nlohmann/json.hpp>
 
 #include "agentty/util/user_root.hpp"    // user_cache_dir()
+#include <limits>
 #include "agentty/domain/catalog.hpp"   // set_catalog_reasoning / set_catalog_effort_set
 #include "agentty/io/http.hpp"
 #include "agentty/util/dbglog.hpp"
@@ -114,13 +115,31 @@ void register_model(const std::string& dev_provider,
     // ("mistralai/mistral-medium-3-5") — under the tail, since agentty's
     // scoped lookup uses the wire model id which may omit the vendor path.
     // capkey normalisation inside the setters folds spelling variants.
+    // Context window, from `limit.context`. Same scoping as the facts
+    // above: the scoped record is authoritative, the shared bare key is
+    // merge-or-poison. Guarded on a positive integer — a null/absent/0
+    // limit is "not declared", and recording 0 would be indistinguishable
+    // from a declaration of nothing.
+    int dev_ctx = 0;
+    if (const auto lim = m.find("limit");
+        lim != m.end() && lim->is_object()) {
+        if (const auto c = lim->find("context");
+            c != lim->end() && c->is_number_integer()) {
+            const auto v = c->get<long long>();
+            if (v > 0 && v <= std::numeric_limits<int>::max())
+                dev_ctx = static_cast<int>(v);
+        }
+    }
+
     set_catalog_reasoning(scope + "/" + mid, reasoning->get<bool>());
+    if (dev_ctx > 0) set_catalog_context_window(scope + "/" + mid, dev_ctx);
     if (set >= 0)
         set_catalog_effort_set(scope + "/" + mid,
                                static_cast<std::uint8_t>(set));
     const std::string tail = capkey::norm_tail(mid);
     if (tail != capkey::norm_model(mid)) {
         set_catalog_reasoning(scope + "/" + tail, reasoning->get<bool>());
+        if (dev_ctx > 0) set_catalog_context_window(scope + "/" + tail, dev_ctx);
         if (set >= 0)
             set_catalog_effort_set(scope + "/" + tail,
                                    static_cast<std::uint8_t>(set));
@@ -130,6 +149,7 @@ void register_model(const std::string& dev_provider,
     // (agree → keep, disagree → no-info; RULE 3 in capkey.hpp).
     if (!tail.empty()) {
         merge_catalog_reasoning(tail, reasoning->get<bool>());
+        if (dev_ctx > 0) merge_catalog_context_window(tail, dev_ctx);
         if (set >= 0)
             merge_catalog_effort_set(tail, static_cast<std::uint8_t>(set));
     }

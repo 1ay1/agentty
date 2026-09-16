@@ -226,6 +226,15 @@ int resolve_context_window(std::string_view provider_id,
                            std::string_view model_id,
                            int advertised,
                            const store::Settings& settings) noexcept {
+    // FIVE rungs, strongest evidence first. The ordering is the whole design,
+    // so it is stated here rather than inferred from the code below.
+    //
+    //   1. user override        they configured the gateway
+    //   2. live advertised      the API is TRUTH — only it can 400 on overflow
+    //   3. models.dev           a real declaration for 7824 models
+    //   4. id inference         Claude/GPT families, [1m] suffix
+    //   5. 200k default         nothing is known; stay conservative
+
     // 1. The user's override wins outright. They configured the gateway;
     //    nothing we can infer is better evidence than that.
     try {
@@ -238,16 +247,42 @@ int resolve_context_window(std::string_view provider_id,
     }
 
     // 2. What the endpoint actually told us, from a probe or a /v1/models
-    //    row. Beats an id guess: only the gateway knows how IT serves the
-    //    model, and the same name elsewhere may differ.
+    //    row. This outranks every static source and always will: the same
+    //    model name behind two gateways can be served with two different
+    //    windows, only the gateway knows which applies to the request we are
+    //    about to send, and only the gateway can reject us for overflowing
+    //    it. Third-party metadata describing the model in general cannot
+    //    overrule the host describing THIS deployment.
     if (advertised > 0) return advertised;
 
-    // 3. The id. Claude/GPT families are known, `[1m]` forces the wide
+    // 3. models.dev's declaration. The rung that makes non-Claude models
+    //    honest.
+    //
+    //    from_id() below answers 200k for a known family and 0 otherwise —
+    //    correct for Claude, which is the family it decodes, and wrong for
+    //    almost everything else. Measured against the live snapshot: 2698 of
+    //    7824 models have a real window of 1M or more, and every one of them
+    //    reached this function as 0 and left as the 200k default.
+    //    gemini-2.5-pro (1M), gpt-4.1 (1M), qwen3-coder-plus (1M),
+    //    llama-4-scout (10M) — all understated, all compacting several times
+    //    sooner than they need to.
+    //
+    //    Scoped by provider first, because the same bare id is genuinely
+    //    served at different sizes by different hosts; a cross-provider
+    //    disagreement poisons the shared key to "no declaration" rather than
+    //    letting one host's figure bleed onto another's.
+    //
+    //    BELOW the live advertisement and ABOVE the id guess, which is
+    //    exactly what it is: better than a guess, worse than the truth.
+    if (const int w = catalog_context_window_for(model_id, provider_id); w > 0)
+        return w;
+
+    // 4. The id. Claude/GPT families are known, `[1m]` forces the wide
     //    window, unknown families report 0.
     if (const int w = ModelCapabilities::from_id(model_id).context_window(); w > 0)
         return w;
 
-    // 4. Nothing is known. Stay conservative: an over-estimate fails the
+    // 5. Nothing is known. Stay conservative: an over-estimate fails the
     //    turn on the wire, an under-estimate only compacts sooner than it
     //    had to.
     return kDefaultContextWindow;

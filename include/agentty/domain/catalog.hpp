@@ -1120,6 +1120,95 @@ inline void merge_catalog_effort_set(const std::string& raw_id,
     m[model_id] = set;
     catalog_effort_detail::any().store(true, std::memory_order_relaxed);
 }
+// ── models.dev context-window declarations ──────────────────────────────
+//
+// The rung that gives every non-Claude model a real window.
+//
+// ModelCapabilities::from_id() reports 200k for a known family and 0 for
+// everything else — a Claude-shaped answer, because that is the family it
+// decodes. Measured against the live snapshot, that leaves 2698 models whose
+// real window is 1M or more reading as the 200k default: gemini-2.5-pro (1M),
+// gpt-4.1 (1M), qwen3-coder-plus (1M), llama-4-scout (10M). A model whose
+// window is understated by 5x compacts five times sooner than it needs to,
+// and the user is told a number nobody declared.
+//
+// Same shape as the reasoning and effort registries above, and the same
+// collision rule, because the hazard is identical: the SAME bare id is served
+// at different sizes by different hosts (qwen3-coder-plus is 256k on iflowcn
+// and 1M on alibaba-coding-plan-cn). So a scoped record is authoritative and
+// the shared bare key is merge-or-poison — two sources that disagree make the
+// key read as "no declaration" rather than letting one host's figure bleed
+// onto another's.
+//
+// This is the SECOND-TO-LAST rung deliberately (see resolve_context_window):
+// a live advertisement from the endpoint outranks it, because only the
+// gateway knows how IT serves the model and only the gateway can 400 on
+// overflow. Static metadata is the best guess available when nothing was
+// advertised — which, for the custom-host case, is most of the time.
+namespace catalog_context_detail {
+inline std::shared_mutex& mu() { static std::shared_mutex m; return m; }
+inline std::map<std::string, int>& map_() {
+    static std::map<std::string, int> m; return m;
+}
+inline std::set<std::string>& poisoned_() {
+    static std::set<std::string> s; return s;
+}
+inline std::atomic<bool>& any() { static std::atomic<bool> a{false}; return a; }
+} // namespace catalog_context_detail
+
+inline void set_catalog_context_window(std::string model_id, int tokens) {
+    if (tokens <= 0) return;
+    bump_caps_epoch();
+    model_id = norm_caps_key(model_id);
+    std::unique_lock lk(catalog_context_detail::mu());
+    catalog_context_detail::map_()[std::move(model_id)] = tokens;
+    catalog_context_detail::any().store(true, std::memory_order_relaxed);
+}
+
+// Bare-tail merge — same agree-or-poison semantics as the siblings.
+//
+// NOTE the key: norm_TAIL, not norm_caps_key. The bare namespace is keyed by
+// the tail precisely so a vendor-prefixed id and its bare form COLLIDE and
+// can poison each other; writing the prefixed key here would mean
+// "elsewhere/model" and "model" never meet, so disagreement could never be
+// detected and the reader (which looks up the tail) would miss every
+// prefixed write. That asymmetry is a real bug in a sibling registry; do not
+// copy it here.
+inline void merge_catalog_context_window(const std::string& raw_id, int tokens) {
+    if (tokens <= 0) return;
+    const std::string key = std::string{capkey::norm_tail(raw_id)};
+    if (key.empty()) return;
+    std::unique_lock lk(catalog_context_detail::mu());
+    auto& m = catalog_context_detail::map_();
+    auto& poisoned = catalog_context_detail::poisoned_();
+    if (poisoned.count(key)) return;                   // already ambiguous
+    if (auto it = m.find(key); it != m.end()) {
+        if (it->second != tokens) {                    // sources disagree
+            m.erase(it);
+            poisoned.insert(key);
+        }
+        return;
+    }
+    m[key] = tokens;
+    catalog_context_detail::any().store(true, std::memory_order_relaxed);
+}
+
+// 0 = no declaration. Scoped-first, bare fallback.
+[[nodiscard]] inline int catalog_context_window_for(std::string_view model_id,
+                                                    std::string_view scope = {}) {
+    if (!catalog_context_detail::any().load(std::memory_order_relaxed))
+        return 0;
+    std::shared_lock lk(catalog_context_detail::mu());
+    auto& m = catalog_context_detail::map_();
+    auto scoped = scope.empty() ? scoped_caps_key(model_id)
+                                : scoped_caps_key(model_id, scope);
+    if (!scoped.empty())
+        if (auto it = m.find(scoped); it != m.end())
+            return it->second;
+    auto it = m.find(std::string{capkey::norm_tail(model_id)});
+    return it == m.end() ? 0 : it->second;
+}
+
 // -1 = no declaration; else the bitmask of declared ON levels.
 // Scoped-first ("provider/model"), bare fallback — see scoped_caps_key.
 [[nodiscard]] inline int catalog_effort_set_for(std::string_view model_id,
