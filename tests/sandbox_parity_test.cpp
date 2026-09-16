@@ -15,6 +15,7 @@
 #include "agtest.hpp"
 
 #include "agentty/tool/util/sandbox.hpp"
+#include "agentty/tool/mcp_tools_bridge.hpp"
 #include <mcp/tools/util/sandbox.hpp>
 
 #include <cstdlib>
@@ -63,14 +64,31 @@ TEST_CASE("sandbox: the two implementations select the SAME backend") {
     // agree — otherwise hooks and tools run under different confinement and
     // the status banner describes only one of them.
     (void)ag::init(ag::Mode::Auto);
-    (void)mc::init(mc::Mode::Auto);
+    // Through the REAL bridge, not mc::init directly: wire_mcp_runtime is
+    // what a running agentty calls, and it is where the host sandbox gets
+    // installed. Calling mc::init here would test a path production never
+    // takes and miss the very wiring this case exists to check.
+    agentty::tools::wire_mcp_runtime("auto");
 
+    // What actually CONFINES a command, which is not always what the local
+    // probe detected. agentty links bastion; mcp-cpp is a standalone library
+    // and cannot, so its probe finds only bwrap. The bridge closes that by
+    // installing agentty's runner as mcp-cpp's host sandbox — so mcp-cpp
+    // then executes under bastion while still REPORTING Backend::Bwrap from
+    // its own detection.
+    //
+    // Comparing detected_backend() alone would therefore fail on a correctly
+    // configured system and pass on a broken one. The invariant that matters
+    // is the engine a command ends up in, so compare that: the host sandbox
+    // when one is installed, else the detected backend.
+    const std::string effective_mcp =
+        mc::has_host_sandbox() ? std::string{"bastion"} : name_of(mc::detected_backend());
     const auto a = name_of(ag::detected_backend());
-    const auto m = name_of(mc::detected_backend());
-    if (a != m)
+
+    if (a != effective_mcp)
         std::printf("MISMATCH: hooks/ACP use %s, tools use %s\n",
-                    a.c_str(), m.c_str());
-    CHECK(a == m);
+                    a.c_str(), effective_mcp.c_str());
+    CHECK(a == effective_mcp);
 
     // And they must agree on whether a sandbox is active at all, which is
     // what the startup banner reports.

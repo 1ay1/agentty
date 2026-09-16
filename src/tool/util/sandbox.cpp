@@ -9,6 +9,12 @@
 #include <string>
 #include <vector>
 
+#if AGENTTY_HAS_BASTION
+#  include "bastion/policy.hpp"
+#  include "bastion/spawn.hpp"
+#  include "bastion/tier.hpp"
+#endif
+
 namespace agentty::tools::util::sandbox {
 
 namespace fs = std::filesystem;
@@ -116,11 +122,22 @@ std::atomic<Backend> g_backend{Backend::None};
 // tier it prints is read so a kernel too old for Landlock is not mistaken
 // for containment.
 [[nodiscard]] bool bastion_can_sandbox() {
-    auto r = run_argv_s({"bastion", "doctor"}, /*max_bytes=*/8192,
-                        std::chrono::seconds{5});
-    if (!r.started || r.timed_out || r.exit_code != 0) return false;
-    return r.output.find("max tier:    T2") != std::string::npos
-        || r.output.find("max tier:    T3") != std::string::npos;
+#if AGENTTY_HAS_BASTION
+    // Linked in, so there is no binary to find and no version to skew: the
+    // policy engine and the host that drives it are the same build. What
+    // remains is a genuine capability question — this kernel may be too old
+    // for Landlock, or the container may forbid it — and bastion answers it
+    // directly rather than through a subprocess whose stdout we would parse.
+    //
+    // A tier that does not contain the filesystem is worse than bwrap here,
+    // so require Kernel (T2) or better. Isolate (T3) additionally brokers
+    // egress; both are acceptable, T0/T1 are not.
+    const auto caps = bastion::active_backend();
+    return caps.max_tier == bastion::Tier::Kernel
+        || caps.max_tier == bastion::Tier::Isolate;
+#else
+    return false;
+#endif
 }
 
 [[nodiscard]] Backend probe() {
@@ -376,13 +393,94 @@ std::atomic<Backend> g_backend{Backend::None};
     return argv;
 }
 
+#if AGENTTY_HAS_BASTION
+// Run a command under bastion IN-PROCESS.
+//
+// Not `bastion run -t t2 -w … -- /bin/sh -c …`. That shim needed the binary
+// on PATH, which no agentty user has, so the backend silently fell back to
+// bwrap for everyone who installed a release. Linking the library removes
+// the binary, the PATH lookup, the version skew between engine and host, and
+// the argv-string round trip — and gives us the typed SpawnResult instead of
+// scraped stderr.
+//
+// The policy is built from the same inputs the CLI took, so behaviour is
+// unchanged: workspace read+write, tier from AGENTTY_SANDBOX_TIER, egress
+// grants from AGENTTY_SANDBOX_NET, and a project policy file when the repo
+// ships one.
+[[nodiscard]] SubprocessResult run_bastion(std::vector<std::string> argv,
+                                           std::size_t max_bytes,
+                                           std::chrono::seconds timeout) {
+    SubprocessResult r;
+    const std::string ws = workspace_root().string();
+
+    auto tier = bastion::Tier::Kernel;          // t2 — matches bwrap's posture
+    if (const char* t = std::getenv("AGENTTY_SANDBOX_TIER"); t && *t) {
+        const std::string v{t};
+        if      (v == "t0") tier = bastion::Tier::Observe;
+        else if (v == "t1") tier = bastion::Tier::Advisory;
+        else if (v == "t3") tier = bastion::Tier::Isolate;
+    }
+
+    auto policy = bastion::Policy{tier}
+                      .allow(bastion::Right::FsRead,  "/",  "system libs")
+                      .allow(bastion::Right::FsExec,  "/",  "toolchain")
+                      .allow(bastion::Right::FsWrite, ws,   "workspace")
+                      .allow(bastion::Right::FsWrite, "/tmp", "ergonomic floor");
+
+    // Egress. At t3 this is a real per-host allowlist; below it the kernel
+    // matches sockets rather than hostnames and bastion says so rather than
+    // implying an allowlist it cannot enforce.
+    if (const char* net = std::getenv("AGENTTY_SANDBOX_NET"); net && *net) {
+        std::string_view rest{net};
+        while (!rest.empty()) {
+            const auto comma = rest.find(',');
+            auto one = rest.substr(0, comma);
+            while (!one.empty() && one.front() == ' ') one.remove_prefix(1);
+            while (!one.empty() && one.back()  == ' ') one.remove_suffix(1);
+            if (!one.empty())
+                policy = std::move(policy).allow(bastion::Right::NetEgress,
+                                                 std::string{one}, "AGENTTY_SANDBOX_NET");
+            if (comma == std::string_view::npos) break;
+            rest.remove_prefix(comma + 1);
+        }
+    } else {
+        // No allowlist named: keep the network, matching what bwrap does
+        // today. Narrowing this silently would break git/npm/curl for every
+        // user who never asked for egress control.
+        policy = std::move(policy).allow(bastion::Right::NetEgress, "*",
+                                         "default: unrestricted, as bwrap");
+    }
+
+    auto sealed = std::move(policy).seal();
+
+    bastion::SpawnRequest req;
+    req.argv             = std::move(argv);
+    req.cwd              = ws;
+    req.inherit_env      = true;
+    req.capture_output   = true;          // the output IS the tool result
+    req.max_output_bytes = max_bytes;
+    (void)timeout;   // bastion does not own the deadline; the caller does
+
+    auto res = bastion::spawn(sealed, req);
+    r.started    = res.launched();
+    r.exit_code  = res.exit_code;
+    r.output     = std::move(res.output);
+    r.truncated  = res.output_truncated;
+    if (!res.error.empty()) r.start_error = res.error;
+    return r;
+}
+#endif  // AGENTTY_HAS_BASTION
+
 [[nodiscard]] SubprocessResult run_wrapped(std::string_view cmd,
                                            std::size_t max_bytes,
                                            std::chrono::seconds timeout) {
+#if AGENTTY_HAS_BASTION
+    if (detected_backend() == Backend::Bastion)
+        return run_bastion({"/bin/sh", "-c", std::string{cmd}},
+                           max_bytes, timeout);
+#endif
     SubprocessOptions opts;
-    opts.command = SubprocessOptions::Argv{
-        detected_backend() == Backend::Bastion ? build_bastion_argv(cmd)
-                                               : build_bwrap_argv(cmd)};
+    opts.command = SubprocessOptions::Argv{build_bwrap_argv(cmd)};
     opts.max_bytes = max_bytes;
     opts.timeout = timeout;
     opts.on_progress = [](std::string_view snap) { progress::emit(snap); };
@@ -401,9 +499,11 @@ std::atomic<Backend> g_backend{Backend::None};
         return r;
     }
     // Build prefix with no shell command, then splice the user's argv.
-    auto wrapped = detected_backend() == Backend::Bastion
-                       ? build_bastion_argv("")
-                       : build_bwrap_argv("");
+#if AGENTTY_HAS_BASTION
+    if (detected_backend() == Backend::Bastion)
+        return run_bastion(user_argv, max_bytes, timeout);
+#endif
+    auto wrapped = build_bwrap_argv("");
     // Pop the trailing 4 elements added by build_bwrap_argv ("--",
     // "/bin/sh", "-c", ""), then append user argv directly.
     wrapped.resize(wrapped.size() - 4);

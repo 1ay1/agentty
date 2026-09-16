@@ -24,6 +24,7 @@
 #include <mcp/tools/util/fs_helpers.hpp>
 #include <mcp/tools/util/progress.hpp>
 #include <mcp/tools/util/sandbox.hpp>
+#include "agentty/tool/util/sandbox.hpp"
 #include <mcp/cap/capability.hpp>
 #include <mcp/cap/local.hpp>
 #include <mcp/codec.hpp>
@@ -539,6 +540,40 @@ void wire_mcp_runtime(std::string_view sandbox_mode) {
     else if (sandbox_mode == "on")  mode = mu::sandbox::Mode::On;
     // "auto" / "" → Auto. main.cpp already rejected any other value.
     (void)mu::sandbox::init(mode);
+
+    // Hand mcp-cpp OUR sandbox when it is one mcp-cpp cannot build itself.
+    //
+    // agentty links bastion; mcp-cpp is a standalone library and cannot
+    // depend on agentty's submodules, so its own probe finds only bwrap. The
+    // result was a session confined by two different engines: hooks and ACP
+    // agents under bastion, tools under bwrap, with one banner describing
+    // both. sandbox_parity_test catches exactly that, and caught this.
+    //
+    // Installed only for the backend mcp-cpp could not have reached on its
+    // own — with bwrap or sandbox-exec, its built-in path is the same code
+    // and delegating would add a hop for nothing.
+    namespace ag = agentty::tools::util::sandbox;
+    if (ag::is_active() && ag::detected_backend() == ag::Backend::Bastion) {
+        mu::sandbox::HostSandbox hs;
+        hs.label = "bastion";
+        hs.run = [](const std::vector<std::string>& argv,
+                    std::size_t max_bytes,
+                    std::chrono::seconds timeout,
+                    std::string_view /*cwd*/,
+                    const std::vector<std::pair<std::string, std::string>>& /*env*/)
+                     -> std::optional<::mcp::tools::util::SubprocessResult> {
+            auto r = ag::run_argv(argv, max_bytes, timeout);
+            ::mcp::tools::util::SubprocessResult out;
+            out.started     = r.started;
+            out.exit_code   = r.exit_code;
+            out.output      = std::move(r.output);
+            out.truncated   = r.truncated;
+            out.timed_out   = r.timed_out;
+            out.start_error = std::move(r.start_error);
+            return out;
+        };
+        mu::sandbox::set_host_sandbox(std::move(hs));
+    }
 }
 
 } // namespace agentty::tools

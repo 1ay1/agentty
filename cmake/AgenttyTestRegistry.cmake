@@ -72,6 +72,11 @@ function(_agentty_test_link_full name)
     if(TARGET mcp::mcp)
         target_link_libraries(${name} PRIVATE mcp::mcp)
     endif()
+    # Same reason as the agentty executable: the objlibs reference bastion's
+    # symbols, so every binary built from them needs the archive.
+    if(TARGET bastion)
+        target_link_libraries(${name} PRIVATE bastion)
+    endif()
     if(TARGET mcp::tools)
         target_link_libraries(${name} PRIVATE mcp::tools)
     endif()
