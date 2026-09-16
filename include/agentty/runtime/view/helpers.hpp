@@ -174,6 +174,27 @@ inline constexpr int kDefaultContextWindow = 200'000;
 [[nodiscard]] std::string context_override_key(std::string_view provider_id,
                                                std::string_view model_id);
 
+// Stamp a catalog row with the window that will ACTUALLY be used.
+//
+// The picker's ctx column reads ModelInfo::context_window; the status bar
+// calls resolve_context_window(). Two routes to one number, and they drifted:
+// a row whose gateway advertised nothing kept context_window == 0 and
+// rendered "auto", while the status bar — running the full ladder — showed
+// the models.dev figure for the very same model. The user sees one screen
+// contradicting the other about a number they are trying to verify.
+//
+// So the loaders bake through HERE, and `row.context_window` is by
+// construction whatever the ladder says. The requirement is sail3r's
+// (PR #39): "the picker's ctx column and the status bar agree by
+// construction". One function, so no future call site can implement half
+// of it.
+//
+// `row.context_window` on entry is the ADVERTISED figure (0 = the endpoint
+// said nothing), which is exactly what the ladder's rung 2 wants.
+void bake_context_window(ModelInfo& row,
+                         std::string_view provider_id,
+                         const store::Settings& settings) noexcept;
+
 [[nodiscard]] int context_max_for_model(std::string_view model_id) noexcept;
 
 // UTF-8 helpers.

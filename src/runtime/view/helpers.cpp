@@ -322,6 +322,16 @@ int resolve_context_window(std::string_view provider_id,
     return kDefaultContextWindow;
 }
 
+void bake_context_window(ModelInfo& row,
+                         std::string_view provider_id,
+                         const store::Settings& settings) noexcept {
+    // The row's current value IS the advertisement (0 = nothing reported),
+    // so feed it in as rung 2 and take whatever the ladder returns.
+    row.context_window =
+        resolve_context_window(provider_id, row.id.value,
+                               row.context_window, settings);
+}
+
 int context_max_for_model(std::string_view model_id) noexcept {
     // The id-only path, for the call sites that have no catalog or settings
     // in hand. Prefer resolve_context_window() wherever both are available.

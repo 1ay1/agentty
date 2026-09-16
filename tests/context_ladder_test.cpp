@@ -145,6 +145,60 @@ TEST_CASE("context ladder: a non-declaration is never recorded as one") {
           == agentty::ui::kDefaultContextWindow);
 }
 
+TEST_CASE("context ladder: the picker column and the status bar agree") {
+    // The two surfaces resolve the window by DIFFERENT routes, and that is
+    // the bug sail3r's PR #39 identified:
+    //
+    //   status bar  -> ui::resolve_context_window(), i.e. the ladder
+    //   picker ctx  -> ModelInfo::context_window, baked when the catalog
+    //                  loaded
+    //
+    // If the bake does not run the ladder, a models.dev declaration is
+    // invisible in the one place a user looks to check it: the column says
+    // "auto" while the status bar says 1M, and they are describing the same
+    // model. His framing — "the picker's ctx column and the status bar agree
+    // BY CONSTRUCTION" — is the right requirement, so it is asserted here
+    // rather than left to whichever call site remembers.
+    //
+    // bake_context_window() is that construction: one function, used by the
+    // catalog loaders, that gives a row the same number the ladder would.
+    agentty::store::Settings s;
+    agentty::set_catalog_context_window("ctxprov/ctxtest-baked-1", 1'000'000);
+
+    // A gateway that advertised nothing.
+    agentty::ModelInfo row;
+    row.id = agentty::ModelId{"ctxtest-baked-1"};
+    row.provider = "ctxprov";
+    row.context_window = 0;
+
+    agentty::ui::bake_context_window(row, "ctxprov", s);
+    const int ladder = agentty::ui::resolve_context_window(
+        "ctxprov", "ctxtest-baked-1", 0, s);
+
+    CHECK(row.context_window == ladder);
+    CHECK(row.context_window == 1'000'000);   // not "auto", not 200k
+
+    // An ADVERTISED window still wins, and both surfaces still agree.
+    agentty::ModelInfo adv;
+    adv.id = agentty::ModelId{"ctxtest-baked-1"};
+    adv.provider = "ctxprov";
+    adv.context_window = 32'768;              // the gateway spoke
+    agentty::ui::bake_context_window(adv, "ctxprov", s);
+    CHECK(adv.context_window == 32'768);
+    CHECK(adv.context_window == agentty::ui::resolve_context_window(
+              "ctxprov", "ctxtest-baked-1", 32'768, s));
+
+    // And a per-model override outranks both, on both surfaces.
+    s.context_overrides[agentty::ui::context_override_key(
+        "ctxprov", "ctxtest-baked-1")] = 512'000;
+    agentty::ModelInfo ovr;
+    ovr.id = agentty::ModelId{"ctxtest-baked-1"};
+    ovr.provider = "ctxprov";
+    ovr.context_window = 32'768;
+    agentty::ui::bake_context_window(ovr, "ctxprov", s);
+    CHECK(ovr.context_window == 512'000);
+}
+
 TEST_CASE("context ladder: the env floor catches what no catalog can know") {
     // The unknowable case: a private gateway serving an id nobody published.
     // Discovery covers ~95% of shipped providers, but a model at

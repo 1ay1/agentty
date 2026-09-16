@@ -652,6 +652,19 @@ Step models_update(Model m, msg::ModelsMsg pm) {
                 if (c.provider_id != e.provider_id) continue;
                 if (e.ok && !e.models.empty()) {
                     c.models = std::move(e.models);
+                    // Same bake as the active provider's load. Without it a
+                    // row from a NON-active provider carries only what its
+                    // gateway advertised, so the fused picker shows "auto"
+                    // for a model whose window models.dev declares — and the
+                    // status bar would show the real figure the moment you
+                    // switched to it. The scope is the ROW's provider, not
+                    // the active one: the same id behind two gateways can be
+                    // served at two different sizes.
+                    {
+                        const auto settings = deps().load_settings();
+                        for (auto& mi : c.models)
+                            ui::bake_context_window(mi, c.provider_id, settings);
+                    }
                     c.invalidate_derived();  // ids changed — all caches stale
                     c.state  = ProviderCatalog::State::Ready;
                     c.loaded_at_ms = now_ms();   // mark fresh
@@ -1035,18 +1048,21 @@ Step models_update(Model m, msg::ModelsMsg pm) {
                     continue;
                 for (const auto& fav : settings.favorite_models)
                     if (mi.id == fav) mi.favorite = true;
-                // A user override outranks whatever the gateway advertised
-                // (or did not). Applied ONCE here, so every downstream
-                // reader — the picker column, the fused rows, the routing
-                // candidate pool — sees the effective window without each
-                // having to remember to consult the settings map.
-                if (const auto ov = settings.context_overrides.find(
-                        ui::context_override_key(e.provider_id.empty()
-                                                     ? active_provider_id()
-                                                     : e.provider_id,
-                                                 mi.id.value));
-                    ov != settings.context_overrides.end() && ov->second > 0)
-                    mi.context_window = ov->second;
+                // Stamp the window the row will actually show. Applied ONCE
+                // here, so every downstream reader — the picker column, the
+                // fused rows, the routing candidate pool — sees the effective
+                // number without each having to remember the ladder.
+                //
+                // The FULL ladder, not just the override: a row whose gateway
+                // advertised nothing used to keep 0 and render "auto" while
+                // the status bar showed the models.dev figure for the same
+                // model, so the two screens contradicted each other about a
+                // number the user was trying to verify (sail3r, PR #39).
+                ui::bake_context_window(mi,
+                                        e.provider_id.empty()
+                                            ? active_provider_id()
+                                            : e.provider_id,
+                                        settings);
                 m.d.available_models.push_back(std::move(mi));
             }
             // Refresh the subagent router's candidate pool so read-only roles
