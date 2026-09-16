@@ -347,7 +347,7 @@ namespace detail {
     const ModelInfo* best = nullptr;
     for (const auto& mi : candidates) {
         const std::string_view id = mi.id.value;
-        if (mi.supports_tools.has_value() && !*mi.supports_tools) continue;
+        if (!mi.tools_allowed()) continue;
         if (!is_dispatchable_model(id)) continue;
         if (ModelCapabilities::tier_for(id) != Tier::Mid) continue;
         if (!best || model_picker_less(mi, *best)) best = &mi;
@@ -363,7 +363,7 @@ namespace detail {
     const Tier parent_tier = ModelCapabilities::tier_for(parent_model);
     for (const auto& mi : candidates) {
         const std::string_view id = mi.id.value;
-        if (mi.supports_tools.has_value() && !*mi.supports_tools) continue;
+        if (!mi.tools_allowed()) continue;
         if (!is_dispatchable_model(id)) continue;
         const Tier t = ModelCapabilities::tier_for(id);
         if (t == Tier::Weak) continue;

@@ -1028,15 +1028,19 @@ Cmd<Msg> launch_stream(Model& m) {
         req.show_reasoning = !compacting && show_reasoning;
         req.session_key   = std::move(session_key);
 
-        // Ollama capability gate: if /api/show reported the model does NOT
-        // support tools (supports_tools == false), skip advertising ANY
-        // tools — the model can only be used for plain chat. This matches
-        // Zed's behavior: models without the "tools" capability don't get
-        // tools on the wire, so they can't leak phantom calls or loop.
-        // std::nullopt means unknown / not probed (non-Ollama endpoints or
-        // probe failure): fall through to the normal heuristic.
+        // Capability gate: withhold tools ONLY on an explicit declaration of
+        // non-support (Ollama's /api/show probe, a provider catalog that says
+        // tool_calls:false). Unknown — not probed, not in the catalog, or a
+        // slug the server rewrote — advertises tools.
+        //
+        // The asymmetry is deliberate and lives on ModelInfo::tools_allowed():
+        // wrongly sending tools fails loudly on the first turn, wrongly
+        // withholding them fails SILENTLY — the turn succeeds and the model
+        // just says it cannot read files. Tested by hand here once, which is
+        // how a nullopt could have been read as "unsupported" by a later
+        // edit; the decision now has exactly one implementation.
         const bool tools_disabled_by_capability =
-            model_supports_tools.has_value() && !model_supports_tools.value();
+            !tools_allowed(model_supports_tools);
 
         // Wire payload diverges on compaction kickoff:
         //   normal turn  → wire_messages_for(thread) substitutes any

@@ -573,8 +573,20 @@ std::vector<ModelInfo> list_models() {
             if (caps.contains("limits"))
                 info.context_window =
                     caps["limits"].value("max_context_window_tokens", 200000);
-            if (caps.contains("supports"))
-                info.supports_tools = caps["supports"].value("tool_calls", true);
+            if (caps.contains("supports")) {
+                // Only an EXPLICIT tool_calls:false withholds tools. A row that
+                // omits the key is UNKNOWN, not unsupported — and unknown
+                // must send tools, because the failure is silent in the
+                // other direction: the turn runs, the model just never sees
+                // a tool and answers "I can't read files". GitHub has
+                // shipped rows with a `supports` object that lists only
+                // streaming/vision, and `.value("tool_calls", true)` was
+                // guessing on every one of them.
+                const auto& sup = caps["supports"];
+                if (sup.contains("tool_calls") && sup["tool_calls"].is_boolean())
+                    info.supports_tools = sup["tool_calls"].get<bool>();
+                // else: leave nullopt — unknown, tools are advertised.
+            }
 
             const std::string cat = m.value("model_picker_category", "");
             int cat_w = cat == "powerful" ? 0 : cat == "versatile" ? 1

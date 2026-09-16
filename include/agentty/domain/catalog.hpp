@@ -19,6 +19,15 @@
 
 namespace agentty {
 
+// Should a model with this declared capability be sent tool definitions?
+//
+// The free form, for call sites that hold the optional rather than the whole
+// ModelInfo (the wire builder looks the capability up by id). Same rule, one
+// implementation: only an explicit `false` withholds.
+[[nodiscard]] inline bool tools_allowed(std::optional<bool> supports) noexcept {
+    return !supports.has_value() || *supports;
+}
+
 struct ModelInfo {
     ModelId     id;
     std::string display_name;
@@ -34,11 +43,35 @@ struct ModelInfo {
     // user override or a probed value over a guess.
     int  context_window = 0;
     bool favorite       = false;
-    // Ollama-specific: the model reports "tools" in its capabilities list.
-    // When false (or unset), agentty skips advertising tools entirely —
-    // the model can only be used for plain chat. Set by list_models() via
-    // Ollama's /api/show probe. std::optional so unknown = std::nullopt.
+    // Does this model accept tool definitions on the wire?
+    //
+    // TRI-STATE, and the third state is load-bearing:
+    //   true    — the provider declared tool support.
+    //   false   — the provider declared NO tool support. Tools are withheld;
+    //             the model can only be used for plain chat.
+    //   nullopt — UNKNOWN (not probed, not listed, slug rewritten by the
+    //             server, provider reports no capability block). Tools ARE
+    //             advertised.
+    //
+    // Unknown must mean SEND, and that asymmetry is deliberate. Wrongly
+    // sending tools to a model that cannot use them produces a loud, local
+    // error on the first turn. Wrongly WITHHOLDING them produces no error at
+    // all: the turn succeeds, the model simply never sees a tool and says it
+    // cannot read files — which users report as "tools are broken with this
+    // provider" and which no test notices, because nothing failed.
+    //
+    // Read it through tools_allowed() below rather than testing the optional
+    // by hand; the old comment here said "false (or unset)" withholds, which
+    // is the opposite of what the code did, and a caller that believed the
+    // comment would have silently disabled tools for every unprobed model.
     std::optional<bool> supports_tools;
+
+    // Should this model be sent tool definitions? The ONE place the tri-state
+    // is collapsed to a decision, so no caller can get the unknown case
+    // backwards. See supports_tools for why unknown sends.
+    [[nodiscard]] bool tools_allowed() const noexcept {
+        return agentty::tools_allowed(supports_tools);
+    }
 
     // Value equality (used to detect when the active provider's fused catalog
     // has drifted from available_models and needs a re-seed).
@@ -1447,7 +1480,7 @@ static_assert(!reasons_by_default("qwen3:32b"));   // explicit-tag family
         const std::string_view id = mi.id.value;
         // A probe that reported no tool support disqualifies the model — a
         // subagent's whole job is tool use.
-        if (mi.supports_tools.has_value() && !*mi.supports_tools) continue;
+        if (!mi.tools_allowed()) continue;
         // Never route to a non-chat asset (embedding/image/audio/moderation)
         // that a raw /v1/models dump also lists — it can't run an agent turn.
         if (!is_dispatchable_model(id)) continue;
