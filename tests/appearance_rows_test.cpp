@@ -27,6 +27,7 @@
 #include <print>
 #include <functional>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -223,3 +224,65 @@ TEST_CASE("settings: every row that opens a pane shows the door arrow") {
     CHECK(!se::opens_pane(se::Action::ToggleChangesStrip));
     CHECK(!se::opens_pane(se::Action::TogglePlugin));
 }
+
+TEST_CASE("settings: a row's description says what it DOES, in every state") {
+    // Smart Mode's off branch was the bare word "off". Next to siblings that
+    // all read like descriptions ("pre-turn context injection", "hidden · ^R
+    // still reviews") a one-word state read as a row whose description had
+    // gone MISSING — and off is the default, so it was the first thing a new
+    // user saw. The question a settings row has to answer is "what would
+    // changing this do?", and that question is loudest in the state where
+    // the feature is doing nothing.
+    //
+    // So: no row may describe itself with a bare state word. Checked over
+    // BOTH values of the toggles, because the defect only existed in one of
+    // them — a test that built the list once would have passed all along.
+    namespace se = agentty::settings;
+
+    for (bool smart_on : {false, true}) {
+        agentty::Model m;
+        m.d.smart.enabled = smart_on;
+
+        const auto rows = se::items_for(m, se::Category::General);
+        CHECK(rows.size() >= 5);
+
+        for (const auto& r : rows) {
+            if (r.primary.empty()) continue;
+            // A state word alone is not a description. (The real rows say
+            // "off · every turn goes to the main model" — state AND effect.)
+            CHECK(r.secondary != "off");
+            CHECK(r.secondary != "on");
+            CHECK(r.secondary != "enabled");
+            CHECK(r.secondary != "disabled");
+            // And every General row has to say something at all.
+            CHECK(!r.secondary.empty());
+        }
+    }
+}
+
+TEST_CASE("settings: a stateful row reports its state, not just its topic") {
+    // The other half of the same rule. "pre-turn context injection" names
+    // the TOPIC but never the value, so the row looks identical whether
+    // retrieval is on or off — you have to open the pane to find out. A row
+    // that owns a setting must show what that setting currently IS.
+    namespace se = agentty::settings;
+
+    agentty::Model off;
+    off.d.smart.enabled = false;
+    agentty::Model on;
+    on.d.smart.enabled = true;
+
+    const auto a = se::items_for(off, se::Category::General);
+    const auto b = se::items_for(on,  se::Category::General);
+    REQUIRE(a.size() == b.size());
+
+    const auto find = [](const std::vector<se::Item>& rows, se::Action act) {
+        for (const auto& r : rows) if (r.action == act) return r.secondary;
+        return std::string{};
+    };
+
+    // Flipping the setting must be VISIBLE on its own row.
+    CHECK(find(a, se::Action::OpenSmart) != find(b, se::Action::OpenSmart));
+    CHECK(!find(a, se::Action::OpenSmart).empty());
+}
+

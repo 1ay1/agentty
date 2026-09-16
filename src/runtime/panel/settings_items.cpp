@@ -41,11 +41,19 @@ std::vector<Item> general(const Model& m) {
         out.push_back(std::move(i));
     }
     // Smart Mode.
+    //
+    // BOTH branches describe what the setting DOES. The off branch used to
+    // be the bare word "off", which read as a row whose description had
+    // gone missing — and off is the DEFAULT, so that was the first thing
+    // every new user saw. A state word is not a description: the row has to
+    // answer "what would turning this on change?" while it is still off,
+    // because that is the only moment the answer matters.
     {
         Item i;
         i.primary   = "Smart Mode";
-        i.secondary = m.d.smart.enabled ? "on — role-based routing active"
-                                        : "off";
+        i.secondary = m.d.smart.enabled
+            ? "on \xc2\xb7 each turn routed to the cheapest model that can do it"
+            : "off \xc2\xb7 every turn goes to the main model";
         i.hint      = "Enter: configure";
         i.action    = Action::OpenSmart;
         out.push_back(std::move(i));
