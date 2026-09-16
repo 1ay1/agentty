@@ -298,6 +298,10 @@ std::vector<Item> hooks() {
 std::vector<Item> items_for(const Model& m, Category cat) {
     switch (cat) {
         case Category::General:  return general(m);
+        // Appearance is a form pane (panel/appearance.hpp), never a flat
+        // list — the General category carries the single door row that opens
+        // it. Return empty rather than leaving the enum unhandled.
+        case Category::Appearance: return {};
         case Category::Plugins:  return plugins(m.ui.plugins, m.ui.plugins_loading);
         case Category::Commands: return commands();
         case Category::Agents:   return agents();
