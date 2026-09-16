@@ -652,6 +652,35 @@ Step models_update(Model m, msg::ModelsMsg pm) {
                 if (c.provider_id != e.provider_id) continue;
                 if (e.ok && !e.models.empty()) {
                     c.models = std::move(e.models);
+                    // Seed each freshly-listed row with the same fallback
+                    // ladder as the active provider's ModelsLoaded so the
+                    // ctx column is populated even when this catalog is for
+                    // a signed-in but inactive custom host. Scope = the
+                    // catalog's own provider.
+                    auto settings = deps().load_settings();
+                    for (auto& mi : c.models) {
+                        if (const auto ov = settings.context_overrides.find(
+                                ui::context_override_key(c.provider_id,
+                                                         mi.id.value));
+                            ov != settings.context_overrides.end()
+                            && ov->second > 0)
+                            mi.context_window = ov->second;
+                        if (mi.context_window == 0)
+                            mi.context_window = catalog_context_window_for(
+                                mi.id.value, c.provider_id);
+                        // CUSTOM-HOST seam: the scoped lookup keys by the
+                        // provider id, which IS the endpoint spec here —
+                        // never registered under dev_scope. Claim by origin.
+                        if (mi.context_window == 0) {
+                            std::uint16_t port = 0;
+                            const std::string host =
+                                context_endpoint_origin(c.provider_id, port);
+                            if (!host.empty())
+                                mi.context_window =
+                                    endpoint_context_window_for(mi.id.value,
+                                                                host, port);
+                        }
+                    }
                     c.invalidate_derived();  // ids changed — all caches stale
                     c.state  = ProviderCatalog::State::Ready;
                     c.loaded_at_ms = now_ms();   // mark fresh
@@ -758,32 +787,51 @@ Step models_update(Model m, msg::ModelsMsg pm) {
             // Reflect the change in the LIVE catalog, then rebuild the rows
             // the view reads. Without this the setting is invisible until
             // the next catalog fetch — the user presses ^W, the column does
-            // not move, and the feature looks broken. available_models is
-            // where the override is normally applied (at load), so it is the
-            // right place to keep in step.
+            // not move, and the feature looks broken.
             //
-            // Only for rows on the ACTIVE provider: available_models holds
-            // that provider's catalog, so a row from another provider has no
-            // entry here to update (its override still persisted above, and
-            // lands when that provider's catalog loads).
+            // The picker view renders m.d.fused_rows, which build_fused_rows
+            // assembles from each provider's CATALOG (c->models) — NOT from
+            // available_models. available_models is the ACTIVE provider's
+            // SSOT (routing pool, status bar), but it is only a deep-copied
+            // SOURCE for the catalog, mirrored once at open. Mutating it
+            // alone (or mutating the catalog without rebuilding) is exactly
+            // the "^W does nothing" bug: the row the view paints never
+            // changes. So: keep available_models in step for the active
+            // provider, mutate the highlighted row's OWN catalog, then
+            // rebuild once.
+            auto apply_to = [&](ModelInfo& mi) {
+                if (next > 0) {
+                    mi.context_window = next;
+                } else {
+                    // Cleared: re-resolve through the FULL ladder (override
+                    // now erased, advertised figure not recoverable here — it
+                    // was overwritten at load — so pass 0 and let
+                    // models.dev / endpoint-origin / from_id / default fill
+                    // in). A genuinely-advertised value returns on the next
+                    // refresh — ^L, or the next switch.
+                    mi.context_window = ui::resolve_context_window(
+                        row_provider, mi.id.value, 0, settings);
+                }
+            };
+
             const bool row_is_active = row_provider == active_provider_id();
             if (row_is_active) {
-                for (auto& mi : m.d.available_models) {
-                    if (mi.id != row_model) continue;
-                    if (next > 0) {
-                        mi.context_window = next;
-                    } else {
-                        // Cleared: fall back to what the id implies. The
-                        // provider's advertised figure is not recoverable
-                        // here (it was overwritten at load), so it returns
-                        // on the next refresh — ^L, or the next switch.
-                        mi.context_window =
-                            ModelCapabilities::from_id(mi.id.value).context_window();
-                    }
-                    break;
-                }
-                rebuild_fused_rows(m, /*sync_sources=*/false);
+                // SSOT for the active provider: the routing candidate pool
+                // and the status-bar gauge read this, so keep it in step.
+                for (auto& mi : m.d.available_models)
+                    if (mi.id == row_model) { apply_to(mi); break; }
             }
+
+            // The catalog the fused rows actually read. Mutate the row's OWN
+            // provider catalog so the picker's ctx column moves immediately
+            // regardless of which host the highlighted row belongs to.
+            for (auto& c : m.d.provider_catalogs) {
+                if (c.provider_id != row_provider) continue;
+                for (auto& mi : c.models)
+                    if (mi.id == row_model) { apply_to(mi); break; }
+                break;
+            }
+            rebuild_fused_rows(m, /*sync_sources=*/false);
 
             // Apply LIVE when the row is the model actually in use, so the
             // ctx-% gauge moves with the setting instead of after a restart.
@@ -1047,6 +1095,34 @@ Step models_update(Model m, msg::ModelsMsg pm) {
                                                  mi.id.value));
                     ov != settings.context_overrides.end() && ov->second > 0)
                     mi.context_window = ov->second;
+                // models.dev fallback for rows the endpoint said NOTHING
+                // about (custom-host / localhost / ollama-cloud /v1/models
+                // rows carry no size): seed the row with the community
+                // declaration so the picker's ctx column and the status bar
+                // agree instead of showing blank. resolve_context_window
+                // still layers user-override → live-advertised above this.
+                if (mi.context_window == 0)
+                    mi.context_window =
+                        catalog_context_window_for(mi.id.value,
+                                                   e.provider_id.empty()
+                                                       ? active_provider_id()
+                                                       : e.provider_id);
+                // CUSTOM-HOST seam: same endpoint-origin claim as
+                // FusedCatalogLoaded — the scoped key above is the
+                // endpoint spec itself for a custom host, which the
+                // dev-scoped registry never carries. Claim by origin.
+                if (mi.context_window == 0) {
+                    const std::string pid =
+                        e.provider_id.empty() ? active_provider_id()
+                                              : e.provider_id;
+                    std::uint16_t port = 0;
+                    const std::string host =
+                        context_endpoint_origin(pid, port);
+                    if (!host.empty())
+                        mi.context_window =
+                            endpoint_context_window_for(mi.id.value, host,
+                                                        port);
+                }
                 m.d.available_models.push_back(std::move(mi));
             }
             // Refresh the subagent router's candidate pool so read-only roles

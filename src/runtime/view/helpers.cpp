@@ -276,6 +276,27 @@ int resolve_context_window(std::string_view provider_id,
     //    exactly what it is: better than a guess, worse than the truth.
     if (const int w = catalog_context_window_for(model_id, provider_id); w > 0)
         return w;
+    //    Endpoint-origin declarations: the CUSTOM-HOST seam. A session's
+    //    provider id is the endpoint spec itself, which the scoped lookup
+    //    above can never resolve — but models.dev declares entries by api
+    //    URL, so the same declaration is reachable keyed by origin. Port
+    //    is a user definition, not identity (loopback entries live at
+    //    whatever port the user picked); the second qualifier between the
+    //    several same-host entries is the model id itself, with
+    //    disagreement → no claim. Only consulted here, after the scoped
+    //    hit, because a preset's own identity outranks its URL's.
+    {
+        std::uint16_t port = 0;
+        const std::string host =
+            context_endpoint_origin(provider_id, port);
+        if (!host.empty())
+            if (const int w = endpoint_context_window_for(model_id, host,
+                                                          port);
+                w > 0)
+                return w;
+    }
+    if (int w = catalog_context_window_for(model_id); w > 0)
+        return w;
 
     // 4. The id. Claude/GPT families are known, `[1m]` forces the wide
     //    window, unknown families report 0.

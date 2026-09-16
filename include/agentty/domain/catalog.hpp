@@ -1,6 +1,8 @@
 #pragma once
 // agentty catalog — describes an LLM the user can select.
 
+#include <algorithm>
+#include <cctype>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -1191,6 +1193,148 @@ inline void merge_catalog_context_window(const std::string& raw_id, int tokens) 
     }
     m[key] = tokens;
     catalog_context_detail::any().store(true, std::memory_order_relaxed);
+}
+
+// ── Endpoint-keyed declarations (custom-host / localhost seam) ──────────
+// The provider-scoped map above is keyed by agentty's PROVIDER id — which
+// for a custom host is the endpoint spec the user typed ("localhost:11434",
+// "https://api.my-gw.com/v1"), a string models.dev knows nothing about. Its
+// scoped entries can never reach such a session, and the bare-tail merge
+// poisons the moment two providers disagree on a shared model id. But a
+// custom host's identity IS its URL, and models.dev declares one too — so
+// declarations are ALSO indexed by endpoint ORIGIN (canonical host + port,
+// scheme/path dropped) and claimed per model when a session's own catalog
+// loads.
+//
+// Keying by origin+PORT first, host-only as the second tier: the port is a
+// user definition, not identity — LM Studio listens on whatever you set,
+// but models.dev has exactly ONE lmstudio entry — while on "127.0.0.1" the
+// same host carries several dev entries (atomic-chat:1337, lmstudio:1234,
+// lynkr:8081) that MUST NOT merge. The second qualifier between them is
+// the MODEL ID itself: claims are applied per model, so a session row only
+// ever adopts an entry that actually declares it; an entry on a DIFFERENT
+// port than the session's never applies (see claim_context_windows_for_endpoint
+// in src/util/modelsdev.cpp).
+namespace catalog_endpoint_detail {
+struct Entry {
+    int tokens = 0;
+    int port   = 0;   // 0 when the declaring api URL used the scheme default
+};
+inline std::map<std::string, std::map<std::string, Entry>>& map_() {
+    static std::map<std::string, std::map<std::string, Entry>> m; return m;
+}
+} // namespace catalog_endpoint_detail
+
+// Parse the ORIGIN out of an api URL / endpoint spec: canonical host
+// (lowercased; every localhost spelling — "localhost", "127.0.0.1",
+// "0.0.0.0", "::1" — folds to "127.0.0.1") plus the explicit port, 0 when
+// the URL used the scheme default. "" when no host can be recovered.
+[[nodiscard]] inline std::string
+context_endpoint_origin(std::string_view url, std::uint16_t& port_out) {
+    port_out = 0;
+    auto s = url;
+    if (auto p = s.find("://"); p != std::string_view::npos) {
+        const auto scheme = s.substr(0, p);
+        std::string sch;
+        for (char c : scheme) sch.push_back(
+            static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+        if (sch == "http")  port_out = 80;
+        if (sch == "https") port_out = 443;
+        s.remove_prefix(p + 3);
+    }
+    if (auto p = s.find('/'); p != std::string_view::npos)
+        s = s.substr(0, p);
+    if (auto p = s.find('@'); p != std::string_view::npos)
+        s = s.substr(p + 1);                       // strip userinfo
+    std::string hostport{s};
+    while (!hostport.empty() && (hostport.back() == ':')) hostport.pop_back();
+    std::string host = hostport;
+    if (auto colon = hostport.rfind(':'); colon != std::string::npos) {
+        const std::string ps = hostport.substr(colon + 1);
+        if (!ps.empty()
+            && std::all_of(ps.begin(), ps.end(),
+                           [](char c){ return c >= '0' && c <= '9'; })) {
+            const long v = std::strtol(ps.c_str(), nullptr, 10);
+            port_out     = static_cast<std::uint16_t>(v);
+            host         = hostport.substr(0, colon);
+        }
+    }
+    // Canonicalize: lowercase, fold every loopback spelling onto
+    // "127.0.0.1" so a session pointed at "localhost:1234" meets the
+    // models.dev entry whose api says "127.0.0.1:1234".
+    std::string canon;
+    canon.reserve(host.size());
+    for (char c : host)
+        canon.push_back(
+            static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    if (canon == "localhost" || canon == "0.0.0.0" || canon == "[::1]"
+        || canon == "::1")
+        canon = "127.0.0.1";
+    if (canon.empty()) return {};
+    return canon;
+}
+
+// Index one model's declared window under its endpoint's origin. Every
+// declaration lands under (canonical host, ORIGINAL port from the api URL —
+// 0 when the URL used the scheme default); whether a session on another
+// port may claim it is the reader's call (endpoint_context_window_for),
+// which knows both the session's port and the model id being resolved.
+// Same-origin rewrites overwrite (a refreshed snapshot is newer facts), so
+// this never poisons — unlike the bare-tail merge, a wrong-port entry
+// simply fails to match instead of erasing information.
+inline void merge_endpoint_context_window(std::string_view api_url,
+                                          const std::string& raw_id,
+                                          int tokens) {
+    if (tokens <= 0) return;
+    std::uint16_t port = 0;
+    const std::string host = context_endpoint_origin(api_url, port);
+    if (host.empty()) return;
+    const std::string model_id = norm_caps_key(raw_id);
+    if (model_id.empty()) return;
+    bump_caps_epoch();
+    std::unique_lock lk(catalog_context_detail::mu());
+    auto& hm = catalog_endpoint_detail::map_()[host];
+    hm[model_id] = catalog_endpoint_detail::Entry{tokens, port};
+    catalog_context_detail::any().store(true, std::memory_order_relaxed);
+}
+
+// 0 = no declaration; else the window a models.dev entry serving this
+// ENDPOINT declares for the model. Tiers, strongest first:
+//   1. exact origin (host + the session's own port) — an entry pinned to
+//      the very listener you pointed at;
+//   2. host-tier (the entry's api URL carried no explicit port);
+//   3. HOST-LEVEL adoption: the port is a USER definition (LM Studio
+//      listens on whatever you set; there is only one lmstudio entry), so
+//      a same-host entry on a DIFFERENT port still applies — but only when
+//      the second qualifier says it's unambiguous: the model id must
+//      actually be declared there, and if several same-host entries declare
+//      the same model at different windows, host-level adoption is refused
+//      (0) rather than letting atomic-chat's figure bleed onto lmstudio.
+// `host` is the CANONICAL origin host (context_endpoint_origin form).
+[[nodiscard]] inline int endpoint_context_window_for(
+    std::string_view model_id, std::string_view host, std::uint16_t port) {
+    if (!catalog_context_detail::any().load(std::memory_order_relaxed))
+        return 0;
+    std::shared_lock lk(catalog_context_detail::mu());
+    auto hm = catalog_endpoint_detail::map_().find(std::string(host));
+    if (hm == catalog_endpoint_detail::map_().end()) return 0;
+    const std::string mid = norm_caps_key(model_id);
+    if (mid.empty()) return 0;
+    int host_tier = 0, adopted = 0; bool ambiguous = false;
+    for (const auto& [mid_key, e] : hm->second) {
+        if (mid_key != mid) continue;
+        if (e.port == port) return e.tokens;              // (1) exact origin
+        if (e.port == 0)   { host_tier = e.tokens; continue; }  // (2)
+        if (port == 0)     { host_tier = e.tokens; continue; }  // session
+            // had no port either — any same-host declaration is the best
+            // evidence there is (a portless session can't disambiguate
+            // further; the model-id qualifier above still applied).
+        if (adopted == 0)  adopted = e.tokens;            // (3) host-level
+        else if (adopted != e.tokens) ambiguous = true;   // two entries,
+            // same model, different windows on the same host → no claim.
+    }
+    if (host_tier > 0) return host_tier;
+    return ambiguous ? 0 : adopted;
 }
 
 // 0 = no declaration. Scoped-first, bare fallback.

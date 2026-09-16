@@ -146,14 +146,18 @@ inline constexpr int kDefaultContextWindow = 200'000;
 // transcript, too large lets the prefix run past what the endpoint accepts
 // and the turn fails on the wire.
 //
-// FOUR sources, most-specific first. The layering is the whole design — a
+// FIVE sources, most-specific first. The layering is the whole design — a
 // single source cannot be right for every deployment:
 //
 //   1. the user's per-model override         (they configured the gateway)
 //   2. what the provider ADVERTISED          (probed /api/show, or the
 //                                             window in a /v1/models row)
-//   3. what the model id implies             (Claude/GPT families, `[1m]`)
-//   4. the conservative default              (nothing is known)
+//   3. the models.dev declaration            (limit.context from the cached
+//                                             community snapshot; fills
+//                                             the gap when the endpoint
+//                                             said nothing)
+//   4. what the model id implies             (Claude/GPT families, `[1m]`)
+//   5. the conservative default              (nothing is known)
 //
 // Note the order of 2 and 3: a LIVE figure from the endpoint that will serve
 // the request outranks a guess from the id. The same name behind two
