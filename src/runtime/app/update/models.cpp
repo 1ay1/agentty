@@ -771,32 +771,51 @@ Step models_update(Model m, msg::ModelsMsg pm) {
             // Reflect the change in the LIVE catalog, then rebuild the rows
             // the view reads. Without this the setting is invisible until
             // the next catalog fetch — the user presses ^W, the column does
-            // not move, and the feature looks broken. available_models is
-            // where the override is normally applied (at load), so it is the
-            // right place to keep in step.
+            // not move, and the feature looks broken.
             //
-            // Only for rows on the ACTIVE provider: available_models holds
-            // that provider's catalog, so a row from another provider has no
-            // entry here to update (its override still persisted above, and
-            // lands when that provider's catalog loads).
+            // The picker view renders m.d.fused_rows, which build_fused_rows
+            // assembles from each provider's CATALOG (c->models) — NOT from
+            // available_models. available_models is the ACTIVE provider's
+            // SSOT (routing pool, status bar), but it is only a deep-copied
+            // SOURCE for the catalog, mirrored once at open. Mutating it
+            // alone (or mutating the catalog without rebuilding) is exactly
+            // the "^W does nothing" bug: the row the view paints never
+            // changes. So: keep available_models in step for the active
+            // provider, mutate the highlighted row's OWN catalog, then
+            // rebuild once.
+            auto apply_to = [&](ModelInfo& mi) {
+                if (next > 0) {
+                    mi.context_window = next;
+                } else {
+                    // Cleared: re-resolve through the FULL ladder (override
+                    // now erased, advertised figure not recoverable here — it
+                    // was overwritten at load — so pass 0 and let
+                    // models.dev / endpoint-origin / from_id / default fill
+                    // in). A genuinely-advertised value returns on the next
+                    // refresh — ^L, or the next switch.
+                    mi.context_window = ui::resolve_context_window(
+                        row_provider, mi.id.value, 0, settings);
+                }
+            };
+
             const bool row_is_active = row_provider == active_provider_id();
             if (row_is_active) {
-                for (auto& mi : m.d.available_models) {
-                    if (mi.id != row_model) continue;
-                    if (next > 0) {
-                        mi.context_window = next;
-                    } else {
-                        // Cleared: fall back to what the id implies. The
-                        // provider's advertised figure is not recoverable
-                        // here (it was overwritten at load), so it returns
-                        // on the next refresh — ^L, or the next switch.
-                        mi.context_window =
-                            ModelCapabilities::from_id(mi.id.value).context_window();
-                    }
-                    break;
-                }
-                rebuild_fused_rows(m, /*sync_sources=*/false);
+                // SSOT for the active provider: the routing candidate pool
+                // and the status-bar gauge read this, so keep it in step.
+                for (auto& mi : m.d.available_models)
+                    if (mi.id == row_model) { apply_to(mi); break; }
             }
+
+            // The catalog the fused rows actually read. Mutate the row's OWN
+            // provider catalog so the picker's ctx column moves immediately
+            // regardless of which host the highlighted row belongs to.
+            for (auto& c : m.d.provider_catalogs) {
+                if (c.provider_id != row_provider) continue;
+                for (auto& mi : c.models)
+                    if (mi.id == row_model) { apply_to(mi); break; }
+                break;
+            }
+            rebuild_fused_rows(m, /*sync_sources=*/false);
 
             // Apply LIVE when the row is the model actually in use, so the
             // ctx-% gauge moves with the setting instead of after a restart.

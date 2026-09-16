@@ -136,6 +136,13 @@ void register_model(const std::string& dev_provider,
     if (set >= 0)
         set_catalog_effort_set(scope + "/" + mid,
                                static_cast<std::uint8_t>(set));
+    // CUSTOM-HOST seam: index the declaration under the entry's api ORIGIN
+    // as well, so a live localhost / custom-host catalog whose URL matches
+    // can claim the figure (the provider-scoped key above can never reach a
+    // custom host, whose provider id IS its endpoint spec). The provider-
+    // scoped write stays the primary channel for presets.
+    if (dev_ctx > 0 && !dev_api.empty())
+        merge_endpoint_context_window(dev_api, mid, dev_ctx);
     const std::string tail = capkey::norm_tail(mid);
     if (tail != capkey::norm_model(mid)) {
         set_catalog_reasoning(scope + "/" + tail, reasoning->get<bool>());
