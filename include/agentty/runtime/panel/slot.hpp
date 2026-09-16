@@ -199,16 +199,37 @@ concept Alternative = requires(Variant v) { std::holds_alternative<K>(v); };
 
 // The slot itself: a thin wrapper so call sites read as intent
 // (`m.ui.panel.is<pn::Models>()`) rather than as variant plumbing.
+//
+// ── Opening is DESCEND, never assignment ───────────────────────────────
+//
+// There are exactly two ways to put a panel in the slot, and they differ in
+// what happens to the parent chain:
+//
+//   descend(k)  — OPEN k over what is there. k.from snapshots the current
+//                 panel, so Esc unwinds one level.
+//   restore(k)  — put k back as it already was, chain included. For ascend()
+//                 and for a reducer rebuilding the open panel in place.
+//
+// `operator=` used to be the third way, spelled as plain assignment and
+// documented as "use descend at OPEN sites". A comment cannot enforce that,
+// and it was not enforced: twelve Open* reducers assigned, which DROPS the
+// parent — so palette → providers → Esc left the panel stack entirely
+// instead of going back to the palette, while the eight that used descend
+// behaved correctly. Same gesture, two behaviours, decided by which opener
+// you happened to be in.
+//
+// So assignment is DELETED. A call site must now say which it means, and
+// "open without stashing the parent" is not a thing you can write by
+// accident — only by writing restore(), which names what it does.
 class State {
 public:
     State() = default;
 
-    // Open K (closing whatever was open) — plain assignment.
+    // Assignment is deleted: it silently discarded the parent chain. Say
+    // descend(k) to OPEN k over the current panel, or restore(k) to put a
+    // panel back with its chain already inside it.
     template <Alternative K>
-    State& operator=(K k) {
-        v_ = std::move(k);
-        return *this;
-    }
+    State& operator=(K k) = delete;
 
     template <Alternative K>
     [[nodiscard]] bool is() const noexcept {
@@ -239,14 +260,50 @@ public:
     // nested from and all. Opening over None stashes nothing (from stays
     // empty) and Esc simply closes: "the thread" needs no snapshot.
     //
-    // Use `descend` at OPEN sites and plain assignment at RESTORE sites —
-    // a restore that descended would stash the child as its own parent's
-    // parent and Esc would cycle instead of unwinding.
+    // Re-opening the SAME kind is a rebuild, not a descent. Without that
+    // check, a reducer that reopens its own panel to refresh it (Smart Mode
+    // does this on every slot assignment) would stash the panel as its own
+    // parent, and Esc would peel identical copies one at a time instead of
+    // leaving. The new panel keeps the chain the old one had.
     template <Alternative K>
     void descend(K k) {
-        if (!std::holds_alternative<None>(v_))
+        if (std::holds_alternative<K>(v_)) {
+            k.from = std::move(std::get<K>(v_).from);
+        } else if (!std::holds_alternative<None>(v_)) {
             k.from = From::of(Snapshot{std::move(v_)});
+        }
         v_ = std::move(k);
+    }
+
+    // Put K back exactly as given — its `from` is already whatever it should
+    // be. For ascend() restoring a stashed parent, and for a reducer
+    // rebuilding the panel it is already inside.
+    //
+    // The counterpart to descend: a restore that descended would stash the
+    // child as its own parent and Esc would cycle instead of unwinding.
+    template <Alternative K>
+    void restore(K k) {
+        v_ = std::move(k);
+    }
+
+    // How many panels Esc would have to walk to leave. 0 = nothing open.
+    // Exposed for tests and diagnostics: the depth is the property the
+    // navigation contract is actually about.
+    [[nodiscard]] int depth() const noexcept {
+        int n = 0;
+        const Variant* cur = &v_;
+        while (!std::holds_alternative<None>(*cur)) {
+            ++n;
+            const From* f = std::visit(
+                [](const auto& a) -> const From* {
+                    if constexpr (requires { a.from; }) return &a.from;
+                    else return nullptr;
+                },
+                *cur);
+            if (!f || f->empty()) break;
+            cur = &f->get()->v;
+        }
+        return n;
     }
 
     // Give the CURRENTLY-OPEN overlay a parent, if it has none yet. The

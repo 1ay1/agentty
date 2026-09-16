@@ -84,7 +84,7 @@ Step fork_update(Model m, msg::ForkMsg fm) {
             if (!m.s.is_idle() || m.s.compacting || m.s.thread_loading)
                 return {std::move(m),
                         set_status_toast(m, "cannot fork while the agent is working")};
-            m.ui.panel = pn::Fork{{fp::Choice::RagPerTurn}};
+            m.ui.panel.descend(pn::Fork{{fp::Choice::RagPerTurn}});
             m.ui.panel.close<pn::Palette>();
             return {std::move(m), Cmd<Msg>::none()};
         },

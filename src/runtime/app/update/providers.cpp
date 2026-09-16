@@ -90,7 +90,7 @@ Step providers_update(Model m, msg::ProvidersMsg pm) {
                 if (const auto* ag = row.acp();    ag && ag->id == active_label) { idx = i; break; }
                 if (const auto* ch = row.custom_host(); ch && *ch == active_label) { idx = i; break; }
             }
-            m.ui.panel = pn::Providers{{idx}};
+            m.ui.panel.descend(pn::Providers{{idx}});
             return done(std::move(m));
         },
         [&](CloseProviders) -> Step {

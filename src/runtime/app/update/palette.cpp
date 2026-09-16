@@ -124,7 +124,7 @@ template <class T, class V>
 Step palette_update(Model m, msg::PaletteMsg pm) {
     return std::visit(overload{
         [&](OpenPalette) -> Step {
-            m.ui.panel = pn::Palette{};
+            m.ui.panel.descend(pn::Palette{});
             return done(std::move(m));
         },
         [&](ClosePalette) -> Step {

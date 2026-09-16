@@ -483,7 +483,7 @@ TEST_CASE("tool timeline adapter") {
     viewer_entry.output = "line one\nline two\nline three";
     viewer_entry.is_live = true;
     viewer_entry.call = make_tool("shell", A::ToolUse::Running{});
-    viewer_model.ui.panel = A::ui::panel::ToolOutput{{{viewer_entry}, 0, false}};
+    viewer_model.ui.panel.descend(A::ui::panel::ToolOutput{{{viewer_entry}, 0, false}});
     int list_height = -1;
     for (int width = 8; width <= 120; ++width) {
         auto viewer = U::tool_output_panel(viewer_model);
@@ -537,8 +537,8 @@ TEST_CASE("tool timeline adapter") {
         entry.output = call.output();
         entry.call = call;
         A::Model structured_model;
-        structured_model.ui.panel =
-            A::ui::panel::ToolOutput{{{std::move(entry)}, 0, true}};
+        structured_model.ui.panel.descend(
+            A::ui::panel::ToolOutput{{{std::move(entry)}, 0, true}});
         int expected_height = -1;
         for (int width : viewer_widths) {
             auto viewer = U::tool_output_panel(structured_model);
@@ -564,8 +564,8 @@ TEST_CASE("tool timeline adapter") {
             ? make_tool(empty.name, A::ToolUse::Running{})
             : make_tool(empty.name, A::ToolUse::Done{});
         A::Model empty_model;
-        empty_model.ui.panel =
-            A::ui::panel::ToolOutput{{{std::move(empty)}, 0, true}};
+        empty_model.ui.panel.descend(
+            A::ui::panel::ToolOutput{{{std::move(empty)}, 0, true}});
         int expected_height = -1;
         for (int width : viewer_widths) {
             auto viewer = U::tool_output_panel(empty_model);
@@ -595,8 +595,8 @@ TEST_CASE("tool timeline adapter") {
     long_entry.call = make_tool("shell",
         A::ToolUse::Done{{}, {}, long_entry.output});
     A::Model short_terminal_model;
-    short_terminal_model.ui.panel =
-        A::ui::panel::ToolOutput{{{std::move(long_entry)}, 0, true}};
+    short_terminal_model.ui.panel.descend(
+        A::ui::panel::ToolOutput{{{std::move(long_entry)}, 0, true}});
     static constexpr std::array<int, 4> short_heights = {8, 10, 11, 12};
     for (int height : short_heights) {
         const auto height_text = std::to_string(height);
@@ -624,8 +624,8 @@ TEST_CASE("tool timeline adapter") {
         short_list_entries.push_back(std::move(entry));
     }
     A::Model short_list_model;
-    short_list_model.ui.panel =
-        A::ui::panel::ToolOutput{{std::move(short_list_entries), 0, false}};
+    short_list_model.ui.panel.descend(
+        A::ui::panel::ToolOutput{{std::move(short_list_entries), 0, false}});
     for (int height : short_heights) {
         const auto height_text = std::to_string(height);
 #ifdef _WIN32

@@ -147,7 +147,7 @@ Step checkpoint_update(Model m, msg::CheckpointMsg cm) {
             // target, and the one the old single-shot path always took.
             const int last = static_cast<int>(entries.size()) - 1;
             auto diffs = load_all_diffs(entries);
-            m.ui.panel = pn::Checkpoints{{std::move(entries), last}};
+            m.ui.panel.descend(pn::Checkpoints{{std::move(entries), last}});
             m.ui.checkpoints_scroll = Model::UI::routed_scroll();
             return {std::move(m), std::move(diffs)};
         },

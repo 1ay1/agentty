@@ -587,7 +587,7 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
                 return prev == '\n';
             };
             if (e.ch == U'/' && at_line_start()) {
-                m.ui.panel = pn::Palette{};
+                m.ui.panel.descend(pn::Palette{});
                 return done(std::move(m));
             }
             // '@' opens the file mention picker. Unlike '/' this is
@@ -610,7 +610,7 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
                 // freezing the UI on an inline walk; the next keystroke
                 // re-pulls once the background thread publishes.
                 if (files_ready()) o.files = list_workspace_files();
-                m.ui.panel = pn::Mention{std::move(o)};
+                m.ui.panel.descend(pn::Mention{std::move(o)});
                 // Refresh git signals in the background so the working-set
                 // ranking reflects edits made since startup (the agent may
                 // have modified files this session). Cheap (~two git calls);
@@ -628,7 +628,7 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             if (e.ch == U'#' && at_word_boundary()) {
                 symbol::Open o;
                 if (symbols_ready()) o.entries = list_workspace_symbols();
-                m.ui.panel = pn::Symbol{std::move(o)};
+                m.ui.panel.descend(pn::Symbol{std::move(o)});
                 return done(std::move(m));
             }
             // Coalesce consecutive typing into one undo unit, but

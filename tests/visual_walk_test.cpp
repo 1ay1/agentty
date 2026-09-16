@@ -47,8 +47,8 @@ TEST_CASE("visual walk: every panel facet changes the hash") {
 
     // The slot variant: switching alternatives moves the hash even when
     // both alternatives are default-constructed.
-    ui::panel::State s1; s1 = pn::Models{};
-    ui::panel::State s2; s2 = pn::Providers{};
+    ui::panel::State s1; s1.descend(pn::Models{});
+    ui::panel::State s2; s2.descend(pn::Providers{});
     CHECK(walk(s1.raw()) != walk(s2.raw()));
 }
 
@@ -116,8 +116,8 @@ TEST_CASE("visual walk: exempt facets are exempt (From does not churn)") {
     // re-walk the ancestry, and restoring would repaint spuriously).
     pn::SettingsList a, b;
     ui::panel::State sa, sb;
-    sa = pn::Palette{};   // parent 1
-    sb = pn::Models{};    // parent 2
+    sa.descend(pn::Palette{});   // parent 1
+    sb.descend(pn::Models{});    // parent 2
     a.from = pn::From::of(pn::Snapshot{sa.raw()});
     b.from = pn::From::of(pn::Snapshot{sb.raw()});
     CHECK(walk(a) == walk(b));

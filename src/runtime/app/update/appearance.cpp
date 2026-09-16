@@ -226,7 +226,7 @@ Step appearance_update(Model m, msg::AppearanceMsg am) {
                     o.pane.form.cursor = i;
                     break;
                 }
-            m.ui.panel = std::move(o);
+            m.ui.panel.descend(std::move(o));
             m.ui.appearance_scroll.y = 0;
             return done(std::move(m));
         },

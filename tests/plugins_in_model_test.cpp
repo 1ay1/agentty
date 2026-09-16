@@ -46,7 +46,7 @@ TEST_CASE("plugins in model") {
     // ── 2: PluginsUpdated stores the snapshot + clears loading ──
     {
         Model m;
-        m.ui.panel = pn::SettingsList{{settings::Category::Plugins, 0}};
+        m.ui.panel.descend(pn::SettingsList{{settings::Category::Plugins, 0}});
         m.ui.plugins_loading = true;
 
         mcp::PluginModel snap;

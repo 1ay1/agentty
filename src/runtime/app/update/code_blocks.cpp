@@ -613,7 +613,7 @@ Step codeblock_update(Model m, msg::CodeBlockMsg cm) {
                     return {std::move(m), std::move(cmd)};
                 }
             }
-            m.ui.panel = pn::CodeBlocks{{std::move(blocks), 0}};
+            m.ui.panel.descend(pn::CodeBlocks{{std::move(blocks), 0}});
             m.ui.code_blocks_scroll.y = 0;
             return done(std::move(m));
         },

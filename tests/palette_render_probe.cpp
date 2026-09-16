@@ -30,7 +30,7 @@ static int count_of(const std::string& h, const std::string& n) {
 
 static void palette_checks() {
     Model m;
-    m.ui.panel = pn::Palette{{}};
+    m.ui.panel.descend(pn::Palette{{}});
     m.d.pending_changes.push_back(FileChange{});
     auto rend = [&]{ return maya::render_to_string(ui::palette_panel(m), 82); };
     std::string out = rend();
@@ -67,7 +67,7 @@ static void diff_review_checks() {
     m.d.pending_changes.push_back(a);
     auto b = diff::compute("README.md", "old\n", "new\nmore\n");
     m.d.pending_changes.push_back(b);
-    m.ui.panel = ui::panel::DiffReview{{0, 0}};
+    m.ui.panel.descend(ui::panel::DiffReview{{0, 0}});
 
     std::string out = maya::render_to_string(ui::diff_review(m), 84);
     check(has(out, "login.cpp") && has(out, "README.md"),
