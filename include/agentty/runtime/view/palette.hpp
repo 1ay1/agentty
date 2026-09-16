@@ -57,12 +57,23 @@ namespace agentty::ui {
 
 namespace detail {
 
-// A named slot in the live theme. Converts to Color on use, which is what
+// A named slot in the live theme. Converts to a colour on use, which is what
 // makes it substitutable for the constant it replaced.
+//
+// The read yields LitColor: a Theme field is already resolved by
+// construction, so a token cannot hand a caller something still symbolic.
+// Both conversions are offered because a token has to drop into BOTH a
+// `LitColor` slot (blending, Theme fields) and a `Color` one (widget Config
+// defaults, Style::with_fg) without a cast at ~700 call sites.
+//
+// The cost is that a bare `ui::fg == c` is ambiguous — two user-defined
+// conversions, neither better. Spell it `ui::fg() == c` to name the read;
+// that is the only place callers notice, and it reads better anyway.
 struct Slot {
-    maya::Color (*read)() noexcept;
+    maya::LitColor (*read)() noexcept;
+    [[nodiscard]] operator maya::LitColor() const noexcept { return read(); }  // NOLINT(google-explicit-constructor)
     [[nodiscard]] operator maya::Color() const noexcept { return read(); }  // NOLINT(google-explicit-constructor)
-    [[nodiscard]] maya::Color operator()() const noexcept { return read(); }
+    [[nodiscard]] maya::LitColor operator()() const noexcept { return read(); }
 };
 
 [[nodiscard]] inline const maya::Theme& thm() noexcept { return ui_prefs::theme(); }
@@ -125,17 +136,20 @@ inline maya::Style fg_bold(maya::Color c)       { return maya::Style{}.with_fg(c
 // color (bright_black / gray) collapses below the readable floor on
 // dark / low-contrast themes (true-black backgrounds, OLED palettes,
 // some Solarized variants). The intent of `fg_dim(muted)` is "subdued
-// secondary text," and bright_black ALONE already carries that role
+// secondary text," and the muted ink ALONE already carries that role
 // on every reasonable theme — stacking the SGR `dim` attribute on top
 // just trades readability for nothing. So suppress the `with_dim()`
-// when the color is bright_black; keep it for everything else, where
-// dimming a bright color is exactly the meaningful signal we want
-// (a muted form of the brand color, etc.).
+// when the colour already IS the muted ink; keep it for everything
+// else, where dimming a bright colour is exactly the meaningful signal
+// we want (a muted form of the brand colour, etc.).
+//
+// maya::theme::is_muted is the shared definition of that question. This
+// used to test `Named && index == BrightBlack` by hand, which was the
+// same check six maya widgets had each grown privately — and which
+// silently stopped being true for any theme whose muted slot is not
+// literally bright_black (i.e. all 57 built-in schemes).
 inline maya::Style fg_dim(maya::Color c) {
-    const bool is_already_muted =
-        c.kind() == maya::Color::Kind::Named
-        && c.index() == static_cast<uint8_t>(maya::AnsiColor::BrightBlack);
-    return is_already_muted
+    return maya::theme::is_muted(c)
         ? maya::Style{}.with_fg(c)
         : maya::Style{}.with_fg(c).with_dim();
 }

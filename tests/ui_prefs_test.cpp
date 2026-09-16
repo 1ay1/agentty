@@ -342,9 +342,11 @@ TEST_CASE("appearance: the palette follows the chosen theme") {
     REQUIRE(dracula != nullptr);
 
     ui_prefs::publish_theme(*dracula);
-    CHECK(ui::fg != native_fg);
-    CHECK(ui::accent != native_accent);
-    CHECK(maya::Color{ui::fg}.kind() == maya::Color::Kind::Rgb);
+    // Call the token explicitly: a Slot converts to both LitColor and Color,
+    // so a bare `ui::fg != x` is ambiguous. `ui::fg()` names the read.
+    CHECK(ui::fg() != native_fg);
+    CHECK(ui::accent() != native_accent);
+    CHECK(maya::Color{ui::fg}.kind() == maya::ColorKind::Rgb);
 
     // And every token tracks the SAME theme — not just the one we looked at.
     CHECK(maya::Color{ui::danger}    == dracula->error);

@@ -667,9 +667,9 @@ maya::AgentTimeline::Config agent_timeline_config(std::span<const ToolUse> tool_
             kb.add(std::string_view{"agentty.tool_panel"})
               .add(static_cast<std::uint64_t>(tool_calls.size()))
               .add(static_cast<std::uint64_t>(rail_color.kind()))
-              .add(static_cast<std::uint64_t>(rail_color.r()))
-              .add(static_cast<std::uint64_t>(rail_color.g()))
-              .add(static_cast<std::uint64_t>(rail_color.b()))
+              .add(static_cast<std::uint64_t>(rail_color.raw_r()))
+              .add(static_cast<std::uint64_t>(rail_color.raw_g()))
+              .add(static_cast<std::uint64_t>(rail_color.raw_b()))
               // The tool-output pref changes the body's HEIGHT, so it has
               // to key every layer that memoizes a built card — otherwise
               // flipping it repaints nothing until the next status change.
@@ -716,11 +716,11 @@ maya::Element agent_timeline_element(std::span<const ToolUse> tool_calls,
     key += "p|";
     key += std::to_string(static_cast<unsigned>(rail_color.kind()));
     key.push_back('.');
-    key += std::to_string(rail_color.r());
+    key += std::to_string(rail_color.raw_r());
     key.push_back('.');
-    key += std::to_string(rail_color.g());
+    key += std::to_string(rail_color.raw_g());
     key.push_back('.');
-    key += std::to_string(rail_color.b());
+    key += std::to_string(rail_color.raw_b());
     key.push_back('|');
     key += std::to_string(tool_calls.size());
     for (const auto& tc : tool_calls) {
