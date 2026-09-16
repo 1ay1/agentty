@@ -361,16 +361,33 @@ int do_replay(const std::string& in_path,
 int do_det(const std::string& in_path, int width, double floor_cps,
            double drain_secs, bool fx_on, int snap_at_frame, int snap_glide_ms,
            long long assert_max_delta, bool adaptive,
-           long long assert_finalize_max, long long assert_finalize_ms) {
+           long long assert_finalize_max, long long assert_finalize_ms,
+           bool deco_on = true, int frame_div = 1) {
     std::vector<Delta> deltas = load_fixture(in_path);
     if (deltas.empty()) { std::println(stderr, "no deltas"); return 2; }
 
     maya::testing::freeze_anim_clock(0);
+    // Motion level under test. The divisor is what makes "Reduced" mean
+    // something on a slow link; without it the bench can only measure the
+    // two extremes.
+    maya::anim::set_frame_divisor(frame_div);
     maya::StreamingMarkdown md;
     md.set_live(true);
     md.set_reveal_fx(fx_on);
+    // The three motion levels the Appearance pane offers map onto these two
+    // switches, so a bench that can only say fx on/off cannot measure the
+    // MIDDLE one — which is the level that matters for a high-latency link
+    // (issue #36): keep the progressive clip (progress information) and
+    // drop the decorative glyph churn (not information).
+    //   Full    = fx on,  deco on
+    //   Reduced = fx on,  deco OFF
+    //   Off     = fx off, deco off
+    md.set_reveal_decorate(fx_on && deco_on);
     md.set_reveal_pacing(floor_cps, drain_secs);
     if (adaptive) md.set_reveal_adaptive(true);
+
+    std::size_t wire_bytes_total = 0, wire_bytes_changed = 0, wire_frames_changed = 0;
+    std::string prev_render;
 
     auto visible_of = [&](const maya::Element& el) -> std::size_t {
         std::string s = maya::render_to_string(el, width);
@@ -442,6 +459,28 @@ int do_det(const std::string& in_path, int width, double floor_cps,
                                  "(simulated tool boundary)", snap_glide_ms, frame);
         }
         const std::size_t vis = visible_of(md.build());
+        // WIRE COST. Content cells are the right metric for "does the reveal
+        // glide", but they are not what a high-latency link pays for
+        // (issue #36: agentty over mosh). What crosses the wire is the
+        // RENDERED FRAME, escape sequences and all, so measure that too —
+        // and measure how much of it CHANGED, since an unchanged frame is
+        // one the render gate should have skipped entirely.
+        {
+            std::string s = maya::render_to_string(md.build(), width);
+            wire_bytes_total += s.size();
+            if (s != prev_render) {
+                ++wire_frames_changed;
+                // Longest common prefix/suffix: a rough stand-in for what a
+                // diffing terminal writer would actually send.
+                std::size_t p = 0;
+                const std::size_t lim = std::min(s.size(), prev_render.size());
+                while (p < lim && s[p] == prev_render[p]) ++p;
+                std::size_t q = 0;
+                while (q < lim - p && s[s.size()-1-q] == prev_render[prev_render.size()-1-q]) ++q;
+                wire_bytes_changed += s.size() - p - q;
+                prev_render = std::move(s);
+            }
+        }
         if (const char* df = std::getenv("DET_DUMP_FRAME");
             df && frame == std::atoi(df)) {
             std::println(stderr, "===== DUMP frame {} (src={} clip={} tailclip={} cur={:.0f} cmt={}) =====",
@@ -478,6 +517,11 @@ int do_det(const std::string& in_path, int width, double floor_cps,
         if (di >= deltas.size() && !md.is_live() && !md.is_finalizing()) break;
     }
     maya::testing::unfreeze_anim_clock();
+    std::println(stderr,
+        "\u2192 wire cost: frames={} changed={} bytes_rendered={} bytes_changed={} "
+        "(avg {} changed B/frame)",
+        frame, wire_frames_changed, wire_bytes_total, wire_bytes_changed,
+        frame ? wire_bytes_changed / frame : 0);
     std::println(stderr,
         "→ det done: frames={} max_frame_delta={} (@ {} ms) frames_over_24={} "
         "(incl-settle max={})",
@@ -578,6 +622,8 @@ int main(int argc, char** argv) {
         int    snap_glide = 0;      // 0 = instant snap; >0 = bounded glide ms
         long long assert_max = 0;   // >0 = fail if a streaming frame bursts past it
         bool   adaptive   = false;  // auto-tune floor to wire rate
+        bool   deco_on    = true;   // Reduced motion = fx on, deco off
+        int    frame_div  = 1;      // Reduced motion also thins repaints
         long long assert_fin_max = 0;  // >0 = cap on a finalizing frame's reveal
         long long assert_fin_ms  = 0;  // >0 = cap on arm→land wall-clock
         for (int i = 3; i < argc; ++i) {
@@ -592,11 +638,13 @@ int main(int argc, char** argv) {
             else if (a == "--assert-finalize-max" && i + 1 < argc) assert_fin_max = std::atoll(argv[++i]);
             else if (a == "--assert-finalize-ms" && i + 1 < argc) assert_fin_ms = std::atoll(argv[++i]);
             else if (a == "--adaptive") adaptive = true;
+            else if (a == "--no-deco") deco_on = false;
+            else if (a == "--frame-div" && i + 1 < argc) frame_div = std::atoi(argv[++i]);
             else { usage(); return 1; }
         }
         return do_det(path, width, floor_cps, drain_secs, fx_on, snap_at,
                       snap_glide, assert_max, adaptive,
-                      assert_fin_max, assert_fin_ms);
+                      assert_fin_max, assert_fin_ms, deco_on, frame_div);
     }
     if (mode == "replay") {
         bool   realtime   = false, fx_on = true;

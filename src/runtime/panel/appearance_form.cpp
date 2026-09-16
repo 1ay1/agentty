@@ -164,12 +164,19 @@ form::Form build_appearance_form(const up::Prefs& p, bool tty) {
         };
         static constexpr std::array<const char*, 3> kMotBlurbs = {
             "streaming reveal and spinners",
-            "no reveal \xc2\xb7 spinners kept",
+            "reveal kept \xc2\xb7 \xc2\xbc the repaints \xc2\xb7 no glyph churn",
             "nothing animates",
         };
         // Reduced motion is an accessibility setting before it is a taste:
         // a typewriter reveal is genuinely unpleasant with a vestibular
         // disorder, and a spinner on a slow link is noise on the wire.
+        //
+        // The blurb used to read "no reveal \xc2\xb7 spinners kept", which was
+        // backwards on both halves — Reduced KEEPS the reveal (progress is
+        // information) and drops the decorative churn. It also undersold the
+        // part that matters on a slow link: Reduced now thins the repaint
+        // rate to a quarter, so it is the setting to reach for over mosh
+        // (issue #36) rather than a milder-sounding Full.
         enum_choice(b, kApMotion, "Animation", kMot, p.motion,
                     "reduce or stop movement", kMotBlurbs);
     }

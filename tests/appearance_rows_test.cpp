@@ -18,6 +18,7 @@
 #include "agtest.hpp"
 
 #include "agentty/domain/ui_prefs.hpp"
+#include "agentty/domain/ui_live.hpp"   // publish() / motion_frame_divisor()
 #include "agentty/runtime/model.hpp"
 #include "agentty/runtime/panel/appearance.hpp"
 #include "agentty/runtime/panel/settings/items.hpp"
@@ -164,6 +165,78 @@ TEST_CASE("appearance: Animation Off actually stops animation") {
 
     maya::anim::set_reduce_motion(false);
     CHECK(!maya::anim::reduce_motion());
+}
+
+TEST_CASE("appearance: Reduced motion is a real middle, not a relabelled Full") {
+    // 0xfk0 (#36) runs agentty over mosh on a high-latency link and asked to
+    // "disable all unnecessary animations and keep only the essential
+    // updates". Reduced is the setting that should have answered that, and
+    // it did not: it dropped only the DECORATIVE layer (scramble, gradient,
+    // caret blink), which restyles bytes that were being sent anyway.
+    //
+    // Measured on a recorded stream (anthropic_md_stream det over
+    // fixtures/anthropic_md_tour.jsonl), counting frames whose RENDER
+    // actually changed — the thing a slow link pays for:
+    //
+    //     Full     1753 changed frames
+    //     Reduced  1753 changed frames   ← byte-identical to Full
+    //     Off        98 changed frames
+    //
+    // So the middle setting cost exactly what the expensive one did. The
+    // user's real choice was full churn or no reveal.
+    //
+    // Motion is TWO axes, not one: decoration is visual noise (vestibular
+    // accessibility), repaint rate is bandwidth. Reduced now thins the
+    // frame REQUESTS as well, so the text still walks in — progress stays
+    // legible — at a quarter of the frames.
+    namespace up = agentty::ui_prefs;
+
+    // The policy, as the domain states it.
+    const auto divisor_for = [](up::Motion mo) {
+        up::Prefs p;
+        p.motion = mo;
+        up::publish(p);
+        return up::motion_frame_divisor();
+    };
+    CHECK(divisor_for(up::Motion::Full)    == 1);
+    CHECK(divisor_for(up::Motion::Reduced) == 4);   // the fix
+    // Off stops the requests outright, so the divisor is moot — but it must
+    // not claim to thin something that is already stopped.
+    CHECK(divisor_for(up::Motion::Off)     == 1);
+
+    // …and what that policy costs, in frame requests over a simulated
+    // second of 60 fps animation. This is the number the reporter feels.
+    const auto requests_per_sec = [](bool off, int div) {
+        maya::anim::set_reduce_motion(off);
+        maya::anim::set_frame_divisor(div);
+        int n = 0;
+        for (int f = 0; f < 60; ++f) {
+            if (maya::anim::reduce_motion()) continue;
+            const int d = maya::anim::frame_divisor();
+            if (d > 1 && (f % d) != 0) continue;
+            ++n;
+        }
+        return n;
+    };
+    CHECK(requests_per_sec(false, 1) == 60);   // Full
+    CHECK(requests_per_sec(false, 4) == 15);   // Reduced — 4x cheaper, still moving
+    CHECK(requests_per_sec(true,  1) == 0);    // Off
+
+    // The divisor is clamped: a host that computes a nonsense value must not
+    // be able to stall animation entirely (0 or negative) or stretch one
+    // frame into a minute.
+    maya::anim::set_frame_divisor(0);
+    CHECK(maya::anim::frame_divisor() == 1);
+    maya::anim::set_frame_divisor(-5);
+    CHECK(maya::anim::frame_divisor() == 1);
+    maya::anim::set_frame_divisor(10000);
+    CHECK(maya::anim::frame_divisor() == 60);
+
+    // Leave the process as we found it: these are global slots and a later
+    // case that renders would otherwise inherit a thinned clock.
+    maya::anim::set_frame_divisor(1);
+    maya::anim::set_reduce_motion(false);
+    up::publish(up::Prefs{});
 }
 
 TEST_CASE("appearance: Syntax highlighting off actually removes the colour") {

@@ -92,6 +92,40 @@ inline void publish(const Prefs& p) {
     return current().motion == Motion::Full;
 }
 
+// How often a self-driven animation may repaint, as a divisor on the frame
+// rate. 1 = every frame; 4 = one frame in four.
+//
+// Motion is not one axis, it is two, and conflating them left the middle
+// setting doing nothing for the people who most needed it. Decoration is
+// about VISUAL NOISE (an accessibility concern — scramble and glyph churn
+// are unpleasant with a vestibular disorder). Repaint rate is about
+// BANDWIDTH: over mosh on a high-latency link, what costs you is the
+// NUMBER OF FRAMES that change, not how each one is styled.
+//
+// Measured on a recorded stream (tests/fixtures/anthropic_md_tour.jsonl),
+// before this existed:
+//
+//     Full     1753 changed frames
+//     Reduced  1753 changed frames   ← identical; decoration restyles bytes
+//                                      that were being sent anyway
+//     Off        98 changed frames
+//
+// So a user on a laggy link had exactly two choices: full repaint churn, or
+// no reveal at all. "Reduced" read like the middle option and delivered the
+// cost of the first — which is issue #36.
+//
+// Reduced now also thins the repaint rate, so it sits where its name
+// promises: text still walks in (progress is still legible), at a quarter
+// of the frames. Full and Off are unchanged.
+[[nodiscard]] inline int motion_frame_divisor() {
+    switch (current().motion) {
+        case Motion::Full:    return 1;
+        case Motion::Reduced: return 4;
+        case Motion::Off:     return 1;   // nothing self-drives anyway
+    }
+    return 1;
+}
+
 // The panel height ceiling, in rows. Still a MAXIMUM — the caller clamps to
 // what the terminal actually has.
 [[nodiscard]] inline int panel_rows() {

@@ -141,6 +141,13 @@ maya::Element view(const Model& m) {
         // frame REQUESTS, so "off" means the render loop goes quiet rather
         // than repainting an unchanging glyph 11× a second.
         maya::anim::set_reduce_motion(m.d.ui.motion == ui_prefs::Motion::Off);
+        // Reduced sits between the two: keep the motion, thin the REPAINTS.
+        // Measured on a recorded stream, Reduced used to change exactly as
+        // many frames as Full (1753 of them) because it only dropped
+        // decoration — which restyles bytes that were being sent anyway. For
+        // a user on mosh over a high-latency link that made the middle
+        // setting worthless: full churn or nothing (issue #36).
+        maya::anim::set_frame_divisor(ui_prefs::motion_frame_divisor());
         // Syntax highlighting, same seam and same reason: the renderer
         // decides per code block, far below any Model, so the preference has
         // to be published rather than threaded. It was persisted and hashed
