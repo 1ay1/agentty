@@ -136,6 +136,9 @@ agentty_fold_test(panel_input_snappiness_test TIMEOUT 180)
 # Does every arrow get a FRAME? Batched input reduces N events and paints
 # once, so rows the user passes through are computed but never shown.
 agentty_fold_test(frame_per_key_probe TIMEOUT 120 ARGS)
+# A theme change recolours every cell, so the whole viewport goes on the
+# wire per keypress. Compares that against a plain cursor move.
+agentty_fold_test(theme_wire_cost_probe TIMEOUT 120 ARGS)
 if(UNIX)
     # PTY-driven (openpty); full-runtime ghost-caret repro — see the
     # header of tests/test_ghost_caret_runtime.cpp (credit: davidwed).
