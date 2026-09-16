@@ -34,6 +34,54 @@ maya::StatusBar::Config status_bar_config(const Model& m) {
     // is now a measured degradation ladder — every fragment is built at
     // its real styled width and the row sheds detail until it fits. No
     // per-host knobs to tune.
+
+    // Identity of the row, so maya can skip the ladder when nothing moved.
+    //
+    // That ladder builds up to eight candidate shapes and MEASURES each to
+    // find the richest that fits. Correct, and expensive to redo 30 times a
+    // second while streaming — profiling put activity_row at 53% of all
+    // render time. maya caches the built row under this key, so the work
+    // happens once per distinct row instead of once per frame.
+    //
+    // EVERY input the ladder reads has to be in here. A key that misses one
+    // paints a stale status bar, which is a worse failure than the cost it
+    // saves: the row would silently stop reporting the thing it exists for.
+    // So this mirrors the five configs assigned above, field for field, and
+    // `model_badge` is absent for the one reason that makes it safe — this
+    // host never sets it (see the note above), leaving it default-empty.
+    {
+        maya::CacheIdBuilder k;
+        k.add(std::string_view{"agentty.status_bar"});
+        // phase_color + phase chip
+        k.add(static_cast<std::uint64_t>(cfg.phase_color.kind()))
+         .add(static_cast<std::uint64_t>(cfg.phase_color.raw_r()))
+         .add(cfg.phase.glyph)
+         .add(cfg.phase.verb)
+         .add(static_cast<std::uint64_t>(cfg.phase.frame))
+         .add(static_cast<std::uint64_t>(cfg.phase.elapsed_secs * 10.0f))
+         .add(static_cast<std::uint64_t>(cfg.phase.breathing));
+        // token stream sparkline — history is the shape that is drawn
+        k.add(static_cast<std::uint64_t>(cfg.token_stream.total))
+         .add(static_cast<std::uint64_t>(cfg.token_stream.rate * 10.0))
+         .add(static_cast<std::uint64_t>(cfg.token_stream.live))
+         .add(static_cast<std::uint64_t>(cfg.token_stream.history.size()));
+        for (const auto& h : cfg.token_stream.history)
+            k.add(static_cast<std::uint64_t>(h));
+        // context gauge
+        k.add(static_cast<std::uint64_t>(cfg.context.used))
+         .add(static_cast<std::uint64_t>(cfg.context.max))
+         .add(static_cast<std::uint64_t>(cfg.context.cells))
+         .add(static_cast<std::uint64_t>(cfg.context.show_bar))
+         .add(static_cast<std::uint64_t>(cfg.context.show_tokens));
+        // breadcrumb
+        k.add(cfg.breadcrumb.title)
+         .add(static_cast<std::uint64_t>(cfg.breadcrumb.max_chars));
+        // status banner (takes over the slot entirely when non-empty)
+        k.add(cfg.status_banner.text)
+         .add(static_cast<std::uint64_t>(cfg.status_banner.is_error))
+         .add(static_cast<std::uint64_t>(cfg.status_banner.kind));
+        cfg.content_key = k.build().hash();
+    }
     return cfg;
 }
 
