@@ -1,3 +1,5 @@
+#include <cstdlib>
+#include <limits>
 #include "agentty/runtime/view/helpers.hpp"
 
 #include <concepts>
@@ -229,11 +231,18 @@ int resolve_context_window(std::string_view provider_id,
     // FIVE rungs, strongest evidence first. The ordering is the whole design,
     // so it is stated here rather than inferred from the code below.
     //
-    //   1. user override        they configured the gateway
+    //   1. user override        per-model, they configured the gateway
     //   2. live advertised      the API is TRUTH — only it can 400 on overflow
     //   3. models.dev           a real declaration for 7824 models
     //   4. id inference         Claude/GPT families, [1m] suffix
-    //   5. 200k default         nothing is known; stay conservative
+    //   5. env / 200k default   nothing is known
+    //
+    // Rungs 2-4 are AUTOMATIC and cover ~95% of what agentty ships: measured
+    // against the live catalogs, openrouter declares a window for 368/368
+    // models, google 39/39, anthropic 14/14, openai 43/48, xai 12/12. The
+    // manual rungs exist for the case no catalog can reach — a private
+    // gateway serving an id nobody has published — and should be rare enough
+    // that most users never meet one.
 
     // 1. The user's override wins outright. They configured the gateway;
     //    nothing we can infer is better evidence than that.
@@ -282,9 +291,34 @@ int resolve_context_window(std::string_view provider_id,
     if (const int w = ModelCapabilities::from_id(model_id).context_window(); w > 0)
         return w;
 
-    // 5. Nothing is known. Stay conservative: an over-estimate fails the
-    //    turn on the wire, an under-estimate only compacts sooner than it
-    //    had to.
+    // 5. An explicit floor for the unknowable case, then the conservative
+    //    default.
+    //
+    //    AGENTTY_MAX_CONTEXT_TOKENS is the escape hatch for a private
+    //    gateway: an id no catalog has published, served by a host that
+    //    advertises nothing. Every serious client keeps one of these because
+    //    discovery provably cannot cover that case — Zed requires max_tokens
+    //    in settings.json for OpenAI-compatible endpoints, Claude Code has
+    //    CLAUDE_CODE_MAX_CONTEXT_TOKENS. The spelling here deliberately
+    //    mirrors Claude Code's so it is guessable by anyone who has hit this
+    //    before.
+    //
+    //    LAST, not first: it is global, so a session that reaches several
+    //    models would otherwise have one number applied to all of them. It
+    //    only speaks when nothing better did.
+    if (const char* env = std::getenv("AGENTTY_MAX_CONTEXT_TOKENS");
+        env && *env) {
+        // Bad input must not silently become a tiny window: a value that
+        // does not parse, or is <= 0, is treated as unset. strtol's endptr
+        // check rejects "1M" and "abc" rather than reading them as 1 or 0.
+        char* end = nullptr;
+        const long v = std::strtol(env, &end, 10);
+        if (end && *end == '\0' && v > 0 && v <= std::numeric_limits<int>::max())
+            return static_cast<int>(v);
+    }
+
+    // Nothing is known. Stay conservative: an over-estimate fails the turn
+    // on the wire, an under-estimate only compacts sooner than it had to.
     return kDefaultContextWindow;
 }
 

@@ -427,7 +427,23 @@ std::optional<Msg> on_fused_picker(const KeyEvent& ev) {
             switch (v->c) {
                 case U'p': return Msg{OpenProviders{}};   // cross-hop
                 case U'f': return Msg{ModelsToggleFavorite{}};
-                case U'w': return Msg{ModelsCycleContext{+1}};   // context window
+                // ^W (cycle the context-window override) is deliberately NOT
+                // here, for the same reason as ^R below: it is a per-model
+                // SETTING you configure once, not a navigation action you
+                // reach for while choosing a model — and a keybinding on a
+                // list row is a poor home for a value you set and forget.
+                //
+                // It should also be needed almost never. The window now
+                // resolves automatically from three sources before any
+                // manual rung: what the gateway advertises in /v1/models,
+                // what it answers to a probe (/v1/model/info, /props,
+                // /api/show), and models.dev's declaration — which together
+                // cover ~95% of the providers agentty ships (openrouter
+                // 368/368, google 39/39, anthropic 14/14, openai 43/48).
+                // What remains is the genuinely unknowable case: a private
+                // gateway serving an id no catalog has heard of. That gets
+                // AGENTTY_MAX_CONTEXT_TOKENS, which is discoverable from the
+                // docs and does not cost every user a keybinding.
                 // ^R (toggle reasoning display) is deliberately NOT here.
                 // Whether reasoning is SHOWN is an Appearance setting — the
                 // "Thinking" row — and having a second, invisible keybinding

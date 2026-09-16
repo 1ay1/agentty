@@ -31,6 +31,7 @@
 #include "agentty/store/store.hpp"
 
 #include <string>
+#include <cstdlib>
 
 namespace {
 
@@ -142,4 +143,56 @@ TEST_CASE("context ladder: a non-declaration is never recorded as one") {
     agentty::store::Settings s;
     CHECK(agentty::ui::resolve_context_window("acme", "ctxtest-zero-1", 0, s)
           == agentty::ui::kDefaultContextWindow);
+}
+
+TEST_CASE("context ladder: the env floor catches what no catalog can know") {
+    // The unknowable case: a private gateway serving an id nobody published.
+    // Discovery covers ~95% of shipped providers, but a model at
+    // 10.0.0.5:4000 called `internal-v2` is unreachable by construction, so
+    // one manual rung has to exist. Zed requires max_tokens in settings.json
+    // for OpenAI-compatible endpoints; Claude Code has
+    // CLAUDE_CODE_MAX_CONTEXT_TOKENS. This mirrors the latter's spelling.
+    struct ScopedEnv {
+        const char* k;
+        ScopedEnv(const char* key, const char* v) : k(key) {
+            if (v) ::setenv(k, v, 1); else ::unsetenv(k);
+        }
+        ~ScopedEnv() { ::unsetenv(k); }
+    };
+    agentty::store::Settings s;
+    const char* kEnv = "AGENTTY_MAX_CONTEXT_TOKENS";
+
+    {   // Unset: the conservative default stands.
+        ScopedEnv e{kEnv, nullptr};
+        CHECK(agentty::ui::resolve_context_window("priv", "ctxtest-env-1", 0, s)
+              == agentty::ui::kDefaultContextWindow);
+    }
+    {   // Set: it is used, because nothing better spoke.
+        ScopedEnv e{kEnv, "1000000"};
+        CHECK(agentty::ui::resolve_context_window("priv", "ctxtest-env-1", 0, s)
+              == 1'000'000);
+    }
+    {   // LAST rung, not first. It is GLOBAL, so a session reaching several
+        // models would otherwise stamp one number on all of them — anything
+        // that actually knows this model must win.
+        ScopedEnv e{kEnv, "1000000"};
+        CHECK(agentty::ui::resolve_context_window("priv", "ctxtest-env-1",
+                                                  /*advertised=*/32'768, s)
+              == 32'768);
+        agentty::set_catalog_context_window("priv/ctxtest-env-2", 262'144);
+        CHECK(agentty::ui::resolve_context_window("priv", "ctxtest-env-2", 0, s)
+              == 262'144);
+        CHECK(agentty::ui::resolve_context_window("anthropic",
+                                                  "claude-sonnet-4-5", 0, s)
+              == 200'000);
+    }
+    {   // Garbage must not become a tiny window. "1M" parses as 1 under a
+        // naive atoi, and a 1-token context would compact on every turn —
+        // far worse than the default it replaced.
+        for (const char* bad : {"1M", "abc", "", "0", "-5", "12x", "1e6"}) {
+            ScopedEnv e{kEnv, bad};
+            CHECK(agentty::ui::resolve_context_window("priv", "ctxtest-env-3", 0, s)
+                  == agentty::ui::kDefaultContextWindow);
+        }
+    }
 }
