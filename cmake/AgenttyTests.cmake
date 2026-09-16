@@ -123,6 +123,10 @@ agentty_fold_test(blob_gc_probe TIMEOUT 300 ARGS)
 # What a terminal RESIZE costs: a width change invalidates every cached
 # layout, so the whole frozen canvas re-lays-out at the new width.
 agentty_fold_test(resize_prof_probe TIMEOUT 120 ARGS)
+# Does browsing themes DEGRADE? "Laggy after a while" is the signature of
+# unbounded growth, not slow code, so this walks the browser hundreds of
+# times and reports per-switch cost + RSS in buckets: flat = no leak.
+agentty_fold_test(theme_switch_leak_probe TIMEOUT 300 ARGS)
 if(UNIX)
     # PTY-driven (openpty); full-runtime ghost-caret repro — see the
     # header of tests/test_ghost_caret_runtime.cpp (credit: davidwed).
