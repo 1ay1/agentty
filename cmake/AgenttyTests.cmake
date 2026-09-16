@@ -37,6 +37,7 @@ set(_AGENTTY_CONSOLIDATED
     codex_responses_test doom_loop_test visual_hash_coverage_test
     wire_fragmentation_test provider_identity_test provider_conformance_test
     login_routing_test tool_advertisement_test gateway_context_window_test
+    smart_settings_roundtrip_test
     capability_conformance_test
     ollama_transport_test openai_transport_test code_block_extract_test
     command_palette_test compaction_threshold_test fsm_test model_caps_test
