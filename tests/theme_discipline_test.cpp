@@ -58,6 +58,52 @@ const std::vector<std::string> kAllowedRawSgr = {
     return listed(kAllowed, rel);
 }
 
+// ── Prefilters ───────────────────────────────────────────────────────
+//
+// libstdc++'s std::regex is an interpreted backtracker with no literal
+// prefix optimisation, so it walks every position of every line even when
+// the line cannot possibly match. At 117k lines x 3 patterns that cost
+// 7.4 SECONDS in the debug build the tests actually run in — making this
+// grep the third-slowest test in the suite, slower than the render
+// benchmarks. Measured: 7515ms -> 24ms, a 310x speedup, by asking a cheap
+// substring question first.
+//
+// CORRECTNESS RULE: each prefilter must be strictly WEAKER than its
+// regex — it may pass lines the regex rejects, never the reverse. A
+// prefilter that filters out a real hit is a silent hole, which is the
+// one failure this file exists to prevent. So each one below tests for a
+// literal substring that the regex PROVABLY requires:
+//
+//   lit         needs "Color::" or "AnsiColor::" or "fg_"/"bg_" — EVERY
+//               one of its eight alternatives starts with one of those.
+//               (Note AnsiColor:: and the fg_/bg_ presets: an earlier
+//               draft of this filter tested only for ::hex/::rgb and would
+//               have silently switched most of the rule off. A prefilter
+//               must be checked against the pattern it fronts, alternative
+//               by alternative — that is the whole risk of this technique.)
+//   raw_sgr     needs "\x1b[" / "\033[" / "\e["  (its literal prefixes)
+//   channel_read needs ".r()" / ".g()" / ".b()" (it IS that literal set)
+//
+// find() is memchr-backed and stops at the first hit, so the common case
+// (no match) costs one scan of the line rather than one per position.
+[[nodiscard]] inline bool may_be_literal(const std::string& l) noexcept {
+    return l.find("Color::") != std::string::npos   // covers AnsiColor:: too
+        || l.find("fg_")     != std::string::npos
+        || l.find("bg_")     != std::string::npos;
+}
+
+[[nodiscard]] inline bool may_be_raw_sgr(const std::string& l) noexcept {
+    return l.find("\\x1b[") != std::string::npos
+        || l.find("\\033[") != std::string::npos
+        || l.find("\\e[")   != std::string::npos;
+}
+
+[[nodiscard]] inline bool may_read_channel(const std::string& l) noexcept {
+    return l.find(".r()") != std::string::npos
+        || l.find(".g()") != std::string::npos
+        || l.find(".b()") != std::string::npos;
+}
+
 // ── Is this channel read guarded? ───────────────────────────────────────
 //
 // `has_channels()` establishes a fact about a colour that holds for the
@@ -223,6 +269,72 @@ TEST_CASE("theme discipline: the guard tracker is block-scoped") {
     }
 }
 
+TEST_CASE("theme discipline: prefilters never reject a real hit") {
+    // A prefilter is an optimisation that can silently DISABLE a rule: if
+    // it rejects a line the regex would have matched, the check quietly
+    // stops checking and the suite stays green forever. Drafting these I
+    // got `lit` wrong on the first attempt — tested for "::hex("/"::rgb"
+    // and missed Color::black(), AnsiColor:: and the fg_/bg_ presets,
+    // which is five of the pattern's eight alternatives.
+    //
+    // So assert the implication directly, on strings chosen to hit every
+    // alternative: regex matches => prefilter passes. The converse is fine
+    // and expected (a prefilter may over-admit; that only costs time).
+    const std::regex lit{
+        R"(Color::(black|red|green|yellow|blue|magenta|cyan|white|bright_\w+)\(\))"
+        R"(|Color::hex\(0x)"
+        R"(|Color::rgb\(\s*[0-9])"
+        R"(|Color::rgb\(\s*0x)"
+        R"(|Color::hsl\(\s*[0-9])"
+        R"(|Color::indexed\(\s*[0-9])"
+        R"(|AnsiColor::)"
+        R"(|\b(fg|bg)_(black|red|green|yellow|blue|magenta|cyan|white)\b)"};
+    const std::regex raw_sgr{R"((\\x1b|\\033|\\e)\[[0-9;]*m)"};
+    const std::regex channel_read{R"(\.[rgb]\(\))"};
+
+    // One probe per alternative, plus near-misses that must NOT match.
+    const std::vector<std::string> corpus = {
+        "auto c = Color::black();",
+        "auto c = Color::bright_magenta();",
+        "auto c = Color::hex(0x282A36);",
+        "auto c = Color::rgb(12, 34, 56);",
+        "auto c = Color::rgb(0xFF, 0, 0);",
+        "auto c = Color::hsl(210, 0.5f, 0.4f);",
+        "auto c = Color::indexed(42);",
+        "AnsiColor::BrightBlack",
+        "Style{}.fg_red()",
+        "auto s = bg_blue;",
+        R"(out += "\x1b[31m";)",
+        R"(out += "\033[0m";)",
+        R"(out += "\e[1;32m";)",
+        "return c.r() + c.g();",
+        "put_u8(o, c.b());",
+        "return LitColor::rgb(mix(a.r(), b.r()));",
+        // Near-misses: no match expected from either layer.
+        "auto c = Color::slot(ThemeSlot::Accent);",
+        "int red = 5;",
+        "// just a comment about rgb",
+    };
+
+    for (const auto& line : corpus) {
+        if (std::regex_search(line, lit)) {
+            const std::string m =
+                "may_be_literal rejected a line `lit` matches: " + line;
+            CHECK(may_be_literal(line), m);
+        }
+        if (std::regex_search(line, raw_sgr)) {
+            const std::string m =
+                "may_be_raw_sgr rejected a line `raw_sgr` matches: " + line;
+            CHECK(may_be_raw_sgr(line), m);
+        }
+        if (std::regex_search(line, channel_read)) {
+            const std::string m =
+                "may_read_channel rejected a channel read: " + line;
+            CHECK(may_read_channel(line), m);
+        }
+    }
+}
+
 TEST_CASE("theme discipline: agentty names tokens, never colours") {
     const fs::path root{AGENTTY_SRC_ROOT};
     REQUIRE(fs::exists(root));
@@ -305,14 +417,16 @@ TEST_CASE("theme discipline: agentty names tokens, never colours") {
                 if (first != std::string::npos
                     && (line.compare(first, 2, "//") == 0
                         || line.compare(first, 1, "*") == 0)) continue;
-                if (!lit_exempt && std::regex_search(line, lit))
+                if (!lit_exempt && may_be_literal(line)
+                    && std::regex_search(line, lit))
                     offenders.push_back(rel + ":" + std::to_string(n)
                                         + "  " + line);
-                if (!listed(kAllowedRawSgr, rel)
+                if (!listed(kAllowedRawSgr, rel) && may_be_raw_sgr(line)
                     && std::regex_search(line, raw_sgr))
                     offenders.push_back(rel + ":" + std::to_string(n)
                                         + "  (raw SGR)  " + line);
-                if (std::regex_search(line, channel_read) && !scope.guarded())
+                if (may_read_channel(line) && !scope.guarded()
+                    && std::regex_search(line, channel_read))
                     offenders.push_back(rel + ":" + std::to_string(n)
                                         + "  (channel read on a colour that "
                                           "may have none)  " + line);
