@@ -124,8 +124,7 @@ struct Resolved {
 scheme_is_light(const maya::Theme& t) noexcept {
     const maya::LitColor bg = t.background;
     if (!bg.has_channels()) return std::nullopt;
-    return (0.2126 * bg.r() + 0.7152 * bg.g() + 0.0722 * bg.b())  // has_channels
-           / 255.0 > 0.5;
+    return (0.2126 * bg.r() + 0.7152 * bg.g() + 0.0722 * bg.b()) / 255.0 > 0.5;
 }
 
 // Why the chosen theme is not in use, or a caveat about it, for the
