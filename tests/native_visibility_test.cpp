@@ -396,6 +396,16 @@ TEST_CASE("native: no widget anywhere paints truecolor") {
     m.d.current.messages.push_back(std::move(a));
     m.s.phase = phase::Idle{};
 
+    // Under native the diff bands must be OFF — that IS the fix, and it is
+    // also why the colours inside push_diff_side's band branch stopped
+    // mattering: the branch is unreachable here. Assert it, so the next
+    // person can tell "the colours are fine" from "nothing ever drew".
+    // I spent a while confusing those two.
+    CHECK(!maya::ToolBodyPreview::diff_bands_ok_for_test(),
+          "native owns no background, so diff bands must degrade to "
+          "coloured text. If this flips to true the band branch is live "
+          "again and its colours need re-checking.");
+
     // The status banner in each of its three kinds — the crimson/amber/
     // indigo palette that was hardcoded until this commit. The kind is
     // classified from the status TEXT, so drive it the way the app does
