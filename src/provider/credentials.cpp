@@ -5,8 +5,10 @@
 //     REQUEST time by their transports; resolve() returns an empty AuthHeader
 //     (the transport supplies the token). We still expose account mgmt via the
 //     accounts registry, which snapshots those files.
-//   • Hosted API-key presets + custom hosts → Settings.provider_keys[id].
-//   • Local (AuthStyle::None) → no credential.
+//   • Hosted API-key presets + custom hosts → Settings.provider_keys[id],
+//     sealed at rest in the auth::keys vault (provider-keys.json).
+//   • Local (AuthStyle::None) → no credential; still persisted as an empty
+//     keyless row so host pickers keep their entry.
 
 #include "agentty/provider/credentials.hpp"
 
