@@ -84,6 +84,25 @@ TEST_CASE("theme discipline: agentty names tokens, never colours") {
     // creeps back in once the obvious route is closed.
     const std::regex raw_sgr{R"((\\x1b|\\033|\\e)\[[0-9;]*m)"};
 
+    // Arithmetic on a colour's channel bytes.
+    //
+    // Resolving a slot yields a LitColor, which is PAINTABLE but not
+    // necessarily NUMERIC: only Kind::Rgb carries channels. Named and
+    // Indexed keep a PALETTE INDEX in the r byte with g/b zero, and Default
+    // has nothing at all — and theme::native states every slot as Named or
+    // Default deliberately, so the user's own palette reaches the screen.
+    //
+    // Multiplying or differencing those bytes therefore reads a palette
+    // index as a colour channel. That is issue #45: bright_black (Named 8)
+    // blended into rgb(8,0,0) and painted over every line of every
+    // reasoning block — invisible on a dark terminal, and invisible to any
+    // developer, because they all run a scheme rather than native.
+    //
+    // Emission of a palette index spells itself index(); guarded arithmetic
+    // names has_channels(). Everything else is the bug.
+    const std::regex channel_arithmetic{
+        R"(\.[rgb]\(\)\s*[-+*/]|[-+*/]\s*\w*\.[rgb]\(\))"};
+
     std::vector<std::string> offenders;
     int scanned = 0;
 
@@ -116,6 +135,11 @@ TEST_CASE("theme discipline: agentty names tokens, never colours") {
                     && std::regex_search(line, raw_sgr))
                     offenders.push_back(rel + ":" + std::to_string(n)
                                         + "  (raw SGR)  " + line);
+                if (std::regex_search(line, channel_arithmetic)
+                    && line.find("has_channels") == std::string::npos)
+                    offenders.push_back(rel + ":" + std::to_string(n)
+                                        + "  (channel arithmetic on a colour "
+                                          "that may have none)  " + line);
             }
         }
     }

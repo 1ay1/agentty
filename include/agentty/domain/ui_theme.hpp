@@ -108,9 +108,24 @@ struct Resolved {
 // A scheme states literal RGB, so its polarity is a FACT about it rather
 // than a preference — which is what lets resolve() notice when the scheme a
 // user picked disagrees with the terminal they are on.
-[[nodiscard]] inline bool scheme_is_light(const maya::Theme& t) noexcept {
-    const maya::LitColor bg = t.background.to_rgb();
-    return (0.2126 * bg.r() + 0.7152 * bg.g() + 0.0722 * bg.b()) / 255.0 > 0.5;
+//
+// ── Only when the background actually has channels ────────────────────
+//
+// std::nullopt means "this theme has no opinion": theme::native states its
+// background as Default (SGR 49), and a Named/Indexed background is a
+// palette slot whose RGB only the terminal knows. Projecting either through
+// to_rgb() invents an answer — it returns white for Default, so native used
+// to report itself as a LIGHT scheme with luminance 1.0, and every caller
+// comparing that against a detected polarity got a confident wrong answer.
+//
+// A theme that owns no canvas cannot clash with the terminal's, so "no
+// opinion" is the truthful result and callers skip the comparison.
+[[nodiscard]] inline std::optional<bool>
+scheme_is_light(const maya::Theme& t) noexcept {
+    const maya::LitColor bg = t.background;
+    if (!bg.has_channels()) return std::nullopt;
+    return (0.2126 * bg.r() + 0.7152 * bg.g() + 0.0722 * bg.b())  // has_channels
+           / 255.0 > 0.5;
 }
 
 // Why the chosen theme is not in use, or a caveat about it, for the
@@ -141,7 +156,10 @@ struct Resolved {
     // heuristic disagreed is exactly the kind of guess issue #37 is about.
     if (r.polarity != maya::theme::Polarity::Unknown) {
         const bool term_light = r.polarity == maya::theme::Polarity::Light;
-        if (scheme_is_light(*r.theme) != term_light)
+        // nullopt = the scheme paints no canvas of its own (native), so
+        // there is nothing for the terminal's polarity to disagree with.
+        if (const auto light = scheme_is_light(*r.theme);
+            light && *light != term_light)
             return term_light ? "dark scheme on a light terminal"
                               : "light scheme on a dark terminal";
     }

@@ -44,6 +44,7 @@ set(_AGENTTY_CONSOLIDATED
     dialect_test
     embed_backend_test form_test embed_form_test escape_guarantee_test
     theme_discipline_test
+    native_visibility_test
     palette_nav_test panel_test panel_nav_test status_bar_cache_test
     appearance_rows_test
     issue37_terminal_respect_test

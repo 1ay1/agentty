@@ -245,7 +245,7 @@ TEST_CASE("theming: the Background preference actually does something") {
 
     const auto r = agentty::ui_prefs::resolve(p, /*tty=*/true);
     REQUIRE(r.theme != nullptr);
-    CHECK(!agentty::ui_prefs::scheme_is_light(*r.theme));
+    CHECK(agentty::ui_prefs::scheme_is_light(*r.theme) == std::optional{false});
     CHECK(!agentty::ui_prefs::theme_override_reason(p, r).empty());
 
     // A NOTE, not an override: the user picked this scheme on this terminal
@@ -267,6 +267,26 @@ TEST_CASE("theming: the Background preference actually does something") {
     l.polarity = agentty::ui_prefs::Polarity::Light;
     const auto rl = agentty::ui_prefs::resolve(l, /*tty=*/true);
     REQUIRE(rl.theme != nullptr);
-    CHECK(agentty::ui_prefs::scheme_is_light(*rl.theme));
+    CHECK(agentty::ui_prefs::scheme_is_light(*rl.theme) == std::optional{true});
     CHECK(agentty::ui_prefs::theme_override_reason(l, rl).empty());
+}
+
+// native states a Default background — SGR 49, the terminal's own canvas.
+// It therefore has NO polarity of its own, and must not claim one: it used
+// to project Default through to_rgb(), get white, and report itself as a
+// light scheme with luminance 1.0. Any caller comparing that against a
+// detected polarity got a confident wrong answer on every dark terminal.
+TEST_CASE("issue 37: native claims no polarity, because it paints no canvas") {
+    CHECK(!agentty::ui_prefs::scheme_is_light(maya::theme::native).has_value());
+
+    // And so it never triggers the mismatch note, on either polarity.
+    for (auto pol : {agentty::ui_prefs::Polarity::Light,
+                     agentty::ui_prefs::Polarity::Dark}) {
+        agentty::ui_prefs::Prefs p;
+        p.theme    = "";            // no scheme named => native
+        p.tier     = agentty::ui_prefs::ColorTier::TrueColor;
+        p.polarity = pol;
+        const auto r = agentty::ui_prefs::resolve(p, /*tty=*/true);
+        CHECK(agentty::ui_prefs::theme_override_reason(p, r).empty());
+    }
 }
