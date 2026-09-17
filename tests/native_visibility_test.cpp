@@ -41,6 +41,7 @@
 #include <maya/render/renderer.hpp>
 #include <maya/style/theme.hpp>
 #include <maya/widget/app_layout.hpp>
+#include <nlohmann/json.hpp>
 
 #include "agentty/domain/ui_theme.hpp"
 #include "agentty/runtime/model.hpp"
@@ -52,6 +53,7 @@
 
 using namespace agentty;
 using namespace maya;
+using json = nlohmann::json;
 
 namespace {
 
@@ -255,4 +257,90 @@ TEST_CASE("native: the reveal animation paints no truecolor") {
         "the reveal animation painted truecolor under native. First: "
         + std::string(bad.empty() ? "-" : bad.front());
     CHECK(bad.empty(), msg);
+}
+
+// ── The sweep ────────────────────────────────────────────────────
+//
+// The three cases above cover the reasoning widget, because that is what
+// #45 named. Twice now the same bug has turned up in a DIFFERENT widget
+// that nobody had rendered under native — the reveal animation, then the
+// diff bands and the status banner. Each time the fix was local and each
+// time the next instance was already sitting there.
+//
+// So stop chasing widgets and assert the property over the UI: put every
+// major surface on screen at once and require the whole frame to be free
+// of truecolor under native. A new widget that hardcodes a colour fails
+// here on the day it is added, without anyone remembering to write a test
+// for it — which is the only kind of coverage that keeps working after
+// the person who wrote it has moved on.
+TEST_CASE("native: no widget anywhere paints truecolor") {
+    ui_prefs::publish_theme(theme::native);
+
+    Model m;
+    m.d.show_reasoning = true;
+
+    // A user turn, so the user/assistant split renders.
+    Message u;
+    u.role = Role::User;
+    u.id   = MessageId{"u1"};
+    u.text = "audit the sandbox and show me the diff";
+    m.d.current.messages.push_back(std::move(u));
+
+    // An assistant turn carrying reasoning, prose, AND tool calls — the
+    // tool timeline, its body preview, and the diff bands inside it.
+    Message a = reasoning_msg(/*done=*/true);
+    a.text =
+        "Here is the audit.\n\n"
+        "- `bwrap` is invoked per tool call\n"
+        "- the profile is **fixed** at startup\n\n"
+        "```cpp\nint main() { return 0; }\n```\n";
+
+    ToolUse shell;
+    shell.id     = ToolCallId{"call_1"};
+    shell.name   = ToolName{"shell"};
+    shell.args   = json{{"command", "ls -la"}};
+    shell.status = ToolUse::Done{.output = "total 4\ndrwxr-xr-x  2 jon jon\n"};
+    a.tool_calls.push_back(std::move(shell));
+
+    // A write + a unified diff: the two paths that carried hardcoded
+    // GitHub-dark greens and coral reds.
+    ToolUse write;
+    write.id     = ToolCallId{"call_2"};
+    write.name   = ToolName{"write"};
+    write.args   = json{{"file_path", "/tmp/x.cpp"}, {"content", "int x = 1;\n"}};
+    write.status = ToolUse::Done{.output = "wrote 1 line"};
+    a.tool_calls.push_back(std::move(write));
+
+    ToolUse diff;
+    diff.id     = ToolCallId{"call_3"};
+    diff.name   = ToolName{"git_diff"};
+    diff.args   = json{{"path", "."}};
+    diff.status = ToolUse::Done{.output =
+        "diff --git a/x.cpp b/x.cpp\n"
+        "@@ -1,3 +1,4 @@\n"
+        " context line\n"
+        "-removed line\n"
+        "+added line\n"};
+    a.tool_calls.push_back(std::move(diff));
+
+    m.d.current.messages.push_back(std::move(a));
+    m.s.phase = phase::Idle{};
+
+    // The status banner in each of its three kinds — the crimson/amber/
+    // indigo palette that was hardcoded until this commit. The kind is
+    // classified from the status TEXT, so drive it the way the app does
+    // rather than setting the enum behind the classifier's back.
+    for (const char* status : {"error: the request failed",
+                              "retrying (upstream cut off)",
+                              "indexing the workspace"}) {
+        m.s.status = status;
+        m.s.status_until = {};   // no expiry, so status_active() is true
+        const auto bad = truecolor_cells(m, 120, 600);
+        const std::string msg =
+            "a widget painted truecolor under theme::native — native states "
+            "no RGB, so this colour is the widget's own palette overriding "
+            "the user's. First: "
+            + std::string(bad.empty() ? "-" : bad.front());
+        CHECK(bad.empty(), msg);
+    }
 }
