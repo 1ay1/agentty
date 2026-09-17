@@ -382,12 +382,14 @@ TEST_CASE("native: no widget anywhere paints truecolor") {
     ToolUse edit;
     edit.id   = ToolCallId{"call_4"};
     edit.name = ToolName{"edit"};
-    {
-        json edits = json::array();
-        edits.push_back({{"old_text", "int old_line = 1;\nint stays = 2;\n"},
-                         {"new_text", "int new_line = 1;\nint stays = 2;\n"}});
-        edit.args = json{{"path", "src/x.cpp"}, {"edits", edits}};
-    }
+    // Top-level old_text/new_text with NO ```diff fence in the output.
+    // That combination is what reaches Kind::EditDiff and push_diff_side's
+    // band path. An `edits` ARRAY, or any output carrying a diff fence,
+    // renders as Kind::GitDiff instead and never touches this code -- which
+    // is why the first version of this test passed with the bug present.
+    edit.args = json{{"path", "src/x.cpp"},
+                     {"old_text", "int old_line = 1;\nint stays = 2;\n"},
+                     {"new_text", "int new_line = 1;\nint stays = 2;\n"}};
     edit.status = ToolUse::Done{.output = "edited src/x.cpp"};
     a.tool_calls.push_back(std::move(edit));
 
@@ -474,12 +476,14 @@ TEST_CASE("native: no text is painted in its own background colour") {
     ToolUse edit;
     edit.id   = ToolCallId{"call_e"};
     edit.name = ToolName{"edit"};
-    {
-        json edits = json::array();
-        edits.push_back({{"old_text", "int old_line = 1;\nint stays = 2;\n"},
-                         {"new_text", "int new_line = 1;\nint stays = 2;\n"}});
-        edit.args = json{{"path", "src/x.cpp"}, {"edits", edits}};
-    }
+    // Top-level old_text/new_text with NO ```diff fence in the output.
+    // That combination is what reaches Kind::EditDiff and push_diff_side's
+    // band path. An `edits` ARRAY, or any output carrying a diff fence,
+    // renders as Kind::GitDiff instead and never touches this code -- which
+    // is why the first version of this test passed with the bug present.
+    edit.args = json{{"path", "src/x.cpp"},
+                     {"old_text", "int old_line = 1;\nint stays = 2;\n"},
+                     {"new_text", "int new_line = 1;\nint stays = 2;\n"}};
     edit.status = ToolUse::Done{.output = "edited src/x.cpp"};
     a.tool_calls.push_back(std::move(edit));
 
