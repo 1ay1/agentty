@@ -119,16 +119,44 @@ dotfiles) and the one-time migration that moves a legacy
 `~/.config/agentty` install into place. Both the root and `credentials/`
 are created on first use and `chmod 0700`'d best-effort.
 
-### At-Rest Encryption (opt-in)
+### At-Rest Encryption
 
-By default the credentials file is plaintext JSON protected only by `0600`
-file permissions — fine on a single-user machine, but readable by any process
-running as the same uid. Two independent, opt-in hardening layers are
-available (`src/io/cred_crypt.cpp`, `include/agentty/auth/cred_crypt.hpp`):
+Three stores hold secrets, and all three are sealed by default:
 
-**1. Passphrase-derived encryption.** When enabled, the credential blob is
-sealed with AES-256-GCM under a key derived from a passphrase. The on-disk
-envelope (v2) stamps the KDF and its parameters so old files keep opening.
+| File | Holds |
+|---|---|
+| `credentials.json` | the active OAuth token / API key |
+| `accounts.json` | every signed-in account |
+| `provider-keys.json` | one API key per provider preset and custom host |
+
+Each is an AES-256-GCM envelope bound to the machine, with the same
+keystore-first / file-fallback path. `0600` is the floor, not the
+protection.
+
+> **Changed in 0.9.1.** Provider API keys used to rest **plaintext** in
+> `settings.json` under `provider_keys` — hosted presets and custom
+> hosts alike — while the other two stores were already sealed. A
+> backup, a synced dotfiles repo, a screen-share or a bug-report
+> attachment of `settings.json` walked away with every live key.
+>
+> They now persist through `auth::keys` into the sealed vault, and
+> `settings.json` stops carrying keys at all. On first load a legacy
+> plaintext `provider_keys` object is **imported into the vault and
+> stripped from settings.json** — one-time, automatic, no user action.
+> Nothing changes at runtime: `store::Settings.provider_keys` is still
+> the in-memory source of truth, and only the at-rest layer moved.
+>
+> An empty map is authoritative — signing out must be able to clear the
+> vault — so `save()` always writes rather than short-circuiting on
+> empty.
+
+On top of that floor, one further **opt-in** layer is available
+(`src/io/cred_crypt.cpp`, `include/agentty/auth/cred_crypt.hpp`):
+
+**Passphrase-derived encryption.** When enabled, the credential blob is
+sealed under a key derived from a passphrase rather than from the
+machine. The on-disk envelope (v2) stamps the KDF and its parameters so
+old files keep opening.
 
 | Env var | Effect |
 |---|---|
@@ -145,7 +173,7 @@ if it was written with scrypt — mixing is not silent, it fails closed. Wrong
 passphrase or a v2 file opened without a passphrase both refuse rather than
 returning garbage.
 
-**2. OS keystore** — see the next section. The two can be combined; when both
+**OS keystore** — see the next section. The two can be combined; when both
 are on, the keystore stores the (already passphrase-sealed) blob.
 
 ## OS Keystore (opt-in)
@@ -469,6 +497,8 @@ main()                                                    (src/main.cpp:1400)
 |---|---|
 | `include/agentty/auth.hpp` | Public types: `Method`, `Style`, `Credentials`, `OAuthConfig`, `TokenResponse`; function declarations |
 | `include/agentty/auth/cred_crypt.hpp` | Passphrase at-rest encryption interface (`seal`/`unseal`, `passphrase_active`) |
+| `include/agentty/auth/keys.hpp` | Sealed provider-key vault (`path`/`load`/`save`) |
+| `src/io/keys.cpp` | provider-keys.json: AES-256-GCM envelope + keystore mirror + legacy import |
 | `include/agentty/auth/keystore.hpp` | OS keystore interface (`store`/`retrieve`/`remove`, `Status`) |
 | `src/io/auth.cpp` | All auth logic: paths, TLS opts, load/save/clear (keystore-aware), PKCE helpers, token exchange/refresh, `resolve()`, login/logout/status subcommands |
 | `src/io/tls.cpp` | libcurl TLS options + opt-in SPKI pinning (`pin_verify_cb`) |

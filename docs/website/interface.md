@@ -50,3 +50,37 @@ Each tool gets a purpose-built widget — agentty doesn't just print raw JSON:
 ## Smooth streaming
 
 SSE deltas drip into the screen at ⅛ buffer per tick (clamped 32–256 chars), so server-side batching doesn't translate into chunky on-screen text. Where the terminal supports it, frames are wrapped in DEC 2026 begin/end-sync to avoid tearing.
+
+## Appearance
+
+[[Ctrl+K]] → **Appearance** opens a form with eleven look-and-feel knobs. Changes apply immediately — there is no apply step — and persist to your user config, not the project's, because a light terminal is a property of your eyes rather than of the repo you happen to be in.
+
+| Setting | Options |
+|---|---|
+| Scheme | `native` + 615 built-ins, via a fuzzy browser |
+| Colors | auto / truecolor / 256 / 16 / mono |
+| Background | auto / dark / light |
+| Density | compact / normal / roomy |
+| Prose width | 0–200 columns (0 = no cap) |
+| Compact turns | on / off |
+| Motion | full / reduced / off |
+| Syntax highlighting | on / off |
+| Tool output | collapsed / preview / full |
+| Thinking | shown / collapsed / hidden |
+| Timestamps | off / relative / absolute |
+
+`auto` on Colors and Background shows what was actually detected, so you can see whether the guess was right before overriding it.
+
+The theme browser previews live: arrowing through the list restyles the transcript under you, [[Enter]] keeps it, [[Esc]] puts back the one you opened on. Typing filters by fuzzy subsequence — `gvd` finds Gruvbox Dark.
+
+Colour changes repaint; **layout** changes (density, prose width, compact turns) apply to new output only. Rows already committed to your scrollback are the terminal's, not ours — rewriting them would tear the canvas.
+
+### Why `native` is the default
+
+Every named scheme is a guess about your terminal. `native` is the absence of a guess: it emits only your terminal's own foreground and background plus the 16 ANSI colours **you** configured, and never a hardcoded RGB value.
+
+That makes it the one choice that is correct on a light terminal, a dark terminal, a 16-colour terminal and a monochrome one simultaneously — and it means a carefully-tuned palette (Catppuccin, Gruvbox, your own) shows through instead of being painted over.
+
+The trade is that agentty cannot *read* those 16 colours — the terminal owns them and does not report them — so a few effects that need to know a colour's brightness degrade rather than guess. Filled elements use reverse video, letting the terminal pair its own foreground and background, and blends that cannot be computed become no blend at all rather than a wrong one.
+
+If you would rather agentty pick a complete palette, the browser has 615 of them.

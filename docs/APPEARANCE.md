@@ -214,6 +214,52 @@ choice that is correct on a light terminal, a dark terminal, a
 Every built-in scheme is a *guess* about your terminal. Native is the
 absence of a guess.
 
+### 3.3 Writing a widget that survives native
+
+Native is the theme most likely to break and least likely to be noticed
+breaking, because every developer runs a scheme. Issue #45 was one
+report that turned out to be **seven** separate bugs, all of the same
+family, all invisible under any other theme.
+
+The root fact: under native the 23 theme slots collapse onto the 16 ANSI
+colours the *terminal* owns. Two different slots can be the same colour,
+and we cannot read what any of them actually look like.
+
+**A `LitColor` is paintable, not numeric.** Only `Kind::Rgb` has
+channels. `Named`/`Indexed` keep a palette *index* in the `r_` byte with
+`g_`/`b_` zero; `Default` has nothing at all. Reading `r()/g()/b()` off
+one is how `bright_black` became `rgb(8,0,0)` — near-black, invisible,
+selectable. Guard arithmetic with `has_channels()`, and let a blend
+degrade to **no effect** (snap to an endpoint), never to a `to_rgb()`
+projection: projecting substitutes the standard table for whatever the
+user actually remapped.
+
+**A slot may not be distinct from its neighbour.** `success` and
+`diff_added` are both SGR 32 here. Pairing them paints green on green —
+both perfectly legitimate palette colours, and unreadable. Never assume
+two slots differ; if a fg/bg pair must contrast, one side has to be
+stated rather than named.
+
+**`inverse_text` is not ink for a badge.** Under native it is `Default`,
+the same colour as ordinary text, because there is no second canvas to
+invert against. A filled chip using it paints normal foreground on a
+coloured block. For a filled element, either state both sides (see
+`maya::diff_palette`) or use **reverse video** (SGR 7) and let the
+terminal swap its own pair — it is the only party that knows them.
+
+**Effects that cannot be computed must become no effect.** The reveal
+animation, the diff bands and the status banner each carried their own
+hardcoded RGB, which is a widget overruling the user's palette. Name a
+role (`Color::slot`) unless the colour is genuinely content rather than
+chrome — a diff's green, a language brand colour, a syntax deck — in
+which case state it *with its ink*, because contrast is a property of
+the pair.
+
+The guards for this live in `tests/native_visibility_test.cpp`: render
+every surface under native and assert no cell paints a truecolor value,
+and no cell paints text in its own background colour. Chasing individual
+widgets found three instances and missed the fourth every time.
+
 ---
 
 ## 4. The seam: how a pref reaches the renderer
@@ -262,9 +308,9 @@ detection is involved, what was resolved.
 
 | Row | Values | Drives |
 |---|---|---|
-| Scheme | native + 57 built-ins | The whole palette |
+| Scheme | native + 615 built-ins | The whole palette |
 
-A `Pick`, not a `Choice` — 57 options and growing is precisely the case
+A `Pick`, not a `Choice` — 615 options is precisely the case
 `form.hpp` says belongs in a searchable picker rather than a dropdown.
 See §6 for the browser's design.
 
@@ -412,7 +458,7 @@ learn it from, which is the wrong place — a theme is not something you
 reach for mid-turn, and its neighbours (profile, Smart Mode, retrieval)
 all live in Settings. Now: **Ctrl+K → Settings → Appearance**.
 
-**A theme dropdown.** 57 options in a `Choice` would be a worse picker
+**A theme dropdown.** 615 options in a `Choice` would be a worse picker
 than the picker. `form.hpp` draws this line explicitly: if you cannot
 name every option in a header comment, it is a `Pick`.
 
@@ -483,3 +529,28 @@ The three scrollback tests — `reveal_scrollback_test`,
 `scrollback_wire_fuzz`, `frozen_invariant_fuzz` — are what actually
 prove the variable-height seam is safe. Run them after touching
 anything in §2.2.
+
+`tests/native_visibility_test.cpp` guards §3.3. It renders every major
+surface under native — reasoning (settled, live, and mid-reveal), tool
+calls including all three diff paths, and the status banner in each of
+its kinds — and asserts:
+
+- no cell paints a truecolor value (the diff palette is the one listed
+  exemption, colour by colour, so a *new* literal still fails)
+- no cell paints text in its own background colour
+- every native slot resolves to `Named`/`Default`, never RGB
+- no pairwise blend of two slots fabricates a triple
+
+The pair matters: the first question is "did anyone invent a colour",
+the second is "can you read it", and neither implies the other. Fixing
+the first by moving widgets onto theme slots is what *caused* the
+second.
+
+`maya/tests/test_blend_safety.cpp` pins the same rule one layer down,
+and both repos' `theme_discipline` tests grep the source for colour
+literals and unguarded channel reads.
+
+> **Run maya's own suite too.** agentty does not compile maya's tests or
+> examples, so a change to a maya header can be green here and red in
+> maya's CI. `cmake -B build -DMAYA_BUILD_TESTS=ON -DMAYA_BUILD_EXAMPLES=ON`
+> in `maya/` is what CI builds.

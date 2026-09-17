@@ -146,22 +146,36 @@ inline constexpr auto text_inverse   = AGENTTY_THEME_SLOT(inverse_text);
 
 // A chip: the theme's own text colour, on a tint of `hue`.
 //
-// The ink stays `text` — the same colour as prose — and the HUE moves until
-// that text reads on it. That is the right way round for a label: ink that
-// changes per chip is a second thing for the eye to resolve, while ink that
-// stays the prose colour makes the chip read as text on a tint, which is
-// what a badge is.
+// Two cases, because only one of them is measurable.
 //
-// maya tints toward the canvas, so the hue stays recognisably itself. On a
-// palette colour it cannot measure and returns the hue unchanged — the
-// terminal owns those entries, and guessing at them is the mistake this
-// area keeps repeating.
+// RGB hue (every named scheme). Keep the theme's `text` as the ink and
+// move the HUE until that text reads on it. That is the right way round
+// for a label: ink that changes per chip is a second thing for the eye to
+// resolve, while ink that stays the prose colour makes the chip read as
+// text on a tint, which is what a badge is.
+//
+// PALETTE hue (theme::native). We cannot measure it — the terminal owns
+// those 16 entries — and we must not project it, because projecting throws
+// away the colour the user actually chose. Their `text` is no help either:
+// under native it is Default, the terminal's ORDINARY foreground, so
+// pairing it with a palette band is light-on-light, which is agentty #45
+// all over again.
+//
+// So hand the question to the one party that can answer it. SGR 7 tells
+// the terminal to swap its own foreground and background: the band becomes
+// the user's palette colour and the ink becomes the user's background, a
+// pair they chose together and the terminal knows exactly.
 [[nodiscard]] inline maya::Style chip_style(maya::Color hue) noexcept {
     const maya::Theme& th = detail::thm();
+    const maya::LitColor lit = th.resolve(hue);
+
+    if (lit.kind() != maya::ColorKind::Rgb)
+        return maya::Style{}.with_fg(lit).with_inverse();
+
     const maya::LitColor ink    = th.resolve(maya::Color::slot(maya::ThemeSlot::Text));
     const maya::LitColor canvas = th.resolve(maya::Color::slot(maya::ThemeSlot::Background));
     return maya::Style{}
-        .with_bg(maya::band_for(th.resolve(hue), ink, canvas))
+        .with_bg(maya::band_for(lit, ink, canvas))
         .with_fg(maya::Color::slot(maya::ThemeSlot::Text));
 }
 

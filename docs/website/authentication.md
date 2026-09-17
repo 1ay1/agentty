@@ -52,5 +52,9 @@ agentty status    # show which auth source will be used
 ```
 
 :::warn
-Credentials are stored at mode `0600` and written atomically (temp + fsync + rename). Treat the file like any other secret — anyone who can read it can act as you against the Anthropic API.
+Every credential store is **sealed at rest** with AES-256-GCM bound to the machine, written atomically (temp + fsync + rename) at mode `0600`: `credentials.json` (the active token), `accounts.json` (every signed-in account), and `provider-keys.json` (one API key per provider and custom host).
+
+Provider keys used to rest in plaintext inside `settings.json` — a file people paste into bug reports and sync to dotfiles repos. As of 0.9.1 they live in the sealed vault instead, and an upgraded install migrates them on first load with no action from you.
+
+Sealing is machine-bound, so it protects a stolen file, not a compromised account: anything running as your user can still ask agentty to unseal. For a secret that survives that, add a passphrase (`AGENTTY_ENCRYPT_PASSPHRASE=1`) or the OS keystore (`AGENTTY_USE_KEYSTORE=1`).
 :::
