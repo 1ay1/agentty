@@ -36,6 +36,7 @@
 #include <vector>
 
 #include <maya/core/animation.hpp>
+#include <maya/core/anim_clock.hpp>   // advance_anim_clock_ms (reveal frames)
 #include <maya/render/canvas.hpp>
 #include <maya/render/renderer.hpp>
 #include <maya/style/theme.hpp>
@@ -126,29 +127,15 @@ TEST_CASE("native: bright_black stays SGR 90, never a truecolor triple") {
           "blending the default colour with itself must stay the default");
 }
 
-TEST_CASE("native: a rendered reasoning turn paints no truecolor cell") {
-    // End-to-end: build a real turn with reasoning, render it under native,
-    // and inspect every painted CELL. Under native no slot has channels, so
-    // any Rgb foreground or background in the frame was computed from bytes
-    // that were not channels. This is the check that would have caught #45
-    // as reported.
-    ui_prefs::publish_theme(theme::native);
+namespace {
 
-    Model m;
-    m.d.show_reasoning = true;
-    Message a;
-    a.role = Role::Assistant;
-    a.id   = MessageId{"a1"};
-    a.thinking = "Let me start by exploring the repository structure.\n\n"
-                 "The user wants:\n\n"
-                 "1. An audit of the implementation\n"
-                 "2. A blueprint of what it would take\n\n"
-                 "This is a blueprint task, no code editing.";
-    a.text = "Here is the audit.";
-    m.d.current.messages.push_back(std::move(a));
-    m.s.phase = phase::Idle{};
-
-    constexpr int kW = 100, kH = 400;
+// Render a model under native and return every truecolor cell found.
+//
+// Under native no slot has channels, so ANY Rgb foreground or background
+// in the frame was computed from bytes that were not channels. Returning
+// the offenders rather than a bool keeps the failure message able to name
+// a row and column, which is what made the original diagnosis quick.
+std::vector<std::string> truecolor_cells(Model& m, int w = 100, int h = 400) {
     auto root = maya::AppLayout{{
         .thread        = ui::thread_config(m),
         .changes_strip = ui::changes_strip_config(m),
@@ -158,34 +145,114 @@ TEST_CASE("native: a rendered reasoning turn paints no truecolor cell") {
     }}.build();
 
     maya::StylePool pool;
-    maya::Canvas canvas(kW, kH, &pool);
+    maya::Canvas canvas(w, h, &pool);
     canvas.clear();
     maya::render_tree(root, canvas, pool, maya::theme::native, true);
 
-    int rgb_cells = 0;
-    std::string first;
+    std::vector<std::string> bad;
     const int max_row = canvas.max_content_row();
     for (int y = 0; y <= max_row; ++y) {
-        for (int x = 0; x < kW; ++x) {
+        for (int x = 0; x < w; ++x) {
             const auto& cell = canvas.get(x, y);
             const maya::Style& st = pool.get(cell.style_id);
             for (const auto* c : {&st.fg, &st.bg}) {
                 if (!c->has_value()) continue;
                 const LitColor lit = theme::native.resolve(**c);
                 if (lit.kind() != ColorKind::Rgb) continue;
-                ++rgb_cells;
-                if (first.empty())
-                    first = "row " + std::to_string(y) + " col "
-                          + std::to_string(x) + " -> " + lit.fg_sgr();
+                bad.push_back("row " + std::to_string(y) + " col "
+                              + std::to_string(x) + " -> " + lit.fg_sgr());
             }
         }
     }
+    return bad;
+}
 
-    CHECK(max_row > 0, "the render produced no rows");
+Message reasoning_msg(bool done) {
+    Message a;
+    a.role = Role::Assistant;
+    a.id   = MessageId{"a1"};
+    a.thinking = "Let me start by exploring the repository structure.\n\n"
+                 "The user wants:\n\n"
+                 "1. An audit of the **bwrap** implementation\n"
+                 "2. A blueprint of what it would take\n\n"
+                 "This is a blueprint task, no code editing.\n\n"
+                 "The cwd is /home/jon/sandbox. Let me check the structure";
+    if (done) a.text = "Here is the audit.";
+    return a;
+}
+
+} // namespace
+
+TEST_CASE("native: a rendered reasoning turn paints no truecolor cell") {
+    // End-to-end, SETTLED: the state the first screenshot shows.
+    ui_prefs::publish_theme(theme::native);
+
+    Model m;
+    m.d.show_reasoning = true;
+    m.d.current.messages.push_back(reasoning_msg(/*done=*/true));
+    m.s.phase = phase::Idle{};
+
+    const auto bad = truecolor_cells(m);
     const std::string msg =
         "cell(s) painted a truecolor value under theme::native — native states "
         "no RGB, so every triple here was computed from bytes that were not "
         "channels (agentty #45). First: "
-        + std::string(first.empty() ? "-" : first);
-    CHECK(rgb_cells == 0, msg);
+        + std::string(bad.empty() ? "-" : bad.front());
+    CHECK(bad.empty(), msg);
+}
+
+TEST_CASE("native: a LIVE streaming reasoning block stays visible") {
+    // The state the issue's screenshots ACTUALLY show: mid-stream, header
+    // reading "Thinking", body still arriving. This path differs from the
+    // settled one in the way that matters — ReasoningStream applies its
+    // "stream of consciousness" GRADIENT while live, fading body_fg to
+    // body_fg_bright down the block. That is a per-line lerp between two
+    // theme slots, i.e. exactly the operation that produced rgb(8,0,0).
+    //
+    // The settled test alone would pass with the gradient still broken,
+    // because a settled block renders flat. Reported-state coverage is not
+    // optional here.
+    ui_prefs::publish_theme(theme::native);
+
+    Model m;
+    m.d.show_reasoning = true;
+    m.d.current.messages.push_back(reasoning_msg(/*done=*/false));
+    m.s.phase = phase::Streaming{phase::Active{}};
+
+    const auto bad = truecolor_cells(m);
+    const std::string msg =
+        "a LIVE reasoning block painted truecolor under native — the live "
+        "gradient blends two slots per line, which is the #45 operation. "
+        "First: " + std::string(bad.empty() ? "-" : bad.front());
+    CHECK(bad.empty(), msg);
+}
+
+TEST_CASE("native: the reveal animation paints no truecolor") {
+    // Reveal is ON by default everywhere, and it is the other per-cell
+    // colour effect in the program: decorate_text_reveal ghosts and glides
+    // freshly-arrived glyphs, and decorate_end_caret builds a backdrop by
+    // dividing the caret colour's channels by four. Both are arithmetic on
+    // a colour, both run on the live tail, and neither is exercised by a
+    // settled render.
+    ui_prefs::publish_theme(theme::native);
+    ::setenv("AGENTTY_REVEAL", "1", 1);
+
+    Model m;
+    m.d.show_reasoning = true;
+    m.d.current.messages.push_back(reasoning_msg(/*done=*/false));
+    m.s.phase = phase::Streaming{phase::Active{}};
+
+    // Several animation frames: the reveal window moves, so one frame is
+    // not a sample of it.
+    std::vector<std::string> bad;
+    for (int frame = 0; frame < 8 && bad.empty(); ++frame) {
+        maya::testing::advance_anim_clock_ms(16);
+        bad = truecolor_cells(m);
+    }
+    ::unsetenv("AGENTTY_REVEAL");
+
+    const std::string msg =
+        "the reveal animation painted truecolor under native. First: "
+        + std::string(bad.empty() ? "-" : bad.front());
+    CHECK(bad.empty(), msg);
 }
