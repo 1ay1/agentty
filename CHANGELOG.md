@@ -4,6 +4,8 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-09-17
+
 ### Security
 - **Provider API keys were resting in plaintext in `settings.json`.** Hosted-preset keys ("openai", "groq", …) and custom-host keys (including the keyless localhost rows) were serialised under `provider_keys` into an unencrypted file — the same class of exposure as SECURITY_AUDIT finding #1, but one store over: credentials.json and accounts.json were already sealed with the machine-bound AES-256-GCM envelope, so a backup, a synced dotfiles repo, or a pasted bug report of settings.json walked away with every live key while the token stores stayed safe. All provider keys now persist through the same encryption framework: a new `auth::keys` vault writes them to `~/.agentty/credentials/provider-keys.json` — sealed with `crypt::seal`, mirrored into the OS keystore when `AGENTTY_USE_KEYSTORE` is enabled, atomically at 0600 — and `settings.json` carries no credential-shaped field at all (not even an empty `provider_keys` object). First load of an upgraded install imports the legacy plaintext keys into the vault and the next save strips them from settings.json, so no migration step is asked of the user; a sign-out that empties the map clears the vault at rest. The in-memory story is unchanged — selection, picker rows, and the central resolver keep reading `Settings.provider_keys`, so no workflow moves.
 
