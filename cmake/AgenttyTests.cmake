@@ -16,7 +16,7 @@ include(AgenttyTestRegistry)
 # a per-exe build; see git history for the per-test rationale comments.
 set(_AGENTTY_CONSOLIDATED
     error_class_test accounts_registry_test acp_agents_test acp_integration_test
-    custom_host_key_prompt_test dispatch_route_test
+    custom_host_key_prompt_test dispatch_route_test provider_keys_seal_test
     model_label_test cache_anchor_test composer_edit_test hooks_gate_test
     tool_result_image_test
     image_dims_test

@@ -4,8 +4,8 @@
 // provider (Mistral) → HTTP 401.
 //
 // Isolated via XDG_CONFIG_HOME + a temp settings dir so it never touches the
-// real config; the keystore is disabled so provider_keys round-trip through the
-// sealed settings file.
+// real config; the keystore is disabled so provider_keys round-trip through
+// the sealed provider-keys.json vault.
 #include "agtest.hpp"
 
 #include "agentty/provider/credentials.hpp"

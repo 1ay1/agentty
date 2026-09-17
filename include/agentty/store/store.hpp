@@ -133,10 +133,16 @@ struct Settings {
     // startup in main.cpp.
     std::string          provider;
     // Per-provider API keys entered via the in-app login modal, keyed by
-    // the provider's canonical id ("openai", "groq", …). A saved key here
-    // takes precedence over the env-var chain so a user who pasted a key
-    // once doesn't have to re-export it every shell. Anthropic is NOT
-    // stored here — its creds live in credentials.json.
+    // the provider's canonical id ("openai", "groq", …) — custom hosts are
+    // keyed by their endpoint spec. A saved key here takes precedence over
+    // the env-var chain so a user who pasted a key once doesn't have to
+    // re-export it every shell. Anthropic is NOT stored here — its creds
+    // live in credentials.json.
+    //
+    // This map is the IN-MEMORY source of truth only. At rest it is sealed
+    // (auth::keys → provider-keys.json, machine-bound AES-256-GCM + optional
+    // OS keystore) and never serialised into settings.json, which is a
+    // plaintext file a backup or a pasted bug report would happily carry.
     std::map<std::string, std::string> provider_keys;
     // Last model selected per provider, keyed by canonical provider id
     // ("anthropic", "openai", "ollama", …). Lets a provider switch restore

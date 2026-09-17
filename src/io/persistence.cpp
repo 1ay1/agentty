@@ -29,6 +29,7 @@
 #include <nlohmann/json.hpp>
 
 #include "agentty/tool/util/utf8.hpp"
+#include "agentty/auth/keys.hpp"
 #include "agentty/util/base64.hpp"
 #include "agentty/util/dbglog.hpp"
 #include "agentty/util/home_dir.hpp"
@@ -1726,9 +1727,30 @@ store::Settings load_settings() {
         auto favs = j.value("favorite_models", std::vector<std::string>{});
         for (auto& f : favs) s.favorite_models.push_back(ModelId{std::move(f)});
         s.provider = j.value("provider", "");
+        // PROVIDER KEYS NO LONGER LIVE HERE — they rest sealed in the
+        // auth::keys vault (provider-keys.json, keystore-mirrored). The
+        // vault's existence is NOT a signal of content, so the map is
+        // loaded unconditionally. The object below is a LEGACY-ONLY
+        // import source: keys saved by a pre-vault build. It is
+        // prioritised (a legacy file must not clobber a vault already
+        // resealed by a later run), then removed on the next save, so an
+        // upgraded install's keys exist ONLY in encrypted form.
+        //
+        // PERSIST the vault now, on the load that first saw the plaintext:
+        // the settings cache and the reducers may hold this map for many
+        // minutes (or the process may exit) before any later save runs, so
+        // sealing here — not in save_settings — is what closes the window
+        // where the only copy of an imported key is about to be stripped
+        // from settings.json while still nowhere sealed.
+        s.provider_keys = auth::keys::load();
         if (j.contains("provider_keys") && j["provider_keys"].is_object()) {
+            bool migrated = false;
             for (auto& [k, v] : j["provider_keys"].items())
-                if (v.is_string()) s.provider_keys[k] = v.get<std::string>();
+                if (v.is_string()) {
+                    s.provider_keys[k] = v.get<std::string>();
+                    migrated = true;
+                }
+            if (migrated) auth::keys::save(s.provider_keys);
         }
         if (j.contains("provider_models") && j["provider_models"].is_object()) {
             for (auto& [k, v] : j["provider_models"].items())
@@ -1929,11 +1951,13 @@ void save_settings(const store::Settings& s) {
     for (const auto& mid : s.favorite_models) favs.push_back(mid);
     j["favorite_models"] = std::move(favs);
     if (!s.provider.empty()) j["provider"] = s.provider;
-    if (!s.provider_keys.empty()) {
-        json keys = json::object();
-        for (const auto& [k, v] : s.provider_keys) keys[k] = v;
-        j["provider_keys"] = std::move(keys);
-    }
+    // Provider keys are sealed at rest in the auth::keys vault, NEVER in
+    // the plaintext settings body — they are not even written as an empty
+    // object, so settings.json carries no credential-shaped field at all.
+    // save() with an empty map wipes the vault, so a sign-out that empties
+    // the map clears the keys at rest — the load-sealed/imported vault is
+    // never resurrected by an empty-write.
+    auth::keys::save(s.provider_keys);
     if (!s.provider_models.empty()) {
         json pm = json::object();
         for (const auto& [k, v] : s.provider_models) pm[k] = v;
