@@ -444,24 +444,23 @@ TEST_CASE("native: no widget anywhere paints truecolor") {
 // canvas to fill. native does not, by design, so bands degrade to
 // coloured TEXT there, which is how diff and status lines have always
 // read on a plain terminal.
-TEST_CASE("native: a filled chip degrades to coloured text") {
+TEST_CASE("native: a filled chip picks ink that reads on its band") {
     // The model badge paints the provider name on a filled block — ink from
     // `inverse_text`, canvas from the model family's hue. That works in
     // every scheme and is wrong under native, because native's inverse_text
     // is Default: the terminal's ORDINARY foreground. On Ghostty that made
-    // a light-lavender "Anthropic" on a bright-magenta chip. Both colours
-    // are real and distinct, so invisible_cells() cannot see it — only the
-    // terminal knows they are both light.
+    // a light-lavender "Anthropic" on a bright-magenta chip.
     //
-    // So the rule is structural, not perceptual: with no canvas to fill,
-    // don't fill. Assert the decision rather than the pixels.
+    // The fix is NOT to drop the fill — the chip earns its block, it is
+    // what makes "provider" read as a container for "model". The fix is to
+    // pick the ink from the BAND: measure its luminance, answer black or
+    // white. So the test is that every filled cell carries ink chosen that
+    // way, which is checkable without knowing the user's palette.
     ui_prefs::publish_theme(theme::native);
     CHECK(!ui::theme_owns_canvas(),
           "native states Default for background — it paints no canvas, which "
           "is the whole point of it");
 
-    // Under native nothing may paint a background at all, so no chip, band
-    // or tab can put the terminal's own foreground on a coloured block.
     Model m;
     m.d.show_reasoning = true;
     m.d.current.messages.push_back(reasoning_msg(/*done=*/true));
@@ -481,29 +480,41 @@ TEST_CASE("native: a filled chip degrades to coloured text") {
     maya::render_tree(root, canvas, pool, maya::theme::native, true);
 
     std::string first;
-    int filled = 0;
+    int bad = 0;
     for (int y = 0; y <= canvas.max_content_row(); ++y) {
         for (int x = 0; x < 120; ++x) {
             const auto& cell = canvas.get(x, y);
+            if (cell.character == U' ' || cell.character == 0) continue;
             const maya::Style& st = pool.get(cell.style_id);
-            if (!st.bg.has_value()) continue;
+            if (!st.bg.has_value() || !st.fg.has_value()) continue;
+
             const LitColor bg = theme::native.resolve(*st.bg);
-            // Default bg is "the terminal's own", i.e. no fill at all.
+            const LitColor fg = theme::native.resolve(*st.fg);
+            // Default bg is "the terminal's own" — no fill, nothing to check.
             if (bg.kind() == ColorKind::Default) continue;
-            ++filled;
+
+            // On a real band the ink must be what ink_for() would choose.
+            // Anything else was picked without looking at the band, which is
+            // how Default ended up on bright magenta.
+            const LitColor want = ink_for(bg);
+            if (fg.fg_sgr() == want.fg_sgr()) continue;
+
+            ++bad;
             if (first.empty())
                 first = "row " + std::to_string(y) + " col "
-                      + std::to_string(x) + " bg=SGR " + bg.fg_sgr();
+                      + std::to_string(x) + " bg=SGR " + bg.fg_sgr()
+                      + " fg=SGR " + fg.fg_sgr()
+                      + " (wanted SGR " + want.fg_sgr() + ")";
         }
     }
 
     const std::string msg =
-        "a cell painted a real background under theme::native. native owns "
-        "no canvas, so every filled element (chip, band, active tab) must "
-        "degrade to coloured text — otherwise its ink is inverse_text, which "
-        "under native is just the terminal's ordinary foreground. First: "
+        "a filled cell under theme::native carries ink that was not chosen "
+        "from its band. inverse_text is Default here, i.e. the terminal's "
+        "ordinary foreground, so it cannot be trusted on a colour — use "
+        "ui::ink_on(band). First: "
         + std::string(first.empty() ? "-" : first);
-    CHECK(filled == 0, msg);
+    CHECK(bad == 0, msg);
 }
 
 TEST_CASE("native: no text is painted in its own background colour") {

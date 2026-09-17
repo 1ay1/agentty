@@ -60,16 +60,14 @@ maya::Element model_badge_config(const Model& m) {
     // is exactly the provider→model relationship, and it needs no separator
     // glyph: the fill's edge IS the boundary.
     //
-    // ...but only when the theme owns a canvas to fill. Under native there
-    // is none, and inverse_text there is Default — the terminal's ordinary
-    // foreground — so a filled chip painted light lavender on bright
-    // magenta. Same bug as the status banner and the diff bands: fall back
-    // to the family hue as TEXT, bold, on the user's own background.
+    // The INK comes from the band, not from a slot. inverse_text is the
+    // theme's ink for its own badges and is right whenever the theme owns a
+    // canvas — but under native it is Default, i.e. the terminal's ordinary
+    // foreground, which painted light-lavender text on a bright-magenta chip
+    // (agentty #45). ink_for() measures the band's luminance and answers
+    // black or white, so the fill survives on every theme.
     const std::string prov = provider::provider_display_name(provider::active());
-    const Style prov_style =
-        ui::theme_owns_canvas()
-            ? Style{}.with_bg(name.color).with_fg(ui::text_inverse).with_bold()
-            : Style{}.with_fg(name.color).with_bold();
+    const Style prov_style = ui::band_style(name.color).with_bold();
 
     // Reasoning-effort chip: when a tier is active AND the model can reason,
     // ride a compact "· ◇high" so the current effort is visible at a glance
@@ -91,11 +89,7 @@ maya::Element model_badge_config(const Model& m) {
         // No model yet (e.g. an ACP agent that picks its own): show just the
         // provider chip so the slot is never blank. No family colour to
         // borrow here, so it stays muted.
-        return text(" " + prov + " ",
-                    ui::theme_owns_canvas()
-                        ? Style{}.with_bg(muted)
-                                 .with_fg(ui::text_inverse).with_bold()
-                        : Style{}.with_fg(muted).with_bold());
+        return text(" " + prov + " ", ui::band_style(muted).with_bold());
     }
 
     // Update chip: when a newer release is known (background check), a

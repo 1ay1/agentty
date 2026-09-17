@@ -184,16 +184,15 @@ Element diff_review(const Model& m) {
         // rest look disabled, when they are simply not the current file.
         // Both marks are single-row, so the pane's line budget is unchanged.
         rail.marker(TabMark::Editor);
-        // Fill the active tab only when the theme owns a canvas. Under native
-        // inverse_text is Default (the terminal's own ink), so a filled tab
-        // would be normal foreground on a coloured block. Unfilled + the
-        // accent hue on the label reads as "current" just as well.
-        if (ui::theme_owns_canvas()) {
-            rail.theme.active_bg = accent;
-            rail.theme.active    = ui::text_inverse;
-        } else {
-            rail.theme.active    = accent;
-        }
+        // Fill on every theme. TabStrip takes colours rather than a Style,
+        // so it cannot use reverse video — keep inverse_text where the theme
+        // owns a canvas, and fall back to the terminal's own background as
+        // ink where it does not (native's background IS the honest inverse
+        // of its foreground).
+        rail.theme.active_bg = accent;
+        rail.theme.active    = ui::theme_owns_canvas()
+                                   ? maya::Color{ui::text_inverse}
+                                   : maya::Color::slot(maya::ThemeSlot::Background);
         rail.theme.idle      = fg;
         rail.theme.accent    = accent;
         for (const auto& f : m.d.pending_changes) {

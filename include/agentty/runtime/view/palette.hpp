@@ -144,6 +144,18 @@ inline constexpr auto text_inverse   = AGENTTY_THEME_SLOT(inverse_text);
     return detail::thm().background.kind() != maya::ColorKind::Default;
 }
 
+// A filled band with readable ink — resolve the slot, then ask maya.
+//
+// Use this for ANY element that paints text on a coloured background: a
+// chip, a toast, an active tab. maya measures a real RGB band, but falls
+// back to REVERSE VIDEO for a palette one, because the terminal owns those
+// 16 entries and we cannot read them. Guessing from the standard table is
+// what made the composer chip and the toasts unreadable on a remapped
+// palette (agentty #45).
+[[nodiscard]] inline maya::Style band_style(maya::Color band) noexcept {
+    return maya::on_band(detail::thm().resolve(band));
+}
+
 // Status — severity / outcome ONLY. Never a category color.
 inline constexpr auto status_ok    = AGENTTY_THEME_SLOT(success);
 inline constexpr auto status_info  = AGENTTY_THEME_SLOT(info);
