@@ -220,6 +220,13 @@ function(agentty_fold_test name)
         set_tests_properties(${name} PROPERTIES LABELS "${F_LABELS}")
         if("perf" IN_LIST F_LABELS)
             set_property(DIRECTORY APPEND PROPERTY AGENTTY_T_PERF ${name})
+            # A wall-clock probe measured against a threshold cannot share a
+            # machine with another one. Run in parallel they steal each
+            # other's CPU and fail intermittently on a busy box -- which
+            # reads as a flaky test rather than the resource contention it
+            # is. RESOURCE_LOCK makes ctest serialise them against each
+            # other while everything else still runs -j12.
+            set_tests_properties(${name} PROPERTIES RESOURCE_LOCK wallclock)
         endif()
     endif()
 endfunction()

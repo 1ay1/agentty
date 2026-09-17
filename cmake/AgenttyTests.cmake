@@ -132,10 +132,10 @@ agentty_fold_test(resize_prof_probe TIMEOUT 120 ARGS)
 agentty_fold_test(theme_switch_leak_probe TIMEOUT 300 ARGS)
 # The other half: flat-and-expensive still feels laggy if keys arrive faster
 # than a switch costs. Reports whether one arrow fits in a key-repeat slot.
-agentty_fold_test(theme_input_lag_probe TIMEOUT 120 ARGS)
+agentty_fold_test(theme_input_lag_probe TIMEOUT 120 ARGS LABELS perf)
 # Every panel must answer a keypress inside one key-repeat slot, AND a
 # burst delivered in one read must land where single-stepping lands.
-agentty_fold_test(panel_input_snappiness_test TIMEOUT 180)
+agentty_fold_test(panel_input_snappiness_test TIMEOUT 180 LABELS perf)
 # Does every arrow get a FRAME? Batched input reduces N events and paints
 # once, so rows the user passes through are computed but never shown.
 agentty_fold_test(frame_per_key_probe TIMEOUT 120 ARGS)
@@ -158,7 +158,7 @@ agentty_fold_test(scrollback_oracle_test   TIMEOUT 600 UNIX_LIBS util)
 agentty_fold_test(external_acp_backend_test TIMEOUT 60)
 agentty_fold_test(md_shape_sweep           TIMEOUT 120)
 agentty_fold_test(reveal_headroom_test     TIMEOUT 60)
-agentty_fold_test(md_cache_probe           TIMEOUT 120)
+agentty_fold_test(md_cache_probe           TIMEOUT 120 LABELS perf)
 if(AGENTTY_MCP)
     agentty_fold_test(mcp_bridge_test      TIMEOUT 60)
     set_tests_properties(mcp_bridge_test PROPERTIES ENVIRONMENT
