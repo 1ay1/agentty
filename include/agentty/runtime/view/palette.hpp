@@ -80,6 +80,19 @@ struct Slot {
 
 }  // namespace detail
 
+}  // namespace agentty::ui
+
+// ui::Slot is a theme TOKEN, not a literal: every read goes back to the
+// live Theme, so it tracks a theme switch and can never pin a colour.
+// maya::Themed rejects anything shaped like a literal (that is the palette
+// bug it exists to prevent), and Slot converts via LitColor, so it has to
+// say what it is. The specialisation names a TYPE, so no literal can
+// sneak through it.
+template <>
+struct maya::is_theme_token<::agentty::ui::detail::Slot> : std::true_type {};
+
+namespace agentty::ui {
+
 #define AGENTTY_THEME_SLOT(field) \
     ::agentty::ui::detail::Slot{ []() noexcept { \
         return ::agentty::ui::detail::thm().field; } }
