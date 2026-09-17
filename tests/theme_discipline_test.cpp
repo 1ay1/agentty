@@ -83,8 +83,30 @@ class GuardScope {
 public:
     // Feed every line of the file in order, BEFORE testing it.
     void observe(const std::string& line) {
-        if (line.find("has_channels") != std::string::npos)
-            guarded_depth_ = depth_;
+        // A guard is CODE. Honouring one found in a COMMENT is not a
+        // detail: every function near this hazard carries a comment
+        // explaining it, so reading comments disarmed the scanner in
+        // exactly the files that needed it most. maya's anim::lerp sat
+        // under a comment headed "Why this checks has_channels()" and was
+        // waved through with its guard deleted.
+        const auto first = line.find_first_not_of(" \t");
+        const bool comment =
+            first != std::string::npos
+            && (line.compare(first, 2, "//") == 0
+                || line.compare(first, 2, "/*") == 0
+                || line.compare(first, 1, "*") == 0);
+
+        // has_channels() is the name, but a proven Kind::Rgb is the same
+        // fact stated the long way, and the SGR emission paths use it
+        // because they must switch on the kind anyway. Inside such a
+        // branch, r()/g()/b() genuinely ARE channels.
+        const bool establishes =
+            line.find("has_channels") != std::string::npos
+            || line.find("ColorKind::Rgb") != std::string::npos
+            || line.find("Kind::Rgb") != std::string::npos;
+
+        if (!comment && establishes) guarded_depth_ = depth_;
+        if (comment) return;   // braces in prose are not scope, either
 
         for (char c : line) {
             if (c == '{') ++depth_;
@@ -169,6 +191,36 @@ TEST_CASE("theme discipline: the guard tracker is block-scoped") {
         CHECK(g[2],  "the first function is guarded");
         CHECK(!g[5], "the next function must NOT inherit the guard");
     }
+
+    // A guard in a COMMENT is not a guard. This one is load-bearing: every
+    // function near this hazard documents it, so honouring comments
+    // disarmed the scanner in precisely the files that needed it. maya's
+    // anim::lerp sat under "// Why this checks has_channels()" and was
+    // waved through with the guard itself deleted.
+    {
+        const auto g = scan({
+            "// Why this checks has_channels() ...",
+            "LitColor lerp(LitColor a, LitColor b, double t) {",
+            "    return LitColor::rgb(mix(a.r(), b.r()));",
+            "}",
+        });
+        CHECK(!g[0], "a comment mentioning has_channels establishes nothing");
+        CHECK(!g[2], "so the body is UNGUARDED and must be flagged");
+    }
+
+    // A proven Kind::Rgb branch is the same fact stated the long way — the
+    // SGR emission paths switch on the kind anyway, and inside such a
+    // branch the bytes genuinely are channels.
+    {
+        const auto g = scan({
+            "switch (c.kind()) {",
+            "    case ColorKind::Rgb:",
+            "        return write(p, c.r(), c.g(), c.b());",
+            "}",
+        });
+        CHECK(g[1], "case ColorKind::Rgb establishes channels");
+        CHECK(g[2], "and covers the emission inside it");
+    }
 }
 
 TEST_CASE("theme discipline: agentty names tokens, never colours") {
@@ -209,11 +261,16 @@ TEST_CASE("theme discipline: agentty names tokens, never colours") {
     // reasoning block — invisible on a dark terminal, and invisible to any
     // developer, because they all run a scheme rather than native.
     //
-    // Emission of a palette index spells itself index(); arithmetic must be
-    // guarded by has_channels(), which GuardScope tracks across the whole
-    // enclosing block. Everything else is the bug.
-    const std::regex channel_arithmetic{
-        R"(\.[rgb]\(\)\s*[-+*/]|[-+*/]\s*\w*\.[rgb]\(\))"};
+    // ANY channel read — not just one adjacent to an operator.
+    //
+    // The first version required a [-+*/] next to the read. That felt
+    // precise and was useless: the original #45 bug passes its channels to
+    // a FUNCTION — `LitColor::rgb(mix(a.r(), b.r()), ...)` — so no operator
+    // is in sight and the scanner walked past the very line it was written
+    // for. Flag every read; the two legitimate shapes (index() for palette
+    // emission, a has_channels/Kind::Rgb branch for real arithmetic) are
+    // already explicit and say so.
+    const std::regex channel_read{R"(\.[rgb]\(\))"};
 
     std::vector<std::string> offenders;
     int scanned = 0;
@@ -228,7 +285,13 @@ TEST_CASE("theme discipline: agentty names tokens, never colours") {
 
             const std::string rel =
                 fs::relative(e.path(), root).generic_string();
-            if (allowed(rel)) continue;
+            // NOTE: kAllowed exempts a file from the COLOUR LITERAL rule
+            // only. It must not skip the whole file — an exemption earned
+            // for one rule silently granting another is how a guard rots.
+            // The channel check below applies everywhere, no exceptions:
+            // palette.hpp reads theme slots, so it has colours in hand and
+            // is exactly the kind of place a blend could appear.
+            const bool lit_exempt = allowed(rel);
             ++scanned;
 
             std::ifstream in{e.path()};
@@ -242,18 +305,17 @@ TEST_CASE("theme discipline: agentty names tokens, never colours") {
                 if (first != std::string::npos
                     && (line.compare(first, 2, "//") == 0
                         || line.compare(first, 1, "*") == 0)) continue;
-                if (std::regex_search(line, lit))
+                if (!lit_exempt && std::regex_search(line, lit))
                     offenders.push_back(rel + ":" + std::to_string(n)
                                         + "  " + line);
                 if (!listed(kAllowedRawSgr, rel)
                     && std::regex_search(line, raw_sgr))
                     offenders.push_back(rel + ":" + std::to_string(n)
                                         + "  (raw SGR)  " + line);
-                if (std::regex_search(line, channel_arithmetic)
-                    && !scope.guarded())
+                if (std::regex_search(line, channel_read) && !scope.guarded())
                     offenders.push_back(rel + ":" + std::to_string(n)
-                                        + "  (channel arithmetic on a colour "
-                                          "that may have none)  " + line);
+                                        + "  (channel read on a colour that "
+                                          "may have none)  " + line);
             }
         }
     }
