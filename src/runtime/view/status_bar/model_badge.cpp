@@ -60,14 +60,23 @@ maya::Element model_badge_config(const Model& m) {
     // is exactly the provider→model relationship, and it needs no separator
     // glyph: the fill's edge IS the boundary.
     //
-    // The INK comes from the band, not from a slot. inverse_text is the
-    // theme's ink for its own badges and is right whenever the theme owns a
-    // canvas — but under native it is Default, i.e. the terminal's ordinary
-    // foreground, which painted light-lavender text on a bright-magenta chip
-    // (agentty #45). ink_for() measures the band's luminance and answers
-    // black or white, so the fill survives on every theme.
+    // The INK stays the theme's normal TEXT colour — the same colour as
+    // prose — and the BAND is the family hue, tinted until that text reads
+    // on it (ui::chip_style).
+    //
+    // That is the right way round for a label. Ink that changes per chip is
+    // a second thing for the eye to resolve; ink that stays the prose
+    // colour makes the chip read as text on a tint, which is what a badge
+    // is. It also means nothing has to guess: the theme already pairs text
+    // with its own background, so the only job is moving the hue far enough
+    // from the text to clear a contrast margin, keeping it recognisably
+    // itself.
+    //
+    // inverse_text was the obvious slot and the wrong one — under native it
+    // is Default, the same colour as ordinary text, so the chip painted
+    // normal foreground on a bright band (agentty #45).
     const std::string prov = provider::provider_display_name(provider::active());
-    const Style prov_style = ui::band_style(name.color).with_bold();
+    const Style prov_style = ui::chip_style(name.color).with_bold();
 
     // Reasoning-effort chip: when a tier is active AND the model can reason,
     // ride a compact "· ◇high" so the current effort is visible at a glance
@@ -87,9 +96,10 @@ maya::Element model_badge_config(const Model& m) {
 
     if (model.empty() || name.name.empty()) {
         // No model yet (e.g. an ACP agent that picks its own): show just the
-        // provider chip so the slot is never blank. No family colour to
-        // borrow here, so it stays muted.
-        return text(" " + prov + " ", ui::band_style(muted).with_bold());
+        // provider chip so the slot is never blank. Same band as the normal
+        // path — the chip should not change colour just because the model
+        // is still unknown.
+        return text(" " + prov + " ", prov_style);
     }
 
     // Update chip: when a newer release is known (background check), a

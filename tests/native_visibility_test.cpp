@@ -138,6 +138,27 @@ namespace {
 // in the frame was computed from bytes that were not channels. Returning
 // the offenders rather than a bool keeps the failure message able to name
 // a row and column, which is what made the original diagnosis quick.
+// The diff palette is the ONE set of literals allowed under native.
+//
+// A diff owns both sides of its pair on purpose (maya::diff_palette): green
+// means added, red means removed, and that is content rather than themed
+// chrome — the same exemption syntax highlighting gets. Stating both sides
+// is also the only way to guarantee contrast when the user's palette is
+// unreadable to us, which is exactly what native makes it.
+//
+// Listed explicitly rather than skipped by region, so a NEW literal
+// anywhere still fails the sweep.
+[[nodiscard]] bool is_diff_palette(LitColor c) {
+    for (const maya::Color& allowed : {
+            maya::diff_palette::add_bg,   maya::diff_palette::add_rail,
+            maya::diff_palette::add_fg,   maya::diff_palette::add_fg_hi,
+            maya::diff_palette::rem_bg,   maya::diff_palette::rem_rail,
+            maya::diff_palette::rem_fg,   maya::diff_palette::rem_fg_hi,
+            maya::diff_palette::hunk_bg,  maya::diff_palette::hunk_fg })
+        if (theme::native.resolve(allowed).fg_sgr() == c.fg_sgr()) return true;
+    return false;
+}
+
 std::vector<std::string> truecolor_cells(Model& m, int w = 100, int h = 400) {
     auto root = maya::AppLayout{{
         .thread        = ui::thread_config(m),
@@ -162,6 +183,7 @@ std::vector<std::string> truecolor_cells(Model& m, int w = 100, int h = 400) {
                 if (!c->has_value()) continue;
                 const LitColor lit = theme::native.resolve(**c);
                 if (lit.kind() != ColorKind::Rgb) continue;
+                if (is_diff_palette(lit)) continue;
                 bad.push_back("row " + std::to_string(y) + " col "
                               + std::to_string(x) + " -> " + lit.fg_sgr());
             }
@@ -397,15 +419,22 @@ TEST_CASE("native: no widget anywhere paints truecolor") {
     m.d.current.messages.push_back(std::move(a));
     m.s.phase = phase::Idle{};
 
-    // Under native the diff bands must be OFF — that IS the fix, and it is
-    // also why the colours inside push_diff_side's band branch stopped
-    // mattering: the branch is unreachable here. Assert it, so the next
-    // person can tell "the colours are fine" from "nothing ever drew".
-    // I spent a while confusing those two.
-    CHECK(!maya::ToolBodyPreview::diff_bands_ok_for_test(),
-          "native owns no background, so diff bands must degrade to "
-          "coloured text. If this flips to true the band branch is live "
-          "again and its colours need re-checking.");
+    // The diff bands are ON under native, and that is deliberate.
+    //
+    // They were briefly turned off here, on the theory that native owns no
+    // canvas so nothing may fill. Wrong call: green-means-added is forty
+    // years of muscle memory, and dropping the band threw away the whole
+    // visual language of a diff to fix an ink problem.
+    //
+    // A diff is CONTENT, not themed chrome — the same exemption syntax
+    // highlighting gets. It owns BOTH sides of its pair (maya's
+    // diff_palette), which is the only way to guarantee contrast when we
+    // cannot read the user's palette. That is why it is truecolor even
+    // here, and why the sweep below exempts it.
+    CHECK(maya::ToolBodyPreview::diff_bands_ok_for_test(),
+          "a 256-colour terminal must get diff bands — they are content, "
+          "not chrome, and diff_palette states both sides so contrast does "
+          "not depend on a palette we cannot read");
 
     // The status banner in each of its three kinds — the crimson/amber/
     // indigo palette that was hardcoded until this commit. The kind is

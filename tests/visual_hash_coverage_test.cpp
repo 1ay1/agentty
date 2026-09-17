@@ -49,6 +49,9 @@
 #include <set>
 #include <string>
 #include <vector>
+#include <map>
+
+#include <maya/style/schemes.hpp>
 
 #include <maya/core/anim_clock.hpp>
 
@@ -736,4 +739,51 @@ TEST_CASE("visual hash: every reveal-armed state carries a time term") {
             "visual_hash mixes no time term — armed frames would be gated "
             "away and the animation freezes until a keypress");
     }
+}
+
+// Every built-in scheme name must hash distinctly.
+//
+// A visual axis is only guarded if DIFFERENT values of it produce different
+// hashes. The theme axis passed "advances the hash" above while still being
+// broken, because that test compares one theme against the baseline — it
+// never compares two themes against each other.
+//
+// mix_str() samples (length + first + last + middle byte), which is right
+// for a 50 KB tool output and wrong for a scheme name. 76 of the 615 names
+// collided under it, and since the sample keys on the ENDS the collisions
+// fell between alphabetical neighbours — precisely the pairs you visit
+// arrowing through the browser:
+//
+//   Acid Lime -> Adventure, Rose Pine Dawn -> Rose Pine Moon, ...
+//
+// Landing on one changed the model, published the theme, and left the gate
+// saying "nothing visual moved". No repaint. The theme appeared only after
+// some unrelated key moved the hash — "it doesn't register until you hit it
+// again".
+TEST_CASE("visual_hash: every scheme name hashes distinctly") {
+    std::printf("visual_hash: %zu scheme names must not collide\n",
+                std::size(maya::theme::schemes));
+
+    std::map<std::uint64_t, std::string> seen;
+    std::vector<std::string> collisions;
+
+    for (const auto& s : maya::theme::schemes) {
+        Model m = baseline();
+        m.d.ui.theme = s.name;
+        const std::uint64_t h = hash_of(m);
+        if (auto it = seen.find(h); it != seen.end())
+            collisions.push_back(it->second + " == " + s.name);
+        else
+            seen.emplace(h, s.name);
+    }
+
+    if (!collisions.empty()) {
+        std::printf("  %zu collision(s):\n", collisions.size());
+        for (std::size_t i = 0; i < collisions.size() && i < 10; ++i)
+            std::printf("    %s\n", collisions[i].c_str());
+    }
+    check(collisions.empty(),
+          "two schemes share a visual_hash — switching between them is a "
+          "silent no-repaint. Hash the theme name in FULL rather than "
+          "sampling it (program.hpp).");
 }

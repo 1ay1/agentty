@@ -121,7 +121,28 @@ struct AgenttyApp {
         //
         // "Changes apply immediately" is the promise this panel makes in
         // its own footer; this is the line that keeps it.
-        mix_str(m.d.ui.theme);
+        //
+        // FULLY hashed, not sampled. mix_str() looks at length + first +
+        // last + middle byte, which is right for a 50 KB tool output and
+        // wrong for a scheme name: 76 of the 615 built-in names collide
+        // with another under that sample, and because the sample keys on
+        // the ENDS, the collisions land between alphabetical neighbours --
+        // which is exactly what arrowing through the browser visits.
+        //
+        //   Acid Lime            -> Adventure
+        //   Black Metal (Marduk) -> Black Metal (Mayhem)
+        //   Nachtschicht         -> Nebula Drift
+        //   Rose Pine Dawn       -> Rose Pine Moon
+        //
+        // Arrow onto one of those and the model changed, the theme was
+        // published, and the gate still said "nothing visual moved" -- so
+        // no repaint. Press Enter (which moves `picking`) and it appears.
+        // That is the "doesn't register until you hit it again" report.
+        //
+        // A scheme name is ~15 bytes and this runs once per frame, so
+        // there is nothing to save by sampling it.
+        for (unsigned char c : m.d.ui.theme) mix(c);
+        mix(m.d.ui.theme.size());
         mix(static_cast<std::uint64_t>(m.d.ui.tier));
         mix(static_cast<std::uint64_t>(m.d.ui.polarity));
         mix(static_cast<std::uint64_t>(m.d.ui.density));

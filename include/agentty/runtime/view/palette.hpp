@@ -144,16 +144,25 @@ inline constexpr auto text_inverse   = AGENTTY_THEME_SLOT(inverse_text);
     return detail::thm().background.kind() != maya::ColorKind::Default;
 }
 
-// A filled band with readable ink — resolve the slot, then ask maya.
+// A chip: the theme's own text colour, on a tint of `hue`.
 //
-// Use this for ANY element that paints text on a coloured background: a
-// chip, a toast, an active tab. maya measures a real RGB band, but falls
-// back to REVERSE VIDEO for a palette one, because the terminal owns those
-// 16 entries and we cannot read them. Guessing from the standard table is
-// what made the composer chip and the toasts unreadable on a remapped
-// palette (agentty #45).
-[[nodiscard]] inline maya::Style band_style(maya::Color band) noexcept {
-    return maya::on_band(detail::thm().resolve(band));
+// The ink stays `text` — the same colour as prose — and the HUE moves until
+// that text reads on it. That is the right way round for a label: ink that
+// changes per chip is a second thing for the eye to resolve, while ink that
+// stays the prose colour makes the chip read as text on a tint, which is
+// what a badge is.
+//
+// maya tints toward the canvas, so the hue stays recognisably itself. On a
+// palette colour it cannot measure and returns the hue unchanged — the
+// terminal owns those entries, and guessing at them is the mistake this
+// area keeps repeating.
+[[nodiscard]] inline maya::Style chip_style(maya::Color hue) noexcept {
+    const maya::Theme& th = detail::thm();
+    const maya::LitColor ink    = th.resolve(maya::Color::slot(maya::ThemeSlot::Text));
+    const maya::LitColor canvas = th.resolve(maya::Color::slot(maya::ThemeSlot::Background));
+    return maya::Style{}
+        .with_bg(maya::band_for(th.resolve(hue), ink, canvas))
+        .with_fg(maya::Color::slot(maya::ThemeSlot::Text));
 }
 
 // Status — severity / outcome ONLY. Never a category color.
