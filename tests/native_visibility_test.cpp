@@ -169,6 +169,61 @@ std::vector<std::string> truecolor_cells(Model& m, int w = 100, int h = 400) {
     return bad;
 }
 
+// Every cell whose ink is the SAME COLOUR as the paper under it.
+//
+// This is the failure the truecolor sweep cannot see, and the one that
+// actually shipped. Under native the 23 theme slots collapse onto the 16
+// ANSI colours the terminal defines — so `success` and `diff_added` are
+// both SGR 32, `text` and `inverse_text` are both SGR 39, and a widget
+// that pairs two of them paints green-on-green or default-on-default.
+//
+// Both colours are perfectly legitimate palette entries. Nothing was
+// fabricated, no channel was misread, the Themed gate is satisfied, and
+// the text is invisible. Contrast is a property of the (slot-pair, theme)
+// combination, and only the theme knows it — so it has to be checked on a
+// rendered frame, not at the call site.
+std::vector<std::string> invisible_cells(Model& m, int w = 100, int h = 400) {
+    auto root = maya::AppLayout{{
+        .thread        = ui::thread_config(m),
+        .changes_strip = ui::changes_strip_config(m),
+        .composer      = ui::composer_config(m),
+        .status_bar    = ui::status_bar_config(m),
+        .overlay       = std::nullopt,
+    }}.build();
+
+    maya::StylePool pool;
+    maya::Canvas canvas(w, h, &pool);
+    canvas.clear();
+    maya::render_tree(root, canvas, pool, maya::theme::native, true);
+
+    std::vector<std::string> bad;
+    const int max_row = canvas.max_content_row();
+    for (int y = 0; y <= max_row; ++y) {
+        for (int x = 0; x < w; ++x) {
+            const auto& cell = canvas.get(x, y);
+            // Blank cells carry no ink, so same-colour is fine (and normal:
+            // that is what a filled band's padding IS).
+            if (cell.character == U' ' || cell.character == 0) continue;
+            const maya::Style& st = pool.get(cell.style_id);
+            if (!st.fg.has_value() || !st.bg.has_value()) continue;
+
+            const LitColor fg = theme::native.resolve(*st.fg);
+            const LitColor bg = theme::native.resolve(*st.bg);
+            // Compare the BYTES that reach the terminal, not the slots.
+            // Two different slot names can be one colour after resolution,
+            // which is exactly the bug.
+            if (fg.fg_sgr() != bg.fg_sgr()) continue;
+
+            std::string glyph;
+            if (cell.character < 128) glyph = std::string(1, char(cell.character));
+            bad.push_back("row " + std::to_string(y) + " col "
+                          + std::to_string(x) + " '" + glyph
+                          + "' fg==bg==SGR " + fg.fg_sgr());
+        }
+    }
+    return bad;
+}
+
 Message reasoning_msg(bool done) {
     Message a;
     a.role = Role::Assistant;
@@ -340,6 +395,79 @@ TEST_CASE("native: no widget anywhere paints truecolor") {
             "a widget painted truecolor under theme::native — native states "
             "no RGB, so this colour is the widget's own palette overriding "
             "the user's. First: "
+            + std::string(bad.empty() ? "-" : bad.front());
+        CHECK(bad.empty(), msg);
+    }
+}
+
+// ── Same colour on same colour ─────────────────────────────────────
+//
+// The sweep above asks "did anyone invent a colour". This asks the
+// question that actually matters to someone looking at the screen: "can
+// you read it".
+//
+// They are different questions and the first does not imply the second.
+// Fixing the invented-colour bug by moving widgets onto theme slots
+// introduced this one: under native the 23 slots collapse onto the 16
+// ANSI colours the terminal owns, so `success` and `diff_added` are both
+// SGR 32 and a diff band became green text on a green block. Every guard
+// in the tree was satisfied — no channel misread, no literal, no
+// truecolor — and the text was invisible.
+//
+// A widget that wants a filled band has to ask whether the theme owns a
+// canvas to fill. native does not, by design, so bands degrade to
+// coloured TEXT there, which is how diff and status lines have always
+// read on a plain terminal.
+TEST_CASE("native: no text is painted in its own background colour") {
+    ui_prefs::publish_theme(theme::native);
+
+    Model m;
+    m.d.show_reasoning = true;
+
+    Message u;
+    u.role = Role::User;
+    u.id   = MessageId{"u1"};
+    u.text = "show me the diff";
+    m.d.current.messages.push_back(std::move(u));
+
+    Message a = reasoning_msg(/*done=*/true);
+    a.text = "Here is the audit.";
+
+    // The diff paths: a write (all-adds band) and a real unified diff.
+    ToolUse write;
+    write.id     = ToolCallId{"call_w"};
+    write.name   = ToolName{"write"};
+    write.args   = json{{"file_path", "/tmp/x.cpp"}, {"content", "int x = 1;\n"}};
+    write.status = ToolUse::Done{.output = "wrote 1 line"};
+    a.tool_calls.push_back(std::move(write));
+
+    ToolUse diff;
+    diff.id     = ToolCallId{"call_d"};
+    diff.name   = ToolName{"git_diff"};
+    diff.args   = json{{"path", "."}};
+    diff.status = ToolUse::Done{.output =
+        "diff --git a/x.cpp b/x.cpp\n"
+        "@@ -1,3 +1,4 @@\n"
+        " context line\n"
+        "-removed line\n"
+        "+added line\n"};
+    a.tool_calls.push_back(std::move(diff));
+
+    m.d.current.messages.push_back(std::move(a));
+    m.s.phase = phase::Idle{};
+
+    // ...and the status banner, whose filled band had the same bug.
+    for (const char* status : {"error: the request failed",
+                              "retrying (upstream cut off)",
+                              "indexing the workspace"}) {
+        m.s.status = status;
+        m.s.status_until = {};
+        const auto bad = invisible_cells(m, 120, 600);
+        const std::string msg =
+            "text painted in its own background colour under theme::native — "
+            "both are valid palette entries, and the result is unreadable. "
+            "A band needs a canvas the theme actually owns; native has none, "
+            "so it must degrade to coloured text. First: "
             + std::string(bad.empty() ? "-" : bad.front());
         CHECK(bad.empty(), msg);
     }
