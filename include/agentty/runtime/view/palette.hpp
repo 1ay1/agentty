@@ -120,7 +120,29 @@ inline constexpr auto text_tertiary  = AGENTTY_THEME_SLOT(muted);      // footer
 // Ink for text sitting ON a filled badge — the theme's own answer to
 // "what reads against my accent colours", rather than a literal black that
 // disappears the moment a scheme's badge hue is dark.
+//
+// ONLY VALID WHEN THE THEME OWNS A CANVAS. Ask theme_owns_canvas() first.
+// Under theme::native inverse_text is Default — the SAME colour as ordinary
+// text — because native paints no background of its own and so has no
+// second canvas to invert against. Putting it on a filled chip there gives
+// you the terminal's normal foreground on a bright band: light-on-light,
+// washed out, which is what the Opus badge looked like on Ghostty.
 inline constexpr auto text_inverse   = AGENTTY_THEME_SLOT(inverse_text);
+
+// Does the live theme paint its own background?
+//
+// Every scheme does. theme::native deliberately does NOT — it states
+// Default for background/surface so the user's own terminal colours reach
+// the screen, which is the entire point of it.
+//
+// That single fact decides whether a FILLED element is a good idea. A band
+// or a chip needs a canvas to sit on and ink that contrasts with it; with
+// no canvas there is no meaningful "inverse", so the honest fallback is
+// coloured TEXT on the user's own background — exactly how status lines and
+// diffs have always read on a plain terminal.
+[[nodiscard]] inline bool theme_owns_canvas() noexcept {
+    return detail::thm().background.kind() != maya::ColorKind::Default;
+}
 
 // Status — severity / outcome ONLY. Never a category color.
 inline constexpr auto status_ok    = AGENTTY_THEME_SLOT(success);

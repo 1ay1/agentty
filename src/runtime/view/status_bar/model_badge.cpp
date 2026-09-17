@@ -59,9 +59,17 @@ maya::Element model_badge_config(const Model& m) {
     // run. A filled block reads as "this is the container" at a glance, which
     // is exactly the provider→model relationship, and it needs no separator
     // glyph: the fill's edge IS the boundary.
+    //
+    // ...but only when the theme owns a canvas to fill. Under native there
+    // is none, and inverse_text there is Default — the terminal's ordinary
+    // foreground — so a filled chip painted light lavender on bright
+    // magenta. Same bug as the status banner and the diff bands: fall back
+    // to the family hue as TEXT, bold, on the user's own background.
     const std::string prov = provider::provider_display_name(provider::active());
     const Style prov_style =
-        Style{}.with_bg(name.color).with_fg(ui::text_inverse).with_bold();
+        ui::theme_owns_canvas()
+            ? Style{}.with_bg(name.color).with_fg(ui::text_inverse).with_bold()
+            : Style{}.with_fg(name.color).with_bold();
 
     // Reasoning-effort chip: when a tier is active AND the model can reason,
     // ride a compact "· ◇high" so the current effort is visible at a glance
@@ -84,8 +92,10 @@ maya::Element model_badge_config(const Model& m) {
         // provider chip so the slot is never blank. No family colour to
         // borrow here, so it stays muted.
         return text(" " + prov + " ",
-                    Style{}.with_bg(muted)
-                           .with_fg(ui::text_inverse).with_bold());
+                    ui::theme_owns_canvas()
+                        ? Style{}.with_bg(muted)
+                                 .with_fg(ui::text_inverse).with_bold()
+                        : Style{}.with_fg(muted).with_bold());
     }
 
     // Update chip: when a newer release is known (background check), a
