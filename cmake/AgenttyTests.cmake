@@ -176,6 +176,12 @@ set_source_files_properties(${CMAKE_SOURCE_DIR}/tests/anthropic_md_stream.cpp
 set_property(DIRECTORY APPEND PROPERTY AGENTTY_FOLD_NAMES anthropic_md_stream)
 
 # Build the one binary: union of every folded test's extra objs/libs.
+# persistence_race: the REAL async save queue under TSan, not a model of it.
+# Folded (it owns main + AGENTTY_HOME, and needs the full io object set), so
+# it is registered in agentty_standalone_tests.def alongside its siblings. It
+# only runs instrumented in the TSan tree, where everything is rebuilt anyway.
+agentty_fold_test(persistence_race_test TIMEOUT 180 LABELS race)
+
 agentty_finalize_fold(
     OBJS $<TARGET_OBJECTS:agentty_acp_obj>
     LIBS acp::acp)
@@ -222,6 +228,7 @@ add_executable(race_harness_test EXCLUDE_FROM_ALL
 target_include_directories(race_harness_test PRIVATE include)
 add_test(NAME race_harness_test COMMAND race_harness_test)
 set_tests_properties(race_harness_test PROPERTIES TIMEOUT 120 LABELS "sanitizer;race")
+
 
 agentty_test(cred_crypt_test MODE raw LABELS sanitizer)
 add_executable(cred_crypt_test EXCLUDE_FROM_ALL

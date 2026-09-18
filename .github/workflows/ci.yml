@@ -213,7 +213,9 @@ jobs:
             -DAGENTTY_BUILD_TESTS=ON \
             -DAGENTTY_SANITIZE_ALL=thread
       - name: Build race test set
-        run: cmake --build build-tsan -j"$(nproc)" --target race_harness_test
+        run: |
+          cmake --build build-tsan -j"$(nproc)" --target race_harness_test
+          cmake --build build-tsan -j"$(nproc)" --target agentty_standalone_tests
       - name: Run under TSan
         env:
           TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1

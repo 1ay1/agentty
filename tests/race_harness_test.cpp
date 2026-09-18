@@ -28,9 +28,13 @@
 #include <atomic>
 #include <barrier>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 using agentty::util::Snapshot;
@@ -158,6 +162,176 @@ void teardown_registration_race() {
     std::printf("  teardown registry: %d actions fired\n", fired.load());
 }
 
+// ── 4. Write-behind save queue: enqueue races drain races stop ───────────
+//
+// The shape of persistence::AsyncWriter and settings_cache's worker: a
+// coalescing map guarded by a mutex, a condvar-driven drain thread, and a
+// stop that must not drop the last write. This is where the settings_cache
+// abort lived (a worker left joinable in a static), so the invariants worth
+// pinning are: every distinct key eventually lands, a newer value for a key
+// supersedes an older queued one, and stop drains rather than truncates.
+//
+// Modelled here rather than driven through persistence.cpp directly because
+// the real one writes to disk; the concurrency is in this structure, not in
+// the fsync.
+void write_behind_queue_race() {
+    struct Writer {
+        std::mutex                                 mu;
+        std::condition_variable                    cv;
+        std::unordered_map<std::string, int>       pending;
+        bool                                       stopping = false;
+        std::thread                                worker;
+        std::unordered_map<std::string, int>       written;
+        std::mutex                                 written_mu;
+
+        void enqueue(std::string id, int v) {
+            {
+                std::lock_guard lk(mu);
+                // Newer snapshot supersedes an older one still queued for the
+                // same id — the coalescing the real writer relies on to bound
+                // the queue under a burst.
+                pending.insert_or_assign(std::move(id), v);
+                if (!worker.joinable()) worker = std::thread([this] { run(); });
+            }
+            cv.notify_one();
+        }
+
+        void flush_and_stop() {
+            std::thread to_join;
+            {
+                std::lock_guard lk(mu);
+                stopping = true;
+                if (worker.joinable()) to_join = std::move(worker);
+            }
+            cv.notify_one();
+            if (to_join.joinable()) to_join.join();
+        }
+
+        void run() {
+            for (;;) {
+                std::string key; int val;
+                {
+                    std::unique_lock lk(mu);
+                    cv.wait(lk, [this] { return !pending.empty() || stopping; });
+                    // Drain-then-stop: keep popping even once stopping is set,
+                    // so the final snapshot always lands.
+                    if (pending.empty()) {
+                        if (stopping) return;
+                        continue;
+                    }
+                    auto it = pending.begin();
+                    key = it->first;
+                    val = it->second;
+                    pending.erase(it);
+                }
+                // Outside the lock, like the real fsync.
+                std::lock_guard wl(written_mu);
+                written[key] = val;
+            }
+        }
+    };
+
+    Writer w;
+    std::barrier sync(kThreads);
+    std::vector<std::thread> producers;
+    for (int t = 0; t < kThreads; ++t) {
+        producers.emplace_back([&, t] {
+            sync.arrive_and_wait();
+            for (int i = 0; i < 400; ++i)
+                w.enqueue("thread" + std::to_string(t), i);
+        });
+    }
+    for (auto& p : producers) p.join();
+    w.flush_and_stop();
+
+    // Every producer's LAST value must have landed: coalescing may drop
+    // intermediate states (that is the point) but never the newest one, and
+    // stop must not truncate the queue.
+    std::lock_guard wl(w.written_mu);
+    check(w.written.size() == static_cast<std::size_t>(kThreads),
+          "write-behind dropped an entire key");
+    for (int t = 0; t < kThreads; ++t) {
+        const auto it = w.written.find("thread" + std::to_string(t));
+        check(it != w.written.end() && it->second == 399,
+              "write-behind lost the newest value for a key");
+    }
+    std::printf("  write-behind queue: %zu keys landed\n", w.written.size());
+}
+
+// ── 5. Connection pool: concurrent acquire/release ─────────────────────
+//
+// http::Pool's shape: a map of endpoint → stack of idle connections, with
+// acquire() popping (and discarding stale entries) while release() pushes and
+// evicts past a cap. Every request thread touches it, so the invariant that
+// matters is ownership: a connection is held by EXACTLY ONE party at a time.
+// A double-hand-out would mean two requests writing one socket.
+//
+// Modelled on the real structure (unique_ptr entries, per-endpoint stacks,
+// eviction at a cap) because the real one needs a live TLS endpoint to dial.
+void connection_pool_race() {
+    constexpr std::size_t kPoolCap = 16;
+    struct Conn { int id; std::atomic<bool> in_use{false}; };
+
+    struct Pool {
+        std::mutex mu;
+        std::unordered_map<int, std::vector<std::unique_ptr<Conn>>> map;
+        std::size_t cap = 16;
+
+        std::unique_ptr<Conn> acquire(int ep) {
+            std::lock_guard lk(mu);
+            auto it = map.find(ep);
+            if (it == map.end() || it->second.empty()) return nullptr;
+            auto p = std::move(it->second.back());
+            it->second.pop_back();
+            return p;
+        }
+
+        void release(std::unique_ptr<Conn> c) {
+            if (!c) return;
+            std::lock_guard lk(mu);
+            auto& stack = map[c->id % 4];
+            if (stack.size() >= cap) stack.erase(stack.begin());
+            stack.push_back(std::move(c));
+        }
+    };
+
+    Pool pool;
+    pool.cap = kPoolCap;
+    std::atomic<int> double_use{0};
+    std::atomic<long> acquires{0};
+
+    // Seed a few endpoints.
+    for (int i = 0; i < 32; ++i)
+        pool.release(std::make_unique<Conn>(i));
+
+    std::barrier sync(kThreads);
+    std::vector<std::thread> ts;
+    for (int t = 0; t < kThreads; ++t) {
+        ts.emplace_back([&, t] {
+            sync.arrive_and_wait();
+            for (int i = 0; i < kIters; ++i) {
+                const int ep = (t + i) % 4;
+                if (auto c = pool.acquire(ep)) {
+                    // If the pool ever handed the same connection to two
+                    // threads, this flag is already set.
+                    if (c->in_use.exchange(true, std::memory_order_acq_rel))
+                        double_use.fetch_add(1, std::memory_order_relaxed);
+                    acquires.fetch_add(1, std::memory_order_relaxed);
+                    c->in_use.store(false, std::memory_order_release);
+                    pool.release(std::move(c));
+                } else {
+                    pool.release(std::make_unique<Conn>(i));
+                }
+            }
+        });
+    }
+    for (auto& t : ts) t.join();
+
+    check(double_use.load() == 0, "pool handed one connection to two threads");
+    std::printf("  connection pool: %ld acquires, %d double-uses\n",
+                acquires.load(), double_use.load());
+}
+
 } // namespace
 
 int main() {
@@ -171,6 +345,12 @@ int main() {
 
     std::printf("--- teardown registration race ---\n");
     teardown_registration_race();
+
+    std::printf("--- write-behind save queue race ---\n");
+    write_behind_queue_race();
+
+    std::printf("--- connection pool acquire/release race ---\n");
+    connection_pool_race();
 
     if (failures == 0) {
         std::printf("PASS (no races, no torn reads)\n");
