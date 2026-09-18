@@ -5,16 +5,25 @@
 // "_Atomic cannot be applied to type ... which is not trivially copyable".
 // snapshot.hpp keeps the same public API on a mutex there.
 //
-// This test compiles the FALLBACK path explicitly, via
-// AGENTTY_FORCE_SNAPSHOT_MUTEX, so it is exercised on the machines we
-// develop on. Otherwise the only people compiling it would be the ones
-// least able to report a bug in it — and a fallback that only builds on
-// hardware the maintainer doesn't own is a fallback that rots.
+// ── Why this is a SEPARATE binary that links nothing ────────────────────────
 //
-// Standalone because it needs a translation-unit-wide macro before any
-// include, which a shared doctest binary can't give it.
+// AGENTTY_FORCE_SNAPSHOT_MUTEX changes AtomicSnapshot's LAYOUT: one variant
+// holds a std::atomic<shared_ptr>, the other a mutex plus a plain shared_ptr.
+// Defining it in a TU that also links agentty's objects — which were compiled
+// with the atomic layout — is a one-definition-rule violation: the same class
+// with two different definitions in one program. The linker doesn't complain;
+// it just picks one, and the result hangs at static-init time.
+//
+// That is exactly what happened when this was first written as a folded test,
+// and it cost a release to find. So: no agentty objects, no shared object set,
+// nothing but this header. If you are tempted to add a link dependency here,
+// the ODR problem comes back.
+//
+// The define comes from the BUILD (AgenttyTests.cmake), not from a #define in
+// this file, for a second reason: the fold compiles each test with
+// -Dmain=<name>_main, and a macro written here would land on the wrong side of
+// that rename.
 
-#define AGENTTY_FORCE_SNAPSHOT_MUTEX 1
 #include "agentty/util/snapshot.hpp"
 
 #include <atomic>
@@ -35,7 +44,9 @@ void check(bool ok, const char* what) {
 
 int main() {
     static_assert(AGENTTY_HAS_ATOMIC_SHARED_PTR == 0,
-                  "this test must compile the mutex fallback, not the atomic path");
+                  "this test must compile the mutex fallback, not the atomic "
+                  "path — check AGENTTY_FORCE_SNAPSHOT_MUTEX reached the "
+                  "compile (it is set in AgenttyTests.cmake, not in this file)");
 
     using Snap = agentty::util::AtomicSnapshot<std::vector<std::string>>;
 
@@ -50,17 +61,17 @@ int main() {
     s.store(std::vector<std::string>{"a", "b", "c"});
     check(s.load()->size() == 3, "store then load round-trips");
 
-    // The property the whole type exists for: a reader holding a handle
-    // keeps its own generation alive across a republish. If this breaks,
-    // callers get a dangling view — the bug an exposed shared_ptr invites.
+    // The property the whole type exists for: a reader holding a handle keeps
+    // its own generation alive across a republish. If this breaks, callers get
+    // a dangling view — the bug an exposed shared_ptr invites.
     auto held = s.load();
     s.store(std::vector<std::string>{"x"});
     check(held->size() == 3, "an old handle is unaffected by a new store");
     check(s.load()->size() == 1, "a fresh load sees the new generation");
 
-    // Readers and a writer at the same time. With the mutex fallback the
-    // danger is a torn refcount, which shows up as a crash or a leak rather
-    // than a wrong value — so this runs long enough to hit it.
+    // Readers and a writer at once. With the mutex fallback the danger is a
+    // torn refcount, which shows up as a crash or a leak rather than a wrong
+    // value — so this runs long enough to hit it.
     {
         Snap hot;
         hot.store(std::vector<std::string>{"seed"});

@@ -4,6 +4,8 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-09-18
+
 ### Added
 - **A skill can declare what it will do, and agentty gates on the content.**
   Optional `effects:` in frontmatter (`read-fs`/`write-fs`/`net`/`exec` — the
@@ -23,8 +25,33 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
   The frontmatter-capability idea came from #47 (Arag Agrawal, Cohesivity).
 
 ### Fixed
+- **Builds on libc++ (Termux/Android).** `std::atomic<std::shared_ptr<T>>`
+  (P0718R2) is C++20 and libstdc++ has shipped it since GCC 12, but libc++
+  has not — so `util/snapshot.hpp` fell through to the primary `std::atomic`
+  template and failed with "_Atomic cannot be applied to type … not
+  trivially copyable". It now falls back to a mutex behind the same public
+  API, gated on `__cpp_lib_atomic_shared_ptr` rather than on the compiler. A
+  standalone test compiles the fallback path on toolchains that *do* have the
+  specialisation, so it can't rot unnoticed.
+- **Distro builds no longer clone at configure time.** `nlohmann_json` and
+  `simdjson` are declared with `FIND_PACKAGE_ARGS`, so an installed system
+  copy satisfies them; the pinned `GIT_TAG` still applies for anyone without
+  one. The version constraint is deliberately unpinned on the find_package
+  path — asking for `3.10` made CMake reject a system simdjson 4.x as
+  incompatible and clone anyway.
+- **The Termux recipe was stale and wrong.** It declared version 0.2.8,
+  passed a `-DAGENTTY_AUTO_PULL_MAYA` flag that no longer exists, and listed
+  build deps CMake ignored. It now builds from the self-contained release
+  tarball (all four submodules vendored) with `AGENTTY_USE_MIMALLOC=OFF`,
+  which removes the last configure-time download.
 - `key_routing_test` and `ui_prefs_test` didn't compile on master — `67797f6c`
   moved `index`/`query` into `FilteredPicker` and left both callers stale.
+- **`all()` re-parsed every skill on every turn.** It built its mtime
+  signature by parsing each `SKILL.md` into a fresh vector, compared, then
+  threw the parse away on a hit — and `catalog_block()` calls it per request.
+  Split into a stat-only signature pass and a parse pass that runs only when
+  the signature moves: **3401µs → 491µs** with 40 skills. A budget test now
+  guards the regression shape.
 
 ## [0.9.1] - 2026-09-17
 

@@ -100,7 +100,28 @@ agentty_fold_test(skills_panel_test        TIMEOUT 30)
 agentty_fold_test(catalog_cost_probe       TIMEOUT 60)
 # Compiles AtomicSnapshot's mutex fallback (the libc++/Termux path) on a
 # toolchain that HAS the atomic specialisation, so it can't rot unnoticed.
-agentty_fold_test(snapshot_mutex_fallback_test TIMEOUT 60)
+# A BARE binary: snapshot.hpp is header-only, and this test must link NO
+# agentty objects. AGENTTY_FORCE_SNAPSHOT_MUTEX changes AtomicSnapshot's
+# layout, so a TU compiled with it linked against objects compiled without it
+# is an ODR violation — same class, two definitions, linker picks one and the
+# program hangs in static init. Found the hard way; hence MODE raw.
+# snapshot.hpp's mutex fallback (the libc++/Termux path) as a BARE binary.
+#
+# It must link NO agentty objects: AGENTTY_FORCE_SNAPSHOT_MUTEX changes
+# AtomicSnapshot's layout, so a TU compiled with it linked against objects
+# compiled without it is an ODR violation — same class, two definitions. The
+# linker picks one and the program hangs in static init. Found the hard way.
+add_executable(snapshot_mutex_fallback_test EXCLUDE_FROM_ALL
+    ${CMAKE_SOURCE_DIR}/tests/snapshot_mutex_fallback_test.cpp)
+target_include_directories(snapshot_mutex_fallback_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(snapshot_mutex_fallback_test PRIVATE
+    AGENTTY_FORCE_SNAPSHOT_MUTEX=1)
+find_package(Threads REQUIRED)
+target_link_libraries(snapshot_mutex_fallback_test PRIVATE Threads::Threads)
+add_test(NAME snapshot_mutex_fallback_test
+         COMMAND snapshot_mutex_fallback_test)
+set_tests_properties(snapshot_mutex_fallback_test PROPERTIES TIMEOUT 60)
 agentty_fold_test(fork_test                TIMEOUT 30)
 agentty_fold_test(palette_render_probe     TIMEOUT 30)
 agentty_fold_test(embed_render_probe       TIMEOUT 30)

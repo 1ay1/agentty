@@ -3,7 +3,7 @@ TERMUX_PKG_DESCRIPTION="AI pair programming in your terminal — one binary, any
 TERMUX_PKG_LICENSE="MIT"
 TERMUX_PKG_LICENSE_FILE="LICENSE"
 TERMUX_PKG_MAINTAINER="@1ay1"
-TERMUX_PKG_VERSION="0.9.1"
+TERMUX_PKG_VERSION="0.9.2"
 
 # The RELEASE tarball, not a GitHub source archive and not a git clone.
 #
@@ -13,7 +13,9 @@ TERMUX_PKG_VERSION="0.9.1"
 # this recipe needs no network after the source step: no `git submodule
 # update`, no configure-time clone.
 TERMUX_PKG_SRCURL=https://github.com/1ay1/agentty/releases/download/v${TERMUX_PKG_VERSION}/agentty-${TERMUX_PKG_VERSION}.tar.gz
-TERMUX_PKG_SHA256=eae9671bfa31ac4fd0fff3c6962a357935556825cfffeebd282d2577720107bd
+# Fill from the published SHA256SUMS once the release finishes building:
+#   gh release download v0.9.2 -p SHA256SUMS -O - | grep agentty-0.9.2.tar.gz
+TERMUX_PKG_SHA256=PENDING_RELEASE
 TERMUX_PKG_AUTO_UPDATE=true
 
 TERMUX_PKG_DEPENDS="libc++, libnghttp2, openssl"
