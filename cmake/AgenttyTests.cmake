@@ -98,6 +98,9 @@ agentty_fold_test(skill_catalog_trust_test TIMEOUT 30)
 # Own HOME + cold skills cache, same reason as skill_catalog_trust_test.
 agentty_fold_test(skills_panel_test        TIMEOUT 30)
 agentty_fold_test(catalog_cost_probe       TIMEOUT 60)
+# Compiles AtomicSnapshot's mutex fallback (the libc++/Termux path) on a
+# toolchain that HAS the atomic specialisation, so it can't rot unnoticed.
+agentty_fold_test(snapshot_mutex_fallback_test TIMEOUT 60)
 agentty_fold_test(fork_test                TIMEOUT 30)
 agentty_fold_test(palette_render_probe     TIMEOUT 30)
 agentty_fold_test(embed_render_probe       TIMEOUT 30)

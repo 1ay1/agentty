@@ -98,11 +98,19 @@ else()
 endif()
 
 set(JSON_BuildTests OFF CACHE INTERNAL "")
+# FIND_PACKAGE_ARGS makes MakeAvailable try find_package() FIRST and only
+# clone when the system has nothing. That matters for DISTRO PACKAGING:
+# Termux, Alpine, Debian et al build in a sandbox where a configure-time
+# `git clone` is either blocked outright or grounds for rejecting the
+# recipe. With this, having the dev package installed satisfies the
+# dependency and nothing is fetched.
+# Developers with neither installed get the pinned clone exactly as before.
 FetchContent_Declare(
     nlohmann_json
     GIT_REPOSITORY https://github.com/nlohmann/json.git
     GIT_TAG        v3.11.3
     GIT_SHALLOW    TRUE
+    FIND_PACKAGE_ARGS 3.11 NAMES nlohmann_json
 )
 
 # simdjson — used on the SSE hot path (content_block_delta) where we parse
@@ -115,6 +123,7 @@ FetchContent_Declare(
     GIT_REPOSITORY https://github.com/simdjson/simdjson.git
     GIT_TAG        v3.10.1
     GIT_SHALLOW    TRUE
+    FIND_PACKAGE_ARGS 3.10 NAMES simdjson
 )
 
 FetchContent_MakeAvailable(nlohmann_json simdjson)
