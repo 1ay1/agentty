@@ -13,9 +13,7 @@ TERMUX_PKG_VERSION="0.9.2"
 # this recipe needs no network after the source step: no `git submodule
 # update`, no configure-time clone.
 TERMUX_PKG_SRCURL=https://github.com/1ay1/agentty/releases/download/v${TERMUX_PKG_VERSION}/agentty-${TERMUX_PKG_VERSION}.tar.gz
-# Fill from the published SHA256SUMS once the release finishes building:
-#   gh release download v0.9.2 -p SHA256SUMS -O - | grep agentty-0.9.2.tar.gz
-TERMUX_PKG_SHA256=PENDING_RELEASE
+TERMUX_PKG_SHA256=9dadc6130fba3a5a13ee3728d2e200b063f54fb273cadaa99e33e9439bced6c3
 TERMUX_PKG_AUTO_UPDATE=true
 
 TERMUX_PKG_DEPENDS="libc++, libnghttp2, openssl"
