@@ -523,9 +523,19 @@ const Skill* find(std::string_view name) {
 std::string catalog_block() {
     const auto& skills = all();
     // Hidden beats listed-but-blocked: user_only skills never appear, so
-    // the model can't waste a turn trying to activate one.
+    // the model can't waste a turn trying to activate one. An UNAPPROVED
+    // effectful skill is hidden for the same reason — listing something
+    // the activation path will refuse just burns a turn and reads as a
+    // malfunction. `agentty skill list` shows it as PENDING, which is
+    // where a human looks; the model is simply not told about it.
+    const auto approvals = load_approvals();
+    auto eligible_for_model = [&](const Skill& s) {
+        if (s.user_only) return false;
+        return std::holds_alternative<scope::Trusted>(trust_of(s, approvals));
+    };
+
     std::size_t eligible = 0;
-    for (const auto& s : skills) if (!s.user_only) ++eligible;
+    for (const auto& s : skills) if (eligible_for_model(s)) ++eligible;
     if (eligible == 0) return {};
 
     std::ostringstream m;
@@ -541,7 +551,7 @@ std::string catalog_block() {
          ".claude/, project and user) and only the listed directory is "
          "readable. Listed: name — description (directory).\n";
     for (const auto& s : skills) {
-        if (s.user_only) continue;
+        if (!eligible_for_model(s)) continue;
         m << "- " << s.name;
         if (!s.description.empty()) m << " — " << s.description;
         if (!s.dir.empty()) m << " (" << s.dir.string() << ")";
@@ -552,6 +562,28 @@ std::string catalog_block() {
 }
 
 std::string activation_payload(const Skill& s) {
+    // The enforcement point. catalog_block() hides an unapproved skill, but
+    // the model can name one directly (it may have seen it in a previous
+    // session, or the user may have mentioned it), so the refusal has to
+    // live HERE rather than relying on the listing to be the only door.
+    //
+    // Refuse with an instruction the model can act on, not a bare error:
+    // it should tell the user what to run, not retry or route around it.
+    if (needs_trust_gate(s.effects)
+        && !std::holds_alternative<scope::Trusted>(trust_of(s))) {
+        std::ostringstream deny;
+        deny << "<skill_blocked name=\"" << s.name << "\">\n"
+             << "This skill declares effects (" << effects_to_frontmatter(s.effects)
+             << ") and has not been approved on this machine, so its contents "
+                "were not loaded.\n\n"
+                "Do NOT attempt to read the skill file directly or guess what "
+                "it says — that defeats the approval. Tell the user they can "
+                "review and approve it with:\n"
+             << "  agentty skill approve " << s.name << "\n"
+             << "</skill_blocked>";
+        return deny.str();
+    }
+
     std::ostringstream out;
     out << "<skill_content name=\"" << s.name << "\">\n";
     if (!s.description.empty()) out << s.description << "\n\n";

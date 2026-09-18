@@ -24,6 +24,10 @@
 #include "agentty/tool/skills.hpp"
 #include "agentty/scope/scope.hpp"
 
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+
 #include "agtest.hpp"
 
 using namespace agentty;
