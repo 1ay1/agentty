@@ -4,6 +4,28 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **A skill can declare what it will do, and agentty gates on the content.**
+  Optional `effects:` in frontmatter (`read-fs`/`write-fs`/`net`/`exec` — the
+  same four bits tools already declare) plus `source:` for provenance. A skill
+  that declares effects installs through the new `agentty skill add|list|
+  remove|approve`, which prints a consent screen **agentty renders from the
+  declaration** — the skill author supplies a name, description and four bits,
+  never a sentence — and pins the approval to a hash of body+effects. Edit the
+  body, or keep the prose and add `exec`, and it re-gates (the MCPoison rule:
+  trust binds to content, never to a name). Approvals live in
+  `~/.agentty/skills_approved.json` under the user root, so a cloned repo can
+  never pre-approve its own skills. Skills with no `effects:` — every skill
+  written before this — are never gated, and that's a `static_assert`, not a
+  promise. Deliberately not a first-run screen and not a settings toggle: a
+  capability arrives because you named it. Docs:
+  [installing skills](docs/website/skill-install.md).
+  The frontmatter-capability idea came from #47 (Arag Agrawal, Cohesivity).
+
+### Fixed
+- `key_routing_test` and `ui_prefs_test` didn't compile on master — `67797f6c`
+  moved `index`/`query` into `FilteredPicker` and left both callers stale.
+
 ## [0.9.1] - 2026-09-17
 
 ### Security

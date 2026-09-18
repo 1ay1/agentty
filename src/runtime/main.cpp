@@ -668,10 +668,13 @@ Args parse_args(int argc, char** argv) {
                     break;        // -m/-w/… handled by the outer loop
                 }
             }
-        } else if (a == "plugin") {
-            // `agentty plugin <verb> …` — hand the whole tail to the
-            // plugin CLI verbatim (it owns its own flags: --uvx/--python/
-            // --npx/--/--project/--force).
+        } else if (a == "plugin" || a == "skill") {
+            // `agentty plugin <verb> …` / `agentty skill <verb> …` — hand the
+            // whole tail to the subcommand CLI verbatim (each owns its own
+            // flags: --uvx/--python/--npx/-- for plugin, --force/--yes for
+            // skill). NOTE: `skill` (install one) is distinct from `skills`
+            // (lint every discovered one) — different verbs, kept separate
+            // so neither grows a mode flag.
             out.subcommand = std::move(a);
             for (int j = i + 1; j < argc; ++j)
                 out.plugin_argv.emplace_back(argv[j]);
@@ -972,6 +975,7 @@ int main(int argc, char** argv) {
     if (args.subcommand == "logout") return auth::cmd_logout();
     if (args.subcommand == "status") return auth::cmd_status();
     if (args.subcommand == "skills") return tools::skills::cmd_skills();
+    if (args.subcommand == "skill")  return tools::skills::cli(args.plugin_argv);
     if (args.subcommand == "hooks")  return tools::hooks::cli(args.cli_run_agent);
     if (args.subcommand == "plugin") return tools::plugin::cli(args.plugin_argv);
     if (args.subcommand == "mcp-login")

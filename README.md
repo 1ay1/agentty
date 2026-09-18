@@ -416,6 +416,8 @@ your platform can't run offers edit/copy instead, and capture is capped at
 
 Drop a `SKILL.md` anywhere under `.agentty/skills/` or `~/.agentty/skills/` — it's live next turn. Compatible with Claude Code's `.claude/skills/` format.
 
+A skill that runs programs or reaches the network says so in its frontmatter (`effects: [exec, net]`) and installs through `agentty skill add`, which shows you what it declared and pins the approval to the content — edit the body and it asks again. Prose-only skills are never gated. See [installing skills](docs/website/skill-install.md).
+
 The tier-1 catalog (name + description of every discovered skill) is capped at 64 entries. Set `AGENTTY_MAX_SKILLS` to override it (clamped to 8–4096) — lower it for small-context models, raise it for large skill libraries.
 
 On codebases with internal DSLs or tribal conventions, agent accuracy jumps from ~20% to ~85% with curated skills ([research](https://arxiv.org/abs/2410.03981)).

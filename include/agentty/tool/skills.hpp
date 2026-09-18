@@ -226,6 +226,34 @@ static_assert( needs_trust_gate(EffectSet{Effect::ReadFs}));
 // write here, so it cannot pre-approve its own skills.
 inline constexpr std::string_view kApprovalsLeaf = "skills_approved.json";
 
+// Load / persist the skill approvals store (kApprovalsLeaf under the user
+// root). Separate from hooks' and MCP's stores on purpose: approving a
+// skill must not silently approve an MCP server.
+[[nodiscard]] scope::Approvals load_approvals();
+void                           save_approvals(const scope::Approvals&);
+
+// Convenience: resolve a skill's trust against the persisted store.
+[[nodiscard]] scope::Trust trust_of(const Skill& s) noexcept;
+
+// The exact bytes an approval is keyed by: body + declared effects. Exposed
+// so the consent UI can show the user what they are approving, and so a
+// test can assert the re-gate without reaching into the implementation.
+[[nodiscard]] std::string content_sha_of(const Skill& s);
+
+// ── The `agentty skill` CLI ────────────────────────────────────────────────
+// verb ∈ {add, list, remove, approve}. One install path for every source:
+//
+//   agentty skill add github.com/user/repo      fetched (needs approval)
+//   agentty skill add ./path/to/skill-dir       local copy
+//   agentty skill list                          with effects + trust column
+//   agentty skill remove NAME
+//   agentty skill approve NAME                  after reading it
+//
+// Deliberately NOT a first-run screen and NOT a menu entry: a capability
+// arrives because the user asked for it by name. Returns a process exit
+// code; prints what it did.
+int cli(const std::vector<std::string>& argv);
+
 // CLI entry: list every discovered skill (scope, dir, resource count)
 // with lint diagnostics. Returns 0 when every skill is clean, 1 when
 // any diagnostic fired — usable in CI exactly like `skills-ref
