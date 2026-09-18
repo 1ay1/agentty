@@ -144,6 +144,11 @@ struct PaletteContext {
     bool update_available   = true;
     bool has_pending_changes = true;   // gates Review / Accept-all / Reject-all
     bool has_code_block     = true;    // gates Run code block
+
+    // The memo below keys on this, so equality is part of the type's contract
+    // rather than something the cache re-derives field by field (and gets
+    // wrong the day a fourth gate is added).
+    [[nodiscard]] bool operator==(const PaletteContext&) const noexcept = default;
 };
 
 // True iff `cmd` should be VISIBLE given the live context. Keeping this in one
@@ -193,8 +198,11 @@ struct CommandMatch {
 
 // THE matcher. Returns visible commands ranked best-first, each with its
 // label-highlight offsets. Single source of truth for view + dispatcher.
+//
+// MEMOISED, and returned by reference — see match_commands() below for why
+// this one is the uncached core and the cached wrapper is what callers use.
 [[nodiscard]] inline std::vector<CommandMatch>
-match_commands(std::string_view query, PaletteContext ctx) {
+match_commands_uncached(std::string_view query, PaletteContext ctx) {
     std::string needle;
     needle.reserve(query.size());
     for (char c : query) needle.push_back(
@@ -226,11 +234,46 @@ match_commands(std::string_view query, PaletteContext ctx) {
     return out;
 }
 
+// The cached front door. Every caller goes through this.
+//
+// The palette was the one picker that never got a filter memo. Its two
+// siblings (`@` and `#`) each hand-rolled one; the palette was left
+// re-running the whole fuzzy scan TWICE per keystroke — once in the reducer
+// to clamp the cursor, once in the view to draw — plus a third time on
+// Enter to resolve the selection. Same bug the siblings had solved, simply
+// not copied a third time, which is the standard fate of a pattern that
+// lives in call sites instead of in a type.
+//
+// The key is (query, ctx) because visibility is a real input: a command can
+// appear or vanish when a diff lands or an update is detected, with the query
+// unchanged. Keying on the query alone would pin a stale row set — the exact
+// class of bug the sibling memos avoid by keying on their whole input.
+//
+// A one-entry cache is exact here, not approximate: within a frame every
+// caller asks the identical question, and across frames the query changes at
+// most once per keystroke.
+[[nodiscard]] inline const std::vector<CommandMatch>&
+match_commands(std::string_view query, PaletteContext ctx) {
+    static std::string               cached_query;
+    static PaletteContext            cached_ctx{};
+    static bool                      cached_valid = false;
+    static std::vector<CommandMatch> cached;
+
+    if (cached_valid && cached_query == query && cached_ctx == ctx)
+        return cached;
+
+    cached       = match_commands_uncached(query, ctx);
+    cached_query = std::string{query};
+    cached_ctx   = ctx;
+    cached_valid = true;
+    return cached;
+}
+
 // Pointer-only view of match_commands, ranked. Kept for the dispatcher +
 // existing call sites/tests that only need "which command is at row N".
 [[nodiscard]] inline std::vector<const CommandDef*>
 filtered_commands(std::string_view query, PaletteContext ctx) {
-    auto matches = match_commands(query, ctx);
+    const auto& matches = match_commands(query, ctx);
     std::vector<const CommandDef*> out;
     out.reserve(matches.size());
     for (const auto& m : matches) out.push_back(m.cmd);

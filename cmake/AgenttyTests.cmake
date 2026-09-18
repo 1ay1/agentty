@@ -28,6 +28,8 @@ set(_AGENTTY_CONSOLIDATED
     turn_provenance_test subagent_pin_test
     update_check_test
     workspace_index_test
+    teardown_test
+    snapshot_picker_test
     dup_tool_call_id_test salvage_dedup_test compaction_wire_test
     plugins_in_model_test tool_stream_snapshot_test tool_timeline_adapter_test
     anthropic_sse_golden_test codex_login_flow_test mcp_reload_race_test

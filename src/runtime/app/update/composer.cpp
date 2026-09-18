@@ -603,32 +603,43 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
                 return prev == ' ' || prev == '\t' || prev == '\n';
             };
             if (e.ch == U'@' && at_word_boundary()) {
-                mention::Open o;
-                // Non-blocking: snapshot the file list ONLY if the prewarm
-                // has landed (files_ready()). If it's still indexing, open
-                // with an empty snapshot + "indexing…" hint rather than
-                // freezing the UI on an inline walk; the next keystroke
-                // re-pulls once the background thread publishes.
-                if (files_ready()) o.files = list_workspace_files();
-                m.ui.panel.descend(pn::Mention{std::move(o)});
-                // Refresh git signals in the background so the working-set
-                // ranking reflects edits made since startup (the agent may
-                // have modified files this session). Cheap (~two git calls);
-                // this open uses the current map, the next keystroke the
-                // fresh one. Terminate-proof detach (a throw out of a bare
-                // detached thread is process death).
-                agentty::util::run_isolated_detached(
-                    "composer.git_refresh", []{ refresh_git_signals(); });
-                return done(std::move(m));
+                // No eager snapshot: the picker pulls one on its first read
+                // and tops itself up if the index publishes later, so opening
+                // cold is free and never leaves the panel stranded on
+                // "indexing…" (see panel/filtered_picker.hpp).
+                m.ui.panel.descend(pn::Mention{mention::Open{}});
+
+                // Refresh git signals so the working-set ranking reflects
+                // edits made since startup.
+                //
+                // Scheduled through the Cmd seam like every other background
+                // job — NOT a hand-rolled thread. This handler used to call a
+                // bare `run_isolated_detached`, so holding `@` spawned one
+                // thread and two 8s-timeout `git` subprocesses PER KEYSTROKE,
+                // all racing to publish into the same map.
+                //
+                // Coalescing lives in the MODEL, which is what makes it Elm
+                // rather than a static latch hidden in the workspace layer:
+                // the reducer can see whether a refresh is already in flight,
+                // so it simply does not emit a second Cmd. One flag, one
+                // place, visible to tests.
+                maya::Cmd<Msg> git_cmd;
+                if (!m.ui.git_refresh_inflight) {
+                    m.ui.git_refresh_inflight = true;
+                    git_cmd = maya::Cmd<Msg>::task_isolated(
+                        [](std::function<void(Msg)> dispatch) {
+                            refresh_git_signals();
+                            dispatch(Msg{GitSignalsRefreshed{}});
+                        });
+                }
+                return {std::move(m), std::move(git_cmd)};
             }
             // '#' opens the symbol picker — mirrors '@'. Non-blocking:
             // snapshot only if the (parallel) symbol scan has landed;
             // otherwise open with an empty snapshot + "indexing…" hint and
             // fill on the first keystroke. Never blocks the UI on the scan.
             if (e.ch == U'#' && at_word_boundary()) {
-                symbol::Open o;
-                if (symbols_ready()) o.entries = list_workspace_symbols();
-                m.ui.panel.descend(pn::Symbol{std::move(o)});
+                m.ui.panel.descend(pn::Symbol{symbol::Open{}});
                 return done(std::move(m));
             }
             // Coalesce consecutive typing into one undo unit, but

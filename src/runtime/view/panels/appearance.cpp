@@ -26,7 +26,7 @@ namespace {
 // does not take is a column of real UI left visible in the scheme you are
 // looking at.
 [[nodiscard]] Element theme_browser(const Model& m, const pn::Appearance& o) {
-    const auto names = pn::matching_themes(o.pane.picker.query);
+    const auto& names = pn::matching_themes(o.pane.picker.query);
 
     Panel::Config cfg;
     cfg.title      = " Theme ";

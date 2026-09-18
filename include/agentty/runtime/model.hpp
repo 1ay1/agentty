@@ -534,6 +534,24 @@ struct Model {
         // paint to <1 ms warm paint on tool-heavy thread resume.
         bool                needs_warmup_render = false;
 
+        // Is a background `git status` refresh (the `@` picker's working-set
+        // ranking) in flight?
+        //
+        // THE single-flight latch for that job, and it lives HERE — on the
+        // Model — on purpose. The reducer emits the refresh Cmd only when
+        // this is false, and GitSignalsRefreshed clears it. So "don't run two
+        // at once" is a property a test can set up and assert on, rather than
+        // a static atomic buried in the workspace layer where the reducer
+        // cannot see it.
+        //
+        // Before this existed, the `@` handler spawned a bare detached thread
+        // per keystroke with no guard at all: holding `@` meant N threads and
+        // 2N `git` subprocesses (8 s timeout each) racing to publish into one
+        // map, with the winner decided arbitrarily.
+        //
+        // Deliberately NOT part of the visual hash — it changes no pixels.
+        bool                git_refresh_inflight = false;
+
         // Cross-frame widget state cache. The only consumers now are:
         //   • StreamingMarkdown — keeps a per-Message widget instance
         //     alive across frames so its block boundary cache survives

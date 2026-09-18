@@ -1,15 +1,23 @@
 // mention_update — reducer for `msg::MentionMsg`. The @file
-// picker captures a snapshot of the workspace's files at open time and
-// then filters that snapshot per-keystroke. On select, an Attachment
+// picker reads a snapshot of the workspace's files and filters it
+// per-keystroke. On select, an Attachment
 // of kind FileRef is appended to composer.attachments and the inline
 // SOH placeholder is inserted at the cursor; the file's bytes are
 // loaded later, at submit time (modal.cpp), so an edited file is read
 // with its latest contents.
+//
+// The snapshot/memo/cursor mechanics are the shared FilteredPicker's
+// (panel/filtered_picker.hpp). Notably the COLD-OPEN REFILL: it used to live
+// only in the `MentionInput` arm behind an `o->files.empty()` guard, so a
+// picker opened before the index published and then arrowed (rather than
+// typed into) never refilled — and once the query was non-empty the guard
+// could never fire again, pinning the picker to whatever partial list it
+// caught on keystroke one. The refill now happens on every READ of the
+// snapshot, which is total by construction.
 
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/runtime/app/update.hpp"
 
-#include <algorithm>
 #include <utility>
 
 #include <maya/core/overload.hpp>
@@ -34,53 +42,37 @@ Step mention_update(Model m, msg::MentionMsg mm) {
             return done(std::move(m));
         },
         [&](MentionInput& e) -> Step {
-            auto* o = m.ui.panel.get<pn::Mention>();
-            if (o && static_cast<uint32_t>(e.ch) < 0x80
-                  && e.ch >= 0x20) {
-                // Picker opened cold (index still warming) → empty snapshot.
-                // Fill it the moment the background walk has published, so
-                // typing progressively reveals results without a blocking
-                // open. One-shot: once files are in, this is a no-op.
-                if (o->files.empty() && files_ready())
-                    o->files = list_workspace_files();
-                o->query.push_back(static_cast<char>(e.ch));
-                o->index = 0;
-            }
+            if (auto* o = m.ui.panel.get<pn::Mention>()) o->picker.type(e.ch);
             return done(std::move(m));
         },
         [&](MentionBackspace) -> Step {
             auto* o = m.ui.panel.get<pn::Mention>();
             if (!o) return done(std::move(m));
-            if (o->query.empty()) {
-                // Backspace on empty query closes the picker — same
-                // affordance as command palette + most chat apps.
-                m.ui.panel.close<pn::Mention>();
-                return done(std::move(m));
-            }
-            o->query.pop_back();
-            o->index = 0;
+            // Backspace on an empty query closes the picker — same
+            // affordance as command palette + most chat apps. The picker
+            // answers "was there anything to erase", so the test and the
+            // mutation cannot drift apart.
+            if (!o->picker.backspace()) m.ui.panel.close<pn::Mention>();
             return done(std::move(m));
         },
         [&](MentionMove& e) -> Step {
-            auto* o = m.ui.panel.get<pn::Mention>();
-            if (!o) return done(std::move(m));
-            int sz = static_cast<int>(mention_filtered(*o).size());
-            if (sz <= 0) { o->index = 0; return done(std::move(m)); }
-            o->index = std::clamp(o->index + e.delta, 0, sz - 1);
+            if (auto* o = m.ui.panel.get<pn::Mention>()) o->picker.move(e.delta);
             return done(std::move(m));
         },
         [&](MentionSelect) -> Step {
             auto* o = m.ui.panel.get<pn::Mention>();
             if (!o) return done(std::move(m));
-            const auto& matches = mention_filtered(*o);
-            if (matches.empty()
-                || o->index < 0
-                || o->index >= static_cast<int>(matches.size())) {
+            const auto* hit = o->picker.selected();
+            if (!hit) {
                 m.ui.panel.close<pn::Mention>();
                 return done(std::move(m));
             }
-            std::string path = std::move(o->files[matches[
-                static_cast<std::size_t>(o->index)]]);
+            // COPY, not move: the snapshot is shared and immutable now, so
+            // stealing the string out of it would corrupt the cached index
+            // every other reader (and the next `@`) sees. The old move was
+            // only safe because each picker owned a private deep copy of the
+            // whole file list — which is precisely the copy we removed.
+            std::string path = *hit;
             m.ui.panel.close<pn::Mention>();
 
             // Frecency: this path just got referenced — rank it near the

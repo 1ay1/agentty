@@ -14,14 +14,18 @@
 #include <string_view>
 #include <vector>
 
+#include "agentty/util/snapshot.hpp"
+
 namespace agentty {
 
 // Walk the workspace, return up to `cap` workspace-relative file
 // paths with binary files / common build & VCS dirs filtered out.
-// Cheap on reasonable repos (low thousands of files) — runs
-// synchronously on open. If a future repo blows past the cap,
-// increase the cap or add async/incremental loading.
-[[nodiscard]] std::vector<std::string>
+//
+// Returns a SNAPSHOT: O(1) to hand out (a refcount bump, not a deep copy of
+// every path), and the returned handle keeps its buffer alive for as long as
+// the caller holds it — so a background republish can never pull the rug out
+// from under a reader. See util/snapshot.hpp.
+[[nodiscard]] util::Snapshot<std::vector<std::string>>
 list_workspace_files(std::size_t cap = 5000);
 
 // Kick the workspace-file walk on a background thread (single-flight, safe
@@ -81,10 +85,21 @@ enum class GitTag {
 [[nodiscard]] GitTag file_git_tag(std::string_view path);
 
 // Rebuild the git-status map SYNCHRONOUSLY against the current project
-// root. Prewarm calls this on a background thread; call it directly after
-// a run of tool edits so a follow-up `@` reflects the new working set, or
-// from a test that just mutated a fixture repo.
+// root. Runs two `git` subprocesses (8 s timeout apiece) on the calling
+// thread, so this is for the prewarm walk and for tests that just mutated a
+// fixture repo — NEVER for a reducer.
 void refresh_git_signals();
+
+// Rebuild the git-status map on a background task. THE form a reducer wants:
+// it returns immediately, and a request arriving while a rebuild is already
+// in flight COALESCES into it rather than spawning a rival.
+//
+// That coalescing is the whole point. The composer's `@` handler used to call
+// the synchronous form from a bare detached thread, so holding `@` spawned a
+// thread and two `git` processes per keystroke, all racing to publish into
+// one map. Single-flight now lives in Model::UI::git_refresh_inflight,
+// not in a rule each caller has to remember.
+void refresh_git_signals_async();
 
 // A one-word label + whether this path is "hot" (dirty/staged/untracked)
 // for the picker's row rendering. Empty label ⇒ no tag.

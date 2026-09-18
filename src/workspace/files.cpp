@@ -280,7 +280,8 @@ std::shared_ptr<const std::vector<std::string>>& files_cache() {
     static std::shared_ptr<const std::vector<std::string>> c;
     return c;
 }
-std::atomic<bool>& files_building() { static std::atomic<bool> b{false}; return b; }
+// Single-flight latch for the file walk lives beside prewarm_workspace_files
+// below, next to the only code that reads it.
 
 // Frecency: paths the user has referenced, most-recent-first-weighted.
 // A tiny recency list (not a full frecency decay) — the last-referenced
@@ -394,46 +395,44 @@ std::vector<std::string> build_file_list(std::size_t cap) {
 } // namespace
 
 namespace {
-// The prewarm walk is OWNED, not detached. A detached FS walk still touching
-// its captured statics (and the mimalloc heap) when a fast pipe-EOF exit runs
-// the CRT atexit handlers is a use-after-free that faults on Windows
-// (0xC0000005) — the same class of bug join_prewarm() closed for TLS dials.
-// main() calls join_workspace_prewarm() before teardown; the thread is kept
-// joinable here so it can.
-std::thread& files_prewarm_thread() {
-    static std::thread t;
-    return t;
+// Single-flight latch. NOT a thread — this module no longer owns one.
+//
+// Who runs the work is maya's business (the caller hands this body to
+// Cmd::task_isolated); the only thing that has to live HERE is "don't do it
+// twice at once", because that is a property of the cache being filled, not
+// of the scheduler filling it.
+std::atomic<bool>& files_building() {
+    static std::atomic<bool> b{false};
+    return b;
 }
 }  // namespace
 
 void prewarm_workspace_files(std::size_t cap) {
-    // Single-flight: only the first caller spawns the walk.
-    bool expected = false;
-    if (!files_building().compare_exchange_strong(expected, true)) return;
+    // SYNCHRONOUS. The caller decides where this runs — init.cpp hands it to
+    // maya's Cmd::task_isolated, which owns the thread, joins it at teardown,
+    // and swallows exceptions. This module used to hand-roll all three, in
+    // parallel with maya's pool doing the same job two lines away in the same
+    // function.
     {
         std::lock_guard<std::mutex> lk(files_mu());
-        if (files_cache()) { files_building() = false; return; }   // already warm
+        if (files_cache()) return;   // already warm
     }
-    // A prior prewarm thread may have finished but not yet been joined;
-    // assigning over a joinable std::thread calls std::terminate, so reap it
-    // first. (Single-flight above makes a second LIVE walk impossible, so
-    // this join returns immediately.)
-    if (files_prewarm_thread().joinable()) files_prewarm_thread().join();
-    files_prewarm_thread() = std::thread([cap] {
-        // Speculative: the `@` picker may never open, so this must lose
-        // every race against real work (see the header).
-        deprioritize_prewarm_thread();
-        // Git signals first (fast, ~two git invocations) so the file list is
-        // already git-aware the instant it publishes — a blank `@` leads
-        // with your dirty files from the very first open.
-        build_git_signals();
-        auto built = std::make_shared<std::vector<std::string>>(build_file_list(cap));
-        {
-            std::lock_guard<std::mutex> lk(files_mu());
-            files_cache() = std::move(built);
-        }
-        files_building() = false;
-    });
+    bool expected = false;
+    if (!files_building().compare_exchange_strong(expected, true)) return;
+
+    // Speculative: the `@` picker may never open, so this must lose every
+    // race against real work (see the header).
+    deprioritize_prewarm_thread();
+    // Git signals first (fast, ~two git invocations) so the file list is
+    // already git-aware the instant it publishes — a blank `@` leads with
+    // your dirty files from the very first open.
+    build_git_signals();
+    auto built = std::make_shared<const std::vector<std::string>>(build_file_list(cap));
+    {
+        std::lock_guard<std::mutex> lk(files_mu());
+        files_cache() = std::move(built);
+    }
+    files_building() = false;
 }
 
 // Shared cooperative-cancel flag for BOTH prewarm walks. A single process-wide
@@ -465,11 +464,15 @@ void deprioritize_prewarm_thread() noexcept {
 }
 
 void join_workspace_prewarm() {
-    // Ask the walk to stop before we block on it, so a big-repo scan doesn't
-    // stall teardown. Idempotent with an explicit request_prewarm_cancel().
+    // Nothing to join anymore: the walk runs on maya's worker pool, which
+    // owns and joins its own threads at teardown. All this still does is trip
+    // the cooperative cancel flag so a big-repo scan stops promptly instead of
+    // making maya's shutdown wait for it.
+    //
+    // Kept as a named no-op-ish entry point rather than deleted because the
+    // CANCEL half is still load-bearing, and because `agentty run` / acp /
+    // mcp-serve (which have no maya runtime) call the prewarm synchronously.
     request_prewarm_cancel();
-    auto& t = files_prewarm_thread();
-    if (t.joinable()) t.join();
 }
 
 bool files_ready() {
@@ -504,19 +507,24 @@ std::string_view git_tag_label(GitTag tag) {
 
 void refresh_git_signals() { build_git_signals(); }
 
-std::vector<std::string> list_workspace_files(std::size_t cap) {
-    // Fast path: warm cache → return it (a copy, cheap: it's paths).
+// Returns a Snapshot: O(1) refcount bump, and the returned handle keeps the
+// buffer alive for as long as the caller holds it. The old signature returned
+// the vector BY VALUE — safe, but a full deep copy of every path on each of
+// the several calls a single keystroke makes.
+util::Snapshot<std::vector<std::string>> list_workspace_files(std::size_t cap) {
+    // Fast path: warm cache → share it.
     {
         std::lock_guard<std::mutex> lk(files_mu());
-        if (auto c = files_cache()) return *c;
+        if (auto c = files_cache())
+            return util::Snapshot<std::vector<std::string>>{c};
     }
     // Cold and someone needs it NOW (synchronous caller, no prewarm yet):
     // build inline and publish, so subsequent calls are instant.
-    auto built = std::make_shared<std::vector<std::string>>(build_file_list(cap));
+    auto built = std::make_shared<const std::vector<std::string>>(build_file_list(cap));
     {
         std::lock_guard<std::mutex> lk(files_mu());
         if (!files_cache()) files_cache() = built;
-        return *files_cache();
+        return util::Snapshot<std::vector<std::string>>{files_cache()};
     }
 }
 

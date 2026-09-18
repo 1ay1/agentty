@@ -39,6 +39,7 @@ set(AGENTTY_IO_SOURCES
     src/util/base64.cpp
     src/util/dbglog.cpp
     src/util/logx.cpp
+    src/util/teardown.cpp
     src/util/home_dir.cpp
     src/util/user_root.cpp
     src/util/update.cpp

@@ -8,6 +8,8 @@
 #include <thread>
 #include <utility>
 
+#include "agentty/util/teardown.hpp"
+
 namespace agentty::app::settings_cache {
 
 namespace {
@@ -70,6 +72,26 @@ void run(State& s) {
 
 void ensure_worker(State& s) {
     if (s.worker.joinable() || s.stopping) return;
+
+    // THE fix for the abort-on-exit.
+    //
+    // This worker lives in a function-local static. `shutdown()` was written
+    // to join it and documented as "called during teardown" — and no call was
+    // ever added, in any of the ~8 reducers that write settings or in main().
+    // So the thread stayed joinable inside the static, and ~std::thread on a
+    // joinable handle calls std::terminate. (Verified: a probe linking this
+    // TU aborts with 134.)
+    //
+    // Relying on main() to know about every threaded subsystem is the flaw.
+    // The subsystem knows; main() cannot. So it registers itself, once, at
+    // the exact moment it first acquires a thread to be responsible for.
+    // There is now no way to start this worker without arranging its join.
+    static bool registered = false;
+    if (!registered) {
+        registered = true;
+        util::teardown::on_shutdown("settings_cache", [] { shutdown(); });
+    }
+
     s.worker = std::thread([&s] { run(s); });
 }
 

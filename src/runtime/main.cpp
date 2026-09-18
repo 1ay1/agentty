@@ -66,6 +66,7 @@
 #include "agentty/acp/server.hpp"
 #include "agentty/airgap/airgap.hpp"
 #include "agentty/util/logx.hpp"   // flight recorder dump in crash handler
+#include "agentty/util/teardown.hpp"
 #include "agentty/domain/profile.hpp"
 #include "agentty/runtime/app/deps.hpp"
 #include "agentty/runtime/app/program.hpp"
@@ -787,6 +788,24 @@ int main(int argc, char** argv) {
 
     install_crash_handler();
 
+    // ── Teardown, on EVERY exit path ────────────────────────────────────
+    //
+    // main() has ~20 early returns (help, version, login, status, skills,
+    // plugin, mcp-*, airgap, …) before the TUI path's explicit run() at the
+    // bottom. A scope guard is the only way to cover all of them without
+    // adding a line to each — and "remember to add a line" is precisely the
+    // failure that left settings_cache's write-behind worker unjoined, so
+    // ~std::thread aborted the process at exit.
+    //
+    // The guard runs before any static destructor, which is the invariant
+    // that matters: a background thread must stop touching its captured
+    // statics while those statics are still alive. Subsystems register
+    // themselves at the moment they start a thread (util::teardown), so this
+    // stays correct as subsystems are added — nobody has to update a list.
+    struct TeardownGuard {
+        ~TeardownGuard() { util::teardown::run(); }
+    } teardown_guard;
+
 #if defined(_WIN32)
     Win32PerfTuning win32_perf;
     // Swap the ANSI-codepage narrow argv for a UTF-8 one recovered from the
@@ -1469,5 +1488,13 @@ int main(int argc, char** argv) {
     // Tear down any cached external ACP agent subprocesses (bounded even for a
     // wedged agent via ExternalAcpBackend's teardown watchdog).
     provider::release_acp_agents();
+
+    // Everything ABOVE this line is a subsystem main() happens to know about;
+    // the registry below covers everything that registered ITSELF when it
+    // first started a thread. Note this is the TUI path's explicit call — the
+    // scope guard installed at the top of main() is what makes the same thing
+    // happen on the ~20 CLI subcommand paths that return before ever getting
+    // here. Calling run() twice is a no-op; the registry clears itself.
+    util::teardown::run();
     return 0;
 }

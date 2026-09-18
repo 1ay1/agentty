@@ -1126,8 +1126,24 @@ Sub<Msg> subscribe(const Model& m) {
         appearance_picking   = o->pane.picking;
     }
 
+    // Snapshot the login state ONLY when login actually owns the keyboard.
+    //
+    // This used to be an unconditional `login_state = m.ui.login` in the
+    // capture list. login::State is a variant whose alternatives carry up to
+    // a dozen std::strings plus a vector<AccountRow> — and maya marks
+    // subscriptions dirty after EVERY message, so that deep copy ran on every
+    // keystroke, every 30 fps tick while streaming, and every SSE delta, to
+    // feed a handler that is unreachable unless `active_panel == Login`.
+    //
+    // std::optional makes the dependency explicit rather than incidental: the
+    // payload exists exactly in the state that consumes it, which is the same
+    // "data lives in the alternative that owns it" rule the panel slot and
+    // ToolUse::Status follow.
+    std::optional<ui::login::State> login_state;
+    if (in_login) login_state = m.ui.login;
+
     auto key_sub = Sub<Msg>::on_key(
-        [=, login_state = m.ui.login](const KeyEvent& ev) -> std::optional<Msg> {
+        [=, login_state = std::move(login_state)](const KeyEvent& ev) -> std::optional<Msg> {
             // ^C quits from ANYWHERE, before overlay routing. Every modal
             // picker's handler returns UNCONDITIONALLY (the dispatch below
             // never falls through for them), so without this a ^C pressed
@@ -1169,7 +1185,11 @@ Sub<Msg> subscribe(const Model& m) {
             // through to global handling and never swallow anything.
             const auto dispatch = [&]() -> std::optional<Msg> {
                 switch (active_panel) {
-                    case OK::Login:          return on_login(login_state, ev);
+                    case OK::Login:
+                        // Reachable only when in_login, which is exactly the
+                        // condition under which the snapshot was taken.
+                        return login_state ? on_login(*login_state, ev)
+                                           : std::nullopt;
                     case OK::Permission:     return on_permission(ev);
                     case OK::Palette: return on_command_palette(ev);
                     case OK::Mention:        return on_mention_palette(ev);

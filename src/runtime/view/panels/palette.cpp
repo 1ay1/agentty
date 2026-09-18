@@ -15,7 +15,7 @@ Element palette_panel(const Model& m) {
     // so a row the dispatcher would reject never renders (no dead Accept-all)
     // and the cursor the view shows indexes the list the reducer resolves.
     const PaletteContext pctx = ui::palette_context(m);
-    auto scored = match_commands(o->query, pctx);
+    const auto& scored = match_commands(o->query, pctx);
     std::vector<const CommandDef*> matches;
     matches.reserve(scored.size());
     for (const auto& s : scored) matches.push_back(s.cmd);

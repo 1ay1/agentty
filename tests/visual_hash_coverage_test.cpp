@@ -264,22 +264,30 @@ const std::vector<Axis>& visual_axes() {
             m.ui.panel.descend(agentty::ui::panel::Mention{});
         }},
         {"mention query", [](Model& m) {
-            agentty::mention::Open o; o.query = "src"; o.index = 0;
+            // The picker owns query + cursor now; drive it through its own
+            // verbs so the test exercises the same path the reducer does.
+            agentty::mention::Open o;
+            o.picker.type(std::string_view{"src"});
             m.ui.panel.descend(pn::Mention{std::move(o)});
         }},
         {"mention index", [](Model& m) {
-            agentty::mention::Open o; o.query = "src"; o.index = 3;
+            agentty::mention::Open o;
+            o.picker.type(std::string_view{"src"});
+            o.picker.jump_to(3);
             m.ui.panel.descend(pn::Mention{std::move(o)});
         }},
         {"symbol opens", [](Model& m) {
             m.ui.panel.descend(agentty::ui::panel::Symbol{});
         }},
         {"symbol query", [](Model& m) {
-            agentty::symbol::Open o; o.query = "foo"; o.index = 0;
+            agentty::symbol::Open o;
+            o.picker.type(std::string_view{"foo"});
             m.ui.panel.descend(pn::Symbol{std::move(o)});
         }},
         {"symbol index", [](Model& m) {
-            agentty::symbol::Open o; o.query = "foo"; o.index = 2;
+            agentty::symbol::Open o;
+            o.picker.type(std::string_view{"foo"});
+            o.picker.jump_to(2);
             m.ui.panel.descend(pn::Symbol{std::move(o)});
         }},
         {"todo modal opens", [](Model& m) {

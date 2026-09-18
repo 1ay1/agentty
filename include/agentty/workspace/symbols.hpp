@@ -14,6 +14,8 @@
 #include <string_view>
 #include <vector>
 
+#include "agentty/util/snapshot.hpp"
+
 namespace agentty {
 
 struct SymbolEntry {
@@ -24,10 +26,15 @@ struct SymbolEntry {
 
 // Walk the workspace once, return all definitions matched by the
 // language regex set. Cached per-process: first call walks the
-// disk; subsequent calls return the cached vector by const-ref.
-// Cap at `cap` entries to bound the picker's working set on huge
-// repos.
-[[nodiscard]] const std::vector<SymbolEntry>&
+// disk; subsequent calls share the cached buffer. Cap at `cap`
+// entries to bound the picker's working set on huge repos.
+//
+// Returns a SNAPSHOT rather than a const-ref. The const-ref form was a
+// latent use-after-free: it copied the owning shared_ptr into a block-scoped
+// local and returned a reference that outlived it. A Snapshot carries the
+// ownership out with the data, so the buffer cannot be freed while a caller
+// still holds the handle. See util/snapshot.hpp.
+[[nodiscard]] util::Snapshot<std::vector<SymbolEntry>>
 list_workspace_symbols(std::size_t cap = 50000);
 
 // Kick the (parallel) symbol scan on a background thread pool — single-

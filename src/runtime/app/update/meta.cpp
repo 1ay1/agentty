@@ -900,6 +900,20 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                 std::chrono::seconds{8});
             return {std::move(m), std::move(toast)};
         },
+
+        [&](GitSignalsRefreshed) -> Step {
+            // The background `git status` finished. Clearing the latch is the
+            // whole arm — the refreshed map itself lives in the workspace
+            // cache the `@` picker reads directly, so there is nothing to
+            // copy into the Model.
+            //
+            // This is the half that makes the refresh single-flight: while
+            // the flag is set, the composer's `@` handler emits no further
+            // refresh Cmd, so holding the key coalesces instead of spawning
+            // a thread per keystroke.
+            m.ui.git_refresh_inflight = false;
+            return done(std::move(m));
+        },
     }, mm);
 }
 

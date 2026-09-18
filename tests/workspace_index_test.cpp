@@ -126,6 +126,7 @@ TEST_CASE("filter_files: git-dirty files lead the working set") {
     // synchronously (refresh_git_signals reads git status against the
     // current project root — deterministic, no prewarm-ordering race).
     auto prev = fs::current_path();
+    const auto prev_ws = agentty::tools::util::project_root();
     fs::current_path(repo);
     agentty::tools::util::set_workspace_root(repo);
     agentty::refresh_git_signals();
@@ -140,7 +141,11 @@ TEST_CASE("filter_files: git-dirty files lead the working set") {
     CHECK(files[m[0]] == "hot.cpp");
     CHECK(agentty::file_git_tag("hot.cpp") == agentty::GitTag::Modified);
 
+    // Restore BOTH cwd and the workspace root before deleting the fixture —
+    // see the sibling test below for why leaving a deleted path in
+    // project_root() breaks a LATER test's bwrap sandbox rather than this one.
     fs::current_path(prev);
+    agentty::tools::util::set_workspace_root(prev_ws);
     std::error_code ec;
     fs::remove_all(repo, ec);
 }
@@ -158,6 +163,7 @@ TEST_CASE("prewarm walk bails promptly when cancelled") {
             << "int f" << i << "(){return " << i << ";}\n";
     }
     auto prev = fs::current_path();
+    const auto prev_ws = agentty::tools::util::project_root();
     fs::current_path(root);
     agentty::tools::util::set_workspace_root(root);
 
@@ -175,7 +181,17 @@ TEST_CASE("prewarm walk bails promptly when cancelled") {
         std::chrono::steady_clock::now() - t0).count();
     CHECK(ms < 1000);   // generous; a full 3000-file scan is far slower
 
+    // Restore BOTH pieces of global state before deleting the tree.
+    //
+    // cwd was already restored here; the workspace root was not — so this
+    // test used to leave `project_root()` pointing at a directory it then
+    // deleted. Any later test that builds a sandbox from the workspace root
+    // (hooks_gate, via bwrap's bind mounts) then failed with
+    // "bwrap: Can't find source path /tmp/agentty_prewarm_cancel_...",
+    // but ONLY when run in-suite after this one — which is why it passed in
+    // isolation and looked like an unrelated flake.
     fs::current_path(prev);
+    agentty::tools::util::set_workspace_root(prev_ws);
     std::error_code ec;
     fs::remove_all(root, ec);
 }

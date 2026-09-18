@@ -2,18 +2,22 @@
 // mention.cpp (the @file picker); the only differences are the
 // candidate type (SymbolEntry vs string) and the chip kind appended on
 // select (Attachment::Symbol vs FileRef).
+//
+// Every arm is now a single call into the shared FilteredPicker: the memo,
+// the cold-open refill and the cursor clamp are the primitive's job, not
+// something each arm re-derives (and, in the refill's case, something only
+// ONE arm used to do — which is why a cold-opened picker that was arrowed
+// rather than typed into stayed on "indexing…" forever).
 
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/runtime/app/update.hpp"
 
-#include <algorithm>
 #include <utility>
 
 #include <maya/core/overload.hpp>
 
 #include "agentty/runtime/composer_attachment.hpp"
 #include "agentty/runtime/panel/symbol.hpp"
-#include "agentty/workspace/symbols.hpp"
 
 namespace pn = agentty::ui::panel;
 
@@ -30,53 +34,37 @@ Step symbol_update(Model m, msg::SymbolMsg sm) {
             return done(std::move(m));
         },
         [&](SymbolInput& e) -> Step {
-            auto* o = m.ui.panel.get<pn::Symbol>();
-            if (o && static_cast<uint32_t>(e.ch) < 0x80
-                  && e.ch >= 0x20) {
-                // Fill a cold-opened snapshot once the parallel scan lands.
-                if (o->entries.empty() && symbols_ready())
-                    o->entries = list_workspace_symbols();
-                o->query.push_back(static_cast<char>(e.ch));
-                o->index = 0;
-            }
+            if (auto* o = m.ui.panel.get<pn::Symbol>()) o->picker.type(e.ch);
             return done(std::move(m));
         },
         [&](SymbolBackspace) -> Step {
             auto* o = m.ui.panel.get<pn::Symbol>();
             if (!o) return done(std::move(m));
-            if (o->query.empty()) {
-                m.ui.panel.close<pn::Symbol>();
-                return done(std::move(m));
-            }
-            o->query.pop_back();
-            o->index = 0;
+            // Backspace on an empty query closes the picker. The picker
+            // reports "there was nothing to erase" so the test and the
+            // mutation cannot drift apart.
+            if (!o->picker.backspace()) m.ui.panel.close<pn::Symbol>();
             return done(std::move(m));
         },
         [&](SymbolMove& e) -> Step {
-            auto* o = m.ui.panel.get<pn::Symbol>();
-            if (!o) return done(std::move(m));
-            int sz = static_cast<int>(symbol_filtered(*o).size());
-            if (sz <= 0) { o->index = 0; return done(std::move(m)); }
-            o->index = std::clamp(o->index + e.delta, 0, sz - 1);
+            if (auto* o = m.ui.panel.get<pn::Symbol>()) o->picker.move(e.delta);
             return done(std::move(m));
         },
         [&](SymbolSelect) -> Step {
             auto* o = m.ui.panel.get<pn::Symbol>();
             if (!o) return done(std::move(m));
-            const auto& matches = symbol_filtered(*o);
-            if (matches.empty()
-                || o->index < 0
-                || o->index >= static_cast<int>(matches.size())) {
+            // `selected()` folds the empty-list and out-of-range checks into
+            // the type: a null result is the only failure mode.
+            const auto* sym = o->picker.selected();
+            if (!sym) {
                 m.ui.panel.close<pn::Symbol>();
                 return done(std::move(m));
             }
-            const auto& sym = o->entries[matches[
-                static_cast<std::size_t>(o->index)]];
             Attachment att;
             att.kind        = Attachment::Kind::Symbol;
-            att.name        = sym.name;
-            att.path        = sym.path;
-            att.line_number = sym.line_number;
+            att.name        = sym->name;
+            att.path        = sym->path;
+            att.line_number = sym->line_number;
             m.ui.panel.close<pn::Symbol>();
 
             std::size_t idx = m.ui.composer.attachments.size();

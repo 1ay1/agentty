@@ -241,8 +241,8 @@ form::Form build_appearance_form(const up::Prefs& p, bool tty) {
 // "native" leads the list always. It is not one of the generated schemes —
 // it is the absence of one — and the way back to your own terminal colors
 // must never be something you have to know the name of.
-std::vector<std::string> matching_themes(std::string_view query) {
-    // Memoised on the query.
+const std::vector<std::string>& matching_themes(std::string_view query) {
+    // Memoised on the query, and returned BY REFERENCE.
     //
     // This walks 615 schemes and builds a std::string per match — ~330
     // allocations and 11-34 us a call — and it is called two or three times
@@ -251,9 +251,12 @@ std::vector<std::string> matching_themes(std::string_view query) {
     // view needs it again to draw. Three identical answers to a question
     // whose input did not change between them.
     //
-    // The query is the entire input, so a one-entry cache is exact rather
-    // than approximate: browsing with ↑↓ holds the query fixed and hits every
-    // time, and typing changes it once per keystroke and pays once.
+    // The memo below killed the three SCANS. It did not kill the three
+    // COPIES: returning by value handed back 615 freshly-allocated strings
+    // on every call, so a held-down arrow key still paid ~1000 allocations
+    // per keypress to answer a question it had already answered. The cache
+    // is process-lifetime and immutable between queries, so a reference is
+    // both safe and the whole point of having cached.
     static std::string   cached_query;
     static bool          cached_valid = false;
     static std::vector<std::string> cached;
@@ -297,9 +300,9 @@ std::vector<std::string> matching_themes(std::string_view query) {
     }
 
     cached_query = std::string{query};
-    cached       = out;
+    cached       = std::move(out);
     cached_valid = true;
-    return out;
+    return cached;
 }
 
 }  // namespace agentty::ui::panel

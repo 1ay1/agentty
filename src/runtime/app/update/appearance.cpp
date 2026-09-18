@@ -193,7 +193,7 @@ void restyle_sealed_turns(Model& m) {
 // also what an out-of-range index yields — the safe end of the range, since
 // native is the one choice correct on every terminal.
 [[nodiscard]] std::string highlighted_theme(const pn::Appearance& o) {
-    const auto names = pn::matching_themes(o.pane.picker.query);
+    const auto& names = pn::matching_themes(o.pane.picker.query);
     if (names.empty()) return {};
     const auto i = static_cast<std::size_t>(
         std::clamp(o.pane.picker.index, 0, static_cast<int>(names.size()) - 1));
@@ -218,7 +218,7 @@ void restyle_sealed_turns(Model& m) {
 void move_highlight(Model& m, int delta) {
     auto* o = m.ui.panel.get<pn::Appearance>();
     if (!o) return;
-    const auto names = pn::matching_themes(o->pane.picker.query);
+    const auto& names = pn::matching_themes(o->pane.picker.query);
     const int n = static_cast<int>(names.size());
     if (n == 0) return;
     // Wraps, like every other list in the app: the way back to the top of 615
@@ -311,7 +311,7 @@ Step appearance_update(Model m, msg::AppearanceMsg am) {
             // Open ON the theme in use, so the first thing the list shows is
             // where you already are — arrowing from there is a comparison
             // rather than a search.
-            const auto names = pn::matching_themes({});
+            const auto& names = pn::matching_themes({});
             const auto it = std::find(names.begin(), names.end(), m.d.ui.theme);
             o->pane.picker.index = it == names.end()
                 ? 0 : static_cast<int>(std::distance(names.begin(), it));

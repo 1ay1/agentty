@@ -350,12 +350,27 @@ std::pair<Model, maya::Cmd<Msg>> init() {
             }
         }));
 
-    // Prewarm the composer's `@` (files) and `#` (symbols) indices on
-    // background threads NOW, so by the time the user types either trigger
-    // the picker opens instantly instead of blocking the UI thread on a
-    // multi-thousand-path walk / multi-second regex scan.
-    prewarm_workspace_files();
-    prewarm_workspace_symbols();
+    // Prewarm the composer's `@` (files) and `#` (symbols) indices so that by
+    // the time the user types either trigger the picker opens instantly
+    // instead of blocking the UI thread on a multi-thousand-path walk / a
+    // multi-second regex scan.
+    //
+    // Through the Cmd seam, like every other background job in this function.
+    // These used to call prewarm_workspace_*() directly, which hand-rolled a
+    // private std::thread apiece — two lines below a modelsdev refresh that
+    // was already going through Cmd::task_isolated. Two mechanisms for one
+    // job is how the git-refresh sibling ended up with a BARE detached thread
+    // and no single-flight at all: new code copies whichever neighbour it
+    // sees first.
+    //
+    // task_isolated (not task) because a filesystem walk is exactly the
+    // hang-prone work its docs describe — a dead NFS/FUSE mount would wedge
+    // a shared-pool slot forever and starve every later tool call. A wedged
+    // isolated task leaks one thread instead.
+    cmds.push_back(maya::Cmd<Msg>::task_isolated(
+        [](std::function<void(Msg)>) { prewarm_workspace_files(); }));
+    cmds.push_back(maya::Cmd<Msg>::task_isolated(
+        [](std::function<void(Msg)>) { prewarm_workspace_symbols(); }));
 
     return {std::move(m), maya::Cmd<Msg>::batch(std::move(cmds))};
 }

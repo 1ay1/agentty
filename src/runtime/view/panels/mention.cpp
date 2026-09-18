@@ -11,7 +11,11 @@ Element mention_panel(const Model& m) {
     auto* o = m.ui.panel.get<pn::Mention>();
     if (!o) return nothing();
 
-    const auto& matches = mention_filtered(*o);
+    // One memoised filter pass shared with the reducer — reading it here
+    // also tops up a cold-opened snapshot, so a picker that was arrowed
+    // rather than typed into still fills in as the index lands.
+    const auto& matches = o->picker.filtered();
+    const auto& files   = o->picker.entries();
 
     Panel::Config cfg;
     cfg.title      = " Mention File ";
@@ -19,30 +23,31 @@ Element mention_panel(const Model& m) {
     cfg.min_width  = kPanelStandard;
     cfg.viewport_h = panel_viewport_h();
     cfg.scroll     = &m.ui.mention_palette_scroll;
-    cfg.selected   = matches.empty() ? -1 : o->index;
+    cfg.selected   = matches.empty() ? -1 : o->picker.index();
 
     // "@" is the trigger character, so the header continues what was typed
     // in the composer. The noun says what the ORDER is rather than what the
     // list contains — changed files sort first, which is the one thing worth
     // knowing before you start typing.
     cfg.header.push_back(
-        filter_header(o->query, "(changed files first)", info, "@ "));
+        filter_header(o->picker.query(), "(changed files first)", info, "@ "));
     cfg.header.push_back(sep);
 
-    if (o->files.empty()) {
+    if (files.empty()) {
         // Distinguish "still indexing" from "genuinely empty" — the walk
         // runs on a background thread; if it hasn't landed the picker
-        // opened with an empty snapshot. files_ready() tells them apart.
+        // opened with an empty snapshot. source_ready() tells them apart.
         cfg.prebuilt.push_back(text(
-            files_ready() ? "  workspace empty (or no readable files)"
-                          : "  indexing workspace… (type to filter as it fills)",
+            o->picker.source_ready()
+                ? "  workspace empty (or no readable files)"
+                : "  indexing workspace… (type to filter as it fills)",
             fg_italic(muted)));
     } else if (matches.empty()) {
         cfg.prebuilt.push_back(text("  no matches", fg_italic(muted)));
     } else {
         cfg.items.reserve(matches.size());
         for (int i = 0; i < static_cast<int>(matches.size()); ++i) {
-            const auto& path = o->files[matches[static_cast<std::size_t>(i)]];
+            const auto& path = files[matches[static_cast<std::size_t>(i)]];
             auto [name, dir] = split_name_dir(path);
             Panel::Item row;
             // Git-status badge — the working-set signal, colour-coded so the
@@ -62,8 +67,8 @@ Element mention_panel(const Model& m) {
             // Light up the matched characters of the filename so the fuzzy
             // rank is legible (re-score the name in-view against the query;
             // the workspace scorer ranks but doesn't return positions).
-            if (!o->query.empty()) {
-                auto fm = fuzzy::score(name, o->query);
+            if (!o->picker.query().empty()) {
+                auto fm = fuzzy::score(name, o->picker.query());
                 if (fm.matched()) { row.highlight = std::move(fm.positions);
                                     row.highlight_fg = highlight; }
             }
@@ -77,7 +82,7 @@ Element mention_panel(const Model& m) {
     // though the scrollbar shows the same thing visually.
     if (static_cast<int>(matches.size()) > kViewportH) {
         cfg.footer.push_back(text(
-            "  " + std::to_string(o->index + 1) + "/"
+            "  " + std::to_string(o->picker.index() + 1) + "/"
                 + std::to_string(matches.size()),
             fg_dim(muted)));
     }

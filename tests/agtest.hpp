@@ -59,13 +59,26 @@ inline void check(bool ok, const std::string& what) {
 } // namespace agtest
 using agtest::check;
 
-// Scoped process-global sandbox: saves HOME and the current working directory
-// on construction and restores them on destruction. Tests that point the
-// process at a temp HOME/cwd (setenv/chdir) MUST wrap that in one of these at
-// the top of their TEST_CASE, so the mutation doesn't leak into sibling cases
-// once every test shares one binary. RAII — restores even if a CHECK throws.
+// Scoped process-global sandbox: saves HOME, the current working directory,
+// and the WORKSPACE ROOT on construction and restores them on destruction.
+// Tests that point the process at a temp HOME/cwd/workspace (setenv/chdir/
+// set_workspace_root) MUST wrap that in one of these at the top of their
+// TEST_CASE, so the mutation doesn't leak into sibling cases once every test
+// shares one binary. RAII — restores even if a CHECK throws.
+//
+// The workspace root is here because leaving it dangling is a genuinely
+// nasty failure: it does not break the test that leaks it, it breaks a LATER
+// test. `set_workspace_root(tmp)` followed by `remove_all(tmp)` leaves
+// project_root() naming a deleted directory, and the next test that builds a
+// bwrap sandbox from it dies with
+//     bwrap: Can't find source path /tmp/...: No such file or directory
+// — which surfaces as an unrelated hook/tool test failing, only in-suite,
+// never in isolation. Three separate fixtures had already grown this leak
+// (agentty_gitrank, agentty_prewarm_cancel, agentty_skills_cap_test), so the
+// fix belongs in the shared guard rather than in each test.
 #include <cstdlib>
 #include <filesystem>
+#include "agentty/tool/util/fs_helpers.hpp"
 namespace agtest {
 class ScopedEnvSandbox {
 public:
@@ -73,12 +86,14 @@ public:
         if (const char* h = std::getenv("HOME")) old_home_ = h, had_home_ = true;
         std::error_code ec;
         old_cwd_ = std::filesystem::current_path(ec);
+        old_ws_  = agentty::tools::util::project_root();
     }
     ~ScopedEnvSandbox() {
         if (had_home_) ::setenv("HOME", old_home_.c_str(), 1);
         else           ::unsetenv("HOME");
         std::error_code ec;
         std::filesystem::current_path(old_cwd_, ec);
+        if (!old_ws_.empty()) agentty::tools::util::set_workspace_root(old_ws_);
     }
     ScopedEnvSandbox(const ScopedEnvSandbox&) = delete;
     ScopedEnvSandbox& operator=(const ScopedEnvSandbox&) = delete;
@@ -86,6 +101,7 @@ private:
     std::string old_home_;
     bool had_home_ = false;
     std::filesystem::path old_cwd_;
+    std::filesystem::path old_ws_;
 };
 } // namespace agtest
 using agtest::ScopedEnvSandbox;

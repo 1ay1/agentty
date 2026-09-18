@@ -151,7 +151,8 @@ std::mutex& sym_mu() { static std::mutex m; return m; }
 std::shared_ptr<const std::vector<SymbolEntry>>& sym_cache() {
     static std::shared_ptr<const std::vector<SymbolEntry>> c; return c;
 }
-std::atomic<bool>& sym_building() { static std::atomic<bool> b{false}; return b; }
+// Single-flight latch for the symbol scan lives beside
+// prewarm_workspace_symbols below, next to the only code that reads it.
 
 std::vector<SymbolEntry> build_symbol_list(std::size_t cap) {
     std::vector<SymbolEntry> out;
@@ -245,40 +246,49 @@ std::vector<SymbolEntry> build_symbol_list(std::size_t cap) {
 } // namespace
 
 namespace {
-// Owned, not detached — see files.cpp: a detached symbol scan racing CRT
-// atexit teardown on a fast pipe-EOF exit faults on Windows (0xC0000005).
-std::thread& sym_prewarm_thread() {
-    static std::thread t;
-    return t;
+// Single-flight latch. NOT a thread — this module does not own one.
+//
+// WHO runs the scan is the caller's business: init.cpp hands it to maya's
+// Cmd::task_isolated, which owns the thread, joins it at teardown and
+// swallows exceptions. What has to live HERE is only "don't scan twice at
+// once", because that is a property of the cache being filled, not of the
+// scheduler filling it.
+std::atomic<bool>& sym_building() {
+    static std::atomic<bool> b{false};
+    return b;
 }
 }  // namespace
 
 void prewarm_workspace_symbols(std::size_t cap) {
-    bool expected = false;
-    if (!sym_building().compare_exchange_strong(expected, true)) return;
+    // SYNCHRONOUS — see files.cpp for the full rationale. In short: agentty
+    // had two mechanisms for "run this in the background" (maya's Cmd seam
+    // and hand-rolled std::threads), and the duplication is what let the git
+    // refresh ship with a bare detached thread and no single-flight at all.
+    // There is one mechanism now, and it is maya's.
     {
         std::lock_guard<std::mutex> lk(sym_mu());
-        if (sym_cache()) { sym_building() = false; return; }
+        if (sym_cache()) return;
     }
-    if (sym_prewarm_thread().joinable()) sym_prewarm_thread().join();
-    sym_prewarm_thread() = std::thread([cap] {
-        // The directory walk before the pool is single-threaded but still
-        // thousands of stat() calls; it gets the same treatment so the
-        // whole prewarm — walk and scan — stays out of the foreground's way.
-        deprioritize_prewarm_thread();
-        auto built = std::make_shared<std::vector<SymbolEntry>>(build_symbol_list(cap));
-        {
-            std::lock_guard<std::mutex> lk(sym_mu());
-            sym_cache() = std::move(built);
-        }
-        sym_building() = false;
-    });
+    bool expected = false;
+    if (!sym_building().compare_exchange_strong(expected, true)) return;
+
+    // The directory walk before the pool is single-threaded but still
+    // thousands of stat() calls; it gets the same treatment so the whole
+    // prewarm — walk and scan — stays out of the foreground's way.
+    deprioritize_prewarm_thread();
+    auto built = std::make_shared<const std::vector<SymbolEntry>>(build_symbol_list(cap));
+    {
+        std::lock_guard<std::mutex> lk(sym_mu());
+        sym_cache() = std::move(built);
+    }
+    sym_building() = false;
 }
 
 void join_workspace_symbols_prewarm() {
-    request_prewarm_cancel();   // stop the scan before blocking on it
-    auto& t = sym_prewarm_thread();
-    if (t.joinable()) t.join();
+    // Nothing to join: the scan runs on maya's pool, which owns and joins its
+    // own threads. Tripping the cooperative cancel is still load-bearing so a
+    // big-repo scan stops promptly instead of delaying maya's shutdown.
+    request_prewarm_cancel();
 }
 
 bool symbols_ready() {
@@ -286,16 +296,30 @@ bool symbols_ready() {
     return static_cast<bool>(sym_cache());
 }
 
-const std::vector<SymbolEntry>& list_workspace_symbols(std::size_t cap) {
+// Returns a Snapshot, not a const-ref.
+//
+// THE BUG THIS CLOSES: the old body took the lock, copied the shared_ptr into
+// a block-scoped local, and returned `*c` — so the only thing keeping the
+// buffer alive died at the closing brace while the reference escaped. It was
+// benign only because this cache is write-once today; one invalidation
+// (workspace switch, refresh, cap change) turns it into a live UAF.
+//
+// The sibling in files.cpp dodged it by returning BY VALUE — safe, but a deep
+// copy of every entry on each of the several calls one keystroke makes. That
+// the two siblings picked opposite sides of a safety/speed tradeoff is the
+// tell that the tradeoff was never supposed to be theirs to make: a shared
+// immutable snapshot is both safe AND O(1), and now both use it.
+util::Snapshot<std::vector<SymbolEntry>> list_workspace_symbols(std::size_t cap) {
     {
         std::lock_guard<std::mutex> lk(sym_mu());
-        if (auto c = sym_cache()) return *c;
+        if (auto c = sym_cache())
+            return util::Snapshot<std::vector<SymbolEntry>>{c};
     }
     // Cold synchronous caller: build inline + publish.
-    auto built = std::make_shared<std::vector<SymbolEntry>>(build_symbol_list(cap));
+    auto built = std::make_shared<const std::vector<SymbolEntry>>(build_symbol_list(cap));
     std::lock_guard<std::mutex> lk(sym_mu());
     if (!sym_cache()) sym_cache() = built;
-    return *sym_cache();
+    return util::Snapshot<std::vector<SymbolEntry>>{sym_cache()};
 }
 
 std::vector<std::size_t>

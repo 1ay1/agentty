@@ -1002,6 +1002,18 @@ struct UpdateApplied {
     std::string detail;   // version on success, error text on failure
 };
 
+// The background `git status` refresh behind the `@` picker's working-set
+// ranking has finished (worker → UI). Carries no payload: the git map is a
+// process-wide cache the picker reads directly. Its ONLY job is to clear
+// Model::UI::git_refresh_inflight, which is what makes the refresh
+// single-flight.
+//
+// Coalescing this way — a flag on the Model, cleared by a Msg — rather than
+// with a static atomic inside the workspace layer is what keeps it Elm: the
+// in-flight state is part of the model a test can construct and assert on,
+// not hidden mutable state the reducer cannot see.
+struct GitSignalsRefreshed {};
+
 // ============================================================================
 // Domain variants — one per orthogonal slice of the runtime. Each is a
 // `std::variant` over its leaves; per-domain reducers visit on these.
@@ -1145,7 +1157,7 @@ using MetaMsg = std::variant<
     ToggleRetrievedExpanded,
     TerminalFocus,
     Tick, Quit, NoOp, ClearStatus, RedrawScreen,
-    UpdateCheckDone, UpdateApplied>;
+    UpdateCheckDone, UpdateApplied, GitSignalsRefreshed>;
 
 } // namespace msg
 

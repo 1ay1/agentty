@@ -11,7 +11,8 @@ Element symbol_panel(const Model& m) {
     auto* o = m.ui.panel.get<pn::Symbol>();
     if (!o) return nothing();
 
-    const auto& matches = symbol_filtered(*o);
+    const auto& matches = o->picker.filtered();
+    const auto& entries = o->picker.entries();
 
     Panel::Config cfg;
     cfg.title      = " Symbol ";
@@ -19,24 +20,26 @@ Element symbol_panel(const Model& m) {
     cfg.min_width  = kPanelWide;
     cfg.viewport_h = panel_viewport_h();
     cfg.scroll     = &m.ui.symbol_palette_scroll;
-    cfg.selected   = matches.empty() ? -1 : o->index;
+    cfg.selected   = matches.empty() ? -1 : o->picker.index();
 
     // The sigil is the trigger character, so the header reads as a
     // continuation of what was typed in the composer.
-    cfg.header.push_back(filter_header(o->query, "symbols", highlight, "# "));
+    cfg.header.push_back(
+        filter_header(o->picker.query(), "symbols", highlight, "# "));
     cfg.header.push_back(sep);
 
-    if (o->entries.empty()) {
+    if (entries.empty()) {
         cfg.prebuilt.push_back(text(
-            symbols_ready() ? "  no symbols indexed"
-                            : "  indexing symbols… (type to filter as it fills)",
+            o->picker.source_ready()
+                ? "  no symbols indexed"
+                : "  indexing symbols… (type to filter as it fills)",
             fg_italic(muted)));
     } else if (matches.empty()) {
         cfg.prebuilt.push_back(text("  no matches", fg_italic(muted)));
     } else {
         cfg.items.reserve(matches.size());
         for (int i = 0; i < static_cast<int>(matches.size()); ++i) {
-            const auto& sym = o->entries[matches[static_cast<std::size_t>(i)]];
+            const auto& sym = entries[matches[static_cast<std::size_t>(i)]];
             auto [fname, dir] = split_name_dir(sym.path);
             Panel::Item row;
             // Combine symbol name + locus into the leading cell so a
@@ -47,8 +50,8 @@ Element symbol_panel(const Model& m) {
             row.leading_style  = fg_of(fg);
             // Highlight the matched chars of the symbol NAME (which is the
             // leading segment, so its offsets map directly onto row.leading).
-            if (!o->query.empty()) {
-                auto fm = fuzzy::score(sym.name, o->query);
+            if (!o->picker.query().empty()) {
+                auto fm = fuzzy::score(sym.name, o->picker.query());
                 if (fm.matched()) { row.highlight = std::move(fm.positions);
                                     row.highlight_fg = highlight; }
             }
@@ -60,7 +63,7 @@ Element symbol_panel(const Model& m) {
 
     if (static_cast<int>(matches.size()) > kViewportH) {
         cfg.footer.push_back(text(
-            "  " + std::to_string(o->index + 1) + "/"
+            "  " + std::to_string(o->picker.index() + 1) + "/"
                 + std::to_string(matches.size()),
             fg_dim(muted)));
     }

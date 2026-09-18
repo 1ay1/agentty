@@ -72,6 +72,10 @@ struct AppearancePane {
 // The schemes a query matches, most relevant first. Shared by the picker's
 // view and its reducer so what is listed and what Enter selects cannot
 // diverge — the same rule the form's Options follows.
-[[nodiscard]] std::vector<std::string> matching_themes(std::string_view query);
+//
+// Returns a reference into a process-lifetime memo: a single arrow key asks
+// this question three times (wrap the index, name the landing row, draw), and
+// returning by value made each of those rebuild 615 strings.
+[[nodiscard]] const std::vector<std::string>& matching_themes(std::string_view query);
 
 }  // namespace agentty::ui::panel
