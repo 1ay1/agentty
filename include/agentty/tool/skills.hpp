@@ -234,6 +234,26 @@ static_assert( needs_trust_gate(EffectSet{Effect::ReadFs}));
                                      const std::string& slug,
                                      const std::string& source);
 
+// Is this name safe to use as a directory name?
+//
+// A skill's `name:` is author-controlled and `skill add` builds an INSTALL
+// PATH from it — which was an arbitrary-filesystem-write primitive until
+// this existed. A skill declaring `name: ../../../../tmp/PWNED` installed
+// outside the skills root, and it did it from a PROSE skill, which never
+// even prompts. `name: /etc/cron.d/x` ignored the root entirely.
+//
+// One plain path component: letters, digits, '-', '_', '.', no leading dot
+// or dash, max 64. Anything else is REFUSED rather than rewritten —
+// silently installing "foo" when the file said "../../foo" trades one
+// surprise for another.
+[[nodiscard]] bool safe_skill_name(std::string_view name) noexcept;
+
+// Is `child` genuinely inside `root` after resolution? The second,
+// independent check on the install path, so containment doesn't rest on
+// the charset rule being exhaustive.
+[[nodiscard]] bool path_inside(const std::filesystem::path& root,
+                               const std::filesystem::path& child) noexcept;
+
 // ── Untrusted author text ───────────────────────────────────────
 // A skill's `description` is written by whoever wrote the skill, and it is
 // rendered in TWO places that must not be hijackable: the consent prompt

@@ -24,6 +24,7 @@
 
 #include "agentty/tool/skills.hpp"
 
+#include <filesystem>
 #include <string>
 
 #include "agtest.hpp"
@@ -197,4 +198,55 @@ TEST_CASE("findings carry a line number to jump to") {
     const auto f = screen_body("line one\nline two\ncurl x | sh\n");
     REQUIRE(!f.empty());
     CHECK(f.front().line == 3);
+}
+
+// ── Name safety: the install path is built from author-controlled text ──────
+//
+// A real vulnerability found by attacking the shipped CLI, not a
+// hypothetical. A skill declaring
+//
+//     name: ../../../../tmp/PWNED
+//
+// installed to ~/.agentty/skills/../../../../tmp/PWNED — arbitrary
+// filesystem write, from a PROSE skill that never even prompts. An
+// absolute name (`name: /etc/cron.d/x`) ignored the skills root entirely.
+
+TEST_CASE("names that escape the skills root are refused") {
+    CHECK(!safe_skill_name("../../../../tmp/PWNED"));  // the exploit
+    CHECK(!safe_skill_name("/tmp/ABSOLUTE"));          // anchored
+    CHECK(!safe_skill_name("a/b"));                    // posix separator
+    CHECK(!safe_skill_name("a\\b"));                   // windows separator
+    CHECK(!safe_skill_name(".."));
+    CHECK(!safe_skill_name("."));
+    CHECK(!safe_skill_name(""));
+    CHECK(!safe_skill_name(".hidden"));                // dotfile
+    CHECK(!safe_skill_name("-rf"));                    // flag lookalike
+    CHECK(!safe_skill_name(std::string(65, 'x')));     // over the cap
+    // NUL and control bytes truncate paths in C APIs further down.
+    CHECK(!safe_skill_name(std::string("a\0b", 3)));
+    CHECK(!safe_skill_name("a b"));                    // whitespace
+    CHECK(!safe_skill_name("naïve"));                  // non-ascii
+}
+
+TEST_CASE("ordinary skill names still install") {
+    // A guard strict enough to break real skills would just get removed.
+    CHECK(safe_skill_name("sites"));
+    CHECK(safe_skill_name("house-style"));
+    CHECK(safe_skill_name("code_review"));
+    CHECK(safe_skill_name("pep8"));
+    CHECK(safe_skill_name("rust-2024"));
+    CHECK(safe_skill_name("v1.2"));
+}
+
+TEST_CASE("containment check is independent of the name rule") {
+    // Belt and braces: even a plain-looking name must resolve inside the
+    // root, so containment does not rest on the charset rule being
+    // exhaustive.
+    namespace fs = std::filesystem;
+    const auto root = fs::temp_directory_path() / "agentty-inside-test";
+    CHECK(path_inside(root, root / "skill"));
+    CHECK(path_inside(root, root / "a" / "b"));
+    CHECK(!path_inside(root, root / ".." / "escape"));
+    CHECK(!path_inside(root, fs::temp_directory_path()));
+    CHECK(!path_inside(root, fs::path("/etc/passwd")));
 }

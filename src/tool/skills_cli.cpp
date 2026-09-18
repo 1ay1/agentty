@@ -55,6 +55,12 @@
 #include <string_view>
 #include <vector>
 
+#if defined(_WIN32)
+#  include <io.h>
+#else
+#  include <unistd.h>
+#endif
+
 namespace fs = std::filesystem;
 
 namespace agentty::tools::skills {
@@ -62,12 +68,84 @@ namespace {
 
 // ── Approvals store ────────────────────────────────────────────────────────
 
+// Is stdin a terminal? agentty ships on Windows too, so this can't just be
+// isatty() from <unistd.h>.
+[[nodiscard]] bool stdin_is_tty() noexcept {
+#if defined(_WIN32)
+    return ::_isatty(::_fileno(stdin)) != 0;
+#else
+    return ::isatty(STDIN_FILENO) != 0;
+#endif
+}
+
+// One size limit, used by BOTH the pre-install check and the copy. Two
+// different limits is how add/list ended up disagreeing about whether a
+// skill existed.
+constexpr std::uintmax_t kMaxSkillFile = 2u * 1024 * 1024;   // 2 MB
+constexpr std::uintmax_t kMaxSkillTotal = 8u * 1024 * 1024;  // 8 MB
+constexpr int            kMaxSkillFiles = 128;
+
+// A skill's `name:` is author-controlled, and `skill add` builds an
+// INSTALL PATH out of it. That combination is a filesystem-write
+// primitive unless the name is constrained, and it was: a skill declaring
+//
+//   name: ../../../../tmp/PWNED
+//
+// installed to ~/.agentty/skills/../../../../tmp/PWNED — outside the skills
+// root, from a prose skill that never even prompts. An absolute name
+// (`name: /etc/cron.d/x`) ignored the root entirely.
+//
+// So: one path component, no separators, no dots-only, conservative
+// charset. Anything else is refused BY NAME rather than sanitised into
+// something else — silently installing "foo" when the file said
+// "../../foo" would be its own surprise.
+[[nodiscard]] bool safe_component_impl(std::string_view n) {
+    if (n.empty() || n.size() > 64) return false;
+    if (n == "." || n == "..") return false;
+    if (n.front() == '.' || n.front() == '-') return false;  // no dotfiles, no flag-lookalikes
+    for (const char c : n) {
+        const auto u = static_cast<unsigned char>(c);
+        const bool ok = (u >= 'a' && u <= 'z') || (u >= 'A' && u <= 'Z')
+                     || (u >= '0' && u <= '9') || c == '-' || c == '_' || c == '.';
+        if (!ok) return false;   // rejects '/', '\\', NUL, spaces, UTF-8
+    }
+    return true;
+}
+
+// Belt and braces: even with a safe component, verify the resolved
+// destination is genuinely inside the skills root before writing. Catches
+// anything the charset check misses (symlinked root, odd platform
+// semantics) — the same containment check the workspace boundary uses.
+[[nodiscard]] bool inside_impl(const fs::path& root, const fs::path& child) {
+    std::error_code ec;
+    const auto r = fs::weakly_canonical(root, ec);
+    if (ec) return false;
+    const auto c = fs::weakly_canonical(child, ec);
+    if (ec) return false;
+    auto ri = r.begin(), rend = r.end();
+    auto ci = c.begin(), cend = c.end();
+    for (; ri != rend; ++ri, ++ci) {
+        if (ci == cend || *ci != *ri) return false;
+    }
+    return true;
+}
+
 // Describe a SKILL.md before installing it, using THE parser — not a
 // second one. This briefly had its own mini-parser and it diverged
 // immediately: block scalars (`description: |`) rendered as a bare "|" in
 // the consent prompt while loading fine afterwards, so the user approved
 // a description they never actually saw.
 std::optional<Skill> peek_skill(const fs::path& md) {
+    // Size-check BEFORE reading. A 10 MB SKILL.md used to be parsed and
+    // screened (~2s of work the user waits on with no output) and then
+    // installed — while the LOADER silently drops oversized files, so
+    // `skill list` then said "no skills installed" and add/list
+    // contradicted each other. Refuse early, at the same limit the copy
+    // enforces, so there is one answer.
+    std::error_code ec;
+    const auto sz = fs::file_size(md, ec);
+    if (!ec && sz > kMaxSkillFile) return std::nullopt;
+
     std::ifstream in(md, std::ios::binary);
     if (!in) return std::nullopt;
     std::ostringstream ss;
@@ -190,6 +268,74 @@ fs::path install_dir_for(std::string_view name) {
     return util::user_root() / "skills" / std::string{name};
 }
 
+// A skill directory is data, not a tree to traverse. Copying it with
+// `recursive` followed symlinks: a `dir-escape -> /tmp` symlink made the
+// copy walk into /tmp, and a `leak.txt -> /etc/passwd` symlink would have
+// copied the target's CONTENT into the user's skills directory. Neither is
+// something a skill install should be able to do.
+//
+// Copy plain files only, one level of real subdirectory, skip symlinks
+// entirely, and cap the total — a skill is text plus a few resources.
+struct CopyResult {
+    bool ok = false;
+    std::string error;
+    int skipped_links = 0;
+};
+
+CopyResult copy_skill_tree(const fs::path& from, const fs::path& to) {
+    CopyResult out;
+    std::error_code ec;
+    fs::create_directories(to, ec);
+    if (ec) { out.error = ec.message(); return out; }
+
+    std::uintmax_t total = 0;
+    int files = 0;
+
+    // follow_directory_symlink is OFF, and every entry is re-checked with
+    // is_symlink() because the recursive iterator can still hand back link
+    // entries themselves.
+    fs::recursive_directory_iterator it(
+        from, fs::directory_options::skip_permission_denied, ec);
+    if (ec) { out.error = ec.message(); return out; }
+
+    for (const auto& e : it) {
+        const auto rel = fs::relative(e.path(), from, ec);
+        if (ec) continue;
+
+        if (fs::is_symlink(e.symlink_status())) { ++out.skipped_links; continue; }
+
+        if (e.is_directory()) {
+            fs::create_directories(to / rel, ec);
+            continue;
+        }
+        if (!e.is_regular_file()) continue;     // fifo, socket, device: not data
+
+        const auto sz = e.file_size(ec);
+        if (ec) continue;
+        if (sz > kMaxSkillFile) {
+            out.error = rel.string() + " is " + std::to_string(sz / 1024)
+                      + " KB — over the 2 MB per-file limit";
+            return out;
+        }
+        total += sz;
+        if (++files > kMaxSkillFiles || total > kMaxSkillTotal) {
+            out.error = "skill is too large (limit: 128 files, 8 MB total)";
+            return out;
+        }
+
+        fs::create_directories((to / rel).parent_path(), ec);
+        fs::copy_file(e.path(), to / rel,
+                      fs::copy_options::overwrite_existing, ec);
+        if (ec) {
+            out.error = "copying " + rel.string() + ": " + ec.message();
+            return out;
+        }
+    }
+
+    out.ok = true;
+    return out;
+}
+
 // ── add ────────────────────────────────────────────────────────────────────
 
 int verb_add(const std::vector<std::string>& argv) {
@@ -223,16 +369,61 @@ int verb_add(const std::vector<std::string>& argv) {
     // file rather than a promise about it.
     const auto parsed = peek_skill(from / "SKILL.md");
     if (!parsed) {
+        std::error_code sz_ec;
+        const auto sz = fs::file_size(from / "SKILL.md", sz_ec);
+        if (!sz_ec && sz > kMaxSkillFile) {
+            std::fprintf(stderr,
+                "refusing to install: SKILL.md is %ju KB, over the 2 MB limit.\n"
+                "a skill is instructions — if it needs more than that, it "
+                "probably wants to be a plugin.\n",
+                static_cast<std::uintmax_t>(sz / 1024));
+            return 1;
+        }
         std::fprintf(stderr, "could not parse %s\n",
                      (from / "SKILL.md").string().c_str());
         return 1;
     }
     Skill s = *parsed;
+
+    // An empty or bodyless SKILL.md installs cleanly and then does nothing
+    // — it occupies a catalog slot and tokens on every turn to say nothing
+    // at all. Almost always a mistake (wrong path, truncated download).
+    if (s.body.empty() && s.description.empty()) {
+        std::fprintf(stderr,
+            "refusing to install: %s has no body and no description.\n"
+            "an empty skill costs catalog space and tokens for nothing — "
+            "check the path?\n",
+            (from / "SKILL.md").string().c_str());
+        return 1;
+    }
+
     if (s.origin.empty() && (src.starts_with("github.com/")
                           || src.starts_with("https://")))
         s.origin = src;
 
+    // The name becomes a PATH. Refuse anything that isn't one plain
+    // component before it can be used for one — see safe_component().
+    if (!safe_skill_name(s.name)) {
+        std::fprintf(stderr,
+            "refusing to install: the skill's name is not a plain directory\n"
+            "name (letters, digits, - and _). it said:\n  %s\n",
+            sanitize_author_text(s.name, 120).c_str());
+        return 1;
+    }
+
     const auto dest = install_dir_for(s.name);
+
+    // Second, independent check: the resolved destination must actually be
+    // under the skills root. Cheap, and it doesn't rely on the charset
+    // rule above being exhaustive.
+    const auto skills_root = util::user_root() / "skills";
+    if (!path_inside(skills_root, dest)) {
+        std::fprintf(stderr,
+            "refusing to install: destination escapes %s\n",
+            skills_root.string().c_str());
+        return 1;
+    }
+
     if (fs::exists(dest / "SKILL.md") && !force) {
         // Never clobber a skill the user may have edited. (This rule came
         // from PR #47, which got it right and tested it.)
@@ -269,6 +460,18 @@ int verb_add(const std::vector<std::string>& argv) {
     }
 
     if ((needs_trust_gate(s.effects) || critical) && !yes) {
+        // No TTY means nobody can answer. Printing a prompt into a pipe
+        // and reading EOF used to exit 0 having installed NOTHING — a
+        // silent no-op that reported success, which in CI reads as "the
+        // skill is there" right up until it isn't.
+        if (!stdin_is_tty()) {
+            std::fprintf(stderr,
+                "this skill needs approval and there is no terminal to ask.\n"
+                "run it interactively, or pass --yes if you have already "
+                "reviewed it.\n");
+            return 1;
+        }
+
         // Findings flip the default. Routine installs lead with [1] install;
         // a flagged one leads with reading the file, and the safe answer is
         // the first thing your eye lands on.
@@ -291,14 +494,32 @@ int verb_add(const std::vector<std::string>& argv) {
         }
     }
 
-    std::error_code ec;
-    fs::create_directories(dest, ec);
-    fs::copy(from, dest,
-             fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
-    if (ec) {
-        std::fprintf(stderr, "install failed: %s\n", ec.message().c_str());
+    // Copy plain files only — no symlinks, no device nodes, size-capped.
+    // This used to be fs::copy(recursive), which followed a
+    // `dir-escape -> /tmp` symlink into /tmp and, when it errored, left a
+    // half-populated directory while still printing success and exiting 0.
+    const auto copied = copy_skill_tree(from, dest);
+    if (!copied.ok) {
+        std::fprintf(stderr, "install failed: %s\n", copied.error.c_str());
+        std::error_code rm;
+        fs::remove_all(dest, rm);   // don't leave a half-skill behind
         return 1;
     }
+
+    // A skill whose SKILL.md didn't make it is not installed, whatever the
+    // copy said. Verifying the one file that matters turns a silent
+    // half-failure into an error the user can act on.
+    if (!fs::exists(dest / "SKILL.md")) {
+        std::fprintf(stderr, "install failed: SKILL.md did not copy\n");
+        std::error_code rm;
+        fs::remove_all(dest, rm);
+        return 1;
+    }
+
+    if (copied.skipped_links > 0)
+        std::printf("skipped %d symlink%s — skills are copied as plain files\n",
+                    copied.skipped_links,
+                    copied.skipped_links == 1 ? "" : "s");
 
     // Approve what we just showed — but key the approval off the skill as
     // the LOADER parses it, not off peek_skill's cheaper read. The two
@@ -361,7 +582,22 @@ int verb_remove(const std::vector<std::string>& argv) {
         std::fprintf(stderr, "usage: agentty skill remove <name>\n");
         return 2;
     }
+    // Same rule as install: a name is one plain component. `remove` was
+    // saved from traversal only by an existence check, which is luck
+    // rather than design — `remove ../../something-that-exists` would have
+    // been a recursive delete outside the skills root.
+    if (!safe_skill_name(argv[0])) {
+        std::fprintf(stderr, "not a skill name: %s\n",
+                     sanitize_author_text(argv[0], 120).c_str());
+        return 1;
+    }
     const auto dest = install_dir_for(argv[0]);
+    const auto skills_root = util::user_root() / "skills";
+    if (!path_inside(skills_root, dest)) {
+        std::fprintf(stderr, "refusing: path escapes %s\n",
+                     skills_root.string().c_str());
+        return 1;
+    }
     if (!fs::exists(dest)) {
         std::fprintf(stderr, "not installed under %s: %s\n",
                      util::user_root().string().c_str(), argv[0].c_str());
@@ -414,6 +650,16 @@ void usage() {
 } // namespace
 
 // ── Public ─────────────────────────────────────────────────────────────────
+
+bool safe_skill_name(std::string_view name) noexcept {
+    return safe_component_impl(name);
+}
+
+bool path_inside(const std::filesystem::path& root,
+                 const std::filesystem::path& child) noexcept {
+    return inside_impl(root, child);
+}
+
 
 scope::Approvals load_approvals() {
     return scope::load_approvals(kApprovalsLeaf);

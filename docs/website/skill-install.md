@@ -194,6 +194,31 @@ fastest possible habituated yes — which is the thing the 93% number is
 about. The decision should happen somewhere you went on purpose, with the
 findings and the body in front of you.
 
+## What `skill add` refuses
+
+Installing is the moment a file you didn't write becomes a file on your
+machine, so the guards live there rather than at load time:
+
+| refused | why |
+|---|---|
+| a `name:` that isn't one plain directory name | the name becomes the install **path** — `name: ../../../../tmp/x` was an arbitrary filesystem write |
+| symlinks inside the skill directory | a `dir → /tmp` link made the copy walk your filesystem; a `file → /etc/passwd` link would have copied its contents |
+| a `SKILL.md` over 2 MB (or 8 MB / 128 files total) | a skill is instructions; past that it wants to be a plugin |
+| a skill with no body and no description | costs a catalog slot and tokens per turn to say nothing — usually a wrong path |
+| a prompt with no terminal to answer it | printing a question into a pipe and reading EOF used to exit 0 having installed nothing |
+| `--yes` on a skill with critical findings | automation shouldn't be able to quietly accept what a human would have stopped at |
+
+The name rule is *refuse*, not *sanitise*: silently installing `foo` when
+the file said `../../foo` just trades one surprise for another. Ordinary
+names — `sites`, `house-style`, `code_review`, `rust-2024` — are unaffected.
+
+Skipped symlinks are reported rather than swallowed:
+
+```
+skipped 2 symlinks — skills are copied as plain files
+installed sym → ~/.agentty/skills/sym
+```
+
 ## Approval is pinned to content
 
 Approving a skill approves **those exact instructions**, not the name.
