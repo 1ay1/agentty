@@ -197,21 +197,39 @@ at compile time.** It has never changed and never will. So I don't need a fast
 metric — I need the *slowest, most accurate* metric, evaluated during
 translation.
 
-### C++26 made `<cmath>` constexpr
+### The formula runs at compile time — on every compiler
 
-[P0533R9](https://wg21.link/p0533r9) landed in C++26, and GCC 16 implements it:
+[P0533R9](https://wg21.link/p0533r9) makes `<cmath>` `constexpr` in C++26, and
+GCC 16 implements it. My first version leaned on that, and it was wrong to:
+**GCC 16 is one compiler.** Clang and MSVC don't ship it, and CI told me so the
+moment it saw the commit — dozens of *"constexpr variable must be initialized by
+a constant expression"* across three jobs.
+
+A header that silently needs one vendor's bleeding edge isn't portable, it's
+lucky. So the eight transcendentals — `sqrt`, `cbrt`, `exp`, `log`, `pow`,
+`sin`, `cos`, `atan2` — are implemented in the header. They aren't a general
+math library: each is range-specialised to what this file actually needs, and
+verified against `std::` over exactly those ranges.
+
+The one that needs care is `atan`. A naive Taylor series is catastrophic near
+|x| = 1 — which is precisely where hue angles at 45° multiples land. Two
+reductions fix it: reciprocal for |x| > 1, then the tan(π/6) addition formula,
+so the series never sees an argument above tan(π/12):
 
 ```cpp
-constexpr double t_log  = std::log(2.0);
-constexpr double t_pow  = std::pow(2.0, 2.4);
-constexpr double t_at2  = std::atan2(1.0, 2.0);
+if (x > 0.26794919243112270647) {          // tan(pi/12)
+    x = (x * kSqrt3 - 1.0) / (kSqrt3 + x);
+    add = kPi / 6.0;
+}
 ```
 
-All of it compiles. Which means the *entire* CIEDE2000 formula — `cbrt`,
-`atan2`, `cos`, `exp`, `pow` — evaluates at compile time. Every palette entry's
-CIELAB coordinates get baked into the binary. Zero runtime conversion cost, and
-the numbers are bit-identical on every platform because they're never computed
-on the target.
+Worst relative error across all eight, over the ranges used: **1.2e-12** —
+against a metric whose just-noticeable difference is ~1.0 in units of tens.
+
+So the *entire* CIEDE2000 formula evaluates during translation, on any
+conforming C++23 compiler. Every palette entry's CIELAB coordinates are baked
+into the binary. Zero runtime conversion cost, and the numbers are bit-identical
+on every platform because they're never computed on the target.
 
 ### The formula has three traps, and static_assert catches them
 
@@ -410,4 +428,9 @@ comparing it to what it should compute. Three lines of output:
 add_bg   rgb=( 10, 61, 28)  →  48;5;235   (grey)
 ```
 
-Everything after that was straightforward.
+Everything after that was straightforward — with one more lesson at the end.
+The first version of the fix shipped green on my machine and broke Clang and
+MSVC instantly, because I'd built it on the one compiler that implements C++26's
+constexpr `<cmath>`. **"It compiles" is a claim about your toolchain, not about
+your code.** CI is the only thing that knows the difference, and it took 90
+seconds to tell me what I'd assumed for a day.
