@@ -54,6 +54,28 @@ static_assert(visual::parts_cover_all<Open>);
 
 } // namespace agentty::stats_panel
 
+// ── skills viewer: the scan is a snapshot, not a hash input ──────────
+namespace agentty::skills_panel {
+
+// The VISUAL inputs are which row is selected and where the body is
+// scrolled. `rows` is exempt for a different reason than the stats
+// projection, and the difference is worth stating:
+//
+// stats' projection is refreshed DURING render, so hashing it would be a
+// hash chasing its own tail. skills' rows are filled ONCE, at open, and
+// never touched again while the panel lives — so they cannot change
+// between frames, and hashing them would be paying to re-walk every
+// skill's findings every frame to learn nothing. A rescan means a new
+// panel value, which the slot's own identity already covers.
+inline auto visual_parts(const Open& p) {
+    return std::make_tuple(p.index,
+                           visual::ref(p.scroll),
+                           visual::exempt);  // rows: snapshot, fixed at open
+}
+static_assert(visual::parts_cover_all<Open>);
+
+} // namespace agentty::skills_panel
+
 // ── form: Secret is the load-bearing exemption ─────────────────
 namespace agentty::form::field {
 
@@ -345,6 +367,13 @@ inline auto visual_parts(const Stats& p) {
         visual::ref(static_cast<const WithFrom&>(p)));
 }
 static_assert(visual::parts_cover_all<Stats>);
+
+inline auto visual_parts(const Skills& p) {
+    return std::make_tuple(
+        visual::ref(static_cast<const agentty::skills_panel::Open&>(p)),
+        visual::ref(static_cast<const WithFrom&>(p)));
+}
+static_assert(visual::parts_cover_all<Skills>);
 
 } // namespace agentty::ui::panel
 

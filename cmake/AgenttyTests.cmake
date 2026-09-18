@@ -95,6 +95,8 @@ agentty_fold_test(cross_process_lock_test  TIMEOUT 30)
 # mtime cache, so the interesting case (unapproved skill hidden) can't be set
 # up honestly there.
 agentty_fold_test(skill_catalog_trust_test TIMEOUT 30)
+# Own HOME + cold skills cache, same reason as skill_catalog_trust_test.
+agentty_fold_test(skills_panel_test        TIMEOUT 30)
 agentty_fold_test(fork_test                TIMEOUT 30)
 agentty_fold_test(palette_render_probe     TIMEOUT 30)
 agentty_fold_test(embed_render_probe       TIMEOUT 30)

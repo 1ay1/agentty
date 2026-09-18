@@ -15,6 +15,7 @@
 
 #include <maya/core/overload.hpp>
 
+#include "agentty/runtime/panel/skills.hpp"
 #include "agentty/runtime/panel/stats.hpp"
 
 namespace pn = agentty::ui::panel;
@@ -99,6 +100,44 @@ Step stats_update(Model m, msg::StatsMsg sm) {
             // stale bound is bounded and self-correcting; not clamping at
             // all is not. StatsTab resets y to 0 for the same reason.
             o->scroll.scroll_by(0, e.delta);
+            return done(std::move(m));
+        },
+
+        // ── Skills viewer ──────────────────────────────────────────
+        // Three arms, no fourth: there is no approve message. See
+        // msg.hpp — an approval reachable from a list you are already
+        // scrolling is the habituated yes, and the decision belongs where
+        // the findings and the body can be shown.
+        [&](OpenSkills) -> Step {
+            // The scan happens HERE, once, not in the view. The view is a
+            // pure formatter; screening every skill's body on every frame
+            // to produce a value that cannot change while the panel is
+            // open would be paying per-frame for a snapshot.
+            pn::Skills pane{};
+            static_cast<skills_panel::Open&>(pane) = skills_panel::scan();
+            m.ui.panel.descend(std::move(pane));
+            return done(std::move(m));
+        },
+
+        [&](CloseSkills) -> Step {
+            ascend(m);
+            return done(std::move(m));
+        },
+
+        [&](SkillsMove e) -> Step {
+            auto* o = m.ui.panel.get<pn::Skills>();
+            if (!o || o->rows.empty()) return done(std::move(m));
+            // Clamp rather than wrap. The list is ordered worst-first, so
+            // wrapping from the last row back to a flagged skill at the
+            // top would read as the panel jumping on its own.
+            const int n = static_cast<int>(o->rows.size());
+            int next = o->index + e.delta;
+            if (next < 0)  next = 0;
+            if (next >= n) next = n - 1;
+            o->index = next;
+            // A new selection means a new detail footer; start it at the
+            // top for the same reason StatsTab does.
+            o->scroll.scroll_to_origin();
             return done(std::move(m));
         },
     }, std::move(sm));

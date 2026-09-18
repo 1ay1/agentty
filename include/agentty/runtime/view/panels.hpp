@@ -24,6 +24,7 @@ namespace agentty::ui {
 [[nodiscard]] maya::Element checkpoints_panel(const Model& m);
 [[nodiscard]] maya::Element rag_panel(const Model& m);
 [[nodiscard]] maya::Element stats_panel(const Model& m);
+[[nodiscard]] maya::Element skills_panel(const Model& m);
 [[nodiscard]] maya::Element settings_list_panel(const Model& m);
 [[nodiscard]] maya::Element fork_panel(const Model& m);
 [[nodiscard]] maya::Element todo_panel(const Model& m);

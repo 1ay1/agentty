@@ -187,6 +187,7 @@ set(AGENTTY_RUNTIME_NOMAIN_SOURCES
     src/runtime/app/update/settings_list.cpp
     src/runtime/panel/settings_items.cpp
     src/runtime/panel/form.cpp
+    src/runtime/panel/skills.cpp
     src/runtime/panel/form_keys.cpp
     src/runtime/view/panels/form_common.cpp
     src/runtime/panel/appearance_form.cpp
@@ -249,6 +250,7 @@ set(AGENTTY_RUNTIME_NOMAIN_SOURCES
     src/runtime/view/panels/todo.cpp
     src/runtime/view/panels/rag.cpp
     src/runtime/view/panels/stats.cpp
+    src/runtime/view/panels/skills.cpp
     src/runtime/view/panels/settings_list.cpp
     src/runtime/view/panels/fork.cpp
     src/runtime/view/diff_review.cpp

@@ -808,6 +808,14 @@ struct ProactiveContextReady { std::string block; double confidence = -1.0; };
 // point of a viewer, and why it needs no per-row message.
 struct OpenStats {};
 struct CloseStats {};
+// Read-only skills viewer. There is no ApproveSkill msg on purpose: an
+// approval one keystroke from a list you are already scrolling is the
+// habituated yes the install flow exists to avoid (93% of Claude Code
+// permission prompts get approved). The decision lives in
+// `agentty skill approve`, where the consent screen can show the body.
+struct OpenSkills {};
+struct CloseSkills {};
+struct SkillsMove { int delta = 0; };
 // Step the tab selection, wrapping. Signed so one message serves Tab and
 // Shift-Tab (and ←/→) rather than two near-identical ones.
 struct StatsTab { int delta = +1; };
@@ -1108,7 +1116,8 @@ using RagMsg = std::variant<
 // and no reducer with retrieval, and folding unrelated panels into one
 // variant is how a reducer grows arms it has no business owning.
 using StatsMsg = std::variant<
-    OpenStats, CloseStats, StatsTab, StatsScroll>;
+    OpenStats, CloseStats, StatsTab, StatsScroll,
+    OpenSkills, CloseSkills, SkillsMove>;
 
 using SettingsListMsg = std::variant<
     OpenSettingsList, CloseSettingsList, SettingsListMove,
@@ -1281,6 +1290,8 @@ static_assert(leaf_domain_count<OpenRag>()           == 1,
               "OpenRag must belong to exactly one Msg domain");
 static_assert(leaf_domain_count<OpenStats>()         == 1,
               "OpenStats must belong to exactly one Msg domain");
+static_assert(leaf_domain_count<OpenSkills>()        == 1,
+              "OpenSkills must belong to exactly one Msg domain");
 static_assert(leaf_domain_count<StatsTab>()          == 1,
               "StatsTab must belong to exactly one Msg domain");
 static_assert(leaf_domain_count<StatsScroll>()       == 1,

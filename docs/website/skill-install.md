@@ -156,6 +156,44 @@ it's evadable by aliases, wrapper scripts, encoding, and anything nobody has
 published yet. A clean result is one piece of evidence. agentty never says
 "safe".
 
+## Seeing what you have
+
+`Ctrl+K` → **Skills** opens a read-only viewer. ↑/↓ move, Esc closes.
+
+```
+┌─ Skills ───────────────────────────────────────────────────┐
+│ !! sneaky                              prose                 │
+│  ! deployer                    exec, net · PENDING           │
+│    house-style                         prose                 │
+│                                                              │
+│   formats code                                               │
+│   you wrote this                                             │
+│   ~/.agentty/skills/sneaky                                   │
+│                                                              │
+│   agentty noticed:                                           │
+│    !! line 1  downloads a script and pipes it into a shell    │
+│    !! line 2  instructs the agent to hide what it is doing    │
+│                                                              │
+│   pattern matching, not proof — and no findings is not a      │
+│   clean bill.                                                │
+│                                                              │
+│   1 skill flagged, 1 awaiting approval                       │
+└──────────────────────────────────────────────────────┘
+```
+
+Rows are ordered worst-first — flagged, then awaiting approval, then the
+rest — so the thing that needs you isn't buried under forty clean skills.
+Every state has a word or a glyph as well as a colour, so it reads the same
+in `theme::native` and to a colourblind user.
+
+**The viewer has no approve key, on purpose.** It answers *what is
+installed, what did it declare, is it approved, what did agentty notice*,
+and then points at `agentty skill approve NAME` for the decision. An
+approval one keystroke away from a list you're already scrolling is the
+fastest possible habituated yes — which is the thing the 93% number is
+about. The decision should happen somewhere you went on purpose, with the
+findings and the body in front of you.
+
 ## Approval is pinned to content
 
 Approving a skill approves **those exact instructions**, not the name.

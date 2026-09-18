@@ -36,6 +36,7 @@ enum class Command : std::uint8_t {
     ForkThread,
     OpenGeneralSettings,
     OpenStats,
+    OpenSkills,
     OpenLogin,
     UpdateAgentty,
     Quit,
@@ -96,6 +97,7 @@ inline constexpr std::array kCommands = std::array{
     CommandDef{Command::SwapModel,     "Swap to previous model", "Jump back to the model you used before (cross-provider)", "Ctrl+Tab", Category::Config},
     CommandDef{Command::OpenProviders, "Switch provider",    "Choose the LLM backend (Anthropic, OpenAI, …)", "Ctrl+P", Category::Config},
     CommandDef{Command::OpenStats, "Stats", "Tokens, cache, tools, latency, routing — what this thread actually did", "Ctrl+L", Category::Config},
+    CommandDef{Command::OpenSkills, "Skills", "What is installed, what it declared, and what agentty noticed in it", "", Category::Config},
     CommandDef{Command::OpenGeneralSettings, "Settings",     "Profile, Smart Mode, retrieval (RAG), changes strip, MCP servers / plugins, slash commands, subagents, hooks — and Appearance: theme, colors, density, motion", "", Category::Config},
     // (No Smart Mode row either. ^S opens it and ^S closes it — a chord
     // the pane itself owns — so the palette row was a third way to reach

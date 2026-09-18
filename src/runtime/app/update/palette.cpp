@@ -93,6 +93,7 @@ template <class T, class V>
         add(Command::SwapModel,        emit<SwitchToPreviousModel>());
         add(Command::OpenProviders,    emit<OpenProviders>());
         add(Command::OpenStats,        emit<OpenStats>());
+        add(Command::OpenSkills,       emit<OpenSkills>());
         add(Command::OpenGeneralSettings,
             emit_val<OpenSettingsList>(settings::Category::General));
         // ── Account ──
