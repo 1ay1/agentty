@@ -222,6 +222,68 @@ static_assert( needs_trust_gate(EffectSet{Effect::ReadFs}));
 [[nodiscard]] scope::Trust trust_of(const Skill& s,
                                     const scope::Approvals& approvals) noexcept;
 
+// Parse one SKILL.md's text. Exposed so `skill add` can describe a file it
+// is about to install WITHOUT a second, subtly-different parser — the CLI
+// briefly had one, and it silently failed on block scalars (`description:
+// |`), showing the user a bare "|" where the description should be. One
+// parser, one set of quirks.
+//   raw    — file contents
+//   slug   — directory name, the identity fallback when `name:` is absent
+//   source — "user" | "project" | ""
+[[nodiscard]] Skill parse_skill_text(const std::string& raw,
+                                     const std::string& slug,
+                                     const std::string& source);
+
+// ── Untrusted author text ───────────────────────────────────────
+// A skill's `description` is written by whoever wrote the skill, and it is
+// rendered in TWO places that must not be hijackable: the consent prompt
+// (where agentty is supposed to be the one talking) and the model-facing
+// catalog (one line away from instructions).
+//
+// Snyk's Feb-2026 audit of 3,984 skills found 91% of confirmed-malicious
+// skills carried prompt injection; the arXiv 98k-skill study documents
+// hidden directives in HTML comments and invisible Unicode. So author text
+// is sanitised before display: control characters, bidi/zero-width
+// smuggling and newlines are stripped, and it is length-capped. This does
+// NOT make the text safe to obey — it makes it unable to impersonate the
+// frame around it.
+[[nodiscard]] std::string sanitize_author_text(std::string_view raw,
+                                              std::size_t max_len = 160);
+
+// ── Injection screening ────────────────────────────────────────────
+// One finding drives this: a prompt everyone approves is not a control.
+// Anthropic measured 93% approval on Claude Code permission prompts;
+// Akhawe & Felt measured 70% clickthrough on Chrome SSL interstitials.
+// Habituation is the DEFAULT outcome of a uniform prompt.
+//
+// So agentty doesn't ask the same question every time. It screens the body
+// for patterns that actually appeared in the wild and RAISES the prompt
+// when they're present — a differentiated warning, which is the one
+// intervention the habituation literature found works (BYU fMRI study:
+// polymorphic warnings substantially reduced habituation of attention).
+//
+// A REVIEW AID, never a verdict. A clean result is one piece of evidence.
+struct Finding {
+    enum class Severity : std::uint8_t { Note, Warn, Critical };
+    Severity    severity;
+    std::string code;      // stable id, e.g. "curl-pipe-shell"
+    std::string detail;    // what was seen, in agentty's words
+    int         line = 0;  // 1-based line in the body; 0 = whole file
+};
+
+// Screen a skill body for documented attack patterns. Ordered by severity,
+// then line. Empty for the overwhelming majority of skills.
+[[nodiscard]] std::vector<Finding> screen_body(std::string_view body);
+
+[[nodiscard]] constexpr std::string_view to_string(Finding::Severity s) noexcept {
+    switch (s) {
+        case Finding::Severity::Critical: return "critical";
+        case Finding::Severity::Warn:     return "warn";
+        case Finding::Severity::Note:     return "note";
+    }
+    return "note";
+}
+
 // The approvals store leaf, under the USER root — a cloned repo cannot
 // write here, so it cannot pre-approve its own skills.
 inline constexpr std::string_view kApprovalsLeaf = "skills_approved.json";

@@ -92,6 +92,70 @@ failure mode worth designing against.
 `[2] print it first` pages the actual `SKILL.md` before you decide.
 Reading the thing beats a checkbox that says you did.
 
+## What agentty checks before it asks
+
+Before the prompt, agentty reads the skill body and looks for patterns that
+have actually shown up in the wild. This is why the prompt isn't the same
+every time.
+
+That matters more than it sounds. Anthropic measured that Claude Code users
+**approve 93% of permission prompts**; browser-warning research found **70%
+clickthrough** on Chrome's SSL interstitial. A screen that looks identical
+every time is one people learn to dismiss without reading. So the routine
+case stays quiet, and a flagged skill gets a screen that looks different,
+with the safe answer first:
+
+```
+  ━━━ REVIEW THIS ONE ━━━
+
+  install skill "helper"?
+
+  formats your code nicely
+
+  declares no effects — prose only.
+
+  reading the file, agentty noticed:
+   !! line 1    downloads a script and pipes it straight into a shell
+   !! line 3    puts instructions inside an HTML comment
+   !! line 6    instructs the agent to hide what it is doing from you
+   !! line 7    installs something that keeps running after this session
+    ! line 5    reads credentials or environment secrets
+
+  this is pattern matching over text, not proof of intent —
+  and a skill with no findings has not been proven safe.
+
+  [2] print it first   [3] cancel   [1] install anyway
+```
+
+Note what that skill *declared*: "formats your code nicely", no `effects:`
+at all. The declaration is the least reliable thing in the file, which is
+why screening reads the **body**. A 98,380-skill study found capability
+present in the code but absent from the documentation in **100% of advanced
+attacks**.
+
+What gets flagged, all drawn from published corpora:
+
+| finding | why |
+|---|---|
+| `curl \| sh` | the code that runs is whatever the server sends today |
+| base64 → `eval` | the real command is hidden from anyone reading the file |
+| instruction override | a skill should describe a task, not reprogram the agent |
+| directives in HTML comments | invisible when rendered, visible to the agent |
+| "don't tell the user" | instructs the agent to hide what it's doing from you |
+| crontab / `authorized_keys` / shell rc | outlives the session |
+| reads credentials + posts outbound | the two halves of exfiltration |
+| `Bash(*)` pre-approval | asks for unrestricted shell up front |
+| password-protected archives | a known way past scanners |
+| bidi / zero-width characters | text that renders differently than it parses |
+
+`--yes` refuses to install a skill with critical findings. Automation
+shouldn't be able to quietly accept something a human would have stopped at.
+
+**This is a review aid, not a verdict.** It's pattern matching over text, so
+it's evadable by aliases, wrapper scripts, encoding, and anything nobody has
+published yet. A clean result is one piece of evidence. agentty never says
+"safe".
+
 ## Approval is pinned to content
 
 Approving a skill approves **those exact instructions**, not the name.
@@ -156,6 +220,14 @@ Two things worth getting right:
   a declaration. `effects:` tells you what the author *said*; it is not a
   capability boundary. What actually constrains a tool run is the
   [sandbox](sandboxing.md) and the permission profile.
+- **Screening is evadable.** It reads text. Aliases, wrapper scripts,
+  encoded payloads and novel patterns get through. Snyk's own scanners
+  report high recall on *known* malicious skills — that is not the same as
+  catching the next one.
+- **A skill's own description is the weakest signal in the file.** Shadow
+  features — capability in the body, absent from the docs — showed up in
+  100% of advanced attacks in the 98k-skill study. Read the body; that's
+  what `[2] print it first` is for.
 - **Remote fetch isn't wired yet.** Clone and add the path for now:
   ```sh
   git clone https://github.com/you/your-skill /tmp/s && agentty skill add /tmp/s
@@ -166,6 +238,29 @@ Two things worth getting right:
 - **There is no "trust all skills" switch**, in settings or anywhere
   else. A toggle like that becomes step one of every install guide, which
   defeats the point of the prompt.
+
+## Where this came from
+
+The design follows three 2026 findings rather than intuition:
+
+- **Snyk** audited 3,984 skills from ClawHub and skills.sh (Feb 2026):
+  13.4% carried a critical issue, and of the confirmed-malicious set, 91%
+  paired a payload with prompt injection. Injection primes the agent to
+  accept what its own training would refuse — which is why author text is
+  sanitised before agentty renders it anywhere.
+- **A 98,380-skill empirical study** (arXiv 2602.06547) behaviourally
+  confirmed 157 malicious skills averaging 4 vulnerabilities across a median
+  of 3 kill-chain phases, with shadow features in 100% of advanced attacks.
+  Hence: screen the body, never trust the declaration.
+- **Datadog** showed dynamic-context commands execute *before* the model
+  sees the skill, so model-level defenses never get a turn. agentty doesn't
+  implement `!`-context at all; a ported skill carrying it gets a note
+  saying those lines are inert here.
+
+And the UX constraint, from Anthropic's own measurement: **93% of permission
+prompts get approved.** Any design whose safety rests on people reading a
+uniform prompt is already failing. That's why the quiet case is quiet and
+the flagged case looks different.
 
 ## Credit
 

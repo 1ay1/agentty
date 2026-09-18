@@ -552,8 +552,13 @@ std::string catalog_block() {
          "readable. Listed: name — description (directory).\n";
     for (const auto& s : skills) {
         if (!eligible_for_model(s)) continue;
-        m << "- " << s.name;
-        if (!s.description.empty()) m << " — " << s.description;
+        // Author-controlled text, one line away from instructions in the
+        // system prompt. Sanitise it so a description cannot smuggle a
+        // newline + fake directive into the catalog block (91% of
+        // confirmed-malicious skills in Snyk's audit carried injection).
+        m << "- " << sanitize_author_text(s.name, 64);
+        if (!s.description.empty())
+            m << " — " << sanitize_author_text(s.description, 300);
         if (!s.dir.empty()) m << " (" << s.dir.string() << ")";
         m << "\n";
     }
@@ -639,6 +644,14 @@ void reset_activations() {
 }
 
 // ── Effects + trust ────────────────────────────────────────────────────────
+
+// The one parser, exposed. `skill add` needs to describe a file before it
+// is installed; giving it its own copy meant block scalars parsed
+// differently in the prompt than at load time.
+Skill parse_skill_text(const std::string& raw, const std::string& slug,
+                       const std::string& source) {
+    return parse_skill(raw, slug, source);
+}
 
 EffectSet parse_effects(std::string_view value) noexcept {
     // Lenient by design: `[exec, net]`, `exec net`, `exec,net` all mean

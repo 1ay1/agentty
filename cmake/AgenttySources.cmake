@@ -146,6 +146,7 @@ set(AGENTTY_TOOL_SOURCES
     src/tool/util/partial_json.cpp
     src/tool/subagent.cpp
     src/tool/skills.cpp
+    src/tool/skills_screen.cpp
     src/tool/skills_cli.cpp
     src/tool/commands.cpp
     src/tool/hooks.cpp

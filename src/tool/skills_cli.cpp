@@ -62,42 +62,20 @@ namespace {
 
 // ── Approvals store ────────────────────────────────────────────────────────
 
-// Parse one SKILL.md off disk WITHOUT going through discovery — `add` must
-// describe the file it is about to copy, not a skill that isn't installed
-// yet. Reuses the shared parser via the install-then-reload path below is
-// not possible (chicken/egg), so this reads the frontmatter it needs:
-// name, description, effects, source. Deliberately minimal — the full
-// parse happens on load, and lint() reports anything odd afterwards.
+// Describe a SKILL.md before installing it, using THE parser — not a
+// second one. This briefly had its own mini-parser and it diverged
+// immediately: block scalars (`description: |`) rendered as a bare "|" in
+// the consent prompt while loading fine afterwards, so the user approved
+// a description they never actually saw.
 std::optional<Skill> peek_skill(const fs::path& md) {
-    std::ifstream in(md);
+    std::ifstream in(md, std::ios::binary);
     if (!in) return std::nullopt;
-    std::string line;
-    if (!std::getline(in, line) || line.find("---") == std::string::npos)
-        return std::nullopt;
-
-    Skill s;
-    auto trim = [](std::string v) {
-        const auto b = v.find_first_not_of(" \t\r\n");
-        if (b == std::string::npos) return std::string{};
-        const auto e = v.find_last_not_of(" \t\r\n");
-        return v.substr(b, e - b + 1);
-    };
-    while (std::getline(in, line)) {
-        if (trim(line) == "---") break;
-        const auto colon = line.find(':');
-        if (colon == std::string::npos) continue;
-        const auto k = trim(line.substr(0, colon));
-        const auto v = trim(line.substr(colon + 1));
-        if      (k == "name")        s.name = v;
-        else if (k == "description") s.description = v;
-        else if (k == "source")      s.origin = v;
-        else if (k == "effects")     s.effects = parse_effects(v);
-    }
-    // Body: everything after the closing fence. Needed for the content hash.
-    std::ostringstream body;
-    body << in.rdbuf();
-    s.body = body.str();
-    if (s.name.empty()) s.name = md.parent_path().filename().string();
+    std::ostringstream ss;
+    ss << in.rdbuf();
+    auto s = parse_skill_text(ss.str(),
+                             md.parent_path().filename().string(),
+                             "user");
+    if (s.name.empty()) return std::nullopt;
     return s;
 }
 
@@ -124,15 +102,38 @@ std::vector<EffectLine> effect_lines(EffectSet e) {
 }
 
 // The consent screen. Everything here is derived: the skill contributes
-// its name, description, source and declared effects — never a sentence.
-void print_consent(const Skill& s) {
+// its name, description, source and declared effects — never a sentence,
+// and its description is SANITISED before it is shown (91% of confirmed
+// malicious skills carry injection; a description that can open a new line
+// can impersonate agentty's own framing).
+//
+// The screen is deliberately NOT uniform. Anthropic measured 93% approval
+// on Claude Code permission prompts; a screen that looks the same every
+// time is one people learn to dismiss. So a clean prose skill gets a quiet
+// two-line note, a clean effectful skill gets the routine prompt, and a
+// skill with findings gets a visually different screen with the default
+// answer flipped. Differentiation is the only intervention the habituation
+// literature found durable.
+void print_consent(const Skill& s, const std::vector<Finding>& findings) {
+    const bool critical = std::ranges::any_of(findings, [](const Finding& f) {
+        return f.severity == Finding::Severity::Critical;
+    });
+
     std::printf("\n");
-    std::printf("  install skill \"%s\"", s.name.c_str());
-    if (!s.origin.empty()) std::printf(" from %s", s.origin.c_str());
+    if (critical) {
+        // Different shape, different words, different default. A user who
+        // has approved twenty skills should FEEL that this one is not those.
+        std::printf("  ━━━ REVIEW THIS ONE ━━━\n\n");
+    }
+
+    std::printf("  install skill \"%s\"",
+                sanitize_author_text(s.name, 64).c_str());
+    if (!s.origin.empty())
+        std::printf(" from %s", sanitize_author_text(s.origin, 96).c_str());
     std::printf("?\n\n");
 
     if (!s.description.empty())
-        std::printf("  %s\n\n", s.description.c_str());
+        std::printf("  %s\n\n", sanitize_author_text(s.description).c_str());
 
     const auto lines = effect_lines(s.effects);
     if (lines.empty()) {
@@ -145,6 +146,27 @@ void print_consent(const Skill& s) {
                         std::string{l.gloss}.c_str());
     }
     std::printf("\n");
+
+    // Findings, if any. These are agentty's words about what it saw in the
+    // body — the skill gets no say in this section.
+    if (!findings.empty()) {
+        std::printf("  reading the file, agentty noticed:\n");
+        for (const auto& f : findings) {
+            const char* mark = f.severity == Finding::Severity::Critical ? "!!"
+                             : f.severity == Finding::Severity::Warn     ? " !"
+                                                                         : "  ";
+            if (f.line > 0)
+                std::printf("   %s line %-4d %s\n", mark, f.line, f.detail.c_str());
+            else
+                std::printf("   %s           %s\n", mark, f.detail.c_str());
+        }
+        std::printf("\n");
+
+        // The honest caveat. Snyk's own scanners miss things; saying
+        // "scanned, looks fine" would be the harmful sentence here.
+        std::printf("  this is pattern matching over text, not proof of intent —\n");
+        std::printf("  and a skill with no findings has not been proven safe.\n\n");
+    }
 
     // The sentence people most need and least expect.
     std::printf("  skills are instructions, not sandboxed code. agentty cannot\n");
@@ -221,10 +243,39 @@ int verb_add(const std::vector<std::string>& argv) {
         return 1;
     }
 
-    print_consent(s);
+    // Screen the BODY, not the frontmatter. The arXiv corpus found shadow
+    // features (capability present in code, absent from the docs) in 100%
+    // of advanced attacks — so a skill's own account of itself is the least
+    // reliable input available, and a declares-nothing/does-everything
+    // mismatch is itself the signal.
+    const auto findings = screen_body(s.body);
+    const bool critical = std::ranges::any_of(findings, [](const Finding& f) {
+        return f.severity == Finding::Severity::Critical;
+    });
 
-    if (needs_trust_gate(s.effects) && !yes) {
-        std::printf("  [1] install   [2] print it first   [3] cancel\n\n> ");
+    print_consent(s, findings);
+
+    // --yes is for scripts, and it stops at critical findings. An
+    // unattended flag that silently installs something carrying an
+    // instruction-override or a persistence payload is the flag doing harm
+    // on the user's behalf; make automation say so explicitly.
+    if (critical && yes) {
+        std::fprintf(stderr,
+            "refusing --yes: this skill has critical findings. install it\n"
+            "interactively, or re-run with --i-have-read-this if you have.\n");
+        const bool read_it = std::ranges::find(
+            argv, std::string{"--i-have-read-this"}) != argv.end();
+        if (!read_it) return 1;
+    }
+
+    if ((needs_trust_gate(s.effects) || critical) && !yes) {
+        // Findings flip the default. Routine installs lead with [1] install;
+        // a flagged one leads with reading the file, and the safe answer is
+        // the first thing your eye lands on.
+        if (critical)
+            std::printf("  [2] print it first   [3] cancel   [1] install anyway\n\n> ");
+        else
+            std::printf("  [1] install   [2] print it first   [3] cancel\n\n> ");
         std::fflush(stdout);
         std::string answer;
         if (!std::getline(std::cin, answer)) return 1;
@@ -342,7 +393,7 @@ int verb_approve(const std::vector<std::string>& argv) {
         std::printf("%s declares no effects — nothing to approve\n", argv[0].c_str());
         return 0;
     }
-    print_consent(*s);
+    print_consent(*s, screen_body(s->body));
     auto store = load_approvals();
     store.approve(content_sha_of(*s));
     save_approvals(store);
