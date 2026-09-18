@@ -110,7 +110,7 @@ FetchContent_Declare(
     GIT_REPOSITORY https://github.com/nlohmann/json.git
     GIT_TAG        v3.11.3
     GIT_SHALLOW    TRUE
-    FIND_PACKAGE_ARGS 3.11 NAMES nlohmann_json
+    FIND_PACKAGE_ARGS NAMES nlohmann_json
 )
 
 # simdjson — used on the SSE hot path (content_block_delta) where we parse
@@ -123,7 +123,14 @@ FetchContent_Declare(
     GIT_REPOSITORY https://github.com/simdjson/simdjson.git
     GIT_TAG        v3.10.1
     GIT_SHALLOW    TRUE
-    FIND_PACKAGE_ARGS 3.10 NAMES simdjson
+# The version is deliberately UNPINNED for the find_package path. Asking for
+# "3.10" makes CMake reject a system simdjson 4.x as incompatible (same-major
+# rule) and clone anyway — which defeats the point on any distro shipping 4.x,
+# including Termux. agentty uses only the stable dom/ondemand surface
+# (parser, document, element, object, array, padded_string), unchanged across
+# 3 and 4, so whatever the distro ships is fine. The GIT_TAG below still pins
+# the version for anyone WITHOUT a system copy.
+    FIND_PACKAGE_ARGS NAMES simdjson
 )
 
 FetchContent_MakeAvailable(nlohmann_json simdjson)
