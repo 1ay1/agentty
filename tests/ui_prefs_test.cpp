@@ -173,7 +173,7 @@ TEST_CASE("appearance: typing filters and previews the top match") {
         auto [n, _] = app::update(std::move(m), Msg{AppearanceThemeQuery{c}});
         m = std::move(n);
     }
-    CHECK(pane(m).pane.picker.query == "dra");
+    CHECK(pane(m).pane.picker.picker.query() == "dra");
     // Narrowing PREVIEWS too — "dra" shows you Dracula without a second
     // keystroke to move onto it.
     CHECK(!m.d.ui.theme.empty());

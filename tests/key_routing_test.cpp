@@ -113,7 +113,7 @@ TEST_CASE("routing: the first arrow after Enter reaches the theme browser") {
     REQUIRE(opened != nullptr);
     CHECK(opened->pane.picking, "Enter did not open the browser");
 
-    const int idx_before    = opened->pane.picker.index;
+    const int idx_before    = opened->pane.picker.picker.index();
     const int cursor_before = opened->pane.form.cursor;
 
     // THE ASSERTION: one ↓, routed through a sub built from the model as it
@@ -125,7 +125,7 @@ TEST_CASE("routing: the first arrow after Enter reaches the theme browser") {
 
     const auto* after = m.ui.panel.get<pn::Appearance>();
     REQUIRE(after != nullptr);
-    CHECK(after->pane.picker.index != idx_before,
+    CHECK(after->pane.picker.picker.index() != idx_before,
           "the FIRST arrow after Enter did not move the browser — this is "
           "the 'input doesn't register until you hit it again' bug");
     CHECK(after->pane.form.cursor == cursor_before,
@@ -148,7 +148,7 @@ TEST_CASE("routing: Escape leaves the browser and the next key hits the form") {
     REQUIRE(closed != nullptr);
     CHECK(!closed->pane.picking, "Escape did not close the browser");
 
-    const int idx_before    = closed->pane.picker.index;
+    const int idx_before    = closed->pane.picker.picker.index();
     const int cursor_before = closed->pane.form.cursor;
 
     CHECK(press(m, special(maya::SpecialKey::Down)),
@@ -158,6 +158,6 @@ TEST_CASE("routing: Escape leaves the browser and the next key hits the form") {
     REQUIRE(after != nullptr);
     CHECK(after->pane.form.cursor != cursor_before,
           "the first arrow after closing the browser did not move the form");
-    CHECK(after->pane.picker.index == idx_before,
+    CHECK(after->pane.picker.picker.index() == idx_before,
           "the arrow still reached the closed browser");
 }

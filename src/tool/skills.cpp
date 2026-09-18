@@ -212,6 +212,8 @@ std::atomic<std::size_t>& cap_resolutions() noexcept {
             else if (k == "compatibility")             field = &s.compatibility;
             else if (k == "allowed-tools")             field = &s.allowed_tools;
             else if (k == "license")                   field = &s.license;
+            else if (k == "source")                    field = &s.origin;
+            else if (k == "effects")                   { s.effects = parse_effects(v); continue; }
             else if (k == "disable-model-invocation")  { s.user_only = is_truthy(v); continue; }
             else continue;   // unknown keys: tolerated, unused
 
@@ -602,6 +604,78 @@ void reset_activations() {
     auto& a = activations();
     std::lock_guard lk(a.mu);
     a.names.clear();
+}
+
+// ── Effects + trust ────────────────────────────────────────────────────────
+
+EffectSet parse_effects(std::string_view value) noexcept {
+    // Lenient by design: `[exec, net]`, `exec net`, `exec,net` all mean
+    // the same thing, and an unknown word is skipped rather than fatal so
+    // a skill written for a future agentty still loads on this one.
+    EffectSet out{};
+    std::string tok;
+    auto flush = [&] {
+        if (tok.empty()) return;
+        // Fold to bare lowercase letters: "write-fs"/"write_fs"/"WriteFs"
+        // all collapse to "writefs", so spelling never costs a user a
+        // confusing "unknown effect" they can't see.
+        std::string k;
+        for (char c : tok) {
+            if (c == '-' || c == '_') continue;
+            k += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        tok.clear();
+        if      (k == "readfs"  || k == "read")  out |= EffectSet{Effect::ReadFs};
+        else if (k == "writefs" || k == "write") out |= EffectSet{Effect::WriteFs};
+        else if (k == "net"     || k == "network") out |= EffectSet{Effect::Net};
+        else if (k == "exec"    || k == "execute") out |= EffectSet{Effect::Exec};
+        // else: unknown — ignored on purpose (forward compatibility).
+    };
+    for (char c : value) {
+        if (c == '[' || c == ']' || c == ',' || c == ' ' ||
+            c == '\t' || c == '"' || c == '\'') { flush(); continue; }
+        tok += c;
+    }
+    flush();
+    return out;
+}
+
+std::string effects_to_frontmatter(EffectSet e) {
+    // Bit order, so the rendering is stable for a given set — the install
+    // prompt and `skill list` must not reorder between runs.
+    std::string out;
+    auto add = [&](std::string_view w) {
+        if (!out.empty()) out += ", ";
+        out += w;
+    };
+    if (e.has(Effect::ReadFs))  add("read-fs");
+    if (e.has(Effect::WriteFs)) add("write-fs");
+    if (e.has(Effect::Net))     add("net");
+    if (e.has(Effect::Exec))    add("exec");
+    return out;
+}
+
+scope::Trust trust_of(const Skill& s, const scope::Approvals& approvals) noexcept {
+    // Prose-only: the overwhelming majority, and the path that must stay
+    // byte-identical to pre-effects agentty.
+    if (!needs_trust_gate(s.effects)) return scope::Trusted{};
+
+    // Content-bound, never name-bound (MCPoison). Hash the bytes that
+    // actually steer the agent: the body plus the declared effects, so a
+    // v2 that keeps its prose but adds `exec` re-gates.
+    const std::string sha = scope::content_hash(
+        s.body + "\n#effects:" + effects_to_frontmatter(s.effects));
+    if (approvals.approved(sha)) return scope::Trusted{};
+
+    // Fetched from somewhere: the user did not write these instructions,
+    // so they approve them once, explicitly.
+    if (!s.origin.empty()) return scope::Pending{sha};
+
+    // Hand-authored. A USER-root skill is the human's own file — trusted,
+    // same as scope treats User-locus config. A PROJECT skill arrives with
+    // the repo, so a clone must not be able to vouch for itself.
+    if (s.source == "user") return scope::Trusted{};
+    return scope::Pending{sha};
 }
 
 std::vector<std::string> lint(const Skill& s) {

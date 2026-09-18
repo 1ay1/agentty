@@ -53,7 +53,8 @@ set(_AGENTTY_CONSOLIDATED
     issue37_terminal_respect_test
     param_tag_repair_test sandbox_escape_test scope_test table_render_test
     ssrf_guard_test render_key_coverage_test reasoning_render_test
-    plugin_config_test skills_engine_test slash_commands_test fuzzy_match_smoke
+    plugin_config_test skills_engine_test skill_effects_trust_test
+    slash_commands_test fuzzy_match_smoke
     provider_model_switch_test
     oauth_proactive_refresh_test maya_host_sequence_test
     smart_slot_panel_stack_test account_switch_refresh_test fused_models_test

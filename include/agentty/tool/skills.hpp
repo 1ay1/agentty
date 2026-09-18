@@ -67,7 +67,11 @@
 
 #include <filesystem>
 #include <string>
+#include <string_view>
 #include <vector>
+
+#include "agentty/scope/scope.hpp"
+#include "agentty/tool/effects.hpp"
 
 namespace agentty::tools::skills {
 
@@ -79,6 +83,18 @@ struct Skill {
     std::string compatibility; // frontmatter `compatibility` (env requirements)
     std::string allowed_tools; // frontmatter `allowed-tools` (experimental)
     std::string license;       // frontmatter `license`
+    // Frontmatter `effects:` — what this skill will tell the agent to DO,
+    // in the SAME four-bit vocabulary tools already declare (effects.hpp),
+    // so a skill's impact is read off the same axis as a tool's and the
+    // permission UI has one word list to render. ABSENT is the common case
+    // and means prose-only: every skill that exists today parses to an
+    // empty set and takes the untouched path (see needs_trust_gate).
+    EffectSet   effects{};
+    // Frontmatter `source:` — where the skill CAME FROM ("github.com/…").
+    // Provenance, in the spirit of scope::Source: a skill the user fetched
+    // is a different thing from one they wrote, and the install prompt says
+    // so. Empty for hand-authored skills.
+    std::string origin;
     bool        user_only = false; // `disable-model-invocation`: hidden from the
                                    // model-facing catalog, loadable explicitly
     std::filesystem::path dir; // absolute skill directory (tier-3 base path)
@@ -150,6 +166,65 @@ void reset_activations();
 // and ≤ 1024 chars, body ≤ 500 lines (spec recommendation — move detail
 // to references/).
 [[nodiscard]] std::vector<std::string> lint(const Skill& s);
+
+// ── Effects: declared capability, parsed from frontmatter ────────────
+// Lenient like the rest of the parser (the spec's client-implementation
+// guidance): `[exec, net]`, `exec net`, `exec,net` and `write-fs` /
+// `write_fs` / `writefs` all parse. Unknown words are IGNORED rather
+// than fatal — a future effect name must not make a skill unloadable on
+// an older binary. An empty or absent value yields the empty set, which
+// is exactly today's behaviour for every skill in the wild.
+[[nodiscard]] EffectSet parse_effects(std::string_view value) noexcept;
+
+// Render an EffectSet as the frontmatter spelling ("exec, net"), for
+// `agentty skill list` and the install prompt. Inverse of parse_effects
+// on the canonical names.
+[[nodiscard]] std::string effects_to_frontmatter(EffectSet e);
+
+// ── Trust: does loading this skill require a deliberate approval? ─────
+// A skill is INSTRUCTIONS, not sandboxed code — but instructions that
+// say "run npx, create a remote tenant, write credentials into the
+// repo" are the same threat class as a project-local MCP server, and
+// that class is already solved (scope::Trust, content-bound approval —
+// the MCPoison lesson: pin trust to CONTENT, never to a name).
+//
+// The gate fires ONLY on declared effects. Prose-only skills — which is
+// every skill that exists today — are never gated, so adopting this
+// costs existing users nothing. That claim is a static_assert below,
+// not a comment.
+[[nodiscard]] constexpr bool needs_trust_gate(EffectSet e) noexcept {
+    return !e.empty();
+}
+
+namespace proofs {
+// "Off is a byte-for-byte no-op" as a build error rather than a promise:
+// a prose-only skill must never reach the approval path.
+static_assert(!needs_trust_gate(EffectSet{}));
+static_assert( needs_trust_gate(EffectSet{Effect::Exec}));
+static_assert( needs_trust_gate(EffectSet{Effect::Net}));
+static_assert( needs_trust_gate(EffectSet{Effect::WriteFs}));
+// ReadFs alone still gates: "read every file under ~" is a real ask.
+static_assert( needs_trust_gate(EffectSet{Effect::ReadFs}));
+} // namespace proofs
+
+// Total: (skill, approvals) → Trust. Pure, so a reducer/test can drive
+// it with a fabricated store.
+//
+//   effects empty                    → Trusted   (prose; today's path)
+//   effects + content hash approved  → Trusted
+//   effects + fetched (`source:`)    → Pending   (user didn't author it)
+//   effects, hand-authored, project  → Pending   (a repo can't vouch for
+//                                                 itself — cloned config)
+//   effects, hand-authored, user     → Trusted   (the human wrote it)
+//
+// Change the body and the hash changes, so an approval earned by v1 does
+// not carry to a v2 that gained `exec`. That re-gate is the whole point.
+[[nodiscard]] scope::Trust trust_of(const Skill& s,
+                                    const scope::Approvals& approvals) noexcept;
+
+// The approvals store leaf, under the USER root — a cloned repo cannot
+// write here, so it cannot pre-approve its own skills.
+inline constexpr std::string_view kApprovalsLeaf = "skills_approved.json";
 
 // CLI entry: list every discovered skill (scope, dir, resource count)
 // with lint diagnostics. Returns 0 when every skill is clean, 1 when
