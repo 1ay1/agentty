@@ -50,6 +50,11 @@ Open scan() {
                 return f.severity == tools::skills::Finding::Severity::Critical;
             });
 
+        // Is another directory in the same scope claiming this name? The
+        // losing copy is invisible everywhere — including this panel — so
+        // the winner has to carry the warning, or nothing does.
+        r.shadow_conflict = tools::skills::shadowed_within_scope(s.name);
+
         out.rows.push_back(std::move(r));
     }
 
@@ -57,8 +62,13 @@ Open scan() {
     // that buries the one flagged skill under forty clean ones is a viewer
     // that answers the wrong question.
     std::ranges::stable_sort(out.rows, [](const Row& a, const Row& b) {
-        const int ra = a.has_critical ? 0 : (a.gated && !a.trusted) ? 1 : 2;
-        const int rb = b.has_critical ? 0 : (b.gated && !b.trusted) ? 1 : 2;
+        const auto rank = [](const Row& r) {
+            if (r.has_critical)          return 0;
+            if (r.shadow_conflict)       return 1;   // something is hidden
+            if (r.gated && !r.trusted)   return 2;
+            return 3;
+        };
+        const int ra = rank(a), rb = rank(b);
         if (ra != rb) return ra < rb;
         return a.name < b.name;
     });

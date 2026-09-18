@@ -424,6 +424,23 @@ int verb_add(const std::vector<std::string>& argv) {
         return 1;
     }
 
+    // Installing a name another directory already claims would create a
+    // skill that silently never loads — the user would see a success
+    // message and then never see the skill again. Refuse with the
+    // conflicting path rather than writing a file that does nothing.
+    if (const auto* clash = find(s.name);
+        clash && !clash->dir.empty()
+              && fs::weakly_canonical(clash->dir) != fs::weakly_canonical(dest)) {
+        std::fprintf(stderr,
+            "refusing to install: \"%s\" is already the name of a skill in\n"
+            "  %s\n"
+            "installing this one would be shadowed and never load. rename it,\n"
+            "or remove the other first.\n",
+            sanitize_author_text(s.name, 64).c_str(),
+            clash->dir.string().c_str());
+        return 1;
+    }
+
     if (fs::exists(dest / "SKILL.md") && !force) {
         // Never clobber a skill the user may have edited. (This rule came
         // from PR #47, which got it right and tested it.)
@@ -571,6 +588,30 @@ int verb_list() {
             std::printf("    %s\n", s.description.c_str());
         if (!s.origin.empty())
             std::printf("    from %s\n", s.origin.c_str());
+    }
+
+    // Name collisions. A skill that lost one is invisible everywhere else
+    // — not in this list, not in the panel, not to `approve` — so if it is
+    // never mentioned the user has no way to discover that something is
+    // sitting on disk wearing a name another skill answers to.
+    const auto& shadows = shadowed();
+    if (!shadows.empty()) {
+        std::printf("\n");
+        for (const auto& sh : shadows) {
+            const bool same_scope = shadowed_within_scope(sh.name);
+            // Cross-scope is the documented override and gets a quiet
+            // note; same-scope is a real problem and says so.
+            std::printf("%s \"%s\" is also declared by %s%s\n",
+                        same_scope ? "!!" : "  ",
+                        sanitize_author_text(sh.name, 64).c_str(),
+                        sh.dir.c_str(),
+                        same_scope ? "" : " (shadowed by a narrower scope)");
+            std::printf("   that copy is NOT loaded");
+            if (!sh.effects.empty())
+                std::printf(" and it declares %s",
+                            effects_to_frontmatter(sh.effects).c_str());
+            std::printf("\n");
+        }
     }
     return 0;
 }

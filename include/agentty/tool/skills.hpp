@@ -234,6 +234,31 @@ static_assert( needs_trust_gate(EffectSet{Effect::ReadFs}));
                                      const std::string& slug,
                                      const std::string& source);
 
+// A skill that lost a name collision. Shadowing ACROSS scopes is a
+// feature — a project skill overriding a user one is the documented rule.
+// Two directories claiming the same name in the SAME scope is not: it is
+// either a mistake, or a way to sit on disk while something else wears
+// your name. Either way the user should be able to see it.
+//
+// Kept separate from the loaded set so nothing downstream can accidentally
+// treat a shadowed skill as active — it is a diagnostic, not a skill.
+struct Shadowed {
+    std::string name;          // the contested name
+    std::string dir;           // where the losing copy lives
+    std::string source;        // its scope
+    EffectSet   effects{};     // what it declared — a hidden effectful
+                               // skill is the interesting case
+    std::string winner_dir;    // the directory that won the name
+};
+
+// Every skill dropped for a name collision during the last discovery.
+// Empty in the overwhelming majority of installs.
+[[nodiscard]] const std::vector<Shadowed>& shadowed();
+
+// Is this name claimed by more than one directory in the SAME scope?
+// That is the case worth flagging — cross-scope shadowing is intended.
+[[nodiscard]] bool shadowed_within_scope(std::string_view name);
+
 // Is this name safe to use as a directory name?
 //
 // A skill's `name:` is author-controlled and `skill add` builds an INSTALL

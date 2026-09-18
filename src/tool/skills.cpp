@@ -333,6 +333,13 @@ void enumerate_resources(const fs::path& dir, std::vector<std::string>& out) {
 // keep their flat names so existing libraries load unchanged.
 // Appends each found SKILL.md's mtime into `sig` so an in-place edit
 // (same dir mtime) still invalidates the cache.
+// Shadowed skills from the last discovery pass. Rebuilt whenever all()
+// re-scans, cleared first so a fixed collision stops being reported.
+std::vector<Shadowed>& shadow_log() {
+    static std::vector<Shadowed> v;
+    return v;
+}
+
 void scan_root(const fs::path& root, const std::string& source,
                std::size_t cap, std::vector<Skill>& out, std::string& sig) {
     std::error_code ec;
@@ -447,8 +454,26 @@ void scan_root(const fs::path& root, const std::string& source,
         // Shadow: earlier roots (project before user, native before
         // interop) — and earlier visit order (shallower before deeper)
         // — win on name collision.
-        if (std::ranges::any_of(out, [&](const Skill& e){ return e.name == s.name; }))
+        if (const auto it = std::ranges::find_if(
+                out, [&](const Skill& e){ return e.name == s.name; });
+            it != out.end()) {
+            // Record it rather than dropping it silently. The losing copy
+            // is NOT loaded — it cannot reach the model — but a skill
+            // sitting on disk invisible to `list`, `approve` and the panel
+            // is exactly how something hides while another entry wears its
+            // name. Cross-scope shadowing is intended and stays quiet at
+            // the UI layer; same-scope is what gets surfaced.
+            std::error_code sec;
+            auto sdir = fs::weakly_canonical(md.parent_path(), sec);
+            shadow_log().push_back(Shadowed{
+                .name        = s.name,
+                .dir         = (sec ? md.parent_path() : sdir).string(),
+                .source      = source,
+                .effects     = s.effects,
+                .winner_dir  = it->dir.string(),
+            });
             continue;
+        }
         std::error_code cec;
         auto abs = fs::weakly_canonical(md.parent_path(), cec);
         s.dir = cec ? fs::absolute(md.parent_path(), cec) : abs;
@@ -573,6 +598,7 @@ const std::vector<Skill>& all() {
     // PASS 2 — something changed on disk; do the expensive read+parse.
     std::vector<Skill> fresh;
     std::string parse_sig;
+    shadow_log().clear();   // rebuilt by this pass
     for (const scope::Source& src : sources) {
         scan_root(src.base / layout.leaf, std::string{scope::to_string(src.locus)},
                   cap, fresh, parse_sig);
@@ -581,6 +607,22 @@ const std::vector<Skill>& all() {
     cache() = std::move(fresh);
     cached_sig = sig;
     return cache();
+}
+
+const std::vector<Shadowed>& shadowed() {
+    all();                 // ensure a discovery has run
+    return shadow_log();
+}
+
+bool shadowed_within_scope(std::string_view name) {
+    // Cross-scope shadowing is the documented rule (project beats user),
+    // so it is not a warning. Two directories in the SAME scope claiming
+    // one name is the case that is either a mistake or a hiding place.
+    const auto* winner = find(name);
+    if (!winner) return false;
+    for (const auto& sh : shadowed())
+        if (sh.name == name && sh.source == winner->source) return true;
+    return false;
 }
 
 const Skill* find(std::string_view name) {

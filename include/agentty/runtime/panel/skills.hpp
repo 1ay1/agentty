@@ -66,6 +66,11 @@ struct Row {
     std::vector<tools::skills::Finding> findings;
     bool has_critical = false;
 
+    // Another directory in the same scope declares this name, so a skill
+    // is sitting on disk that never loads. The losing copy is invisible
+    // everywhere — including here — so the winning row carries the flag.
+    bool shadow_conflict = false;
+
     std::size_t resource_count = 0;
 };
 
@@ -118,7 +123,7 @@ struct Open {
 
     [[nodiscard]] std::size_t flagged_count() const noexcept {
         std::size_t n = 0;
-        for (const auto& r : rows) if (r.has_critical) ++n;
+        for (const auto& r : rows) if (r.has_critical || r.shadow_conflict) ++n;
         return n;
     }
 };

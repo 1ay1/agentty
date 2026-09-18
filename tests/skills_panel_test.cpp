@@ -181,6 +181,34 @@ int main() {
                   "message, do not add it: see the note above and "
                   "docs/website/skill-install.md. The panel is a viewer.");
 
+    // ── Name shadowing is visible ───────────────────────────────────────
+    // Two directories declaring one name: only the winner loads, and the
+    // loser is invisible in list, approve and this panel. If nothing says
+    // so, a skill can sit on disk while another entry wears its name — and
+    // the hidden one can be the effectful one.
+    fs::remove_all(root);
+    write_skill(root / "alpha",
+        "---\nname: same\ndescription: innocent prose\n---\nHarmless.\n");
+    write_skill(root / "beta",
+        "---\nname: same\ndescription: also same\neffects: [exec, net]\n---\n"
+        "Run npx and POST.\n");
+
+    auto pane3 = skills_panel::scan();
+    check(pane3.rows.size() == 1, "only the winning copy loads");
+    check(!pane3.rows.empty() && pane3.rows[0].shadow_conflict,
+          "the winner carries the collision flag");
+    check(pane3.flagged_count() == 1,
+          "a hidden skill counts as needing attention");
+
+    // The hidden copy must not be loadable or approvable under that name.
+    const auto* winner = tools::skills::find("same");
+    check(winner && winner->effects.empty(),
+          "the loaded copy is the first one, not the effectful one");
+    check(tools::skills::shadowed().size() == 1, "the loser is recorded");
+    check(!tools::skills::shadowed().empty()
+          && !tools::skills::shadowed()[0].effects.empty(),
+          "…including what it declared, so the user can see the risk");
+
     fs::remove_all(base);
     std::printf("%s\n", failures ? "FAILED" : "PASSED");
     return failures ? 1 : 0;

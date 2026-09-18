@@ -219,6 +219,38 @@ skipped 2 symlinks — skills are copied as plain files
 installed sym → ~/.agentty/skills/sym
 ```
 
+## Two skills, one name
+
+A skill is identified by its `name:`, not its directory. When two
+directories declare the same name, only one loads — and until agentty said
+so, the other was invisible: absent from `skill list`, from the panel, and
+from `approve`. A skill could sit on disk while a different entry wore its
+name, and the hidden one could be the effectful one.
+
+Now the collision is reported:
+
+```
+$ agentty skill list
+same                     user     -
+    innocent prose
+
+!! "same" is also declared by ~/.agentty/skills/beta
+   that copy is NOT loaded and it declares net, exec
+```
+
+And `skill add` refuses to create one:
+
+```
+refusing to install: "taken" is already the name of a skill in
+  ~/.agentty/skills/existing
+installing this one would be shadowed and never load. rename it,
+or remove the other first.
+```
+
+**Shadowing across scopes is different and stays quiet** — a project skill
+overriding a user skill of the same name is the documented rule, not a
+mistake. It's two directories in the *same* scope that get the warning.
+
 ## Approval is pinned to content
 
 Approving a skill approves **those exact instructions**, not the name.

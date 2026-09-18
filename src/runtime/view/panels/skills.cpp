@@ -60,10 +60,11 @@ Element skills_panel(const Model& m) {
         // "!" for unapproved-but-clean, two spaces for the ordinary case so
         // the names stay aligned in a monospace column.
         const char* mark = r.has_critical          ? "!! "
+                         : r.shadow_conflict       ? "!! "
                          : (r.gated && !r.trusted) ? " ! "
                                                    : "   ";
         row.leading = std::string{mark} + r.name;
-        row.leading_style = r.has_critical ? fg_of(danger)
+        row.leading_style = (r.has_critical || r.shadow_conflict) ? fg_of(danger)
                           : (r.gated && !r.trusted) ? fg_of(warn)
                                                     : fg_of(fg);
 
@@ -111,6 +112,18 @@ Element skills_panel(const Model& m) {
             cfg.footer.push_back(text("  you wrote this", fg_dim(muted)));
 
         cfg.footer.push_back(text("  " + sel->dir, fg_dim(muted)));
+
+        // A name collision hides a whole skill, so it is said plainly and
+        // before the findings — the user cannot discover it any other way.
+        if (sel->shadow_conflict) {
+            cfg.footer.push_back(text(""));
+            cfg.footer.push_back(
+                text("  another skill in this scope declares the same name.",
+                     fg_of(danger)));
+            cfg.footer.push_back(
+                text("  one of them is not loaded \xe2\x80\x94 agentty skill list",
+                     fg_dim(muted)));
+        }
 
         // What screening saw. Capped at four lines: a footer nobody can
         // read is a footer nobody reads, and the CLI shows the full set.
