@@ -275,11 +275,16 @@ struct Scored {
 //   • files_ready() is a non-blocking probe the composer uses to open the
 //     picker INSTANTLY (empty + "indexing…") when the warm hasn't landed.
 namespace {
-std::mutex& files_mu() { static std::mutex m; return m; }
-std::shared_ptr<const std::vector<std::string>>& files_cache() {
-    static std::shared_ptr<const std::vector<std::string>> c;
-    return c;
-}
+// The published file list.
+//
+// AtomicSnapshot, not `mutex + shared_ptr`. The hand-rolled form needed a
+// lock on the LOAD as well as the store — copying a shared_ptr handle while
+// another thread assigns to it is a data race on the pointer itself, even
+// though the pointee is immutable — and that subtlety is exactly the kind a
+// reader "simplifies" away, because the code looks obviously fine. Putting
+// it in the type removes the question: there is no exposed handle to race on,
+// and the five lock/unlock sites this used to need are gone.
+util::AtomicSnapshot<std::vector<std::string>> g_files;
 // Single-flight latch for the file walk lives beside prewarm_workspace_files
 // below, next to the only code that reads it.
 
@@ -413,10 +418,7 @@ void prewarm_workspace_files(std::size_t cap) {
     // and swallows exceptions. This module used to hand-roll all three, in
     // parallel with maya's pool doing the same job two lines away in the same
     // function.
-    {
-        std::lock_guard<std::mutex> lk(files_mu());
-        if (files_cache()) return;   // already warm
-    }
+    if (g_files.has_value()) return;   // already warm
     bool expected = false;
     if (!files_building().compare_exchange_strong(expected, true)) return;
 
@@ -427,11 +429,7 @@ void prewarm_workspace_files(std::size_t cap) {
     // already git-aware the instant it publishes — a blank `@` leads with
     // your dirty files from the very first open.
     build_git_signals();
-    auto built = std::make_shared<const std::vector<std::string>>(build_file_list(cap));
-    {
-        std::lock_guard<std::mutex> lk(files_mu());
-        files_cache() = std::move(built);
-    }
+    g_files.store(build_file_list(cap));
     files_building() = false;
 }
 
@@ -476,8 +474,7 @@ void join_workspace_prewarm() {
 }
 
 bool files_ready() {
-    std::lock_guard<std::mutex> lk(files_mu());
-    return static_cast<bool>(files_cache());
+    return g_files.has_value();
 }
 
 void note_file_referenced(std::string_view path) {
@@ -512,20 +509,22 @@ void refresh_git_signals() { build_git_signals(); }
 // the vector BY VALUE — safe, but a full deep copy of every path on each of
 // the several calls a single keystroke makes.
 util::Snapshot<std::vector<std::string>> list_workspace_files(std::size_t cap) {
-    // Fast path: warm cache → share it.
-    {
-        std::lock_guard<std::mutex> lk(files_mu());
-        if (auto c = files_cache())
-            return util::Snapshot<std::vector<std::string>>{c};
-    }
+    // Fast path: warm cache → share it. Lock-free; the returned handle owns
+    // its buffer, so a concurrent republish cannot pull it out from under
+    // the caller.
+    if (auto warm = g_files.load(); warm.has_value()) return warm;
+
     // Cold and someone needs it NOW (synchronous caller, no prewarm yet):
     // build inline and publish, so subsequent calls are instant.
-    auto built = std::make_shared<const std::vector<std::string>>(build_file_list(cap));
-    {
-        std::lock_guard<std::mutex> lk(files_mu());
-        if (!files_cache()) files_cache() = built;
-        return util::Snapshot<std::vector<std::string>>{files_cache()};
-    }
+    //
+    // Two cold callers can race here and both build. That is deliberate:
+    // the alternative is holding a lock across a multi-thousand-path walk,
+    // which would make the second caller wait on the first. Both produce an
+    // equivalent list, the last store wins, and every reader sees a complete
+    // generation either way.
+    auto built = util::make_snapshot(build_file_list(cap));
+    g_files.store(built);
+    return built;
 }
 
 std::vector<std::size_t>

@@ -42,7 +42,29 @@
 //
 // The result: correctness (no UAF) and speed (no copy) stop being in
 // tension, which is what made the two siblings pick opposite sides.
+//
+// ── THREADING CONTRACT ── read this before sharing one ──────────────────
+//
+// A Snapshot has the same thread-safety as a std::shared_ptr, and for the
+// same reason: the POINTEE is immutable and freely shared, but the HANDLE is
+// an ordinary object.
+//
+//   SAFE    any number of threads reading the SAME Snapshot object, or each
+//           holding their own copy. This is the picker's case — a reader
+//           copies the handle once and its buffer cannot be freed underneath
+//           it however many times the producer republishes.
+//
+//   A RACE  one thread copying a Snapshot while another ASSIGNS to that same
+//           Snapshot object. That is a read and a write of one `ptr_`, and no
+//           amount of pointee immutability fixes it. TSan flags it as a
+//           heap-use-after-free, which is exactly what it is.
+//
+// If a slot is written by a producer and read by consumers, it is not a bare
+// Snapshot — it is an AtomicSnapshot (below). The distinction is in the type
+// so "which one do I need" is answered at the declaration rather than
+// discovered under a sanitizer.
 
+#include <atomic>
 #include <cstddef>
 #include <memory>
 #include <utility>
@@ -89,6 +111,10 @@ public:
         return get()[i];
     }
 
+    // The owning pointer, for AtomicSnapshot's store(). Not part of the
+    // reading surface — callers work through the accessors above.
+    [[nodiscard]] std::shared_ptr<const T> share() const noexcept { return ptr_; }
+
 private:
     std::shared_ptr<const T> ptr_;
 };
@@ -101,5 +127,55 @@ template <class T>
 [[nodiscard]] Snapshot<T> make_snapshot(T value) {
     return Snapshot<T>{std::make_shared<const T>(std::move(value))};
 }
+
+// ── AtomicSnapshot<T> ── a Snapshot slot that a producer republishes ──────
+//
+// THE type for "one thread publishes, others read", which is every cache in
+// this codebase that a background job fills: the workspace file list, the
+// symbol index, the git-status map.
+//
+// Writing that as a bare `Snapshot` field plus a mutex is what every one of
+// those sites did by hand, and the hand-rolled versions disagreed about
+// whether the LOAD needed the lock too (it does — copying a handle reads
+// `ptr_`). Getting it wrong is silent: the pointee really is immutable, so
+// the code looks obviously fine and races only on the handle.
+//
+// std::atomic<std::shared_ptr<T>> does the refcount manipulation atomically,
+// so load() hands back a handle that is already safely owned. Lock-free on
+// platforms that support it, a tiny internal lock where they don't — either
+// way the caller cannot get it wrong, because there is no exposed `ptr_` to
+// race on.
+template <class T>
+class AtomicSnapshot {
+public:
+    AtomicSnapshot() = default;
+
+    // Take a private handle. Safe to call concurrently with store(): the
+    // returned Snapshot owns its buffer for as long as the caller holds it.
+    [[nodiscard]] Snapshot<T> load() const noexcept {
+        return Snapshot<T>{cell_.load(std::memory_order_acquire)};
+    }
+
+    // Republish. Readers already holding a handle keep seeing their own
+    // generation; new loads see this one.
+    void store(Snapshot<T> s) noexcept {
+        cell_.store(s.share(), std::memory_order_release);
+    }
+
+    void store(T value) { store(make_snapshot(std::move(value))); }
+
+    // Has anything been published yet? Distinct from an empty payload — the
+    // "indexing…" vs "workspace empty" distinction the pickers render.
+    [[nodiscard]] bool has_value() const noexcept {
+        return static_cast<bool>(cell_.load(std::memory_order_acquire));
+    }
+
+    void reset() noexcept {
+        cell_.store(std::shared_ptr<const T>{}, std::memory_order_release);
+    }
+
+private:
+    std::atomic<std::shared_ptr<const T>> cell_;
+};
 
 } // namespace agentty::util

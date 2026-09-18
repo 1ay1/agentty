@@ -138,7 +138,7 @@ jobs:
   # readable traces; the constexpr catalog proofs auto-skip under
   # AGENTTY_SANITIZER_BUILD (they already ran green in the build-test job).
   sanitizers:
-    name: sanitizers (asan+ubsan)
+    name: sanitizers (asan+ubsan, tsan)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -189,6 +189,35 @@ jobs:
           ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: ctest --test-dir build-san -L sanitizer --output-on-failure -j"$(nproc)"
+
+      # ── ThreadSanitizer ────────────────────────────────────────────────
+      # A SEPARATE tree because TSan cannot be combined with ASan in one
+      # binary. Scoped to the `race`-labelled tests, which are written to
+      # drive the shared seams from many threads at once so TSan has
+      # interleavings to find.
+      #
+      # This lane exists because asan+ubsan above cannot see a data race, and
+      # every concurrency bug this project has shipped was a race or a
+      # lifetime error between threads: a shared_ptr cycle that made a worker
+      # destroy its own queue and join itself, a worker left joinable in a
+      # function-local static (terminate at exit), and N threads racing to
+      # publish into one map. All three passed the ASan lane.
+      - name: Configure TSan tree
+        run: |
+          cmake -S . -B build-tsan -GNinja -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DAGENTTY_AUTO_PULL_MAYA=OFF \
+            -DAGENTTY_USE_MIMALLOC=OFF \
+            -DMAYA_NATIVE_TUNING=OFF \
+            -DAGENTTY_BUILD_TESTS=ON \
+            -DAGENTTY_SANITIZE_ALL=thread
+      - name: Build race test set
+        run: cmake --build build-tsan -j"$(nproc)" --target race_harness_test
+      - name: Run under TSan
+        env:
+          TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
+        run: ctest --test-dir build-tsan -L race --output-on-failure -j"$(nproc)"
 
   # Compile-only Windows gate. Mirrors release.yml's build-windows configure
   # (vcpkg static openssl+nghttp2, MSVC, Release) but stops at the build:

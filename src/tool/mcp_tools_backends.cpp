@@ -42,7 +42,6 @@
 #include "agentty/mcp/client.hpp"   // mcp_resources / mcp_read_resource seams
 #include "agentty/util/dbglog.hpp"
 #include "agentty/util/logx.hpp"
-#include "agentty/util/isolated_thread.hpp"
 
 #include <mcp/tools/host.hpp>
 

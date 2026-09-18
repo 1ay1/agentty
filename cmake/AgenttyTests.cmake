@@ -206,6 +206,23 @@ target_include_directories(concurrency_primitives_test PRIVATE include)
 add_test(NAME concurrency_primitives_test COMMAND concurrency_primitives_test)
 set_tests_properties(concurrency_primitives_test PROPERTIES TIMEOUT 30 LABELS sanitizer)
 
+# race_harness: the THREAD-sanitizer lane. Registered raw + narrow-source for
+# the same reason as its neighbours (no maya renderer to ODR-clash), and
+# labelled BOTH `sanitizer` and `race` so CI can run it under TSan separately
+# — ASan and TSan cannot be combined in one binary.
+#
+# Why it exists: every concurrency bug this codebase shipped was invisible to
+# asan+ubsan (a shared_ptr cycle that made a worker join itself, a worker left
+# joinable in a static, N threads racing to publish one map). Races need a
+# race detector.
+agentty_test(race_harness_test MODE raw LABELS sanitizer)
+add_executable(race_harness_test EXCLUDE_FROM_ALL
+    tests/race_harness_test.cpp src/util/teardown.cpp
+    src/util/logx.cpp src/util/dbglog.cpp)
+target_include_directories(race_harness_test PRIVATE include)
+add_test(NAME race_harness_test COMMAND race_harness_test)
+set_tests_properties(race_harness_test PROPERTIES TIMEOUT 120 LABELS "sanitizer;race")
+
 agentty_test(cred_crypt_test MODE raw LABELS sanitizer)
 add_executable(cred_crypt_test EXCLUDE_FROM_ALL
     tests/cred_crypt_test.cpp src/io/cred_crypt.cpp src/util/base64.cpp)

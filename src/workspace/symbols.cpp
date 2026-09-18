@@ -147,10 +147,10 @@ bool scan_file(const fs::path& root, const fs::path& file,
 //   3. Yield between files, so even at equal priority the workers are
 //      interruptible rather than monopolising a core for their quantum.
 namespace {
-std::mutex& sym_mu() { static std::mutex m; return m; }
-std::shared_ptr<const std::vector<SymbolEntry>>& sym_cache() {
-    static std::shared_ptr<const std::vector<SymbolEntry>> c; return c;
-}
+// The published symbol index. AtomicSnapshot for the same reason as the file
+// list in files.cpp: a `mutex + shared_ptr` pair needs the lock on the LOAD
+// too (copying the handle races the store), which is the half everyone drops.
+util::AtomicSnapshot<std::vector<SymbolEntry>> g_symbols;
 // Single-flight latch for the symbol scan lives beside
 // prewarm_workspace_symbols below, next to the only code that reads it.
 
@@ -265,10 +265,7 @@ void prewarm_workspace_symbols(std::size_t cap) {
     // and hand-rolled std::threads), and the duplication is what let the git
     // refresh ship with a bare detached thread and no single-flight at all.
     // There is one mechanism now, and it is maya's.
-    {
-        std::lock_guard<std::mutex> lk(sym_mu());
-        if (sym_cache()) return;
-    }
+    if (g_symbols.has_value()) return;
     bool expected = false;
     if (!sym_building().compare_exchange_strong(expected, true)) return;
 
@@ -276,11 +273,7 @@ void prewarm_workspace_symbols(std::size_t cap) {
     // thousands of stat() calls; it gets the same treatment so the whole
     // prewarm — walk and scan — stays out of the foreground's way.
     deprioritize_prewarm_thread();
-    auto built = std::make_shared<const std::vector<SymbolEntry>>(build_symbol_list(cap));
-    {
-        std::lock_guard<std::mutex> lk(sym_mu());
-        sym_cache() = std::move(built);
-    }
+    g_symbols.store(build_symbol_list(cap));
     sym_building() = false;
 }
 
@@ -292,8 +285,7 @@ void join_workspace_symbols_prewarm() {
 }
 
 bool symbols_ready() {
-    std::lock_guard<std::mutex> lk(sym_mu());
-    return static_cast<bool>(sym_cache());
+    return g_symbols.has_value();
 }
 
 // Returns a Snapshot, not a const-ref.
@@ -310,16 +302,13 @@ bool symbols_ready() {
 // tell that the tradeoff was never supposed to be theirs to make: a shared
 // immutable snapshot is both safe AND O(1), and now both use it.
 util::Snapshot<std::vector<SymbolEntry>> list_workspace_symbols(std::size_t cap) {
-    {
-        std::lock_guard<std::mutex> lk(sym_mu());
-        if (auto c = sym_cache())
-            return util::Snapshot<std::vector<SymbolEntry>>{c};
-    }
-    // Cold synchronous caller: build inline + publish.
-    auto built = std::make_shared<const std::vector<SymbolEntry>>(build_symbol_list(cap));
-    std::lock_guard<std::mutex> lk(sym_mu());
-    if (!sym_cache()) sym_cache() = built;
-    return util::Snapshot<std::vector<SymbolEntry>>{sym_cache()};
+    if (auto warm = g_symbols.load(); warm.has_value()) return warm;
+    // Cold synchronous caller: build inline + publish. Two cold callers may
+    // both scan rather than one waiting on the other's multi-second walk —
+    // see list_workspace_files for the same trade.
+    auto built = util::make_snapshot(build_symbol_list(cap));
+    g_symbols.store(built);
+    return built;
 }
 
 std::vector<std::size_t>

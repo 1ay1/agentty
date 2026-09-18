@@ -37,7 +37,6 @@
 #include "agentty/runtime/panel/mention.hpp"
 #include "agentty/runtime/panel/symbol.hpp"
 #include "agentty/workspace/files.hpp"
-#include "agentty/util/isolated_thread.hpp"
 #include "agentty/workspace/symbols.hpp"
 #include "agentty/runtime/view/helpers.hpp"
 
