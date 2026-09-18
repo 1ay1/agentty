@@ -402,3 +402,9 @@ Pre-1.0. Core loop, tools, streaming, permission profiles, in-app auth, persiste
 - C++26 (GCC 14+ / Clang 18+); MSVC builds against `/std:c++latest`.
 - AppleClang tops out at C++23 — `AGENTTY_BUILD_TESTS` requires `g++` or stock LLVM `clang++` on macOS, not Xcode's bundled toolchain.
 - `cmake -B build && cmake --build build`. `AGENTTY_STANDALONE=ON` produces a static binary (libc and usually OpenSSL stay dynamic).
+
+## Unreleased — Optional Sites skill
+
+Optional Sites screen after first-run inference setup. Enable installs a
+bundled skill for temporary app hosting via Cohesivity; Skip leaves it absent.
+Returning users and existing skill installations skip the screen automatically.

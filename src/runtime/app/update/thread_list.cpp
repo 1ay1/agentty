@@ -364,6 +364,13 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
         [&](ThreadsLoaded& e) -> Step {
             m.d.threads = std::move(e.threads);
             m.s.threads_loading = false;
+            if (m.s.sites_setup_pending) {
+                if (!m.d.threads.empty() || !m.d.current.messages.empty()
+                    || tools::skills::find("sites"))
+                    m.s.sites_setup_pending = false;
+                else
+                    open_sites_setup_if_pending(m);
+            }
             // If the thread picker is open, its cursor may now point past the
             // end of the freshly-loaded (possibly shorter) list. Re-clamp so
             // the view and every ThreadList* handler index safely.

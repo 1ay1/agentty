@@ -22,6 +22,12 @@ include(AgenttySubmodules)
 
 # Per-domain source group lists (AGENTTY_*_SOURCES). See cmake/AgenttySources.cmake.
 include(AgenttySources)
+
+# Carry the optional skill with every binary; installation still requires opt-in.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/sites/SKILL.md")
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/sites/SKILL.md" AGENTTY_SITES_SKILL)
+configure_file(cmake/sites_skill.hpp.in generated/sites_skill.hpp @ONLY)
 include(CheckCXXSourceCompiles)
 
 # ── Shared compile flags ────────────────────────────────────────────────
@@ -340,6 +346,7 @@ agentty_objlib(agentty_provider_obj  ${AGENTTY_PROVIDER_SOURCES})
 agentty_objlib(agentty_diff_obj      ${AGENTTY_DIFF_SOURCES})
 agentty_objlib(agentty_rag_obj       ${AGENTTY_RAG_SOURCES})
 agentty_objlib(agentty_tool_obj      ${AGENTTY_TOOL_SOURCES})
+target_include_directories(agentty_tool_obj PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
 agentty_objlib(agentty_runtime_obj   ${AGENTTY_RUNTIME_NOMAIN_SOURCES})
 # ACP glue is only needed by the exe + acp_integration_test. It also
 # needs the acp::acp include dir (acp/acp.hpp) on top of the standard set.

@@ -710,6 +710,7 @@ std::optional<Msg> on_login(const ui::login::State& state, const KeyEvent& ev) {
         return LoginBack{};
 
     if (std::holds_alternative<Picking>(state)
+        || std::holds_alternative<SitesSetup>(state)
         || std::holds_alternative<Failed>(state)) {
         if (auto* ck = std::get_if<CharKey>(&ev.key))
             return LoginPickMethod{ck->codepoint};

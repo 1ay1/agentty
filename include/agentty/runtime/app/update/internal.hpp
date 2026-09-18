@@ -24,6 +24,14 @@ inline Step done(Model m) { return {std::move(m), maya::Cmd<Msg>::none()}; }
 
 namespace detail {
 
+inline void open_sites_setup_if_pending(Model& m) {
+    if (!m.s.sites_setup_pending || m.s.threads_loading
+        || !std::holds_alternative<ui::login::Closed>(m.ui.login)
+        || m.ui.panel.get<ui::panel::Models>()) return;
+    m.s.sites_setup_pending = false;
+    m.ui.login = ui::login::SitesSetup{};
+}
+
 // Hard cap on per-message live buffers. A misbehaving server (or adversarial
 // proxy) emitting unbounded `text_delta`/`input_json_delta` would otherwise
 // grow `streaming_text` / `args_streaming` until the process OOMs. 8 MiB is

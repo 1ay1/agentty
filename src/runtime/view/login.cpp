@@ -181,6 +181,27 @@ Element panel_picking(std::string_view provider,
     return v(std::move(rows)).build();
 }
 
+Element panel_sites_setup(const login::SitesSetup& s) {
+    std::vector<Element> rows;
+    rows.push_back(text("Sites", fg_bold(fg)));
+    rows.push_back(body_text(
+        "Let your agent publish temporary apps with hosting, databases and file storage.",
+        fg_dim(muted)));
+    rows.push_back(text(""));
+    if (!s.error.empty()) {
+        rows.push_back(body_text(std::string{"\xE2\x9A\xA0 "} + s.error,
+                                 fg_of(danger)));
+        rows.push_back(text(""));
+    }
+    rows.push_back(h(text("1) ", fg_bold(highlight)),
+                     text("Enable Sites", fg_bold(fg))).build());
+    rows.push_back(h(text("2) ", fg_bold(highlight)),
+                     text("Skip", fg_bold(fg))).build());
+    rows.push_back(text(""));
+    rows.push_back(key_hints({{"1/2", "choose"}, {"Esc", "skip"}}));
+    return v(std::move(rows)).build();
+}
+
 // One-item Panel for a single-field input state. The field is a REAL
 // panel item — Secret (count-only masking, the type-level can't-leak
 // guarantee) or Text (caret windowing, so a long paste scrolls under the
@@ -499,6 +520,8 @@ Element login_modal(const Model& m) {
             return nothing();
         } else if constexpr (std::same_as<T, login::Picking>) {
             return panel_picking(s.provider, false, "");
+        } else if constexpr (std::same_as<T, login::SitesSetup>) {
+            return panel_sites_setup(s);
         } else if constexpr (std::same_as<T, login::OAuthCode>) {
             return panel_oauth_code(s);
         } else if constexpr (std::same_as<T, login::OAuthExchanging>) {
@@ -538,12 +561,13 @@ Element login_modal(const Model& m) {
     // TextWrap::Wrap, so URLs and prose reflow naturally to whatever
     // width the terminal gives us. Capping at 96 cols left ~50 cols of
     // empty terminal on a typical 150-col window.
+    const bool sites_setup = std::holds_alternative<login::SitesSetup>(m.ui.login);
     return vstack()
         .padding(1, 2)
         .min_width(Dimension::fixed(48))
         .border(BorderStyle::Round)
         .border_color(accent)
-        .border_text(" Sign in to agentty ",
+        .border_text(sites_setup ? " Finish setup " : " Sign in to agentty ",
                      BorderTextPos::Top, BorderTextAlign::Center)
         (std::move(body));
 }

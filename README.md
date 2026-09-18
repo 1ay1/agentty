@@ -416,6 +416,8 @@ your platform can't run offers edit/copy instead, and capture is capped at
 
 Drop a `SKILL.md` anywhere under `.agentty/skills/` or `~/.agentty/skills/` — it's live next turn. Compatible with Claude Code's `.claude/skills/` format.
 
+After first-run inference setup, a separate optional **Sites** screen can enable temporary app hosting, databases, and file storage through Cohesivity. [Sites setup](docs/website/skills.md#sites).
+
 The tier-1 catalog (name + description of every discovered skill) is capped at 64 entries. Set `AGENTTY_MAX_SKILLS` to override it (clamped to 8–4096) — lower it for small-context models, raise it for large skill libraries.
 
 On codebases with internal DSLs or tribal conventions, agent accuracy jumps from ~20% to ~85% with curated skills ([research](https://arxiv.org/abs/2410.03981)).

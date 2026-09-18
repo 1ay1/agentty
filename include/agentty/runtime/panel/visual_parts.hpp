@@ -370,6 +370,11 @@ static_assert(visual::parts_cover_all<Entry>);
 // ── login: its own variant outside the slot ───────────────────────
 namespace agentty::ui::login {
 
+inline auto visual_parts(const SitesSetup& s) {
+    return std::make_tuple(visual::ref(s.error));
+}
+static_assert(visual::parts_cover_all<SitesSetup>);
+
 // The API key IN FLIGHT is a secret: length + cursor only, same rule as
 // field::Secret. (The OAuth callback code is a short-lived one-time token
 // the user just copied from their own browser — still digested

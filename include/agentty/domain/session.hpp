@@ -662,6 +662,9 @@ struct StreamState {
     // to render a "loading…" placeholder instead of an empty list.
     // Cleared by the `ThreadsLoaded` handler.
     bool threads_loading = false;
+    // Set only for a fresh profile that entered the general sign-in flow.
+    // Cleared when the final optional Sites setup screen is shown.
+    bool sites_setup_pending = false;
     // True while a background single-thread JSON load is in flight
     // (kicked off by `ThreadListSelect`). The status bar shows a
     // "loading thread…" chip; the previous thread stays visible

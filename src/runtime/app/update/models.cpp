@@ -594,6 +594,7 @@ Step models_update(Model m, msg::ModelsMsg pm) {
             // to reset. Revalidation (the form may be stale) is ascend()'s
             // job, one place for every SmartMode restore.
             ascend(m);
+            open_sites_setup_if_pending(m);
             return done(std::move(m));
         },
         [&](ModelsMove e) -> Step {
@@ -1013,7 +1014,9 @@ Step models_update(Model m, msg::ModelsMsg pm) {
             // pick that popped you back into the palette would feel like
             // the selection hadn't taken.)
             m.ui.panel.close<pn::Models>();
-            return switch_to_model_ref(std::move(m), row.ref());
+            auto selected = switch_to_model_ref(std::move(m), row.ref());
+            open_sites_setup_if_pending(selected.first);
+            return selected;
         },
         [&](ModelsLoaded& e) -> Step {
             // STALENESS GATE: only accept a payload fetched FOR the provider

@@ -129,6 +129,10 @@ struct Skill {
 // `skill` tool returns.
 [[nodiscard]] std::string activation_payload(const Skill& s);
 
+// Explicit first-run opt-in. Empty result means installed/already present;
+// otherwise returns a user-facing error. Never overwrites a discovered skill.
+[[nodiscard]] std::string install_sites();
+
 // ── Activation tracking (spec: deduplicate activations) ──────────────
 // Once a skill body is in the conversation, re-injecting it doubles the
 // token cost for zero signal. `note_activated` returns true the FIRST

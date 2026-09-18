@@ -1,0 +1,5 @@
+#pragma once
+#include <string_view>
+namespace agentty::tools::skills {
+inline constexpr std::string_view sites_skill_text = R"SITES_SKILL(@AGENTTY_SITES_SKILL@)SITES_SKILL";
+}

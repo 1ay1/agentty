@@ -23,6 +23,7 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <variant>
 #include <vector>
@@ -68,6 +69,12 @@ using Origin = std::variant<origin::Nowhere, origin::Providers,
 struct Picking {
     std::string provider;
     Origin origin = origin::Nowhere{};
+};
+
+// Final step of first-run setup. It is deliberately separate from provider
+// selection so the optional capability cannot disappear in the auth menu.
+struct SitesSetup {
+    std::string error;
 };
 
 struct OAuthCode {
@@ -180,7 +187,7 @@ struct AccountList {
     std::string             confirm_remove; // label awaiting a second Del/d press
 };
 
-using State = std::variant<Closed, Picking, OAuthCode, OAuthExchanging,
+using State = std::variant<Closed, Picking, SitesSetup, OAuthCode, OAuthExchanging,
                            ChatGptWaiting, DeviceWaiting, ApiKeyInput, CustomHostInput,
                            HostProbing, AccountList, Failed>;
 

@@ -237,6 +237,7 @@ std::pair<Model, maya::Cmd<Msg>> init() {
     // interaction is "oh, it found my key → Enter", not an Anthropic
     // sign-in they never wanted. Plain first-runs (no creds anywhere)
     // keep the classic Anthropic modal — the majority path is unchanged.
+    m.s.sites_setup_pending = true;
     if (auth::is_empty(deps().auth)
         && provider::active().kind == provider::Kind::Anthropic) {
         bool cred_elsewhere = false;
@@ -253,8 +254,9 @@ std::pair<Model, maya::Cmd<Msg>> init() {
         if (cred_elsewhere)
             cmds.push_back(maya::Cmd<Msg>::after(
                 std::chrono::milliseconds{0}, Msg{OpenProviders{}}));
-        else
+        else {
             m.ui.login = ui::login::Picking{};
+        }
     }
 
     // Codex (ChatGPT) is a first-class provider too: if it's the active
@@ -264,8 +266,10 @@ std::pair<Model, maya::Cmd<Msg>> init() {
     {
         const auto& sel = provider::active();
         const bool codex_active = sel.is_chatgpt();
-        if (codex_active && !provider::chatgpt::responses_available())
+        if (codex_active && !provider::chatgpt::responses_available()) {
             m.ui.login = ui::login::Picking{};
+            m.s.sites_setup_pending = true;
+        }
         // Same courtesy for GitHub Copilot: launched with --provider copilot
         // but no GitHub credential yet → open the sign-in modal instead of
         // failing on the first send.

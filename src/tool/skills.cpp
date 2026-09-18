@@ -2,6 +2,7 @@
 // progressive-disclosure rationale and the discovery-root table.
 
 #include "agentty/util/user_root.hpp"
+#include "sites_skill.hpp"
 #include "agentty/tool/skills.hpp"
 #include "agentty/util/home_dir.hpp"
 
@@ -516,6 +517,25 @@ const Skill* find(std::string_view name) {
     for (const auto& s : all())
         if (s.name == name) return &s;
     return nullptr;
+}
+
+std::string install_sites() {
+    if (find("sites")) return {};
+    const auto directory = ::agentty::util::user_root() / "skills" / "sites";
+    std::error_code ec;
+    fs::create_directories(directory, ec);
+    if (ec) return "Cannot create the Sites skill directory: " + ec.message();
+    const auto target = directory / "SKILL.md";
+    // Exclusive creation preserves even an unreadable file or dangling symlink.
+    std::ofstream out(target, std::ios::out | std::ios::binary | std::ios::noreplace);
+    if (!out) return "Cannot write the Sites skill; check the skills folder permissions or existing file.";
+    out << sites_skill_text;
+    out.close();
+    if (!out) {
+        fs::remove(target, ec);
+        return "Cannot finish writing the Sites skill.";
+    }
+    return {};
 }
 
 std::string catalog_block() {

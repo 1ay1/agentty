@@ -32,6 +32,7 @@
 #include "agentty/runtime/app/deps.hpp"
 #include "agentty/runtime/view/helpers.hpp"
 #include "agentty/tool/subagent.hpp"
+#include "agentty/tool/skills.hpp"
 
 namespace agentty::app::detail {
 
@@ -90,6 +91,7 @@ void install_and_close(Model& m, auth::Credentials creds,
     }
 
     m.ui.login = login::Closed{};
+    open_sites_setup_if_pending(m);
     m.s.status = "logged in";
     m.s.status_until = std::chrono::steady_clock::now()
                      + std::chrono::seconds{4};
@@ -694,6 +696,16 @@ Step account_remove(Model m) {
 }
 
 Step login_pick_method(Model m, char32_t key) {
+    if (auto* sites = std::get_if<login::SitesSetup>(&m.ui.login)) {
+        if (key == U'2') {
+            m.ui.login = login::Closed{};
+        } else if (key == U'1') {
+            const auto error = tools::skills::install_sites();
+            if (error.empty()) m.ui.login = login::Closed{};
+            else sites->error = error;
+        }
+        return done(std::move(m));
+    }
     const auto* picking = std::get_if<login::Picking>(&m.ui.login);
     if (!picking && !std::holds_alternative<login::Failed>(m.ui.login))
         return done(std::move(m));
