@@ -272,7 +272,14 @@ foreach(_logx_t logx_redaction_test logx_format_test logx_lifecycle_test)
         tests/${_logx_t}.cpp tests/test_main.cpp
         src/util/logx.cpp src/util/dbglog.cpp)
     target_include_directories(${_logx_t} PRIVATE include tests)
-    target_link_libraries(${_logx_t} PRIVATE doctest::doctest maya::maya)
+    # nlohmann for the HEADERS, not for a symbol: these tests include
+    # agtest.hpp, which reaches tool/util/fs_helpers.hpp -> tool/registry.hpp
+    # -> <nlohmann/json.hpp>. A raw target gets no include paths from the
+    # object libraries, so without this the build fails at the SCAN step
+    # (C++20 module dependency scanning), which is why it surfaced in CI as a
+    # fatal "no such file" on a test that links nothing json-related.
+    target_link_libraries(${_logx_t} PRIVATE
+        doctest::doctest maya::maya nlohmann_json::nlohmann_json)
     add_test(NAME ${_logx_t} COMMAND ${_logx_t})
     set_tests_properties(${_logx_t} PROPERTIES TIMEOUT 30
         ENVIRONMENT "AGENTTY_LOG=trace;AGENTTY_LOG_FILE=${CMAKE_CURRENT_BINARY_DIR}/${_logx_t}.log")
@@ -290,7 +297,9 @@ add_executable(logx_rotation_test EXCLUDE_FROM_ALL
     tests/logx_rotation_test.cpp tests/test_main.cpp
     src/util/logx.cpp src/util/dbglog.cpp)
 target_include_directories(logx_rotation_test PRIVATE include tests)
-target_link_libraries(logx_rotation_test PRIVATE doctest::doctest maya::maya)
+# Same transitive nlohmann include as the logx block above (agtest.hpp).
+target_link_libraries(logx_rotation_test PRIVATE
+    doctest::doctest maya::maya nlohmann_json::nlohmann_json)
 add_test(NAME logx_rotation_test COMMAND logx_rotation_test)
 set_tests_properties(logx_rotation_test PROPERTIES TIMEOUT 30
     ENVIRONMENT "AGENTTY_LOG=trace;AGENTTY_LOG_FILE=${CMAKE_CURRENT_BINARY_DIR}/logx_rotation_test.log")
