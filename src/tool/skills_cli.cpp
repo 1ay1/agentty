@@ -582,16 +582,25 @@ int verb_remove(const std::vector<std::string>& argv) {
         std::fprintf(stderr, "usage: agentty skill remove <name>\n");
         return 2;
     }
-    // Same rule as install: a name is one plain component. `remove` was
-    // saved from traversal only by an existence check, which is luck
-    // rather than design — `remove ../../something-that-exists` would have
-    // been a recursive delete outside the skills root.
     if (!safe_skill_name(argv[0])) {
         std::fprintf(stderr, "not a skill name: %s\n",
                      sanitize_author_text(argv[0], 120).c_str());
         return 1;
     }
-    const auto dest = install_dir_for(argv[0]);
+
+    // `list` shows the FRONTMATTER name; the directory may be called
+    // something else. Removing only by directory meant a user could see
+    // "dangerous" in the list and have `remove dangerous` fail — unable to
+    // uninstall the thing in front of them. Try the directory first, then
+    // resolve by declared name.
+    auto dest = install_dir_for(argv[0]);
+    if (!fs::exists(dest)) {
+        if (const auto* s = find(argv[0]);
+            s && !s->dir.empty() && s->source == "user") {
+            dest = s->dir;
+        }
+    }
+
     const auto skills_root = util::user_root() / "skills";
     if (!path_inside(skills_root, dest)) {
         std::fprintf(stderr, "refusing: path escapes %s\n",
@@ -610,6 +619,7 @@ int verb_remove(const std::vector<std::string>& argv) {
         return 1;
     }
     std::printf("removed %s\n", argv[0].c_str());
+    std::printf("  %s\n", dest.string().c_str());
     return 0;
 }
 

@@ -473,15 +473,60 @@ std::size_t debug_cap_resolutions() noexcept {
     return cap_resolutions().load(std::memory_order_relaxed);
 }
 
+// Stat-only pass: the mtime/size fingerprint of one root, WITHOUT reading
+// or parsing anything. Deliberately mirrors scan_root's traversal (same
+// directory order, same SKILL.md locations, same nesting) so the two agree
+// on what "changed" means — if they drift, the cache either never hits or
+// never invalidates, and both are worse than the cost this saves.
+void scan_root_signature(const fs::path& root, std::string& sig) {
+    std::error_code ec;
+    if (!fs::is_directory(root, ec)) return;
+
+    // The root's own mtime catches an added or removed skill directory.
+    if (const auto t = fs::last_write_time(root, ec); !ec)
+        sig += std::to_string(static_cast<long long>(t.time_since_epoch().count()));
+    sig += "|";
+
+    std::vector<fs::path> dirs;
+    for (fs::directory_iterator it(root, ec), end; !ec && it != end; it.increment(ec)) {
+        if (it->is_directory(ec)) dirs.push_back(it->path());
+    }
+    std::ranges::sort(dirs);   // stable order → stable signature
+
+    for (const auto& d : dirs) {
+        // A skill is <dir>/SKILL.md, or one level of group nesting.
+        const auto md = d / "SKILL.md";
+        if (fs::is_regular_file(md, ec)) {
+            sig += d.filename().string();
+            if (const auto t = fs::last_write_time(md, ec); !ec)
+                sig += std::to_string(static_cast<long long>(t.time_since_epoch().count()));
+            if (const auto z = fs::file_size(md, ec); !ec)
+                sig += ":" + std::to_string(z);
+            sig += ";";
+            continue;
+        }
+        std::vector<fs::path> subs;
+        for (fs::directory_iterator it(d, ec), end; !ec && it != end; it.increment(ec)) {
+            if (it->is_directory(ec)) subs.push_back(it->path());
+        }
+        std::ranges::sort(subs);
+        for (const auto& s : subs) {
+            const auto smd = s / "SKILL.md";
+            if (!fs::is_regular_file(smd, ec)) continue;
+            sig += s.filename().string();
+            if (const auto t = fs::last_write_time(smd, ec); !ec)
+                sig += std::to_string(static_cast<long long>(t.time_since_epoch().count()));
+            if (const auto z = fs::file_size(smd, ec); !ec)
+                sig += ":" + std::to_string(z);
+            sig += ";";
+        }
+    }
+}
+
 const std::vector<Skill>& all() {
     static std::mutex mu;
     static std::string cached_sig = "\x01uninit";
     std::lock_guard lk(mu);
-
-    // Build the current signature from every root's + SKILL.md's mtime;
-    // rescan only when it changed (cheap stat vs full parse per turn).
-    std::string sig;
-    std::vector<Skill> fresh;
 
     // Resolve the cap ONCE for this pass — every root's scan bound and
     // every catalog slice below share this value, so the environment
@@ -502,15 +547,39 @@ const std::vector<Skill>& all() {
     env.project_root     = fs::path{"."};
     env.project_writable = true;   // discovery reads all dialects; unused here
     const scope::Layout layout{.leaf = "skills"};
-    for (const scope::Source& src : scope::plan(layout, env)) {
+    const auto sources = scope::plan(layout, env);
+
+    // PASS 1 — signature only. stat() per SKILL.md, no file read, no parse.
+    //
+    // This split is the point. It used to be ONE pass: scan_root parsed
+    // every SKILL.md to build `fresh`, compared signatures, and threw the
+    // parse away on a hit. catalog_block() calls all() on EVERY turn, so
+    // that was a full re-parse of the whole skill library per request —
+    // measured at ~3 ms with 40 skills of 4 KB, sitting on the path
+    // between the user pressing enter and the request going out.
+    std::string sig;
+    for (const scope::Source& src : sources)
+        scan_root_signature(src.base / layout.leaf, sig);
+
+    // The cap is an INPUT to the result, not just to the traversal: it
+    // decides how many skills survive, and AGENTTY_MAX_SKILLS can change
+    // between calls in the same process. Keying on files alone meant a cap
+    // change returned the previous list — caught by skills_engine_test,
+    // which flips the env var and re-reads all().
+    sig += "#cap=" + std::to_string(cap);
+
+    if (sig == cached_sig) return cache();
+
+    // PASS 2 — something changed on disk; do the expensive read+parse.
+    std::vector<Skill> fresh;
+    std::string parse_sig;
+    for (const scope::Source& src : sources) {
         scan_root(src.base / layout.leaf, std::string{scope::to_string(src.locus)},
-                  cap, fresh, sig);
+                  cap, fresh, parse_sig);
     }
 
-    if (sig != cached_sig) {
-        cache() = std::move(fresh);
-        cached_sig = sig;
-    }
+    cache() = std::move(fresh);
+    cached_sig = sig;
     return cache();
 }
 
@@ -521,7 +590,51 @@ const Skill* find(std::string_view name) {
 }
 
 std::string catalog_block() {
+    // CACHED. This runs on EVERY turn (provider::system_prompt_for →
+    // default_system_prompt), and resolving trust made it expensive: a
+    // JSON read of the approvals store plus a SHA-256 over every skill
+    // body. Measured at 3.4 ms/turn with 40 skills of 4 KB — paid on the
+    // request path to recompute a string that changes only when a skill
+    // file or an approval does.
+    //
+    // The key is (skills-cache generation, approvals file mtime+size).
+    // all() already rescans on its own mtime signature, so a skill edit
+    // lands next turn exactly as before; an approve lands when the file
+    // it wrote changes.
+    static std::mutex mu;
+    static std::string cached;
+    static std::uintmax_t cached_key = 0;
+    static const void*    cached_data = nullptr;
+
     const auto& skills = all();
+
+    // Approvals file identity — cheap stat, no parse.
+    std::uintmax_t akey = 0;
+    {
+        std::error_code ec;
+        const auto p = agentty::util::user_root() / std::string{kApprovalsLeaf};
+        const auto sz = fs::file_size(p, ec);
+        if (!ec) {
+            akey = sz;
+            const auto t = fs::last_write_time(p, ec);
+            if (!ec)
+                akey ^= static_cast<std::uintmax_t>(
+                    t.time_since_epoch().count()) * 1099511628211ull;
+        }
+    }
+    // all() returns a reference to its own cached vector and rebuilds it
+    // in place on rescan; pairing the data pointer with the size catches
+    // both "vector reallocated" and "count changed".
+    const std::uintmax_t key =
+        akey ^ (static_cast<std::uintmax_t>(skills.size()) << 32);
+
+    {
+        std::lock_guard lk(mu);
+        if (cached_data == static_cast<const void*>(skills.data())
+            && cached_key == key)
+            return cached;
+    }
+
     // Hidden beats listed-but-blocked: user_only skills never appear, so
     // the model can't waste a turn trying to activate one. An UNAPPROVED
     // effectful skill is hidden for the same reason — listing something
@@ -536,7 +649,13 @@ std::string catalog_block() {
 
     std::size_t eligible = 0;
     for (const auto& s : skills) if (eligible_for_model(s)) ++eligible;
-    if (eligible == 0) return {};
+    if (eligible == 0) {
+        std::lock_guard lk(mu);
+        cached.clear();
+        cached_key = key;
+        cached_data = static_cast<const void*>(skills.data());
+        return {};
+    }
 
     std::ostringstream m;
     m << "\n\n<skills>\n"
@@ -563,7 +682,14 @@ std::string catalog_block() {
         m << "\n";
     }
     m << "</skills>";
-    return m.str();
+    auto built = m.str();
+    {
+        std::lock_guard lk(mu);
+        cached = built;
+        cached_key = key;
+        cached_data = static_cast<const void*>(skills.data());
+    }
+    return built;
 }
 
 std::string activation_payload(const Skill& s) {

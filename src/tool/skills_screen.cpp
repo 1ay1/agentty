@@ -115,13 +115,37 @@ std::string sanitize_author_text(std::string_view raw, std::size_t max_len) {
             ++i;
             continue;
         }
-        last_was_space = (c == ' ');
-        out += static_cast<char>(c);
-        ++i;
+
+        // Copy a WHOLE UTF-8 sequence or none of it. The byte-at-a-time
+        // version split multibyte characters at the cap — a description of
+        // emoji or CJK truncated to invalid bytes, which then went into
+        // the model's system prompt and the TUI. Verified: a run of U+1F680
+        // capped at 10 produced a dangling lead byte.
+        std::size_t len = 1;
+        if      ((c & 0xE0) == 0xC0) len = 2;
+        else if ((c & 0xF0) == 0xE0) len = 3;
+        else if ((c & 0xF8) == 0xF0) len = 4;
+        else if (c >= 0x80)          { ++i; continue; }  // stray continuation
+
+        if (i + len > raw.size()) break;                 // truncated input
+        // Continuation bytes must actually be continuations; if not, the
+        // input is malformed and the byte is dropped rather than copied.
+        bool well_formed = true;
+        for (std::size_t k = 1; k < len; ++k)
+            if ((static_cast<unsigned char>(raw[i + k]) & 0xC0) != 0x80)
+                well_formed = false;
+        if (!well_formed) { ++i; continue; }
+
+        // Stop BEFORE the cap rather than straddling it.
+        if (out.size() + len > max_len) break;
+
+        last_was_space = (len == 1 && c == ' ');
+        out.append(raw, i, len);
+        i += len;
     }
 
     while (!out.empty() && out.back() == ' ') out.pop_back();
-    if (i < raw.size()) out += "…";     // truncated — say so
+    if (i < raw.size()) out += "\xE2\x80\xA6";     // … truncated, and says so
     return out;
 }
 

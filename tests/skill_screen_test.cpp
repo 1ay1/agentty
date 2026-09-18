@@ -250,3 +250,60 @@ TEST_CASE("containment check is independent of the name rule") {
     CHECK(!path_inside(root, fs::temp_directory_path()));
     CHECK(!path_inside(root, fs::path("/etc/passwd")));
 }
+
+// ── Truncation must not split a UTF-8 sequence ──────────────────────────────
+//
+// The sanitiser copied bytes one at a time and stopped at a byte count, so a
+// description of emoji or CJK truncated mid-character. That output goes into
+// the model's system prompt and the TUI — agentty scrubs UTF-8 strictly
+// elsewhere precisely because invalid sequences break both. Verified broken
+// before the fix: 50×U+1F680 capped at 10 left a dangling lead byte.
+
+namespace {
+bool valid_utf8(std::string_view s) {
+    std::size_t i = 0;
+    while (i < s.size()) {
+        const auto c = static_cast<unsigned char>(s[i]);
+        std::size_t n = c < 0x80        ? 1
+                      : (c & 0xE0) == 0xC0 ? 2
+                      : (c & 0xF0) == 0xE0 ? 3
+                      : (c & 0xF8) == 0xF0 ? 4
+                                           : 0;
+        if (n == 0 || i + n > s.size()) return false;
+        for (std::size_t k = 1; k < n; ++k)
+            if ((static_cast<unsigned char>(s[i + k]) & 0xC0) != 0x80) return false;
+        i += n;
+    }
+    return true;
+}
+} // namespace
+
+TEST_CASE("truncation never splits a multibyte character") {
+    // 4-byte (emoji), 3-byte (CJK), 2-byte (latin-1 supplement) — caps swept
+    // across every offset where a naive byte cut would land mid-sequence.
+    const std::string emoji = [] { std::string s; for (int i = 0; i < 50; ++i) s += "\xF0\x9F\x9A\x80"; return s; }();
+    const std::string cjk   = [] { std::string s; for (int i = 0; i < 50; ++i) s += "\xE6\x97\xA5"; return s; }();
+    const std::string acc   = [] { std::string s; for (int i = 0; i < 50; ++i) s += "\xC3\xA9"; return s; }();
+
+    for (std::size_t cap = 1; cap <= 40; ++cap) {
+        CHECK(valid_utf8(sanitize_author_text(emoji, cap)));
+        CHECK(valid_utf8(sanitize_author_text(cjk, cap)));
+        CHECK(valid_utf8(sanitize_author_text(acc, cap)));
+    }
+}
+
+TEST_CASE("malformed input does not produce malformed output") {
+    // A truncated sequence, a stray continuation byte, and an over-long
+    // lead byte must all come out clean rather than propagating.
+    CHECK(valid_utf8(sanitize_author_text("ok\xF0\x9F\x9A")));      // cut short
+    CHECK(valid_utf8(sanitize_author_text("ok\x80\x80 more")));     // stray cont.
+    CHECK(valid_utf8(sanitize_author_text("ok\xFF\xFE more")));     // invalid lead
+}
+
+TEST_CASE("multibyte text survives when it fits") {
+    // The guard must not eat legitimate non-ascii — plenty of skills are
+    // written in languages that need it.
+    const std::string jp = "\xE6\x97\xA5\xE6\x9C\xAC\xE8\xAA\x9E";   // 日本語
+    CHECK(sanitize_author_text(jp, 64) == jp);
+    CHECK(valid_utf8(sanitize_author_text(jp, 64)));
+}
