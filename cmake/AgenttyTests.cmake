@@ -181,6 +181,7 @@ set_property(DIRECTORY APPEND PROPERTY AGENTTY_FOLD_NAMES anthropic_md_stream)
 # it is registered in agentty_standalone_tests.def alongside its siblings. It
 # only runs instrumented in the TSan tree, where everything is rebuilt anyway.
 agentty_fold_test(persistence_race_test TIMEOUT 180 LABELS race)
+agentty_fold_test(theme_preview_cost_probe TIMEOUT 120 NO_TEST)
 
 agentty_finalize_fold(
     OBJS $<TARGET_OBJECTS:agentty_acp_obj>

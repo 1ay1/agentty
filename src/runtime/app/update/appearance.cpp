@@ -89,6 +89,37 @@ void reproject(Model& m) {
 // already recorded. A STRUCTURAL pref (compact turns, density) must not do
 // this — it would re-seal at a new height and tear the ledger, which is why
 // those settings are documented as forward-only.
+}  // namespace
+
+// Re-style everything already built under a NEW theme.
+//
+// Declared in internal.hpp: external linkage so its cost is measurable
+// (theme_preview_cost_probe), because this runs on EVERY arrow key in the
+// theme browser — "moving applies it, you are looking at the preview" is that
+// panel's whole design.
+//
+// ── Why there is only one of these ───────────────────────────────────────
+//
+// A cheaper "preview" variant that skipped rehydrate_frozen() is tempting and
+// WRONG: the frozen ledger is PAINTED every frame (conversation.cpp hands it
+// to maya as cfg.ledger), so its Elements are on screen. Skipping it previews
+// the new scheme on the newest turns and leaves everything above in the old
+// one — worse than not previewing at all.
+//
+// It is also unnecessary. The ledger is bounded to ~3 viewports by
+// frozen_row_budget(), so this is O(visible rows), NOT O(transcript):
+// measured at 0.64 ms on a 3000-message thread, 2% of the 33 ms budget at 30
+// keys/sec, and FLAT as the thread grows.
+//
+// What actually made the browser lag was never this function's cost — it was
+// calling persist() alongside it on every keystroke (a settings write per
+// arrow) and re-sealing turns whose HEIGHT could change. Height stability is
+// the load-bearing part: a re-seal at a new height shifts maya's committed
+// scrollback prefix, check_scrollback fails, the frame demotes to Stale, and
+// recovery is a full-viewport repaint (~33 KB instead of 13 bytes). At 30
+// keys/sec that is ~1 MB/s the terminal cannot composite — the highlight
+// appears frozen until you stop, which only happens on a thread long enough
+// to have a frozen prefix at all.
 void restyle_sealed_turns(Model& m) {
     // Publish FIRST. The reducer runs before view(), which is where the
     // theme is normally resolved and published — so rebuilding here without
@@ -143,6 +174,8 @@ void restyle_sealed_turns(Model& m) {
     if (m.ui.frozen_through == 0) return;
     rehydrate_frozen(m);
 }
+
+namespace {
 
 // Apply a row's current form value back onto the prefs.
 //
@@ -231,6 +264,11 @@ void move_highlight(Model& m, int delta) {
     if (next == m.d.ui.theme) { reproject(m); return; }
 
     m.d.ui.theme = std::move(next);
+    // Re-style everything on screen, including the frozen prefix — it is
+    // painted every frame, so a preview that skipped it would show the new
+    // scheme on the newest turns and the old one above. Bounded to ~3
+    // viewports by frozen_row_budget(), so this is O(visible), not
+    // O(transcript): ~0.64 ms on a 3000-message thread.
     restyle_sealed_turns(m);
     reproject(m);
 }
@@ -354,6 +392,11 @@ Step appearance_update(Model m, msg::AppearanceMsg am) {
             // only ends the browse and makes it durable.
             m.d.ui.theme = highlighted_theme(*o);
             o->pane.picking = false;
+            // The full restyle, once, on the way out. Browsing only ever
+            // previewed (live tail re-coloured, frozen prefix untouched), so
+            // THIS is where the sealed transcript is rebuilt in the chosen
+            // scheme — one rebuild per browse session instead of one per
+            // keystroke.
             restyle_sealed_turns(m);
             persist(m);
             reproject(m);
@@ -368,6 +411,9 @@ Step appearance_update(Model m, msg::AppearanceMsg am) {
             // model must not keep the last one we merely looked at.
             m.d.ui.theme = o->pane.picker.restore;
             o->pane.picking = false;
+            // Full restyle on the way out, as with Commit: the frozen prefix
+            // may be carrying a previewed scheme's colours and has to be put
+            // back under the restored one.
             restyle_sealed_turns(m);
             persist(m);
             reproject(m);

@@ -181,6 +181,15 @@ void rehydrate_frozen(Model& m);
 // For NewThread before a fresh-start submit.
 void clear_frozen(Model& m);
 
+// restyle_sealed_turns: re-publish the theme, drop built colours, and
+// rebuild the frozen prefix so EVERYTHING ON SCREEN carries the new
+// scheme. Runs on every arrow key in the theme browser, which is what
+// makes its cost load-bearing — the frozen ledger is bounded to ~3
+// viewports (frozen_row_budget), so it is O(visible rows), not
+// O(transcript). External linkage so theme_preview_cost_probe can time
+// it as a regression test.
+void restyle_sealed_turns(Model& m);
+
 // Settle one Assistant message's StreamingMarkdown widget: feed the
 // final bytes, finish() (flush tail → prefix, flip live_ off), apply the
 // same auto-fold preset cached_markdown_for uses, and stamp the cache

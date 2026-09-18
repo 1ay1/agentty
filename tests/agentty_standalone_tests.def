@@ -29,6 +29,7 @@ FOLD_NOARGS(mcp_http_test)
 FOLD_NOARGS(md_shape_sweep)
 FOLD_NOARGS(reveal_headroom_test)
 
+FOLD_ARGS(theme_preview_cost_probe)
 FOLD_ARGS(external_acp_backend_test)
 FOLD_ARGS(embed_render_probe)
 FOLD_ARGS(long_session_bench)
