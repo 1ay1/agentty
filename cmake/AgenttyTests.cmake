@@ -136,6 +136,16 @@ agentty_fold_test(theme_switch_leak_probe TIMEOUT 300 ARGS)
 # The other half: flat-and-expensive still feels laggy if keys arrive faster
 # than a switch costs. Reports whether one arrow fits in a key-repeat slot.
 agentty_fold_test(theme_input_lag_probe TIMEOUT 120 ARGS LABELS perf)
+agentty_fold_test(theme_lag_repro TIMEOUT 180 ARGS NO_TEST)
+agentty_fold_test(theme_memo_stale_probe TIMEOUT 120 NO_TEST)
+# THE invariant every list overlay owes its user: the highlighted row is on
+# screen. Written against FilteredPicker, so it holds for every picker built
+# on it rather than only the theme browser that broke.
+agentty_fold_test(picker_cursor_visible_test TIMEOUT 120)
+# The reported gesture, against a PERSISTENT renderer. Every other theme
+# probe renders through render_to_string (fresh pool + cache per call), which
+# structurally cannot catch a stale cross-frame cache entry.
+agentty_fold_test(theme_alternating_key_test TIMEOUT 180)
 # Every panel must answer a keypress inside one key-repeat slot, AND a
 # burst delivered in one read must land where single-stepping lands.
 agentty_fold_test(panel_input_snappiness_test TIMEOUT 180 LABELS perf)

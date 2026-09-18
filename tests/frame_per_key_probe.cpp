@@ -59,7 +59,7 @@ int main(int argc, char** argv) {
 
     const auto row = [&] {
         const auto* o = m.ui.panel.get<pn::Appearance>();
-        return o ? o->pane.picker.index : -1;
+        return o ? o->pane.picker.picker.index() : -1;
     };
 
     std::printf("keys arriving %d-per-read, %d keys total\n\n", batch, total);

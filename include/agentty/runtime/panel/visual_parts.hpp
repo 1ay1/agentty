@@ -240,11 +240,10 @@ inline auto visual_parts(const AppearancePane& p) {
 }
 static_assert(visual::parts_cover_all<AppearancePane>);
 
-inline auto visual_parts(const AppearancePane::ThemePicker& p) {
-    return std::make_tuple(visual::ref(p.query), p.index, p.scroll,
-                           visual::exempt);
-}
-static_assert(visual::parts_cover_all<AppearancePane::ThemePicker>);
+// AppearancePane::ThemePicker declares its own visual_parts next to the type
+// (panel/appearance.hpp) — it holds a FilteredPicker, which has a
+// user-provided constructor, so the brace-arity probe reads 0 and the
+// completeness proof needs the opt-in to live beside the thing it describes.
 
 inline auto visual_parts(const Palette& p) {
     return std::make_tuple(

@@ -23,6 +23,8 @@
 #include "agentty/domain/ui_prefs.hpp"
 #include "agentty/runtime/panel/form.hpp"
 
+#include "agentty/runtime/panel/filtered_picker.hpp"
+
 namespace agentty::ui::panel {
 
 // Row ids. Named constants rather than literals at both the build site and
@@ -40,6 +42,19 @@ inline constexpr std::string_view kApToolOutput = "tool_output";
 inline constexpr std::string_view kApThinking   = "thinking";
 inline constexpr std::string_view kApTimestamps = "timestamps";
 
+// ── What feeds the theme picker ─────────────────────────────────────────
+//
+// The scheme list is a process-lifetime constant (maya's built-in table), so
+// the "snapshot" is always ready and never refills. It still goes through
+// SnapshotSource because that is the seam FilteredPicker reads through, and
+// a picker with one uniform shape is the point of this file.
+[[nodiscard]] ui::SnapshotSource<std::string> theme_source();
+
+// Fuzzy subsequence match over scheme names, best first — the same ranking
+// `matching_themes` applied, now expressed as the picker's filter so the
+// list and the cursor cannot disagree about what "row 4" means.
+[[nodiscard]] ui::FilterFn<std::string> theme_filter();
+
 // The pane's state. Named `AppearancePane` rather than `Appearance` because
 // the panel SLOT type in slot.hpp is what the rest of the runtime says when
 // it means "the Appearance overlay" — that one inherits this and adds the
@@ -49,21 +64,52 @@ struct AppearancePane {
     form::Form form;
 
     // The theme picker, when open over this pane. A Pick row hands off to a
-    // real overlay rather than growing the dropdown into a worse picker, and
-    // this is its state: the query being typed and where the cursor sits.
+    // real overlay rather than growing the dropdown into a worse picker.
+    //
+    // This is a FilteredPicker, not a hand-rolled {query, index, scroll}
+    // bundle, and that is the whole point. The bundle is what broke: the
+    // reducer advanced `index` while `scroll` sat unread beside it, so the
+    // highlight walked off the bottom of 615 schemes and Down appeared to do
+    // nothing. The picker owns query, cursor AND the derived viewport
+    // together (see visible()/visible_entries()), so there is no second
+    // field to leave behind.
     struct ThemePicker {
-        std::string query;
-        int         index  = 0;
-        int         scroll = 0;
+        ThemePicker() : picker(theme_source(), theme_filter()) {}
+
+        ui::FilteredPicker<std::string> picker;
+
         // The theme in use when the browser opened. Moving the highlight
         // APPLIES a scheme (the list is its own preview), so Esc needs
         // somewhere to put back — without this, cancelling would leave you
-        // wearing the last thing you merely looked at.
+        // wearing the last thing you merely looked at. Never drawn, so it is
+        // exempt from the frame hash.
         std::string restore;
     };
     bool        picking = false;
     ThemePicker picker;
 };
+
+// The picker owns every visible axis (query + cursor); `restore` is the Esc
+// undo stash and never reaches the screen.
+inline auto visual_parts(const AppearancePane::ThemePicker& p) {
+    return std::make_tuple(visual::ref(p.picker), visual::exempt);
+}
+
+}  // namespace agentty::ui::panel
+
+namespace agentty::visual {
+// The reviewed claim. ThemePicker has a user-provided constructor (it seeds
+// the FilteredPicker with its source + filter), so the brace-arity probe
+// reads 0 and the structural proof cannot check this one itself. Both members
+// are accounted for above: `picker` is the visible state, `restore` is the
+// Esc undo stash that is never drawn.
+template <>
+inline constexpr bool
+    trusted_parts<ui::panel::AppearancePane::ThemePicker> = true;
+}  // namespace agentty::visual
+
+namespace agentty::ui::panel {
+static_assert(visual::parts_cover_all<AppearancePane::ThemePicker>);
 
 // Build the pane's rows from the prefs. Pure: prefs in, form out, so the
 // view can rebuild it whenever the model changes and never hold stale rows.

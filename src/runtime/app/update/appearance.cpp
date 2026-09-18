@@ -223,14 +223,15 @@ namespace {
 }
 
 // The theme the browser is currently highlighting. Empty == native, which is
-// also what an out-of-range index yields — the safe end of the range, since
-// native is the one choice correct on every terminal.
+// also what an empty list yields — the safe end of the range, since native is
+// the one choice correct on every terminal.
+//
+// Reads through the picker's own accessor: the cursor is clamped inside
+// against the filtered set, so there is no second place that can disagree
+// about which row is selected.
 [[nodiscard]] std::string highlighted_theme(const pn::Appearance& o) {
-    const auto& names = pn::matching_themes(o.pane.picker.query);
-    if (names.empty()) return {};
-    const auto i = static_cast<std::size_t>(
-        std::clamp(o.pane.picker.index, 0, static_cast<int>(names.size()) - 1));
-    return names[i];
+    const std::string* sel = o.pane.picker.picker.selected();
+    return sel ? *sel : std::string{};
 }
 
 // Move the browser's highlight and LIVE-APPLY what it lands on. The applying
@@ -251,12 +252,12 @@ namespace {
 void move_highlight(Model& m, int delta) {
     auto* o = m.ui.panel.get<pn::Appearance>();
     if (!o) return;
-    const auto& names = pn::matching_themes(o->pane.picker.query);
-    const int n = static_cast<int>(names.size());
-    if (n == 0) return;
-    // Wraps, like every other list in the app: the way back to the top of 615
-    // schemes should not be 614 keystrokes.
-    o->pane.picker.index = ((o->pane.picker.index + delta) % n + n) % n;
+    // The picker wraps and clamps against its OWN filtered count, so the
+    // reducer never derives list geometry. That is what keeps the cursor and
+    // the rendered window from drifting apart — there is only one of them.
+    // Wrapping, because walking back to the top of 615 schemes should not
+    // take 614 keystrokes.
+    o->pane.picker.picker.move_wrapping(delta);
 
     std::string next = highlighted_theme(*o);
     // Landing on the scheme already in force is a no-op, not a rebuild. With
@@ -344,15 +345,23 @@ Step appearance_update(Model m, msg::AppearanceMsg am) {
             auto* o = m.ui.panel.get<pn::Appearance>();
             if (!o) return done(std::move(m));
             o->pane.picking      = true;
-            o->pane.picker.query.clear();
-            o->pane.picker.scroll = 0;
+            o->pane.picker.picker.clear_query();
             // Open ON the theme in use, so the first thing the list shows is
             // where you already are — arrowing from there is a comparison
-            // rather than a search.
-            const auto& names = pn::matching_themes({});
-            const auto it = std::find(names.begin(), names.end(), m.d.ui.theme);
-            o->pane.picker.index = it == names.end()
-                ? 0 : static_cast<int>(std::distance(names.begin(), it));
+            // rather than a search. jump_to clamps inside the picker against
+            // its own filtered count, and the viewport is derived from that
+            // same cursor, so the row we open on is one the window contains.
+            {
+                const auto& pk  = o->pane.picker.picker;
+                const auto& src = pk.entries();
+                const auto& idx = pk.filtered();
+                for (std::size_t i = 0; i < idx.size(); ++i) {
+                    if (src[idx[i]] == m.d.ui.theme) {
+                        pk.jump_to(static_cast<int>(i));
+                        break;
+                    }
+                }
+            }
             // What to restore if the user changes their mind. Stashed on the
             // pane rather than in a message so an Esc always has something
             // to go back to, however the browser was left.
@@ -368,15 +377,12 @@ Step appearance_update(Model m, msg::AppearanceMsg am) {
         [&](AppearanceThemeQuery& e) -> Step {
             auto* o = m.ui.panel.get<pn::Appearance>();
             if (!o) return done(std::move(m));
-            if (e.text.empty()) {
-                if (!o->pane.picker.query.empty()) o->pane.picker.query.pop_back();
-            } else {
-                o->pane.picker.query += e.text;
-            }
-            // Re-filtering invalidates the index; go back to the top rather
-            // than to a position that means something else now.
-            o->pane.picker.index  = 0;
-            o->pane.picker.scroll = 0;
+            if (e.text.empty()) o->pane.picker.picker.backspace();
+            else                o->pane.picker.picker.type(e.text);
+            // The picker resets its own cursor on every query edit — one
+            // place, so no arm can narrow the list and leave the cursor
+            // pointing at a row that now means something else.
+            //
             // Live-apply the new top match. Typing narrows AND previews, so
             // "dra" shows you Dracula without a second keystroke.
             m.d.ui.theme = highlighted_theme(*o);
@@ -392,11 +398,10 @@ Step appearance_update(Model m, msg::AppearanceMsg am) {
             // only ends the browse and makes it durable.
             m.d.ui.theme = highlighted_theme(*o);
             o->pane.picking = false;
-            // The full restyle, once, on the way out. Browsing only ever
-            // previewed (live tail re-coloured, frozen prefix untouched), so
-            // THIS is where the sealed transcript is rebuilt in the chosen
-            // scheme — one rebuild per browse session instead of one per
-            // keystroke.
+            // The full restyle, once, on the way out. Browsing already
+            // re-styled on each move (the list is its own preview), so this
+            // is the settle: it puts the sealed transcript under whichever
+            // scheme you actually stopped on.
             restyle_sealed_turns(m);
             persist(m);
             reproject(m);

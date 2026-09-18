@@ -241,6 +241,79 @@ form::Form build_appearance_form(const up::Prefs& p, bool tty) {
 // "native" leads the list always. It is not one of the generated schemes —
 // it is the absence of one — and the way back to your own terminal colors
 // must never be something you have to know the name of.
+// ── The scheme list, as the picker's source + filter ────────────────────
+//
+// `matching_themes` used to be the whole story: the reducer called it to
+// wrap an index, a helper called it to name the landing row, and the view
+// called it again to draw. Three callers deriving list geometry
+// independently is exactly how the cursor and the viewport drifted apart.
+// Now there is one owner (the FilteredPicker), and these two functions are
+// only what feeds it.
+
+// Every scheme name, native first as the empty string. Process-lifetime and
+// immutable, so the picker's snapshot is built once and never refills.
+const util::Snapshot<std::vector<std::string>>& all_theme_names() {
+    static const util::Snapshot<std::vector<std::string>> names = [] {
+        std::vector<std::string> out;
+        out.reserve(std::size(maya::theme::schemes) + 1);
+        out.emplace_back();   // native — the terminal's own colours
+        for (const auto& s : maya::theme::schemes)
+            out.emplace_back(s.name);
+        return util::make_snapshot(std::move(out));
+    }();
+    return names;
+}
+
+ui::SnapshotSource<std::string> theme_source() {
+    return ui::SnapshotSource<std::string>{
+        .ready = [] { return true; },
+        .fetch = [] { return all_theme_names(); },
+    };
+}
+
+ui::FilterFn<std::string> theme_filter() {
+    return [](const std::vector<std::string>& entries, std::string_view query) {
+        auto fold = [](std::string_view s, std::string& into) {
+            into.clear();
+            into.reserve(s.size());
+            for (char c : s)
+                into.push_back(static_cast<char>(
+                    std::tolower(static_cast<unsigned char>(c))));
+        };
+        std::string q;
+        fold(query, q);
+
+        // Subsequence, not substring: "gvd" finds "Gruvbox Dark". Same rule
+        // the old matching_themes used, so muscle memory is unchanged.
+        auto subseq = [](std::string_view hay, std::string_view needle) {
+            std::size_t k = 0;
+            for (char c : hay)
+                if (k < needle.size() && c == needle[k]) ++k;
+            return k == needle.size();
+        };
+
+        std::vector<std::size_t> out;
+        out.reserve(entries.size());
+        // One reusable buffer rather than a fresh string per scheme: at 615
+        // entries that was most of the allocations, all discarded at once.
+        std::string folded;
+        for (std::size_t i = 0; i < entries.size(); ++i) {
+            // The empty name IS native. It matches an empty query, and the
+            // literal "native" otherwise — so a query that plainly means a
+            // scheme does not drag native along at the top.
+            const std::string_view name =
+                entries[i].empty() ? std::string_view{"native"}
+                                   : std::string_view{entries[i]};
+            if (!q.empty()) {
+                fold(name, folded);
+                if (!subseq(folded, q)) continue;
+            }
+            out.push_back(i);
+        }
+        return out;
+    };
+}
+
 const std::vector<std::string>& matching_themes(std::string_view query) {
     // Memoised on the query, and returned BY REFERENCE.
     //

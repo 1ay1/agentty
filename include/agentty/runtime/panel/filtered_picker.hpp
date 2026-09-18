@@ -163,6 +163,77 @@ public:
         return &entries()[idx[i]];
     }
 
+    // ── Viewport ─────────────────────────────────────────────────────
+    //
+    // THE CURSOR AND THE WINDOW THAT CONTAINS IT ARE ONE VALUE.
+    //
+    // This exists because they were once two, and the gap between them is
+    // where the theme browser broke: it moved an `index` while a separate
+    // `scroll` sat unread beside it, so the highlight walked off the bottom
+    // of a 615-row list and the user was left steering a selection they
+    // could not see. Pressing Down appeared to do nothing; Enter then
+    // committed a scheme from far below the last visible row.
+    //
+    // The window is DERIVED, never stored. There is no offset field to
+    // forget to advance, no second writer to race, and no way to render a
+    // slice that excludes the cursor — the arithmetic that places the
+    // window is the same arithmetic that guarantees it contains index().
+    // A caller cannot hold this wrong because there is no state to hold.
+    struct Window {
+        std::size_t first  = 0;  // first visible position in filtered order
+        std::size_t count  = 0;  // how many are visible
+        std::size_t total  = 0;  // filtered().size(), for "n of m" + scrollbars
+        int         cursor = -1; // cursor's offset WITHIN the slice, -1 if empty
+
+        [[nodiscard]] bool empty()   const noexcept { return count == 0; }
+        [[nodiscard]] bool scrolled_above() const noexcept { return first > 0; }
+        [[nodiscard]] bool scrolled_below() const noexcept {
+            return first + count < total;
+        }
+    };
+
+    // The slice to render for a viewport `rows` tall, centred on the cursor
+    // the way a text editor scrolls: the cursor sits still in the middle
+    // until it reaches an end of the list, where the window stops and the
+    // cursor travels the last half-screen itself. Clamped so the final page
+    // is full rather than trailing blank rows past the end.
+    [[nodiscard]] Window visible(int rows) const {
+        Window w;
+        w.total = filtered().size();
+        if (w.total == 0 || rows <= 0) return w;
+
+        const auto vh  = static_cast<std::size_t>(rows);
+        const auto cur = static_cast<std::size_t>(index());
+
+        w.count = std::min(vh, w.total);
+        if (w.total > vh) {
+            // Keep the cursor centred, then clamp at both ends. Written as
+            // signed arithmetic because cur - vh/2 underflows near the top.
+            const auto half  = static_cast<long long>(vh) / 2;
+            long long  first = static_cast<long long>(cur) - half;
+            const long long max_first =
+                static_cast<long long>(w.total) - static_cast<long long>(vh);
+            first = std::clamp(first, 0LL, max_first);
+            w.first = static_cast<std::size_t>(first);
+        }
+        w.cursor = static_cast<int>(cur - w.first);
+        return w;
+    }
+
+    // The entries in that window, in filtered order — what a view renders.
+    // Returning the projected Entry pointers (not indices) keeps the caller
+    // from re-deriving the mapping and getting it wrong on the second site.
+    [[nodiscard]] std::vector<const Entry*> visible_entries(int rows) const {
+        const Window w = visible(rows);
+        const auto& idx = filtered();
+        const auto& src = entries();
+        std::vector<const Entry*> out;
+        out.reserve(w.count);
+        for (std::size_t i = w.first; i < w.first + w.count && i < idx.size(); ++i)
+            out.push_back(&src[idx[i]]);
+        return out;
+    }
+
     // ── Reading the candidate set ────────────────────────────────────────
 
     // THE accessor. Every read goes through here, which is exactly why the

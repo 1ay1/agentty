@@ -193,11 +193,11 @@ int main() {
         const auto* ob = burst.ui.panel.get<pn::Appearance>();
         const auto* os = step.ui.panel.get<pn::Appearance>();
         std::printf("  index  burst=%d  stepped=%d\n",
-                    ob ? ob->pane.picker.index : -1,
-                    os ? os->pane.picker.index : -1);
+                    ob ? ob->pane.picker.picker.index() : -1,
+                    os ? os->pane.picker.picker.index() : -1);
         std::printf("  theme  burst=%s  stepped=%s\n",
                     burst.d.ui.theme.c_str(), step.d.ui.theme.c_str());
-        CHECK(ob && os && ob->pane.picker.index == os->pane.picker.index,
+        CHECK(ob && os && ob->pane.picker.picker.index() == os->pane.picker.picker.index(),
               "burst landed on a different row than single-stepping");
         CHECK(burst.d.ui.theme == step.d.ui.theme,
               "burst landed on a different THEME than single-stepping");
@@ -220,8 +220,8 @@ int main() {
         const auto* oa = a.ui.panel.get<pn::Appearance>();
         const auto* ob = b.ui.panel.get<pn::Appearance>();
         std::printf("  wrap(%d) burst=%d stepped=%d\n", kWrap,
-                    oa ? oa->pane.picker.index : -1, ob ? ob->pane.picker.index : -1);
-        CHECK(oa && ob && oa->pane.picker.index == ob->pane.picker.index,
+                    oa ? oa->pane.picker.picker.index() : -1, ob ? ob->pane.picker.picker.index() : -1);
+        CHECK(oa && ob && oa->pane.picker.picker.index() == ob->pane.picker.picker.index(),
               "wrapping past the end depends on paint timing");
         CHECK(a.d.ui.theme == b.d.ui.theme, "wrap landed on a different theme");
     }
@@ -258,9 +258,9 @@ int main() {
 
         const auto* o = m.ui.panel.get<pn::Appearance>();
         std::printf("  browser index=%d   form cursor %d\u2192%d\n",
-                    o ? o->pane.picker.index : -1,
+                    o ? o->pane.picker.picker.index() : -1,
                     form_cursor_before, o ? o->pane.form.cursor : -1);
-        CHECK(o && o->pane.picker.index == 3,
+        CHECK(o && o->pane.picker.picker.index() == 3,
               "arrows after the opening key did not reach the browser");
         CHECK(o && o->pane.form.cursor == form_cursor_before,
               "arrows leaked into the form behind the browser");

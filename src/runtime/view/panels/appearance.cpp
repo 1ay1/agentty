@@ -26,7 +26,7 @@ namespace {
 // does not take is a column of real UI left visible in the scheme you are
 // looking at.
 [[nodiscard]] Element theme_browser(const Model& m, const pn::Appearance& o) {
-    const auto& names = pn::matching_themes(o.pane.picker.query);
+    const auto& pick = o.pane.picker.picker;
 
     Panel::Config cfg;
     cfg.title      = " Theme ";
@@ -35,17 +35,32 @@ namespace {
     // Half the usual viewport. The list is the smaller half of what is on
     // screen — what it is previewing is the larger.
     cfg.viewport_h = std::max(6, panel_viewport_h() / 2);
-    cfg.scroll     = &m.ui.appearance_scroll;
-    cfg.selected   = names.empty() ? -1 : o.pane.picker.index;
 
-    cfg.header.push_back(filter_header(o.pane.picker.query));
+    // WINDOWED IN THE CALLER, which is what maya's Panel asks of anyone with
+    // a list this long: an `items` body is opaque (never virtualised) and
+    // measure_body() caps its row accounting, so handing it all 615 schemes
+    // AND a scroll pointer is a contradiction — the panel cannot scroll what
+    // it refuses to window. That is the bug this file had: the cursor walked
+    // off the bottom while the offset never moved.
+    //
+    // So we hand it exactly the visible slice and no scroll state at all.
+    // The slice comes from the picker, which derives it from the same cursor
+    // it clamps — the window provably contains the selection because both
+    // are one value, not two that must be kept in agreement.
+    const auto win     = pick.visible(cfg.viewport_h);
+    const auto visible = pick.visible_entries(cfg.viewport_h);
+    cfg.scroll   = nullptr;
+    cfg.selected = win.cursor;
+
+    cfg.header.push_back(filter_header(pick.query()));
     cfg.header.push_back(sep);
 
-    if (names.empty()) {
+    if (visible.empty()) {
         cfg.prebuilt.push_back(text("  no scheme matches", fg_italic(muted)));
     } else {
-        cfg.items.reserve(names.size());
-        for (const auto& name : names) {
+        cfg.items.reserve(visible.size());
+        for (const std::string* name_p : visible) {
+            const std::string& name = *name_p;
             Panel::Item row;
             // The empty name IS native — the terminal's own colours, and the
             // only choice correct on a light terminal, a 16-colour terminal
@@ -74,8 +89,8 @@ namespace {
                                   t->success, t->warning, t->error};
                 }
             }
-            if (!o.pane.picker.query.empty() && !is_native) {
-                auto fm = fuzzy::score(name, o.pane.picker.query);
+            if (!pick.query().empty() && !is_native) {
+                auto fm = fuzzy::score(name, pick.query());
                 if (fm.matched()) { row.highlight = std::move(fm.positions);
                                     row.highlight_fg = highlight; }
             }
