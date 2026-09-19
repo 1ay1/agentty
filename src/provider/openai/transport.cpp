@@ -1927,7 +1927,10 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
         for (auto& m : build_native_messages(req.messages))
             messages.push_back(std::move(m));
         body["messages"] = std::move(messages);
-        if (!req.tools.empty()) body["tools"] = wire::openai_chat_tools(req.tools);
+        if (!req.tools.empty()) {
+            body["tools"] = wire::openai_chat_tools(req.tools);
+            body["tool_choice"] = "auto";
+        }
     } else {
         // max_tokens is `max_tokens` on the OpenAI chat endpoint (newer models
         // also accept max_completion_tokens; max_tokens stays accepted for the
@@ -1949,8 +1952,10 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
         }
         body["messages"] = std::move(messages);
 
-        if (!req.tools.empty())
+        if (!req.tools.empty()) {
             body["tools"] = wire::openai_chat_tools(req.tools);
+            body["tool_choice"] = "auto";
+        }
 
         // Prompt-cache routing. OpenAI auto-caches prefixes >=1024 tokens;
         // sending a stable prompt_cache_key pins a conversation's identical
