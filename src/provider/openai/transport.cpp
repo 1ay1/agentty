@@ -1050,14 +1050,19 @@ void handle_delta(StreamCtx& ctx, const json& delta) {
             }
 
             if (!fn_args.empty() && slot.started) {
-                // A chunk that REPEATS what we already hold is a coalescing
-                // proxy restating the whole value, not new bytes. Treat a
-                // fragment that our accumulated args already start with as a
-                // snapshot; otherwise append. Either way emit only what is
-                // newly known, so both dialects behave identically.
-                const bool repeat = fn_args.size() <= slot.args.size()
-                                 && slot.args.compare(0, fn_args.size(), fn_args) == 0;
-                const auto fresh = wire::unseen(slot.args, fn_args, repeat);
+                // A snapshot is when the server restates the COMPLETE arguments
+                // (longer than what we have, or equal to it on retransmission).
+                // A fragment is never longer than the accumulated buffer yet.
+                // This distinguishes:
+                //  (1) Snapshot longer: fn_args > slot.args and slot.args is a prefix
+                //  (2) Idempotent repeat: fn_args == slot.args exactly
+                //  (3) Fragment: fn_args.size() == 1 (e.g., "{" from token-by-token)
+                //      that happens to match the start of our accumulated buffer —
+                //      this is legitimate new data, not a retransmission.
+                const bool snapshot = (fn_args.size() > slot.args.size()
+                                    && fn_args.compare(0, slot.args.size(), slot.args) == 0)
+                                   || fn_args == slot.args;
+                const auto fresh = wire::unseen(slot.args, fn_args, snapshot);
                 if (!fresh.empty())
                     ctx.sink(StreamToolUseDelta{ToolCallId{slot.id},
                                                 std::string{fresh}});
