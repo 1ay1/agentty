@@ -57,6 +57,7 @@ provider::StreamResult stream_responses(provider::Request req, provider::EventSi
 [[nodiscard]] std::string format_http_error_for_test(int status, std::string_view body);
 // Scripted SSE `data:` payloads → the agentty Msg sequence the reducer sees.
 [[nodiscard]] std::vector<Msg> parse_sse_for_test(
-    const std::vector<std::string>& sse_data_lines);
+    const std::vector<std::string>& sse_data_lines,
+    bool show_reasoning = true);
 
 } // namespace agentty::provider::chatgpt

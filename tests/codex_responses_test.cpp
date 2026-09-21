@@ -473,3 +473,63 @@ TEST_CASE("stale tool result is budget capped") {
     CHECK(old_output.size() < 8192);         // tight head+tail budget
 }
 
+
+// ── The reasoning toggle must work on EVERY dialect ─────────────────────
+//
+// Reported against Copilot: turning reasoning off in the model panel still
+// showed the summary whenever a gpt-* model was selected, while Claude
+// models respected it. The split is not the vendor — it is the DIALECT.
+// Copilot routes gpt-* over Responses and claude-* over Anthropic, and of
+// the four transports only this codec was emitting reasoning
+// unconditionally. The toggle was not broken; it was unimplemented on one
+// of four paths, which is worse because it looks arbitrary.
+TEST_CASE("sse reasoning is suppressed when the user hides it") {
+    std::vector<std::string> sse = {
+        R"({"type":"response.output_item.added","item":{"type":"reasoning","id":"r1"}})",
+        R"({"type":"response.reasoning_summary_part.added","item_id":"r1"})",
+        R"({"type":"response.reasoning_summary_text.delta","delta":"pondering…"})",
+        R"({"type":"response.output_text.delta","delta":"the answer"})",
+        R"({"type":"response.completed","response":{"usage":{}}})",
+    };
+
+    // Visible: the summary text reaches the reducer.
+    std::string shown;
+    for (const auto& m : cc::parse_sse_for_test(sse, /*show_reasoning=*/true))
+        if (auto* t = leaf<StreamThinkingDelta>(m)) shown += t->text;
+    CHECK(shown == "pondering…");
+
+    // Hidden: no reasoning TEXT is stored…
+    std::string hidden;
+    int heartbeats = 0, boundaries = 0;
+    for (const auto& m : cc::parse_sse_for_test(sse, /*show_reasoning=*/false))
+        if (auto* t = leaf<StreamThinkingDelta>(m)) {
+            hidden += t->text;
+            ++heartbeats;
+            if (t->block_boundary) ++boundaries;
+        }
+    CHECK(hidden.empty());
+
+    // …but the event still fires, because it is the turn's LIVENESS signal:
+    // the reducer resets last_event_at and the retry counter on it. Swallow
+    // it entirely and a long silent reasoning phase looks like a stalled
+    // stream and gets retried.
+    CHECK(heartbeats > 0);
+    // No paragraph boundaries though — a boundary with no text around it
+    // would open an empty thinking block in the transcript.
+    CHECK(boundaries == 0);
+}
+
+TEST_CASE("sse hidden reasoning does not disturb the answer") {
+    // The regression guard: suppressing reasoning must not touch anything
+    // else on the stream.
+    std::vector<std::string> sse = {
+        R"({"type":"response.reasoning_summary_text.delta","delta":"think"})",
+        R"({"type":"response.output_text.delta","delta":"hello "})",
+        R"({"type":"response.output_text.delta","delta":"world"})",
+        R"({"type":"response.completed","response":{"usage":{"input_tokens":3,"output_tokens":2}}})",
+    };
+    std::string text;
+    for (const auto& m : cc::parse_sse_for_test(sse, /*show_reasoning=*/false))
+        if (auto* t = leaf<StreamTextDelta>(m)) text += t->text;
+    CHECK(text == "hello world");
+}

@@ -331,6 +331,18 @@ struct StreamCtx {
     std::unordered_map<std::string, ToolSlot> tools;
     OpenCalls open_tool_items;
     bool text_block_open = false;
+    // Mirrors req.show_reasoning. The other three transports (chat, ollama,
+    // anthropic) already gate on this; the Responses codec did not, so a
+    // user who turned reasoning OFF still saw the summary on every model
+    // riding this dialect (Copilot's gpt-*, ChatGPT/Codex). The toggle
+    // looked broken because it was — on one dialect out of four.
+    //
+    // HIDDEN still emits an EMPTY ThinkingDelta rather than nothing, the
+    // same shape the chat transport uses: the event is the turn's liveness
+    // signal (it resets last_event_at and the retry counter in the
+    // reducer), so swallowing it entirely would make a long silent reasoning
+    // phase look like a stalled stream. Empty text stores nothing.
+    bool show_reasoning = true;
     bool saw_function_call = false;
     bool terminated = false;
     StopReason stop = StopReason::EndTurn;
@@ -436,7 +448,9 @@ void dispatch(StreamCtx& ctx, std::string_view data) {
     if (type == "response.reasoning_summary_text.delta"
         || type == "response.reasoning_text.delta") {
         ++ctx.thinking_deltas;
-        ctx.sink(StreamThinkingDelta{j.value("delta", std::string{}), {}});
+        ctx.sink(StreamThinkingDelta{
+            ctx.show_reasoning ? j.value("delta", std::string{}) : std::string{},
+            {}});
         return;
     }
     // Summary PART boundary: the Responses API splits a reasoning summary
@@ -446,7 +460,8 @@ void dispatch(StreamCtx& ctx, std::string_view data) {
     // thought two…"). Emit a block boundary so the reducer inserts the
     // paragraph break — same event Anthropic uses for a new thinking block.
     if (type == "response.reasoning_summary_part.added") {
-        ctx.sink(StreamThinkingDelta{{}, {}, /*block_boundary=*/true});
+        if (ctx.show_reasoning)
+            ctx.sink(StreamThinkingDelta{{}, {}, /*block_boundary=*/true});
         return;
     }
     if (type == "response.output_item.added") {
@@ -455,7 +470,10 @@ void dispatch(StreamCtx& ctx, std::string_view data) {
         if (itype == "reasoning") {
             // New reasoning item — paragraph boundary for its summary text
             // (see above). Harmless if the item produces no visible text.
-            ctx.sink(StreamThinkingDelta{{}, {}, /*block_boundary=*/true});
+            // Suppressed when reasoning is hidden: a boundary with no text
+            // around it would open an empty thinking block.
+            if (ctx.show_reasoning)
+                ctx.sink(StreamThinkingDelta{{}, {}, /*block_boundary=*/true});
         }
         if (itype == "function_call") {
             // A new tool call opens. Close any prior text block first so the
@@ -670,6 +688,7 @@ provider::StreamResult stream(const Site& site, provider::Request req,
 
     StreamCtx ctx;
     ctx.sink = sink;
+    ctx.show_reasoning = req.show_reasoning;
     // Shared scaffold: status/Retry-After capture, heartbeats, buffered-wait,
     // wire dump, capped error body. Our feed stops the read once dispatch()
     // fired the terminal event (deliberate post-`response.completed` abort —
@@ -722,9 +741,11 @@ provider::StreamResult stream(const Site& site, provider::Request req,
 }
 
 // ── Codec accessors (shared by hosts and tests) ───────────────────────────
-std::vector<Msg> parse_sse_for_test(const std::vector<std::string>& sse_data_lines) {
+std::vector<Msg> parse_sse_for_test(const std::vector<std::string>& sse_data_lines,
+                                    bool show_reasoning) {
     std::vector<Msg> out;
     StreamCtx ctx;
+    ctx.show_reasoning = show_reasoning;
     ctx.sink = [&](Msg m) { out.push_back(std::move(m)); };
     for (const auto& line : sse_data_lines) dispatch(ctx, line);
     return out;

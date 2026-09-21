@@ -119,7 +119,11 @@ struct Site {
 
 // Scripted SSE `data:` payloads → the Msg sequence a reducer would see.
 // The single entry point every Responses-dialect test drives.
+// `show_reasoning` mirrors Request::show_reasoning so a test can pin the
+// hidden-reasoning path; defaults true, which is the capture semantics every
+// existing test expects.
 [[nodiscard]] std::vector<Msg> parse_sse_for_test(
-    const std::vector<std::string>& sse_data_lines);
+    const std::vector<std::string>& sse_data_lines,
+    bool show_reasoning = true);
 
 } // namespace agentty::provider::responses

@@ -354,8 +354,9 @@ std::string format_http_error_for_test(int status, std::string_view body) {
     return format_http_error(status, body);
 }
 
-std::vector<Msg> parse_sse_for_test(const std::vector<std::string>& sse_data_lines) {
-    return responses::parse_sse_for_test(sse_data_lines);
+std::vector<Msg> parse_sse_for_test(const std::vector<std::string>& sse_data_lines,
+                                    bool show_reasoning) {
+    return responses::parse_sse_for_test(sse_data_lines, show_reasoning);
 }
 
 } // namespace agentty::provider::chatgpt
