@@ -213,6 +213,19 @@ using wire::could_be_tool_json;
 // closing a call merely because another index emitted would truncate siblings.
 void close_open_tools(StreamCtx& ctx) {
     for (auto& slot : ctx.tools.all()) {
+        // A call whose name never resolved to a known tool was never
+        // announced (the start gate waits for a resolvable name so a
+        // fragmented name can finish accumulating). Announce it now under
+        // whatever accumulated, so it reaches the model as "unknown tool:
+        // <full name>" instead of silently vanishing mid-turn.
+        if (!slot.started && !slot.name.empty()) {
+            if (slot.id.empty()) slot.id = "call_late";
+            ctx.sink(StreamToolUseStart{ToolCallId{slot.id},
+                                        ToolName{slot.name}});
+            if (!slot.args.empty())
+                ctx.sink(StreamToolUseDelta{ToolCallId{slot.id}, slot.args});
+            slot.started = true;
+        }
         if (!slot.started || slot.ended || slot.id.empty()) continue;
         ctx.sink(StreamToolUseEnd{ToolCallId{slot.id}});
         slot.ended = true;
@@ -1098,9 +1111,51 @@ void handle_delta(StreamCtx& ctx, const json& delta) {
                 if (fn.contains("arguments") && fn["arguments"].is_string())
                     fn_args = fn["arguments"].get<std::string>();
             }
-            if (!fn_name.empty()) slot.name = fn_name;
+            // The NAME can arrive in fragments too, not just the arguments.
+            //
+            // The spec's own accumulator (`accumulated.function.name ??=`)
+            // takes the first non-null and never appends, which is right for
+            // servers that send the whole name once. But real gateways split
+            // it: `"re"` then `"ad"` for `read` (opencode #24137). Taking
+            // only the first fragment dispatches a tool called `re`, which
+            // fails "unknown tool" three times and kills the turn.
+            //
+            // So: append until the call is ANNOUNCED. The announce gate
+            // below waits for a name that resolves to a real tool, which is
+            // what makes appending safe — a server that sends the whole name
+            // up front matches on the first fragment and never accumulates a
+            // second, and one that splits it builds up until it does.
+            //
+            // An empty name on a continuation is IGNORED, never assigned:
+            // several gateways (Azure, local proxies) re-send
+            // `"name": ""` on argument chunks, and letting that through
+            // wipes an established name (A3S-Lab/Code #139).
+            if (!fn_name.empty()) {
+                if (slot.started) {
+                    // Already announced under a resolved name — a later
+                    // fragment cannot rename the call.
+                } else if (slot.name.empty()) {
+                    slot.name = fn_name;
+                } else if (slot.name != fn_name) {
+                    slot.name += fn_name;
+                }
+            }
 
-            if (!slot.started && !slot.name.empty()) {
+            // Announce once the name names something we can actually run.
+            //
+            // Waiting for a KNOWN tool is what lets the accumulation above
+            // terminate: a complete name resolves immediately, a partial one
+            // does not and we keep collecting. A name that never resolves is
+            // announced by close_open_tools at end of turn instead, so the
+            // call still reaches the model as "unknown tool: <full name>"
+            // rather than vanishing.
+            const bool name_is_known = [&] {
+                if (ctx.known_tools.empty()) return true;   // nothing declared
+                for (const auto& t : ctx.known_tools)
+                    if (t == slot.name) return true;
+                return false;
+            }();
+            if (!slot.started && !slot.name.empty() && name_is_known) {
                 if (slot.id.empty())
                     slot.id = "call_" + std::to_string(index);
                 ctx.sink(StreamToolUseStart{ToolCallId{slot.id},

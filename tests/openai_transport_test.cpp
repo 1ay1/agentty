@@ -2029,3 +2029,96 @@ TEST_CASE("test_sse_bare_error_object_llamacpp") {
     CHECK(joined_text(msgs).empty());
 }
 
+
+TEST_CASE("test_sse_tool_name_split_across_deltas") {
+    // opencode #24137: an OpenAI-compatible gateway splits function.name
+    // across deltas the same way it splits arguments — "re" then "ad" for
+    // `read`. The spec's own accumulator (`name ??=`) takes the first
+    // non-null and never appends, so we dispatched a tool called `re`, got
+    // "unknown tool" three times, and the doom-loop breaker killed the turn.
+    //
+    // The name is accumulated until it resolves to a tool we advertised;
+    // that gate is what lets the accumulation terminate without guessing how
+    // many fragments to expect.
+    std::string sse =
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+            "\"id\":\"c1\",\"type\":\"function\","
+            "\"function\":{\"name\":\"re\",\"arguments\":\"\"}}]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+            "\"function\":{\"name\":\"ad\",\"arguments\":\"\"}}]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+            "\"function\":{\"arguments\":\"{\\\"path\\\":\\\"a.txt\\\"}\"}}]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n"
+        "data: [DONE]\n\n";
+
+    auto msgs = oai::parse_sse_for_test(sse, {"read"});
+
+    CHECK(count_leaf<StreamToolUseStart>(msgs) == 1);
+    for (const auto& m : msgs)
+        if (const auto* s = get_leaf<StreamToolUseStart>(m))
+            CHECK(s->name.value == "read");        // not "re"
+    CHECK(joined_tool_args(msgs) == std::string{"{\"path\":\"a.txt\"}"});
+}
+
+TEST_CASE("test_sse_whole_tool_name_is_not_doubled") {
+    // The other direction, and the one that would break every normal server:
+    // a gateway that RESTATES the full name on continuation chunks must not
+    // accumulate "readread". Appending only happens while the call is
+    // unannounced and only for a fragment that differs from what we hold.
+    std::string sse =
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+            "\"id\":\"c1\",\"type\":\"function\","
+            "\"function\":{\"name\":\"read\",\"arguments\":\"\"}}]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+            "\"function\":{\"name\":\"read\","
+            "\"arguments\":\"{\\\"path\\\":\\\"a.txt\\\"}\"}}]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n"
+        "data: [DONE]\n\n";
+
+    auto msgs = oai::parse_sse_for_test(sse, {"read"});
+    CHECK(count_leaf<StreamToolUseStart>(msgs) == 1);
+    for (const auto& m : msgs)
+        if (const auto* s = get_leaf<StreamToolUseStart>(m))
+            CHECK(s->name.value == "read");
+}
+
+TEST_CASE("test_sse_empty_name_on_continuation_keeps_the_name") {
+    // A3S-Lab/Code #139: Azure and several local proxies re-send
+    // `"name": ""` on argument chunks. Assigning it wipes an established
+    // name and the NEXT turn fails on an empty tool name.
+    std::string sse =
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+            "\"id\":\"c1\",\"type\":\"function\","
+            "\"function\":{\"name\":\"read\",\"arguments\":\"\"}}]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+            "\"function\":{\"name\":\"\","
+            "\"arguments\":\"{\\\"path\\\":\\\"a.txt\\\"}\"}}]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n"
+        "data: [DONE]\n\n";
+
+    auto msgs = oai::parse_sse_for_test(sse, {"read"});
+    for (const auto& m : msgs)
+        if (const auto* s = get_leaf<StreamToolUseStart>(m))
+            CHECK(s->name.value == "read");
+    CHECK(joined_tool_args(msgs) == std::string{"{\"path\":\"a.txt\"}"});
+}
+
+TEST_CASE("test_sse_unresolvable_tool_name_still_reaches_the_model") {
+    // The accumulation gate waits for a name that resolves. A name that
+    // NEVER resolves must not vanish — it has to reach the model as a
+    // failed call so it can correct itself, rather than the turn ending
+    // with a tool call that silently did not happen.
+    std::string sse =
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+            "\"id\":\"c1\",\"type\":\"function\","
+            "\"function\":{\"name\":\"nosuchtool\",\"arguments\":\"{}\"}}]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n"
+        "data: [DONE]\n\n";
+
+    auto msgs = oai::parse_sse_for_test(sse, {"read"});
+    CHECK(count_leaf<StreamToolUseStart>(msgs) == 1);
+    CHECK(count_leaf<StreamToolUseEnd>(msgs) == 1);
+    for (const auto& m : msgs)
+        if (const auto* s = get_leaf<StreamToolUseStart>(m))
+            CHECK(s->name.value == "nosuchtool");
+}
