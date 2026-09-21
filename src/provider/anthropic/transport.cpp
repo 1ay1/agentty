@@ -603,12 +603,13 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
             return std::string{"http: "} + result.error().render();
         },
         .on_any_end = [&ctx]() {
-            if (ctx.in_tool_use) {
-                ctx.sink(StreamToolUseEnd{ToolCallId{ctx.current_tool_id}});
-                ctx.in_tool_use = false;
-                ctx.current_tool_id.clear();
-                ctx.current_tool_name.clear();
-            }
+            // The stream ended without the server closing its blocks — an
+            // abort, a transport error, a truncated response. Close every
+            // one that is still open; a tool call left pending here wedges
+            // the turn. Taking the lot, so there is no order to get wrong.
+            for (const auto& b : ctx.tool_blocks)
+                ctx.sink(StreamToolUseEnd{ToolCallId{b.id}});
+            ctx.tool_blocks.clear();
         },
     });
 }

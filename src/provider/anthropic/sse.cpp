@@ -68,6 +68,18 @@ FastDelta dispatch_content_block_delta_fast(StreamCtx& ctx, std::string_view dat
     simdjson::ondemand::object root;
     if (doc.get_object().get(root)) return FastDelta::Unparseable;
 
+    // Read `index` BEFORE `delta`. simdjson On-Demand is a forward-only
+    // cursor: once we descend into the `delta` object and consume its
+    // fields, the root's remaining keys are no longer reachable. `index`
+    // precedes `delta` in every frame Anthropic emits, so taking it here
+    // costs nothing and makes it available to the tool-delta arm below.
+    //
+    // -1 means the frame carried no index — which no conforming
+    // content_block_delta does, and which the tool arm treats as
+    // unattributable rather than guessing.
+    std::int64_t block_index = -1;
+    if (root["index"].get_int64().get(block_index)) block_index = -1;
+
     simdjson::ondemand::object delta;
     if (root["delta"].get_object().get(delta)) return FastDelta::Unparseable;
 
@@ -85,8 +97,19 @@ FastDelta dispatch_content_block_delta_fast(StreamCtx& ctx, std::string_view dat
     if (delta_type == "input_json_delta") {
         std::string_view partial;
         if (delta["partial_json"].get_string().get(partial)) return FastDelta::Recognized;
-        ctx.sink(StreamToolUseDelta{
-            ToolCallId{ctx.current_tool_id}, std::string{partial}});
+        // Which block do these bytes belong to? The frame says so — read
+        // it rather than assuming the most recently opened call.
+        auto* blk = ctx.tool_at(static_cast<int>(block_index));
+        if (!blk) {
+            // A delta for a block we never saw open. Dropping is the only
+            // honest move: appending to some other call produces valid
+            // JSON and a silently wrong tool invocation. Say so instead.
+            AGT_LOG(Wire, Warn, "anthropic.tool_delta_unattributable",
+                    "index={} open_blocks={}", block_index,
+                    ctx.tool_blocks.size());
+            return FastDelta::Recognized;
+        }
+        ctx.sink(StreamToolUseDelta{ToolCallId{blk->id}, std::string{partial}});
         return FastDelta::Handled;
     }
     // Thinking blocks have nothing to render but they ARE proof that the
@@ -282,10 +305,20 @@ void dispatch_event(StreamCtx& ctx, std::string_view name, std::string_view data
             auto block = j.value("content_block", json::object());
             auto type = block.value("type", "");
             if (type == "tool_use") {
-                ctx.current_tool_id = block.value("id", "");
-                ctx.current_tool_name = block.value("name", "");
-                ctx.in_tool_use = true;
-                ctx.sink(StreamToolUseStart{ToolCallId{ctx.current_tool_id}, ToolName{ctx.current_tool_name}});
+                // Record the block at the index the wire gave it. That index
+                // addresses every delta and the stop, so it is the block's
+                // identity for its whole life.
+                const int idx = j.value("index", -1);
+                StreamCtx::ToolBlock b;
+                b.index = idx;
+                b.id    = block.value("id", "");
+                b.name  = block.value("name", "");
+                // A restated index means the previous block at that slot is
+                // over and the server reused it. Replace rather than
+                // accumulate, so a long turn cannot grow an unbounded list.
+                if (auto* prior = ctx.tool_at(idx)) *prior = b;
+                else ctx.tool_blocks.push_back(b);
+                ctx.sink(StreamToolUseStart{ToolCallId{b.id}, ToolName{b.name}});
             } else if (type == "text") {
                 // Mark the text block open so its matching
                 // content_block_stop emits StreamTextBlockClosed.
@@ -320,9 +353,20 @@ void dispatch_event(StreamCtx& ctx, std::string_view name, std::string_view data
             if (type == "text_delta") {
                 ctx.sink(StreamTextDelta{delta.value("text", "")});
             } else if (type == "input_json_delta") {
-                ctx.sink(StreamToolUseDelta{
-                    ToolCallId{ctx.current_tool_id},
-                    delta.value("partial_json", "")});
+                // Same attribution rule as the fast path above. This arm
+                // only runs when simdjson declined the frame, so it must
+                // reach the identical conclusion — two spellings of "which
+                // call owns these bytes" is how the divergence class
+                // starts.
+                const int idx = j.value("index", -1);
+                if (auto* blk = ctx.tool_at(idx)) {
+                    ctx.sink(StreamToolUseDelta{
+                        ToolCallId{blk->id}, delta.value("partial_json", "")});
+                } else {
+                    AGT_LOG(Wire, Warn, "anthropic.tool_delta_unattributable",
+                            "index={} open_blocks={} path=slow",
+                            idx, ctx.tool_blocks.size());
+                }
             } else if (type == "thinking_delta") {
                 // Capture reasoning text for replay; also a liveness signal.
                 ++ctx.thinking_deltas;
@@ -335,11 +379,16 @@ void dispatch_event(StreamCtx& ctx, std::string_view name, std::string_view data
         }
 
         case SseEventKind::ContentBlockStop: {
-            if (ctx.in_tool_use) {
-                ctx.sink(StreamToolUseEnd{ToolCallId{ctx.current_tool_id}});
-                ctx.in_tool_use = false;
-                ctx.current_tool_id.clear();
-                ctx.current_tool_name.clear();
+            // The stop carries the index of the block it closes. Close THAT
+            // one — with parallel blocks, closing "the current tool" ends
+            // whichever opened last, which on interleaved output is the
+            // wrong call and leaves the right one open forever.
+            const int stop_idx = j.value("index", -1);
+            if (auto* blk = ctx.tool_at(stop_idx)) {
+                ctx.sink(StreamToolUseEnd{ToolCallId{blk->id}});
+                std::erase_if(ctx.tool_blocks, [stop_idx](const auto& b) {
+                    return b.index == stop_idx;
+                });
             } else if (ctx.text_block_open) {
                 // The prose block just closed — this ALWAYS precedes a
                 // tool_use content_block_start, so it is the earliest
@@ -371,12 +420,14 @@ void dispatch_event(StreamCtx& ctx, std::string_view name, std::string_view data
         }
 
         case SseEventKind::MessageStop: {
-            if (ctx.in_tool_use) {
-                ctx.sink(StreamToolUseEnd{ToolCallId{ctx.current_tool_id}});
-                ctx.in_tool_use = false;
-                ctx.current_tool_id.clear();
-                ctx.current_tool_name.clear();
-            }
+            // Close whatever the server left open. Taking the lot, so order
+            // does not matter and there is nothing to be wrong about —
+            // the same reasoning as OpenCalls::drain() on the Responses
+            // dialect. A block without its stop would otherwise leave a
+            // tool call pending forever.
+            for (const auto& b : ctx.tool_blocks)
+                ctx.sink(StreamToolUseEnd{ToolCallId{b.id}});
+            ctx.tool_blocks.clear();
             ctx.sink(StreamFinished{ctx.stop_reason});
             ctx.terminated = true;
             break;

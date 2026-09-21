@@ -154,3 +154,70 @@ TEST_CASE("anthropic sse golden") {
                          static_cast<unsigned long long>(got), rendered.c_str());
     }
 }
+
+TEST_CASE("anthropic parallel tool blocks stay separate") {
+    namespace ap = agentty::provider::anthropic;
+
+    // Two tool_use blocks open at once, their input_json deltas
+    // INTERLEAVED. Anthropic puts an `index` on every content_block frame,
+    // and that index is the block's identity for its whole life: start,
+    // every delta, stop.
+    //
+    // The decoder used to keep ONE `current_tool_id` and route every delta
+    // to whichever block opened last — the `latest_tool_item` shape from
+    // docs/TOOL_CALL_ATTRIBUTION.md, which has shipped as a bug in
+    // openai-python, opik, strands, zed, and twice here. On this stream it
+    // appends block 0's arguments to block 1's call, producing JSON that
+    // still parses and a tool that runs with another call's path.
+    //
+    // Claude emits blocks one at a time today, so the old code was safe by
+    // luck rather than by construction. This removes the luck.
+    const std::vector<std::pair<std::string, std::string>> events = {
+        {"message_start",
+         R"({"type":"message_start","message":{"usage":{"input_tokens":1}}})"},
+        {"content_block_start",
+         R"({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_A","name":"read"}})"},
+        {"content_block_start",
+         R"({"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_B","name":"grep"}})"},
+        // Interleaved, and deliberately not in open order.
+        {"content_block_delta",
+         R"({"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"pattern\":"}})"},
+        {"content_block_delta",
+         R"({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"path\":"}})"},
+        {"content_block_delta",
+         R"({"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"\"b\"}"}})"},
+        {"content_block_delta",
+         R"({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"\"a.txt\"}"}})"},
+        {"content_block_stop", R"({"type":"content_block_stop","index":0})"},
+        {"content_block_stop", R"({"type":"content_block_stop","index":1})"},
+        {"message_stop", R"({"type":"message_stop"})"},
+    };
+
+    const std::string rendered = render_all(ap::parse_sse_for_test(events));
+
+    // Each call receives its OWN bytes. Before the fix both accumulated
+    // onto toolu_B — the block that opened last — and toolu_A got none.
+    check(rendered.find(R"(ToolUseDelta(toolu_A,{"path":))") != std::string::npos,
+          "block 0's first delta lands on block 0's call");
+    check(rendered.find(R"(ToolUseDelta(toolu_A,"a.txt"}))") != std::string::npos,
+          "block 0's second delta lands on block 0's call");
+    check(rendered.find(R"(ToolUseDelta(toolu_B,{"pattern":))") != std::string::npos,
+          "block 1's first delta lands on block 1's call");
+    check(rendered.find(R"(ToolUseDelta(toolu_B,"b"}))") != std::string::npos,
+          "block 1's second delta lands on block 1's call");
+
+    // Crucially: NO crossover. block 1's payload must never appear under
+    // block 0's id — that is the corruption this whole seam exists to
+    // prevent, and it is invisible downstream because the result parses.
+    check(rendered.find(R"(ToolUseDelta(toolu_A,{"pattern":))") == std::string::npos,
+          "block 1's bytes never land on block 0's call");
+    check(rendered.find(R"(ToolUseDelta(toolu_B,{"path":))") == std::string::npos,
+          "block 0's bytes never land on block 1's call");
+
+    // And each closes exactly once. The stop names its own index, so it
+    // cannot end the wrong call or leave the right one open forever.
+    check(rendered.find("ToolUseEnd(toolu_A)") != std::string::npos,
+          "block 0 ends");
+    check(rendered.find("ToolUseEnd(toolu_B)") != std::string::npos,
+          "block 1 ends");
+}
