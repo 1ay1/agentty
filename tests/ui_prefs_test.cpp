@@ -328,12 +328,12 @@ TEST_CASE("appearance: the palette follows the chosen theme") {
     // by the only means that would have caught the original bug — comparing
     // what the tokens RESOLVE TO across a theme change.
 
-    // Native: the terminal's own colours. Nothing literal, so `fg` is the
-    // terminal default rather than a colour we picked for the user.
+    // Native: the terminal's own colours. Nothing literal, so `fg` RESOLVES
+    // to the terminal default rather than a colour we picked for the user.
     ui_prefs::publish_theme(maya::theme::native);
-    const maya::Color native_fg     = ui::fg;
-    const maya::Color native_accent = ui::accent;
-    CHECK(native_fg.kind() == maya::Color::Kind::Default);
+    const maya::LitColor native_fg     = ui::fg();
+    const maya::LitColor native_accent = ui::accent();
+    CHECK(native_fg.kind() == maya::LitColor::Kind::Default);
 
     // Now a scheme with literal RGB. Same token, different colour.
     const maya::Theme* dracula = nullptr;
@@ -346,18 +346,26 @@ TEST_CASE("appearance: the palette follows the chosen theme") {
     // so a bare `ui::fg != x` is ambiguous. `ui::fg()` names the read.
     CHECK(ui::fg() != native_fg);
     CHECK(ui::accent() != native_accent);
-    CHECK(maya::Color{ui::fg}.kind() == maya::ColorKind::Rgb);
+    CHECK(ui::fg().kind() == maya::LitColor::Kind::Rgb);
+
+    // The Color conversion stays SYMBOLIC — that is the late-binding
+    // invariant (docs/LATE_BINDING.md). A token dropped into a Style must
+    // still name a slot so the resolve happens at PAINT, which is what lets
+    // a stored Element follow a later theme switch. Asserting Rgb here would
+    // be asserting the bug.
+    CHECK(maya::Color{ui::fg}.kind() == maya::ColorKind::Slot);
 
     // And every token tracks the SAME theme — not just the one we looked at.
-    CHECK(maya::Color{ui::danger}    == dracula->error);
-    CHECK(maya::Color{ui::success}   == dracula->success);
-    CHECK(maya::Color{ui::muted}     == dracula->muted);
-    CHECK(maya::Color{ui::highlight} == dracula->primary);
-    CHECK(maya::Color{ui::code_path} == dracula->link);
+    // Compared as RESOLVED values, since that is what a Theme field holds.
+    CHECK(ui::danger()    == dracula->error);
+    CHECK(ui::success()   == dracula->success);
+    CHECK(ui::muted()     == dracula->muted);
+    CHECK(ui::highlight() == dracula->primary);
+    CHECK(ui::code_path() == dracula->link);
 
     // Back to native, so the rest of the suite paints as it expects.
     ui_prefs::publish_theme(maya::theme::native);
-    CHECK(maya::Color{ui::fg} == native_fg);
+    CHECK(ui::fg() == native_fg);
 }
 
 TEST_CASE("appearance: publishing a theme reaches the PROJECTED palettes too") {

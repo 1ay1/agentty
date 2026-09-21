@@ -404,6 +404,90 @@ TEST_CASE("test_sse_stray_close_tag_in_prose_is_kept") {
     CHECK(joined_text(msgs).find("ends reasoning") != std::string::npos);
 }
 
+TEST_CASE("test_sse_tool_call_nested_object_fragments") {
+    // Issue #48. llama.cpp (and any server that streams token-by-token)
+    // fragments `function.arguments` finely enough that a fragment can equal
+    // a PREFIX of what we have already accumulated — `{"` opening a NESTED
+    // object, when the buffer already starts with the `{"` of the top-level
+    // object.
+    //
+    // Chat Completions does not label its payloads, so a per-chunk test
+    // cannot tell that fragment from a coalescing proxy restating the value.
+    // The old heuristic guessed "retransmission" and dropped it, which ate
+    // the `{` that opens the first element of `edits` and made the whole
+    // args string invalid JSON — surfaced to the user as
+    // "old_string is missing — stream truncated" on a stream that was
+    // neither missing a field nor truncated.
+    auto frag = [](std::string_view a) {
+        std::string esc;
+        for (char c : a) {
+            if (c == '"')       esc += "\\\"";
+            else if (c == '\\') esc += "\\\\";
+            else                 esc += c;
+        }
+        return "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+               "\"function\":{\"arguments\":\"" + esc + "\"}}]}}]}\n\n";
+    };
+
+    std::string sse =
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+            "\"id\":\"call_7\",\"type\":\"function\","
+            "\"function\":{\"name\":\"edit\",\"arguments\":\"\"}}]}}]}\n\n";
+
+    // The reporter's shape: the damaging fragment is the `{"` at index 8,
+    // which is byte-identical to the buffer's first two bytes.
+    for (std::string_view f : {"{\"", "path", "\":\"", "/tmp/a.md", "\",\"",
+                               "edits", "\":", "[", "{\"", "old_text",
+                               "\":\"", "x", "\",\"", "new_text", "\":\"",
+                               "y", "\"}", "]", "}"})
+        sse += frag(f);
+
+    sse += "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n"
+           "data: [DONE]\n\n";
+
+    auto msgs = oai::parse_sse_for_test(sse);
+
+    // Every byte the server sent, in order, with nothing dropped.
+    CHECK(joined_tool_args(msgs) ==
+          std::string{"{\"path\":\"/tmp/a.md\",\"edits\":"
+                      "[{\"old_text\":\"x\",\"new_text\":\"y\"}]}"});
+
+    // And it has to actually parse — the user-visible symptom was a tool
+    // call that failed with a missing required field.
+    auto parsed = nlohmann::json::parse(joined_tool_args(msgs), nullptr, false);
+    CHECK(!parsed.is_discarded());
+    CHECK(parsed.contains("edits"));
+    CHECK(parsed["edits"].is_array());
+    CHECK(parsed["edits"][0].contains("old_text"));
+}
+
+TEST_CASE("test_sse_tool_call_coalescing_proxy_snapshots") {
+    // The OTHER carrier, which the heuristic exists for: a proxy that
+    // restates the COMPLETE arguments in every chunk. Blind concatenation
+    // would yield `{"a":1}{"a":1,"b":2}`; the classifier has to notice that
+    // each payload contains the previous one and emit only the suffix.
+    //
+    // Kept beside the fragment test on purpose: these two are the reason a
+    // per-chunk guess is impossible, and a fix for either that breaks the
+    // other is not a fix.
+    std::string sse =
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+            "\"id\":\"call_9\",\"type\":\"function\","
+            "\"function\":{\"name\":\"grep\",\"arguments\":\"\"}}]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+            "\"function\":{\"arguments\":\"{\\\"pattern\\\":\"}}]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+            "\"function\":{\"arguments\":\"{\\\"pattern\\\":\\\"x\\\"}\"}}]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n"
+        "data: [DONE]\n\n";
+
+    auto msgs = oai::parse_sse_for_test(sse);
+    CHECK(joined_tool_args(msgs) == std::string{"{\"pattern\":\"x\"}"});
+
+    auto parsed = nlohmann::json::parse(joined_tool_args(msgs), nullptr, false);
+    CHECK(!parsed.is_discarded());
+}
+
 TEST_CASE("test_sse_tool_call_stream") {
     // OpenAI tool-call streaming: opening frame carries id+name, subsequent
     // frames carry arguments fragments; finish_reason "tool_calls".

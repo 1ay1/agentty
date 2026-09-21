@@ -174,6 +174,31 @@ void restyle_sealed_turns(Model& m) {
     // than retroactively. See pull_field's note below.
 }
 
+// Re-render what is already on screen, for a pref that changes the CONTENT
+// of a built Element rather than only which colour its slots resolve to.
+//
+// A theme swap needs none of this (see restyle_sealed_turns): slots resolve
+// at paint, so a stored Element follows the new palette untouched. These
+// rows are different in kind:
+//
+//   • tier      — decides whether a scheme renders as truecolor, 256, 16 or
+//                 not at all. That is a QUANTISATION of the resolved value,
+//                 applied when the Element is built, so an already-built one
+//                 keeps the old approximation.
+//   • polarity  — picks which side of the canvas the inks sit on, which
+//                 changes which theme resolve() hands back entirely.
+//   • syntax    — re-tokenises every code block into a different span tree.
+//                 Not a colour change at all; a structural one.
+//
+// All three reach the same already-built Elements, and all three used to
+// change nothing until the next turn redrew.
+void rebuild_rendered_content(Model& m) {
+    ui_prefs::publish_theme(*ui_prefs::resolve(m.d.ui, /*tty=*/true).theme);
+    m.ui.view_cache.clear_settled();
+    if (m.ui.frozen_through == 0) return;
+    rehydrate_frozen(m);
+}
+
 namespace {
 
 // Apply a row's current form value back onto the prefs.
@@ -323,15 +348,15 @@ Step appearance_update(Model m, msg::AppearanceMsg am) {
             // write through. `changed` covers ←/→ in place and a dropdown
             // commit; `left_field` covers finishing a number edit.
             if (applied.changed || applied.left_field) {
-                bool recolour = false;
+                bool rebuild = false;
                 if (const auto* row = o->pane.form.focused())
-                    recolour = pull_field(m, *row);
-                // A colour-bearing knob has to reach the transcript that is
-                // already on screen, exactly as a theme change does —
-                // otherwise dropping to 16 colours or flipping polarity
-                // leaves every settled turn in the palette it was built
-                // under, and only new turns look right.
-                if (recolour) restyle_sealed_turns(m);
+                    rebuild = pull_field(m, *row);
+                // tier / polarity / syntax change the CONTENT of an
+                // already-built Element, not just which colour its slots
+                // resolve to — a quantisation, a different resolved theme,
+                // or a different span tree. A theme swap needs no rebuild
+                // (slots resolve at paint); these do.
+                if (rebuild) rebuild_rendered_content(m);
                 persist(m);
                 reproject(m);
             }
