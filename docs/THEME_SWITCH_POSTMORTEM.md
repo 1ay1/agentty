@@ -190,6 +190,78 @@ it runs.
 
 ---
 
+## The structural fix
+
+The three-line latch worked, but it was the wrong shape: it added a fourth
+term to a hand-maintained list.
+
+```cpp
+// before — a parallel description that drifted from the truth
+return coalesced_last_render_ || pending_retheme_ || retheme_paint_owed_;
+```
+
+Every future deferral has to remember to join that list. Nothing enforces
+it, and the bug was precisely one missing term.
+
+The witness chain already knows the answer. `Synced` *means* the wire
+matches the canvas; every other state means it doesn't. So ask it:
+
+```cpp
+[[nodiscard]] inline bool owes_paint(const InlineCoherence& c) noexcept {
+    return std::visit([](const auto& f) -> bool {
+        using T = std::decay_t<decltype(f)>;
+        if      constexpr (std::is_same_v<T, InlineFrame<Synced>>) return false;
+        else if constexpr (std::is_same_v<T, InlineFrame<Sealed>>) return false;
+        else if constexpr (std::is_same_v<T, InlineFrame<Stale>>)  return true;
+        // ... every alternative named explicitly ...
+        else { static_assert(owes_paint_unhandled<T>, "..."); }
+    }, c);
+}
+```
+
+```cpp
+// after — one wire fact, one screen fact, the second derived
+return coalesced_last_render_
+    || (is_inline() && inline_frame::owes_paint(in_coherence_));
+```
+
+The `static_assert` in the `else` is the load-bearing part: adding a state to
+`InlineCoherence` without deciding whether it owes a paint is a **compile
+error**, not a silently dropped frame. There is no registry to join, so a
+future state cannot forget to join it.
+
+This deleted `retheme_paint_owed_` entirely — the latch became expressible as
+a question about the state.
+
+**Verified by mutation.** Flipping the `Stale` arm to `return false` makes
+`test_owes_paint_is_derived` abort (exit 134). The test kills the mutant, so
+it is pinning the invariant rather than decorating it.
+
+One scoping detail worth keeping: the predicate is gated on `is_inline()`,
+because `in_coherence_` is the *inline* witness chain. Fullscreen and grid
+never advance it, so an ungated call would read `Empty` forever and busy-loop
+— turning a missed frame into a pegged core. The retry cadence is separately
+bounded at 2–8 ms, so an owed frame paces rather than spins.
+
+### Why this one, out of four candidate designs
+
+Typed return values (`Painted` / `NeedsPaint`), RAII debt tokens, and folding
+the paint into the transition itself would all have prevented the bug. This
+one was chosen because it **removes** code rather than adding a mechanism:
+one hand-maintained list deleted, one derived predicate added, and the
+obligation moved from "remember to set a flag" to "the type already knows".
+
+The general rule it encodes:
+
+> When something must be true of *every* state, derive it from the state.
+> Never enumerate the cases — enumerations rot, derivations can't.
+
+Which is the same inversion `visual.hpp` already uses for the frame hash and
+`theme::projected<P>()` uses for palettes. The mechanisms were there; this
+seam just hadn't adopted one yet.
+
+---
+
 ## Fixes retained
 
 | commit | what |
@@ -198,4 +270,5 @@ it runs.
 | agentty `9af90536` | `ui::Slot` hands back a symbolic slot |
 | agentty `4cd0a9d2` | theme switch stops rebuilding the transcript (net −9 lines) |
 | maya `1eb42c9` | theme swap survives a coalesced frame |
-| maya (this) | **the actual fix** — a demoted repaint is guaranteed a painting frame |
+| maya `d14faf3` | **the actual fix** — a demoted repaint is guaranteed a painting frame |
+| maya `d63d077` | the structural version — the debt is derived from the state, and a new state that forgets to answer is a compile error |
