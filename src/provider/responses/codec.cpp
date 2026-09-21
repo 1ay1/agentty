@@ -277,6 +277,17 @@ json build_body(const provider::Request& req) {
 struct ToolSlot {
     std::string call_id;   // the id a tool_result must echo
     std::string args;
+    // The item's position in the response's output[] array.
+    //
+    // This is the ONLY identity Copilot's proxy leaves intact. It rewrites
+    // `item_id` on argument frames into a ~440-char base64 blob (its
+    // encrypted reasoning content) that matches no item it ever announced,
+    // so every carrier looked unaddressable and all 45 tools dispatched
+    // with `{}`. Same root cause as openclaw#72602 and the copilot-sdk
+    // report: the proxy's id rewriting does not round-trip.
+    //
+    // -1 = the frame that opened this call carried no output_index.
+    int output_index = -1;
 };
 
 // ── The set of calls currently open, with no way to pick one arbitrarily ──
@@ -379,13 +390,45 @@ struct StreamCtx {
 // the chat decoder's wire::ToolCallTracker, which returns Ambiguous rather
 // than picking; see include/agentty/provider/wire/tool_calls.hpp.
 [[nodiscard]] std::string addressed_item(const StreamCtx& ctx, const json& j) {
+    // (1) output_index — the item's slot in the response's output[] array.
+    //
+    // Tried FIRST, ahead of item_id, because it is the one identity a proxy
+    // cannot rewrite without also renumbering the array it is describing.
+    // Copilot's proxy replaces `item_id` on argument frames with a ~440-char
+    // base64 blob (its encrypted reasoning content) that matches nothing it
+    // announced — so item_id was non-empty, looked authoritative, resolved
+    // to nobody, and every tool dispatched with `{}`. Matching on position
+    // sidesteps the rewriting entirely. Same failure documented in
+    // openclaw#72602 ("Encrypted content item_id did not match the target
+    // item id") and github/copilot-sdk#615.
+    if (const auto oi = j.find("output_index");
+        oi != j.end() && oi->is_number_integer()) {
+        const int idx = oi->get<int>();
+        for (const auto& [item, slot] : ctx.tools)
+            if (slot.output_index == idx) return item;
+        // A position we have no call for is NOT a reason to fall through to
+        // a rewritten item_id: the server told us exactly which slot it
+        // meant and we do not have it. Keep looking only via the
+        // unambiguous paths below.
+    }
+
+    // (2) item_id — correct on every well-behaved Responses server, and
+    // still the only handle when a frame carries no output_index.
     if (const auto it = j.find("item_id");
         it != j.end() && it->is_string()
-        && !it->get_ref<const std::string&>().empty())
-        return it->get<std::string>();
-    // Exactly one candidate means there is no order to be wrong about, and
-    // OpenCalls::sole() is the only read that can answer at all — it returns
-    // nullopt for zero or many rather than handing back an arbitrary item.
+        && !it->get_ref<const std::string&>().empty()) {
+        const auto& id = it->get_ref<const std::string&>();
+        // Only trust it if it names a call we actually opened. An id that
+        // resolves to nothing is not authority, it is noise — treating it
+        // as authoritative is what suppressed the sole() fallback below and
+        // turned a routable single-call turn into `{}`.
+        if (ctx.tools.find(id) != ctx.tools.end()) return id;
+    }
+
+    // (3) Exactly one candidate means there is no order to be wrong about,
+    // and OpenCalls::sole() is the only read that can answer at all — it
+    // returns nullopt for zero or many rather than handing back an
+    // arbitrary item.
     if (auto only = ctx.open_tool_items.sole()) return *only;
     return {};
 }
@@ -523,7 +566,16 @@ void dispatch(StreamCtx& ctx, std::string_view data) {
             const std::string item_id = item.value("id", std::string{});
             const std::string call_id = item.value("call_id", item_id);
             const std::string name    = item.value("name", std::string{});
-            ctx.tools[item_id] = ToolSlot{call_id, {}};
+            // The slot this item occupies in the response's output[] array.
+            // Captured here because this is the one frame whose item_id is
+            // trustworthy (the server is announcing the item, not
+            // referring back to it), so it is where position and identity
+            // can still be tied together. Later argument frames carry only
+            // the position on Copilot — see addressed_item.
+            const int out_idx = (j.contains("output_index")
+                                 && j["output_index"].is_number_integer())
+                              ? j["output_index"].get<int>() : -1;
+            ctx.tools[item_id] = ToolSlot{call_id, {}, out_idx};
             ctx.open_tool_items.open(item_id);
             ctx.saw_function_call = true;
             // The identity pairing, logged once per call. item_id is what
@@ -532,8 +584,9 @@ void dispatch(StreamCtx& ctx, std::string_view data) {
             // a mismatch here is the difference between arguments landing
             // and arguments going to tool_args_unroutable.
             AGT_LOG(Wire, Debug, "responses.tool_open",
-                    "item_id={} call_id={} name={}",
-                    item_id, call_id, name.empty() ? "<empty>" : name);
+                    "item_id={} call_id={} name={} output_index={}",
+                    item_id, call_id, name.empty() ? "<empty>" : name,
+                    out_idx);
             ctx.sink(StreamToolUseStart{ToolCallId{call_id}, ToolName{name}});
             // Carrier (1): some backends deliver the whole args string
             // up-front on `added`. A snapshot, so route it as a total.
