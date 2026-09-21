@@ -460,6 +460,29 @@ struct Message {
     // Assistant turns produced without reasoning. Multiple reasoning items in
     // one turn are joined newline-separated in order.
     std::string reasoning_encrypted;
+    // WHICH site minted those blobs (`responses::Site::id` — "chatgpt",
+    // "copilot", …). Empty on turns with no encrypted reasoning.
+    //
+    // The ciphertext is opaque AND account-scoped: only the backend that
+    // produced it can decrypt it. Replaying a ChatGPT blob to Copilot is
+    // not a no-op, it is a 400 — "Encrypted content item_id did not match
+    // the target item id" — and it fails the whole request, not just the
+    // reasoning item. That is openclaw#72602 and github/copilot-sdk#615,
+    // both filed against exactly this: a thread that switches provider
+    // mid-conversation and carries its reasoning across.
+    //
+    // We had no such tag, so nothing stopped it. Switch provider with ^P
+    // on a thread that has Codex reasoning captured, and every subsequent
+    // turn sends ciphertext the new backend cannot read. Today that is
+    // masked — Copilot rejects the `include`, so the field only ever
+    // fills on ChatGPT — which means the bug is latent, waiting for a
+    // second site to start returning blobs. Latent is not fixed.
+    //
+    // Recording the origin is what makes the replay decidable: send a blob
+    // only to the site that minted it, and drop it silently otherwise.
+    // Dropping costs continuity of chain-of-thought across a provider
+    // switch, which the user just asked for anyway; sending costs the turn.
+    std::string reasoning_site;
     std::string reasoning_summary;
 
     // Unified reasoning text for DISPLAY, across every provider. All three

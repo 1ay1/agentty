@@ -209,7 +209,15 @@ struct StreamThinkingDelta {
 // The reducer stashes it on the in-flight assistant Message so the follow-up
 // turn can replay it in `input[]` and preserve chain-of-thought across tool
 // rounds under store:false. Never rendered; wire-only.
-struct StreamReasoning { std::string encrypted; };
+// An opaque, ACCOUNT-SCOPED reasoning blob the backend asked us to replay on
+// the next turn. `site` records which host minted it (responses::Site::id).
+//
+// The pairing is the whole point: ciphertext from one backend sent to another
+// is a 400 that fails the entire request, not a field the server ignores
+// (openclaw#72602). Carrying the origin with the payload is what lets the
+// replay be decided rather than assumed — the two travel together or the
+// invariant is only a comment.
+struct StreamReasoning { std::string encrypted; std::string site; };
 // Mirrors Anthropic's message.usage shape. cache_* fields are non-zero only
 // when the request hit a cache_control breakpoint. Fields default to 0 so
 // callers that only care about input/output keep working.

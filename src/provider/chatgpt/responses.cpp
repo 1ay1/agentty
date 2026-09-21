@@ -339,7 +339,12 @@ provider::StreamResult stream_responses(provider::Request req,
 // the existing expectations about store/include still hold.
 nlohmann::json build_body_for_test(const provider::Request& req) {
     provider::Request r = req;
-    json body = responses::build_body(r);
+    // Build FOR this site, exactly as stream() does. The seam claims to
+    // return the body as sent, so it has to pass the same site id —
+    // otherwise encrypted-reasoning replay is gated off here and on
+    // nowhere else, and the test would be asserting a body no request
+    // ever produces.
+    json body = responses::build_body(r, kChatGptSite.id);
     if (r.model.empty() || r.model == "chatgpt-default")
         body["model"] = "gpt-5-codex";
     chatgpt_decorate_body(body, r);

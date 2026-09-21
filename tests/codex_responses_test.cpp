@@ -329,6 +329,7 @@ TEST_CASE("build input replays reasoning") {
 
     Message a; a.role = Role::Assistant; a.text = "";
     a.reasoning_encrypted = "BLOB_A\nBLOB_B";   // two items in one turn
+    a.reasoning_site      = "chatgpt";          // minted by THIS backend
     ToolUse tc;
     tc.id = ToolCallId{"call_1"}; tc.name = ToolName{"shell"};
     tc.args = json{{"command", "ls"}};
@@ -348,6 +349,50 @@ TEST_CASE("build input replays reasoning") {
     CHECK(in[2]["encrypted_content"] == "BLOB_B");
     CHECK(in[3]["type"] == "function_call");      // reasoning precedes the call
     CHECK(in[4]["type"] == "function_call_output");
+}
+
+TEST_CASE("build input never replays another site's reasoning") {
+    // Encrypted reasoning is opaque AND account-scoped: only the backend
+    // that minted it can decrypt it. Sending a Copilot blob to ChatGPT is
+    // not a field the server ignores — it is a 400 that fails the WHOLE
+    // request ("Encrypted content item_id did not match the target item
+    // id", openclaw#72602, github/copilot-sdk#615).
+    //
+    // So the replay is gated on the minting site, and this pins the three
+    // ways the gate has to hold. Nothing else in the suite would notice:
+    // a wrongly-replayed blob produces a perfectly well-formed request.
+    const auto input_of = [](const Message& a) {
+        provider::Request req;
+        req.model = "gpt-5-codex";
+        Message u; u.role = Role::User; u.text = "go";
+        req.messages.push_back(u);
+        req.messages.push_back(a);
+        return cc::build_body_for_test(req)["input"];
+    };
+    const auto has_reasoning = [](const json& in) {
+        for (const auto& item : in)
+            if (item.value("type", "") == "reasoning") return true;
+        return false;
+    };
+
+    Message a; a.role = Role::Assistant; a.text = "done";
+    a.reasoning_encrypted = "BLOB";
+
+    // 1. Minted by THIS site — replayed, which is the whole feature.
+    a.reasoning_site = "chatgpt";
+    CHECK(has_reasoning(input_of(a)));
+
+    // 2. Minted by ANOTHER site — dropped. This is the user switching
+    //    provider with ^P mid-thread, which is a supported thing to do.
+    a.reasoning_site = "copilot";
+    CHECK(!has_reasoning(input_of(a)));
+
+    // 3. UNTAGGED — also dropped. Threads written before the tag existed
+    //    reload with an empty site, and "we don't know who minted this"
+    //    has to fail closed. Losing chain-of-thought continuity on an old
+    //    thread costs nothing visible; a 400 costs the turn.
+    a.reasoning_site.clear();
+    CHECK(!has_reasoning(input_of(a)));
 }
 
 TEST_CASE("sse error") {

@@ -110,12 +110,21 @@ struct Site {
 // ── Codec pieces (exposed for tests and for hosts that need them) ────────
 
 // Conversation → Responses `input[]`.
-[[nodiscard]] nlohmann::json build_input(const provider::Request& req);
+//
+// `site` is the id of the host this body is being built FOR
+// (`Site::id` — "chatgpt", "copilot"). It gates encrypted-reasoning
+// replay: a blob is account-scoped ciphertext, so it may only be sent
+// back to the site that minted it. Empty means "no site context" and
+// replays nothing, which is the safe default for tests and for any
+// caller that has not threaded it through.
+[[nodiscard]] nlohmann::json build_input(const provider::Request& req,
+                                         std::string_view site = {});
 // agentty ToolSpecs → Responses `tools[]`.
 [[nodiscard]] nlohmann::json build_tools(const provider::Request& req);
 // The neutral request body (model/input/tools/stream + reasoning ladder).
 // Hosts layer their extras on top via Site::decorate_body.
-[[nodiscard]] nlohmann::json build_body(const provider::Request& req);
+[[nodiscard]] nlohmann::json build_body(const provider::Request& req,
+                                        std::string_view site = {});
 
 // Scripted SSE `data:` payloads → the Msg sequence a reducer would see.
 // The single entry point every Responses-dialect test drives.

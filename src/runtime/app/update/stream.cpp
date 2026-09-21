@@ -1644,6 +1644,14 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                 auto& msg = m.d.current.messages.back();
                 // A turn can emit multiple reasoning items; keep them all in
                 // order, newline-joined, so every blob is replayed.
+                //
+                // Record WHICH site minted them. The blobs in one message
+                // always come from one turn, so one tag covers the set;
+                // build_input replays them only when it is building for that
+                // same site. Without this, switching provider mid-thread
+                // sends ciphertext the new backend cannot decrypt, and the
+                // whole request 400s (openclaw#72602).
+                msg.reasoning_site = e.site;
                 if (msg.reasoning_encrypted.empty())
                     msg.reasoning_encrypted = std::move(e.encrypted);
                 else {

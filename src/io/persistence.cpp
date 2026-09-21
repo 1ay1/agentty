@@ -511,6 +511,11 @@ json message_to_json(const Message& m) {
     // base64-ish ciphertext (ASCII), so no UTF-8 scrub needed.
     if (!m.reasoning_encrypted.empty())
         j["reasoning_encrypted"] = m.reasoning_encrypted;
+    // The site that minted those blobs. Persisted WITH them: a thread
+    // reloaded tomorrow must still know which backend can decrypt its
+    // ciphertext, or the first turn after a restart replays it blind.
+    if (!m.reasoning_site.empty())
+        j["reasoning_site"] = m.reasoning_site;
     // Non-image attachments (Paste / FileRef / Symbol). Persisted so a
     // reloaded thread can rebuild its wire payload — the user's `text`
     // carries chip placeholders, and the model only sees real content
@@ -705,6 +710,11 @@ std::expected<Message, DeserializeError> message_from_json(const json& j) {
                     tb.value("redacted_data", "")});
     m.reasoning_summary = j.value("reasoning_summary", "");
     m.reasoning_encrypted = j.value("reasoning_encrypted", "");
+    // Absent on threads written before the tag existed. Empty means "we
+    // don't know which site minted this", and build_input replays nothing
+    // without a match — so an old thread quietly loses reasoning
+    // continuity rather than risking a 400 on a blob we cannot place.
+    m.reasoning_site = j.value("reasoning_site", "");
     if (auto it = j.find("error"); it != j.end() && it->is_string()
         && !it->get<std::string>().empty())
         m.error = it->get<std::string>();

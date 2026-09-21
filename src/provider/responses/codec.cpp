@@ -74,7 +74,7 @@ std::string scrub_utf8(std::string_view in) {
 // Rebuilds the whole turn history each call (the Codex backend runs
 // store:false, so state is client-side). Every assistant tool_call becomes a
 // `function_call` item immediately followed by its `function_call_output`.
-json build_input(const provider::Request& req) {
+json build_input(const provider::Request& req, std::string_view site) {
     json input = json::array();
     // Count terminal-carrying tool results so each can be assigned a recency
     // rank (0 = newest) for the shared age-tiered wire budget. Without this a
@@ -133,7 +133,8 @@ json build_input(const provider::Request& req) {
         // produced (item-pairing invariant). Under store:false we send only
         // `encrypted_content` — NOT the server `id` (echoing a rs_… id makes
         // the backend do a lookup that 404s on a non-persisted response).
-        if (!m.reasoning_encrypted.empty()) {
+        if (!m.reasoning_encrypted.empty()
+            && !site.empty() && m.reasoning_site == site) {
             std::size_t start = 0;
             while (start <= m.reasoning_encrypted.size()) {
                 std::size_t nl = m.reasoning_encrypted.find('\n', start);
@@ -241,11 +242,11 @@ json build_tools(const provider::Request& req) {
 // `model` is deliberately NOT defaulted here: hosts can rewrite the slug
 // (Copilot's Auto session picks a server-blessed model), so the caller's
 // Target::model is authoritative and stream() stamps it after decoration.
-json build_body(const provider::Request& req) {
+json build_body(const provider::Request& req, std::string_view site) {
     json body{
         {"model", req.model},
         {"instructions", scrub_utf8(req.system_prompt)},
-        {"input", build_input(req)},
+        {"input", build_input(req, site)},
         {"tool_choice", "auto"},
         {"parallel_tool_calls", true},
         {"stream", true},
@@ -375,6 +376,10 @@ struct StreamCtx {
     // reducer), so swallowing it entirely would make a long silent reasoning
     // phase look like a stalled stream. Empty text stores nothing.
     bool show_reasoning = true;
+    // Which host this stream is talking to (responses::Site::id). Stamped
+    // onto every captured reasoning blob so the replay can check that the
+    // ciphertext is going back to the backend that can decrypt it.
+    std::string site;
     bool saw_function_call = false;
     bool terminated = false;
     // ── Argument-routing health, counted for the whole response ────────
@@ -735,7 +740,7 @@ void dispatch(StreamCtx& ctx, std::string_view data) {
             // reasoning_summary_text.delta → StreamThinkingDelta.
             if (auto enc = item.value("encrypted_content", std::string{});
                 !enc.empty())
-                ctx.sink(StreamReasoning{std::move(enc)});
+                ctx.sink(StreamReasoning{std::move(enc), ctx.site});
             if (ctx.text_block_open) {
                 ctx.text_block_open = false;
                 ctx.sink(StreamTextBlockClosed{});
@@ -905,7 +910,7 @@ provider::StreamResult stream(const Site& site, provider::Request req,
     http::append_sse_no_buffer(hr.headers);
 
     try {
-        json body = build_body(req);
+        json body = build_body(req, site.id);
         // Host-specific fields layer on top of the neutral body.
         if (site.decorate_body) site.decorate_body(body, req);
         // The host's model choice is authoritative (see build_body).
@@ -947,6 +952,7 @@ provider::StreamResult stream(const Site& site, provider::Request req,
     StreamCtx ctx;
     ctx.sink = sink;
     ctx.show_reasoning = req.show_reasoning;
+    ctx.site = std::string{site.id};
     // Shared scaffold: status/Retry-After capture, heartbeats, buffered-wait,
     // wire dump, capped error body. Our feed stops the read once dispatch()
     // fired the terminal event (deliberate post-`response.completed` abort —
