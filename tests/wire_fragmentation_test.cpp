@@ -64,17 +64,37 @@ enum class Framing {
     DeltasAndDone,   // Both. The snapshot must not duplicate the fragments.
     InlineOnAdded,   // Whole args up-front on output_item.added.
     ItemDoneOnly,    // Only the completed item restates them.
+
+    // The CUSTOM tool-call protocol. Same two shapes as the two above it,
+    // but a different item type (`custom_tool_call`), different event names
+    // (`response.custom_tool_call_input.*`) and the payload under `input`
+    // rather than `arguments`.
+    //
+    // A model using custom tool calling delivers its arguments ONLY here.
+    // We dropped these events entirely until GitHub's own client was found
+    // to deserialize them — the same silent `{}` dispatch that DoneOnly
+    // caused on Copilot, from the same cause: a carrier nobody enumerated.
+    // Putting them in the matrix is what stops the third repeat.
+    CustomDeltasOnly,
+    CustomDoneOnly,
 };
 
 static std::string name_of(Framing f) {
     switch (f) {
-        case Framing::DeltasOnly:    return "DeltasOnly";
-        case Framing::DoneOnly:      return "DoneOnly (Copilot)";
-        case Framing::DeltasAndDone: return "DeltasAndDone";
-        case Framing::InlineOnAdded: return "InlineOnAdded";
-        case Framing::ItemDoneOnly:  return "ItemDoneOnly";
+        case Framing::DeltasOnly:       return "DeltasOnly";
+        case Framing::DoneOnly:         return "DoneOnly (Copilot)";
+        case Framing::DeltasAndDone:    return "DeltasAndDone";
+        case Framing::InlineOnAdded:    return "InlineOnAdded";
+        case Framing::ItemDoneOnly:     return "ItemDoneOnly";
+        case Framing::CustomDeltasOnly: return "CustomDeltasOnly";
+        case Framing::CustomDoneOnly:   return "CustomDoneOnly";
     }
     return "?";
+}
+
+// Is this framing on the custom-tool protocol rather than the function one?
+static bool is_custom(Framing f) {
+    return f == Framing::CustomDeltasOnly || f == Framing::CustomDoneOnly;
 }
 
 // Build a spec-legal Responses SSE script delivering `args` under `style`.
@@ -82,22 +102,33 @@ static std::vector<std::string> synth(Framing style, const std::string& args) {
     const std::string esc = json(args).dump();  // args as a JSON string literal
     std::vector<std::string> sse;
 
+    // The custom-tool protocol spells all three of these differently. Keep
+    // the spellings in one place so the script below reads as ONE shape
+    // with two vocabularies, which is what it is.
+    const char* item_type = is_custom(style) ? "custom_tool_call" : "function_call";
+    const char* arg_key   = is_custom(style) ? "input" : "arguments";
+
     std::string added =
-        R"({"type":"response.output_item.added","item":{"type":"function_call",)"
-        R"("id":"fc_1","call_id":"call_9","name":"grep")";
-    if (style == Framing::InlineOnAdded) added += R"(,"arguments":)" + esc;
+        std::string{R"({"type":"response.output_item.added","item":{"type":")"}
+        + item_type + R"(","id":"fc_1","call_id":"call_9","name":"grep")";
+    if (style == Framing::InlineOnAdded)
+        added += std::string{",\""} + arg_key + "\":" + esc;
     added += "}}";
     sse.push_back(added);
 
     const auto delta = [&](const std::string& chunk) {
-        sse.push_back(
-            R"({"type":"response.function_call_arguments.delta","item_id":"fc_1",)"
-            R"("delta":)" + json(chunk).dump() + "}");
+        const char* ev = is_custom(style)
+                       ? "response.custom_tool_call_input.delta"
+                       : "response.function_call_arguments.delta";
+        sse.push_back(std::string{R"({"type":")"} + ev
+                      + R"(","item_id":"fc_1","delta":)"
+                      + json(chunk).dump() + "}");
     };
 
     switch (style) {
         case Framing::DeltasOnly:
-        case Framing::DeltasAndDone: {
+        case Framing::DeltasAndDone:
+        case Framing::CustomDeltasOnly: {
             const auto mid = args.size() / 2;
             delta(args.substr(0, mid));
             delta(args.substr(mid));
@@ -106,6 +137,7 @@ static std::vector<std::string> synth(Framing style, const std::string& args) {
         case Framing::DoneOnly:
         case Framing::InlineOnAdded:
         case Framing::ItemDoneOnly:
+        case Framing::CustomDoneOnly:
             break;  // no fragments at all
     }
 
@@ -115,11 +147,17 @@ static std::vector<std::string> synth(Framing style, const std::string& args) {
             R"({"type":"response.function_call_arguments.done","item_id":"fc_1",)"
             R"("arguments":)" + esc + "}");
     }
+    if (style == Framing::CustomDoneOnly) {
+        sse.push_back(
+            R"({"type":"response.custom_tool_call_input.done","item_id":"fc_1",)"
+            R"("input":)" + esc + "}");
+    }
 
     std::string done =
-        R"({"type":"response.output_item.done","item":{"type":"function_call",)"
-        R"("id":"fc_1")";
-    if (style == Framing::ItemDoneOnly) done += R"(,"arguments":)" + esc;
+        std::string{R"({"type":"response.output_item.done","item":{"type":")"}
+        + item_type + R"(","id":"fc_1")";
+    if (style == Framing::ItemDoneOnly)
+        done += std::string{",\""} + arg_key + "\":" + esc;
     done += "}}";
     sse.push_back(done);
     sse.push_back(R"({"type":"response.completed","response":{"usage":{}}})");
@@ -141,7 +179,8 @@ TEST_CASE("tool arguments survive every legal SSE framing") {
 
     for (auto style : {Framing::DeltasOnly, Framing::DoneOnly,
                        Framing::DeltasAndDone, Framing::InlineOnAdded,
-                       Framing::ItemDoneOnly}) {
+                       Framing::ItemDoneOnly,
+                       Framing::CustomDeltasOnly, Framing::CustomDoneOnly}) {
         INFO("framing = " << name_of(style));
         const auto decoded = decode_args(synth(style, args));
 
@@ -158,7 +197,8 @@ TEST_CASE("tool arguments survive every legal SSE framing") {
 TEST_CASE("a tool call emits exactly one end regardless of framing") {
     const std::string args = R"({"pattern":"x"})";
     for (auto style : {Framing::DeltasOnly, Framing::DoneOnly,
-                       Framing::DeltasAndDone, Framing::InlineOnAdded}) {
+                       Framing::DeltasAndDone, Framing::InlineOnAdded,
+                       Framing::CustomDeltasOnly, Framing::CustomDoneOnly}) {
         INFO("framing = " << name_of(style));
         std::map<std::string, int> ends;
         for (const auto& m : cc::parse_sse_for_test(synth(style, args)))

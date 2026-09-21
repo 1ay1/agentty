@@ -556,9 +556,19 @@ void dispatch(StreamCtx& ctx, std::string_view data) {
             if (ctx.show_reasoning)
                 ctx.sink(StreamThinkingDelta{{}, {}, /*block_boundary=*/true});
         }
-        if (itype == "function_call") {
+        if (itype == "function_call" || itype == "custom_tool_call") {
             // A new tool call opens. Close any prior text block first so the
             // reveal cursor snaps before the card (matches Anthropic seam).
+            //
+            // `custom_tool_call` is the same thing under the custom-tool
+            // protocol: a named call whose arguments stream on the
+            // custom_tool_call_input carriers instead of the
+            // function_call_arguments ones. It opens a slot identically,
+            // because everything downstream — attribution, argument
+            // accumulation, the ToolUse the reducer builds — is the same
+            // question. Recognising only `function_call` here would leave
+            // carrier (5) wired to a slot that never exists, which is a
+            // more confusing version of dropping the event outright.
             if (ctx.text_block_open) {
                 ctx.text_block_open = false;
                 ctx.sink(StreamTextBlockClosed{});
@@ -590,8 +600,11 @@ void dispatch(StreamCtx& ctx, std::string_view data) {
             ctx.sink(StreamToolUseStart{ToolCallId{call_id}, ToolName{name}});
             // Carrier (1): some backends deliver the whole args string
             // up-front on `added`. A snapshot, so route it as a total.
-            if (const auto a = item.value("arguments", std::string{}); !a.empty())
-                feed_tool_args(ctx, item_id, a, /*total=*/true);
+            // `input` is the custom-tool spelling of the same field.
+            auto a0 = item.value("arguments", std::string{});
+            if (a0.empty()) a0 = item.value("input", std::string{});
+            if (!a0.empty())
+                feed_tool_args(ctx, item_id, a0, /*total=*/true);
         }
         return;
     }
@@ -611,15 +624,48 @@ void dispatch(StreamCtx& ctx, std::string_view data) {
                        j.value("arguments", std::string{}), /*total=*/true);
         return;
     }
+    // Carrier (5): the CUSTOM tool-call input stream. Same two shapes as
+    // carriers (2) and (3) — `.delta` fragments then a `.done` snapshot —
+    // but under a different event name and with the payload on `input`
+    // rather than `delta`/`arguments`.
+    //
+    // A model using custom tool calling delivers its arguments ONLY here.
+    // We used to fall through to unhandled_event and drop them, which is
+    // the same silent `{}` dispatch that carrier (3) caused on Copilot —
+    // and for the same reason: a carrier nobody enumerated. GitHub's own
+    // client deserializes this one (`response.custom_tool_call_input.delta`
+    // sits beside the others in its event table), which is what prompted
+    // the check.
+    //
+    // Routed through the same feed_tool_args seam as every other carrier,
+    // so attribution, snapshot-vs-fragment reconciliation and logging are
+    // identical by construction rather than by care.
+    if (type == "response.custom_tool_call_input.delta") {
+        feed_tool_args(ctx, addressed_item(ctx, j),
+                       j.value("delta", std::string{}), /*total=*/false);
+        return;
+    }
+    if (type == "response.custom_tool_call_input.done") {
+        feed_tool_args(ctx, addressed_item(ctx, j),
+                       j.value("input", std::string{}), /*total=*/true);
+        return;
+    }
     if (type == "response.output_item.done") {
         const auto& item = j.value("item", json::object());
         const auto itype = item.value("type", std::string{});
-        if (itype == "function_call") {
+        if (itype == "function_call" || itype == "custom_tool_call") {
             const std::string item_id = item.value("id", std::string{});
             // Carrier (4): the completed item may restate the full arguments.
             // Last chance to learn them before the call is dispatched — a
             // no-op when an earlier carrier already supplied them.
-            if (const auto a = item.value("arguments", std::string{}); !a.empty())
+            //
+            // Custom tool calls carry the same snapshot under `input`
+            // instead of `arguments`; try both rather than assuming which
+            // protocol produced this item. Mislabelled here costs a whole
+            // call's arguments, and the cost of looking is one map lookup.
+            auto a = item.value("arguments", std::string{});
+            if (a.empty()) a = item.value("input", std::string{});
+            if (!a.empty())
                 feed_tool_args(ctx, item_id, a, /*total=*/true);
             close_tool(ctx, item_id);
         }
@@ -735,8 +781,16 @@ void dispatch(StreamCtx& ctx, std::string_view data) {
         static std::mutex           seen_mu;
         static std::set<std::string> seen;
         std::lock_guard lk(seen_mu);
-        if (seen.insert(type).second)
+        if (seen.insert(type).second) {
+            // On the WIRE channel, not dbglog. An unknown event is the
+            // single most useful line in a bug report about this dialect —
+            // and under `AGENTTY_LOG=wire=debug`, the filter someone
+            // debugging a transport actually runs, a dbglog line does not
+            // appear at all. A dropped carrier that is invisible on the one
+            // channel you would be watching is a dropped carrier twice.
+            AGT_LOG(Wire, Warn, "responses.unhandled_event", "type={}", type);
             util::dbglog("responses.unhandled_event", type);
+        }
     }
     ctx.sink(StreamHeartbeat{});
 }
