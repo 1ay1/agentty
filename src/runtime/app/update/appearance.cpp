@@ -79,100 +79,99 @@ void reproject(Model& m) {
 // conversation on screen and the chrome restyles while the transcript above
 // it does not. The taller the thread, the more of the screen stays wrong.
 //
-// rehydrate_frozen is the documented escape hatch for exactly this (see
-// frozen.cpp's lifecycle invariants: "if such a mutation becomes necessary
-// … call rehydrate_frozen() to rebuild from scratch"). It re-seals every
-// turn under the theme now in force.
-//
-// Safe because a theme change is HEIGHT-PRESERVING: only the colours of
-// each cell differ, so every rebuilt block lands at the height the ledger
-// already recorded. A STRUCTURAL pref (compact turns, density) must not do
-// this — it would re-seal at a new height and tear the ledger, which is why
-// those settings are documented as forward-only.
+// THAT IS HISTORY. Colours are late-bound now (docs/LATE_BINDING.md): a
+// sealed Element carries symbolic slots and resolves at PAINT, so it follows
+// the live theme without being rebuilt. The paragraph above is kept because
+// it names the failure precisely, and because the reasoning below — about
+// what a re-seal costs — is exactly why we stopped doing one.
 }  // namespace
 
-// Re-style everything already built under a NEW theme.
+// Publish a NEW theme to everything already on screen.
 //
-// Declared in internal.hpp: external linkage so its cost is measurable
+// Declared in internal.hpp: external linkage so its cost stays measurable
 // (theme_preview_cost_probe), because this runs on EVERY arrow key in the
 // theme browser — "moving applies it, you are looking at the preview" is that
 // panel's whole design.
 //
-// ── Why there is only one of these ───────────────────────────────────────
+// ── Why this is now a publish and not a rebuild ───────────────────────
 //
-// A cheaper "preview" variant that skipped rehydrate_frozen() is tempting and
-// WRONG: the frozen ledger is PAINTED every frame (conversation.cpp hands it
-// to maya as cfg.ledger), so its Elements are on screen. Skipping it previews
-// the new scheme on the newest turns and leaves everything above in the old
-// one — worse than not previewing at all.
+// It used to re-seal the frozen prefix through rehydrate_frozen() and drop
+// every settled turn's built Element, because both had the outgoing palette
+// RESOLVED into them and nothing else would ever invalidate them (a theme
+// switch changes no bytes, so no content-keyed cache notices).
 //
-// It is also unnecessary. The ledger is bounded to ~3 viewports by
-// frozen_row_budget(), so this is O(visible rows), NOT O(transcript):
-// measured at 0.64 ms on a 3000-message thread, 2% of the 33 ms budget at 30
-// keys/sec, and FLAT as the thread grows.
+// Two things were wrong with paying that cost, and the second one is the
+// reason the whole approach was abandoned:
 //
-// What actually made the browser lag was never this function's cost — it was
-// calling persist() alongside it on every keystroke (a settings write per
-// arrow) and re-sealing turns whose HEIGHT could change. Height stability is
-// the load-bearing part: a re-seal at a new height shifts maya's committed
-// scrollback prefix, check_scrollback fails, the frame demotes to Stale, and
-// recovery is a full-viewport repaint (~33 KB instead of 13 bytes). At 30
-// keys/sec that is ~1 MB/s the terminal cannot composite — the highlight
-// appears frozen until you stop, which only happens on a thread long enough
-// to have a frozen prefix at all.
+//   1. It is unnecessary under late binding. The Elements are not stale.
+//
+//   2. It scales with the transcript, and a preview keystroke does not have
+//      that much time. Re-rendering committed content per switch measured
+//      2.42 -> 4.65 ms per keypress on a 100-message thread and grew with
+//      length; past one key-repeat slot (33 ms at 30/s) keys outrun frames,
+//      frames coalesce, and the browser visibly updates on every SECOND
+//      theme you arrow past. "Slow" and "skips every other entry" are one
+//      symptom, and this was its cause.
+//
+// Height stability is why a re-seal is dangerous rather than merely slow: a
+// rebuild at a different height shifts maya's committed scrollback prefix,
+// check_scrollback fails, the frame demotes to Stale, and recovery is a
+// full-viewport repaint (~33 KB instead of 13 bytes). At 30 keys/sec that is
+// ~1 MB/s the terminal cannot composite. Not rebuilding at all is both
+// cheaper and safer than rebuilding carefully.
+//
+// A STRUCTURAL pref (density, compact turns) is different in kind: it
+// changes row HEIGHTS, which invalidates the ledger's recorded measurements
+// rather than their colours. Those stay forward-only — they apply to turns
+// rendered from then on, and are deliberately not retro-applied, because
+// re-sealing at a new height tears the ledger. See pull_field below.
 void restyle_sealed_turns(Model& m) {
-    // Publish FIRST. The reducer runs before view(), which is where the
-    // theme is normally resolved and published — so rebuilding here without
-    // this would re-seal every turn under the theme we are leaving, which
-    // is the exact bug being fixed, one frame later. The turn builders read
-    // `ui::` tokens, and those resolve through the live theme at BUILD time.
+    // Publish the theme. That is now ALMOST the whole job.
     //
-    // publish_theme drives BOTH sinks (see ui_theme.hpp). That matters here
-    // more than anywhere: rehydrate_frozen() below rebuilds sealed turns
-    // immediately, and markdown prose renders from a PROJECTED palette
-    // (~74 `colors::` reads in render_block.cpp alone) that is re-derived
-    // by maya's on_theme_changed hook. Publishing only agentty's half left
-    // that projection stale, so the rebuild baked the OUTGOING palette into
-    // the new Elements — on a dark→light swap, dark ink on a light canvas
-    // for the whole transcript, with only the newest unsealed message
-    // looking right.
+    // Colours are LATE-BOUND (docs/LATE_BINDING.md): a built Element carries
+    // symbolic `Color::slot(...)` values, and maya resolves them in
+    // Style::to_sgr() against whatever theme is live at PAINT time. So a
+    // sealed turn built ten themes ago paints correctly under the current
+    // one without being touched, and StylePool::retheme() re-derives the
+    // cached SGR bytes on the swap — ids stay valid, no canvas cell needs
+    // rewriting.
+    //
+    // This function used to rebuild the entire sealed transcript on every
+    // arrow key, because a committed Element really did have the outgoing
+    // palette baked into it. That rebuild was O(transcript) per keystroke,
+    // and on a long thread it cost more than a key-repeat slot — keys
+    // outran frames, frames coalesced, and the browser visibly updated on
+    // every SECOND theme you passed. "Slow" and "skips entries" were one
+    // symptom. Late binding deletes the work instead of optimising it.
+    //
+    // publish_theme drives BOTH sinks (see ui_theme.hpp): agentty's own
+    // token atom and maya::app_set_theme, which bumps the theme epoch and
+    // re-derives every projected palette. Publishing only one half is its
+    // own bug — markdown prose renders from a projection, so a half-publish
+    // left prose on the old scheme while the chrome moved.
     //
     // Cheap and idempotent: view() publishes the same value again next
     // frame, and publish is a pointer store plus a value compare.
     ui_prefs::publish_theme(*ui_prefs::resolve(m.d.ui, /*tty=*/true).theme);
 
-    // The LIVE tail is cached too, and for the same reason it is stale.
+    // NOTHING ELSE TO DO.
     //
-    // ViewCache::finalized holds a built maya::Element per settled-but-not-
-    // yet-frozen message — colours already resolved, exactly like a frozen
-    // turn. It is keyed on message identity and nothing else, so a theme
-    // change does not perturb the key and every subsequent frame serves the
-    // old palette from cache. That is the last few turns of the
-    // conversation: the part the user is actually looking at while they
-    // cycle schemes.
+    // This is the part worth reading, because it used to be forty lines of
+    // cache surgery and the surgery is what made theme switching slow.
     //
-    // Cleared unconditionally, and BEFORE the early return below, because
-    // this is the case that early return got wrong: a thread with nothing
-    // frozen yet (a short conversation, or a fresh one) has no sealed rows
-    // to rebuild but does have a live tail to re-colour, and it used to
-    // return having done neither. Re-caching is one rebuild of the visible
-    // tail, which is what picking a theme asked for.
+    // It used to drop ViewCache::finalized (the built Element per settled
+    // message) and then call rehydrate_frozen() to rebuild the sealed
+    // prefix, because both held Elements with the outgoing palette RESOLVED
+    // into them. Neither is stale any more: those Elements carry symbolic
+    // slots, so they paint under the theme live at paint time. Dropping and
+    // rebuilding them would re-derive, at O(transcript) per keystroke,
+    // something that is already correct.
     //
-    // Settled entries only: a PINNED entry holds the live reveal widget for
-    // the turn being streamed right now, and dropping that would restart
-    // its animation mid-word. It rebuilds from its widget every frame, so
-    // it picks up the new theme without being destroyed.
-    //
-    // COLOURS only, not the whole entry. A settled entry's built Element is
-    // stale under a new theme; the StreamingMarkdown widget that produced it
-    // is not, because markdown structure does not depend on what colour a
-    // heading is. Dropping both forced a full re-parse of every kept message
-    // — the dominant cost of a theme swap, and all of it spent re-deriving
-    // something that had not changed.
-    m.ui.view_cache.invalidate_colours();
-
-    if (m.ui.frozen_through == 0) return;
-    rehydrate_frozen(m);
+    // The one thing this path deliberately does NOT handle is a change to
+    // row HEIGHTS (density, compact turns). Those are forward-only by
+    // design: re-sealing a frozen turn at a new height tears the scrollback
+    // ledger, so they take effect on turns rendered from then on rather
+    // than retroactively. See pull_field's note below.
 }
 
 namespace {

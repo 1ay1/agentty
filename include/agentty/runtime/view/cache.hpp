@@ -360,27 +360,19 @@ public:
     // own without being destroyed.
     void clear_settled() noexcept { entries_.clear(); }
 
-    // Drop only what a THEME change invalidates, keeping what it does not.
+    // (There is deliberately no invalidate_colours() here any more.)
     //
-    // A settled entry holds two things: `finalized`, a built Element with
-    // colours already resolved, and `streaming`, the StreamingMarkdown
-    // widget that produced it. A new theme invalidates the first and is
-    // irrelevant to the second — markdown structure does not depend on what
-    // colour a heading is.
+    // It used to drop each settled entry's built Element on a theme change,
+    // because that Element had the outgoing palette RESOLVED into it and
+    // nothing else would ever invalidate it — a theme switch changes no
+    // bytes, so no content-keyed cache notices.
     //
-    // clear_settled() drops both, which forces settle_message_md() to
-    // re-parse every kept message from source on the next rebuild. That is
-    // the dominant cost of a theme swap (37-82 ms on a real transcript) and
-    // it is spent re-deriving something that did not change. Keeping the
-    // widget lets the rebuild go straight to build(), which resolves slots
-    // against the new theme and is the only work a recolour actually needs.
-    void invalidate_colours() noexcept {
-        for (auto& [key, entry] : entries_) entry.md.finalized.reset();
-        // Pinned entries are untouched on purpose: they hold the live reveal
-        // widget for the turn being streamed right now, and they rebuild from
-        // that widget every frame anyway, so they follow the new theme
-        // without being disturbed.
-    }
+    // Colours are late-bound now (docs/LATE_BINDING.md): a built Element
+    // carries symbolic slots and resolves at PAINT, so it is simply not
+    // stale under a new theme and there is nothing to invalidate. If you
+    // find yourself wanting this function back, the real question is which
+    // value got resolved too early — MAYA_ASSERT_LATE_BOUND in
+    // maya/style/binding.hpp is where that gets caught.
 
 private:
     // One payload type, two homes. A key lives in AT MOST ONE of these at
