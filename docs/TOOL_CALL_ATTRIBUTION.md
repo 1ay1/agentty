@@ -150,3 +150,50 @@ enum class AttributionError : std::uint8_t { Ambiguous };
 
 When you cannot know, say so in the type. The caller can then tell the user
 something true, which is the one thing a silent guess can never do.
+
+---
+
+## 9. Three layers, and what each one actually buys
+
+A scanner only catches the spelling it already knows. `*s.begin()` was
+caught; `calls.back()` — "the most recent call" — would have walked straight
+past it. So the guarantee is layered, and it is worth being precise about
+where each layer stops.
+
+**Layer 1 — the type removes what it can.**
+
+`ToolCallTracker` keeps its vector private. The only ways to reach a call
+are `at(Attribution)` and `displaced(Attribution)`, both of which require a
+handle that `attribute()` returned — so there is no spelling that picks a
+call without first proving which one it is. `all()` returns a
+`views::filter` range rather than the vector, which is **not**
+random-access, so `all()[i]` is a compile error.
+
+Verified by trying it: `tools.calls.back()` fails to compile (private), and
+`all()[0]` fails to compile (category). `OpenCalls` in the Responses codec
+does the same job — it exposes `sole()`, which answers "is there exactly
+one", and nothing that answers "give me any one".
+
+**Layer 2 — the scanner catches the residue.**
+
+`back()` is legal on a bidirectional range and no view category removes it
+while staying iterable. So `attribution_discipline_test` matches it by name,
+narrowed to call-collection identifiers. That narrowing is deliberate:
+`tools_j.back()["cache_control"]` is building a request body, not choosing
+an owner, and a scanner that fires on ordinary `back()` gets switched off —
+which is worse than not having one. (That false positive was real; it showed
+up on the first run against the Anthropic transport.)
+
+**Layer 3 — the doc states the rule for what neither can see.**
+
+A fallback keyed on a timestamp, an insertion counter, or "the call whose
+name matches" would pass both. This file is the answer to those, and the
+reason it leads with *why guessing loses to failing* rather than with a list
+of banned constructs.
+
+### The claim, stated exactly
+
+Not "the bug is unwritable". The positional spellings are unwritable, the
+named ones are caught, and the rest rests on a reviewer knowing the rule.
+Claiming more than that would be the same overconfidence that named a coin
+flip `latest_tool_item`.

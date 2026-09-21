@@ -43,7 +43,7 @@ TEST_CASE("identity: the ordinary case — open by index, continue by index") {
     REQUIRE(b.has_value());
     CHECK(!b->is_new);
     CHECK(b->call == a->call);
-    CHECK(t.calls().size() == 1);
+    CHECK(t.size() == 1);
 }
 
 TEST_CASE("identity: parallel calls stay apart") {
@@ -53,7 +53,7 @@ TEST_CASE("identity: parallel calls stay apart") {
     REQUIRE(a.has_value());
     REQUIRE(b.has_value());
     CHECK(a->call != b->call);
-    CHECK(t.calls().size() == 2);
+    CHECK(t.size() == 2);
 
     // Interleaved continuations land on the right call.
     auto a2 = t.attribute(index_only(0));
@@ -75,7 +75,7 @@ TEST_CASE("identity: a reused index with a new id is a NEW call") {
     ToolCallTracker t;
     auto a = t.attribute(both("call_a", 0));
     REQUIRE(a.has_value());
-    t.calls()[a->call].started = true;
+    t.at(*a).started = true;
 
     auto b = t.attribute(both("call_b", 0));
     REQUIRE(b.has_value());
@@ -105,7 +105,7 @@ TEST_CASE("identity: a known id continues its call even if the index moves") {
     REQUIRE(moved.has_value());
     CHECK(!moved->is_new);
     CHECK(moved->call == a->call);
-    CHECK(t.calls().size() == 1);
+    CHECK(t.size() == 1);
 
     // And the new index now routes to it.
     auto by_new = t.attribute(index_only(3));
@@ -128,7 +128,7 @@ TEST_CASE("identity: id-only providers (no usable index)") {
     REQUIRE(a2.has_value());
     CHECK(!a2->is_new);
     CHECK(a2->call == a->call);
-    CHECK(t.calls().size() == 2);
+    CHECK(t.size() == 2);
 }
 
 TEST_CASE("identity: an empty id is absent, not a value") {
@@ -144,7 +144,7 @@ TEST_CASE("identity: an empty id is absent, not a value") {
     REQUIRE(b.has_value());
     CHECK(!b->is_new);
     CHECK(b->call == a->call);
-    CHECK(t.calls().size() == 1);
+    CHECK(t.size() == 1);
 }
 
 TEST_CASE("identity: no id and no index is legal for a single call") {
@@ -159,7 +159,7 @@ TEST_CASE("identity: no id and no index is legal for a single call") {
     REQUIRE(b.has_value());
     CHECK(!b->is_new);
     CHECK(b->call == a->call);
-    CHECK(t.calls().size() == 1);
+    CHECK(t.size() == 1);
 }
 
 TEST_CASE("identity: no id and no index with several calls FAILS") {
@@ -183,7 +183,7 @@ TEST_CASE("identity: reset clears every handle") {
     ToolCallTracker t;
     (void)t.attribute(both("call_a", 0));
     (void)t.attribute(both("call_b", 1));
-    CHECK(t.calls().size() == 2);
+    CHECK(t.size() == 2);
 
     t.reset();
     CHECK(t.empty());
@@ -193,5 +193,5 @@ TEST_CASE("identity: reset clears every handle") {
     auto a = t.attribute(index_only(0));
     REQUIRE(a.has_value());
     CHECK(a->is_new);
-    CHECK(t.calls().size() == 1);
+    CHECK(t.size() == 1);
 }

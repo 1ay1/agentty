@@ -53,6 +53,7 @@
 #include <cstdint>
 #include <expected>
 #include <optional>
+#include <ranges>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -104,9 +105,60 @@ struct Attribution {
 // what the chunk said about identity and it tells you which call that is.
 class ToolCallTracker {
 public:
-    [[nodiscard]] const std::vector<Call>& calls() const noexcept { return calls_; }
-    [[nodiscard]] std::vector<Call>&       calls()       noexcept { return calls_; }
-    [[nodiscard]] bool empty() const noexcept { return calls_.empty(); }
+    // Every call seen this turn, ITERATION ONLY.
+    //
+    // Deliberately not the vector: a container hands out back(), front(),
+    // operator[] and begin(), and every one of those is a spelling of "pick
+    // a call without proving which". That is the bug this whole header
+    // exists to prevent, and a scanner only ever catches the spelling it
+    // already knows — `*s.begin()` was caught, `calls().back()` would not
+    // have been.
+    //
+    // A range with only begin/end supports the one legitimate use (close
+    // every open call at end of turn, where taking ALL of them is not a
+    // choice) and supports nothing else. The bug becomes unwritable rather
+    // than merely detectable.
+    // A range that is ITERABLE and not INDEXABLE.
+    //
+    // Getting this right took two attempts, both worth recording because
+    // both look like they work:
+    //   • std::ranges::subrange over a contiguous iterator keeps
+    //     random-access, so operator[] still compiles.
+    //   • views::transform preserves the source category, so it does too.
+    // views::filter cannot be random-access (finding the Nth match requires
+    // walking), so the category degrades to bidirectional — verified:
+    // random_access_range is false. The predicate is always true, so
+    // iteration order and contents are unchanged.
+    //
+    // WHAT THIS DOES AND DOES NOT BUY. `t.all()[i]` no longer compiles, so
+    // the positional-pick spellings are gone. `t.all().back()` DOES still
+    // compile — back() is legal on a bidirectional range, and no view
+    // category removes it while staying iterable. That residue is covered by
+    // attribution_discipline_test, which scans for it by name.
+    //
+    // So the guarantee is layered, and honestly so: the type removes the
+    // spellings it can, the scanner catches the ones it cannot, and the
+    // doc (docs/TOOL_CALL_ATTRIBUTION.md) states the rule for the cases
+    // neither can see. Claiming the type alone made the bug unwritable
+    // would be the same overconfidence as naming a coin flip
+    // `latest_tool_item`.
+    [[nodiscard]] auto all() const noexcept {
+        return calls_ | std::views::filter([](const Call&) { return true; });
+    }
+    [[nodiscard]] auto all() noexcept {
+        return calls_ | std::views::filter([](const Call&) { return true; });
+    }
+    [[nodiscard]] std::size_t size()  const noexcept { return calls_.size(); }
+    [[nodiscard]] bool        empty() const noexcept { return calls_.empty(); }
+
+    // The call an Attribution names. Takes the handle attribute() returned,
+    // so there is no spelling of this that picks a call without having first
+    // proven which one it is — `at(0)`, `back()`, "the most recent" are all
+    // unwritable because the index type only comes from an attribution.
+    [[nodiscard]] Call& at(const Attribution& who) { return calls_[who.call]; }
+    [[nodiscard]] Call& displaced(const Attribution& who) {
+        return calls_[*who.displaced];
+    }
 
     // Which call does this chunk belong to?
     //

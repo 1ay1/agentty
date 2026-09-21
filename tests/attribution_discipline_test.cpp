@@ -50,15 +50,38 @@ namespace {
 [[nodiscard]] bool looks_like_arbitrary_pick(const std::string& line) {
     // Cheap prefilter first: the regex below is the expensive part and the
     // overwhelming majority of lines contain none of these.
-    if (line.find(".begin()") == std::string::npos) return false;
+    const bool candidate = line.find(".begin()") != std::string::npos
+                        || line.find(".back()")  != std::string::npos
+                        || line.find(".front()") != std::string::npos;
+    if (!candidate) return false;
     // Skip comments. This file's own rule is discussed in prose in the very
     // decoders it guards, and flagging an explanation of the bug as the bug
     // trains people to ignore the scanner.
     const auto first = line.find_first_not_of(" \t");
     if (first != std::string::npos && line.compare(first, 2, "//") == 0)
         return false;
-    static const std::regex pick{R"(\*\s*[A-Za-z_][A-Za-z0-9_.>-]*\.begin\(\))"};
-    return std::regex_search(line, pick);
+
+    // `*thing.begin()` — an arbitrary element of an unordered container.
+    static const std::regex deref_begin{
+        R"(\*\s*[A-Za-z_][A-Za-z0-9_.>-]*\.begin\(\))"};
+    if (std::regex_search(line, deref_begin)) return true;
+
+    // `calls.back()` / `tool_slots.front()` — "the most recent call".
+    //
+    // Matched on COLLECTION-OF-CALLS names, not on anything containing
+    // "tool". back()/front() are ordinary on strings, buffers and JSON
+    // arrays — `tools_j.back()["cache_control"]` is building a request body,
+    // not choosing an owner — and a scanner that fires on those gets
+    // switched off, which is worse than not having one.
+    //
+    // The type layer already removes the INDEXING spellings
+    // (ToolCallTracker::all() is not random-access), so this only has to
+    // cover the residue: the plausible-sounding "latest" pick that would
+    // otherwise walk past both layers.
+    static const std::regex ends_pick{
+        R"(\b(calls|tool_calls|tool_slots|slots|open_tools|open_tool_items)\s*\.(back|front)\(\))",
+        std::regex::icase};
+    return std::regex_search(line, ends_pick);
 }
 
 // An explicit, reviewed exemption. The comment must say WHY, so the next
@@ -141,6 +164,23 @@ TEST_CASE("attribution: the scanner recognises the shape it exists for") {
     // scanner.
     CHECK(!looks_like_arbitrary_pick(
         "// it was refreshed from `*open_tool_items.begin()` on a set,"));
+
+    // ── The residue the TYPE cannot remove ──
+    //
+    // ToolCallTracker::all() is deliberately not random-access, so `[i]` is
+    // a compile error. back() is still legal on a bidirectional range, and
+    // "the most recent call" is exactly the plausible-sounding spelling that
+    // would otherwise slip through both layers.
+    CHECK(looks_like_arbitrary_pick("    auto& c = tracker.calls.back();"));
+    CHECK(looks_like_arbitrary_pick("    return calls.back().id;"));
+    CHECK(looks_like_arbitrary_pick("    auto& s = tool_slots.front();"));
+
+    // But NOT on the ordinary uses of back()/front(), which are everywhere
+    // on strings and buffers. A scanner that fires on those gets switched
+    // off, which is worse than not having one.
+    CHECK(!looks_like_arbitrary_pick("    if (buf.back() == '\\n') buf.pop_back();"));
+    CHECK(!looks_like_arbitrary_pick("    if (sv.front() != '{') return false;"));
+    CHECK(!looks_like_arbitrary_pick("    tools_j.back()[\"cache_control\"] = x;"));
 
     // The exemption is honoured, and only with the marker.
     CHECK(exempted("  auto id = *s.begin();  // attribution-ok: size()==1 above"));

@@ -273,6 +273,55 @@ struct ToolSlot {
     std::string args;
 };
 
+// ── The set of calls currently open, with no way to pick one arbitrarily ──
+//
+// A plain set exposes begin(), and `*s.begin()` on an unordered container is
+// an ARBITRARY element dressed up as a choice. That is exactly the bug this
+// codec shipped: a fallback named `latest_tool_item` was refreshed from
+// `*open_tool_items.begin()`, so "latest" meant whichever item the hash
+// happened to yield, and an unaddressed argument fragment was appended to a
+// coin-flip call.
+//
+// The discipline test scans for that literal shape, but a scanner only ever
+// catches the spelling it knows — `.back()`, `.front()`, a "most recent"
+// timestamp and a dozen other spellings of the same mistake would walk past
+// it. So the real fix is here, in the type: this exposes `sole()`, which
+// answers "is there exactly one, and if so which", and NOTHING that answers
+// "give me any one of them". A future decoder cannot reintroduce the bug
+// because there is no member to reintroduce it with.
+//
+// drain() exists because closing every open call at end of turn genuinely
+// wants all of them, and order does not matter when you are taking the lot.
+class OpenCalls {
+public:
+    void open(std::string item_id) { items_.insert(std::move(item_id)); }
+    bool close(const std::string& item_id) { return items_.erase(item_id) > 0; }
+
+    [[nodiscard]] std::size_t size()  const noexcept { return items_.size(); }
+    [[nodiscard]] bool        empty() const noexcept { return items_.empty(); }
+
+    // The one open call, or nullopt when there are zero or many.
+    //
+    // This is the ONLY read that yields a single id, and it is total: the
+    // "many" case has no answer, so a caller cannot accidentally receive a
+    // guess. Compare the old `*begin()`, which always returned something and
+    // was right only by luck.
+    [[nodiscard]] std::optional<std::string> sole() const {
+        if (items_.size() != 1) return std::nullopt;
+        return *items_.begin();   // attribution-ok: size()==1, no order to be wrong about
+    }
+
+    // Every open call, for the end-of-turn sweep. Taking all of them is not
+    // a choice, so there is nothing to get wrong.
+    [[nodiscard]] std::vector<std::string> drain() {
+        std::vector<std::string> out(items_.begin(), items_.end());
+        return out;
+    }
+
+private:
+    std::unordered_set<std::string> items_;
+};
+
 struct StreamCtx {
     EventSink sink;
     wire::SseFramer sse;
@@ -280,7 +329,7 @@ struct StreamCtx {
     // what argument events carry; the slot holds the call_id they must be
     // forwarded under.
     std::unordered_map<std::string, ToolSlot> tools;
-    std::unordered_set<std::string> open_tool_items;
+    OpenCalls open_tool_items;
     bool text_block_open = false;
     bool saw_function_call = false;
     bool terminated = false;
@@ -316,9 +365,10 @@ struct StreamCtx {
         it != j.end() && it->is_string()
         && !it->get_ref<const std::string&>().empty())
         return it->get<std::string>();
-    // Exactly one candidate means there is no order to be wrong about.
-    // attribution-ok: size()==1 checked on this line; see attribution_discipline_test.
-    if (ctx.open_tool_items.size() == 1) return *ctx.open_tool_items.begin();
+    // Exactly one candidate means there is no order to be wrong about, and
+    // OpenCalls::sole() is the only read that can answer at all — it returns
+    // nullopt for zero or many rather than handing back an arbitrary item.
+    if (auto only = ctx.open_tool_items.sole()) return *only;
     return {};
 }
 
@@ -345,14 +395,13 @@ void feed_tool_args(StreamCtx& ctx, const std::string& item_id,
 }
 
 void close_tool(StreamCtx& ctx, const std::string& item_id) {
-    if (item_id.empty() || !ctx.open_tool_items.erase(item_id)) return;
+    if (item_id.empty() || !ctx.open_tool_items.close(item_id)) return;
     if (const auto it = ctx.tools.find(item_id); it != ctx.tools.end())
         ctx.sink(StreamToolUseEnd{ToolCallId{it->second.call_id}});
 }
 
 void close_all_tools(StreamCtx& ctx) {
-    std::vector<std::string> ids(ctx.open_tool_items.begin(),
-                                 ctx.open_tool_items.end());
+    std::vector<std::string> ids = ctx.open_tool_items.drain();
     for (const auto& id : ids) close_tool(ctx, id);
 }
 
@@ -419,7 +468,7 @@ void dispatch(StreamCtx& ctx, std::string_view data) {
             const std::string call_id = item.value("call_id", item_id);
             const std::string name    = item.value("name", std::string{});
             ctx.tools[item_id] = ToolSlot{call_id, {}};
-            ctx.open_tool_items.insert(item_id);
+            ctx.open_tool_items.open(item_id);
             ctx.saw_function_call = true;
             ctx.sink(StreamToolUseStart{ToolCallId{call_id}, ToolName{name}});
             // Carrier (1): some backends deliver the whole args string

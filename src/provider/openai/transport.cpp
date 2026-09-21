@@ -212,7 +212,7 @@ using wire::could_be_tool_json;
 // argument deltas by tool_calls[].index and only gives a turn-level finish, so
 // closing a call merely because another index emitted would truncate siblings.
 void close_open_tools(StreamCtx& ctx) {
-    for (auto& slot : ctx.tools.calls()) {
+    for (auto& slot : ctx.tools.all()) {
         if (!slot.started || slot.ended || slot.id.empty()) continue;
         ctx.sink(StreamToolUseEnd{ToolCallId{slot.id}});
         slot.ended = true;
@@ -1071,7 +1071,7 @@ void handle_delta(StreamCtx& ctx, const json& delta) {
                 // still parses, so the corruption reaches a tool
                 // invocation silently. Drop the fragment and say so.
                 AGT_LOG(Wire, Warn, "openai.tool_args_unattributable",
-                        "calls_in_flight={}", ctx.tools.calls().size());
+                        "calls_in_flight={}", ctx.tools.size());
                 continue;
             }
 
@@ -1080,14 +1080,14 @@ void handle_delta(StreamCtx& ctx, const json& delta) {
             // tool_use with no tool_result and hangs the turn, so splitting
             // without closing trades one bug for a worse one.
             if (who->displaced) {
-                auto& old = ctx.tools.calls()[*who->displaced];
+                auto& old = ctx.tools.displaced(*who);
                 if (old.started && !old.ended && !old.id.empty()) {
                     ctx.sink(StreamToolUseEnd{ToolCallId{old.id}});
                     old.ended = true;
                 }
             }
 
-            auto& slot = ctx.tools.calls()[who->call];
+            auto& slot = ctx.tools.at(*who);
 
             std::string fn_name;
             std::string fn_args;
