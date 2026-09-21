@@ -122,6 +122,19 @@ target_link_libraries(snapshot_mutex_fallback_test PRIVATE Threads::Threads)
 add_test(NAME snapshot_mutex_fallback_test
          COMMAND snapshot_mutex_fallback_test)
 set_tests_properties(snapshot_mutex_fallback_test PROPERTIES TIMEOUT 60)
+# EXCLUDE_FROM_ALL keeps it out of a plain `make`, which is right — it must
+# not be linked into anything. But add_test() registers it with ctest
+# regardless, so if nothing ever builds it the suite reports "Not Run" and
+# fails the job. That is what it did: a red CI job for a test whose binary
+# was never produced.
+#
+# It cannot go through agentty_test() (that helper links the agentty objects
+# this test must avoid), so it joins the DERIVED aggregates by hand here —
+# the one place a hand-rolled target has to opt in, next to the reason why.
+set_property(DIRECTORY APPEND PROPERTY AGENTTY_T_STANDALONE
+             snapshot_mutex_fallback_test)
+set_property(DIRECTORY APPEND PROPERTY AGENTTY_T_SANITIZER
+             snapshot_mutex_fallback_test)
 agentty_fold_test(fork_test                TIMEOUT 30)
 agentty_fold_test(palette_render_probe     TIMEOUT 30)
 agentty_fold_test(embed_render_probe       TIMEOUT 30)
