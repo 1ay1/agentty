@@ -263,16 +263,44 @@ is used correctly, but it proves nobody deleted the only line that reads
 it. A dialect that genuinely cannot express a field must now say so in
 the table, with the reason.
 
-### 4.4 Typed failures — still open
+### 4.4 Typed failures — DONE (`eb6f2fd4`)
 
-GitHub has `ModelCallFailureRequestFingerprint` (7 fields) and typed rate
-limits. We have `error_class.hpp`, which is good, and per-transport
-message sniffing, which is not. A fingerprint lets two failures be
-recognised as *the same failure* across vendors — which is what a circuit
-breaker and a retry ladder both need.
+The assumption going in was "we string-match everywhere". Measured, that
+was wrong: `error_class.hpp` is already typed, `static_assert`-proven and
+per-class, the retry ladder already consumes it, and only Kimi still
+sniffs (a quota-message special case, correct there).
 
-Deliberately last: it wants a consumer. Building fingerprints with
-nothing reading them is ceremony.
+The real gap was narrower and worse. A mid-stream `event: error` arrives
+inside a **200** body — the status line is long gone — so both dialects
+fell back to sniffing the human `message`, while a machine-readable
+`error.type` sat unused in the same JSON object.
+
+That fallback is wrong in both directions:
+
+- an overload phrased "unusually high demand" matches no substring we
+  know → classifies **Terminal**, turn dies on a retryable failure
+- an invalid request whose message contains "connection" → classifies
+  **Transient**, six retries against something that can never succeed
+
+Now `error.type` maps onto the equivalent HTTP status and goes through
+the same `classify(HttpError)` table the header path uses. One table for
+both dialects, because two lists drift. An unrecognised type returns `0`
+— *no opinion* — which keeps the caller on its existing path rather than
+inventing a classification.
+
+> **The mutation that survived.** Deleting the typed status on the
+> Anthropic side broke nothing: the golden renderer printed
+> `Error(message)` without the status, so the field was unobservable
+> from any test. Fixed the renderer, and the same mutation now fails two
+> assertions. A field nothing can see is a field nothing is checking —
+> and green would have said otherwise.
+
+Still genuinely absent: a **circuit breaker**. GitHub has
+`api_circuit_breaker.rs` with `CLOSED`/`HALF_OPEN`; our retry ladder is
+per-turn and keeps no cross-turn memory of a dead endpoint. That is a
+real difference, deliberately not built yet — it needs an endpoint-health
+store above the transports, and inventing one with a single consumer
+would be the ceremony this section warns about.
 
 ### 4.5 The fifth carrier — DONE (`8359ddc2`)
 
@@ -322,6 +350,12 @@ Each is stated so it can be checked, not admired.
 7. **Diagnosis belongs on the channel someone will actually read.**
    A dropped event logged where nobody looks is a dropped event.
 
+8. **A field nothing can observe is a field nothing is checking.**
+   Mutate the source and watch the test fail. Twice in this work a test
+   passed for the wrong reason — once because the code path was never
+   reached, once because the renderer dropped the field under assertion.
+   Green is evidence only after you have seen red.
+
 ---
 
 ## 6. Where this landed
@@ -334,7 +368,10 @@ The order mattered: each step made the next cheaper and safer.
 | 4.1 | Anthropic keyed by block index; strategy named per transport | `059b9c1e`, `e59af900` |
 | 4.3 | request-half conformance; `max_tokens` on Responses | `e59af900` |
 | 4.2 | salvage where it cannot be wrong, and counted | `9a0a7807` |
-| 4.4 | typed failure fingerprints | *open — wants a consumer* |
+| 4.4 | typed mid-stream errors via the proven table | `eb6f2fd4` |
+
+All five closed. The one remaining difference from GitHub's runtime is a
+circuit breaker (§4.4) — named, scoped, and left unbuilt on purpose.
 
 None of it was a rewrite. The pieces existed; they were in two places
 when they should have been in one, and in zero places when they should
