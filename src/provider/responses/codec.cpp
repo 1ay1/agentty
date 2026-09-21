@@ -376,6 +376,18 @@ struct StreamCtx {
     bool show_reasoning = true;
     bool saw_function_call = false;
     bool terminated = false;
+    // ── Argument-routing health, counted for the whole response ────────
+    //
+    // A rate, not an incident. GitHub's client reports salvaged tool
+    // inputs in telemetry alongside quota, which is the tell that argument
+    // loss on a proxied wire is a normal state to be measured rather than
+    // an error to be logged once and forgotten.
+    //
+    // Summarised on `response.completed`, so one line per turn says whether
+    // this wire is healthy — instead of needing someone to count warnings
+    // in a 20 MB log, which is what the Copilot diagnosis actually took.
+    int salvaged_args  = 0;   // recovered because exactly one call was open
+    int unroutable_args = 0;  // dropped: nothing could own them safely
     StopReason stop = StopReason::EndTurn;
     // Diagnostic: how many reasoning-bearing events arrived this turn.
     // Lets a "reasoning is not showing" report be split into its two REAL
@@ -451,17 +463,48 @@ struct StreamCtx {
 // what is newly known. `total` = the server's complete view, not a fragment.
 void feed_tool_args(StreamCtx& ctx, const std::string& item_id,
                     std::string_view payload, bool total) {
-    const auto it = ctx.tools.find(item_id);
+    auto it = ctx.tools.find(item_id);
     if (it == ctx.tools.end()) {
         // An argument payload we can't route is a tool call about to fail
         // as "[invalid args]" — the model DID send the arguments, we just
         // couldn't attach them (item never opened / id mismatch / a carrier
         // event shape we don't know). Exactly the `.done` bug's failure
         // shape; must never be silent.
-        AGT_LOG(Wire, Warn, "responses.tool_args_unroutable",
-                "item_id={} known_items={} bytes={}",
-                item_id, ctx.tools.size(), payload.size());
-        return;
+        //
+        // ── SALVAGE ────────────────────────────────────────────────
+        //
+        // GitHub's own client ships `copilot_salvaged_tool_input_ids` in
+        // its telemetry — it reconstructs tool inputs that fail to route
+        // and reports how often. You do not build that unless it fires in
+        // production against your own servers. The lesson is that argument
+        // loss on a proxied wire is an EXPECTED state, not an error.
+        //
+        // So recover, but only where recovery cannot be wrong: exactly one
+        // call open means there is no order to get wrong and no second
+        // candidate to corrupt. `sole()` answers that and nothing else —
+        // it returns nullopt for zero OR many, so this cannot decay into
+        // "pick the most recent", which is the bug the whole seam exists
+        // to prevent.
+        //
+        // With several calls open we still drop. A rewritten id plus two
+        // candidates is a coin flip, and the losing side produces valid
+        // JSON dispatched to the wrong tool — strictly worse than one
+        // visibly broken turn.
+        if (auto only = ctx.open_tool_items.sole();
+            only && ctx.tools.count(*only)) {
+            AGT_LOG(Wire, Warn, "responses.tool_args_salvaged",
+                    "item_id={} recovered_to={} bytes={}",
+                    item_id, *only, payload.size());
+            ++ctx.salvaged_args;
+            it = ctx.tools.find(*only);
+        } else {
+            AGT_LOG(Wire, Warn, "responses.tool_args_unroutable",
+                    "item_id={} known_items={} open={} bytes={}",
+                    item_id, ctx.tools.size(),
+                    ctx.open_tool_items.size(), payload.size());
+            ++ctx.unroutable_args;
+            return;
+        }
     }
     const auto fresh = wire::unseen(it->second.args, payload, total);
     // Which CARRIER delivered the bytes, and whether they were new. This is
@@ -711,9 +754,11 @@ void dispatch(StreamCtx& ctx, std::string_view data) {
         // the model wants tool results before continuing.
         ctx.stop = ctx.saw_function_call ? StopReason::ToolUse : StopReason::EndTurn;
         AGT_LOG(Wire, Debug, "responses.completed",
-                "stop={} tool_calls={} thinking_deltas={}",
+                "stop={} tool_calls={} thinking_deltas={} "
+                "salvaged_args={} unroutable_args={}",
                 ctx.saw_function_call ? "tool_use" : "end_turn",
-                ctx.tools.size(), ctx.thinking_deltas);
+                ctx.tools.size(), ctx.thinking_deltas,
+                ctx.salvaged_args, ctx.unroutable_args);
         ctx.sink(StreamFinished{ctx.stop});
         ctx.terminated = true;
         return;

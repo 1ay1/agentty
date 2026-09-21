@@ -142,8 +142,14 @@ TEST_CASE("responses: a tool call's whole life is in the log") {
 
     // Closing: the verdict, with the arguments the call actually ended up
     // with. Non-zero here is a healthy turn.
+    //
+    // Match the FULL token `args=0 `, not the substring: `responses.
+    // completed` now also carries `salvaged_args=0 unroutable_args=0`, and
+    // a bare `args=0` matches inside those. The tool_closed line ends with
+    // `args=N`, so anchor on the space that follows the site's own field.
     CHECK(has(dump, "responses.tool_closed"));
-    CHECK(!has(dump, "args=0"));
+    CHECK(!has(dump, " args=0\n"));
+    CHECK(!has(dump, " args=0 "));
 }
 
 TEST_CASE("responses: the empty-arguments failure is visible in the log") {
@@ -159,6 +165,9 @@ TEST_CASE("responses: the empty-arguments failure is visible in the log") {
     // together say "the server sent no arguments", which is a different bug
     // from "we dropped them" and points at a different fix. Without this
     // line the two are indistinguishable from a bug report.
+    //
+    // Anchored on the trailing newline so this cannot accidentally match
+    // `salvaged_args=0` / `unroutable_args=0` on the completed line.
     CHECK(has(dump, "responses.tool_closed"));
-    CHECK(has(dump, "args=0"));
+    CHECK(has(dump, " args=0\n"));
 }

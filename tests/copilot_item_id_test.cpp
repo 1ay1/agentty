@@ -161,10 +161,15 @@ TEST_CASE("copilot: a good item_id still wins over position") {
 }
 
 TEST_CASE("copilot: an unknown position with several calls open is not guessed") {
-    // The discipline this dialect already holds elsewhere: when the server
-    // names a slot we do not have and more than one call is open, there is
-    // no honest answer. Dropping the fragment is correct; picking one
-    // appends another call's bytes and still parses.
+    // The discipline this dialect holds everywhere: when the server names a
+    // slot we do not have and more than one call is open, there is no
+    // honest answer. Dropping the fragment is correct; picking one appends
+    // another call's bytes and still parses.
+    //
+    // This is also the boundary of salvage (below). Salvage recovers only
+    // where recovery cannot be wrong — exactly one candidate. Two
+    // candidates is a coin flip, and a coin flip that produces valid JSON
+    // is worse than a visibly broken turn.
     const std::vector<std::string> sse = {
         R"({"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_a","call_id":"call_a","name":"read"}})",
         R"({"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","id":"fc_b","call_id":"call_b","name":"grep"}})",
@@ -176,6 +181,62 @@ TEST_CASE("copilot: an unknown position with several calls open is not guessed")
 
     const auto msgs = cc::parse_sse_for_test(sse);
 
+    CHECK(args_for(msgs, "call_a").empty());
+    CHECK(args_for(msgs, "call_b").empty());
+}
+
+TEST_CASE("copilot: unroutable args are salvaged when exactly one call is open") {
+    // GitHub's client ships `copilot_salvaged_tool_input_ids` in telemetry:
+    // it reconstructs tool inputs that fail to route, and reports how often
+    // it had to. You do not build that unless it fires in production
+    // against your own servers — so argument loss on a proxied wire is an
+    // EXPECTED state, not an exceptional one.
+    //
+    // The carrier that needs this is `output_item.done`. Its arguments are
+    // addressed by the item's OWN `id` field, not by addressed_item(), so
+    // the sole()-fallback that rescues the `.delta`/`.done` carriers does
+    // not apply. If the proxy rewrites the id here — exactly what it does
+    // to item_id on argument frames — the payload has no owner and the
+    // call dispatches with `{}`.
+    //
+    // One call open means there is exactly one thing these bytes can belong
+    // to and no order to get wrong. Recover them.
+    const std::vector<std::string> sse = {
+        R"({"type":"response.output_item.added","item":{"type":"function_call","id":"fc_real","call_id":"call_9","name":"read"}})",
+        // The completed item restates the arguments under a REWRITTEN id.
+        std::string{R"({"type":"response.output_item.done","item":{"type":"function_call","id":")"}
+            + kEncryptedBlob + R"(","arguments":"{\"path\":\"a.txt\"}"}})",
+        R"({"type":"response.completed","response":{"usage":{}}})",
+    };
+
+    const auto msgs = cc::parse_sse_for_test(sse);
+
+    // Without salvage this is `read` dispatched with `{}` — "[invalid args]
+    // path required" — while the arguments sat in the log.
+    CHECK(args_for(msgs, "call_9") == R"({"path":"a.txt"})");
+}
+
+TEST_CASE("copilot: salvage refuses rather than guessing between two calls") {
+    // The same unroutable payload, but now two calls are open. Salvage must
+    // NOT fire: either choice produces JSON that parses and dispatches, so
+    // a wrong guess is silent corruption — `read` running with `grep`'s
+    // arguments, or the reverse.
+    //
+    // Refusing costs one broken turn and says so in the log. Guessing costs
+    // a tool running on the wrong input with nobody the wiser. The asymmetry
+    // is the whole reason OpenCalls::sole() returns nullopt for "many"
+    // instead of handing back the first element.
+    const std::vector<std::string> sse = {
+        R"({"type":"response.output_item.added","item":{"type":"function_call","id":"fc_a","call_id":"call_a","name":"read"}})",
+        R"({"type":"response.output_item.added","item":{"type":"function_call","id":"fc_b","call_id":"call_b","name":"grep"}})",
+        std::string{R"({"type":"response.output_item.done","item":{"type":"function_call","id":"unknown_)"}
+            + kEncryptedBlob + R"(","arguments":"{\"path\":\"a.txt\"}"}})",
+        R"({"type":"response.completed","response":{"usage":{}}})",
+    };
+
+    const auto msgs = cc::parse_sse_for_test(sse);
+
+    // Neither call receives the orphaned bytes.
     CHECK(args_for(msgs, "call_a").empty());
     CHECK(args_for(msgs, "call_b").empty());
 }
