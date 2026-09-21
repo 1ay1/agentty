@@ -39,7 +39,7 @@ set(_AGENTTY_CONSOLIDATED
     codex_responses_test doom_loop_test visual_hash_coverage_test
     wire_fragmentation_test provider_identity_test provider_conformance_test
     provider_matrix_test tool_call_identity_test attribution_discipline_test
-    empty_tool_args_test responses_log_test
+    empty_tool_args_test responses_log_test reasoning_ssot_test
     login_routing_test tool_advertisement_test gateway_context_window_test
     smart_settings_roundtrip_test sandbox_parity_test context_ladder_test
     capability_conformance_test

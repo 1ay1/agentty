@@ -785,17 +785,35 @@ Cmd<Msg> launch_stream(Model& m) {
 
     // Whether to ask the provider for visible reasoning at all.
     //
-    // Gated on the DISPLAY preference, because requesting reasoning you have
-    // told us to hide is the worst of both: you pay for the tokens and never
-    // see them. Appearance's "Thinking" row is the one place that question
-    // is asked — the model picker used to carry a second ^R toggle for the
-    // same thing, and the two could disagree in exactly this direction.
+    // THE EFFORT STRIP IS THE SSOT. "reasoning ‹off›" in the model picker
+    // means no reasoning is requested, full stop — that is the control the
+    // user reaches for, it is per-model (which is what the question actually
+    // depends on), and it is the only one of these that was ever wired to a
+    // key. Anything else that can contradict it is a bug, not a preference.
     //
-    // Collapsed still requests: a collapsed block is shown, just folded, and
-    // it cannot be unfolded if it was never sent.
-    const bool show_reasoning =
-        m.d.show_reasoning
-        && m.d.ui.thinking != ui_prefs::Thinking::Hidden;
+    // Two other inputs used to sit in this expression:
+    //
+    //   m.d.show_reasoning      — the old ^R toggle. Its handler still
+    //                             exists but nothing dispatches it (^R is
+    //                             review now), so the flag was frozen at
+    //                             whatever settings.json last held. It could
+    //                             only ever disagree with the strip.
+    //   ui.thinking != Hidden   — Appearance's display preference, which is
+    //                             about whether to RENDER a block we already
+    //                             have. Letting a render choice silently
+    //                             change what we REQUEST is how you get
+    //                             tokens paid for and dropped.
+    //
+    // Both are gone from the request path. `effort` alone decides, so the
+    // strip and the wire cannot drift: off there is off on the wire (see
+    // build_body — the `reasoning` field is omitted entirely with no tier).
+    // ui.thinking still governs DISPLAY of whatever comes back, which is
+    // the question Appearance is actually for.
+    //
+    // Compaction is the one override: a mechanical summarise never wants
+    // visible thinking regardless of tier. Both are applied at the single
+    // assignment to req.show_reasoning below, which reads req.effort so the
+    // orchestration path cannot drift from it either.
 
     // Look up the selected model's supports_tools from available_models.
     // Ollama models have this set via /api/show probe at list time. If
@@ -898,7 +916,6 @@ Cmd<Msg> launch_stream(Model& m) {
          model_id = std::move(model_id),
          compaction_model = std::move(compaction_model),
          effort = std::move(effort),
-         show_reasoning,
          model_supports_tools,
          model_context_window,
          auth = std::move(auth),
@@ -1022,10 +1039,17 @@ Cmd<Msg> launch_stream(Model& m) {
         req.effort        = compacting ? std::string{}
                           : (orchestrate ? std::string{effort_wire(turn_profile.effort)}
                                          : std::move(effort));
-        // Reasoning display: never for compaction (a mechanical summarise);
-        // otherwise carry the user's global "show reasoning" preference so the
-        // Anthropic transport can request VISIBLE thinking.
-        req.show_reasoning = !compacting && show_reasoning;
+        // Reasoning display follows the effort ACTUALLY SENT, computed from
+        // req.effort rather than the pre-orchestration value: with a
+        // strategic role the turn profile can pick a different tier, and
+        // reading the captured `effort` there would ask for reasoning on a
+        // turn that sends none (or the reverse). One expression, one
+        // source — see the SSOT note where `show_reasoning` is computed.
+        //
+        // Compaction forces effort empty just above, so this is already
+        // false for it; the explicit `!compacting` stays as documentation
+        // of the intent rather than a load-bearing term.
+        req.show_reasoning = !compacting && !req.effort.empty();
         req.session_key   = std::move(session_key);
 
         // Capability gate: withhold tools ONLY on an explicit declaration of

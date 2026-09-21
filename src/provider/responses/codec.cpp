@@ -254,10 +254,16 @@ json build_body(const provider::Request& req) {
     // return human-readable summary text (response.reasoning_summary_text.*)
     // rather than silently burning thinking tokens — measured on both
     // ChatGPT and Copilot.
+    //
+    // With NO effort tier the field is omitted entirely. It used to send
+    // `reasoning: {summary: auto}` in that case, which is not "no opinion"
+    // — it is an explicit request for a reasoning summary. The picker's
+    // strip read `reasoning ‹off›` while every request asked for it, so the
+    // user saw thinking blocks they had switched off and paid for the
+    // tokens. The effort strip is the only place this is chosen, so `off`
+    // there has to mean off on the wire.
     if (!req.effort.empty())
         body["reasoning"] = json{{"effort", req.effort}, {"summary", "auto"}};
-    else
-        body["reasoning"] = json{{"summary", "auto"}};
     return body;
 }
 
