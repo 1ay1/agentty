@@ -144,6 +144,15 @@ std::string model_display_label(std::string_view id,
     return model_name::decode(id, display_name).full();
 }
 
+std::string model_display_label_qualified(std::string_view id,
+                                          std::string_view display_name) {
+    // Same label, prefixed with the routing namespace when the id carries
+    // one. For the picker's collision case only: a gateway fronting several
+    // backends namespaces by LANE (`dgpu/x` on the discrete GPU,
+    // `utils/x` on CPU), and those decode to the same label.
+    return model_name::decode(id, display_name).qualified();
+}
+
 std::string timestamp_hh_mm(std::chrono::system_clock::time_point tp) {
     auto tt = std::chrono::system_clock::to_time_t(tp);
     std::tm tm{};

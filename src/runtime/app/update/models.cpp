@@ -351,6 +351,24 @@ void rebuild_fused_rows(Model& m, bool sync_sources) {
             c.row_keys.reserve(c.models.size());
             c.display_labels.clear();
             c.display_labels.reserve(c.models.size());
+            // A gateway that fronts several backends namespaces its ids by
+            // ROUTING LANE: Bifrost serves both `dgpu/granite-4.0-h-tiny`
+            // (discrete GPU) and `utils/granite-4.0-h-tiny` (CPU). The
+            // decoder drops the namespace because for a hosted provider it
+            // is noise, so both rows render "Granite 4.0 H Tiny" and the
+            // picker shows two identical lines for two very different
+            // machines.
+            //
+            // Detect the collision within this catalog and qualify only the
+            // rows that need it. Qualifying everything would put "openai/"
+            // in front of every hosted model for no gain; qualifying nothing
+            // is the bug. (Their setup worked around this at the gateway by
+            // renaming models — a client display quirk should not be costing
+            // users an alias table.)
+            std::unordered_map<std::string, int> label_counts;
+            for (const auto& mi : c.models)
+                ++label_counts[ui::model_display_label(mi.id.value,
+                                                       mi.display_name)];
             for (const auto& mi : c.models) {
                 // Canonical label (ui::model_display_label) as the name
                 // segment — the SAME string build_fused_rows scores and
@@ -358,6 +376,9 @@ void rebuild_fused_rows(Model& m, bool sync_sources) {
                 // what's on screen.
                 std::string label =
                     ui::model_display_label(mi.id.value, mi.display_name);
+                if (label_counts[label] > 1)
+                    label = ui::model_display_label_qualified(mi.id.value,
+                                                              mi.display_name);
                 std::string key = ui::detail::fused_haystack(
                     c.label, label, mi);
                 for (char& ch : key)

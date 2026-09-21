@@ -106,6 +106,12 @@ namespace agentty::ui {
 [[nodiscard]] std::string model_display_label(std::string_view id,
                                               std::string_view display_name);
 
+// As above, but prefixed with the routing namespace when the id has one
+// ("igpu/Laguna Xs 2.1"). For the picker's disambiguation path only — see
+// the collision note in update/models.cpp.
+[[nodiscard]] std::string model_display_label_qualified(
+    std::string_view id, std::string_view display_name);
+
 // Context window size for a given model id. Defaults to 200 K but bumps
 // to 1 M when the model id carries the agentty-internal `[1m]` tag (which
 // triggers the `context-1m-2025-08-07` beta on the wire). Used by the

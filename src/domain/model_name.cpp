@@ -624,6 +624,21 @@ ModelName decode(std::string_view id, std::string_view server_name) {
         break;
     }
 
+    // Remember the routing namespace before normalize_id() drops it.
+    //
+    // Only the LAST segment before the basename: `openrouter/anthropic/x`
+    // is reached through openrouter but produced by anthropic, and the
+    // nearer prefix is the one that distinguishes two otherwise-identical
+    // rows. For a single-segment prefix (`igpu/x`) the two coincide.
+    if (const auto slash = id.find_last_of('/');
+        slash != std::string_view::npos && slash > 0) {
+        auto prefix = id.substr(0, slash);
+        if (const auto prev = prefix.find_last_of('/');
+            prev != std::string_view::npos)
+            prefix = prefix.substr(prev + 1);
+        out.ns = std::string{prefix};
+    }
+
     // ── 2. Taxonomy: delegated, never re-derived ────────────────────────
     const auto caps = ModelCapabilities::from_id(id);
     out.color        = color_of(caps.family);
@@ -724,6 +739,14 @@ std::string ModelName::full() const {
         s.append(" \xc2\xb7 ");   // " · "
         s.append(annotation);
     }
+    return s;
+}
+
+std::string ModelName::qualified() const {
+    if (ns.empty()) return full();
+    std::string s = ns;
+    s.push_back('/');
+    s.append(full());
     return s;
 }
 

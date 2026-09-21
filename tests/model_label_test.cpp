@@ -607,3 +607,54 @@ TEST_CASE("model_name: UTF-8 survives intact") {
     }
     CHECK(i == s.size());   // consumed exactly — no dangling partial glyph
 }
+
+// ── Self-hosted gateway: the routing namespace is IDENTITY ──────────────
+//
+// Real setup that reported this (gitlab.com/r3xxar/fw16-ai-inference): a
+// Bifrost gateway on :8090 fronting two llama.cpp servers and a CPU lane.
+// Model ids are namespaced by LANE — `dgpu/…` on an RX 7700S, `igpu/…` on
+// a Radeon 780M, `utils/…` on CPU.
+//
+// The decoder drops a leading namespace because for a hosted provider it is
+// noise (`openrouter/anthropic/claude-…` is the same product however you
+// reached it). But two lanes can serve the SAME weights, and then both rows
+// render identically — same label, wildly different machine. Their README
+// documents working around this at the gateway with an alias table, which a
+// client display quirk should not be costing anyone.
+TEST_CASE("model label: a routing namespace is kept as a fact") {
+    using agentty::model_name::decode;
+
+    // The plain label is unchanged — the common case stays clean.
+    CHECK(decode("igpu/laguna-xs-2.1", "").full() == "Laguna Xs 2.1");
+    CHECK(decode("dgpu/granite-4.2-3b", "").full() == "Granite 4.2 3b");
+
+    // …but the lane is retained, so a caller that needs to disambiguate can.
+    CHECK(decode("igpu/laguna-xs-2.1", "").ns == "igpu");
+    CHECK(decode("dgpu/granite-4.2-3b", "").ns == "dgpu");
+    CHECK(decode("utils/granite-4.0-h-tiny", "").ns == "utils");
+
+    // A hosted id with no namespace keeps an empty one — qualified() then
+    // degrades to full(), so nothing changes for the 99% case.
+    CHECK(decode("gpt-4o", "").ns.empty());
+    CHECK(decode("gpt-4o", "").qualified() == decode("gpt-4o", "").full());
+
+    // Multi-segment: the NEAREST prefix distinguishes, not the whole path.
+    // `openrouter/anthropic/x` is produced by anthropic and reached through
+    // openrouter; the producer is what tells two rows apart.
+    CHECK(decode("openrouter/anthropic/claude-3-5-haiku", "").ns == "anthropic");
+}
+
+TEST_CASE("model label: same weights on two lanes are distinguishable") {
+    using agentty::model_name::decode;
+
+    // THE BUG. Same model, two lanes: an 8GB discrete GPU and CPU. Before
+    // this, both rendered "Granite 4.0 H Tiny" and the picker showed two
+    // identical rows for two very different machines.
+    const auto dgpu = decode("dgpu/granite-4.0-h-tiny", "");
+    const auto util = decode("utils/granite-4.0-h-tiny", "");
+
+    CHECK(dgpu.full() == util.full());            // still collide plainly…
+    CHECK(dgpu.qualified() != util.qualified());  // …but are now separable
+    CHECK(dgpu.qualified() == "dgpu/Granite 4.0 H Tiny");
+    CHECK(util.qualified() == "utils/Granite 4.0 H Tiny");
+}
