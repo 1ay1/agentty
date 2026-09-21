@@ -1112,6 +1112,14 @@ provider::StreamResult run_one_completion(Thread& thread,
                     ToolUse tc;
                     tc.id     = e.id;
                     tc.name   = e.name;
+                    // Seed `{}`, same as the main reducer. A tool with no
+                    // required arguments (`ls`, `git_status`) streams zero
+                    // argument deltas on every OpenAI-compatible wire, so
+                    // `args` stayed null and the dispatcher below read that
+                    // as "args failed to parse" — a working call reported to
+                    // the model as malformed. Absent arguments are an empty
+                    // object; only a FAILED parse may leave args null.
+                    tc.args   = json::object();
                     tc.status = ToolUse::Pending{std::chrono::steady_clock::now()};
                     asst.tool_calls.push_back(std::move(tc));
                     tool_json[e.id.value].clear();
@@ -1122,7 +1130,13 @@ provider::StreamResult run_one_completion(Thread& thread,
                     auto json_it = tool_json.find(e.id.value);
                     const std::string partial = json_it == tool_json.end()
                                               ? std::string{} : json_it->second;
-                    if (tc && !partial.empty()) {
+                    // An empty or whitespace-only buffer means the model sent
+                    // no arguments at all — `args` keeps the `{}` seeded at
+                    // Start. Providers also send a literal "" for this; treat
+                    // both the same way rather than parsing "" and failing.
+                    const bool blank =
+                        partial.find_first_not_of(" \t\r\n") == std::string::npos;
+                    if (tc && !blank) {
                         try {
                             tc->args = json::parse(partial);
                         } catch (...) {

@@ -120,6 +120,11 @@ struct StreamCtx {
     // own lifecycle; there is no provider-global "active" call.
     wire::ToolCallTracker tools;
     bool any_structured_tool = false; // a real tool_calls[] delta arrived
+    // An unattributable chunk poisoned the tool state: we cannot know which
+    // call the bytes belonged to, so every call in flight may be missing
+    // arguments. Set once, reported once, and it stops us emitting tool
+    // events built from state we no longer trust.
+    bool tool_attribution_failed = false;
 
     // ── Incremental leaked-tool-call salvage (local models) ─────────────
     // Many Ollama/llama.cpp models (qwen2.5-coder, hermes, mistral, etc.)
@@ -212,6 +217,11 @@ using wire::could_be_tool_json;
 // argument deltas by tool_calls[].index and only gives a turn-level finish, so
 // closing a call merely because another index emitted would truncate siblings.
 void close_open_tools(StreamCtx& ctx) {
+    // Attribution failed earlier in this response: we know some argument
+    // bytes went unplaced, but not which call lost them. Announcing these
+    // calls now would hand the model a set of tool invocations that look
+    // complete and are not. The StreamError already went out; stay quiet.
+    if (ctx.tool_attribution_failed) return;
     for (auto& slot : ctx.tools.all()) {
         // A call whose name never resolved to a known tool was never
         // announced (the start gate waits for a resolvable name so a
@@ -1029,6 +1039,7 @@ void handle_delta(StreamCtx& ctx, const json& delta) {
             ctx.salvage_eligible = false;  // real tool call, no need for salvage
         }
         int array_pos = -1;
+        const std::size_t array_len = delta["tool_calls"].size();
         for (const auto& tc : delta["tool_calls"]) {
             ++array_pos;
             // `index` is how Chat Completions distinguishes PARALLEL calls:
@@ -1038,9 +1049,9 @@ void handle_delta(StreamCtx& ctx, const json& delta) {
             // second call's arguments were appended to the first and both
             // were lost. Falling back to the payload's own array position
             // keeps them apart, which is what the field means when present.
-            const int index = (tc.contains("index") && tc["index"].is_number_integer())
-                            ? tc["index"].get<int>()
-                            : array_pos;
+            const bool has_wire_index =
+                tc.contains("index") && tc["index"].is_number_integer();
+            const int index = has_wire_index ? tc["index"].get<int>() : array_pos;
             if (index < 0) continue;
             // `index` is server-controlled. A hostile or buggy endpoint
             // can send an absurd one, so cap it before it reaches the
@@ -1056,9 +1067,22 @@ void handle_delta(StreamCtx& ctx, const json& delta) {
             // identity at all", which with two calls in flight is correctly
             // reported as ambiguous — correct, but it drops arguments a
             // well-ordered server did give us enough to place.
+            //
+            // That reasoning only holds while position is EVIDENCE rather
+            // than a guess: it requires the delta to restate every call in
+            // flight, so slot N really is the Nth call. A delta carrying
+            // FEWER elements than there are open calls has no such
+            // correspondence — element 0 could be any of them — and using
+            // position there silently appends one call's arguments to
+            // another. In that case send no index at all and let the tracker
+            // report it as unattributable.
             constexpr std::size_t kMaxToolSlots = 1024;
+            const bool position_is_evidence =
+                has_wire_index || ctx.tools.size() <= 1
+                || array_len >= ctx.tools.size();
             std::optional<std::size_t> slot_index;
-            if (index >= 0 && static_cast<std::size_t>(index) < kMaxToolSlots)
+            if (position_is_evidence
+                && static_cast<std::size_t>(index) < kMaxToolSlots)
                 slot_index = static_cast<std::size_t>(index);
 
             // WHO does this chunk belong to?
@@ -1082,9 +1106,29 @@ void handle_delta(StreamCtx& ctx, const json& delta) {
                 // pick is a coin flip, and the losing side appends these
                 // bytes to another call's arguments — producing JSON that
                 // still parses, so the corruption reaches a tool
-                // invocation silently. Drop the fragment and say so.
-                AGT_LOG(Wire, Warn, "openai.tool_args_unattributable",
-                        "calls_in_flight={}", ctx.tools.size());
+                // invocation silently.
+                //
+                // Dropping the fragment avoids the corruption but keeps the
+                // silence: the remaining arguments still parse, so the turn
+                // runs a tool with SOME of its arguments missing and nothing
+                // says so. A chunk we cannot attribute means every call in
+                // flight is now suspect, so fail the turn — the same choice
+                // zed makes (ToolCallAccumulator::entry returns
+                // AmbiguousToolCallChunk and the mapper surfaces it as a
+                // completion error rather than a best guess). Report once:
+                // later chunks would otherwise each raise their own error.
+                if (!ctx.tool_attribution_failed) {
+                    ctx.tool_attribution_failed = true;
+                    AGT_LOG(Wire, Warn, "openai.tool_args_unattributable",
+                            "calls_in_flight={}", ctx.tools.size());
+                    ctx.sink(StreamError{
+                        "the provider sent a tool-call fragment that names "
+                        "neither an id nor an index while "
+                            + std::to_string(ctx.tools.size())
+                            + " calls were in flight — it cannot be placed "
+                              "without risking corrupted arguments",
+                        std::nullopt});
+                }
                 continue;
             }
 

@@ -566,6 +566,58 @@ TEST_CASE("test_sse_parallel_tool_calls_without_index") {
     CHECK(b_args == std::string{"{\"pattern\":\"b\"}"});
 }
 
+TEST_CASE("test_sse_tool_call_unattributable_fragment_fails_the_turn") {
+    // The one case attribution genuinely cannot resolve: a fragment carrying
+    // NEITHER an id NOR an index, arriving while several calls are open and
+    // the array-position fallback does not apply (a single-element array that
+    // could belong to either open call).
+    //
+    // Guessing corrupts arguments SILENTLY — the loser's JSON still parses,
+    // so a tool runs with another call's bytes appended. Dropping the
+    // fragment avoids corruption but is silent in its own way: the tool runs
+    // with arguments MISSING and the model is told the call succeeded.
+    //
+    // Neither is acceptable, so the turn fails. That is also what zed does
+    // (ToolCallAccumulator::entry returns AmbiguousToolCallChunk, and the
+    // mapper turns it into a completion error rather than a best guess).
+    std::string sse =
+        // Two calls open, each properly identified.
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":["
+            "{\"index\":0,\"id\":\"call_a\",\"type\":\"function\","
+             "\"function\":{\"name\":\"read\",\"arguments\":\"\"}}"
+        "]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":["
+            "{\"index\":1,\"id\":\"call_b\",\"type\":\"function\","
+             "\"function\":{\"name\":\"grep\",\"arguments\":\"\"}}"
+        "]}}]}\n\n"
+        // A lone fragment with no identity at all. Which call? Unknowable.
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":["
+            "{\"function\":{\"arguments\":\"{\\\"path\\\":\\\"a\\\"}\"}}"
+        "]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n"
+        "data: [DONE]\n\n";
+
+    auto msgs = oai::parse_sse_for_test(sse);
+
+    // The failure is REPORTED, not swallowed.
+    CHECK(count_leaf<StreamError>(msgs) >= 1);
+
+    // And reported ONCE — a long response must not emit one error per
+    // unplaceable chunk.
+    CHECK(count_leaf<StreamError>(msgs) == 1);
+
+    // The poisoned calls are NOT handed to the reducer as if complete: a
+    // StreamToolUseEnd here would let the turn dispatch `read` with no path.
+    CHECK(count_leaf<StreamToolUseEnd>(msgs) == 0);
+
+    // The error names the situation well enough to act on.
+    bool explains = false;
+    for (const auto& m : msgs)
+        if (const auto* e = get_leaf<StreamError>(m))
+            explains = e->message.find("tool-call fragment") != std::string::npos;
+    CHECK(explains);
+}
+
 TEST_CASE("test_sse_tool_call_index_reused_for_a_new_call") {
     // A provider may REUSE index 0 for a second parallel call, distinguishing
     // them only by a new `id`. Keying on index alone merges them: the second
