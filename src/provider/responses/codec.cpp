@@ -316,6 +316,8 @@ struct StreamCtx {
         it != j.end() && it->is_string()
         && !it->get_ref<const std::string&>().empty())
         return it->get<std::string>();
+    // Exactly one candidate means there is no order to be wrong about.
+    // attribution-ok: size()==1 checked on this line; see attribution_discipline_test.
     if (ctx.open_tool_items.size() == 1) return *ctx.open_tool_items.begin();
     return {};
 }
