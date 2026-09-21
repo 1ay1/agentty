@@ -145,31 +145,26 @@ are either per-transport or absent. §4.
 
 ## 3. What agentty does today
 
-Credit where due: we already have the right ideas. We have them in the
+Credit where due: we already had the right ideas. We had them in the
 wrong number of places.
 
-Measured, not assumed:
+Measured before the work, and after:
 
-| Transport | lines | uses `wire::` | `ToolCallTracker` | salvage |
-|---|---:|---:|:---:|---:|
-| `openai/transport.cpp` | 2955 | 31 | yes | 90 |
-| `ollama/transport.cpp` | 1843 | 24 | **no** | 69 |
-| `responses/codec.cpp` | 881 | 13 | yes | **0** |
-| `anthropic/sse.cpp` | 419 | 3 | **no** | **0** |
+| Transport | attribution, before | after |
+|---|---|---|
+| `openai/transport.cpp` | keyed — `ToolCallTracker` | unchanged |
+| `responses/codec.cpp` | keyed — `OpenCalls` | + `output_index` first |
+| `anthropic/sse.cpp` | **single `current_tool_id`** | keyed — block index |
+| `ollama/transport.cpp` | hand-rolled | **atomic** — verified, documented |
 
-Read that table as a risk map.
+The `wire::` usage count was the real tell: it is the size of our neutral
+core, and it was small — two headers, `tool_calls.hpp` and
+`streamed.hpp`. Everything else that *could* be shared was copied or
+absent.
 
-- **Attribution discipline** (`ToolCallTracker`, which returns `Ambiguous`
-  rather than guessing) is in **2 of 4**. Ollama and Anthropic each hand-roll
-  their own tool-call state.
-- **Salvage** is in **2 of 4**, and the two implementations are unrelated
-  to each other — `openai` has one flavour, `ollama` another, both local.
-- **`responses/`** has attribution but no salvage, which is exactly the
-  combination that produced `args=0` on 16 consecutive calls.
-
-The `wire::` column is the real tell. It is the size of our neutral core,
-and it is small — two headers, `tool_calls.hpp` and `streamed.hpp`.
-Everything else that *could* be shared is copied or absent.
+Salvage was in 2 of 4 transports as two unrelated implementations, and
+absent from `responses/` — exactly the combination that produced `args=0`
+on 16 consecutive calls.
 
 ### 3.1 The shape of every bug we shipped
 
@@ -193,79 +188,105 @@ be reached from the leaves.
 
 ---
 
-## 4. The gap, concretely
+## 4. The gap, as of now
 
-Five items, ordered by how much silence they remove. Each one is real
-today, not speculative.
+Five items. **All five have shipped** — kept here with what was actually
+done, because the reasoning is worth more than the checklist.
 
-### 4.1 One attribution seam, used by all four
+### 4.1 One attribution seam — DONE (`059b9c1e`, `e59af900`)
 
-`ToolCallTracker` already encodes the rule and makes guessing unwritable —
-`attribute()` returns `Ambiguous`, `sole()` returns `nullopt` for zero *or
-many*. It is used by two transports.
+Anthropic hand-rolled a single `current_tool_id` and routed every
+`input_json_delta` to it. The wire puts an `index` on every
+`content_block` frame and we ignored it in six places.
 
-Ollama and Anthropic should not have their own tool-call state. The
-Anthropic dialect addresses blocks by `index` and looks safe *today*;
-"looks safe today" is precisely the reasoning that produced the previous
-four bugs.
+It was safe — Claude emits blocks one at a time, so "the last one
+opened" happened to be right. A bet on emission order is not a property.
+Now keyed by the wire's index through one named `tool_at()`, with no
+spelling of "the most recent".
 
-**Test:** `attribution_discipline_test` already scans for arbitrary picks.
-Extend it to assert that every transport routes through the tracker — the
-shape, not the instance.
+**The C++ part:** deleting the old fields turned "did I find every site?"
+into a build error. The compiler found a sixth site in `transport.cpp`.
+That is the argument for changing the *type* rather than the uses.
 
-### 4.2 Salvage as a shared, measured layer
+Ollama turned out **not** to need the tracker. Its NDJSON carries whole
+calls in one frame, so `Start`→`Delta`→`End` go out back-to-back and two
+calls are never in flight. Checked rather than assumed, and now written
+down so nobody re-derives it.
 
-Today: `openai` salvages one way, `ollama` another, `responses` and
-`anthropic` not at all.
+`attribution_discipline_test` gained two cases: every transport must
+**name** its strategy (`keyed` or `atomic`) with the mechanism that
+proves it, and the spellings `current_tool_id` / `active_tool_id` /
+`last_tool_id` / `latest_tool_item` are banned outright. The old scanner
+could not catch those — no `*begin()`, no `.back()`, nothing that looks
+like a pick. It looks like a variable, and it is an attribution decision.
 
-GitHub's position (§2.2) is that salvage is a normal path with telemetry.
-Ours should be one helper, reachable from every dialect, that
+### 4.2 Salvage, measured — DONE (`9a0a7807`)
 
-- reconstructs what it can,
-- records that it salvaged and for which call,
-- and is **counted**, so we know the rate instead of guessing.
+The carrier that needed it is `output_item.done`: its arguments are
+addressed by the item's **own** `id`, not through `addressed_item()`, so
+the `sole()` fallback that rescues the other carriers never applies. A
+rewritten id there and the payload has no owner.
 
-We already log `responses.tool_args_unroutable`. That is the measurement
-hook. Use it before building the recovery, so the recovery is sized to
-reality.
+Salvage fires only where it cannot be wrong — exactly one open call.
+`sole()` answers that and nothing else, so it cannot decay into "pick the
+most recent". With two open we still drop: a coin flip producing valid
+JSON is worse than a visibly broken turn.
 
-### 4.3 A prepared-call seam that transports cannot bypass
+And it is **counted**. `salvaged_args` / `unroutable_args` on
+`responses.completed`, so one line per turn says whether the wire is
+healthy — instead of counting warnings in a 20 MB log, which is what the
+Copilot diagnosis actually took.
 
-`PreparedModelCall` is the structural answer to §3.1's first row. If every
-transport receives a neutral, already-resolved call, "this dialect ignores
-`effort`" stops being expressible.
+> **A note worth more than the feature.** The first version of the
+> salvage test passed *without salvage ever firing* — `addressed_item`
+> already rescued that carrier. Checking the log instead of trusting the
+> green run showed `salvaged_args=0`, and the test was rewritten against
+> the carrier that genuinely lacks the fallback. A test that passes for
+> the wrong reason is worse than no test: it converts "we don't know"
+> into "we checked".
 
-We have `provider::Request` and a conformance test that asserts the
-reasoning gate across dialects — the idea is there. What is missing is
-that the *request* is still assembled per-transport, so a field can be
-dropped on the floor and only a test would catch it.
+### 4.3 Promises asserted per dialect — DONE (`e59af900`)
 
-**Direction:** make the neutral call the only input a transport gets, and
-extend `provider_conformance_test` from `reasoning` to every field that is
-a promise to the user — `effort`, `max_tokens`, `context_window`, tool
-advertisement.
+Writing the contract found a live bug: **Responses never sent
+`max_tokens`.** Chat, Anthropic and Ollama all did, under their own
+spellings (`max_tokens`, `max_tokens`, `num_predict`). This dialect calls
+it `max_output_tokens` and dropped the field. A user capping output got
+the cap on three models of four, with nothing in the UI to tell them
+apart — the reasoning toggle's shape exactly, found by a test this time
+rather than a report.
 
-### 4.4 Typed failures, not string matching
+`provider_conformance_test` now has a **request** half. Behavioural where
+a pure body builder exists, structural elsewhere — the other three
+assemble their body inside the stream function, so a behavioural
+assertion cannot reach them. Coarse on purpose: it cannot prove the value
+is used correctly, but it proves nobody deleted the only line that reads
+it. A dialect that genuinely cannot express a field must now say so in
+the table, with the reason.
 
-They have `ModelCallFailureRequestFingerprint` (7 fields) and typed rate
-limits: `user_weekly_rate_limited`, `user_global_rate_limited`,
-`user_model_rate_limited`, `integration_rate_limited`.
+### 4.4 Typed failures — still open
 
-We have `error_class.hpp`, which is good, and a lot of per-transport
-message sniffing, which is not. A fingerprint means two failures can be
+GitHub has `ModelCallFailureRequestFingerprint` (7 fields) and typed rate
+limits. We have `error_class.hpp`, which is good, and per-transport
+message sniffing, which is not. A fingerprint lets two failures be
 recognised as *the same failure* across vendors — which is what a circuit
 breaker and a retry ladder both need.
 
-### 4.5 The carrier we drop
+Deliberately last: it wants a consumer. Building fingerprints with
+nothing reading them is ceremony.
 
-`response.custom_tool_call_input.delta` — GitHub deserializes it, we hit
-`responses.unhandled_event` and drop the arguments.
+### 4.5 The fifth carrier — DONE (`8359ddc2`)
 
-Worth noting precisely: that path logs via `util::dbglog`, **not**
-`AGT_LOG(Wire, …)`, so it does *not* appear under `AGENTTY_LOG=wire=debug`.
-A dropped carrier is invisible on the channel where someone debugging this
-would be looking. That is a small fix with an outsized effect on the next
-report.
+`response.custom_tool_call_input.delta` / `.done`, item type
+`custom_tool_call`, payload under `input`. We handled none of it; a model
+using custom tools got `{}` on every call. Routed through the same
+`feed_tool_args` seam as the other four, so attribution and
+snapshot-vs-fragment reconciliation are identical **by construction**.
+The framing matrix went 5 → 7.
+
+Also: `responses.unhandled_event` logged via `util::dbglog`, not
+`AGT_LOG(Wire, …)`. Under `AGENTTY_LOG=wire=debug` — the filter you
+actually run — an unknown event did not appear at all. It is on
+`Wire/Warn` now.
 
 ---
 
@@ -303,25 +324,26 @@ Each is stated so it can be checked, not admired.
 
 ---
 
-## 6. Where to start
+## 6. Where this landed
 
-The order matters, because each step makes the next one cheaper and
-safer.
+The order mattered: each step made the next cheaper and safer.
 
-1. **§4.5** — route `unhandled_event` to the `Wire` channel and add the
-   fifth carrier. Hours. Removes a silent drop and improves every future
-   report.
-2. **§4.1** — move Ollama and Anthropic onto `ToolCallTracker`, extend the
-   discipline test to assert it structurally. This is the one that stops
-   the recurring class.
-3. **§4.3** — tighten the prepared-call seam and grow the conformance
-   contract to the remaining promised fields.
-4. **§4.2** — measure unroutable rate first, then build salvage to fit.
-5. **§4.4** — typed failure fingerprints, once there is a retry/breaker
-   consumer that needs them.
+| # | What | Commit |
+|---|---|---|
+| 4.5 | fifth carrier + `unhandled_event` on `Wire` | `8359ddc2` |
+| 4.1 | Anthropic keyed by block index; strategy named per transport | `059b9c1e`, `e59af900` |
+| 4.3 | request-half conformance; `max_tokens` on Responses | `e59af900` |
+| 4.2 | salvage where it cannot be wrong, and counted | `9a0a7807` |
+| 4.4 | typed failure fingerprints | *open — wants a consumer* |
 
-Nothing here is a rewrite. The pieces exist; they are in two places when
-they should be in one, and in zero places when they should be in one.
+None of it was a rewrite. The pieces existed; they were in two places
+when they should have been in one, and in zero places when they should
+have been in one.
+
+The measured result: attribution discipline went from 2 of 4 transports
+to 4 of 4, with the remaining hand-rolled state deleted rather than
+documented. Salvage went from two unrelated implementations to one that
+reports its own rate.
 
 ---
 
