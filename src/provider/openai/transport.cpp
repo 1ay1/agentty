@@ -48,6 +48,7 @@
 #include "agentty/provider/msg_shared.hpp"
 #include "agentty/provider/wire.hpp"
 #include "agentty/provider/wire/streamed.hpp"
+#include "agentty/provider/wire/tool_calls.hpp"
 #include "agentty/provider/wire_supersede.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
 #include "agentty/tool/util/fs_helpers.hpp"   // util::workspace_root/project_root — AGENTS.md anchor + walk start
@@ -112,10 +113,12 @@ struct StreamCtx {
     // iterate() calls so the hot path avoids a malloc per SSE frame.
     simdjson::ondemand::parser simd_parser;
 
-    // Tool-call streaming state, indexed by OpenAI's tool_calls[].index.
-    // Calls may interleave, so each slot owns its own lifecycle; there is no
-    // provider-global "active" call.
-    std::vector<ToolCallSlot> tool_slots;
+    // Tool-call streaming state. Attribution (which chunk belongs to which
+    // call) lives in wire::ToolCallTracker — it keys on (id, index) jointly
+    // because neither alone is reliable across providers, and it is unit
+    // tested without any SSE plumbing. Calls may interleave, so each has its
+    // own lifecycle; there is no provider-global "active" call.
+    wire::ToolCallTracker tools;
     bool any_structured_tool = false; // a real tool_calls[] delta arrived
 
     // ── Incremental leaked-tool-call salvage (local models) ─────────────
@@ -209,7 +212,7 @@ using wire::could_be_tool_json;
 // argument deltas by tool_calls[].index and only gives a turn-level finish, so
 // closing a call merely because another index emitted would truncate siblings.
 void close_open_tools(StreamCtx& ctx) {
-    for (auto& slot : ctx.tool_slots) {
+    for (auto& slot : ctx.tools.calls()) {
         if (!slot.started || slot.ended || slot.id.empty()) continue;
         ctx.sink(StreamToolUseEnd{ToolCallId{slot.id}});
         slot.ended = true;
@@ -1022,52 +1025,70 @@ void handle_delta(StreamCtx& ctx, const json& delta) {
             // second call's arguments were appended to the first and both
             // were lost. Falling back to the payload's own array position
             // keeps them apart, which is what the field means when present.
-            const int index = tc.contains("index") && tc["index"].is_number_integer()
+            const int index = (tc.contains("index") && tc["index"].is_number_integer())
                             ? tc["index"].get<int>()
                             : array_pos;
             if (index < 0) continue;
             // `index` is server-controlled. A hostile or buggy endpoint
-            // (or a compat proxy) can send an absurd index; resize(index+1)
-            // would then allocate index * sizeof(ToolCallSlot) bytes and
-            // OOM-kill the process mid-stream (and index+1 on INT_MAX
-            // overflows to a negative -> huge size_t). Real streams never
-            // carry more than a handful of parallel tool calls, so cap the
-            // slot table far below any legitimate use.
-            constexpr int kMaxToolSlots = 1024;
-            if (index >= kMaxToolSlots) continue;
-            if (static_cast<std::size_t>(index) >= ctx.tool_slots.size())
-                ctx.tool_slots.resize(static_cast<std::size_t>(index) + 1);
-            auto& slot = ctx.tool_slots[index];
+            // can send an absurd one, so cap it before it reaches the
+            // tracker — otherwise we allocate per-call state for it.
+            //
+            // When the field is ABSENT we fall back to the payload's own
+            // array position. Chat Completions interleaves fragments for
+            // parallel calls in one delta, and a provider that omits the
+            // index leaves position as the only thing separating them: the
+            // opening delta lists both calls, and the continuation delta
+            // lists their fragments in the SAME order with no id and no
+            // index. Without the fallback both fragments look like "no
+            // identity at all", which with two calls in flight is correctly
+            // reported as ambiguous — correct, but it drops arguments a
+            // well-ordered server did give us enough to place.
+            constexpr std::size_t kMaxToolSlots = 1024;
+            std::optional<std::size_t> slot_index;
+            if (index >= 0 && static_cast<std::size_t>(index) < kMaxToolSlots)
+                slot_index = static_cast<std::size_t>(index);
 
-            // A continuation chunk may RESTATE id/name as empty strings
-            // rather than omitting them — several OpenAI-compatible proxies
-            // do exactly that. Assigning it blindly loses the id we already
-            // have, and the id is the call's identity: StreamToolUseDelta
-            // would carry an empty ToolCallId and the end-of-turn sweep
-            // (which skips slots with an empty id) would never close the
-            // call at all. `name` was already guarded this way; `id` was
-            // not. First non-empty value wins, for both.
-            if (tc.contains("id") && tc["id"].is_string()) {
-                auto wire_id = tc["id"].get<std::string>();
-                if (!wire_id.empty()) {
-                    // A DIFFERENT id at an index we are already streaming
-                    // means the server REUSED the index for a new parallel
-                    // call. Identity is (id, index) jointly, never index
-                    // alone: keying on index would append the new call's
-                    // arguments to the old one and corrupt both.
-                    //
-                    // Close the old call before adopting the new identity,
-                    // so the reducer still sees a matched start/end pair for
-                    // it — an unclosed call leaves a tool_use with no
-                    // tool_result and hangs the turn.
-                    if (slot.started && !slot.ended && !slot.id.empty()
-                        && slot.id != wire_id) {
-                        ctx.sink(StreamToolUseEnd{ToolCallId{slot.id}});
-                        slot = ToolCallSlot{};
-                    }
-                    slot.id = std::move(wire_id);
+            // WHO does this chunk belong to?
+            //
+            // Delegated to wire::ToolCallTracker, which keys on (id, index)
+            // jointly and fails rather than guessing when a chunk carries
+            // neither. That rule is not obvious and we got it wrong twice:
+            // index-only keying merged two parallel calls that reused index
+            // 0, and an empty-id restatement wiped the call's identity so it
+            // was never closed. Both are pinned in
+            // tests/tool_call_identity_test.cpp, against the seam rather
+            // than against an SSE fixture.
+            std::string_view wire_id;
+            if (tc.contains("id") && tc["id"].is_string())
+                wire_id = tc["id"].get_ref<const std::string&>();
+
+            const auto who = ctx.tools.attribute(
+                wire::ChunkIdentity{wire_id, slot_index});
+            if (!who) {
+                // Ambiguous: no id, no index, several calls in flight. Any
+                // pick is a coin flip, and the losing side appends these
+                // bytes to another call's arguments — producing JSON that
+                // still parses, so the corruption reaches a tool
+                // invocation silently. Drop the fragment and say so.
+                AGT_LOG(Wire, Warn, "openai.tool_args_unattributable",
+                        "calls_in_flight={}", ctx.tools.calls().size());
+                continue;
+            }
+
+            // An index reused for a DIFFERENT id means the previous call at
+            // that index is over. Close it here: an unclosed call leaves a
+            // tool_use with no tool_result and hangs the turn, so splitting
+            // without closing trades one bug for a worse one.
+            if (who->displaced) {
+                auto& old = ctx.tools.calls()[*who->displaced];
+                if (old.started && !old.ended && !old.id.empty()) {
+                    ctx.sink(StreamToolUseEnd{ToolCallId{old.id}});
+                    old.ended = true;
                 }
             }
+
+            auto& slot = ctx.tools.calls()[who->call];
+
             std::string fn_name;
             std::string fn_args;
             if (tc.contains("function") && tc["function"].is_object()) {
