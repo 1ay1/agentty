@@ -401,6 +401,24 @@ void feed_tool_args(StreamCtx& ctx, const std::string& item_id,
         return;
     }
     const auto fresh = wire::unseen(it->second.args, payload, total);
+    // Which CARRIER delivered the bytes, and whether they were new. This is
+    // the line that separates the two ways a tool call ends up with `{}`:
+    //
+    //   no routed= line at all  → the server sent no arguments on any
+    //                             carrier (or they went to tool_args_
+    //                             unroutable above, which logs separately)
+    //   routed= with fresh=0    → the bytes arrived but we already had
+    //                             them, i.e. a redundant carrier — healthy
+    //   routed= with fresh>0    → arguments genuinely accumulated
+    //
+    // Copilot sends ONLY the `.done` snapshot, so on a healthy Copilot turn
+    // this is the single routed= line for the call, with total=1 and
+    // fresh=<all of it>. If that line is missing, the bug is upstream of
+    // the decoder.
+    AGT_LOG(Wire, Debug, "responses.tool_args_routed",
+            "item_id={} call_id={} total={} bytes={} fresh={} have={}",
+            item_id, it->second.call_id, total ? 1 : 0, payload.size(),
+            fresh.size(), it->second.args.size());
     if (!fresh.empty())
         ctx.sink(StreamToolUseDelta{ToolCallId{it->second.call_id},
                                     std::string{fresh}});
@@ -408,8 +426,17 @@ void feed_tool_args(StreamCtx& ctx, const std::string& item_id,
 
 void close_tool(StreamCtx& ctx, const std::string& item_id) {
     if (item_id.empty() || !ctx.open_tool_items.close(item_id)) return;
-    if (const auto it = ctx.tools.find(item_id); it != ctx.tools.end())
+    if (const auto it = ctx.tools.find(item_id); it != ctx.tools.end()) {
+        // The verdict for this call, at the moment it is handed to the
+        // reducer. `args=0` here is the exact symptom the user sees as
+        // "[invalid args] path required" — having it in the log with the
+        // call_id attached turns that from a guess into a lookup, and the
+        // routed= lines above say whether the bytes ever arrived.
+        AGT_LOG(Wire, Debug, "responses.tool_closed",
+                "item_id={} call_id={} args={}",
+                item_id, it->second.call_id, it->second.args.size());
         ctx.sink(StreamToolUseEnd{ToolCallId{it->second.call_id}});
+    }
 }
 
 void close_all_tools(StreamCtx& ctx) {
@@ -425,6 +452,11 @@ void emit_usage(StreamCtx& ctx, const json& usage) {
 
 void dispatch(StreamCtx& ctx, std::string_view data) {
     if (data.empty() || data == "[DONE]") return;
+    // Ground truth, before any interpretation. The Chat transport already
+    // dumps its request body at Trace; this is the response half, and it is
+    // what settles "the server never sent the arguments" versus "we failed
+    // to route them" without another round of guessing.
+    AGT_LOG(Wire, Trace, "responses.frame", "raw={}", data);
     json j;
     try { j = json::parse(data); } catch (const std::exception& e) {
         // A frame we could not even parse is a DROPPED wire event — the
@@ -488,6 +520,14 @@ void dispatch(StreamCtx& ctx, std::string_view data) {
             ctx.tools[item_id] = ToolSlot{call_id, {}};
             ctx.open_tool_items.open(item_id);
             ctx.saw_function_call = true;
+            // The identity pairing, logged once per call. item_id is what
+            // later argument frames address; call_id is what the reducer and
+            // the tool dispatcher use. When they differ (they do on Copilot)
+            // a mismatch here is the difference between arguments landing
+            // and arguments going to tool_args_unroutable.
+            AGT_LOG(Wire, Debug, "responses.tool_open",
+                    "item_id={} call_id={} name={}",
+                    item_id, call_id, name.empty() ? "<empty>" : name);
             ctx.sink(StreamToolUseStart{ToolCallId{call_id}, ToolName{name}});
             // Carrier (1): some backends deliver the whole args string
             // up-front on `added`. A snapshot, so route it as a total.
@@ -685,6 +725,34 @@ provider::StreamResult stream(const Site& site, provider::Request req,
         sink(StreamError{std::string{"could not encode request: "} + e.what()});
         return provider::StreamResult::failed("could not encode request");
     }
+
+    // Request metadata + the full body, matching the Chat transport's
+    // `openai.request` / `openai.request.body` pair exactly. Without these
+    // the Responses dialect was the one transport you could not debug from
+    // the log: a Copilot turn that came back with empty tool arguments gave
+    // you the decoded events but never what we ASKED for, so "did we send
+    // the tools?" and "did the server drop them?" looked identical. Body is
+    // NOT truncated — a rejected request is exactly when the last bytes
+    // matter.
+    //
+    // The tool count is on the Debug line rather than only in the Trace body
+    // because "how many tools did this turn advertise" is the first question
+    // when a model stops calling them, and it should not cost a full-body
+    // dump to answer.
+    std::size_t tool_count = 0;
+    try {
+        const auto parsed = json::parse(hr.body);
+        if (const auto t = parsed.find("tools");
+            t != parsed.end() && t->is_array())
+            tool_count = t->size();
+    } catch (...) { /* diagnostics only — never fail a turn to log it */ }
+
+    AGT_LOG(Wire, Debug, "responses.request",
+            "POST https://{}:{}{} site={} model={} tools={} reasoning={} bytes={}",
+            target->host, static_cast<unsigned>(target->port), target->path,
+            site.id, target->model.empty() ? req.model : target->model,
+            tool_count, req.show_reasoning ? 1 : 0, hr.body.size());
+    AGT_LOG(Wire, Trace, "responses.request.body", "raw={}", hr.body);
 
     StreamCtx ctx;
     ctx.sink = sink;
