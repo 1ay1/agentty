@@ -57,7 +57,12 @@ std::string render_stream(const StreamMsg& sm) {
         else if constexpr (std::is_same_v<T, StreamFinished>)
             return "Finished(" + std::to_string(static_cast<int>(e.stop_reason)) + ")";
         else if constexpr (std::is_same_v<T, StreamError>)
-            return "Error(" + e.message + ")";
+            // Include http_status: a mid-stream error's typed status is the
+            // difference between a retryable overload and a dead turn, and
+            // a renderer that drops it makes that untestable — which is
+            // exactly how the field went unasserted when it was added.
+            return "Error(" + e.message + ",status="
+                 + std::to_string(e.http_status) + ")";
         else if constexpr (std::is_same_v<T, StreamHeartbeat>)
             return "Heartbeat";
         else if constexpr (std::is_same_v<T, StreamBufferedWait>)
@@ -153,6 +158,54 @@ TEST_CASE("anthropic sse golden") {
                          static_cast<unsigned long long>(kGoldenHash),
                          static_cast<unsigned long long>(got), rendered.c_str());
     }
+}
+
+TEST_CASE("anthropic error events carry their typed status") {
+    namespace ap = agentty::provider::anthropic;
+
+    // A mid-stream `event: error` arrives inside a 200 body — the status
+    // line is long gone. Anthropic types the failure for us anyway, in
+    // `error.type`, and the decoder must carry that through as the
+    // equivalent HTTP status so the retry ladder classifies via the
+    // compile-time-proven table instead of sniffing the human message.
+    //
+    // The prose here is deliberately unfamiliar: no substring the sniffer
+    // recognises. Without the typed status this classifies Terminal and
+    // the turn dies on a failure the server explicitly said to retry.
+    const std::vector<std::pair<std::string, std::string>> overloaded = {
+        {"error",
+         R"({"type":"error","error":{"type":"overloaded_error",)"
+         R"("message":"unusually high demand right now"}})"},
+    };
+
+    std::string rendered = render_all(ap::parse_sse_for_test(overloaded));
+    check(rendered.find("status=503") != std::string::npos,
+          "overloaded_error surfaces as 503");
+    check(rendered.find("unusually high demand right now") != std::string::npos,
+          "the human message is preserved alongside the type");
+
+    // And a rate limit, the other retryable one.
+    const std::vector<std::pair<std::string, std::string>> limited = {
+        {"error",
+         R"({"type":"error","error":{"type":"rate_limit_error",)"
+         R"("message":"slow down"}})"},
+    };
+    rendered = render_all(ap::parse_sse_for_test(limited));
+    check(rendered.find("status=429") != std::string::npos,
+          "rate_limit_error surfaces as 429");
+
+    // An unknown type means NO OPINION: 0 leaves the reducer on its
+    // existing string path rather than inventing a classification. Getting
+    // this wrong in the confident direction is how a future error type
+    // would start being mis-retried.
+    const std::vector<std::pair<std::string, std::string>> unknown = {
+        {"error",
+         R"({"type":"error","error":{"type":"some_future_error",)"
+         R"("message":"who knows"}})"},
+    };
+    rendered = render_all(ap::parse_sse_for_test(unknown));
+    check(rendered.find("status=0") != std::string::npos,
+          "an unrecognised error type yields no opinion");
 }
 
 TEST_CASE("anthropic parallel tool blocks stay separate") {

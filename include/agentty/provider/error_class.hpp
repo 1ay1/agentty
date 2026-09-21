@@ -303,6 +303,57 @@ enum class ErrorClass {
     return set;
 }
 
+// ── Wire error TYPE → HTTP status ────────────────────────────────────────
+//
+// A mid-stream `event: error` body carries a machine-readable `error.type`
+// and no HTTP status: by the time the SSE body is flowing, the status line
+// is long past (it was 200). So the classifier fell back to sniffing the
+// human `message`, which is the lossy path this header exists to avoid.
+//
+// That fallback is only mostly right, and the failures are asymmetric:
+//
+//   • a provider that phrases `overloaded_error` as "The model is currently
+//     experiencing high demand" has no substring the sniffer knows, so a
+//     retryable overload classifies Terminal and the turn dies
+//   • a genuine `invalid_request_error` whose message happens to contain
+//     the word "connection" classifies Transient and gets retried six
+//     times against a request that can never succeed
+//
+// Both vanish if we use the field the server already typed for us. This
+// maps the error taxonomy onto the equivalent HTTP status, so the SSE path
+// reaches the SAME compile-time-proven classify(HttpError) table as the
+// header path instead of a parallel, drifting substring list.
+//
+// Returns 0 for an unrecognised type, which means "no opinion" — the caller
+// keeps its existing string-sniff behaviour rather than guessing Terminal.
+//
+// Covers Anthropic's published taxonomy plus the OpenAI/Responses spellings
+// that mean the same thing; both dialects surface errors this way and a
+// shared table is one fewer place to drift.
+[[nodiscard]] inline int wire_error_type_status(std::string_view type) noexcept {
+    // Rate limiting — the server is shedding load on purpose.
+    if (type == "rate_limit_error" || type == "rate_limit_exceeded"
+     || type == "insufficient_quota")
+        return 429;
+    // Overload / transient server-side — same request will likely work.
+    if (type == "overloaded_error" || type == "api_error"
+     || type == "server_error" || type == "service_unavailable")
+        return 503;
+    // Auth — credentials, not the request.
+    if (type == "authentication_error" || type == "invalid_api_key")
+        return 401;
+    if (type == "permission_error" || type == "permission_denied")
+        return 403;
+    // Terminal request problems — re-sending changes nothing.
+    if (type == "invalid_request_error" || type == "invalid_request")
+        return 400;
+    if (type == "not_found_error" || type == "model_not_found")
+        return 404;
+    if (type == "request_too_large" || type == "context_length_exceeded")
+        return 413;
+    return 0;   // unknown — no opinion, let the caller sniff
+}
+
 // Backoff duration for the Nth retry attempt (0-indexed). Caps at 6
 // attempts; longer schedules for RateLimit since Anthropic's per-minute
 // window doesn't reset on demand. Returning `std::chrono::milliseconds`

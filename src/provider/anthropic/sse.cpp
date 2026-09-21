@@ -20,6 +20,8 @@
 #include <nlohmann/json.hpp>
 #include <simdjson.h>
 
+#include "agentty/provider/error_class.hpp"
+
 namespace agentty::provider::anthropic {
 
 namespace {
@@ -441,7 +443,20 @@ void dispatch_event(StreamCtx& ctx, std::string_view name, std::string_view data
             // retry_after unset and let the runtime fall back to its own
             // schedule.
             auto err = j.value("error", json::object());
-            ctx.sink(StreamError{err.value("message", "unknown error"), std::nullopt});
+            // The wire typed this for us (`rate_limit_error`,
+            // `overloaded_error`, …). Translate it to the equivalent HTTP
+            // status so the reducer classifies through the proven
+            // classify(HttpError) table instead of sniffing the human
+            // message — a retryable overload whose prose we don't recognise
+            // would otherwise be read as Terminal and kill the turn.
+            // 0 = unrecognised type, which leaves the existing string path.
+            const int status =
+                provider::wire_error_type_status(err.value("type", ""));
+            AGT_LOG(Wire, Warn, "anthropic.error_event",
+                    "type={} status={} msg={}", err.value("type", ""),
+                    status, err.value("message", ""));
+            ctx.sink(StreamError{err.value("message", "unknown error"),
+                                 std::nullopt, status});
             ctx.terminated = true;
             break;
         }

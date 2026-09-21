@@ -30,6 +30,7 @@
 
 #include "agentty/provider/stream_epilogue.hpp"
 #include "agentty/provider/stream_scaffold.hpp"
+#include "agentty/provider/error_class.hpp"
 #include "agentty/provider/usage.hpp"
 #include "agentty/provider/msg_shared.hpp"
 #include "agentty/provider/wire.hpp"
@@ -812,12 +813,29 @@ void dispatch(StreamCtx& ctx, std::string_view data) {
             msg = compose(err);
             if (msg.empty()) msg = "Codex request failed";
         }
+        const json& err_obj = j.contains("error") && j["error"].is_object()
+                                  ? j["error"] : j;
+        std::string code = err_obj.value("code", err_obj.value("type", std::string{}));
+        if (code == "error") code.clear();   // the event discriminator, not a code
+        if (code.empty())
+            code = j.value("response", json::object())
+                       .value("error", json::object())
+                       .value("code", std::string{});
+        // The server already typed this failure. Map it to the equivalent
+        // HTTP status so the reducer classifies through the proven
+        // classify(HttpError) table rather than sniffing prose — the
+        // status line is long gone by the time an SSE error body arrives
+        // (it was 200), so without this the retry ladder is guessing from
+        // a human sentence. 0 = unrecognised, keeps the string path.
+        const int status = provider::wire_error_type_status(code);
         // The full wire error event, not just the composed one-liner: the
         // event may carry fields compose() doesn't surface (param, request
         // id) that decide a provider-side ticket vs a client bug.
-        AGT_LOG(Wire, Warn, "responses.error_event", "msg={} raw={}",
-                msg, data.substr(0, 2048));
-        ctx.sink(StreamError{msg, std::nullopt});
+        AGT_LOG(Wire, Warn, "responses.error_event",
+                "code={} status={} msg={} raw={}",
+                code.empty() ? "<none>" : code, status, msg,
+                data.substr(0, 2048));
+        ctx.sink(StreamError{msg, std::nullopt, status});
         ctx.terminated = true;
         return;
     }

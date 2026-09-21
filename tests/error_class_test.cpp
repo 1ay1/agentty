@@ -73,6 +73,96 @@ TEST_CASE("classify_stream_error is a pure dispatcher") {
     CHECK(classify_stream_error("Overloaded", 0) == classify("Overloaded"));
 }
 
+// ── Typed mid-stream errors ────────────────────────────────────────
+//
+// An `event: error` inside a 200 body carries a machine-readable type and no
+// HTTP status — the status line was 200 and is long gone. So the retry
+// ladder used to classify these by sniffing the human `message`.
+//
+// That is the lossy path this header exists to avoid, and its failures are
+// asymmetric in both directions: a retryable overload whose prose we don't
+// recognise dies as Terminal, and a permanently-invalid request whose prose
+// happens to contain a transient-sounding word gets retried six times.
+
+TEST_CASE("wire error types map to the status that means the same thing") {
+    using agentty::provider::wire_error_type_status;
+
+    // Anthropic's published taxonomy.
+    CHECK(wire_error_type_status("rate_limit_error")     == 429);
+    CHECK(wire_error_type_status("overloaded_error")     == 503);
+    CHECK(wire_error_type_status("api_error")            == 503);
+    CHECK(wire_error_type_status("authentication_error") == 401);
+    CHECK(wire_error_type_status("permission_error")     == 403);
+    CHECK(wire_error_type_status("invalid_request_error")== 400);
+    CHECK(wire_error_type_status("not_found_error")      == 404);
+    CHECK(wire_error_type_status("request_too_large")    == 413);
+
+    // The OpenAI/Responses spellings for the same conditions. Both dialects
+    // surface errors this way; one table is one fewer place to drift.
+    CHECK(wire_error_type_status("rate_limit_exceeded")     == 429);
+    CHECK(wire_error_type_status("insufficient_quota")      == 429);
+    CHECK(wire_error_type_status("server_error")            == 503);
+    CHECK(wire_error_type_status("context_length_exceeded") == 413);
+
+    // Unknown means NO OPINION, not Terminal. 0 tells the caller to keep
+    // its existing string-sniff rather than inventing a classification —
+    // guessing here would be the same mistake as guessing a tool call's
+    // owner: confidently wrong beats visibly unsure only until it matters.
+    CHECK(wire_error_type_status("some_future_error") == 0);
+    CHECK(wire_error_type_status("")                  == 0);
+}
+
+TEST_CASE("a typed wire error classifies like its HTTP equivalent") {
+    using agentty::provider::wire_error_type_status;
+    using K = agentty::http::HttpErrorKind;
+
+    // The point of the mapping: a mid-stream error reaches the SAME
+    // compile-time-proven table as a header error, instead of a parallel
+    // substring list that drifts from it.
+    struct Case { const char* type; int status; };
+    static constexpr Case kCases[] = {
+        {"rate_limit_error",      429},
+        {"overloaded_error",      503},
+        {"authentication_error",  401},
+        {"invalid_request_error", 400},
+    };
+    for (const auto& c : kCases) {
+        INFO("type = " << c.type);
+        CHECK(wire_error_type_status(c.type) == c.status);
+        CHECK(classify_stream_error("any prose at all", c.status)
+              == classify(agentty::http::HttpError{K::Status, c.status, ""}));
+    }
+}
+
+TEST_CASE("typed errors fix what prose sniffing gets wrong") {
+    using agentty::provider::wire_error_type_status;
+
+    // THE MOTIVATING CASE, in both directions.
+
+    // 1. A retryable overload phrased in prose the sniffer has never seen.
+    //    Sniffing calls it Terminal and the turn dies on a failure the
+    //    server told us to retry.
+    const char* unfamiliar =
+        "The model is currently experiencing unusually high demand";
+    const auto sniffed = classify(unfamiliar);
+    const auto typed   = classify_stream_error(
+        unfamiliar, wire_error_type_status("overloaded_error"));
+
+    CHECK(typed == ErrorClass::Transient);
+    CHECK(sniffed != typed);      // the sniff really does get this wrong
+
+    // 2. The reverse: a permanently-invalid request whose message happens
+    //    to read as transient. Retrying it six times cannot help, and the
+    //    user waits through the whole ladder for a guaranteed failure.
+    const char* misleading =
+        "invalid connection parameter: tools[0].name";
+    const auto typed_terminal = classify_stream_error(
+        misleading, wire_error_type_status("invalid_request_error"));
+
+    CHECK(typed_terminal == ErrorClass::Terminal);
+    CHECK(max_retries_for(typed_terminal, /*mid_stream=*/true) == 0);
+}
+
 // ── Long-context entitlement rejection: the [1m] self-heal trigger ───────
 // Anthropic 400s the whole request when the context-1m beta rides on an
 // unentitled subscription. The reducer strips the `[1m]` marker and retries;
