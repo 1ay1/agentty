@@ -264,6 +264,20 @@ json build_body(const provider::Request& req) {
     // there has to mean off on the wire.
     if (!req.effort.empty())
         body["reasoning"] = json{{"effort", req.effort}, {"summary", "auto"}};
+    // Output cap. Chat sends `max_tokens`, Anthropic sends `max_tokens`,
+    // Ollama sends `num_predict` — this dialect spells it
+    // `max_output_tokens`, and used to send nothing at all.
+    //
+    // A field on the neutral Request is a promise to the user. Kept by
+    // three implementations of four, it is worse than absent: it looks
+    // correct to whoever wrote it and arbitrary to whoever hits the one
+    // that ignores it. That is exactly how the reasoning toggle shipped
+    // broken for months (see the note above), so the same reading applies
+    // here even though nobody has reported it yet.
+    //
+    // 0 means "no opinion" and omits the field — the server's default is a
+    // better answer than a number we invented.
+    if (req.max_tokens > 0) body["max_output_tokens"] = req.max_tokens;
     return body;
 }
 

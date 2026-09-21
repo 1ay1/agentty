@@ -141,6 +141,133 @@ TEST_CASE("attribution: no decoder picks an arbitrary call as an owner") {
         "checked above — append `// attribution-ok: <why>`.");
 }
 
+TEST_CASE("attribution: every transport states how it attributes") {
+    // The scan above catches a decoder that picks arbitrarily. It cannot
+    // catch a decoder that never faces the question because it keeps ONE
+    // slot and routes everything there — which is what the Anthropic SSE
+    // parser did for years (`current_tool_id`, every input_json_delta sent
+    // to whichever block opened last).
+    //
+    // That code was safe, but safe BY LUCK: Claude emits content blocks one
+    // at a time, so "the last one opened" happened to be right. A bet on a
+    // server's emission order is not a property, and the losing side is one
+    // call's arguments appended to another's — still valid JSON, dispatched
+    // silently, wrong tool.
+    //
+    // So each transport must NAME its strategy, and the name has to be a
+    // real mechanism. Three are legitimate:
+    //
+    //   keyed      — a per-call slot keyed on the wire's own identity
+    //                (Chat's wire::ToolCallTracker, Responses' output_index
+    //                + OpenCalls, Anthropic's content-block index)
+    //   atomic     — the protocol delivers a whole call in one frame, so
+    //                Start/Delta/End are emitted back-to-back and two calls
+    //                are never in flight (Ollama's NDJSON message.tool_calls
+    //                and its salvage paths)
+    //
+    // A transport with neither is the shape that keeps coming back.
+    struct Transport {
+        const char* path;
+        const char* evidence;   // the token that proves the strategy
+        const char* why;
+    };
+    const Transport kTransports[] = {
+        {"openai/transport.cpp",   "ctx.tools.attribute",
+         "Chat Completions interleaves parallel calls; keyed on (id, index) "
+         "jointly via wire::ToolCallTracker, which returns Ambiguous rather "
+         "than guessing."},
+        {"responses/codec.cpp",    "addressed_item",
+         "Responses addresses frames by output_index (a proxy cannot rewrite "
+         "it without renumbering output[]), then a validated item_id, then "
+         "OpenCalls::sole() which answers only when there is exactly one."},
+        {"anthropic/sse.cpp",     "tool_at",
+         "Anthropic puts an index on every content_block frame; that index "
+         "is the block's identity for start, every delta, and stop."},
+        {"ollama/transport.cpp",  "StreamToolUseEnd",
+         "Ollama's NDJSON carries whole calls in one frame, so each is "
+         "emitted Start->Delta->End atomically and nothing is ever in "
+         "flight to misattribute."},
+    };
+
+    const fs::path root{AGENTTY_SRC_ROOT};
+    for (const auto& t : kTransports) {
+        const auto path = root / "src" / "provider" / t.path;
+        INFO("transport = " << t.path);
+        REQUIRE(fs::exists(path));
+
+        std::ifstream in(path);
+        REQUIRE(in);
+        const std::string src((std::istreambuf_iterator<char>(in)),
+                              std::istreambuf_iterator<char>());
+
+        CHECK_MESSAGE(src.find(t.evidence) != std::string::npos,
+            t.path << " no longer contains `" << t.evidence
+                   << "`, the mechanism its attribution rests on. " << t.why
+                   << " If the strategy changed, update this table with the "
+                      "new mechanism — do not delete the row. A transport "
+                      "with no named strategy is one that routes bytes "
+                      "somewhere plausible, and plausible corruption still "
+                      "parses.");
+    }
+}
+
+TEST_CASE("attribution: no transport keeps a single current-call slot") {
+    // The specific spelling of the Anthropic bug, banned by name.
+    //
+    // `current_tool_id` / `active_tool` / `last_tool` read as bookkeeping
+    // and are in fact an attribution decision: every delta goes to that
+    // one call. The scanner in this file would not flag it — there is no
+    // `*begin()`, no `.back()`, nothing that looks like a pick. It looks
+    // like a variable.
+    static constexpr std::string_view kBanned[] = {
+        "current_tool_id", "current_tool_name",
+        "active_tool_id",  "last_tool_id",
+        "latest_tool_item",
+    };
+
+    const fs::path root{AGENTTY_SRC_ROOT};
+    const fs::path dir = root / "src" / "provider";
+    REQUIRE(fs::exists(dir));
+
+    std::vector<std::string> offenders;
+    for (const auto& e : fs::recursive_directory_iterator(dir)) {
+        if (!e.is_regular_file()) continue;
+        const auto ext = e.path().extension();
+        if (ext != ".cpp" && ext != ".hpp") continue;
+
+        std::ifstream in(e.path());
+        REQUIRE(in);
+        std::string line;
+        int lineno = 0;
+        while (std::getline(in, line)) {
+            ++lineno;
+            // Comments explaining the ban are not violations of it — the
+            // decoders document this rule, and flagging the explanation
+            // trains people to ignore the scanner.
+            const auto first = line.find_first_not_of(" \t");
+            if (first != std::string::npos
+                && line.compare(first, 2, "//") == 0) continue;
+            if (exempted(line)) continue;
+            for (auto banned : kBanned) {
+                if (line.find(banned) == std::string::npos) continue;
+                offenders.push_back(
+                    fs::relative(e.path(), root).generic_string() + ":"
+                    + std::to_string(lineno) + "  " + line);
+            }
+        }
+    }
+
+    for (const auto& o : offenders) MESSAGE(o);
+    CHECK_MESSAGE(offenders.empty(),
+        "a provider decoder keeps a single 'current tool' slot. That is an "
+        "attribution decision wearing the clothes of bookkeeping: every "
+        "delta goes to that one call, so the moment the server interleaves "
+        "two, one call's arguments land on the other. It parses, it "
+        "dispatches, and nothing notices. Key on the identity the wire "
+        "already provides (content_block index, tool_calls[].index, "
+        "output_index) and resolve through ONE named lookup.");
+}
+
 TEST_CASE("attribution: the scanner recognises the shape it exists for") {
     // A discipline test that cannot fail is decoration. These are the exact
     // lines from the two bugs, so a future rewrite of the matcher has to keep

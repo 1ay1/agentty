@@ -20,6 +20,8 @@
 // that frames one tool call in its own wire language. Everything asserted is
 // dialect-independent — that is the point.
 
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -502,4 +504,113 @@ TEST_CASE("conformance: hiding reasoning never disturbs the answer") {
              sse, {}, false, false, /*show_reasoning=*/false))
         if (auto* t = leaf<StreamTextDelta>(m)) text += t->text;
     CHECK(text == "hello world");
+}
+
+// ── The REQUEST half of the contract ─────────────────────────────────
+//
+// Everything above asserts what a dialect DECODES. This asserts what it
+// ENCODES, which is where the quieter class of bug lives.
+//
+// A field on the neutral `provider::Request` is a promise to the user:
+// they set an output cap, or a reasoning tier, and expect it to apply.
+// A promise kept by three implementations of four is WORSE than one that
+// was never made — it looks correct to whoever wrote it and arbitrary to
+// whoever happens to be on the dialect that ignores it, with nothing in
+// the UI distinguishing the two.
+//
+// That is not hypothetical. The reasoning toggle shipped honoured on
+// three transports and ignored on the fourth, and `max_tokens` was sent
+// by Chat, Anthropic and Ollama but silently dropped by Responses —
+// found by writing this test, not by a report.
+//
+// Only Responses exposes a pure body builder today; the other three
+// assemble their body inside the stream function, so a behavioural
+// assertion cannot reach them. Rather than skip them, check the SOURCE
+// for the field being read at all. Coarse on purpose: it cannot prove
+// the value is used correctly, but it does prove nobody deleted the only
+// line that looks at it.
+
+TEST_CASE("conformance: max_tokens reaches the wire on the responses dialect") {
+    provider::Request req;
+    req.model = "gpt-5.4";
+    Message u; u.role = Role::User; u.text = "hi";
+    req.messages.push_back(u);
+
+    // Set: the cap appears, under this dialect's spelling.
+    req.max_tokens = 4096;
+    const json capped = provider::chatgpt::build_body_for_test(req);
+    REQUIRE(capped.contains("max_output_tokens"));
+    CHECK(capped["max_output_tokens"] == 4096);
+
+    // Unset: the field is omitted entirely. 0 means "no opinion", and the
+    // server's default beats a number we invented.
+    req.max_tokens = 0;
+    CHECK(!provider::chatgpt::build_body_for_test(req).contains("max_output_tokens"));
+}
+
+TEST_CASE("conformance: every dialect reads every promised request field") {
+    // The structural half. One row per (dialect, field) with the token
+    // that proves the field is consulted.
+    //
+    // If a dialect genuinely cannot express a field, that is a legitimate
+    // answer — but it has to be written down HERE, with the reason, not
+    // left as an absence somebody has to notice.
+    struct Row {
+        const char* file;
+        const char* field;
+        const char* evidence;   // empty = documented as inexpressible
+        const char* note;
+    };
+    static constexpr Row kRows[] = {
+        // max_tokens — the output cap.
+        {"openai/transport.cpp",    "max_tokens", "req.max_tokens",
+         "Chat Completions: max_tokens / max_completion_tokens."},
+        {"anthropic/transport.cpp", "max_tokens", "req.max_tokens",
+         "Anthropic requires max_tokens; also clamps the thinking budget "
+         "strictly below it."},
+        {"ollama/transport.cpp",    "max_tokens", "req.max_tokens",
+         "Ollama spells it options.num_predict."},
+        {"responses/codec.cpp",     "max_tokens", "req.max_tokens",
+         "Responses spells it max_output_tokens. Was MISSING until this "
+         "test was written — the promise was kept by 3 of 4."},
+
+        // effort — the reasoning tier, and the SSOT for whether reasoning
+        // is requested at all (see docs/COPILOT_RESPONSES.md §6.1).
+        {"openai/transport.cpp",    "effort", "req.effort",
+         "reasoning_effort, with capability discovery on rejection."},
+        {"ollama/transport.cpp",    "effort", "req.effort",
+         "maps onto the native think parameter."},
+        {"responses/codec.cpp",     "effort", "req.effort",
+         "reasoning.effort; empty tier omits the whole reasoning object."},
+        {"anthropic/transport.cpp", "effort", "req.effort",
+         "gates extended thinking and sizes budget_tokens."},
+
+        // show_reasoning — whether the user wants to SEE it.
+        {"openai/transport.cpp",    "show_reasoning", "req.show_reasoning",
+         "filters reasoning_content at decode."},
+        {"ollama/transport.cpp",    "show_reasoning", "req.show_reasoning",
+         "gates swallowed <think> spans."},
+        {"responses/codec.cpp",     "show_reasoning", "req.show_reasoning",
+         "gates reasoning_summary_text deltas."},
+    };
+
+    const std::filesystem::path root{AGENTTY_SRC_ROOT};
+    for (const auto& r : kRows) {
+        const auto path = root / "src" / "provider" / r.file;
+        INFO("dialect = " << r.file << "  field = " << r.field);
+        REQUIRE(std::filesystem::exists(path));
+
+        std::ifstream in(path);
+        REQUIRE(in);
+        const std::string src((std::istreambuf_iterator<char>(in)),
+                              std::istreambuf_iterator<char>());
+
+        CHECK_MESSAGE(src.find(r.evidence) != std::string::npos,
+            r.file << " never reads `" << r.evidence << "`. " << r.note
+                   << "  A Request field is a promise to the user; kept by "
+                      "some dialects and not others, it looks arbitrary to "
+                      "them and correct to us. Either honour it here, or "
+                      "change this row to record why this wire cannot "
+                      "express it.");
+    }
 }
