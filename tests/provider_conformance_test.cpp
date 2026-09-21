@@ -182,6 +182,87 @@ struct OllamaNative {
 const std::string kArgs =
     R"({"pattern":"foo\"bar","glob":"src/**/*.cpp","opts":{"word":true}})";
 
+// ── Hostile framing: the same call, sent the way a BROKEN server sends it ──
+//
+// The contract above uses well-formed wire. Every tool-call bug this project
+// has shipped came from the other kind, and a survey of other harnesses says
+// it is universal, not our incompetence: openai-python #3377 (fragments
+// keyed on arrival order instead of index), opik #8360 (streamed tool calls
+// dropped entirely), strands #3950, crewai, azure-ai, theia, llm-gateway
+// #136 (empty id on continuations). Same field, same handful of mistakes.
+//
+// The root cause is a property of the DIALECT, not of any server: Chat
+// Completions carries several distinct facts on fields that do not say what
+// they are. `arguments` is a fragment or a whole snapshot. `id` is the
+// identity or an empty restatement. `index` is the parallel-call key or
+// absent. Anthropic names its fragments in the type and Responses separates
+// them by event, which is exactly why neither has this bug class.
+//
+// So the decoder cannot be "correct" against a spec — it has to be correct
+// against the wire that real servers emit. These cases pin the shapes that
+// have actually broken someone, and they run against EVERY dialect that can
+// express them, so a fix in one decoder cannot quietly skip another.
+struct Hostile {
+    // A continuation chunk restates `id` as empty instead of omitting it.
+    static Decoded chat_empty_id(const std::string& name, const std::string& args) {
+        const auto mid = args.size() / 2;
+        auto tc = [&](const std::string& head, const std::string& a) {
+            return R"({"choices":[{"delta":{"tool_calls":[{"index":0,)"
+                   + head + R"("function":{)" + a + "}}]}}]}";
+        };
+        std::string bytes;
+        bytes += "data: " + tc(R"("id":"call_1",)",
+                               R"("name":")" + name + R"(","arguments":")" "\"")
+                 + "\n\n";
+        bytes += "data: " + tc(R"("id":"",)",
+                               R"("arguments":)" + json(args.substr(0, mid)).dump())
+                 + "\n\n";
+        bytes += "data: " + tc(R"("id":"",)",
+                               R"("arguments":)" + json(args.substr(mid)).dump())
+                 + "\n\n";
+        bytes += R"(data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]})"
+                 "\n\n" "data: [DONE]\n\n";
+        return decode(provider::openai::parse_sse_for_test(bytes, {name}));
+    }
+
+    // Token-by-token fragmentation fine enough that a fragment equals a
+    // PREFIX of the buffer — issue #48. `{"` opening a nested object when
+    // the accumulated value already starts `{"`.
+    static Decoded chat_prefix_fragments(const std::string& name,
+                                         const std::string& args) {
+        std::string bytes;
+        bytes += R"(data: {"choices":[{"delta":{"tool_calls":[{"index":0,)"
+                 R"("id":"call_1","function":{"name":")" + name +
+                 R"(","arguments":""}}]}}]})" "\n\n";
+        // One byte at a time: the most adversarial framing a server can pick,
+        // and what llama.cpp approximates.
+        for (char c : args) {
+            bytes += "data: " +
+                std::string{R"({"choices":[{"delta":{"tool_calls":[{"index":0,)"
+                            R"("function":{"arguments":)"}
+                + json(std::string(1, c)).dump() + "}}]}}]}" + "\n\n";
+        }
+        bytes += R"(data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]})"
+                 "\n\n" "data: [DONE]\n\n";
+        return decode(provider::openai::parse_sse_for_test(bytes, {name}));
+    }
+};
+
+TEST_CASE("conformance: hostile framing round-trips the same arguments") {
+    // Whatever the server does to the framing, the tool layer must receive
+    // exactly what the model authored.
+    for (auto make : {&Hostile::chat_empty_id, &Hostile::chat_prefix_fragments}) {
+        const auto d = make("grep", kArgs);
+        REQUIRE_NOTHROW((void)json::parse(d.args));
+        CHECK(json::parse(d.args) == json::parse(kArgs));
+        // Announced once, closed once — the reducer pairs tool_use with
+        // tool_result on exactly these, so a dropped End hangs the turn.
+        CHECK(d.starts == 1);
+        CHECK(d.ends == 1);
+        CHECK(d.name == "grep");
+    }
+}
+
 template <class D>
 void check_contract() {
     for (auto st : {Style::Fragments, Style::Snapshot, Style::Both}) {
