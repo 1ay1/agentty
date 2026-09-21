@@ -488,6 +488,84 @@ TEST_CASE("test_sse_tool_call_coalescing_proxy_snapshots") {
     CHECK(!parsed.is_discarded());
 }
 
+TEST_CASE("test_sse_tool_call_empty_id_on_continuation") {
+    // A continuation chunk that RESTATES `id` as "" instead of omitting it.
+    // Several OpenAI-compatible proxies do this (llm-gateway #136 is the
+    // public report), and assigning it blindly loses the call's identity:
+    // every later delta carries an empty ToolCallId, and the end-of-turn
+    // sweep skips slots with an empty id, so the call is never closed and
+    // the turn hangs with a tool call that never dispatches.
+    std::string sse =
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+            "\"id\":\"call_keep\",\"type\":\"function\","
+            "\"function\":{\"name\":\"read\",\"arguments\":\"\"}}]}}]}\n\n"
+        // id restated as empty — must NOT clobber call_keep.
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"\","
+            "\"function\":{\"arguments\":\"{\\\"path\\\":\"}}]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"\","
+            "\"function\":{\"arguments\":\"\\\"a.txt\\\"}\"}}]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n"
+        "data: [DONE]\n\n";
+
+    auto msgs = oai::parse_sse_for_test(sse);
+
+    // The id survives on every carrier.
+    for (const auto& m : msgs) {
+        if (const auto* s = get_leaf<StreamToolUseStart>(m))
+            CHECK(s->id.value == "call_keep");
+        if (const auto* d = get_leaf<StreamToolUseDelta>(m))
+            CHECK(d->id.value == "call_keep");
+        if (const auto* e = get_leaf<StreamToolUseEnd>(m))
+            CHECK(e->id.value == "call_keep");
+    }
+
+    // And the call is actually CLOSED — the sweep skips empty ids, so a
+    // clobbered id shows up here as a missing End rather than a wrong one.
+    CHECK(count_leaf<StreamToolUseEnd>(msgs) == 1);
+    CHECK(joined_tool_args(msgs) == std::string{"{\"path\":\"a.txt\"}"});
+}
+
+TEST_CASE("test_sse_parallel_tool_calls_without_index") {
+    // Chat Completions interleaves fragments for PARALLEL calls in one
+    // stream, and `index` is the only thing separating them. A provider that
+    // omits the field used to land every call on slot 0, concatenating one
+    // call's arguments onto another's — both calls corrupted.
+    //
+    // The array position is the natural fallback: it is what `index` means
+    // when present, and it is what the payload already tells us.
+    std::string sse =
+        // Two calls opened in ONE delta, no index on either.
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":["
+            "{\"id\":\"call_a\",\"type\":\"function\","
+             "\"function\":{\"name\":\"read\",\"arguments\":\"\"}},"
+            "{\"id\":\"call_b\",\"type\":\"function\","
+             "\"function\":{\"name\":\"grep\",\"arguments\":\"\"}}"
+        "]}}]}\n\n"
+        // Arguments for both, still no index, same array order.
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":["
+            "{\"function\":{\"arguments\":\"{\\\"path\\\":\\\"a\\\"}\"}},"
+            "{\"function\":{\"arguments\":\"{\\\"pattern\\\":\\\"b\\\"}\"}}"
+        "]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n"
+        "data: [DONE]\n\n";
+
+    auto msgs = oai::parse_sse_for_test(sse);
+
+    // Two distinct calls, not one merged blob.
+    CHECK(count_leaf<StreamToolUseStart>(msgs) == 2);
+    CHECK(count_leaf<StreamToolUseEnd>(msgs) == 2);
+
+    // Each call's arguments stay with that call.
+    std::string a_args, b_args;
+    for (const auto& m : msgs)
+        if (const auto* d = get_leaf<StreamToolUseDelta>(m)) {
+            if (d->id.value == "call_a") a_args += d->partial_json;
+            if (d->id.value == "call_b") b_args += d->partial_json;
+        }
+    CHECK(a_args == std::string{"{\"path\":\"a\"}"});
+    CHECK(b_args == std::string{"{\"pattern\":\"b\"}"});
+}
+
 TEST_CASE("test_sse_tool_call_stream") {
     // OpenAI tool-call streaming: opening frame carries id+name, subsequent
     // frames carry arguments fragments; finish_reason "tool_calls".

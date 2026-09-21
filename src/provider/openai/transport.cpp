@@ -1012,8 +1012,19 @@ void handle_delta(StreamCtx& ctx, const json& delta) {
             ctx.text_hold.clear();
             ctx.salvage_eligible = false;  // real tool call, no need for salvage
         }
+        int array_pos = -1;
         for (const auto& tc : delta["tool_calls"]) {
-            const int index = tc.value("index", 0);
+            ++array_pos;
+            // `index` is how Chat Completions distinguishes PARALLEL calls:
+            // fragments for different calls interleave in one stream and the
+            // index is the only thing separating them. A provider that omits
+            // it used to collapse every parallel call onto slot 0, so the
+            // second call's arguments were appended to the first and both
+            // were lost. Falling back to the payload's own array position
+            // keeps them apart, which is what the field means when present.
+            const int index = tc.contains("index") && tc["index"].is_number_integer()
+                            ? tc["index"].get<int>()
+                            : array_pos;
             if (index < 0) continue;
             // `index` is server-controlled. A hostile or buggy endpoint
             // (or a compat proxy) can send an absurd index; resize(index+1)
@@ -1028,8 +1039,18 @@ void handle_delta(StreamCtx& ctx, const json& delta) {
                 ctx.tool_slots.resize(static_cast<std::size_t>(index) + 1);
             auto& slot = ctx.tool_slots[index];
 
-            if (tc.contains("id") && tc["id"].is_string())
-                slot.id = tc["id"].get<std::string>();
+            // A continuation chunk may RESTATE id/name as empty strings
+            // rather than omitting them — several OpenAI-compatible proxies
+            // do exactly that. Assigning it blindly loses the id we already
+            // have, and the id is the call's identity: StreamToolUseDelta
+            // would carry an empty ToolCallId and the end-of-turn sweep
+            // (which skips slots with an empty id) would never close the
+            // call at all. `name` was already guarded this way; `id` was
+            // not. First non-empty value wins, for both.
+            if (tc.contains("id") && tc["id"].is_string()) {
+                auto wire_id = tc["id"].get<std::string>();
+                if (!wire_id.empty()) slot.id = std::move(wire_id);
+            }
             std::string fn_name;
             std::string fn_args;
             if (tc.contains("function") && tc["function"].is_object()) {
