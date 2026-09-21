@@ -222,7 +222,10 @@ struct HostProbe {
     std::string_view sse_bytes,
     std::vector<std::string> known_tools = {},
     bool allow_memory_salvage = false,
-    bool reason_by_default = false);
+    bool reason_by_default = false,
+    // Mirrors Request::show_reasoning. Defaulted true so existing tests keep
+    // capture semantics; the conformance suite drives both values.
+    bool show_reasoning = true);
 
 // Same, for the native Ollama /api/chat NDJSON path (feed_ndjson).
 [[nodiscard]] std::vector<Msg> parse_ndjson_for_test(

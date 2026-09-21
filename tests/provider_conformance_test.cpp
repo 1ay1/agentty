@@ -392,3 +392,114 @@ TEST_CASE("conformance: shared streaming timeout ladder") {
     CHECK(provider::stream_timeouts(std::chrono::milliseconds(600'000)).idle
           == std::chrono::milliseconds(600'000));
 }
+
+// ── The reasoning toggle, asserted against EVERY dialect ────────────────
+//
+// This suite existed and still missed a bug: reasoning arrived on Copilot's
+// gpt-* models with the toggle OFF, because the Responses codec never read
+// Request::show_reasoning. Three transports honoured it, one didn't, and
+// nothing cross-checked — the contract only covered tool calls.
+//
+// That is the general shape: a Request field is a PROMISE to the user, and
+// a promise kept by three of four implementations is worse than one kept by
+// none, because it looks arbitrary. So the axis gets the same treatment tool
+// calls got — state it once, instantiate per dialect.
+//
+// Two legitimate strategies, and the contract accepts both:
+//
+//   SUPPRESS AT SOURCE   Anthropic asks the server not to send it
+//                        (`thinking.display`), so nothing arrives to filter.
+//   FILTER AT DECODE     Chat/Ollama/Responses receive it either way and
+//                        drop the text on the way to the reducer.
+//
+// What both must produce is the same OBSERVABLE: no reasoning text reaches
+// the reducer when the user hid it. How a dialect gets there is its own
+// business; that it gets there is not.
+namespace reasoning {
+
+// Reasoning text that survived to the reducer, and whether ANY liveness
+// signal still fired.
+//
+// Liveness is counted across BOTH carriers on purpose. A dialect may keep
+// the turn alive with an empty-text ThinkingDelta (chat, responses) or with
+// a StreamHeartbeat (ollama); the reducer resets last_event_at on either, so
+// both satisfy the requirement. Asserting one spelling would be pinning a
+// mechanism instead of the guarantee — and would have failed a dialect that
+// is behaving correctly, which is how a contract loses its authority.
+struct Seen {
+    std::string text;
+    int         liveness = 0;
+};
+
+Seen collect(const std::vector<Msg>& msgs) {
+    Seen s;
+    for (const auto& m : msgs) {
+        if (auto* t = leaf<StreamThinkingDelta>(m)) { s.text += t->text; ++s.liveness; }
+        if (leaf<StreamHeartbeat>(m))               { ++s.liveness; }
+    }
+    return s;
+}
+
+// Each dialect frames the same turn: a reasoning burst, then an answer.
+Seen chat(bool show) {
+    const std::string sse =
+        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"pondering\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"answer\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    return collect(provider::openai::parse_sse_for_test(
+        sse, {}, false, false, show));
+}
+
+Seen responses(bool show) {
+    const std::vector<std::string> sse{
+        R"({"type":"response.reasoning_summary_text.delta","delta":"pondering"})",
+        R"({"type":"response.output_text.delta","delta":"answer"})",
+        R"({"type":"response.completed","response":{"usage":{}}})"};
+    return collect(provider::chatgpt::parse_sse_for_test(sse, show));
+}
+
+Seen ollama(bool show) {
+    const std::string nd =
+        R"({"message":{"role":"assistant","thinking":"pondering"},"done":false})" "\n"
+        R"({"message":{"role":"assistant","content":"answer"},"done":true})" "\n";
+    return collect(provider::ollama::parse_ndjson_for_test(
+        nd, {}, false, false, show));
+}
+
+}  // namespace reasoning
+
+TEST_CASE("conformance: hiding reasoning hides it on every dialect") {
+    struct Case { const char* id; reasoning::Seen (*run)(bool); };
+    for (const Case c : {Case{"openai-chat",      &reasoning::chat},
+                         Case{"openai-responses", &reasoning::responses},
+                         Case{"ollama-native",    &reasoning::ollama}}) {
+        INFO("dialect = " << std::string{c.id});
+
+        // Shown: the text reaches the reducer.
+        const auto on = c.run(true);
+        CHECK(on.text.find("pondering") != std::string::npos);
+
+        // Hidden: no reasoning TEXT survives…
+        const auto off = c.run(false);
+        CHECK(off.text.empty());
+
+        // …but SOME liveness signal still fires. Swallowing the event
+        // entirely makes a long silent reasoning phase look like a dead
+        // stream, and the retry watchdog acts on that.
+        CHECK(off.liveness > 0);
+    }
+}
+
+TEST_CASE("conformance: hiding reasoning never disturbs the answer") {
+    // The regression guard. Suppression must touch exactly one channel.
+    const std::string sse =
+        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"think\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"hello \"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"world\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    std::string text;
+    for (const auto& m : provider::openai::parse_sse_for_test(
+             sse, {}, false, false, /*show_reasoning=*/false))
+        if (auto* t = leaf<StreamTextDelta>(m)) text += t->text;
+    CHECK(text == "hello world");
+}

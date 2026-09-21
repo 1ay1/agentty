@@ -1799,9 +1799,11 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
 std::vector<Msg> parse_ndjson_for_test(std::string_view ndjson_bytes,
                                        std::vector<std::string> known_tools,
                                        bool json_protocol,
-                                       bool allow_memory_salvage) {
+                                       bool allow_memory_salvage,
+                                       bool show_reasoning) {
     std::vector<Msg> out;
     StreamCtx ctx;
+    ctx.show_reasoning = show_reasoning;
     ctx.sink = [&out](Msg m) { out.push_back(std::move(m)); };
     ctx.known_tools = std::move(known_tools);
     ctx.allow_remember_salvage = allow_memory_salvage;

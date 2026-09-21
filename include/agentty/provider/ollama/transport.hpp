@@ -81,6 +81,8 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink,
     std::string_view ndjson_bytes,
     std::vector<std::string> known_tools = {},
     bool json_protocol = false,
-    bool allow_memory_salvage = false);
+    bool allow_memory_salvage = false,
+    // Mirrors Request::show_reasoning — see the openai seam.
+    bool show_reasoning = true);
 
 } // namespace agentty::provider::ollama

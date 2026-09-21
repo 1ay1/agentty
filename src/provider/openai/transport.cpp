@@ -2862,9 +2862,11 @@ std::vector<ModelInfo> list_models(const AuthHeader& auth, const Endpoint& endpo
 std::vector<Msg> parse_sse_for_test(std::string_view sse_bytes,
                                    std::vector<std::string> known_tools,
                                    bool allow_memory_salvage,
-                                   bool reason_by_default) {
+                                   bool reason_by_default,
+                                   bool show_reasoning) {
     std::vector<Msg> out;
     StreamCtx ctx;
+    ctx.show_reasoning = show_reasoning;
     ctx.known_tools = std::move(known_tools);
     ctx.allow_remember_salvage = allow_memory_salvage;
     ctx.allow_forget_salvage = allow_memory_salvage;
