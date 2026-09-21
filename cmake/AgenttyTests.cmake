@@ -180,6 +180,12 @@ agentty_fold_test(picker_cursor_visible_test TIMEOUT 120)
 # probe renders through render_to_string (fresh pool + cache per call), which
 # structurally cannot catch a stale cross-frame cache entry.
 agentty_fold_test(theme_alternating_key_test TIMEOUT 180)
+# The OTHER half of "live theme switch is flaky", and the one that is
+# PERMANENT rather than late: a committed markdown block is stored as an
+# already-RENDERED Element, so it keeps the palette that was live when its
+# text was committed. Everything still animating repaints correctly, which is
+# what made it look intermittent.
+agentty_fold_test(theme_settled_recolour_test TIMEOUT 180)
 # Every panel must answer a keypress inside one key-repeat slot, AND a
 # burst delivered in one read must land where single-stepping lands.
 agentty_fold_test(panel_input_snappiness_test TIMEOUT 180 LABELS perf)
