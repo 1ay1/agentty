@@ -1575,13 +1575,48 @@ Endpoint Endpoint::from_spec(std::string_view spec) {
         auto slash = s.find('/');
         std::string_view authority = (slash == std::string_view::npos)
             ? s : s.substr(0, slash);
+        // Strip userinfo: "user:pass@host" dials `host`, not the whole
+        // string. Left in, it became the SNI name and the Host header, so
+        // TLS failed with a name mismatch that read as "certificate
+        // problem" rather than "your URL has credentials in it".
+        if (auto at = authority.rfind('@'); at != std::string_view::npos)
+            authority = authority.substr(at + 1);
+
         std::string prefix;   // base path prefix, may be empty
         if (slash != std::string_view::npos) {
             prefix = std::string{s.substr(slash)};
+            // Drop ?query and #fragment — neither belongs in a base path.
+            // Without this, "/v1?key=x" produced the path
+            // "/v1?key=x/chat/completions", which every server 404s.
+            if (auto q = prefix.find_first_of("?#"); q != std::string::npos)
+                prefix.resize(q);
             // Strip trailing '/' so "/api/" → "/api", and "/" → "".
             while (prefix.size() > 1 && prefix.back() == '/')
                 prefix.pop_back();
             if (prefix == "/") prefix.clear();
+            // Collapse duplicate slashes: a hand-edited or concatenated URL
+            // yields "//v1", and "//v1/chat/completions" is a different
+            // path to most routers.
+            for (std::size_t i = 1; i + 1 <= prefix.size();) {
+                if (prefix[i] == '/' && prefix[i - 1] == '/') prefix.erase(i, 1);
+                else ++i;
+            }
+            // THE ONE USERS ACTUALLY HIT. The docs say the path is a
+            // PREFIX and we append /chat/completions — but what a provider
+            // hands you, and what you therefore paste, is the full
+            // endpoint URL. Appending to that gives
+            // "/v1/chat/completions/chat/completions": a 404 on every
+            // request, from a URL that is visibly correct.
+            //
+            // So accept both spellings. A prefix that already ends in the
+            // completions path IS the endpoint; take the part before it.
+            for (std::string_view tail : {"/chat/completions", "/completions"}) {
+                if (prefix.size() > tail.size()
+                    && std::string_view{prefix}.ends_with(tail)) {
+                    prefix.resize(prefix.size() - tail.size());
+                    break;
+                }
+            }
         }
         // BARE URL → /v1 DEFAULT. This endpoint speaks the OpenAI dialect,
         // and that dialect lives under /v1 everywhere — api.openai.com/v1,
@@ -1632,6 +1667,14 @@ Endpoint Endpoint::from_spec(std::string_view spec) {
         // to the default endpoint rather than dialing an empty host.
         if (ep.host.empty()) return Endpoint{};
 
+        // Hostnames are case-insensitive (RFC 4343), but we compare them as
+        // strings in several places — SNI, the Host header, and the
+        // per-provider credential lookup keyed on the endpoint. "API.Foo.com"
+        // and "api.foo.com" are the same server, and a user who capitalises
+        // one should not get a second, key-less identity.
+        for (char& c : ep.host)
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+
         ep.path       = prefix + "/chat/completions";
         ep.models_path = prefix + "/models";
         return ep;
@@ -1649,6 +1692,12 @@ Endpoint Endpoint::from_spec(std::string_view spec) {
     // the port, not "8080#work".
     if (auto hash = s.rfind('#'); hash != std::string::npos)
         s.resize(hash);
+    // Same normalisation as the URL arm: a bare spec can carry userinfo
+    // ("user@my-box.lan:8080") and can be capitalised. Both reach the same
+    // dialling code, so both need the same cleanup — having one arm accept a
+    // shape the other rejects is its own bug report.
+    if (auto at = s.rfind('@'); at != std::string::npos)
+        s.erase(0, at + 1);
     if (auto colon = s.rfind(':'); colon != std::string::npos) {
         ep.host = s.substr(0, colon);
         try {
@@ -1664,6 +1713,8 @@ Endpoint Endpoint::from_spec(std::string_view spec) {
         ep.port = 443;
         ep.use_tls = true;
     }
+    for (char& c : ep.host)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     return ep;
 }
 

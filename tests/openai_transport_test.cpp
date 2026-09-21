@@ -1240,6 +1240,96 @@ TEST_CASE("test_provider_display_name_url_label") {
 // fix the raw spec flows into parse_selection → from_spec. This pins the
 // contract for the specs the TUI must accept: every URL form a CLI user
 // can pass via --provider, plus bare host[:port].
+TEST_CASE("endpoint: the URL a provider actually hands you") {
+    namespace P = agentty::provider;
+
+    // THE ONE PEOPLE HIT. Docs say the path is a PREFIX and we append
+    // /chat/completions. But what a provider's dashboard gives you — and
+    // therefore what you paste — is the full endpoint URL. Appending to that
+    // produced "/v1/chat/completions/chat/completions": a 404 on every
+    // request, from a URL that looks obviously correct in the settings pane.
+    {
+        auto sel = P::parse_selection("https://api.example.com/v1/chat/completions");
+        CHECK(sel.openai_endpoint.host == "api.example.com");
+        CHECK(sel.openai_endpoint.path == "/v1/chat/completions");
+        CHECK(sel.openai_endpoint.models_path == "/v1/models");
+    }
+    // Same URL as a prefix. Both spellings name the same endpoint, so both
+    // must land on it — that is the whole point of accepting the full form.
+    {
+        auto sel = P::parse_selection("https://api.example.com/v1");
+        CHECK(sel.openai_endpoint.path == "/v1/chat/completions");
+    }
+    // A gateway under a sub-path, pasted whole.
+    {
+        auto sel = P::parse_selection("https://gw.corp/openai/v1/chat/completions");
+        CHECK(sel.openai_endpoint.path == "/openai/v1/chat/completions");
+        CHECK(sel.openai_endpoint.models_path == "/openai/v1/models");
+    }
+}
+
+TEST_CASE("endpoint: query strings and fragments never reach the path") {
+    namespace P = agentty::provider;
+    // Azure-style URLs carry ?api-version=. Left in the prefix it became
+    // "/v1?api-version=x/chat/completions", which every server 404s.
+    {
+        auto sel = P::parse_selection("https://api.example.com/v1?api-version=2024");
+        CHECK(sel.openai_endpoint.host == "api.example.com");
+        CHECK(sel.openai_endpoint.path == "/v1/chat/completions");
+    }
+    // The fragment is our own multi-account tag and is never dialled.
+    {
+        auto sel = P::parse_selection("https://api.example.com/v1#work");
+        CHECK(sel.openai_endpoint.path == "/v1/chat/completions");
+    }
+}
+
+TEST_CASE("endpoint: userinfo is stripped from the dialled host") {
+    namespace P = agentty::provider;
+    // "user:pass@host" left whole became the SNI name and the Host header,
+    // so TLS failed with a name mismatch — surfaced to the user as a
+    // certificate error rather than "your URL has credentials in it".
+    {
+        auto sel = P::parse_selection("https://user:pw@api.example.com/v1");
+        CHECK(sel.openai_endpoint.host == "api.example.com");
+        CHECK(sel.openai_endpoint.port == 443);
+    }
+    // The bare host[:port] arm reaches the same dialling code, so it needs
+    // the same cleanup — one arm accepting a shape the other rejects is its
+    // own bug report.
+    {
+        auto sel = P::parse_selection("user@my-box.lan:8080");
+        CHECK(sel.openai_endpoint.host == "my-box.lan");
+        CHECK(sel.openai_endpoint.port == 8080);
+    }
+}
+
+TEST_CASE("endpoint: a host is dialled case-insensitively") {
+    namespace P = agentty::provider;
+    // Hostnames are case-insensitive (RFC 4343) but we compare them as
+    // strings for SNI, the Host header, and the credential lookup keyed on
+    // the endpoint. A user who capitalises should not get a second, key-less
+    // identity for the same server.
+    {
+        auto a = P::parse_selection("https://API.Example.COM/v1");
+        auto b = P::parse_selection("https://api.example.com/v1");
+        CHECK(a.openai_endpoint.host == "api.example.com");
+        CHECK(a.openai_endpoint.host == b.openai_endpoint.host);
+    }
+    {
+        auto sel = P::parse_selection("My-Box.LAN:8080");
+        CHECK(sel.openai_endpoint.host == "my-box.lan");
+    }
+}
+
+TEST_CASE("endpoint: duplicate slashes collapse") {
+    namespace P = agentty::provider;
+    // A hand-edited or concatenated URL yields "//v1", and
+    // "//v1/chat/completions" is a different path to most routers.
+    auto sel = P::parse_selection("https://api.example.com//v1");
+    CHECK(sel.openai_endpoint.path == "/v1/chat/completions");
+}
+
 TEST_CASE("test_tui_custom_host_specs") {
     namespace P = agentty::provider;
 
