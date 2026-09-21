@@ -222,6 +222,60 @@ TEST_CASE("sse parallel tool calls are id addressed") {
     CHECK(ends["call_2"] == 1);
 }
 
+TEST_CASE("sse an unaddressed delta with several calls open is not guessed") {
+    // The Responses dialect normally addresses every argument event with
+    // item_id. When it is ABSENT the codec fell back to `latest_tool_item`,
+    // which sounds ordered and is not: it is refreshed from
+    // `*open_tool_items.begin()` on an unordered_set, i.e. whichever item
+    // the hash happens to yield.
+    //
+    // With two calls open that is a coin flip, and the losing side appends
+    // one call's arguments to the other. The result still parses, so the
+    // corruption is silent and reaches a tool invocation — the same failure
+    // the chat decoder's ToolCallTracker refuses to commit by returning
+    // Ambiguous instead of picking.
+    std::vector<std::string> sse = {
+        R"({"type":"response.output_item.added","item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"edit"}})",
+        R"({"type":"response.output_item.added","item":{"type":"function_call","id":"fc_2","call_id":"call_2","name":"shell"}})",
+        // No item_id, two calls open — unattributable.
+        R"({"type":"response.function_call_arguments.delta","delta":"{\"path\":\"x\"}"})",
+        R"({"type":"response.output_item.done","item":{"type":"function_call","id":"fc_1"}})",
+        R"({"type":"response.output_item.done","item":{"type":"function_call","id":"fc_2"}})",
+        R"({"type":"response.completed","response":{"usage":{}}})",
+    };
+
+    std::map<std::string, std::string> args;
+    for (const auto& m : cc::parse_sse_for_test(sse))
+        if (auto* d = leaf<StreamToolUseDelta>(m))
+            args[d->id.value] += d->partial_json;
+
+    // Neither call may receive the orphaned fragment. Dropping it is the
+    // honest outcome: the turn fails visibly on a missing field rather than
+    // running `edit` with a path that belonged to `shell`.
+    CHECK(args["call_1"].empty());
+    CHECK(args["call_2"].empty());
+}
+
+TEST_CASE("sse an unaddressed delta with ONE call open still lands") {
+    // The converse, and why this cannot simply be "always require item_id":
+    // with exactly one call in flight there is no ambiguity, and older
+    // servers legitimately omit the field. Refusing here would break them
+    // for no safety gain.
+    std::vector<std::string> sse = {
+        R"({"type":"response.output_item.added","item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"edit"}})",
+        R"({"type":"response.function_call_arguments.delta","delta":"{\"path\":\"x\"}"})",
+        R"({"type":"response.output_item.done","item":{"type":"function_call","id":"fc_1"}})",
+        R"({"type":"response.completed","response":{"usage":{}}})",
+    };
+
+    std::map<std::string, std::string> args;
+    for (const auto& m : cc::parse_sse_for_test(sse))
+        if (auto* d = leaf<StreamToolUseDelta>(m))
+            args[d->id.value] += d->partial_json;
+
+    CHECK(json::parse(args["call_1"])["path"] == "x");
+}
+
 TEST_CASE("sse reasoning") {
     std::vector<std::string> sse = {
         R"({"type":"response.reasoning_summary_text.delta","delta":"thinking…"})",

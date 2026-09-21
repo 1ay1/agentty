@@ -281,7 +281,6 @@ struct StreamCtx {
     // forwarded under.
     std::unordered_map<std::string, ToolSlot> tools;
     std::unordered_set<std::string> open_tool_items;
-    std::string latest_tool_item;   // fallback for older events without item_id
     bool text_block_open = false;
     bool saw_function_call = false;
     bool terminated = false;
@@ -293,6 +292,33 @@ struct StreamCtx {
     // client-side (reducer/render). Surfaced in the end-of-turn Debug line.
     int thinking_deltas = 0;
 };
+
+// Which open call does an argument event belong to?
+//
+// `item_id` is the answer whenever the server sends one, which is nearly
+// always. When it is absent we may only fall back if there is exactly ONE
+// call open — then there is nothing to be wrong about.
+//
+// With several open, any choice is a coin flip, and the losing side appends
+// one call's arguments to another. The result still PARSES, so the
+// corruption is silent and reaches a tool invocation: `edit` runs with a
+// path that belonged to `shell`. Returning empty drops the fragment, and the
+// turn then fails visibly on a missing required field — strictly better than
+// dispatching a tool with another call's bytes.
+//
+// This used to fall back to `latest_tool_item`, which sounds ordered and is
+// not: it was refreshed from `*open_tool_items.begin()` on an unordered_set,
+// so "latest" was whichever item the hash happened to yield. Same rule as
+// the chat decoder's wire::ToolCallTracker, which returns Ambiguous rather
+// than picking; see include/agentty/provider/wire/tool_calls.hpp.
+[[nodiscard]] std::string addressed_item(const StreamCtx& ctx, const json& j) {
+    if (const auto it = j.find("item_id");
+        it != j.end() && it->is_string()
+        && !it->get_ref<const std::string&>().empty())
+        return it->get<std::string>();
+    if (ctx.open_tool_items.size() == 1) return *ctx.open_tool_items.begin();
+    return {};
+}
 
 // Route an argument payload from ANY carrier into the slot and forward only
 // what is newly known. `total` = the server's complete view, not a fragment.
@@ -320,10 +346,6 @@ void close_tool(StreamCtx& ctx, const std::string& item_id) {
     if (item_id.empty() || !ctx.open_tool_items.erase(item_id)) return;
     if (const auto it = ctx.tools.find(item_id); it != ctx.tools.end())
         ctx.sink(StreamToolUseEnd{ToolCallId{it->second.call_id}});
-    if (ctx.latest_tool_item == item_id) {
-        ctx.latest_tool_item = ctx.open_tool_items.empty()
-            ? std::string{} : *ctx.open_tool_items.begin();
-    }
 }
 
 void close_all_tools(StreamCtx& ctx) {
@@ -396,7 +418,6 @@ void dispatch(StreamCtx& ctx, std::string_view data) {
             const std::string name    = item.value("name", std::string{});
             ctx.tools[item_id] = ToolSlot{call_id, {}};
             ctx.open_tool_items.insert(item_id);
-            ctx.latest_tool_item = item_id;
             ctx.saw_function_call = true;
             ctx.sink(StreamToolUseStart{ToolCallId{call_id}, ToolName{name}});
             // Carrier (1): some backends deliver the whole args string
@@ -408,7 +429,7 @@ void dispatch(StreamCtx& ctx, std::string_view data) {
     }
     // Carrier (2): incremental fragments. What Codex sends.
     if (type == "response.function_call_arguments.delta") {
-        feed_tool_args(ctx, j.value("item_id", ctx.latest_tool_item),
+        feed_tool_args(ctx, addressed_item(ctx, j),
                        j.value("delta", std::string{}), /*total=*/false);
         return;
     }
@@ -418,7 +439,7 @@ void dispatch(StreamCtx& ctx, std::string_view data) {
     // server that also streamed fragments this is a no-op, because
     // observe_total() returns just the unseen suffix (usually nothing).
     if (type == "response.function_call_arguments.done") {
-        feed_tool_args(ctx, j.value("item_id", ctx.latest_tool_item),
+        feed_tool_args(ctx, addressed_item(ctx, j),
                        j.value("arguments", std::string{}), /*total=*/true);
         return;
     }
