@@ -566,6 +566,72 @@ TEST_CASE("test_sse_parallel_tool_calls_without_index") {
     CHECK(b_args == std::string{"{\"pattern\":\"b\"}"});
 }
 
+TEST_CASE("test_sse_tool_call_index_reused_for_a_new_call") {
+    // A provider may REUSE index 0 for a second parallel call, distinguishing
+    // them only by a new `id`. Keying on index alone merges them: the second
+    // call's arguments get appended to the first, and both are corrupted.
+    //
+    // Learned from Zed's ToolCallAccumulator, which keys on (id, index)
+    // jointly for exactly this reason — "either value alone is unreliable
+    // because some providers omit indices, reuse indices, or repeat IDs
+    // across parallel calls".
+    std::string sse =
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+            "\"id\":\"call_a\",\"type\":\"function\","
+            "\"function\":{\"name\":\"read\","
+            "\"arguments\":\"{\\\"path\\\":\\\"a\\\"}\"}}]}}]}\n\n"
+        // Same index, DIFFERENT id — a new call, not a continuation.
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+            "\"id\":\"call_b\",\"type\":\"function\","
+            "\"function\":{\"name\":\"grep\","
+            "\"arguments\":\"{\\\"pattern\\\":\"}}]}}]}\n\n"
+        // Anonymous continuation: belongs to the LATEST call at that index.
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+            "\"function\":{\"arguments\":\"\\\"b\\\"}\"}}]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n"
+        "data: [DONE]\n\n";
+
+    auto msgs = oai::parse_sse_for_test(sse);
+
+    // TWO calls, each with its own arguments — not one merged blob.
+    CHECK(count_leaf<StreamToolUseStart>(msgs) == 2);
+    CHECK(count_leaf<StreamToolUseEnd>(msgs) == 2);
+
+    std::string a, b;
+    for (const auto& m : msgs)
+        if (const auto* d = get_leaf<StreamToolUseDelta>(m)) {
+            if (d->id.value == "call_a") a += d->partial_json;
+            if (d->id.value == "call_b") b += d->partial_json;
+        }
+    CHECK(a == std::string{"{\"path\":\"a\"}"});
+    CHECK(b == std::string{"{\"pattern\":\"b\"}"});
+}
+
+TEST_CASE("test_sse_tool_call_id_only_no_index") {
+    // MiniMax (Zed #42584) identifies calls by ID alone and sends no usable
+    // index. Two calls therefore arrive with no index at all, and the only
+    // thing separating them is the id.
+    std::string sse =
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":["
+            "{\"id\":\"call_a\",\"type\":\"function\","
+             "\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\"}}"
+        "]}}]}\n\n"
+        // Continuation for the SAME id, still no index.
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":["
+            "{\"id\":\"call_a\","
+             "\"function\":{\"arguments\":\"\\\"src\\\"}\"}}"
+        "]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n"
+        "data: [DONE]\n\n";
+
+    auto msgs = oai::parse_sse_for_test(sse);
+
+    // ONE call, not two: the repeated id is the same call continuing.
+    CHECK(count_leaf<StreamToolUseStart>(msgs) == 1);
+    CHECK(count_leaf<StreamToolUseEnd>(msgs) == 1);
+    CHECK(joined_tool_args(msgs) == std::string{"{\"path\":\"src\"}"});
+}
+
 TEST_CASE("test_sse_tool_call_stream") {
     // OpenAI tool-call streaming: opening frame carries id+name, subsequent
     // frames carry arguments fragments; finish_reason "tool_calls".

@@ -225,15 +225,35 @@ bool guard_truncated_tool_args(ToolUse& tc) {
         if (missing.empty()) return false;
     }
     auto now = std::chrono::steady_clock::now();
+    // State what was OBSERVED, not a guess at why.
+    //
+    // This used to assert "the stream was truncated before the full tool
+    // input arrived". That is one possible cause and frequently the wrong
+    // one: issue #48 was a decoder bug on a stream that was complete and
+    // valid, with finish_reason=tool_calls, and the message sent the
+    // reporter looking for a truncated response that never existed. A
+    // diagnosis presented as fact costs more than no diagnosis.
+    //
+    // So: name the field, show what DID arrive, and let the reader see for
+    // themselves whether it looks cut off. The raw args are the evidence —
+    // Zed's ToolUseJsonParseError carries `raw_input` for the same reason.
+    std::string got = tc.args_dump();
+    constexpr std::size_t kMaxShown = 400;
+    const bool clipped = got.size() > kMaxShown;
+    if (clipped) {
+        got.resize(kMaxShown);
+        got += "…";
+    }
     tc.status = ToolUse::Failed{
         tc.started_at(),
         now,
-        std::string{"Tool call arguments look incomplete — `"}
-            + std::string{missing}
-            + "` is missing. This usually means the stream was truncated "
-              "before the full tool input arrived. Please emit a fresh "
-              "tool call with every required field populated (including `"
-            + std::string{missing} + "`).",
+        std::string{"Tool call is missing the required field `"}
+            + std::string{missing} + "`.\n\nArguments received"
+            + (clipped ? " (first " + std::to_string(kMaxShown) + " bytes)"
+                       : std::string{})
+            + ":\n" + got
+            + "\n\nRe-send the call with `" + std::string{missing}
+            + "` populated.",
     };
     return true;
 }

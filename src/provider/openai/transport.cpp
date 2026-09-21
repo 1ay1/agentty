@@ -1049,7 +1049,24 @@ void handle_delta(StreamCtx& ctx, const json& delta) {
             // not. First non-empty value wins, for both.
             if (tc.contains("id") && tc["id"].is_string()) {
                 auto wire_id = tc["id"].get<std::string>();
-                if (!wire_id.empty()) slot.id = std::move(wire_id);
+                if (!wire_id.empty()) {
+                    // A DIFFERENT id at an index we are already streaming
+                    // means the server REUSED the index for a new parallel
+                    // call. Identity is (id, index) jointly, never index
+                    // alone: keying on index would append the new call's
+                    // arguments to the old one and corrupt both.
+                    //
+                    // Close the old call before adopting the new identity,
+                    // so the reducer still sees a matched start/end pair for
+                    // it — an unclosed call leaves a tool_use with no
+                    // tool_result and hangs the turn.
+                    if (slot.started && !slot.ended && !slot.id.empty()
+                        && slot.id != wire_id) {
+                        ctx.sink(StreamToolUseEnd{ToolCallId{slot.id}});
+                        slot = ToolCallSlot{};
+                    }
+                    slot.id = std::move(wire_id);
+                }
             }
             std::string fn_name;
             std::string fn_args;
