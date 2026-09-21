@@ -2122,3 +2122,36 @@ TEST_CASE("test_sse_unresolvable_tool_name_still_reaches_the_model") {
         if (const auto* s = get_leaf<StreamToolUseStart>(m))
             CHECK(s->name.value == "nosuchtool");
 }
+
+TEST_CASE("test_sse_error_object_mid_stream_terminates") {
+    // A provider can answer 200, stream a few deltas, then emit
+    // `{"error": …}` in place of a finish_reason. The transport sees a clean
+    // 200 and a closed stream, so only the decoded event knows the turn
+    // failed.
+    //
+    // The decoder has always handled this shape; what was missing was a
+    // consumer. The subagent loop's StreamError arm was empty, so the error
+    // was decoded and discarded and the turn returned its partial text as a
+    // successful answer — a truncated reply with no indication anything went
+    // wrong, which is the worst possible reading of a failed request.
+    std::string sse =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"starting\"}}]}\n\n"
+        "data: {\"error\":{\"message\":\"upstream exploded\","
+            "\"type\":\"server_error\"}}\n\n"
+        "data: [DONE]\n\n";
+
+    auto msgs = oai::parse_sse_for_test(sse);
+
+    // The content before the error is kept — it really did arrive.
+    CHECK(joined_text(msgs).find("starting") != std::string::npos);
+
+    // And the error is emitted, carrying the provider's own message rather
+    // than a generic "stream failed".
+    bool saw = false;
+    for (const auto& m : msgs)
+        if (const auto* e = get_leaf<StreamError>(m)) {
+            saw = true;
+            CHECK(e->message.find("upstream exploded") != std::string::npos);
+        }
+    CHECK(saw);
+}

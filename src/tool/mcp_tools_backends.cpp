@@ -1062,6 +1062,19 @@ provider::StreamResult run_one_completion(Thread& thread,
     asst.role = Role::Assistant;
     StopReason stop = StopReason::Unspecified;
     std::unordered_map<std::string, std::string> tool_json;
+    // A StreamError that arrives MID-STREAM, after a 200 and some content.
+    //
+    // The transport-level error paths (non-2xx status, connection failure)
+    // are reported by StreamResult, but a provider can also answer 200 OK,
+    // stream a few deltas, and then emit `{"error": {...}}` in place of a
+    // finish_reason. The decoder handles that shape correctly — and this
+    // loop's StreamError arm was EMPTY, so the message was decoded and
+    // thrown away. The turn then returned whatever partial text had arrived
+    // as if it had completed normally.
+    //
+    // Captured here and folded into last_error after the stream, so the
+    // subagent reports a failure instead of a truncated success.
+    std::string stream_error;
 
     auto find_tool = [&](const ToolCallId& id) -> ToolUse* {
         auto it = std::find_if(asst.tool_calls.begin(), asst.tool_calls.end(),
@@ -1143,8 +1156,15 @@ provider::StreamResult run_one_completion(Thread& thread,
                 } else if constexpr (std::same_as<T, StreamFinished>) {
                     stop = e.stop_reason;
                 } else if constexpr (std::same_as<T, StreamError>) {
-                    // StreamResult is authoritative. The event remains useful
-                    // for legacy/scripted seams that cannot stamp a result.
+                    // StreamResult is authoritative for TRANSPORT failures
+                    // (non-2xx, dropped connection) — but it cannot see an
+                    // error the provider streams INSIDE a 200 in place of a
+                    // finish_reason. That shape used to land here and be
+                    // dropped, so the turn returned its partial text as if
+                    // it had completed. First error wins: a provider that
+                    // emits several while unwinding is best described by
+                    // whatever broke first.
+                    if (stream_error.empty()) stream_error = e.message;
                 }
             }, *sm);
         };
@@ -1173,6 +1193,18 @@ provider::StreamResult run_one_completion(Thread& thread,
     }
     cancel_bridge.request_stop();
     pump(/*force=*/true);   // flush the throttled tail
+
+    // A provider that answered 200, streamed some deltas, then emitted
+    // `{"error": …}` instead of a finish_reason leaves `result` OK — the
+    // transport saw a clean 200 and a closed stream. Only the decoded event
+    // knows better, so promote it here, alongside the other post-stream
+    // corrections below.
+    //
+    // Without this the turn returned its partial text as a successful
+    // answer: the user sees a truncated reply with no indication anything
+    // went wrong, which is the worst possible reading of a failed request.
+    if (result.ok() && !stream_error.empty())
+        result = provider::StreamResult::failed(stream_error);
 
     // An empty successful close is a transient transport failure. A max-token
     // turn is also incomplete: partial prose/tool JSON is not a final report.
