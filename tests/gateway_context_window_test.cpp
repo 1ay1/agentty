@@ -21,6 +21,7 @@
 #include "agtest.hpp"
 
 #include "agentty/provider/openai/transport.hpp"
+#include "agentty/domain/session.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -113,4 +114,46 @@ TEST_CASE("context: the deployment's own figure outranks the generic one") {
     CHECK(advertised(json::parse(
         R"({"id":"x","max_input_tokens":8192,
              "top_provider":{"context_length":1000000}})")) == 1'000'000);
+}
+
+// ── A private gateway that declares nothing: the documented last rung ────
+//
+// Real setup (gitlab.com/r3xxar/fw16-ai-inference): Bifrost on :8090 in
+// front of two llama.cpp servers. Its /v1/models rows are bare — id and
+// object, nothing else — and the model ids (`igpu/laguna-xs-2.1`) are
+// unknown to every public catalog by construction.
+//
+// So every automatic rung answers 0, and that is CORRECT: inventing a
+// window here is how a real 262k model gets clamped to a default nobody
+// chose. But 0 has a consequence worth pinning, because it is silent:
+// StreamState::compaction_threshold() returns 0 when context_max <= 0, so
+// auto-compaction NEVER FIRES and a long thread grows until the server
+// rejects it.
+//
+// AGENTTY_MAX_CONTEXT_TOKENS is the escape hatch (docs/CONTEXT_WINDOW.md).
+// These pin both halves: the detection stays honest, and the override is
+// what arms compaction again.
+TEST_CASE("context: a bare private-gateway row declares nothing") {
+    // Exactly what Bifrost serves for a locally-hosted model.
+    CHECK(advertised(json::parse(
+        R"({"id":"igpu/laguna-xs-2.1","object":"model","owned_by":"bifrost"})"))
+        == 0);
+    CHECK(advertised(json::parse(
+        R"({"id":"dgpu/granite-4.2-3b","object":"model","owned_by":"bifrost"})"))
+        == 0);
+}
+
+TEST_CASE("context: an unknown window disarms compaction, a known one arms it") {
+    // The consequence, stated directly. This is the part a user cannot see:
+    // the gauge shows no maximum and nothing warns, so the first symptom is
+    // a 400 from the server deep into a long session.
+    agentty::StreamState s;
+
+    s.context_max = 0;                       // nobody declared one
+    CHECK(s.compaction_threshold() == 0);    // → auto-compaction never fires
+
+    s.context_max = 262'144;                 // AGENTTY_MAX_CONTEXT_TOKENS=262144
+    const int thr = s.compaction_threshold();
+    CHECK(thr > 0);                          // → armed
+    CHECK(thr < s.context_max);              // → leaves room for the reply
 }
