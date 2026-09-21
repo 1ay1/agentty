@@ -1271,6 +1271,17 @@ public:
         // breaker): the identical tool call failing 3× means the loop is
         // stuck — stop burning turns and report what we have.
         std::unordered_map<std::string, int> failed_calls;
+        // The mirror of failed_calls: a tool that keeps SUCCEEDING with
+        // byte-identical arguments is looping too, and that case had no cap
+        // at all. Measured against a local model behind a private gateway:
+        // 80 identical successful `read` calls before the turn budget ran
+        // out — on a 22GB resident that is minutes of GPU time spent
+        // re-deriving an answer it already had.
+        //
+        // Threshold is higher than the failure one: a repeat that WORKS is
+        // weaker evidence (re-reading a file after an edit is normal), but
+        // six in a row without a text answer is not a strategy.
+        std::unordered_map<std::string, int> repeated_ok_calls;
         bool doomed = false;
         // Set once we've told the model it's out of budget and must write its
         // final report NOW. Prevents a thorough agent from exploring straight
@@ -1451,6 +1462,14 @@ public:
                             res->text, kSubagentToolBudget);
                         tc.status = ToolUse::Done{now, now, std::move(capped)};
                         log += "\n    \xe2\x9c\x93 " + summarize_call(tc);
+                        // Identical SUCCEEDING call 6× → also stuck.
+                        std::string ok_key = tc.name.value + '\0'
+                            + (tc.args.is_null() ? std::string{} : tc.args.dump());
+                        if (++repeated_ok_calls[ok_key] >= 6) {
+                            doomed = true;
+                            log += "\n  \xe2\x9a\xa0 same call repeated 6\xc3\x97 "
+                                   "with identical args \xe2\x80\x94 stopping";
+                        }
                     } else {
                         tc.status = ToolUse::Failed{now, now, res.error().render()};
                         log += "\n    \xe2\x9c\x97 " + summarize_call(tc) + "  \xe2\x80\x94 "

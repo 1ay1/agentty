@@ -1407,6 +1407,22 @@ std::optional<LoopBreak> agent_loop_should_break(
     // bails in seconds rather than spinning until the user hits Esc.
     constexpr int kRepeatLimit  = 3;   // same failing call N times → stop
     constexpr int kMaxToolTurns = 25;  // tool-call turns w/o a text answer
+    // Same SUCCEEDING call, byte-identical args, N times in one run → stop.
+    //
+    // Higher than kRepeatLimit because a repeat that WORKS is weaker
+    // evidence of a stuck model than one that fails: re-reading a file after
+    // editing it, or re-running a test, is legitimate. But a model that has
+    // called `read` on the same path six times with identical arguments and
+    // still has not spoken is not going to converge on the seventh.
+    //
+    // Without this the only backstop was kMaxToolTurns, which is gated on
+    // enforce_step_cap — true only for models the id heuristic recognises as
+    // weak. A locally-hosted model with an unfamiliar name
+    // (`igpu/laguna-xs-2.1` behind a private gateway) is NOT recognised, so
+    // an identical-call loop ran with no limit at all: measured at 80
+    // successful repeats before the harness gave up, which on a 22GB local
+    // model is minutes of GPU time spent going nowhere.
+    constexpr int kSuccessRepeatLimit = 6;
 
     // Find the start of the current run: the last User message. (Sub-turn
     // continuations push Assistant placeholders; tool results live inside the
@@ -1428,6 +1444,8 @@ std::optional<LoopBreak> agent_loop_should_break(
     // streak. A success resets that call's streak; historical failures before
     // demonstrated recovery must not trip the breaker later.
     std::unordered_map<std::string, int> failure_streaks;
+    // The mirror, for calls that keep SUCCEEDING identically.
+    std::unordered_map<std::string, int> success_streaks;
     for (std::size_t i = run_start; i < messages.size(); ++i) {
         const auto& msg = messages[i];
         if (msg.role != Role::Assistant || msg.tool_calls.empty()) continue;
@@ -1441,9 +1459,11 @@ std::optional<LoopBreak> agent_loop_should_break(
             // per tool sub-turn — raw args.dump() made it O(N²) over the run).
             std::string key = tc.name.value + '\0'
                 + (tc.args.is_null() ? std::string{} : tc.args_dump());
+            const bool bad = tc.is_failed() || tc.is_rejected();
             auto& streak = failure_streaks[key];
-            if (tc.is_failed() || tc.is_rejected()) ++streak;
-            else streak = 0;
+            if (bad) ++streak; else streak = 0;
+            auto& ok_streak = success_streaks[key];
+            if (bad) ok_streak = 0; else ++ok_streak;
         }
     }
 
@@ -1458,6 +1478,28 @@ std::optional<LoopBreak> agent_loop_should_break(
                 "change the arguments (check the path/target exists, or pick a "
                 "different tool), or answer the user directly with what you "
                 "already know."};
+        }
+    }
+    // The same check for calls that keep SUCCEEDING. Applied to EVERY model,
+    // not just ones the id heuristic calls weak: an unfamiliar local id
+    // behind a private gateway is unrecognised by construction, and that is
+    // exactly the deployment where an unbounded loop costs the most (a 22GB
+    // resident re-running the same read for minutes).
+    //
+    // A repeat that works is weaker evidence than one that fails, so the
+    // threshold is higher — re-reading a file after editing it is normal.
+    // Six identical, successful, byte-for-byte calls without a text answer is
+    // not.
+    for (const auto& [key, streak] : success_streaks) {
+        if (streak >= kSuccessRepeatLimit) {
+            auto nul = key.find('\0');
+            std::string name = nul == std::string::npos ? key : key.substr(0, nul);
+            return LoopBreak{
+                "Stopped: the `" + name + "` tool was called "
+                + std::to_string(streak) + " times in a row with identical "
+                "arguments and the same result. You already have this output — "
+                "answer the user with what you know, or take a different "
+                "action."};
         }
     }
     // RUNAWAY step cap. Only enforced for weak local models (caller passes

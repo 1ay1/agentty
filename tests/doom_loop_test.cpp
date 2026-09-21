@@ -98,14 +98,51 @@ TEST_CASE("two failures no break") {
 }
 
 // ── 3. Same call but SUCCEEDING → never break (legit re-read) ────────────────
-TEST_CASE("repeat succeeding no break") {
+TEST_CASE("repeat succeeding tolerated below the limit") {
+    // A repeat that WORKS is weak evidence of a stuck model: re-reading a
+    // file after editing it, or re-running a test, is ordinary. So the
+    // threshold sits above the failure one and five is still fine.
     std::vector<Message> msgs;
     msgs.push_back(user());
     json a = {{"path", "log.txt"}};
     for (int i = 0; i < 5; ++i)
         msgs.push_back(asst_call("read", a, Term::Done));
     check(!agent_loop_should_break(msgs).has_value(),
-          "repeated SUCCEEDING call never breaks");
+          "five identical successful calls are still legitimate");
+}
+
+TEST_CASE("repeat succeeding breaks at the limit") {
+    // The gap this closes. The failure breaker only counted FAILING calls,
+    // and the step cap is gated on enforce_step_cap — true only for models
+    // the id heuristic recognises as weak. A locally-hosted model behind a
+    // private gateway (`igpu/laguna-xs-2.1`) is unrecognised by
+    // construction, so an identical-call loop that SUCCEEDED every time had
+    // no cap at all: measured at 80 repeats before the turn budget ran out,
+    // which on a 22GB resident is minutes of GPU time going nowhere.
+    //
+    // Applies to EVERY model, weak or not — the deployment where this costs
+    // most is exactly the one the heuristic cannot identify.
+    std::vector<Message> msgs;
+    msgs.push_back(user());
+    json a = {{"path", "log.txt"}};
+    for (int i = 0; i < 6; ++i)
+        msgs.push_back(asst_call("read", a, Term::Done));
+    auto brk = agent_loop_should_break(msgs, /*enforce_step_cap=*/false);
+    check(brk.has_value(), "six identical successful calls break the loop");
+    if (brk) check(brk->reason.find("read") != std::string::npos,
+                   "the break names the offending tool");
+}
+
+TEST_CASE("succeeding repeats with different args never break") {
+    // The discriminator: it is the IDENTICAL call that is evidence of a
+    // loop, not the tool. A model walking a directory reads many files.
+    std::vector<Message> msgs;
+    msgs.push_back(user());
+    for (int i = 0; i < 12; ++i)
+        msgs.push_back(asst_call("read",
+            json{{"path", "f" + std::to_string(i) + ".txt"}}, Term::Done));
+    check(!agent_loop_should_break(msgs, false).has_value(),
+          "distinct successful reads are a legitimate traversal");
 }
 
 // ── 4. Different args each time → not the same dead call ─────────────────────
