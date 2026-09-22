@@ -2716,6 +2716,25 @@ struct WindowProbe {
     // A single window that applies to the whole server (llama.cpp serves one
     // model). Used when per_model has no entry for an id.
     int server_wide = 0;
+    // Is per_model a MEASUREMENT of what the server allocated, or another
+    // party's DECLARATION of what a model supports?
+    //
+    // The distinction decides whether this may shrink a window the row
+    // already advertised. A measurement may: llama.cpp's meta.n_ctx and LM
+    // Studio's loaded_instances[].config.context_length are the size the
+    // running process actually allocated, so a request genuinely cannot
+    // exceed them.
+    //
+    // A declaration may NOT. LiteLLM's /v1/model/info is a config file the
+    // proxy was handed; it can be stale, conservative, or a default the
+    // admin never edited, and letting it override a larger advertised
+    // window would silently cost users context they really have. Same for
+    // any future catalog-shaped route.
+    //
+    // Getting this wrong is a quiet, expensive bug: too-small means we
+    // compact a conversation that never needed compacting, and the user
+    // sees history disappear for no reason.
+    bool measured = false;
 };
 
 // Is this endpoint a server running on THIS machine?
@@ -2789,6 +2808,8 @@ struct WindowProbe {
             util::dbglog("openai.window_probe.model_info", e.what());
         } catch (...) {}
     }
+    // NOT measured: /v1/model/info is the proxy's own config, a declaration
+    // like the row's, so it fills holes but never shrinks a larger one.
     if (!out.per_model.empty()) return out;
 
     // 2. LM Studio /api/v1/models — the NATIVE API, not the /v1 shim.
@@ -2841,7 +2862,11 @@ struct WindowProbe {
             util::dbglog("openai.window_probe.lmstudio", e.what());
         } catch (...) {}
     }
-    if (!out.per_model.empty()) return out;
+    if (!out.per_model.empty()) {
+        // MEASURED: this is the size the loaded instance allocated.
+        out.measured = true;
+        return out;
+    }
 
     // 3. llama.cpp /props — one model per server, so the answer is
     //    server-wide. n_ctx here is the RUNTIME window (-c on the command
@@ -2857,8 +2882,51 @@ struct WindowProbe {
             }
             if (out.server_wide <= 0)
                 out.server_wide = advertised_context_window(j);
+            // MEASURED: default_generation_settings.n_ctx is meta.slot_n_ctx,
+            // the window this process actually allocated (verified in
+            // llama.cpp tools/server/server-context.cpp).
+            if (out.server_wide > 0) out.measured = true;
         } catch (const std::exception& e) {
             util::dbglog("openai.window_probe.props", e.what());
+        } catch (...) {}
+    }
+    if (out.measured) return out;
+
+    // 4. Ollama /api/ps — what is loaded RIGHT NOW, and at what size.
+    //
+    // /api/tags (the route list_models uses for Ollama) carries no window
+    // at all — verified against ollama api/types.go ListModelResponse,
+    // which is {name, model, modified_at, size, digest, details,
+    // capabilities}. So an Ollama row arrives here at 0 and the runtime
+    // falls back to effective_num_ctx()'s 8k floor / 32k ceiling.
+    //
+    // That fallback is a guess. /api/ps reports, per LOADED model,
+    // ProcessModelResponse.context_length — the actual num_ctx the daemon
+    // allocated, which is the same class of fact as llama.cpp's n_ctx and
+    // strictly better than a heuristic. Someone running `ollama serve` with
+    // OLLAMA_CONTEXT_LENGTH=65536 currently gets clamped to 32k by our
+    // ceiling despite having asked for more.
+    //
+    // Only loaded models appear, which is correct: an unloaded model has no
+    // allocated window to report, and inventing one is the #49 bug.
+    if (auto body = get("/api/ps")) {
+        try {
+            auto j = json::parse(*body);
+            for (const auto& row : j.value("models", json::array())) {
+                if (!row.is_object()) continue;
+                const int w = row.value("context_length", 0);
+                if (w <= 0) continue;
+                // Ollama answers to both "llama3.2" and "llama3.2:latest";
+                // index whichever names the row carries so the lookup in
+                // list_models hits regardless of how the user typed it.
+                for (const char* key : {"model", "name"}) {
+                    const auto id = row.value(key, std::string{});
+                    if (!id.empty()) out.per_model[id] = w;
+                }
+            }
+            if (!out.per_model.empty()) out.measured = true;
+        } catch (const std::exception& e) {
+            util::dbglog("openai.window_probe.ollama_ps", e.what());
         } catch (...) {}
     }
     return out;
@@ -3043,8 +3111,15 @@ std::vector<ModelInfo> list_models(const AuthHeader& auth, const Endpoint& endpo
                     for (auto& mi : result) {
                         const auto it = probe.per_model.find(mi.id.value);
                         if (it != probe.per_model.end()) {
-                            // Measured beats declared when it is tighter.
-                            if (mi.context_window <= 0 || it->second < mi.context_window)
+                            // Fill a hole always; SHRINK only on a real
+                            // measurement (see WindowProbe::measured).
+                            // Letting a declaration shrink a larger
+                            // advertised window would quietly cost users
+                            // context they actually have — and the symptom,
+                            // a conversation compacting early for no visible
+                            // reason, is one nobody would trace back here.
+                            if (mi.context_window <= 0
+                                || (probe.measured && it->second < mi.context_window))
                                 mi.context_window = it->second;
                         } else if (mi.context_window <= 0 && probe.server_wide > 0) {
                             // server_wide is NOT applied over a declared

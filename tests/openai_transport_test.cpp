@@ -2240,7 +2240,20 @@ TEST_CASE("live: a local server's RUNTIME window reaches ModelInfo") {
     REQUIRE(!models.empty());
 
     const std::string m{mode};
-    if (m == "llama") {
+    if (m == "litellm") {
+        // THE REGRESSION GUARD. /v1/models advertises 128000; the proxy's
+        // /v1/model/info declares a stale 8192. A DECLARATION must never
+        // shrink a larger advertised window — only a MEASUREMENT may
+        // (WindowProbe::measured). Getting this backwards would compact
+        // conversations that never needed compacting, and nobody would
+        // trace that symptom back to a probe.
+        CHECK(models.front().context_window == 128000);
+    } else if (m == "ollama") {
+        // /api/tags carries no window at all, so this row arrives at 0.
+        // /api/ps reports the LOADED context_length, which is a real
+        // measurement of what the daemon allocated.
+        CHECK(models.front().context_window == 16384);
+    } else if (m == "llama") {
         // meta.n_ctx = 8192 (served), meta.n_ctx_train = 32768 (ceiling).
         // Before the fix this row advertised nothing and resolved to the
         // 200k default.

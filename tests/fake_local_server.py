@@ -63,6 +63,36 @@ LMSTUDIO_NATIVE = {
 }
 
 
+# Ollama: /api/tags carries NO window (verified: ollama api/types.go
+# ListModelResponse). /api/ps reports the loaded context_length.
+OLLAMA_TAGS = {
+    "models": [
+        {"name": "qwen2.5-coder:7b", "model": "qwen2.5-coder:7b",
+         "modified_at": "", "size": 4431389696, "digest": "abc"},
+    ]
+}
+OLLAMA_PS = {
+    "models": [
+        {"name": "qwen2.5-coder:7b", "model": "qwen2.5-coder:7b",
+         "size": 4431389696, "digest": "abc",
+         "context_length": 16384},
+    ]
+}
+
+# LiteLLM: /v1/model/info is a DECLARATION (the proxy's config), not a
+# measurement — it must never shrink a larger advertised window.
+LITELLM_V1 = {
+    "object": "list",
+    "data": [{"id": "gpt-4o", "object": "model", "context_length": 128000}],
+}
+LITELLM_INFO = {
+    "data": [
+        {"model_name": "gpt-4o",
+         "model_info": {"max_input_tokens": 8192}},   # stale/conservative
+    ]
+}
+
+
 class H(BaseHTTPRequestHandler):
     def _send(self, obj, code=200):
         body = json.dumps(obj).encode()
@@ -77,6 +107,19 @@ class H(BaseHTTPRequestHandler):
         if MODE == "llama":
             if path in ("/v1/models", "/models"):
                 return self._send(LLAMA_MODELS)
+        elif MODE == "ollama":
+            if path in ("/v1/models", "/models"):
+                return self._send({"object": "list", "data": [
+                    {"id": "qwen2.5-coder:7b", "object": "model"}]})
+            if path == "/api/tags":
+                return self._send(OLLAMA_TAGS)
+            if path == "/api/ps":
+                return self._send(OLLAMA_PS)
+        elif MODE == "litellm":
+            if path in ("/v1/models", "/models"):
+                return self._send(LITELLM_V1)
+            if path == "/v1/model/info":
+                return self._send(LITELLM_INFO)
         else:
             if path in ("/v1/models", "/models"):
                 return self._send(LMSTUDIO_V1)
