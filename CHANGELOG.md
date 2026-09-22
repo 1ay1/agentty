@@ -4,6 +4,61 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **Local servers now report the context window they actually serve**
+  ([#49](https://github.com/1ay1/agentty/issues/49)). Three separate bugs all
+  ended in the same 200k default. llama-server puts the window in a nested
+  `meta.n_ctx` and our ladder only looked at the top level of a row, so every
+  llama.cpp model advertised nothing. LM Studio's `/v1` shim reports
+  `max_context_length` — what the *architecture* supports — while the real
+  number lives on the native API at `loaded_instances[].config.context_length`;
+  a model capable of 262k loaded at 16k still refuses at 16k. And the probe
+  that could have corrected both was gated on "does any row have an unknown
+  window", which a declared ceiling satisfies — so it never ran, and a refresh
+  changed nothing. A *measured* runtime window now overrides a *declared* one
+  when it is smaller. Verified against a real llama-server (8192, not 200k) and
+  a real Ollama 0.34.2 daemon (4096 loaded, not the 40960 the GGUF declares).
+- **llama-server router mode** answers a bare `/props` with a placeholder
+  (`n_ctx: 0`), so the window only exists behind `?model=<name>`. Now queried
+  per model — with `autoload=false`, because the router's `models_autoload`
+  defaults to true and a naive query would load every model on the server just
+  to read a number.
+- **Ollama's `/api/tags` carries no window at all**, so those models fell back
+  to a guess. The loaded `context_length` from `/api/ps` is used instead.
+- **A server on your LAN counts as local.** The runtime probe was scoped to
+  loopback, which excluded the most common setup there is: the model server on
+  the box with the GPU, reached over the network. RFC1918, link-local, CGNAT,
+  IPv6 ULA, `*.local` and single-label hostnames are all recognised now.
+
+### Added
+- **Adding a custom host tells you its context window.** The add-host probe
+  already connected and read the response; it now reports what it found —
+  `✓ 3 models · openai-compatible · 12ms · 32k ctx` — instead of only that the
+  connection worked. The window is the fact that decides whether long sessions
+  work on that host.
+- **A self-hosted server is detected, not configured.** Answering `/props`,
+  `/api/ps` or `loaded_instances` is proof — no hosted API serves those — so a
+  host on a public-looking address that answers one is remembered, and every
+  later refresh probes it too. No toggle: the server already told us what it
+  is. `AGENTTY_PROBE_HOSTS` remains for a host that is silent about its window
+  *and* unrecognisable, where there is nothing to detect.
+- **Updates are automatic**, following Zed's model: an hourly re-check instead
+  of once at startup, and the download starts on its own rather than waiting to
+  be found in the palette. A finished update keeps asking for the restart it
+  still needs — the status chip becomes `↺ v0.9.4` and stays until you restart,
+  because the new binary is on disk but the running process is still the old
+  one. Gated on `self_update_possible()`, so package-manager and nix installs
+  are untouched; `AGENTTY_NO_AUTO_UPDATE=1` restores notify-only.
+- **The in-TUI download shows progress.** `perform_update()` always took a
+  progress callback and the shell path always used it; the TUI passed none, so
+  a ~15 MB download sat behind one frozen line — indistinguishable from a hang.
+
+### Changed
+- **winget submissions were failing silently.** `continue-on-error` was there
+  for the benign duplicate-submission case but swallowed every other cause, so
+  the job reported success while the step had failed on a missing token scope.
+  A failure that is not a duplicate now fails loudly and names the fix.
+
 ## [0.9.3] - 2026-09-22
 
 ### Added
