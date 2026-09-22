@@ -111,13 +111,34 @@ TEST_CASE("logx: a site name quoted inside a payload is not a site field") {
 
 TEST_CASE("logx: a message with newlines stays one grep-able record") {
     require_logging();
-    // Raw wire bodies contain newlines (SSE frames are \n\n separated). The
-    // line must still START with a timestamp so `grep ' E '` and the
-    // diagnostics tail-reader keep working.
+    // Raw wire bodies contain newlines (SSE frames are \n\n separated).
+    // They must not split the record: the file is line-oriented, and every
+    // consumer — `grep ' E '`, the diagnostics session scanner, the user
+    // pasting a line into an issue — assumes one event is one line.
+    //
+    // This used to assert only that the tail fragment was "recoverable",
+    // which a split record technically satisfies. It isn't enough: a body
+    // that wraps hides the error's level from grep, and a payload that
+    // quotes a site name at the start of its own line is indistinguishable
+    // from a real event (that is how diagnostics came to report a chunk of
+    // conversation as the active provider).
     logx::emit(logx::Channel::Wire, logx::Level::Error, "fmt.multiline",
-               "data: {\"a\":1}\n\ndata: {\"b\":2}");
+               "data: {{\"a\":1}}\n\ndata: {{\"b\":2}}");
     const auto line = last_line();
-    // The tail after the final newline is the body's last fragment; what
-    // matters is that the record was written whole and is recoverable.
-    CHECK(line.find("data:") != std::string::npos);
+
+    // BOTH frames are on the ONE line the reader gets back.
+    CHECK(line.find("\"a\":1") != std::string::npos);
+    CHECK(line.find("\"b\":2") != std::string::npos);
+    // And it still carries its header, so the level is greppable.
+    CHECK(line.find(" E ") != std::string::npos);
+    CHECK(line.find("fmt.multiline:") != std::string::npos);
+
+    // A carriage return must not survive either — a stray \r makes the
+    // line look truncated in a pager.
+    logx::emit(logx::Channel::Wire, logx::Level::Error, "fmt.crlf",
+               "one\r\ntwo");
+    const auto crlf = last_line();
+    CHECK(crlf.find('\r') == std::string::npos);
+    CHECK(crlf.find("one") != std::string::npos);
+    CHECK(crlf.find("two") != std::string::npos);
 }

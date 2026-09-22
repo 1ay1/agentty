@@ -235,6 +235,22 @@ constexpr std::size_t kSlotBytes = 384;
 // falls back to a heap buffer sized exactly once. Chosen so a typical SSE
 // chunk (~1-2 KB) still formats on the stack.
 constexpr std::size_t kStackLine = 4096;
+
+// What an embedded newline in a MESSAGE BODY becomes on disk.
+//
+// A record is one line; a body is arbitrary bytes (SSE frames, request
+// bodies, whole conversations when someone debugs agentty with agentty).
+// Raw newlines would split one record across many lines and break every
+// grep the log promises to support.
+//
+// A space, not '\\n': inside a JSON body every real newline is ALREADY
+// escaped as the two characters backslash-n, so the raw ones left here are
+// frame separators and structural whitespace. Turning those into a literal
+// backslash-n would be a lie about the payload's bytes — a space keeps the
+// line honest and readable, and never collides with an escape the payload
+// legitimately contains.
+constexpr char kBodyNewline = ' ';
+
 struct Slot {
     std::atomic<std::uint16_t> len{0};
     char bytes[kSlotBytes];
@@ -563,10 +579,34 @@ void emit(Channel ch, Level lv, std::string_view site,
             site.data());
         if (w < 0) return;
         n = std::min(static_cast<std::size_t>(w), cap - 2);
+        const std::size_t hdr_end = n;   // everything before the message body
         const std::size_t room = cap - 2 - n;   // keep \n + NUL
         const std::size_t take = std::min(msg.size(), room);
         std::memcpy(line + n, msg.data(), take);
         n += take;
+
+        // ONE EVENT IS ONE LINE.
+        //
+        // The message body is arbitrary: raw SSE frames, request bodies,
+        // and — when the user is debugging agentty by talking to agentty —
+        // whole conversations. Any of it can contain newlines, and copying
+        // them verbatim splits one record across many physical lines.
+        //
+        // That breaks the file's central promise. `grep ' E '` misses
+        // errors whose body wrapped, every continuation line is
+        // indistinguishable from a real record, and a payload that quotes
+        // "provider.select:" at the start of its own line becomes
+        // impossible to tell from the event — which is exactly how
+        // `agentty diagnostics` came to report a chunk of conversation as
+        // the active provider.
+        //
+        // Escaping here, over the BODY ONLY, keeps the header parseable
+        // and the record whole. The substitution is in place and
+        // one-for-one — this runs on every log call, so it must not
+        // allocate or shift the buffer.
+        for (std::size_t i = hdr_end; i < n; ++i) {
+            if (line[i] == '\n' || line[i] == '\r') line[i] = kBodyNewline;
+        }
 
         // Strip secrets before ANY sink sees the line. One seam, so a new
         // channel or call site cannot leak by omission.
