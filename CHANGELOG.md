@@ -4,6 +4,8 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.3] - 2026-09-22
+
 ### Added
 - **Every outbound request is audited before it goes out.** A typed
   `audit_wire()` walks the messages the transport is about to send and reports
