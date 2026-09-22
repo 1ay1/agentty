@@ -822,11 +822,13 @@ Cmd<Msg> launch_stream(Model& m) {
     // entirely (Zed-style: the model can only be used for plain chat).
     // std::nullopt = unknown/not probed = fall through to heuristic.
     std::optional<bool> model_supports_tools;
+    std::optional<bool> model_supports_vision;
     int model_context_window = 0;
     for (const auto& mi : m.d.available_models) {
         if (mi.id.value == model_id) {
-            model_supports_tools = mi.supports_tools;
-            model_context_window = mi.context_window;
+            model_supports_tools  = mi.supports_tools;
+            model_supports_vision = mi.supports_vision;
+            model_context_window  = mi.context_window;
             break;
         }
     }
@@ -918,6 +920,7 @@ Cmd<Msg> launch_stream(Model& m) {
          compaction_model = std::move(compaction_model),
          effort = std::move(effort),
          model_supports_tools,
+         model_supports_vision,
          model_context_window,
          auth = std::move(auth),
          cancel]
@@ -1134,6 +1137,30 @@ Cmd<Msg> launch_stream(Model& m) {
                     static_cast<double>(context_max) * 0.95);
                 soft_trim_to_ceiling(req.messages, soft_ceiling);
             }
+            // ── Images: withhold ONLY on an explicit declaration ────────
+            //
+            // Same asymmetry as the tool gate below, for the same reason.
+            // A model that DECLARED vision:false rejects image parts — a
+            // hard 400 on most wires, or on Ollama an image it silently
+            // ignores while answering about text it cannot see. Stripping
+            // turns both into a normal turn that simply lacks the picture.
+            //
+            // Unknown still SENDS. Stripping on silence would remove
+            // images from every model no catalog describes, and a vision
+            // model whose screenshot we quietly dropped is
+            // indistinguishable from one that looked and was unhelpful.
+            if (!model_supports_vision.value_or(true)) {
+                std::size_t stripped = 0;
+                for (auto& msg : req.messages) {
+                    stripped += msg.images.size();
+                    msg.images.clear();
+                }
+                if (stripped > 0) {
+                    AGT_LOG(Model, Info, "wire.images_withheld",
+                            "model={} stripped={} reason=declared_text_only",
+                            model_id, stripped);
+                }
+            }
             // ── Preflight: what is WRONG with this payload? ──────────
             //
             // The payload is final here — compaction substituted, trimming
@@ -1155,7 +1182,7 @@ Cmd<Msg> launch_stream(Model& m) {
             {
                 const auto audit = audit_wire(req.messages);
                 AGT_LOG(Model, Debug, "wire.shape",
-                        "messages={} tool_calls={} tool_results={} "
+                        "loop=main messages={} tool_calls={} tool_results={} "
                         "images={} last_role={} defects={}",
                         audit.message_count, audit.tool_call_count,
                         audit.tool_result_count, audit.image_part_count,
@@ -1163,7 +1190,7 @@ Cmd<Msg> launch_stream(Model& m) {
                         audit.defects.size());
                 for (const auto& d : audit.defects) {
                     AGT_LOG(Model, Warn, "wire.defect",
-                            "kind={} message_index={} detail={}",
+                            "loop=main kind={} message_index={} detail={}",
                             describe(d.kind), d.message_index,
                             d.detail.empty() ? "-" : d.detail);
                 }

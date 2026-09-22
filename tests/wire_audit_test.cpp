@@ -32,6 +32,7 @@
 #include "agtest.hpp"
 
 #include "agentty/runtime/app/wire_audit.hpp"
+#include "agentty/domain/catalog.hpp"
 
 using namespace agentty;
 using namespace agentty::app::cmd;
@@ -222,4 +223,40 @@ TEST_CASE("wire audit: an empty payload is clean, not a crash") {
     const auto a = audit_wire({});
     CHECK(a.clean());
     CHECK(a.message_count == 0);
+}
+
+TEST_CASE("vision: unknown sends, only a declaration withholds") {
+    // The tri-state, and why its default is the opposite of what "be
+    // safe" suggests.
+    //
+    // A model that DECLARED vision:false rejects image parts — a hard 400
+    // on most wires, or on Ollama an image it silently ignores while
+    // answering about text it cannot see. Withholding there turns a dead
+    // turn into a normal one that simply lacks the picture.
+    //
+    // But UNKNOWN must still send. Stripping on silence would remove
+    // images from every model no catalog describes, and a vision model
+    // whose screenshot we quietly dropped is indistinguishable from one
+    // that looked and was unhelpful — the user reports "it ignored my
+    // screenshot" and nothing in the log disagrees.
+    //
+    // Exactly the reasoning ModelInfo::supports_tools documents, which is
+    // why this mirrors it rather than inventing a second convention.
+    ModelInfo mi;
+
+    CHECK(!mi.supports_vision.has_value());   // nothing populates it by default
+    CHECK(mi.vision_allowed());               // …and unknown SENDS
+
+    mi.supports_vision = true;
+    CHECK(mi.vision_allowed());
+
+    mi.supports_vision = false;               // the one case we KNOW
+    CHECK(!mi.vision_allowed());
+
+    // And it agrees with the tool gate's shape, so a reader who has
+    // internalised one is not surprised by the other.
+    ModelInfo t;
+    CHECK(t.tools_allowed());                 // unknown advertises tools
+    t.supports_tools = false;
+    CHECK(!t.tools_allowed());
 }

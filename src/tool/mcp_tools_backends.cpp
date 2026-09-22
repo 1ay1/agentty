@@ -15,6 +15,7 @@
 
 #include "agentty/util/user_root.hpp"
 #include "agentty/tool/mcp_tools_backends.hpp"
+#include "agentty/runtime/app/wire_audit.hpp"
 #include "agentty/util/home_dir.hpp"
 
 #include "agentty/scope/scope.hpp"
@@ -999,6 +1000,31 @@ provider::StreamResult run_one_completion(Thread& thread,
     // ceiling). The wrap-up nudge already forces a tight final report.
     req.max_tokens    = 8192;
     req.messages      = thread.messages;
+    // Same preflight the main loop runs. The subagent assembles its own
+    // request — its own thread, its own tool advertisement, its own
+    // trimming — so a defect here is invisible to cmd_factory's audit.
+    //
+    // That asymmetry is the class this codebase keeps relearning: the
+    // reasoning toggle honoured by 3 transports of 4, `args={}` seeded by
+    // the main reducer and not the subagent loop. Two loops that both
+    // build requests must both check them, or the one nobody watches is
+    // where the malformed payload comes from.
+    {
+        const auto audit = app::cmd::audit_wire(req.messages);
+        AGT_LOG(Model, Debug, "wire.shape",
+                "loop=subagent messages={} tool_calls={} tool_results={} "
+                "images={} last_role={} defects={}",
+                audit.message_count, audit.tool_call_count,
+                audit.tool_result_count, audit.image_part_count,
+                audit.last_role == Role::User ? "user" : "assistant",
+                audit.defects.size());
+        for (const auto& d : audit.defects) {
+            AGT_LOG(Model, Warn, "wire.defect",
+                    "loop=subagent kind={} message_index={} detail={}",
+                    app::cmd::describe(d.kind), d.message_index,
+                    d.detail.empty() ? "-" : d.detail);
+        }
+    }
     req.cancel        = std::make_shared<http::CancelToken>();
     // Stable per-subagent conversation identity so the shared prefix
     // (heavy system prompt + tool schemas + accumulated tool results) is

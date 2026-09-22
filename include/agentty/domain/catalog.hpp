@@ -75,6 +75,31 @@ struct ModelInfo {
         return agentty::tools_allowed(supports_tools);
     }
 
+    // Does this model accept image parts? Same tri-state, same reasoning,
+    // OPPOSITE default — and the asymmetry is the whole point.
+    //
+    //   nullopt  nobody said → SEND. Withholding on silence would strip
+    //            images from every model no catalog describes, and a
+    //            vision model that silently never sees the screenshot is
+    //            indistinguishable from a model that saw it and was
+    //            unhelpful. Exactly the failure supports_tools documents.
+    //   true     declared vision → send.
+    //   false    DECLARED text-only → withhold. This is the one case we
+    //            actually know, and sending is a hard 400 on most wires
+    //            ("image input is not supported for this model") or, on
+    //            Ollama, an image the model quietly ignores.
+    //
+    // Unset by every path today — nothing populates it yet, so behaviour
+    // is unchanged. It exists so the decision has ONE home before two call
+    // sites grow their own, which is how the reasoning toggle ended up
+    // honoured by three transports of four.
+    std::optional<bool> supports_vision;
+
+    [[nodiscard]] bool vision_allowed() const noexcept {
+        // Mirrors tools_allowed(): only an explicit `false` withholds.
+        return supports_vision.value_or(true);
+    }
+
     // Value equality (used to detect when the active provider's fused catalog
     // has drifted from available_models and needs a re-seed).
     [[nodiscard]] bool operator==(const ModelInfo&) const = default;

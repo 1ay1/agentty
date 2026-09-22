@@ -586,6 +586,17 @@ std::vector<ModelInfo> list_models() {
                 if (sup.contains("tool_calls") && sup["tool_calls"].is_boolean())
                     info.supports_tools = sup["tool_calls"].get<bool>();
                 // else: leave nullopt — unknown, tools are advertised.
+
+                // Same tri-state for images. GitHub's rows carry `vision`
+                // in this object (the comment above notes rows that list
+                // ONLY streaming/vision), so this is a real declaration
+                // rather than an inference — which is the only kind worth
+                // acting on. Absent stays nullopt: unknown SENDS, because
+                // a vision model whose images we stripped is
+                // indistinguishable from one that saw them and was
+                // unhelpful.
+                if (sup.contains("vision") && sup["vision"].is_boolean())
+                    info.supports_vision = sup["vision"].get<bool>();
             }
 
             const std::string cat = m.value("model_picker_category", "");
