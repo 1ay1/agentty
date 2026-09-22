@@ -19,6 +19,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -1422,6 +1423,31 @@ json json_protocol_schema(const std::vector<provider::ToolSpec>& tools) {
 // is the single highest-leverage robustness lever for local models. Exposed
 // (non-anonymous) so a unit test can assert the chosen values without a
 // network round-trip. Reads AGENTTY_OLLAMA_NUM_CTX / _NUM_PREDICT overrides.
+int effective_num_ctx(int advertised) noexcept {
+    // The ONE place the served window is decided. build_options() below
+    // calls this for the wire, and the runtime calls it for the gauge, so
+    // the two cannot drift — which they did, by a factor of four.
+    constexpr int kAgentCtxFloor   = 8192;    // unknown-window default
+    constexpr int kAgentCtxCeiling = 32768;   // don't OOM a local KV cache
+
+    // The power-user escape hatch outranks everything: someone who set this
+    // knows their machine better than a ceiling we picked. Honoured here
+    // rather than only in build_options, or the gauge would ignore it and
+    // reintroduce the same divergence for exactly the users who cared
+    // enough to configure it.
+    if (const char* v = std::getenv("AGENTTY_OLLAMA_NUM_CTX")) {
+        char* end = nullptr;
+        const long n = std::strtol(v, &end, 10);
+        if (end && *end == '\0' && n > 0 && n <= std::numeric_limits<int>::max())
+            return static_cast<int>(n);
+    }
+
+    if (advertised <= 0) return kAgentCtxFloor;
+    if (advertised < kAgentCtxFloor)   return kAgentCtxFloor;
+    if (advertised > kAgentCtxCeiling) return kAgentCtxCeiling;
+    return advertised;
+}
+
 json build_options(const Request& req) {
     auto env_int = [](const char* name) -> int {
         if (const char* v = std::getenv(name)) {
@@ -1450,18 +1476,12 @@ json build_options(const Request& req) {
     //   3. A safe agent-sized default (8192) when the window is unknown — 4x
     //      Ollama's floor, enough to hold the prompt + a few tool turns,
     //      small enough to load on modest hardware.
-    int num_ctx = env_int("AGENTTY_OLLAMA_NUM_CTX");
-    if (num_ctx <= 0) {
-        constexpr int kAgentCtxFloor   = 8192;    // unknown-window default
-        constexpr int kAgentCtxCeiling = 32768;   // don't OOM a local KV cache
-        if (req.context_window > 0) {
-            num_ctx = req.context_window;
-            if (num_ctx < kAgentCtxFloor)   num_ctx = kAgentCtxFloor;
-            if (num_ctx > kAgentCtxCeiling) num_ctx = kAgentCtxCeiling;
-        } else {
-            num_ctx = kAgentCtxFloor;
-        }
-    }
+    //
+    // All three now live in effective_num_ctx(), because the context GAUGE
+    // needs the same answer: it used to score the unclamped window while
+    // the wire sent the clamped one, so the bar read a quarter of true
+    // usage on a 131k local model.
+    const int num_ctx = effective_num_ctx(req.context_window);
 
     // ── num_predict (max output tokens) ────────────────────────────────
     //

@@ -476,14 +476,43 @@ struct ModelCapabilities {
     }
 
     // The model's context window in TOKENS — the ctx-% and auto-compaction
-    // denominator. Matches Claude Code: base 200k for every known Claude
-    // model, widened to 1M ONLY when the explicit `[1m]` suffix set
-    // extended_context_1m. Unknown families report 0 so the caller prefers a
-    // real probed window (Ollama /api/show, OpenAI /v1/models).
+    // denominator.
+    //
+    // This rung speaks ONLY for the Claude families, where 200k is the
+    // published base for every generation and `[1m]` is the one documented
+    // widening. That is knowledge, not a guess.
+    //
+    // It used to answer 200k for ANY known family, which swept in
+    // Family::Gpt — and GPT windows are not 200k. gpt-5.4 is 400k, gpt-4.1
+    // is 1M, and neither is inferable from the id. So a Copilot session
+    // whose catalog had not loaded yet got a 200k denominator on a 400k
+    // model: the gauge read double the real usage and auto-compaction fired
+    // at roughly half the thread it should have, silently throwing away
+    // context the model could still see.
+    //
+    // Returning 0 is the honest answer for a family whose window we do not
+    // know. 0 means UNKNOWN, and the resolver's later rungs — models.dev,
+    // the env escape hatch, the conservative default — are built for
+    // exactly that. A confident wrong number outranks all of them; an
+    // honest zero lets the ladder do its job.
+    //
+    // Note the asymmetry that makes this safe either way: an over-estimate
+    // fails the turn on the wire, an under-estimate only compacts sooner
+    // than it had to.
     [[nodiscard]] constexpr int context_window() const noexcept {
         if (extended_context_1m) return 1'000'000;   // explicit [1m] variant
-        if (is_known_family()) return 200'000;
-        return 0;   // unknown: caller falls back to a probed window
+        switch (family) {
+            case Family::Haiku:
+            case Family::Sonnet:
+            case Family::Opus:
+            case Family::Fable:
+            case Family::Mythos:
+                return 200'000;      // published Claude base, every generation
+            case Family::Gpt:
+            case Family::Unknown:
+                break;               // not inferable from the id — say so
+        }
+        return 0;   // unknown: caller falls back to a catalog or probe
     }
 
     // ── Capability tier: a provider-RELATIVE strength ordinal ────────────

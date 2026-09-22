@@ -26,6 +26,7 @@
 
 #include "agentty/provider/openai/transport.hpp"
 #include "agentty/domain/session.hpp"
+#include "agentty/domain/catalog.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -81,6 +82,75 @@ TEST_CASE("context: every gateway dialect that declares a window is recovered") 
 
     // Proxies that stringify numeric metadata still count as declarations.
     CHECK(advertised(json::parse(R"({"id":"x","context_length":"131072"})")) == 131'072);
+}
+
+TEST_CASE("context: the OpenAI-compatible universe beyond Claude and GPT") {
+    // The ladder above was built from the stacks we had reports about.
+    // But "OpenAI-compatible" is most of the ecosystem now, and each
+    // vendor picked its own spelling for the same number. A spelling we
+    // do not read is not a small miss — it silently drops the model to
+    // the 200k default, which is the exact bug this file was opened for,
+    // just for a vendor nobody had filed yet.
+    //
+    // So: one case per major hosted OpenAI-compatible API, using the
+    // field each actually returns on /v1/models. These are the providers
+    // a user reaches through a gateway or a direct base-url override.
+
+    // Mistral (api.mistral.ai). Its own spelling, matching nothing else.
+    CHECK(advertised(json::parse(
+        R"({"id":"mistral-large-latest","max_context_length":131072})"))
+        == 131'072);
+
+    // Together.ai, Fireworks, DeepSeek, Perplexity — all `context_length`.
+    CHECK(advertised(json::parse(
+        R"({"id":"meta-llama/Llama-3.3-70B","context_length":131072})"))
+        == 131'072);
+    CHECK(advertised(json::parse(
+        R"({"id":"deepseek-chat","context_length":65536})")) == 65'536);
+
+    // Groq spells it `context_window` on its model rows.
+    CHECK(advertised(json::parse(
+        R"({"id":"llama-3.3-70b-versatile","context_window":131072})"))
+        == 131'072);
+
+    // Cohere's compat layer nests under `context_length` inside a
+    // per-model object the same way LiteLLM nests model_info.
+    CHECK(advertised(json::parse(
+        R"({"id":"command-r-plus","model_info":{"context_window":128000}})"))
+        == 128'000);
+
+    // Qwen / DashScope and several Chinese providers report the input
+    // half separately — max_input_tokens is the number that bounds the
+    // prompt, which is what a context gauge is measuring.
+    CHECK(advertised(json::parse(
+        R"({"id":"qwen-max","max_input_tokens":30720})")) == 30'720);
+}
+
+TEST_CASE("context: an output cap is never mistaken for a context window") {
+    // The dangerous near-miss. Many rows carry BOTH a context window and a
+    // max-output cap, and the output cap is always much smaller
+    // (4k–32k against 128k–1M).
+    //
+    // Reading the wrong one does not fail loudly: it produces a plausible
+    // small number, the gauge reads ~10x the true usage, and
+    // auto-compaction fires almost immediately — so the model is handed a
+    // summary of a conversation that comfortably fit. The user sees an
+    // agent that "forgets" constantly on a model with a huge window.
+    //
+    // `max_output_tokens` / `max_completion_tokens` / `max_tokens` at the
+    // TOP level are output caps and must never be read as the window.
+    CHECK(advertised(json::parse(
+        R"({"id":"x","max_output_tokens":8192})")) == 0);
+    CHECK(advertised(json::parse(
+        R"({"id":"x","max_completion_tokens":16384})")) == 0);
+
+    // And when both appear, the WINDOW wins — not whichever came first.
+    CHECK(advertised(json::parse(
+        R"({"id":"x","max_output_tokens":8192,"context_length":200000})"))
+        == 200'000);
+    CHECK(advertised(json::parse(
+        R"({"id":"x","max_context_length":131072,"max_output_tokens":4096})"))
+        == 131'072);
 }
 
 TEST_CASE("context: a silent row is UNKNOWN (0), never a guess") {
@@ -160,6 +230,41 @@ TEST_CASE("context: an unknown window disarms compaction, a known one arms it") 
     const int thr = s.compaction_threshold();
     CHECK(thr > 0);                          // → armed
     CHECK(thr < s.context_max);              // → leaves room for the reply
+}
+
+TEST_CASE("context: id inference only speaks for families it knows") {
+    // Rung 4 of resolve_context_window is id inference. It is ABOVE the
+    // env escape hatch and the conservative default, so a number it
+    // returns silences both — which makes a confident wrong answer here
+    // worse than no answer at all.
+    //
+    // It used to return 200k for any KNOWN FAMILY, and Family::Gpt is a
+    // known family. So gpt-5.4 (really 400k) and gpt-4.1 (really 1M) both
+    // inferred 200k. On a Copilot session whose catalog had not loaded
+    // yet, the gauge read double the true usage and auto-compaction fired
+    // at roughly half the thread it should have — silently discarding
+    // context the model could still see, with nothing anywhere saying so.
+    //
+    // The rule: infer only where the id genuinely determines the window.
+    using MC = agentty::ModelCapabilities;
+
+    // Claude: 200k is the published base for every generation, and `[1m]`
+    // is the one documented widening. That is knowledge, so it speaks.
+    CHECK(MC::from_id("claude-sonnet-5").context_window()      == 200'000);
+    CHECK(MC::from_id("claude-opus-5").context_window()        == 200'000);
+    CHECK(MC::from_id("claude-haiku-4-5").context_window()     == 200'000);
+    CHECK(MC::from_id("claude-sonnet-5[1m]").context_window()  == 1'000'000);
+
+    // GPT: the window is NOT inferable from the id. 0 means unknown, which
+    // hands the question to models.dev / the env override / the default —
+    // rungs that exist precisely for this.
+    CHECK(MC::from_id("gpt-5.4").context_window()  == 0);
+    CHECK(MC::from_id("gpt-4.1").context_window()  == 0);
+    CHECK(MC::from_id("gpt-5-codex").context_window() == 0);
+
+    // And an id from no family we recognise stays 0, as it always did.
+    CHECK(MC::from_id("gemini-2.5-pro").context_window()   == 0);
+    CHECK(MC::from_id("some-private-model").context_window() == 0);
 }
 
 TEST_CASE("context: every path into available_models bakes the window") {

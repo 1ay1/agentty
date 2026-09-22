@@ -73,6 +73,25 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink,
 // AGENTTY_OLLAMA_NUM_CTX / _NUM_PREDICT / _TEMPERATURE overrides.
 [[nodiscard]] nlohmann::json build_options(const Request& req);
 
+// The context window Ollama will ACTUALLY serve for `advertised`.
+//
+// A local model's published window is a claim about the weights, not about
+// the machine. Ollama allocates a KV cache to match, and a 131k-token cache
+// on a laptop does not fail gracefully — it OOMs the server and takes the
+// whole request with it. So the wire clamps to a ceiling.
+//
+// This exists because the CLAMP and the GAUGE must be one number. They were
+// two: the wire sent num_ctx=32768 while the context gauge scored the
+// unclamped 131072, so the bar read a quarter of true usage and
+// auto-compaction fired at four times the thread it should have. The model
+// silently truncated its own prompt long before agentty thought to compact
+// — the exact "local models forget everything" failure, invisible from
+// inside because every layer was individually right.
+//
+// `advertised` is the resolved window (0 = unknown). Returns what the
+// server will actually hold, which is what a gauge must measure against.
+[[nodiscard]] int effective_num_ctx(int advertised) noexcept;
+
 // Test-only: feed an NDJSON byte buffer through the live parser and collect
 // every dispatched Msg (no network round-trip). Pass json_protocol=true to
 // exercise the weak-model single-object protocol (no native tools array; the

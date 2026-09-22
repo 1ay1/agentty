@@ -18,6 +18,7 @@
 #include "agentty/runtime/app/cmd_factory.hpp"
 #include "agentty/runtime/app/deps.hpp"
 #include "agentty/provider/selection.hpp"   // provider::active (stall watchdog)
+#include "agentty/provider/ollama/transport.hpp"  // effective_num_ctx
 #include "agentty/runtime/composer_attachment.hpp"
 #include "agentty/runtime/mem.hpp"
 #include "agentty/runtime/panel/settings/items.hpp"      // ascend(): revalidate a restored list
@@ -88,8 +89,26 @@ int resolved_context_max(const Model& m, std::string_view provider_id) {
     for (const auto& mi : m.d.available_models) {
         if (mi.id == m.d.model_id) { advertised = mi.context_window; break; }
     }
-    return ui::resolve_context_window(provider_id, m.d.model_id.value,
-                                      advertised, deps().load_settings());
+    const int resolved =
+        ui::resolve_context_window(provider_id, m.d.model_id.value,
+                                   advertised, deps().load_settings());
+
+    // Ollama does not serve what the weights claim. It allocates a KV cache
+    // to match, so agentty clamps num_ctx to a ceiling that will actually
+    // load on a laptop instead of OOMing the server mid-request.
+    //
+    // The GAUGE has to agree with that clamp. It did not: the wire sent
+    // num_ctx=32768 while this returned the model's unclamped 131072, so
+    // the context bar read a quarter of true usage and auto-compaction
+    // waited for four times the thread it should have. The model silently
+    // truncated its own prompt long before agentty thought to compact —
+    // "local models forget everything", invisible from inside because
+    // every layer was individually correct.
+    //
+    // One function answers it for both.
+    if (provider_id == "ollama")
+        return provider::ollama::effective_num_ctx(resolved);
+    return resolved;
 }
 
 Step meta_update(Model m, msg::MetaMsg mm) {

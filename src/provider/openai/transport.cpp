@@ -2622,8 +2622,32 @@ namespace detail {
         if (const int w = pick(*mi, "context_window");   w > 0) return w;
     }
 
-    // Flat spellings.
+    // Flat spellings, in the order a row is most likely to carry them.
+    //
+    // Every hosted OpenAI-compatible API picked its own name for the same
+    // number, and a spelling we do not read is not a small miss: the model
+    // silently drops to the 200k default, the gauge misreads, and
+    // auto-compaction fires at the wrong point. So this list is the
+    // ecosystem, not a guess — one entry per vendor we can actually name.
+    //
+    //   context_length     Together, Fireworks, DeepSeek, Perplexity,
+    //                      openrouter's flat rows
+    //   context_window     Groq
+    //   max_context_length Mistral (api.mistral.ai) — its own spelling,
+    //                      matching nothing else in the ecosystem
+    //   max_input_tokens   Qwen/DashScope and several others that report
+    //                      the input half separately; that is the number
+    //                      bounding the prompt, which is what a context
+    //                      gauge measures
+    //   n_ctx / n_ctx_train  llama.cpp (served window, then train-time)
+    //
+    // NOTE what is deliberately absent: `max_tokens`, `max_output_tokens`,
+    // `max_completion_tokens`. Those are OUTPUT caps, an order of
+    // magnitude smaller, and reading one as the window produces a
+    // plausible wrong number rather than a visible failure — the agent
+    // then "forgets" constantly on a model with a huge window.
     for (const char* key : {"context_length", "context_window",
+                            "max_context_length",
                             "max_input_tokens", "n_ctx", "n_ctx_train"})
         if (const int w = pick(m, key); w > 0) return w;
 

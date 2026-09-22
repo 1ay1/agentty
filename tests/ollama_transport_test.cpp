@@ -685,6 +685,47 @@ TEST_CASE("options small window floored") {
     CHECK(o["num_ctx"].get<int>() == 8192);
 }
 
+TEST_CASE("the gauge measures the window ollama will actually serve") {
+    // A local model's published window is a claim about the WEIGHTS, not
+    // about the machine. Ollama allocates a KV cache to match, so agentty
+    // clamps num_ctx to a ceiling that will load on a laptop rather than
+    // OOMing the server mid-request. That clamp is correct.
+    //
+    // The bug was that only the WIRE knew about it. The context gauge
+    // scored the unclamped window, so on a 131k local model the bar read a
+    // quarter of true usage and auto-compaction waited for four times the
+    // thread it should have. The model silently truncated its own prompt
+    // long before agentty thought to compact — "local models forget
+    // everything", invisible from inside because every layer was
+    // individually right and no two agreed.
+    //
+    // So: one function, and the wire is DERIVED from it. This asserts they
+    // cannot drift, at every interesting point of the clamp.
+    struct Case { int advertised; int served; const char* why; };
+    static constexpr Case kCases[] = {
+        {0,        8192,  "unknown window falls to the agent default"},
+        {2048,     8192,  "below the floor is raised to it"},
+        {8192,     8192,  "exactly the floor is unchanged"},
+        {16384,   16384,  "between floor and ceiling passes through"},
+        {32768,   32768,  "exactly the ceiling is unchanged"},
+        {131072,  32768,  "a 128k model is clamped, not served whole"},
+        {1000000, 32768,  "a 1M model is clamped just the same"},
+    };
+
+    for (const auto& c : kCases) {
+        INFO(c.why << " (advertised=" << c.advertised << ")");
+
+        // The number the gauge will use.
+        CHECK(oll::effective_num_ctx(c.advertised) == c.served);
+
+        // The number the wire actually sends, built independently.
+        oll::Request r;
+        r.max_tokens     = 16384;
+        r.context_window = c.advertised;
+        CHECK(oll::build_options(r)["num_ctx"].get<int>() == c.served);
+    }
+}
+
 TEST_CASE("options json protocol sampling") {
     // Weak/json-protocol path gets a low temperature for tool-call reliability.
     oll::Request r;
