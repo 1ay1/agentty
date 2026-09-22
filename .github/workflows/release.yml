@@ -998,7 +998,19 @@ jobs:
   #     renders packaging/winget/*.yaml from the CMake version + the built
   #     .msi's real SHA256/ProductCode and opens the initial PR via the API.
   # Either way the submitted version is the central CMake project VERSION.
-  # Requires WINGET_TOKEN (classic PAT, public_repo scope); skipped if absent.
+  # Requires WINGET_TOKEN; skipped if absent.
+  #
+  # SCOPES: classic PAT with `public_repo` AND `workflow`. public_repo alone
+  # is NOT enough and fails in a way that looks unrelated: komac must first
+  # sync the 1ay1/winget-pkgs fork with upstream, upstream carries files under
+  # .github/workflows/, and GitHub refuses a token without `workflow` scope to
+  # push those — surfacing as "1ay1 does not have the correct permissions to
+  # execute `UpdateRef` / failed to sync upstream changes". That is what broke
+  # v0.9.3, and because the step was continue-on-error the job still reported
+  # success; only verify-release caught it.
+  #
+  # If the fork has drifted far enough that komac gives up, resync it by hand:
+  #   gh api repos/1ay1/winget-pkgs/merge-upstream -X POST -f branch=master
   publish-winget:
     name: publish to winget
     needs: [prepare, checksums-final, build-windows]
@@ -1029,10 +1041,19 @@ jobs:
       # UPDATE path — package already exists upstream.
       - name: Update manifest (winget-releaser)
         if: ${{ env.WINGET_TOKEN != '' && steps.exists.outputs.present == 'true' }}
-        # Non-fatal: winget is publish-once-per-version. A manual re-dispatch
-        # for an already-submitted version makes komac error on the
-        # duplicate; that's a no-op, not a release-breaking failure. The
-        # tagged-release path submits each version exactly once.
+        id: winget_update
+        # Non-fatal HERE, but NOT silent — see the classify step below.
+        #
+        # winget is publish-once-per-version, so a manual re-dispatch for an
+        # already-submitted version makes komac error on the duplicate; that
+        # genuinely is a no-op. But this flag was swallowing every other cause
+        # too. v0.9.3 failed with "1ay1 does not have the correct permissions
+        # to execute `UpdateRef` / failed to sync upstream changes" and the job
+        # still reported success — the only reason anyone noticed is that
+        # verify-release checks the LIVE channel and went red.
+        #
+        # So: keep the step non-fatal, then read its outcome and fail on
+        # anything that is not the benign duplicate.
         continue-on-error: true
         uses: vedantmgoyal9/winget-releaser@main
         with:
@@ -1047,6 +1068,33 @@ jobs:
           release-tag: ${{ needs.prepare.outputs.tag }}
           installers-regex: 'agentty-windows-x86_64\.msi$'
           token: ${{ secrets.WINGET_TOKEN }}
+
+      # A failed update is only acceptable if the version was ALREADY there.
+      - name: Classify a winget update failure
+        if: ${{ steps.winget_update.outcome == 'failure' }}
+        env:
+          GH_TOKEN: ${{ secrets.WINGET_TOKEN }}
+          V: ${{ needs.prepare.outputs.version }}
+        run: |
+          # Ask the only question that matters: is this version on winget now?
+          # If a PR exists (open or merged) the duplicate-submission theory
+          # holds and the failure is genuinely a no-op. If not, the submission
+          # really did fail and the release must say so.
+          prs=$(gh search prs --repo microsoft/winget-pkgs \
+                  "agentty.agentty version $V" --limit 5 \
+                  --json state --jq 'length' 2>/dev/null || echo 0)
+          if [ "${prs:-0}" -gt 0 ]; then
+            echo "winget-releaser failed but $V is already submitted — duplicate, ignoring"
+            exit 0
+          fi
+          echo "::error::winget submission FAILED and no PR exists for $V."
+          echo "::error::Most likely the 1ay1/winget-pkgs fork is stale and WINGET_TOKEN"
+          echo "::error::lacks the 'workflow' scope, so komac cannot sync it (upstream"
+          echo "::error::carries .github/workflows/*.yml, which needs that scope)."
+          echo "::error::Fix: regenerate WINGET_TOKEN as a classic PAT with 'repo' AND"
+          echo "::error::'workflow', then sync the fork:"
+          echo "::error::  gh api repos/1ay1/winget-pkgs/merge-upstream -X POST -f branch=master"
+          exit 1
 
       # FIRST-SUBMISSION path — package not yet upstream. Render the templates
       # from the central version + the exact built .msi and open the initial PR.
@@ -1366,8 +1414,20 @@ jobs:
             if gh api "repos/microsoft/winget-pkgs/contents/manifests/a/agentty/agentty/$V" >/dev/null 2>&1; then
               ok "winget manifest merged @ $V"
             else
-              me=$(GH_TOKEN=$WINGET_TOKEN gh api user -q .login 2>/dev/null || echo 1ay1)
-              prs=$(GH_TOKEN=$WINGET_TOKEN gh pr list --repo microsoft/winget-pkgs --author "$me" --state all --search "agentty.agentty version $V in:title" --json number,state -q '.[] | "\(.number):\(.state)"' 2>/dev/null || true)
+              # Any PR for this VERSION counts, regardless of author.
+              #
+              # Scoping this to `--author $me` was wrong twice over. It missed
+              # third-party updater bots (0.9.2 actually reached winget via
+              # damn-good-b0t after our own submission had failed), and when
+              # the token is broken `gh api user` falls back to a guessed
+              # login, so the search silently looks for the wrong person.
+              #
+              # The question is "is this version submitted", not "did we
+              # submit it" — and the publish job now fails loudly on its own
+              # when OUR submission breaks, so this no longer has to infer it.
+              prs=$(GH_TOKEN=$WINGET_TOKEN gh search prs --repo microsoft/winget-pkgs \
+                      "agentty.agentty version $V" --limit 5 \
+                      --json number,state -q '.[] | "\(.number):\(.state)"' 2>/dev/null || true)
               if [ -n "$prs" ]; then ok "winget PR open/merged for $V ($prs)"; else bad "winget: no PR found for version $V"; fi
             fi
           else skip "winget"; fi
