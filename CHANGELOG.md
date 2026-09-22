@@ -4,6 +4,8 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.4] - 2026-09-22
+
 ### Fixed
 - **Local servers now report the context window they actually serve**
   ([#49](https://github.com/1ay1/agentty/issues/49)). Three separate bugs all
