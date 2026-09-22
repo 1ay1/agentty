@@ -203,6 +203,16 @@ jobs:
       # function-local static (terminate at exit), and N threads racing to
       # publish into one map. All three passed the ASan lane.
       - name: Configure TSan tree
+        # Same compiler as the ASan tree above. Without this the step falls
+        # back to the runner's DEFAULT gcc (13), which does not implement
+        # deducing `this` (P0847) — so maya's type-state Terminal fails to
+        # parse and the whole lane dies at maya/src/app/app.cpp with
+        # "expected identifier before 'this'". The ASan configure has always
+        # set this; the TSan one was missed, so the lane only ever built
+        # when the runner image happened to default to a new enough gcc.
+        env:
+          CC: gcc-14
+          CXX: g++-14
         run: |
           cmake -S . -B build-tsan -GNinja -DCMAKE_BUILD_TYPE=Debug \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
