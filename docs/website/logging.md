@@ -126,8 +126,8 @@ questions — grep for the tag, not for prose:
 
 | Site | Answers |
 |------|---------|
-| `startup` | Which version / OS / build is this? *(always present)* |
-| `provider.select` | Which provider and endpoint was active? *(always present)* |
+| `startup` | Which version / OS / build is this? *(`warn` — kept by default)* |
+| `provider.select` | Which provider and endpoint was active? *(`warn` — kept by default)* |
 | `stream.end` | How did this turn end? `clean_close` · `cancelled` · `http_error` · `transport_error` · `already_terminated` |
 | `stream.http_error` / `stream.transport_error` | The exact failure text the user saw |
 | `stream.error` | How the reducer classified a failure (drives retry-vs-surface) |

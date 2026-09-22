@@ -392,20 +392,46 @@ int cmd_diagnostics() {
                 std::filesystem::path{std::string{lf}}, sec)) {
             std::ifstream in{std::string{lf}, std::ios::binary};
             std::string ln, startup, provider;
+            // Match the SITE FIELD, not any substring of the line.
+            //
+            // The log interleaves events with raw wire bytes, and a request
+            // body routinely quotes text the user typed — including, when the
+            // user is debugging agentty, the literal string "provider.select:".
+            // A bare find() over the whole line therefore matched a request
+            // body and reported a chunk of conversation as the active
+            // provider. Observed, not hypothetical.
+            //
+            // Every line is "<ts> <uptime> <tid> <level> <channel> <site>: …",
+            // so the site is preceded by a space and a channel name. Requiring
+            // the level letter and a following colon pins it to the field.
+            const auto is_event = [](const std::string& line,
+                                     std::string_view site) {
+                const auto at = line.find(site);
+                if (at == std::string::npos) return false;
+                // A payload hit sits deep in a JSON blob; a real site field
+                // sits in the header, within the first ~64 columns.
+                if (at > 64) return false;
+                // and is followed immediately by the ':' the format demands
+                return line.compare(at + site.size(), 1, ":") == 0;
+            };
             while (std::getline(in, ln)) {
-                if (ln.find("startup:") != std::string::npos)         startup  = ln;
-                if (ln.find("provider.select:") != std::string::npos) provider = ln;
+                if (is_event(ln, "startup"))         startup  = ln;
+                if (is_event(ln, "provider.select")) provider = ln;
             }
-            // These are Info-level, so a default release run (Warn+) does not
-            // capture them. Say so rather than printing a bare "(not
-            // captured)", which reads like a bug in the collector.
+            // Both of these are Warn — the tier a default release build
+            // keeps — so "missing" does NOT mean the level was too low. It
+            // means logging was turned off, or the log rotated past them
+            // (they are written once, at startup, and a 32 MB rotation mid-
+            // session drops the head of the file). Advising AGENTTY_LOG=info
+            // here, as this used to, sends the user to change a setting that
+            // was never the cause.
             out += (startup.empty()
-                        ? std::string{"startup: (not captured \u2014 Info level; "
-                                      "set AGENTTY_LOG=info for this)"}
+                        ? std::string{"startup: (not in the log \u2014 logging was off, "
+                                      "or the file rotated past the banner)"}
                         : startup) + "\n";
             out += (provider.empty()
-                        ? std::string{"provider: (not captured \u2014 Info level; "
-                                      "set AGENTTY_LOG=info for this)"}
+                        ? std::string{"provider: (not in the log \u2014 logging was off, "
+                                      "or no provider was selected this session)"}
                         : provider) + "\n";
         } else {
             out += "(no log captured \u2014 see the NOTE below)\n";

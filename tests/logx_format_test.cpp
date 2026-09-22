@@ -80,6 +80,35 @@ TEST_CASE("logx: every channel and level renders") {
     }
 }
 
+TEST_CASE("logx: a site name quoted inside a payload is not a site field") {
+    require_logging();
+    // `agentty diagnostics` reconstructs the session by scanning the log for
+    // the `startup` and `provider.select` events. It used to do that with a
+    // bare find() over the whole line — which matched a REQUEST BODY that
+    // happened to quote the string, and printed a chunk of the user's
+    // conversation as the active provider. Observed in a real log.
+    //
+    // The distinguishing fact is POSITION: a site field lives in the line
+    // header, a payload hit lives deep in a JSON blob. Pin that the header
+    // stays short enough for the scanner's column bound to separate them.
+    logx::emit(logx::Channel::Wire, logx::Level::Trace, "anthropic.request.body",
+               "raw={{\"text\":\"provider.select: provider=bogus\"}}");
+    const auto line = last_line();
+
+    const auto at = line.find("provider.select");
+    REQUIRE(at != std::string::npos);      // the payload really is in there
+    CHECK(at > 64);                        // but far past the header
+
+    // A genuine event puts its site inside the header window.
+    logx::emit(logx::Channel::Wire, logx::Level::Warn, "provider.select",
+               "provider=anthropic kind=anthropic");
+    const auto real = last_line();
+    const auto site = real.find("provider.select");
+    REQUIRE(site != std::string::npos);
+    CHECK(site <= 64);
+    CHECK(real.compare(site + std::string_view{"provider.select"}.size(), 1, ":") == 0);
+}
+
 TEST_CASE("logx: a message with newlines stays one grep-able record") {
     require_logging();
     // Raw wire bodies contain newlines (SSE frames are \n\n separated). The
