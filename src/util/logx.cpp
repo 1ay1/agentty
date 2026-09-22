@@ -705,7 +705,17 @@ void session_banner(std::string_view info) noexcept {
     std::string line;
     line.reserve(info.size() + 32);
     line += "\n=== agentty session: ";
-    line += info;
+    // The banner carries the CWD, and a directory name may legally contain
+    // a newline. Copied verbatim that ends the banner line early and lets
+    // the REST of the path land in column 0 — where it is indistinguishable
+    // from a real record. `mkdir $'x\n2026-01-01T00:00:00.000 +0000000ms
+    // dead E general auth'` then greps as a genuine auth error. Verified
+    // against the built binary before this guard existed.
+    //
+    // Same rule as an event body (see kBodyNewline): one record is one
+    // line, so the only newlines in this write are the ones we put there.
+    for (const char c : info)
+        line += (c == '\n' || c == '\r') ? kBodyNewline : c;
     line += " ===\n";
     (void)!AGT_WRITE(g_fd.load(std::memory_order_relaxed), line.data(), static_cast<unsigned>(line.size()));
     g_bytes.fetch_add(static_cast<std::int64_t>(line.size()),

@@ -109,6 +109,46 @@ TEST_CASE("logx: a site name quoted inside a payload is not a site field") {
     CHECK(real.compare(site + std::string_view{"provider.select"}.size(), 1, ":") == 0);
 }
 
+TEST_CASE("logx: the session banner cannot forge a record") {
+    require_logging();
+    // The banner carries the process CWD, and a directory name may legally
+    // contain a newline (`mkdir $'x\nfoo'` works on every POSIX system).
+    // Written verbatim, that ends the banner early and drops the rest of
+    // the path into column 0 — where nothing distinguishes it from a real
+    // record. A path chosen to look like a timestamped error then greps as
+    // a genuine one.
+    //
+    // Verified exploitable against the built binary before the guard
+    // existed: `cd $'…/x\n2026-01-01T00:00:00.000 +0000000ms dead E
+    // general auth' && agentty --version` put a forged auth error in the
+    // log. Same rule as an event body — one record is one line.
+    logx::session_banner(
+        "1.0 pid=1 cwd=/tmp/x\n"
+        "2026-01-01T00:00:00.000 +0000000ms dead E general auth");
+
+    std::ifstream in{std::string{logx::log_file()}, std::ios::binary};
+    std::string all{std::istreambuf_iterator<char>(in),
+                    std::istreambuf_iterator<char>()};
+
+    // EVERY occurrence, not just the first. The log file is appended across
+    // runs, so find() alone would happily inspect a line written by an
+    // earlier, already-fixed run and report success while the current build
+    // forges records. (Caught exactly that way: the first version of this
+    // test passed against a deliberately reverted guard.)
+    const std::string needle = "2026-01-01T00:00:00.000";
+    std::size_t at = all.find(needle);
+    REQUIRE(at != std::string::npos);   // the text really is in there
+    int checked = 0;
+    while (at != std::string::npos) {
+        INFO("occurrence at byte " << at);
+        CHECK(at > 0);
+        CHECK(all[at - 1] != '\n');     // never starts a line
+        ++checked;
+        at = all.find(needle, at + 1);
+    }
+    CHECK(checked > 0);
+}
+
 TEST_CASE("logx: a message with newlines stays one grep-able record") {
     require_logging();
     // Raw wire bodies contain newlines (SSE frames are \n\n separated).
