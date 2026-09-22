@@ -2485,15 +2485,24 @@ OllamaProbe probe_ollama_model(const AuthHeader& auth,
         // arch-prefixed keys; the window lives under "<arch>.context_length"
         // (e.g. "qwen2.context_length": 32768, "llama.context_length": 8192).
         // The arch prefix varies per model, so scan for any key ending in
-        // ".context_length" rather than hard-coding the architecture.
+        // ".context_length" rather than hard-coding the architecture. This
+        // mirrors what Ollama's own CLI does in cmd/cmd.go's showInfo.
+        //
+        // The value may be a FLOAT. ModelInfo is Go's map[string]any, so
+        // encoding/json emits every number as float64 and 32768 arrives as
+        // 32768.0 — Ollama's own tests use float64 literals for exactly this
+        // field. An is_number_integer() check silently dropped all of them.
         if (j.contains("model_info") && j["model_info"].is_object()) {
             for (auto it = j["model_info"].begin(); it != j["model_info"].end(); ++it) {
                 const std::string& key = it.key();
                 if (key.size() >= 15
                     && key.compare(key.size() - 15, 15, ".context_length") == 0
-                    && it.value().is_number_integer()) {
-                    out.context_window = it.value().get<int>();
-                    break;
+                    && it.value().is_number()) {
+                    const double d = it.value().get<double>();
+                    if (d > 0 && d < 2e9) {
+                        out.context_window = static_cast<int>(d);
+                        break;
+                    }
                 }
             }
         }
@@ -2644,6 +2653,38 @@ namespace detail {
         meta != m.end() && meta->is_object()) {
         if (const int w = pick(*meta, "n_ctx");       w > 0) return w;
         if (const int w = pick(*meta, "n_ctx_train"); w > 0) return w;
+    }
+
+    // GGUF arch-prefixed keys: "<arch>.context_length".
+    //
+    // This is how the window is spelled in a model's own metadata —
+    // "qwen2.context_length", "llama.context_length", "gemma3.context_length"
+    // — and it is exactly what Ollama's own CLI reads in cmd/cmd.go's
+    // showInfo(). The prefix varies per architecture, so scan for the
+    // suffix rather than hard-coding a list that would go stale with every
+    // new model family.
+    //
+    // Any nested object is searched, because the key appears at the top
+    // level on some servers and under "model_info" on Ollama.
+    {
+        const auto scan = [](const nlohmann::json& obj) -> int {
+            if (!obj.is_object()) return 0;
+            constexpr std::string_view kSuffix = ".context_length";
+            for (auto it = obj.begin(); it != obj.end(); ++it) {
+                const std::string& key = it.key();
+                if (key.size() <= kSuffix.size()) continue;
+                if (key.compare(key.size() - kSuffix.size(),
+                                kSuffix.size(), kSuffix) != 0) continue;
+                if (!it.value().is_number()) continue;
+                const double d = it.value().get<double>();
+                if (d > 0 && d < 2e9) return static_cast<int>(d);
+            }
+            return 0;
+        };
+        if (const auto mi = m.find("model_info");
+            mi != m.end() && mi->is_object())
+            if (const int w = scan(*mi); w > 0) return w;
+        if (const int w = scan(m); w > 0) return w;
     }
 
     // Flat spellings, in the order a row is most likely to carry them.

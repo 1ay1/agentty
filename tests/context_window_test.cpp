@@ -170,6 +170,47 @@ TEST_CASE("context: an architectural maximum is not the loaded window") {
             < det::advertised_context_window(row));
 }
 
+TEST_CASE("context: a GGUF arch-prefixed context_length is a window") {
+    // How the window is spelled in a model's own metadata, and exactly what
+    // Ollama's CLI reads (cmd/cmd.go showInfo). The arch prefix varies per
+    // family, so it is matched by suffix.
+    const auto row = json::parse(R"({
+        "model_info": {
+            "general.architecture": "qwen2",
+            "qwen2.context_length": 32768,
+            "qwen2.embedding_length": 3584
+        }
+    })");
+    CHECK(det::advertised_context_window(row) == 32768);
+}
+
+TEST_CASE("context: a FLOAT context_length still counts") {
+    // Ollama's ModelInfo is Go's map[string]any, so encoding/json emits
+    // every number as float64 — 32768 arrives as 32768.0. Ollama's own
+    // tests (cmd/cmd_test.go) use float64 literals for this exact field.
+    //
+    // An is_number_integer() check silently dropped ALL of these, so every
+    // Ollama model fell through to the default despite the daemon having
+    // told us the answer.
+    const auto row = json::parse(R"({
+        "model_info": { "qwen2.context_length": 32768.0 }
+    })");
+    CHECK(det::advertised_context_window(row) == 32768);
+
+    // The flat spellings take floats too — LiteLLM emits 16385.0.
+    const auto flat = json::parse(R"({ "context_length": 16385.0 })");
+    CHECK(det::advertised_context_window(flat) == 16385);
+}
+
+TEST_CASE("context: embedding_length is not a context window") {
+    // Both keys live side by side in model_info and both end in "_length".
+    // Matching too loosely would report a 3584-token window for a 32k model.
+    const auto row = json::parse(R"({
+        "model_info": { "qwen2.embedding_length": 3584 }
+    })");
+    CHECK(det::advertised_context_window(row) == 0);
+}
+
 TEST_CASE("context: resolution order is override > advertised > id") {
     Settings s;
     const char* prov = "litellm";

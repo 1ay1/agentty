@@ -71,6 +71,20 @@ OLLAMA_TAGS = {
          "modified_at": "", "size": 4431389696, "digest": "abc"},
     ]
 }
+# /api/show — Ollama's per-model capability probe. ModelInfo is Go's
+# map[string]any, so encoding/json emits EVERY number as float64: the
+# context_length arrives as 32768.0, not 32768. Ollama's own tests
+# (cmd/cmd_test.go) use float64 literals for this exact field.
+OLLAMA_SHOW = {
+    "capabilities": ["completion", "tools"],
+    "details": {"family": "qwen2", "parameter_size": "7B"},
+    "model_info": {
+        "general.architecture": "qwen2",
+        "general.parameter_count": 7615616512.0,
+        "qwen2.context_length": 32768.0,
+        "qwen2.embedding_length": 3584.0,
+    },
+}
 OLLAMA_PS = {
     "models": [
         {"name": "qwen2.5-coder:7b", "model": "qwen2.5-coder:7b",
@@ -127,6 +141,16 @@ class H(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def do_POST(self):
+        # /api/show is a POST in ollama's API.
+        path = self.path.split("?")[0]
+        if MODE == "ollama" and path == "/api/show":
+            n = int(self.headers.get("Content-Length") or 0)
+            if n:
+                self.rfile.read(n)
+            return self._send(OLLAMA_SHOW)
+        self._send({"error": "not found"}, 404)
 
     def do_GET(self):
         path = self.path.split("?")[0]
