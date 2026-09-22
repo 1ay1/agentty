@@ -189,8 +189,19 @@ int main() {
                                    const provider::EventSink& sink) {
             if (turn == 0)
                 emit_text(sink, "I'll start by mapping the codebase structure.");
+            // The pattern must VARY per turn. The runner treats 6 identical
+            // SUCCEEDING calls (keyed on name+args, NOT call id) as a stuck
+            // loop and stops early with the doom-loop banner — which is a
+            // different exit than the turn budget this scenario is about.
+            //
+            // With a fixed pattern the outcome depended on whether each grep
+            // happened to succeed: locally the loop ran to the budget and the
+            // test passed, while on CI it tripped the doom check at turn 6 and
+            // failed in 1.9 s instead of 11 s. Varying the pattern pins the
+            // intended path regardless.
             emit_tool_call(sink, "t" + std::to_string(turn), "grep",
-                           json{{"pattern", "zzz_no_match_expected"}});
+                           json{{"pattern", "zzz_no_match_expected_"
+                                             + std::to_string(turn)}});
             emit_finish(sink, StopReason::ToolUse);
         });
         auto out = run_task("explore everything in exhaustive detail");
@@ -313,8 +324,11 @@ int main() {
         install_scripted_stream([](int turn, const provider::Request&,
                                    const provider::EventSink& sink) {
             if (turn < agentty::tools::subagent::max_turns_for(/*read_only=*/false) - 1) {   // final turns write prose
+                // Varied per turn — 6 identical succeeding calls trip the
+                // doom-loop check and exit before the cap (see scenario A).
                 emit_tool_call(sink, "t" + std::to_string(turn), "grep",
-                               json{{"pattern", "zzz_no_match_expected"}});
+                               json{{"pattern", "zzz_no_match_expected_"
+                                                 + std::to_string(turn)}});
                 emit_finish(sink, StopReason::ToolUse);
             } else {
                 emit_text(sink, "I mapped the modules and it all looks fine.");
@@ -339,8 +353,11 @@ int main() {
         install_scripted_stream([saw_nudge](int turn, const provider::Request& req,
                                             const provider::EventSink& sink) {
             if (req_has_nudge(req)) saw_nudge->store(true);
+            // Varied per turn — the nudge fires near the CAP, so this loop
+            // must not exit early on the doom-loop check (see scenario A).
             emit_tool_call(sink, "t" + std::to_string(turn), "grep",
-                           json{{"pattern", "zzz_no_match_expected"}});
+                           json{{"pattern", "zzz_no_match_expected_"
+                                             + std::to_string(turn)}});
             emit_finish(sink, StopReason::ToolUse);
         });
         (void)run_task("keep exploring forever");
