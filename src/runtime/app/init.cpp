@@ -52,6 +52,20 @@ std::pair<Model, maya::Cmd<Msg>> init() {
     m.d.available_models = seed_models();
 
     auto settings = deps().load_settings();
+    // Bake the seeded rows through the SAME ladder the refresh path uses.
+    //
+    // seed_models() returns the bundled catalog's raw figures, and it runs
+    // before settings exist — so a user who pinned a context window for a
+    // model got their pin ignored on every row until the first provider
+    // refresh. Until then the picker's ctx column and the status bar
+    // disagreed about the same model, which is exactly the contradiction
+    // bake_context_window() was introduced to end (PR #39). The refresh
+    // path bakes; the seed path did not, so the invariant held everywhere
+    // except the state you actually start in.
+    //
+    // Cheap: a handful of bundled rows, once, at startup.
+    for (auto& mi : m.d.available_models)
+        ui::bake_context_window(mi, detail::active_provider_id(), settings);
     // ONE-TIME MIGRATION: the legacy account-blind `context_1m_blocked`
     // bool becomes a keyed fact for the CURRENTLY ACTIVE account. That is
     // the best available attribution — the bool never recorded whose block

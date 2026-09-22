@@ -20,6 +20,10 @@
 
 #include "agtest.hpp"
 
+#include <filesystem>
+#include <fstream>
+#include <string>
+
 #include "agentty/provider/openai/transport.hpp"
 #include "agentty/domain/session.hpp"
 
@@ -156,4 +160,66 @@ TEST_CASE("context: an unknown window disarms compaction, a known one arms it") 
     const int thr = s.compaction_threshold();
     CHECK(thr > 0);                          // → armed
     CHECK(thr < s.context_max);              // → leaves room for the reply
+}
+
+TEST_CASE("context: every path into available_models bakes the window") {
+    // bake_context_window() exists so ONE number reaches both the picker's
+    // ctx column and the status bar (PR #39). That only holds if every
+    // path that fills `available_models` runs it.
+    //
+    // The refresh path did. The SEED path — init.cpp, the rows you start
+    // with — did not: it ran before settings were even loaded, so a user
+    // who pinned a context window had their pin ignored on every row until
+    // the first provider refresh. The invariant held everywhere except the
+    // state you actually boot into, which is the one state nobody thinks
+    // to re-check.
+    //
+    // This is a source scan because the bug is a MISSING CALL SITE. A
+    // behavioural test would have to construct the full init path, and
+    // would still only cover the two call sites that exist today rather
+    // than the third somebody adds next year.
+    const std::filesystem::path root{AGENTTY_SRC_ROOT};
+
+    struct Site { const char* file; const char* why; };
+    static constexpr Site kSites[] = {
+        {"src/runtime/app/init.cpp",
+         "the SEEDED rows — the catalog you start with, before any refresh. "
+         "Bakes right after load_settings(), because the ladder needs them."},
+        {"src/runtime/app/update/models.cpp",
+         "the REFRESH rows — rebuilt when a provider lists its models."},
+    };
+
+    for (const auto& s : kSites) {
+        const auto path = root / s.file;
+        INFO("site = " << s.file);
+        REQUIRE(std::filesystem::exists(path));
+
+        std::ifstream in(path);
+        REQUIRE(in);
+        std::string src;
+        {
+            std::string line;
+            while (std::getline(in, line)) {
+                // Strip comment lines. Every one of these files EXPLAINS
+                // the invariant in prose, and a scan that matches the
+                // explanation passes while the call is gone — which is
+                // exactly what this test caught about itself.
+                const auto first = line.find_first_not_of(" \t");
+                if (first != std::string::npos
+                    && line.compare(first, 2, "//") == 0) continue;
+                src += line;
+                src += '\n';
+            }
+        }
+
+        // A CALL, not a mention: the name followed by an open paren.
+        CHECK_MESSAGE(src.find("bake_context_window(") != std::string::npos,
+            s.file << " fills available_models without baking the context "
+                      "window. " << s.why
+                   << "  Unbaked rows carry the raw catalog figure, so the "
+                      "picker's ctx column and the status bar disagree about "
+                      "the same model, and a user's pinned window is "
+                      "silently ignored. Call ui::bake_context_window(row, "
+                      "provider_id, settings) on every row.");
+    }
 }
