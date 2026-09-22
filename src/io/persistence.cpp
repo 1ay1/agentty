@@ -1466,23 +1466,85 @@ static std::vector<Message> persistable(const std::vector<Message>& in) {
 // diff: re-serialising is not guaranteed stable (blob promotion can move
 // a payload out of line on the way in), and a byte comparison would fail
 // on differences that are not data loss.
-static bool log_matches(const ThreadLog& log, const std::vector<Message>& want) {
+// A bare bool here was a dead end in practice: the save path logged
+// "log verification FAILED" with no reason, on real threads, in bursts
+// that later healed on their own. Which is the worst shape a diagnostic
+// can have — it names a symptom and withholds every fact needed to tell
+// a writer bug (data loss, must keep the legacy file) apart from a
+// benign race (the thread grew while we were verifying it). So the
+// comparison reports WHERE it diverged, in the same vocabulary the wire
+// audit uses: a kind, an index, and the two values.
+struct LogMismatch {
+    enum class Kind {
+        None,
+        Count,       // different number of messages
+        Id,
+        Role,
+        Text,
+        Thinking,
+        TollCallCount,
+        ToolOutput,
+        ImageCount,
+    };
+    Kind        kind  = Kind::None;
+    std::size_t index = 0;   // message index, or message count for Count
+    std::string want;        // what we meant to write
+    std::string got;         // what read back
+
+    [[nodiscard]] bool ok() const noexcept { return kind == Kind::None; }
+
+    [[nodiscard]] std::string_view kind_name() const noexcept {
+        switch (kind) {
+            case Kind::None:          return "none";
+            case Kind::Count:         return "message_count";
+            case Kind::Id:            return "id";
+            case Kind::Role:          return "role";
+            case Kind::Text:          return "text";
+            case Kind::Thinking:      return "thinking";
+            case Kind::TollCallCount: return "tool_call_count";
+            case Kind::ToolOutput:    return "tool_output";
+            case Kind::ImageCount:    return "image_count";
+        }
+        return "unknown";
+    }
+};
+
+// Long fields go in the log; a 200 KB tool output must not.
+static std::string brief(std::string_view s) {
+    constexpr std::size_t kMax = 80;
+    if (s.size() <= kMax) return std::string{s};
+    return std::string{s.substr(0, kMax)} + "…(" + std::to_string(s.size()) + "B)";
+}
+
+static LogMismatch log_diff(const ThreadLog& log, const std::vector<Message>& want) {
+    using K = LogMismatch::Kind;
     const auto got = log.all();
-    if (got.size() != want.size()) return false;
+    if (got.size() != want.size())
+        return {K::Count, want.size(), std::to_string(want.size()),
+                std::to_string(got.size())};
     for (std::size_t i = 0; i < got.size(); ++i) {
         const auto& a = want[i];
         const auto& b = got[i];
-        if (a.id.value != b.id.value)   return false;
-        if (a.role     != b.role)       return false;
-        if (a.text     != b.text)       return false;
-        if (a.thinking != b.thinking)   return false;
-        if (a.tool_calls.size() != b.tool_calls.size()) return false;
+        if (a.id.value != b.id.value)
+            return {K::Id, i, a.id.value, b.id.value};
+        if (a.role != b.role)
+            return {K::Role, i, role_to_string(a.role), role_to_string(b.role)};
+        if (a.text != b.text)
+            return {K::Text, i, brief(a.text), brief(b.text)};
+        if (a.thinking != b.thinking)
+            return {K::Thinking, i, brief(a.thinking), brief(b.thinking)};
+        if (a.tool_calls.size() != b.tool_calls.size())
+            return {K::TollCallCount, i, std::to_string(a.tool_calls.size()),
+                    std::to_string(b.tool_calls.size())};
         for (std::size_t k = 0; k < a.tool_calls.size(); ++k)
             if (a.tool_calls[k].output() != b.tool_calls[k].output())
-                return false;
-        if (a.images.size() != b.images.size()) return false;
+                return {K::ToolOutput, i, brief(a.tool_calls[k].output()),
+                        brief(b.tool_calls[k].output())};
+        if (a.images.size() != b.images.size())
+            return {K::ImageCount, i, std::to_string(a.images.size()),
+                    std::to_string(b.images.size())};
     }
-    return true;
+    return {};
 }
 
 static void save_thread_sync(const Thread& t) {
@@ -1509,7 +1571,10 @@ static void save_thread_sync(const Thread& t) {
         // Re-open from scratch so the verification reads the FILES, not
         // the in-memory state that just wrote them.
         auto check = ThreadLog::open(t.id);
-        if (check && log_matches(*check, persistable(t.messages))) {
+        const LogMismatch diff =
+            check ? log_diff(*check, persistable(t.messages))
+                  : LogMismatch{LogMismatch::Kind::Count, 0, "log", "unopenable"};
+        if (diff.ok()) {
             if (fs::exists(legacy_path, ec)) {
                 fs::remove(legacy_path, ec);
                 AGT_LOG(Persist, Info, "thread.save",
@@ -1528,8 +1593,10 @@ static void save_thread_sync(const Thread& t) {
         // writer, and the user's history is the thing that must not pay
         // for it.
         AGT_LOG(Persist, Error, "thread.save",
-                "log verification FAILED id={} messages={} — keeping the "
-                "legacy document", t.id.value, t.messages.size());
+                "log verification FAILED id={} messages={} kind={} index={} "
+                "want={} got={} — keeping the legacy document",
+                t.id.value, t.messages.size(), diff.kind_name(), diff.index,
+                diff.want, diff.got);
     } else if (!log) {
         AGT_LOG(Persist, Warn, "thread.save",
                 "could not open a log for id={} — falling back to legacy",
