@@ -854,6 +854,31 @@ struct Thread {
         std::string summary;             // model output, <summary>…</summary> stripped
         std::chrono::system_clock::time_point created_at =
             std::chrono::system_clock::now();
+        // What the squeeze ACHIEVED, in estimated tokens.
+        //
+        // Compaction's whole job is to make the next request fit. Without
+        // these two numbers nobody can tell a compaction that reclaimed
+        // 180k tokens from one that reclaimed 400 — both look identical in
+        // the transcript, both leave a summary, and the second one means
+        // the very next turn compacts again and the thread livelocks
+        // summarising itself.
+        //
+        // GitHub's runtime tracks the same pair (`preCompactionTokens` /
+        // `postCompactionTokens`) for the same reason: a reclaim is a
+        // RATE to watch, not an event that either happened or didn't.
+        //
+        // 0/0 on records written before this existed — absent, not zero
+        // reclaim. `reclaimed()` returns nullopt rather than inventing a
+        // number, so an old thread reads as "unknown" instead of "this
+        // compaction did nothing".
+        int tokens_before = 0;
+        int tokens_after  = 0;
+
+        // Tokens this compaction reclaimed, or nullopt when unmeasured.
+        [[nodiscard]] std::optional<int> reclaimed() const noexcept {
+            if (tokens_before <= 0 || tokens_after <= 0) return std::nullopt;
+            return tokens_before - tokens_after;
+        }
     };
     std::vector<CompactionRecord> compactions;
 };
@@ -892,6 +917,14 @@ struct Thread {
     auto from_bytes = static_cast<int>(static_cast<double>(bytes) / kBytesPerToken);
     return from_bytes + images * kTokensPerImage;
 }
+
+// NOTE: the compaction-AWARE estimate lives in cmd_factory as
+// `cmd::estimate_wire_tokens(Thread)`. It scores the substituted wire view
+// (summary in place of the covered prefix) using the same bytes/3.5 +
+// ~1500-per-image basis as the function above, so the two are comparable.
+// Do not add a second one here — three estimators that must agree is two
+// too many, and CompactionRecord's before/after pair is only meaningful
+// while both sides come from the same scorer.
 
 struct PendingPermission {
     ToolCallId  id;

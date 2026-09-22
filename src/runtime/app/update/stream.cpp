@@ -356,7 +356,29 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
         rec.up_to_index = up_to;
         rec.summary     = std::move(summary);
         rec.created_at  = std::chrono::system_clock::now();
+        // What did this actually buy us? Measured on the WIRE payload, not
+        // the transcript — the transcript is immutable, so before/after on
+        // it are identical and every reclaim would read as zero.
+        //
+        // `before` is the effective size with the compactions that existed
+        // a moment ago; `after` includes this one. A compaction that
+        // reclaims almost nothing is the dangerous case: it looks like
+        // success, leaves a summary, and the next turn compacts again —
+        // the thread livelocks summarising itself while the user watches
+        // it do nothing. That is only visible as a NUMBER.
+        rec.tokens_before = cmd::estimate_wire_tokens(m.d.current);
         m.d.current.compactions.push_back(std::move(rec));
+        m.d.current.compactions.back().tokens_after =
+            cmd::estimate_wire_tokens(m.d.current);
+        {
+            const auto& r = m.d.current.compactions.back();
+            AGT_LOG(Model, Info, "compaction.done",
+                    "up_to={} summary_bytes={} tokens_before={} "
+                    "tokens_after={} reclaimed={}",
+                    r.up_to_index, r.summary.size(),
+                    r.tokens_before, r.tokens_after,
+                    r.reclaimed().value_or(-1));
+        }
         m.d.current.updated_at = std::chrono::system_clock::now();
 
         // Do NOT rehydrate frozen. The currently-frozen prefix is

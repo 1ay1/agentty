@@ -162,3 +162,74 @@ TEST_CASE("compaction wire") {
               "fork+compaction: raw tail after the boundary preserved");
     }
 }
+
+TEST_CASE("compaction reclaim is measured") {
+    // A compaction's whole job is to make the next request fit. Nothing
+    // recorded whether it DID.
+    //
+    // The dangerous case is not a compaction that fails loudly — it is one
+    // that reclaims almost nothing. It looks identical in the transcript:
+    // a summary appears, the turn continues. Then the next turn is still
+    // over threshold, compacts again, reclaims nothing again, and the
+    // thread livelocks summarising itself while the user watches it do
+    // nothing. That is only visible as a NUMBER, which is why GitHub's
+    // runtime carries the same pre/post pair.
+    //
+    // Both sides must come from the SAME scorer or the difference is
+    // noise, so this pins that the pair is measured with
+    // cmd::estimate_wire_tokens — the compaction-aware one.
+    Thread t;
+    t.messages.push_back(umsg(std::string(20000, 'q')));   // a big prefix
+    t.messages.push_back(amsg(std::string(20000, 'a')));
+    t.messages.push_back(umsg("and now a short tail"));
+
+    const int before = app::cmd::estimate_wire_tokens(t);
+
+    Thread::CompactionRecord rec;
+    rec.up_to_index   = 2;              // subsume the two big messages
+    rec.summary       = "user asked a long thing; assistant answered";
+    rec.tokens_before = before;
+    t.compactions.push_back(rec);
+    t.compactions.back().tokens_after = app::cmd::estimate_wire_tokens(t);
+
+    const auto& r = t.compactions.back();
+
+    // The measurement is real: a big prefix replaced by one short summary
+    // has to shrink the wire substantially.
+    check(r.tokens_after < r.tokens_before,
+          "compaction reclaim: after is smaller than before");
+    check(r.reclaimed().has_value(),
+          "compaction reclaim: a measured record reports a reclaim");
+    check(*r.reclaimed() > 1000,
+          "compaction reclaim: subsuming ~40KB reclaims real tokens");
+
+    // And it agrees with the estimator the auto-compaction trigger reads,
+    // which is the only reason before/after can be compared at all.
+    check(r.tokens_after == app::cmd::estimate_wire_tokens(t),
+          "compaction reclaim: after matches the live wire estimate");
+}
+
+TEST_CASE("an unmeasured compaction reports unknown, not zero") {
+    // Records written before the measurement existed reload with 0/0.
+    // Zero reclaim and "we never measured" want OPPOSITE reactions — the
+    // first means compaction is broken and the thread is about to
+    // livelock, the second means we simply don't know. Conflating them
+    // would have an old thread reporting a disaster that never happened.
+    Thread t;
+    t.messages.push_back(umsg("q"));
+    t.messages.push_back(amsg("a"));
+
+    Thread::CompactionRecord rec;
+    rec.up_to_index = 1;
+    rec.summary     = "old record, written before tokens were tracked";
+    t.compactions.push_back(rec);
+
+    check(!t.compactions.back().reclaimed().has_value(),
+          "unmeasured compaction reports nullopt rather than 0");
+
+    // A half-measured record is also unknown: one side alone cannot
+    // produce a difference, and guessing the other would be inventing data.
+    t.compactions.back().tokens_before = 5000;
+    check(!t.compactions.back().reclaimed().has_value(),
+          "half-measured compaction is still unknown");
+}

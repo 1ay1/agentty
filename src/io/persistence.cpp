@@ -933,6 +933,13 @@ std::expected<Thread, DeserializeError> thread_meta_from_json(const json& j) {
                 rec.created_at = std::chrono::system_clock::time_point{
                     std::chrono::seconds{cj["created_at"].get<int64_t>()}};
             }
+            // Absent on records written before the measurement existed.
+            // Leaving them 0 makes reclaimed() return nullopt — "unknown",
+            // which is the truth — rather than a fabricated zero.
+            if (cj.contains("tokens_before") && cj["tokens_before"].is_number_integer())
+                rec.tokens_before = cj["tokens_before"].get<int>();
+            if (cj.contains("tokens_after") && cj["tokens_after"].is_number_integer())
+                rec.tokens_after = cj["tokens_after"].get<int>();
             t.compactions.push_back(std::move(rec));
         }
     }
@@ -1396,6 +1403,14 @@ json thread_meta_to_json(const Thread& t) {
             cj["summary"]     = tools::util::to_valid_utf8(c.summary);
             cj["created_at"]  = std::chrono::duration_cast<std::chrono::seconds>(
                                     c.created_at.time_since_epoch()).count();
+            // Only when measured. Writing 0/0 for an unmeasured record
+            // would make "we didn't record this" indistinguishable from
+            // "this compaction reclaimed nothing" — and those want
+            // opposite reactions.
+            if (c.tokens_before > 0 && c.tokens_after > 0) {
+                cj["tokens_before"] = c.tokens_before;
+                cj["tokens_after"]  = c.tokens_after;
+            }
             comps.push_back(std::move(cj));
         }
         j["compactions"] = std::move(comps);
