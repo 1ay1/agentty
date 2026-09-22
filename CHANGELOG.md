@@ -4,6 +4,8 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.5] - 2026-09-22
+
 ### Fixed
 - **`agentty run` takes its arguments in any order.** The parser scanned only
   the leading arguments and stopped at the first option it didn't own, so a
