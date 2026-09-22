@@ -4,6 +4,92 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Every outbound request is audited before it goes out.** A typed
+  `audit_wire()` walks the messages the transport is about to send and reports
+  shape defects by name — a tool call with no name, a tool result with no call,
+  a call nobody answered, an image with no media type. It runs on the main loop
+  *and* the subagent loop (tagged `loop=main` / `loop=subagent`), so a malformed
+  request is described in the log **before** the server answers 400 instead of
+  after. The in-flight assistant slot is exempt: every turn appends the message
+  the model is about to fill, so it is empty by construction, and a warning that
+  fires on every healthy turn trains you to ignore the channel.
+- **Vision is gated on what the model and the account actually allow.**
+  `supports_vision` is a tristate on `ModelInfo`: unknown still sends (absence
+  of evidence is not evidence), an explicit `false` withholds. An organisation
+  policy rejection is recorded as `Fact::VisionOrgPolicy` — account-scoped, not
+  model-scoped, because "your org disabled images" says nothing about the model.
+  Per-request causes (bad media type, too many images) are never remembered as
+  facts about either.
+- **Compaction reports what it actually reclaimed.** `CompactionRecord` carries
+  before/after token counts and a `reclaimed()`; an unmeasured compaction is
+  *unknown*, not zero.
+
+### Fixed
+- **A tool still running no longer fails thread-save verification.** A save
+  fires every turn, including mid-tool, and the reader deliberately coerces a
+  pending call to `Failed{"interrupted"}` so a crashed process never reloads
+  waiting forever. The verifier compared that against memory, called the write
+  corrupt, and refused to retire the legacy document — on a live thread that was
+  37 failures in a row, healing only on a turn that happened to end without a
+  tool. Nothing was ever lost (the gate is fail-safe), but the migration never
+  completed and the error named no field. It now compares what the format
+  *promises*: unsettled calls are exempt, and the UTF-8 scrub applied on write
+  is accepted as the writer working rather than as corruption.
+- **One log event is one line.** Message bodies were copied verbatim, so any
+  payload containing a newline — every SSE frame, every request body — split one
+  record across many physical lines. That broke `grep ' E '`, made continuation
+  lines indistinguishable from real records, and let a payload quoting a site
+  name at the start of its own line impersonate an event. Newlines and CRs in
+  the body are now escaped in place, over the body region only, so the header
+  stays parseable.
+- **`agentty diagnostics` no longer reports a request body as the session
+  summary.** It scanned for `provider.select:` with a substring match over a
+  file that interleaves events with raw wire bytes, so a request body quoting
+  that string won — anyone debugging agentty *by talking to agentty* poisoned
+  their own bug report. It now matches the site field by position. The fallback
+  text also told you to set `AGENTTY_LOG=info` to capture `startup` /
+  `provider.select`; both are `warn` and already kept by default, so it now
+  names the real causes.
+- **The session banner could forge a log record.** It writes the process CWD,
+  and a directory name may legally contain a newline — so `mkdir $'x\n2026-…
+  dead E general auth'` put a line in the log that grepped as a genuine auth
+  error. Same rule as an event body now: only the newlines we write are
+  newlines.
+- **Encrypted reasoning only replays to the backend that minted it.** Blobs
+  carry their minting site and are withheld from any other, so ciphertext is
+  never handed to a backend that cannot read it.
+- **Context windows are read from every vendor's spelling.** `context_length`,
+  `context_window`, `max_context_length` (Mistral), `max_input_tokens`, `n_ctx`.
+  A GPT family name no longer implies a 200k window — the id doesn't determine
+  it, so inference now stays silent and the catalog/probe/env ladder decides.
+  Ollama's gauge and wire agree on one `effective_num_ctx()` instead of
+  disagreeing about the clamp.
+- **Mid-stream errors are typed from the wire.** The server's error type and
+  status decide the classification instead of prose pattern-matching.
+- **A standalone build no longer adopts a system simdjson.** `FIND_PACKAGE_ARGS`
+  is right for a distro build and wrong for the release binary, whose contract
+  is that it runs where none of this is installed. The macOS runners ship a
+  Homebrew simdjson, so the release job linked its dylib and failed its own
+  portability check — the reason the last three releases produced no macOS
+  binaries. Distro builds still reuse the system copy.
+- **Missing `<variant>` / `<string_view>` includes.** libstdc++ supplied them
+  transitively; libc++ and MSVC make no such promise.
+
+### Changed
+- **CI is ~58% faster** (38m49s → 16m28s on the Linux gate). Both ccaches were
+  configured smaller than a single build's output, so they evicted themselves
+  mid-build — 60 cleanups at a 26% hit rate on the release job, 321 at 5.5% on
+  the sanitizer job — and then missed on nearly everything. Sized to the real
+  working set, within GitHub's 10 GB per-repo budget. A new `prune-caches` job
+  keeps one entry per key prefix, since the cache action writes a fresh
+  timestamped key every run and never removes the one it superseded (the repo
+  had drifted to 9.70 of 10 GB, almost all of it dead copies).
+- **`scripts/check-submodules-pushed.sh`** refuses a push whose submodule
+  pointer names a commit no remote can fetch — the failure mode where the
+  superproject is clean, your machine builds fine, and every CI job dies at
+  "Init submodules" before compiling anything.
+
 ## [0.9.2] - 2026-09-18
 
 ### Added
