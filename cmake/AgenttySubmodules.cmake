@@ -118,19 +118,40 @@ FetchContent_Declare(
 # for config + cold events; simdjson's ondemand API is 3–5× faster for the
 # "open doc, read two fields, throw away" pattern that dominates here.
 set(SIMDJSON_DEVELOPER_MODE   OFF CACHE INTERNAL "")
-FetchContent_Declare(
-    simdjson
-    GIT_REPOSITORY https://github.com/simdjson/simdjson.git
-    GIT_TAG        v3.10.1
-    GIT_SHALLOW    TRUE
+# A STANDALONE build must not adopt a system copy.
+#
+# FIND_PACKAGE_ARGS is what lets a distro package satisfy this without a
+# clone — right for a distro build, wrong for the release binary, whose whole
+# contract (AgenttyStandalone.cmake: "no third-party shared-library
+# dependencies") is that it runs on a machine that has none of this
+# installed. The macOS runners ship a Homebrew simdjson, so the release job
+# quietly linked /usr/local/opt/simdjson/lib/libsimdjson.33.dylib and failed
+# its own portability check — three releases in a row, on both arches, while
+# Linux and Windows cloned and built it static and passed.
+#
+# Everything else in that job is already forced static by hand (openssl,
+# nghttp2 from source, libstdc++/libgcc/libquadmath via linker flags). This
+# closes the one dependency that could still arrive dynamically, for every
+# platform rather than just macOS: the same trap exists anywhere a standalone
+# build runs on a box with the dev package installed.
+#
 # The version is deliberately UNPINNED for the find_package path. Asking for
 # "3.10" makes CMake reject a system simdjson 4.x as incompatible (same-major
 # rule) and clone anyway — which defeats the point on any distro shipping 4.x,
 # including Termux. agentty uses only the stable dom/ondemand surface
 # (parser, document, element, object, array, padded_string), unchanged across
-# 3 and 4, so whatever the distro ships is fine. The GIT_TAG below still pins
-# the version for anyone WITHOUT a system copy.
-    FIND_PACKAGE_ARGS NAMES simdjson
+# 3 and 4, so whatever the distro ships is fine. GIT_TAG still pins the
+# version for anyone WITHOUT a system copy.
+set(_agentty_simdjson_find_args FIND_PACKAGE_ARGS NAMES simdjson)
+if(AGENTTY_STANDALONE)
+    set(_agentty_simdjson_find_args "")
+endif()
+FetchContent_Declare(
+    simdjson
+    GIT_REPOSITORY https://github.com/simdjson/simdjson.git
+    GIT_TAG        v3.10.1
+    GIT_SHALLOW    TRUE
+    ${_agentty_simdjson_find_args}
 )
 
 FetchContent_MakeAvailable(nlohmann_json simdjson)
