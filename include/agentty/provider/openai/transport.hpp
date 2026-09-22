@@ -160,10 +160,18 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink,
 // Exposed for tests because the 0 is a contract, not an implementation
 // detail: it is what distinguishes "the gateway told us" from "nobody
 // knows", and every downstream behaviour hangs off that distinction — the
-// window probe only fires on 0, the picker column only says "auto" on 0,
-// and resolve_context_window() only falls through to models.dev / id
-// inference / the 200k default on 0. A shape that silently resolves to a
-// number nobody declared is the bug this returns 0 to prevent.
+// picker column only says "auto" on 0, and resolve_context_window() only
+// falls through to models.dev / id inference / the 200k default on 0. A
+// shape that silently resolves to a number nobody declared is the bug this
+// returns 0 to prevent.
+//
+// What a row declares is not always what the server will honour, so a
+// non-zero answer here is not the end of the story. For a LOCAL endpoint
+// list_models still probes and takes the smaller of the two: LM Studio's
+// /v1 rows advertise `max_context_length` (what the model architecture
+// supports) while the instance may be loaded at a fraction of it, and
+// llama.cpp's rows carry both the served `meta.n_ctx` and the much larger
+// `meta.n_ctx_train`. Declared is a ceiling; probed is the measurement.
 [[nodiscard]] int advertised_context_window(const nlohmann::json& model_row);
 
 // ── Custom-host dialect probe ───────────────────────────────────

@@ -2207,3 +2207,47 @@ TEST_CASE("test_sse_error_object_mid_stream_terminates") {
         }
     CHECK(saw);
 }
+
+// ── Live probe against a local server (opt-in) ────────────────────────────
+//
+// Issue #49 was not a parser bug alone — the parser change is covered by
+// context_window_test. This covers what only an end-to-end run can: that
+// list_models() actually REACHES the probe for a local endpoint, and that a
+// measured runtime window overrides a declared architectural one.
+//
+// Opt-in because it needs a server on the port. tests/fake_local_server.py
+// serves the exact payloads verified from llama.cpp's
+// server-context.cpp (get_res_model_info) and LM Studio's native API:
+//
+//   python3 tests/fake_local_server.py llama     8080 &
+//   AGENTTY_LIVE_LOCAL_PORT=8080 AGENTTY_LIVE_LOCAL_MODE=llama ./agentty_tests
+//   python3 tests/fake_local_server.py lmstudio  1234 &
+//   AGENTTY_LIVE_LOCAL_PORT=1234 AGENTTY_LIVE_LOCAL_MODE=lmstudio ./agentty_tests
+TEST_CASE("live: a local server's RUNTIME window reaches ModelInfo") {
+    const char* port_s = std::getenv("AGENTTY_LIVE_LOCAL_PORT");
+    const char* mode   = std::getenv("AGENTTY_LIVE_LOCAL_MODE");
+    if (!port_s || !mode) return;   // not opted in
+
+    namespace oai = agentty::provider::openai;
+    oai::Endpoint ep;
+    ep.host        = "127.0.0.1";
+    ep.port        = static_cast<std::uint16_t>(std::atoi(port_s));
+    ep.path        = "/v1/chat/completions";
+    ep.models_path = "/v1/models";
+    ep.use_tls     = false;
+
+    auto models = oai::list_models(auth::AuthHeader{}, ep);
+    REQUIRE(!models.empty());
+
+    const std::string m{mode};
+    if (m == "llama") {
+        // meta.n_ctx = 8192 (served), meta.n_ctx_train = 32768 (ceiling).
+        // Before the fix this row advertised nothing and resolved to the
+        // 200k default.
+        CHECK(models.front().context_window == 8192);
+    } else {
+        // /v1 declares max_context_length 262144; the native API reports the
+        // instance loaded at 16384. The smaller, measured one must win.
+        CHECK(models.front().context_window == 16384);
+    }
+}

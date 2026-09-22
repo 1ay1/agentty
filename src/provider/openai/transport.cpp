@@ -2622,6 +2622,30 @@ namespace detail {
         if (const int w = pick(*mi, "context_window");   w > 0) return w;
     }
 
+    // llama-server's per-model `meta` block.
+    //
+    // Verified against llama.cpp tools/server/server-context.cpp
+    // (get_res_model_info): each /v1/models row carries
+    //
+    //     "meta": { "n_ctx": slot_n_ctx, "n_ctx_train": …, … }
+    //
+    // n_ctx is the SERVED window — what the server was actually started
+    // with (-c), divided across slots — and n_ctx_train is the model's
+    // train-time maximum. The served one is the number that bounds this
+    // request, so it wins; n_ctx_train is the fallback for a build that
+    // omits it.
+    //
+    // The flat ladder below already lists n_ctx/n_ctx_train, but llama.cpp
+    // never puts them at the top level of a row — only inside `meta` — so
+    // every llama-server model fell through to the 200k default. That is
+    // issue #49: a 8k or 32k local model whose gauge claimed 200k, so
+    // compaction never fired and the server truncated the prompt instead.
+    if (const auto meta = m.find("meta");
+        meta != m.end() && meta->is_object()) {
+        if (const int w = pick(*meta, "n_ctx");       w > 0) return w;
+        if (const int w = pick(*meta, "n_ctx_train"); w > 0) return w;
+    }
+
     // Flat spellings, in the order a row is most likely to carry them.
     //
     // Every hosted OpenAI-compatible API picked its own name for the same
@@ -2694,6 +2718,29 @@ struct WindowProbe {
     int server_wide = 0;
 };
 
+// Is this endpoint a server running on THIS machine?
+//
+// Only a local server is worth probing unconditionally: the probe costs up
+// to three extra round-trips and every route it tries (/api/v1/models,
+// /props, /api/tags) is local-server-specific, so against a hosted API it
+// buys three guaranteed 404s per refresh. Locally those are sub-millisecond
+// and they carry the only accurate answer — the RUNTIME window — which no
+// catalog can know.
+//
+// Host-based, not TLS-based: `https://localhost:8443` is still local, and a
+// plain-HTTP remote gateway is still remote.
+[[nodiscard]] inline bool is_local_endpoint(const Endpoint& ep) {
+    const std::string& h = ep.host;
+    if (h.empty()) return false;
+    if (h == "localhost" || h == "127.0.0.1" || h == "::1" || h == "[::1]")
+        return true;
+    // 127.0.0.0/8 — llama-server is commonly bound to 127.0.0.2 and friends.
+    if (h.rfind("127.", 0) == 0) return true;
+    // The docker-desktop / podman bridge alias for the host machine.
+    if (h == "host.docker.internal") return true;
+    return false;
+}
+
 [[nodiscard]] inline WindowProbe probe_endpoint_windows(const AuthHeader& auth,
                                                        const Endpoint& ep) {
     WindowProbe out;
@@ -2744,7 +2791,59 @@ struct WindowProbe {
     }
     if (!out.per_model.empty()) return out;
 
-    // 2. llama.cpp /props — one model per server, so the answer is
+    // 2. LM Studio /api/v1/models — the NATIVE API, not the /v1 shim.
+    //
+    // LM Studio serves two APIs on one port. The OpenAI-compatible /v1 one
+    // reports `max_context_length`: what the model ARCHITECTURE supports.
+    // The native one additionally reports, per running instance:
+    //
+    //     "loaded_instances": [ { "config": { "context_length": 16384 } } ]
+    //
+    // which is the window the instance was actually loaded with. Those are
+    // different numbers and only the second one bounds a request — a model
+    // capable of 128k loaded at 16k will still refuse at 16k.
+    //
+    // This is the second half of issue #49: the gauge showed the
+    // architectural maximum, so compaction sat idle while the server
+    // truncated the prompt.
+    //
+    // NOTE the asymmetry, which matters: an UNLOADED model gets no entry
+    // here at all. LM Studio does not expose the saved load config of an
+    // unloaded model, so its real window is unknowable until it loads — and
+    // substituting max_context_length would size prompts against a window
+    // that was never allocated, which is the bug we are fixing. Leaving it
+    // absent lets the existing ladder fall back to max_context_length as a
+    // declared ceiling, which is honest: it is the best bound available
+    // until the model loads.
+    if (auto body = get("/api/v1/models")) {
+        try {
+            auto j = json::parse(*body);
+            for (const auto& row : j.value("models", json::array())) {
+                if (!row.is_object()) continue;
+                const std::string id = row.value("key", std::string{});
+                if (id.empty()) continue;
+                const auto li = row.find("loaded_instances");
+                if (li == row.end() || !li->is_array()) continue;
+                // Several instances of one model can be loaded at different
+                // sizes. The smallest is the only one every request is
+                // guaranteed to fit, so it is the safe bound.
+                int best = 0;
+                for (const auto& inst : *li) {
+                    if (!inst.is_object()) continue;
+                    const auto cfg = inst.find("config");
+                    if (cfg == inst.end() || !cfg->is_object()) continue;
+                    const int w = advertised_context_window(*cfg);
+                    if (w > 0 && (best == 0 || w < best)) best = w;
+                }
+                if (best > 0) out.per_model[id] = best;
+            }
+        } catch (const std::exception& e) {
+            util::dbglog("openai.window_probe.lmstudio", e.what());
+        } catch (...) {}
+    }
+    if (!out.per_model.empty()) return out;
+
+    // 3. llama.cpp /props — one model per server, so the answer is
     //    server-wide. n_ctx here is the RUNTIME window (-c on the command
     //    line), which is the number that actually applies; n_ctx_train is
     //    the architectural ceiling and is often much larger.
@@ -2901,18 +3000,58 @@ std::vector<ModelInfo> list_models(const AuthHeader& auth, const Endpoint& endpo
             // This is the seam that fixes "my 1M-context models show 200k":
             // a private gateway's window is knowable only from the gateway,
             // never from a third-party catalog keyed by URL.
+            // Probe whenever ANY row is unknown, and also — for a LOCAL
+            // server — whenever the rows already declare something, because
+            // what they declare may not be the runtime window.
+            //
+            // Gating the probe on `any_unknown` alone was wrong for the two
+            // biggest local servers, because both declare something:
+            //
+            //   * LM Studio's /v1 rows carry `max_context_length` — what the
+            //     ARCHITECTURE supports. A model capable of 128k but loaded
+            //     at 16k still refuses at 16k. The row looked "known", so
+            //     the probe never ran and the gauge showed 128k forever.
+            //   * llama-server rows carry meta.n_ctx_train alongside the
+            //     served meta.n_ctx.
+            //
+            // A DECLARED ceiling and a MEASURED runtime window are different
+            // facts, and the measured one is the only one a request has to
+            // fit inside — so when every row is "known" we still probe, and
+            // a per-model result OVERRIDES a declared window if it is
+            // smaller. (That is also why #49 reported "values don't update
+            // on refresh": a refresh re-read the declared ceiling and the
+            // probe result had nowhere to land.)
+            //
+            // Smaller-only, deliberately. A probe larger than the declared
+            // ceiling would mean we misread something; raising the window on
+            // that basis risks building a prompt the server rejects, while
+            // lowering it only costs headroom. Fail toward the smaller
+            // number.
+            //
+            // LOCAL-ONLY, also deliberately. The probe is up to three extra
+            // HTTP round-trips, and none of its endpoints exist on a hosted
+            // API — running it against api.openai.com on every refresh would
+            // buy three guaranteed 404s. Hosted rows keep the old rule:
+            // probe only to fill a hole.
             const bool any_unknown =
                 std::any_of(result.begin(), result.end(),
                             [](const ModelInfo& mi) { return mi.context_window <= 0; });
-            if (any_unknown) {
+            const bool local = detail::is_local_endpoint(endpoint);
+            if (any_unknown || local) {
                 const auto probe = detail::probe_endpoint_windows(auth, endpoint);
                 if (!probe.per_model.empty() || probe.server_wide > 0) {
                     for (auto& mi : result) {
-                        if (mi.context_window > 0) continue;
                         const auto it = probe.per_model.find(mi.id.value);
-                        if (it != probe.per_model.end()) mi.context_window = it->second;
-                        else if (probe.server_wide > 0)
+                        if (it != probe.per_model.end()) {
+                            // Measured beats declared when it is tighter.
+                            if (mi.context_window <= 0 || it->second < mi.context_window)
+                                mi.context_window = it->second;
+                        } else if (mi.context_window <= 0 && probe.server_wide > 0) {
+                            // server_wide is NOT applied over a declared
+                            // window: on a multi-model gateway it describes
+                            // whichever model is loaded, not this row.
                             mi.context_window = probe.server_wide;
+                        }
                     }
                 }
             }

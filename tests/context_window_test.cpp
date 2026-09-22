@@ -93,6 +93,83 @@ TEST_CASE("context: garbage never throws or yields a bogus window") {
     }
 }
 
+TEST_CASE("context: llama-server reports the window inside meta, not at the top") {
+    // Verbatim shape from llama.cpp tools/server/server-context.cpp
+    // (get_res_model_info). n_ctx is the SERVED window (slot_n_ctx, i.e.
+    // what -c allocated); n_ctx_train is the architectural ceiling.
+    //
+    // Issue #49: the flat ladder already listed n_ctx/n_ctx_train, but
+    // llama.cpp never puts them at the top level of a row — only inside
+    // `meta` — so every llama-server model fell through to the 200k
+    // default. An 8k model claiming 200k means compaction never fires and
+    // the server truncates the prompt instead.
+    const auto row = json::parse(R"({
+        "id": "qwen2.5-coder-7b",
+        "object": "model",
+        "owned_by": "llamacpp",
+        "meta": {
+            "vocab_type": 2, "n_vocab": 152064,
+            "n_ctx": 8192, "n_ctx_train": 32768,
+            "n_embd": 3584, "n_params": 7615616512,
+            "size": 4431389696, "ftype": 15
+        }
+    })");
+    // The SERVED window wins over the train-time ceiling: 8192 is what a
+    // request actually has to fit inside.
+    CHECK(det::advertised_context_window(row) == 8192);
+}
+
+TEST_CASE("context: llama-server falls back to n_ctx_train when n_ctx is absent") {
+    const auto row = json::parse(R"({
+        "id": "m", "meta": { "n_ctx_train": 32768 }
+    })");
+    CHECK(det::advertised_context_window(row) == 32768);
+}
+
+TEST_CASE("context: a meta block that says nothing is not a window") {
+    // `meta` exists on every llama.cpp row, so its mere presence must not
+    // be read as an answer — 0 has to stay "nobody said".
+    const auto row = json::parse(R"({
+        "id": "m", "meta": { "n_vocab": 152064, "ftype": 15 }
+    })");
+    CHECK(det::advertised_context_window(row) == 0);
+}
+
+TEST_CASE("context: LM Studio's loaded instance config is a window") {
+    // The per-instance config block from LM Studio's native
+    // /api/v1/models. The probe reads each loaded_instances[].config
+    // through this same parser, so `context_length` must resolve there.
+    const auto cfg = json::parse(R"({
+        "context_length": 16384,
+        "eval_batch_size": 512,
+        "flash_attention": true
+    })");
+    CHECK(det::advertised_context_window(cfg) == 16384);
+}
+
+TEST_CASE("context: an architectural maximum is not the loaded window") {
+    // LM Studio's /v1 shim reports max_context_length — what the model
+    // ARCHITECTURE supports. A model capable of 128k loaded at 16k still
+    // refuses at 16k.
+    //
+    // Both parse to a number, and that was the trap: the row looked
+    // "known", so the endpoint probe (which alone can see the loaded
+    // instance) never ran. The parser is right to return the declared
+    // value here — it is the only bound available until the model loads —
+    // but list_models must treat a smaller probed value as authoritative.
+    const auto row = json::parse(R"({
+        "id": "qwen/qwen3-coder-30b", "max_context_length": 262144
+    })");
+    CHECK(det::advertised_context_window(row) == 262144);
+
+    const auto loaded = json::parse(R"({ "context_length": 16384 })");
+    CHECK(det::advertised_context_window(loaded) == 16384);
+    // The whole point of the probe override: the runtime number is smaller,
+    // and smaller is the one a prompt has to respect.
+    CHECK(det::advertised_context_window(loaded)
+            < det::advertised_context_window(row));
+}
+
 TEST_CASE("context: resolution order is override > advertised > id") {
     Settings s;
     const char* prov = "litellm";
