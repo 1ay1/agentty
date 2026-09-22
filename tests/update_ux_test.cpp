@@ -28,6 +28,7 @@
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/runtime/model.hpp"
 #include "agentty/runtime/msg.hpp"
+#include "agentty/util/update.hpp"
 
 namespace A = agentty;
 namespace D = agentty::app::detail;
@@ -58,6 +59,54 @@ bool has(const std::string& hay, const char* needle) {
 }
 
 } // namespace
+
+TEST_CASE("update: finding a release starts the download without being asked") {
+    install_stub_deps();
+    A::Model m;
+
+    auto [next, cmd] = D::meta_update(
+        std::move(m),
+        A::msg::MetaMsg{A::UpdateCheckDone{true, "9.9.9",
+                                           "https://example/releases"}});
+
+    CHECK(next.s.update_latest == "9.9.9");
+    // The whole point: no palette trip, no keystroke. Either the download
+    // is already running, or self_update_possible() refused this install
+    // (package manager / nix / Windows) and we correctly did nothing.
+    std::string why;
+    if (A::update::self_update_possible(why)) {
+        CHECK(next.s.update_in_flight);
+    } else {
+        CHECK(!next.s.update_in_flight);   // not ours to replace
+    }
+}
+
+TEST_CASE("update: a staged update does not start a second download") {
+    install_stub_deps();
+    A::Model m;
+    m.s.update_pending_restart = "9.9.9";   // already installed, awaiting restart
+
+    auto [next, cmd] = D::meta_update(
+        std::move(m),
+        A::msg::MetaMsg{A::UpdateCheckDone{true, "9.9.9", "https://example"}});
+
+    // Re-downloading a version already written to disk would overwrite the
+    // staged binary for no gain, and on a slow link would do it repeatedly
+    // as the hourly poll keeps finding the same release.
+    CHECK(!next.s.update_in_flight);
+}
+
+TEST_CASE("update: an in-flight download is not restarted by another check") {
+    install_stub_deps();
+    A::Model m;
+    m.s.update_in_flight = true;
+
+    auto [next, cmd] = D::meta_update(
+        std::move(m),
+        A::msg::MetaMsg{A::UpdateCheckDone{true, "9.9.9", "https://example"}});
+
+    CHECK(next.s.update_in_flight);   // still the ORIGINAL one
+}
 
 TEST_CASE("update: download progress reaches the status line") {
     auto m = updating_model("1.2.3");

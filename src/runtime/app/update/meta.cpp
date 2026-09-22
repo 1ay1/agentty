@@ -16,6 +16,7 @@
 #include <maya/core/motion.hpp>   // anim::keep_animating — frame requests
 
 #include "agentty/runtime/app/cmd_factory.hpp"
+#include "agentty/util/update.hpp"   // self_update_possible
 #include "agentty/runtime/app/deps.hpp"
 #include "agentty/provider/selection.hpp"   // provider::active (stall watchdog)
 #include "agentty/provider/ollama/transport.hpp"  // effective_num_ctx
@@ -364,6 +365,31 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             if (m.s.last_tick.time_since_epoch().count() == 0) m.s.last_tick = now;
             const auto tick_gap = now - m.s.last_tick;
             m.s.last_tick = now;
+
+            // ── Periodic release check ────────────────────────
+            // The check used to run ONCE, at startup. A session that stays
+            // open for a day — the normal case here — therefore never
+            // learned about a release cut while it was running, and there
+            // was no in-app way to ask: the "Update agentty" palette entry
+            // is gated on a check having already succeeded, so a launch
+            // with no network left you with no path at all short of
+            // quitting and running `agentty update`.
+            //
+            // Hourly, like Zed. The check itself is 24h-cached on disk, so
+            // the overwhelming majority of these are one small file read on
+            // a worker thread and dispatch nothing.
+            constexpr auto kUpdatePollInterval = std::chrono::hours{1};
+            if (!m.s.update_in_flight
+                && m.s.update_pending_restart.empty()
+                && m.s.update_latest.empty()
+                && !std::getenv("AGENTTY_NO_UPDATE_CHECK")) {
+                if (m.s.last_update_poll.time_since_epoch().count() == 0)
+                    m.s.last_update_poll = now;   // startup check just ran
+                else if (now - m.s.last_update_poll >= kUpdatePollInterval) {
+                    m.s.last_update_poll = now;
+                    return {std::move(m), cmd::check_for_update()};
+                }
+            }
 
             // ── LOOP resume ───────────────────────────────────────
             // A failed iteration parked the loop behind a backoff deadline.
@@ -891,13 +917,45 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             return done(std::move(m));
         },
         [&](UpdateCheckDone& e) -> Step {
-            // Background release check landed. Store the signal — the
-            // status bar's version chip and the palette entry both read
-            // update_latest. No toast, no banner: an update NOTICE must
-            // never interrupt; the chip is the whole announcement.
+            // Background release check landed.
             if (e.update_available && !e.latest.empty()) {
                 m.s.update_latest = std::move(e.latest);
                 m.s.update_url    = std::move(e.url);
+
+                // START THE DOWNLOAD — don't wait to be asked.
+                //
+                // This used to stop at the chip: the user had to notice it,
+                // open the palette and run "Update agentty". Most never did,
+                // so people ran old binaries for weeks and reported bugs
+                // that were already fixed. Zed's model is better and it is
+                // the one users already expect — an update is something that
+                // happens TO you, and by the time you're told, the only step
+                // left is the restart.
+                //
+                // Gated on self_update_possible(), which already refuses the
+                // cases where replacing the binary is not ours to do:
+                // package-manager installs under /usr, nix, Windows. There
+                // the chip stays exactly as before — a signal to go run
+                // pacman/apt/brew — and nothing is touched.
+                //
+                // AGENTTY_NO_AUTO_UPDATE=1 keeps the old behaviour (notify
+                // only, install on request). Replacing someone's binary
+                // without asking needs an off switch that does not also
+                // turn off the notice — AGENTTY_NO_UPDATE_CHECK is the
+                // bigger hammer that disables checking entirely.
+                std::string why;
+                if (!m.s.update_in_flight
+                    && m.s.update_pending_restart.empty()
+                    && !std::getenv("AGENTTY_NO_AUTO_UPDATE")
+                    && update::self_update_possible(why)) {
+                    m.s.update_in_flight = true;
+                    std::string v = m.s.update_latest;
+                    // Quiet: the download is incidental to whatever the user
+                    // is actually doing. The status line reports progress
+                    // (see UpdateProgress) and the chip reports the outcome;
+                    // neither steals focus.
+                    return {std::move(m), cmd::perform_self_update(std::move(v))};
+                }
             }
             return done(std::move(m));
         },

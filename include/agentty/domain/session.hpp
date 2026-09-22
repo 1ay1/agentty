@@ -702,6 +702,10 @@ struct StreamState {
     // "↺ restart for vX.Y.Z" chip instead: the signal survives until the
     // thing it is asking for actually happens.
     std::string update_pending_restart;   // "" = nothing staged
+    // When the last release check ran. Zero = the startup check owns the
+    // first interval. Drives the hourly re-poll in the Tick reducer, so a
+    // long-lived session notices a release without being restarted.
+    std::chrono::steady_clock::time_point last_update_poll{};
 
     std::string status;
     // Optional expiry for `status`. When set, the status bar hides the
