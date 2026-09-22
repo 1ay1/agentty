@@ -32,11 +32,26 @@ WireAudit audit_wire(const std::vector<Message>& wire) {
             }
         }
 
-        // An entirely contentless message. Checked before tool calls
-        // because a message with calls is never empty regardless of text.
+        // An entirely contentless message.
+        //
+        // EXCEPT the last one. Every turn appends the assistant message
+        // the model is ABOUT to fill before the request goes out, so the
+        // final slot is legitimately empty at audit time — by
+        // construction, on every healthy turn.
+        //
+        // This fired on real traffic immediately: a 928-message thread
+        // reported `defects=1` on every single turn, always at index
+        // 927. A warning that fires on every healthy turn is worse than
+        // no warning, because it trains the reader to skip the channel
+        // the real defects arrive on — the exact failure the
+        // "checker that cries wolf gets muted" note in the pending-call
+        // arm below was written about. I wrote that note and then shipped
+        // the same mistake one arm up.
         const bool has_text  = !m.text.empty() || !m.streaming_text.empty()
                             || !m.pending_stream.empty();
-        if (!has_text && m.tool_calls.empty() && m.images.empty()) {
+        const bool is_last   = (i + 1 == wire.size());
+        if (!has_text && m.tool_calls.empty() && m.images.empty()
+            && !is_last) {
             a.defects.push_back({Defect::Kind::EmptyMessage, i, {}});
         }
 

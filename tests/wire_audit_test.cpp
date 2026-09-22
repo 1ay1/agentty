@@ -135,18 +135,35 @@ TEST_CASE("wire audit: an image with no media type is flagged") {
     CHECK(!has_kind(audit_wire(good), Defect::Kind::ImageMissingMediaType));
 }
 
-TEST_CASE("wire audit: an empty message is flagged") {
+TEST_CASE("wire audit: an empty message is flagged, except the last one") {
     // No text, no calls, no images. Anthropic rejects empty content
     // blocks; other dialects silently drop the turn, which is worse —
     // the model then answers a question it cannot see.
     std::vector<Message> wire;
     wire.push_back(umsg("hello"));
     wire.push_back(amsg(""));          // nothing at all
+    wire.push_back(umsg("still here"));
 
     const auto a = audit_wire(wire);
 
     REQUIRE(a.count(Defect::Kind::EmptyMessage) == 1);
     CHECK(a.defects.front().message_index == 1);
+
+    // But the FINAL message is empty by construction: every turn appends
+    // the assistant message the model is about to fill before the request
+    // goes out. Flagging it fires on every healthy turn.
+    //
+    // This is not hypothetical — the first version shipped without the
+    // exemption and a real 928-message thread reported defects=1 on every
+    // single turn, always at the last index. A warning that fires on
+    // healthy traffic is worse than none: it trains the reader to skip
+    // the channel the real defects arrive on.
+    std::vector<Message> in_flight;
+    in_flight.push_back(umsg("hello"));
+    in_flight.push_back(amsg(""));     // the turn about to be filled
+
+    CHECK(audit_wire(in_flight).count(Defect::Kind::EmptyMessage) == 0);
+    CHECK(audit_wire(in_flight).clean());
 }
 
 TEST_CASE("wire audit: a pending call mid-transcript is unanswered") {
