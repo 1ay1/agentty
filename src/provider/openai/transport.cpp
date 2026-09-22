@@ -2781,6 +2781,21 @@ struct WindowProbe {
     bool measured = false;
 };
 
+// Hosts the user has explicitly opted into runtime probing for.
+//
+// Installed by the runtime from Settings::probe_hosts — pushed IN rather
+// than read out, because this layer takes no dependency on the settings
+// store (the whole transport is constructed from an Endpoint and an auth
+// header, which is what makes it testable without a filesystem).
+std::set<std::string>& probe_opt_in() {
+    static std::set<std::string> s;
+    return s;
+}
+std::shared_mutex& probe_opt_in_mu() {
+    static std::shared_mutex m;
+    return m;
+}
+
 // Is this endpoint a server we should probe unconditionally?
 //
 // The probe is up to four extra round-trips and every route it tries
@@ -2804,11 +2819,17 @@ struct WindowProbe {
 
     // Explicit opt-in, for anything the heuristics cannot see: a server on a
     // public address, behind a VPN with its own DNS, or reached through a
-    // tunnel. Comma-separated hosts, matched exactly.
+    // tunnel. Set in the app (the add-host toast offers it when it matters)
+    // and persisted in Settings::probe_hosts; AGENTTY_PROBE_HOSTS adds to it
+    // for one run without persisting.
     //
     // This exists because the alternative is telling someone their setup is
     // unsupported — the probe is the only way to learn a runtime window, so
     // refusing to run it makes the window permanently wrong.
+    {
+        std::shared_lock lk(probe_opt_in_mu());
+        if (probe_opt_in().count(h) > 0) return true;
+    }
     if (const char* v = std::getenv("AGENTTY_PROBE_HOSTS")) {
         std::string_view list{v};
         while (!list.empty()) {
@@ -3102,6 +3123,11 @@ struct WindowProbe {
 }
 
 }  // namespace detail
+
+void install_probe_hosts(std::set<std::string> hosts) {
+    std::unique_lock lk(detail::probe_opt_in_mu());
+    detail::probe_opt_in() = std::move(hosts);
+}
 
 // Public forwarder — see the header for why the 0 is a contract.
 int advertised_context_window(const nlohmann::json& model_row) {

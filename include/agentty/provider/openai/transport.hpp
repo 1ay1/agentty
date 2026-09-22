@@ -174,6 +174,29 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink,
 // `meta.n_ctx_train`. Declared is a ceiling; probed is the measurement.
 [[nodiscard]] int advertised_context_window(const nlohmann::json& model_row);
 
+// Should this endpoint get the full runtime-window probe?
+//
+// "Local" means A SERVER YOU RUN, not a server on this machine: loopback,
+// RFC1918, link-local, CGNAT, IPv6 ULA, *.local, a bare single-label host,
+// or anything listed in AGENTTY_PROBE_HOSTS. Everything else is assumed to
+// be somebody else's API, where the probe's routes are guaranteed 404s.
+//
+// Exposed because it decides NETWORK BEHAVIOUR and the UI needs to explain
+// it: when a host answers but reports no window, whether we ASKED is the
+// difference between "this server doesn't say" and "we didn't check".
+namespace detail {
+[[nodiscard]] bool is_local_endpoint(const Endpoint& endpoint);
+}
+
+// Tell the transport which hosts the user opted into probing.
+//
+// Pushed IN from the runtime (Settings::probe_hosts) rather than read out,
+// because this layer takes no dependency on the settings store — that is
+// what lets a transport be constructed from just an Endpoint and an auth
+// header, and tested without a filesystem. Call on startup and whenever the
+// set changes; replaces the previous set wholesale.
+void install_probe_hosts(std::set<std::string> hosts);
+
 // ── Custom-host dialect probe ───────────────────────────────────
 // One call answers "what is actually running at this endpoint?" before a
 // custom host is committed. Tries, in order:

@@ -692,6 +692,21 @@ struct HostProbed {
     int           model_count = 0;
     long          latency_ms = 0;
     std::string   error;
+    // Did this host tell us a real context window, and if not, is that
+    // because we declined to ask?
+    //
+    // A local server is the only thing that knows its own RUNTIME window
+    // (llama.cpp's meta.n_ctx, LM Studio's loaded instance, Ollama's
+    // /api/ps) — no catalog can. When we get one, saying so at add time is
+    // the difference between trusting the number and wondering about it.
+    //
+    // When we DON'T, the reason matters. `probe_skipped` means the host
+    // did not look self-hosted, so the extra round-trips were withheld on
+    // purpose — which is correct for api.openai.com and wrong for the
+    // GPU box on someone's LAN reached by a public name. That is the one
+    // case worth offering a fix for, right where the user is looking.
+    int  window_tokens  = 0;      // 0 = none learned
+    bool probe_skipped  = false;  // true = host not classified self-hosted
 };
 // Sign out of the ACTIVE provider: clear its on-disk credentials (Anthropic
 // credentials.json, or the Codex/ChatGPT token store), zero the live auth

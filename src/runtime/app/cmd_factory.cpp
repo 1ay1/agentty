@@ -2183,6 +2183,31 @@ Cmd<Msg> probe_host_async(std::string spec, std::uint64_t attempt_id,
                 r.native_api  = probe.dialect == D::OllamaNative;
                 r.model_count = probe.model_count;
                 r.latency_ms  = probe.latency_ms;
+
+                // Did this host tell us a real context window?
+                //
+                // list_models runs the whole ladder including the runtime
+                // probe, so asking here costs one more request on a host
+                // that just answered in milliseconds — and it turns the
+                // add-host toast from "connected" into "connected, and the
+                // window is 8k", which is the fact that decides whether
+                // long sessions work.
+                //
+                // The largest window across the listed models is the right
+                // summary: the toast names what this host can do, and the
+                // per-model number is still shown in the picker.
+                auto models = provider::openai::list_models(auth,
+                                                            sel.openai_endpoint);
+                for (const auto& mi : models)
+                    if (mi.context_window > r.window_tokens)
+                        r.window_tokens = mi.context_window;
+                // No window AND we never asked — the host didn't look
+                // self-hosted, so the runtime routes were withheld. That is
+                // the only case the UI should offer to change.
+                r.probe_skipped =
+                    r.window_tokens <= 0
+                    && !provider::openai::detail::is_local_endpoint(
+                           sel.openai_endpoint);
             } else if (probe.http_status == 401 || probe.http_status == 403) {
                 r.error = "HTTP " + std::to_string(probe.http_status)
                         + " \xe2\x80\x94 this host needs an API key";

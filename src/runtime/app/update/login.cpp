@@ -248,12 +248,48 @@ Step host_probed(Model m, HostProbed r) {
                                            provider::parse_selection(spec)));
     // Enrich the switch toast with what the probe FOUND — the "it just
     // works" moment: dialect, model count, latency.
+    //
+    // And the CONTEXT WINDOW, which is the fact that actually decides
+    // whether long sessions work on this host. Three honest states, not
+    // one generic success:
+    //
+    //   · 32k ctx          we asked the server and it told us. Trust it.
+    //   · ctx: auto        we asked, it doesn't say. The ^W override in
+    //                      the model picker is how you set one.
+    //   · ctx not checked  we did NOT ask, because the host didn't look
+    //                      self-hosted. This is the only state with a
+    //                      REMEDY, and it names it.
+    //
+    // That last line exists because of a real report: someone running
+    // llama-server on their GPU box reached it by a name we classified as
+    // remote, so the runtime probe was withheld and their window was
+    // silently wrong. Telling them "not checked" plus the one variable
+    // that fixes it beats a success toast that hides the gap.
+    std::string ctx;
+    if (r.window_tokens > 0) {
+        ctx = " \xc2\xb7 " + ui::context_window_label(r.window_tokens) + " ctx";
+    } else if (r.probe_skipped) {
+        // No keybinding here on purpose. This picker already refuses to hide
+        // per-model settings behind invisible chords (see on_model_picker:
+        // "a hidden control that contradicts a visible one is worse than no
+        // control"), and a toast that teaches a chord is the same mistake
+        // with a shorter lifetime.
+        //
+        // Name the place instead. The provider picker is where this host's
+        // row lives, so it is where someone who wants to change something
+        // about the host will already be.
+        ctx = " \xc2\xb7 ctx not checked \xe2\x80\x94 set AGENTTY_PROBE_HOSTS="
+            + provider::parse_selection(spec).openai_endpoint.host;
+    } else {
+        ctx = " \xc2\xb7 ctx: auto";
+    }
     auto found = set_status_toast(step.first,
         std::string{"\xe2\x9c\x93 "} + std::to_string(r.model_count)
         + (r.model_count == 1 ? " model" : " models") + " \xc2\xb7 "
         + (r.native_api ? "ollama native" : "openai-compatible") + " \xc2\xb7 "
-        + std::to_string(r.latency_ms) + "ms \xc2\xb7 " + r.models_path,
-        std::chrono::seconds{5});
+        + std::to_string(r.latency_ms) + "ms" + ctx,
+        // A remedy needs longer to read than a success.
+        std::chrono::seconds{r.probe_skipped ? 12 : 6});
     return {std::move(step.first),
             maya::Cmd<Msg>::batch(std::move(step.second), std::move(found))};
 }
