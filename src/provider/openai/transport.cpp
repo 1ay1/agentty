@@ -2760,19 +2760,40 @@ struct WindowProbe {
     return false;
 }
 
+// Percent-encode one query-string value.
+//
+// Model ids routinely contain '/' and ':' ("qwen/qwen3-coder-30b",
+// "llama3.2:latest"), and llama-server's router matches on the exact name.
+// Sending those raw would either truncate the value at the first reserved
+// character or miss the model entirely.
+[[nodiscard]] inline std::string url_encode(std::string_view in) {
+    static const char* hex = "0123456789ABCDEF";
+    std::string out;
+    out.reserve(in.size() * 3);
+    for (unsigned char c : in) {
+        const bool safe = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+                       || (c >= '0' && c <= '9')
+                       || c == '-' || c == '_' || c == '.' || c == '~';
+        if (safe) out.push_back(static_cast<char>(c));
+        else { out.push_back('%'); out.push_back(hex[c >> 4]); out.push_back(hex[c & 15]); }
+    }
+    return out;
+}
+
 [[nodiscard]] inline WindowProbe probe_endpoint_windows(const AuthHeader& auth,
-                                                       const Endpoint& ep) {
+                                                       const Endpoint& ep,
+                                                       const std::vector<std::string>& ids = {}) {
     WindowProbe out;
     http::Timeouts tos;
     tos.connect = std::chrono::milliseconds(1'500);
     tos.total   = std::chrono::milliseconds(4'000);
 
-    auto get = [&](const char* path) -> std::optional<std::string> {
+    auto get = [&](std::string_view path) -> std::optional<std::string> {
         http::Request hreq;
         hreq.method    = http::HttpMethod::Get;
         hreq.host      = ep.host;
         hreq.port      = ep.port;
-        hreq.path      = path;
+        hreq.path      = std::string{path};
         hreq.plaintext = !ep.use_tls;
         hreq.headers   = build_request_headers(auth, ep);
         hreq.max_body_bytes = 2ull * 1024 * 1024;
@@ -2868,10 +2889,22 @@ struct WindowProbe {
         return out;
     }
 
-    // 3. llama.cpp /props — one model per server, so the answer is
-    //    server-wide. n_ctx here is the RUNTIME window (-c on the command
-    //    line), which is the number that actually applies; n_ctx_train is
-    //    the architectural ceiling and is often much larger.
+    // 3. llama.cpp /props — the RUNTIME window (-c on the command line),
+    //    which is the number that actually applies; n_ctx_train is the
+    //    architectural ceiling and is often much larger.
+    //
+    //    Two server shapes:
+    //
+    //    SINGLE-MODEL (the classic `llama-server -m model.gguf`): a bare
+    //    /props answers for the one model it serves, so the result is
+    //    server-wide.
+    //
+    //    ROUTER (`llama-server --models-dir ...`, multi-model): a bare
+    //    /props returns a DUMMY with n_ctx: 0 — literally a placeholder so
+    //    the web UI doesn't break (verified in tools/server/server-models.cpp,
+    //    get_router_props). The real answer needs ?model=<name>.
+    //
+    //    So a 0 here is not "no answer", it is "ask again per model".
     if (auto body = get("/props")) {
         try {
             auto j = json::parse(*body);
@@ -2886,6 +2919,33 @@ struct WindowProbe {
             // the window this process actually allocated (verified in
             // llama.cpp tools/server/server-context.cpp).
             if (out.server_wide > 0) out.measured = true;
+
+            // Router mode: ask per model for the ones we were given.
+            //
+            // `autoload=false` is NOT optional. The router's models_autoload
+            // defaults to TRUE, so a plain /props?model=X LOADS that model —
+            // walking the list would pull every model on the server into
+            // memory just to read a number. With autoload=false an unloaded
+            // model answers "model is not loaded" and we simply skip it,
+            // which is the correct outcome anyway: a model that is not
+            // resident has no allocated window to report.
+            if (j.value("role", std::string{}) == "router" && !ids.empty()) {
+                for (const auto& id : ids) {
+                    auto pb = get("/props?model=" + url_encode(id)
+                                  + "&autoload=false");
+                    if (!pb) continue;
+                    try {
+                        auto pj = json::parse(*pb);
+                        int w = 0;
+                        if (auto dg = pj.find("default_generation_settings");
+                            dg != pj.end() && dg->is_object())
+                            w = advertised_context_window(*dg);
+                        if (w <= 0) w = advertised_context_window(pj);
+                        if (w > 0) out.per_model[id] = w;
+                    } catch (...) {}
+                }
+                if (!out.per_model.empty()) out.measured = true;
+            }
         } catch (const std::exception& e) {
             util::dbglog("openai.window_probe.props", e.what());
         } catch (...) {}
@@ -3106,7 +3166,13 @@ std::vector<ModelInfo> list_models(const AuthHeader& auth, const Endpoint& endpo
                             [](const ModelInfo& mi) { return mi.context_window <= 0; });
             const bool local = detail::is_local_endpoint(endpoint);
             if (any_unknown || local) {
-                const auto probe = detail::probe_endpoint_windows(auth, endpoint);
+                // The ids let the probe answer per model where the endpoint
+                // requires it (llama-server router mode's /props?model=).
+                std::vector<std::string> ids;
+                ids.reserve(result.size());
+                for (const auto& mi : result) ids.push_back(mi.id.value);
+                const auto probe =
+                    detail::probe_endpoint_windows(auth, endpoint, ids);
                 if (!probe.per_model.empty() || probe.server_wide > 0) {
                     for (auto& mi : result) {
                         const auto it = probe.per_model.find(mi.id.value);

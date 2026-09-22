@@ -93,6 +93,32 @@ LITELLM_INFO = {
 }
 
 
+# llama-server ROUTER mode (multi-model). Verified against
+# tools/server/server-models.cpp get_router_props: a BARE /props returns a
+# dummy with n_ctx 0 so the web UI doesn't break; the real window needs
+# ?model=<name>. And models_autoload defaults to TRUE, so a query without
+# autoload=false would LOAD the model as a side effect.
+ROUTER_MODELS = {
+    "object": "list",
+    "data": [
+        {"id": "qwen3-coder", "object": "model", "owned_by": "llamacpp"},
+        {"id": "gemma3:27b",  "object": "model", "owned_by": "llamacpp"},
+    ],
+}
+ROUTER_PROPS_BARE = {
+    "role": "router",
+    "max_instances": 2,
+    "models_autoload": True,
+    "model_alias": "llama-server",
+    "model_path": "none",
+    "default_generation_settings": {"params": {}, "n_ctx": 0},
+}
+ROUTER_PROPS_PER_MODEL = {
+    "qwen3-coder": 32768,
+    # gemma3:27b is NOT loaded -> error, and must be skipped, not defaulted.
+}
+
+
 class H(BaseHTTPRequestHandler):
     def _send(self, obj, code=200):
         body = json.dumps(obj).encode()
@@ -115,6 +141,24 @@ class H(BaseHTTPRequestHandler):
                 return self._send(OLLAMA_TAGS)
             if path == "/api/ps":
                 return self._send(OLLAMA_PS)
+        elif MODE == "router":
+            if path in ("/v1/models", "/models"):
+                return self._send(ROUTER_MODELS)
+            if path == "/props":
+                from urllib.parse import parse_qs, urlparse
+                q = parse_qs(urlparse(self.path).query)
+                name = (q.get("model") or [""])[0]
+                if not name:
+                    return self._send(ROUTER_PROPS_BARE)
+                # Refuse to answer unless autoload was explicitly disabled —
+                # mirrors the real server, where omitting it LOADS the model.
+                autoload = (q.get("autoload") or ["true"])[0]
+                if autoload not in ("false", "0"):
+                    print("  !! would have AUTOLOADED %s" % name, file=sys.stderr)
+                w = ROUTER_PROPS_PER_MODEL.get(name)
+                if w is None:
+                    return self._send({"error": {"message": "model is not loaded"}}, 400)
+                return self._send({"default_generation_settings": {"n_ctx": w}})
         elif MODE == "litellm":
             if path in ("/v1/models", "/models"):
                 return self._send(LITELLM_V1)

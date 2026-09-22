@@ -2240,7 +2240,21 @@ TEST_CASE("live: a local server's RUNTIME window reaches ModelInfo") {
     REQUIRE(!models.empty());
 
     const std::string m{mode};
-    if (m == "litellm") {
+    if (m == "router") {
+        // llama-server ROUTER mode. A bare /props answers with a dummy
+        // n_ctx 0, so the window only exists at /props?model=<name> — which
+        // is exactly what the issue reported and what a bare probe missed.
+        //
+        // Two models: qwen3-coder is loaded (32768), gemma3:27b is not.
+        // The unloaded one must keep whatever the ladder gave it rather
+        // than inherit the loaded model's window.
+        REQUIRE(models.size() == 2u);
+        const ModelInfo* loaded = nullptr;
+        for (const auto& mi : models)
+            if (mi.id.value == "qwen3-coder") loaded = &mi;
+        REQUIRE(loaded != nullptr);
+        CHECK(loaded->context_window == 32768);
+    } else if (m == "litellm") {
         // THE REGRESSION GUARD. /v1/models advertises 128000; the proxy's
         // /v1/model/info declares a stale 8192. A DECLARATION must never
         // shrink a larger advertised window — only a MEASUREMENT may
