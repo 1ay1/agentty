@@ -36,6 +36,58 @@ permissions:
   contents: read
 
 jobs:
+  # ── Reclaim the cache budget ───────────────────────────────────────────
+  # GitHub allows 10 GB of Actions cache PER REPO and evicts LRU across every
+  # key once that's exceeded. hendrikmuhs/ccache-action writes a NEW entry per
+  # run (key + timestamp) and never removes the one it just superseded, so the
+  # release ccache alone had four ~1.76 GiB copies and the ASan one four more
+  # — 9.70 GiB of a 10 GB budget, nearly all of it dead.
+  #
+  # That is self-defeating: the pressure evicts the vcpkg cache (8 minutes to
+  # rebuild) and the msys2 packages, so caches that WOULD have saved time get
+  # thrown out to store copies nothing will ever restore. Only the newest
+  # entry per prefix is ever a restore candidate.
+  #
+  # Runs first, non-blocking (continue-on-error), so a hiccup in the API
+  # never fails CI.
+  prune-caches:
+    name: prune superseded caches
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    continue-on-error: true
+    steps:
+      - name: Keep the newest entry per key prefix
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          # Sort NEWEST-FIRST explicitly. The API does not return caches in
+          # date order (verified: a 13:57 entry came back after a 12:59 one),
+          # so trusting its order would keep an old entry and delete the one
+          # the next run actually wants — the exact opposite of the goal.
+          #
+          # Then keep the first sighting of each prefix (the part before the
+          # action's "-<ISO timestamp>" suffix) and delete the rest. Keys
+          # without a timestamp suffix (vcpkg, msys2) are never touched.
+          gh api --paginate "repos/$REPO/actions/caches?per_page=100" \
+            --jq '.actions_caches[] | "\(.created_at)\t\(.id)\t\(.key)"' \
+            | sort -r \
+            | while IFS="$(printf '\t')" read -r created id key; do
+                prefix=$(printf '%s' "$key" | sed -E 's/-20[0-9]{2}-[0-9]{2}-[0-9]{2}T.*$//')
+                [ "$prefix" = "$key" ] && continue     # no timestamp: not ours to prune
+                if grep -qxF "$prefix" /tmp/seen 2>/dev/null; then
+                  echo "delete superseded: $key"
+                  gh api -X DELETE "repos/$REPO/actions/caches/$id" >/dev/null || true
+                else
+                  echo "keep newest:      $key"
+                  echo "$prefix" >> /tmp/seen
+                fi
+              done
+          echo "--- budget after prune ---"
+          gh api "repos/$REPO/actions/cache/usage" \
+            --jq '"\(.active_caches_count) caches, \(.active_caches_size_in_bytes/1073741824*100|floor/100) GiB"'
+
   build-test:
     name: build + test (linux gcc)
     runs-on: ubuntu-latest
@@ -76,7 +128,27 @@ jobs:
         uses: hendrikmuhs/ccache-action@v1.2
         with:
           key: linux-gcc14-release
-          max-size: 2G
+          # 2G was SMALLER THAN ONE BUILD's output. The post-job report read
+          # "2.0 / 2.0 GB (99.96%), Cleanups: 60" — ccache evicted itself 60
+          # times while compiling, so objects written early were gone before
+          # the next run could use them. Hit rate sat at 26% and the build
+          # took 36m33s of a 38m49s job.
+          #
+          # 6G, not more, because the ceiling that actually binds is
+          # GITHUB'S: 10 GB of Actions cache PER REPO, evicted LRU across
+          # every key. This repo sat at 9.70 GiB — four stale copies of this
+          # same ccache plus four of the ASan one — so a bigger entry would
+          # have pushed out the vcpkg cache (8 min to rebuild) and the msys2
+          # packages, making CI slower overall. A 30G ccache cannot even be
+          # stored: the entry is dropped when it exceeds the budget, so the
+          # next run starts cold every time.
+          #
+          # The sum of every max-size must fit in 10 GB even at worst case:
+          # 6 (here) + 3 (asan) + 0.2 (msys2/vcpkg) = 9.2 GiB. In practice
+          # entries track the real working set — ~530 Release TUs compress
+          # to 1.76 GiB today — so the steady state is far below that, but
+          # the ceiling must not be able to overflow the budget on its own.
+          max-size: 6G
 
       - name: ccache tuning
         # LTO emits GIMPLE bytecode whose cache key is sensitive to absolute
@@ -168,7 +240,18 @@ jobs:
         uses: hendrikmuhs/ccache-action@v1.2
         with:
           key: linux-gcc14-asan-ubsan
-          max-size: 600M
+          # 600M held LESS THAN ONE BUILD: "0.6 / 0.6 GB (97.97%), Cleanups:
+          # 321" with a 5.47% hit rate — the cache evicted itself 321 times
+          # and then missed on 415 of 439 compiles. It was pure overhead:
+          # paying upload/download for something that never hit.
+          #
+          # Sanitizer objects are bigger than release ones (instrumentation
+          # + full debug info), which is exactly why 600M never stood a
+          # chance. 3G covers a full ASan build and the TSan tree that
+          # follows it in the same job, and fits the 10 GB repo budget
+          # alongside the release cache now that prune-caches drops
+          # superseded copies.
+          max-size: 3G
       - name: Configure (ASan + UBSan)
         env:
           CC: gcc-14
