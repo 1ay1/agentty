@@ -106,8 +106,17 @@ maya::Element model_badge_config(const Model& m) {
     // compact "⬆ vX.Y.Z" rides beside the model badge — bright enough to
     // notice, quiet enough to ignore. The palette's "Update agentty" (and
     // `agentty update`) are the actions; this chip is only the signal.
+    //
+    // After an update lands the chip does NOT vanish — it becomes
+    // "↺ v<new>", and stays until the process actually restarts. The
+    // download writes a new binary but this process keeps running the old
+    // one, so "updated" is only half true; the restart is the outstanding
+    // step and it needs a marker that outlives the status line.
     Element update_chip = text("");
-    if (!m.s.update_latest.empty())
+    if (!m.s.update_pending_restart.empty())
+        update_chip = text("  \xe2\x86\xba v" + m.s.update_pending_restart,
+                           fg_of(ui::status_warn));
+    else if (!m.s.update_latest.empty())
         update_chip = text("  \xe2\xac\x86 v" + m.s.update_latest,
                            fg_of(ui::status_ok));
 

@@ -901,13 +901,39 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             }
             return done(std::move(m));
         },
+        [&](UpdateProgress& e) -> Step {
+            // A stale progress line after the download finished would be
+            // worse than none — ignore anything arriving once we are no
+            // longer updating.
+            if (!m.s.update_in_flight) return done(std::move(m));
+            const auto mib = [](std::size_t b) {
+                char buf[32];
+                std::snprintf(buf, sizeof buf, "%.1f", double(b) / (1024.0 * 1024.0));
+                return std::string{buf};
+            };
+            if (e.total > 0) {
+                const int pct = int((e.got * 100) / e.total);
+                m.s.status = "\xe2\xac\x86 downloading agentty "
+                           + mib(e.got) + " / " + mib(e.total) + " MiB ("
+                           + std::to_string(pct) + "%)";
+            } else {
+                // No Content-Length: show what we have rather than a
+                // percentage we would have to invent.
+                m.s.status = "\xe2\xac\x86 downloading agentty "
+                           + mib(e.got) + " MiB";
+            }
+            m.s.status_until = {};
+            return done(std::move(m));
+        },
         [&](UpdateApplied& e) -> Step {
             m.s.update_in_flight = false;
             if (e.ok) {
                 // Updated on disk; the running process is the old image.
-                // Persistent (no-expiry) banner — restarting is the one
-                // thing the user must know to do.
-                m.s.update_latest.clear();   // chip disappears
+                // The chip switches from "⬆ available" to "↺ restart" — a
+                // persistent marker, because the status line below scrolls
+                // away and the restart is the one step still outstanding.
+                m.s.update_latest.clear();
+                m.s.update_pending_restart = e.detail;
                 m.s.status = "✓ updated to v" + e.detail +
                              " — restart agentty to use it";
                 m.s.status_until = {};       // sticky until overwritten

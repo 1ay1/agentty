@@ -687,6 +687,21 @@ struct StreamState {
     std::string update_latest;    // "" = up to date / not checked
     std::string update_url;       // release page for the toast
     bool        update_in_flight = false;
+    // Set once a self-update has been WRITTEN TO DISK. The running process
+    // is still the old image — classic Unix: the new binary is at the same
+    // path, this process keeps the inode it started with — so the user must
+    // restart to get it.
+    //
+    // That used to be said once, in the status line, which a long-running
+    // session scrolls past in seconds. Then the "⬆ vX.Y.Z" chip cleared
+    // too, so the only evidence an update had happened at all was a message
+    // that had already gone. People kept running the old binary for days
+    // and reported bugs that were already fixed.
+    //
+    // Keeping the version here lets the status bar show a persistent
+    // "↺ restart for vX.Y.Z" chip instead: the signal survives until the
+    // thing it is asking for actually happens.
+    std::string update_pending_restart;   // "" = nothing staged
 
     std::string status;
     // Optional expiry for `status`. When set, the status bar hides the

@@ -1011,6 +1011,21 @@ struct UpdateCheckDone {
     std::string latest;   // "0.3.1"
     std::string url;      // release page (used in the toast)
 };
+// Download progress during an in-TUI update (worker → UI).
+//
+// perform_update() has always taken a progress callback and `agentty update`
+// from a shell has always used it — it prints a live percentage. The TUI
+// passed no callback at all, so a ~15 MB download sat behind one frozen
+// "⬆ downloading…" line for the whole transfer. On a slow link that is
+// indistinguishable from a hang, and the one thing a user must not think
+// about a self-update is that it has hung.
+//
+// `total` is 0 when the server sent no Content-Length; the reducer shows
+// bytes-so-far rather than a percentage in that case.
+struct UpdateProgress {
+    std::size_t got   = 0;
+    std::size_t total = 0;   // 0 = unknown
+};
 // In-TUI update finished (worker → UI). Success shows the restart toast;
 // failure shows the error + a hint to run `agentty update` from a shell.
 struct UpdateApplied {
@@ -1174,7 +1189,7 @@ using MetaMsg = std::variant<
     ToggleRetrievedExpanded,
     TerminalFocus,
     Tick, Quit, NoOp, ClearStatus, RedrawScreen,
-    UpdateCheckDone, UpdateApplied, GitSignalsRefreshed>;
+    UpdateCheckDone, UpdateProgress, UpdateApplied, GitSignalsRefreshed>;
 
 } // namespace msg
 

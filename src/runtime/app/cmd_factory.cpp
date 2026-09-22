@@ -1927,7 +1927,24 @@ Cmd<Msg> perform_self_update(std::string version) {
     return Cmd<Msg>::task([version = std::move(version)](
                               std::function<void(Msg)> dispatch) {
         try {
-            auto err = update::perform_update(version);
+            // Throttle: the HTTP layer calls back per chunk, which is
+            // thousands of times for a ~15 MB asset. Dispatching each one
+            // would flood the UI queue and make the update itself the
+            // slowest thing on screen. A frame is the finest granularity
+            // anyone can see, so coalesce to ~10/s and always let the
+            // final call through (total reached) so the bar lands on 100%.
+            auto last = std::chrono::steady_clock::now()
+                      - std::chrono::seconds{1};
+            auto err = update::perform_update(
+                version,
+                [&](std::size_t got, std::size_t total) {
+                    const auto now = std::chrono::steady_clock::now();
+                    const bool finished = total > 0 && got >= total;
+                    if (!finished && now - last < std::chrono::milliseconds{100})
+                        return;
+                    last = now;
+                    dispatch(Msg{msg::MetaMsg{UpdateProgress{got, total}}});
+                });
             if (err.empty())
                 dispatch(Msg{UpdateApplied{true, version}});
             else
