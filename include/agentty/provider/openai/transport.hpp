@@ -152,8 +152,16 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink,
 [[nodiscard]] nlohmann::json build_tools(const std::vector<provider::ToolSpec>& tools);
 
 // Fetch available models from the endpoint's /v1/models.
+//
+// `force_probe` runs the runtime-window routes (/props, /api/ps,
+// /api/v1/models) even when the address does not look self-hosted. Used at
+// ADD-HOST time, where the user is waiting on an answer about this one
+// host and a few extra milliseconds buy the difference between a real
+// window and a guess. Routine refreshes leave it false so a hosted API
+// never pays for routes it does not serve.
 [[nodiscard]] std::vector<ModelInfo> list_models(const AuthHeader& auth,
-                                                 const Endpoint& endpoint);
+                                                 const Endpoint& endpoint,
+                                                 bool force_probe = false);
 
 // The context window a /v1/models row DECLARES, or 0 when it declares none.
 //

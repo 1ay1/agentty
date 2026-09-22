@@ -1893,6 +1893,11 @@ store::Settings load_settings() {
                 if (v.is_number_integer() && v.get<int>() > 0)
                     s.context_overrides[k] = v.get<int>();
         }
+        if (j.contains("probe_hosts") && j["probe_hosts"].is_array()) {
+            for (auto& v : j["probe_hosts"])
+                if (v.is_string() && !v.get<std::string>().empty())
+                    s.probe_hosts.insert(v.get<std::string>());
+        }
         if (j.contains("recent_models") && j["recent_models"].is_array()) {
             for (auto& v : j["recent_models"])
                 if (v.is_string()) s.recent_models.push_back(v.get<std::string>());
@@ -2097,6 +2102,11 @@ void save_settings(const store::Settings& s) {
         for (const auto& [k, v] : s.context_overrides)
             if (v > 0) co[k] = v;
         if (!co.empty()) j["context_overrides"] = std::move(co);
+    }
+    if (!s.probe_hosts.empty()) {
+        json ph = json::array();
+        for (const auto& h : s.probe_hosts) ph.push_back(h);
+        j["probe_hosts"] = std::move(ph);
     }
     if (!s.recent_models.empty()) {
         json rm = json::array();

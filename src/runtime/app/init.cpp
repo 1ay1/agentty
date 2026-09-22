@@ -326,6 +326,12 @@ std::pair<Model, maya::Cmd<Msg>> init() {
         cmds.push_back(cmd::refresh_oauth(std::move(*refresh)));
     }
 
+    // Hosts proven self-hosted in an earlier session. Pushed into the
+    // transport before any model fetch, so a refresh probes them without
+    // the user re-adding the host.
+    if (!settings.probe_hosts.empty())
+        provider::openai::install_probe_hosts(settings.probe_hosts);
+
     // Background release check — 24h-cached (the fast path is one small
     // file read on a worker), so this is effectively free on most
     // launches; when a newer release exists, the status bar grows an

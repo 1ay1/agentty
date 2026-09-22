@@ -707,6 +707,16 @@ struct HostProbed {
     // case worth offering a fix for, right where the user is looking.
     int  window_tokens  = 0;      // 0 = none learned
     bool probe_skipped  = false;  // true = host not classified self-hosted
+    // Set when a host at a PUBLIC-looking address answered a runtime route
+    // anyway — i.e. it is self-hosted despite not looking it.
+    //
+    // /props, /api/ps, loaded_instances and meta.n_ctx are not things a
+    // hosted API serves, so answering one is proof. Remembering the host
+    // here lets every later model refresh probe it too, which is the whole
+    // reason this would otherwise need a settings toggle: the server
+    // already told us what it is, so asking the user to confirm it would
+    // be asking them to repeat an answer we have.
+    std::string learned_self_hosted;   // "" = nothing learned
 };
 // Sign out of the ACTIVE provider: clear its on-disk credentials (Anthropic
 // credentials.json, or the Codex/ChatGPT token store), zero the live auth

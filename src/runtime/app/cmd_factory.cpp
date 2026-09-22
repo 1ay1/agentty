@@ -2196,18 +2196,40 @@ Cmd<Msg> probe_host_async(std::string spec, std::uint64_t attempt_id,
                 // The largest window across the listed models is the right
                 // summary: the toast names what this host can do, and the
                 // per-model number is still shown in the picker.
-                auto models = provider::openai::list_models(auth,
-                                                            sel.openai_endpoint);
+                //
+                // ADD TIME IS DIFFERENT from a routine refresh, so the
+                // address heuristic is bypassed here: force_probe asks the
+                // runtime routes regardless of what the host looks like.
+                // This is the one moment the user is sitting in front of a
+                // modal waiting for an answer about THIS host, so a few
+                // extra milliseconds are affordable in a way they are not
+                // on every background refresh — and the alternative is
+                // asking them a question the server can answer itself.
+                auto models = provider::openai::list_models(
+                    auth, sel.openai_endpoint, /*force_probe=*/true);
                 for (const auto& mi : models)
                     if (mi.context_window > r.window_tokens)
                         r.window_tokens = mi.context_window;
-                // No window AND we never asked — the host didn't look
-                // self-hosted, so the runtime routes were withheld. That is
-                // the only case the UI should offer to change.
-                r.probe_skipped =
-                    r.window_tokens <= 0
-                    && !provider::openai::detail::is_local_endpoint(
-                           sel.openai_endpoint);
+
+                // A host that answered a runtime route IS self-hosted —
+                // /props, /api/ps, loaded_instances and meta.n_ctx are not
+                // things a hosted API serves. So when the probe worked on
+                // an address the heuristic would have excluded, remember
+                // the host: every later refresh then probes it too, without
+                // the user configuring anything.
+                //
+                // This is what replaces the settings toggle. The server
+                // already told us what it is; asking the user to confirm it
+                // would be asking them to repeat an answer we have.
+                const bool looks_local =
+                    provider::openai::detail::is_local_endpoint(sel.openai_endpoint);
+                if (r.window_tokens > 0 && !looks_local)
+                    r.learned_self_hosted = sel.openai_endpoint.host;
+                // Still nothing, and we would not normally have asked: the
+                // host is reachable but silent about its window AND does not
+                // look self-hosted. Nothing to remember, and nothing the UI
+                // can fix by itself.
+                r.probe_skipped = r.window_tokens <= 0 && !looks_local;
             } else if (probe.http_status == 401 || probe.http_status == 403) {
                 r.error = "HTTP " + std::to_string(probe.http_status)
                         + " \xe2\x80\x94 this host needs an API key";

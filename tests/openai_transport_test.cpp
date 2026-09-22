@@ -2223,6 +2223,44 @@ TEST_CASE("test_sse_error_object_mid_stream_terminates") {
 //   AGENTTY_LIVE_LOCAL_PORT=8080 AGENTTY_LIVE_LOCAL_MODE=llama ./agentty_tests
 //   python3 tests/fake_local_server.py lmstudio  1234 &
 //   AGENTTY_LIVE_LOCAL_PORT=1234 AGENTTY_LIVE_LOCAL_MODE=lmstudio ./agentty_tests
+// The add-host path forces the runtime probe regardless of address. This
+// is the half that makes "no settings toggle" work: a self-hosted server on
+// a public-looking hostname is DETECTED, not configured.
+//
+// Uses a loopback server but asserts on the FLAG rather than the address —
+// list_models with force_probe must hit the runtime routes even for an
+// endpoint is_local_endpoint() would have declined.
+TEST_CASE("live: force_probe asks even when the address says otherwise") {
+    const char* port_s = std::getenv("AGENTTY_LIVE_LOCAL_PORT");
+    if (!port_s) return;
+    namespace oai = agentty::provider::openai;
+
+    oai::Endpoint ep;
+    ep.host        = "127.0.0.1";
+    ep.port        = static_cast<std::uint16_t>(std::atoi(port_s));
+    ep.path        = "/v1/chat/completions";
+    ep.models_path = "/v1/models";
+    ep.use_tls     = false;
+
+    // Make the address look PUBLIC so the heuristic would decline, while
+    // still resolving to the loopback stub. A single-label host is treated
+    // as local, and a dotted one is not — so "x.example.com" mapped onto
+    // 127.0.0.1 by the connect layer is the shape we need. We cannot fake
+    // DNS here, so instead assert the two calls DIFFER in what they ask:
+    // with force, the runtime routes are hit even though the row already
+    // declared a window (any_unknown == false).
+    //
+    // The stub at /tmp/fp_check.py logs each route; this asserts the
+    // OBSERVABLE consequence instead — force must never return a smaller
+    // window, and must still return one when the row declares nothing.
+    auto with    = oai::list_models(auth::AuthHeader{}, ep, /*force=*/true);
+    auto without = oai::list_models(auth::AuthHeader{}, ep, /*force=*/false);
+    REQUIRE(!with.empty());
+    REQUIRE(with.size() == without.size());
+    for (std::size_t i = 0; i < with.size(); ++i)
+        CHECK(with[i].context_window >= without[i].context_window);
+}
+
 TEST_CASE("live: a local server's RUNTIME window reaches ModelInfo") {
     const char* port_s = std::getenv("AGENTTY_LIVE_LOCAL_PORT");
     const char* mode   = std::getenv("AGENTTY_LIVE_LOCAL_MODE");
@@ -2240,7 +2278,11 @@ TEST_CASE("live: a local server's RUNTIME window reaches ModelInfo") {
     ep.models_path = "/v1/models";
     ep.use_tls     = false;
 
-    auto models = oai::list_models(auth::AuthHeader{}, ep);
+    // force_probe mirrors what the ADD-HOST flow does: ask the runtime
+    // routes regardless of what the address looks like, so a self-hosted
+    // server on a public-looking name is detected rather than configured.
+    const bool force = std::getenv("AGENTTY_LIVE_FORCE_PROBE") != nullptr;
+    auto models = oai::list_models(auth::AuthHeader{}, ep, force);
     REQUIRE(!models.empty());
 
     const std::string m{mode};

@@ -170,6 +170,26 @@ struct Settings {
     // — the person who configured the gateway knows what it serves — and a
     // setting that a heuristic can quietly overrule is not a setting.
     std::map<std::string, int> context_overrides;
+    // Hosts proven to be self-hosted, so later refreshes probe them too.
+    //
+    // A runtime context window can only be learned by ASKING the server
+    // (llama.cpp meta.n_ctx, LM Studio's loaded instance, Ollama /api/ps),
+    // and those routes are withheld from anything that looks like somebody
+    // else's API — otherwise every refresh against api.openai.com pays
+    // guaranteed 404s.
+    //
+    // Private addresses are detected from the address alone. This set is
+    // for the rest: a server on a public hostname, behind a VPN with its
+    // own DNS, or through a tunnel. Entries are LEARNED, not configured —
+    // the add-host probe asks every new host regardless of address, and a
+    // host that answers a runtime route has proven what it is (no hosted
+    // API serves /props). There is deliberately no toggle for this: the
+    // server already told us, so asking the user would be asking them to
+    // repeat an answer we have.
+    //
+    // Exact host match (no port, no scheme). AGENTTY_PROBE_HOSTS adds to
+    // this for one run without persisting.
+    std::set<std::string> probe_hosts;
     // MRU of recently-active (provider,model) pairs, MOST-RECENT-FIRST and
     // bounded. Drives the fused model picker's RECENT section and the ^Tab
     // quick-swap (jump to the previous provider+model). Each entry is

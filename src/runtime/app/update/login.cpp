@@ -283,6 +283,22 @@ Step host_probed(Model m, HostProbed r) {
     } else {
         ctx = " \xc2\xb7 ctx: auto";
     }
+
+    // A host at a public-looking address that ANSWERED a runtime route is
+    // self-hosted — /props, /api/ps and loaded_instances are not things a
+    // hosted API serves. Persist it so every later model refresh probes it
+    // too.
+    //
+    // This is what a settings toggle would have been for, and why there
+    // isn't one: the server already told us what it is. Asking the user to
+    // confirm it would be asking them to repeat an answer we have.
+    if (!r.learned_self_hosted.empty()) {
+        auto settings = deps().load_settings();
+        if (settings.probe_hosts.insert(r.learned_self_hosted).second) {
+            deps().save_settings(settings);
+            provider::openai::install_probe_hosts(settings.probe_hosts);
+        }
+    }
     auto found = set_status_toast(step.first,
         std::string{"\xe2\x9c\x93 "} + std::to_string(r.model_count)
         + (r.model_count == 1 ? " model" : " models") + " \xc2\xb7 "

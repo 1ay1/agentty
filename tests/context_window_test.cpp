@@ -235,6 +235,29 @@ TEST_CASE("probe: a hosted API is never probed") {
     CHECK_FALSE(det::is_local_endpoint(host_ep("100.1.2.3")));
 }
 
+TEST_CASE("probe: a learned host is treated as self-hosted from then on") {
+    // The add-host flow probes EVERY new host regardless of address. A host
+    // that answers a runtime route (/props, /api/ps, loaded_instances) has
+    // proven what it is — no hosted API serves those — so it is remembered
+    // and every later refresh probes it too.
+    //
+    // This is what replaces a settings toggle: the server already told us
+    // what it is, so asking the user to confirm would be asking them to
+    // repeat an answer we have.
+    CHECK_FALSE(det::is_local_endpoint(host_ep("llm.example.com")));
+
+    agentty::provider::openai::install_probe_hosts({"llm.example.com"});
+    CHECK(det::is_local_endpoint(host_ep("llm.example.com")));
+    // Exact host only — learning one host must not opt in its neighbours.
+    CHECK_FALSE(det::is_local_endpoint(host_ep("other.example.com")));
+    CHECK_FALSE(det::is_local_endpoint(host_ep("evil-llm.example.com")));
+
+    // Install replaces wholesale, so a host dropped from settings stops
+    // being probed rather than lingering in a stale set.
+    agentty::provider::openai::install_probe_hosts({});
+    CHECK_FALSE(det::is_local_endpoint(host_ep("llm.example.com")));
+}
+
 TEST_CASE("probe: AGENTTY_PROBE_HOSTS opts a public host in") {
     // The escape hatch for a server reached over a VPN with its own DNS, or
     // through a tunnel, where no heuristic can tell. Without this the answer

@@ -3134,7 +3134,8 @@ int advertised_context_window(const nlohmann::json& model_row) {
     return detail::advertised_context_window(model_row);
 }
 
-std::vector<ModelInfo> list_models(const AuthHeader& auth, const Endpoint& endpoint) {
+std::vector<ModelInfo> list_models(const AuthHeader& auth, const Endpoint& endpoint,
+                                   bool force_probe) {
     std::vector<ModelInfo> result;
     if (endpoint.use_tls && is_empty(auth)) return result;
 
@@ -3300,7 +3301,7 @@ std::vector<ModelInfo> list_models(const AuthHeader& auth, const Endpoint& endpo
                 std::any_of(result.begin(), result.end(),
                             [](const ModelInfo& mi) { return mi.context_window <= 0; });
             const bool local = detail::is_local_endpoint(endpoint);
-            if (any_unknown || local) {
+            if (any_unknown || local || force_probe) {
                 // The ids let the probe answer per model where the endpoint
                 // requires it (llama-server router mode's /props?model=).
                 std::vector<std::string> ids;
