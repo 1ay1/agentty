@@ -2230,7 +2230,11 @@ TEST_CASE("live: a local server's RUNTIME window reaches ModelInfo") {
 
     namespace oai = agentty::provider::openai;
     oai::Endpoint ep;
-    ep.host        = "127.0.0.1";
+    // AGENTTY_LIVE_LOCAL_HOST lets this point at a NON-loopback address, which
+    // is the shape reported on #49: llama-server on the box with the GPU,
+    // reached over the LAN.
+    if (const char* h = std::getenv("AGENTTY_LIVE_LOCAL_HOST")) ep.host = h;
+    else                                                        ep.host = "127.0.0.1";
     ep.port        = static_cast<std::uint16_t>(std::atoi(port_s));
     ep.path        = "/v1/chat/completions";
     ep.models_path = "/v1/models";

@@ -8,6 +8,7 @@ Serves the EXACT payload shapes verified from upstream source:
       /api/v1/models -> models[].loaded_instances[].config.context_length
 """
 import json
+import os
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -201,4 +202,4 @@ class H(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     print(f"fake {MODE} server on :{PORT}", file=sys.stderr)
-    HTTPServer(("127.0.0.1", PORT), H).serve_forever()
+    HTTPServer((os.environ.get("BIND", "127.0.0.1"), PORT), H).serve_forever()

@@ -14,9 +14,11 @@
 #include "agtest.hpp"
 
 #include "agentty/domain/catalog.hpp"
+#include "agentty/provider/openai/transport.hpp"
 #include "agentty/runtime/view/helpers.hpp"
 #include "agentty/store/store.hpp"
 
+#include <cstdlib>   // setenv/unsetenv
 #include <nlohmann/json.hpp>
 
 using json = nlohmann::json;
@@ -28,6 +30,7 @@ namespace ui = agentty::ui;
 // list_models and the test is the only other caller.
 namespace agentty::provider::openai::detail {
 [[nodiscard]] int advertised_context_window(const nlohmann::json& m);
+[[nodiscard]] bool is_local_endpoint(const agentty::provider::openai::Endpoint& ep);
 }
 namespace det = agentty::provider::openai::detail;
 
@@ -168,6 +171,90 @@ TEST_CASE("context: an architectural maximum is not the loaded window") {
     // and smaller is the one a prompt has to respect.
     CHECK(det::advertised_context_window(loaded)
             < det::advertised_context_window(row));
+}
+
+// ── Which endpoints get the runtime-window probe ────────────────────────
+//
+// This decides NETWORK BEHAVIOUR. True costs a few extra round-trips per
+// refresh and is the only way a runtime window is ever learned; false means
+// the endpoint keeps whatever its /v1/models row declared. Both mistakes are
+// silent, which is why the classification is pinned here.
+namespace {
+agentty::provider::openai::Endpoint host_ep(const char* h) {
+    agentty::provider::openai::Endpoint ep;
+    ep.host = h;
+    return ep;
+}
+}
+
+TEST_CASE("probe: a server on your own network counts as local") {
+    // The first version of this checked loopback only. Reported on #49
+    // within hours: "I do host llama-server on a different host than the
+    // loopback". Putting the model server on the box with the GPU is the
+    // NORMAL way to run local models, and that setup was left with a
+    // permanently wrong context window.
+    CHECK(det::is_local_endpoint(host_ep("localhost")));
+    CHECK(det::is_local_endpoint(host_ep("127.0.0.1")));
+    CHECK(det::is_local_endpoint(host_ep("127.0.0.2")));      // 127/8
+    CHECK(det::is_local_endpoint(host_ep("::1")));
+    CHECK(det::is_local_endpoint(host_ep("host.docker.internal")));
+
+    // RFC1918 — the LAN cases from the report.
+    CHECK(det::is_local_endpoint(host_ep("192.168.1.50")));
+    CHECK(det::is_local_endpoint(host_ep("10.0.0.7")));
+    CHECK(det::is_local_endpoint(host_ep("172.16.0.1")));
+    CHECK(det::is_local_endpoint(host_ep("172.31.255.254")));
+
+    // Link-local, CGNAT (tailscale hands out 100.64/10), mDNS, and a bare
+    // single-label hostname that cannot resolve on the public internet.
+    CHECK(det::is_local_endpoint(host_ep("169.254.1.1")));
+    CHECK(det::is_local_endpoint(host_ep("100.84.22.21")));
+    CHECK(det::is_local_endpoint(host_ep("gpubox.local")));
+    CHECK(det::is_local_endpoint(host_ep("gpubox")));
+
+    // IPv6 unique-local and link-local.
+    CHECK(det::is_local_endpoint(host_ep("fd00::1")));
+    CHECK(det::is_local_endpoint(host_ep("fe80::1")));
+}
+
+TEST_CASE("probe: a hosted API is never probed") {
+    // The other half. Probing these buys a guaranteed 404 per route per
+    // refresh, forever, for every user.
+    CHECK_FALSE(det::is_local_endpoint(host_ep("api.openai.com")));
+    CHECK_FALSE(det::is_local_endpoint(host_ep("api.anthropic.com")));
+    CHECK_FALSE(det::is_local_endpoint(host_ep("openrouter.ai")));
+    CHECK_FALSE(det::is_local_endpoint(host_ep("api.mistral.ai")));
+    CHECK_FALSE(det::is_local_endpoint(host_ep("")));
+
+    // 172.x OUTSIDE 16-31 is public (172.15 and 172.32 are routable), and
+    // 17.x is Apple. A prefix match on "172." or "17." would swallow both.
+    CHECK_FALSE(det::is_local_endpoint(host_ep("172.15.0.1")));
+    CHECK_FALSE(det::is_local_endpoint(host_ep("172.32.0.1")));
+    CHECK_FALSE(det::is_local_endpoint(host_ep("17.253.144.10")));
+    // 100.x outside the CGNAT range is public too.
+    CHECK_FALSE(det::is_local_endpoint(host_ep("100.1.2.3")));
+}
+
+TEST_CASE("probe: AGENTTY_PROBE_HOSTS opts a public host in") {
+    // The escape hatch for a server reached over a VPN with its own DNS, or
+    // through a tunnel, where no heuristic can tell. Without this the answer
+    // to "my server is at llm.example.com" is "unsupported", and the window
+    // stays wrong forever — the probe is the ONLY way to learn it.
+    CHECK_FALSE(det::is_local_endpoint(host_ep("llm.example.com")));
+
+    ::setenv("AGENTTY_PROBE_HOSTS", "llm.example.com", 1);
+    CHECK(det::is_local_endpoint(host_ep("llm.example.com")));
+    // Exact match only — a suffix must not opt in the whole domain.
+    CHECK_FALSE(det::is_local_endpoint(host_ep("evil-llm.example.com")));
+
+    // Comma-separated, spaces tolerated.
+    ::setenv("AGENTTY_PROBE_HOSTS", "a.example.com, b.example.com", 1);
+    CHECK(det::is_local_endpoint(host_ep("a.example.com")));
+    CHECK(det::is_local_endpoint(host_ep("b.example.com")));
+    CHECK_FALSE(det::is_local_endpoint(host_ep("c.example.com")));
+
+    ::unsetenv("AGENTTY_PROBE_HOSTS");
+    CHECK_FALSE(det::is_local_endpoint(host_ep("a.example.com")));
 }
 
 TEST_CASE("context: a GGUF arch-prefixed context_length is a window") {

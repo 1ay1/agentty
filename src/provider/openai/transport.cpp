@@ -24,6 +24,7 @@
 #include <map>
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <array>
 #include <chrono>
 #include <format>
@@ -2780,26 +2781,91 @@ struct WindowProbe {
     bool measured = false;
 };
 
-// Is this endpoint a server running on THIS machine?
+// Is this endpoint a server we should probe unconditionally?
 //
-// Only a local server is worth probing unconditionally: the probe costs up
-// to three extra round-trips and every route it tries (/api/v1/models,
-// /props, /api/tags) is local-server-specific, so against a hosted API it
-// buys three guaranteed 404s per refresh. Locally those are sub-millisecond
-// and they carry the only accurate answer — the RUNTIME window — which no
-// catalog can know.
+// The probe is up to four extra round-trips and every route it tries
+// (/api/v1/models, /props, /api/ps) is local-server-specific, so against a
+// hosted API it buys guaranteed 404s per refresh. On a self-hosted server
+// they are cheap and carry the only accurate answer — the RUNTIME window —
+// which no catalog can know.
 //
-// Host-based, not TLS-based: `https://localhost:8443` is still local, and a
-// plain-HTTP remote gateway is still remote.
-[[nodiscard]] inline bool is_local_endpoint(const Endpoint& ep) {
+// "Local" therefore means "a server you run", not "a server on this
+// machine". The first version of this checked loopback only, which was
+// wrong the moment anyone put llama-server on the box with the GPU and
+// talked to it over their LAN — reported on #49 within hours. A private
+// address is the honest generalisation: RFC1918 and friends are not
+// routable on the internet, so nothing behind one is a hosted API.
+//
+// Host-based, not TLS-based: `https://llama.lan:8443` is still yours, and a
+// plain-HTTP remote gateway is still somebody else's.
+[[nodiscard]] bool is_local_endpoint(const Endpoint& ep) {
     const std::string& h = ep.host;
     if (h.empty()) return false;
-    if (h == "localhost" || h == "127.0.0.1" || h == "::1" || h == "[::1]")
-        return true;
-    // 127.0.0.0/8 — llama-server is commonly bound to 127.0.0.2 and friends.
-    if (h.rfind("127.", 0) == 0) return true;
+
+    // Explicit opt-in, for anything the heuristics cannot see: a server on a
+    // public address, behind a VPN with its own DNS, or reached through a
+    // tunnel. Comma-separated hosts, matched exactly.
+    //
+    // This exists because the alternative is telling someone their setup is
+    // unsupported — the probe is the only way to learn a runtime window, so
+    // refusing to run it makes the window permanently wrong.
+    if (const char* v = std::getenv("AGENTTY_PROBE_HOSTS")) {
+        std::string_view list{v};
+        while (!list.empty()) {
+            const auto comma = list.find(',');
+            auto item = list.substr(0, comma);
+            // trim spaces
+            while (!item.empty() && item.front() == ' ') item.remove_prefix(1);
+            while (!item.empty() && item.back()  == ' ') item.remove_suffix(1);
+            if (!item.empty() && item == h) return true;
+            if (comma == std::string_view::npos) break;
+            list.remove_prefix(comma + 1);
+        }
+    }
+
+    if (h == "localhost" || h == "::1" || h == "[::1]") return true;
     // The docker-desktop / podman bridge alias for the host machine.
     if (h == "host.docker.internal") return true;
+    // A .local name is mDNS — link-local by definition (RFC 6762).
+    if (h.size() > 6 && h.compare(h.size() - 6, 6, ".local") == 0) return true;
+
+    // Private / non-routable IPv4. Parsed rather than prefix-matched, so
+    // "17.2.3.4" (Apple) is not mistaken for 172.16/12, and a hostname that
+    // merely starts with digits is not mistaken for an address at all.
+    unsigned a = 0, b = 0, c = 0, d = 0;
+    char tail = '\0';
+    if (std::sscanf(h.c_str(), "%u.%u.%u.%u%c", &a, &b, &c, &d, &tail) == 4
+        && a < 256 && b < 256 && c < 256 && d < 256) {
+        if (a == 127) return true;                     // loopback
+        if (a == 10)  return true;                     // 10/8
+        if (a == 192 && b == 168) return true;         // 192.168/16
+        if (a == 172 && b >= 16 && b <= 31) return true;  // 172.16/12
+        if (a == 169 && b == 254) return true;         // link-local
+        if (a == 100 && b >= 64 && b <= 127) return true;  // CGNAT — tailscale
+        return false;   // a real routable address
+    }
+
+    // IPv6 unique-local (fc00::/7) and link-local (fe80::/10).
+    if (h.size() > 2) {
+        const std::string_view v6{h.front() == '[' ? h.c_str() + 1 : h.c_str()};
+        if (v6.size() >= 2) {
+            const char c0 = static_cast<char>(std::tolower(v6[0]));
+            const char c1 = static_cast<char>(std::tolower(v6[1]));
+            if (c0 == 'f' && (c1 == 'c' || c1 == 'd')) return true;
+            if (c0 == 'f' && c1 == 'e' && v6.size() >= 3) {
+                const char c2 = static_cast<char>(std::tolower(v6[2]));
+                if (c2 >= '8' && c2 <= '9') return true;
+                if (c2 == 'a' || c2 == 'b') return true;
+            }
+        }
+    }
+
+    // A bare single-label hostname ("gpubox", "nas") has no dots and cannot
+    // resolve on the public internet without a search domain — it is a
+    // machine on your network.
+    if (h.find('.') == std::string::npos && h.find(':') == std::string::npos)
+        return true;
+
     return false;
 }
 
