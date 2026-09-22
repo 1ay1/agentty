@@ -683,16 +683,48 @@ Args parse_args(int argc, char** argv) {
             // A missing / `-` prompt reads stdin (pipe usage:
             // `git diff | agentty run -` or `… | agentty run`).
             out.subcommand = std::move(a);
-            while (i + 1 < argc) {
-                std::string opt = argv[i + 1];
-                if (opt == "--agent" && i + 2 < argc) {
-                    out.cli_run_agent = argv[i += 2];
-                } else if (opt[0] != '-' || opt == "-") {
-                    if (out.cli_run_prompt.empty()) out.cli_run_prompt = argv[++i];
-                    else break;   // extra positional → top-level flags below
-                } else {
-                    break;        // -m/-w/… handled by the outer loop
+            // Scan the WHOLE tail, not just the leading run of arguments.
+            //
+            // This used to `break` on the first option it didn't own so the
+            // outer loop could see -m/-w/…, which meant a prompt positioned
+            // after one of those was never claimed here — it fell through to
+            // the outer loop and died as "unknown arg". So
+            //
+            //     agentty run --agent coder "prompt"        worked
+            //     agentty run -w dir "prompt"                did not
+            //
+            // and the rule ("a positional may not follow a global flag")
+            // was invisible: the error named the prompt, which was fine.
+            //
+            // Instead, walk every remaining argument and take only what this
+            // subcommand owns, leaving the rest in place. Options we skip
+            // stay in argv for the outer loop, which is already written to
+            // ignore what it has consumed — so order stops mattering without
+            // either loop needing to know about the other.
+            for (int j = i + 1; j < argc; ++j) {
+                const std::string opt = argv[j];
+                if (opt == "--agent" && j + 1 < argc) {
+                    out.cli_run_agent = argv[++j];
+                    continue;
                 }
+                // A non-flag (or a bare "-", which means stdin) is the
+                // prompt. Only the FIRST one: a second positional is a
+                // mistake worth reporting, not a second prompt to silently
+                // concatenate.
+                if (opt.empty() || opt[0] != '-' || opt == "-") {
+                    if (out.cli_run_prompt.empty()) out.cli_run_prompt = opt;
+                    continue;
+                }
+                // A flag this subcommand doesn't own — and possibly its
+                // value. Skipping the value matters: in `-w dir "prompt"`
+                // the `dir` is a non-flag, so without this it would be
+                // taken as the prompt and the real prompt ignored.
+                //
+                // Any `-x VALUE` shape qualifies, which is safe because a
+                // false positive only costs us a candidate prompt that a
+                // later positional replaces — and the outer loop is the one
+                // that actually validates these flags.
+                if (j + 1 < argc && argv[j + 1][0] != '-') ++j;
             }
         } else if (a == "plugin" || a == "skill") {
             // `agentty plugin <verb> …` / `agentty skill <verb> …` — hand the
@@ -737,6 +769,26 @@ Args parse_args(int argc, char** argv) {
             out.subcommand = "version";
             return out;
         } else {
+            // Arguments the `run` scan already claimed are not unknown — they
+            // arrive here because they sat after a global flag, and the
+            // scan deliberately leaves everything in place rather than
+            // reordering argv.
+            //
+            // This is what lets every placement work:
+            //
+            //     agentty run --agent coder "prompt"
+            //     agentty run -w dir "prompt"
+            //     agentty run --agent coder -w dir "prompt"
+            //
+            // Previously the scan stopped at the first flag it didn't own,
+            // so a prompt after -w/-m was never claimed and died here as
+            // "unknown arg" — an invisible rule, since the error named the
+            // prompt rather than the ordering.
+            if (out.subcommand == "run") {
+                if (a == "--agent") { ++i; continue; }   // flag + its value
+                if (!out.cli_run_prompt.empty() && a == out.cli_run_prompt)
+                    continue;
+            }
             std::fprintf(stderr, "unknown arg: %s\n\n", a.c_str());
             out.bad = true;
             return out;

@@ -394,6 +394,18 @@ target_include_directories(user_root_test PRIVATE include)
 add_test(NAME user_root_test COMMAND user_root_test)
 set_tests_properties(user_root_test PROPERTIES TIMEOUT 30)
 
+# ── CLI argument order ──────────────────────────────────────────────────────
+# A shell test because parse_args lives inside main.cpp and the contract worth
+# pinning is the BINARY's: `agentty run` must accept --agent, -w/-m and the
+# prompt in any order. The parser used to stop at the first flag it didn't own,
+# so a prompt after -w died as "unknown arg: <prompt>" — an invisible rule,
+# since the error named the prompt rather than the position.
+add_test(NAME cli_arg_order_test
+         COMMAND ${CMAKE_COMMAND} -E env sh
+                 ${CMAKE_SOURCE_DIR}/tests/cli_arg_order_test.sh
+                 $<TARGET_FILE:agentty>)
+set_tests_properties(cli_arg_order_test PROPERTIES TIMEOUT 60)
+
 # ── Finalize: build agentty_tests + derived aggregates ──────────────────────
 agentty_finalize_tests()
 
