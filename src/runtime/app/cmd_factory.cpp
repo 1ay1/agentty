@@ -1,4 +1,5 @@
 #include "agentty/runtime/app/cmd_factory.hpp"
+#include "agentty/runtime/app/wire_audit.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -1132,6 +1133,40 @@ Cmd<Msg> launch_stream(Model& m) {
                 const int soft_ceiling = static_cast<int>(
                     static_cast<double>(context_max) * 0.95);
                 soft_trim_to_ceiling(req.messages, soft_ceiling);
+            }
+            // ── Preflight: what is WRONG with this payload? ──────────
+            //
+            // The payload is final here — compaction substituted, trimming
+            // done, both branches converged. Audit it BEFORE it leaves,
+            // because after it leaves the only evidence is a 400 and a
+            // 90 KB body, and the defect is one empty string inside it.
+            //
+            // This never refuses to send. Providers disagree about what is
+            // legal and they change; a client that blocks a request the
+            // server would have accepted is worse than one that sends a
+            // request the server rejects. Every defect is a strong
+            // suspicion, named and counted, and the request still goes.
+            //
+            // The SHAPE line is the half that pays off even when the turn
+            // succeeds: `messages=48 tool_results=23 last_role=assistant`
+            // distinguishes one 400 from another when you cannot see the
+            // body, which is the reason GitHub's failure telemetry carries
+            // the same seven numbers.
+            {
+                const auto audit = audit_wire(req.messages);
+                AGT_LOG(Model, Debug, "wire.shape",
+                        "messages={} tool_calls={} tool_results={} "
+                        "images={} last_role={} defects={}",
+                        audit.message_count, audit.tool_call_count,
+                        audit.tool_result_count, audit.image_part_count,
+                        audit.last_role == Role::User ? "user" : "assistant",
+                        audit.defects.size());
+                for (const auto& d : audit.defects) {
+                    AGT_LOG(Model, Warn, "wire.defect",
+                            "kind={} message_index={} detail={}",
+                            describe(d.kind), d.message_index,
+                            d.detail.empty() ? "-" : d.detail);
+                }
             }
             // All tools, every profile. Gating is the policy layer's job
             // (`tool::DynamicDispatch::needs_permission`, called from
