@@ -2240,7 +2240,28 @@ TEST_CASE("live: a local server's RUNTIME window reaches ModelInfo") {
     REQUIRE(!models.empty());
 
     const std::string m{mode};
-    if (m == "router") {
+    if (m == "real") {
+        // Pointed at a REAL daemon, not a stub. Asserts the invariant that
+        // matters rather than a fixed number (the window depends on the
+        // model and on OLLAMA_CONTEXT_LENGTH): whatever we report must be
+        // a real number, and it must be the LOADED window from /api/ps
+        // rather than the much larger architectural one from /api/show.
+        //
+        // On a stock 0.34.2 with qwen3:0.6b those are 4096 and 40960 — a
+        // 10x gap, and picking the wrong one means every prompt over 4k
+        // gets silently truncated by the server.
+        bool any = false;
+        for (const auto& mi : models) {
+            if (mi.context_window <= 0) continue;
+            any = true;
+            INFO("model " << mi.id.value << " window " << mi.context_window);
+            // The architectural window for this family is 40960; the loaded
+            // one is far smaller. Anything >= 40960 means we read the wrong
+            // field.
+            CHECK(mi.context_window < 40960);
+        }
+        CHECK(any);
+    } else if (m == "router") {
         // llama-server ROUTER mode. A bare /props answers with a dummy
         // n_ctx 0, so the window only exists at /props?model=<name> — which
         // is exactly what the issue reported and what a bare probe missed.

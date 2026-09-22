@@ -2488,10 +2488,12 @@ OllamaProbe probe_ollama_model(const AuthHeader& auth,
         // ".context_length" rather than hard-coding the architecture. This
         // mirrors what Ollama's own CLI does in cmd/cmd.go's showInfo.
         //
-        // The value may be a FLOAT. ModelInfo is Go's map[string]any, so
-        // encoding/json emits every number as float64 and 32768 arrives as
-        // 32768.0 — Ollama's own tests use float64 literals for exactly this
-        // field. An is_number_integer() check silently dropped all of them.
+        // Accept a FLOAT as well as an integer. Ollama itself sends a plain
+        // integer — verified against a real 0.34.2 daemon, which answers
+        // "qwen3.context_length":40960 — but ModelInfo is typed
+        // map[string]any, so nothing in the protocol guarantees that, and
+        // LiteLLM already emits this class of field as a float (16385.0).
+        // Being strict here buys nothing and silently drops a window.
         if (j.contains("model_info") && j["model_info"].is_object()) {
             for (auto it = j["model_info"].begin(); it != j["model_info"].end(); ++it) {
                 const std::string& key = it.key();
