@@ -4,6 +4,23 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **`agentty run` takes its arguments in any order.** The parser scanned only
+  the leading arguments and stopped at the first option it didn't own, so a
+  prompt placed after a global flag was never claimed — it fell through and
+  died as `unknown arg: <prompt>`:
+
+  ```
+  agentty run --agent coder "prompt"           worked
+  agentty run --agent coder -w dir "prompt"    unknown arg: prompt
+  ```
+
+  The rule was really "a positional may not follow a global flag", and it was
+  invisible because the error named the *prompt* rather than the position — so
+  it read as a malformed prompt. All orders work now, and `--agent` still binds
+  the role in the ones that were broken. Thanks to
+  [@Eeems](https://github.com/Eeems) for reporting it.
+
 ## [0.9.4] - 2026-09-22
 
 ### Fixed
