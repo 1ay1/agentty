@@ -1516,6 +1516,37 @@ static std::string brief(std::string_view s) {
     return std::string{s.substr(0, kMax)} + "…(" + std::to_string(s.size()) + "B)";
 }
 
+// What the on-disk format promises to give back, for one field.
+//
+// Two transforms are INTENTIONAL and must not read as data loss:
+//
+//  1. UTF-8 scrubbing. message_to_json runs every string through
+//     to_valid_utf8, so a lone surrogate or truncated sequence in memory
+//     comes back repaired. Comparing raw memory against the file flags
+//     that as corruption when it is the writer doing its job.
+//
+//  2. In-flight tool state. A save fires on every turn, including while a
+//     tool is still running, and the reader deliberately coerces a
+//     `pending`/`running` call to Failed{"interrupted"} — a process that
+//     died mid-tool must not reload with a call that waits forever. So
+//     output() is "" in memory and "interrupted" on disk, by design.
+//
+// This is the actual cause of the "log verification FAILED" bursts seen on
+// live threads: they landed on turns with a tool in flight and healed once
+// it completed. The gate was refusing to retire the legacy document over a
+// difference the format guarantees.
+static bool round_trips(std::string_view want, std::string_view got) {
+    return got == want || got == tools::util::to_valid_utf8(std::string{want});
+}
+
+// Did this call finish before the snapshot was taken? Only a terminal call
+// has an output the file is expected to reproduce verbatim.
+static bool settled(const ToolUse& t) noexcept {
+    return std::holds_alternative<ToolUse::Done>(t.status)
+           || std::holds_alternative<ToolUse::Failed>(t.status)
+           || std::holds_alternative<ToolUse::Rejected>(t.status);
+}
+
 static LogMismatch log_diff(const ThreadLog& log, const std::vector<Message>& want) {
     using K = LogMismatch::Kind;
     const auto got = log.all();
@@ -1529,17 +1560,21 @@ static LogMismatch log_diff(const ThreadLog& log, const std::vector<Message>& wa
             return {K::Id, i, a.id.value, b.id.value};
         if (a.role != b.role)
             return {K::Role, i, role_to_string(a.role), role_to_string(b.role)};
-        if (a.text != b.text)
+        if (!round_trips(a.text, b.text))
             return {K::Text, i, brief(a.text), brief(b.text)};
-        if (a.thinking != b.thinking)
+        if (!round_trips(a.thinking, b.thinking))
             return {K::Thinking, i, brief(a.thinking), brief(b.thinking)};
         if (a.tool_calls.size() != b.tool_calls.size())
             return {K::TollCallCount, i, std::to_string(a.tool_calls.size()),
                     std::to_string(b.tool_calls.size())};
-        for (std::size_t k = 0; k < a.tool_calls.size(); ++k)
-            if (a.tool_calls[k].output() != b.tool_calls[k].output())
+        for (std::size_t k = 0; k < a.tool_calls.size(); ++k) {
+            // An unsettled call is allowed to come back as the reader's
+            // interrupted form. Checking it would pin a transient.
+            if (!settled(a.tool_calls[k])) continue;
+            if (!round_trips(a.tool_calls[k].output(), b.tool_calls[k].output()))
                 return {K::ToolOutput, i, brief(a.tool_calls[k].output()),
                         brief(b.tool_calls[k].output())};
+        }
         if (a.images.size() != b.images.size())
             return {K::ImageCount, i, std::to_string(a.images.size()),
                     std::to_string(b.images.size())};

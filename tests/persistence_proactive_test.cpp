@@ -118,3 +118,73 @@ TEST_CASE("persistence proactive") {
 
     fs::remove_all(tmp);
 }
+
+TEST_CASE("persistence: a tool in flight does not fail log verification") {
+    // save_thread_sync writes the log, re-reads it, and compares. Only if
+    // that verification passes does it delete the legacy <id>.json. The
+    // comparison used to check tool output unconditionally — but the reader
+    // deliberately coerces a pending/running call to Failed{"interrupted"},
+    // so output() is "" in memory and "interrupted" on disk.
+    //
+    // A save fires on EVERY turn, so any turn with a tool still running hit
+    // that difference, logged "log verification FAILED", and kept the legacy
+    // document alive. Seen on a live 2400-message thread: 37 failures in
+    // bursts that healed the moment the tool finished. Nothing was lost, but
+    // the migration never completed and the error said nothing usable.
+    //
+    // This drives the REAL save path with a tool mid-flight and asserts the
+    // migration completes anyway.
+    auto tmp = fs::temp_directory_path()
+             / ("agentty_inflight_test_" + std::to_string(::getpid()));
+    fs::remove_all(tmp);
+    fs::create_directories(tmp);
+    ::setenv("HOME", tmp.c_str(), 1);
+    ::unsetenv("USERPROFILE");
+
+    Thread t;
+    t.id    = persistence::new_id();
+    t.title = "in flight";
+
+    Message user;
+    user.id   = MessageId{"m-user"};
+    user.role = Role::User;
+    user.text = "run something";
+    t.messages.push_back(user);
+
+    // The assistant turn the reducer saves while the tool is STILL RUNNING.
+    Message asst;
+    asst.id   = MessageId{"m-asst"};
+    asst.role = Role::Assistant;
+    asst.text = "running it now";
+    ToolUse tc;
+    tc.id     = ToolCallId{"call-live"};
+    tc.name   = ToolName{"shell"};
+    tc.status = ToolUse::Running{};
+    asst.tool_calls.push_back(tc);
+    t.messages.push_back(asst);
+
+    persistence::save_thread(t);
+    persistence::flush_pending_saves();
+
+    const auto log_path    = persistence::threads_dir() / (t.id.value + ".jsonl");
+    const auto legacy_path = persistence::threads_dir() / (t.id.value + ".json");
+
+    check(fs::exists(log_path), "log written with a tool in flight");
+    // THE ASSERTION THAT WAS FAILING IN PRODUCTION: verification passed, so
+    // the legacy document was retired rather than kept forever.
+    check(!fs::exists(legacy_path),
+          "legacy document retired despite the in-flight tool");
+
+    // And the turn still reloads intact, with the call made terminal so a
+    // reload never waits on a tool whose process is gone.
+    auto loaded = persistence::load_thread_by_id(t.id);
+    REQUIRE(loaded.has_value());
+    REQUIRE(loaded->messages.size() == 2u);
+    REQUIRE(loaded->messages[1].tool_calls.size() == 1u);
+    check(loaded->messages[1].tool_calls[0].is_terminal(),
+          "the in-flight call reloaded terminal, not pending");
+    check(loaded->messages[1].text == "running it now",
+          "the assistant text survived");
+
+    fs::remove_all(tmp);
+}
