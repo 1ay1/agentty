@@ -199,6 +199,103 @@ enum class ErrorClass {
         || lower_contains("context-1m");   // future error-shape drift
 }
 
+// ── Vision rejection → learned capability / entitlement ────────────────
+//
+// A request carrying images can be refused for FOUR different reasons, and
+// they want three different reactions. Copilot's API returns each as its
+// own sentence — these strings are lifted from the GitHub CLI's own binary
+// (`runtime.node`), so they are what the server actually says rather than
+// what we imagine it says:
+//
+//   "not supported for vision"                       model cannot see
+//   "image media type not supported"                 this FORMAT is out
+//   "exceeded maximum number of images"              too MANY, not too big
+//   "vision is not enabled for this organization"    policy, not capability
+//
+// The last one is the interesting one, and it is why this returns a KIND
+// rather than a bool. "The model cannot see" and "your org forbids it" are
+// both 400s mentioning vision, but:
+//
+//   • a model capability is a property of the MODEL — switching accounts
+//     changes nothing, and the fix is to pick a different model
+//   • an org policy is a property of the ACCOUNT — the same model works
+//     fine on another login, and recording it as a model capability would
+//     poison the model for every account (exactly the bug
+//     domain::entitlement's keyed storage was built to prevent, see its
+//     header note on the account-blind `context_1m_blocked` bool)
+//
+// Collapsing them loses the distinction that decides what to tell the user
+// and what to remember.
+enum class VisionRejection : std::uint8_t {
+    None,           // not a vision rejection at all
+    ModelCapability,// this model cannot accept images (any account)
+    MediaType,      // the model sees images, just not THIS format
+    TooManyImages,  // over the per-request image count limit
+    OrgPolicy,      // the account's organisation disabled vision
+};
+
+[[nodiscard]] constexpr std::string_view tag(VisionRejection v) noexcept {
+    switch (v) {
+        case VisionRejection::None:            return "none";
+        case VisionRejection::ModelCapability: return "model_capability";
+        case VisionRejection::MediaType:       return "media_type";
+        case VisionRejection::TooManyImages:   return "too_many_images";
+        case VisionRejection::OrgPolicy:       return "org_policy";
+    }
+    return "?";
+}
+
+[[nodiscard]] inline VisionRejection classify_vision_rejection(
+        std::string_view message, int http_status) noexcept {
+    // Same status gate as the long-context detector: 0 means the status is
+    // unavailable (an SSE error body inside a 200), which is exactly when a
+    // message sniff is the only evidence there is.
+    if (http_status != 0 && http_status != 400 && http_status != 422)
+        return VisionRejection::None;
+
+    auto lower_contains = [&](std::string_view needle) noexcept -> bool {
+        if (needle.size() > message.size()) return false;
+        for (std::size_t i = 0; i + needle.size() <= message.size(); ++i) {
+            bool ok = true;
+            for (std::size_t j = 0; j < needle.size(); ++j) {
+                char a = message[i + j], b = needle[j];
+                if (a >= 'A' && a <= 'Z') a = static_cast<char>(a + 32);
+                if (b >= 'A' && b <= 'Z') b = static_cast<char>(b + 32);
+                if (a != b) { ok = false; break; }
+            }
+            if (ok) return true;
+        }
+        return false;
+    };
+
+    // ORDER MATTERS. "vision is not enabled for this organization" also
+    // contains "vision", so the narrow, most-specific test has to run
+    // first or an org-policy block would be recorded as a permanent model
+    // capability — and the model would stay image-less on every account,
+    // including ones that are entitled.
+    if (lower_contains("for this organization")
+     || lower_contains("for this organisation")   // en-GB drift
+     || lower_contains("organization policy"))
+        return VisionRejection::OrgPolicy;
+
+    if (lower_contains("maximum number of images")
+     || lower_contains("too many images"))
+        return VisionRejection::TooManyImages;
+
+    if (lower_contains("media type not supported")
+     || lower_contains("could not process image")
+     || lower_contains("unsupported image"))
+        return VisionRejection::MediaType;
+
+    if (lower_contains("not supported for vision")
+     || lower_contains("does not support image")
+     || lower_contains("image input is not supported")
+     || lower_contains("vision is not supported"))
+        return VisionRejection::ModelCapability;
+
+    return VisionRejection::None;
+}
+
 // ── reasoning_effort rejection → learned capability ──────────────────────
 // Parse a 4xx body that REJECTS the reasoning_effort parameter and extract
 // what the provider says it accepts — this is capability DISCOVERY, not a

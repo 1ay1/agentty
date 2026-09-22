@@ -1149,7 +1149,21 @@ Cmd<Msg> launch_stream(Model& m) {
             // images from every model no catalog describes, and a vision
             // model whose screenshot we quietly dropped is
             // indistinguishable from one that looked and was unhelpful.
-            if (!model_supports_vision.value_or(true)) {
+            //
+            // The SECOND reason to withhold is not about the model at all:
+            // this account's organisation may have image input disabled
+            // (Copilot: "vision is not enabled for this organization").
+            // That is an entitlement, learned from a 400 in a previous
+            // session and stored account-scoped — so it withholds on every
+            // model here, and stops the moment the user logs into an
+            // entitled account. Keeping it OUT of supports_vision is what
+            // makes that possible: a model blamed for a policy block would
+            // stay image-less forever.
+            const bool org_blocks_vision = detail::entitlement_blocked(
+                deps().load_settings(),
+                domain::entitlement::Fact::VisionOrgPolicy);
+
+            if (!model_supports_vision.value_or(true) || org_blocks_vision) {
                 std::size_t stripped = 0;
                 for (auto& msg : req.messages) {
                     stripped += msg.images.size();
@@ -1157,8 +1171,10 @@ Cmd<Msg> launch_stream(Model& m) {
                 }
                 if (stripped > 0) {
                     AGT_LOG(Model, Info, "wire.images_withheld",
-                            "model={} stripped={} reason=declared_text_only",
-                            model_id, stripped);
+                            "model={} stripped={} reason={}",
+                            model_id, stripped,
+                            org_blocks_vision ? "org_policy"
+                                              : "declared_text_only");
                 }
             }
             // ── Preflight: what is WRONG with this payload? ──────────

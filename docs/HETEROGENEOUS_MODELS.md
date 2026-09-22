@@ -97,19 +97,25 @@ That single property is what would have prevented our reasoning bug
 (`COPILOT_RESPONSES.md` §6.1), where one transport of four quietly
 ignored the toggle for months.
 
-### 2.2 What they deserialize, and what they don't
+### 2.2 Their model-layer vocabulary
 
-serde emits field names contiguously. Their Responses event struct:
+Near their model layer's strings:
 
 ```
 …tool_search_output econnrefused enotfound  output_index  call_id  custom_ …
 ```
 
-`output_index` and `call_id`. **No `item_id`.** They do not deserialize
-the field whose rewriting broke us, because they key on the identity a
-proxy cannot forge.
+`output_index` and `call_id` are **present** in that vocabulary.
 
-Same table, a few hundred bytes on:
+> **Do not read more into this than presence.** An earlier version of this
+> section said their Responses struct deserializes these two and *not*
+> `item_id`. The presence half is sound; the absence half is not provable
+> from a binary that interns string literals, and the run above also
+> contains OAuth error prose — adjacency in a dedup pool is not structure.
+> §8 has the full correction. The `output_index` fix was diagnosed from a
+> user's log, not from this line.
+
+Same vocabulary, a few hundred bytes on:
 
 ```
 partial_json   copilot_salvaged_tool_input_ids   copilot_quota_snapshots
@@ -404,3 +410,143 @@ whose embedded tar sits at offset `108754132`, containing
 tables and struct names survive in the binary. No decompilation was
 needed, and none of it is guesswork — where this document says "they do
 X", the string is in the binary.
+
+---
+
+## 8. What the binary can and cannot prove
+
+A correction, because getting this wrong produced a confident false claim
+in an earlier commit message and the method matters more than the claim.
+
+**Reliable.** Rust leaves three things intact that are worth reading:
+
+| Artifact | Why it is trustworthy |
+|---|---|
+| `src/runtime/src/….rs` paths | panic-location table, one per source file |
+| `struct X with N elements` | serde's `expecting()` string, verbatim |
+| literal error prose | the sentence the server or client emits |
+
+Those give module layout, struct arity, and exact wire vocabulary. The
+architecture in §2 rests on them and stands.
+
+**Not reliable: ABSENCE, and ADJACENCY.**
+
+Rust interns and deduplicates string literals. A field name used by five
+structs appears **once**, in a pool that also holds unrelated prose. So:
+
+- *"`item_id` is not in their Responses struct"* — **unprovable this way.**
+  `item_id` appears twice in the whole binary, and both are a
+  window-reading tool's parameter schema. That does not mean the Responses
+  decoder never names it; it means the string is shared or absent from the
+  pool for reasons invisible from outside.
+- *"`output_index` and `call_id` are adjacent, therefore same struct"* —
+  **no.** That run also contains `econnrefused`, `enotfound` and OAuth
+  error prose. Adjacency in a dedup pool is not structure.
+
+So the honest form of §2.2 is: **`output_index` and `call_id` are present
+in their model layer's vocabulary.** The rest was inference narrated as
+reading.
+
+**Does that change what shipped?** No. The `output_index` fix
+(`16e09b35`) was diagnosed from a user's log — 48 unroutable frames, three
+per call, ~440-char base64 blobs matching no announced item — and three
+other projects reached the same fix independently. The binary was
+corroboration that got over-weighted in a commit message. The code is
+right; one sentence of its justification was not.
+
+**The rule going forward:** presence is evidence, absence is not, and
+adjacency is never structure. Where this document makes a claim the
+binary cannot support, it says so.
+
+---
+
+## 9. Vision, and the layer a capability belongs to
+
+The first thing found by applying §8's rule honestly — four literal error
+strings, which is exactly the category that IS trustworthy:
+
+```
+not supported for vision
+image media type not supported
+exceeded maximum number of images
+vision is not enabled for this organization
+```
+
+Four refusals of the same request, wanting three different reactions. The
+last one is the interesting one.
+
+### 9.1 Why it is not one boolean
+
+"This model cannot see" and "your organisation forbids it" are both 400s
+mentioning vision. They belong to **different layers**:
+
+| | Scope | Fix | Where it belongs |
+|---|---|---|---|
+| model capability | the MODEL | pick another model | `ModelInfo::supports_vision` |
+| org policy | the ACCOUNT | log into an entitled account | `entitlement::Fact` |
+
+Recording an org block as a model capability is the worse error of the
+two: it blames the model, persists against it for **every** account, and
+survives the account switch that fixes it. The user moves to a working
+login and finds the model still refusing to look at images, with nothing
+anywhere explaining why.
+
+That is precisely the failure `docs/IDENTITY_CAPABILITY_ENTITLEMENT.md`
+was written about, and the reason the account-blind `context_1m_blocked`
+bool became a keyed fact. The same trap, one capability later.
+
+### 9.2 The ordering hazard
+
+`"vision is not enabled for this organization"` **contains the word
+"vision"**. A classifier testing model-capability patterns first matches
+it and records the wrong layer.
+
+So `classify_vision_rejection()` runs the narrow, most-specific test
+first, and a test pins exactly that — moving the org arm after the model
+arm fails two assertions.
+
+### 9.3 What each kind does
+
+| Kind | Recorded where | Scope |
+|---|---|---|
+| `OrgPolicy` | `Fact::VisionOrgPolicy`, empty model id | account-wide |
+| `ModelCapability` | `ModelInfo::supports_vision = false` | that model |
+| `MediaType` | nowhere | this request only |
+| `TooManyImages` | nowhere | this request only |
+
+The bottom two are deliberately not remembered: a PNG instead of a TIFF,
+or two images instead of six, would succeed on that very model. Recording
+them as capabilities would strip images that were never the problem.
+
+All four then **strip the images and retry the turn**. That is the point
+— the user asked a question and attached a picture, and an answer about
+the text beats a dead turn with a 400 in it.
+
+### 9.4 The tri-state default, restated
+
+`supports_vision` is `optional<bool>`, and **unknown SENDS** — the same
+asymmetry as `supports_tools`, for the same reason. Stripping on silence
+would remove images from every model no catalog describes, and a vision
+model whose screenshot we quietly dropped is indistinguishable from one
+that looked and was unhelpful.
+
+Only an explicit `false` withholds, because that is the one case we know.
+
+---
+
+## 10. Still open
+
+- **`max_prompt_images`** — they carry a per-model image COUNT limit
+  beside `supported_media_types`. We have no cap, so six screenshots to a
+  model accepting two is a 400. The `TooManyImages` arm now recovers from
+  it; a preflight cap would avoid it. Field names confirmed present;
+  their values are not readable from the binary.
+- **`supported_media_types`** — same: a declared allow-list we could
+  validate against before sending.
+- **Circuit breaker** — `api_circuit_breaker.rs`, `CLOSED`/`HALF_OPEN`.
+  Our ladder is per-turn and forgets a dead endpoint between turns.
+  Needs an endpoint-health store above the transports.
+
+All three want a real catalog row or a real failure before being built
+against. That is the §8 rule applied forward: build on what is verified,
+not on what is plausible.

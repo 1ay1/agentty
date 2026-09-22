@@ -2255,6 +2255,104 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                                     Msg{RetryStream{}}))};
             }
 
+            // ── Vision rejection: learn WHY, then retry without images ──
+            //
+            // A 400 on an image-bearing request has four causes and they
+            // are not interchangeable (see classify_vision_rejection).
+            // Getting the distinction wrong is not cosmetic:
+            //
+            //   • an ORG POLICY block recorded as a model capability
+            //     would blame the model, persist against it for every
+            //     account, and survive the account switch that fixes it
+            //   • a MODEL capability recorded as an org fact would strip
+            //     images from every model on the account, including ones
+            //     that see perfectly well
+            //
+            // So each kind is recorded where it belongs, then the turn
+            // retries with the images removed. The retry is the point: the
+            // user asked a question and attached a picture, and an answer
+            // about the text beats a dead turn with a 400 in it.
+            if (const auto vis = provider::classify_vision_rejection(
+                        e.message, e.http_status);
+                vis != provider::VisionRejection::None
+                && err_ctx && !has_committed) {
+                // Did this turn actually carry images? If not, the message
+                // matched something that only looked like a vision
+                // rejection, and stripping nothing then retrying would be
+                // an infinite loop on an unrelated 400.
+                std::size_t carried = 0;
+                for (const auto& msg : m.d.current.messages)
+                    carried += msg.images.size();
+
+                if (carried > 0) {
+                    AGT_LOG(Model, Warn, "vision.rejected",
+                            "kind={} images={} model={} msg={}",
+                            provider::tag(vis), carried,
+                            m.d.model_id.value, e.message);
+
+                    auto s = deps().load_settings();
+                    bool remembered = false;
+                    switch (vis) {
+                        case provider::VisionRejection::OrgPolicy:
+                            // ACCOUNT-wide, empty model_id. The model can
+                            // see; this login may not.
+                            remembered = detail::entitlement_record_blocked(
+                                s, domain::entitlement::Fact::VisionOrgPolicy);
+                            break;
+                        case provider::VisionRejection::ModelCapability:
+                            // A property of the MODEL. Recorded on the
+                            // catalog row so the gate in cmd_factory
+                            // withholds images next turn without another
+                            // round-trip.
+                            for (auto& mi : m.d.available_models)
+                                if (mi.id == m.d.model_id)
+                                    mi.supports_vision = false;
+                            break;
+                        case provider::VisionRejection::MediaType:
+                        case provider::VisionRejection::TooManyImages:
+                            // Per-REQUEST, not per-model: a different
+                            // format or fewer images would succeed on this
+                            // very model. Remembering either as a
+                            // capability would be wrong, so we only strip
+                            // and retry this one turn.
+                            break;
+                        case provider::VisionRejection::None:
+                            break;   // unreachable, guarded above
+                    }
+                    if (remembered) deps().save_settings(s);
+
+                    // Strip and retry. The transcript keeps its images for
+                    // display — only the wire payload loses them, rebuilt
+                    // from m.d.current on the retry.
+                    for (auto& msg : m.d.current.messages) msg.images.clear();
+
+                    if (!reschedule_streaming(m.s.phase, [&](phase::Active& c) {
+                            c.transient_retries = prior_transient + 1;
+                            c.last_failure_at   = std::chrono::steady_clock::now();
+                            c.retry             = retry::Scheduled{};
+                        }))
+                        return done(std::move(m));
+
+                    auto toast = set_status_toast(m,
+                        vis == provider::VisionRejection::OrgPolicy
+                            ? "your organisation has image input disabled — "
+                              "retried without the image"
+                        : vis == provider::VisionRejection::TooManyImages
+                            ? "too many images for this model — retried "
+                              "without them"
+                        : vis == provider::VisionRejection::MediaType
+                            ? "this image format isn't supported — retried "
+                              "without it"
+                            : "this model can't read images — retried "
+                              "without them",
+                        std::chrono::seconds{8});
+                    return {std::move(m), Cmd<Msg>::batch(
+                        std::move(toast),
+                        Cmd<Msg>::after(std::chrono::milliseconds{50},
+                                        Msg{RetryStream{}}))};
+                }
+            }
+
             // ── Auth (401/403): try a one-shot OAuth refresh ─────────
             // The bearer token expired (or was rotated) mid-session.
             // Deps still holds the stale header; load creds from disk

@@ -18,6 +18,7 @@
 
 #include "agentty/provider/error_class.hpp"
 #include "agentty/domain/catalog.hpp"
+#include "agentty/domain/entitlement.hpp"
 
 using namespace agentty::provider;
 
@@ -161,6 +162,114 @@ TEST_CASE("typed errors fix what prose sniffing gets wrong") {
 
     CHECK(typed_terminal == ErrorClass::Terminal);
     CHECK(max_retries_for(typed_terminal, /*mid_stream=*/true) == 0);
+}
+
+// ── Vision rejections ──────────────────────────────────────────
+//
+// A 400 on an image-bearing request has four causes and they are NOT
+// interchangeable. The strings below are what Copilot's API actually
+// returns — read out of the GitHub CLI's own binary, not invented.
+
+TEST_CASE("vision rejection: each cause is told apart") {
+    using agentty::provider::classify_vision_rejection;
+    using V = agentty::provider::VisionRejection;
+
+    // The model genuinely cannot see. A property of the MODEL: switching
+    // account changes nothing, and the fix is a different model.
+    CHECK(classify_vision_rejection("not supported for vision", 400)
+          == V::ModelCapability);
+    CHECK(classify_vision_rejection(
+              "This model does not support image input", 400)
+          == V::ModelCapability);
+
+    // The model sees images, just not THIS format. Per-request: a PNG
+    // would work on the very same model, so remembering it as a
+    // capability would be wrong.
+    CHECK(classify_vision_rejection("image media type not supported", 400)
+          == V::MediaType);
+    CHECK(classify_vision_rejection("could not process image", 400)
+          == V::MediaType);
+
+    // Too MANY, not too big. Also per-request.
+    CHECK(classify_vision_rejection(
+              "exceeded maximum number of images", 400)
+          == V::TooManyImages);
+
+    // Policy, not capability — the one that matters most (below).
+    CHECK(classify_vision_rejection(
+              "vision is not enabled for this organization", 400)
+          == V::OrgPolicy);
+
+    // And an ordinary 400 is not swept in. A classifier that fires on
+    // unrelated errors would strip images from turns that never had a
+    // vision problem, and then retry forever.
+    CHECK(classify_vision_rejection("invalid request: messages[0]", 400)
+          == V::None);
+    CHECK(classify_vision_rejection("rate limit exceeded", 429) == V::None);
+}
+
+TEST_CASE("vision rejection: org policy is never read as a model defect") {
+    // THE ordering hazard, and the reason this is an enum rather than a
+    // bool.
+    //
+    // "vision is not enabled for this organization" contains the word
+    // "vision". A classifier that tested the model-capability patterns
+    // first would match it, record the MODEL as blind, and persist that
+    // against the model for every account — including the entitled ones.
+    // The user would switch to a working account and find the model still
+    // refusing to look at images, with nothing anywhere explaining why.
+    //
+    // So the narrow, most-specific test runs FIRST. This pins it against
+    // messages deliberately built to trip a naive ordering.
+    using agentty::provider::classify_vision_rejection;
+    using V = agentty::provider::VisionRejection;
+
+    CHECK(classify_vision_rejection(
+              "vision is not enabled for this organization", 400)
+          == V::OrgPolicy);
+    CHECK(classify_vision_rejection(
+              "vision is not supported for this organization", 400)
+          == V::OrgPolicy);
+    CHECK(classify_vision_rejection(
+              "image input is not supported for this organisation", 400)
+          == V::OrgPolicy);          // en-GB spelling
+    CHECK(classify_vision_rejection(
+              "blocked by organization policy", 403)
+          == V::None);               // 403 is an auth class, not ours
+
+    // Every kind has a distinct, greppable tag — a log line that says
+    // "vision failed" is the 400 we already had.
+    CHECK(agentty::provider::tag(V::OrgPolicy)       == "org_policy");
+    CHECK(agentty::provider::tag(V::ModelCapability) == "model_capability");
+    CHECK(agentty::provider::tag(V::MediaType)       == "media_type");
+    CHECK(agentty::provider::tag(V::TooManyImages)   == "too_many_images");
+}
+
+TEST_CASE("vision rejection: an org block is account-scoped, not model-scoped") {
+    // The storage half of the same distinction.
+    //
+    // An org-policy block must key on the ACCOUNT and not the model, so
+    // that (a) it applies to every model on that login, and (b) it
+    // evaporates the moment the user switches to an entitled account.
+    // Recording it per-model would do the opposite on both counts.
+    namespace ent = agentty::domain::entitlement;
+    ent::Store s;
+
+    ent::record_blocked(s, ent::Fact::VisionOrgPolicy, "copilot", "work");
+
+    // Blocks on this account, for ANY model — no model component in the key.
+    CHECK(ent::blocked(s, ent::Fact::VisionOrgPolicy, "copilot", "work"));
+
+    // And NOT on another account of the same provider. This is the
+    // property the whole registry exists for: the other login's facts were
+    // never in the way, so nothing has to be reset on a switch.
+    CHECK(!ent::blocked(s, ent::Fact::VisionOrgPolicy, "copilot", "personal"));
+
+    // Nor on a different provider.
+    CHECK(!ent::blocked(s, ent::Fact::VisionOrgPolicy, "openai", "work"));
+
+    // And it does not collide with the other fact on the same key axes.
+    CHECK(!ent::blocked(s, ent::Fact::Context1M, "copilot", "work"));
 }
 
 // ── Long-context entitlement rejection: the [1m] self-heal trigger ───────

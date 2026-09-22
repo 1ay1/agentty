@@ -83,11 +83,26 @@ enum class Fact : std::uint8_t {
     // subscription (HTTP 400). Model-scoped: entitlement is per model line,
     // and a future account might be entitled for one model but not another.
     Context1M,
+
+    // The account's ORGANISATION has image input disabled — Copilot
+    // answers "vision is not enabled for this organization" (its own
+    // wording, read out of the GitHub CLI binary).
+    //
+    // ACCOUNT-WIDE, so recorded with an empty model_id. This is the whole
+    // reason it is a Fact and not a ModelInfo field: the model is perfectly
+    // capable of seeing images and will do so the moment you log into an
+    // entitled account. Storing it as a model capability would blame the
+    // model, poison it for every account, and survive the switch that
+    // fixes it — which is exactly what the account-blind
+    // `context_1m_blocked` bool did before this registry existed (see the
+    // header note above).
+    VisionOrgPolicy,
 };
 
 [[nodiscard]] constexpr std::string_view tag(Fact f) noexcept {
     switch (f) {
-        case Fact::Context1M: return "ctx1m";
+        case Fact::Context1M:       return "ctx1m";
+        case Fact::VisionOrgPolicy: return "vision_org";
     }
     return "?";
 }
