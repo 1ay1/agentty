@@ -8,12 +8,23 @@ This book contains **25 comprehensive chapters** organized into 5 parts, plus ex
 
 ## Part I: Foundations (5 chapters)
 
-### [Chapter 1: C++ Basics — Types, Values, and References](part1-foundations/ch01-basics/README.md)
-- 1.1 Why Types Matter
-- 1.2 Values vs. References vs. Pointers
-- 1.3 const Correctness
-- 1.4 Type Deduction (auto, decltype)
-- 1.5 Exercises (4)
+### [Chapter 1: Types, Values, and References](part1-foundations/ch01-basics/README.md)
+
+Rewritten and expanded. Eleven sections, each its own file, each with a
+runnable program in `ch01-basics/code/`. 6–10 hours.
+
+- [1.0 The model you need first](part1-foundations/ch01-basics/00-the-model.md)
+- [1.1 What a type actually is](part1-foundations/ch01-basics/01-what-is-a-type.md)
+- [1.2 Integers lie to you](part1-foundations/ch01-basics/02-integers-lie.md)
+- [1.3 Strong types: agentty's `Id<Tag>`](part1-foundations/ch01-basics/03-strong-types.md)
+- [1.4 Value categories](part1-foundations/ch01-basics/04-value-categories.md)
+- [1.5 Initialisation](part1-foundations/ch01-basics/05-initialisation.md)
+- [1.6 References and const](part1-foundations/ch01-basics/06-references-and-const.md)
+- [1.7 Lifetime](part1-foundations/ch01-basics/07-lifetime.md)
+- [1.8 Copy, move, elision](part1-foundations/ch01-basics/08-copy-move-elision.md)
+- [1.9 auto and decltype](part1-foundations/ch01-basics/09-auto-and-decltype.md)
+- [1.10 Capstone: rebuild `ImageContent`](part1-foundations/ch01-basics/10-capstone-imagecontent.md)
+- [Exercises (8)](part1-foundations/ch01-basics/exercises.md) · [Quick reference](part1-foundations/ch01-basics/quick-reference.md)
 
 ### [Chapter 2: Memory Management — RAII and Ownership](part1-foundations/ch02-memory/README.md)
 - 2.1 The Stack vs. The Heap
@@ -316,7 +327,7 @@ Skip low-level chapters. Focus on design patterns and system architecture.
 
 **Ready to become a C++ expert?**
 
-Start: [Chapter 1: C++ Basics](part1-foundations/ch01-basics/README.md)
+Start: [Chapter 1: Types, Values, and References](part1-foundations/ch01-basics/README.md)
 
 Or jump to your level:
 - [Chapter 6: std::variant](part2-modern-patterns/ch06-variant/README.md) (Intermediate)
