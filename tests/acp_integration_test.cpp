@@ -112,7 +112,13 @@ TEST_CASE("acp integration end-to-end") {
             sink(ag::Msg{ag::StreamStarted{}});
             sink(ag::Msg{ag::StreamTextDelta{"Reading. "}});
             sink(ag::Msg{ag::StreamToolUseStart{call_id, ag::ToolName{"read"}}});
-            std::string args = std::string("{\"path\":\"") + target.string() + "\"}";
+            // RELATIVE path on purpose. A model writes "note.txt" far more
+            // often than an absolute path, and Zed silently drops a
+            // location it cannot resolve as absolute — so the server has to
+            // absolutise against the session cwd. Using target.string()
+            // here (already absolute) would make that fix untestable.
+            std::string args = std::string("{\"path\":\"")
+                             + target.filename().string() + "\"}";
             sink(ag::Msg{ag::StreamToolUseDelta{call_id, args}});
             sink(ag::Msg{ag::StreamToolUseEnd{call_id}});
             sink(ag::Msg{ag::StreamUsage{1200, 40, 0, 0}});
@@ -127,7 +133,13 @@ TEST_CASE("acp integration end-to-end") {
             const ag::ToolCallId call_id{tcid};
             sink(ag::Msg{ag::StreamToolUseStart{
                 call_id, ag::ToolName{"write"}}});
-            std::string args = std::string("{\"path\":\"") + target.string()
+            // RELATIVE on purpose — a model writes "out.txt" far more often
+            // than an absolute path, and Zed silently DROPS a location it
+            // cannot resolve as absolute (resolve_location falls back to
+            // open_local_buffer only `if is_absolute`). Using target.string()
+            // here would make the server's absolutise() untestable.
+            std::string args = std::string("{\"path\":\"")
+                             + target.filename().string()
                              + "\",\"content\":\"hello from acp\\n\"}";
             sink(ag::Msg{ag::StreamToolUseDelta{call_id, args}});
             sink(ag::Msg{ag::StreamToolUseEnd{call_id}});
@@ -195,6 +207,7 @@ TEST_CASE("acp integration end-to-end") {
     // shows up as a broken tool in the transcript.
     std::set<std::string> announced_tool_ids;
     std::atomic<int>      orphan_tool_updates{0};
+    std::atomic<int>      relative_locations{0};
     std::atomic<int> tool_completed{0};
     std::atomic<int> tool_failed{0};
     std::string last_tool_text;
@@ -231,6 +244,15 @@ TEST_CASE("acp integration end-to-end") {
                 ++tool_calls;
                 std::lock_guard lk(transcript_mu);
                 announced_tool_ids.insert(t.toolCall.toolCallId.value);
+                // Locations must be ABSOLUTE. Zed's resolve_location tries
+                // project_path_for_absolute_path, then falls back to
+                // open_local_buffer only `if is_absolute(path)` — a relative
+                // path matches neither, returns None, and the location is
+                // silently dropped. Follow-along just stops moving; nothing
+                // errors, so this is invisible without an assertion.
+                for (const auto& l : t.toolCall.locations)
+                    if (!l.path.empty() && l.path.front() != '/')
+                        ++relative_locations;
                 tc_title = t.toolCall.title;
                 // The PROGRAMMATIC name (spec 1.8.0), distinct from the
                 // human title. A client grouping or filtering by tool
@@ -244,7 +266,15 @@ TEST_CASE("acp integration end-to-end") {
             [&](const SU_ToolCallUpdate& u) {
                 { std::lock_guard lk(transcript_mu);
                   if (!announced_tool_ids.count(u.update.toolCallId.value))
-                      ++orphan_tool_updates; }
+                      ++orphan_tool_updates;
+                  // Locations ride on the UPDATE, not the initial ToolCall:
+                  // at announce time the args haven't finished streaming, so
+                  // there is no path yet. This is where the absolute-path
+                  // contract actually has to hold.
+                  if (u.update.locations)
+                      for (const auto& l : *u.update.locations)
+                          if (!l.path.empty() && l.path.front() != '/')
+                              ++relative_locations; }
                 if (u.update.status && *u.update.status == ToolCallStatus::Completed)
                     ++tool_completed;
                 if (u.update.status && *u.update.status == ToolCallStatus::Failed)
@@ -436,6 +466,8 @@ TEST_CASE("acp integration end-to-end") {
     // "Tool call not found" failure card, so this is user-visible breakage,
     // not a protocol nicety.
     CHECK(orphan_tool_updates.load() == 0);
+    // Every location we emitted was absolute (see the collector above).
+    CHECK(relative_locations.load() == 0);
     if (tool_completed.load() != 1) {
         std::lock_guard lk(transcript_mu);
         std::fprintf(stderr, "tool_failed=%d last_tool_text=[%s]\n",

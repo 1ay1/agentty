@@ -352,15 +352,37 @@ a::List<a::ToolCallLocation> tool_locations(const ToolUse& tc, std::string_view 
     // claude-code-acp emits the RAW (absolute) path in locations — only the
     // card *title* is display-pathed. Zed uses locations to open the file in
     // the editor, which needs the real on-disk path, not a project-relative
-    // one. (void)cwd keeps the signature stable for callers.
-    (void)cwd;
+    // one.
+    //
+    // And it must be ABSOLUTE, not merely raw. Zed's resolve_location
+    // (acp_thread.rs) tries project_path_for_absolute_path, then falls back
+    // to open_local_buffer only `if is_absolute(path)` — a relative path
+    // matches neither and returns None, so the location is silently dropped
+    // and follow-along stops moving. Nothing errors; the feature just
+    // quietly stops working.
+    //
+    // A tool arg is whatever the model typed, which for `read` is very often
+    // "src/main.cpp". So resolve against the session cwd here rather than
+    // trusting it.
+    auto absolutise = [&](std::string p) -> std::string {
+        if (p.empty() || cwd.empty()) return p;
+        namespace fs = std::filesystem;
+        std::error_code ec;
+        fs::path fp{p};
+        if (fp.is_absolute()) return p;
+        auto joined = fs::path{cwd} / fp;
+        // lexically_normal, not canonical: the file may not exist yet (a
+        // `write` to a new path still wants a location), and canonical would
+        // throw or return empty for it.
+        return joined.lexically_normal().string();
+    };
     auto add = [&](std::initializer_list<const char*> keys, bool default_line_one = false) {
         for (const char* key : keys) {
             if (args.contains(key) && args[key].is_string()) {
                 std::string p = args[key].get<std::string>();
                 if (p.empty()) continue;
                 a::ToolCallLocation loc;
-                loc.path = std::move(p);
+                loc.path = absolutise(std::move(p));
                 auto ln = num("line"); if (!ln) ln = num("offset"); if (!ln) ln = num("start_line");
                 // claude-code-acp's Read emits `line: input.offset ?? 1`, so a
                 // Read with no offset still anchors the editor at line 1.
@@ -2254,6 +2276,23 @@ AgentServer::run_bash_via_terminal(Session& sess, ToolUse& tc) {
                 a::ToolCallUpdate c;
                 c.toolCallId = a::ToolCallId{tc.id.value};
                 c.status     = a::Just(a::ToolCallStatus::Failed);
+                // Replace the live terminal block with static text.
+                //
+                // The Releaser below frees this terminal the moment we
+                // return, and Zed drops a released terminal's widget — its
+                // ToolCallContent::Terminal arm resolves the id against a
+                // live map and ERRORS when it misses (acp_thread.rs
+                // from_acp). So a cancel that left the terminal block in
+                // place gave the user a card that renders as empty or
+                // broken, with no trace of what was cancelled.
+                //
+                // Every other exit from this function already leaves durable
+                // text (`fail` sends a text block, the success path attaches
+                // the fenced scrollback). Cancel was the one that didn't.
+                a::List<a::ToolCallContent> cc;
+                cc.push_back(a::ToolCallContent{
+                    a::TCC_Content{text_block("(cancelled)"), json::object()}});
+                c.content = a::Just(std::move(cc));
                 send_update(sess.id, a::SU_ToolCallUpdate{std::move(c)});
                 return TerminalRun{false, true, {}};
             }
