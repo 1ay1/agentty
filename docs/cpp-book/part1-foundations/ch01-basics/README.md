@@ -1,519 +1,968 @@
-# Chapter 1: C++ Basics — Types, Values, and References
+# Chapter 1: Types, Values, and References
 
-**Goal:** Understand C++'s type system and why it enables compile-time safety.
+**Goal:** Understand what a C++ object *is*, how names refer to it, when it dies, and why agentty's type system catches bugs that other languages discover at 3am in production.
 
-**Time:** 2-3 hours  
-**Prerequisites:** Basic programming (variables, functions, loops)
+**Time:** 6–10 hours. This is the longest chapter in the book, deliberately — everything later stands on it.
+
+**Prerequisites:** You can write a loop and call a function in *some* language.
 
 ---
 
-## 1.1 Why Types Matter
+## How to read this chapter
 
-In dynamically-typed languages (Python, JavaScript), types are checked at runtime:
+Every example here is real, compiled code. The companion file `ch01_examples.cpp` sits next to this README and contains all of them:
 
-```python
-# Python - runtime type error
-thread_id = "abc123"
-tool_id = "abc123"
-save_thread(tool_id)  # Oops! Wrong ID, discovered when function runs
+```sh
+cd docs/cpp-book/part1-foundations/ch01-basics
+g++ -std=c++23 -Wall -Wextra -fsanitize=address,undefined -g \
+    ch01_examples.cpp -o ch01 && ./ch01
 ```
 
-In C++, **types are contracts checked at compile time**:
+Every output block below is the **actual output** of that program, not something I typed by hand. Run it and follow along.
 
-```cpp
-// C++ - compile-time type safety
-ThreadId thread_id{"abc123"};
-ToolCallId tool_id{"abc123"};
-save_thread(tool_id);  // COMPILE ERROR: expected ThreadId, got ToolCallId
+Blocks marked `// ERROR:` are *supposed* to fail. Compile them anyway and read what your compiler says — learning to read compiler errors is half of learning C++.
+
+Alongside each concept you'll find **the real agentty code that uses it**, with a file path. By the end of this chapter you'll understand `include/agentty/domain/id.hpp` and `include/agentty/domain/lazy_bytes.hpp` completely.
+
+---
+
+## 1.0 The mental model you need first
+
+Most languages let you stay vague about one question: **where does this value live, and who destroys it?** Python, Java, Go and JavaScript all answer "somewhere on the heap, and the garbage collector handles it eventually."
+
+C++ makes you answer it. That is the entire difficulty of the language, and the entire source of its speed. Four sentences, and most of C++ stops being arbitrary:
+
+1. An **object** is a region of storage with a type and a lifetime.
+2. A **name** is not an object — it's a way to reach one.
+3. Every object has a well-defined moment it is **destroyed**, usually determined by the scope it was created in.
+4. Copying is explicit, moving is explicit, and both are visible in the type system.
+
+If you read only one section, read **§1.8 (lifetime)**. That's where the real bugs live.
+
+---
+
+## 1.1 What is a type, really?
+
+A type is three things at once:
+
+- **A size and layout** — how many bytes, arranged how
+- **A set of operations** — what you're allowed to do
+- **A set of promises** — what the compiler will enforce
+
+```
+=== 1.1 what a type is ===
+int 4  double 8  char 1 bytes
 ```
 
-**Key insight:** Catch bugs when you write the code, not when users run it.
+All three can hold "42", but the *bits* differ completely. `int` 42 is `00000000 00000000 00000000 00101010`. `double` 42.0 is an IEEE-754 sign/exponent/mantissa arrangement sharing no bits with it. The type tells the compiler how to interpret the storage.
 
-### The Cost of Runtime Type Errors
+### Types constrain operations
 
-Real bug from agentty's history:
 ```cpp
-// Old code - stringly typed
+int a = 10, b = 3;
+std::string s = "hello", t = "world";
+
+int q = a / b;             // 3 — integer division
+// auto bad = s / t;       // ERROR: no operator/ for std::string
+```
+
+```
+error: no match for 'operator/' (operand types are 'std::string' and 'std::string')
+```
+
+The compiler isn't being difficult. Division of two strings has no meaning, so the language refuses to guess.
+
+### Integer division is the first trap
+
+```
+7 / 2        = 3   <- integer division truncates
+7.0 / 2.0    = 3.5
+(double)7/2  = 3.5
+```
+
+`7 / 2` is `3`, not `3.5`. Both operands are `int`, so the compiler picks integer division. It truncates toward zero and does **not** warn you, because this is well-defined and sometimes exactly what you want.
+
+This causes real bugs. Computing a percentage:
+
+```cpp
+int done = 3, total = 4;
+int    wrong = (done / total) * 100;                           // 0
+double right = (static_cast<double>(done) / total) * 100.0;    // 75
+```
+
+```
+progress wrong: 0%
+progress right: 75%
+```
+
+`done / total` is `3/4` = `0` in integer arithmetic, then `0 * 100` = `0`. Your progress bar reads 0% until the job finishes, then jumps to 100%.
+
+---
+
+## 1.2 Integers: the part everyone gets wrong
+
+C++ inherits C's integer rules, designed for 1972 hardware. Three edges you must know.
+
+### Trap 1: signed overflow is undefined behaviour
+
+```cpp
+int max = std::numeric_limits<int>::max();   // 2147483647
+int bad = max + 1;                            // UNDEFINED BEHAVIOUR
+```
+
+This might print `-2147483648`. It might print `2147483647`. With optimisation on it might delete your loop entirely. **Undefined behaviour means the compiler may assume it never happens** and optimise accordingly.
+
+Watch it happen:
+
+```cpp
+// overflow.cpp
+#include <cstdio>
+bool always_true(int x) {
+    return x + 1 > x;   // compiler reasons: signed overflow is UB,
+}                       // therefore this is ALWAYS true
+int main() { std::printf("%d\n", always_true(2147483647)); }
+```
+
+```sh
+$ g++ -O0 overflow.cpp -o a && ./a
+0                    # actually computed, wrapped around
+$ g++ -O2 overflow.cpp -o a && ./a
+1                    # whole function replaced with `return true`
+```
+
+**The same program gives different answers at different optimisation levels.** That's UB — not "unspecified", not "platform-dependent", but a promise you made to the compiler and broke.
+
+Catch it:
+
+```sh
+g++ -std=c++23 -fsanitize=undefined -g overflow.cpp -o a && ./a
+# runtime error: signed integer overflow: 2147483647 + 1 cannot be
+#   represented in type 'int'
+```
+
+**Use `-fsanitize=undefined` while learning. Always.** It turns silent corruption into a clear message.
+
+### Trap 2: unsigned wraps — silently and legally
+
+```
+empty.size() - 1 = 18446744073709551615   <- wrapped!
+```
+
+`std::vector::size()` returns `std::size_t`, which is unsigned. On an empty vector, `size() - 1` wraps to 18 quintillion. This loop reads far past the end:
+
+```cpp
+for (std::size_t i = 0; i < v.size() - 1; ++i)   // BUG on empty v
+```
+
+Unsigned overflow is *defined* to wrap, so no sanitizer catches it.
+
+**The fix is to never subtract.** Move the term to the other side:
+
+```cpp
+for (std::size_t i = 0; i + 1 < v.size(); ++i)
+    std::printf("(%d,%d) ", v[i], v[i + 1]);
+```
+
+```
+adjacent pairs: (10,20) (20,30) 
+```
+
+Safe on an empty vector, because `0 + 1 < 0` is simply false.
+
+### Trap 3: comparing signed with unsigned
+
+```
+s < u           : false  <- wrong      (s = -1, u = 1)
+std::cmp_less   : true   <- right
+```
+
+`s` gets converted to unsigned, becoming 4294967295. `-Wall -Wextra` warns:
+
+```
+warning: comparison of integer expressions of different signedness
+```
+
+C++20 gave us a real fix: `std::cmp_less`, `cmp_greater`, `cmp_equal` compare **mathematical values**, not bit patterns.
+
+### Practical rules
+
+- `int` for ordinary arithmetic and small loop counters
+- `std::size_t` for sizes and indices — never subtract without a guard
+- `std::int64_t`, `std::uint32_t` (from `<cstdint>`) when width matters: serialisation, protocols, file formats
+- `-Wall -Wextra -fsanitize=undefined,address` on every practice program
+
+---
+
+## 1.3 Strong types — agentty's `Id<Tag>`
+
+Here's a bug that actually shipped:
+
+```cpp
+struct Request { std::string provider_id, model_id; };
+
 std::string fetch_model_id(const Request& r) {
-    return r.provider_id;  // BUG: returned provider ID instead of model ID
+    return r.provider_id;   // BUG: wrong field, same type, compiles fine
 }
-// Used like:
-auto id = fetch_model_id(req);
-catalog.find_model(id);  // Returns nullopt, silent failure
 ```
 
-**Impact:** User selects GPT-4, gets GPT-3.5. No error, just wrong behavior.
+Both fields are `std::string`, so the compiler has nothing to object to. The user picks GPT-4, gets something else, no error anywhere. Found weeks later by someone reading logs.
 
-**Fix with strong types:**
-```cpp
-ModelId fetch_model_id(const Request& r) {
-    return r.model_id;  // Can't accidentally return provider_id
-}
-// Type mismatch caught at compile time:
-// catalog.find_model(provider_id);  // ERROR: expected ModelId, got ProviderId
-```
+The type system could have caught this, if we'd let it.
 
-### Creating Strong Types
+### The real agentty code
 
-**Template-based newtype pattern from agentty:**
+Open `include/agentty/domain/id.hpp`. Here is the actual type, in full:
 
 ```cpp
-// include/agentty/domain/id.hpp
 template <typename Tag>
 struct Id {
     std::string value;
-    
-    // Explicit constructor prevents accidental conversions
+
+    Id() = default;
     explicit Id(std::string s) noexcept : value(std::move(s)) {}
-    
-    // Comparison operators
+
+    [[nodiscard]] bool        empty() const noexcept { return value.empty(); }
+    [[nodiscard]] const char* c_str() const noexcept { return value.c_str(); }
+
     bool operator==(const Id&) const = default;
     auto operator<=>(const Id&) const = default;
+
+    [[nodiscard]] bool operator==(std::string_view sv) const noexcept {
+        return value == sv;
+    }
+
+    friend void to_json(nlohmann::json& j, const Id& id) { j = id.value; }
+    friend void from_json(const nlohmann::json& j, Id& id) { j.get_to(id.value); }
 };
 
-// Create distinct types
-using ThreadId   = Id<struct ThreadIdTag>;
-using ToolCallId = Id<struct ToolCallIdTag>;
-using ModelId    = Id<struct ModelIdTag>;
-using MessageId  = Id<struct MessageIdTag>;
+struct ThreadIdTag     {};
+struct ToolCallIdTag   {};
+struct ModelIdTag      {};
+
+using ThreadId   = Id<ThreadIdTag>;
+using ToolCallId = Id<ToolCallIdTag>;
+using ModelId    = Id<ModelIdTag>;
 ```
 
-**Usage:**
+Every piece of that earns its place. Let's go through it.
+
+**`template <typename Tag>`** — `Tag` is never used in the body. It exists purely to make `Id<ThreadIdTag>` and `Id<ToolCallIdTag>` *different types*. This is the "phantom type" pattern.
+
+```
+=== 1.3 strong types ===
+sizeof(std::string) = 32
+sizeof(ThreadId)    = 32  <- identical
+```
+
+Same size, same generated code. The wrapper exists only during compilation. This is **zero-overhead abstraction** — the central promise of C++ and the theme of this book.
+
+**`explicit`** — without it, any `std::string` silently becomes a `ThreadId` and you're back where you started:
+
 ```cpp
-ThreadId tid{"thread_001"};
-ToolCallId tcid{"tool_001"};
-
-// This compiles:
-process_thread(tid);
-
-// This doesn't:
-process_thread(tcid);  // ERROR: cannot convert ToolCallId to ThreadId
-process_thread("thread_001");  // ERROR: explicit constructor
+void save(ThreadId id);
+save("abc123");          // ERROR: explicit blocks the implicit conversion
+save(ThreadId{"abc123"}); // must say what you mean
 ```
 
-**Key features:**
-1. **Zero runtime cost** — `sizeof(ThreadId) == sizeof(std::string)`
-2. **Compile-time safety** — Wrong type = compile error
-3. **Explicit construction** — No accidental conversions from strings
-4. **Self-documenting** — Function signatures tell you what ID type they need
+**`noexcept`** — this constructor cannot throw, because `std::move` on a `std::string` only steals a pointer. Chapter 4 shows why that keyword makes `std::vector<ThreadId>` measurably faster.
+
+**`[[nodiscard]]`** — calling `id.empty()` and ignoring the answer is always a bug. The attribute makes it a warning:
+
+```cpp
+id.empty();              // warning: ignoring return value
+if (id.empty()) { ... }  // fine
+```
+
+**`= default` on `operator==`** — C++20 generates the obvious member-wise comparison. You get `==`, `!=`, and from `<=>` all four relational operators, without writing them.
+
+**`friend void to_json(...)`** — found by argument-dependent lookup. When nlohmann's JSON library serialises a `ThreadId`, it finds this function because it's declared in the same namespace as the type. Chapter 3 covers ADL properly.
+
+### What it prevents
+
+```cpp
+ThreadId   t{"abc123"};
+ToolCallId c{"abc123"};
+
+// t == c;        // ERROR: no operator== for these two types
+// save_thread(c); // ERROR: cannot convert ToolCallId to ThreadId
+```
+
+The bug is now **impossible to write**. Not discouraged by convention, not caught in review — mechanically impossible, checked on every build.
 
 ---
 
-## 1.2 Values vs. References vs. Pointers
+## 1.4 Value categories: lvalue, prvalue, xvalue
 
-C++ has three ways to refer to data:
+This is the concept people skip, and then move semantics never makes sense. Twenty minutes. Do it now.
 
-| Type | Syntax | Nullable? | Can rebind? | Ownership |
-|------|--------|-----------|-------------|-----------|
-| **Value** | `T x` | No | N/A | Owns the data |
-| **Reference** | `T& x` | No | No | Aliases existing data |
-| **Pointer** | `T* x` | Yes | Yes | Aliases existing data |
+Every *expression* has two independent properties: its **type**, and its **value category**.
 
-### Values: Owning Data
+| Category | Informally | Has a name? | Address? |
+|---|---|---|---|
+| **lvalue** | a thing with identity | yes | yes |
+| **prvalue** | a fresh value, no identity | no | no |
+| **xvalue** | a thing being emptied out | yes | yes |
+
+The memorable rule: **if it has a name, it's an lvalue.**
+
+### Proving it with overloads
 
 ```cpp
-std::string text = "hello";  // Value: owns 5 bytes of "hello"
-std::string copy = text;     // Copy: new allocation, independent lifetime
-copy[0] = 'H';               // Mutates copy, text unchanged
+void cat(int&)  { std::puts("lvalue"); }
+void cat(int&&) { std::puts("rvalue"); }
+
+int x = 1;
+cat(x);              // lvalue
+cat(42);             // rvalue
+cat(x + 1);          // rvalue — x+1 makes a new temporary
+cat(std::move(x));   // rvalue
 ```
 
-**When to use:**
-- You need an independent copy
-- The data is small (< 64 bytes)
-- You're returning from a function (RVO optimization, Chapter 4)
+```
+cat(x)             ->   lvalue
+cat(42)            ->   rvalue
+cat(x + 1)         ->   rvalue
+cat(std::move(x))  ->   rvalue
+```
 
-**Real example from agentty:**
+### `std::move` does not move anything
+
+The most misleading name in the standard library:
+
 ```cpp
-// Domain types are values (cheap to copy or move)
-struct Message {
-    MessageId id;
-    Role role;
-    std::string text;
-    std::vector<ImageContent> images;
-    // ...
-};
+std::string a = "data";
+(void)std::move(a);          // NOTHING HAPPENS
+std::string b = std::move(a); // NOW it moves
+```
 
-// Function returns by value (RVO elides the copy)
-Message make_user_message(std::string text) {
-    return Message{
-        .id = generate_id(),
-        .role = Role::User,
-        .text = std::move(text)  // Move, not copy (Chapter 4)
-    };
+```
+after std::move(a) alone: a='data'
+after b = std::move(a):   a='' b='data'
+```
+
+`std::move(a)` is a **cast**. It produces an xvalue and compiles to zero instructions. The *move* happens when something consumes that xvalue — here, `b`'s constructor.
+
+If it were named `std::rvalue_cast`, a decade of confusion would have been avoided.
+
+### The trap that catches everyone
+
+```cpp
+void f(int&& r) {
+    cat(r);              // lvalue!  r has a NAME
+    cat(std::move(r));   // rvalue   must re-cast
 }
 ```
 
-### References: Aliasing Data
-
-```cpp
-std::string text = "hello";
-std::string& ref = text;     // Reference: ref is another name for text
-ref[0] = 'H';                // Mutates text through ref
-std::cout << text;           // Prints "Hello"
+```
+  inside f(int&& r), the expression `r` is an:   lvalue
+  after std::move(r):                            rvalue
 ```
 
-**Key properties:**
-1. **Cannot be null** — Must refer to existing object
-2. **Cannot be rebound** — Always refers to same object
-3. **Zero overhead** — Compiled to pointer, but safer
+**A named rvalue reference is an lvalue.** This is deliberate safety — because `r` has a name you could use it again after moving, so the compiler makes you state your intent.
 
-**When to use:**
-- Avoiding copies of large objects
-- Modifying function arguments
-- Returning subobjects from a larger object
+---
 
-**Real example from agentty:**
+## 1.5 Initialisation: five ways, and which to use
+
+```
+int b{}=0  c{5}=5  d(5)=5  e=5 -> 5
+Point p1{}=(0,0)  p2{1,2}=(1,2)
+```
+
+### Why `{}` is the better default: narrowing
+
 ```cpp
-class Model {
-    Thread thread_;
-    std::vector<Thread> history_;
-    
+double d = 3.99;
+int a(d);       // 3 — silently truncates
+int b = d;      // 3 — silently truncates
+// int c{d};    // ERROR: narrowing conversion
+```
+
+```
+int(3.99) via () = 3   <- silent truncation
+uint8_t = 300 via = : 44   <- silently wrapped
+```
+
+300 doesn't fit in a byte. Parentheses shrug and give you 44. **Braces refuse to compile.** A bug caught for free, at compile time, by typing two different characters.
+
+### The one place `{}` surprises you
+
+```
+vector(5,0).size()=5   vector{5,0}.size()=2
+```
+
+`std::vector<int> a(5, 0)` is five zeros. `std::vector<int> b{5, 0}` is two elements: 5 and 0. `std::initializer_list` constructors win over everything when you use braces.
+
+### Most vexing parse
+
+```cpp
+Widget w1();     // NOT a variable — declares a FUNCTION taking nothing
+Widget w2{};     // an actual variable
+```
+
+Anything that *can* be parsed as a declaration *is*. `Widget w1()` looks exactly like a function prototype, so that's what it becomes. Braces are immune.
+
+### Summary
+
+| Form | Meaning | Use when |
+|---|---|---|
+| `T x;` | default-init (garbage for scalars) | basically never |
+| `T x{};` | value-init (zeroed) | **default choice** |
+| `T x{a,b};` | list-init, narrowing is an error | **default choice** |
+| `T x(a,b);` | direct-init | ctor takes a count/size |
+| `T x = a;` | copy-init | rarely |
+
+**Rule: use `{}` unless the type has a count-like constructor.**
+
+---
+
+## 1.6 References
+
+A reference is an **alias**. Not an object, no storage of its own, can never be reseated.
+
+```cpp
+int x = 1, y = 2;
+int& r = x;      // r IS x
+r = y;           // assigns y's VALUE into x. Does NOT rebind r.
+```
+
+```
+after r = y: x=2 y=2 r=2
+&x == &r ? yes  <- r IS x
+```
+
+Same address. They are the same object under two names.
+
+### A reference can never be null
+
+```cpp
+// int& r;        // ERROR: no unbound references
+int* p = nullptr; // fine — pointers can be nothing
+```
+
+This shows up in agentty's signatures as documentation. From `src/acp/server.cpp`:
+
+```cpp
+const Model* find(const ModelId& id) const;   // returns nullptr if absent
+void must_have(const Config& c);              // caller guarantees it exists
+```
+
+The signature *is* the contract. A reader knows instantly whether to expect null.
+
+### `const&` binds everything
+
+```cpp
+void take(const std::string& s);
+
+std::string a = "lvalue";
+take(a);              // lvalue
+take("temporary");    // prvalue — temporary created, lives to end of statement
+take(std::move(a));   // xvalue
+```
+
+That's why `const T&` is the default for read-only parameters: accepts every category, copies nothing.
+
+### …but not for small types
+
+A reference is a pointer underneath. For a 4-byte `int`, passing a reference costs an indirection to avoid copying four bytes.
+
+```cpp
+void f(int x);                  // yes
+void f(const int& x);           // pointless, possibly slower
+void f(std::string_view s);     // yes — 16 bytes, no allocation
+void f(const std::string& s);   // yes, when you need std::string itself
+```
+
+**Rule of thumb:** by value if `sizeof(T) <= 16` and trivially copyable, otherwise `const&`.
+
+### Reference collapsing
+
+You can't *write* a reference to a reference, but a template can *produce* one:
+
+```
+T&  &   →  T&
+T&  &&  →  T&
+T&& &   →  T&
+T&& &&  →  T&&
+```
+
+Only `&& &&` stays `&&`. **Any lvalue reference wins.** This is the machinery behind perfect forwarding (Chapter 3).
+
+---
+
+## 1.7 `const` — and agentty's `mutable` cache
+
+`const` means "not modifiable *through this name*". A compile-time promise, not a runtime lock.
+
+### Top-level vs low-level
+
+```cpp
+const int* p1 = &x;        // pointer to const int   — LOW-LEVEL
+// *p1 = 5;                // ERROR: can't modify pointee
+p1 = &y;                   // fine: pointer is mutable
+
+int* const p2 = &x;        // const pointer to int   — TOP-LEVEL
+*p2 = 5;                   // fine: pointee is mutable
+// p2 = &y;                // ERROR: can't repoint
+
+const int* const p3 = &x;  // both
+```
+
+**Read pointer declarations right-to-left.** `const int* p1` → "p1 is a pointer to an int that is const".
+
+### `const` member functions
+
+A `const T&` can only call `const` member functions. That's how read-only access is enforced.
+
+### The `mutable` escape hatch — a real agentty use
+
+Now the interesting part. Open `include/agentty/domain/lazy_bytes.hpp`.
+
+agentty stores images and tool outputs as content-addressed blobs on disk. A `Message` holding an image shouldn't load the bytes until something actually needs them. But `bytes()` is a *read* — it should be callable on a `const Message`.
+
+The conflict: reading requires filling a cache, and filling a cache is a mutation.
+
+```cpp
+class LazyBytes {
 public:
-    // Read-only access: const reference
-    const Thread& thread() const { 
-        return thread_; 
-    }
-    
-    // Read-write access: mutable reference
-    Thread& thread_mut() { 
-        return thread_; 
-    }
-    
-    // Get specific history entry
-    const Thread& history(std::size_t idx) const { 
-        return history_.at(idx); 
-    }
-};
+    struct Source { std::string blob; };
 
-// Usage:
-Model m = load_model();
-const Thread& t = m.thread();  // No copy, just an alias
-std::cout << t.messages.size();
-```
+    [[nodiscard]] bool materialised() const noexcept { return have_; }
 
-**Why references, not pointers:**
-- Cannot be null (no null checks needed)
-- Intent is clearer ("I'm working with this object, not maybe-this-object")
-- Safer (cannot be accidentally reassigned)
-
-### Pointers: When You Need Nullable/Rebindable
-
-```cpp
-std::string* ptr = nullptr;      // Can be null
-std::string text = "hello";
-ptr = &text;                     // Can point to different objects
-
-if (ptr != nullptr) {
-    std::cout << *ptr;           // Dereference to access
-}
-```
-
-**When to use:**
-- Nullable (optional) references
-- Polymorphism (base class pointers)
-- Dynamic memory (but prefer smart pointers, Chapter 5)
-
-**Real example from agentty:**
-```cpp
-// Tool execution can fail, so result is optional
-struct ToolUse {
-    ToolCallId id;
-    std::string name;
-    std::variant<Queued, Executing, Done, Failed> state;
-    
-    // Get output if done
-    const std::string* output() const {
-        if (auto* d = std::get_if<Done>(&state)) {
-            return &d->output;
+    // const, yet it fills the cache — that is what `mutable` is for.
+    [[nodiscard]] const std::string& bytes() const {
+        if (!have_) {
+            cache_ = resolve_from_disk(src_);   // logically a read
+            have_  = true;
         }
-        return nullptr;
+        return cache_;
     }
+
+private:
+    Source              src_;
+    mutable std::string cache_;
+    mutable bool        have_ = false;
 };
-
-// Usage:
-if (const std::string* out = tool.output()) {
-    process(*out);
-} else {
-    // Still executing or failed
-}
 ```
 
-**Modern alternative: `std::optional`**
+```
+=== 1.7 const + mutable cache ===
+  materialised? no
+    (resolving blob 'sha256-abc' from disk...)
+  first  bytes(): BYTES:sha256-abc
+  second bytes(): BYTES:sha256-abc  <- cached, no resolve
+  materialised? yes
+```
+
+`mutable` members can be modified even through a `const` object. The justification is in the header's own comment:
+
+> `mutable` cache + const `bytes()`: materialising is not a logical mutation, so it stays available on a const Message.
+
+That's the test for `mutable`: **is this a change to the object's observable state, or just to how it's stored?** A cache is the second. Anything else is almost certainly a design smell.
+
+### `constexpr` vs `const`
+
 ```cpp
-std::optional<std::string_view> output() const {
-    if (auto* d = std::get_if<Done>(&state)) {
-        return d->output;
-    }
-    return std::nullopt;
-}
-
-// Usage:
-if (auto out = tool.output()) {
-    process(*out);
-}
+const int     a = runtime_value();    // const, but not known at compile time
+constexpr int b = 7;                  // known WHILE COMPILING
+std::array<int, b> arr{};             // needs a compile-time constant
+// std::array<int, a> bad{};          // ERROR
 ```
+
+`const` = "I won't change it". `constexpr` = "the compiler knows its value". Chapter 10 goes deep.
 
 ---
 
-## 1.3 const Correctness
+## 1.8 Lifetime — where the real bugs are
 
-`const` is a **compile-time promise** that you won't modify something.
+Everything so far was vocabulary. This is where C++ actually hurts people.
 
-### const Variables
+**Rule: an object created in a scope is destroyed when that scope exits, in reverse order of construction.**
 
-```cpp
-const int x = 42;
-x = 43;  // COMPILE ERROR: x is const
+```
+=== 1.8 lifetime (reverse destruction order) ===
+  + a
+  + b
+  + c
+  (leaving inner scope)
+  - c
+  - b
+  (leaving function)
+  - a
 ```
 
-### const References (Read-Only Access)
+`c` dies before `b`. Deterministic, guaranteed, and the foundation of RAII (Chapter 2).
+
+### Dangling reference: returning a local
 
 ```cpp
-void print_thread(const Thread& t) {
-    std::cout << t.title;       // OK: reading
-    t.messages.clear();         // COMPILE ERROR: modifying const object
+const std::string& broken() {
+    std::string local = "I die at the closing brace";
+    return local;          // reference to a dead object
 }
 ```
 
-**Why use const references:**
-1. **Avoids copies** — No allocation for large objects
-2. **Documents intent** — "I won't modify this"
-3. **Enables compiler optimizations** — const values can be cached
-4. **Thread-safe** — Multiple threads can read const references simultaneously
+```
+warning: reference to local variable 'local' returned [-Wreturn-local-addr]
+```
 
-**Real example from maya:**
+```sh
+$ g++ -fsanitize=address -g dangle.cpp -o a && ./a
+ERROR: AddressSanitizer: stack-use-after-return
+```
+
+**Fix: return by value.** It's not slow — see §1.9.
+
+### The subtle version the compiler misses
+
 ```cpp
-// Rendering is read-only — takes const Model
-Element view(const Model& model) {
-    return v(
-        render_thread(model.thread()),
-        render_composer(model.composer),
-        render_statusbar(model.ui.status)
-    );
+struct View {
+    const std::string& s;   // storing a reference — hazard
+    explicit View(const std::string& str) : s(str) {}
+};
+
+std::string make() { return "temporary"; }
+
+View v{make()};   // the temporary dies at the end of THIS LINE
+v.print();        // v.s now refers to freed memory
+```
+
+No warning. Under ASan: `stack-use-after-scope`.
+
+**Any type that stores a reference or pointer is a lifetime hazard.** That includes `std::string_view` and `std::span`.
+
+### `string_view` — the modern footgun
+
+```cpp
+std::string_view bad() {
+    std::string s = "hello";
+    return s;             // view outlives the string it views
 }
 ```
 
-### const Member Functions
+`string_view` is a pointer + length. It owns nothing. **Perfect as a parameter, lethal as a return type or member** unless you can prove the data outlives it.
+
+agentty uses it correctly in `src/util/logx.cpp`:
 
 ```cpp
-class Thread {
-    std::string title_;
-    std::vector<Message> messages_;
-    
+void emit(Channel ch, Level lv, std::string_view site, std::string_view msg);
+```
+
+The caller owns those strings and they outlive the call. That's the safe shape.
+
+### Lifetime extension (real, but narrow)
+
+```cpp
+const std::string& r = make();   // temporary's life extended to r's scope
+std::printf("%s\n", r.c_str());  // SAFE
+```
+
+Binding a temporary to a `const&` **local variable** extends its life. This does *not* apply to function parameters or member references. Rely on it only in this exact shape.
+
+### Iterator invalidation
+
+```
+  vector size=3 cap=3
+  push -> size=4 cap=6      <- reallocated
+  push -> size=5 cap=6
+  push -> size=6 cap=6
+  push -> size=7 cap=12     <- and again
+```
+
+When a vector grows past capacity it allocates a new buffer, moves everything, and frees the old one. **Every pointer, reference and iterator into it dangles.**
+
+```cpp
+std::vector<int> v{1, 2, 3};
+int& first = v[0];
+v.push_back(4);        // may reallocate
+std::printf("%d\n", first);   // heap-use-after-free
+```
+
+**Rule: don't hold references into a container you're still modifying.**
+
+---
+
+## 1.9 Copy, move, and why returning by value is fast
+
+New programmers avoid returning big objects, fearing a copy. Let's measure.
+
+```
+=== 1.9 elision ===
+ make_prvalue():
+  ctor 1
+ make_named():
+  ctor 2
+ std::move(b):
+  move 2
+```
+
+- **`make_prvalue()`** — `return Tracked{1};` — *one constructor*. No copy, no move. Since C++17 this is **guaranteed**: the object is built directly in the caller's storage.
+- **`make_named()`** — `Tracked t{2}; return t;` — also one constructor. That's NRVO. Not guaranteed by the standard, but every real compiler does it.
+- **`std::move(b)`** — one move. The only one that cost anything.
+
+**Returning by value is free. Do it.**
+
+### The pessimisation beginners write
+
+```cpp
+T bad()  { T t; return std::move(t); }   // BLOCKS elision — forces a move
+T good() { T t; return t; }              // elided — nothing happens
+```
+
+`return std::move(t)` makes things **slower**. It turns a name into an xvalue, defeating NRVO. **Never `std::move` a return value of local type.**
+
+### `noexcept` on moves is not optional
+
+```
+=== 1.9 noexcept decides copy vs move ===
+ vector<Throwing> reallocating:
+  COPY
+ vector<Safe> reallocating:
+  move
+```
+
+Same code. One keyword different. One **copies**, the other **moves**.
+
+Why: when `vector` reallocates it must preserve the strong exception guarantee — if anything throws halfway, the vector must be unchanged. A throwing move can't be undone (the source is already gutted), so `vector` refuses to use it. A `noexcept` move can't fail.
+
+This is why agentty's `Id` constructor is marked `noexcept`:
+
+```cpp
+explicit Id(std::string s) noexcept : value(std::move(s)) {}
+```
+
+`std::vector<ThreadId>` is used throughout the codebase. Without that keyword, every reallocation would deep-copy every string.
+
+**Always mark move constructors and move assignment `noexcept`.**
+
+---
+
+## 1.10 `auto` and `decltype`
+
+### `auto` drops references and const
+
+```cpp
+const std::string  s = "hello";
+const std::string& r = s;
+
+auto a = s;          // std::string — const and & dropped. A COPY.
+auto b = r;          // std::string — still a copy!
+const auto& c = s;   // const std::string& — no copy
+```
+
+**`auto x = ...` always copies.** Want a reference? Say `auto&` or `const auto&`.
+
+### The loop that silently copies
+
+```
+ for (auto e : v):
+  COPY
+  COPY
+ for (const auto& e : v):
+ (no output above = no copies)
+```
+
+**Default to `for (const auto& x : v)`.** Use `auto&` to modify, plain `auto` only when you genuinely want a copy.
+
+You'll see this everywhere in agentty:
+
+```cpp
+for (const auto& m : models_)          // no copies
+    if (m.id == id) return &m;
+```
+
+### `decltype` and the parentheses trap
+
+```
+decltype(x)   is reference? no
+decltype((x)) is reference? yes  <- extra parens!
+```
+
+One pair of parentheses changes `int` into `int&`. `decltype(x)` gives the *declared type* of the entity; `decltype((x))` gives the type of the *expression*, and an lvalue expression of type `int` yields `int&`.
+
+---
+
+## 1.11 Reading real agentty code
+
+You now know enough to read this properly. From `include/agentty/domain/conversation.hpp`:
+
+```cpp
+class ImageContent {
 public:
-    // const member function: promises not to modify `this`
-    std::size_t message_count() const {
-        return messages_.size();
+    using Source = LazyBytes::Source;
+
+    std::string media_type;
+
+    ImageContent() = default;
+    ImageContent(std::string mt, std::string raw_bytes)
+        : media_type(std::move(mt)), data_(std::move(raw_bytes)) {}
+
+    static ImageContent lazy(std::string mt, Source src) {
+        ImageContent img;
+        img.media_type = std::move(mt);
+        img.data_      = LazyBytes::lazy(std::move(src));
+        return img;
     }
-    
-    // const overload: returns const reference
-    const std::vector<Message>& messages() const {
-        return messages_;
-    }
-    
-    // Non-const overload: returns mutable reference
-    std::vector<Message>& messages_mut() {
-        return messages_;
-    }
-    
-    // Mutating operation: not const
-    void add_message(Message m) {
-        messages_.push_back(std::move(m));
-    }
-};
 
-// Usage:
-const Thread& ct = get_thread();
-ct.message_count();  // OK
-ct.messages();       // Returns const reference
-ct.add_message(msg); // COMPILE ERROR: ct is const
+    [[nodiscard]] const std::string& bytes() const { return data_.bytes(); }
+    void set_bytes(std::string raw) { data_.set_bytes(std::move(raw)); }
+    [[nodiscard]] bool materialised() const noexcept { return data_.materialised(); }
 
-Thread& mt = get_thread_mut();
-mt.add_message(msg);  // OK
-```
-
-**Key insight:** const-correctness propagates. If you have a const reference, you can only call const member functions, which can only call other const functions...
-
-### The const Sandwich Pattern (agentty's architecture)
-
-```
-Input (const) → Pure Function → Output (new value)
-```
-
-**Example: The update function**
-```cpp
-// Takes Model by VALUE (owned), returns new Model
-std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
-    // m is mutable here (we own it)
-    return std::visit(overload{
-        [&](StreamTextDelta delta) -> std::pair<Model, Cmd<Msg>> {
-            m.stream.text += delta.text;  // Mutate owned Model
-            return {std::move(m), Cmd<Msg>::none()};
-        },
-        // ... other handlers
-    }, msg);
-}
-```
-
-**Why this works:**
-1. Input is moved into function (no copy)
-2. Function mutates its local copy
-3. Returns by value (RVO optimization)
-4. Caller gets new Model, old one is gone
-
-**Not an OOP mutating method:**
-```cpp
-// NOT like this (imperative style):
-void Model::handle_text_delta(StreamTextDelta delta) {
-    this->stream.text += delta.text;  // Mutating shared state
-}
-```
-
----
-
-## 1.4 Type Deduction: auto and decltype
-
-### auto: Let the Compiler Figure It Out
-
-```cpp
-auto x = 42;                      // int
-auto y = 3.14;                    // double
-auto s = std::string{"hello"};    // std::string
-auto t = make_thread();           // Thread (whatever make_thread returns)
-```
-
-**When to use auto:**
-1. **Iterator types** — `auto it = vec.begin()` vs `std::vector<T>::iterator it = ...`
-2. **Lambda types** — Cannot name them otherwise
-3. **Template return types** — Readability
-
-**When NOT to use auto:**
-1. **Unclear types** — `auto x = get_something()` — what is x?
-2. **Intentional conversions** — `int x = get_double()` truncates, `auto x = get_double()` doesn't
-
-**Real example from agentty:**
-```cpp
-// Clear: we're iterating over messages
-for (const auto& msg : thread.messages) {
-    process(msg);
-}
-
-// Unclear: what type is step?
-auto step = update(model, msg);  // Bad
-std::pair<Model, Cmd<Msg>> step = update(model, msg);  // Better
-auto [next_model, cmd] = update(model, msg);  // Best (structured binding)
-```
-
-### decltype: Get the Type of an Expression
-
-```cpp
-int x = 42;
-decltype(x) y = 100;  // y is int
-
-const Thread& get_thread();
-decltype(get_thread()) t = ...;  // t is const Thread&
-```
-
-**Used in templates (advanced topic, Chapter 12):**
-```cpp
-template <typename F, typename Arg>
-auto apply(F f, Arg arg) -> decltype(f(arg)) {
-    return f(arg);
-}
-```
-
----
-
-## 1.5 Exercises
-
-### Exercise 1.1: Strong Types
-Create strong types for a simplified thread system:
-```cpp
-// TODO: Define ThreadId, MessageId, UserId
-// Implement:
-// - Explicit constructors from std::string
-// - Equality comparison
-// - Hash function (for use in unordered_map)
-
-// Test:
-ThreadId tid{"thread_001"};
-MessageId mid{"msg_001"};
-// This should NOT compile:
-// process_thread(mid);
-```
-
-**Solution:** See `solutions/ch01/ex1-strong-types.cpp`
-
-### Exercise 1.2: const Correctness
-Fix the const-correctness issues:
-```cpp
-class ThreadList {
-    std::vector<Thread> threads_;
-public:
-    // TODO: Make this const-correct
-    Thread& get(size_t idx) {
-        return threads_.at(idx);
-    }
-    
-    // TODO: Add const overload
-    
-    // TODO: Make this const
-    size_t size() {
-        return threads_.size();
-    }
+private:
+    LazyBytes data_;
 };
 ```
 
-**Solution:** See `solutions/ch01/ex2-const.cpp`
+Work through it:
 
-### Exercise 1.3: References vs. Pointers
-When should you use references vs. pointers? For each scenario, choose the best option and explain why:
+1. **`ImageContent(std::string mt, std::string raw_bytes)`** — by value, then `std::move` into members. The caller can move in and pay zero copies; if they pass an lvalue they pay exactly one copy, which they were going to pay anyway. (§1.4, §1.9)
 
-1. Function parameter: large struct you want to read but not modify
-2. Function return: might not find the requested object
-3. Class member: always present, owned by the class
-4. Function parameter: small int you want to modify
+2. **`static ImageContent lazy(...)`** — a named constructor. It returns by value, and NRVO means `img` is built directly in the caller's storage — no copy despite appearances. (§1.9)
 
-**Solution:** See `solutions/ch01/ex3-refs-pointers.md`
+3. **`const std::string& bytes() const`** — returns a reference to avoid copying potentially megabytes of image data. Safe because the data lives in `data_`, which outlives the call. (§1.6, §1.8)
 
-### Exercise 1.4: Build a Miniature Type System
-Implement a simplified version of agentty's ID system with:
-- Three ID types: UserId, SessionId, RequestId
-- A Registry that stores objects by ID
-- Compile-time safety (wrong ID type = compile error)
+4. **`[[nodiscard]]`** — calling `bytes()` and ignoring it is pointless work. (§1.3)
 
-**Starter code:** `exercises/ch01/ex4-registry.cpp`  
-**Solution:** `solutions/ch01/ex4-registry.cpp`
+5. **`materialised() const noexcept`** — a pure query. `noexcept` because reading a bool cannot throw. (§1.9)
+
+6. **`private: LazyBytes data_;`** — the lazy-loading machinery is hidden. Callers see bytes; they never see the blob store. (Chapter 2)
+
+Every one of those decisions is something you can now justify.
 
 ---
 
-## Key Takeaways
+## 1.12 Exercises
 
-1. **Use types to make illegal states unrepresentable**
-   - Strong types catch bugs at compile time
-   - Zero runtime cost
+Reading C++ and writing C++ are different skills.
 
-2. **Prefer references over pointers for non-nullable parameters**
-   - Clearer intent
-   - Safer (no null checks)
+### 1.1 — Break it on purpose (20 min)
 
-3. **Use const everywhere possible**
-   - Documents immutability
-   - Enables optimizations
-   - Required for functional architecture
+Compile each with `-fsanitize=address,undefined -g`, read the output, then fix it.
 
-4. **auto for clarity, explicit types for intent**
-   - Use auto for obvious types (iterators, lambdas)
-   - Use explicit types when conversion matters
+```cpp
+// (a)
+std::vector<int> v{1,2,3};
+int& r = v[0];
+v.push_back(4);
+return r;
+
+// (b)
+std::string_view f() { std::string s = "temp"; return s; }
+
+// (c)
+int m = std::numeric_limits<int>::max();
+return m + 1;
+```
+
+For each: what does the sanitizer call it, and *why* does it happen?
+
+### 1.2 — Predict, then verify (30 min)
+
+Using `Tracked` from `ch01_examples.cpp`, predict the output **before** compiling:
+
+```cpp
+Tracked a{1};
+Tracked b = a;
+Tracked c = std::move(a);
+std::vector<Tracked> v;
+v.push_back(b);
+v.push_back(std::move(c));
+v.reserve(10);
+```
+
+Where were you wrong? (Most people miss the `reserve`.)
+
+### 1.3 — Extend agentty's `Id` (45 min)
+
+Starting from the real `include/agentty/domain/id.hpp`, add:
+
+- `starts_with(std::string_view)` — useful for the `call_salvaged_` prefix check the real codebase does
+- a `std::hash` specialisation so `Id` works as an `unordered_map` key
+- a `size()` accessor
+
+Then prove `sizeof(Id<T>) == sizeof(std::string)` still holds. Why does adding member *functions* never change the size?
+
+### 1.4 — Find three dangles (30 min)
+
+```cpp
+struct Cache {
+    std::vector<std::string> items;
+    const std::string& first() const { return items.front(); }
+    std::string_view longest() const {
+        std::string best;
+        for (const auto& s : items) if (s.size() > best.size()) best = s;
+        return best;
+    }
+};
+
+int main() {
+    Cache c;
+    const std::string& f = c.first();
+    c.items.push_back("hello");
+    auto l = c.longest();
+    return (int)(f.size() + l.size());
+}
+```
+
+Find them with sanitizers. Explain each in one sentence.
+
+### 1.5 — Measure `noexcept` (30 min)
+
+Build a `Buffer` owning a heap allocation. Move constructor **without** `noexcept`, put 10,000 in a vector, time it. Add `noexcept`. Time again. Explain the difference using §1.9.
+
+### 1.6 — Design like agentty (60 min)
+
+Design types for a file tool such that these are **compile errors**:
+
+```cpp
+process(output_path, input_path);   // arguments swapped
+process("relative/path");           // must be absolute
+resize(height, width);              // dimensions swapped
+```
+
+Constraint: zero runtime overhead vs raw `std::string`/`int`. Prove it with `sizeof`.
 
 ---
 
-## Next Chapter
+## Key takeaways
 
-[Chapter 2: Memory Management — RAII and Ownership →](../ch02-memory/README.md)
+1. **An object is storage + type + lifetime.** The lifetime part is what makes C++ hard and fast.
+2. **If it has a name, it's an lvalue** — including a named `T&&`.
+3. **`std::move` moves nothing.** It's a cast; the move happens when something consumes the result.
+4. **Prefer `{}`** — it rejects narrowing conversions.
+5. **Integer division truncates**, signed overflow is UB, unsigned wraps silently, mixed comparisons lie. Use `-fsanitize=undefined` and `std::cmp_less`.
+6. **`const&` for big parameters, by value for small.** ~16 bytes is the line.
+7. **Return by value.** It's elided. Never `return std::move(local)`.
+8. **Mark moves `noexcept`** or containers silently copy.
+9. **`auto` copies.** `const auto&` in range-for by default.
+10. **Anything storing a reference or pointer** — including `string_view` — is a lifetime hazard.
+11. **Modifying a container invalidates references into it.**
+12. **Strong types cost nothing.** Same `sizeof`, same codegen, bugs become compile errors.
 
-In the next chapter, you'll learn:
-- How C++ manages memory (stack vs heap)
-- RAII: the pattern that prevents resource leaks
-- Ownership and lifetimes
-- The Rule of Zero/Three/Five
+---
+
+## Flags to use from now on
+
+```sh
+g++ -std=c++23 -Wall -Wextra -Wpedantic \
+    -fsanitize=address,undefined -g \
+    yourfile.cpp -o yourfile
+```
+
+Turn them off for release builds. Never for learning.
+
+---
+
+## agentty files you can now read
+
+- `include/agentty/domain/id.hpp` — the whole thing
+- `include/agentty/domain/lazy_bytes.hpp` — `mutable`, const-correctness, ownership
+- `include/agentty/domain/conversation.hpp` lines 41–72 — `ImageContent`
+
+Open them. You'll recognise every construct.
+
+---
+
+## Next chapter
+
+**Chapter 2: Memory Management — RAII and Ownership** takes §1.8's lifetime rules and turns them into a design discipline: how destructors run automatically, why that makes C++ resource handling safer than `try/finally`, and how ownership becomes visible in a type.
