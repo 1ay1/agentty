@@ -349,6 +349,34 @@ int main() {
                               {"cd", root.string()}});
         check(has(r, "e2e-bash-ok"), "shell: runs and captures stdout");
     }
+    // ── shell guard: destructive commands hidden inside substitutions,
+    //    `bash -c`, and wrappers are refused before anything runs ────────
+    for (const char* evil : {"echo hi && x=$(rm -rf /)", "bash -c 'ls && rm -rf ~'",
+                             "sudo env A=1 rm -rf /", "find ~ -exec rm -rf {} +"}) {
+        auto r = run("shell", {{"command", evil}, {"cd", root.string()}});
+        check(!r.has_value(), std::string{"shell guard refuses: "} + evil);
+    }
+    {
+        // …and ordinary work is untouched.
+        auto r = run("shell", {{"command", "python3 -c 'print(40+2)'"},
+                              {"cd", root.string()}});
+        check(has(r, "42"), "shell guard allows `python3 -c`");
+    }
+    // ── shell → typed action: a pure file-inspection call gets a tip that
+    //    names the EXACT native call replacing it ────────────────────────
+    {
+        auto r = run("shell", {{"command", "sed -n '1,2p' code.cpp"},
+                              {"cd", root.string()}});
+        check(has(r, "read path=code.cpp end_line=2"),
+              "shell tip: `sed -n 1,2p` → exact `read` call");
+        auto g = run("shell", {{"command", "grep -rn answer . | head -5"},
+                              {"cd", root.string()}});
+        check(has(g, "grep pattern=answer path=."),
+              "shell tip: `grep -rn … | head` → exact `grep` call");
+        auto b = run("shell", {{"command", "echo build-step"},
+                              {"cd", root.string()}});
+        check(!has(b, "native tool does this"), "shell tip: no tip for non-inspection work");
+    }
     // ── legacy `bash` name canonicalises to the `shell` tool ────────────────
     // Models call the exec tool `bash` (training prior) before internalising
     // our `shell` schema; tools::find aliases it so the first-turn call works
