@@ -2689,15 +2689,59 @@ namespace detail {
 // treatment, and conflating them is what pinned every custom-host model to
 // the built-in default.
 [[nodiscard]] inline int advertised_context_window(const nlohmann::json& m) {
+    // A context window is a TOKEN COUNT, and every shape below has to survive
+    // a gateway that lies, overflows, or stringifies it.
+    //
+    // The old extraction narrowed straight to `int`, which is UB on overflow
+    // and produced plausible-looking garbage rather than a visible failure:
+    //
+    //   18446744073709551615  ->        -1   (uint64 max, seen from buggy proxies)
+    //   4000000000            -> -294967296  (a real number, just > INT_MAX)
+    //   1e18                  -> -2147483648 (float narrowing, UB)
+    //   "1e6"                 ->         1   (stoi stops at 'e')
+    //
+    // Any of those reaching the gauge is worse than reporting nothing: a
+    // NEGATIVE window disables compaction entirely (every `used < window`
+    // test is false), and a window of 1 compacts on every single turn. Both
+    // read as "agentty is broken" rather than "this gateway lies".
+    //
+    // So: widen first, validate, THEN narrow. Reject anything outside a
+    // plausible band — below 1024 is not a usable agent window (it is almost
+    // certainly an output cap or a parse artifact), and above 100M is not a
+    // real deployment in 2026 (the largest shipped windows are ~10M).
+    constexpr std::int64_t kMinPlausibleWindow = 1024;
+    constexpr std::int64_t kMaxPlausibleWindow = 100'000'000;
     auto as_int = [](const nlohmann::json& v) -> int {
-        if (v.is_number_integer())  return v.get<int>();
-        if (v.is_number_unsigned()) return static_cast<int>(v.get<std::uint64_t>());
-        if (v.is_number_float())    return static_cast<int>(v.get<double>());
-        // Some proxies stringify numeric metadata.
-        if (v.is_string()) {
-            try { return std::stoi(v.get<std::string>()); } catch (...) {}
+        std::int64_t n = 0;
+        if (v.is_number_integer())  n = v.get<std::int64_t>();
+        else if (v.is_number_unsigned()) {
+            const auto u = v.get<std::uint64_t>();
+            if (u > static_cast<std::uint64_t>(kMaxPlausibleWindow)) return 0;
+            n = static_cast<std::int64_t>(u);
+        } else if (v.is_number_float()) {
+            const double d = v.get<double>();
+            // NaN/inf compare false against both bounds, so this rejects them
+            // without a separate isfinite() — and never narrows a value that
+            // would not fit.
+            if (!(d >= static_cast<double>(kMinPlausibleWindow)
+               && d <= static_cast<double>(kMaxPlausibleWindow))) return 0;
+            n = static_cast<std::int64_t>(d);
+        } else if (v.is_string()) {
+            // Some proxies stringify numeric metadata. Require the WHOLE
+            // string to be the number: "1e6" must not become 1, and
+            // "128000abc" must not become 128000 — a partial parse is a
+            // misread, not a lenient read.
+            const auto& s = v.get_ref<const std::string&>();
+            try {
+                std::size_t consumed = 0;
+                n = std::stoll(s, &consumed);
+                if (consumed != s.size()) return 0;
+            } catch (...) { return 0; }
+        } else {
+            return 0;
         }
-        return 0;
+        if (n < kMinPlausibleWindow || n > kMaxPlausibleWindow) return 0;
+        return static_cast<int>(n);
     };
     auto pick = [&](const nlohmann::json& obj, const char* key) -> int {
         if (!obj.is_object()) return 0;
@@ -2765,7 +2809,11 @@ namespace detail {
                                 kSuffix.size(), kSuffix) != 0) continue;
                 if (!it.value().is_number()) continue;
                 const double d = it.value().get<double>();
-                if (d > 0 && d < 2e9) return static_cast<int>(d);
+                // Same plausibility band as as_int above: a sub-1k "window"
+                // is an output cap or an artifact, not a usable one.
+                if (d >= static_cast<double>(kMinPlausibleWindow)
+                 && d <= static_cast<double>(kMaxPlausibleWindow))
+                    return static_cast<int>(d);
             }
             return 0;
         };
