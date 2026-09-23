@@ -12,6 +12,7 @@
 
 #include <atomic>
 #include <cctype>
+#include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -29,8 +30,10 @@
 #  endif
 #  include <winsock2.h>
 #  include <ws2tcpip.h>
+#  include <process.h>
 #else
 #  include <arpa/inet.h>
+#  include <fcntl.h>
 #  include <netinet/in.h>
 #  include <sys/socket.h>
 #  include <sys/stat.h>
@@ -317,13 +320,48 @@ bool save_token(const std::string& server, const StoredToken& t) {
     auto sealed = auth::crypt::seal(to_json(t).dump());
     if (!sealed) return false;
     const fs::path p = token_path(server);
-    std::ofstream f(p, std::ios::binary | std::ios::trunc);
-    if (!f) return false;
-    f << *sealed;
-    f.close();
-#if !defined(_WIN32)
-    ::chmod(p.c_str(), 0600);
+    // Write a sibling temp then rename over the target: a crash mid-write
+    // leaves the old token intact instead of a torn file that forces a
+    // re-login. Unique per process+call so concurrent saves don't share it.
+    static std::atomic<std::uint64_t> seq{0};
+    fs::path tmp = p;
+    tmp += ".tmp-" + std::to_string(
+#if defined(_WIN32)
+        static_cast<unsigned long>(::_getpid())
+#else
+        static_cast<unsigned long>(::getpid())
 #endif
+    ) + "-" + std::to_string(seq.fetch_add(1));
+#if defined(_WIN32)
+    {
+        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+        if (!f) return false;
+        f << *sealed;
+        f.close();
+        if (!f) { fs::remove(tmp, ec); return false; }
+    }
+#else
+    {
+        // Born 0600: never readable by others, not even for an instant.
+        const int fd = ::open(tmp.c_str(),
+                              O_WRONLY | O_CREAT | O_EXCL | O_TRUNC | O_CLOEXEC,
+                              0600);
+        if (fd < 0) return false;
+        const char* d = sealed->data();
+        std::size_t left = sealed->size();
+        bool ok = true;
+        while (left > 0) {
+            const ssize_t w = ::write(fd, d, left);
+            if (w < 0) { if (errno == EINTR) continue; ok = false; break; }
+            d += w; left -= static_cast<std::size_t>(w);
+        }
+        if (ok && ::fsync(fd) != 0) ok = false;
+        ::close(fd);
+        if (!ok) { fs::remove(tmp, ec); return false; }
+    }
+#endif
+    fs::rename(tmp, p, ec);
+    if (ec) { std::error_code rm; fs::remove(tmp, rm); return false; }
     return true;
 }
 
