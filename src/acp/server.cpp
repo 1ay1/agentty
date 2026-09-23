@@ -1177,7 +1177,14 @@ a::NewSessionResult AgentServer::on_new_session(const a::NewSessionParams& p) {
 void AgentServer::on_load_session(const a::LoadSessionParams& p) {
     std::string sid = p.sessionId.value;
     std::string cwd = p.cwd;
-    if (sid.empty()) throw std::runtime_error("session/load: missing sessionId");
+    // InvalidParams, not InternalError. Zed's client branches on the code
+    // (agent_servers/src/acp.rs): AuthRequired opens the sign-in flow, any
+    // other non-InternalError is surfaced to the user as-is, and
+    // InternalError is treated as "the agent broke" — so reporting a client
+    // mistake as InternalError blames us for their bad request and loses
+    // the actionable message.
+    if (sid.empty())
+        throw a::RpcError(a::errc::InvalidParams, "session/load: missing sessionId");
     // Loaded session = different context; allow skills to re-activate.
     tools::skills::reset_activations();
 
@@ -1203,7 +1210,10 @@ void AgentServer::on_load_session(const a::LoadSessionParams& p) {
     if (!from_memory) {
         auto path = persistence::threads_dir() / (sid + ".json");
         auto loaded = persistence::load_thread_file(path);
-        if (!loaded) throw std::runtime_error("session/load: no such session: " + sid);
+        if (!loaded)
+            throw a::RpcError(a::errc::InvalidParams,
+                              "session/load: no such session: " + sid,
+                              json{{"sessionId", sid}});
         thread = std::move(*loaded);
 
         util::RankedLock lk(session_mtx_);
@@ -1286,7 +1296,10 @@ a::SessionModeState AgentServer::mode_state(Profile current) {
 
 void AgentServer::on_set_mode(const a::SetModeParams& p) {
     auto s = find_session(p.sessionId.value);
-    if (!s) throw std::runtime_error("session/set_mode: unknown sessionId: " + p.sessionId.value);
+    if (!s)
+        throw a::RpcError(a::errc::InvalidParams,
+                          "session/set_mode: unknown sessionId: " + p.sessionId.value,
+                          json{{"sessionId", p.sessionId.value}});
     Profile applied;
     {
         // Guard the write: a detached worker turn reads sess.profile
@@ -1303,7 +1316,11 @@ void AgentServer::on_set_mode(const a::SetModeParams& p) {
 
 a::SetConfigOptionResult AgentServer::on_set_config_option(const a::SetConfigOptionParams& p) {
     auto s = find_session(p.sessionId.value);
-    if (!s) throw std::runtime_error("session/set_config_option: unknown sessionId: " + p.sessionId.value);
+    if (!s)
+        throw a::RpcError(a::errc::InvalidParams,
+                          "session/set_config_option: unknown sessionId: "
+                              + p.sessionId.value,
+                          json{{"sessionId", p.sessionId.value}});
 
     if (p.configId == "model") {
         // Guard the write: a detached worker turn reads sess.model
@@ -1316,9 +1333,11 @@ a::SetConfigOptionResult AgentServer::on_set_config_option(const a::SetConfigOpt
         // Validate against the known ids so a bad value is an error, not a
         // silent Ask fallback that looks like success.
         if (p.value != "ask" && p.value != "write" && p.value != "minimal")
-            throw std::runtime_error(
+            throw a::RpcError(a::errc::InvalidParams,
                 "session/set_config_option: mode must be ask|write|minimal, got '"
-                + p.value + "'");
+                    + p.value + "'",
+                json{{"configId", "mode"}, {"value", p.value},
+                     {"supported", json::array({"ask", "write", "minimal"})}});
         Profile applied;
         {
             util::RankedLock lk(session_mtx_);
@@ -1336,9 +1355,10 @@ a::SetConfigOptionResult AgentServer::on_set_config_option(const a::SetConfigOpt
         // Surface an unknown config id rather than silently accepting and
         // dropping it — a client setting e.g. "temperatuer" deserves an error,
         // not a no-op that looks like success.
-        throw std::runtime_error(
-            "session/set_config_option: unknown configId '" + p.configId
-            + "' (supported: mode, model)");
+        throw a::RpcError(a::errc::InvalidParams,
+            "session/set_config_option: unknown configId '" + p.configId + "'",
+            json{{"configId", p.configId},
+                 {"supported", json::array({"mode", "model"})}});
     }
 
     // Echo the COMPLETE new config state (v2 contract) so the client's

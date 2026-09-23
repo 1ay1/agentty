@@ -27,6 +27,7 @@
 #include <fstream>
 #include <mutex>
 #include <string>
+#include <set>
 #include <thread>
 #include <vector>
 
@@ -185,6 +186,15 @@ TEST_CASE("acp integration end-to-end") {
 
     std::atomic<int> agent_text_chunks{0};
     std::atomic<int> tool_calls{0};
+    // Every ToolCallUpdate must reference an id a ToolCall already announced.
+    //
+    // This is not a style rule — it is what Zed's client DOES with a stray
+    // update: acp_thread.rs's update_tool_call() looks the id up, finds
+    // nothing, and renders a visible "Tool call not found" FAILURE card in
+    // the user's panel. So an unpaired update is not silently ignored; it
+    // shows up as a broken tool in the transcript.
+    std::set<std::string> announced_tool_ids;
+    std::atomic<int>      orphan_tool_updates{0};
     std::atomic<int> tool_completed{0};
     std::atomic<int> tool_failed{0};
     std::string last_tool_text;
@@ -220,6 +230,7 @@ TEST_CASE("acp integration end-to-end") {
             [&](const SU_ToolCall& t) {
                 ++tool_calls;
                 std::lock_guard lk(transcript_mu);
+                announced_tool_ids.insert(t.toolCall.toolCallId.value);
                 tc_title = t.toolCall.title;
                 // The PROGRAMMATIC name (spec 1.8.0), distinct from the
                 // human title. A client grouping or filtering by tool
@@ -231,6 +242,9 @@ TEST_CASE("acp integration end-to-end") {
                               [&](const auto&) {});
             },
             [&](const SU_ToolCallUpdate& u) {
+                { std::lock_guard lk(transcript_mu);
+                  if (!announced_tool_ids.count(u.update.toolCallId.value))
+                      ++orphan_tool_updates; }
                 if (u.update.status && *u.update.status == ToolCallStatus::Completed)
                     ++tool_completed;
                 if (u.update.status && *u.update.status == ToolCallStatus::Failed)
@@ -361,15 +375,43 @@ TEST_CASE("acp integration end-to-end") {
     agent.session_set_config_option(
         SetConfigOptionParams{ns.sessionId, "model", "claude-sonnet-4-20250514",
                               Json::object()}).get();
-    // An unknown configId is a hard error, not a silent no-op.
+    // An unknown configId is a hard error, not a silent no-op — and the
+    // CODE matters, not just that it threw.
+    //
+    // Zed branches on it (agent_servers/src/acp.rs): AuthRequired opens the
+    // sign-in flow, any other non-InternalError is surfaced to the user
+    // verbatim, and InternalError is treated as "the agent broke" — it digs
+    // into err.data looking for a crash detail and otherwise shows a
+    // generic failure. So reporting a CLIENT mistake as InternalError
+    // blames the agent for a bad request and buries the actionable message.
     {
+        int  code = 0;
+        Json data;
         bool threw = false;
         try {
             agent.session_set_config_option(
                 SetConfigOptionParams{ns.sessionId, "temperatuer", "9",
                                       Json::object()}).get();
+        } catch (const RpcError& e) {
+            threw = true; code = e.code; data = e.data;
         } catch (...) { threw = true; }
         CHECK(threw);
+        CHECK(code == errc::InvalidParams);      // NOT InternalError
+        // And it says what WOULD have worked, so the client can act.
+        CHECK(data.contains("supported"));
+    }
+
+    // Same for an unknown sessionId: the client sent a bad id, we did not
+    // crash.
+    {
+        int  code = 0;
+        try {
+            agent.session_set_mode(
+                SetModeParams{SessionId{"no-such-session"},
+                              SessionModeId{"ask"}, Json::object()}).get();
+        } catch (const RpcError& e) { code = e.code; }
+          catch (...) {}
+        CHECK(code == errc::InvalidParams);
     }
 
     // set_mode round-trip (switch to minimal then back to ask). Keep the
@@ -390,6 +432,10 @@ TEST_CASE("acp integration end-to-end") {
       CHECK(!last_session_title.empty()); }
     CHECK(perm_requests.load() == 1);           // write asked once
     CHECK(tool_calls.load() == 1);
+    // No update referenced an unannounced id. Zed renders those as a
+    // "Tool call not found" failure card, so this is user-visible breakage,
+    // not a protocol nicety.
+    CHECK(orphan_tool_updates.load() == 0);
     if (tool_completed.load() != 1) {
         std::lock_guard lk(transcript_mu);
         std::fprintf(stderr, "tool_failed=%d last_tool_text=[%s]\n",
