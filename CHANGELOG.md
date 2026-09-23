@@ -4,6 +4,11 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.8] - 2026-09-23
+
+### Fixed
+- **Headless runs now resolve the real context window, including on custom hosts.** `agentty run`, `agentty acp` and `agentty mcp-serve` never build a Model, so they installed the subagent seam with an empty model catalog — leaving `context_window` at 0 on every turn (the Ollama transport reads 0 as "use my tiny default" and truncates exactly the long runs headless exists for), `cheapest_capable_model()` with nothing to choose from, and Smart Mode's role resolver falling back to the parent model for every pinned slot. They now fetch the live catalog through the same seam the stream path dispatches on, layered over the bundled floor so an id that outlived its catalog row (a `-m` pinned in settings) still resolves. Verified: a custom OpenAI-compatible host goes from 0 to its advertised 131072.
+
 ## [0.9.7] - 2026-09-23
 
 All about reaching **any** OpenAI-compatible endpoint, and telling the truth about what happened when you do.
