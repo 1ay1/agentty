@@ -986,6 +986,11 @@ jobs:
             echo "::error::AUR push failed and AUR is NOT reporting maintenance — likely an SSH auth problem (AUR_SSH_KEY) or the account lost write access to agentty-bin. Fix it; do not ignore."
             exit 1
           fi
+          # Say so. Without this the step's last output is the `git commit`
+          # line, so a log that ends there is ambiguous between "pushed" and
+          # "exited early" — which is exactly the diagnosis #50 cost, for a
+          # push that had in fact worked.
+          echo "✓ AUR agentty-bin pushed at $V"
 
   # Submit the Windows .msi to the winget community repo. winget is the
   # zero-cost, no-SmartScreen-warning install path: `winget install agentty`.
@@ -1390,7 +1395,22 @@ jobs:
           # ---- 4. AUR: PKGBUILD pkgver is this version ----
           echo "::group::aur"
           if [ -n "$AUR_SSH_KEY" ]; then
-            pk=$(curl -fsSL "https://aur.archlinux.org/cgit/aur.git/plain/PKGBUILD?h=agentty-bin" 2>/dev/null || true)
+            # RETRY before declaring drift. cgit serves from a mirror that
+            # lags the git push by up to a minute or two, so a single read
+            # right after publish-aur finishes routinely shows the PREVIOUS
+            # version. That fired on v0.9.4 and v0.9.5 back to back — both
+            # times the package was already correct by the time anyone
+            # looked, and both times the release went red for it.
+            #
+            # A gate that cries wolf on healthy releases is worse than no
+            # gate: it trains you to ignore the one red X that matters. So
+            # give the mirror ~90s to catch up before believing it.
+            pk=""
+            for attempt in 1 2 3 4 5 6; do
+              pk=$(curl -fsSL "https://aur.archlinux.org/cgit/aur.git/plain/PKGBUILD?h=agentty-bin" 2>/dev/null || true)
+              printf '%s\n' "$pk" | grep -qE "^pkgver=${V}$" && break
+              [ "$attempt" -lt 6 ] && sleep 15
+            done
             if printf '%s\n' "$pk" | grep -qE "^pkgver=${V}$"; then
               ok "AUR agentty-bin @ $V"
             elif [ -z "$pk" ] || printf '%s\n' "$pk" | grep -qi 'AUR is down\|maintenance'; then
@@ -1425,9 +1445,19 @@ jobs:
               # The question is "is this version submitted", not "did we
               # submit it" — and the publish job now fails loudly on its own
               # when OUR submission breaks, so this no longer has to infer it.
-              prs=$(GH_TOKEN=$WINGET_TOKEN gh search prs --repo microsoft/winget-pkgs \
-                      "agentty.agentty version $V" --limit 5 \
-                      --json number,state -q '.[] | "\(.number):\(.state)"' 2>/dev/null || true)
+              #
+              # RETRY, same reason as the AUR check above: komac opens the PR
+              # and GitHub's search index takes a little while to return it,
+              # so a read immediately after publish-winget finishes can come
+              # back empty for a submission that landed fine.
+              prs=""
+              for attempt in 1 2 3 4 5 6; do
+                prs=$(GH_TOKEN=$WINGET_TOKEN gh search prs --repo microsoft/winget-pkgs \
+                        "agentty.agentty version $V" --limit 5 \
+                        --json number,state -q '.[] | "\(.number):\(.state)"' 2>/dev/null || true)
+                [ -n "$prs" ] && break
+                [ "$attempt" -lt 6 ] && sleep 15
+              done
               if [ -n "$prs" ]; then ok "winget PR open/merged for $V ($prs)"; else bad "winget: no PR found for version $V"; fi
             fi
           else skip "winget"; fi
