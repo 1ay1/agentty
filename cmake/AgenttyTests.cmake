@@ -31,6 +31,7 @@ set(_AGENTTY_CONSOLIDATED
     teardown_test
     snapshot_picker_test
     dup_tool_call_id_test salvage_dedup_test compaction_wire_test
+    subprocess_group_kill_test
     plugins_in_model_test tool_stream_snapshot_test tool_timeline_adapter_test
     anthropic_sse_golden_test codex_login_flow_test mcp_reload_race_test
     persistence_proactive_test proactive_deferred_test rag_adapter_test

@@ -584,8 +584,34 @@ SubprocessResult run_posix(const std::vector<std::string>& argv_in,
     pid_t pid = -1;
     int rc = 0;
 #if AGENTTY_HAVE_POSIX_SPAWN
-    rc = ::posix_spawnp(&pid, arg_ptrs[0], &piped.actions.a, nullptr,
+    // Own session (or at least own process group) so timeout/cancel can
+    // signal the whole tree: `sh -c` plus anything it forks. Signalling
+    // only the leader left `cmd &`, pipelines and dev servers running.
+    posix_spawnattr_t attr;
+    const bool have_attr = (::posix_spawnattr_init(&attr) == 0);
+    posix_spawnattr_t* attrp = nullptr;
+#  ifdef POSIX_SPAWN_SETSID
+    if (have_attr && ::posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETSID) == 0)
+        attrp = &attr;
+#  endif
+#  ifdef POSIX_SPAWN_SETPGROUP
+    if (have_attr && !attrp
+        && ::posix_spawnattr_setpgroup(&attr, 0) == 0
+        && ::posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP) == 0)
+        attrp = &attr;
+#  endif
+    rc = ::posix_spawnp(&pid, arg_ptrs[0], &piped.actions.a, attrp,
                         arg_ptrs.data(), environ);
+    // Some libcs advertise SETSID but reject it at spawn time. Retry with
+    // a plain process group, which every POSIX libc supports.
+#  if defined(POSIX_SPAWN_SETSID) && defined(POSIX_SPAWN_SETPGROUP)
+    if (rc == EINVAL && attrp
+        && ::posix_spawnattr_setpgroup(&attr, 0) == 0
+        && ::posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP) == 0)
+        rc = ::posix_spawnp(&pid, arg_ptrs[0], &piped.actions.a, attrp,
+                            arg_ptrs.data(), environ);
+#  endif
+    if (have_attr) ::posix_spawnattr_destroy(&attr);
 #else
     // Fork/exec fallback (Bionic without <spawn.h> below API 28). Perform
     // the same fd wiring the file_actions would have — stdin<-/dev/null,
@@ -593,6 +619,7 @@ SubprocessResult run_posix(const std::vector<std::string>& argv_in,
     // child before exec. execvp honours PATH like posix_spawnp.
     pid = ::fork();
     if (pid == 0) {
+        if (::setsid() < 0) (void)::setpgid(0, 0);
         int devnull = ::open("/dev/null", O_RDONLY);
         if (devnull >= 0) { ::dup2(devnull, STDIN_FILENO); ::close(devnull); }
         ::dup2(piped.write_end.fd, STDOUT_FILENO);
@@ -675,14 +702,23 @@ SubprocessResult run_posix(const std::vector<std::string>& argv_in,
     // a reaped child — the order can vary (child can exit before its
     // last bytes drain on a heavily-buffered pipe; pipe can EOF before
     // waitpid completes if the child is being reparented).
+    auto signal_group = [&](int sig) {
+        // The child leads its own group (see spawn). Fall back to the
+        // leader alone only if the group is already gone.
+        if (::kill(-cpid, sig) != 0 && errno == ESRCH)
+            (void)::kill(cpid, sig);
+    };
+
     bool reaped = false;
-    while (!eof || !reaped) {
+    bool group_done = false;
+    auto cleanup_deadline = clock::time_point::max();
+    while (!eof || !reaped || (sent_term && !group_done)) {
         auto now = clock::now();
 
         // Cancellation has the same bounded SIGTERM → SIGKILL path as the
         // idle watchdog, but is not reported as a timeout to the caller.
         if (!sent_term && opts.stop_requested && opts.stop_requested()) {
-            ::kill(cpid, SIGTERM);
+            signal_group(SIGTERM);
             sent_term = true;
             kill_at   = now + kKillGrace;
         }
@@ -695,14 +731,21 @@ SubprocessResult run_posix(const std::vector<std::string>& argv_in,
         // successful drain below, so reaching it means the child has
         // gone silent for at least `opts.timeout` seconds.
         if (!sent_term && has_idle_window && now >= idle_deadline) {
-            ::kill(cpid, SIGTERM);
+            signal_group(SIGTERM);
             sent_term = true;
             timed_out = true;
             kill_at   = now + kKillGrace;
         }
         if (sent_term && !sent_kill && now >= kill_at) {
-            ::kill(cpid, SIGKILL);
+            signal_group(SIGKILL);
             sent_kill = true;
+            cleanup_deadline = now + std::chrono::seconds{1};
+        }
+        if (sent_term) {
+            // Keep going until every process in the group is gone, bounded
+            // so a descendant stuck in D state can't hang us forever.
+            group_done = (::kill(-cpid, 0) != 0 && errno == ESRCH);
+            if (sent_kill && now >= cleanup_deadline) group_done = true;
         }
 
         // Compute the next event we care about and bound the poll
