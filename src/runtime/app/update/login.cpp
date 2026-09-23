@@ -283,7 +283,19 @@ Step host_probed(Model m, HostProbed r) {
     // that fixes it beats a success toast that hides the gap.
     std::string ctx;
     if (r.window_tokens > 0) {
-        ctx = " \xc2\xb7 " + ui::context_window_label(r.window_tokens) + " ctx";
+        // SAY WHERE THE NUMBER CAME FROM. A window is either something the
+        // endpoint TOLD us or something we defaulted to, and those two
+        // deserve different confidence from the reader (this is the
+        // Observed<T> distinction from lens.hpp, surfaced in the UI).
+        //
+        // GitHub Copilot's runtime models this the same way — its model
+        // record carries max_context_window_tokens / max_prompt_tokens /
+        // max_output_tokens as separate advertised limits, distinct from
+        // whatever a session ends up using. A single unlabelled number is
+        // the thing that makes a wrong window impossible to debug: you
+        // cannot tell a 131k the server promised from a 131k we assumed.
+        ctx = " \xc2\xb7 " + ui::context_window_label(r.window_tokens)
+            + " ctx (advertised)";
     } else if (r.probe_skipped) {
         // No keybinding here on purpose. This picker already refuses to hide
         // per-model settings behind invisible chords (see on_model_picker:
@@ -297,7 +309,10 @@ Step host_probed(Model m, HostProbed r) {
         ctx = " \xc2\xb7 ctx not checked \xe2\x80\x94 set AGENTTY_PROBE_HOSTS="
             + provider::parse_selection(spec).openai_endpoint.host;
     } else {
-        ctx = " \xc2\xb7 ctx: auto";
+        // Nothing advertised and nothing to probe: the catalog default is
+        // carrying this. Say so rather than printing a bare number the user
+        // would reasonably read as measured.
+        ctx = " \xc2\xb7 ctx: default";
     }
 
     // A host at a public-looking address that ANSWERED a runtime route is

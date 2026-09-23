@@ -1336,11 +1336,9 @@ void dispatch_data(StreamCtx& ctx, std::string_view data) {
 
     // Top-level error object (some servers stream an error frame mid-body).
     if (j.contains("error")) {
-        std::string msg = "unknown error";
-        if (j["error"].is_object())
-            msg = j["error"].value("message", msg);
-        else if (j["error"].is_string())
-            msg = j["error"].get<std::string>();
+        // Same SSOT as the HTTP-status path below: dialect::error_message()
+        // knows every envelope this wire uses, so neither site re-derives it.
+        std::string msg = dialect::error_message()(j).value_or("unknown error");
         ctx.sink(StreamError{msg, std::nullopt});
         ctx.terminated = true;
         return;
@@ -1422,10 +1420,15 @@ void feed_sse(StreamCtx& ctx, const char* data, size_t len) {
             try {
                 auto j = json::parse(payload);
                 if (j.is_object()) {
-                    if (j.contains("message") && j["message"].is_string())
-                        msg = j["message"].get<std::string>();
-                    else if (j.contains("error") && j["error"].is_object())
-                        msg = j["error"].value("message", msg);
+                    // Envelope shapes live in dialect::error_message() — the
+                    // SSOT for how this spec-less wire spells an error. Three
+                    // exist ({"error":{"message"}}, {"error":"…"} flattened by
+                    // some gateways, and llama.cpp's bare {"message","code"}),
+                    // and an unrecognised one surfaces to the user as "the
+                    // model stopped for no reason", which is the worst
+                    // possible diagnostic. Parsing them here too would be a
+                    // second partial list that drifts from the first.
+                    if (auto m = dialect::error_message()(j)) msg = std::move(*m);
                     // llama.cpp stamps the would-be HTTP status in `code`
                     // (500 template failure, 400 bad request, 503 busy).
                     // Carrying it into StreamError.http_status routes the

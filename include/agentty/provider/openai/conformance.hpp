@@ -37,6 +37,26 @@
 // The failure modes are not symmetric, which is what sets the default:
 // sending a field an endpoint rejects is a HARD 400/422 that kills the turn;
 // omitting a field costs an optimisation. So when in doubt, omit.
+//
+// ── AND TOLERANCE VARIES, SO IT CANNOT BE ASSUMED ────────────────────────
+//
+// Measured on Yolo-Auto (vllm-0.29.1 behind a billing proxy, 2026-09-23):
+// it accepts `prompt_cache_key`, `reasoning_effort` AND
+// `max_completion_tokens` — all HTTP 200, unknown fields silently ignored.
+// vLLM is permissive by default.
+//
+// That is exactly why the tiers are NOT derived from "did it work somewhere".
+// One tolerant endpoint proves nothing about a strict one: Mistral MAGISTRAL
+// returns 422 for the same `reasoning_effort` this host shrugs at. A field is
+// Universal only when it works on the STRICTEST endpoint we support, never
+// because the most permissive one let it through.
+//
+// GitHub Copilot's runtime reaches the same conclusion from the other side:
+// its model records carry `supported_endpoints` and per-model
+// `supportsReasoningEffort`, and it ships a whole
+// `reasoning_effort_fallback` path (configured_effort → resultingEffort with
+// a primary_reason) rather than assuming a configured effort is deliverable.
+// Capability is per-endpoint data, not a global constant.
 
 #include <cstdint>
 #include <string_view>
