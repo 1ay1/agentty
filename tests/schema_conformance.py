@@ -101,14 +101,45 @@ FIELD_RE = re.compile(
 
 
 def our_product(body):
-    """{key: modality} for a record codec, or None if it isn't one."""
+    """{key: modality} for a record codec, or None if it isn't one.
+
+    Two shapes, because not every codec uses the combinators:
+
+      record(required("k", &T::k), …)     the DSL — modality is explicit
+      j["k"] = …;                          hand-written — modality inferred
+
+    The second exists where the wire shape is irregular enough that the
+    combinators can't express it (CreateMessageResult encodes `content` as
+    either one block or an array). Skipping those left 17 modelled types
+    never compared at all — a silent hole exactly like the ones this script
+    is for, so they are parsed rather than ignored.
+
+    For a hand-written codec the KEY SET is recoverable but the modality is
+    not — `if (r.title) j["title"] = …` is indistinguishable from an
+    unconditional write at this level. Those keys are marked "unknown" so
+    the presence checks still run while the modality checks stay quiet,
+    rather than firing on a guess.
+    """
     if body is None:
         return None
     if "variant_codec" in body or "sum_tagged" in body or re.search(r"\bmatch\s*\(", body):
         return None            # a coproduct, not a product
-    if "record<" not in body:
-        return None            # hand-written codec; shape not inferable
-    return {k: mod for mod, k in FIELD_RE.findall(body)}
+    if "record<" in body:
+        return {k: mod for mod, k in FIELD_RE.findall(body)}
+    # Hand-written. Two ways a key gets written:
+    #   j["k"] = v;                  assignment
+    #   Json j = {{"k", v}, ...};    brace-init
+    # Missing the second reported PromptReference.name as absent when it is
+    # right there in `{{"type", "ref/prompt"}, {"name", r.name}}`.
+    keys = set(re.findall(r'\b\w+\s*\[\s*"([^"]+)"\s*\]\s*=', body))
+    keys |= set(re.findall(r'\{\s*"([^"]+)"\s*,', body))
+    if not keys:
+        return None            # can't infer a shape; nothing to compare
+    # Modality is NOT inferable here — `if (r.title) j["title"] = ...` is an
+    # optional field that looks identical to a required one at this level.
+    # Report the KEY SET only, marked unknown, so the presence checks run
+    # and the modality checks stay silent rather than firing on a guess.
+    return {k: "unknown" for k in sorted(keys)}
 
 
 def our_sum_values(body):
@@ -198,7 +229,7 @@ CARRIERS = {
     "number":  ("double", "float", "int", "int64"),
     "boolean": ("bool",),
     "array":   ("List", "vector", "array"),
-    "object":  ("Json", "map", "object"),
+    "object":  ("Json", "map", "object", "pair"),
 }
 
 
@@ -368,7 +399,7 @@ def check(label, schema_path, sources):
             mod = got.get(k)
             if mod is None:
                 fails.append(f"{name}.{k}: REQUIRED by schema, absent from codec")
-            elif mod == "optional":
+            elif mod == "optional":        # "unknown" never fires here
                 # `optional` encodes a Maybe and OMITS the key when empty —
                 # for a MUST field that is a wire violation we would never
                 # see locally, since our own decoder tolerates the absence.
@@ -376,7 +407,7 @@ def check(label, schema_path, sources):
 
         want_opt = want_all - want_req
         for k in sorted(want_opt):
-            if got.get(k) == "required":
+            if got.get(k) == "required":   # "unknown" never fires here
                 # Mirror image: we would REJECT a legal message from a peer
                 # that legitimately omits it.
                 fails.append(f"{name}.{k}: optional in schema, modelled `required`")

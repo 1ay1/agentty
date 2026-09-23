@@ -45,3 +45,4 @@ AGENTTY_ASSISTANT_USAGE.md
 hand/
 resume/
 
+__pycache__/
