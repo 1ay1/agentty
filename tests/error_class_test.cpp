@@ -455,3 +455,42 @@ TEST_CASE("parse_effort_rejection: ollama think-value + minimal harvesting") {
         CHECK((*set & effort_bit(Effort::High))    != 0);
     }
 }
+
+// A 429 covers two unrelated situations and only one is worth retrying.
+//
+// A burst/concurrency limit clears in seconds — retrying is exactly right.
+// A plan QUOTA does not clear until it resets, and every retry is guaranteed
+// to fail with the message the first response already carried. So the user
+// sits through a backoff to learn nothing.
+//
+// The server tells us which one it is, in Retry-After. Yolo-Auto's free tier
+// answers `retry-after: 29410` (8h, to 00:00 UTC) with
+// type=insufficient_quota — captured live 2026-09-23 after exhausting a real
+// key's 15 requests. agentty used to clamp that to 600s and retry 3×, so a
+// "you are out until midnight" became three pointless 10-minute waits.
+TEST_CASE("retry-after: hours means quota, and a quota is terminal") {
+    namespace P = agentty::provider;
+
+    // The threshold is the line between "wait" and "tell the user".
+    CHECK(P::kRetryAfterTerminalSeconds == 15 * 60);
+
+    // Burst limits sit well under it and must still be honoured, not
+    // shortened — re-hitting the same 429 early burns the budget faster
+    // than the server permits.
+    CHECK(30   <= P::kRetryAfterTerminalSeconds);   // typical burst backoff
+    CHECK(60   <= P::kRetryAfterTerminalSeconds);
+    CHECK(300  <= P::kRetryAfterTerminalSeconds);   // a 5-min cooldown
+
+    // A real quota reset is far beyond it.
+    CHECK(29410 > P::kRetryAfterTerminalSeconds);   // Yolo-Auto free, measured
+    CHECK(3600  > P::kRetryAfterTerminalSeconds);   // an hourly cap
+    CHECK(86400 > P::kRetryAfterTerminalSeconds);   // a daily cap
+
+    // And the classification itself is unchanged: this is still a RateLimit,
+    // not an Auth or Terminal error. What changed is whether we WAIT on it —
+    // the class still drives the slow loop-backoff schedule.
+    agentty::http::HttpError e{};
+    e.kind        = agentty::http::HttpErrorKind::Status;
+    e.http_status = 429;
+    CHECK(P::classify(e) == P::ErrorClass::RateLimit);
+}

@@ -570,6 +570,22 @@ inline constexpr std::chrono::seconds kRetryDecayWindow{90};
 // no-progress attempts the failure latches Terminal regardless of class.
 inline constexpr int kMaxNoProgressFailures = 6;
 
+// A `Retry-After` longer than this is a QUOTA, not a burst limit — treat it
+// as terminal instead of waiting.
+//
+// 429 covers two unrelated situations and only one of them is worth retrying.
+// A burst/concurrency limit clears in seconds. A plan quota does not clear
+// until it resets: Yolo-Auto's free tier answers `retry-after: 29410` (8 h,
+// to 00:00 UTC) with type=insufficient_quota, and hosted providers answer
+// similarly on a billing cap.
+//
+// Retrying the second kind is always wrong — every attempt is guaranteed to
+// fail with the message the FIRST response already carried, so the user waits
+// through a backoff to learn nothing. 15 minutes is the line: beyond it,
+// nobody is sitting at a terminal waiting for the window to open, and saying
+// so immediately is strictly more useful than saying it later.
+inline constexpr long kRetryAfterTerminalSeconds = 15 * 60;
+
 [[nodiscard]] constexpr std::string_view to_string(ErrorClass k) noexcept {
     switch (k) {
         case ErrorClass::Transient: return "transient";

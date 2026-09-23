@@ -2488,13 +2488,33 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                 if (e.retry_after.has_value()) {
                     auto s = e.retry_after->count();
                     if (s < 1)   s = 1;
-                    // Honor the server's backoff. Cap at 10 min only to bound
-                    // a pathological/garbage value — a 300 s Retry-After must
-                    // be respected, not silently shortened to 120 s (which
-                    // would re-hit the same 429 and burn the budget faster
-                    // than the server permits).
-                    if (s > 600) s = 600;
-                    delay = std::chrono::seconds(s);
+                    // A RETRY-AFTER MEASURED IN HOURS IS A QUOTA, NOT A
+                    // BURST LIMIT, AND RETRYING IT IS ALWAYS WRONG.
+                    //
+                    // 429 covers two different things. A burst limit clears
+                    // in seconds and a retry is exactly right. A plan quota
+                    // does not clear until it resets — Yolo-Auto's free tier
+                    // answers `retry-after: 29410` (8h to 00:00 UTC) with
+                    // type=insufficient_quota, and Anthropic/OpenAI do the
+                    // same on a billing cap.
+                    //
+                    // Clamping that to 600 s turned "you are out until
+                    // midnight" into three pointless 10-minute waits, each
+                    // one guaranteed to fail, before giving up with the same
+                    // message the FIRST response already carried. The user
+                    // sat through the backoff to learn nothing.
+                    //
+                    // So: honour a server hint up to the cap, and treat
+                    // anything beyond it as terminal. The server said when it
+                    // will serve again; if that is further away than we are
+                    // willing to wait, waiting is not the answer — telling
+                    // the user is.
+                    if (s > provider::kRetryAfterTerminalSeconds) {
+                        can_retry = false;
+                    } else {
+                        if (s > 600) s = 600;
+                        delay = std::chrono::seconds(s);
+                    }
                 } else {
                     delay = provider::backoff_with_jitter(klass, attempt);
                 }

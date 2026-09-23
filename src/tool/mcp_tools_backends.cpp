@@ -1436,6 +1436,26 @@ public:
                     progress::emit(log);
                     break;
                 }
+                // A RETRY-AFTER MEASURED IN HOURS IS A QUOTA, NOT A BURST
+                // LIMIT. A burst limit clears in seconds and retrying is
+                // right; a plan quota does not clear until it resets, so
+                // every attempt is guaranteed to fail with the message the
+                // FIRST response already carried.
+                //
+                // Measured: Yolo-Auto's free tier answers
+                // `retry-after: 29410` (8h, to 00:00 UTC) with
+                // type=insufficient_quota. Clamping that to 30s turned "you
+                // are out until midnight" into three pointless waits and 95
+                // seconds of wall clock before giving up with the same text.
+                // Same reasoning as the interactive reducer — see
+                // kRetryAfterTerminalSeconds in provider/error_class.hpp.
+                if (stream_result.retry_after
+                    && stream_result.retry_after->count()
+                           > provider::kRetryAfterTerminalSeconds) {
+                    log += "\n  \xe2\x9a\xa0 " + err;
+                    progress::emit(log);
+                    break;
+                }
                 // Honor server guidance, but cap it so a hostile/mistaken
                 // Retry-After cannot pin a task worker indefinitely.
                 constexpr auto kMaxRetryAfter = std::chrono::seconds{30};
