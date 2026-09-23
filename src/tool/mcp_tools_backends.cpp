@@ -999,6 +999,23 @@ provider::StreamResult run_one_completion(Thread& thread,
     // fan-out of parallel subagents (each turn otherwise billed at the full
     // ceiling). The wrap-up nudge already forces a tight final report.
     req.max_tokens    = 8192;
+    // The model's real context window, looked up in the SAME catalog the model
+    // was routed from.
+    //
+    // This was simply never set here, so every subagent turn (and every
+    // `agentty run`, which goes through this loop) dispatched with
+    // context_window=0 regardless of provider. Downstream that means the
+    // Ollama transport cannot size `options.num_ctx` and falls back to the
+    // daemon's tiny default (~2k/4k), silently truncating a long agent
+    // conversation — exactly the failure the field exists to prevent.
+    //
+    // The main reducer sets it from the same place (cmd_factory.cpp:954).
+    // Two loops that both build requests must both fill them in; the one
+    // nobody watches is the one that rots — which is the asymmetry the
+    // comment right below has been warning about.
+    for (const auto& mi : cfg.candidates) {
+        if (mi.id.value == req.model) { req.context_window = mi.context_window; break; }
+    }
     req.messages      = thread.messages;
     // Same preflight the main loop runs. The subagent assembles its own
     // request — its own thread, its own tool advertisement, its own

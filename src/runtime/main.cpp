@@ -67,6 +67,7 @@
 #include "agentty/airgap/airgap.hpp"
 #include "agentty/util/logx.hpp"   // flight recorder dump in crash handler
 #include "agentty/util/teardown.hpp"
+#include "agentty/domain/bundled_catalog.hpp"
 #include "agentty/domain/profile.hpp"
 #include "agentty/runtime/app/deps.hpp"
 #include "agentty/runtime/app/program.hpp"
@@ -1321,10 +1322,33 @@ int main(int argc, char** argv) {
         if (auto ov = smart::tuning::enabled_override())
             sa_smart.enabled = *ov;
         settings::registry::apply_env(sa_smart);
+        // The model CATALOG, for the same reason and with the same history.
+        //
+        // The TUI pushes this from init() and again on every catalog load
+        // (set_candidates in init.cpp / models.cpp), but `agentty run` and
+        // `agentty acp` never build a Model — so they ran with an EMPTY
+        // candidate list, and everything that reads it silently degraded:
+        //
+        //   • context_window resolved to 0 on every headless turn, so the
+        //     Ollama transport could not size options.num_ctx and fell back
+        //     to the daemon's ~2k/4k default, truncating long runs.
+        //   • cheapest_capable_model() had nothing to choose from, so
+        //     read-only subagent roles never routed down to a cheap model.
+        //   • Smart Mode's role resolver had no candidates, so pinned slots
+        //     fell back to the parent model — the exact failure the comment
+        //     above describes for RoleConfig, one field over.
+        //
+        // Seeded from the SAME bundled catalog init() uses, so headless and
+        // interactive start from one floor. A live /models fetch supersedes
+        // it in the TUI; headless has no fetch, which is precisely why the
+        // floor has to be non-empty here.
+        auto sa_candidates = catalog::bundled(
+            provider::parse_selection(provider_spec).provider_id());
         tools::subagent::install(tools::subagent::Config{
             .auth = provider_auth,
             .model = std::move(sa_model),
             .installed = true,
+            .candidates = std::move(sa_candidates),
             .stream = stream_fn,
             .smart = std::move(sa_smart)});
     }
