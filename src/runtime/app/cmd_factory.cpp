@@ -27,6 +27,10 @@
 #include "agentty/provider/credentials.hpp"
 #include "agentty/util/modelsdev.hpp"
 #include "agentty/util/logx.hpp"
+
+#if AGENTTY_MCP
+#include <mcp/tools/util/shellx.hpp>
+#endif
 #include "agentty/util/dbglog.hpp"
 #include "agentty/tool/registry.hpp"
 #include "agentty/mcp/client.hpp"   // plugin_model(), reload_mcp_plugins via registry
@@ -1371,14 +1375,25 @@ Cmd<Msg> run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args,
                 // in the log with the arguments that produced it — the exact
                 // evidence that was missing when Copilot's tool calls were
                 // arriving empty.
+                // Shell calls also log what they were FOR (read / search /
+                // list / git / mixed / other / none), so the rate of shell
+                // detours around native tools is measurable from the log.
+                std::string shell_cat = "-";
+#if AGENTTY_MCP
+                if (name.value == "shell" && args.is_object())
+                    if (auto it = args.find("command"); it != args.end() && it->is_string()) {
+                        namespace sx = ::mcp::tools::util::shellx;
+                        shell_cat = std::string{sx::category(sx::plan(sx::analyze(it->get<std::string>())))};
+                    }
+#endif
                 AGT_LOGL(Tool, result ? ::agentty::logx::Level::Debug
                                       : ::agentty::logx::Level::Warn,
-                         "tool.exec", "name={} ms={} ok={} err={} args={}",
+                         "tool.exec", "name={} ms={} ok={} err={} shell={} args={}",
                          name.value, t_ms, result ? 1 : 0,
                          result ? std::string{"-"}
                                 : std::string{tools::to_string(result.error().kind)}
                                       + ": " + result.error().detail,
-                         args_dump);
+                         shell_cat, args_dump);
                 if (result) {
                     // post_tool hooks: fire-and-forget (never block, never
                     // rewrite the result).
