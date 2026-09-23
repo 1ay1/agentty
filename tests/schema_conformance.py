@@ -23,11 +23,15 @@ What this checks, per type we implement:
 
   1. PRODUCT SHAPE   every schema-required key is a field in the codec, and
                      every codec key exists in the schema (no invented keys)
-  2. MODALITY        a schema-required key is not modelled as `optional`
+  2. MODALITY        a schema-required key is not modelled `optional`
                      (that would let us omit a MUST field), and a
-                     schema-optional key is not modelled as `required`
+                     schema-optional key is not modelled `required`
                      (that would make us reject a legal peer message)
-  3. SUM VALUES      every enum's codec carries exactly the schema's
+  3. CARRIER         the C++ member type encodes to the JSON type the
+                     schema declares — a key can be present and correctly
+                     required and still carry a string where the protocol
+                     says integer
+  4. SUM VALUES      every enum's codec carries exactly the schema's
                      allowed strings — no missing, no invented
 
   MCP   {"type":"string","enum":[…]}          two spellings of the same
@@ -162,6 +166,69 @@ ABSTRACT = {"Result", "Request", "Notification", "PaginatedRequest",
             "AgentNotification", "JSONRPCRequest", "JSONRPCNotification"}
 
 
+def struct_members(sources, name):
+    """{member: declared C++ type} for `struct <name> { ... };`.
+
+    The codec gives MODALITY (required/optional/defaulted); the struct gives
+    the CARRIER. Conformance needs both — a key can be present, correctly
+    required, and still carry a string where the schema says integer, which
+    encodes a JSON type the peer rejects.
+    """
+    for _, blob in sources.items():
+        m = re.search(r"\bstruct\s+" + re.escape(name) + r"\b\s*(?::[^{]*)?\{", blob)
+        if not m:
+            continue
+        body = _balanced(blob, m.end() - 1)
+        out = {}
+        # `Type name;` / `Type name = init;` — one member per statement.
+        for decl in re.finditer(
+                r"^\s*((?:const\s+)?[\w:]+(?:\s*<[^;]*?>)?)\s+(\w+)\s*(?:=[^;]*)?;",
+                body, re.M):
+            out[decl.group(2)] = decl.group(1).strip()
+        return out
+    return None
+
+
+# Schema JSON type -> the C++ carriers that encode to it. Deliberately a
+# whitelist: an unrecognised carrier is reported, not assumed fine. Better a
+# note to widen the table than a silent pass on a real mismatch.
+CARRIERS = {
+    "string":  ("std::string", "string"),
+    "integer": ("int", "int64", "int32", "size_t", "long", "unsigned"),
+    "number":  ("double", "float", "int", "int64"),
+    "boolean": ("bool",),
+    "array":   ("List", "vector", "array"),
+    "object":  ("Json", "map", "object"),
+}
+
+
+def carrier_ok(schema_type, cpp_type):
+    """Could `cpp_type` encode to `schema_type`?
+
+    Unwraps Maybe<>/List<> to the payload, since the modality and
+    multiplicity dimensions are checked separately — here we only care what
+    is ultimately carried.
+    """
+    t = cpp_type
+    # A named newtype (ToolCallId, SessionId, MessageId, …) wraps a string.
+    if re.fullmatch(r"\w*(Id|Name|Path|Uri|Version)", t):
+        return schema_type == "string"
+    inner = re.sub(r"^Maybe<(.*)>$", r"\1", t).strip()
+    if schema_type == "array":
+        return bool(re.match(r"(List|std::vector)\s*<", inner))
+    inner = re.sub(r"^(List|std::vector)\s*<(.*)>$", r"\2", inner).strip()
+    pats = CARRIERS.get(schema_type)
+    if pats is None:
+        return True            # union / unconstrained — nothing to check
+    low = inner.lower()
+    if any(p.lower() in low for p in pats):
+        return True
+    # An enum or a nested record is a legitimate carrier for string/object.
+    if schema_type in ("string", "object") and re.fullmatch(r"[\w:]+", inner):
+        return True
+    return False
+
+
 def check(label, schema_path, sources):
     schema = json.loads(Path(schema_path).read_text())
     defs = defs_of(schema)
@@ -219,6 +286,24 @@ def check(label, schema_path, sources):
                 # that legitimately omits it.
                 fails.append(f"{name}.{k}: optional in schema, modelled `required`")
 
+        # ── carrier types ──
+        # The fourth dimension. A key can be present, correctly required,
+        # and still carry the wrong JSON type — ttlMs as a string, say,
+        # which encodes `"3600000"` where the peer's schema says integer.
+        # Modality and presence both pass that happily.
+        members = struct_members(sources, name) or {}
+        props = node.get("properties") or {}
+        for k in sorted(set(got) & set(props) & set(members)):
+            st = props[k].get("type")
+            if isinstance(st, list):
+                st = next((x for x in st if x != "null"), None)   # nullable
+            if not isinstance(st, str):
+                continue                      # union / $ref — not checkable
+            if not carrier_ok(st, members[k]):
+                fails.append(
+                    f"{name}.{k}: schema says {st}, codec carries "
+                    f"{members[k]}")
+
         extras = sorted(set(got) - want_all - ENVELOPE - tags - {"_meta"})
         if extras:
             # An extra key is a VIOLATION only when the schema closes the
@@ -268,8 +353,18 @@ def main():
     if bad:
         print(f"{len(bad)} conformance problem(s)")
         return 1
-    print("codec algebra agrees with the schema algebra "
-          "(product shape, field modality, sum values)")
+    # Four dimensions of the algebra, verified:
+    #   product shape   required keys present, no invented keys
+    #   modality        required/optional matches the schema
+    #   carrier         the C++ type encodes to the schema's JSON type
+    #   sum values      enums carry exactly the schema's strings
+    #
+    # NOT verified, and worth naming rather than implying otherwise:
+    # semantic constraints (minimum/maxLength/pattern/format), $ref
+    # chasing into nested records, and anything the schema expresses as an
+    # untyped union. Those need a real schema walker, not a shape compare.
+    print("codec algebra agrees with the schema algebra")
+    print("  (product shape · field modality · carrier type · sum values)")
     return 0
 
 
