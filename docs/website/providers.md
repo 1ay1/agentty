@@ -6,7 +6,7 @@ nav_order: 50
 slug: providers
 ---
 
-agentty is **bring-your-own-model**: it speaks to any OpenAI-compatible backend, plus Anthropic and local Ollama. Sign in with a subscription you already pay for — Claude Pro/Max, ChatGPT Plus/Pro, GitHub Copilot, or **Kimi** — or bring an API key for **DeepSeek, Google Gemini, xAI Grok, Mistral, Groq, OpenRouter, Together, Cerebras, Fireworks**, or any custom endpoint. Pick one with `--provider`, or switch live mid-thread with `^P` (provider) and `^/` (model) — both overlays have a **live search filter**, so just start typing (`kimi`, `grok`, `deepseek`…) to jump to a provider.
+agentty is **bring-your-own-model**: it speaks to any OpenAI-compatible backend, plus Anthropic and local Ollama. Sign in with a subscription you already pay for — Claude Pro/Max, ChatGPT Plus/Pro, GitHub Copilot, or **Kimi** — or bring an API key for **DeepSeek, Google Gemini, xAI Grok, Mistral, Groq, OpenRouter, Yolo-Auto, Together, Cerebras, Fireworks**, or any custom endpoint. Pick one with `--provider`, or switch live mid-thread with `^P` (provider) and `^/` (model) — both overlays have a **live search filter**, so just start typing (`kimi`, `grok`, `deepseek`…) to jump to a provider.
 
 ## Pick a provider
 
@@ -23,6 +23,7 @@ agentty --provider gemini -m gemini-2.5-pro      # Google Gemini (GEMINI_API_KEY
 agentty --provider xai -m grok-4.6               # xAI Grok (XAI_API_KEY)
 agentty --provider groq -m llama-3.3-70b         # Groq
 agentty --provider openrouter                    # any model via OpenRouter
+agentty --provider yolo-auto -m yolo             # Yolo-Auto (YOLO_AUTO_API_KEY)
 agentty --provider ollama -m qwen2.5-coder       # local model, no key
 agentty -m claude-opus-4-5                        # Claude (API key or Pro/Max OAuth)
 ```
@@ -55,6 +56,7 @@ Even a 1M window eventually fills on a long session. When it does, you can [fork
 | `together` | Open models on `together.ai` | `TOGETHER_API_KEY` |
 | `fireworks` | Open models on `fireworks.ai` | `FIREWORKS_API_KEY` |
 | `openrouter` | Any model via `openrouter.ai` | `OPENROUTER_API_KEY` |
+| `yolo-auto` | Flat-rate OpenAI-compatible API (`yolo` / `yolo-small`) | `YOLO_AUTO_API_KEY` |
 | `ollama` | Local models at `localhost:11434` | None |
 | `host:port` | Any raw OpenAI-compatible endpoint | `OPENAI_API_KEY` |
 | `https://host[:port]/path` | Any OpenAI-compatible endpoint with a custom path prefix (e.g. a gateway serving on `/api` instead of `/v1`) | `OPENAI_API_KEY` |
