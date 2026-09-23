@@ -1554,13 +1554,14 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                         // than leaving the liveness clock to fall back. A
                         // field that is only sometimes set is a field the
                         // next reader has to reason about.
-                        tc2.status = ToolUse::Running{now2, {}, {}, now2};
+                        const auto seq = cmd::next_tool_exec_seq();
+                        tc2.status = ToolUse::Running{now2, {}, {}, now2, seq};
                         auto cancel = active_ctx(m.s.phase)
                             ? active_ctx(m.s.phase)->cancel
                             : http::CancelTokenPtr{};
                         return {std::move(m),
                                 cmd::run_tool(tc2.id, tc2.name, tc2.args,
-                                              std::move(cancel))};
+                                              std::move(cancel), seq)};
                     }
                 }
             }

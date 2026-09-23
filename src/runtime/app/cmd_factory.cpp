@@ -1304,8 +1304,13 @@ Cmd<Msg> launch_stream(Model& m) {
     });
 }
 
+std::uint64_t next_tool_exec_seq() noexcept {
+    static std::atomic<std::uint64_t> seq{0};
+    return seq.fetch_add(1, std::memory_order_relaxed) + 1;   // never 0
+}
+
 Cmd<Msg> run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args,
-                  http::CancelTokenPtr cancel) {
+                  http::CancelTokenPtr cancel, std::uint64_t exec_seq) {
     // task_isolated, NOT task: a tool that wedges (e.g. read on a hung NFS
     // mount, bash on a process that won't unblock) must not consume a slot
     // in the shared BG worker pool. With Cmd::task the pool's max workers
@@ -1319,16 +1324,24 @@ Cmd<Msg> run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args,
         [id = std::move(id),
          name = std::move(tool_name),
          args = std::move(args),
-         cancel = std::move(cancel)]
+         cancel = std::move(cancel),
+         exec_seq]
         (std::function<void(Msg)> dispatch) {
+            // Every result this worker sends carries its exec_seq, so the
+            // reducer can drop it if the call it was started for is gone.
+            auto out = [exec_seq](ToolExecOutput o) {
+                o.exec_seq = exec_seq;
+                return o;
+            };
             // Install a thread-local progress sink *before* dispatch so the
             // subprocess runner inside the tool can stream stdout+stderr to
             // the UI as bytes arrive. RAII scope guarantees the sink is
             // cleared even if the tool throws, so the next tool run can't
             // inherit a stale dispatch lambda.
             agentty::tools::progress::Scope progress_scope{
-                [dispatch, id](std::string_view snapshot) {
-                    dispatch(ToolExecProgress{id, std::string{snapshot}});
+                [dispatch, id, exec_seq](std::string_view snapshot) {
+                    dispatch(ToolExecProgress{id, std::string{snapshot},
+                                              exec_seq});
                 }};
             agentty::tools::cancellation::Scope cancellation_scope{
                 [cancel] { return cancel && cancel->is_cancelled(); }};
@@ -1342,9 +1355,9 @@ Cmd<Msg> run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args,
                 if (auto pre = tools::hooks::run_pre_tool(name.value,
                                                           args_dump);
                     pre.blocked) {
-                    dispatch(ToolExecOutput{id, std::unexpected(
+                    dispatch(out(ToolExecOutput{id, std::unexpected(
                         tools::ToolError::unknown(
-                            "blocked by pre_tool hook: " + pre.reason))});
+                            "blocked by pre_tool hook: " + pre.reason))}));
                     return;
                 }
                 const auto t_start = std::chrono::steady_clock::now();
@@ -1374,13 +1387,13 @@ Cmd<Msg> run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args,
                     // Carry the structured FileChange(s) — single-file (edit/
                     // write/apply_patch) via change, multi-file (replace) via
                     // changes — into the reducer for diff-review.
-                    dispatch(ToolExecOutput{id, std::move(result->text),
+                    dispatch(out(ToolExecOutput{id, std::move(result->text),
                                             std::move(result->change),
                                             std::move(result->changes),
-                                            std::move(result->images)});
+                                            std::move(result->images)}));
                 } else {
-                    dispatch(ToolExecOutput{id,
-                        std::unexpected(std::move(result).error())});
+                    dispatch(out(ToolExecOutput{id,
+                        std::unexpected(std::move(result).error())}));
                 }
             } catch (const std::exception& e) {
                 // DynamicDispatch already catches tool exceptions, but guard
@@ -1388,12 +1401,12 @@ Cmd<Msg> run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args,
                 // the tool never gets stuck in Running with no terminal Msg.
                 AGT_LOG(Tool, Error, "tool.dispatch_throw", "name={} err={}",
                         name.value, e.what());
-                dispatch(ToolExecOutput{id, std::unexpected(
+                dispatch(out(ToolExecOutput{id, std::unexpected(
                     tools::ToolError::unknown(
-                        std::string{"dispatch error: "} + e.what()))});
+                        std::string{"dispatch error: "} + e.what()))}));
             } catch (...) {
-                dispatch(ToolExecOutput{id, std::unexpected(
-                    tools::ToolError::unknown("dispatch error: unknown exception"))});
+                dispatch(out(ToolExecOutput{id, std::unexpected(
+                    tools::ToolError::unknown("dispatch error: unknown exception"))}));
             }
         });
 }
@@ -1763,12 +1776,15 @@ Cmd<Msg> kick_pending_tools(Model& m) {
                 // really begins — a tool that sat awaiting permission has a
                 // started_at minutes in the past, and charging that gap to
                 // the wedge budget killed freshly-approved tools (issue #40).
+                const auto seq = next_tool_exec_seq();
                 tc.status = ToolUse::Running{tc.started_at(), {}, {},
-                                             std::chrono::steady_clock::now()};
+                                             std::chrono::steady_clock::now(),
+                                             seq};
                 auto cancel = active_ctx(m.s.phase)
                     ? active_ctx(m.s.phase)->cancel
                     : http::CancelTokenPtr{};
-                cmds.push_back(run_tool(tc.id, tc.name, tc.args, std::move(cancel)));
+                cmds.push_back(run_tool(tc.id, tc.name, tc.args,
+                                        std::move(cancel), seq));
 
                 // Tool wall-clock watchdog removed at user request.
                 // Tools now run for as long as their worker takes;

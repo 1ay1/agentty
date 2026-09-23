@@ -281,7 +281,8 @@ void apply_tool_output(Model& m, const ToolCallId& id,
                        std::expected<std::string, tools::ToolError>&& result,
                        std::optional<FileChange>&& change = std::nullopt,
                        std::vector<FileChange>&& changes = {},
-                       std::vector<ImageContent>&& images = {});
+                       std::vector<ImageContent>&& images = {},
+                       std::uint64_t exec_seq = 0);
 void mark_tool_rejected(Model& m, const ToolCallId& id,
                         std::string_view reason);
 
@@ -339,6 +340,34 @@ bool with_live_tool(Model& m, const ToolCallId& id, F&& f) {
         return true;
     }
     return false;
+}
+
+// Route a worker's message to the exact execution that sent it. `seq` is
+// the Running::exec_seq the worker was started with. A tagged message
+// whose execution is no longer Running came from a worker whose call was
+// cancelled or settled; the id may since belong to a NEW call (ids are not
+// unique across turns), so it is dropped whole. Returns false when dropped.
+// seq 0 = untagged: falls back to id routing (with_live_tool).
+template <ToolMutator F>
+bool with_exec_tool(Model& m, const ToolCallId& id, std::uint64_t seq,
+                    F&& f) {
+    if (seq == 0) return with_live_tool(m, id, std::forward<F>(f));
+    for (std::size_t i = m.ui.frozen_through;
+         i < m.d.current.messages.size(); ++i)
+        for (auto& tc : m.d.current.messages[i].tool_calls)
+            if (tc.id == id)
+                if (auto* r = std::get_if<ToolUse::Running>(&tc.status);
+                    r && r->exec_seq == seq) {
+                    std::forward<F>(f)(tc);
+                    return true;
+                }
+    return false;
+}
+
+[[nodiscard]] inline bool tool_exec_is_current(Model& m,
+                                               const ToolCallId& id,
+                                               std::uint64_t seq) {
+    return with_exec_tool(m, id, seq, [](ToolUse&) {});
 }
 
 // ── Per-domain reducers ──────────────────────────────────────────────────

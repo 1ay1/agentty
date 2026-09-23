@@ -107,10 +107,15 @@ void soft_trim_to_ceiling(std::vector<Message>& v, int ceiling);
 // auto-compaction logic and the context-gauge.
 [[nodiscard]] int estimate_wire_tokens(const Thread& t);
 
+// Fresh, process-unique tag for one tool dispatch. Stamp it on
+// ToolUse::Running and pass the same value to run_tool.
+[[nodiscard]] std::uint64_t next_tool_exec_seq() noexcept;
+
 [[nodiscard]] maya::Cmd<Msg> run_tool(ToolCallId id,
                                       ToolName tool_name,
                                       nlohmann::json args,
-                                      http::CancelTokenPtr cancel = {});
+                                      http::CancelTokenPtr cancel = {},
+                                      std::uint64_t exec_seq = 0);
 
 // Inspect the latest assistant turn and either fire off pending tool calls,
 // request permission, or kick the follow-up stream once tool results are in.

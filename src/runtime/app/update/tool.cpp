@@ -25,6 +25,7 @@
 #include "agentty/store/store.hpp"
 #include "agentty/tool/spec.hpp"
 #include "agentty/tool/util/utf8.hpp"
+#include "agentty/util/logx.hpp"
 
 namespace pn = agentty::ui::panel;
 
@@ -288,8 +289,9 @@ void apply_tool_output(Model& m, const ToolCallId& id,
                        std::expected<std::string, tools::ToolError>&& result,
                        std::optional<FileChange>&& change,
                        std::vector<FileChange>&& changes,
-                       std::vector<ImageContent>&& images) {
-    with_live_tool(m, id, [&](ToolUse& tc) {
+                       std::vector<ImageContent>&& images,
+                       std::uint64_t exec_seq) {
+    const bool landed = with_exec_tool(m, id, exec_seq, [&](ToolUse& tc) {
         // Idempotent: a tool already in a terminal state
         // (Done / Failed / Rejected) keeps that state. Realistic
         // ways a late ToolExecOutput can land here:
@@ -329,6 +331,9 @@ void apply_tool_output(Model& m, const ToolCallId& id,
         }
         release_streaming_buffers(tc);
     });
+    // A stale worker (its call was cancelled) must not queue diffs for
+    // review either: the user already walked away from that call.
+    if (exec_seq != 0 && !landed) return;
     // Queue the structured change(s) (edit / write / apply_patch / replace)
     // for diff-review. Multi-file tools (replace) fill `changes`; single-file
     // tools fill `change`. DEDUP per file: successive edits to the SAME path
@@ -408,7 +413,7 @@ Step tool_update(Model m, msg::ToolMsg tm) {
             // Frozen prefix is immutable — a late progress snapshot
             // for a turn that's already settled into m.ui.frozen
             // silently no-ops here.
-            with_live_tool(m, e.id, [&](ToolUse& tc) {
+            with_exec_tool(m, e.id, e.exec_seq, [&](ToolUse& tc) {
                 if (auto* r = std::get_if<ToolUse::Running>(&tc.status)) {
                     // Belt-and-braces terminal line-discipline. The in-tree
                     // subprocess runners already clean at the capture
@@ -492,6 +497,13 @@ Step tool_update(Model m, msg::ToolMsg tm) {
 
         // ── Tool execution result ───────────────────────────────────────
         [&](ToolExecOutput& e) -> Step {
+            // A worker whose call was cancelled or settled; its id may now
+            // belong to a different call. Drop it whole.
+            if (!tool_exec_is_current(m, e.id, e.exec_seq)) {
+                AGT_LOG(Tool, Info, "tool.stale_result",
+                        "id={} seq={} dropped", e.id.value, e.exec_seq);
+                return done(std::move(m));
+            }
             // todo's side effect on the UI's plan state — runs only
             // when the call actually succeeded; failures don't synthesise
             // a plan. The final exact state lands here even if the live
@@ -503,7 +515,8 @@ Step tool_update(Model m, msg::ToolMsg tm) {
                             sync_todo_state_from_args(m, tc.args);
             }
             apply_tool_output(m, e.id, std::move(e.result), std::move(e.change),
-                              std::move(e.changes), std::move(e.images));
+                              std::move(e.changes), std::move(e.images),
+                              e.exec_seq);
             // If the Ctrl+O viewer is open, refresh it so the Live row settles
             // into a finished entry the instant this tool completes.
             resync_live_tool_viewer(m);

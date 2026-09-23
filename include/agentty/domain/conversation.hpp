@@ -129,6 +129,9 @@ struct ToolUse {
         // Running directly); readers fall back to started_at, which is the
         // pre-fix behaviour and correct whenever there was no approval gap.
         std::chrono::steady_clock::time_point executing_since{};
+        // Unique per dispatch (next_tool_exec_seq). The worker echoes it on
+        // its progress/result so a stale worker can't hit a reused id.
+        std::uint64_t exec_seq = 0;
 
         // The instant from which "has this gone quiet?" should be measured.
         // Every liveness consumer goes through this rather than reaching for

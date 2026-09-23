@@ -357,12 +357,21 @@ struct ToolExecOutput {
     // reducer stores them on ToolUse::Done so the wire renders them as image
     // blocks in this call's tool_result. Empty for text-only tools.
     std::vector<ImageContent> images;
+    // Which execution produced this result (ToolUse::Running::exec_seq).
+    // Tool ids are not unique across turns (gateways and our own synthetic
+    // ids restart at call_0), so a worker that outlives a cancel must not
+    // land its output on a new call that reuses the id. 0 = untagged.
+    std::uint64_t exec_seq = 0;
 };
 // Contains the FULL accumulated output, not a delta — the update handler can
 // assign unconditionally without maintaining append state. Coalesced at the
 // subprocess boundary (~100 ms) so a chatty command doesn't flood the event
 // queue with micro-updates.
-struct ToolExecProgress { ToolCallId id; std::string snapshot; };
+struct ToolExecProgress {
+    ToolCallId id;
+    std::string snapshot;
+    std::uint64_t exec_seq = 0;   // see ToolExecOutput::exec_seq
+};
 // Wall-clock watchdog for tool execution. Scheduled by kick_pending_tools
 // via Cmd::after when a non-subprocess tool transitions to Running. If the
 // tool has reached a terminal state by the time the check fires, this is
