@@ -2,33 +2,67 @@
 
 # 4. Value categories
 
-**Time:** 60 minutes
-**Code:** [`code/04_value_categories.cpp`](code/04_value_categories.cpp)
-
-```sh
-cd code && make 04_value_categories && ./04_value_categories
-```
+**Time:** 60 minutes. Type everything.
 
 Every expression in C++ has a type *and* a value category. The category
 decides which overload gets picked, whether you can bind a reference to
-it, and whether the compiler is allowed to steal its guts. Most confusion
-about `std::move` is really confusion about categories.
+it, and whether the compiler is allowed to steal its guts.
+
+Most confusion about `std::move` is really confusion about categories.
+We're going to make categories **visible**, which is the only way to stop
+guessing about them.
+
+Open `04_value_categories.cpp`.
 
 ---
 
-## how to see a category
+## build the detector
 
 You can't print a value category. But you can make the compiler tell you,
 by overloading on it:
 
 ```cpp
-void cat(int&)  { std::puts("lvalue"); }
-void cat(int&&) { std::puts("rvalue"); }
+#include <cstdio>
+#include <string>
+#include <utility>
+
+static void cat(int&)  { std::puts("lvalue"); }
+static void cat(int&&) { std::puts("rvalue"); }
 ```
 
-`int&` binds only to lvalues. `int&&` binds only to rvalues. Whichever one
-gets called tells you the category of the argument expression. That trick
-is used in every demo below, and it's worth keeping in your own toolbox.
+That's the whole trick, and it's worth keeping in your own toolbox.
+
+`int&` binds **only** to lvalues. `int&&` binds **only** to rvalues. So
+whichever overload gets called tells you the category of whatever you
+passed. The compiler does the classification; you just read the output.
+
+Now use it:
+
+```cpp
+static int  global = 100;
+static int& give_lvalue()  { return global; }   // returns a reference
+static int  give_prvalue() { return 42; }       // returns a value
+
+static void categories() {
+    std::puts("-- what kind of expression is this? --");
+    int x = 1;
+    int arr[3]{};
+
+    std::printf("x                 -> "); cat(x);
+    std::printf("42                -> "); cat(42);
+    std::printf("x + 1             -> "); cat(x + 1);
+    std::printf("arr[0]            -> "); cat(arr[0]);
+    std::printf("give_lvalue()     -> "); cat(give_lvalue());
+    std::printf("give_prvalue()    -> "); cat(give_prvalue());
+    std::printf("std::move(x)      -> "); cat(std::move(x));
+}
+
+int main() {
+    categories();
+}
+```
+
+**Predict each line before you run it.** Then run:
 
 ```
 -- what kind of expression is this? --
@@ -40,6 +74,10 @@ give_lvalue()     -> lvalue
 give_prvalue()    -> rvalue
 std::move(x)      -> rvalue
 ```
+
+The two that trip people up: `arr[0]` is an **lvalue** (it names a real
+element that persists), and `x + 1` is an **rvalue** (the sum is a value
+that exists only for this expression).
 
 ---
 
@@ -66,7 +104,7 @@ Formally there are five, arranged in a lattice:
 - **rvalue** — prvalue or xvalue. "can be moved from".
 
 You will never need to say "glvalue" out loud. What you need day to day is
-the two questions:
+two questions:
 
 **Does it have identity?** (can I take its address, will it still be there
 on the next line?) → lvalue-ish.
@@ -82,38 +120,50 @@ on the next line?) → lvalue-ish.
 
 ## the trap everyone hits
 
+Add this:
+
+```cpp
+static void inside(int&& r) {
+    std::printf("  param declared int&&, but `r` itself   -> "); cat(r);
+    std::printf("  std::move(r)                           -> "); cat(std::move(r));
+}
+
+static void named_rvalue_ref() {
+    std::puts("\n-- a named rvalue reference is an LVALUE --");
+    inside(42);
+}
+```
+
 ```
 -- a named rvalue reference is an LVALUE --
   param declared int&&, but `r` itself   -> lvalue
   std::move(r)                           -> rvalue
 ```
 
-Read that twice.
+**Read that twice.**
 
-```cpp
-void inside(int&& r) {
-    cat(r);              // prints "lvalue"
-}
-```
+The parameter's *type* is `int&&`. But `r` is a **name**, and naming
+something makes the expression an lvalue. Types and categories are
+different axes.
 
-The parameter's *type* is `int&&`. But `r` is a name, and naming something
-makes the expression an lvalue. Types and categories are different axes.
+### why it has to be this way
 
-**Why it has to be this way:** if `r` stayed an rvalue inside the
-function, then
+If `r` stayed an rvalue inside the function, then:
 
 ```cpp
 void f(std::string&& s) {
-    use(s);      // if this moved from s...
+    use(s);      // if this silently moved from s...
     use(s);      // ...this would see a gutted string
 }
 ```
 
-would be a disaster. Making the name an lvalue means you must *ask* to
-move, explicitly, and you can see where you asked.
+would be a disaster. Making the name an lvalue means you must **ask** to
+move, explicitly, and the `std::move` is visible in the code where you
+asked.
 
-**The consequence:** when you forward an `&&` parameter onward, you must
-re-`move` it.
+### the consequence
+
+When you forward an `&&` parameter onward, you must re-`move` it:
 
 ```cpp
 void take(std::string&& s) {
@@ -121,21 +171,35 @@ void take(std::string&& s) {
 }
 ```
 
-Drop the `std::move` and you silently get a copy.
+Drop the `std::move` there and you silently get a copy. This is one of the
+most common performance bugs in C++, and it produces no warning.
 
 ---
 
 ## `std::move` moves nothing
 
+```cpp
+static void move_is_a_cast() {
+    std::puts("\n-- std::move does not move --");
+    std::string a = "payload";
+
+    (void)std::move(a);       // a bare std::move, result discarded
+    std::printf("after a bare std::move(a):  a = '%s'   <- untouched\n",
+                a.c_str());
+
+    std::string b = std::move(a);   // NOW the move constructor runs
+    std::printf("after b = std::move(a):     a = '%s'  b = '%s'\n",
+                a.c_str(), b.c_str());
+}
+```
+
 ```
 -- std::move does not move --
 after a bare std::move(a):  a = 'payload'   <- untouched
 after b = std::move(a):     a = ''  b = 'payload'
-std::move only changes the expression's category. the actual
-stealing is done by whatever constructor or assignment runs.
 ```
 
-`std::move` is a cast. That's the whole implementation:
+`std::move` is a **cast**. That's the entire implementation:
 
 ```cpp
 template <typename T>
@@ -153,38 +217,60 @@ overload:
 ```cpp
 std::string b = std::move(a);
 //              ^^^^^^^^^^^^^ now an xvalue
-//   so string's move constructor is chosen instead of the copy ctor
+//   so string's MOVE constructor is chosen instead of the copy ctor,
 //   and THAT is what steals a's buffer
 ```
 
-`std::move` on its own line does nothing at all, which is why it's
-`[[nodiscard]]` and why the demo has to `(void)` it to keep the build
-clean.
+`std::move` on its own line does nothing at all. Which is why it's
+`[[nodiscard]]` — try removing the `(void)` and see:
 
-**Better name:** `rvalue_cast`. It was proposed. It lost. We live with
-`move`.
+```
+warning: ignoring return value of 'constexpr typename
+std::remove_reference<_Tp>::type&& std::move(_Tp&&)', declared with
+attribute 'nodiscard' [-Wunused-result]
+```
+
+> **Better name:** `rvalue_cast`. It was proposed. It lost. We live with
+> `move`.
 
 ---
 
 ## what's left behind
+
+```cpp
+static void moved_from_state() {
+    std::puts("\n-- what is left behind --");
+    std::string src = "a fairly long string to defeat SSO buffers";
+    std::string dst = std::move(src);
+    std::printf("dst        = '%s'\n", dst.c_str());
+    std::printf("src.size() = %zu   (valid object, unspecified value)\n",
+                src.size());
+    src = "reassigned";            // always legal
+    std::printf("src        = '%s'   <- assigning is always fine\n",
+                src.c_str());
+}
+```
 
 ```
 -- what is left behind --
 dst        = 'a fairly long string to defeat SSO buffers'
 src.size() = 0   (valid object, unspecified value)
 src        = 'reassigned'   <- assigning is always fine
-you may destroy or assign a moved-from object. do not READ it.
 ```
 
+Note the deliberately **long** string. A short one might live entirely in
+the SSO buffer (section 1) with no heap allocation to steal, and then the
+"move" is just a copy and the demo proves nothing.
+
 The standard says a moved-from standard library object is in a **valid but
-unspecified state**. Two words, both important:
+unspecified state**. Two words, both load-bearing:
 
 - **valid** — the invariants hold. Destroying it is fine. Assigning to it
-  is fine. Calling any operation with no precondition is fine
-  (`size()`, `empty()`, `clear()`).
-- **unspecified** — you don't get to know *what* value. libstdc++ leaves
-  a moved-from string empty; MSVC might too; the standard doesn't promise
-  it and a future version could change.
+  is fine. Calling any operation with no precondition is fine (`size()`,
+  `empty()`, `clear()`).
+- **unspecified** — you don't get to know *what* value. libstdc++ leaves a
+  moved-from string empty; the standard doesn't promise it, and a future
+  version could change.
 
 So:
 
@@ -193,7 +279,7 @@ std::string b = std::move(a);
 
 a.clear();          // fine
 a = "new value";    // fine
-a.size();           // fine, but the answer is not guaranteed to be 0
+a.size();           // fine, but the answer isn't guaranteed to be 0
 std::cout << a;     // legal but MEANINGLESS. don't.
 a.front();          // UB if a happens to be empty. precondition violated.
 ```
@@ -224,6 +310,8 @@ it can prove nobody else needs the value.
 
 ### 2. what a reference can bind
 
+Write these and read each error:
+
 ```cpp
 std::string s = "x";
 
@@ -242,14 +330,14 @@ That table is worth memorising:
 | `const T&` | yes | yes |
 | `T&&` | no | yes |
 
-`const T&` binding to everything is why it's the default for a read-only
-parameter.
+`const T&` binding to everything is exactly why it's the default for a
+read-only parameter.
 
 ### 3. elision
 
 A prvalue returned from a function isn't a temporary that gets copied — in
-C++17 it's *constructed directly* into the destination. Section 8 has the
-proof.
+C++17 it's *constructed directly* into the destination. Section 8 proves
+it.
 
 ---
 
@@ -259,8 +347,8 @@ One place categories leak into type deduction:
 
 ```cpp
 int x = 0;
-decltype(x)    // int      -- x is a declared name, gives the declared type
-decltype((x))  // int&     -- (x) is an expression, and it's an lvalue
+decltype(x)    // int      -- x is a declared NAME, gives the declared type
+decltype((x))  // int&     -- (x) is an EXPRESSION, and it's an lvalue
 ```
 
 `decltype` on a name gives the declared type. `decltype` on an
@@ -268,8 +356,113 @@ decltype((x))  // int&     -- (x) is an expression, and it's an lvalue
 `T&&` for xvalues, `T` for prvalues. Wrapping in parens turns the name
 into an expression.
 
-This is a real gotcha in return types. Section 9 covers
-`decltype(auto)`.
+This is a real gotcha in return types. Section 9 covers `decltype(auto)`.
+
+---
+
+## the whole file
+
+```cpp
+// 04_value_categories.cpp — lvalue, prvalue, xvalue, and what std::move is.
+
+#include <cstdio>
+#include <string>
+#include <utility>
+
+// Two overloads. Which one the compiler picks tells you the value
+// category of the argument expression.
+static void cat(int&)  { std::puts("lvalue"); }
+static void cat(int&&) { std::puts("rvalue"); }
+
+// ── the categories ─────────────────────────────────────────────────────
+static int  global = 100;
+static int& give_lvalue() { return global; }   // returns a reference
+static int  give_prvalue() { return 42; }      // returns a value
+
+static void categories() {
+    std::puts("-- what kind of expression is this? --");
+    int x = 1;
+    int arr[3]{};
+
+    std::printf("x                 -> "); cat(x);
+    std::printf("42                -> "); cat(42);
+    std::printf("x + 1             -> "); cat(x + 1);
+    std::printf("arr[0]            -> "); cat(arr[0]);
+    std::printf("give_lvalue()     -> "); cat(give_lvalue());
+    std::printf("give_prvalue()    -> "); cat(give_prvalue());
+    std::printf("std::move(x)      -> "); cat(std::move(x));
+    std::puts("\nrule of thumb: can you take its address and will it still");
+    std::puts("be there next line? then it is an lvalue.");
+}
+
+// ── the trap: a named rvalue reference is an lvalue ────────────────────
+static void inside(int&& r) {
+    std::printf("  param declared int&&, but `r` itself   -> "); cat(r);
+    std::printf("  std::move(r)                           -> "); cat(std::move(r));
+}
+
+static void named_rvalue_ref() {
+    std::puts("\n-- a named rvalue reference is an LVALUE --");
+    inside(42);
+    std::puts("  this is why you still write std::move(x) when forwarding");
+    std::puts("  an int&& parameter onward. the name makes it an lvalue again.");
+}
+
+// ── std::move is a cast. it moves nothing. ─────────────────────────────
+static void move_is_a_cast() {
+    std::puts("\n-- std::move does not move --");
+    std::string a = "payload";
+
+    // INTENTIONAL: std::move is [[nodiscard]]; discarding it is precisely
+    // the mistake this demo exists to show.
+    (void)std::move(a);
+    std::printf("after a bare std::move(a):  a = '%s'   <- untouched\n",
+                a.c_str());
+
+    std::string b = std::move(a);   // NOW the move constructor runs
+    std::printf("after b = std::move(a):     a = '%s'  b = '%s'\n",
+                a.c_str(), b.c_str());
+    std::puts("std::move only changes the expression's category. the actual");
+    std::puts("stealing is done by whatever constructor or assignment runs.");
+}
+
+// ── moved-from is valid but unspecified ────────────────────────────────
+static void moved_from_state() {
+    std::puts("\n-- what is left behind --");
+    std::string src = "a fairly long string to defeat SSO buffers";
+    std::string dst = std::move(src);
+    std::printf("dst        = '%s'\n", dst.c_str());
+    std::printf("src.size() = %zu   (valid object, unspecified value)\n",
+                src.size());
+    src = "reassigned";            // always legal
+    std::printf("src        = '%s'   <- assigning is always fine\n",
+                src.c_str());
+    std::puts("you may destroy or assign a moved-from object. do not READ it.");
+}
+
+int main() {
+    categories();
+    named_rvalue_ref();
+    move_is_a_cast();
+    moved_from_state();
+}
+```
+
+---
+
+## now break it
+
+1. Add `static void cat(const int&)` as a third overload. Which calls
+   change? (Hint: `const int&` binds to both, so it only wins when
+   neither exact match applies.)
+2. Remove the `(void)` from the bare `std::move` and read the
+   `-Wunused-result` warning.
+3. In `inside`, remove the `std::move` from the second line. Watch it
+   print `lvalue` both times.
+4. Change the long string in `moved_from_state` to `"hi"`. Does `src`
+   still end up empty? Why might it not? (SSO — section 1.)
+5. Write all five reference bindings from the table above and read the
+   two errors.
 
 ---
 
@@ -286,8 +479,8 @@ This is a real gotcha in return types. Section 9 covers
 <details>
 <summary>answers</summary>
 
-1. `cat(int&)` then `cat(int&&)`. `x` is an lvalue, `std::move(x)` is an
-   xvalue which is an rvalue.
+1. `cat(int&)` then `cat(int&&)`. `x` is an lvalue; `std::move(x)` is an
+   xvalue, which is an rvalue.
 2. lvalue. The type is `std::string&&` but the expression `s` names
    something, so it's an lvalue.
 3. Nothing. It's a `static_cast` to an rvalue reference and generates no

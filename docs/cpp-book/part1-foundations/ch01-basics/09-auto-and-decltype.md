@@ -2,16 +2,46 @@
 
 # 9. auto and decltype
 
-**Time:** 45 minutes
-**Code:** [`code/09_auto.cpp`](code/09_auto.cpp)
+**Time:** 45 minutes. Type everything.
 
-```sh
-cd code && make 09_auto && ./09_auto
-```
+Open `09_auto.cpp`.
 
 ---
 
 ## auto drops references and top-level const
+
+```cpp
+#include <cstdio>
+#include <type_traits>
+
+static void auto_strips() {
+    std::puts("-- auto strips ref and top-level const --");
+    int              x = 1;
+    int&             r = x;
+    const int        c = 2;
+    const int&       cr = c;
+
+    auto a1 = r;    // int    (not int&)
+    auto a2 = c;    // int    (not const int)
+    auto a3 = cr;   // int
+    a1 = a2 = a3 = 9;   // all writable, none affect x or c
+
+    std::printf("after writing to the autos: x = %d, c = %d\n", x, c);
+    std::printf("is_same<decltype(a1), int> = %s\n",
+                std::is_same_v<decltype(a1), int> ? "true" : "false");
+
+    auto& keeps_ref = r;            // int&
+    keeps_ref = 77;
+    std::printf("through auto& : x = %d\n", x);
+
+    const auto& view = x;           // const int&
+    std::printf("const auto& view = %d\n", view);
+}
+
+int main() {
+    auto_strips();
+}
+```
 
 ```
 -- auto strips ref and top-level const --
@@ -21,23 +51,15 @@ through auto& : x = 77
 const auto& view = 77
 ```
 
-```cpp
-int        x = 1;
-int&       r = x;
-const int  c = 2;
-const int& cr = c;
-
-auto a1 = r;    // int  -- NOT int&
-auto a2 = c;    // int  -- NOT const int
-auto a3 = cr;   // int  -- both dropped
-```
-
-`auto` deduces like a by-value template parameter: references are
+`auto` deduces like a **by-value template parameter**: references are
 stripped, and top-level `const` is stripped. You get a fresh, writable
 copy.
 
 The output proves it — writing 9 to all three autos left `x` and `c`
 untouched.
+
+Note `std::is_same_v<decltype(a1), int>` — that's how you ask the compiler
+what a type actually is, instead of guessing. Keep it in your toolbox.
 
 To keep the reference or the const, say so:
 
@@ -57,14 +79,52 @@ int* const cp = &x;
 auto r2 = cp;           // int* -- the const is on the POINTER, dropped
 ```
 
-`auto` drops the const *on the thing being copied*. `const int*` is "a
-pointer to const int" — the pointer itself isn't const, so nothing is
+`auto` drops the const **on the thing being copied**. `const int*` reads
+as "pointer to const int" — the pointer itself isn't const, so nothing is
 dropped. `int* const` is "a const pointer", and copying it gives you a
 writable pointer.
+
+Verify both with `static_assert` rather than trusting me:
+
+```cpp
+static_assert(std::is_same_v<decltype(q),  const int*>);
+static_assert(std::is_same_v<decltype(r2), int*>);
+```
 
 ---
 
 ## the range-for copy
+
+```cpp
+#include <string>
+#include <vector>
+
+struct Chatty {
+    std::string s;
+    explicit Chatty(const char* c) : s(c) {}
+    Chatty(const Chatty& o) : s(o.s) { std::printf("  COPY %s\n", s.c_str()); }
+    Chatty(Chatty&&) noexcept = default;
+};
+
+static void range_for() {
+    std::puts("\n-- range-for --");
+    std::vector<Chatty> v;
+    v.reserve(2);
+    v.emplace_back("one");
+    v.emplace_back("two");
+
+    std::puts(" for (auto e : v)        <- copies each element:");
+    for (auto e : v) (void)e;
+
+    std::puts(" for (const auto& e : v) <- no copies:");
+    for (const auto& e : v) (void)e;
+    std::puts(" (nothing printed above means nothing was copied)");
+
+    std::puts(" for (auto& e : v)       <- when you want to modify");
+    for (auto& e : v) e.s += "*";
+    std::printf(" now: %s %s\n", v[0].s.c_str(), v[1].s.c_str());
+}
+```
 
 ```
 -- range-for --
@@ -97,37 +157,51 @@ copy is free and `for (auto x : v)` is fine and reads better.
 
 ## the map trap
 
-```
--- the map trap --
- value_type is pair<const string, int>, NOT pair<string,int>.
- so `for (const std::pair<std::string,int>& kv : m)` copies
- every element to convert the type. use auto&:
-   a -> 1
-   b -> 2
-```
-
-This one is nasty because you wrote a `const&` and still got a copy.
+This one is nasty because you wrote a `const&` and *still* got a copy.
 
 ```cpp
-std::map<std::string, int> m;
+#include <map>
 
+static void map_range_for() {
+    std::puts("\n-- the map trap --");
+    std::map<std::string, int> m{{"a", 1}, {"b", 2}};
+    for (const auto& [k, val] : m)
+        std::printf("   %s -> %d\n", k.c_str(), val);
+}
+```
+
+The version that costs you:
+
+```cpp
 for (const std::pair<std::string, int>& kv : m)    // COPIES EVERY ELEMENT
 ```
 
-`std::map<K,V>::value_type` is `std::pair<const K, V>`. The `K` is const,
-because changing a key in place would break the tree ordering.
+Here's why. `std::map<K,V>::value_type` is **`std::pair<const K, V>`** —
+the key is const, because changing a key in place would break the tree
+ordering.
 
-You wrote `pair<string, int>`, which is a *different type*. A `const&`
+You wrote `pair<string, int>`, which is a **different type**. A `const&`
 can't bind to a different type, so the compiler creates a temporary of
-your type, converts, binds to that, and destroys it each iteration. Silent
-copy of every key and value.
+your type, converts, binds the reference to *that*, and destroys it each
+iteration. Silent copy of every key and value.
+
+Prove the type identity yourself:
+
+```cpp
+static_assert(std::is_same_v<std::map<std::string, int>::value_type,
+                             std::pair<const std::string, int>>);
+static_assert(!std::is_same_v<std::map<std::string, int>::value_type,
+                              std::pair<std::string, int>>);
+```
+
+The fix:
 
 ```cpp
 for (const auto& [k, v] : m)     // correct, and shorter
 ```
 
-`auto` deduces the real `value_type` and no conversion happens. Structured
-bindings on top make it readable.
+`auto` deduces the real `value_type`, so no conversion happens.
+Structured bindings on top make it readable.
 
 **This is the strongest practical argument for `auto` in range-for:** the
 type is easy to get subtly wrong, and being wrong costs a copy silently.
@@ -135,6 +209,29 @@ type is easy to get subtly wrong, and being wrong costs a copy silently.
 ---
 
 ## decltype
+
+```cpp
+static int  val() { return 1; }
+static int& ref() { static int n = 5; return n; }
+
+static void decltypes() {
+    std::puts("\n-- decltype --");
+    int x = 0;
+    std::printf("decltype(x)    is int   : %s\n",
+                std::is_same_v<decltype(x), int> ? "yes" : "no");
+    std::printf("decltype((x))  is int&  : %s   <- extra parens matter\n",
+                std::is_same_v<decltype((x)), int&> ? "yes" : "no");
+    std::printf("decltype(val()) is int  : %s\n",
+                std::is_same_v<decltype(val()), int> ? "yes" : "no");
+    std::printf("decltype(ref()) is int& : %s\n",
+                std::is_same_v<decltype(ref()), int&> ? "yes" : "no");
+
+    auto           a = ref();   // int  — the reference is dropped
+    decltype(auto) d = ref();   // int& — the reference is kept
+    d = 42;
+    std::printf("after d = 42: ref() = %d, a = %d\n", ref(), a);
+}
+```
 
 ```
 -- decltype --
@@ -145,16 +242,8 @@ decltype(ref()) is int& : yes
 after d = 42: ref() = 42, a = 5
 ```
 
-`decltype` gives you the *exact* declared type, keeping references and
+`decltype` gives you the **exact** declared type, keeping references and
 const. Unlike `auto`, it strips nothing.
-
-```cpp
-int  x = 0;
-int& r = x;
-
-decltype(x)  a;     // int
-decltype(r)  b = x; // int&    -- reference kept
-```
 
 ### the parens rule
 
@@ -169,10 +258,8 @@ For an expression (not a plain name), `decltype` gives:
 - `T&&` if it's an xvalue
 - `T` if it's a prvalue
 
-Wrapping a name in parens makes it an expression. So `decltype((x))` is
-`int&`.
-
-This is the classic gotcha:
+Wrapping a name in parens makes it an expression. This is the classic
+gotcha:
 
 ```cpp
 decltype(auto) f() {
@@ -181,17 +268,19 @@ decltype(auto) f() {
 }
 ```
 
+That's a section-7 dangling bug caused by two characters.
+
 ### `decltype(auto)`
 
-```cpp
-int& ref() { static int n = 5; return n; }
+Look at the last two lines of the output. `a` is still 5; `d = 42`
+changed the actual static inside `ref()`.
 
+```cpp
 auto           a = ref();   // int   -- reference dropped, a is a copy
 decltype(auto) d = ref();   // int&  -- reference kept, d aliases n
-d = 42;                     // changes n
 ```
 
-`decltype(auto)` means "deduce, but use `decltype` rules". It's for
+`decltype(auto)` means "deduce, but use `decltype` rules". Its main use is
 perfect forwarding of a return type:
 
 ```cpp
@@ -203,6 +292,127 @@ decltype(auto) invoke(F&& f, Args&&... args) {
 
 If `f` returns a reference, so does `invoke`. With plain `auto` you'd
 silently copy. Chapter 4 goes deeper.
+
+---
+
+## the whole file
+
+```cpp
+// 09_auto.cpp — auto, decltype, and the range-for copy you didn't ask for.
+
+#include <cstdio>
+#include <map>
+#include <string>
+#include <type_traits>
+#include <vector>
+
+struct Chatty {
+    std::string s;
+    explicit Chatty(const char* c) : s(c) {}
+    Chatty(const Chatty& o) : s(o.s) { std::printf("  COPY %s\n", s.c_str()); }
+    Chatty(Chatty&&) noexcept = default;
+};
+
+// ── auto drops references and top-level const ──────────────────────────
+static void auto_strips() {
+    std::puts("-- auto strips ref and top-level const --");
+    int              x = 1;
+    int&             r = x;
+    const int        c = 2;
+    const int&       cr = c;
+
+    auto a1 = r;    // int    (not int&)
+    auto a2 = c;    // int    (not const int)
+    auto a3 = cr;   // int
+    a1 = a2 = a3 = 9;   // all writable, none affect x or c
+
+    std::printf("after writing to the autos: x = %d, c = %d\n", x, c);
+    std::printf("is_same<decltype(a1), int> = %s\n",
+                std::is_same_v<decltype(a1), int> ? "true" : "false");
+
+    auto& keeps_ref = r;            // int&
+    keeps_ref = 77;
+    std::printf("through auto& : x = %d\n", x);
+
+    const auto& view = x;           // const int&
+    std::printf("const auto& view = %d\n", view);
+}
+
+// ── the range-for trap ─────────────────────────────────────────────────
+static void range_for() {
+    std::puts("\n-- range-for --");
+    std::vector<Chatty> v;
+    v.reserve(2);
+    v.emplace_back("one");
+    v.emplace_back("two");
+
+    std::puts(" for (auto e : v)        <- copies each element:");
+    for (auto e : v) (void)e;
+
+    std::puts(" for (const auto& e : v) <- no copies:");
+    for (const auto& e : v) (void)e;
+    std::puts(" (nothing printed above means nothing was copied)");
+
+    std::puts(" for (auto& e : v)       <- when you want to modify");
+    for (auto& e : v) e.s += "*";
+    std::printf(" now: %s %s\n", v[0].s.c_str(), v[1].s.c_str());
+}
+
+// ── the map one, which costs a copy for a subtler reason ───────────────
+static void map_range_for() {
+    std::puts("\n-- the map trap --");
+    std::map<std::string, int> m{{"a", 1}, {"b", 2}};
+    std::puts(" value_type is pair<const string, int>, NOT pair<string,int>.");
+    std::puts(" so `for (const std::pair<std::string,int>& kv : m)` copies");
+    std::puts(" every element to convert the type. use auto&:");
+    for (const auto& [k, val] : m)
+        std::printf("   %s -> %d\n", k.c_str(), val);
+}
+
+// ── decltype vs decltype(auto) ─────────────────────────────────────────
+static int  val() { return 1; }
+static int& ref() { static int n = 5; return n; }
+
+static void decltypes() {
+    std::puts("\n-- decltype --");
+    int x = 0;
+    std::printf("decltype(x)    is int   : %s\n",
+                std::is_same_v<decltype(x), int> ? "yes" : "no");
+    std::printf("decltype((x))  is int&  : %s   <- extra parens matter\n",
+                std::is_same_v<decltype((x)), int&> ? "yes" : "no");
+    std::printf("decltype(val()) is int  : %s\n",
+                std::is_same_v<decltype(val()), int> ? "yes" : "no");
+    std::printf("decltype(ref()) is int& : %s\n",
+                std::is_same_v<decltype(ref()), int&> ? "yes" : "no");
+
+    auto           a = ref();   // int  — the reference is dropped
+    decltype(auto) d = ref();   // int& — the reference is kept
+    d = 42;
+    std::printf("after d = 42: ref() = %d, a = %d\n", ref(), a);
+}
+
+// ── when auto helps and when it hides ──────────────────────────────────
+static void style() {
+    std::puts("\n-- style --");
+    std::vector<std::string> v{"x"};
+    for (auto it = v.begin(); it != v.end(); ++it)  // good: name is noise
+        std::printf("iterator auto: %s\n", it->c_str());
+
+    auto n = v.size();                              // fine: size_t is obvious
+    std::printf("size = %zu\n", n);
+
+    std::puts("use auto when the type is long and obvious from the right side.");
+    std::puts("write the type when it is the interesting part of the line.");
+}
+
+int main() {
+    auto_strips();
+    range_for();
+    map_range_for();
+    decltypes();
+    style();
+}
+```
 
 ---
 
@@ -228,13 +438,22 @@ auto f = 1 / 3;           // int. 0. the type was the interesting part.
 **The test:** would a reader of this line have to go look up the type to
 understand what the line does? If yes, write it out.
 
-### the `auto x = T{...}` style
+---
 
-Some people write everything as `auto x = Type{args};`. It guarantees
-initialisation (no most vexing parse), puts the type on the right where
-it's easy to change, and lines up nicely. It's a defensible style. Just
-pick one and be consistent — agentty uses plain `auto` where the type is
-obvious and explicit types elsewhere.
+## now break it
+
+1. Change `for (const auto& e : v)` to
+   `for (const Chatty& e : v)`. Does it still avoid the copy? (It should
+   — same type.) Now try `for (const std::pair<std::string,int>& kv : m)`
+   on the map and count copies.
+2. Add `std::printf` to `Chatty`'s move constructor and rerun. Which
+   loops move?
+3. Write `decltype(auto) f() { int x = 0; return (x); }` and run it under
+   ASan.
+4. Write the four `static_assert`s from the pointer-const section and
+   flip one to see the failure message.
+5. Change `decltype(auto) d = ref();` to `auto d = ref();` and rerun.
+   Explain why `ref()` no longer changes.
 
 ---
 
