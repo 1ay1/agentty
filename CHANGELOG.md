@@ -4,6 +4,9 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- **The `^P` provider picker now offers to connect to whatever endpoint you type.** agentty has always spoken to any OpenAI-compatible server (`--provider host:port`, or the "Custom host…" row), but the picker never said so: typing a hostname made every familiar provider disappear and left one muted grey row behind, which reads as "no". Now a query that looks like an endpoint — a dot, a `host:port`, an `https://` — promotes a concrete **"Use `<host>` as a custom OpenAI-compatible host"** row to the TOP, and `Enter` carries the typed text straight into the connect probe instead of reopening an empty field. Saved custom hosts are searchable too (they used to vanish the moment you typed, so the only way back to one was scrolling past every built-in), the escape hatch is no longer painted in the muted style this TUI uses for *unavailable*, and the footer says what `Enter` will do rather than showing a static legend.
+
 ## [0.9.6] - 2026-09-23
 
 ### Fixed

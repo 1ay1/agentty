@@ -265,7 +265,7 @@ TEST_CASE("provider filter: fuzzy narrows + ranks") {
     CHECK(P::filter_provider_indices("zzqzzq").empty());
 }
 
-TEST_CASE("provider rows: one ordered list, filter hides non-preset rows") {
+TEST_CASE("provider rows: one ordered list, saved hosts searchable") {
     namespace ui = agentty::ui;
     const std::vector<std::string> hosts = {"my-host.example:8443"};
 
@@ -283,8 +283,9 @@ TEST_CASE("provider rows: one ordered list, filter hides non-preset rows") {
         CHECK(saw_host);
     }
 
-    // Filtered: only matching presets + the always-present sentinel; the saved
-    // custom host is hidden (it isn't part of the provider text search).
+    // Filtered by a PRESET name: matching presets + the sentinel. The saved
+    // host does not match "kimi", so it is absent for that reason — not
+    // because saved hosts are hidden while filtering.
     {
         auto rows = ui::build_provider_rows(hosts, "kimi");
         CHECK(rows.size() >= 2);          // >=1 preset + sentinel
@@ -292,15 +293,90 @@ TEST_CASE("provider rows: one ordered list, filter hides non-preset rows") {
         CHECK(rows.front().preset() != nullptr);
         CHECK(rows.front().preset()->id == "kimi");
         for (const auto& r : rows)
-            CHECK(r.custom_host() == nullptr);   // no saved host while filtering
+            CHECK(r.custom_host() == nullptr);   // "kimi" doesn't match the host
     }
 
-    // No preset matches: still exactly the sentinel, so the escape hatch
-    // (open the custom-host modal) is always reachable.
+    // A SAVED HOST IS SEARCHABLE. It used to vanish the moment you typed,
+    // so the only way back to a host you had already saved was to scroll
+    // past every preset. A saved host is a provider; it belongs in the
+    // provider search space.
+    {
+        auto rows = ui::build_provider_rows(hosts, "my-host");
+        bool found = false;
+        for (const auto& r : rows)
+            if (const auto* c = r.custom_host()) found = (*c == hosts[0]);
+        CHECK(found);
+    }
+
+    // No preset matches and the query is NOT endpoint-shaped: still exactly
+    // the sentinel, so the escape hatch is always reachable.
     {
         auto rows = ui::build_provider_rows(hosts, "zzqzzq");
         CHECK(rows.size() == 1);
         CHECK(rows.front().is_new_custom_host());
+        CHECK(rows.front().new_host_prefill() == nullptr);   // not promoted
+    }
+}
+
+// An endpoint-shaped query PROMOTES the custom-host row to the top and
+// pre-fills it with what was typed.
+//
+// WHY THIS IS A TEST AND NOT A TWEAK: agentty has always spoken to any
+// OpenAI-compatible host, but the picker never said so. Typing a hostname
+// made every familiar provider disappear and left one muted grey row, which
+// reads as "no". That UI gap produced a pull request adding a registry row
+// for a service the generic path already handled. These asserts pin the fix:
+// the answer is FIRST, it is CONCRETE, and it carries the typed text forward.
+TEST_CASE("provider rows: an endpoint-shaped query offers the custom host first") {
+    namespace ui = agentty::ui;
+    const std::vector<std::string> none;
+
+    // What counts as endpoint-shaped.
+    CHECK(ui::query_looks_like_host("yolo-auto.com"));
+    CHECK(ui::query_looks_like_host("localhost:8080"));
+    CHECK(ui::query_looks_like_host("https://gw.internal/api"));
+    CHECK(ui::query_looks_like_host("192.168.1.9:1234"));
+    // ...and what does not. A provider name must never be mistaken for a host,
+    // or the offer row would shove real providers down on every search.
+    CHECK(!ui::query_looks_like_host("kimi"));
+    CHECK(!ui::query_looks_like_host("openrouter"));
+    CHECK(!ui::query_looks_like_host("gpt"));
+    CHECK(!ui::query_looks_like_host(""));
+    CHECK(!ui::query_looks_like_host("my server"));   // spaces: it's prose
+
+    // Promoted: FIRST row, carries the typed text, and the trailing duplicate
+    // sentinel is gone (one offer, not two).
+    {
+        auto rows = ui::build_provider_rows(none, "yolo-auto.com");
+        REQUIRE(!rows.empty());
+        CHECK(rows.front().is_new_custom_host());
+        REQUIRE(rows.front().new_host_prefill() != nullptr);
+        CHECK(*rows.front().new_host_prefill() == "yolo-auto.com");
+        int sentinels = 0;
+        for (const auto& r : rows) sentinels += r.is_new_custom_host() ? 1 : 0;
+        CHECK(sentinels == 1);
+    }
+
+    // A host:port query still ranks the offer first even though presets may
+    // fuzzy-match the digits.
+    {
+        auto rows = ui::build_provider_rows(none, "localhost:11434");
+        REQUIRE(!rows.empty());
+        REQUIRE(rows.front().new_host_prefill() != nullptr);
+        CHECK(*rows.front().new_host_prefill() == "localhost:11434");
+    }
+
+    // ALREADY SAVED: do not offer to re-add a host that is already a row of
+    // its own further down. Two rows for one endpoint is a papercut that
+    // makes the picker look broken.
+    {
+        const std::vector<std::string> saved = {"my-host.example:8443"};
+        auto rows = ui::build_provider_rows(saved, "my-host.example:8443");
+        CHECK(rows.front().new_host_prefill() == nullptr);
+        bool saw_saved = false;
+        for (const auto& r : rows)
+            if (const auto* c = r.custom_host()) saw_saved = (*c == saved[0]);
+        CHECK(saw_saved);
     }
 }
 

@@ -247,8 +247,17 @@ Step providers_update(Model m, msg::ProvidersMsg pm) {
             const ui::ProviderRow& chosen = rows[static_cast<std::size_t>(selected)];
 
             // "Custom host…" sentinel: hand off to the free-text endpoint modal.
+            // If the row was PROMOTED (the query was endpoint-shaped), carry
+            // the typed text straight in with the cursor at the end, so Enter
+            // goes to the probe instead of reopening an empty field. Retyping
+            // a hostname you just typed is the kind of friction that makes
+            // people conclude the feature does not exist.
             if (chosen.is_new_custom_host()) {
                 ui::login::CustomHostInput ch;
+                if (const std::string* prefill = chosen.new_host_prefill()) {
+                    ch.host_input = *prefill;
+                    ch.cursor     = static_cast<int>(ch.host_input.size());
+                }
                 ch.origin = ui::login::origin::Providers{};  // Esc = one step back
                 m.ui.login = std::move(ch);
                 return done(std::move(m));

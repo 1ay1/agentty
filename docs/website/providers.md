@@ -103,6 +103,26 @@ The `#name` is a local tag only — it never reaches the wire — but it shows o
 
 Custom hosts you add are **saved** — they reappear in the `^P` picker every session (`Del` on a row removes one, two-press). A local host committed without a key is saved too, so you never re-type it.
 
+### Adding one from the TUI
+
+You don't need the CLI, and you don't need to hunt for a menu. Open `^P` and **just type the endpoint**:
+
+```
+^P  →  yolo-auto.com
+
+  Use yolo-auto.com  as a custom OpenAI-compatible host      ⏎ connect
+  ──────────────────────────────────────────────────────────────────
+  ⏎ connects to yolo-auto.com · agentty probes it and adopts the dialect it finds
+```
+
+The moment what you type looks like an endpoint — it has a dot, a `host:port`, or an `https://` — the picker offers it as the **first** row. `Enter` carries the text straight into the connect modal (no retyping) and probes the server: it tries the configured models path, then `/v1/models`, then Ollama's `/api/tags`, adopts whichever answers, and reports `✓ 12 models · openai · 45ms` before committing. A dead endpoint never becomes your active provider.
+
+Searching also reaches hosts you've **already saved**, so `gw.internal` jumps straight to that row instead of making you scroll past every built-in.
+
+:::tip You do not need a built-in row
+The provider list is a convenience for endpoints with quirks — their own transport, OAuth, a second dialect, a non-standard port. **Any** plain OpenAI-compatible server works through the custom-host path with no code change, which is why llama.cpp, vLLM and LM Studio don't have rows either.
+:::
+
 :::tip Debugging a custom host
 Set `AGENTTY_LOG=wire=trace`  to see the exact request path, status, and response your server returned — see **[Logging & diagnostics](/docs/logging)**. The most common issues are a missing `/v1` (→ 404) and a model id that doesn't match what `/v1/models` reports.
 :::

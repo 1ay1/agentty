@@ -135,10 +135,21 @@ Element providers_panel(const Model& m) {
                 row.trailing_style = fg_of(success);
             }
             row.active         = active;
-        } else {   // NewCustomHost sentinel
+        } else if (const std::string* prefill = r.new_host_prefill()) {
+            // PROMOTED sentinel: the query itself is endpoint-shaped, so this
+            // row stops being a generic escape hatch and becomes a concrete
+            // offer for the thing the user just typed. Full foreground, not
+            // muted — muted is this TUI's vocabulary for "unavailable", and
+            // reading the one row that solves your problem as disabled is
+            // exactly how a user concludes agentty cannot reach their server.
+            row.leading        = "Use " + *prefill + "  as a custom OpenAI-compatible host";
+            row.leading_style  = fg_of(fg);
+            row.trailing       = "\xe2\x8f\x8e connect";
+            row.trailing_style = fg_of(info);
+        } else {   // NewCustomHost sentinel, unpromoted
             row.leading        = std::string{"Custom host\xe2\x80\xa6  "}
                                + "any OpenAI-compatible server (host:port)";
-            row.leading_style  = fg_of(muted);
+            row.leading_style  = fg_of(fg);
             row.trailing       = "\xe2\x9c\x8e edit";
             row.trailing_style = fg_of(info);
         }
@@ -170,14 +181,46 @@ Element providers_panel(const Model& m) {
     }();
 
     cfg.footer.push_back(text(""));
-    cfg.footer.push_back(h(
-        text("\xe2\x9c\x93", fg_of(success)), text(" ready  ", fg_dim(muted)),
-        text("\xe2\x9a\xa0", fg_of(warn)),    text(" set the named key first  ", fg_dim(muted))
-    ).build());
+
+    // The footer's top line is CONTEXTUAL, because a static legend teaches
+    // nothing at the moment a user is stuck. Three states:
+    //
+    //   typed an endpoint  → confirm what Enter will do with it
+    //   typed a non-match  → say the generic path exists, in words, AT the
+    //                        moment the list looks empty (this is where a
+    //                        user otherwise concludes agentty can't reach
+    //                        their server and goes to patch the registry)
+    //   otherwise          → the badge legend
+    const bool host_shaped = ui::query_looks_like_host(picker->query);
+    const bool no_presets  = !picker->query.empty()
+                           && provider::filter_provider_indices(picker->query).empty();
+    if (host_shaped) {
+        cfg.footer.push_back(h(
+            text("\xe2\x8f\x8e", fg_of(info)),
+            text(" connects to ", fg_dim(muted)),
+            text(picker->query, fg_of(fg)),
+            text(" \xc2\xb7 agentty probes it and adopts the dialect it finds",
+                 fg_dim(muted))
+        ).build());
+    } else if (no_presets) {
+        cfg.footer.push_back(h(
+            text("no built-in provider matches ", fg_dim(muted)),
+            text("\xe2\x80\x9c" + picker->query + "\xe2\x80\x9d", fg_of(fg)),
+            text(" \xc2\xb7 type a ", fg_dim(muted)),
+            text("host:port", fg_of(info)),
+            text(" to use any OpenAI-compatible server", fg_dim(muted))
+        ).build());
+    } else {
+        cfg.footer.push_back(h(
+            text("\xe2\x9c\x93", fg_of(success)), text(" ready  ", fg_dim(muted)),
+            text("\xe2\x9a\xa0", fg_of(warn)),    text(" set the named key first  ", fg_dim(muted))
+        ).build());
+    }
     cfg.footer.push_back(key_hints({
         {"\xe2\x86\x91\xe2\x86\x93", "move", 5},        // ↑↓
-        {"type", "filter", 4},
-        {"Enter", row_has_accounts ? "accounts" : "switch", 5},
+        {"type", host_shaped ? "endpoint" : "filter", 4},
+        {"Enter", host_shaped ? "connect"
+                              : (row_has_accounts ? "accounts" : "switch"), 5},
         {"^D", picker->confirm_remove.empty() ? "remove" : "confirm", 2},
         {"^/", "models", 3},                       // cross-hint: model picker
         {"Esc", "close", 4},
