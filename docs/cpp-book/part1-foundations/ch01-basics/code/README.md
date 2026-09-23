@@ -1,15 +1,31 @@
 # Chapter 1 example programs
 
-Ten programs, one per section. Each is standalone: no agentty headers, no
-build system, nothing to install beyond a C++23 compiler.
+Twelve programs, ten of them one-per-section. Each is standalone: no
+agentty headers, no build system, nothing to install beyond a C++23
+compiler.
 
 ## build everything
 
 ```sh
-make          # builds all ten
-make run      # builds and runs all ten in order
+make          # builds all twelve
+make run      # builds and runs all twelve in order
+make verify   # the honest-chapter check. see below.
+make proof    # just the zero-overhead assembly diff
 make clean
 ```
+
+## `make verify` is the important one
+
+```sh
+make verify
+```
+
+1. Rebuilds all twelve with `-Werror`. Zero warnings allowed.
+2. Runs `12_selftest`, which asserts every claim the chapter makes.
+3. Runs `proof.sh`, which diffs `-O2` assembly to prove `Id<Tag>` is free.
+
+If that passes, the chapter is not lying to you on your machine. If it
+fails, the failing assertion names the section it belongs to.
 
 ## build one
 
@@ -38,15 +54,21 @@ g++ -std=c++23 -Wall -Wextra -fsanitize=address,undefined -g \
 | `08_copy_move.cpp` | [8. Copy, move, elision](../08-copy-move-elision.md) |
 | `09_auto.cpp` | [9. auto and decltype](../09-auto-and-decltype.md) |
 | `10_imagecontent.cpp` | [10. Capstone](../10-capstone-imagecontent.md) |
+| `11_zero_overhead.cpp` | evidence for [3](../03-strong-types.md). run `make proof`. |
+| `12_selftest.cpp` | the whole chapter, as assertions |
+| `proof.sh` | compiles 11 at `-O2 -S` and diffs weak vs strong |
 
 ## about the warnings
 
-Two warnings are deliberate and marked in the source:
+Three warnings are deliberate and marked in the source with a pragma and
+a comment saying why:
 
 - `02_integers.cpp` — the signed/unsigned comparison. The warning is the
-  lesson, so it is suppressed with a local pragma and explained inline.
+  lesson.
 - `04_value_categories.cpp` — a discarded `std::move`, to show it does
   nothing on its own.
+- `08_copy_move.cpp` — `return std::move(local)`, so you can watch it
+  block elision in the output.
 
 Anything else that warns is a bug. Tell me.
 

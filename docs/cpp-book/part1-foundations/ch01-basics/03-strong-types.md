@@ -390,16 +390,114 @@ compiler won't let you accidentally key by something else.
 
 ---
 
-## the cost, measured
+## the cost, proven not claimed
 
-- **Runtime:** zero. Same size, same instructions, same codegen. Verify it
-  yourself: `g++ -O2 -S` the strong and weak versions and diff the
-  assembly. They're identical.
-- **Compile time:** a few extra template instantiations. Unmeasurable at
-  this scale.
-- **Typing:** you write `ThreadId{s}` instead of `s`. That's the whole
-  price.
-- **Return:** a whole category of bug becomes a compile error.
+Everybody writing about strong types says "zero overhead". Let's not take
+anyone's word for it, including mine.
+
+```sh
+cd code && make proof
+```
+
+That compiles [`11_zero_overhead.cpp`](code/11_zero_overhead.cpp) at `-O2
+-S` and diffs the generated assembly of each weak/strong function pair:
+
+```
+comparing -O2 output, std::string vs Id<ThreadIdTag>
+
+  len     identical     2 instructions, same order
+  empty   identical     3 instructions, same order
+  total   equivalent   12 instructions, scheduled differently:
+             0a1
+             > 	xorl	%edx, %edx
+             4d4
+             < 	xorl	%edx, %edx
+             (same instruction multiset. the scheduler just
+              hoisted an init. zero cost either way.)
+
+no pair costs an extra instruction. the strong type is free.
+```
+
+Here's what those first two actually compile to. Read them side by side:
+
+```asm
+; std::size_t weak_len(const std::string& s) { return s.size(); }
+        movq    8(%rdi), %rax
+        ret
+
+; std::size_t strong_len(const ThreadId& id) { return id.value.size(); }
+        movq    8(%rdi), %rax
+        ret
+```
+
+```asm
+; bool weak_empty(const std::string& s) { return s.empty(); }
+        cmpq    $0, 8(%rdi)
+        sete    %al
+        ret
+
+; bool strong_empty(const ThreadId& id) { return id.empty(); }
+        cmpq    $0, 8(%rdi)
+        sete    %al
+        ret
+```
+
+Byte for byte the same. The template, the tag, the wrapper struct, the
+`[[nodiscard]]`, the member function call — all of it evaporates before a
+single instruction is emitted.
+
+The third pair is worth a second look, because it *didn't* come out
+identical:
+
+```
+  total   equivalent   12 instructions, scheduled differently
+```
+
+Same twelve instructions, one `xorl` hoisted above the loop instead of
+below. That's the instruction scheduler making an arbitrary choice between
+two equally good orderings — it happens between two compilations of
+identical source too. The script reports it as `equivalent` rather than
+pretending it's identical, because **a teaching tool that fudges its own
+evidence is worthless.** Same instruction multiset, same cost.
+
+And the timing side, from `./11_zero_overhead`:
+
+```
+-- sizes --
+sizeof(std::string)       = 32
+sizeof(ThreadId)          = 32
+sizeof(vector<string>)    = 24
+sizeof(vector<ThreadId>)  = 24
+2000000 strings on the heap, both ways, byte for byte.
+
+-- summing 2000000 lengths --
+weak   (std::string) :   45.04 ms
+strong (ThreadId)    :   45.12 ms
+```
+
+0.2% apart on two million elements, which is noise — run it again and the
+order flips. **Don't trust that number.** Laptop timings are affected by
+thermal state, other processes, and which loop ran first. The assembly is
+the real evidence; the benchmark is there to show you that a benchmark
+*wouldn't have settled the question*.
+
+So the actual ledger:
+
+| | cost |
+|---|---|
+| runtime | zero. proven above. |
+| memory | zero. `sizeof` is identical. |
+| compile time | a few template instantiations. unmeasurable here. |
+| typing | `ThreadId{s}` instead of `s`. |
+| **return** | **a whole bug class becomes a compile error** |
+
+### do this yourself
+
+Don't stop at reading the output. Open `11_zero_overhead.cpp`, add a
+member to `Id` — say a `bool` — and rerun `make proof`. Watch the sizes
+diverge and the assembly change. *That's* what a non-free abstraction
+looks like, and now you can tell the difference by looking instead of by
+guessing.
 
 ---
 

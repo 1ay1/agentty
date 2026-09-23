@@ -11,3 +11,5 @@
 10_imagecontent
 *.o
 *.dSYM/
+11_zero_overhead
+12_selftest

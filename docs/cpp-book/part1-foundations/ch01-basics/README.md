@@ -35,6 +35,50 @@ Read them in order. Each one has a program next to it in `code/`.
 | — | [Exercises](exercises.md) | eight, ordered by difficulty | 2h+ |
 | — | [Quick reference](quick-reference.md) | one page, for after | — |
 
+Plus two programs with no prose section, because they exist to be *run*:
+
+- `code/11_zero_overhead.cpp` — proves the strong type is free, by diffing
+  `-O2` assembly. Used by [section 3](03-strong-types.md).
+- `code/12_selftest.cpp` — **every claim in this chapter as an
+  assertion.** 45 `static_assert`s and 15 runtime checks. If it builds and
+  runs clean, the chapter is true on your machine.
+
+---
+
+## verify the chapter before you trust it
+
+```sh
+cd code && make verify
+```
+
+That does three things:
+
+1. builds all twelve programs with `-Wall -Wextra -Wpedantic -Werror` and
+   both sanitizers — **zero warnings allowed**
+2. runs the self-test, which asserts every claim the prose makes
+3. proves the zero-overhead claim by diffing optimised assembly
+
+```
+building all 12 programs, warnings are errors...
+  ok: zero warnings
+
+running the self-test...
+  ...
+15 runtime checks, 0 failures
+everything the chapter claims is true on this machine.
+
+proving zero overhead...
+  len     identical     2 instructions, same order
+  empty   identical     3 instructions, same order
+  total   equivalent   12 instructions, scheduled differently
+no pair costs an extra instruction. the strong type is free.
+
+chapter 1 verified.
+```
+
+If something fails on your compiler or platform, that's genuinely
+interesting — the failing assertion names the section it came from.
+
 ---
 
 ## how to read this
@@ -44,8 +88,9 @@ all first:
 
 ```sh
 cd code
-make          # all ten
-make run      # all ten, in order, with headers
+make          # all twelve
+make run      # all twelve, in order, with headers
+make verify   # the one that checks the chapter is honest
 ```
 
 Then keep the matching program open beside the prose. Every output block

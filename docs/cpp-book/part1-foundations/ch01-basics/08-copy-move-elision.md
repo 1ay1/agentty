@@ -260,20 +260,85 @@ should be a smart pointer instead.
 
 ### rule of five
 
-**If you declare one, declare all five.** Declaring a destructor suppresses
-the implicit move operations, so a class with a custom destructor and no
-declared move operations silently *copies* where you expected moves.
+**If you declare one, declare all five.**
+
+This is not a style rule. Declaring a destructor **suppresses the implicit
+move operations**, and nothing warns you. Run `./12_selftest` and look at
+this block:
+
+```
+  growing to 64 elements:
+    hand-written move, no dtor :  0 copies, 63 moves
+    hand-written move, + dtor  :  0 copies, 63 moves
+    implicit move, no dtor     : nothrow=yes  -> vector MOVES
+    implicit move, + dtor      : nothrow=no  -> vector COPIES
+```
+
+The two types in the last pair are these:
+
+```cpp
+struct ImplicitFine    { std::string s; };
+struct ImplicitTrapped { std::string s; ~ImplicitTrapped() {} };
+//                                      ^^^^^^^^^^^^^^^^^^^^^ the only difference
+```
+
+An **empty destructor**. That's it. And it flipped every vector
+reallocation from a pointer swap to a full string copy.
+
+Here's the chain, because it's worth being able to recite:
+
+1. You declare `~ImplicitTrapped()`.
+2. The compiler stops generating the implicit move constructor and move
+   assignment. (The rule exists because a class that needs a custom
+   destructor probably manages a resource, and a default memberwise move
+   would likely be wrong for it.)
+3. `ImplicitTrapped t2 = std::move(t1);` still compiles — overload
+   resolution quietly falls back to the **copy** constructor.
+4. The copy constructor can throw, so
+   `is_nothrow_move_constructible_v` is false.
+5. `vector` sees that and uses `move_if_noexcept`, which picks the copy.
+6. Every reallocation now deep-copies every string. Forever.
+
+No error. No warning. Not even at `-Wall -Wextra`. Your program is just
+quietly slower, and the cause is one line that looks like it does nothing.
+
+The classic version of this bug is worse than slow — it's a crash:
 
 ```cpp
 struct Handle {
+    int fd_;
     ~Handle() { close(fd_); }
-    // no move ctor declared -> moves silently become copies
-    // -> double close. crash.
+    // no move declared -> moves become COPIES
+    // -> two Handles with the same fd -> double close
 };
 ```
 
-Chapter 2 covers this properly. For now: if you write one, write all five,
-or use `= default` / `= delete` to say what you mean.
+The self-test pins all of this down as assertions:
+
+```cpp
+static_assert(std::is_move_constructible_v<HasDtor>,
+              "it looks movable...");
+static_assert(!std::is_nothrow_move_constructible_v<HasDtor>,
+              "...but that's the COPY ctor answering");
+static_assert(std::is_nothrow_move_constructible_v<decltype(HasDtor::s)>,
+              "even though the only member moves just fine");
+```
+
+Read those three together. The type reports itself as move-constructible.
+It isn't, really — the copy constructor is answering the phone.
+
+**So: declare zero, or declare five.** And put this in a test for anything
+performance-sensitive:
+
+```cpp
+static_assert(std::is_nothrow_move_constructible_v<MyType>);
+static_assert(std::is_nothrow_move_assignable_v<MyType>);
+```
+
+It catches the regression on the day someone adds a destructor, instead of
+six months later in a profile.
+
+Chapter 2 covers the resource-owning case properly.
 
 ### `= default` and `= delete`
 
