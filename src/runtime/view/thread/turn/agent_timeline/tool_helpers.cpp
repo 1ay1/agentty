@@ -378,12 +378,7 @@ static std::string tool_timeline_detail_base(const ToolUse& tc) {
                 tc.shell_label.clear();
                 namespace sx = ::mcp::tools::util::shellx;
                 const auto pl = sx::plan(sx::analyze(cmd));
-                if (pl.pure_inspection()) {
-                    for (const auto& st : pl.steps) {
-                        if (!tc.shell_label.empty()) tc.shell_label += "; ";
-                        tc.shell_label += sx::describe(st);
-                    }
-                }
+                if (pl.pure_inspection()) tc.shell_label = sx::describe(pl);
                 tc.shell_label_valid = true;
             }
             label = tc.shell_label;
