@@ -223,10 +223,105 @@ def carrier_ok(schema_type, cpp_type):
     low = inner.lower()
     if any(p.lower() in low for p in pats):
         return True
-    # An enum or a nested record is a legitimate carrier for string/object.
+    # A nested record or enum is a legitimate carrier for object/string — but
+    # only if it is NOT a known scalar. Accepting any identifier here let
+    # `std::string` pass for `type: object`, which is precisely the mismatch
+    # worth catching: a scalar where the peer expects a record.
+    SCALARS = re.compile(
+        r"^(std::)?(string|string_view|bool|char|u?int\w*|int\d*_t|"
+        r"uint\d*_t|size_t|double|float|long|short)$")
+    if SCALARS.match(inner):
+        return False
     if schema_type in ("string", "object") and re.fullmatch(r"[\w:]+", inner):
         return True
     return False
+
+
+def resolve_ref(defs, node, depth=0):
+    """Follow `$ref` to the definition it names.
+
+    140 MCP properties are a bare `{"$ref": "#/$defs/Annotations"}` with no
+    `type` of their own, so a checker that only reads `type` skips every one
+    of them — silently, which is the failure mode this whole script exists
+    to avoid. Resolving lets the carrier check see the target's shape.
+
+    Depth-bounded: the schemas are recursive (a ContentBlock can nest a
+    resource that nests content), and an unbounded chase would not
+    terminate.
+    """
+    seen = 0
+    while isinstance(node, dict) and "$ref" in node and seen < 8:
+        target = node["$ref"].rsplit("/", 1)[-1]
+        nxt = defs.get(target)
+        if not isinstance(nxt, dict):
+            return node, target
+        node, seen = nxt, seen + 1
+        if "$ref" not in node:
+            return node, target
+    return node, None
+
+
+# Formats we understand. Two families:
+#   STRING  byte (base64), uri, uri-template, date-time — all strings on the
+#           wire, so the carrier check already covers them.
+#   NUMERIC  double/float/int32/uint32/int64/uint64 — these are WIDTH hints
+#           (OpenAPI style), not string formats, and they DO constrain the
+#           carrier: `uint32` in a std::int64_t is fine, in a std::string is
+#           not — which the carrier check catches via `type` anyway.
+# Listed so an unknown format is visible rather than silently ignored.
+KNOWN_FORMATS = {
+    "byte", "uri", "uri-template", "date-time", "uuid",
+    "double", "float", "int32", "uint32", "int64", "uint64",
+}
+
+
+# Runtime constraints the C++ type cannot express, enforced at a CHOKE POINT
+# in code instead. Listed here so the checker stays quiet about them and the
+# enforcement site is discoverable from one place — a note nobody acts on is
+# decoration, but deleting the check would lose the contract entirely.
+#
+#   <Type>.<field>: where the clamp lives
+ENFORCED_AT = {
+    # `minimum: 0` on a ttl. Clamped in apply_cache_hint (stateless server)
+    # and in the typed server's discover/list paths, so a negative can never
+    # reach the wire regardless of what a caller passes.
+    "DiscoverResult.ttlMs": "server_stateless.hpp apply_cache_hint + server.hpp",
+    "ListToolsResult.ttlMs": "server_stateless.hpp apply_cache_hint",
+    "ListPromptsResult.ttlMs": "server_stateless.hpp apply_cache_hint",
+    "ListResourcesResult.ttlMs": "server_stateless.hpp apply_cache_hint",
+    "ListResourceTemplatesResult.ttlMs": "server_stateless.hpp apply_cache_hint",
+    "ReadResourceResult.ttlMs": "server_stateless.hpp apply_cache_hint",
+}
+
+
+def semantic_notes(tname, key, prop, cpp_type):
+    """Constraints the TYPE cannot express.
+
+    These are RUNTIME contracts, not shape mismatches, so they are notes
+    rather than failures — and only when the carrier does not already
+    enforce them.
+
+    `minimum: 0` is the common one: C++ has no non-negative int, and
+    wrapping 27 fields in a newtype would cost more than the bug. But an
+    UNSIGNED carrier satisfies it outright, and so does a format that
+    already says unsigned (`uint32`), so neither is worth reporting —
+    reporting them anyway produced 20 lines of noise nobody would read,
+    which is how a checker becomes decoration.
+    """
+    out = []
+    lo = prop.get("minimum")
+    fmt = prop.get("format")
+    if isinstance(lo, (int, float)) and lo >= 0:
+        unsigned_carrier = re.search(r"unsigned|size_t|uint", cpp_type, re.I)
+        unsigned_format = isinstance(fmt, str) and fmt.startswith("uint")
+        enforced = f"{tname}.{key}" in ENFORCED_AT
+        if not unsigned_carrier and not unsigned_format and not enforced:
+            out.append(f"{tname}.{key}: schema minimum={lo}, carrier "
+                       f"{cpp_type} admits negatives (runtime contract)")
+    if isinstance(fmt, str) and fmt not in KNOWN_FORMATS:
+        out.append(f"{tname}.{key}: unrecognised format {fmt!r} — "
+                   f"widen KNOWN_FORMATS after checking what it implies")
+    return out
 
 
 def check(label, schema_path, sources):
@@ -294,15 +389,32 @@ def check(label, schema_path, sources):
         members = struct_members(sources, name) or {}
         props = node.get("properties") or {}
         for k in sorted(set(got) & set(props) & set(members)):
-            st = props[k].get("type")
+            prop = props[k]
+            if not isinstance(prop, dict):
+                continue
+            # Follow $ref FIRST. 140 MCP properties are a bare $ref with no
+            # `type` of their own; reading `type` alone skips every one.
+            target, refname = resolve_ref(defs, prop)
+            st = target.get("type")
             if isinstance(st, list):
                 st = next((x for x in st if x != "null"), None)   # nullable
-            if not isinstance(st, str):
-                continue                      # union / $ref — not checkable
-            if not carrier_ok(st, members[k]):
-                fails.append(
-                    f"{name}.{k}: schema says {st}, codec carries "
-                    f"{members[k]}")
+            if isinstance(st, str):
+                if not carrier_ok(st, members[k]):
+                    via = f" (via {refname})" if refname else ""
+                    fails.append(
+                        f"{name}.{k}: schema says {st}{via}, codec carries "
+                        f"{members[k]}")
+            elif refname:
+                # The $ref names a record. The carrier must be that record
+                # (or a Maybe/List of it) — a std::string here would encode
+                # a scalar where the peer expects an object.
+                inner = re.sub(r"^Maybe<(.*)>$", r"\1", members[k]).strip()
+                inner = re.sub(r"^(List|std::vector)\s*<(.*)>$", r"\2", inner).strip()
+                if re.fullmatch(r"std::string|bool|int\w*|double|float", inner):
+                    fails.append(
+                        f"{name}.{k}: schema $ref {refname} (a record), "
+                        f"codec carries scalar {members[k]}")
+            notes.extend(semantic_notes(name, k, target, members[k]))
 
         extras = sorted(set(got) - want_all - ENVELOPE - tags - {"_meta"})
         if extras:
