@@ -1338,12 +1338,69 @@ int main(int argc, char** argv) {
         //     fell back to the parent model — the exact failure the comment
         //     above describes for RoleConfig, one field over.
         //
-        // Seeded from the SAME bundled catalog init() uses, so headless and
-        // interactive start from one floor. A live /models fetch supersedes
-        // it in the TUI; headless has no fetch, which is precisely why the
-        // floor has to be non-empty here.
-        auto sa_candidates = catalog::bundled(
-            provider::parse_selection(provider_spec).provider_id());
+        // ASK THE PROVIDER, don't guess. list_models_for dispatches on the
+        // same axes as the stream path (Wire dialect + oauth_native), so the
+        // catalog here cannot disagree with the transport that will serve the
+        // turn — and for a CUSTOM HOST it is the only way to learn anything
+        // at all, because no bundled catalog can know a private deployment's
+        // models or their windows. That is the whole point of the /v1/models
+        // ladder: a self-hosted gateway's window is knowable only from the
+        // gateway.
+        //
+        // HEADLESS ONLY. The TUI fetches this itself — init() seeds the
+        // bundled floor and ModelsLoaded pushes the live catalog the moment
+        // it lands, both through set_candidates — so fetching here too would
+        // put a synchronous network round trip in front of the first frame
+        // to produce a list that is about to be replaced. `agentty run` and
+        // `agentty acp` have no such refresh, which is exactly why they need
+        // it now.
+        std::vector<ModelInfo> sa_candidates;
+        const bool headless = args.subcommand == "run"
+                           || args.subcommand == "acp"
+                           || args.subcommand == "mcp-serve";
+        if (headless) {
+            // Falls back to the provider's static seed when auth is empty or
+            // the network is unreachable, so an offline run still gets a
+            // floor. Wrapped anyway: a catalog fetch must never be the thing
+            // that stops a headless run from starting.
+            try {
+                sa_candidates = provider::list_models_for(provider::active(),
+                                                          provider_auth);
+            } catch (...) { /* fall through to the bundled floor below */ }
+        }
+        if (sa_candidates.empty())
+            sa_candidates = catalog::bundled(
+                provider::parse_selection(provider_spec).provider_id());
+        // Publish the windows process-wide, the same way the TUI's
+        // ModelsLoaded arm does — the bundled floor FIRST, then the live
+        // catalog over it.
+        //
+        // Union, not replace. A live /v1/models answer is the ceiling for
+        // what you can REACH, but it is not a superset of what you can
+        // NAME: Anthropic's live catalog moves as models ship, so a
+        // `-m claude-opus-4-5` pinned in settings (or passed on the command
+        // line) can outlive its row while the bundled floor still knows its
+        // window. Seeding the floor underneath means a retired-but-known id
+        // resolves its real window instead of 0 — and 0 is not "unknown"
+        // downstream, the Ollama transport reads it as "use my tiny
+        // default" and truncates the run.
+        // SKIP the picker-only `[1m]`/`[2m]` variant rows. They carry the
+        // SAME model id with a marker suffix, and the map's key normaliser
+        // strips that suffix — so seeding them writes 1000000 under the base
+        // id and every request for the plain model claims a 1M window it was
+        // never entitled to. The extended window is opt-in per turn, not a
+        // property of the id.
+        const auto seed_windows = [](const std::vector<ModelInfo>& rows) {
+            for (const auto& mi : rows) {
+                if (mi.id.value != agentty::wire_model_id(mi.id.value)) continue;
+                if (mi.context_window > 0)
+                    agentty::set_catalog_context_window(mi.id.value,
+                                                        mi.context_window);
+            }
+        };
+        seed_windows(catalog::bundled(
+            provider::parse_selection(provider_spec).provider_id()));
+        seed_windows(sa_candidates);
         tools::subagent::install(tools::subagent::Config{
             .auth = provider_auth,
             .model = std::move(sa_model),

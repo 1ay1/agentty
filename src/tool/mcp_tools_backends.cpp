@@ -952,6 +952,37 @@ provider::StreamResult run_one_completion(Thread& thread,
     // returns a clean id when it finds a cheaper model; this also covers the
     // "kept the parent" fallback and the write-role (cfg.model) path.
     req.model         = agentty::wire_model_id(req.model);
+    // The model's real context window, from the SAME catalog the model was
+    // routed out of.
+    //
+    // AFTER wire_model_id(), deliberately. Catalog ids carry picker-only
+    // markers (`[1m]`/`[2m]`) that the wire id strips, so matching before
+    // the strip missed on exactly the rows that have a marker — and matching
+    // after means one id shape on both sides.
+    //
+    // This was never set here at all, so every subagent turn (and every
+    // `agentty run`, which is this same loop) dispatched with
+    // context_window=0: the Ollama transport then could not size
+    // options.num_ctx and fell back to the daemon's ~2k/4k default,
+    // truncating exactly the long runs headless exists for. The main reducer
+    // fills it at cmd_factory.cpp:954; two loops that both build requests
+    // must both fill them in, which is the asymmetry the comment below has
+    // been warning about.
+    for (const auto& mi : cfg.candidates) {
+        if (agentty::wire_model_id(mi.id.value) == req.model) {
+            req.context_window = mi.context_window;
+            break;
+        }
+    }
+    // A catalog MISS is not "unknown window", it is "this id is not in the
+    // list we happen to hold" — which is ordinary: the live catalog moves
+    // (a `-m claude-opus-4-5` pinned in settings outlives its row), a custom
+    // host may serve ids no catalog lists, and an offline run has only the
+    // bundled floor. Leaving 0 there pushes a WRONG answer downstream (the
+    // Ollama transport reads 0 as "use my tiny default"), so fall back to
+    // the model's own known window instead of a hole.
+    if (req.context_window <= 0)
+        req.context_window = agentty::catalog_context_window_for(req.model);
     req.system_prompt = subagent_system_prompt(type);
     // Smart-channel telemetry, the delegation half of the trace. Without this
     // a debug log showed ONLY the Strategic turn: subagents dispatch on a
@@ -999,23 +1030,6 @@ provider::StreamResult run_one_completion(Thread& thread,
     // fan-out of parallel subagents (each turn otherwise billed at the full
     // ceiling). The wrap-up nudge already forces a tight final report.
     req.max_tokens    = 8192;
-    // The model's real context window, looked up in the SAME catalog the model
-    // was routed from.
-    //
-    // This was simply never set here, so every subagent turn (and every
-    // `agentty run`, which goes through this loop) dispatched with
-    // context_window=0 regardless of provider. Downstream that means the
-    // Ollama transport cannot size `options.num_ctx` and falls back to the
-    // daemon's tiny default (~2k/4k), silently truncating a long agent
-    // conversation — exactly the failure the field exists to prevent.
-    //
-    // The main reducer sets it from the same place (cmd_factory.cpp:954).
-    // Two loops that both build requests must both fill them in; the one
-    // nobody watches is the one that rots — which is the asymmetry the
-    // comment right below has been warning about.
-    for (const auto& mi : cfg.candidates) {
-        if (mi.id.value == req.model) { req.context_window = mi.context_window; break; }
-    }
     req.messages      = thread.messages;
     // Same preflight the main loop runs. The subagent assembles its own
     // request — its own thread, its own tool advertisement, its own
