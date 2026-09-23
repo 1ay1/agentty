@@ -184,20 +184,27 @@ TEST_CASE("dialect: context window is a vLLM extension, absent on OpenAI") {
     // CAPTURED LIVE 2026-09-23 from https://yolo-auto.com/v1/models. Both keys
     // present. Verified honoured: a 125,040-token prompt returned HTTP 200 on
     // a FREE key, so the number is real and not a marketing ceiling.
+    //
+    // NOTE this is the NARROW flat-key lens. The full ladder — ~15 spellings
+    // across top_provider / model_info / meta and GGUF arch-prefixed keys —
+    // lives in detail::advertised_window_tokens(), which is the SSOT. A
+    // second partial list here would be worse than none: a spelling it missed
+    // would silently fall back to a default window, the gauge would misread,
+    // and auto-compaction would fire at the wrong point (issue #49).
     const json yolo = json::parse(
         R"({"id":"qwen3.8-flash","object":"model","owned_by":"yolo-auto",
             "context_length":131072,"max_model_len":131072})");
-    CHECK(dx::model_context_window()(yolo).value() == 131072);
+    CHECK(dx::model_context_window_flat()(yolo).value() == 131072);
 
     // Either key alone is enough.
-    CHECK(dx::model_context_window()(json::parse(R"({"max_model_len":8192})"))
+    CHECK(dx::model_context_window_flat()(json::parse(R"({"max_model_len":8192})"))
               .value() == 8192);
 
     // OpenAI proper ships NEITHER — this field is not in its shape at all.
     // Absence must be representable, which is what Observed<> is for.
     const json openai = json::parse(
         R"({"id":"gpt-4o","object":"model","owned_by":"openai"})");
-    CHECK(!dx::model_context_window()(openai).has_value());
+    CHECK(!dx::model_context_window_flat()(openai).has_value());
 }
 
 // ═══ Observed<T>: a claim is not an observation ══════════════════════════

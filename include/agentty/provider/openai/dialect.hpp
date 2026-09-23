@@ -118,19 +118,30 @@ inline const Lens<std::string>& error_message() {
 
 // ── model metadata from /v1/models ───────────────────────────────────────
 //
-// NOT IN OPENAI'S SHAPE AT ALL. `context_length` / `max_model_len` are a vLLM
-// extension, and they are the reason agentty can size a context window for a
-// custom host without being told: verified on Yolo-Auto, which reports
-// 131072 for qwen3.8-flash and honours it (a 125k-token prompt returned 200
-// on a free key).
+// NOT IN OPENAI'S SHAPE AT ALL. OpenAI's own /v1/models returns only
+// {id, object, created, owned_by} — no window. So every gateway that wanted
+// to publish one invented its own place to put it, and there are now ~15
+// spellings across nested blocks (`top_provider`, `model_info`, `meta`) and
+// GGUF arch-prefixed keys ("qwen2.context_length").
 //
-// Absent on OpenAI proper and on most hosted gateways — hence Observed<>
-// at the call site rather than a defaulted int.
-inline const Lens<int>& model_context_window() {
+// THE FULL LADDER LIVES IN detail::advertised_window_tokens()
+// (src/provider/openai/transport.cpp) and that function is the SSOT — it is
+// the one place that knows all of them, in priority order, with each entry
+// attributed to the vendor it was observed on. Do not duplicate it here: a
+// second partial list is worse than none, because a spelling this one misses
+// silently falls back to a default window, the gauge misreads, and
+// auto-compaction fires at the wrong point (that is issue #49).
+//
+// This lens is deliberately the NARROW case: the two flat keys a probe sees
+// on a plain vLLM row, used where only a quick top-level read is wanted.
+// Anything that needs the real answer calls advertised_window_tokens().
+//
+// Verified on Yolo-Auto (vllm-0.29.1, 2026-09-23): both keys present, 131072,
+// and honoured — a 125,040-token prompt returned 200 on a free key.
+inline const Lens<int>& model_context_window_flat() {
     static const Lens<int> l =
           key<int>("context_length")
-        | key<int>("max_model_len")
-        | key<int>("context_window");
+        | key<int>("max_model_len");
     return l;
 }
 
