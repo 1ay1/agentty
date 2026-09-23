@@ -265,6 +265,51 @@ TEST_CASE("provider filter: fuzzy narrows + ranks") {
     CHECK(P::filter_provider_indices("zzqzzq").empty());
 }
 
+// canonical_spec is the ONE normalisation point for custom-host identity: the
+// CLI (--provider) and the TUI modal both run a spec through it before it is
+// persisted or compared. Two spellings of one endpoint that survive this
+// function become two saved hosts, two provider_keys slots and two picker
+// rows — which is the bug series (#8/#10/#11/#17/#19) that put it here. It had
+// no direct coverage; these pin the rules.
+TEST_CASE("canonical_spec: one endpoint has exactly one spelling") {
+    namespace P = agentty::provider;
+
+    // Whitespace and a trailing slash are noise.
+    CHECK(P::canonical_spec("  yolo-auto.com  ") == "yolo-auto.com");
+    CHECK(P::canonical_spec("yolo-auto.com/")    == "yolo-auto.com");
+    CHECK(P::canonical_spec("\tlocalhost:8080\n") == "localhost:8080");
+
+    // DNS is case-insensitive, so the HOST folds.
+    CHECK(P::canonical_spec("YOLO-AUTO.COM")  == "yolo-auto.com");
+    CHECK(P::canonical_spec("LocalHost:8080") == "localhost:8080");
+    CHECK(P::canonical_spec("HTTPS://API.OPENAI.COM") == "https://api.openai.com");
+
+    // ...but the PATH does not. A gateway may serve /V1 and /v1 differently,
+    // so folding it would silently dial the wrong endpoint.
+    CHECK(P::canonical_spec("HOST.COM/V1") == "host.com/V1");
+
+    // ...and neither does the "#name" account tag, which is user-chosen text
+    // and part of the identity by design.
+    CHECK(P::canonical_spec("HOST.COM#Work") == "host.com#Work");
+
+    // The scheme's "//" must survive slash-stripping.
+    CHECK(P::canonical_spec("https://host.com") == "https://host.com");
+    CHECK(P::canonical_spec("https://host.com/") == "https://host.com");
+
+    // Presets pass through untouched (they are ids, not hosts).
+    CHECK(P::canonical_spec("anthropic") == "anthropic");
+    CHECK(P::canonical_spec("ollama")    == "ollama");
+
+    // IDEMPOTENT: running it twice must not change the answer, or a spec
+    // could drift every time it round-trips through settings.
+    for (const char* s : {"  YOLO-AUTO.COM/  ", "https://Host.com/V1#A",
+                          "localhost:11434", "kimi"}) {
+        const std::string once  = P::canonical_spec(s);
+        const std::string twice = P::canonical_spec(once);
+        CHECK(once == twice);
+    }
+}
+
 TEST_CASE("provider rows: one ordered list, saved hosts searchable") {
     namespace ui = agentty::ui;
     const std::vector<std::string> hosts = {"my-host.example:8443"};
@@ -336,6 +381,13 @@ TEST_CASE("provider rows: an endpoint-shaped query offers the custom host first"
     CHECK(ui::query_looks_like_host("localhost:8080"));
     CHECK(ui::query_looks_like_host("https://gw.internal/api"));
     CHECK(ui::query_looks_like_host("192.168.1.9:1234"));
+    CHECK(ui::query_looks_like_host("api.openai.com/v1"));
+    CHECK(ui::query_looks_like_host("host.local:11434/v1"));
+    CHECK(ui::query_looks_like_host("yolo-auto.com/v1#work"));   // #account tag
+    CHECK(ui::query_looks_like_host("YOLO-AUTO.COM"));           // DNS is case-insensitive
+    CHECK(ui::query_looks_like_host("  yolo-auto.com  "));       // pasted with whitespace
+    CHECK(ui::query_looks_like_host("[::1]:8080"));              // bracketed IPv6
+
     // ...and what does not. A provider name must never be mistaken for a host,
     // or the offer row would shove real providers down on every search.
     CHECK(!ui::query_looks_like_host("kimi"));
@@ -343,6 +395,18 @@ TEST_CASE("provider rows: an endpoint-shaped query offers the custom host first"
     CHECK(!ui::query_looks_like_host("gpt"));
     CHECK(!ui::query_looks_like_host(""));
     CHECK(!ui::query_looks_like_host("my server"));   // spaces: it's prose
+
+    // MODEL IDS ARE THE DANGEROUS CLASS. People type them into the provider
+    // box constantly while hunting, and several contain a dot or a dash. If
+    // any of these read as a host, the offer row displaces the real providers
+    // exactly when the user is trying to find one.
+    CHECK(!ui::query_looks_like_host("gpt-4o"));
+    CHECK(!ui::query_looks_like_host("gpt-4.1"));
+    CHECK(!ui::query_looks_like_host("qwen3.8-flash"));    // a REAL model id
+    CHECK(!ui::query_looks_like_host("claude-opus-4-5"));
+    CHECK(!ui::query_looks_like_host("v1.5"));
+    CHECK(!ui::query_looks_like_host("3.5"));
+    CHECK(!ui::query_looks_like_host("a.b"));             // too short to be real
 
     // Promoted: FIRST row, carries the typed text, and the trailing duplicate
     // sentinel is gone (one offer, not two).
@@ -377,6 +441,25 @@ TEST_CASE("provider rows: an endpoint-shaped query offers the custom host first"
         for (const auto& r : rows)
             if (const auto* c = r.custom_host()) saw_saved = (*c == saved[0]);
         CHECK(saw_saved);
+    }
+
+    // THE OFFER IS CANONICAL. What the row shows is what gets persisted, so a
+    // messy paste cannot create a second identity for a host you already have.
+    // Without this, "  YOLO-AUTO.COM/  " and "yolo-auto.com" become two saved
+    // hosts with two separate key slots — the user pastes a key into one and
+    // the other still says "no key".
+    {
+        auto rows = ui::build_provider_rows(none, "  YOLO-AUTO.COM/  ");
+        REQUIRE(!rows.empty());
+        REQUIRE(rows.front().new_host_prefill() != nullptr);
+        CHECK(*rows.front().new_host_prefill() == "yolo-auto.com");
+    }
+    // ...and the dedup against saved hosts uses that same canonical form, so a
+    // differently-spelled query still recognises the host you already have.
+    {
+        const std::vector<std::string> saved = {"yolo-auto.com"};
+        auto rows = ui::build_provider_rows(saved, "YOLO-AUTO.COM");
+        CHECK(rows.front().new_host_prefill() == nullptr);   // no duplicate offer
     }
 }
 

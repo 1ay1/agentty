@@ -103,6 +103,22 @@ struct Selection {
     std::string s{spec.substr(b, e - b)};
     while (s.size() > 1 && s.back() == '/' && s[s.size() - 2] != '/')
         s.pop_back();
+
+    // CASE-FOLD THE HOST (and the scheme), never the path or the #name.
+    // DNS is case-insensitive, so "YOLO-AUTO.COM" and "yolo-auto.com" are the
+    // same server and MUST collapse to one identity here — otherwise they
+    // become two saved hosts, two provider_keys entries, and two picker rows
+    // for one endpoint, and the user pastes a key into one spelling then
+    // wonders why the other says "no key". Paths stay untouched because a
+    // path CAN be case-sensitive (`/V1` is not guaranteed to equal `/v1` on
+    // an arbitrary gateway), and the "#name" account tag is user-chosen text.
+    const auto scheme_end = s.find("//");
+    std::size_t host_begin = (scheme_end == std::string::npos) ? 0 : scheme_end + 2;
+    std::size_t host_end   = s.find('/', host_begin);
+    if (host_end == std::string::npos) host_end = s.find('#', host_begin);
+    if (host_end == std::string::npos) host_end = s.size();
+    for (std::size_t i = 0; i < host_end; ++i)
+        if (s[i] >= 'A' && s[i] <= 'Z') s[i] = static_cast<char>(s[i] - 'A' + 'a');
     return s;
 }
 

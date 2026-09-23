@@ -79,7 +79,7 @@ struct ProviderRow {
 
 // Does this query look like an ENDPOINT the user wants to dial, rather than
 // the name of a built-in provider? True for "yolo-auto.com",
-// "localhost:8080", "https://gw.internal/api" — false for "kimi", "grok".
+// "localhost:8080", "https://gw.internal/api" — false for "kimi", "gpt-4o".
 //
 // WHY THIS EXISTS: agentty has spoken to any OpenAI-compatible host since
 // forever (`--provider host:port`, and the "Custom host…" row), but the picker
@@ -88,20 +88,55 @@ struct ProviderRow {
 // The field evidence was a pull request adding a registry row for a service
 // the generic path already handled. The feature was there; the UI hid it.
 //
-// Deliberately loose: a dot, a colon, or a scheme is enough. A false positive
-// costs one extra row offering something that would have worked anyway; a
-// false negative costs the user the whole feature.
+// THE TWO FAILURE MODES ARE NOT SYMMETRIC, which is what sets the threshold:
+//   false NEGATIVE — user typed a real endpoint, gets no offer, concludes
+//                    agentty cannot reach their server. Costs the feature.
+//   false POSITIVE — an extra row appears offering to dial something that
+//                    isn't a host. Costs one row, and Enter would just fail
+//                    the probe with a clear message.
+// So lean permissive — but NOT so permissive that typing a MODEL name while
+// hunting for a provider shoves the real providers down. "gpt-4o", "v1.5" and
+// "3.5" all contain a dot or a dash and must stay false, because a user types
+// those into this box constantly.
 [[nodiscard]] inline bool query_looks_like_host(std::string_view q) {
-    if (q.size() < 3) return false;
-    if (q.find(' ') != std::string_view::npos) return false;
+    // Trim first: a pasted endpoint usually arrives with whitespace, and the
+    // untrimmed form used to fail here while canonical_spec() accepted it —
+    // i.e. paste worked from the CLI but not from the picker.
+    while (!q.empty() && (q.front() == ' ' || q.front() == '\t')) q.remove_prefix(1);
+    while (!q.empty() && (q.back()  == ' ' || q.back()  == '\t'
+                       || q.back()  == '\r' || q.back() == '\n')) q.remove_suffix(1);
+
+    if (q.size() < 4) return false;                       // "a.b" is not a host
+    if (q.find(' ') != std::string_view::npos) return false;   // prose
+
+    // An explicit scheme is a declaration of intent; nothing else to check.
     if (q.starts_with("http://") || q.starts_with("https://")) return true;
-    const auto dot   = q.find('.');
-    const auto colon = q.find(':');
-    // A dot with something on both sides ("a.com", not ".x" or "x."), or a
-    // colon followed by a digit ("localhost:8080").
-    if (dot != std::string_view::npos && dot > 0 && dot + 1 < q.size()) return true;
-    if (colon != std::string_view::npos && colon + 1 < q.size()
+
+    // An IPv6 literal must be bracketed to carry a port: "[::1]:8080".
+    if (q.front() == '[') return q.find(']') != std::string_view::npos;
+
+    // host:port — a colon followed by a digit. Strongest signal after a
+    // scheme, and the one that makes every localhost server work.
+    if (const auto colon = q.find(':');
+        colon != std::string_view::npos && colon > 0 && colon + 1 < q.size()
         && q[colon + 1] >= '0' && q[colon + 1] <= '9') return true;
+
+    // A dotted name. Require the LAST dot-segment to look like a TLD or a
+    // path — i.e. start with a letter — so version and model strings ("v1.5",
+    // "3.5", "gpt-4.1") do not read as hosts. "yolo-auto.com" and
+    // "api.openai.com/v1" do.
+    const auto dot = q.rfind('.');
+    if (dot == std::string_view::npos || dot == 0 || dot + 1 >= q.size())
+        return false;
+    const char after = q[dot + 1];
+    const bool alpha = (after >= 'a' && after <= 'z') || (after >= 'A' && after <= 'Z');
+    if (!alpha) return false;
+    // ...and something alphabetic before the dot too, so "1.com" style noise
+    // and a bare ".com" stay out.
+    for (std::size_t i = 0; i < dot; ++i) {
+        const char c = q[i];
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) return true;
+    }
     return false;
 }
 
@@ -134,15 +169,21 @@ struct ProviderRow {
     const auto presets = provider::providers();
     rows.reserve(provider::providers().size() + saved_custom_hosts.size() + 4);
 
-    // A saved host that EXACTLY matches the query is already reachable as its
-    // own row below; offering to re-add it would be a duplicate.
+    // Canonicalise ONCE, here, and offer the canonical form. The row the user
+    // sees is then byte-identical to the settings key that will be written, so
+    // "  YOLO-AUTO.COM/  " and "yolo-auto.com" cannot become two saved hosts.
+    const std::string canon = provider::canonical_spec(query);
+
+    // A saved host that matches the query is already reachable as its own row
+    // below; offering to re-add it would be a duplicate. Compare CANONICALLY —
+    // saved specs are stored canonical, so a raw compare would miss.
     const bool already_saved =
-        std::find(saved_custom_hosts.begin(), saved_custom_hosts.end(),
-                  provider::canonical_spec(query)) != saved_custom_hosts.end();
+        std::find(saved_custom_hosts.begin(), saved_custom_hosts.end(), canon)
+            != saved_custom_hosts.end();
 
     const bool offer_host = query_looks_like_host(query) && !already_saved;
     if (offer_host)
-        rows.push_back({ProviderRow::NewCustomHost{std::string{query}}});
+        rows.push_back({ProviderRow::NewCustomHost{canon}});
 
     // Presets, fuzzy-filtered + ranked by the shared SSOT filter so the reducer
     // and view see the exact same order.
@@ -150,11 +191,15 @@ struct ProviderRow {
     for (int idx : vis)
         rows.push_back({ProviderRow::Preset{&presets[static_cast<std::size_t>(idx)]}});
 
-    // Saved custom hosts: substring match on the spec (they have no label or
-    // blurb to fuzzy-rank, and a host is something you recall by prefix).
+    // Saved custom hosts: case-insensitive substring match on the spec (they
+    // have no label or blurb to fuzzy-rank, and a host is something you recall
+    // by prefix). Case-insensitive because the saved form is lowercased but a
+    // user hunting for it may not type it that way.
     for (const auto& spec : saved_custom_hosts) {
-        if (query.empty() || spec.find(query) != std::string::npos)
+        if (query.empty()
+            || spec.find(canon) != std::string::npos) {
             rows.push_back({ProviderRow::CustomHost{spec}});
+        }
     }
 
     // ACP agents are not part of the provider text search.

@@ -20,6 +20,9 @@
 // StreamToolUseEnd when the index is superseded or the stream ends.
 
 #include "agentty/provider/openai/transport.hpp"
+// The observation tables: every way this spec-less wire spells a field lives
+// there, not here. See lens.hpp for why a Lens and not an acp::Codec.
+#include "agentty/provider/openai/dialect.hpp"
 
 #include <map>
 #include <algorithm>
@@ -894,28 +897,28 @@ void ensure_nonempty_turn(StreamCtx& ctx) {
 // Handle one choices[0].delta object.
 void handle_delta(StreamCtx& ctx, const json& delta) {
     // Reasoning / chain-of-thought text. Reasoning-capable models on the Chat
-    // wire stream their thinking in a field PARALLEL to `content`: DeepSeek and
-    // most compat proxies use `reasoning_content`; a few (some OpenRouter
-    // passthroughs) use `reasoning`. Emit it as StreamThinkingDelta — the SAME
-    // event the Anthropic transport emits for thinking_delta — so the reducer /
-    // UI render it identically (no signature on this wire). Also a liveness
-    // signal during a long reasoning pause before any visible content.
-    for (const char* key : {"reasoning_content", "reasoning"}) {
-        auto it = delta.find(key);
-        if (it != delta.end() && it->is_string()) {
-            const auto& r = it->get_ref<const std::string&>();
-            // Only stop once a NON-empty value was taken: some proxies
-            // (OpenRouter normalisation) send an empty reasoning_content
-            // alongside a populated reasoning — breaking on the empty first
-            // key would silently drop all reasoning.
-            if (!r.empty()) {
-                if (ctx.show_reasoning)
-                    ctx.sink(StreamThinkingDelta{r, {}});
-                else
-                    ctx.sink(StreamHeartbeat{});  // liveness only, no capture
-                break;   // never double-count if a proxy sends both
-            }
-        }
+    // wire stream their thinking in a field PARALLEL to `content`, and the
+    // ecosystem does not agree on its name — DeepSeek/vLLM say
+    // `reasoning_content`, OpenAI's Responses API and some OpenRouter
+    // passthroughs say `reasoning`.
+    //
+    // WHICH SPELLINGS EXIST IS NOT DECIDED HERE. dialect::reasoning_delta() is
+    // the single source of truth for that, and it also encodes the ordering
+    // rule (prefer the specific key, but fall through when it is EMPTY — some
+    // proxies send an empty reasoning_content beside a populated reasoning,
+    // and stopping at the first key that merely exists drops all reasoning
+    // silently). Adding a provider's spelling is a one-line change there,
+    // covered by openai_dialect_test.cpp against captured fixtures.
+    //
+    // Emit as StreamThinkingDelta — the SAME event the Anthropic transport
+    // emits for thinking_delta — so the reducer / UI render it identically.
+    // Also a liveness signal during a long reasoning pause before any visible
+    // content.
+    if (auto r = dialect::reasoning_delta()(delta)) {
+        if (ctx.show_reasoning)
+            ctx.sink(StreamThinkingDelta{*r, {}});
+        else
+            ctx.sink(StreamHeartbeat{});  // liveness only, no capture
     }
 
     // Structured content-parts array (Mistral reasoning models): `content`
