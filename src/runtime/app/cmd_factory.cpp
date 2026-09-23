@@ -396,16 +396,49 @@ std::size_t front_drop_count(const std::vector<Message>& v, int ceiling,
 // soft-trim ceilings produce different wire payloads from the same
 // source state. The next user turn that submits with more context
 // available will send a fatter prefix automatically.
+//
+// Three entries are protected: the head (task framing / compaction
+// summary), the LATEST User message (the request the model is serving
+// right now) and the newest message (the latest tool results). The rest
+// go oldest-first. Only if that still doesn't fit is the head dropped.
+} // namespace
+
 void soft_trim_to_ceiling(std::vector<Message>& v, int ceiling) {
     if (ceiling <= 0 || v.size() <= 1) return;
-    // Sentinel: the leading entry stays put. Price every message once,
-    // find how many to drop from index 1 forward in a single pass, then
-    // erase them in ONE shift. If we run out of trimmable entries we send
-    // what we have — the upstream will hard-reject with a clear error,
-    // which is strictly better than the in-tool-burst yank.
-    const std::size_t drop = front_drop_count(v, ceiling, /*keep_head=*/1);
-    if (drop > 0)
-        v.erase(v.begin() + 1, v.begin() + 1 + static_cast<std::ptrdiff_t>(drop));
+
+    const std::size_t n = v.size();
+    std::size_t anchor = 0;
+    for (std::size_t i = n; i-- > 0;)
+        if (v[i].role == Role::User) { anchor = i; break; }
+
+    std::vector<MsgWeight> w(n);
+    std::size_t bytes = 0;
+    int images = 0;
+    for (std::size_t i = 0; i < n; ++i) {
+        w[i] = message_weight(v[i]);
+        bytes  += w[i].bytes;
+        images += w[i].images;
+    }
+
+    std::vector<char> drop(n, 0);
+    auto over = [&] { return tokens_from(bytes, images) > ceiling; };
+    auto take = [&](std::size_t i) {
+        drop[i] = 1;
+        bytes  -= w[i].bytes;
+        images -= w[i].images;
+    };
+    for (std::size_t i = 1; i + 1 < n && over(); ++i)
+        if (i != anchor) take(i);
+    // Last resort: the head. Never when it IS the live request.
+    if (over() && anchor != 0) take(0);
+
+    std::size_t out = 0;
+    for (std::size_t i = 0; i < n; ++i)
+        if (!drop[i]) {
+            if (out != i) v[out] = std::move(v[i]);
+            ++out;
+        }
+    v.resize(out);
     // Drop any leading Assistants exposed by the trim — the wire
     // must start with a User. (If [0] was a compaction-summary user,
     // it remains; if it was a real first-user-turn and we never
@@ -416,6 +449,7 @@ void soft_trim_to_ceiling(std::vector<Message>& v, int ceiling) {
     if (lead > 0) v.erase(v.begin(), v.begin() + static_cast<std::ptrdiff_t>(lead));
 }
 
+namespace {
 
 // Normal-turn wire payload: if the thread has compaction records,
 // replace the prefix [0, latest.up_to_index) with one synthetic User

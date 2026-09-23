@@ -96,6 +96,11 @@ struct TurnRouting {
 // immediately after every compaction.
 [[nodiscard]] std::vector<Message> wire_messages_for(const Thread& t);
 
+// Wire-only trim to fit `ceiling` estimated tokens. Keeps the head, the
+// latest User message and the newest message; drops the rest oldest-first,
+// and the head only as a last resort. The result always opens with a User.
+void soft_trim_to_ceiling(std::vector<Message>& v, int ceiling);
+
 // Bytes-based prefix token estimate computed against the wire view
 // (i.e. with compaction substitution applied). Same approximation as
 // `estimate_prefix_tokens(Thread)` but the right denominator for

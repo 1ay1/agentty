@@ -233,3 +233,45 @@ TEST_CASE("an unmeasured compaction reports unknown, not zero") {
     check(!t.compactions.back().reclaimed().has_value(),
           "half-measured compaction is still unknown");
 }
+
+TEST_CASE("soft trim keeps the live request") {
+    // ~1143 tokens per 4000-byte message at 3.5 bytes/token.
+    const std::string big(4000, 'x');
+
+    // Long tool loop: q1, then q2 followed by many assistant sub-turns.
+    // The old front-trim peeled q2 away and kept only the last assistant.
+    {
+        std::vector<Message> v = { umsg("q1"), amsg(big), umsg("q2") };
+        for (int i = 0; i < 10; ++i) v.push_back(amsg(big));
+        app::cmd::soft_trim_to_ceiling(v, 3000);
+        bool has_q2 = false;
+        for (auto& m : v) if (m.text == "q2") has_q2 = true;
+        check(has_q2, "latest user message survives the trim");
+        check(v.front().role == Role::User, "wire still opens with a User");
+        check(v.back().text == big, "newest message survives");
+    }
+
+    // A huge first prompt alone overflows: the head goes, the live turn stays.
+    {
+        std::vector<Message> v = { umsg(std::string(40000, 'h')), amsg("a1"),
+                                   umsg("q2"), amsg("a2") };
+        app::cmd::soft_trim_to_ceiling(v, 1000);
+        check(v.front().text == "q2", "oversized head is dropped last");
+        check(v.size() == 2, "live turn kept whole");
+    }
+
+    // Fits already: nothing changes.
+    {
+        std::vector<Message> v = { umsg("q1"), amsg("a1"), umsg("q2") };
+        app::cmd::soft_trim_to_ceiling(v, 100000);
+        check(v.size() == 3, "under the ceiling is a no-op");
+    }
+
+    // The head IS the live request: never dropped.
+    {
+        std::vector<Message> v = { umsg(std::string(40000, 'h')), amsg(big) };
+        app::cmd::soft_trim_to_ceiling(v, 100);
+        check(!v.empty() && v.front().role == Role::User,
+              "sole user message is never dropped");
+    }
+}
