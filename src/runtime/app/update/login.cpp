@@ -221,6 +221,22 @@ Step host_probed(Model m, HostProbed r) {
     if (!hp || hp->attempt_id != r.attempt_id) return done(std::move(m));
     auto origin = std::move(hp->origin);
     if (!r.ok) {
+        // A 401/403 means the ADDRESS WAS RIGHT and the server wants a key.
+        // Sending the user back to edit a URL they typed correctly is the
+        // wrong move, and it is the most common paid-provider onboarding
+        // path: type the host, get 401. Go straight to the key prompt with
+        // the host already bound to it.
+        if (r.needs_key) {
+            login::ApiKeyInput api;
+            api.provider       = r.spec;
+            api.provider_label = r.spec;    // a custom host IS its own label
+            api.origin         = std::move(origin);
+            m.ui.login         = std::move(api);
+            auto toast = set_status_toast(
+                m, r.spec + " needs an API key \xe2\x80\x94 paste it below",
+                std::chrono::seconds{6});
+            return {std::move(m), std::move(toast)};
+        }
         login::CustomHostInput ch;
         ch.host_input = std::move(r.spec);
         ch.cursor     = static_cast<int>(ch.host_input.size());

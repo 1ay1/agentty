@@ -692,6 +692,13 @@ struct HostProbed {
     int           model_count = 0;
     long          latency_ms = 0;
     std::string   error;
+    // The endpoint answered 401/403: the ADDRESS IS CORRECT, it just wants
+    // credentials. Distinct from every other failure, because the fix is
+    // "paste a key", not "fix the URL" — so the reducer sends the user to the
+    // key prompt instead of back to an address field that was already right.
+    // Without this, the most common paid-provider onboarding (type host, get
+    // 401) dumped you back into editing a URL you had typed correctly.
+    bool          needs_key = false;
     // Did this host tell us a real context window, and if not, is that
     // because we declined to ask?
     //

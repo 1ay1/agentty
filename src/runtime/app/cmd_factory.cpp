@@ -2230,15 +2230,16 @@ Cmd<Msg> probe_host_async(std::string spec, std::uint64_t attempt_id,
                 // look self-hosted. Nothing to remember, and nothing the UI
                 // can fix by itself.
                 r.probe_skipped = r.window_tokens <= 0 && !looks_local;
-            } else if (probe.http_status == 401 || probe.http_status == 403) {
-                r.error = "HTTP " + std::to_string(probe.http_status)
-                        + " \xe2\x80\x94 this host needs an API key";
-            } else if (probe.http_status != 0) {
-                r.error = "HTTP " + std::to_string(probe.http_status)
-                        + " \xe2\x80\x94 no model list at any known path";
             } else {
-                r.error = "nothing listening \xe2\x80\x94 is the server "
-                          "running on that host:port?";
+                // One sentence per failure mode, from the probe's own taxonomy
+                // (HostProbe::explain). Three very different mistakes used to
+                // arrive here as the same unhelpful string — notably a 200 +
+                // HTML response, which is what you get from pasting a
+                // dashboard URL instead of the API base, and which used to
+                // report "HTTP 200 — no model list at any known path".
+                r.error = probe.explain();
+                r.needs_key =
+                    probe.failure == provider::openai::HostProbe::Failure::NeedsKey;
             }
         } catch (const std::exception& e) {
             r.error = e.what();

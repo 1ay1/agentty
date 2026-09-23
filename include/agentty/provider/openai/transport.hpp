@@ -222,11 +222,48 @@ struct HostProbe {
         OpenAiCompat,  // an OpenAI-shape /models answered
         OllamaNative,  // /api/tags answered (bare Ollama daemon)
     };
+
+    // WHY the probe failed, which is not derivable from http_status alone.
+    //
+    // Three very different problems used to arrive as the same message:
+    //
+    //   • 200 + HTML   a web app is serving this path. Pasting the dashboard
+    //                  URL instead of the API base is the single most common
+    //                  custom-host mistake, and `https://host/models` on a
+    //                  real provider genuinely returns 200 text/html —
+    //                  verified on yolo-auto.com. The old code saw 200, then
+    //                  failed to parse, and reported "HTTP 200 — no model
+    //                  list at any known path", which tells the user nothing
+    //                  about the actual mistake.
+    //   • 200 + JSON   reachable and speaking JSON, but not a model list.
+    //                  Usually a gateway that needs a different prefix.
+    //   • 401/403      the endpoint is CORRECT and wants a key. This is a
+    //                  success for "did I type the host right?" and must
+    //                  never read as "nothing there".
+    //
+    // Each one has a different fix, so each one needs a different sentence.
+    enum class Failure : std::uint8_t {
+        None,          // it worked
+        Unreachable,   // connect failed: wrong host, wrong port, server down
+        NeedsKey,      // 401/403 — right endpoint, missing credentials
+        NotAnApi,      // 200 but HTML: this is a web page, not an API base
+        NoModelList,   // 200 + JSON, but no recognisable model list
+        HttpError,     // some other non-200
+    };
+
     Dialect     dialect      = Dialect::None;
+    Failure     failure      = Failure::None;
     std::string models_path;     // the path that answered ("" when None)
     int         model_count  = 0;
     int         http_status  = 0;   // last status seen (0 = connect failure)
     long        latency_ms   = 0;   // round trip of the answering request
+
+    [[nodiscard]] bool ok() const noexcept { return dialect != Dialect::None; }
+
+    // One sentence the user can act on. Kept HERE, next to the taxonomy, so
+    // the message and the classification cannot drift apart — and so the TUI
+    // and any future CLI surface read identically.
+    [[nodiscard]] std::string explain() const;
 };
 [[nodiscard]] HostProbe probe_host(const AuthHeader& auth,
                                    const Endpoint& endpoint);

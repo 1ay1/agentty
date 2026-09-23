@@ -2522,11 +2522,59 @@ OllamaProbe probe_ollama_model(const AuthHeader& auth,
 } // namespace
 
 // ── Model listing ────────────────────────────────────────────────────────────
+// One actionable sentence per failure. The taxonomy and the wording live
+// together so they cannot drift.
+std::string HostProbe::explain() const {
+    switch (failure) {
+        case Failure::None:
+            return {};
+        case Failure::Unreachable:
+            return "nothing listening \xe2\x80\x94 is the server running on "
+                   "that host:port?";
+        case Failure::NeedsKey:
+            // NOT a typo in the address. Say so, or the user starts editing a
+            // URL that was already correct.
+            return "HTTP " + std::to_string(http_status)
+                 + " \xe2\x80\x94 the endpoint is right, it needs an API key";
+        case Failure::NotAnApi:
+            // The single most common custom-host mistake: pasting the
+            // dashboard / docs URL instead of the API base.
+            return "that's a web page, not an API \xe2\x80\x94 use the API "
+                   "base URL (usually ends in /v1)";
+        case Failure::NoModelList:
+            return "reachable, but no model list at any known path "
+                   "\xe2\x80\x94 check the path prefix (often /v1)";
+        case Failure::HttpError:
+            return "HTTP " + std::to_string(http_status)
+                 + " \xe2\x80\x94 no model list at any known path";
+    }
+    return "probe failed";
+}
+
 HostProbe probe_host(const AuthHeader& auth, const Endpoint& endpoint) {
     HostProbe out;
     http::Timeouts tos;
     tos.connect = std::chrono::milliseconds(3'000);
     tos.total   = std::chrono::milliseconds(6'000);
+
+    // Worst failure seen so far, so the LAST attempt cannot erase the most
+    // informative diagnosis. Ordering matters: a 401 on the configured path
+    // is far more useful than a 404 on the fallback, because it means the
+    // address was right all along.
+    auto note = [&](HostProbe::Failure f) {
+        const auto rank = [](HostProbe::Failure x) {
+            switch (x) {
+                case HostProbe::Failure::NeedsKey:    return 5;  // most useful
+                case HostProbe::Failure::NotAnApi:    return 4;
+                case HostProbe::Failure::NoModelList: return 3;
+                case HostProbe::Failure::HttpError:   return 2;
+                case HostProbe::Failure::Unreachable: return 1;
+                case HostProbe::Failure::None:        return 0;
+            }
+            return 0;
+        };
+        if (rank(f) > rank(out.failure)) out.failure = f;
+    };
 
     auto attempt = [&](const std::string& path) -> bool {
         http::Request r;
@@ -2545,9 +2593,28 @@ HostProbe probe_host(const AuthHeader& auth, const Endpoint& endpoint) {
         auto resp       = http::default_client().send(r, tos);
         const auto ms   = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - t0).count();
-        if (!resp) return false;                 // connect failure — keep 0
+        if (!resp) { note(HostProbe::Failure::Unreachable); return false; }
         out.http_status = resp->status;
-        if (resp->status != 200) return false;
+        if (resp->status == 401 || resp->status == 403) {
+            // The address is CORRECT — it answered, and it wants credentials.
+            // Treat as the most informative outcome short of success.
+            note(HostProbe::Failure::NeedsKey);
+            return false;
+        }
+        if (resp->status != 200) { note(HostProbe::Failure::HttpError); return false; }
+
+        // 200 + HTML is the dashboard-URL mistake. Detect it BEFORE trying to
+        // parse, so the diagnosis is "that's a web page" instead of a JSON
+        // error the user cannot act on. Verified live: https://yolo-auto.com
+        // /models returns 200 text/html with a full SPA.
+        const std::string_view body{resp->body};
+        const auto first = body.find_first_not_of(" \t\r\n");
+        if (first != std::string_view::npos
+            && (body.compare(first, 1, "<") == 0)) {
+            note(HostProbe::Failure::NotAnApi);
+            return false;
+        }
+
         // Count models from either shape. {"data":[…]} = OpenAI dialect;
         // {"models":[…]} = Ollama /api/tags.
         try {
@@ -2559,11 +2626,13 @@ HostProbe probe_host(const AuthHeader& auth, const Endpoint& endpoint) {
                 out.dialect     = HostProbe::Dialect::OllamaNative;
                 out.model_count = static_cast<int>(j["models"].size());
             } else {
+                note(HostProbe::Failure::NoModelList);
                 return false;                    // 200 but not a model list
             }
-        } catch (...) { return false; }
+        } catch (...) { note(HostProbe::Failure::NoModelList); return false; }
         out.models_path = path;
         out.latency_ms  = static_cast<long>(ms);
+        out.failure     = HostProbe::Failure::None;
         return true;
     };
 
@@ -2573,7 +2642,7 @@ HostProbe probe_host(const AuthHeader& auth, const Endpoint& endpoint) {
     if (endpoint.models_path != "/v1/models" && attempt("/v1/models"))
         return out;
     if (attempt("/api/tags")) return out;
-    return out;   // dialect None; http_status carries the last error seen
+    return out;   // dialect None; failure carries the best diagnosis
 }
 
 namespace detail {
