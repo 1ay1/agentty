@@ -107,6 +107,7 @@ Set the model per-subprocess in the `args`. In ACP mode `-m` is an *ephemeral* o
 ## What works over ACP
 
 - **Streaming text** — the model's reply renders token-by-token in Zed's panel.
+- **Images in prompts** — paste or attach a screenshot and it reaches the model as an image, not a dropped block. Whether the *selected model* can see it is a separate question agentty already answers: a text-only model has the image withheld rather than the turn failed. Audio is deliberately not advertised — no provider agentty ships accepts it.
 - **Tool calls** — every `read` / `edit` / `bash` / `grep` / … shows up as a Zed tool card with the right icon, the raw arguments, and live status (pending → running → done/failed). Result bodies are shaped to match Zed's native agent: a `read` renders as a gutter-numbered file excerpt, and all other output is markdown-escaped so file contents render verbatim instead of being reparsed as formatting.
 - **Slash-command menu** — agentty populates Zed's composer `/` menu (`available_commands_update`) with `/compact`, `/new`, and every installed skill as `/<skill-name>`, the same way the native agent exposes its commands.
 - **Model picker** — agentty advertises a `model` config option (`config_option_update`) listing the provider's model catalog, so you can switch models from Zed's per-session dropdown instead of relaunching with `-m`.

@@ -7,6 +7,7 @@
 
 #include "agentty/acp/server.hpp"
 
+#include "agentty/util/base64.hpp"
 #include "agentty/util/logx.hpp"
 
 #include <chrono>
@@ -392,21 +393,50 @@ a::List<a::ToolCallLocation> tool_locations(const ToolUse& tc, std::string_view 
 }
 
 // Build the prompt text from acp ContentBlock[].
-std::string prompt_text_from_blocks(const a::List<a::ContentBlock>& blocks) {
-    std::string out;
+// One prompt's content blocks, split into what the model takes.
+//
+// Images used to be dropped on the floor here — the visitor had an empty
+// arm for ImageContent and the function returned only text. So pasting a
+// screenshot into Zed's agent panel silently sent the words and discarded
+// the picture, on a build whose TUI has had vision for months. Nothing
+// reported it, because a dropped block looks exactly like a model that
+// ignored the image.
+struct PromptParts {
+    std::string               text;
+    std::vector<ImageContent> images;
+};
+
+[[nodiscard]] PromptParts prompt_parts_from_blocks(const a::List<a::ContentBlock>& blocks) {
+    PromptParts out;
     for (const auto& b : blocks) {
         a::match(b,
-            [&](const a::TextContent& t) { out += t.text; out += "\n"; },
+            [&](const a::TextContent& t) { out.text += t.text; out.text += "\n"; },
             [&](const a::ResourceLinkContent& l) {
-                out += "[resource: " + (l.name.empty() ? l.uri : l.name)
-                     + " (" + l.uri + ")]\n";
+                out.text += "[resource: " + (l.name.empty() ? l.uri : l.name)
+                          + " (" + l.uri + ")]\n";
             },
             [&](const a::ResourceContent& r) {
                 a::match(r.resource,
-                    [&](const a::TextResource& tr) { out += tr.text; out += "\n"; },
+                    [&](const a::TextResource& tr) { out.text += tr.text; out.text += "\n"; },
                     [&](const a::BlobResource&)    {});
             },
-            [&](const a::ImageContent&) {},
+            [&](const a::ImageContent& img) {
+                // ACP sends base64 + mimeType; our ImageContent holds raw
+                // bytes + media_type. Decode once here so every provider's
+                // image path sees the same shape it does from the TUI.
+                //
+                // A block that fails to decode is SKIPPED rather than
+                // aborting the turn: one bad attachment must not lose the
+                // prompt it arrived with.
+                auto bytes = util::base64_decode(img.data);
+                if (bytes.empty()) return;
+                out.images.emplace_back(
+                    img.mimeType.empty() ? std::string{"image/png"} : img.mimeType,
+                    std::move(bytes));
+            },
+            // Audio has no path into a prompt yet — no provider we ship
+            // accepts it, and silently transcoding is worse than declining
+            // the capability (which we do, so a client should not send it).
             [&](const a::AudioContent&) {});
     }
     return out;
@@ -1058,6 +1088,17 @@ a::InitializeResult AgentServer::on_initialize(const a::InitializeParams& p) {
     auto& caps = r.agentCapabilities;
     caps.loadSession = true;
     caps.promptCapabilities.embeddedContext = true;
+    // Images in prompts. Declared because the blocks are now DECODED into
+    // the user message (prompt_parts_from_blocks) rather than dropped —
+    // claiming this while discarding them would be worse than not claiming
+    // it, since the client would show the attachment as sent.
+    //
+    // Whether the selected MODEL can see them is a separate question the
+    // provider layer already answers (supports_vision / the org-policy
+    // entitlement), and it degrades by withholding the image rather than
+    // failing the turn. Audio stays undeclared: no provider we ship takes
+    // it, and transcoding silently would be a lie about what was sent.
+    caps.promptCapabilities.image = true;
     caps.auth.logout = a::Just(a::Unit{});
     caps.sessionCapabilities.list      = a::Just(a::Unit{});
     caps.sessionCapabilities.resume    = a::Just(a::Unit{});
@@ -1401,7 +1442,8 @@ void AgentServer::on_delete_session(const a::DeleteSessionParams& p) {
 // ── Prompt + turn loop ───────────────────────────────────────────────────────
 void AgentServer::on_prompt(const a::PromptParams& p, Responder resp) {
     std::string sid  = p.sessionId.value;
-    std::string text = prompt_text_from_blocks(p.prompt);
+    auto parts = prompt_parts_from_blocks(p.prompt);
+    std::string text = std::move(parts.text);
     std::string pending_title;   // title to push to Zed's sidebar (first msg only)
 
     {
@@ -1423,8 +1465,9 @@ void AgentServer::on_prompt(const a::PromptParams& p, Responder resp) {
             return;
         }
         Message um;
-        um.role = Role::User;
-        um.text = std::move(text);
+        um.role   = Role::User;
+        um.text   = std::move(text);
+        um.images = std::move(parts.images);
         bool first_message = it->second->thread.messages.empty();
         if (first_message && !um.text.empty())
             it->second->thread.title = persistence::title_from_first_message(um.text);

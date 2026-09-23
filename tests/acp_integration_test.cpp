@@ -68,8 +68,24 @@ TEST_CASE("acp integration end-to-end") {
     std::atomic<int> completions{0};
     std::atomic<bool> read_mode{false};
     std::atomic<bool> bash_mode{false};
+    // What the MODEL actually received for the last turn. An ACP image block
+    // is only useful if it survives all the way onto the Request — declaring
+    // the capability and then dropping the bytes is the failure this guards.
+    std::atomic<int> saw_images{0};
+    std::string      saw_media_type;
+    std::string      saw_bytes;
+    std::mutex       saw_mu;
     auto stream = [&](ag::provider::Request req, ag::provider::EventSink sink) {
         int n = completions.fetch_add(1);
+        {
+            std::lock_guard lk(saw_mu);
+            for (const auto& m : req.messages) {
+                if (m.images.empty()) continue;
+                saw_images.store(static_cast<int>(m.images.size()));
+                saw_media_type = m.images.front().media_type;
+                saw_bytes      = m.images.front().bytes();
+            }
+        }
         if (bash_mode.load() && n % 2 == 0) {
             // Bash-turn first completion: stream a `bash` tool call, so we can
             // assert the fenced command-output card body (the "bash shows no
@@ -305,6 +321,12 @@ TEST_CASE("acp integration end-to-end") {
     CHECK(init.protocolVersion == kProtocolVersion);
     CHECK(init.agentCapabilities.loadSession == true);
     CHECK(init.agentCapabilities.promptCapabilities.embeddedContext == true);
+    // Images are DECLARED because they are now decoded into the prompt
+    // rather than dropped. Declaring a capability we then discard is worse
+    // than not declaring it: the client shows the attachment as sent.
+    CHECK(init.agentCapabilities.promptCapabilities.image == true);
+    // Audio stays undeclared — no provider we ship accepts it.
+    CHECK(init.agentCapabilities.promptCapabilities.audio == false);
     CHECK(init.agentInfo.has_value() && init.agentInfo->name == "agentty");
 
     NewSessionParams nsp; nsp.cwd = tmp.string();
@@ -449,6 +471,38 @@ TEST_CASE("acp integration end-to-end") {
       // The bash card body is fenced and contains the command's stdout.
       CHECK(last_tool_text.find("```")          != std::string::npos);
       CHECK(last_tool_text.find("hello-stdout") != std::string::npos); }
+
+    // ── An image in a prompt reaches the model ─────────────────────────────
+    //
+    // The server used to have an EMPTY visitor arm for ImageContent, so a
+    // screenshot pasted into Zed's agent panel was silently discarded — the
+    // words went, the picture didn't, on a build whose TUI has had vision
+    // for months. A dropped block is indistinguishable from a model that
+    // ignored the image, which is why nobody reported it.
+    //
+    // Asserting on what the MODEL received (not just that the capability is
+    // declared) is the point: declaring `image` and then dropping the bytes
+    // would be worse than not declaring it at all.
+    {
+        // A 1x1 PNG, base64 — the smallest thing that is unambiguously an
+        // image and survives a decode byte-for-byte.
+        const std::string png_b64 =
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+        PromptParams ip2;
+        ip2.sessionId = ns.sessionId;
+        ip2.prompt.push_back(TextContent{"what is in this image?", Nothing, Json::object()});
+        ip2.prompt.push_back(ImageContent{png_b64, "image/png", Nothing, Nothing,
+                                          Json::object()});
+        (void)agent.session_prompt(ip2).get();
+
+        std::lock_guard lk(saw_mu);
+        CHECK(saw_images.load() == 1);
+        CHECK(saw_media_type == "image/png");
+        // Decoded, not passed through as base64: the model layer wants raw
+        // bytes, and a PNG starts with the 8-byte signature.
+        CHECK(saw_bytes.size() > 8);
+        CHECK(saw_bytes.compare(1, 3, "PNG") == 0);
+    }
 
     // close round-trip.
     agent.session_close(CloseSessionParams{ns.sessionId, Json::object()}).get();
