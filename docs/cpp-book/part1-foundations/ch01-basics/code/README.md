@@ -1,14 +1,14 @@
 # Chapter 1 example programs
 
-Twelve programs, ten of them one-per-section. Each is standalone: no
+Thirteen programs, ten of them one-per-section. Each is standalone: no
 agentty headers, no build system, nothing to install beyond a C++23
 compiler.
 
 ## build everything
 
 ```sh
-make          # builds all twelve
-make run      # builds and runs all twelve in order
+make          # builds all thirteen
+make run      # builds and runs all thirteen in order
 make verify   # the honest-chapter check. see below.
 make proof    # just the zero-overhead assembly diff
 make clean
@@ -20,7 +20,7 @@ make clean
 make verify
 ```
 
-1. Rebuilds all twelve with `-Werror`. Zero warnings allowed.
+1. Rebuilds all thirteen with `-Werror`. Zero warnings allowed.
 2. Runs `12_selftest`, which asserts every claim the chapter makes.
 3. Runs `proof.sh`, which diffs `-O2` assembly to prove `Id<Tag>` is free.
 
@@ -56,11 +56,12 @@ g++ -std=c++23 -Wall -Wextra -fsanitize=address,undefined -g \
 | `10_imagecontent.cpp` | [10. Capstone](../10-capstone-imagecontent.md) |
 | `11_zero_overhead.cpp` | evidence for [3](../03-strong-types.md). run `make proof`. |
 | `12_selftest.cpp` | the whole chapter, as assertions |
+| `13_predict.cpp` | answer key for [exercise 9](../exercises.md), computed |
 | `proof.sh` | compiles 11 at `-O2 -S` and diffs weak vs strong |
 
 ## about the warnings
 
-Three warnings are deliberate and marked in the source with a pragma and
+Four warnings are deliberate and marked in the source with a pragma and
 a comment saying why:
 
 - `02_integers.cpp` — the signed/unsigned comparison. The warning is the
@@ -69,6 +70,7 @@ a comment saying why:
   nothing on its own.
 - `08_copy_move.cpp` — `return std::move(local)`, so you can watch it
   block elision in the output.
+- `13_predict.cpp` — a `uint8_t > 255` comparison that can never be true.
 
 Anything else that warns is a bug. Tell me.
 

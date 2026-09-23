@@ -438,6 +438,182 @@ int main() {
 
 ---
 
+## the machine underneath: how C++ actually picks a type
+
+You've now seen four traps. An expert doesn't memorise four traps — they
+know the one rule that *generates* all four, and can derive the answer
+for a case they've never seen.
+
+Here's the rule. Type this; it's the single most useful diagnostic program
+in this chapter.
+
+```cpp
+#include <cstdio>
+#include <type_traits>
+
+// a tiny type-name printer, so the compiler tells us what it deduced
+template <class T> const char* n();
+template <> const char* n<int>()                { return "int"; }
+template <> const char* n<unsigned>()           { return "unsigned"; }
+template <> const char* n<long>()               { return "long"; }
+template <> const char* n<unsigned long>()      { return "unsigned long"; }
+template <> const char* n<long long>()          { return "long long"; }
+template <> const char* n<unsigned long long>() { return "unsigned long long"; }
+
+#define SHOW(expr) std::printf("%-12s -> %s\n", #expr, n<decltype(expr)>())
+
+int main() {
+    short s = 1; unsigned short us = 1; char c = 1; bool b = true;
+    int i = 1;   unsigned u = 1;  long l = 1;
+    unsigned long ul = 1;         long long ll = 1;
+
+    std::puts("-- stage 1: integral promotion (small types) --");
+    SHOW(s + s);
+    SHOW(us + us);
+    SHOW(c + c);
+    SHOW(b + b);
+
+    std::puts("\n-- stage 2: usual arithmetic conversions --");
+    SHOW(i + u);
+    SHOW(i + l);
+    SHOW(u + l);
+    SHOW(ul + ll);
+    SHOW(i + ll);
+}
+```
+
+`decltype(expr)` (section 9) asks the compiler what type an expression
+*actually* has. The `SHOW` macro stringifies the expression with `#expr`
+so you see both sides. This technique — make the compiler tell you — beats
+reading a standards table every time.
+
+```
+-- stage 1: integral promotion (small types) --
+s + s        -> int
+us + us      -> int
+c + c        -> int
+b + b        -> int
+
+-- stage 2: usual arithmetic conversions --
+i + u        -> unsigned
+i + l        -> long
+u + l        -> long
+ul + ll      -> unsigned long long
+i + ll       -> long long
+```
+
+### stage 1: integral promotion
+
+**Anything smaller than `int` becomes `int` before arithmetic happens.**
+`char`, `short`, `bool`, `uint8_t` — all of them. There is no such thing
+as `char + char` arithmetic; it's `int + int` that you then maybe store
+back into a `char`.
+
+This single fact explains the answer to the trick question at the end of
+this section:
+
+```cpp
+std::uint8_t x{200};
+x += 100;            // is this UB?
+```
+
+**No.** `x` promotes to `int`, `200 + 100 = 300` happens in `int` where it
+fits fine, then the conversion *back* to `uint8_t` is a well-defined
+truncation to 44. Unsigned narrowing is defined; it's *signed overflow*
+that's UB, and no signed overflow occurred.
+
+Same reason this doesn't overflow:
+
+```cpp
+char a = 100, b = 100;
+std::printf("%d\n", a + b);     // 200. computed in int.
+char c = a + b;
+std::printf("%d\n", c);         // -56. truncated on the way back.
+```
+
+And why this is `int`-sized:
+
+```cpp
+std::uint8_t s8 = 1;
+sizeof(s8 << 4)                 // 4, not 1. it promoted first.
+```
+
+### stage 2: the usual arithmetic conversions
+
+Once both operands are at least `int`, C++ picks a common type by walking
+this list in order:
+
+1. **Same signedness?** Take the higher rank.
+   `int + long` → `long`.
+2. **Unsigned has rank ≥ signed?** Everything becomes **unsigned**.
+   `int + unsigned` → `unsigned`. **This is trap 2.**
+3. **Signed type can represent every value of the unsigned type?**
+   Everything becomes that signed type.
+   `unsigned + long` → `long`, because on this machine `long` is 64-bit
+   and holds every 32-bit `unsigned`.
+4. **Otherwise**, both become the *unsigned* version of the signed type.
+   `unsigned long + long long` → `unsigned long long`.
+
+Now look back at the output. Every line follows from those four steps, and
+now you can predict a combination you've never seen.
+
+### rule 3 is platform-dependent, which is the nasty part
+
+```
+unsigned max = 4294967295, long max = 9223372036854775807 -> long can hold it: yes
+```
+
+`u + l` gave `long` on this machine because `long` is 64-bit here. **On
+Windows, `long` is 32-bit**, so rule 3 fails, rule 4 applies, and the same
+expression yields `unsigned long`.
+
+Same source. Same compiler version. Different sign on the result.
+
+That is why "just use `long`" is not portable advice, and why section 1
+told you to reach for `<cstdint>` at every boundary. `std::int64_t` means
+the same thing everywhere.
+
+### deriving the traps from the rule
+
+With stages 1 and 2 in hand, all four traps stop being separate facts:
+
+| trap | which rule produced it |
+|---|---|
+| 1. `size() - 1` wraps | `size_t` is unsigned; unsigned arithmetic is mod 2ᴺ |
+| 2. `-1 < 1u` is false | stage 2, rule 2: the signed operand converts to unsigned |
+| 3. `INT_MAX + 1` is UB | signed overflow is undefined; unsigned is defined |
+| 4. silent truncation | conversion *back* to the narrow type after promotion |
+
+And two cases you haven't been shown, which you can now answer without
+looking anything up:
+
+```cpp
+std::uint8_t a = 200, b = 100;
+if (a + b > 255) { }        // does this ever fire?
+
+std::int16_t x = 30000;
+x * 2;                      // is this UB?
+```
+
+<details>
+<summary>work them out first, then check</summary>
+
+**First:** yes, it fires. Both promote to `int`, `300 > 255` is true. If
+you'd written `std::uint8_t sum = a + b; if (sum > 255)` it could
+*never* fire, because `sum` truncated to 44 and a `uint8_t` can't exceed
+255 — gcc will even warn that the comparison is always false.
+
+**Second:** no, not UB. `int16_t` promotes to `int`, and `60000` fits in a
+32-bit `int` comfortably. It would only be UB if `int` were 16-bit, which
+is legal but rare. Store it back into an `int16_t` and you get a
+defined-but-wrong value... actually no — converting an out-of-range value
+to a *signed* type was implementation-defined before C++20 and is now
+defined as modular wrapping. So `-5536`.
+
+</details>
+
+---
+
 ## the rules, compressed
 
 - Never subtract from an unsigned size. Rewrite `i < size() - 1` as
@@ -447,6 +623,10 @@ int main() {
 - Use `{}` so narrowing is a compile error.
 - Use `<cstdint>` fixed-width types at every boundary.
 - Keep `-Wall -Wextra` on. Two of these four are caught for free.
+
+And the one rule the other six follow from: **everything smaller than
+`int` promotes to `int`; then mixed operands converge on a common type,
+and when signedness is mixed, unsigned usually wins.**
 
 ---
 

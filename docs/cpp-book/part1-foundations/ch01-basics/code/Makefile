@@ -18,7 +18,8 @@ PROGS := 01_types \
          09_auto \
          10_imagecontent \
          11_zero_overhead \
-         12_selftest
+         12_selftest \
+         13_predict
 
 all: $(PROGS)
 

@@ -37,6 +37,7 @@ Read them in order. Each one has a program next to it in `code/`.
 | 8 | [Copy, move, elision](08-copy-move-elision.md) | who copies, who moves, why `noexcept` changes vector | 75m |
 | 9 | [auto and decltype](09-auto-and-decltype.md) | what auto drops, the range-for copy | 45m |
 | 10 | [Capstone: rebuild ImageContent](10-capstone-imagecontent.md) | all of it at once, on real agentty code | 90m |
+| 11 | [Reading what the tools tell you](11-reading-the-tools.md) | warnings, static_assert, sanitizer reports, gdb | 60m |
 | — | [Exercises](exercises.md) | eight, ordered by difficulty | 2h+ |
 | — | [Quick reference](quick-reference.md) | one page, for after | — |
 
@@ -58,13 +59,13 @@ cd code && make verify
 
 That does three things:
 
-1. builds all twelve programs with `-Wall -Wextra -Wpedantic -Werror` and
+1. builds all thirteen programs with `-Wall -Wextra -Wpedantic -Werror` and
    both sanitizers — **zero warnings allowed**
 2. runs the self-test, which asserts every claim the prose makes
 3. proves the zero-overhead claim by diffing optimised assembly
 
 ```
-building all 12 programs, warnings are errors...
+building all 13 programs, warnings are errors...
   ok: zero warnings
 
 running the self-test...
@@ -119,7 +120,7 @@ own — not instead of writing it.
 
 ```sh
 cd code
-make run      # build and run all twelve
+make run      # build and run all thirteen
 make verify   # the honest-chapter check, see below
 ```
 
@@ -134,13 +135,37 @@ If you only remember three things from this chapter:
    getting mixed up.
 
 2. **The type system is free.** `Id<ThreadIdTag>` is the same 32 bytes as
-   `std::string` and compiles to the same machine code, but it makes
-   `cancel(call_id, thread_id)` a compile error instead of a 3am page.
+   `std::string` and compiles to the same machine code (§3 proves it in
+   assembly), but it makes `cancel(call_id, thread_id)` a compile error
+   instead of a 3am page.
 
 3. **Ownership and lifetime are design, not bookkeeping.** `const&` means
    "I'm borrowing", by-value means "I'm keeping", `string_view` means "I'm
    borrowing and I'll be gone before you are". Say which one you mean in
    the signature and the compiler enforces it.
+
+---
+
+## what "expert" means here
+
+The difference between knowing this chapter and being good at C++ isn't
+more facts. It's three habits:
+
+**You derive instead of recalling.** §2 lists four integer traps, but it
+also gives you the promotion-and-conversion rule that *generates* all
+four. When you hit a fifth case the book never mentioned, you work it out
+in ten seconds instead of guessing.
+
+**You reach for the type system first.** When a bug keeps coming back, the
+question isn't "where do I add a check" but "what type change makes this
+unrepresentable" (§3). That's why `MessageId` exists instead of a message
+index.
+
+**You can read what the machine says.** An ASan report is a structured
+document that names the bug class, the exact line, how far off your index
+was, and where the memory was born and died (§11). Most people scroll past
+it. Learning to read it is worth more than any single language feature in
+this chapter.
 
 ---
 

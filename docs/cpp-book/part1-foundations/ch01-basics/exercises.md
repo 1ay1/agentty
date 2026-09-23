@@ -2,15 +2,19 @@
 
 # Exercises
 
-Eight, easiest first. Do them in `code/`, next to the examples — the
-Makefile picks up any `.cpp` in that directory if you add it to `PROGS`,
-or just compile by hand:
+Twelve, easiest first. Do them in `code/`, next to the examples — or just
+compile by hand:
 
 ```sh
 g++ -std=c++23 -Wall -Wextra -fsanitize=address,undefined -g ex1.cpp -o ex1 && ./ex1
 ```
 
 Don't read a solution until you've made your version run.
+
+The last four are different from the rest. 1–8 check that you *learned the
+chapter*. 9–12 check that you can **work without it** — derive an answer
+the text never gave you, and judge a design rather than apply a rule.
+Those are the ones that matter.
 
 ---
 
@@ -294,11 +298,224 @@ and where it stops being true.
 
 ---
 
+## 9. predict before you compile
+
+**Sections 1, 2, 4, 8, 9. About 45 minutes. This is the one that tests
+whether you can derive.**
+
+For each expression below, write down **on paper** (a) the resulting type
+and (b) the value, before compiling anything. Then check with
+`TypeIs<decltype(expr)>` (§11) and a `printf`.
+
+```cpp
+short s = 30000;
+std::uint8_t b = 200;
+unsigned u = 1;
+int i = -1;
+long l = 1;
+std::size_t n = 0;
+
+1.  s + s
+2.  b + b
+3.  b * 2
+4.  i + u
+5.  u + l
+6.  n - 1
+7.  i < u
+8.  (b + b) > 255
+9.  static_cast<std::uint8_t>(b + b) > 255
+10. sizeof(b << 1)
+```
+
+Score yourself. **Anything under 8/10 means go back to §2's "the machine
+underneath" and work through the four conversion rules again** — you're
+still recalling traps instead of deriving from the rule.
+
+Then the harder half. Same drill, but these are about value categories and
+copies:
+
+```cpp
+std::vector<std::string> v{"a", "b", "c"};
+
+11. how many string copies does `for (auto x : v)` make?
+12. how many does `for (const auto& x : v)` make?
+13. how many does `std::vector<std::string> w = v;` make?
+14. how many does `auto w = std::move(v);` make?
+15. how many does `v.push_back("d")` make, if capacity is 3?
+```
+
+Verify 11–15 with a `Tracked`-style counting type, not by reasoning alone.
+
+<details>
+<summary>answer key — measured, not asserted</summary>
+
+**Types and values.** `short s = 30000; uint8_t b = 200; unsigned u = 1;
+int i = -1; long l = 1; size_t n = 0;`
+
+| # | expression | type | value |
+|---|---|---|---|
+| 1 | `s + s` | `int` | 60000 — promoted, so no overflow |
+| 2 | `b + b` | `int` | 400 — promoted, **not** 144 |
+| 3 | `b * 2` | `int` | 400 |
+| 4 | `i + u` | `unsigned` | 0 — `-1` became `UINT_MAX`, plus 1 wraps |
+| 5 | `u + l` | `long` | 2 — **on 64-bit Linux.** `unsigned long` on Windows |
+| 6 | `n - 1` | `unsigned long` | 18446744073709551615 |
+| 7 | `i < u` | `bool` | **false**, and it warns |
+| 8 | `(b + b) > 255` | `bool` | **true** — 400 > 255 |
+| 9 | `(uint8_t)(b+b) > 255` | `bool` | **false, always** — warns `-Wtype-limits` |
+| 10 | `sizeof(b << 1)` | `size_t` | **4** — promoted to `int` before shifting |
+
+The two that catch most people are 8 and 9. Same arithmetic, one cast
+apart, opposite answers — and 9 can *never* be true, which is why gcc
+warns that the comparison is pointless.
+
+**Copies**, with `vector<T> v` holding 3 elements, capacity 3:
+
+| # | expression | copies | moves |
+|---|---|---|---|
+| 11 | `for (auto x : v)` | **3** | 0 |
+| 12 | `for (const auto& x : v)` | 0 | 0 |
+| 13 | `std::vector<T> w = v;` | **3** | 0 |
+| 14 | `auto w = std::move(v);` | 0 | **0** |
+| 15 | `v.push_back(T{"d"})` at capacity | 0 | **4** |
+
+14 is the interesting one: **zero moves, not three.** Moving a `vector`
+moves the vector's three pointers, not its elements. The elements never
+learn it happened.
+
+15 is four moves, not one: one for the new element, plus three to
+relocate the existing ones into the bigger buffer. And they're *moves*
+only because `T`'s move constructor is `noexcept` (§8). Take that
+`noexcept` off and you get 4 copies.
+
+</details>
+
+---
+
+## 10. the design review
+
+**Sections 3, 6, 8, 10. About 60 minutes. No code required — this is
+judgement.**
+
+Here's a real class from a real codebase. It compiles, passes its tests,
+and is wrong in five ways you now know how to name.
+
+```cpp
+class Session {
+public:
+    Session(std::string id, std::string user) {
+        id_ = id;
+        user_ = user;
+    }
+
+    ~Session() { log_close(); }
+
+    std::string id() { return id_; }
+    bool expired() { return expiry_ < now(); }
+
+    void add_event(std::string e) { events_.push_back(e); }
+
+    std::string_view last_event() { return events_.back(); }
+
+private:
+    std::string id_;
+    std::string user_;
+    std::vector<std::string> events_;
+    Time expiry_;
+};
+```
+
+Write one paragraph per problem: **what's wrong, which section covers it,
+what it costs, and the fix.** Then rewrite the class.
+
+<details>
+<summary>the five, once you've found them</summary>
+
+1. **The constructor copies twice** (§6). Takes by value implicitly? No —
+   it takes by value and then *copy-assigns* in the body. Should be
+   `: id_(std::move(id)), user_(std::move(user))`. Two allocations saved
+   per session, and §5 explains why body-assignment is worse than an init
+   list.
+
+2. **The destructor kills the implicit moves** (§8). `~Session()` is
+   user-declared, so `Session` has no move constructor — every
+   `vector<Session>` reallocation deep-copies every string in every event
+   list. This is the expensive one.
+
+3. **`id()` returns by value and isn't const** (§6). Should be
+   `const std::string& id() const`. As written, every caller allocates,
+   and no caller holding a `const Session&` can call it at all — const
+   poisoning.
+
+4. **`expired()` isn't const** (§6). Same problem, and this one is a
+   predicate so it should also be `[[nodiscard]]`.
+
+5. **`last_event()` returns a dangling-prone view** (§7). It's a
+   `string_view` into a `vector` element. Any `add_event` that reallocates
+   invalidates it. Return `const std::string&`, or document the
+   invalidation contract loudly.
+
+Bonus: `expiry_` has no default member initialiser, so a `Session` whose
+constructor throws midway leaves it indeterminate (§5).
+
+</details>
+
+---
+
+## 11. find the real bug in agentty
+
+**Sections 3, 7, 11. About 60 minutes. Uses the actual codebase.**
+
+Open `include/agentty/domain/` and pick a header you haven't read.
+
+1. For every member function, state whether it should be `const`,
+   `noexcept`, `[[nodiscard]]`, and whether it is. Find one that's
+   missing something.
+2. For every type, run
+   `static_assert(std::is_nothrow_move_constructible_v<T>)` in a scratch
+   file. Does every one pass? If one fails, work out which of §8's rules
+   caused it.
+3. Find one place where a `std::string` parameter could be a
+   `std::string_view` (§6) and one where it couldn't. Explain the
+   difference.
+
+Write up what you find. If it's a genuine improvement, that's a patch.
+
+---
+
+## 12. teach it back
+
+**All sections. About 60 minutes. The real test.**
+
+Pick the single concept from this chapter you found hardest. Write an
+explanation of it for someone who knows Python but not C++.
+
+Constraints:
+
+- under 500 words
+- exactly one runnable program, under 40 lines, that demonstrates it
+- at least one thing the reader is told to **break on purpose**, with the
+  expected error
+- no hand-waving: every claim either shows output or cites a rule
+
+If you can't do this, you don't know the concept yet — and finding out
+which one that is, is the point of the exercise.
+
+The list of things worth trying: why `std::move` doesn't move; why a named
+`T&&` is an lvalue; why `~T(){}` makes your vector slow; why
+`LazyBytes::empty()` must not call `bytes()`; why `-1 < 1u` is false.
+
+---
+
 ## after these
 
 You should be able to open `include/agentty/domain/` and read any file in
 it without reaching for a reference. Try it — pick a header you haven't
 seen and see how far you get.
+
+If exercises 9 and 10 went well, you're ready for chapter 2. If they
+didn't, the gap they exposed is worth closing first — it'll only get more
+expensive later.
 
 [chapter index](README.md) · [quick reference](quick-reference.md) ·
 [chapter 2 →](../ch02-memory/)

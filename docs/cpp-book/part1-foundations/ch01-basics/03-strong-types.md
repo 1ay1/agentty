@@ -558,7 +558,96 @@ difference by looking instead of by guessing.
 
 ---
 
-## when to reach for this
+## the principle, generalised
+
+You can now write `Id<Tag>`. An expert can decide *when* to reach for it
+and *how far* to take it. That's a design judgement, and it has a name.
+
+### make illegal states unrepresentable
+
+Every bug is a program reaching a state it shouldn't. You have three
+places to stop it:
+
+| where | mechanism | cost of a miss |
+|---|---|---|
+| runtime | `if (bad) throw` | crash, or worse, silence |
+| test | assertion in a test suite | caught if the test exists |
+| **type** | **it doesn't compile** | **impossible** |
+
+Strong types move a check from row 1 to row 3. The swapped-argument bug
+doesn't get *detected* — it stops being expressible.
+
+That's the lens for the rest of the book. Every pattern in later chapters
+(`std::variant` for sum types, `std::unique_ptr` for ownership, `const`
+for immutability) is the same move: take a rule that lived in your head or
+in a comment, and hand it to the compiler.
+
+### how far to take it: adding operators
+
+`Id<Tag>` deliberately has almost no operations, because ids don't have
+arithmetic. But when the underlying value *does*, the type should carry
+the rules of its domain. Units are the classic case — type this:
+
+```cpp
+#include <compare>
+#include <cstdio>
+
+template <typename Tag>
+struct Quantity {
+    double v{};
+
+    constexpr Quantity() = default;
+    constexpr explicit Quantity(double d) noexcept : v(d) {}
+
+    constexpr auto operator<=>(const Quantity&) const = default;
+
+    // same-unit arithmetic only
+    constexpr Quantity operator+(Quantity o) const noexcept { return Quantity{v + o.v}; }
+    constexpr Quantity operator-(Quantity o) const noexcept { return Quantity{v - o.v}; }
+};
+
+struct MetersTag  {};
+struct SecondsTag {};
+using Meters  = Quantity<MetersTag>;
+using Seconds = Quantity<SecondsTag>;
+
+int main() {
+    constexpr Meters a{100.0}, b{50.0};
+    constexpr Meters c = a + b;
+    std::printf("100m + 50m = %.1fm\n", c.v);
+
+    static_assert(c.v == 150.0);                    // computed at COMPILE time
+    static_assert(sizeof(Meters) == sizeof(double)); // still free
+
+    // Meters bad = a + Seconds{1.0};   // does not compile
+}
+```
+
+```
+100m + 50m = 150.0m
+sizeof(Meters)=8 sizeof(double)=8
+```
+
+Three things happened there worth noticing.
+
+**`operator+` takes `Quantity` by value, not `const Quantity&`.** It's one
+`double` — §6's small-and-trivial carve-out. A reference would be slower.
+
+**Everything is `constexpr`, so `static_assert(c.v == 150.0)` works.** The
+addition ran at compile time. A strong type doesn't just cost nothing at
+runtime; it can move work *out* of runtime entirely. Chapter 10 is about
+this.
+
+**`Meters + Seconds` doesn't compile** because `operator+` takes
+`Quantity<MetersTag>`, and `Quantity<SecondsTag>` isn't that type. You got
+dimensional analysis for free, out of the same phantom-tag trick.
+
+> This is exactly what `std::chrono` does. `std::chrono::seconds` and
+> `std::chrono::milliseconds` are the same machinery, with conversions
+> between compatible units defined deliberately. Once you've written
+> `Quantity`, `<chrono>` stops looking like magic.
+
+### the decision, as a checklist
 
 Wrap it in a strong type when **two values of the same underlying type
 mean different things and could be confused at a call site.**
@@ -568,13 +657,33 @@ Good candidates:
 - ids of different kinds (this section)
 - units: `Meters` vs `Feet`, `Milliseconds` vs `Seconds`
 - an index into *this* array vs an index into *that* one
-- user input vs sanitised string
+- user input vs sanitised string — the type is the audit trail
 
 Don't bother when:
 
 - there's only one thing of that type in the whole program
 - the value is immediately consumed and never passed around
 - it's a local in a ten-line function
+
+The test that actually decides it: **can you write down a call site where
+swapping two arguments compiles and does the wrong thing?** If yes, wrap
+them. If you can't construct such a call site, you're adding ceremony for
+nothing.
+
+### the cost of over-applying it
+
+Strong types are not free of *design* cost, even though they're free of
+runtime cost. Every one you add is:
+
+- a name someone has to learn
+- a constructor call at every boundary where raw data enters
+- a place where you'll eventually want an operator and have to decide
+  whether to add it
+
+A codebase where every `int` is wrapped is as hard to read as one where
+nothing is. `Id<Tag>` earns its place in agentty because there are six id
+kinds flowing through the same functions. One id kind wouldn't have been
+worth a template.
 
 ---
 
