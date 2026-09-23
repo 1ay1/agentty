@@ -246,24 +246,26 @@ Pasting images **over SSH** needs one terminal setting — see [Clipboard & Imag
 **Linux**
 
 ```bash
-# Debian / Ubuntu
-curl -fsSLO https://github.com/1ay1/agentty/releases/latest/download/agentty_amd64.deb
-sudo dpkg -i agentty_amd64.deb
+# Debian / Ubuntu  (V = the release you want, e.g. 0.9.5)
+curl -fsSLO https://github.com/1ay1/agentty/releases/latest/download/agentty_${V}_amd64.deb
+sudo dpkg -i agentty_${V}_amd64.deb
 
 # Fedora / RHEL / CentOS
-sudo dnf install https://github.com/1ay1/agentty/releases/latest/download/agentty-x86_64.rpm
+sudo dnf install https://github.com/1ay1/agentty/releases/latest/download/agentty-${V}-1.x86_64.rpm
 
 # openSUSE
-sudo zypper install https://github.com/1ay1/agentty/releases/latest/download/agentty-x86_64.rpm
+sudo zypper install https://github.com/1ay1/agentty/releases/latest/download/agentty-${V}-1.x86_64.rpm
 
 # Arch (AUR)
 yay -S agentty-bin   # prebuilt static release
 yay -S agentty-git   # build HEAD from source, dynamically linked
 
-# Alpine
-curl -fsSLO https://github.com/1ay1/agentty/releases/latest/download/agentty-x86_64.apk
-sudo apk add --allow-untrusted agentty-x86_64.apk
+# Alpine — no .apk yet; use the install script above
 ```
+
+Package filenames carry the version, so `latest/download/` needs it spelled
+out — see the [releases page](https://github.com/1ay1/agentty/releases/latest)
+for the exact names, or use the install script, which resolves it for you.
 
 **macOS**
 

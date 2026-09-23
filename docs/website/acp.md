@@ -1,12 +1,12 @@
 ---
-title: Zed / ACP
-description: Run agentty as an Agent Client Protocol agent inside Zed — streaming responses, inline diffs, native permission prompts, session reload, and a one-command air-gapped setup. Same engine as the TUI, driven over JSON-RPC on stdio.
+title: Zed / JetBrains / ACP
+description: Run agentty as an Agent Client Protocol agent inside Zed or a JetBrains IDE — streaming responses, inline diffs, native permission prompts, session reload, and a one-command air-gapped setup. Same engine as the TUI, driven over JSON-RPC on stdio.
 nav_section: Advanced
 nav_order: 20
 slug: acp
 ---
 
-agentty speaks the [Agent Client Protocol](https://agentclientprotocol.com) — the same protocol Zed uses to drive Claude Code and Gemini. Point Zed at the `agentty acp` subcommand and your terminal agent becomes a first-class agent panel inside the editor: streaming responses, inline diffs for every edit, and native permission prompts before any file write or shell command.
+agentty speaks the [Agent Client Protocol](https://agentclientprotocol.com) — the same protocol Zed and JetBrains use to drive Claude Code, Codex and Gemini. Point your editor at the `agentty acp` subcommand and your terminal agent becomes a first-class agent panel inside it: streaming responses, inline diffs for every edit, and native permission prompts before any file write or shell command.
 
 ## Set up in Zed
 
@@ -24,6 +24,64 @@ Add this to Zed's `settings.json` (`zed: open settings`):
 ```
 
 Then open the agent panel (`cmd-?` / `ctrl-?`), pick **agentty** from the agent list, and prompt. Auth is whatever `agentty login` already set up — the ACP process reads the same `~/.config/agentty/credentials.json`, so there's nothing extra to configure.
+
+## Set up in a JetBrains IDE
+
+IntelliJ IDEA, PyCharm, GoLand, WebStorm and the rest support ACP through AI Assistant's **AI Chat**. agentty isn't in the curated registry, so add it as a custom agent.
+
+In AI Chat, click the **⋮** menu → **Add Custom Agent**. That creates `~/.jetbrains/acp.json` and opens it. Add agentty under `agent_servers`:
+
+```json
+{
+  "agent_servers": {
+    "agentty": {
+      "command": "/usr/local/bin/agentty",
+      "args": ["acp"]
+    }
+  }
+}
+```
+
+Then pick **agentty** from the chat mode selector and prompt.
+
+:::note Use an absolute path
+Unlike Zed, JetBrains launches the command without a login shell, so `"agentty"` alone usually won't resolve. Run `which agentty` and paste the full path. This is the single most common reason a custom agent fails to start.
+:::
+
+A JetBrains subscription is **not** required to use ACP agents. If agentty doesn't appear in the list, check that `acp.json` parses and restart the IDE.
+
+### MCP servers
+
+JetBrains can expose its own MCP servers to the agent via `default_mcp_settings`:
+
+```json
+{
+  "default_mcp_settings": {
+    "use_custom_mcp": true,
+    "use_idea_mcp": false
+  },
+  "agent_servers": {
+    "agentty": {
+      "command": "/usr/local/bin/agentty",
+      "args": ["acp"]
+    }
+  }
+}
+```
+
+`use_custom_mcp` (default `true`) passes through the MCP servers you configured in the IDE; `use_idea_mcp` (default `false`) exposes the built-in IntelliJ MCP server, which gives the agent IDE-native tools like refactorings and inspections.
+
+agentty has [its own MCP configuration](mcp.html) in `~/.agentty/mcp.json`, and the two are additive — servers you configure here are on top of whatever the IDE passes in.
+
+:::warning WSL is not supported
+JetBrains does not currently support ACP agents under the Windows Subsystem for Linux. On Windows, run the IDE and agentty natively, or use the TUI.
+:::
+
+### Collecting logs
+
+If something misbehaves, AI Chat's **⋮** menu → **Get ACP Logs** downloads an archive of the agent's logs. For the full JSON-RPC traffic, enable `llm.agent.extended.logging` in the Registry (**Help → Find Action → Registry**) and restart.
+
+agentty's own log is independent and often more useful: `AGENTTY_LOG=debug` on the `env` block, then read `~/.agentty/logs/agentty.log`. See [logging](logging.html).
 
 ## Model & permission profile
 

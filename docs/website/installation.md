@@ -39,16 +39,16 @@ Update: `dpkg -i` the new release's `.deb`.
 
 ```bash
 # Fedora / RHEL / CentOS
-sudo dnf install https://github.com/1ay1/agentty/releases/latest/download/agentty-x86_64.rpm
+sudo dnf install https://github.com/1ay1/agentty/releases/latest/download/agentty-{{version}}-1.x86_64.rpm
 
 # openSUSE
-sudo zypper install https://github.com/1ay1/agentty/releases/latest/download/agentty-x86_64.rpm
+sudo zypper install https://github.com/1ay1/agentty/releases/latest/download/agentty-{{version}}-1.x86_64.rpm
 
 # or upgrade an existing install:
 sudo rpm -Uvh https://github.com/1ay1/agentty/releases/latest/download/agentty-{{version}}-1.x86_64.rpm
 ```
 
-`-U` is upgrade; works for the first install too.
+`-U` is upgrade; works for the first install too. Use `agentty-{{version}}-1.aarch64.rpm` on ARM.
 
 ## Arch Linux
 
@@ -61,9 +61,10 @@ Or install the release-page `.pkg.tar.zst` with `sudo pacman -U`.
 
 ## Alpine
 
+No `.apk` is published yet — use the install script or the static binary:
+
 ```bash
-curl -fsSLO https://github.com/1ay1/agentty/releases/latest/download/agentty-x86_64.apk
-sudo apk add --allow-untrusted agentty-x86_64.apk
+curl -fsSL https://agentty.org/install.sh | sh
 ```
 
 ## Nix · Snap · Gentoo
