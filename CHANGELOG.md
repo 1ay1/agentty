@@ -4,6 +4,67 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **An image pasted into Zed's agent panel now reaches the model.** The ACP
+  server had an empty visitor arm for `ImageContent`, so a screenshot was
+  silently dropped — the words went, the picture didn't, on a build whose TUI
+  has had vision for months. A dropped block is indistinguishable from a model
+  that ignored the image, which is why nobody reported it.
+  `promptCapabilities.image` is now declared, because it is now true.
+- **Client mistakes are reported as `InvalidParams`, not `InternalError`.**
+  Every ACP failure path threw a generic exception, which maps to
+  `InternalError` — so "unknown sessionId" or a mistyped config option told
+  the editor *the agent had crashed*. Zed branches on the code
+  (`AuthRequired` → sign-in, other → show the user, `InternalError` → treat as
+  a crash), so a user's typo was reported as our bug and the actionable
+  message was buried. All six paths now carry a typed code plus structured
+  data: the id that wasn't found, the values that *would* have worked.
+- **Tool-call locations are absolute**, so "follow along" keeps working. Zed
+  resolves a location only if the path is absolute; a relative one is silently
+  dropped and the cursor just stops moving. Tool args are whatever the model
+  typed, which is very often `src/main.cpp`.
+- **A cancelled terminal run leaves readable output.** The terminal is released
+  as the tool returns, and a released terminal's widget is dropped — so a
+  cancel left an empty card with no trace of what was cancelled. Every other
+  exit already left durable text; cancel was the one that didn't.
+- **MCP: `resultType` is emitted on every result.** Required from protocol
+  2026-07-28, which we advertise, and we emitted it on none of the eight
+  result types. Invisible locally — our own client defaults the field, so
+  agentty-to-agentty worked perfectly while a conformant third-party client
+  would reject the response.
+- **MCP: `ttlMs`/`cacheScope` are always sent, and never negative.** Both are
+  required on every cacheable result, but were skipped entirely when the TTL
+  was zero — and a zero TTL is the ordinary way to say *don't cache this*, so
+  the response that most needed to say it shipped malformed.
+- **The release audit no longer fails on channels that land a minute later.**
+  AUR's cgit and GitHub's PR search both lag the publish job, so a single read
+  straight afterwards saw a stale version and called it drift — four healthy
+  releases reported as broken. Both checks now retry before believing the
+  answer.
+
+### Added
+- **The ACP tool card carries the programmatic tool name** (`read`, `bash`)
+  alongside the human title, stabilised in ACP 1.8.0. A client that groups or
+  picks icons by tool identity cannot recover that from *"Reading
+  src/main.cpp"*.
+- **`tests/schema_conformance.py`** — checks our codecs against the MCP and ACP
+  schemas as a *type algebra* rather than by reading code: product shape, field
+  modality, carrier type, and enum values, following `$ref` and honouring
+  semantic constraints. Every protocol bug in this release was found by it or
+  by reading a reference client, not by inspection — the failures it catches
+  are the ones that are invisible when you only talk to yourself.
+
+### Documentation
+- **JetBrains IDEs** get their own setup section on the ACP page
+  ([#51](https://github.com/1ay1/agentty/issues/51)) — including the absolute
+  path requirement that is their most common startup failure, MCP passthrough,
+  and the WSL limitation.
+- **Package install commands are fixed**
+  ([#52](https://github.com/1ay1/agentty/issues/52)). Asset filenames carry the
+  version, so `latest/download/agentty-x86_64.rpm` always 404'd. Nine URLs were
+  wrong across the docs and README. Thanks to
+  [@TechPro424](https://github.com/TechPro424) for both.
+
 ## [0.9.5] - 2026-09-22
 
 ### Fixed
