@@ -27,6 +27,9 @@
 #  include <cerrno>
 #  include <fcntl.h>
 #  include <poll.h>
+#  if defined(__linux__)
+#    include <sys/syscall.h>   // SYS_pidfd_open (reap wait)
+#  endif
 #  include <signal.h>
 #  include <sys/wait.h>
 #  include <unistd.h>
@@ -710,6 +713,8 @@ SubprocessResult run_posix(const std::vector<std::string>& argv_in,
     };
 
     bool reaped = false;
+    int  exit_fd = -2;   // pidfd for the reap wait; -2 = not opened yet
+    auto reap_backoff = std::chrono::microseconds{200};
     bool group_done = false;
     auto cleanup_deadline = clock::time_point::max();
     while (!eof || !reaped || (sent_term && !group_done)) {
@@ -779,9 +784,22 @@ SubprocessResult run_posix(const std::vector<std::string>& argv_in,
                 eof = true;   // poll error → stop trying to read
             }
         } else {
-            // Pipe is done; just sleep briefly until reap completes.
-            std::this_thread::sleep_for(
-                std::chrono::milliseconds(std::min<long>(wait_ms, 20)));
+            // Pipe is done; wait for the reap. pidfd wakes the instant the
+            // child exits instead of a flat 20 ms sleep on every command.
+            const long cap = std::min<long>(wait_ms, 20);
+#if defined(__linux__) && defined(SYS_pidfd_open)
+            if (exit_fd == -2)
+                exit_fd = static_cast<int>(::syscall(SYS_pidfd_open, cpid, 0));
+            if (exit_fd >= 0) {
+                struct pollfd xfd{exit_fd, POLLIN, 0};
+                (void)::poll(&xfd, 1, static_cast<int>(cap));
+            } else
+#endif
+            {
+                std::this_thread::sleep_for(reap_backoff);
+                reap_backoff = std::min<std::chrono::microseconds>(
+                    reap_backoff * 2, std::chrono::milliseconds(cap > 0 ? cap : 1));
+            }
         }
 
         // Non-blocking reap. If the child is gone but the pipe's still
@@ -814,6 +832,7 @@ SubprocessResult run_posix(const std::vector<std::string>& argv_in,
     }
 
     if (read_fd >= 0) child.read_end.reset();
+    if (exit_fd >= 0) ::close(exit_fd);
     emit_progress();   // final flush so the UI sees the last bytes
 
     if      (WIFEXITED  (wait_status)) r.exit_code = WEXITSTATUS(wait_status);
