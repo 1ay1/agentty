@@ -268,6 +268,25 @@ struct HostProbe {
 [[nodiscard]] HostProbe probe_host(const AuthHeader& auth,
                                    const Endpoint& endpoint);
 
+// ── The request body, as a pure function ─────────────────────────────────
+//
+// The exact JSON agentty puts on the wire, derived from a Request and
+// nothing else — no sink, no socket, no globals.
+//
+// WHY IT IS OUT HERE: it used to be built inline inside the streaming
+// function, so the only way to see what we send was a wire=trace log on a
+// live call. That made "which fields go to which endpoints" a question you
+// answered by reading a hot path, and left conformance.hpp's tiers as
+// documentation with nothing enforcing them. As a pure function the body is
+// assertable in a unit test, which is what turns those tiers from a comment
+// into a contract.
+//
+// The tier rules it implements (evidence for each is in conformance.hpp):
+//   Universal  model, stream, max_tokens, stream_options, tools
+//   Hosted     prompt_cache_key    — TLS only; local servers reject it
+//   Probed     reasoning_effort    — arrives pre-gated by the catalog
+[[nodiscard]] nlohmann::json build_request_body(const Request& req);
+
 // Common request headers (accept/content-type/user-agent + auth). The auth
 // header is `authorization: Bearer <key>` unless `endpoint.auth_header_name`
 // is set, in which case the key goes out raw under that name. Exposed for

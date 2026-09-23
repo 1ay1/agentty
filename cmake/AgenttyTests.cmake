@@ -46,6 +46,7 @@ set(_AGENTTY_CONSOLIDATED
     capability_conformance_test
     ollama_transport_test openai_transport_test code_block_extract_test
     openai_dialect_test host_probe_taxonomy_test openai_conformance_policy_test
+    openai_request_body_test
     command_palette_test compaction_threshold_test fsm_test model_caps_test
     dialect_test
     embed_backend_test form_test embed_form_test escape_guarantee_test

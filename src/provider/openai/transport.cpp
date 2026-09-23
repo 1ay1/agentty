@@ -2125,76 +2125,12 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
     ctx.known_tools.reserve(req.tools.size());
     for (const auto& t : req.tools) ctx.known_tools.push_back(t.name);
 
-    // ── Build the request body ──────────────────────────────────────────────
+    // ── Build the request body ──────────────────────────────────────────
+    // One pure function, asserted directly in openai_request_body_test.cpp.
+    // Keeping it out of this hot path is what lets the conformance tiers be
+    // a contract rather than a comment.
     const bool native = req.endpoint.native_api;
-    json body;
-    body["model"]  = req.model;
-    body["stream"] = true;
-
-    if (native) {
-        // Ollama native /api/chat: system prompt as a role:"system" message,
-        // structured tool_calls, NDJSON response.
-        // num_predict = max output tokens (Ollama default is low ~128).
-        body["options"] = {{"num_predict", req.max_tokens}};
-        json messages = json::array();
-        if (!req.system_prompt.empty())
-            messages.push_back({{"role", "system"},
-                                {"content", scrub_utf8(req.system_prompt)}});
-        for (auto& m : build_native_messages(req.messages))
-            messages.push_back(std::move(m));
-        body["messages"] = std::move(messages);
-        if (!req.tools.empty()) {
-            body["tools"] = wire::openai_chat_tools(req.tools);
-            body["tool_choice"] = "auto";
-        }
-    } else {
-        // max_tokens is `max_tokens` on the OpenAI chat endpoint (newer models
-        // also accept max_completion_tokens; max_tokens stays accepted for the
-        // whole compatible family, so use it for portability).
-        body["max_tokens"] = req.max_tokens;
-        // Ask for a usage frame on the final SSE event so the context gauge can
-        // update even on streaming requests.
-        body["stream_options"] = {{"include_usage", true}};
-
-        // messages: system prompt first, then the conversation.
-        json messages = json::array();
-        if (!req.system_prompt.empty()) {
-            messages.push_back({{"role", "system"},
-                                {"content", scrub_utf8(req.system_prompt)}});
-        }
-        {
-            json conv = build_messages(Thread{ThreadId{""}, "", req.messages, {}, {}});
-            for (auto& m : conv) messages.push_back(std::move(m));
-        }
-        body["messages"] = std::move(messages);
-
-        if (!req.tools.empty()) {
-            body["tools"] = wire::openai_chat_tools(req.tools);
-            body["tool_choice"] = "auto";
-        }
-
-        // Prompt-cache routing. OpenAI auto-caches prefixes >=1024 tokens;
-        // sending a stable prompt_cache_key pins a conversation's identical
-        // prefix (system + tools + history) to the same cache node across
-        // turns, lifting the cache-hit rate on the exact bytes that repeat.
-        // Only for hosted TLS endpoints — local Ollama/llama.cpp ignore or
-        // reject the field, and their KV cache is prefix-automatic anyway.
-        if (req.endpoint.use_tls && !req.session_key.empty())
-            body["prompt_cache_key"] = req.session_key;
-
-        // Reasoning effort. Chat Completions takes a top-level `reasoning_effort`
-        // (o-series, DeepSeek-Reasoner/R1, xAI Grok reasoning, Mistral
-        // Small/Medium, Gemini *-thinking via the compat shim). req.effort is
-        // the model-agnostic tier already gated to "" by effort_wire_for when
-        // the model can't (or must not) take it — e.g. Mistral MAGISTRAL reasons
-        // natively and REJECTS reasoning_effort (422), so the catalog excludes
-        // it and effort arrives empty here. So this needs no capability
-        // re-check. Hosted TLS only; local servers reject the field. NOTE:
-        // reasoning TEXT still streams for excluded models — the response-side
-        // reasoning_content handler is unconditional (see handle_delta).
-        if (req.endpoint.use_tls && !req.effort.empty())
-            body["reasoning_effort"] = req.effort;
-    }
+    json body = build_request_body(req);
 
     std::string body_str;
     try {
@@ -2523,6 +2459,80 @@ OllamaProbe probe_ollama_model(const AuthHeader& auth,
     return out;
 }
 } // namespace
+
+// The exact JSON agentty puts on the wire. Pure: Request in, json out.
+// See the header for why this is not inline in the stream path, and
+// conformance.hpp for the evidence behind each tier decision below.
+json build_request_body(const Request& req) {
+    const bool native = req.endpoint.native_api;
+    json body;
+    body["model"]  = req.model;
+    body["stream"] = true;
+
+    if (native) {
+        // Ollama native /api/chat: system prompt as a role:"system" message,
+        // structured tool_calls, NDJSON response.
+        // num_predict = max output tokens (Ollama default is low ~128).
+        body["options"] = {{"num_predict", req.max_tokens}};
+        json messages = json::array();
+        if (!req.system_prompt.empty())
+            messages.push_back({{"role", "system"},
+                                {"content", scrub_utf8(req.system_prompt)}});
+        for (auto& m : build_native_messages(req.messages))
+            messages.push_back(std::move(m));
+        body["messages"] = std::move(messages);
+        if (!req.tools.empty()) {
+            body["tools"] = wire::openai_chat_tools(req.tools);
+            body["tool_choice"] = "auto";
+        }
+        return body;
+    }
+
+    // max_tokens is `max_tokens` on the OpenAI chat endpoint (newer models
+    // also accept max_completion_tokens; max_tokens stays accepted for the
+    // whole compatible family, so use it for portability).
+    body["max_tokens"] = req.max_tokens;
+    // Ask for a usage frame on the final SSE event so the context gauge can
+    // update even on streaming requests.
+    body["stream_options"] = {{"include_usage", true}};
+
+    // messages: system prompt first, then the conversation.
+    json messages = json::array();
+    if (!req.system_prompt.empty()) {
+        messages.push_back({{"role", "system"},
+                            {"content", scrub_utf8(req.system_prompt)}});
+    }
+    {
+        json conv = build_messages(Thread{ThreadId{""}, "", req.messages, {}, {}});
+        for (auto& m : conv) messages.push_back(std::move(m));
+    }
+    body["messages"] = std::move(messages);
+
+    if (!req.tools.empty()) {
+        body["tools"] = wire::openai_chat_tools(req.tools);
+        body["tool_choice"] = "auto";
+    }
+
+    // Prompt-cache routing. OpenAI auto-caches prefixes >=1024 tokens;
+    // sending a stable prompt_cache_key pins a conversation's identical
+    // system+tools+history prefix to one cache node. HOSTED TIER: local
+    // servers reject the field and their KV cache is prefix-automatic
+    // anyway, so there is nothing to gain and a 400 to lose.
+    if (req.endpoint.use_tls && !req.session_key.empty())
+        body["prompt_cache_key"] = req.session_key;
+
+    // Reasoning effort. PROBED TIER: the catalog already excluded models
+    // that can't (or must not) take it — e.g. Mistral MAGISTRAL reasons
+    // natively and REJECTS reasoning_effort (422), so the catalog excludes
+    // it and effort arrives empty here. So this needs no capability
+    // re-check. Hosted TLS only; local servers reject the field. NOTE:
+    // reasoning TEXT still streams for excluded models — the response-side
+    // reasoning handler is unconditional (see handle_delta).
+    if (req.endpoint.use_tls && !req.effort.empty())
+        body["reasoning_effort"] = req.effort;
+
+    return body;
+}
 
 // ── Model listing ────────────────────────────────────────────────────────────
 // One actionable sentence per failure. The taxonomy and the wording live
