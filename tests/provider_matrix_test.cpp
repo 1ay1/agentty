@@ -6,9 +6,9 @@
 // DIALECT (4 of them). That is the right shape for wire decoding, and it is
 // where a tool-call framing bug belongs.
 //
-// But a user does not pick a dialect. They pick "groq" or "gemini", and 13
-// of our 15 rows share the single OpenAIChat decoder. What actually differs
-// between those 13 is the ROW: where it dials, which env vars carry its key,
+// But a user does not pick a dialect. They pick "groq" or "gemini", and 14
+// of our 16 rows share the single OpenAIChat decoder. What actually differs
+// between those 14 is the ROW: where it dials, which env vars carry its key,
 // whether it needs a key at all, whether it has a second dialect, which
 // long-lived transport slot it owns. Those facts are what break a provider
 // for a user, and they are per-row, not per-dialect.
@@ -280,7 +280,7 @@ TEST_CASE("matrix: per-call providers claim no routing slot") {
 
 // ── 5. The shared decoder, per provider ──────────────────────────────────
 //
-// 13 rows share the OpenAIChat decoder, so a decoding bug is 13 broken
+// 14 rows share the OpenAIChat decoder, so a decoding bug is 14 broken
 // providers. The conformance suite pins the dialect; this pins that each
 // CHAT row actually round-trips a tool call through it — a row that declares
 // OpenAIChat but is somehow not decodable by it is a contradiction worth

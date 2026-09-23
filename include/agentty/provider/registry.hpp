@@ -292,7 +292,7 @@ using ProviderPreset = ProviderDescriptor;
 // To add a provider: append ONE row here. The endpoint columns below are the
 // only place its host/path live — Endpoint::from_spec is a lookup over this
 // table, so there is no second arm to keep in sync.
-inline constexpr std::array<ProviderDescriptor, 15> kProviders{{
+inline constexpr std::array<ProviderDescriptor, 16> kProviders{{
     {.id = "anthropic", .label = "Anthropic",
      .blurb = "Claude — OAuth (Pro/Max) or API key",
      // Own transport (not the OpenAI-compat one): no endpoint columns.
@@ -384,6 +384,17 @@ inline constexpr std::array<ProviderDescriptor, 15> kProviders{{
      // OpenRouter shipped an OpenAI-compatible Responses endpoint; upstream
      // reasoning models behind it need the same routing as first-party.
      .responses_path = "/api/v1/responses"},
+
+    {.id = "yolo-auto", .label = "Yolo-Auto",
+     .blurb = "Flat-rate OpenAI-compatible API: yolo / yolo-small",
+     // Static key, OpenAI-compatible chat path. The line-up is
+     // server-driven: /v1/models carries the key's current aliases, so this
+     // row needs no bundled floor (same shape as openrouter below).
+     .wire = Wire::OpenAIChat, .lifetime = Lifetime::PerCall,
+     .auth = AuthStyle::ApiKey,
+     .auth_env = {"YOLO_AUTO_API_KEY", "OPENAI_API_KEY", ""},
+     .host = "yolo-auto.com", .path = "/v1/chat/completions",
+     .models_path = "/v1/models"},
 
     {.id = "together", .label = "Together",
      .blurb = "Open models on together.ai",

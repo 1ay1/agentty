@@ -4,6 +4,9 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Yolo-Auto as a built-in provider (`--provider yolo-auto`, or pick it in `^P`).** An OpenAI-compatible chat endpoint at `https://yolo-auto.com/v1` with flat-rate plans instead of per-token billing, exposing the stable `yolo` and `yolo-small` aliases. It reads its key from `YOLO_AUTO_API_KEY` (then `OPENAI_API_KEY`, `-k`, or the in-app prompt) and lists what that key can reach from `/v1/models`, so the picker shows the account's current line-up rather than a hardcoded list. Tool-calling, streaming, and reasoning ride the same OpenAI-compatible path as every other row; nothing provider-specific to configure.
+
 ## [0.9.6] - 2026-09-23
 
 ### Fixed
