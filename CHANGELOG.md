@@ -4,6 +4,8 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.6] - 2026-09-23
+
 ### Fixed
 - **An image pasted into Zed's agent panel now reaches the model.** The ACP
   server had an empty visitor arm for `ImageContent`, so a screenshot was
