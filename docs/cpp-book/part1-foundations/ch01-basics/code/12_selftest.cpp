@@ -164,6 +164,19 @@ static_assert(!std::is_nothrow_move_constructible_v<HasDtor>,
 static_assert(std::is_nothrow_move_constructible_v<decltype(HasDtor::s)>,
               "§8: even though the only member moves just fine");
 
+// And `= default` does NOT save you. It is DECLARING the destructor that
+// suppresses the implicit moves, not what is in its body. This trips up
+// people who think they already know the rule.
+struct DtorNone     { std::string s; };
+struct DtorProvided { std::string s; ~DtorProvided() {} };
+struct DtorDefaulted{ std::string s; ~DtorDefaulted() = default; };
+static_assert(std::is_nothrow_move_constructible_v<DtorNone>,
+              "§8: no declared dtor -> implicit noexcept move");
+static_assert(!std::is_nothrow_move_constructible_v<DtorProvided>,
+              "§8: a provided dtor suppresses it");
+static_assert(!std::is_nothrow_move_constructible_v<DtorDefaulted>,
+              "§8: and so does `= default`. tidiness is not free.");
+
 struct MoveOnly {
     std::string s;
     MoveOnly(const MoveOnly&)            = delete;

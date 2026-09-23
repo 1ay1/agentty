@@ -2,11 +2,16 @@
 
 This is the longest chapter in the book. Everything later stands on it.
 
-**Time:** 6–10 hours if you run the code and do the exercises. Less if you
-only read, but then you won't learn it.
+**Time:** 6–10 hours if you type the code and do the exercises. Less if
+you only read, but then you won't learn it.
 
 **Prerequisite:** you can write a loop and call a function in some
 language. That's it.
+
+**How it works:** every section builds a complete program in the prose,
+piece by piece, with each line explained as it appears. You type it, run
+it, then break it on purpose. The full source of every program is in the
+section itself — you never need to open another file to follow along.
 
 **What you'll be able to do at the end:** read
 `include/agentty/domain/id.hpp`, `include/agentty/domain/lazy_bytes.hpp`,
@@ -40,8 +45,8 @@ Plus two programs with no prose section, because they exist to be *run*:
 - `code/11_zero_overhead.cpp` — proves the strong type is free, by diffing
   `-O2` assembly. Used by [section 3](03-strong-types.md).
 - `code/12_selftest.cpp` — **every claim in this chapter as an
-  assertion.** 45 `static_assert`s and 15 runtime checks. If it builds and
-  runs clean, the chapter is true on your machine.
+  assertion.** ~50 `static_assert`s and 15 runtime checks. If it builds
+  and runs clean, the chapter is true on your machine.
 
 ---
 
@@ -83,32 +88,40 @@ interesting — the failing assertion names the section it came from.
 
 ## how to read this
 
-Every claim in these pages is backed by a program in `code/`. Build them
-all first:
+**Type the code.** Every section builds a program in front of you, line by
+line, explaining each decision as it lands. Don't copy-paste and don't
+just read — open an empty `.cpp` file and type it. Typing is slow enough
+that you actually notice what you're writing.
+
+Each section ends with a **now break it** list: deliberate changes that
+make the program fail in instructive ways. Do them. Watching `-Wnarrowing`
+fire on your own code teaches more than reading that it exists.
+
+Compile everything with:
 
 ```sh
-cd code
-make          # all twelve
-make run      # all twelve, in order, with headers
-make verify   # the one that checks the chapter is honest
-```
-
-Then keep the matching program open beside the prose. Every output block
-in these files is pasted from an actual run, not typed by hand. If your
-machine prints something different, that difference is interesting and you
-should chase it.
-
-Blocks marked `// ERROR:` are supposed to fail. Compile them anyway.
-Reading compiler errors is half the skill.
-
-Everything builds with:
-
-```
--std=c++23 -Wall -Wextra -Wpedantic -g -fsanitize=address,undefined
+g++ -std=c++23 -Wall -Wextra -Wpedantic -g -fsanitize=address,undefined \
+    yourfile.cpp -o yourfile && ./yourfile
 ```
 
 Sanitizers on, always. They turn "mysterious crash next Tuesday" into
 "line 47, use-after-free, here's the stack".
+
+Every output block, every compiler error, and every warning quoted in
+these pages is pasted from a real run on a real machine. If yours differs,
+that's interesting and you should chase it.
+
+### the reference copies in `code/`
+
+`code/` holds a finished copy of each program, plus two extras that exist
+only to be run. Use them to check your work **after** you've written your
+own — not instead of writing it.
+
+```sh
+cd code
+make run      # build and run all twelve
+make verify   # the honest-chapter check, see below
+```
 
 ---
 
