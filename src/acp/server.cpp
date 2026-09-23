@@ -706,6 +706,11 @@ a::ToolCall make_tool_call(const ToolUse& tc, a::ToolCallStatus status,
     a::ToolCall out;
     out.toolCallId = a::ToolCallId{tc.id.value};
     out.title      = tool_title(tc, cwd);
+    // The PROGRAMMATIC name, alongside the human title. Stabilised in spec
+    // 1.8.0 and optional, but a client that wants to group, filter or icon
+    // by tool identity cannot parse it back out of "Reading src/main.cpp" —
+    // so omitting it just makes that impossible.
+    out.name       = a::Just<std::string>(tc.name.value);
     out.kind       = acp_tool_kind(tc.name.value);
     out.status     = status;
     if (!tc.args.is_null()) out.rawInput = a::Just<json>(tc.args);
@@ -1762,6 +1767,7 @@ StopReason AgentServer::stream_completion(Session& sess, bool& out_cancelled,
                         // bare lowercase tool name. The SU_ToolCallUpdate on
                         // StreamToolUseEnd refines it with the arg detail.
                         call.title      = tool_title(assistant.tool_calls.back(), scwd);
+                        call.name       = a::Just<std::string>(ev.name.value);
                         call.kind       = acp_tool_kind(ev.name.value);
                         call.status     = a::ToolCallStatus::Pending;
                         send_update(sid, a::SU_ToolCall{std::move(call)});

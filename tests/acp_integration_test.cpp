@@ -189,6 +189,7 @@ TEST_CASE("acp integration end-to-end") {
     std::atomic<int> tool_failed{0};
     std::string last_tool_text;
     std::string tc_title;
+    std::string tc_name;
     std::string perm_title;
     std::atomic<bool> tc_is_edit_kind{false};
     std::atomic<bool> tc_announce_diff{false};
@@ -220,6 +221,10 @@ TEST_CASE("acp integration end-to-end") {
                 ++tool_calls;
                 std::lock_guard lk(transcript_mu);
                 tc_title = t.toolCall.title;
+                // The PROGRAMMATIC name (spec 1.8.0), distinct from the
+                // human title. A client grouping or filtering by tool
+                // identity cannot recover it from "Reading src/main.cpp".
+                if (t.toolCall.name) tc_name = *t.toolCall.name;
                 if (t.toolCall.kind == ToolKind::Edit) tc_is_edit_kind.store(true);
                 for (const auto& cc : t.toolCall.content)
                     match(cc, [&](const TCC_Diff&) { tc_announce_diff.store(true); },
@@ -401,6 +406,10 @@ TEST_CASE("acp integration end-to-end") {
     { std::lock_guard lk(transcript_mu);
       CHECK(tc_title.rfind("Write ", 0) == 0);
       CHECK(tc_title.find('/') == std::string::npos);   // relative, no dir sep
+      // …and the programmatic name rides alongside it. Stabilised in spec
+      // 1.8.0; without it a client can only ever show the prose title, so
+      // grouping/filtering/iconography by tool identity is impossible.
+      CHECK(tc_name == "write");
       CHECK(perm_title.rfind("Write ", 0) == 0); }
     CHECK(tc_is_edit_kind.load());
     CHECK(tc_announce_diff.load());
