@@ -101,6 +101,72 @@ def tagged_union_keys(sources):
     return keys
 
 
+def schema_enums(schema):
+    """{TypeName: [allowed wire strings]} for every string enum.
+
+    Presence of a field is only half a contract. An enum we model with the
+    WRONG strings still emits a key the peer will reject — and it fails the
+    same silent way, because our own decoder accepts whatever our encoder
+    produces.
+
+    TWO SHAPES, because the two specs disagree:
+      MCP   {"type": "string", "enum": ["user", "assistant"]}
+      ACP   {"oneOf": [{"type": "string", "const": "assistant"}, …]}
+
+    Handling only the first silently checked ZERO ACP enums while reporting
+    success — ToolKind, ToolCallStatus and StopReason all went unverified.
+    A checker that reports "0 checked" as a pass is worse than no checker.
+    """
+    defs = schema.get("$defs") or schema.get("definitions") or {}
+    out = {}
+    for name, node in defs.items():
+        if not isinstance(node, dict):
+            continue
+        vals = node.get("enum")
+        if isinstance(vals, list) and node.get("type") == "string":
+            out[name] = sorted(str(v) for v in vals)
+            continue
+        one_of = node.get("oneOf")
+        if isinstance(one_of, list):
+            consts = [b["const"] for b in one_of
+                      if isinstance(b, dict) and isinstance(b.get("const"), str)]
+            # Only when EVERY arm is a string const — a oneOf mixing consts
+            # with object shapes is a tagged union, not an enum.
+            if consts and len(consts) == len(one_of):
+                out[name] = sorted(consts)
+    return out
+
+
+def check_enums(label, schema_path, sources):
+    """Does each enum's codec carry exactly the schema's allowed strings?
+
+    Extra values are as wrong as missing ones: encoding a value the peer's
+    schema forbids is a protocol violation we would never see locally.
+    """
+    schema = json.loads(Path(schema_path).read_text())
+    failures = []
+    checked = 0
+
+    for ename, allowed in sorted(schema_enums(schema).items()):
+        body = codec_body(sources, ename)
+        if body is None:
+            continue   # not implemented; a scope decision, not a bug
+        checked += 1
+        # The codec spells each wire value as a string literal.
+        got = sorted(set(re.findall(r'"([^"]+)"', body)))
+        missing = [v for v in allowed if v not in got]
+        extra = [v for v in got if v not in allowed]
+        if missing:
+            failures.append(f"{ename}: missing {missing}")
+        if extra:
+            failures.append(f"{ename}: not in schema {extra}")
+
+    print(f"[{label}] {checked} enum(s) checked")
+    for f in failures:
+        print(f"  ENUM MISMATCH: {f}")
+    return failures
+
+
 def check(label, schema_path, sources, ignore_fields=frozenset()):
     schema = json.loads(Path(schema_path).read_text())
     reqs = required_fields(schema)
@@ -177,16 +243,23 @@ def main():
         # types, which we build rather than model as structs.
         bad += check("mcp", args.mcp, src,
                      ignore_fields={"jsonrpc", "method", "id"})
+        bad += check_enums("mcp", args.mcp, src)
     if args.acp and Path(args.acp).exists():
         src = cpp_sources("acp-cpp/include")
         bad += check("acp", args.acp, src,
                      ignore_fields={"jsonrpc", "method", "id"})
+        bad += check_enums("acp", args.acp, src)
 
     print()
     if bad:
-        print(f"{len(bad)} required field(s) missing")
+        print(f"{len(bad)} conformance problem(s)")
         return 1
-    print("every required field of every implemented type is present")
+    # Say what was actually checked, not "conforming". This verifies two
+    # things: every REQUIRED field of every implemented type is wired into
+    # its codec, and every string ENUM carries exactly the schema's values.
+    # It does NOT verify JSON types, optional-field shapes, or semantics —
+    # a field present but carrying the wrong type still passes here.
+    print("required fields + enum values conform for every implemented type")
     return 0
 
 
