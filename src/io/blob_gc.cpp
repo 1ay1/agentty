@@ -20,6 +20,8 @@ using json = nlohmann::json;
 
 namespace {
 
+constexpr std::string_view kStampName = ".gc-stamp";
+
 // Every key under which a blob name can appear.
 //
 // Deliberately NOT a hardcoded list. The writer generates some of these
@@ -89,7 +91,8 @@ void collect_refs(const json& j, std::unordered_set<std::string>& out) {
 
 } // namespace
 
-GcStats collect_in(const fs::path& threads_dir, bool dry_run) {
+GcStats collect_in(const fs::path& threads_dir, bool dry_run,
+                   std::chrono::seconds min_age) {
     GcStats st;
     std::error_code ec;
     if (!fs::is_directory(threads_dir, ec)) return st;
@@ -127,7 +130,8 @@ GcStats collect_in(const fs::path& threads_dir, bool dry_run) {
     if (!fs::is_directory(blob_dir, ec)) { st.ran = st.unreadable == 0; return st; }
 
     for (const auto& e : fs::directory_iterator(blob_dir, ec))
-        if (e.is_regular_file(ec)) ++st.total_blobs;
+        if (e.is_regular_file(ec) && e.path().filename() != kStampName)
+            ++st.total_blobs;
     for (const auto& r : referenced)
         if (fs::exists(blob_dir / r, ec)) ++st.referenced;
     st.dangling = referenced.size() - st.referenced;
@@ -139,11 +143,20 @@ GcStats collect_in(const fs::path& threads_dir, bool dry_run) {
     }
     st.ran = true;
 
-    // ── SWEEP ─────────────────────────────────────────────────────────
+    // ── SWEEP ─────────────────────────────────────────────────────────────────────
+    const auto cutoff = fs::file_time_type::clock::now() - min_age;
     for (const auto& e : fs::directory_iterator(blob_dir, ec)) {
         if (!e.is_regular_file(ec)) continue;
         const auto name = e.path().filename().string();
         if (referenced.count(name)) continue;
+        if (name == kStampName) continue;
+        if (min_age.count() > 0) {
+            std::error_code tec;
+            const auto mt = e.last_write_time(tec);
+            // Unknown age or too young: a save may be about to reference it
+            // (or it's a writer's in-progress temp). Leave it.
+            if (tec || mt > cutoff) continue;
+        }
 
         const auto sz = e.file_size(ec);
         if (dry_run) {
@@ -167,6 +180,22 @@ GcStats collect_in(const fs::path& threads_dir, bool dry_run) {
 
 GcStats collect(bool dry_run) {
     return collect_in(persistence::threads_dir(), dry_run);
+}
+
+std::optional<GcStats> collect_if_due() {
+    using namespace std::chrono;
+    const auto blob_dir = persistence::threads_dir() / "blobs";
+    std::error_code ec;
+    if (!fs::is_directory(blob_dir, ec)) return std::nullopt;
+    const auto stamp = blob_dir / kStampName;
+    const auto now = fs::file_time_type::clock::now();
+    if (auto t = fs::last_write_time(stamp, ec); !ec && now - t < hours{24})
+        return std::nullopt;
+    // Claim the slot first so two instances starting together don't both
+    // sweep; a failed sweep simply retries tomorrow.
+    { std::ofstream touch(stamp, std::ios::trunc); }
+    fs::last_write_time(stamp, now, ec);
+    return collect_in(persistence::threads_dir(), /*dry_run=*/false, hours{24});
 }
 
 } // namespace agentty::blobs

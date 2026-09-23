@@ -248,3 +248,22 @@ TEST_CASE("blob gc: an empty store is a no-op") {
     CHECK(st.deleted == 0u);
     CHECK(st.scanned_threads == 0u);
 }
+
+TEST_CASE("blob gc: grace window spares young orphans") {
+    const auto dir = make_dir("grace");
+    const auto young = put_in(dir, std::string(100, 'y'));
+    const auto old   = put_in(dir, std::string(200, 'o'));
+    std::error_code ec;
+    fs::last_write_time(dir / "blobs" / old,
+                        fs::file_time_type::clock::now() - std::chrono::hours{48}, ec);
+    REQUIRE(!ec);
+    write_file(dir / "t.json", nlohmann::json{{"id", "t"},
+        {"messages", nlohmann::json::array()}}.dump());
+
+    const auto st = blobs::collect_in(dir, false, std::chrono::hours{24});
+    CHECK(st.ran);
+    CHECK_MESSAGE(blob_exists(dir, young),
+                  "a fresh orphan may be mid-save; it must survive");
+    CHECK_FALSE(blob_exists(dir, old));
+    CHECK(st.deleted == 1u);
+}

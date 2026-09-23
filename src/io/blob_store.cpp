@@ -48,7 +48,13 @@ std::string put(const std::string& bytes) {
     std::error_code ec;
     // Content-addressed: if it's already there it is byte-identical by
     // construction, so rewriting it would be pure I/O for no change.
-    if (fs::exists(out, ec)) return n;
+    if (fs::exists(out, ec)) {
+        // Refresh mtime: the GC only reclaims blobs older than its grace
+        // window, so a blob being re-referenced by a save in flight must
+        // look fresh even though its bytes are old.
+        fs::last_write_time(out, fs::file_time_type::clock::now(), ec);
+        return n;
+    }
     // Reuses the atomic temp+fsync+rename writer: a blob is only ever
     // published complete, so a crash mid-write can't leave a reference
     // pointing at a truncated payload.

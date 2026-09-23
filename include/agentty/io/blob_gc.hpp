@@ -36,9 +36,11 @@
 // references, so it refuses to delete anything at all. An unreadable
 // thread file is exactly when a user most needs their payloads intact.
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 
 namespace agentty::blobs {
 
@@ -65,9 +67,18 @@ struct GcStats {
 // urgent enough to justify an O(corpus) walk during a thread switch.
 [[nodiscard]] GcStats collect(bool dry_run = false);
 
-// Same, against an explicit threads directory. For tests and for
-// operating on a copy.
+// `min_age`: only reclaim unreferenced blobs whose mtime is at least this
+// old. A save writes its blobs BEFORE the thread file that references
+// them (and another agentty process may be mid-save), so a fresh
+// unreferenced blob may be about to become referenced. 0 = no grace.
 [[nodiscard]] GcStats collect_in(const std::filesystem::path& threads_dir,
-                                 bool dry_run = false);
+                                 bool dry_run = false,
+                                 std::chrono::seconds min_age =
+                                     std::chrono::seconds{0});
+
+// Background-safe housekeeping: runs collect with a 24 h grace window, at
+// most once per day (stamp file in the blob dir). Returns nullopt when
+// skipped because it ran recently.
+[[nodiscard]] std::optional<GcStats> collect_if_due();
 
 } // namespace agentty::blobs

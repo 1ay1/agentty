@@ -13,6 +13,7 @@
 #include "agentty/provider/kimi/kimi_oauth.hpp"
 #include "agentty/workspace/files.hpp"
 #include "agentty/workspace/symbols.hpp"
+#include "agentty/io/blob_gc.hpp"
 #include "agentty/util/modelsdev.hpp"
 #include "agentty/util/dbglog.hpp"
 #include "agentty/tool/subagent.hpp"   // set_smart: push pins to the task router
@@ -391,6 +392,16 @@ std::pair<Model, maya::Cmd<Msg>> init() {
         [](std::function<void(Msg)>) { prewarm_workspace_files(); }));
     cmds.push_back(maya::Cmd<Msg>::task_isolated(
         [](std::function<void(Msg)>) { prewarm_workspace_symbols(); }));
+
+    // Reclaim blobs no thread references any more (deleted threads,
+    // replaced outputs). Once a day at most, 24 h grace so a save in
+    // flight in this or another instance never loses a payload.
+    cmds.push_back(maya::Cmd<Msg>::task_isolated(
+        [](std::function<void(Msg)>) {
+            try { (void)blobs::collect_if_due(); }
+            catch (const std::exception& e) { util::dbglog("blob_gc", e.what()); }
+            catch (...) { util::dbglog("blob_gc", "non-std exception"); }
+        }));
 
     return {std::move(m), maya::Cmd<Msg>::batch(std::move(cmds))};
 }
