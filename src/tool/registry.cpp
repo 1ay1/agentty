@@ -311,7 +311,11 @@ std::vector<ToolDef> wire_tools_snapshot() {
 
 std::vector<const ToolDef*> select_wire_tools(
     std::string_view query, std::size_t max_external) {
-    const auto& catalog = wire_tools();
+    return select_wire_tools_from(wire_tools(), query, max_external);
+}
+
+std::vector<const ToolDef*> select_wire_tools_from(
+    const std::vector<ToolDef>& catalog, std::string_view query, std::size_t max_external) {
     std::vector<const ToolDef*> selected;
     std::vector<std::pair<int, const ToolDef*>> candidates;
     selected.reserve(catalog.size());
@@ -355,8 +359,16 @@ std::vector<const ToolDef*> select_wire_tools(
     }
     std::stable_sort(candidates.begin(), candidates.end(),
         [](const auto& a, const auto& b) { return a.first > b.first; });
-    for (std::size_t i = 0; i < max_external; ++i)
-        selected.push_back(candidates[i].second);
+    // Score decides WHICH tools make the cut, never their ORDER on the wire.
+    // The tools block is the head of the prompt-cache prefix (tools → system
+    // → messages), so emitting in score order reordered it on every user
+    // message even when the chosen set was the same, busting the whole cache.
+    // Emit the chosen ones in catalog order: same set, same bytes.
+    std::vector<const ToolDef*> chosen;
+    chosen.reserve(max_external);
+    for (std::size_t i = 0; i < max_external; ++i) chosen.push_back(candidates[i].second);
+    std::ranges::sort(chosen, std::less<>{});   // catalog is one contiguous vector
+    for (const auto* t : chosen) selected.push_back(t);
     return selected;
 }
 

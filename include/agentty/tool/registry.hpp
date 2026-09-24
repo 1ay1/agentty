@@ -169,6 +169,13 @@ struct ToolDef {
 // MCP tools most relevant to the current user request.
 [[nodiscard]] std::vector<const ToolDef*> select_wire_tools(
     std::string_view query, std::size_t max_external = 16);
+// Same selection over an explicit catalog (pure; for tests). Natives and
+// pinned tools always; the top `max_external` other tools by query score,
+// emitted in CATALOG order so the wire tools block (the head of the prompt
+// cache prefix) stays byte-stable while the chosen set is unchanged.
+[[nodiscard]] std::vector<const ToolDef*> select_wire_tools_from(
+    const std::vector<ToolDef>& catalog, std::string_view query,
+    std::size_t max_external = 16);
 
 // The MCP tool-list generation counter, surfaced through the tools namespace
 // so callers (ACP server, wire walks) don't need to link the mcp TU or know

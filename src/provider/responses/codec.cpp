@@ -166,9 +166,22 @@ json build_input(const provider::Request& req, std::string_view site) {
                 {"name", tc.name.value},
                 {"arguments", scrub_utf8(args)},
             });
-            // The result the host produced for this call (may be pending if
-            // the turn is still in flight — then we skip, the model re-requests).
-            if (tc.is_terminal()) {
+            // Every function_call MUST be followed by its function_call_output
+            // or the next request 400s ("No tool output found for function
+            // call"), and because the history replays every turn the thread
+            // stays wedged. A call that never finished (cancelled, stream
+            // died, still in flight when a request is built) gets a synthetic
+            // error output, the same rule the Anthropic and Chat transports
+            // follow. The in-memory ToolUse is untouched.
+            if (!tc.is_terminal()) {
+                input.push_back({
+                    {"type", "function_call_output"},
+                    {"call_id", tc.id.value},
+                    {"output", "(tool call did not complete \u2014 previous turn ended before this tool produced a result)"},
+                });
+                continue;
+            }
+            {
                 // Age-tiered wire budget (shared with every other transport):
                 // newest results keep the full budget, stale successes fade to
                 // a tight head+tail so a big dump stops replaying every turn.

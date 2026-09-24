@@ -41,6 +41,39 @@ static const Leaf* leaf(const Msg& m) {
 }
 
 // ── 1. Request body ─────────────────────────────────────────────────────────
+// ── 1b. Every function_call is paired, even one that never finished ──────────
+// The Responses API 400s "No tool output found for function call" when a
+// function_call has no function_call_output, and the history replays every
+// turn, so one cancelled call used to wedge the thread for good.
+TEST_CASE("unfinished call is paired with a synthetic output") {
+    provider::Request req;
+    req.model = "gpt-5-codex";
+    Message u; u.role = Role::User; u.text = "go";
+    req.messages.push_back(u);
+    Message a; a.role = Role::Assistant;
+    for (int st = 0; st < 3; ++st) {
+        ToolUse tc;
+        tc.id = ToolCallId{"call_" + std::to_string(st)};
+        tc.name = ToolName{"read"}; tc.args = json{{"path", "a"}};
+        if (st == 0) tc.status = ToolUse::Done{.output = "ok"};
+        else if (st == 1) tc.status = ToolUse::Pending{};
+        else tc.status = ToolUse::Running{};
+        a.tool_calls.push_back(tc);
+    }
+    req.messages.push_back(a);
+    const json body = cc::build_body_for_test(req);
+    std::map<std::string, int> calls, outputs;
+    for (const auto& it : body["input"]) {
+        if (it.value("type", "") == "function_call") ++calls[it["call_id"].get<std::string>()];
+        if (it.value("type", "") == "function_call_output") ++outputs[it["call_id"].get<std::string>()];
+    }
+    CHECK(calls.size() == 3);
+    for (const auto& [id, n] : calls) {
+        INFO(id);
+        CHECK(outputs[id] == 1);          // exactly one output per call
+    }
+}
+
 TEST_CASE("build body") {
     provider::Request req;
     req.model         = "gpt-5-codex";
