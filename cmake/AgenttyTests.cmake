@@ -100,6 +100,7 @@ agentty_fold_test(turn_prep_bench ARGS     TIMEOUT 600 LABELS perf)
 agentty_fold_test(cache_churn_bench ARGS   TIMEOUT 600 LABELS perf)
 agentty_fold_test(symbol_read_corpus ARGS  TIMEOUT 600 LABELS perf)
 agentty_fold_test(shell_native_tool_diff ARGS TIMEOUT 120 LABELS perf)
+agentty_fold_test(shell_translate_e2e       TIMEOUT 60)
 agentty_fold_test(cross_process_lock_test  TIMEOUT 30)
 # Drives skills::catalog_block()/activation_payload() with a COLD all() cache
 # and its own HOME — in the shared binary another case has already warmed the

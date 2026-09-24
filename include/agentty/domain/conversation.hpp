@@ -333,6 +333,24 @@ struct ToolUse {
     mutable std::string shell_label;
     mutable bool        shell_label_valid = false;
 
+    // A `shell` call the runtime answered with NATIVE tools instead of a
+    // shell (`sed -n 10,40p a.cpp` → read path=a.cpp start_line=10 …). One
+    // entry per native call, in order, each with its own output. Empty for
+    // every call that ran in the shell. The model's tool_use is untouched
+    // (still `shell`); its tool_result is these outputs. The view renders
+    // each as the native tool's own card. Persisted.
+    struct Translated {
+        std::string    tool;       // "read" | "grep" | "list_dir" | "glob"
+        nlohmann::json args;
+        std::string    output;
+        bool           ok = true;
+        std::string    fragment;   // the shell text this call replaced
+    };
+    std::vector<Translated> translated;
+    // Set only on the synthetic native cards the view expands a translated
+    // shell call into: the shell text this card answered. Not persisted.
+    std::string translated_from;
+
     // O(1) render key. Called once per visible tool every frame via
     // Message::compute_render_key → turn_element/turn_config cache
     // predicate. Hashing the full output bytes here meant frame time
@@ -351,6 +369,7 @@ struct ToolUse {
         mix(progress_text().size());
         mix(args_streaming.size());
         mix(static_cast<std::uint64_t>(status.index()));
+        mix(translated.size());   // shell call became native cards
         return k;
     }
 };

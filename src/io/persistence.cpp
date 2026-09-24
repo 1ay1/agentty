@@ -354,6 +354,26 @@ json message_to_json(const Message& m) {
             t["output"] = std::move(out);
         }
         t["status"] = std::string{tc.status_name()};
+        // Native translation of a shell call: the calls + their outputs, so a
+        // reloaded thread still renders Read/Grep cards instead of a raw
+        // Shell card. Outputs are small (native tools page/cap themselves);
+        // large ones go to the blob store like any tool output.
+        if (!tc.translated.empty()) {
+            json arr = json::array();
+            for (const auto& x : tc.translated) {
+                json e;
+                e["tool"] = x.tool;
+                e["args"] = x.args;
+                e["ok"] = x.ok;
+                e["fragment"] = tools::util::to_valid_utf8(x.fragment);
+                auto o = tools::util::to_valid_utf8(x.output);
+                if (o.size() >= 8u * 1024u)
+                    if (auto name = blobs::put(o); !name.empty()) { e["output_blob"] = std::move(name); arr.push_back(std::move(e)); continue; }
+                e["output"] = std::move(o);
+                arr.push_back(std::move(e));
+            }
+            t["translated"] = std::move(arr);
+        }
         tcs.push_back(std::move(t));
     }
     j["tool_calls"] = std::move(tcs);
@@ -740,6 +760,20 @@ std::expected<Message, DeserializeError> message_from_json(const json& j) {
             tc.id = ToolCallId{t.value("id", "")};
             tc.name = ToolName{t.value("name", "")};
             tc.args = t.value("args", json::object());
+            if (auto tr = t.find("translated"); tr != t.end() && tr->is_array()) {
+                for (const auto& e : *tr) {
+                    if (!e.is_object()) continue;
+                    ToolUse::Translated x;
+                    x.tool = e.value("tool", std::string{});
+                    x.args = e.value("args", json::object());
+                    x.ok = e.value("ok", true);
+                    x.fragment = e.value("fragment", std::string{});
+                    x.output = e.value("output", std::string{});
+                    if (auto ob = e.value("output_blob", std::string{}); !ob.empty())
+                        x.output = blobs::get(ob);
+                    if (!x.tool.empty()) tc.translated.push_back(std::move(x));
+                }
+            }
             // Old persisted threads stored status as an int enum; new ones
             // use the string tag returned by ToolUse::status_name(). Accept
             // both so existing on-disk threads keep loading.

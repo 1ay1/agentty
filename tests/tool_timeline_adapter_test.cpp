@@ -12,6 +12,8 @@
 #include "agtest.hpp"
 
 #include "agentty/domain/conversation.hpp"
+#include "agentty/io/persistence.hpp"
+#include "agentty/runtime/view/thread/turn/agent_timeline/agent_timeline.hpp"
 #include "agentty/runtime/model.hpp"
 #include "agentty/runtime/view/panels.hpp"
 #include "agentty/runtime/view/thread/turn/agent_timeline/tool_body_preview.hpp"
@@ -753,4 +755,43 @@ TEST_CASE("shell card names what the command does") {
     auto streaming = make_tool("shell", A::ToolUse::Pending{}, {{"command", "cat a"}});
     streaming.args_streaming = "{\"command\":\"cat a";
     check(U::tool_timeline_detail(streaming) == "cat a", "streaming call unlabelled");
+}
+
+TEST_CASE("translated shell call renders as native cards") {
+    // A shell call answered by native tools shows AS those tools, each card
+    // marking the shell text it answered; the shell card itself is gone.
+    auto sh = make_tool("shell", A::ToolUse::Done{{}, {}, "[answered natively]", {}},
+                        {{"command", "grep -n foo a.cpp && sed -n 1,5p b.cpp"}});
+    sh.translated.push_back({"grep", {{"pattern", "foo"}, {"path", "a.cpp"}}, "a.cpp:3: foo", true, "grep -n foo a.cpp"});
+    sh.translated.push_back({"read", {{"path", "b.cpp"}, {"start_line", 1}, {"end_line", 5}}, "x\ny\n", true, "sed -n 1,5p b.cpp"});
+    std::vector<A::ToolUse> calls{sh};
+    auto cfg = U::agent_timeline_config(calls, 0, maya::Color::slot(maya::ThemeSlot::Primary));
+    REQUIRE(cfg.events.size() == 2);
+    check(cfg.events[0].name == "Grep", "first card is Grep: " + cfg.events[0].name);
+    check(cfg.events[1].name == "Read", "second card is Read: " + cfg.events[1].name);
+    check(cfg.events[0].detail.find("\xe2\x86\xa9 grep -n foo a.cpp") != std::string::npos,
+          "grep card shows the shell text it answered: " + cfg.events[0].detail);
+    check(cfg.events[1].detail.find("\xe2\x86\xa9 sed -n 1,5p b.cpp") != std::string::npos,
+          "read card shows the shell text it answered: " + cfg.events[1].detail);
+    // A shell call that ran in the shell is untouched.
+    std::vector<A::ToolUse> plain{make_tool("shell", A::ToolUse::Done{{}, {}, "ok", {}}, {{"command", "make"}})};
+    auto cfg2 = U::agent_timeline_config(plain, 0, maya::Color::slot(maya::ThemeSlot::Primary));
+    REQUIRE(cfg2.events.size() == 1);
+    check(cfg2.events[0].name == "Shell", "untranslated call stays a Shell card");
+}
+
+TEST_CASE("translated shell call survives save and load") {
+    A::Message m;
+    m.role = A::Role::Assistant;
+    auto sh = make_tool("shell", A::ToolUse::Done{{}, {}, "[answered natively]", {}},
+                        {{"command", "sed -n 1,5p b.cpp"}});
+    sh.translated.push_back({"read", {{"path", "b.cpp"}, {"start_line", 1}}, "x\ny\n", true, "sed -n 1,5p b.cpp"});
+    m.tool_calls.push_back(sh);
+    auto back = A::persistence::message_from_json(A::persistence::message_to_json(m));
+    REQUIRE(back.has_value());
+    REQUIRE(back->tool_calls.size() == 1);
+    const auto& t = back->tool_calls[0].translated;
+    REQUIRE(t.size() == 1);
+    check(t[0].tool == "read" && t[0].output == "x\ny\n" && t[0].fragment == "sed -n 1,5p b.cpp"
+          && t[0].args.value("start_line", 0) == 1, "translation round-trips");
 }

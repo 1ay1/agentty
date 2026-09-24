@@ -251,9 +251,43 @@ thread_local PanelRenderMemo g_panel_render_memo;
 
 } // namespace
 
-maya::AgentTimeline::Config agent_timeline_config(std::span<const ToolUse> tool_calls,
+maya::AgentTimeline::Config agent_timeline_config(std::span<const ToolUse> tool_calls_in,
                                                   int spinner_frame,
                                                   maya::Color rail_color) {
+    // A shell call that was answered by native tools renders AS those tools:
+    // `sed -n 10,40p a.cpp` shows as a Read card with the file's lines, a
+    // grep as a Grep card with grouped hits. Expand each one into synthetic
+    // ToolUses (terminal, same timing, id suffixed so body caches don't
+    // collide) before anything else runs — every card renderer, grep-hit
+    // index and cache below then works on them unchanged.
+    std::vector<ToolUse> expanded;
+    const bool any_translated = std::ranges::any_of(tool_calls_in,
+        [](const ToolUse& t) { return !t.translated.empty() && t.is_terminal(); });
+    if (any_translated) {
+        expanded.reserve(tool_calls_in.size() + 4);
+        for (const auto& tc : tool_calls_in) {
+            if (tc.translated.empty() || !tc.is_terminal()) { expanded.push_back(tc); continue; }
+            const auto t0 = tc.started_at();
+            const auto t1 = std::visit([&](const auto& s) {
+                using S = std::decay_t<decltype(s)>;
+                if constexpr (requires { s.finished_at; }) return s.finished_at;
+                else return t0;
+            }, tc.status);
+            for (std::size_t k = 0; k < tc.translated.size(); ++k) {
+                const auto& x = tc.translated[k];
+                ToolUse n;
+                n.id = ToolCallId{tc.id.value + "~" + std::to_string(k)};
+                n.name = ToolName{x.tool};
+                n.args = x.args;
+                n.status = x.ok ? ToolUse::Status{ToolUse::Done{t0, t1, x.output, {}}}
+                                : ToolUse::Status{ToolUse::Failed{t0, t1, x.output}};
+                n.translated_from = x.fragment;
+                expanded.push_back(std::move(n));
+            }
+        }
+    }
+    const std::span<const ToolUse> tool_calls =
+        any_translated ? std::span<const ToolUse>{expanded} : tool_calls_in;
     int total = static_cast<int>(tool_calls.size());
     int done  = 0;
     float total_elapsed = 0.0f;

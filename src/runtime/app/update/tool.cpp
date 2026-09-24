@@ -517,6 +517,12 @@ Step tool_update(Model m, msg::ToolMsg tm) {
             apply_tool_output(m, e.id, std::move(e.result), std::move(e.change),
                               std::move(e.changes), std::move(e.images),
                               e.exec_seq);
+            // Shell call answered by native tools: keep the calls on the
+            // ToolUse so the view renders native cards (and it persists).
+            if (!e.translated.empty())
+                with_live_tool(m, e.id, [&](ToolUse& tc) {
+                    if (tc.translated.empty()) tc.translated = std::move(e.translated);
+                });
             // If the Ctrl+O viewer is open, refresh it so the Live row settles
             // into a finished entry the instant this tool completes.
             resync_live_tool_viewer(m);
