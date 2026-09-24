@@ -3,10 +3,13 @@
 #include "agentty/util/modelsdev.hpp"
 
 #include <chrono>
+#include <condition_variable>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <sstream>
 #include <string_view>
+#include <thread>
 
 #include <nlohmann/json.hpp>
 
@@ -256,6 +259,60 @@ int refresh() {
         if (ec) fs::remove(tmp, ec);
     }
     return n;
+}
+
+// ── Background owned thread (same pattern as blob_gc.cpp) ─────────────
+namespace {
+struct Bg {
+    std::mutex              mu;
+    std::condition_variable cv;
+    std::thread             th;
+    bool                    stop = false;
+    bool                    no_net = false;
+};
+Bg& bg() { static Bg b; return b; }
+constexpr auto kStartDelay = std::chrono::seconds(5);
+}  // namespace
+
+void start_background_refresh(bool no_net) {
+    auto& b = bg();
+    std::lock_guard lk(b.mu);
+    if (b.th.joinable() || b.stop) return;
+    b.no_net = no_net;
+    try {
+        b.th = std::thread([&b] {
+            {
+                std::unique_lock lk2(b.mu);
+                if (b.cv.wait_for(lk2, kStartDelay, [&] { return b.stop; })) return;
+            }
+            try {
+                load_cached();
+                if (!b.no_net) {
+                    try { (void)refresh(); } catch (...) {}
+                }
+            } catch (const std::exception& e) {
+                util::dbglog("modelsdev.refresh", e.what());
+            } catch (...) {}
+        });
+    } catch (const std::system_error&) {
+        // No thread available: skip, retry next start.
+    }
+}
+
+void join_background_refresh() noexcept {
+    auto& b = bg();
+    std::thread th;
+    {
+        std::lock_guard lk(b.mu);
+        b.stop = true;
+        th = std::move(b.th);
+    }
+    b.cv.notify_all();
+    if (th.joinable() && th.get_id() != std::this_thread::get_id()) {
+        try { th.join(); } catch (...) {}
+    } else if (th.joinable()) {
+        th.detach();
+    }
 }
 
 } // namespace agentty::modelsdev

@@ -358,18 +358,7 @@ std::pair<Model, maya::Cmd<Msg>> init() {
     // Same opt-outs as the release check (airgap installs must not dial
     // out).
     const bool no_net = std::getenv("AGENTTY_NO_UPDATE_CHECK") != nullptr;
-    cmds.push_back(maya::Cmd<Msg>::task_isolated(
-        [no_net](std::function<void(Msg)>) {
-            agentty::modelsdev::load_cached();
-            if (!no_net) {
-                try { (void)agentty::modelsdev::refresh(); }
-                catch (const std::exception& e) {
-                    util::dbglog("modelsdev.refresh", e.what());
-                } catch (...) {
-                    util::dbglog("modelsdev.refresh", "non-std exception");
-                }
-            }
-        }));
+    agentty::modelsdev::start_background_refresh(no_net);
 
     // Prewarm the composer's `@` (files) and `#` (symbols) indices so that by
     // the time the user types either trigger the picker opens instantly

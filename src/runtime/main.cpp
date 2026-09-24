@@ -99,6 +99,7 @@
 #include "agentty/tool/util/fs_helpers.hpp"
 #include "agentty/workspace/files.hpp"     // join_workspace_prewarm
 #include "agentty/workspace/symbols.hpp"   // join_workspace_symbols_prewarm
+#include "agentty/util/modelsdev.hpp"       // join_background_refresh
 #include "agentty/tool/util/sandbox.hpp"
 #include "agentty/tool/subagent.hpp"
 #include "agentty/tool/mcp_tools_bridge.hpp"
@@ -887,8 +888,9 @@ int main(int argc, char** argv) {
     // stays correct as subsystems are added — nobody has to update a list.
     struct TeardownGuard {
         ~TeardownGuard() {
-            // Before util::teardown::run(): the GC walk logs through logx,
+            // Before util::teardown::run(): these walks log through logx,
             // whose worker is one of the registered teardowns.
+            modelsdev::join_background_refresh();
             blobs::join_background_gc();
             util::teardown::run();
         }
@@ -1681,6 +1683,8 @@ int main(int argc, char** argv) {
     // free that faults on Windows (0xC0000005). Join them before teardown.
     join_workspace_prewarm();
     join_workspace_symbols_prewarm();
+    // The modelsdev refresh (http call to models.dev): same race, same fault.
+    modelsdev::join_background_refresh();
     // And the blob GC (io/blob_gc): same race, same fault. Joined before
     // the persistence flush below so the two never walk the threads dir
     // at once during shutdown.
