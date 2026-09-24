@@ -27,10 +27,13 @@
 
 #include <nlohmann/json.hpp>
 
+#include <atomic>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <thread>
+#include <vector>
 
 namespace fs = std::filesystem;
 using namespace agentty;
@@ -268,4 +271,49 @@ TEST_CASE("lazy image: a missing blob degrades to empty, never throws") {
         "image/png", ImageContent::Source{.blob = "definitely-not-a-real-blob",
                                           .b64 = {}});
     CHECK(img.bytes().empty());
+}
+
+TEST_CASE("lazy image: many threads reading one unmaterialised image") {
+    // bytes() is const and runs on worker threads: the provider transports
+    // build the wire body off the UI thread, and the persistence writer
+    // saves on its own. It used to write two `mutable` fields unguarded, so
+    // two readers of the same unresolved payload raced on a std::string.
+    // Now it resolves once under std::call_once. Under the tsan preset this
+    // is the regression check; in a normal build it checks every reader
+    // sees the exact bytes.
+    const std::string original = payload(256u * 1024u, 11);
+    Thread t = thread_with_image(original);
+    persistence::save_thread(t);
+    persistence::flush_pending_saves();
+    auto loaded = persistence::load_thread_by_id(t.id);
+    REQUIRE(loaded.has_value());
+
+    // One object shared by reference, AND copies of it: both are real
+    // shapes (a const Thread& handed around, a Thread copied per turn).
+    const ImageContent& shared = loaded->messages[0].images[0];
+    REQUIRE(!shared.materialised());
+    std::vector<ImageContent> copies(4, shared);
+
+    std::atomic<int> wrong{0};
+    {
+        std::vector<std::jthread> ts;
+        for (int i = 0; i < 8; ++i)
+            ts.emplace_back([&, i] {
+                const auto& b = (i % 2) ? shared.bytes() : copies[i / 2].bytes();
+                if (b != original) ++wrong;
+            });
+    }
+    CHECK(wrong.load() == 0);
+    CHECK(shared.materialised());
+}
+
+TEST_CASE("lazy image: set_bytes on one copy leaves the others alone") {
+    // Copies share one cell for cheap copying; replacing the payload must
+    // not change what the other copies see.
+    const std::string original = payload(4u * 1024u, 5);
+    ImageContent a{"image/png", original};
+    ImageContent b = a;
+    a.set_bytes("replaced");
+    CHECK(a.bytes() == "replaced");
+    CHECK(b.bytes() == original);
 }
