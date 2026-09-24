@@ -362,9 +362,6 @@ struct ToolExecOutput {
     // ids restart at call_0), so a worker that outlives a cancel must not
     // land its output on a new call that reuses the id. 0 = untagged.
     std::uint64_t exec_seq = 0;
-    // Set when a `shell` call was answered by native tools (see
-    // ToolUse::translated). The reducer copies it onto the ToolUse.
-    std::vector<ToolUse::Translated> translated;
 };
 // Contains the FULL accumulated output, not a delta — the update handler can
 // assign unconditionally without maintaining append state. Coalesced at the

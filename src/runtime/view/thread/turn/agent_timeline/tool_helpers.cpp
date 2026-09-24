@@ -812,18 +812,6 @@ static std::string tool_timeline_detail_base(const ToolUse& tc) {
 // weren't errors, and their glyph already says "skipped".
 std::string tool_timeline_detail(const ToolUse& tc) {
     std::string detail = tool_timeline_detail_base(tc);
-    // A native card that answered a shell command: say so, and show the
-    // command it replaced — the user sees what ran AND what was asked.
-    if (!tc.translated_from.empty()) {
-        std::string from = tc.translated_from;
-        if (auto nl = from.find('\n'); nl != std::string::npos) from = from.substr(0, nl) + " \xe2\x80\xa6";
-        if (from.size() > 60) {
-            std::size_t cut = 60;
-            while (cut > 0 && (static_cast<unsigned char>(from[cut]) & 0xC0) == 0x80) --cut;
-            from = from.substr(0, cut) + "\xe2\x80\xa6";
-        }
-        detail += "  \xc2\xb7  \xe2\x86\xa9 " + from;   // · ↩ <shell text>
-    }
     if (tc.is_failed()) {
         std::string reason = tool_failure_reason(tc);
         if (reason.empty()) reason = "failed";

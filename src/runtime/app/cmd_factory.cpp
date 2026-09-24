@@ -1365,68 +1365,6 @@ Cmd<Msg> run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args,
                     return;
                 }
                 const auto t_start = std::chrono::steady_clock::now();
-#if AGENTTY_MCP
-                // Shell → native tools. A shell call that is pure file
-                // inspection is answered by the real read / grep / list_dir
-                // / glob tools: native cards for the user, native output for
-                // the model. Everything translated is read-only, so trying
-                // natively first is always safe; if ANY native call errors
-                // or a search finds nothing (gitignored file, path outside
-                // the workspace), the original command runs in the shell
-                // exactly as before — the model never gets a worse answer.
-                if (name.value == "shell" && args.is_object()
-                    && !std::getenv("AGENTTY_NO_SHELL_TRANSLATE")) {
-                    namespace sx = ::mcp::tools::util::shellx;
-                    const auto cmd_it = args.find("command");
-                    const std::string cwd = [&] {
-                        if (auto c = args.find("cd"); c != args.end() && c->is_string()
-                            && !c->get_ref<const std::string&>().empty())
-                            return c->get<std::string>();
-                        return tools::util::workspace_root().string();
-                    }();
-                    if (cmd_it != args.end() && cmd_it->is_string())
-                        if (auto calls = sx::to_native_calls(cmd_it->get_ref<const std::string&>(), cwd)) {
-                            std::vector<ToolUse::Translated> done_calls;
-                            bool all_ok = true;
-                            for (const auto& nc : *calls) {
-                                auto j = nlohmann::json::parse(nc.args_json, nullptr, false);
-                                if (j.is_discarded()) { all_ok = false; break; }
-                                auto r = tool::DynamicDispatch::execute(nc.tool, j);
-                                if (!r) { all_ok = false; break; }
-                                // A search that found nothing may be the
-                                // native tool skipping a gitignored / build
-                                // file the shell would read. Let the shell
-                                // decide instead of reporting "no matches".
-                                if (nc.tool == "grep" && r->text.starts_with("No matches")) { all_ok = false; break; }
-                                done_calls.push_back({nc.tool, std::move(j), std::move(r->text),
-                                                      true, nc.shell_fragment});
-                            }
-                            if (all_ok && !done_calls.empty()) {
-                                const auto t_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                    std::chrono::steady_clock::now() - t_start).count();
-                                // What the model reads: which native calls
-                                // answered its command, then each output.
-                                std::string text = "[answered natively, no shell:";
-                                for (const auto& d : done_calls) text += " " + d.tool + " " + d.args.dump() + ";";
-                                text.back() = ']';
-                                for (const auto& d : done_calls) {
-                                    text += "\n\n";
-                                    if (done_calls.size() > 1) text += "── " + d.tool + " " + d.args.dump() + "\n";
-                                    text += d.output;
-                                }
-                                AGT_LOG(Tool, Debug, "tool.exec",
-                                        "name=shell ms={} ok=1 err=- shell=native calls={} args={}",
-                                        t_ms, done_calls.size(), args.dump());
-                                ToolExecOutput o{id, std::move(text)};
-                                o.translated = std::move(done_calls);
-                                dispatch(out(std::move(o)));
-                                return;
-                            }
-                            AGT_LOG(Tool, Debug, "shell.translate_fallback", "cmd={}",
-                                    cmd_it->get_ref<const std::string&>());
-                        }
-                }
-#endif
                 auto result = tool::DynamicDispatch::execute(name.value, args);
                 const auto t_ms = std::chrono::duration_cast<
                     std::chrono::milliseconds>(
