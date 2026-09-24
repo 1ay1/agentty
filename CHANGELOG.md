@@ -4,6 +4,8 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.9] - 2026-09-24
+
 ### Fixed
 - **Windows: agentty no longer crashes when it exits right after starting.** The daily blob cleanup ran on a detached thread. A process that exited at once (stdin at EOF, a pipe, a quick quit) could reach static destruction while that walk was still logging, and Windows killed it with an access violation (`0xC0000005`). The cleanup now runs on its own thread that starts after a 20 s delay, stops between files when asked, and is joined before shutdown on every exit path.
 - **ChatGPT / Codex login: a cancelled tool call no longer wedges the thread.** A `function_call` whose tool never finished was sent back with no `function_call_output`, and the Responses API rejects that with "No tool output found for function call" on every later request. It now gets a placeholder error result, like the other transports.
