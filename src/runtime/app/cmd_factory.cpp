@@ -1392,6 +1392,7 @@ Cmd<Msg> run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args,
                             case mu::Intent::FindFiles: shell_cat = "find";   break;
                             case mu::Intent::ListDir:   shell_cat = "list";   break;
                             case mu::Intent::CountOnly: shell_cat = "count";  break;
+                            case mu::Intent::GitRead:   shell_cat = "git";    break;
                             case mu::Intent::Write:     shell_cat = "write";  break;
                             case mu::Intent::Other:     shell_cat = "other";  break;
                         }
