@@ -29,7 +29,7 @@
 #include "agentty/util/logx.hpp"
 
 #if AGENTTY_MCP
-#include <mcp/tools/util/shellx.hpp>
+#include <mcp/tools/util/bash_validate.hpp>
 #endif
 #include "agentty/util/dbglog.hpp"
 #include "agentty/tool/registry.hpp"
@@ -1375,15 +1375,27 @@ Cmd<Msg> run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args,
                 // in the log with the arguments that produced it — the exact
                 // evidence that was missing when Copilot's tool calls were
                 // arriving empty.
-                // Shell calls also log what they were FOR (read / search /
-                // list / git / mixed / other / none), so the rate of shell
-                // detours around native tools is measurable from the log.
+                // Shell calls also log what analyze_detour judged them
+                // (read / search / find / list / count / write / other), and
+                // whether that was a detour a native tool does better. Same
+                // classifier as the tip, so the log measures what the model
+                // was told.
                 std::string shell_cat = "-";
 #if AGENTTY_MCP
                 if (name.value == "shell" && args.is_object())
                     if (auto it = args.find("command"); it != args.end() && it->is_string()) {
-                        namespace sx = ::mcp::tools::util::shellx;
-                        shell_cat = std::string{sx::category(sx::plan(sx::analyze(it->get<std::string>())))};
+                        namespace mu = ::mcp::tools::util;
+                        const auto d = mu::analyze_detour(it->get<std::string>());
+                        switch (d.intent) {
+                            case mu::Intent::ReadFile:  shell_cat = "read";   break;
+                            case mu::Intent::Search:    shell_cat = "search"; break;
+                            case mu::Intent::FindFiles: shell_cat = "find";   break;
+                            case mu::Intent::ListDir:   shell_cat = "list";   break;
+                            case mu::Intent::CountOnly: shell_cat = "count";  break;
+                            case mu::Intent::Write:     shell_cat = "write";  break;
+                            case mu::Intent::Other:     shell_cat = "other";  break;
+                        }
+                        if (d.substitutable()) shell_cat += "+detour";
                     }
 #endif
                 AGT_LOGL(Tool, result ? ::agentty::logx::Level::Debug

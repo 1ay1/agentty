@@ -13,10 +13,6 @@
 #include "agentty/tool/util/utf8.hpp"
 #include "agentty/util/home_dir.hpp"
 
-#if AGENTTY_MCP
-#include <mcp/tools/util/shellx.hpp>
-#endif
-
 namespace agentty::ui {
 
 // ── Display ─────────────────────────────────────────────────────────────
