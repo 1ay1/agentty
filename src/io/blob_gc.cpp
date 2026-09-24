@@ -8,9 +8,14 @@
 
 #include <nlohmann/json.hpp>
 
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <fstream>
+#include <mutex>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unordered_set>
 
 namespace agentty::blobs {
@@ -19,6 +24,11 @@ namespace fs = std::filesystem;
 using json = nlohmann::json;
 
 namespace {
+
+// Set by join_background_gc(). Checked between files in every walk so a
+// sweep over thousands of threads stops promptly at shutdown.
+std::atomic<bool> g_cancel{false};
+[[nodiscard]] bool cancelled() noexcept { return g_cancel.load(std::memory_order_relaxed); }
 
 constexpr std::string_view kStampName = ".gc-stamp";
 
@@ -100,6 +110,7 @@ GcStats collect_in(const fs::path& threads_dir, bool dry_run,
     // ── MARK ──────────────────────────────────────────────────────────
     std::unordered_set<std::string> referenced;
     for (const auto& e : fs::directory_iterator(threads_dir, ec)) {
+        if (cancelled()) return st;          // ran == false: nothing deleted
         if (!e.is_regular_file(ec)) continue;
         const auto p   = e.path();
         const auto ext = p.extension();
@@ -146,6 +157,7 @@ GcStats collect_in(const fs::path& threads_dir, bool dry_run,
     // ── SWEEP ─────────────────────────────────────────────────────────────────────
     const auto cutoff = fs::file_time_type::clock::now() - min_age;
     for (const auto& e : fs::directory_iterator(blob_dir, ec)) {
+        if (cancelled()) break;              // partial sweep is safe: each delete stands alone
         if (!e.is_regular_file(ec)) continue;
         const auto name = e.path().filename().string();
         if (referenced.count(name)) continue;
@@ -196,6 +208,57 @@ std::optional<GcStats> collect_if_due() {
     { std::ofstream touch(stamp, std::ios::trunc); }
     fs::last_write_time(stamp, now, ec);
     return collect_in(persistence::threads_dir(), /*dry_run=*/false, hours{24});
+}
+
+namespace {
+// One owned thread, not a detached one: main() must be able to wait for it
+// before static destruction. The delay means a process that exits at once
+// never starts the walk at all.
+struct Bg {
+    std::mutex              mu;
+    std::condition_variable cv;
+    std::thread             th;
+    bool                    stop = false;
+};
+Bg& bg() { static Bg b; return b; }
+constexpr auto kStartDelay = std::chrono::seconds(20);
+}  // namespace
+
+void start_background_gc() {
+    auto& b = bg();
+    std::lock_guard lk(b.mu);
+    if (b.th.joinable() || b.stop) return;
+    try {
+        b.th = std::thread([&b] {
+            {
+                std::unique_lock lk2(b.mu);
+                if (b.cv.wait_for(lk2, kStartDelay, [&] { return b.stop; })) return;
+            }
+            try { (void)collect_if_due(); }
+            catch (const std::exception& e) {
+                AGT_LOG(Persist, Warn, "blob_gc", "{}", e.what());
+            } catch (...) {}
+        });
+    } catch (const std::system_error&) {
+        // No thread available: skip today, retry next start.
+    }
+}
+
+void join_background_gc() noexcept {
+    auto& b = bg();
+    std::thread th;
+    {
+        std::lock_guard lk(b.mu);
+        b.stop = true;
+        th = std::move(b.th);
+    }
+    g_cancel.store(true, std::memory_order_relaxed);
+    b.cv.notify_all();
+    if (th.joinable() && th.get_id() != std::this_thread::get_id()) {
+        try { th.join(); } catch (...) {}
+    } else if (th.joinable()) {
+        th.detach();
+    }
 }
 
 } // namespace agentty::blobs

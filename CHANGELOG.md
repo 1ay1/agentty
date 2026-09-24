@@ -4,6 +4,14 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **Windows: agentty no longer crashes when it exits right after starting.** The daily blob cleanup ran on a detached thread. A process that exited at once (stdin at EOF, a pipe, a quick quit) could reach static destruction while that walk was still logging, and Windows killed it with an access violation (`0xC0000005`). The cleanup now runs on its own thread that starts after a 20 s delay, stops between files when asked, and is joined before shutdown on every exit path.
+- **ChatGPT / Codex login: a cancelled tool call no longer wedges the thread.** A `function_call` whose tool never finished was sent back with no `function_call_output`, and the Responses API rejects that with "No tool output found for function call" on every later request. It now gets a placeholder error result, like the other transports.
+- **MCP tools no longer bust the prompt cache.** External tools were sent in relevance order, so a new message that ranked the same tools differently reordered the start of the prompt and paid full price. The chosen tools now go out in a fixed order.
+
+### Changed
+- **Shell detours get precise advice, not a rewrite.** When the model uses the shell for something a native tool does better (`sed -n`, `grep -rn`, `cat`, `ls`, `git log`), the shell still runs, and a one-line tip names the exact native call with the parameters read off the model's own command (`read` with `start_line: 147, end_line: 162`, `grep` with `context: "8", glob: "*.cpp"`, `git_log` with `count: 5`). The decision uses a real bash parse, and anything that writes a file is never advised. From the third detour in a row a short reminder is added. `grep` gains `limit` and `exclude` (the native forms of `| head -N` and `| grep -v`), and its context window goes up to 60 lines. See `docs/SHELL_DETOURS.md`.
+
 ## [0.9.8] - 2026-09-23
 
 ### Fixed

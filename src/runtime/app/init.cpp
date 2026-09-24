@@ -395,13 +395,10 @@ std::pair<Model, maya::Cmd<Msg>> init() {
 
     // Reclaim blobs no thread references any more (deleted threads,
     // replaced outputs). Once a day at most, 24 h grace so a save in
-    // flight in this or another instance never loses a payload.
-    cmds.push_back(maya::Cmd<Msg>::task_isolated(
-        [](std::function<void(Msg)>) {
-            try { (void)blobs::collect_if_due(); }
-            catch (const std::exception& e) { util::dbglog("blob_gc", e.what()); }
-            catch (...) { util::dbglog("blob_gc", "non-std exception"); }
-        }));
+    // flight in this or another instance never loses a payload. Its own
+    // joinable thread (started after a delay), NOT a detached task: a walk
+    // still running at exit touched freed statics and crashed Windows CI.
+    blobs::start_background_gc();
 
     return {std::move(m), maya::Cmd<Msg>::batch(std::move(cmds))};
 }

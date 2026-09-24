@@ -73,6 +73,7 @@
 #include "agentty/runtime/app/program.hpp"
 #include "agentty/auth/auth.hpp"
 #include "agentty/io/persistence.hpp"
+#include "agentty/io/blob_gc.hpp"
 #include "agentty/io/http.hpp"
 #include "agentty/mcp/serve.hpp"
 #include "agentty/mcp/oauth.hpp"
@@ -885,7 +886,12 @@ int main(int argc, char** argv) {
     // themselves at the moment they start a thread (util::teardown), so this
     // stays correct as subsystems are added — nobody has to update a list.
     struct TeardownGuard {
-        ~TeardownGuard() { util::teardown::run(); }
+        ~TeardownGuard() {
+            // Before util::teardown::run(): the GC walk logs through logx,
+            // whose worker is one of the registered teardowns.
+            blobs::join_background_gc();
+            util::teardown::run();
+        }
     } teardown_guard;
 
 #if defined(_WIN32)
@@ -1675,6 +1681,10 @@ int main(int argc, char** argv) {
     // free that faults on Windows (0xC0000005). Join them before teardown.
     join_workspace_prewarm();
     join_workspace_symbols_prewarm();
+    // And the blob GC (io/blob_gc): same race, same fault. Joined before
+    // the persistence flush below so the two never walk the threads dir
+    // at once during shutdown.
+    blobs::join_background_gc();
 
     // Drain the async persistence queue. The Quit reducer arm enqueues
     // a final save_thread() right before maya returns; this blocks

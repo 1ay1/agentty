@@ -267,3 +267,20 @@ TEST_CASE("blob gc: grace window spares young orphans") {
     CHECK_FALSE(blob_exists(dir, old));
     CHECK(st.deleted == 1u);
 }
+
+// The background GC must never outlive main(). The Windows CI pipe smoke
+// test (stdin at EOF → exit at once) crashed 0xC0000005 when the walk ran
+// on a detached thread into static destruction. start + join right away
+// must return at once and run nothing; join must be idempotent.
+TEST_CASE("blob gc: background thread joins at once and runs nothing") {
+    const auto t0 = std::chrono::steady_clock::now();
+    blobs::start_background_gc();
+    blobs::start_background_gc();                 // second start is a no-op
+    blobs::join_background_gc();
+    blobs::join_background_gc();                  // idempotent
+    blobs::start_background_gc();                 // after join: stays stopped
+    blobs::join_background_gc();
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - t0).count();
+    CHECK_MESSAGE(ms < 1000, "join must not wait out the start delay");
+}
