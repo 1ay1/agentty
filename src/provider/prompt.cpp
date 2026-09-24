@@ -290,8 +290,8 @@ std::string default_system_prompt(bool lean) {
         // four idioms that produced them.
         << "  - The shell idioms you reach for have native equivalents — "
         << "a pipe is usually a PARAMETER you haven't found yet:\n"
-        << "      `cmd | head -20`   → `limit: 20` (every search/read "
-        << "tool bounds its own output)\n"
+        << "      `cmd | head -20`   → `limit: 20` on `grep`/`read` (list_dir "
+        << "and glob are already bounded)\n"
         // The one idiom with no native TOOL answer: a real build/test
         // command whose output you want to bound. The pipe filters at the
         // wrong layer — it discards the rest before the terminal card sees
@@ -306,6 +306,16 @@ std::string default_system_prompt(bool lean) {
         << "`symbol: \"name\"` for one function's body\n"
         << "      `cmd 2>/dev/null`  → nothing: native tools report "
         << "\"no matches\" instead of shouting\n"
+        // Measured on 11.5k real shell calls: 19% were `cd X && inspect`,
+        // 28% glued steps together with `echo "=== x ==="`, and 24% of
+        // greps used BRE `\|`, which ripgrep reads as a literal pipe.
+        << "      `cd X && grep …`   → `grep` with `path: \"X\"` — native "
+        << "tools take the directory as a parameter\n"
+        << "      `a; echo ===; b`   → two native calls in one turn; they "
+        << "run in parallel and each gets its own card\n"
+        << "      `grep -A 8 --include=*.cpp` → `context: \"8\"`, "
+        << "`glob: \"*.cpp\"`; and the pattern is ripgrep syntax: `a|b`, "
+        << "not `a\\|b`\n"
         << "</shell>\n\n"
         << "<tool-batching>\n"
         << "  - Every model round-trip costs seconds. When your next "
