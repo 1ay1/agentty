@@ -126,6 +126,19 @@ The provider list is a convenience for endpoints with quirks — their own trans
 :::tip Debugging a custom host
 Set `AGENTTY_LOG=wire=trace`  to see the exact request path, status, and response your server returned — see **[Logging & diagnostics](/docs/logging)**. The most common issues are a missing `/v1` (→ 404) and a model id that doesn't match what `/v1/models` reports.
 :::
+
+### Known working endpoints
+
+Hosted gateways that work through the custom-host path as is. Type the spec into `^P` (or pass it to `--provider`), then paste the key when prompted, pass `-k`, or set `OPENAI_API_KEY`.
+
+| Endpoint | Spec | Key | Example model |
+|---|---|---|---|
+| [Requesty](https://docs.requesty.ai) | `https://router.requesty.ai/v1` (EU: `https://router.eu.requesty.ai/v1`) | [app.requesty.ai/api-keys](https://app.requesty.ai/api-keys) | `openai/gpt-4o-mini` |
+
+```bash
+agentty --provider https://router.requesty.ai/v1 -k <key> -m openai/gpt-4o-mini
+```
+
 ## Sign in with GitHub Copilot
 
 If you have a GitHub Copilot subscription (Individual, Business, or Enterprise), you can use its models — GPT-4o, o-series, Claude, Gemini, and more — through your existing Copilot plan, **no API key required**.
