@@ -362,20 +362,22 @@ int main() {
                               {"cd", root.string()}});
         check(has(r, "42"), "shell guard allows `python3 -c`");
     }
-    // ── shell → typed action: a pure file-inspection call gets a tip that
-    //    names the EXACT native call replacing it ────────────────────────
+    // ── shell detour: the command still runs, and a pure file-inspection
+    //    call gets a tip naming the native tool + the exact parameter read
+    //    off the command (never a rewrite, never run in its place) ──────────
     {
         auto r = run("shell", {{"command", "sed -n '1,2p' code.cpp"},
                               {"cd", root.string()}});
-        check(has(r, "read path=code.cpp end_line=2"),
-              "shell tip: `sed -n 1,2p` → exact `read` call");
+        check(has(r, "`read` with `start_line: 1, end_line: 2`"),
+              "shell tip: `sed -n 1,2p` → read with the exact range");
         auto g = run("shell", {{"command", "grep -rn answer . | head -5"},
                               {"cd", root.string()}});
-        check(has(g, "grep pattern=answer path=."),
-              "shell tip: `grep -rn … | head` → exact `grep` call");
+        check(has(g, "`grep`") && has(g, "`limit:5`"),
+              "shell tip: `grep -rn … | head -5` → grep with limit:5");
+        check(has(g, "answer"), "shell tip: the shell still ran and its output is there");
         auto b = run("shell", {{"command", "echo build-step"},
                               {"cd", root.string()}});
-        check(!has(b, "native tool does this"), "shell tip: no tip for non-inspection work");
+        check(!has(b, "tip:"), "shell tip: no tip for non-inspection work");
     }
     // ── legacy `bash` name canonicalises to the `shell` tool ────────────────
     // Models call the exec tool `bash` (training prior) before internalising
