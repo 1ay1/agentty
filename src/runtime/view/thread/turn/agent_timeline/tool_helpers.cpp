@@ -365,33 +365,10 @@ static std::string tool_timeline_detail_base(const ToolUse& tc) {
     if (n == "shell" || n == "diagnostics") {
         auto cmd = safe("command");
         if (cmd.empty()) return "\xe2\x80\xa6";
-        // What the command DOES, when it is pure file inspection: "Read
-        // a.cpp:10-40", "Search `foo` in src". Shown ahead of the raw text
-        // (kept, so the user still sees exactly what ran). Only for a
-        // command that has finished streaming: a half-streamed command would
-        // flip between labels and rewrite a header row.
-        std::string label;
-#if AGENTTY_MCP
-        if (n == "shell" && tc.args_streaming.empty()) {
-            if (!tc.shell_label_valid || tc.shell_label_key != cmd) {
-                tc.shell_label_key = cmd;
-                tc.shell_label.clear();
-                namespace sx = ::mcp::tools::util::shellx;
-                const auto pl = sx::plan(sx::analyze(cmd));
-                if (pl.pure_inspection()) {
-                    for (const auto& st : pl.steps) {
-                        if (!tc.shell_label.empty()) tc.shell_label += "; ";
-                        tc.shell_label += sx::describe(st);
-                    }
-                }
-                tc.shell_label_valid = true;
-            }
-            label = tc.shell_label;
-        }
-#endif
+        // plain command only. a "Read ..." label made a shell detour look
+        // like a native call and hid it from the user.
         if (auto nl = cmd.find('\n'); nl != std::string::npos)
             cmd = cmd.substr(0, nl) + " \xe2\x80\xa6";
-        if (!label.empty()) cmd = label + "  \xc2\xb7  " + cmd;
         if (tc.is_done()) {
             int rc = parse_exit_code(tc.output());
             if (rc != 0) cmd += "  \xc2\xb7  exit " + std::to_string(rc);

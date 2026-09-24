@@ -725,25 +725,12 @@ TEST_CASE("tool_display_name always capitalises") {
           "single char capitalises");
 }
 
-TEST_CASE("shell card names what the command does") {
-    // Pure file inspection gets a typed label ahead of the raw command;
-    // the raw command stays, so the user still sees exactly what ran.
+TEST_CASE("shell card shows the plain command") {
+    // No "Read ..." label: a shell detour must look like a shell call.
     auto d = [](const char* cmd) {
         return U::tool_timeline_detail(make_tool("shell", A::ToolUse::Running{},
                                                  {{"command", cmd}}));
     };
-    const auto read = d("sed -n '10,40p' src/a.cpp");
-    check(read.starts_with("Read src/a.cpp:10-40"), "sed -n range -> Read label: " + read);
-    check(read.find("sed -n") != std::string::npos, "raw command kept: " + read);
-    const auto search = d("cd src && grep -rn foo . | head -20");
-    check(search.starts_with("Search `foo` in src"), "grep -> Search label: " + search);
-    // Not inspection: no label, just the command.
-    check(d("cmake --build build -j12") == "cmake --build build -j12",
-          "build command stays unlabelled");
-    // Mixed inspection + work: no label (it isn't a pure read).
-    check(d("grep -n x f && rm f").starts_with("grep"), "mixed call unlabelled");
-    // Still streaming (args incomplete): no label yet, no flicker.
-    auto streaming = make_tool("shell", A::ToolUse::Pending{}, {{"command", "cat a"}});
-    streaming.args_streaming = "{\"command\":\"cat a";
-    check(U::tool_timeline_detail(streaming) == "cat a", "streaming call unlabelled");
+    check(d("sed -n '10,40p' src/a.cpp") == "sed -n '10,40p' src/a.cpp", "inspection unlabelled");
+    check(d("cmake --build build -j12") == "cmake --build build -j12", "build unlabelled");
 }

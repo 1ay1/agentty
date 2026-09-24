@@ -324,15 +324,6 @@ struct ToolUse {
         return args_dump_cache;
     }
 
-    // View cache: what a shell command DOES, as a short label ("Read
-    // src/x.cpp:10-40", "Search `foo` in src"), computed once per distinct
-    // command text by the view layer (it needs the shell parser, which the
-    // domain must not depend on). Keyed on the command, so args edits during
-    // streaming just recompute. Empty label = nothing typed to show.
-    mutable std::string shell_label_key;
-    mutable std::string shell_label;
-    mutable bool        shell_label_valid = false;
-
     // O(1) render key. Called once per visible tool every frame via
     // Message::compute_render_key → turn_element/turn_config cache
     // predicate. Hashing the full output bytes here meant frame time
