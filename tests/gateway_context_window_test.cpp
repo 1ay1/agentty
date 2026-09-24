@@ -47,6 +47,40 @@ int advertised(const json& m) {
 
 }  // namespace
 
+TEST_CASE("context: llama.cpp router rows read the window from launch args") {
+    // An UNLOADED router model has no `meta`; the size only lives in the
+    // argv the router will launch it with (server-models.cpp,
+    // get_router_models: status.args). Shape copied from that source.
+    using agentty::provider::openai::router_declared_window;
+    auto row = [](std::string args) {
+        return json::parse(R"({"id":"m","status":{"value":"unloaded","args":)"
+                           + args + "}}");
+    };
+
+    // Default --parallel is auto: 4 slots, unified KV, so each slot can use
+    // the whole pool.
+    CHECK(router_declared_window(row(R"(["llama-server","--ctx-size","65536"])")) == 65'536);
+    // Explicit slots without unified KV split the pool.
+    CHECK(router_declared_window(row(
+        R"(["llama-server","--ctx-size","65536","--parallel","2"])")) == 32'768);
+    // Explicit slots WITH unified KV don't.
+    CHECK(router_declared_window(row(
+        R"(["llama-server","--ctx-size","65536","--parallel","2","--kv-unified"])")) == 65'536);
+    // Per-slot cap binds.
+    CHECK(router_declared_window(row(
+        R"(["llama-server","--ctx-size","65536","--kv-unified-per-slot","16384"])")) == 16'384);
+    // No -c: pool sized from the per-slot cap.
+    CHECK(router_declared_window(row(
+        R"(["llama-server","--parallel","1","--kv-unified-per-slot","32768"])")) == 32'768);
+    // No -c / -c 0 means "trained size", which the args don't tell us.
+    CHECK(router_declared_window(row(R"(["llama-server","-m","x.gguf"])")) == 0);
+    CHECK(router_declared_window(row(R"(["llama-server","--ctx-size","0"])")) == 0);
+    // Garbage and missing shapes are "unknown", never a number.
+    CHECK(router_declared_window(row(R"(["llama-server","--ctx-size","lots"])")) == 0);
+    CHECK(router_declared_window(json::parse(R"({"id":"m"})")) == 0);
+    CHECK(router_declared_window(json::parse(R"({"id":"m","status":"loaded"})")) == 0);
+}
+
 TEST_CASE("context: every gateway dialect that declares a window is recovered") {
     // One case per real serving stack. Each is the shape that stack actually
     // emits on /v1/models, so a regression here is a regression against a

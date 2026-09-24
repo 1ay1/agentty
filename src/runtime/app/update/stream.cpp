@@ -24,6 +24,7 @@
 
 #include "agentty/auth/auth.hpp"
 #include "agentty/domain/catalog.hpp"
+#include "agentty/domain/smart_mode.hpp"   // utility_model: which model compacted
 #include "agentty/domain/smart_tuning.hpp"
 #include "agentty/provider/error_class.hpp"
 #include "agentty/provider/selection.hpp"
@@ -1819,7 +1820,22 @@ Step stream_update(Model m, msg::StreamMsg sm) {
             return done(std::move(m));
         },
         [&](StreamFinished e) -> Step {
+            // Which model just ran: the compaction model for a compaction
+            // turn (finalize_turn clears the flag, so read it first).
+            std::string ran_model = m.d.model_id.value;
+            if (m.s.compacting) {
+                std::string cm = smart::utility_model(
+                    ran_model, m.d.available_models, m.d.smart,
+                    active_provider_id());
+                if (!cm.empty()) ran_model = std::move(cm);
+            }
             auto cmd = finalize_turn(m, e.stop_reason);
+            // A local router loads the model on the first request, so only
+            // now can it report the served window. Probe the model that just
+            // ran, while it's still the resident one. Cheap: a no-op Cmd for
+            // hosted providers, a couple of localhost GETs otherwise.
+            cmd = maya::Cmd<Msg>::batch(std::move(cmd),
+                                        cmd::probe_model_window(std::move(ran_model)));
             // No force_redraw arming. The previous version armed
             // needs_force_redraw here so the next user input would
             // trigger maya's case-(B) soft redraw — meant to flush
@@ -1962,8 +1978,16 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                 // halving each time, down to a tiny last-few-turns recap, so
                 // it succeeds on ANY window (even ~10k). Bounded by a few
                 // attempts so a genuinely unshrinkable payload still ends.
+                // llama.cpp words it differently: "request (9911 tokens)
+                // exceeds the available context size (8192 tokens)". Same
+                // situation (common on a router, where the args-declared size
+                // can be more than the server really allocates), same fix.
+                const bool llama_overflow =
+                    e.message.find("exceeds the available context size")
+                        != std::string::npos;
                 if (m.s.compacting && e.http_status == 400
-                    && e.message.find("too long") != std::string::npos) {
+                    && (e.message.find("too long") != std::string::npos
+                        || llama_overflow)) {
                     // Parse "... > N maximum" (fall back to X if only that
                     // is present).
                     long limit = 0;
@@ -1974,6 +1998,13 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                                    static_cast<unsigned char>(e.message[b-1]))) --b;
                         try { limit = std::stol(e.message.substr(b, pos - b)); }
                         catch (...) { limit = 0; }
+                    }
+                    if (constexpr std::string_view kSize = "context size (";
+                        limit == 0 && llama_overflow) {
+                        if (auto pos = e.message.find(kSize); pos != std::string::npos) {
+                            try { limit = std::stol(e.message.substr(pos + kSize.size())); }
+                            catch (...) { limit = 0; }
+                        }
                     }
                     // Next ceiling: 60% of the reported limit, or if we
                     // already had a ceiling, halve it. Floor so we don't

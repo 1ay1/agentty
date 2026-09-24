@@ -888,6 +888,16 @@ Cmd<Msg> launch_stream(Model& m) {
     std::string compaction_model =
         smart::utility_model(model_id, m.d.available_models, m.d.smart,
                              detail::active_provider_id());
+    // The compaction model's own window, when the catalog knows it. On a
+    // local router the summariser can be a different model loaded with a
+    // BIGGER context than the main one, and the payload should use it.
+    int compaction_model_window = 0;
+    if (compaction_model != model_id)
+        for (const auto& mi : m.d.available_models)
+            if (mi.id.value == compaction_model) {
+                compaction_model_window = mi.context_window;
+                break;
+            }
 
     // Layer 3a (orchestration): when active, the MAIN turn runs on the
     // Strategic role's (model, effort) so the flagship orchestrates and
@@ -956,6 +966,7 @@ Cmd<Msg> launch_stream(Model& m) {
          session_key = std::move(session_key),
          model_id = std::move(model_id),
          compaction_model = std::move(compaction_model),
+         compaction_model_window,
          effort = std::move(effort),
          model_supports_tools,
          model_supports_vision,
@@ -1153,10 +1164,15 @@ Cmd<Msg> launch_stream(Model& m) {
             // window is the model's BASE (200K), not the 1M the parent picked.
             // Trim the compaction payload to that base window — trimming to 65%
             // of 1M (650K) would then overflow the 200K request and fail.
-            int compaction_ctx = context_max;
+            int compaction_ctx = compaction_model_window > 0
+                ? compaction_model_window : context_max;
             if (int base = ui::context_max_for_model(req.model);
-                base > 0 && (compaction_ctx <= 0 || base < compaction_ctx))
+                base > 0 && compaction_model_window <= 0
+                && (compaction_ctx <= 0 || base < compaction_ctx))
                 compaction_ctx = base;
+            // Tell the transport too (Ollama sizes num_ctx from it).
+            if (compaction_model_window > 0)
+                req.context_window = compaction_model_window;
             req.messages = wire_messages_for_compaction(thread, compaction_ctx, compaction_style, compaction_ceiling);
             drop_stale_proactive(req.messages);
             // req.tools left empty — summarisation is text-only.
@@ -2097,6 +2113,30 @@ Cmd<Msg> fetch_models() {
                                   "models fetch: unknown exception"});
         }
     });
+}
+
+Cmd<Msg> probe_model_window(std::string model_id) {
+    const auto& sel = provider::active();
+    // Only a local OpenAI-compatible host has a window that can change under
+    // us (a router swapping models). Ollama's native api isn't this route.
+    if (model_id.empty() || sel.kind != provider::Kind::OpenAI
+        || sel.openai_endpoint.native_api
+        || !provider::openai::detail::is_local_endpoint(sel.openai_endpoint))
+        return Cmd<Msg>::none();
+    return Cmd<Msg>::task(
+        [model_id = std::move(model_id),
+         endpoint = sel.openai_endpoint,
+         for_provider = detail::active_provider_id()](
+            std::function<void(Msg)> dispatch) {
+            int w = 0;
+            try {
+                w = provider::openai::probe_loaded_window(auth_snapshot(),
+                                                          endpoint, model_id);
+            } catch (...) {}
+            AGT_LOG(Wire, Info, "models.window_probe", "provider={} model={} window={}",
+                    for_provider, model_id, w);
+            dispatch(ModelWindowProbed{for_provider, model_id, w});
+        });
 }
 
 Cmd<Msg> fetch_models_for(std::string spec) {

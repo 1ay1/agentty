@@ -426,6 +426,16 @@ struct OpenModels {};
 // active provider's result isn't queued behind slower providers on the bounded
 // worker pool — the selected models refresh first, the rest trickle in.
 struct FusedRefreshOthers {};
+// Result of re-probing ONE model's live window on a local endpoint (see
+// cmd::probe_model_window). A llama.cpp router with one model resident at a
+// time only reports the loaded model's size, so the window is re-checked
+// after a switch and after each turn. `window` is 0 when the server couldn't
+// say (model not loaded yet); the reducer then keeps what it had.
+struct ModelWindowProbed {
+    std::string provider_id;
+    std::string model_id;
+    int         window = 0;
+};
 // ^L — force a full live refresh: mark EVERY authed provider's catalog stale
 // and refetch (active immediately, others deferred). The manual escape hatch
 // when a catalog is stale/failed and the user doesn't want to wait for the TTL
@@ -1143,7 +1153,7 @@ using ModelsMsg = std::variant<
     ModelsScopeProvider,
     ModelsFilterInput, ModelsFilterBackspace,
     ModelsLoaded, FusedCatalogLoaded, SwitchToPreviousModel, FusedRefreshOthers,
-    ModelsRefresh>;
+    ModelsRefresh, ModelWindowProbed>;
 
 using ThreadListMsg = std::variant<
     OpenThreadList, CloseThreadList, ThreadListMove, ThreadListJump,

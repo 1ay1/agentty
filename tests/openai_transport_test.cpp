@@ -2317,10 +2317,40 @@ TEST_CASE("live: a local server's RUNTIME window reaches ModelInfo") {
         // than inherit the loaded model's window.
         REQUIRE(models.size() == 2u);
         const ModelInfo* loaded = nullptr;
-        for (const auto& mi : models)
+        const ModelInfo* unloaded = nullptr;
+        for (const auto& mi : models) {
             if (mi.id.value == "qwen3-coder") loaded = &mi;
+            if (mi.id.value == "gemma3:27b")  unloaded = &mi;
+        }
         REQUIRE(loaded != nullptr);
+        REQUIRE(unloaded != nullptr);
         CHECK(loaded->context_window == 32768);
+        // Not resident, so no measurement: the size comes from the launch
+        // args the router lists for it.
+        CHECK(unloaded->context_window == 131072);
+
+        // One model resident at a time. The live probe only answers for the
+        // loaded one, and never loads anything itself.
+        CHECK(oai::probe_loaded_window(auth::AuthHeader{}, ep, "qwen3-coder") == 32768);
+        CHECK(oai::probe_loaded_window(auth::AuthHeader{}, ep, "gemma3:27b") == 0);
+        CHECK(oai::probe_loaded_window(auth::AuthHeader{}, ep, "qwen3-coder") == 32768);
+
+        // A request for the other model swaps it in (router autoload).
+        {
+            agentty::http::Request r;
+            r.method    = agentty::http::HttpMethod::Post;
+            r.host      = ep.host;
+            r.port      = ep.port;
+            r.path      = "/v1/chat/completions";
+            r.plaintext = true;
+            r.headers   = {{"content-type", "application/json"}};
+            r.body      = R"({"model":"gemma3:27b","messages":[]})";
+            auto resp = agentty::http::default_client().send(r, {});
+            REQUIRE(resp);
+            REQUIRE(resp->status == 200);
+        }
+        CHECK(oai::probe_loaded_window(auth::AuthHeader{}, ep, "gemma3:27b") == 131072);
+        CHECK(oai::probe_loaded_window(auth::AuthHeader{}, ep, "qwen3-coder") == 0);
     } else if (m == "litellm") {
         // THE REGRESSION GUARD. /v1/models advertises 128000; the proxy's
         // /v1/model/info declares a stale 8192. A DECLARATION must never

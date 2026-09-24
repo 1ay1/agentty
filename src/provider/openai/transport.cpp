@@ -3267,6 +3267,70 @@ int advertised_context_window(const nlohmann::json& model_row) {
     return detail::advertised_context_window(model_row);
 }
 
+int router_declared_window(const nlohmann::json& row) {
+    // llama-server router rows (tools/server/server-models.cpp,
+    // get_router_models) carry the argv the router will launch the child
+    // with: {"status": {"value": "unloaded", "args": ["llama-server",
+    // "--ctx-size", "32768", ...]}}. Only a LOADED row also gets `meta`,
+    // so for everything else this is the only place the size is written.
+    //
+    // Slot window, mirroring server-context.cpp: with a unified KV cache
+    // every slot can use the whole pool; without it the pool is split
+    // across --parallel slots. --parallel defaults to auto (4 slots,
+    // unified), and --kv-unified-per-slot caps each slot.
+    const auto st = row.find("status");
+    if (st == row.end() || !st->is_object()) return 0;
+    const auto args = st->find("args");
+    if (args == st->end() || !args->is_array()) return 0;
+
+    long long ctx = -1, parallel = -1, per_slot = 0;
+    int unified = -1;   // -1 unset, 0 off, 1 on
+    auto num = [](const std::string& s) -> long long {
+        try {
+            std::size_t used = 0;
+            const long long v = std::stoll(s, &used);
+            return used == s.size() ? v : -1;
+        } catch (...) { return -1; }
+    };
+    const auto& a = *args;
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        if (!a[i].is_string()) continue;
+        const auto& k = a[i].get_ref<const std::string&>();
+        const bool has_v = i + 1 < a.size() && a[i + 1].is_string();
+        const std::string v = has_v ? a[i + 1].get<std::string>() : "";
+        if (k == "--ctx-size" || k == "-c")            { ctx = num(v); ++i; }
+        else if (k == "--parallel" || k == "-np")      { parallel = num(v); ++i; }
+        else if (k == "--kv-unified-per-slot")         { per_slot = num(v); ++i; }
+        else if (k == "--kv-unified" || k == "-kvu")   unified = 1;
+        else if (k == "--no-kv-unified" || k == "-no-kvu") unified = 0;
+    }
+    if (parallel < 0) {            // auto: 4 slots, unified KV
+        parallel = 4;
+        if (unified < 0) unified = 1;
+    }
+    // No -c (or -c 0) means "whatever the model was trained with", except
+    // when --kv-unified-per-slot sizes the pool itself.
+    if (ctx <= 0 && per_slot > 0) ctx = parallel * per_slot;
+    if (ctx <= 0) return 0;
+    long long slot = unified == 1 ? ctx : ctx / std::max(1LL, parallel);
+    if (per_slot > 0 && per_slot < slot) slot = per_slot;
+    return detail::advertised_context_window(nlohmann::json{{"n_ctx", slot}});
+}
+
+int probe_loaded_window(const AuthHeader& auth, const Endpoint& endpoint,
+                        const std::string& model_id) {
+    if (model_id.empty() || !detail::is_local_endpoint(endpoint)) return 0;
+    const auto probe = detail::probe_endpoint_windows(auth, endpoint, {model_id});
+    // Declarations (LiteLLM's config) are not what this asks for.
+    if (!probe.measured) return 0;
+    if (const auto it = probe.per_model.find(model_id); it != probe.per_model.end())
+        return it->second;
+    // Per-model routes (router, LM Studio, Ollama) answered but not for this
+    // id: it isn't loaded. server_wide is only meaningful on a single-model
+    // server, where it describes the one model it serves.
+    return probe.per_model.empty() ? probe.server_wide : 0;
+}
+
 std::vector<ModelInfo> list_models(const AuthHeader& auth, const Endpoint& endpoint,
                                    bool force_probe) {
     std::vector<ModelInfo> result;
@@ -3385,7 +3449,10 @@ std::vector<ModelInfo> list_models(const AuthHeader& auth, const Endpoint& endpo
                     .id           = ModelId{id},
                     .display_name = m.value("display_name", id),
                     .provider     = endpoint.label,
-                    .context_window = detail::advertised_context_window(m),
+                    .context_window = [&] {
+                        const int w = detail::advertised_context_window(m);
+                        return w > 0 ? w : router_declared_window(m);
+                    }(),
                 });
             }
             // Any row the catalog said nothing about gets ONE chance to be

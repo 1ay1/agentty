@@ -182,6 +182,29 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink,
 // `meta.n_ctx_train`. Declared is a ceiling; probed is the measurement.
 [[nodiscard]] int advertised_context_window(const nlohmann::json& model_row);
 
+// The window a llama-server ROUTER row will get once loaded, read from the
+// launch args the router lists for it (status.args: --ctx-size, --parallel,
+// --kv-unified, --kv-unified-per-slot). 0 when the args don't pin a size.
+//
+// An unloaded router model has no `meta` block, so without this every one of
+// them showed no window at all. It is an upper bound, not a measurement: the
+// server also caps each slot at the model's trained length (n_ctx_slot() in
+// server-context.cpp), which the router doesn't list. probe_loaded_window()
+// gives the real number once the model is up.
+[[nodiscard]] int router_declared_window(const nlohmann::json& model_row);
+
+// The window the server has ACTUALLY allocated for `model_id` right now, or
+// 0 when it can't say (model not loaded, host doesn't report it).
+//
+// Runs the same routes as the catalog probe (llama.cpp /props, router
+// /props?model=&autoload=false, LM Studio loaded instances, Ollama /api/ps)
+// but only returns a measured number. Never loads a model as a side effect.
+// Meant for re-checking one model after a switch or a turn, when a router
+// may have swapped which model is resident.
+[[nodiscard]] int probe_loaded_window(const AuthHeader& auth,
+                                      const Endpoint& endpoint,
+                                      const std::string& model_id);
+
 // Should this endpoint get the full runtime-window probe?
 //
 // "Local" means A SERVER YOU RUN, not a server on this machine: loopback,

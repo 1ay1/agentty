@@ -116,13 +116,25 @@ LITELLM_INFO = {
 ROUTER_MODELS = {
     "object": "list",
     "data": [
-        {"id": "qwen3-coder", "object": "model", "owned_by": "llamacpp"},
-        {"id": "gemma3:27b",  "object": "model", "owned_by": "llamacpp"},
+        {"id": "qwen3-coder", "object": "model", "owned_by": "llamacpp",
+         "status": {"value": "loaded", "args": [
+             "llama-server", "--ctx-size", "32768"]}},
+        # A dumber model launched with a much bigger context: the one a
+        # user compacts on. Unloaded rows have NO meta block, so the only
+        # place its size is written is status.args (server-models.cpp,
+        # get_router_models).
+        {"id": "gemma3:27b",  "object": "model", "owned_by": "llamacpp",
+         "status": {"value": "unloaded", "args": [
+             "llama-server", "--ctx-size", "131072"]}},
     ],
 }
+# What each model allocates when loaded. The router holds ONE at a time
+# (--models-max 1): a chat request for another model swaps it in.
+ROUTER_LOADED_WINDOW = {"qwen3-coder": 32768, "gemma3:27b": 131072}
+ROUTER_STATE = {"loaded": os.environ.get("ROUTER_LOADED", "qwen3-coder")}
 ROUTER_PROPS_BARE = {
     "role": "router",
-    "max_instances": 2,
+    "max_instances": 1,
     "models_autoload": True,
     "model_alias": "llama-server",
     "model_path": "none",
@@ -151,6 +163,17 @@ class H(BaseHTTPRequestHandler):
             if n:
                 self.rfile.read(n)
             return self._send(OLLAMA_SHOW)
+        if MODE == "router" and path in ("/v1/chat/completions", "/chat/completions"):
+            # Autoload: the requested model replaces the resident one.
+            n = int(self.headers.get("Content-Length") or 0)
+            body = json.loads(self.rfile.read(n) or b"{}")
+            name = body.get("model", "")
+            if name not in ROUTER_LOADED_WINDOW:
+                return self._send({"error": {"message": "model not found"}}, 400)
+            ROUTER_STATE["loaded"] = name
+            return self._send({"id": "x", "object": "chat.completion", "model": name,
+                               "choices": [{"index": 0, "finish_reason": "stop",
+                                            "message": {"role": "assistant", "content": "ok"}}]})
         self._send({"error": "not found"}, 404)
 
     def do_GET(self):
@@ -168,7 +191,11 @@ class H(BaseHTTPRequestHandler):
                 return self._send(OLLAMA_PS)
         elif MODE == "router":
             if path in ("/v1/models", "/models"):
-                return self._send(ROUTER_MODELS)
+                rows = json.loads(json.dumps(ROUTER_MODELS))
+                for r in rows["data"]:
+                    up = r["id"] == ROUTER_STATE["loaded"]
+                    r["status"]["value"] = "loaded" if up else "unloaded"
+                return self._send(rows)
             if path == "/props":
                 from urllib.parse import parse_qs, urlparse
                 q = parse_qs(urlparse(self.path).query)
@@ -180,7 +207,7 @@ class H(BaseHTTPRequestHandler):
                 autoload = (q.get("autoload") or ["true"])[0]
                 if autoload not in ("false", "0"):
                     print("  !! would have AUTOLOADED %s" % name, file=sys.stderr)
-                w = ROUTER_PROPS_PER_MODEL.get(name)
+                w = ROUTER_LOADED_WINDOW.get(name) if name == ROUTER_STATE["loaded"] else None
                 if w is None:
                     return self._send({"error": {"message": "model is not loaded"}}, 400)
                 return self._send({"default_generation_settings": {"n_ctx": w}})

@@ -189,6 +189,11 @@ struct LoopBreak {
 // fan-out). Dispatches FusedCatalogLoaded{spec, models, ok}.
 [[nodiscard]] maya::Cmd<Msg> fetch_models_for(std::string spec);
 
+// Re-measure the live context window of `model_id` on the active provider
+// when it is a local OpenAI-compatible endpoint (llama.cpp router, LM Studio,
+// Ollama). Dispatches ModelWindowProbed. A no-op Cmd for hosted providers.
+[[nodiscard]] maya::Cmd<Msg> probe_model_window(std::string model_id);
+
 // ── Self-update ─────────────────────────────────────────────
 // Background release check (24h-cached, never blocks a frame): dispatches
 // UpdateCheckDone. check_for_update() is safe to fire on every launch.

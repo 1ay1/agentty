@@ -465,7 +465,12 @@ Step switch_to_model_ref(Model m, const ModelRef& ref, bool record = true) {
             ui::pretty_model_label(m.d.model_id.value) + " \xc2\xb7 "
                 + provider::provider_display_name(provider::active()),
             std::chrono::seconds{3});
-        return {std::move(m), std::move(toast)};
+        // A local router may serve this model at a different size than the
+        // catalog said (or say nothing until it's loaded). Re-check now; the
+        // post-turn probe catches it once the first request loads it.
+        auto probe = cmd::probe_model_window(m.d.model_id.value);
+        return {std::move(m), maya::Cmd<Msg>::batch(
+            std::move(toast), std::move(probe))};
     }
 
     // Cross-provider — atomic switch through the ONE funnel, model pre-stashed.
@@ -1070,6 +1075,11 @@ Step models_update(Model m, msg::ModelsMsg pm) {
                 settings.provider = proven->first;
                 if (!proven->second.empty())
                     settings.provider_models[proven->first] = proven->second;
+                // Give it a picker row too, same as adding the host in the
+                // app: saved_custom_hosts() builds rows from provider_keys,
+                // so without this a --provider host never showed its models.
+                // Presets are filtered out there, so this is safe for them.
+                settings.provider_keys.try_emplace(proven->first, "");
                 deps().save_settings(settings);
             }
             m.d.available_models.clear();
@@ -1166,6 +1176,28 @@ Step models_update(Model m, msg::ModelsMsg pm) {
                 if (n == 0) c->index = 0;
                 else if (c->index >= n) c->index = n - 1;
                 else if (c->index < 0) c->index = 0;
+            }
+            return done(std::move(m));
+        },
+        [&](ModelWindowProbed& e) -> Step {
+            // Stale (provider switched meanwhile) or nothing measured: keep
+            // what we had. 0 just means the model wasn't resident yet.
+            if (e.window <= 0 || e.provider_id != active_provider_id())
+                return done(std::move(m));
+            bool changed = false;
+            for (auto& mi : m.d.available_models)
+                if (mi.id.value == e.model_id && mi.context_window != e.window) {
+                    mi.context_window = e.window;
+                    changed = true;
+                }
+            if (!changed) return done(std::move(m));
+            if (m.d.model_id.value == e.model_id)
+                m.s.context_max = resolved_context_max(m, e.provider_id);
+            if (auto* c = m.ui.panel.get<pn::Models>()) {
+                rebuild_fused_rows(m);
+                const int n = static_cast<int>(m.d.fused_rows.size());
+                if (n == 0) c->index = 0;
+                else if (c->index >= n) c->index = n - 1;
             }
             return done(std::move(m));
         },
