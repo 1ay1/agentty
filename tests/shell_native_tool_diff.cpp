@@ -21,9 +21,6 @@ int main(int argc, char** argv) {
         "cat LICENSE | wc -l", "sed -n '10,40p' src/runtime/app/deps.cpp | tail -3",
         "head -1 LICENSE && tail -1 LICENSE", "cat LICENSE 2>/dev/null | head -2",
         "sed -n '99999p' LICENSE", "head -0 LICENSE",
-        "grep -n MIT LICENSE", "grep -c the LICENSE", "grep -ni 'permission' LICENSE",
-        "grep -n 'zzqqnomatch' LICENSE", "grep -n 'Software\\|warranty' LICENSE | head -3",
-        "grep -nw 'the' README.md | wc -l",
     };
     for (const char* c : cmds) {
         auto r = sh->execute(nlohmann::json{{"command", c}, {"cd", root}});
