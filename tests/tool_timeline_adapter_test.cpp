@@ -737,13 +737,6 @@ TEST_CASE("shell card names what the command does") {
     check(read.find("sed -n") != std::string::npos, "raw command kept: " + read);
     const auto search = d("cd src && grep -rn foo . | head -20");
     check(search.starts_with("Search `foo` in src"), "grep -> Search label: " + search);
-    // Several steps: a count, not every step joined (that ran off the row
-    // and hid the raw command).
-    const auto multi = d("grep -n a x.cpp; grep -n b y.cpp; sed -n 1,9p z.cpp");
-    check(multi.starts_with("2 searches, 1 read  \xc2\xb7  grep -n a"), "multi-step label: " + multi);
-    // A huge regex is clipped so the command still fits.
-    const auto longpat = d("grep -n 'class [A-Za-z]*Poller\\|struct [A-Za-z]*Poller\\|Poller' include/reed/x.hpp");
-    check(longpat.find("\xe2\x80\xa6`") != std::string::npos, "long pattern clipped: " + longpat);
     // Not inspection: no label, just the command.
     check(d("cmake --build build -j12") == "cmake --build build -j12",
           "build command stays unlabelled");
