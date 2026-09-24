@@ -4,6 +4,16 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.10] - 2026-09-24
+
+### Fixed
+- **Local router: context window now tracks which model is actually loaded.** A llama.cpp router serving one model at a time (the normal `--models-max 1` setup) never showed context sizes for unloaded models, and switching models didn't re-check the window. The context bar and compaction both used stale numbers.
+  - Unloaded models now get a size from their launch args (`--ctx-size`, `--parallel`, `--kv-unified-per-slot`). Once the model loads, a lightweight re-probe corrects it to the real allocation.
+  - After every model switch and every finished turn, agentty re-checks the active model's live window. No extra work for hosted providers.
+- **Compaction uses the compaction model's own context window.** When Smart Mode routes compaction to a different (bigger-context) model, the summarisation payload is now sized to that model's window instead of the main model's.
+- **Compaction understands llama.cpp's context-overflow error.** The shrink-retry that halves the payload on "too long" now also fires on llama.cpp's "exceeds the available context size" wording, so a declared size larger than the real allocation recovers on the first retry.
+- **`--provider` hosts appear in the model picker.** A custom host passed with `--provider` was activated but never saved to `provider_keys`, so its models didn't show in the fused picker. Now it gets a picker row the moment its first model fetch succeeds.
+
 ## [0.9.9] - 2026-09-24
 
 ### Fixed
