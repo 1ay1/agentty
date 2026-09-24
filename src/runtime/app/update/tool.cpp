@@ -27,9 +27,17 @@
 #include "agentty/tool/util/utf8.hpp"
 #include "agentty/util/logx.hpp"
 
+#if AGENTTY_MCP
+#include <mcp/tools/util/bash_validate.hpp>
+#endif
+
 namespace pn = agentty::ui::panel;
 
 namespace agentty::app::detail {
+
+// After this many shell detours in a row the tip gets a plain reminder on
+// top. 3: one detour is noise, two can be a one-off, three is the habit.
+inline constexpr int kDetourReminderAt = 3;
 
 using json = nlohmann::json;
 
@@ -318,6 +326,30 @@ void apply_tool_output(Model& m, const ToolCallId& id,
         auto now = std::chrono::steady_clock::now();
         auto started = tc.started_at();
         if (result) {
+            // Drift reminder. Shell begets shell: after a shell inspection
+            // the next one is shell 81% of the time (22% after a native
+            // one). The per-call tip is easy to skim past once the habit has
+            // set in, so when detours chain, say so plainly at the point of
+            // decision (event-driven reminder, cf. OpenDev 2603.05344
+            // §2.3.4). Counted with substitutable(), the same gate the tip
+            // uses. Any other call resets the streak.
+            bool detour = false;
+#if AGENTTY_MCP
+            if (tc.name.value == "shell" && tc.args.is_object())
+                if (auto it = tc.args.find("command"); it != tc.args.end() && it->is_string())
+                    detour = ::mcp::tools::util::analyze_detour(it->get<std::string>()).substitutable();
+#endif
+            if (detour) {
+                if (++m.d.shell_detour_streak >= kDetourReminderAt)
+                    *result = "[reminder] shell detour #"
+                        + std::to_string(m.d.shell_detour_streak)
+                        + " in a row. the tip below names the exact native "
+                          "call; make that call next. native calls run in "
+                          "parallel and each gets its own card.\n"
+                        + std::move(*result);
+            } else {
+                m.d.shell_detour_streak = 0;
+            }
             tc.status = ToolUse::Done{started, now,
                 clamp_output(std::move(*result)), std::move(images)};
         } else {

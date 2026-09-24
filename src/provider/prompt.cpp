@@ -316,6 +316,7 @@ std::string default_system_prompt(bool lean) {
         << "      `grep -A 8 --include=*.cpp` → `context: \"8\"`, "
         << "`glob: \"*.cpp\"`; and the pattern is ripgrep syntax: `a|b`, "
         << "not `a\\|b`\n"
+        << "      `grep … | grep -v x` → `grep` with `exclude: \"x\"`\n"
         << "</shell>\n\n"
         << "<tool-batching>\n"
         << "  - Every model round-trip costs seconds. When your next "

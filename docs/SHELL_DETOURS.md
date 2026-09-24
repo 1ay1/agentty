@@ -57,6 +57,7 @@ cmd 2>/dev/null       → nothing: native tools report "no matches"
 cd X && grep …        → grep with path: "X"
 a; echo ===; b        → two native calls in one turn, they run in parallel
 grep -A 8 --include=… → context: "8", glob: "*.cpp"; pattern is a|b, not a\|b
+grep … | grep -v PAT  → grep with exclude: "PAT"
 ```
 
 every line is true for the current tools. that was not always so: the sep
@@ -166,15 +167,58 @@ codex parses commands only to label them. neither rewrites them.
 ## results
 
 - detours caught on the 11.5k real calls: 233 with the sep 16 scanner,
-  2,735 now (24%). another 3,284 get the `head_lines`/`tail_lines` tip.
+  2,879 now (25.0%). another 3,172 get the `head_lines`/`tail_lines` tip.
 - safety sweep: 0 tipped calls have a write, exec or network op outside
   quotes. (a naive regex flags 110; all are words like `rm` or `>` inside
   quoted grep patterns or echo text.)
-- speed, -O2, per call, parse + verdict + tip: p50 40us, p90 127us,
-  p99 213us, max 450us. a shell spawn is about 1-20ms.
+- fuzz: 60k mutated inputs (byte flips, splices, quote/paren injection,
+  300-deep parens, 60-deep `bash -c`) under ASan+UBSan: no crash, no
+  write ever tipped, no tipped call with a write redirect.
+- speed, -O2, per call, parse + verdict + tip: p50 40us, p90 128us,
+  p99 217us, max 465us. a shell spawn is about 1-20ms. the tree-sitter
+  parse is the whole cost (~0.2us/byte, linear); our own analysis is under
+  1% of it. commands over 16 KiB get no advice (the longest real tipped
+  call was 7 KB), which caps the worst case.
 - tests: `mcp-cpp/tests/bash_validate_test.cpp` (writes in every shape,
-  silent cases, exact params, git, chained steps), `search_tools_test.cpp`
-  (grep limit and wide context).
+  silent cases, exact params, git, chained steps, exclude),
+  `search_tools_test.cpp` (grep limit, wide context, exclude),
+  `tests/shell_detour_streak_test.cpp` (the drift reminder).
+
+## coverage accounting
+
+every silent verdict carries a typed `Silence` reason, so coverage is a
+table, not a guess. on the real calls:
+
+| reason | share | what it is |
+|---|---|---|
+| work | 36.0% | a program no native tool replaces: cmake, python, rm, tests |
+| nested | 14.6% | `$()`, loops, `if`, subshells |
+| filter | 12.0% | inspection piped into sort/awk/cut/`grep -i` |
+| sed-program | 1.0% | sed that isn't one range print |
+| expansion | 0.6% | `$VAR`, `~` in an inspection |
+| git-shape | 0.6% | `git log --format/--stat/-p` and similar |
+| other | <1% | unparsed, flags, stdin, redirects, scaffold-only |
+
+work and nested are real shell work and should stay silent. filter is the
+only big recoverable bucket; its biggest shape, `| grep -v PAT`, is now
+folded into grep's `exclude`.
+
+## the drift reminder
+
+the tip is easy to skim past once the habit sets in. so when detours
+chain, the reducer (`update/tool.cpp`) puts a plain line on top of the tip
+from the third detour in a row:
+
+```
+[reminder] shell detour #3 in a row. the tip below names the exact native
+call; make that call next. native calls run in parallel and each gets its
+own card.
+```
+
+detour-ness comes from `substitutable()`, the same gate as the tip, so a
+build or a write never counts. any other call resets the streak. this is
+the event-driven reminder idea from opendev (arxiv 2603.05344, §2.3.4):
+guidance at the moment of decision, not only up front.
 
 ## measuring it
 
@@ -195,31 +239,16 @@ over it. see the eval sketch in the sep 24 session.
 
 ## next
 
-in order of expected payoff:
-
-1. **measure live.** a few sessions on the new binary, then the `+detour`
-   share per session against the baselines above. nothing below is worth
-   doing blind.
-2. **repeat the reminder when it drifts.** shell begets shell (81% vs 22%),
-   and a system prompt fades over a long session. opendev (arxiv
-   2603.05344, §2.3.4) handles this with event-driven system reminders:
-   guidance injected at the point of decision, not only up front. the
-   same here would be: after N detours in a row, add a short reminder to
-   the next turn naming the parameters. cheap, no round trip, and it
-   targets the exact moment the habit forms.
-3. **refuse for the clearest cases.** only if 1 shows tips don't break the
-   chain. refuse when `substitutable()` is true and the tip already names
-   an exact parameter, return the call to make instead, run nothing in its
-   place. costs one round trip, breaks the chain every time.
-4. **grep exclude.** `grep … | grep -v x` is 5.7% of calls and stays silent
-   because the native grep can't exclude. an `exclude` param would make
-   these tippable.
-5. **speed, if it ever matters.** p99 is 213us, well under a shell spawn.
-   the tree-sitter parse dominates. a prefilter only helps 2% of calls
-   (the rest mention a relevant word), so it isn't worth it. caching the
-   verdict per command string would help repeated calls.
-6. **fuzz.** the parser takes whatever the model sends. it survived 11.5k
-   real calls; a libFuzzer target on `analyze_detour` would guard odd
-   input.
-7. **windows.** the shell there is cmd.exe. the bash parse will mostly fail
-   cleanly and give no advice, which is safe. not checked.
+1. **measure live.** a few long sessions on the new binary, then the
+   `+detour` share per session against the baselines above, and how often
+   the reminder fires and whether the next call is native.
+2. **refuse for the clearest cases.** only if 1 shows tips plus the
+   reminder don't break the chain. refuse when `substitutable()` is true
+   and the tip names an exact parameter, return the call to make, run
+   nothing in its place. one round trip, breaks the chain every time.
+3. **more of the filter bucket.** after `grep -v`, the next shapes are
+   `| grep -E PAT` (a second positive filter), `| cut -c`, `| sort -u`.
+   each needs a native param that is exactly equivalent, or it stays
+   silent.
+4. **windows.** the shell there is cmd.exe. the bash parse mostly fails
+   cleanly and gives no advice, which is safe. not checked.

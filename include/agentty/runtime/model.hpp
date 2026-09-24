@@ -326,6 +326,9 @@ struct Model {
         // "Reasoning"). Off by default. Provider-agnostic.
         bool                             show_reasoning = false;
         std::optional<PendingPermission> pending_permission;
+        // Shell detours in a row (analyze_detour().substitutable()). Drives
+        // the drift reminder in update/tool.cpp; reset by any other call.
+        int                              shell_detour_streak = 0;
 
         // Session-scoped "always allow" grants, keyed by tool name
         // (e.g. "shell", "write"). Set by PermissionApproveAlways;
