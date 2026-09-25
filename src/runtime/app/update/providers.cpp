@@ -202,10 +202,12 @@ Step providers_update(Model m, msg::ProvidersMsg pm) {
             }
             const std::string removed = target;
             {
-                auto s = deps().load_settings();
-                s.provider_keys.erase(removed);
-                if (is_custom_host) s.provider_models.erase(removed);
-                deps().save_settings(s);
+                // provider_keys is vault-owned; re-read before mutating so a
+                // key added since this Model was built isn't written away.
+                refresh_record(m);
+                m.d.persisted.provider_keys.erase(removed);
+                if (is_custom_host) m.d.persisted.provider_models.erase(removed);
+                save_record(m);
             }
             // Also drop any stored account credentials for a preset sign-out
             // (custom hosts keep everything in provider_keys, handled above).

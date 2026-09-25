@@ -447,14 +447,13 @@ TEST_CASE("trim commits exact dropped rows") {
     // the host must commit the dropped rows against the still-valid old
     // frame so the next render's shorter canvas aligns. Returning none()
     // (or commit_scrollback_overflow) strands a duplicate boundary.
-    using Cmd = maya::Cmd<agentty::Msg>;
-    const auto* commit = std::get_if<Cmd::CommitScrollback>(&cmd.inner);
+    const auto* commit = std::get_if<maya::CommitScrollback>(&cmd.inner);
     CHECK(commit != nullptr,
           "trim must return commit_scrollback(N) for the top-deletion; "
           "none() leaves maya unable to reconcile and strands a duplicate "
           "of the trimmed boundary one screen up.");
     if (commit) {
-        CHECK(commit->rows == static_cast<int>(dropped_rows),
+        CHECK(commit->debt.rows() == static_cast<int>(dropped_rows),
               "trim committed the wrong row count — must equal the rows "
               "dropped from the frozen prefix, or the scrollback boundary "
               "misaligns (under-commit strands the new prefix; over-commit "

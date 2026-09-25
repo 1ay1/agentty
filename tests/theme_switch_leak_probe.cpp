@@ -16,7 +16,7 @@
 
 #include <maya/style/schemes.hpp>
 #include <maya/core/render_context.hpp>
-#include <maya/app/inline.hpp>
+#include <maya/print.hpp>
 
 #include "agentty/runtime/view/view.hpp"
 

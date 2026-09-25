@@ -673,14 +673,34 @@ void reset_composer_draft(ComposerState& c) {
     c.queued.clear();
 }
 
-void persist_settings(const Model& m) {
-    // Load-modify-save: preserve provider, provider_keys, and the
-    // per-provider model map that this function doesn't own. Building a
-    // fresh Settings{} here would silently wipe the active provider on
-    // every model-picker select.
-    auto s = deps().load_settings();
+// The ONE place settings reach the store. See the contract on the
+// declaration in update/internal.hpp.
+void save_record(Model& m) {
+    deps().save_settings(m.d.persisted);
+}
+
+void refresh_record(Model& m) {
+    // Only the vault-owned fields: everything else on the record is the
+    // Model's own and may hold edits this frame that the store has not seen.
+    // Copying the whole record back would undo them.
+    auto disk = deps().load_settings();
+    m.d.persisted.provider_keys = std::move(disk.provider_keys);
+}
+
+void persist_settings(Model& m) {
+    // Sync the settings that still live as separate Domain members INTO the
+    // record, then save the record. The scattered members are what has not
+    // migrated into `m.d.persisted` yet; until they do, this is the function
+    // that reconciles them.
+    auto& s = m.d.persisted;
     s.model_id = m.d.model_id;
     s.profile  = m.d.profile;
+    // The ACTIVE provider, so a relaunch comes back where the user left off.
+    // This used to be written ONLY by the `--provider` CLI flag, which meant
+    // switching provider in the picker persisted the per-provider model but
+    // not the provider itself — every restart fell back to the default.
+    if (const std::string pid = active_provider_id(); !pid.empty())
+        s.provider = pid;
     // MERGE favorites, don't rebuild: `favorite_models` is one GLOBAL list
     // spanning every provider, but m.d.available_models only holds the
     // catalog of the provider loaded right now. Rebuilding the list from
@@ -709,7 +729,7 @@ void persist_settings(const Model& m) {
     const bool was_enabled  = s.smart.enabled;
     s.smart = m.d.smart;
     if (keep_enabled) s.smart.enabled = was_enabled;
-    deps().save_settings(s);
+    save_record(m);
     // Keep the subagent role-router (Layer 3b) in step with any Smart Mode
     // change the user just made in the overlay.
     tools::subagent::set_smart(m.d.smart);
@@ -741,11 +761,10 @@ commit_provider_switch(Model m, std::string_view spec,
     provider::prewarm_active_provider();
 
     {
-        auto settings = deps().load_settings();
         if (!m.d.model_id.empty())
-            settings.provider_models[outgoing_id] = m.d.model_id.value;
-        settings.provider = spec_s;
-        deps().save_settings(settings);
+            m.d.persisted.provider_models[outgoing_id] = m.d.model_id.value;
+        m.d.persisted.provider = spec_s;
+        save_record(m);
     }
 
     // (3) Make a valid model active for the NEW backend. Priority:

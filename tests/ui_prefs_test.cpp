@@ -4,6 +4,7 @@
 
 #include "agentty/runtime/app/deps.hpp"
 #include "agentty/runtime/app/update.hpp"
+#include "agentty/runtime/app/update/internal.hpp"   // persist_settings
 #include "agentty/runtime/model.hpp"
 #include "agentty/runtime/panel/settings/items.hpp"
 #include "agentty/runtime/panel/form_keys.hpp"
@@ -85,23 +86,23 @@ TEST_CASE("appearance: the pane opens on a setting, not a header") {
 TEST_CASE("appearance: adjusting in place wraps") {
     install_stub_deps();
     Model m = opened();
-    CHECK(m.d.ui.density == ui_prefs::Density::Normal);
+    CHECK(m.d.ui().density == ui_prefs::Density::Normal);
     m = press(std::move(m), ui::panel::kApDensity, form::keys::Action{form::keys::Intent::AdjustUp});
-    CHECK(m.d.ui.density == ui_prefs::Density::Roomy);
+    CHECK(m.d.ui().density == ui_prefs::Density::Roomy);
     m = press(std::move(m), ui::panel::kApDensity, form::keys::Action{form::keys::Intent::AdjustUp});
-    CHECK(m.d.ui.density == ui_prefs::Density::Compact);
+    CHECK(m.d.ui().density == ui_prefs::Density::Compact);
     m = press(std::move(m), ui::panel::kApDensity, form::keys::Action{form::keys::Intent::AdjustUp});
-    CHECK(m.d.ui.density == ui_prefs::Density::Normal);   // wrapped
+    CHECK(m.d.ui().density == ui_prefs::Density::Normal);   // wrapped
 }
 
 TEST_CASE("appearance: a toggle is a toggle") {
     install_stub_deps();
     Model m = opened();
-    const bool was = m.d.ui.syntax;
+    const bool was = m.d.ui().syntax;
     m = press(std::move(m), ui::panel::kApSyntax, form::keys::Action{form::keys::Intent::Activate});
-    CHECK(m.d.ui.syntax == !was);
+    CHECK(m.d.ui().syntax == !was);
     m = press(std::move(m), ui::panel::kApSyntax, form::keys::Action{form::keys::Intent::Activate});
-    CHECK(m.d.ui.syntax == was);
+    CHECK(m.d.ui().syntax == was);
 }
 
 TEST_CASE("appearance: a change is persisted, not just held") {
@@ -110,8 +111,8 @@ TEST_CASE("appearance: a change is persisted, not just held") {
     m = press(std::move(m), ui::panel::kApMotion, form::keys::Action{form::keys::Intent::AdjustUp});
     // The pane has no apply step, so "what I see" and "what is saved"
     // must never be two different things — not even for one keystroke.
-    CHECK(g_saved.ui.motion == m.d.ui.motion);
-    CHECK(m.d.ui.motion != ui_prefs::Motion::Full);
+    CHECK(g_saved.ui.motion == m.d.ui().motion);
+    CHECK(m.d.ui().motion != ui_prefs::Motion::Full);
 }
 
 TEST_CASE("appearance: the theme row hands off to a browser, not a dropdown") {
@@ -125,7 +126,7 @@ TEST_CASE("appearance: the theme row hands off to a browser, not a dropdown") {
 TEST_CASE("appearance: moving in the browser previews the theme live") {
     install_stub_deps();
     Model m = opened();
-    CHECK(m.d.ui.theme.empty());              // native by default
+    CHECK(m.d.ui().theme.empty());              // native by default
     m = press(std::move(m), ui::panel::kApTheme, form::keys::Action{form::keys::Intent::Activate});
 
     // Moving APPLIES — the list is its own preview, so you judge a scheme
@@ -134,7 +135,7 @@ TEST_CASE("appearance: moving in the browser previews the theme live") {
         auto [n, _] = app::update(std::move(m), Msg{AppearanceThemeMove{+1}});
         m = std::move(n);
     }
-    CHECK(!m.d.ui.theme.empty());
+    CHECK(!m.d.ui().theme.empty());
 
     // Esc is a true cancel: it puts back what we opened on, in the model
     // AND on disk, so a browse you abandoned leaves nothing behind.
@@ -142,7 +143,7 @@ TEST_CASE("appearance: moving in the browser previews the theme live") {
         auto [n, _] = app::update(std::move(m), Msg{AppearanceThemeCancel{}});
         m = std::move(n);
     }
-    CHECK(m.d.ui.theme.empty());
+    CHECK(m.d.ui().theme.empty());
     CHECK(g_saved.ui.theme.empty());
     CHECK(!pane(m).pane.picking);
 }
@@ -155,12 +156,12 @@ TEST_CASE("appearance: Enter in the browser keeps what you are looking at") {
         auto [n, _] = app::update(std::move(m), Msg{AppearanceThemeMove{+1}});
         m = std::move(n);
     }
-    const std::string previewing = m.d.ui.theme;
+    const std::string previewing = m.d.ui().theme;
     {
         auto [n, _] = app::update(std::move(m), Msg{AppearanceThemeCommit{}});
         m = std::move(n);
     }
-    CHECK(m.d.ui.theme == previewing);
+    CHECK(m.d.ui().theme == previewing);
     CHECK(g_saved.ui.theme == previewing);
     CHECK(!pane(m).pane.picking);
 }
@@ -176,7 +177,7 @@ TEST_CASE("appearance: typing filters and previews the top match") {
     CHECK(pane(m).pane.picker.picker.query() == "dra");
     // Narrowing PREVIEWS too — "dra" shows you Dracula without a second
     // keystroke to move onto it.
-    CHECK(!m.d.ui.theme.empty());
+    CHECK(!m.d.ui().theme.empty());
 }
 
 TEST_CASE("appearance: resolution never leaves the user unable to read") {
@@ -593,6 +594,36 @@ TEST_CASE("appearance: a colour knob invalidates what is already rendered") {
         CHECK_MESSAGE(cached(m),
                       k.what << " is structural and must not re-seal the ledger");
     }
+}
+
+// ── The two save paths must not fight ──────────────────────────────
+//
+// agentty saves settings two different ways:
+//
+//   A. load-modify-save through the seam  (ToggleChangesStrip, and ~20 more)
+//   B. persist_settings(m), which seeds from m.d.persisted and writes it back
+//
+// B only sees what A left in `m.d.persisted`. An A-style arm that writes the
+// seam but not the record leaves the two disagreeing, and the next B — a
+// theme tweak, a model switch, a rag save, or Quit — writes the stale record
+// over the top. That is "settings don't persist": the write lands, then a
+// later unrelated save silently reverts it.
+TEST_CASE("settings: a toggle survives a later whole-record save") {
+    install_stub_deps();
+
+    Model m;
+    m.d.persisted = g_saved;   // as init() seeds it
+
+    auto [m2, _] = app::update(std::move(m), Msg{ToggleChangesStrip{}});
+    m = std::move(m2);
+
+    // The toggle itself works — it reaches both the model and the store.
+    CHECK(m.d.show_changes_strip == true);
+    CHECK(g_saved.show_changes_strip == true);
+
+    // ...and it must still be there after ANY other save runs.
+    agentty::app::detail::persist_settings(m);
+    CHECK(g_saved.show_changes_strip == true);
 }
 
 TEST_CASE("appearance: Esc steps back, it does not close everything") {

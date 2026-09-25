@@ -250,10 +250,12 @@ Step host_probed(Model m, HostProbed r) {
     // PERSIST the keyless host (empty key) so it has a picker row next
     // session — saved_custom_hosts() derives rows from provider_keys.
     {
-        auto settings = deps().load_settings();
-        if (settings.provider_keys.find(spec) == settings.provider_keys.end()) {
-            settings.provider_keys[spec] = "";
-            deps().save_settings(settings);
+        // provider_keys is vault-owned — re-read before adding the row.
+        refresh_record(m);
+        if (m.d.persisted.provider_keys.find(spec)
+                == m.d.persisted.provider_keys.end()) {
+            m.d.persisted.provider_keys[spec] = "";
+            save_record(m);
         }
     }
     auth::AuthHeader new_auth = provider::credentials::resolve(spec);
@@ -323,10 +325,13 @@ Step host_probed(Model m, HostProbed r) {
     // isn't one: the server already told us what it is. Asking the user to
     // confirm it would be asking them to repeat an answer we have.
     if (!r.learned_self_hosted.empty()) {
-        auto settings = deps().load_settings();
-        if (settings.probe_hosts.insert(r.learned_self_hosted).second) {
-            deps().save_settings(settings);
-            provider::openai::install_probe_hosts(settings.probe_hosts);
+        // Onto step.first, NOT `m`: the model was moved into
+        // commit_provider_switch above, so `m` is a husk here and anything
+        // written to it is discarded.
+        auto& sm = step.first;
+        if (sm.d.persisted.probe_hosts.insert(r.learned_self_hosted).second) {
+            save_record(sm);
+            provider::openai::install_probe_hosts(sm.d.persisted.probe_hosts);
         }
     }
     auto found = set_status_toast(step.first,
@@ -367,9 +372,9 @@ Step sign_out(Model m) {
     // File-backed stores (Anthropic / OAuth token files) are the vault's.
     if (!pid.empty()) {
         if (auth::vault::of(pid).kind == auth::vault::Kind::SettingsKey) {
-            auto settings = deps().load_settings();
-            if (settings.provider_keys.erase(pid) > 0)
-                deps().save_settings(settings);
+            refresh_record(m);
+            if (m.d.persisted.provider_keys.erase(pid) > 0)
+                save_record(m);
         } else {
             auth::vault::sign_out(pid);
         }
@@ -713,11 +718,11 @@ Step account_remove(Model m) {
     // tier, so keeping them would be wrong as well as dead. This is the one
     // place forgetting is correct: removal, not a switch.
     {
-        auto s = deps().load_settings();
+        auto& s = m.d.persisted;
         const auto before = s.entitlements.size();
         domain::entitlement::forget_account(s.entitlements, row.provider,
                                             row.label);
-        if (s.entitlements.size() != before) deps().save_settings(s);
+        if (s.entitlements.size() != before) save_record(m);
     }
 
     // If we removed the account we're currently authed as, the newest
@@ -1050,9 +1055,11 @@ Step login_submit(Model m) {
             // "paste a key" flow, shared with credentials::.
             provider::credentials::add_key(provider, key);
             {
-                auto settings = deps().load_settings();
-                settings.provider = provider;
-                deps().save_settings(settings);
+                // add_key wrote the vault directly; pull its work into the
+                // record before saving, or this save would drop the key.
+                refresh_record(m);
+                m.d.persisted.provider = provider;
+                save_record(m);
             }
             auth::AuthHeader new_auth = provider::credentials::resolve(provider);
             m.ui.login = login::Closed{};

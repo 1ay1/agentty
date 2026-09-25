@@ -84,9 +84,65 @@ Cmd finalize_turn(Model& m, StopReason stop_reason = StopReason::Unspecified);
 // carries no todos array (partial early stream).
 void sync_todo_state_from_args(Model& m, const nlohmann::json& args);
 
+// ── Saving settings ───────────────────────────────────────────────────────
+//
+// THE rule: `m.d.persisted` is the record. Saving is handing it over.
+//
+// agentty used to save settings two different ways, and they fought:
+//
+//   A. load-modify-save — `auto s = deps().load_settings(); s.x = ...;
+//      deps().save_settings(s);` — which wrote the store but left
+//      `m.d.persisted` stale.
+//   B. persist_settings(m), which seeds FROM `m.d.persisted`.
+//
+// Every A-style write was therefore live ammunition pointed at the next B:
+// toggle the changes strip (A), then change a theme or switch a model or
+// quit (B), and B wrote its stale record straight over A's change. That is
+// the "settings don't persist" bug — the write lands, then an unrelated
+// save silently reverts it.
+//
+// The fix is to delete the A shape rather than to ask ~20 call sites to
+// remember to also patch the record. Edit the field on `m.d.persisted`,
+// then call this:
+//
+//     m.d.persisted.show_changes_strip = m.d.show_changes_strip;
+//     save_record(m);
+//
+// so there is exactly one snapshot in play and nothing to keep in sync.
+// Still write-behind at the seam, so a reducer never stalls a frame on disk.
+//
+// (This is the shape jaal wants the reducer to have. Once `update` returns
+// `Cmd` instead of a pair, the body becomes
+// `return Cmd::fx<save_settings>({m.d.persisted})` and the seam goes away
+// entirely — see docs/design/jaal-rewrite.md. Routing every writer through
+// one function now is what makes that a mechanical change later, instead of
+// 20 separate ones.)
+void           save_record(Model& m);
+
+// Re-seed `m.d.persisted` from the store before touching a field the Model
+// does NOT own.
+//
+// Most of Settings is the Model's: the record is authoritative and
+// save_record() hands it over. `provider_keys` is the exception. It is
+// written by the credential layer (credentials::add_key / clear_active,
+// vault::key_clear, account_switch) on paths that have no Deps, so they call
+// persistence::save_settings directly. Those writes land on disk and
+// invalidate the settings cache, but nothing can reach into a Model that is
+// sitting in the reducer loop — so the record's COPY of provider_keys goes
+// stale, and a whole-record save would write the stale copy back and drop a
+// key the user just added.
+//
+// So: refresh, then mutate, then save. Cheap (the cache serves it from
+// memory) and it is the only way a reducer can see a bypassing writer's work.
+void           refresh_record(Model& m);
+
 // ── update/submit.cpp helpers ─────────────────────────────────────────────
 Step           submit_message(Model m);
-void           persist_settings(const Model& m);
+// Sync the settings fields that still live as SEPARATE Domain members
+// (model_id, effort, profile, smart, the active provider) into
+// `m.d.persisted`, then save the record. Use this when one of THOSE changed;
+// use save_record() when you edited `m.d.persisted` directly.
+void           persist_settings(Model& m);
 
 // Clear ALL transient composer draft state (text, cursor, attachments,
 // undo/redo, history walk, queued messages, queue-peek/draft snapshots).

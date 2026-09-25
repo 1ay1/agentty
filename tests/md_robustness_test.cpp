@@ -19,7 +19,7 @@
 
 #include "agtest.hpp"
 
-#include <maya/app/inline.hpp>
+#include <maya/print.hpp>
 #include <maya/widget/markdown.hpp>
 
 #include <memory>

@@ -21,7 +21,7 @@
 
 #include "agentty/domain/ui_theme.hpp"
 
-#include <maya/app/app.hpp>
+#include <maya/style/schemes.hpp>
 #include <maya/style/schemes.hpp>
 #include <maya/style/theme.hpp>
 #include <maya/terminal/ansi.hpp>

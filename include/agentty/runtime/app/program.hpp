@@ -35,7 +35,25 @@ struct AgenttyApp {
     using Cmd   = ::agentty::Cmd;
     using Sub   = ::agentty::Sub;
 
-    static std::pair<Model, Cmd> init() { return ::agentty::app::init(); }
+    // jaal's init is `Cmd init(Model&)` — it fills the model IN PLACE and
+    // returns only the first Cmd (core/program.hpp, `has_init`).
+    //
+    // This used to be `static std::pair<Model, Cmd> init()`, the old runtime's
+    // shape. That is not an error anyone reports: `has_init` is a `requires`
+    // test, so a signature jaal can't call simply reads as "this program has
+    // no init", and the kernel value-initialises the Model instead. Everything
+    // init() loads — settings, the thread list, the active provider — was
+    // built and then dropped on the floor, which presents as agentty
+    // remembering nothing across restarts and showing the first-run card on
+    // every launch.
+    //
+    // The free function still returns a pair (init.cpp builds a Model and its
+    // Cmd together, and the tests call it that way), so this adapts.
+    static Cmd init(Model& m) {
+        auto [built, cmd] = ::agentty::app::init();
+        m = std::move(built);
+        return std::move(cmd);
+    }
 
     // jaal calls P::update(Model&, T) for whatever it lands on as it walks the
     // Msg tree, so the 23 domain reducers are static members here. Each

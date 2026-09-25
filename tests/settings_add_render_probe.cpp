@@ -7,7 +7,7 @@
 #include <cstdlib>
 #include <string>
 
-#include <maya/app/inline.hpp>
+#include <maya/print.hpp>
 #include <maya/core/render_context.hpp>
 
 #include "agentty/runtime/model.hpp"
@@ -24,7 +24,7 @@ int main(int argc, char** argv) {
 
     if (arg == "--pane") {
         pn::Appearance ap;
-        ap.pane.form = pn::build_appearance_form(m.d.ui, true);
+        ap.pane.form = pn::build_appearance_form(m.d.ui(), true);
         ap.pane.form.cursor = argc > 2 ? std::atoi(argv[2]) : 0;
         m.ui.panel.descend(std::move(ap));
         int w = 86;

@@ -456,13 +456,12 @@ struct Harness {
     // semantics). Without this the harness diverges from production and
     // the freeze frame re-emits the whole turn — but that divergence is
     // ALSO the real bug surface, so we keep both code paths exercised.
-    void apply_trim(maya::Cmd<agentty::Msg>& cmd) {
+    void apply_trim(agentty::Cmd& cmd) {
         if (dead || !synced) return;
-        using Cmd = maya::Cmd<agentty::Msg>;
-        const auto* c = std::get_if<Cmd::CommitScrollback>(&cmd.inner);
+        const auto* c = std::get_if<maya::CommitScrollback>(&cmd.inner);
         if (!c) return;
         const int prev_rows = synced->rows();
-        const int safe = std::min(c->rows, std::max(0, prev_rows - term_h));
+        const int safe = std::min(c->debt.rows(), std::max(0, prev_rows - term_h));
         if (safe <= 0) return;
         synced = std::move(*synced).commit(synced->scrollback_marker(safe));
         commits += static_cast<std::size_t>(safe);

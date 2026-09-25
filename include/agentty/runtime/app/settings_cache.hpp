@@ -29,6 +29,13 @@
 // A write still in flight at exit would be lost, so `flush()` blocks until the
 // queue drains and is called on the quit path. That is the one place a
 // synchronous wait is correct: the frame after it is never drawn.
+//
+// The cache also assumes it is the ONLY writer. Code that writes settings.json
+// behind its back (provider::credentials::add_key and the other credential
+// helpers call persistence::save_settings directly, because they run on paths
+// that have no Deps) leaves the cache serving a value that predates the write
+// — and the next save through the seam publishes that stale value back over
+// it. A bypassing writer must call `invalidate()`; see the note there.
 
 #include <functional>
 
@@ -46,6 +53,19 @@ struct Seam {
 
 [[nodiscard]] Seam wrap(std::function<store::Settings()> load_from_disk,
                         std::function<void(const store::Settings&)> save_to_disk);
+
+// Drop the cached value so the next `load` faults in from disk again.
+//
+// For code that wrote settings.json WITHOUT going through this seam. The
+// canonical case is the credential helpers (provider::credentials::add_key,
+// clear_active, ...): they run from CLI paths with no Deps installed, so they
+// call persistence::save_settings directly. Without invalidation the cache
+// keeps its pre-write copy, and the next reducer save writes that copy back —
+// silently undoing the key that was just added.
+//
+// Drains any queued write first, so an in-flight save cannot land on disk
+// AFTER the bypassing write and re-clobber it.
+void invalidate() noexcept;
 
 // Block until every queued write has hit disk. Called from the quit path.
 // Never throws; safe to call when nothing is queued or nothing was wrapped.

@@ -10,7 +10,7 @@
 #include <cstdlib>
 #include <unistd.h>
 
-#include <maya/app/inline.hpp>
+#include <maya/print.hpp>
 #include <maya/core/render_context.hpp>
 #include <maya/element/builder.hpp>
 

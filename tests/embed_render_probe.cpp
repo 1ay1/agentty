@@ -9,7 +9,7 @@
 #include <cstdlib>
 #include <string>
 
-#include <maya/app/inline.hpp>
+#include <maya/print.hpp>
 #include <maya/widget/panel.hpp>
 
 #include "agentty/runtime/panel/form_keys.hpp"

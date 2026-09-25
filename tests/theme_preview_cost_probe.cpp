@@ -71,7 +71,7 @@ int main(int argc, char** argv) {
     // The OLD per-keystroke cost.
     double full = 0;
     for (int i = 0; i < kIters; ++i) {
-        m.d.ui.theme = (i % 2) ? "Dracula" : "Nord";
+        m.d.ui().theme = (i % 2) ? "Dracula" : "Nord";
         const auto t0 = clk::now();
         app::detail::restyle_sealed_turns(m);
         full += ms_since(t0);
@@ -81,7 +81,7 @@ int main(int argc, char** argv) {
     // The NEW per-keystroke cost.
     double second = 0;
     for (int i = 0; i < kIters; ++i) {
-        m.d.ui.theme = (i % 2) ? "Dracula" : "Nord";
+        m.d.ui().theme = (i % 2) ? "Dracula" : "Nord";
         const auto t0 = clk::now();
         app::detail::restyle_sealed_turns(m);
         second += ms_since(t0);

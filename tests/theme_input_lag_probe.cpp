@@ -20,7 +20,7 @@
 #include "agentty/io/persistence.hpp"
 
 #include <maya/core/render_context.hpp>
-#include <maya/app/inline.hpp>
+#include <maya/print.hpp>
 
 #include <chrono>
 #include <cstdio>

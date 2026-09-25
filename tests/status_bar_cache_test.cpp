@@ -18,7 +18,7 @@
 #include "agentty/runtime/model.hpp"
 #include "agentty/runtime/view/status_bar/status_bar.hpp"
 
-#include <maya/app/inline.hpp>
+#include <maya/print.hpp>
 
 #include <string>
 

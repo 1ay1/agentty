@@ -30,7 +30,7 @@
 #include "agentty/io/persistence.hpp"
 
 #include <maya/maya.hpp>
-#include <maya/app/inline.hpp>
+#include <maya/print.hpp>
 
 #include <cstdio>
 #include <string>
@@ -120,7 +120,7 @@ int main(int argc, char** argv) {
     // EVERY theme to the same palette and "the ledger did not change" is a
     // property of the harness, not of the code under test. Forcing TrueColor
     // is what a real terminal session already has.
-    m.d.ui.tier = ui_prefs::ColorTier::TrueColor;
+    m.d.ui().tier = ui_prefs::ColorTier::TrueColor;
 
     app::detail::rehydrate_frozen(m);
 
@@ -139,11 +139,11 @@ int main(int argc, char** argv) {
         std::printf("a single arrow key changes what is on screen\n");
         std::string f0, v0, f1, v1;
         frame(f0, v0);
-        const std::string t0 = m.d.ui.theme;
+        const std::string t0 = m.d.ui().theme;
 
         m = app::update(std::move(m), Msg{AppearanceThemeMove{1}}).first;
         frame(f1, v1);
-        const std::string t1 = m.d.ui.theme;
+        const std::string t1 = m.d.ui().theme;
 
         std::printf("    theme: '%s' -> '%s'\n", t0.c_str(), t1.c_str());
         // Distinguish "the reducer never picked a real scheme" from "it did
@@ -152,7 +152,7 @@ int main(int argc, char** argv) {
         // headless run can silently resolve everything to the same palette —
         // which would look exactly like the bug without being it.
         {
-            const auto r0 = ui_prefs::resolve(m.d.ui, /*tty=*/true);
+            const auto r0 = ui_prefs::resolve(m.d.ui(), /*tty=*/true);
             std::printf("    resolved tier=%d  scheme=%s  ink=%02x%02x%02x\n",
                         static_cast<int>(r0.tier),
                         (r0.theme == &maya::theme::native) ? "native(FALLBACK)"

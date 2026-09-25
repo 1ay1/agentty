@@ -98,11 +98,11 @@ void record_recent(Model& m, const std::string& provider_id,
     mru.insert(mru.begin(), std::move(ref));
     if (static_cast<int>(mru.size()) > kRecentCap) mru.resize(kRecentCap);
 
-    auto s = deps().load_settings();
+    auto& s = m.d.persisted;
     s.recent_models.clear();
     for (const auto& r : mru)
         s.recent_models.push_back(r.provider_id + "\t" + r.model_id);
-    deps().save_settings(s);
+    save_record(m);
 }
 
 // Hydrate m.d.recent_models from Settings ("<provider>\t<model>" per entry).
@@ -717,14 +717,14 @@ Step models_update(Model m, msg::ModelsMsg pm) {
                 return done(std::move(m));
             const auto& row = m.d.fused_rows[static_cast<std::size_t>(c->index)];
             if (row.is_signin_offer()) return done(std::move(m));
-            auto s = deps().load_settings();
+            auto& s = m.d.persisted;
             ModelId mid = row.model.id;
             auto it = std::find(s.favorite_models.begin(),
                                 s.favorite_models.end(), mid);
             const bool now_fav = (it == s.favorite_models.end());
             if (now_fav) s.favorite_models.push_back(mid);
             else         s.favorite_models.erase(it);
-            deps().save_settings(s);
+            save_record(m);
             // Live feedback: flip the star on every cached row for this model
             // (no re-sort — keep the cursor where it is).
             for (auto& r : m.d.fused_rows)
@@ -776,7 +776,7 @@ Step models_update(Model m, msg::ModelsMsg pm) {
             const ModelId    row_model    = row.model.id;
             const std::string row_provider = row.provider_id;
 
-            auto settings = deps().load_settings();
+            auto& settings = m.d.persisted;
             const std::string key =
                 ui::context_override_key(row_provider, row_model.value);
             const auto it = settings.context_overrides.find(key);
@@ -791,7 +791,7 @@ Step models_update(Model m, msg::ModelsMsg pm) {
 
             if (next <= 0) settings.context_overrides.erase(key);
             else           settings.context_overrides[key] = next;
-            deps().save_settings(settings);
+            save_record(m);
 
             // Reflect the change in the LIVE catalog, then rebuild the rows
             // the view reads. Without this the setting is invisible until
@@ -897,7 +897,7 @@ Step models_update(Model m, msg::ModelsMsg pm) {
                 }
             }
             const int cur = reasoning_override_for(id);   // -1 auto, 0 off, 1 on
-            auto s = deps().load_settings();
+            auto& s = m.d.persisted;
             const char* label = nullptr;
             if (cur < 0) {
                 s.reasoning_effort_overrides[id] = true;
@@ -912,7 +912,7 @@ Step models_update(Model m, msg::ModelsMsg pm) {
                 clear_reasoning_override(id);
                 label = "reasoning: auto (catalog default)";
             }
-            deps().save_settings(s);
+            save_record(m);
             // Clamp against the ROW's provider scope, not the ambient one:
             // the fused picker lists models from providers that are NOT
             // active, and capability facts are keyed "provider/model".
@@ -1063,7 +1063,7 @@ Step models_update(Model m, msg::ModelsMsg pm) {
                 return {std::move(m), std::move(toast)};
             }
             if (e.models.empty()) return done(std::move(m));
-            auto settings = deps().load_settings();
+            auto& settings = m.d.persisted;
             // PERSIST-ON-SUCCESS: a custom --provider spec registered at
             // startup as unproven becomes sticky NOW — the host answered a
             // non-empty model fetch, so it's a real endpoint, not a typo.
@@ -1071,6 +1071,8 @@ Step models_update(Model m, msg::ModelsMsg pm) {
             // for raw host/URL specs, at most once per process.
             if (auto proven = provider::take_unproven_spec(
                     active_provider_id())) {
+                // provider_keys is vault-owned — re-read before adding a row.
+                refresh_record(m);
                 settings.provider = proven->first;
                 if (!proven->second.empty())
                     settings.provider_models[proven->first] = proven->second;
@@ -1079,7 +1081,7 @@ Step models_update(Model m, msg::ModelsMsg pm) {
                 // so without this a --provider host never showed its models.
                 // Presets are filtered out there, so this is safe for them.
                 settings.provider_keys.try_emplace(proven->first, "");
-                deps().save_settings(settings);
+                save_record(m);
             }
             m.d.available_models.clear();
             for (auto& mi : e.models) {
@@ -1206,9 +1208,8 @@ Step models_update(Model m, msg::ModelsMsg pm) {
             // Anthropic transport request VISIBLE thinking. Persisted so it
             // survives restarts. Mirrors the ToggleChangesStrip pattern.
             m.d.show_reasoning = !m.d.show_reasoning;
-            auto s = deps().load_settings();
-            s.show_reasoning = m.d.show_reasoning;
-            deps().save_settings(s);
+            m.d.persisted.show_reasoning = m.d.show_reasoning;
+            save_record(m);
             // Anthropic caveat: visible thinking is only REQUESTED when an
             // effort tier is active (the transport gates thinking mode on
             // req.effort). With effort off, ^R would silently show nothing —

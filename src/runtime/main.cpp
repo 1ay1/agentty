@@ -62,6 +62,7 @@
 }
 
 #include <maya/maya.hpp>
+#include <maya/host/run.hpp>   // maya::run: the jaal host
 
 #include "agentty/acp/server.hpp"
 #include "agentty/airgap/airgap.hpp"
@@ -1618,28 +1619,22 @@ int main(int argc, char** argv) {
 
     // ── Frame-gate tracing ──────────────────────────────────────────────
     // Installed only when `ui` trace logging is on, because this fires once
-    // per event-loop iteration. With it on, the log answers the single most
-    // common rendering question directly — "the model changed but the screen
-    // didn't": you can see whether visual_hash moved and whether the frame
-    // was skipped, instead of bisecting by rebuilding maya.
+    // per event-loop iteration.
+    //
+    // The `frame` half is gone, and not by accident: maya's set_frame_trace
+    // was a global hook the old run loop called, and the new host reports the
+    // same thing as a RETURN VALUE instead — Screen::present_if hands back
+    // `Presented{.skipped = true}` when the visual hash matched. That is the
+    // better design (nothing global, no null check per frame), it just isn't
+    // reachable from main(): the host reads it, not the program. If we want
+    // the "model changed but the screen didn't" line back, it belongs in
+    // maya's host next to the present() call, not here.
+    //
+    // The emit side survives because it hooks the RENDERER, which the program
+    // still links directly: `emit` says whether the composed frame had any
+    // bytes, and an empty emit right after a model change is the exact
+    // signature of the diff concluding the wire already showed it.
     if (logx::recorded(logx::Channel::Ui, logx::Level::Trace)) {
-        maya::set_frame_trace([](std::uint64_t hash, bool skipped,
-                                 bool needs_render) noexcept {
-            // Identify the live theme by ADDRESS, not by reading its
-            // channels: r()/g()/b() on a non-Rgb LitColor reads a palette
-            // index as a colour channel (the theme-discipline invariant
-            // this repo enforces at test time). A pointer is enough for
-            // the only question here - did the painted palette change
-            // between frames.
-            const void* tf = static_cast<const void*>(&maya::theme::live());
-            AGT_LOG(Ui, Trace, "frame",
-                    "hash={:016x} {} needs_render={} theme={}",
-                    hash, skipped ? "SKIP" : "render", needs_render, tf);
-        });
-        // The emit side. `frame` says whether view() ran; `emit` says whether
-        // the composed frame had any bytes. A `render` followed by an EMPTY
-        // emit is the exact signature of "the model changed and the screen
-        // didn't" — the diff concluded the wire already showed it.
         maya::set_emit_trace([](const char* state, std::size_t bytes,
                                 bool empty) noexcept {
             AGT_LOG(Ui, Trace, "emit",

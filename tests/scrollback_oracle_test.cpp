@@ -39,7 +39,7 @@
 #include <termios.h>
 #include <unistd.h>
 
-#include <maya/app/app.hpp>
+#include <maya/screen.hpp>
 #include <maya/core/anim_clock.hpp>
 #include <maya/terminal/tmux.hpp>   // reset_cache_for_test + FAKE probe seam
 
@@ -664,11 +664,10 @@ static bool settle_freeze_trim(Ctx& cx, const std::string& st) {
                  st.c_str(), cx.rt->inline_content_rows(),
                  (std::size_t)m.ui.frozen.row_total(), m.ui.frozen.size());
     auto trim = agentty::app::detail::trim_frozen_if_oversized(m);
-    using Cmd = maya::Cmd<agentty::Msg>;
-    if (const auto* c = std::get_if<Cmd::CommitScrollback>(&trim.inner)) {
+    if (const auto* c = std::get_if<maya::CommitScrollback>(&trim.inner)) {
         std::fprintf(err, "  [info] turn %s: trim commit_scrollback(%d) -> frozen_row_total=%zu\n",
-                     st.c_str(), c->rows, (std::size_t)m.ui.frozen.row_total());
-        cx.rt->commit_inline_prefix(c->rows);
+                     st.c_str(), c->debt.rows(), (std::size_t)m.ui.frozen.row_total());
+        cx.rt->commit_inline_prefix(c->debt.rows());
         // NOTE: after a prefix commit maya's shadow shifted; the oracle's
         // committed snapshot is still valid (commit emits zero bytes).
     }
@@ -723,11 +722,10 @@ static bool tool_turn(Ctx& cx, int t, int H) {
         m.d.current.messages.push_back(std::move(u));
         agentty::app::detail::freeze_through(m, m.d.current.messages.size());
         auto trim = agentty::app::detail::trim_frozen_if_oversized(m);
-        using Cmd = maya::Cmd<agentty::Msg>;
-        if (const auto* c = std::get_if<Cmd::CommitScrollback>(&trim.inner)) {
+        if (const auto* c = std::get_if<maya::CommitScrollback>(&trim.inner)) {
             std::fprintf(err, "  [info] turn %s: submit trim commit_scrollback(%d)\n",
-                         st.c_str(), c->rows);
-            cx.rt->commit_inline_prefix(c->rows);
+                         st.c_str(), c->debt.rows());
+            cx.rt->commit_inline_prefix(c->debt.rows());
         }
         m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
         if (cx.frame("t" + st + "-submit")) return true;
@@ -937,11 +935,10 @@ static bool write_edit_turn(Ctx& cx, int t, int H) {
         m.d.current.messages.push_back(std::move(u));
         agentty::app::detail::freeze_through(m, m.d.current.messages.size());
         auto trim = agentty::app::detail::trim_frozen_if_oversized(m);
-        using Cmd = maya::Cmd<agentty::Msg>;
-        if (const auto* c = std::get_if<Cmd::CommitScrollback>(&trim.inner)) {
+        if (const auto* c = std::get_if<maya::CommitScrollback>(&trim.inner)) {
             std::fprintf(err, "  [info] turn %s: submit trim commit_scrollback(%d)\n",
-                         st.c_str(), c->rows);
-            cx.rt->commit_inline_prefix(c->rows);
+                         st.c_str(), c->debt.rows());
+            cx.rt->commit_inline_prefix(c->debt.rows());
         }
         m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
         if (cx.frame("t" + st + "-submit")) return true;
@@ -1130,9 +1127,8 @@ static bool deep_run_turn(Ctx& cx, int t, int H) {
         m.d.current.messages.push_back(std::move(u));
         agentty::app::detail::freeze_through(m, m.d.current.messages.size());
         auto trim = agentty::app::detail::trim_frozen_if_oversized(m);
-        using Cmd = maya::Cmd<agentty::Msg>;
-        if (const auto* c = std::get_if<Cmd::CommitScrollback>(&trim.inner))
-            cx.rt->commit_inline_prefix(c->rows);
+        if (const auto* c = std::get_if<maya::CommitScrollback>(&trim.inner))
+            cx.rt->commit_inline_prefix(c->debt.rows());
         m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
         if (cx.frame("t" + st + "-submit")) return true;
     }
@@ -1256,11 +1252,16 @@ static int run_shape(int W, int H) {
 
     std::fprintf(err, "=== shape %dx%d ===\n", W, H);
 
-    maya::RunConfig cfg;
+    // Host split: maya::detail::Runtime + RunConfig became maya::Screen +
+    // maya::Options. The oracle drives the DEVICE directly (inline row
+    // accounting, scrollback recovery counters, commit_inline_prefix), so it
+    // holds the Screen for lifetime and reaches through impl() for those.
+    maya::Options cfg;
     cfg.mode = maya::Mode::Inline;
-    auto rt_r = maya::detail::Runtime::create(cfg);
-    if (!rt_r) { std::fprintf(err, "Runtime::create failed\n"); return 2; }
-    auto rt = std::move(*rt_r);
+    auto scr_r = maya::Screen::open(cfg);
+    if (!scr_r) { std::fprintf(err, "Screen::open failed\n"); return 2; }
+    auto scr = std::move(*scr_r);
+    auto& rt = scr.impl();
 
     TermEmu emu(W, H);
     emu.feed(read_all(master));

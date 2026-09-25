@@ -654,14 +654,14 @@ Step tool_update(Model m, msg::ToolMsg tm) {
             // sibling propagation.
             m.d.session_grants.insert(name.value);
             // Persist the grant (Zed's always_allow rules): reload-proof.
-            // Load-modify-save so we never clobber provider keys etc.
+            // Onto the record, so the next whole-record save carries it
+            // instead of writing a copy that predates it.
             {
-                auto s = deps().load_settings();
-                if (std::find(s.always_allow_tools.begin(),
-                              s.always_allow_tools.end(), name.value)
-                        == s.always_allow_tools.end()) {
-                    s.always_allow_tools.push_back(name.value);
-                    deps().save_settings(s);
+                auto& allow = m.d.persisted.always_allow_tools;
+                if (std::find(allow.begin(), allow.end(), name.value)
+                        == allow.end()) {
+                    allow.push_back(name.value);
+                    save_record(m);
                 }
             }
             m.s.status = name.value + ": always allowed (persists \xc2\xb7 "

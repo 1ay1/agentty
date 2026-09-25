@@ -13,7 +13,7 @@
 
 #include <doctest/doctest.h>
 
-#include <maya/app/inline.hpp>
+#include <maya/print.hpp>
 
 #include "agentty/runtime/panel/form.hpp"
 #include "agentty/runtime/panel/form_keys.hpp"

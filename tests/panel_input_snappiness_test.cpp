@@ -21,7 +21,7 @@
 #include "agentty/runtime/panel/form_keys.hpp"
 
 #include <maya/core/render_context.hpp>
-#include <maya/app/inline.hpp>
+#include <maya/print.hpp>
 
 #include <chrono>
 #include <cstdio>
@@ -196,10 +196,10 @@ int main() {
                     ob ? ob->pane.picker.picker.index() : -1,
                     os ? os->pane.picker.picker.index() : -1);
         std::printf("  theme  burst=%s  stepped=%s\n",
-                    burst.d.ui.theme.c_str(), step.d.ui.theme.c_str());
+                    burst.d.ui().theme.c_str(), step.d.ui().theme.c_str());
         CHECK(ob && os && ob->pane.picker.picker.index() == os->pane.picker.picker.index(),
               "burst landed on a different row than single-stepping");
-        CHECK(burst.d.ui.theme == step.d.ui.theme,
+        CHECK(burst.d.ui().theme == step.d.ui().theme,
               "burst landed on a different THEME than single-stepping");
     }
 
@@ -223,7 +223,7 @@ int main() {
                     oa ? oa->pane.picker.picker.index() : -1, ob ? ob->pane.picker.picker.index() : -1);
         CHECK(oa && ob && oa->pane.picker.picker.index() == ob->pane.picker.picker.index(),
               "wrapping past the end depends on paint timing");
-        CHECK(a.d.ui.theme == b.d.ui.theme, "wrap landed on a different theme");
+        CHECK(a.d.ui().theme == b.d.ui().theme, "wrap landed on a different theme");
     }
 
     // ── 3. The routing race: a batch that CHANGES which panel owns keys ──

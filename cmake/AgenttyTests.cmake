@@ -26,6 +26,7 @@ set(_AGENTTY_CONSOLIDATED
     wire_shared_test complexity_test copilot_token_test kimi_token_test
     chatgpt_bundled_models_test settings_default_test
     turn_provenance_test subagent_pin_test
+    program_hooks_test
     update_check_test update_ux_test mcp_result_type_test
     workspace_index_test
     teardown_test
@@ -256,6 +257,9 @@ set_property(DIRECTORY APPEND PROPERTY AGENTTY_FOLD_NAMES anthropic_md_stream)
 # it is registered in agentty_standalone_tests.def alongside its siblings. It
 # only runs instrumented in the TSan tree, where everything is rebuilt anyway.
 agentty_fold_test(persistence_race_test TIMEOUT 180 LABELS race)
+# thread_index: the mtime cache actually caches. Folded for the same reason
+# as persistence_race — it owns AGENTTY_HOME and needs the io object set.
+agentty_fold_test(thread_index_test TIMEOUT 60)
 agentty_fold_test(theme_preview_cost_probe TIMEOUT 120 NO_TEST)
 
 agentty_finalize_fold(

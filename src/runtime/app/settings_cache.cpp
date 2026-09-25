@@ -8,6 +8,7 @@
 #include <thread>
 #include <utility>
 
+#include "agentty/io/persistence.hpp"
 #include "agentty/util/teardown.hpp"
 
 namespace agentty::app::settings_cache {
@@ -42,6 +43,16 @@ State& state() {
     return s;
 }
 
+// Set while THIS cache's worker is inside save_to_disk.
+//
+// The worker's write goes through persistence::save_settings like any other,
+// so it fires the same "settings were written" observer we register below.
+// Acting on our own write would be wrong twice over: the cached value is
+// already correct, and invalidate() drains — from the worker thread, waiting
+// on `writing` that only the worker clears. That is a self-deadlock. Thread-
+// local rather than a plain bool because only the writing thread should skip.
+thread_local bool in_our_own_write = false;
+
 // Drain loop. Runs on its own thread; the ONLY place settings IO happens.
 void run(State& s) {
     std::unique_lock lock(s.mu);
@@ -60,8 +71,13 @@ void run(State& s) {
         // which is the entire point of this file.
         lock.unlock();
         try {
+            in_our_own_write = true;
             if (s.save_to_disk) s.save_to_disk(value);
-        } catch (...) { /* best-effort: a failed save must not kill the app */ }
+            in_our_own_write = false;
+        } catch (...) {
+            in_our_own_write = false;
+            /* best-effort: a failed save must not kill the app */
+        }
         lock.lock();
 
         s.writing = false;
@@ -109,6 +125,14 @@ Seam wrap(std::function<store::Settings()> load_from_disk,
         s.cached.reset();
         s.stopping = false;
     }
+
+    // Anyone writing settings.json directly — the credential helpers, the
+    // --model/--provider CLI paths — invalidates us, or their write would be
+    // undone by the next save publishing a copy that predates it.
+    persistence::on_settings_written([] {
+        if (in_our_own_write) return;
+        invalidate();
+    });
 
     Seam out;
 
@@ -158,11 +182,26 @@ void flush() noexcept {
             auto value = std::move(*s.pending);
             s.pending.reset();
             lock.unlock();
+            // Same self-write guard as the worker: this save fires the
+            // write observer, and letting that re-enter invalidate()/flush()
+            // from inside flush() would recurse.
+            in_our_own_write = true;
             try { s.save_to_disk(value); } catch (...) {}
+            in_our_own_write = false;
         }
         return;
     }
     s.cv.wait(lock, [&] { return !s.pending && !s.writing; });
+}
+
+void invalidate() noexcept {
+    // Drain first. A queued write holds a value that predates the bypassing
+    // write we are being told about; letting it land afterwards would undo
+    // that write on disk, which is the exact failure this exists to stop.
+    flush();
+    auto& s = state();
+    std::lock_guard lock(s.mu);
+    s.cached.reset();
 }
 
 void shutdown() noexcept {

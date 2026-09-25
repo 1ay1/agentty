@@ -69,6 +69,14 @@ ModelInfo mi(const char* id, const char* prov) {
 // open, then an assign-mode Models descend()s over it — the pane rides
 // in the picker's `from` snapshot.
 Model in_slot_assign(int slot) {
+    // The fused picker prunes catalogs whose provider isn't authed
+    // (refresh_fused_sources -> provider_is_authed), so a test that only
+    // seeds a catalog gets an EMPTY row list and fails looking for its own
+    // models. Give anthropic a key: that is what "signed in" means for a
+    // keyed preset, and it's what the real flow has by the time a picker
+    // opens.
+    g_settings.provider_keys["anthropic"] = "sk-test";
+
     Model m;
     m.d.model_id = ModelId{"claude-opus-4-5"};
     m.d.available_models = { mi("claude-opus-4-5", "anthropic"),

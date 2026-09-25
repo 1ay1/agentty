@@ -2188,9 +2188,8 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                     if (key.empty()) key = m.d.model_id.value;
                     set_learned_effort_set(key, *learned);
                     {   // Persist — tomorrow's session starts correct.
-                        auto s = deps().load_settings();
-                        s.learned_effort_sets[key] = *learned;
-                        deps().save_settings(s);
+                        m.d.persisted.learned_effort_sets[key] = *learned;
+                        save_record(m);
                     }
                     const auto caps = resolved_caps(m.d.model_id.value);
                     const Effort before = m.d.effort;
@@ -2247,7 +2246,7 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                 // Persist the discovery + the corrected model id so the next
                 // launch doesn't re-offer what this account can't use.
                 {
-                    auto s = deps().load_settings();
+                    auto& s = m.d.persisted;
                     // Account-scoped: this SUBSCRIPTION isn't entitled. Keyed
                     // by (provider, account, model) so switching accounts
                     // neither loses this fact nor applies it to an account
@@ -2264,7 +2263,7 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                     // every session.
                     s.provider_models[active_provider_id()] =
                         m.d.model_id.value;
-                    deps().save_settings(s);
+                    save_record(m);
                 }
                 // Drop `[1m]` rows from the live catalog so the picker
                 // reflects reality without waiting for a refetch.
@@ -2322,7 +2321,7 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                             provider::tag(vis), carried,
                             m.d.model_id.value, e.message);
 
-                    auto s = deps().load_settings();
+                    auto& s = m.d.persisted;
                     bool remembered = false;
                     switch (vis) {
                         case provider::VisionRejection::OrgPolicy:
@@ -2351,7 +2350,7 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                         case provider::VisionRejection::None:
                             break;   // unreachable, guarded above
                     }
-                    if (remembered) deps().save_settings(s);
+                    if (remembered) save_record(m);
 
                     // Strip and retry. The transcript keeps its images for
                     // display — only the wire payload loses them, rebuilt

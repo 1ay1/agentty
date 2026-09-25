@@ -547,8 +547,7 @@ static void run_walk(std::uint64_t seed, int width, int term_h) {
                 if (h.dead) break;
                 auto cmd =
                     agentty::app::detail::trim_frozen_if_oversized(m);
-                using Cmd = maya::Cmd<agentty::Msg>;
-                // W5: the trim returns commit_scrollback(N) when it drops
+                        // W5: the trim returns commit_scrollback(N) when it drops
                 // rows (a top-DELETION that maya's render-time reconciliation
                 // cannot fix — the host must commit in lockstep), or none()
                 // when it doesn't trim. Both are acceptable; the invariant

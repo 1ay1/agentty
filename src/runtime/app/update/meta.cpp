@@ -159,9 +159,8 @@ Step meta_update(Model m, msg::MetaMsg mm) {
         [&](ToggleChangesStrip) -> Step {
             m.d.show_changes_strip = !m.d.show_changes_strip;
             // Persist so it survives restarts.
-            auto s = deps().load_settings();
-            s.show_changes_strip = m.d.show_changes_strip;
-            deps().save_settings(s);
+            m.d.persisted.show_changes_strip = m.d.show_changes_strip;
+            save_record(m);
             auto cmd = set_status_toast(m, m.d.show_changes_strip
                 ? "changes strip: shown" : "changes strip: hidden (Ctrl+R still reviews)");
             return {std::move(m), std::move(cmd)};
@@ -180,13 +179,11 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             // user-facing way to revoke a stale always-allow.
             const bool had_grants = !m.d.session_grants.empty();
             m.d.session_grants.clear();
-            {
-                auto s = deps().load_settings();
-                if (!s.always_allow_tools.empty()) {
-                    s.always_allow_tools.clear();
-                    deps().save_settings(s);
-                }
-            }
+            m.d.persisted.always_allow_tools.clear();
+            // One save, not two: persist_settings writes the whole record,
+            // so clearing the grants on it above is enough. Saving them
+            // separately first (as this did) only created a window for the
+            // save below to write a record that still had them.
             persist_settings(m);
             // Confirm the switch — a profile change is invisible otherwise
             // (the composer chip updates, but a keyboard-driven cycle needs a
@@ -1060,15 +1057,17 @@ void apply_smart(Model& m, smart::RoleConfig cfg) {
     // rather than each one re-reading the environment and possibly disagreeing.
     settings::registry::apply_env(cfg);
 
-    // 1. Persist. Load-modify-save so a concurrent change to an unrelated
-    //    setting is not clobbered by writing a stale whole-Settings.
-    auto s = deps().load_settings();
-    s.smart = cfg;
-    deps().save_settings(s);
-
-    // 2. The UI thread's copy — what the classifier and the effort scaler read
-    //    on the next turn.
+    // 1. The UI thread's copy — what the classifier and the effort scaler
+    //    read on the next turn.
     m.d.smart = std::move(cfg);
+
+    // 2. Persist. Onto the RECORD, not a fresh load-modify-save: the old
+    //    comment here claimed load-modify-save avoided clobbering, but it is
+    //    what CAUSED clobbering. It wrote the store while leaving
+    //    `m.d.persisted` stale, so the next whole-record save put the old
+    //    smart config straight back.
+    m.d.persisted.smart = m.d.smart;
+    save_record(m);
 
     // 3. The subagent router's copy. `task` runs on a worker with no Model, so
     //    it genuinely needs its own snapshot; this is the push that keeps it

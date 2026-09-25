@@ -28,7 +28,7 @@
 // sanitizer it still exercises the path, and the width cell must remain
 // readable and correct.
 
-#include <maya/app/inline.hpp>
+#include <maya/print.hpp>
 #include <maya/render/renderer.hpp>
 #include <maya/widget/markdown.hpp>
 

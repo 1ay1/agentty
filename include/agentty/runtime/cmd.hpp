@@ -31,6 +31,7 @@
 #include "agentty/domain/conversation.hpp"   // ImageContent
 #include "agentty/domain/id.hpp"
 #include "agentty/io/http.hpp"               // http::CancelTokenPtr
+#include "agentty/provider/selection.hpp"    // provider::Selection
 #include "agentty/runtime/msg.hpp"
 
 // ── agentty's value types, as jaal sees them ──────────────────────────────
@@ -105,6 +106,24 @@ inline constexpr bool jaal::sendable_opt_in<nlohmann::json> = true;
 // Opting in the pointer, not the token: the shared_ptr is what crosses.
 template <>
 inline constexpr bool jaal::sendable_opt_in<agentty::http::CancelTokenPtr> = true;
+
+// provider::Selection carries `const ProviderPreset* row`, and Sendable
+// refuses raw pointers — "may point at memory another thread frees" — which
+// is the right default. Here it can't: the pointer only ever aims into
+// `kProviders`, an `inline constexpr std::array` in registry.hpp, so the
+// target has static storage duration and outlives every thread. The type's
+// own comment already made that promise ("static storage, never dangles");
+// this is where jaal is told.
+//
+// The pointer is why Selection exists in this shape: identity and endpoint
+// are orthogonal, and re-deriving identity from `openai_endpoint.label` broke
+// custom hosts, because pointing a provider at a custom base URL overwrites
+// the label. Carrying the row makes identity a value.
+//
+// Not Frozen — nothing needs it to be, and the endpoint strings are mutable
+// through a non-const Selection.
+template <>
+inline constexpr bool jaal::sendable_opt_in<agentty::provider::Selection> = true;
 
 // ── the message tree, as jaal routes it ───────────────────────────────
 // Msg is a variant of 23 DOMAIN variants, not 231 leaves — agentty grouped

@@ -44,7 +44,7 @@
 #include "agentty/runtime/panel/appearance.hpp"
 #include "agentty/runtime/app/deps.hpp"
 
-#include <maya/app/app.hpp>
+#include <maya/host/sources.hpp>   // maya::on_key
 
 using namespace agentty;
 namespace pn = agentty::ui::panel;
@@ -53,12 +53,22 @@ namespace {
 
 // Route one key through a sub built from THIS model, exactly as the runtime
 // does, and return the message it produced (if any).
+//
+// maya::detail::dispatch_through_sub is gone with the old run loop: routing
+// now belongs to jaal, where a Sub is a tree of leaf subscriptions and each
+// router descriptor knows how to turn an event into a Msg. So walk the leaves
+// (for_each flattens batches, in subscribe() order) and ask the on_key router
+// to route; the first leaf that answers wins, which is the kernel's rule too.
 std::optional<Msg> route(const Model& m, const maya::KeyEvent& ev) {
     const auto sub = agentty::app::subscribe(m);
-    std::vector<Msg> out;
-    maya::detail::dispatch_through_sub(sub, maya::Event{ev}, out);
-    if (out.empty()) return std::nullopt;
-    return std::move(out.front());
+    std::optional<Msg> out;
+    sub.for_each([&](const auto& leaf) {
+        if (out) return;                       // first match wins
+        using L = std::remove_cvref_t<decltype(leaf)>;
+        if constexpr (std::same_as<L, jaal::payload_t<maya::on_key, Msg>>)
+            out = maya::on_key::route(leaf, ev);
+    });
+    return out;
 }
 
 // Press a key: route it against the current model, then apply whatever it

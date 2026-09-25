@@ -1147,15 +1147,45 @@ struct IndexEntry {
     long long   size       = -1;  // file size in bytes; -1 == unknown (pre-v2)
 };
 
-long long file_mtime_ns(const fs::path& p) {
+// The file's last-write time, in SECONDS since the UNIX epoch.
+//
+// Two separate things were wrong here, and fixing one without the other
+// still leaves the cache dead:
+//
+//   1. NANOSECONDS OVERFLOWED. fs::file_time_type's epoch is
+//      implementation-defined, and on libstdc++ it sits far enough before
+//      1970 that a present-day timestamp cast to nanoseconds wraps int64
+//      and comes out negative. Hence seconds.
+//
+//   2. THE EPOCH IS STILL NOT 1970. Counting seconds straight off
+//      time_since_epoch() does not overflow, but it is measured from
+//      whatever epoch file_clock uses — here about -4.65e9, i.e. 1822.
+//      That is a stable number, so the cache would have worked by
+//      accident; but it is meaningless in a file other tools read, and it
+//      changes if the standard library does.
+//
+// clock_cast is the portable conversion, and is what C++20 added it for.
+// The fallback is for the one libstdc++ release that shipped file_clock
+// without the cast: there file_clock and system_clock share an epoch, so
+// the difference is zero and the subtraction is exact rather than a guess.
+//
+// 0 still means "unknown", which load_all_threads treats as a cache miss.
+// The resolution loss from nanoseconds does not matter because the check
+// is paired with file size — see the companion below.
+long long file_mtime_secs(const fs::path& p) {
     std::error_code ec;
     auto t = fs::last_write_time(p, ec);
     if (ec) return 0;
-    return std::chrono::duration_cast<std::chrono::nanoseconds>(
-               t.time_since_epoch()).count();
+#if defined(__cpp_lib_chrono) && __cpp_lib_chrono >= 201907L
+    const auto sys = std::chrono::clock_cast<std::chrono::system_clock>(t);
+#else
+    const auto sys = std::chrono::system_clock::now() +
+                     (t - fs::file_time_type::clock::now());
+#endif
+    return std::chrono::duration_cast<std::chrono::seconds>(sys.time_since_epoch()).count();
 }
 
-// Companion to file_mtime_ns for the freshness check. mtime alone is not
+// Companion to file_mtime_secs for the freshness check. mtime alone is not
 // sufficient: mtime granularity is filesystem-dependent (FAT 2 s, HFS+
 // 1 s), so a thread rewritten within the same tick as its recorded stamp
 // compares equal and the cache serves the OLD title/updated_at forever —
@@ -1181,6 +1211,20 @@ std::unordered_map<std::string, IndexEntry> read_thread_index_locked() {
     try {
         json j; ifs >> j;
         if (!j.is_object()) return out;
+        // Two mtime bugs, two version bumps, and an index written under
+        // either is useless:
+        //
+        //   v2  nanoseconds since file_clock's epoch — overflowed int64 and
+        //       wrapped negative, so no entry ever matched.
+        //   v3  seconds, but still since FILE_CLOCK's epoch (~1822 on
+        //       libstdc++), not the Unix epoch. Self-consistent, so the
+        //       cache worked; but the number meant nothing to anything else
+        //       reading the file, and it moves if the standard library does.
+        //   v4  seconds since the Unix epoch, via clock_cast.
+        //
+        // Reading a stale index costs a full reparse anyway, so an older one
+        // is dropped whole and this run rebuilds it correctly.
+        if (j.value("version", 0) < 4) return out;
         auto& threads = j.contains("threads") ? j["threads"] : j;
         if (!threads.is_object()) return out;
         for (auto& [id, e] : threads.items()) {
@@ -1216,7 +1260,7 @@ void write_thread_index_locked(const std::unordered_map<std::string, IndexEntry>
         threads[id] = std::move(ej);
     }
     json j;
-    j["version"] = 2;
+    j["version"] = 4;
     j["threads"] = std::move(threads);
     try { (void)write_json_atomic(thread_index_path(), j.dump()); }
     catch (const std::exception&) { /* best-effort cache */ }
@@ -1250,7 +1294,7 @@ void reindex_thread(const Thread& t) {
     const auto file = fs::exists(meta_file, ec) ? meta_file : legacy_file;
     // Stat OUTSIDE the lock, then read-modify-write inside it, so the
     // whole update is atomic with respect to delete_thread().
-    const long long mt = file_mtime_ns(file);
+    const long long mt = file_mtime_secs(file);
     const long long sz = file_size_bytes(file);
     std::lock_guard<std::mutex> lk(thread_index_mu());
     auto idx = read_thread_index_locked();
@@ -1321,7 +1365,7 @@ std::vector<Thread> load_all_threads() {
         if (!is_meta && fs::exists(threads_dir() / (id + ".meta.json"), ec))
             continue;
 
-        const long long   mt = file_mtime_ns(e.path());
+        const long long   mt = file_mtime_secs(e.path());
         const long long   sz = file_size_bytes(e.path());
 
         // Fast path: index entry whose mtime AND size both still match —
@@ -2435,6 +2479,14 @@ store::Settings load_settings() {
     return s;
 }
 
+// The observer registered by on_settings_written(), if any. A plain
+// function-local static: registration happens once, during startup, before
+// any reducer runs.
+std::function<void()>& settings_write_observer() {
+    static std::function<void()> obs;
+    return obs;
+}
+
 void save_settings(const store::Settings& s) {
     json j;
     j["model_id"] = s.model_id;
@@ -2647,6 +2699,15 @@ void save_settings(const store::Settings& s) {
     if (!write_json_atomic(data_dir() / "settings.json", j.dump(2)))
         AGT_LOG(Persist, Error, "settings.save", "result=write_failed path={}",
                 (data_dir() / "settings.json").string());
+
+    // Tell anyone caching settings that the file moved under them. See
+    // on_settings_written() in persistence.hpp for why this is here and not
+    // in each of the four callers that bypass the seam.
+    if (auto& obs = settings_write_observer(); obs) obs();
+}
+
+void on_settings_written(std::function<void()> observer) {
+    settings_write_observer() = std::move(observer);
 }
 
 ThreadId new_id() {

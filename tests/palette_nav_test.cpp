@@ -18,7 +18,7 @@
 #include "agentty/runtime/view/panels.hpp"
 #include "agentty/runtime/panel/palette.hpp"
 
-#include <maya/app/inline.hpp>
+#include <maya/print.hpp>
 
 #include <string>
 #include <vector>

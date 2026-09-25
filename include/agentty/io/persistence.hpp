@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <expected>
 #include <filesystem>
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -85,6 +86,22 @@ void delete_thread(const ThreadId& id);
 
 [[nodiscard]] store::Settings load_settings();
 void save_settings(const store::Settings& s);
+
+// Called after every save_settings() that goes DIRECTLY to disk.
+//
+// The TUI reads settings through a write-behind cache
+// (runtime/app/settings_cache.hpp) that assumes it is the only writer. It
+// isn't: the credential helpers (credentials::add_key, vault::key_clear,
+// account_switch, the --model/--provider CLI paths) call save_settings here
+// directly, because they also run on paths where no Deps exists. A cache
+// holding a copy from before such a write will publish it back on the next
+// save and silently undo it.
+//
+// So the cache registers itself here and drops its copy. This lives at the
+// io layer rather than in each writer because the writers span provider/,
+// io/ and main() — and a new one would otherwise have to KNOW to invalidate,
+// which is exactly the kind of rule that gets forgotten.
+void on_settings_written(std::function<void()> observer);
 
 [[nodiscard]] ThreadId new_id();
 [[nodiscard]] std::string title_from_first_message(std::string_view text);

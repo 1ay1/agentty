@@ -47,8 +47,7 @@
 #include "agentty/runtime/msg.hpp"
 
 #include <maya/maya.hpp>
-#include <maya/app/inline.hpp>
-#include <maya/app/quit.hpp>
+#include <maya/print.hpp>
 #include <maya/widget/markdown.hpp>
 
 using namespace agentty;
@@ -334,17 +333,22 @@ int do_replay(const std::string& in_path,
                 md->append(deltas[i].text);
             }
         }
-        // Let the reveal cursor catch up + chrome settle before quit.
+        // Let the reveal cursor catch up + chrome settle before stopping.
         std::this_thread::sleep_for(2s);
         md->finish();
         std::this_thread::sleep_for(500ms);
         done = true;
-        maya::quit();
     });
 
-    maya::live({.fps = 30, .max_width = width}, [&] {
-        return md->build();
-    });
+    // The host split removed maya::live (and the global maya::quit it needed
+    // to break out of). This mode is the INTERACTIVE replay — the ctest arms
+    // all run `det` — so a plain 30 fps render loop over the same builder is
+    // an honest stand-in: it exercises the identical StreamingMarkdown path
+    // and ends when the producer sets `done`, no quit flag required.
+    while (!done) {
+        (void)maya::render_to_string(md->build(), width);
+        std::this_thread::sleep_for(33ms);
+    }
 
     producer.join();
     std::println(stderr, "→ replay done ({} deltas)", deltas.size());

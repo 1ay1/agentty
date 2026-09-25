@@ -7,7 +7,7 @@
 #include "agentty/runtime/panel/palette.hpp"
 #include "agentty/diff/diff.hpp"
 #include "agentty/runtime/panel/common.hpp"
-#include <maya/app/inline.hpp>
+#include <maya/print.hpp>
 #include <cstdio>
 #include <string>
 

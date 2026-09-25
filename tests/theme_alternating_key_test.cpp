@@ -183,7 +183,7 @@ int main() {
             const bool moved = (cur != prev);
             std::printf("    %-4s theme=%-22s hash=%s screen %s\n",
                         dir > 0 ? "down" : "up",
-                        m.d.ui.theme.empty() ? "native" : m.d.ui.theme.c_str(),
+                        m.d.ui().theme.empty() ? "native" : m.d.ui().theme.c_str(),
                         hash_moved ? "moved " : "SAME  ",
                         moved ? "changed" : "DID NOT CHANGE");
             if (!moved) ++dead;
@@ -212,7 +212,7 @@ int main() {
             std::string cur = scr.frame(m);
             const bool moved = (cur != prev);
             std::printf("    down theme=%-22s screen %s\n",
-                        m.d.ui.theme.empty() ? "native" : m.d.ui.theme.c_str(),
+                        m.d.ui().theme.empty() ? "native" : m.d.ui().theme.c_str(),
                         moved ? "changed" : "DID NOT CHANGE");
             if (!moved) ++dead;
             prev = std::move(cur);
@@ -232,15 +232,15 @@ int main() {
         m = app::update(std::move(m), Msg{AppearancePickTheme{}}).first;
 
         scr.frame(m);
-        const std::string theme_at_start = m.d.ui.theme;
+        const std::string theme_at_start = m.d.ui().theme;
 
         m = app::update(std::move(m), Msg{AppearanceThemeMove{+1}}).first;
         const std::string away_frame  = scr.frame(m);
-        const std::string theme_away  = m.d.ui.theme;
+        const std::string theme_away  = m.d.ui().theme;
 
         m = app::update(std::move(m), Msg{AppearanceThemeMove{-1}}).first;
         const std::string back_frame  = scr.frame(m);
-        const std::string theme_back  = m.d.ui.theme;
+        const std::string theme_back  = m.d.ui().theme;
 
         std::printf("leave a row and come back\n");
         std::printf("    start=%s  away=%s  back=%s\n",

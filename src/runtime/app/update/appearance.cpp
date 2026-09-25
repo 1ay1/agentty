@@ -47,17 +47,18 @@ namespace {
 
 // Persist the prefs to the USER store.
 //
-// No load_settings() first: `m.d.persisted` IS the record, so the prefs the
-// reducer just edited are already in it. This used to read the last saved
-// settings back through the seam and patch one field, which is what made
-// every reducer that saves impure — see docs/design/jaal-rewrite.md.
+// Goes through persist_settings rather than saving `m.d.persisted` straight:
+// only `ui` is aliased into the record (Domain::ui() returns persisted.ui).
+// `effort`, `model_id`, `profile`, `smart` and the active provider live as
+// SEPARATE Domain fields, so a raw save of the record wrote whatever those
+// held at init() time and silently reverted every change made since — a
+// theme tweak would undo a model switch. persist_settings syncs the scattered
+// fields into the record first, then saves, then writes it back.
 //
 // Still write-behind at the Deps seam, so a reducer never stalls a frame on
-// the disk; that is what makes saving on every keystroke affordable. When
-// this becomes a jaal effect the write-behind moves into the host and this
-// function turns into `return Cmd::fx<save_settings>({m.d.persisted})`.
-void persist(const Model& m) {
-    deps().save_settings(m.d.persisted);
+// the disk; that is what makes saving on every keystroke affordable.
+void persist(Model& m) {
+    persist_settings(m);
 }
 
 // Rebuild the pane's rows from the prefs. The form is a PROJECTION of

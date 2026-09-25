@@ -37,16 +37,22 @@ namespace {
 // either even if it wanted to.
 // Persist the retrieval mode.
 //
-// Edits `m.d.persisted` and saves it: no load_settings() first, because the
-// Model holds the record. `configured = true` is the first-run latch — once
-// the user has chosen a mode, the onboarding prompt stops asking.
+// Edits the rag block in `m.d.persisted`, then saves through persist_settings
+// rather than handing the record to the seam directly: only `ui` and `rag`
+// are edited in place on the record, while `effort`, `model_id`, `profile`,
+// `smart` and the active provider are SEPARATE Domain fields. A raw save
+// would write those as they stood at init() and revert everything changed
+// since — switching retrieval mode would undo a model switch.
+// `configured = true` is the first-run latch — once the user has chosen a
+// mode, the onboarding prompt stops asking.
 void commit_mode(Model& m, store::RagMode mode) {
     auto& rag = m.d.persisted.rag;
     rag.configured = true;
     rag.mode       = mode;
     rag.proactive  = (mode != store::RagMode::Off);
-    deps().save_settings(m.d.persisted);
-    tools::rag_apply_settings(rag);
+    const auto applied = rag;   // persist_settings may rewrite the record
+    persist_settings(m);
+    tools::rag_apply_settings(applied);
 }
 
 // Project an EmbedConfig onto the persisted settings shape. The API key is
@@ -394,7 +400,9 @@ Step rag_settings_update(Model m, msg::RagMsg rm) {
             // The pipeline knobs, read back through the same table that
             // generated their rows.
             rs::apply_form_to_settings(f->form, m.d.persisted);
-            deps().save_settings(m.d.persisted);
+            // Same reason as commit_mode: save through persist_settings so
+            // the scattered Domain fields reach the record first.
+            persist_settings(m);
             tools::rag_apply_settings(m.d.persisted.rag);
 
             const std::string label = eb::describe(f->cfg);

@@ -68,6 +68,14 @@ function(_agentty_test_link_full name)
         OpenSSL::SSL
         OpenSSL::Crypto
         Threads::Threads)
+    # The runtime is a jaal program now: include/agentty/runtime/cmd.hpp pulls
+    # <jaal/jaal.hpp>, and the render probes pull <maya/app/inline.hpp>. Both
+    # arrive through maya::app (an INTERFACE target carrying jaal's include
+    # dir), which is what the `agentty` exe links. Tests linked only
+    # maya::maya, so every TU touching the runtime failed to find the headers.
+    if(TARGET maya::app)
+        target_link_libraries(${name} PRIVATE maya::app)
+    endif()
     # registry.cpp routes the whole tool set through the mcp-cpp bridge.
     if(TARGET mcp::mcp)
         target_link_libraries(${name} PRIVATE mcp::mcp)

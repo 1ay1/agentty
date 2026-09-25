@@ -153,7 +153,7 @@ static void fail(const char* inv, const char* detail) {
 
 // ── The invariant battery ────────────────────────────────────────────────
 static void check_invariants(const Model& m, bool stream_active,
-                             const maya::Cmd<agentty::Msg>* trim_cmd,
+                             const agentty::Cmd* trim_cmd,
                              std::size_t expected_dropped_rows) {
     const auto& f = m.ui;
 
@@ -200,11 +200,10 @@ static void check_invariants(const Model& m, bool stream_active,
     // CommitScrollbackOverflow is never valid (it advances prev_rows past
     // whatever maya thinks overflowed, which over-commits).
     if (trim_cmd) {
-        using Cmd = maya::Cmd<agentty::Msg>;
         const bool is_none =
             std::holds_alternative<Cmd::None>(trim_cmd->inner);
         const auto* commit =
-            std::get_if<Cmd::CommitScrollback>(&trim_cmd->inner);
+            std::get_if<maya::CommitScrollback>(&trim_cmd->inner);
         INV(is_none || commit != nullptr, "I6",
             "trim returned an unexpected Cmd type — must be none() or a "
             "conservative commit_scrollback(N) (never CommitScrollbackOverflow).");
@@ -212,7 +211,7 @@ static void check_invariants(const Model& m, bool stream_active,
             // Never OVER-commit: committing more rows than the trim dropped
             // strands a duplicate of the visible tail. Under-commit is safe
             // (maya reconciles it), so the bound is <=, not ==.
-            INV(static_cast<std::size_t>(std::max(0, commit->rows))
+            INV(static_cast<std::size_t>(std::max(0, commit->debt.rows()))
                     <= expected_dropped_rows,
                 "I6",
                 "trim's commit_scrollback row count > rows actually "
@@ -220,7 +219,7 @@ static void check_invariants(const Model& m, bool stream_active,
             // And it must commit SOMETHING when it dropped rows (a positive
             // lower bound), so a real top-deletion is never left wholly
             // uncommitted-via-overflow-misread.
-            INV(commit->rows >= 1, "I6",
+            INV(commit->debt.rows() >= 1, "I6",
                 "trim dropped rows but committed 0 — expected a positive "
                 "conservative count.");
         } else {
@@ -329,8 +328,8 @@ static void run_walk(std::uint64_t seed, int width) {
         }
 
         // ── Pick a frozen-subsystem op ──
-        maya::Cmd<agentty::Msg> trim_cmd = maya::Cmd<agentty::Msg>::none();
-        const maya::Cmd<agentty::Msg>* trim_ptr = nullptr;
+        agentty::Cmd trim_cmd = agentty::Cmd::none();
+        const agentty::Cmd* trim_ptr = nullptr;
         std::size_t dropped_rows = 0;
 
         const int op = rng.below(7);

@@ -6,6 +6,7 @@
 // NOARGS = original was `int main()`.   ARGS = `int main(int, char**)`.
 
 FOLD_NOARGS(persistence_race_test)
+FOLD_NOARGS(thread_index_test)
 FOLD_NOARGS(fork_test)
 FOLD_NOARGS(palette_render_probe)
 FOLD_NOARGS(thread_delete_test)

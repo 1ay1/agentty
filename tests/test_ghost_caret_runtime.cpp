@@ -7,7 +7,7 @@
 //   visual row). User sees the painted caret still on the (erased)
 //   second row until the next repaint.
 //
-// Drives the REAL agentty view() + update() + REAL maya Runtime::render
+// Drives the REAL agentty view() + update() + REAL maya Screen::present
 // through a PTY into a compact VT emulator, then inspects the SCREEN
 // rows: after the shrink, the caret block must be back on the line
 // above, and the previously-caret-holding row must be empty.
@@ -30,7 +30,7 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 
-#include <maya/app/app.hpp>
+#include <maya/screen.hpp>
 #include <maya/core/anim_clock.hpp>
 #include <maya/terminal/tmux.hpp>   // reset_cache_for_test — the probe is one-shot
 
@@ -393,11 +393,16 @@ int main() {
     ::close(slave);
     fcntl(master, F_SETFL, fcntl(master, F_GETFL, 0) | O_NONBLOCK);
 
-    maya::RunConfig cfg;
+    // The host split replaced maya::detail::Runtime + RunConfig with
+    // maya::Screen + maya::Options. Screen owns the device and cleans up in
+    // its destructor; `impl()` is the escape hatch for the finalize-bytes
+    // assertion at the bottom, which needs the explicit cleanup() call.
+    maya::Options cfg;
     cfg.mode = maya::Mode::Inline;
-    auto rt_r = maya::detail::Runtime::create(cfg);
-    if (!rt_r) { std::fprintf(stderr, "Runtime::create failed\n"); return 2; }
-    maya::detail::Runtime& rt = *rt_r;
+    auto scr_r = maya::Screen::open(cfg);
+    if (!scr_r) { std::fprintf(stderr, "Screen::open failed\n"); return 2; }
+    maya::Screen& scr = *scr_r;
+    maya::detail::Device& rt = scr.impl();
 
     Model m;
     // Welcome screen off → plain composer-only frame.
