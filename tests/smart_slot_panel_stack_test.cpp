@@ -78,6 +78,10 @@ Model in_slot_assign(int slot) {
     g_settings.provider_keys["anthropic"] = "sk-test";
 
     Model m;
+    // The settings RECORD is what refresh_fused_sources reads for auth now,
+    // not the seam — so a hand-built Model has to carry it, the way init()
+    // seeds it at startup.
+    m.d.persisted = g_settings;
     m.d.model_id = ModelId{"claude-opus-4-5"};
     m.d.available_models = { mi("claude-opus-4-5", "anthropic"),
                              mi("claude-haiku-4-5", "anthropic") };
@@ -203,6 +207,7 @@ TEST_CASE("smart slot picker stack") {
     {
         auto rows_for = [](int slot) {
             Model m;
+            m.d.persisted = g_settings;   // the record, as init() seeds it
             m.d.model_id = ModelId{"claude-opus-4-5"};
             m.d.available_models = { mi("claude-opus-4-5", "anthropic"),
                                      mi("claude-haiku-4-5", "anthropic") };

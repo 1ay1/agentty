@@ -70,10 +70,11 @@ void write_embed_into(store::RagConfig& r, const eb::EmbedConfig& c) {
 }
 
 // Load the live embed config for the form's initial state.
-[[nodiscard]] eb::EmbedConfig current_embed_config() {
+// Takes the settings record; see model_for_provider in internal.hpp for why
+// a reducer helper should never re-read the seam.
+[[nodiscard]] eb::EmbedConfig current_embed_config(const store::Settings& s) {
     eb::EmbedConfig c;
     eb::apply_env(c);
-    const auto s = deps().load_settings();
     if (!s.rag.embed_backend.empty()) {
         c.backend = eb::backend_from_id(s.rag.embed_backend);
         if (!s.rag.embed_model.empty()) c.model = s.rag.embed_model;
@@ -94,13 +95,14 @@ void write_embed_into(store::RagConfig& r, const eb::EmbedConfig& c) {
 // cursor on the same logical field. `advanced` must be carried through every
 // rebuild: dropping it would silently collapse the pane back to the basic rows
 // the next time any field changed the row set.
-void resync_rows(rs::EmbedForm& f, store::RagMode mode, bool advanced) {
+void resync_rows(rs::EmbedForm& f, const store::Settings& settings,
+                 store::RagMode mode, bool advanced) {
     const auto* focused = f.form.focused();
     const std::string focused_id = focused ? focused->id : std::string{};
     f.cfg = rs::config_from_form(f.cfg, f.form);
 
     const bool was_dirty = f.form.dirty;
-    f.form = rs::build_form(f.cfg, mode, deps().load_settings(), advanced);
+    f.form = rs::build_form(f.cfg, mode, settings, advanced);
     f.form.dirty = was_dirty;
     for (std::size_t i = 0; i < f.form.fields.size(); ++i)
         if (f.form.fields[i].id == focused_id) {
@@ -174,11 +176,12 @@ void refresh_status(rs::EmbedForm& f) {
 // Build the pane's form for `mode`, seeded with what the live retriever
 // already knows so opening it immediately shows whether embeddings work
 // rather than an empty "untested" state.
-[[nodiscard]] rs::EmbedForm make_embed_form(store::RagMode mode,
+[[nodiscard]] rs::EmbedForm make_embed_form(const store::Settings& settings,
+                                            store::RagMode mode,
                                             bool advanced = false) {
     rs::EmbedForm f;
-    f.cfg  = current_embed_config();
-    f.form = rs::build_form(f.cfg, mode, deps().load_settings(), advanced);
+    f.cfg  = current_embed_config(settings);
+    f.form = rs::build_form(f.cfg, mode, settings, advanced);
     const auto st = tools::rag_embed_status();
     using S = tools::RagEmbedStatus::State;
     if (st.state == S::Ready)
@@ -210,10 +213,10 @@ Cmd rag_settings_update(Model& m, msg::RagMsg rm) {
             // every key and answers none of them, so the app looked frozen.
             // An overlay must never be representable in a state where it owns
             // the keyboard but cannot act on it.
-            const auto s = deps().load_settings();
-            const auto mode = s.rag.configured ? s.rag.mode : store::RagMode::On;
+            const auto& st = m.d.persisted;
+            const auto mode = st.rag.configured ? st.rag.mode : store::RagMode::On;
             m.ui.panel.descend(
-                pn::Rag{{mode, mode, make_embed_form(mode)}});
+                pn::Rag{{mode, mode, make_embed_form(m.d.persisted, mode)}});
             return Cmd::none();
         },
         [&](CloseRag) -> Cmd {
@@ -232,7 +235,7 @@ Cmd rag_settings_update(Model& m, msg::RagMsg rm) {
                 o->advanced = !o->advanced;
                 const int cursor = o->embed.form.cursor;
                 o->embed.form = rs::build_form(o->embed.cfg, o->cursor,
-                                               deps().load_settings(),
+                                               m.d.persisted,
                                                o->advanced);
                 // Clamp: hiding rows can leave the cursor past the end.
                 const int n = static_cast<int>(o->embed.form.fields.size());
@@ -284,7 +287,7 @@ Cmd rag_settings_update(Model& m, msg::RagMsg rm) {
                     if (on_backend) {
                         auto* o = m.ui.panel.get<pn::Rag>();
                         const auto mode = o ? o->cursor : store::RagMode::On;
-                        resync_rows(*f, mode, o && o->advanced);
+                        resync_rows(*f, m.d.persisted, mode, o && o->advanced);
                     } else {
                         sync_cfg(*f);
                     }
@@ -330,7 +333,7 @@ Cmd rag_settings_update(Model& m, msg::RagMsg rm) {
             f->probe = rs::EmbedForm::Testing{};
             const std::uint64_t gen = ++f->probe_gen;
 
-            store::RagConfig probe_cfg = deps().load_settings().rag;
+            store::RagConfig probe_cfg = m.d.persisted.rag;
             write_embed_into(probe_cfg, f->cfg);
             std::string key = f->cfg.api_key;
             // task_isolated: the probe dials a network endpoint or memory-maps

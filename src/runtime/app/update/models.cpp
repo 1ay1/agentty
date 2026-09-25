@@ -108,7 +108,7 @@ void record_recent(Model& m, const std::string& provider_id,
 // Hydrate m.d.recent_models from Settings ("<provider>\t<model>" per entry).
 void hydrate_recents(Model& m) {
     if (m.d.recent_models.empty()) {
-        auto s = deps().load_settings();
+        const auto& s = m.d.persisted;
         for (const auto& e : s.recent_models) {
             auto tab = e.find('\t');
             if (tab == std::string::npos) continue;
@@ -175,7 +175,7 @@ void hydrate_recents(Model& m) {
 // is what keeps open INSTANT even with slow backends (Ollama / custom hosts
 // whose list probe would otherwise block the UI thread for seconds).
 void refresh_fused_sources(Model& m) {
-    const auto settings = deps().load_settings();
+    const auto& settings = m.d.persisted;
     const std::string active_pid = active_provider_id();
 
     // Prune catalogs whose provider is no longer authed (e.g. signed out via
@@ -685,7 +685,7 @@ Cmd models_update(Model& m, msg::ModelsMsg pm) {
                     // the active one: the same id behind two gateways can be
                     // served at two different sizes.
                     {
-                        const auto settings = deps().load_settings();
+                        const auto& settings = m.d.persisted;
                         for (auto& mi : c.models)
                             ui::bake_context_window(mi, c.provider_id, settings);
                     }
@@ -944,7 +944,7 @@ Cmd models_update(Model& m, msg::ModelsMsg pm) {
             // provider is no longer authed or whose model was delisted, so
             // ^Tab never switches to a dead id (which every request 400s).
             // At most one full lap; stop if we come back to the active row.
-            const auto settings = deps().load_settings();
+            const auto& settings = m.d.persisted;
             ModelRef target;
             for (int step = 1; step <= n; ++step) {
                 const ModelRef& cand =

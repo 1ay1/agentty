@@ -185,7 +185,11 @@ bool entitlement_record_blocked(store::Settings& s,
 // sane built-in default for the provider kind. Returns empty when no recall
 // exists and the provider has no hardcoded default (the model list refetch
 // will then auto-select the first available model).
-std::string    model_for_provider(std::string_view spec);
+// Takes the settings RECORD rather than reading the store: the Model
+// already holds it, and a reducer that re-reads the seam is how the two
+// copies drifted apart. See save_record above.
+std::string    model_for_provider(const store::Settings& s,
+                                  std::string_view spec);
 
 // Commit a live provider switch — the ONE place the full sequence lives, so
 // the three entry points (provider picker, custom-host modal, api-key modal)

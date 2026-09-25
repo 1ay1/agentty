@@ -65,7 +65,7 @@ Cmd providers_update(Model& m, msg::ProvidersMsg pm) {
         const auto* p = m.ui.panel.get<pn::Providers>();
         return p ? p->query : std::string{};
     }();
-    auto settings = deps().load_settings();
+    const auto& settings = m.d.persisted;
     const std::vector<std::string> saved_custom_hosts =
         provider::saved_custom_hosts(settings.provider_keys);
     const auto rows = ui::build_provider_rows(saved_custom_hosts, query);
@@ -201,7 +201,7 @@ Cmd providers_update(Model& m, msg::ProvidersMsg pm) {
                 target = *spec;
                 is_custom_host = true;
             } else if (const auto* pr = row.preset()) {
-                auto s = deps().load_settings();
+                const auto& s = m.d.persisted;
                 const std::string pid{pr->id};
                 if (s.provider_keys.count(pid)) target = pid;  // has a saved key
             }
@@ -241,7 +241,7 @@ Cmd providers_update(Model& m, msg::ProvidersMsg pm) {
             const bool was_active = (removed == active_provider_id());
             if (was_active) app::update_auth(auth::AuthHeader{});
             // Rebuild the row list so a removed custom host is gone; clamp.
-            auto s2 = deps().load_settings();
+            const auto& s2 = m.d.persisted;
             const auto fresh = ui::build_provider_rows(
                 provider::saved_custom_hosts(s2.provider_keys), p->query);
             if (!fresh.empty() && p->index >= static_cast<int>(fresh.size()))

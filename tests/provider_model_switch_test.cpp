@@ -58,6 +58,23 @@ static void install_stub_deps() {
     });
 }
 
+// A Model with the settings record seeded, the way init() seeds it.
+//
+// `m.d.persisted` IS the settings record now — reducers read it instead of
+// going back through the seam, which is what stopped the two copies drifting
+// apart. init() assigns it once at startup; a test that builds a bare Model
+// has to do the same or it starts life with a blank record while the stub
+// store has content, which is exactly the split-brain the record exists to
+// prevent (here it read as "no provider is authed", so the fused picker came
+// up empty).
+//
+// Call AFTER setting g_settings.
+[[nodiscard]] static Model seeded_model() {
+    Model m;
+    m.d.persisted = g_settings;
+    return m;
+}
+
 static ModelInfo mi(const char* id, const char* prov) {
     ModelInfo m;
     m.id = ModelId{id};
@@ -79,7 +96,7 @@ TEST_CASE("provider model switch") {
 
     // ── 1: a ModelsLoaded stamped for a DIFFERENT provider is dropped ──
     {
-        Model m;
+        Model m = seeded_model();
         m.s.models_loading = true;
         m.d.model_id = ModelId{"claude-opus-4-5"};
 
@@ -98,7 +115,7 @@ TEST_CASE("provider model switch") {
 
     // ── 2: a ModelsLoaded stamped for the ACTIVE provider installs ──
     {
-        Model m;
+        Model m = seeded_model();
         m.s.models_loading = true;
         m.d.model_id = ModelId{"some-stale-model"};
 
@@ -118,7 +135,7 @@ TEST_CASE("provider model switch") {
 
     // ── 3: legacy/synthetic dispatch (empty provider_id) still accepted ──
     {
-        Model m;
+        Model m = seeded_model();
         m.s.models_loading = true;
 
         ModelsLoaded legacy;
@@ -150,7 +167,7 @@ TEST_CASE("model picker ^E toggles reasoning override + feedback") {
     // the overlay. Hermetic auth so the catalog seeds without on-disk creds.
     g_settings.provider_keys["mistral"] = "sk-test";
     provider::select(provider::parse_selection("mistral"));
-    Model m0;
+    Model m0 = seeded_model();
     m0.d.available_models = { mi("codestral-latest", "mistral") };
     m0.d.model_id = ModelId{"codestral-latest"};
     auto [m, _open] = app::update(std::move(m0), Msg{OpenModels{}});
@@ -201,7 +218,7 @@ TEST_CASE("model picker ^E on family-gated model is a hinted no-op") {
 
     g_settings.provider_keys["anthropic"] = "sk-test";
     provider::select(provider::parse_selection("anthropic"));
-    Model m0;
+    Model m0 = seeded_model();
     m0.d.available_models = { mi("claude-opus-4-5", "anthropic") };
     m0.d.model_id = ModelId{"claude-opus-4-5"};
     auto [m, _open] = app::update(std::move(m0), Msg{OpenModels{}});
@@ -475,7 +492,7 @@ TEST_CASE("fused picker open, merge, same-provider switch, MRU") {
     g_settings.provider_keys["anthropic"] = "sk-test";
     provider::select(provider::parse_selection("anthropic"));
 
-    Model m;
+    Model m = seeded_model();
     m.d.model_id = ModelId{"claude-sonnet-4-6"};
     m.d.available_models = {mi("claude-sonnet-4-6", "anthropic"),
                             mi("claude-opus-4", "anthropic")};
@@ -529,7 +546,7 @@ TEST_CASE("fused catalog loaded merges by provider id") {
     g_settings.provider_keys["openai"] = "sk-test";   // openai authed → catalog
     provider::select(provider::parse_selection("anthropic"));
 
-    Model m;
+    Model m = seeded_model();
     m.d.model_id = ModelId{"claude-sonnet-4-6"};
     m.d.available_models = {mi("claude-sonnet-4-6", "anthropic")};
     auto [m1, c1] = app::update(std::move(m), Msg{OpenModels{}});
@@ -559,7 +576,7 @@ TEST_CASE("fused picker caches rows and clears them on close") {
     g_settings.provider_keys["xai"]       = "sk-test";
     provider::select(provider::parse_selection("anthropic"));
 
-    Model m;
+    Model m = seeded_model();
     m.d.model_id = ModelId{"claude-sonnet-4-6"};
     m.d.available_models = {mi("claude-sonnet-4-6", "anthropic")};
 
@@ -611,7 +628,7 @@ TEST_CASE("fused picker digits type into the filter") {
     g_settings.provider_keys["xai"]       = "sk-test";
     provider::select(provider::parse_selection("anthropic"));
 
-    Model m;
+    Model m = seeded_model();
     m.d.model_id = ModelId{"claude-sonnet-4-6"};
     m.d.available_models = {mi("claude-sonnet-4-6", "anthropic")};
     auto [m1, c1] = app::update(std::move(m), Msg{OpenModels{}});
@@ -645,7 +662,7 @@ TEST_CASE("fused rows expose name match positions for highlight") {
     g_settings.provider_keys["anthropic"] = "sk-test";
     provider::select(provider::parse_selection("anthropic"));
 
-    Model m;
+    Model m = seeded_model();
     m.d.model_id = ModelId{"claude-sonnet-4-5"};
     m.d.available_models = {mi("claude-sonnet-4-5", "anthropic"),
                             mi("claude-opus-4-5", "anthropic")};
@@ -678,7 +695,7 @@ TEST_CASE("^Tab cycles the MRU ring without reordering") {
     g_settings.provider_keys["anthropic"] = "sk-test";
     provider::select(provider::parse_selection("anthropic"));
 
-    Model m;
+    Model m = seeded_model();
     m.d.model_id = ModelId{"claude-a"};
     m.d.available_models = {mi("claude-a", "anthropic"),
                             mi("claude-b", "anthropic"),
@@ -717,7 +734,7 @@ TEST_CASE("classic model picker feeds the MRU ring") {
     g_settings.provider_keys["anthropic"] = "sk-test";
     provider::select(provider::parse_selection("anthropic"));
 
-    Model m;
+    Model m = seeded_model();
     m.d.model_id = ModelId{"claude-a"};
     m.d.available_models = {mi("claude-a", "anthropic"),
                             mi("claude-b", "anthropic")};
@@ -775,7 +792,7 @@ TEST_CASE("fused active catalog re-seeds when available_models grows") {
     g_settings.provider_keys["anthropic"] = "sk-test";
     provider::select(provider::parse_selection("anthropic"));
 
-    Model m;
+    Model m = seeded_model();
     m.d.model_id = ModelId{"claude-opus-4-5"};
     m.d.available_models = {mi("claude-opus-4-5", "anthropic"),
                             mi("claude-sonnet-4-5", "anthropic")};
@@ -813,7 +830,7 @@ TEST_CASE("ModelsLoaded refreshes the open fused picker") {
     g_settings.provider_keys["anthropic"] = "sk-test";
     provider::select(provider::parse_selection("anthropic"));
 
-    Model m;
+    Model m = seeded_model();
     m.d.model_id = ModelId{"claude-opus-4-5"};
     m.d.available_models = {mi("claude-opus-4-5", "anthropic")};
     auto [m1, c1] = app::update(std::move(m), Msg{OpenModels{}});
@@ -850,7 +867,7 @@ TEST_CASE("fused open prioritizes active provider, defers others") {
     g_settings.provider_keys["openai"]    = "sk-o";   // a second authed provider
     provider::select(provider::parse_selection("anthropic"));
 
-    Model m;
+    Model m = seeded_model();
     m.d.model_id = ModelId{"claude-sonnet-4-5"};
     m.d.available_models = {mi("claude-sonnet-4-5", "anthropic")};
     auto [m1, c1] = app::update(std::move(m), Msg{OpenModels{}});
@@ -881,7 +898,7 @@ TEST_CASE("fused refetches stale/failed catalogs, skips fresh") {
     g_settings.provider_keys["openai"]    = "sk-o";
     provider::select(provider::parse_selection("anthropic"));
 
-    Model m;
+    Model m = seeded_model();
     m.d.model_id = ModelId{"claude-sonnet-4-5"};
     m.d.available_models = {mi("claude-sonnet-4-5", "anthropic")};
     auto [m1, c1] = app::update(std::move(m), Msg{OpenModels{}});
@@ -920,7 +937,7 @@ TEST_CASE("fused ^L forces a full refresh") {
     g_settings.provider_keys["openai"]    = "sk-o";
     provider::select(provider::parse_selection("anthropic"));
 
-    Model m;
+    Model m = seeded_model();
     m.d.model_id = ModelId{"claude-sonnet-4-5"};
     m.d.available_models = {mi("claude-sonnet-4-5", "anthropic")};
     auto [m1, c1] = app::update(std::move(m), Msg{OpenModels{}});
@@ -954,7 +971,7 @@ TEST_CASE("fused browse view hides sign-in offers; query surfaces them") {
     g_settings.provider_keys["anthropic"] = "sk-a";   // only ONE provider authed
     provider::select(provider::parse_selection("anthropic"));
 
-    Model m;
+    Model m = seeded_model();
     m.d.model_id = ModelId{"claude-sonnet-4-5"};
     m.d.available_models = {mi("claude-sonnet-4-5", "anthropic")};
     auto [m1, c1] = app::update(std::move(m), Msg{OpenModels{}});
@@ -988,7 +1005,7 @@ TEST_CASE("fused prunes a signed-out provider's catalog") {
     g_settings.provider_keys["openai"]    = "sk-o";
     provider::select(provider::parse_selection("anthropic"));
 
-    Model m;
+    Model m = seeded_model();
     m.d.model_id = ModelId{"claude-sonnet-4-5"};
     m.d.available_models = {mi("claude-sonnet-4-5", "anthropic")};
     auto [m1, c1] = app::update(std::move(m), Msg{OpenModels{}});
@@ -1001,7 +1018,14 @@ TEST_CASE("fused prunes a signed-out provider's catalog") {
     CHECK(had_openai);
 
     // Sign out of openai, then rebuild the sources (as any refresh would).
+    //
+    // Through the RECORD, which is what the real sign-out paths mutate
+    // (login.cpp's sign_out and providers.cpp's ^D both erase from
+    // m.d.persisted.provider_keys, then save it). Erasing only from the stub
+    // store would test a state the app can't reach — the record is what
+    // refresh_fused_sources reads.
     g_settings.provider_keys.erase("openai");
+    m2.d.persisted.provider_keys.erase("openai");
     auto [m3, c3] = app::update(std::move(m2), Msg{OpenModels{}});  // re-open re-syncs
     for (const auto& c : m3.d.provider_catalogs)
         CHECK(c.provider_id != "openai");            // catalog pruned
@@ -1018,7 +1042,7 @@ TEST_CASE("^Tab skips a dead MRU entry") {
     g_settings.provider_keys["anthropic"] = "sk-a";   // xai NOT authed
     provider::select(provider::parse_selection("anthropic"));
 
-    Model m;
+    Model m = seeded_model();
     m.d.model_id = ModelId{"claude-a"};
     m.d.available_models = {mi("claude-a", "anthropic"),
                             mi("claude-c", "anthropic")};
@@ -1043,7 +1067,7 @@ TEST_CASE("provider picker: ^D signs out of a keyed preset (two-press)") {
     g_settings.provider_keys["openrouter"] = "sk-or";   // keyed preset
     provider::select(provider::parse_selection("anthropic"));
 
-    Model m;
+    Model m = seeded_model();
     m.d.model_id = ModelId{"claude-sonnet-4-5"};
     auto [m1, c1] = app::update(std::move(m), Msg{OpenProviders{}});
 
@@ -1083,7 +1107,7 @@ TEST_CASE("provider picker: ^D on the ACTIVE provider zeroes live auth") {
     provider::select(provider::parse_selection("openrouter"));
     app::update_auth(auth::AuthHeader{auth::ApiKeyHeader{"sk-or"}});
 
-    Model m;
+    Model m = seeded_model();
     auto [m1, c1] = app::update(std::move(m), Msg{OpenProviders{}});
     auto* p = m1.ui.panel.get<pn::Providers>();
     REQUIRE(p != nullptr);
@@ -1114,7 +1138,7 @@ TEST_CASE("provider picker: Enter opens accounts on active OAuth provider") {
     g_settings.provider_keys["anthropic"] = "sk-a";
     provider::select(provider::parse_selection("anthropic"));
 
-    Model m;
+    Model m = seeded_model();
     m.d.model_id = ModelId{"claude-sonnet-4-5"};
     auto [m1, c1] = app::update(std::move(m), Msg{OpenProviders{}});
 
@@ -1210,7 +1234,7 @@ TEST_CASE("fused picker cycles reasoning effort") {
     g_settings.provider_keys["anthropic"] = "sk-test";
     provider::select(provider::parse_selection("anthropic"));
 
-    Model m;
+    Model m = seeded_model();
     // An effort-capable model (Claude Opus supports the reasoning ladder).
     m.d.model_id = ModelId{"claude-opus-4-5"};
     m.d.effort = Effort::None;
@@ -1253,7 +1277,7 @@ TEST_CASE("the model picker re-opens cleanly, never stacks") {
     g_settings.provider_keys["anthropic"] = "sk-test";
     provider::select(provider::parse_selection("anthropic"));
 
-    Model m;
+    Model m = seeded_model();
     m.d.model_id = ModelId{"claude-sonnet-4-6"};
     m.d.available_models = {mi("claude-sonnet-4-6", "anthropic")};
 
@@ -1285,7 +1309,7 @@ TEST_CASE("SignOut falls back to another authed provider") {
     g_settings.provider_keys["groq"]       = "sk-gr";
     provider::select(provider::parse_selection("openrouter"));
 
-    Model m;
+    Model m = seeded_model();
     m.d.recent_models = { ModelRef{"groq", "llama-3.3-70b"} };  // MRU fallback
     auto [m1, c1] = app::update(std::move(m), Msg{LoginMsg{SignOut{}}});
 
@@ -1309,7 +1333,7 @@ TEST_CASE("SignOut with no saved fallback opens sign-in") {
     g_settings.provider_keys["openrouter"] = "sk-or";
     provider::select(provider::parse_selection("openrouter"));
 
-    Model m;
+    Model m = seeded_model();
     auto [m1, c1] = app::update(std::move(m), Msg{LoginMsg{SignOut{}}});
     CHECK(g_settings.provider_keys.count("openrouter") == 0);
     const bool opened_signin =
@@ -1339,7 +1363,7 @@ TEST_CASE("fused picker shows an active custom host's models") {
     g_settings.provider_keys["my-box.lan:8080"] = "";   // keyless local host
     provider::select(provider::parse_selection("my-box.lan:8080"));
 
-    Model m;
+    Model m = seeded_model();
     m.d.model_id = ModelId{"qwen3:32b"};
     m.d.available_models = {mi("qwen3:32b", "my-box.lan:8080"),
                             mi("llama3.3:70b", "my-box.lan:8080")};
@@ -1383,7 +1407,7 @@ TEST_CASE("fused picker gives a non-active saved custom host a mergeable catalog
     g_settings.provider_keys["api.my-gw.com"] = "sk-gw";
     provider::select(provider::parse_selection("anthropic"));
 
-    Model m;
+    Model m = seeded_model();
     m.d.model_id = ModelId{"claude-sonnet-4-6"};
     m.d.available_models = {mi("claude-sonnet-4-6", "anthropic")};
 

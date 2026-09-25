@@ -609,13 +609,13 @@ bool entitlement_record_blocked(store::Settings& s,
     return is_new;
 }
 
-std::string model_for_provider(std::string_view spec) {
+std::string model_for_provider(const store::Settings& s,
+                               std::string_view spec) {
     const bool is_chatgpt =
         spec == "codex" || spec == "chatgpt" || spec == "codex-cli";
     const bool is_copilot = spec == "copilot";
 
     // 1) Recall the model the user last used on this provider.
-    auto s = deps().load_settings();
     if (auto it = s.provider_models.find(std::string{spec});
         it != s.provider_models.end() && !it->second.empty()) {
         // ChatGPT's line-up is server-driven and changes over time: a slug the
@@ -775,7 +775,7 @@ commit_provider_switch(Model& m, std::string_view spec,
     //     provider+model switch instead of "switch provider, then land on
     //     whatever the recall/default was."
     std::string next{desired_model};
-    if (next.empty()) next = model_for_provider(spec_s);
+    if (next.empty()) next = model_for_provider(m.d.persisted, spec_s);
     if (!next.empty()) {
         m.d.model_id    = ModelId{next};
         m.s.context_max = resolved_context_max(m, detail::active_provider_id());

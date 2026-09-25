@@ -396,7 +396,7 @@ Cmd sign_out(Model& m) {
     // registry row. Only when nothing is left do we open the sign-in modal.
     {
         const std::string just_left = signout_provider_id(sel);
-        auto settings = deps().load_settings();
+        const auto& settings = m.d.persisted;
         // Only fall back to a provider with a REAL credential (saved or env) —
         // never silently hop onto an always-on local backend (Ollama) the
         // user never chose. That would be a surprising "I signed out but I'm
@@ -625,8 +625,10 @@ Cmd account_select(Model& m) {
             m.ui.login = login::Closed{};
             const auto* p = provider::preset_for(provider);
             const std::string plabel = p ? std::string{p->label} : provider;
-            std::string recalled = deps().load_settings().provider_models.count(provider)
-                ? deps().load_settings().provider_models.at(provider) : std::string{};
+            std::string recalled =
+                m.d.persisted.provider_models.count(provider)
+                    ? m.d.persisted.provider_models.at(provider)
+                    : std::string{};
             return commit_provider_switch(
                 m, provider,
                                           provider::credentials::resolve(provider),
@@ -982,7 +984,7 @@ Cmd login_submit(Model& m) {
             // for confirmation/edit, not a blank field.
             std::string existing_key;
             {
-                auto settings = deps().load_settings();
+                const auto& settings = m.d.persisted;
                 if (auto it = settings.provider_keys.find(spec);
                     it != settings.provider_keys.end())
                     existing_key = it->second;

@@ -67,6 +67,7 @@ TEST_CASE("custom host key prompt transitions") {
         agentty::store::Settings s;
         install_stub_deps(s);
         agentty::Model m;
+        m.d.persisted = s;   // the record, as init() seeds it
         m.ui.login = login::CustomHostInput{.host_input = "https://chat.example.org/api"};
         auto [m2, cmd] = ::agentty::app::detail::step(::agentty::app::detail::login_update, std::move(m), msg::LoginMsg{agentty::LoginSubmit{}});
         auto* api = std::get_if<login::ApiKeyInput>(&m2.ui.login);
@@ -92,6 +93,7 @@ TEST_CASE("custom host key prompt transitions") {
         s.provider_keys["https://chat.example.org/api"] = "sk-test-key";
         install_stub_deps(s);
         agentty::Model m;
+        m.d.persisted = s;   // the record, as init() seeds it
         m.ui.login = login::CustomHostInput{.host_input = "https://chat.example.org/api"};
         auto [m2, cmd] = ::agentty::app::detail::step(::agentty::app::detail::login_update, std::move(m), msg::LoginMsg{agentty::LoginSubmit{}});
         auto* api = std::get_if<login::ApiKeyInput>(&m2.ui.login);
@@ -112,6 +114,7 @@ TEST_CASE("custom host key prompt transitions") {
         agentty::store::Settings s;
         install_stub_deps(s);
         agentty::Model m;
+        m.d.persisted = s;   // the record, as init() seeds it
         m.d.available_models.push_back(agentty::ModelInfo{
             .id = agentty::ModelId{"old-model"}, .display_name = "old"});
         m.ui.login = login::CustomHostInput{.host_input = "localhost:8080"};
@@ -148,6 +151,7 @@ TEST_CASE("custom host key prompt transitions") {
         agentty::store::Settings s;
         install_stub_deps(s);
         agentty::Model m;
+        m.d.persisted = s;   // the record, as init() seeds it
         m.ui.login = login::CustomHostInput{.host_input = "http://10.0.0.5:5000/custom"};
         auto [m1, cmd1] = ::agentty::app::detail::step(::agentty::app::detail::login_update, std::move(m), msg::LoginMsg{agentty::LoginSubmit{}});
         auto* hp = std::get_if<login::HostProbing>(&m1.ui.login);
@@ -179,6 +183,7 @@ TEST_CASE("custom host key prompt transitions") {
         agentty::store::Settings s;
         install_stub_deps(s);
         agentty::Model m;
+        m.d.persisted = s;   // the record, as init() seeds it
         // First submit a TLS host to land in ApiKeyInput.
         m.ui.login = login::CustomHostInput{.host_input = "https://chat.example.org/api"};
         auto [m1, cmd1] = ::agentty::app::detail::step(::agentty::app::detail::login_update, std::move(m), msg::LoginMsg{agentty::LoginSubmit{}});
