@@ -30,7 +30,13 @@ Element providers_panel(const Model& m) {
     // The one ordered, query-filtered row list — the SAME list the reducer
     // resolves a selection against (see build_provider_rows). The cursor is a
     // plain index into it; there is no offset math on either side.
-    auto settings = app::deps().load_settings();
+    //
+    // Off the RECORD, not the seam. view() is a pure function of the Model:
+    // reaching through deps() here meant the same Model could paint two
+    // different frames depending on what the store happened to hold, which
+    // is also what makes visual_hash's cache-skip unsound. `m.d.persisted`
+    // is the same settings the reducers read.
+    const auto& settings = m.d.persisted;
     const std::vector<std::string> saved_custom_hosts =
         provider::saved_custom_hosts(settings.provider_keys);
     const auto rows = ui::build_provider_rows(saved_custom_hosts, picker->query);

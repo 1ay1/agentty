@@ -1026,6 +1026,11 @@ Cmd launch_stream(Model& m) {
         std::string         effort;
         std::optional<bool> model_supports_tools;
         std::optional<bool> model_supports_vision;
+        // Resolved on the UI thread from `m.d.persisted`, not read from the
+        // seam inside the worker: the task body has no Model, and reaching
+        // through deps() there is a second reader of settings racing the
+        // reducers that write them. The answer can't change mid-turn anyway.
+        bool                org_blocks_vision;
         int                 model_context_window;
         auth::AuthHeader    auth;
         http::CancelTokenPtr cancel;
@@ -1291,9 +1296,7 @@ Cmd launch_stream(Model& m) {
             // entitled account. Keeping it OUT of supports_vision is what
             // makes that possible: a model blamed for a policy block would
             // stay image-less forever.
-            const bool org_blocks_vision = detail::entitlement_blocked(
-                deps().load_settings(),
-                domain::entitlement::Fact::VisionOrgPolicy);
+            const bool org_blocks_vision = in.org_blocks_vision;
 
             if (!model_supports_vision.value_or(true) || org_blocks_vision) {
                 std::size_t stripped = 0;
@@ -1417,6 +1420,9 @@ Cmd launch_stream(Model& m) {
             .effort                  = std::move(effort),
             .model_supports_tools    = model_supports_tools,
             .model_supports_vision   = model_supports_vision,
+            .org_blocks_vision       = detail::entitlement_blocked(
+                                           m.d.persisted,
+                                           domain::entitlement::Fact::VisionOrgPolicy),
             .model_context_window    = model_context_window,
             .auth                    = std::move(auth),
             .cancel                  = cancel,
