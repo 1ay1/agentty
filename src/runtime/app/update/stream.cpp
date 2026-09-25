@@ -1095,7 +1095,7 @@ Cmd finalize_turn(Model& m, StopReason stop_reason) {
             // compaction and fires immediately.
             // Cmd::send, not a task: this dispatches ONE message and does
             // no work. jaal added `send` for exactly this (D25) — a task
-            // would burn a pool thread to call dispatch(), and `after(0ms)`
+            // would burn a pool thread to call out.send(Msg{}), and `after(0ms)`
             // goes through the timer heap and doesn't arrive until the next
             // step, costing a frame.
             auto compact_cmd = Cmd::send(Msg{CompactContext{}});

@@ -626,9 +626,9 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
                 if (!m.ui.git_refresh_inflight) {
                     m.ui.git_refresh_inflight = true;
                     git_cmd = Cmd::task_isolated(
-                        [](std::function<void(Msg)> dispatch) {
+                        [](jaal::Sink<Msg> out, std::stop_token) {
                             refresh_git_signals();
-                            dispatch(Msg{GitSignalsRefreshed{}});
+                            out.send(Msg{GitSignalsRefreshed{}});
                         });
                 }
                 return {std::move(m), std::move(git_cmd)};

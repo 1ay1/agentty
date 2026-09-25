@@ -520,9 +520,9 @@ Step submit_message(Model m) {
         // grounding is in the transcript. Here we only kick the retrieval.
         launch = Cmd::task_isolated(
             [probe = std::move(proactive_probe)]
-            (std::function<void(Msg)> dispatch) {
+            (jaal::Sink<Msg> out, std::stop_token) {
                 auto hit = tools::proactive_retrieve_blocking(probe, /*k=*/3);
-                dispatch(Msg{ProactiveContextReady{
+                out.send(Msg{ProactiveContextReady{
                     hit ? std::move(hit->block) : std::string{},
                     hit ? hit->confidence : -1.0}});
             });
@@ -550,7 +550,7 @@ Step submit_message(Model m) {
     if (checkpoint_to_create) {
         parts.push_back(Cmd::task_isolated(
             [id = std::move(*checkpoint_to_create)]
-            (std::function<void(Msg)>) {
+            (jaal::Sink<Msg>, std::stop_token) {
                 (void)workspace::create_checkpoint(id);
             }));
     }

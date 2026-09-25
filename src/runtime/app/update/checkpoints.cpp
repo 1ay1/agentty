@@ -108,7 +108,7 @@ Cmd load_all_diffs(const std::vector<cp::Entry>& entries) {
     for (int i = 0; i < static_cast<int>(entries.size()); ++i) {
         parts.push_back(Cmd::task_isolated(
             [i, id = entries[static_cast<std::size_t>(i)].id.value]
-            (std::function<void(Msg)> dispatch) {
+            (jaal::Sink<Msg> out, std::stop_token) {
                 auto d = workspace::checkpoint_summary(id);
                 CheckpointDiffLoaded ev;
                 ev.index         = i;
@@ -116,7 +116,7 @@ Cmd load_all_diffs(const std::vector<cp::Entry>& entries) {
                 ev.files_changed = d.files_changed;
                 ev.insertions    = d.insertions;
                 ev.deletions     = d.deletions;
-                dispatch(Msg{std::move(ev)});
+                out.send(Msg{std::move(ev)});
             }));
     }
     return parts.empty() ? Cmd::none() : Cmd::batch(std::move(parts));

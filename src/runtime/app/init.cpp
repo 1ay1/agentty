@@ -389,9 +389,9 @@ std::pair<Model, Cmd> init() {
     // a shared-pool slot forever and starve every later tool call. A wedged
     // isolated task leaks one thread instead.
     cmds.push_back(Cmd::task_isolated(
-        [](std::function<void(Msg)>) { prewarm_workspace_files(); }));
+        [](jaal::Sink<Msg>, std::stop_token) { prewarm_workspace_files(); }));
     cmds.push_back(Cmd::task_isolated(
-        [](std::function<void(Msg)>) { prewarm_workspace_symbols(); }));
+        [](jaal::Sink<Msg>, std::stop_token) { prewarm_workspace_symbols(); }));
 
     // Reclaim blobs no thread references any more (deleted threads,
     // replaced outputs). Once a day at most, 24 h grace so a save in

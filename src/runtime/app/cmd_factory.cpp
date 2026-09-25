@@ -1011,7 +1011,7 @@ Cmd launch_stream(Model& m) {
          model_context_window,
          auth = std::move(auth),
          cancel]
-        (std::function<void(Msg)> dispatch) mutable {
+        (jaal::Sink<Msg> out, std::stop_token) mutable {
         // Build wire payload off the UI thread.
         provider::Request req;
         req.model         = compacting ? std::move(compaction_model)
@@ -1344,7 +1344,7 @@ Cmd launch_stream(Model& m) {
         // from this worker.
         auto guarded = [dispatch, cancel](Msg m) {
             if (cancel && cancel->is_cancelled()) return;
-            dispatch(std::move(m));
+            out.send(Msg{std::move(m)});
         };
         try {
             // Pass `guarded` straight through as the EventSink instead of
@@ -1384,7 +1384,7 @@ Cmd run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args,
          args = std::move(args),
          cancel = std::move(cancel),
          exec_seq]
-        (std::function<void(Msg)> dispatch) {
+        (jaal::Sink<Msg> out, std::stop_token) {
             // Every result this worker sends carries its exec_seq, so the
             // reducer can drop it if the call it was started for is gone.
             auto out = [exec_seq](ToolExecOutput o) {
@@ -1398,8 +1398,8 @@ Cmd run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args,
             // inherit a stale dispatch lambda.
             agentty::tools::progress::Scope progress_scope{
                 [dispatch, id, exec_seq](std::string_view snapshot) {
-                    dispatch(ToolExecProgress{id, std::string{snapshot},
-                                              exec_seq});
+                    out.send(Msg{ToolExecProgress{id, std::string{snapshot},
+                                              exec_seq}});
                 }};
             agentty::tools::cancellation::Scope cancellation_scope{
                 [cancel] { return cancel && cancel->is_cancelled(); }};
@@ -1413,9 +1413,9 @@ Cmd run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args,
                 if (auto pre = tools::hooks::run_pre_tool(name.value,
                                                           args_dump);
                     pre.blocked) {
-                    dispatch(out(ToolExecOutput{id, std::unexpected(
+                    out.send(Msg{out(ToolExecOutput{id, std::unexpected(
                         tools::ToolError::unknown(
-                            "blocked by pre_tool hook: " + pre.reason))}));
+                            "blocked by pre_tool hook: " + pre.reason))})});
                     return;
                 }
                 const auto t_start = std::chrono::steady_clock::now();
@@ -1469,13 +1469,13 @@ Cmd run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args,
                     // Carry the structured FileChange(s) — single-file (edit/
                     // write/apply_patch) via change, multi-file (replace) via
                     // changes — into the reducer for diff-review.
-                    dispatch(out(ToolExecOutput{id, std::move(result->text),
+                    out.send(Msg{out(ToolExecOutput{id, std::move(result->text),
                                             std::move(result->change),
                                             std::move(result->changes),
-                                            std::move(result->images)}));
+                                            std::move(result->images)})});
                 } else {
-                    dispatch(out(ToolExecOutput{id,
-                        std::unexpected(std::move(result).error())}));
+                    out.send(Msg{out(ToolExecOutput{id,
+                        std::unexpected(std::move(result).error())})});
                 }
             } catch (const std::exception& e) {
                 // DynamicDispatch already catches tool exceptions, but guard
@@ -1483,12 +1483,12 @@ Cmd run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args,
                 // the tool never gets stuck in Running with no terminal Msg.
                 AGT_LOG(Tool, Error, "tool.dispatch_throw", "name={} err={}",
                         name.value, e.what());
-                dispatch(out(ToolExecOutput{id, std::unexpected(
+                out.send(Msg{out(ToolExecOutput{id, std::unexpected(
                     tools::ToolError::unknown(
-                        std::string{"dispatch error: "} + e.what()))}));
+                        std::string{"dispatch error: "} + e.what()))})});
             } catch (...) {
-                dispatch(out(ToolExecOutput{id, std::unexpected(
-                    tools::ToolError::unknown("dispatch error: unknown exception"))}));
+                out.send(Msg{out(ToolExecOutput{id, std::unexpected(
+                    tools::ToolError::unknown("dispatch error: unknown exception"))})});
             }
         });
 }
@@ -2045,7 +2045,7 @@ Cmd check_for_update() {
 
 Cmd perform_self_update(std::string version) {
     return Cmd::task([version = std::move(version)](
-                              std::function<void(Msg)> dispatch) {
+                              jaal::Sink<Msg> out, std::stop_token) {
         try {
             // Throttle: the HTTP layer calls back per chunk, which is
             // thousands of times for a ~15 MB asset. Dispatching each one
@@ -2063,16 +2063,16 @@ Cmd perform_self_update(std::string version) {
                     if (!finished && now - last < std::chrono::milliseconds{100})
                         return;
                     last = now;
-                    dispatch(Msg{msg::MetaMsg{UpdateProgress{got, total}}});
+                    out.send(Msg{msg::MetaMsg{UpdateProgress{got, total}}});
                 });
             if (err.empty())
-                dispatch(Msg{UpdateApplied{true, version}});
+                out.send(Msg{UpdateApplied{true, version}});
             else
-                dispatch(Msg{UpdateApplied{false, std::move(err)}});
+                out.send(Msg{UpdateApplied{false, std::move(err)}});
         } catch (const std::exception& e) {
-            dispatch(Msg{UpdateApplied{false, e.what()}});
+            out.send(Msg{UpdateApplied{false, e.what()}});
         } catch (...) {
-            dispatch(Msg{UpdateApplied{false, "unknown error"}});
+            out.send(Msg{UpdateApplied{false, "unknown error"}});
         }
     });
 }
@@ -2167,7 +2167,7 @@ Cmd probe_model_window(std::string model_id) {
          // the UI thread swaps on a provider switch.
          auth = auth_snapshot(),
          for_provider = detail::active_provider_id()](
-            std::function<void(Msg)> dispatch) {
+            jaal::Sink<Msg> out, std::stop_token) {
             int w = 0;
             try {
                 w = provider::openai::probe_loaded_window(auth, endpoint,
@@ -2175,7 +2175,7 @@ Cmd probe_model_window(std::string model_id) {
             } catch (...) {}
             AGT_LOG(Wire, Info, "models.window_probe", "provider={} model={} window={}",
                     for_provider, model_id, w);
-            dispatch(ModelWindowProbed{for_provider, model_id, w});
+            out.send(Msg{ModelWindowProbed{for_provider, model_id, w}});
         });
 }
 
@@ -2188,7 +2188,7 @@ Cmd fetch_models_for(std::string spec) {
     // against a provider signed out mid-fetch). list_models_for falls back to
     // the bundled seed on empty auth / unreachable host, so this is fast and
     // non-empty for hosted providers even before a live fetch succeeds.
-    return Cmd::task([spec = std::move(spec)](std::function<void(Msg)> dispatch) {
+    return Cmd::task([](jaal::Sink<Msg> out, std::stop_token, std::string spec) {
         try {
             auto sel = provider::parse_selection(spec);
             // Resolve credentials for THIS spec — not auth_snapshot(), which
@@ -2201,24 +2201,24 @@ Cmd fetch_models_for(std::string spec) {
                     : std::string{provider::default_provider_id()};
             auto models = provider::list_models_for(
                 sel, provider::credentials::resolve(pid));
-            dispatch(FusedCatalogLoaded{spec, std::move(models), true});
+            out.send(Msg{FusedCatalogLoaded{spec, std::move(models), true}});
         } catch (...) {
-            dispatch(FusedCatalogLoaded{spec, std::vector<ModelInfo>{}, false});
+            out.send(Msg{FusedCatalogLoaded{spec, std::vector<ModelInfo>{}, false}});
         }
-    });
+    }, std::move(spec));
 }
 
 Cmd open_browser_async(std::string url) {
     // task_isolated rather than task: posix_spawn / ShellExecute can
     // wedge on a hung WindowServer or a bizarre default-opener.
     // Isolated thread keeps a wedge from starving the shared BG pool.
-    return Cmd::task_isolated([url = std::move(url)]
-                                   (std::function<void(Msg)>) {
-        // No dispatch — the reducer doesn't care whether the browser
+    return Cmd::task_isolated([](jaal::Sink<Msg>, std::stop_token,
+                                 std::string url) {
+        // No send — the reducer doesn't care whether the browser
         // launched. The user can always paste auth_url manually from
         // the modal if their default opener is broken.
         auth::open_browser(url);
-    });
+    }, std::move(url));
 }
 
 Cmd oauth_exchange(auth::OAuthCode    code,
@@ -2228,18 +2228,18 @@ Cmd oauth_exchange(auth::OAuthCode    code,
         [code = std::move(code),
          verifier = std::move(verifier),
          state = std::move(state)]
-        (std::function<void(Msg)> dispatch) {
+        (jaal::Sink<Msg> out, std::stop_token) {
             try {
                 auto r = auth::exchange_code(code, verifier, state);
-                dispatch(LoginExchanged{std::move(r)});
+                out.send(Msg{LoginExchanged{std::move(r)}});
             } catch (const std::exception& e) {
-                dispatch(LoginExchanged{std::unexpected(auth::OAuthError{
+                out.send(Msg{LoginExchanged{std::unexpected(auth::OAuthError{
                     auth::OAuthErrorKind::Network,
-                    std::string{"exchange threw: "} + e.what()})});
+                    std::string{"exchange threw: "} + e.what()})}});
             } catch (...) {
-                dispatch(LoginExchanged{std::unexpected(auth::OAuthError{
+                out.send(Msg{LoginExchanged{std::unexpected(auth::OAuthError{
                     auth::OAuthErrorKind::Network,
-                    "exchange threw: unknown exception"})});
+                    "exchange threw: unknown exception"})}});
             }
         });
 }
@@ -2250,16 +2250,16 @@ Cmd load_threads_async() {
     // `nlohmann::json::parse` per file). Isolating it keeps the shared
     // worker pool free for stream / tool tasks the user fires in the
     // meantime.
-    return Cmd::task_isolated([](std::function<void(Msg)> dispatch) {
+    return Cmd::task_isolated([](jaal::Sink<Msg> out, std::stop_token) {
         try {
             auto threads = deps().load_threads();
-            dispatch(ThreadsLoaded{std::move(threads)});
+            out.send(Msg{ThreadsLoaded{std::move(threads)}});
         } catch (...) {
             // Best-effort: a corrupt file is already logged + skipped
             // by load_all_threads, so any throw here is something the
             // user can't act on. Dispatch an empty list so the UI
             // doesn't sit on "loading…" forever.
-            dispatch(ThreadsLoaded{std::vector<Thread>{}});
+            out.send(Msg{ThreadsLoaded{std::vector<Thread>{}}});
         }
     });
 }
@@ -2273,7 +2273,7 @@ Cmd load_plugins_async(bool reconnect) {
     // m.ui.plugins — the view reads THAT, never the global pool. This is the
     // Cmd→Msg discipline that makes the panel a pure function of the Model.
     return Cmd::task_isolated(
-        [reconnect](std::function<void(Msg)> dispatch) {
+        [reconnect](jaal::Sink<Msg> out, std::stop_token) {
             if (reconnect) {
                 // Force the connect. On a COLD start nothing has accessed the
                 // registry yet, so the pool is unbuilt — touching registry()
@@ -2284,7 +2284,7 @@ Cmd load_plugins_async(bool reconnect) {
                 (void)tools::registry();
                 (void)tools::reload_mcp_plugins();
             }
-            dispatch(PluginsUpdated{mcp::plugin_model()});
+            out.send(Msg{PluginsUpdated{mcp::plugin_model()}});
         });
 }
 
@@ -2295,20 +2295,20 @@ Cmd load_thread_async(ThreadId id) {
     // the load_threads_async policy and keeps the per-thread parse
     // off the same pool that tools/stream contend for.
     return Cmd::task_isolated(
-        [id = std::move(id)](std::function<void(Msg)> dispatch) {
+        [id = std::move(id)](jaal::Sink<Msg> out, std::stop_token) {
             try {
                 auto loaded = deps().load_thread(id);
                 if (loaded) {
-                    dispatch(ThreadLoaded{std::move(*loaded)});
+                    out.send(Msg{ThreadLoaded{std::move(*loaded)}});
                 } else {
                     // Disk read / parse failure: surface an empty
                     // Thread so the reducer clears `thread_loading`
                     // and the UI doesn't sit stuck on the spinner.
                     // Reducer detects empty ThreadId == no swap.
-                    dispatch(ThreadLoaded{Thread{}});
+                    out.send(Msg{ThreadLoaded{Thread{}}});
                 }
             } catch (...) {
-                dispatch(ThreadLoaded{Thread{}});
+                out.send(Msg{ThreadLoaded{Thread{}}});
             }
         });
 }
@@ -2326,7 +2326,7 @@ Cmd probe_host_async(std::string spec, std::uint64_t attempt_id,
     // modal's "probing…" state resolves quickly either way.
     return Cmd::task([spec = std::move(spec), attempt_id,
                            auth = std::move(auth)]
-                          (std::function<void(Msg)> dispatch) {
+                          (jaal::Sink<Msg> out, std::stop_token) {
         HostProbed r;
         r.attempt_id = attempt_id;
         r.spec       = spec;
@@ -2404,7 +2404,7 @@ Cmd probe_host_async(std::string spec, std::uint64_t attempt_id,
         } catch (...) {
             r.error = "probe failed";
         }
-        dispatch(std::move(r));
+        out.send(Msg{std::move(r)});
     });
 }
 
@@ -2418,27 +2418,27 @@ Cmd device_login_async(std::string provider, std::string provider_label,
     // shutdown. Runs isolated because login() blocks while the user signs in.
     return Cmd::task_isolated(
         [provider = std::move(provider), provider_label = std::move(provider_label),
-         attempt_id, cancel = std::move(cancel)](std::function<void(Msg)> dispatch) {
+         attempt_id, cancel = std::move(cancel)](jaal::Sink<Msg> out, std::stop_token) {
         const auto cancelled = [cancel] {
             return cancel && cancel->load(std::memory_order_acquire);
         };
         auto emit_code = [&](std::string bare_url, std::string browser_url,
                              std::string user_code) {
-            dispatch(DeviceCodeReady{
+            out.send(Msg{DeviceCodeReady{
                 .provider = provider,
                 .attempt_id = attempt_id,
                 .verification_url = std::move(bare_url),
                 .browser_url = std::move(browser_url),
                 .user_code = std::move(user_code),
-            });
+            }});
         };
         auto done = [&](std::optional<std::string> error) {
-            dispatch(DeviceLoginDone{
+            out.send(Msg{DeviceLoginDone{
                 .provider = provider,
                 .provider_label = provider_label,
                 .attempt_id = attempt_id,
                 .error = std::move(error),
-            });
+            }});
         };
         try {
             // Each provider's login() shares the same shape (timeout,
@@ -2495,7 +2495,7 @@ Cmd codex_login_async(std::uint64_t attempt_id,
     // message carries attempt_id so a late worker cannot complete a newer
     // login, and Esc trips cancel for cooperative polling shutdown.
     return Cmd::task_isolated(
-        [attempt_id, cancel = std::move(cancel)](std::function<void(Msg)> dispatch) {
+        [attempt_id, cancel = std::move(cancel)](jaal::Sink<Msg> out, std::stop_token) {
         const auto cancelled = [cancel] {
             return cancel && cancel->load(std::memory_order_acquire);
         };
@@ -2503,30 +2503,30 @@ Cmd codex_login_async(std::uint64_t attempt_id,
             auto r = provider::chatgpt::codex_login(
                 900, [attempt_id, &dispatch](
                          const provider::chatgpt::CodexDeviceCode& code) {
-                    dispatch(CodexDeviceCodeReady{
+                    out.send(Msg{CodexDeviceCodeReady{
                         .attempt_id = attempt_id,
                         .verification_url = code.verification_url,
                         .user_code = code.user_code,
-                    });
+                    }});
                 }, cancelled);
-            dispatch(CodexLoginDone{
+            out.send(Msg{CodexLoginDone{
                 .attempt_id = attempt_id,
                 .result = std::move(r),
-            });
+            }});
         } catch (const std::exception& e) {
-            dispatch(CodexLoginDone{
+            out.send(Msg{CodexLoginDone{
                 .attempt_id = attempt_id,
                 .result = std::unexpected(auth::OAuthError{
                     auth::OAuthErrorKind::Network,
                     std::string{"ChatGPT login threw: "} + e.what()}),
-            });
+            }});
         } catch (...) {
-            dispatch(CodexLoginDone{
+            out.send(Msg{CodexLoginDone{
                 .attempt_id = attempt_id,
                 .result = std::unexpected(auth::OAuthError{
                     auth::OAuthErrorKind::Network,
                     "ChatGPT login threw: unknown exception"}),
-            });
+            }});
         }
     });
 }
@@ -2534,19 +2534,19 @@ Cmd codex_login_async(std::uint64_t attempt_id,
 Cmd refresh_oauth(std::string refresh_token) {
     return Cmd::task(
         [refresh_token = std::move(refresh_token)]
-        (std::function<void(Msg)> dispatch) {
+        (jaal::Sink<Msg> out, std::stop_token) {
             try {
                 auto r = auth::refresh_access_token_locked(
                     auth::RefreshToken{refresh_token});
-                dispatch(TokenRefreshed{std::move(r)});
+                out.send(Msg{TokenRefreshed{std::move(r)}});
             } catch (const std::exception& e) {
-                dispatch(TokenRefreshed{std::unexpected(auth::OAuthError{
+                out.send(Msg{TokenRefreshed{std::unexpected(auth::OAuthError{
                     auth::OAuthErrorKind::Network,
-                    std::string{"refresh threw: "} + e.what()})});
+                    std::string{"refresh threw: "} + e.what()})}});
             } catch (...) {
-                dispatch(TokenRefreshed{std::unexpected(auth::OAuthError{
+                out.send(Msg{TokenRefreshed{std::unexpected(auth::OAuthError{
                     auth::OAuthErrorKind::Network,
-                    "refresh threw: unknown exception"})});
+                    "refresh threw: unknown exception"})}});
             }
         });
 }

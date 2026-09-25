@@ -500,7 +500,7 @@ namespace runner_ui {
 
 [[nodiscard]] Cmd run_block_cmd(std::string command, cbp::BlockShell shell) {
     return Cmd::task_isolated(
-        [cmd = std::move(command), shell](std::function<void(Msg)> dispatch) {
+        [cmd = std::move(command), shell](jaal::Sink<Msg> out, std::stop_token) {
             const std::string wrapped = wrap_for_windows_shell(shell, cmd);
 
             // Windows parity for "what's happening while it runs": the
@@ -577,7 +577,7 @@ namespace runner_ui {
                 out(tail);
             }
 
-            dispatch(Msg{std::move(fin)});
+            out.send(Msg{std::move(fin)});
         });
 }
 

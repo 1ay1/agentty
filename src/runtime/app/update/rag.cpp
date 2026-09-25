@@ -338,9 +338,9 @@ Step rag_settings_update(Model m, msg::RagMsg rm) {
                     Cmd::task_isolated(
                         [probe_cfg = std::move(probe_cfg), key = std::move(key),
                          gen]
-                        (std::function<void(Msg)> dispatch) {
+                        (jaal::Sink<Msg> out, std::stop_token) {
                             const auto r = tools::rag_probe_embedder(probe_cfg, key);
-                            dispatch(Msg{RagEmbedTestDone{r.ok, r.dim,
+                            out.send(Msg{RagEmbedTestDone{r.ok, r.dim,
                                                           r.latency_ms, r.error,
                                                           gen}});
                         })};
