@@ -25,7 +25,6 @@
 #include "agentty/provider/prompt_policy.hpp"
 #include "agentty/provider/selection.hpp"
 #include "agentty/provider/credentials.hpp"
-#include "agentty/util/modelsdev.hpp"
 #include "agentty/util/logx.hpp"
 
 #if AGENTTY_MCP
@@ -2002,18 +2001,6 @@ Cmd<Msg> check_for_update() {
             util::dbglog("update.check", "non-std exception");
         }
         dispatch(Msg{UpdateCheckDone{}});
-    });
-}
-
-Cmd<Msg> refresh_modelsdev() {
-    return Cmd<Msg>::task_isolated([](std::function<void(Msg)>) {
-        // Fire-and-forget: registries are consulted at render/wire time, so
-        // there is no Msg to dispatch — the moment the fetch lands, the next
-        // frame's ladder/badges and the next request's clamp see it. Errors
-        // are swallowed; a metadata refresh must never surface as a failure.
-        try { (void)agentty::modelsdev::refresh(); }
-        catch (const std::exception& e) { util::dbglog("modelsdev.refresh", e.what()); }
-        catch (...) { util::dbglog("modelsdev.refresh", "non-std exception"); }
     });
 }
 
