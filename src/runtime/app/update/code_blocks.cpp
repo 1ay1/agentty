@@ -498,87 +498,102 @@ namespace runner_ui {
     return win_shell::powershell_command(body);
 }
 
-[[nodiscard]] Cmd run_block_cmd(std::string command, cbp::BlockShell shell) {
-    return Cmd::task_isolated(
-        [cmd = std::move(command), shell](jaal::Sink<Msg> out, std::stop_token) {
-            const std::string wrapped = wrap_for_windows_shell(shell, cmd);
+// The task BODY for the Windows runner. jaal requires a task body to capture
+// nothing (`TaskBody<Body, Msg, Args...>` resolves to a plain function
+// pointer), so everything it needs arrives as Sendable arguments after the
+// stop_token. This used to be a capturing lambda, which is why the msys2 leg
+// — the only CI lane with a compiler new enough to instantiate jaal's checks
+// — failed with "a task body must not capture anything" while MSVC reported
+// the same thing as a Sendable static_assert.
+//
+// The console-echo helper below is also deliberately NOT named `out`: the
+// Sink parameter owns that name, and shadowing it made `out.send(...)`
+// resolve to the echo lambda.
+static void run_block_body(jaal::Sink<Msg> out, std::stop_token,
+                           std::string cmd, cbp::BlockShell shell) {
+    const std::string wrapped = wrap_for_windows_shell(shell, cmd);
 
-            // Windows parity for "what's happening while it runs": the
-            // shared subprocess runner (run_command_s) is blocking and
-            // non-streaming — output only appears in the Result card at the
-            // end — so we can't tee live. But we CAN show the run is alive:
-            // print a header, spin a background thread that ticks an
-            // elapsed-time heartbeat (OSC-2 title + an in-place line;
-            // modern Windows Terminal / conhost with VT processing render
-            // both), run the command, then a footer. All decoration is
-            // console-only and never enters the captured buffer.
-            const bool con = (::_isatty(_fileno(stdout)) != 0);
-            auto out = [](const std::string& s) {
-                std::fputs(s.c_str(), stdout); std::fflush(stdout);
-            };
-            if (con) {
-                out("\x1b[2m\n╭─ running ─ (output shown when it finishes) ─────\x1b[0m\n"
-                    "\x1b[36m$ \x1b[0m\x1b[1m" + cmd + "\x1b[0m\n");
-            }
+    // Windows parity for "what's happening while it runs": the
+    // shared subprocess runner (run_command_s) is blocking and
+    // non-streaming — output only appears in the Result card at the
+    // end — so we can't tee live. But we CAN show the run is alive:
+    // print a header, spin a background thread that ticks an
+    // elapsed-time heartbeat (OSC-2 title + an in-place line;
+    // modern Windows Terminal / conhost with VT processing render
+    // both), run the command, then a footer. All decoration is
+    // console-only and never enters the captured buffer.
+    const bool con = (::_isatty(_fileno(stdout)) != 0);
+    auto echo = [](const std::string& s) {
+        std::fputs(s.c_str(), stdout); std::fflush(stdout);
+    };
+    if (con) {
+        echo("\x1b[2m\n╭─ running ─ (output shown when it finishes) ─────\x1b[0m\n"
+             "\x1b[36m$ \x1b[0m\x1b[1m" + cmd + "\x1b[0m\n");
+    }
 
-            std::string label = cmd.substr(0, cmd.find_first_of(" \t\n"));
-            if (label.size() > 24) label.resize(24);
-            std::atomic<bool> done_flag{false};
-            std::thread ticker;
-            if (con) {
-                ticker = std::thread([&done_flag, label] {
-                    static constexpr const char* kSpin[] =
-                        {"⣷","⣯","⣟","⡿","⣾","⣽","⣻","⣷"};
-                    int spin = 0;
-                    const auto start = std::chrono::steady_clock::now();
-                    while (!done_flag.load(std::memory_order_relaxed)) {
-                        const long secs = static_cast<long>(
-                            std::chrono::duration_cast<std::chrono::seconds>(
-                                std::chrono::steady_clock::now() - start).count());
-                        std::string s = "\x1b]2;● " + std::to_string(secs)
-                                      + "s — " + label + " — agentty\x07";
-                        s += "\r\x1b[2K\x1b[2m" + std::string(kSpin[spin++ % 8])
-                           + " running… " + std::to_string(secs) + "s\x1b[0m";
-                        std::fputs(s.c_str(), stdout); std::fflush(stdout);
-                        std::this_thread::sleep_for(std::chrono::milliseconds(250));
-                    }
-                });
-            }
-
+    std::string label = cmd.substr(0, cmd.find_first_of(" \t\n"));
+    if (label.size() > 24) label.resize(24);
+    std::atomic<bool> done_flag{false};
+    std::thread ticker;
+    if (con) {
+        ticker = std::thread([&done_flag, label] {
+            static constexpr const char* kSpin[] =
+                {"⣷","⣯","⣟","⡿","⣾","⣽","⣻","⣷"};
+            int spin = 0;
             const auto start = std::chrono::steady_clock::now();
-            auto r = tools::util::run_command_s(wrapped);
-            const long secs = static_cast<long>(
-                std::chrono::duration_cast<std::chrono::seconds>(
-                    std::chrono::steady_clock::now() - start).count());
-
-            done_flag.store(true, std::memory_order_relaxed);
-            if (ticker.joinable()) ticker.join();
-
-            CodeBlockRunFinished fin;
-            fin.command   = cmd;   // show the ORIGINAL body in the card
-            fin.timed_out = r.timed_out;
-            if (!r.started) {
-                fin.output    = "[failed to start: " + r.start_error + "]";
-                fin.exit_code = -1;
-            } else {
-                fin.output    = std::move(r.output);
-                fin.exit_code = r.exit_code;
-                if (r.truncated) fin.output += "\n[output truncated]";
+            while (!done_flag.load(std::memory_order_relaxed)) {
+                const long secs = static_cast<long>(
+                    std::chrono::duration_cast<std::chrono::seconds>(
+                        std::chrono::steady_clock::now() - start).count());
+                std::string s = "\x1b]2;● " + std::to_string(secs)
+                              + "s — " + label + " — agentty\x07";
+                s += "\r\x1b[2K\x1b[2m" + std::string(kSpin[spin++ % 8])
+                   + " running… " + std::to_string(secs) + "s\x1b[0m";
+                std::fputs(s.c_str(), stdout); std::fflush(stdout);
+                std::this_thread::sleep_for(std::chrono::milliseconds(250));
             }
-
-            if (con) {
-                const bool ok = (fin.exit_code == 0 && !r.timed_out);
-                std::string tail = "\r\x1b[2K\x1b]2;\x07";   // wipe hb + restore title
-                tail += ok ? "\x1b[32m╰─ ✓ done"
-                     : r.timed_out ? "\x1b[33m╰─ ■ timed out"
-                     : "\x1b[31m╰─ ✗ failed";
-                tail += "\x1b[0m\x1b[2m  exit " + std::to_string(fin.exit_code)
-                      + "  ·  " + std::to_string(secs) + "s\x1b[0m\n";
-                out(tail);
-            }
-
-            out.send(Msg{std::move(fin)});
         });
+    }
+
+    const auto start = std::chrono::steady_clock::now();
+    auto r = tools::util::run_command_s(wrapped);
+    const long secs = static_cast<long>(
+        std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now() - start).count());
+
+    done_flag.store(true, std::memory_order_relaxed);
+    if (ticker.joinable()) ticker.join();
+
+    CodeBlockRunFinished fin;
+    fin.command   = cmd;   // show the ORIGINAL body in the card
+    fin.timed_out = r.timed_out;
+    if (!r.started) {
+        fin.output    = "[failed to start: " + r.start_error + "]";
+        fin.exit_code = -1;
+    } else {
+        fin.output    = std::move(r.output);
+        fin.exit_code = r.exit_code;
+        if (r.truncated) fin.output += "\n[output truncated]";
+    }
+
+    if (con) {
+        const bool ok = (fin.exit_code == 0 && !r.timed_out);
+        std::string tail = "\r\x1b[2K\x1b]2;\x07";   // wipe hb + restore title
+        tail += ok ? "\x1b[32m╰─ ✓ done"
+             : r.timed_out ? "\x1b[33m╰─ ■ timed out"
+             : "\x1b[31m╰─ ✗ failed";
+        tail += "\x1b[0m\x1b[2m  exit " + std::to_string(fin.exit_code)
+              + "  ·  " + std::to_string(secs) + "s\x1b[0m\n";
+        echo(tail);
+    }
+
+    out.send(Msg{std::move(fin)});
+}
+
+[[nodiscard]] Cmd run_block_cmd(std::string command, cbp::BlockShell shell) {
+    // Body is a plain function; the command and shell ride along as Sendable
+    // arguments, which is what jaal's task contract asks for.
+    return Cmd::task_isolated(run_block_body, std::move(command), shell);
 }
 
 #endif

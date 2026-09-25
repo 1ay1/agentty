@@ -115,19 +115,22 @@ jobs:
           git submodule update --init --recursive --force
 
       - name: Install deps
-        # GCC 14 for C++26 (std::expected / std::format). Mirrors the local
-        # GCC toolchain; ubuntu-latest's default g++ can lag. Shared libs are
-        # fine — this isn't a distributable build.
+        # GCC 16 for C++26. maya vendors jaal, which needs structured binding
+        # packs (P1061) to see inside a struct for its Sendable checks —
+        # jaal/meta/fields.hpp is a hard #error without them. P1061 landed in
+        # GCC 16, so gcc-14 can no longer build this tree. g++-16 is not in
+        # the runner image; ubuntu-toolchain-r/test carries it.
         run: |
+          sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            g++-14 cmake ninja-build pkg-config ripgrep \
+            g++-16 cmake ninja-build pkg-config ripgrep \
             libssl-dev libnghttp2-dev zlib1g-dev
 
       - name: ccache
         uses: hendrikmuhs/ccache-action@v1.2
         with:
-          key: linux-gcc14-release
+          key: linux-gcc16-release
           # 2G was SMALLER THAN ONE BUILD's output. The post-job report read
           # "2.0 / 2.0 GB (99.96%), Cleanups: 60" — ccache evicted itself 60
           # times while compiling, so objects written early were gone before
@@ -161,8 +164,8 @@ jobs:
           echo "CCACHE_NOHASHDIR=1" >> "$GITHUB_ENV"
       - name: Configure
         env:
-          CC: gcc-14
-          CXX: g++-14
+          CC: gcc-16
+          CXX: g++-16
         # Stays Release + LTO so CI exercises the SAME optimized codegen the
         # shipped binary uses (an -O3/LTO-only miscompile must fail here, not
         # in release.yml). Speed comes from ccache: on a warm cache only the
@@ -232,14 +235,15 @@ jobs:
           git submodule update --init --recursive --force
       - name: Install deps
         run: |
+          sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            g++-14 cmake ninja-build pkg-config ripgrep \
+            g++-16 cmake ninja-build pkg-config ripgrep \
             libssl-dev libnghttp2-dev zlib1g-dev
       - name: ccache
         uses: hendrikmuhs/ccache-action@v1.2
         with:
-          key: linux-gcc14-asan-ubsan
+          key: linux-gcc16-asan-ubsan
           # 600M held LESS THAN ONE BUILD: "0.6 / 0.6 GB (97.97%), Cleanups:
           # 321" with a 5.47% hit rate — the cache evicted itself 321 times
           # and then missed on 415 of 439 compiles. It was pure overhead:
@@ -254,8 +258,8 @@ jobs:
           max-size: 3G
       - name: Configure (ASan + UBSan)
         env:
-          CC: gcc-14
-          CXX: g++-14
+          CC: gcc-16
+          CXX: g++-16
         run: |
           cmake -S . -B build-san -GNinja -DCMAKE_BUILD_TYPE=Debug \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
@@ -294,8 +298,8 @@ jobs:
         # set this; the TSan one was missed, so the lane only ever built
         # when the runner image happened to default to a new enough gcc.
         env:
-          CC: gcc-14
-          CXX: g++-14
+          CC: gcc-16
+          CXX: g++-16
         run: |
           cmake -S . -B build-tsan -GNinja -DCMAKE_BUILD_TYPE=Debug \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
@@ -486,12 +490,13 @@ jobs:
           git submodule update --init --recursive --force
       - name: Install deps
         run: |
+          sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends g++-14 cmake ninja-build
+          sudo apt-get install -y --no-install-recommends g++-16 cmake ninja-build
       - name: Configure fuzz harnesses (GCC asan+ubsan driver)
         env:
-          CC: gcc-14
-          CXX: g++-14
+          CC: gcc-16
+          CXX: g++-16
         run: |
           cmake -S mcp-cpp -B fuzzbuild -G Ninja \
             -DCMAKE_BUILD_TYPE=Debug \
