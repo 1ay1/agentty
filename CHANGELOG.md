@@ -4,6 +4,8 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.11] - 2026-09-25
+
 ### Performance
 - **Long threads no longer slow down as they grow.** A big thread got sluggish between turns even though the UI itself stayed responsive: the work done *per round* scaled with the whole transcript, so every extra turn made the next one slower. Four fixes, all measured on real threads:
   - **Saves only write what changed.** A save ran at the end of every round and rewrote the entire thread — re-encoding every message, fsyncing the full log, then parsing it all back (reading every blob) to verify. agentty now fingerprints each message, cuts the log at the first one that changed, and appends from there, verifying only the new lines. History-rewriting paths (compaction, fork, edit, rewind) and the first save of a thread still do a full write. Building the save no longer copies the transcript either, and the fingerprint pass hashes four independent lanes at once. On a 2519-message, 29 MB thread: **~1178 ms → ~4 ms per round**, and flat as the thread grows.
