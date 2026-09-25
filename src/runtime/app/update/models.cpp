@@ -446,7 +446,7 @@ auth::AuthHeader resolve_switch_auth(const std::string& spec) {
 // Records the target in the MRU either way (unless `record` is false, e.g. a
 // ^Tab ring-walk which must not reorder the MRU mid-cycle), and fires the
 // switch toast.
-Step switch_to_model_ref(Model m, const ModelRef& ref, bool record = true) {
+Cmd switch_to_model_ref(Model& m, const ModelRef& ref, bool record = true) {
     const std::string cur_pid = active_provider_id();
 
     if (ref.provider_id == cur_pid) {
@@ -468,8 +468,8 @@ Step switch_to_model_ref(Model m, const ModelRef& ref, bool record = true) {
         // catalog said (or say nothing until it's loaded). Re-check now; the
         // post-turn probe catches it once the first request loads it.
         auto probe = cmd::probe_model_window(m.d.model_id.value);
-        return {std::move(m), Cmd::batch(
-            std::move(toast), std::move(probe))};
+        return Cmd::batch(
+            std::move(toast), std::move(probe));
     }
 
     // Cross-provider — atomic switch through the ONE funnel, model pre-stashed.
@@ -477,14 +477,14 @@ Step switch_to_model_ref(Model m, const ModelRef& ref, bool record = true) {
     const std::string label = p ? std::string{p->label} : ref.provider_id;
     auth::AuthHeader auth = resolve_switch_auth(ref.provider_id);
     if (record) record_recent(m, ref.provider_id, ref.model_id);
-    return commit_provider_switch(std::move(m), ref.provider_id,
+    return commit_provider_switch(m, ref.provider_id,
                                   std::move(auth), label, ref.model_id);
 }
 
 // Route to the login flow for `provider_id`, popping to `origin` on Esc.
 // Used by a fused sign-in offer (un-authed provider row). Mirrors the entry
 // points ProvidersSelect uses for each auth style.
-Step open_login_for(Model m, const std::string& provider_id,
+Cmd open_login_for(Model& m, const std::string& provider_id,
                     const std::string& label, ui::login::Origin origin) {
     const provider::ProviderPreset* p = provider::preset_for(provider_id);
     if (p && p->oauth_native) {
@@ -494,7 +494,7 @@ Step open_login_for(Model m, const std::string& provider_id,
         pk.provider = provider_id;
         pk.origin   = std::move(origin);
         m.ui.login = std::move(pk);
-        return {std::move(m), Cmd::none()};
+        return Cmd::none();
     }
     // Hosted API-key (or Anthropic key): the API-key input, returning to the
     // fused picker on success.
@@ -503,14 +503,13 @@ Step open_login_for(Model m, const std::string& provider_id,
         .provider_label = label,
         .origin         = std::move(origin),
     };
-    return {std::move(m), Cmd::none()};
+    return Cmd::none();
 }
 
 } // namespace
 
-Step models_update(Model m, msg::ModelsMsg pm) {
+Cmd models_update(Model& m, msg::ModelsMsg pm) {
     using namespace agentty::msg;
-    auto done = [](Model mm) -> Step { return {std::move(mm), Cmd::none()}; };
 
     // Clamp the cursor to the current row count after any list change.
     auto clamp_cursor = [](Model& mm) {
@@ -523,7 +522,7 @@ Step models_update(Model m, msg::ModelsMsg pm) {
     };
 
     return std::visit(overload{
-        [&](OpenModels) -> Step {
+        [&](OpenModels) -> Cmd {
             hydrate_recents(m);
             if (auto* c = m.ui.panel.get<pn::Models>()) {
                 // Already open (the smart-mode hand-off descend()s the panel
@@ -562,13 +561,13 @@ Step models_update(Model m, msg::ModelsMsg pm) {
             if (!active_fresh) boot.push_back(cmd::fetch_models());
             boot.push_back(Cmd::after(std::chrono::milliseconds{120},
                                                  Msg{FusedRefreshOthers{}}));
-            return {std::move(m), Cmd::batch(std::move(boot))};
+            return Cmd::batch(std::move(boot));
         },
-        [&](ModelsRefresh) -> Step {
+        [&](ModelsRefresh) -> Cmd {
             // ^L — force a full live refresh: reset every catalog's freshness so
             // the active + deferred waves all refetch, regardless of TTL. The
             // manual escape hatch when the user wants the very latest now.
-            if (!m.ui.panel.get<pn::Models>()) return done(std::move(m));
+            if (!m.ui.panel.get<pn::Models>()) return Cmd::none();
             for (auto& c : m.d.provider_catalogs) c.loaded_at_ms = 0;
             const std::string apid = active_provider_id();
             std::vector<Cmd> boot;
@@ -581,16 +580,16 @@ Step models_update(Model m, msg::ModelsMsg pm) {
             auto toast = set_status_toast(m, "refreshing models\xe2\x80\xa6",
                                           std::chrono::seconds{2});
             boot.push_back(std::move(toast));
-            return {std::move(m), Cmd::batch(std::move(boot))};
+            return Cmd::batch(std::move(boot));
         },
-        [&](FusedRefreshOthers) -> Step {
+        [&](FusedRefreshOthers) -> Cmd {
             // Lazy second wave: refresh every OTHER authed provider whose live
             // catalog is STALE (older than the TTL), FAILED, or never fetched.
             // A recently-fetched Ready catalog is left alone so re-opening the
             // picker rapidly doesn't re-hammer every provider — but a catalog
             // that's been Ready a while IS refetched, so the list stays current
             // instead of freezing after its first load. No-op if closed.
-            if (!m.ui.panel.get<pn::Models>()) return done(std::move(m));
+            if (!m.ui.panel.get<pn::Models>()) return Cmd::none();
             const std::string active_pid = active_provider_id();
             const std::int64_t t = now_ms();
             std::vector<Cmd> fetches;
@@ -605,10 +604,10 @@ Step models_update(Model m, msg::ModelsMsg pm) {
                 c.state = ProviderCatalog::State::Loading;
                 fetches.push_back(cmd::fetch_models_for(c.provider_id));
             }
-            if (fetches.empty()) return done(std::move(m));
-            return {std::move(m), Cmd::batch(std::move(fetches))};
+            if (fetches.empty()) return Cmd::none();
+            return Cmd::batch(std::move(fetches));
         },
-        [&](CloseModels) -> Step {
+        [&](CloseModels) -> Cmd {
             m.d.fused_rows.clear();       // release the cache while closed
             if (m.ui.effort_dirty) { persist_settings(m); m.ui.effort_dirty = false; }
             // Esc unwinds one level — and that ONE path now covers slot-assign
@@ -619,16 +618,16 @@ Step models_update(Model m, msg::ModelsMsg pm) {
             // to reset. Revalidation (the form may be stale) is ascend()'s
             // job, one place for every SmartMode restore.
             ascend(m);
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ModelsMove e) -> Step {
+        [&](ModelsMove e) -> Cmd {
             if (auto* c = m.ui.panel.get<pn::Models>()) {
                 c->index += e.delta;
                 clamp_cursor(m);
             }
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ModelsJump e) -> Step {
+        [&](ModelsJump e) -> Cmd {
             if (auto* c = m.ui.panel.get<pn::Models>()) {
                 const int n = static_cast<int>(m.d.fused_rows.size());
                 // Page by a full viewport so PageUp/Down lands a screen away
@@ -644,9 +643,9 @@ Step models_update(Model m, msg::ModelsMsg pm) {
                 }
                 clamp_cursor(m);
             }
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ModelsFilterInput e) -> Step {
+        [&](ModelsFilterInput e) -> Cmd {
             if (auto* c = m.ui.panel.get<pn::Models>()) {
                 // Every printable — digits included — types into the query.
                 // ASCII only — model/provider ids are ASCII in practice.
@@ -659,18 +658,18 @@ Step models_update(Model m, msg::ModelsMsg pm) {
                     clamp_cursor(m);
                 }
             }
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ModelsFilterBackspace) -> Step {
+        [&](ModelsFilterBackspace) -> Cmd {
             if (auto* c = m.ui.panel.get<pn::Models>(); c && !c->query.empty()) {
                 c->query.pop_back();
                 c->index = 0;
                 rebuild_fused_rows(m, /*sync_sources=*/false);   // re-rank only
                 clamp_cursor(m);
             }
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](FusedCatalogLoaded e) -> Step {
+        [&](FusedCatalogLoaded e) -> Cmd {
             // Merge in place, guarded by provider_id (a provider signed out
             // mid-fetch is simply not in the list anymore).
             for (auto& c : m.d.provider_catalogs) {
@@ -708,15 +707,15 @@ Step models_update(Model m, msg::ModelsMsg pm) {
                 rebuild_fused_rows(m, /*sync_sources=*/false);
                 clamp_cursor(m);
             }
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ModelsToggleFavorite) -> Step {
+        [&](ModelsToggleFavorite) -> Cmd {
             auto* c = m.ui.panel.get<pn::Models>();
             if (!c || c->index < 0
                 || c->index >= static_cast<int>(m.d.fused_rows.size()))
-                return done(std::move(m));
+                return Cmd::none();
             const auto& row = m.d.fused_rows[static_cast<std::size_t>(c->index)];
-            if (row.is_signin_offer()) return done(std::move(m));
+            if (row.is_signin_offer()) return Cmd::none();
             auto& s = m.d.persisted;
             ModelId mid = row.model.id;
             auto it = std::find(s.favorite_models.begin(),
@@ -729,9 +728,9 @@ Step models_update(Model m, msg::ModelsMsg pm) {
             // (no re-sort — keep the cursor where it is).
             for (auto& r : m.d.fused_rows)
                 if (r.model.id == mid) r.model.favorite = now_fav;
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ModelsCycleEffort e) -> Step {
+        [&](ModelsCycleEffort e) -> Cmd {
             // ←/→ walks the reasoning-effort ladder of the HIGHLIGHTED model
             // (off → low → medium → high … within its caps), mutating the
             // GLOBAL m.d.effort LIVE — exactly like the classic model picker's
@@ -741,20 +740,20 @@ Step models_update(Model m, msg::ModelsMsg pm) {
             auto* c = m.ui.panel.get<pn::Models>();
             if (!c || c->index < 0
                 || c->index >= static_cast<int>(m.d.fused_rows.size()))
-                return done(std::move(m));
+                return Cmd::none();
             const auto& row = m.d.fused_rows[static_cast<std::size_t>(c->index)];
-            if (row.is_signin_offer()) return done(std::move(m));
+            if (row.is_signin_offer()) return Cmd::none();
             // Resolve under the ROW's provider — a Groq row highlighted while
             // Mistral is active must walk Groq's ladder, not Mistral's.
             const auto caps = resolved_caps(row.model.id.value,
                                             row.provider_id);
-            if (!effort_capable(caps)) return done(std::move(m));
+            if (!effort_capable(caps)) return Cmd::none();
             m.d.effort = cycle_effort(clamp_effort(m.d.effort, caps),
                                       e.delta, caps);
             m.ui.effort_dirty = true;
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ModelsCycleContext e) -> Step {
+        [&](ModelsCycleContext e) -> Cmd {
             // ^W steps the HIGHLIGHTED model's context-window override along
             // kContextLadder, wrapping. "auto" is rung 0, so a full lap
             // always returns to "let agentty decide" — the control clears
@@ -766,9 +765,9 @@ Step models_update(Model m, msg::ModelsMsg pm) {
             auto* c = m.ui.panel.get<pn::Models>();
             if (!c || c->index < 0
                 || c->index >= static_cast<int>(m.d.fused_rows.size()))
-                return done(std::move(m));
+                return Cmd::none();
             const auto& row = m.d.fused_rows[static_cast<std::size_t>(c->index)];
-            if (row.is_signin_offer()) return done(std::move(m));
+            if (row.is_signin_offer()) return Cmd::none();
 
             // Copy what we need BEFORE any rebuild: `row` is a reference
             // into m.d.fused_rows, and rebuild_fused_rows() below
@@ -867,18 +866,18 @@ Step models_update(Model m, msg::ModelsMsg pm) {
                 if (auto_win > 0)
                     note += " (" + ui::context_window_label(auto_win) + ")";
             }
-            return {std::move(m), set_status_toast(m, std::move(note))};
+            return set_status_toast(m, std::move(note));
         },
-        [&](ModelsToggleReasoning) -> Step {
+        [&](ModelsToggleReasoning) -> Cmd {
             // ^E flips the highlighted model's per-model reasoning OVERRIDE
             // through its tri-state (auto → ON → OFF → auto). Mirrors the
             // model picker so tuning survives the move to the fused surface.
             auto* c = m.ui.panel.get<pn::Models>();
             if (!c || c->index < 0
                 || c->index >= static_cast<int>(m.d.fused_rows.size()))
-                return done(std::move(m));
+                return Cmd::none();
             const auto& row = m.d.fused_rows[static_cast<std::size_t>(c->index)];
-            if (row.is_signin_offer()) return done(std::move(m));
+            if (row.is_signin_offer()) return Cmd::none();
             const std::string id = row.model.id.value;
             // Claude/GPT are FAMILY-GATED: their effort ladder is decoded from
             // the model family and is not user-editable, so an override here
@@ -893,7 +892,7 @@ Step models_update(Model m, msg::ModelsMsg pm) {
                     auto toast = set_status_toast(m,
                         "reasoning effort is model-managed here "
                         "(\xe2\x86\x90/\xe2\x86\x92 to set the tier)");
-                    return {std::move(m), std::move(toast)};
+                    return std::move(toast);
                 }
             }
             const int cur = reasoning_override_for(id);   // -1 auto, 0 off, 1 on
@@ -923,9 +922,9 @@ Step models_update(Model m, msg::ModelsMsg pm) {
             m.d.effort = clamp_effort(m.d.effort,
                                       resolved_caps(id, row.provider_id));
             auto toast = set_status_toast(m, label);
-            return {std::move(m), std::move(toast)};
+            return std::move(toast);
         },
-        [&](SwitchToPreviousModel) -> Step {
+        [&](SwitchToPreviousModel) -> Cmd {
             // ^Tab MRU cycle: walk the recent ring to progressively OLDER
             // models — A → B → C → D → A — not a single A↔B toggle. The switch
             // does NOT reorder the ring (record=false), so finding the active
@@ -935,7 +934,7 @@ Step models_update(Model m, msg::ModelsMsg pm) {
             // way to do Alt-Tab semantics here — no commit deadline needed.)
             hydrate_recents(m);
             const auto& ring = m.d.recent_models;
-            if (ring.size() < 2) return done(std::move(m));  // nothing to cycle
+            if (ring.size() < 2) return Cmd::none();  // nothing to cycle
             const ModelRef active{active_provider_id(), m.d.model_id.value};
             const int n = static_cast<int>(ring.size());
             int cur = 0;
@@ -954,14 +953,14 @@ Step models_update(Model m, msg::ModelsMsg pm) {
                 if (cand.empty()) continue;
                 if (mru_ref_is_live(m, cand, settings)) { target = cand; break; }
             }
-            if (target.empty()) return done(std::move(m));
-            return switch_to_model_ref(std::move(m), target, /*record=*/false);
+            if (target.empty()) return Cmd::none();
+            return switch_to_model_ref(m, target, /*record=*/false);
         },
-        [&](ModelsSelect) -> Step {
+        [&](ModelsSelect) -> Cmd {
             auto* c = m.ui.panel.get<pn::Models>();
             if (!c || c->index < 0
                 || c->index >= static_cast<int>(m.d.fused_rows.size()))
-                return done(std::move(m));
+                return Cmd::none();
             const FusedRow row = m.d.fused_rows[static_cast<std::size_t>(c->index)];
             // Copy the assign mode out BEFORE any close: `c` points into the
             // variant, and closing destroys the alternative (the old
@@ -976,7 +975,7 @@ Step models_update(Model m, msg::ModelsMsg pm) {
             if (row.is_signin_offer()) {
                 // Route to login for that provider, returning here after.
                 m.ui.panel.close<pn::Models>();
-                return open_login_for(std::move(m), row.provider_id,
+                return open_login_for(m, row.provider_id,
                                       row.label,
                                       ui::login::origin::Models{});
             }
@@ -1030,7 +1029,7 @@ Step models_update(Model m, msg::ModelsMsg pm) {
                 if (auto* sm = m.ui.panel.get<pn::SmartMode>())
                     smart_form::focus_role(sm->form, assigned);
                 auto toast = set_status_toast(m, "Smart Mode slot set");
-                return {std::move(m), std::move(toast)};
+                return std::move(toast);
             }
 
             // Ordinary pick: a COMPLETED selection means "done" — close
@@ -1038,9 +1037,9 @@ Step models_update(Model m, msg::ModelsMsg pm) {
             // pick that popped you back into the palette would feel like
             // the selection hadn't taken.)
             m.ui.panel.close<pn::Models>();
-            return switch_to_model_ref(std::move(m), row.ref());
+            return switch_to_model_ref(m, row.ref());
         },
-        [&](ModelsLoaded& e) -> Step {
+        [&](ModelsLoaded& e) -> Cmd {
             // STALENESS GATE: only accept a payload fetched FOR the provider
             // that is active NOW. Two quick switches interleave their slow
             // fetches; without this, provider A's late catalog lands under
@@ -1048,7 +1047,7 @@ Step models_update(Model m, msg::ModelsMsg pm) {
             // (Empty provider_id = legacy/synthetic dispatch — accept.)
             if (!e.provider_id.empty()
                 && e.provider_id != active_provider_id()) {
-                return done(std::move(m));   // keep models_loading: the
+                return Cmd::none();   // keep models_loading: the
                                              // newer fetch is still in flight
             }
             // The fetch finished (success OR failure) — always clear the
@@ -1060,9 +1059,9 @@ Step models_update(Model m, msg::ModelsMsg pm) {
             if (!e.error.empty()) {
                 auto toast = set_status_toast(m, std::move(e.error),
                                               std::chrono::seconds{6});
-                return {std::move(m), std::move(toast)};
+                return std::move(toast);
             }
-            if (e.models.empty()) return done(std::move(m));
+            if (e.models.empty()) return Cmd::none();
             auto& settings = m.d.persisted;
             // PERSIST-ON-SUCCESS: a custom --provider spec registered at
             // startup as unproven becomes sticky NOW — the host answered a
@@ -1178,20 +1177,20 @@ Step models_update(Model m, msg::ModelsMsg pm) {
                 else if (c->index >= n) c->index = n - 1;
                 else if (c->index < 0) c->index = 0;
             }
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ModelWindowProbed& e) -> Step {
+        [&](ModelWindowProbed& e) -> Cmd {
             // Stale (provider switched meanwhile) or nothing measured: keep
             // what we had. 0 just means the model wasn't resident yet.
             if (e.window <= 0 || e.provider_id != active_provider_id())
-                return done(std::move(m));
+                return Cmd::none();
             bool changed = false;
             for (auto& mi : m.d.available_models)
                 if (mi.id.value == e.model_id && mi.context_window != e.window) {
                     mi.context_window = e.window;
                     changed = true;
                 }
-            if (!changed) return done(std::move(m));
+            if (!changed) return Cmd::none();
             if (m.d.model_id.value == e.model_id)
                 m.s.context_max = resolved_context_max(m, e.provider_id);
             if (auto* c = m.ui.panel.get<pn::Models>()) {
@@ -1200,9 +1199,9 @@ Step models_update(Model m, msg::ModelsMsg pm) {
                 if (n == 0) c->index = 0;
                 else if (c->index >= n) c->index = n - 1;
             }
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ModelsToggleShowReasoning&) -> Step {
+        [&](ModelsToggleShowReasoning&) -> Cmd {
             // Flip whether the model's reasoning/thinking is SHOWN. Global (all
             // providers): renders the transcript reasoning block AND makes the
             // Anthropic transport request VISIBLE thinking. Persisted so it
@@ -1226,27 +1225,27 @@ Step models_update(Model m, msg::ModelsMsg pm) {
                     ? "reasoning: shown — needs an effort tier on this model "
                       "(\xe2\x86\x90/\xe2\x86\x92 in the picker)"
                     : "reasoning: shown (live thinking + \xe2\x9c\xa6 summary)");
-            return {std::move(m), std::move(toast)};
+            return std::move(toast);
         },
-        [&](ModelsScopeProvider&) -> Step {
+        [&](ModelsScopeProvider&) -> Cmd {
             // ^/ — restrict the list to ONLY the highlighted row's provider,
             // or clear the scope if it is already active. The selected row's
             // provider is "the current selection's provider" the user means.
             auto* c = m.ui.panel.get<pn::Models>();
-            if (!c) return done(std::move(m));
+            if (!c) return Cmd::none();
             if (!c->provider_scope.empty()) {
                 // Already scoped — toggle back to all providers.
                 c->provider_scope.clear();
                 rebuild_fused_rows(m);
                 clamp_cursor(m);
                 auto toast = set_status_toast(m, "scope: all providers");
-                return {std::move(m), std::move(toast)};
+                return std::move(toast);
             }
             const int n = static_cast<int>(m.d.fused_rows.size());
-            if (c->index < 0 || c->index >= n) return done(std::move(m));
+            if (c->index < 0 || c->index >= n) return Cmd::none();
             const auto& row = m.d.fused_rows[static_cast<std::size_t>(c->index)];
             // Sign-in offers / rows without a provider can't be scoped to.
-            if (row.provider_id.empty()) return done(std::move(m));
+            if (row.provider_id.empty()) return Cmd::none();
             const std::string pid   = row.provider_id;
             const std::string label = row.label.empty() ? pid : row.label;
             // (row is now dangling once rebuild_fused_rows reallocates the
@@ -1259,7 +1258,7 @@ Step models_update(Model m, msg::ModelsMsg pm) {
             clamp_cursor(m);
             auto toast = set_status_toast(
                 m, "scope: " + label + " only (^/ to clear)");
-            return {std::move(m), std::move(toast)};
+            return std::move(toast);
         },
     }, pm);
 }

@@ -107,7 +107,7 @@ bool tool_failed(const Model& m) {
 }
 
 Model tick(Model m) {
-    auto [next, _] = app::detail::meta_update(std::move(m), msg::MetaMsg{Tick{}});
+    auto [next, _] = ::agentty::app::detail::step(::agentty::app::detail::meta_update, std::move(m), msg::MetaMsg{Tick{}});
     return std::move(next);
 }
 

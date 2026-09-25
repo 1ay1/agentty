@@ -429,7 +429,7 @@ void mark_tool_rejected(Model& m, const ToolCallId& id,
 // prompt is always *about* a specific pending tool call and the resolution
 // feeds back into the tool state machine — no clean split.
 
-Step tool_update(Model m, msg::ToolMsg tm) {
+Cmd tool_update(Model& m, msg::ToolMsg tm) {
     using maya::overload;
 
     return std::visit(overload{
@@ -439,7 +439,7 @@ Step tool_update(Model m, msg::ToolMsg tm) {
         // and rely on the existing Tick subscription (active during
         // ExecutingTool) to re-render. Ignore if the tool has already
         // finalised (a late snapshot racing the terminal ToolExecOutput).
-        [&](ToolExecProgress& e) -> Step {
+        [&](ToolExecProgress& e) -> Cmd {
             // Frozen prefix is immutable — a late progress snapshot
             // for a turn that's already settled into m.ui.frozen
             // silently no-ops here.
@@ -489,11 +489,11 @@ Step tool_update(Model m, msg::ToolMsg tm) {
             // If the user is watching the Ctrl+O viewer, keep its Live row
             // (row 0) tailing this fresh output in place.
             resync_live_tool_viewer(m);
-            return done(std::move(m));
+            return Cmd::none();
         },
 
         // ── Per-tool wall-clock watchdog ──────────────────────────────────
-        [&](ToolTimeoutCheck& e) -> Step {
+        [&](ToolTimeoutCheck& e) -> Cmd {
             bool flipped = false;
             with_live_tool(m, e.id, [&](ToolUse& tc) {
                 if (tc.is_terminal()) return;
@@ -520,19 +520,19 @@ Step tool_update(Model m, msg::ToolMsg tm) {
                     tc.started_at(), now, std::move(reason)};
                 flipped = true;
             });
-            if (!flipped) return done(std::move(m));
+            if (!flipped) return Cmd::none();
             auto cmd = cmd::kick_pending_tools(m);
-            return {std::move(m), std::move(cmd)};
+            return std::move(cmd);
         },
 
         // ── Tool execution result ───────────────────────────────────────
-        [&](ToolExecOutput& e) -> Step {
+        [&](ToolExecOutput& e) -> Cmd {
             // A worker whose call was cancelled or settled; its id may now
             // belong to a different call. Drop it whole.
             if (!tool_exec_is_current(m, e.id, e.exec_seq)) {
                 AGT_LOG(Tool, Info, "tool.stale_result",
                         "id={} seq={} dropped", e.id.value, e.exec_seq);
-                return done(std::move(m));
+                return Cmd::none();
             }
             // todo's side effect on the UI's plan state — runs only
             // when the call actually succeeded; failures don't synthesise
@@ -601,19 +601,19 @@ Step tool_update(Model m, msg::ToolMsg tm) {
             // the output; StreamFinished → finalize_turn runs the normal
             // kick and finds this tool already terminal.
             if (m.s.is_streaming()) {
-                if (host_cmd.is_none()) return done(std::move(m));
-                return {std::move(m), std::move(host_cmd)};
+                if (host_cmd.is_none()) return Cmd::none();
+                return std::move(host_cmd);
             }
             auto kick = cmd::kick_pending_tools(m);
             if (host_cmd.is_none())
-                return {std::move(m), std::move(kick)};
-            return {std::move(m), Cmd::batch(
-                std::move(kick), std::move(host_cmd))};
+                return std::move(kick);
+            return Cmd::batch(
+                std::move(kick), std::move(host_cmd));
         },
 
         // ── Permission ──────────────────────────────────────────────
-        [&](PermissionApprove) -> Step {
-            if (!m.d.pending_permission) return done(std::move(m));
+        [&](PermissionApprove) -> Cmd {
+            if (!m.d.pending_permission) return Cmd::none();
             auto id = m.d.pending_permission->id;
             // Permission only ever fires against a tool in the live
             // tail — a frozen turn is by definition past every pending
@@ -630,18 +630,18 @@ Step tool_update(Model m, msg::ToolMsg tm) {
                 tc.status = ToolUse::Approved{tc.started_at()};
             });
             m.d.pending_permission.reset();
-            return {std::move(m), cmd::kick_pending_tools(m)};
+            return cmd::kick_pending_tools(m);
         },
-        [&](PermissionReject) -> Step {
-            if (!m.d.pending_permission) return done(std::move(m));
+        [&](PermissionReject) -> Cmd {
+            if (!m.d.pending_permission) return Cmd::none();
             auto id = m.d.pending_permission->id;
             mark_tool_rejected(m, id, "User rejected this tool call.");
             m.d.pending_permission.reset();
             auto cmd = cmd::kick_pending_tools(m);
-            return {std::move(m), std::move(cmd)};
+            return std::move(cmd);
         },
-        [&](PermissionApproveAlways) -> Step {
-            if (!m.d.pending_permission) return done(std::move(m));
+        [&](PermissionApproveAlways) -> Cmd {
+            if (!m.d.pending_permission) return Cmd::none();
             auto id   = m.d.pending_permission->id;
             auto name = m.d.pending_permission->tool_name;
             // Record a session-scoped grant for this tool NAME so every
@@ -672,7 +672,7 @@ Step tool_update(Model m, msg::ToolMsg tm) {
                 tc.status = ToolUse::Approved{tc.started_at()};
             });
             m.d.pending_permission.reset();
-            return {std::move(m), cmd::kick_pending_tools(m)};
+            return cmd::kick_pending_tools(m);
         },
     }, tm);
 }

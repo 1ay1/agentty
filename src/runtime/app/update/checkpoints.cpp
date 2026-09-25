@@ -188,12 +188,7 @@ Cmd checkpoint_update(Model& m, msg::CheckpointMsg cm) {
             // Idle, restores files on an isolated worker, then truncates the
             // transcript + refills the composer in CheckpointRestored.
             // RestoreCheckpoint lives in the META domain, not this one.
-            // meta_update still returns a pair, so take its model back;
-            // that unpacking goes away when meta converts.
-            auto [next, cmd] = meta_update(
-                std::move(m), msg::MetaMsg{RestoreCheckpoint{std::move(id)}});
-            m = std::move(next);
-            return std::move(cmd);
+            return meta_update(m, msg::MetaMsg{RestoreCheckpoint{std::move(id)}});
         },
     }, cm);
 }

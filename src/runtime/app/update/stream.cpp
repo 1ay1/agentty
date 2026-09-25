@@ -481,8 +481,7 @@ Cmd finalize_turn(Model& m, StopReason stop_reason) {
             m.ui.composer.attachments = std::move(head.attachments);
             m.ui.composer.cursor      = static_cast<int>(m.ui.composer.text.size());
             m.ui.composer.queued.erase(m.ui.composer.queued.begin());
-            auto [mm, sub_cmd] = submit_message(std::move(m));
-            m = std::move(mm);
+            auto sub_cmd = submit_message(m);
             return sub_cmd;
         }
         if (m.s.status.empty()) return Cmd::none();
@@ -905,8 +904,7 @@ Cmd finalize_turn(Model& m, StopReason stop_reason) {
         m.ui.composer.attachments = std::move(head.attachments);
         m.ui.composer.cursor      = static_cast<int>(m.ui.composer.text.size());
         m.ui.composer.queued.erase(m.ui.composer.queued.begin());
-        auto [mm, sub_cmd] = submit_message(std::move(m));
-        m = std::move(mm);
+        auto sub_cmd = submit_message(m);
         return Cmd::batch(std::move(kp), std::move(sub_cmd));
     }
 
@@ -935,8 +933,7 @@ Cmd finalize_turn(Model& m, StopReason stop_reason) {
         m.ui.composer.text        = m.ui.composer.loop_text;
         m.ui.composer.attachments = m.ui.composer.loop_attachments;
         m.ui.composer.cursor      = static_cast<int>(m.ui.composer.text.size());
-        auto [mm, sub_cmd] = submit_message(std::move(m));
-        m = std::move(mm);
+        auto sub_cmd = submit_message(m);
         // submit drained the composer — restore the armed payload so the box
         // keeps DISPLAYING what is on repeat between iterations. The composer
         // is read-only while looping, so this is a status readout, not a
@@ -1114,7 +1111,7 @@ Cmd finalize_turn(Model& m, StopReason stop_reason) {
 // Every event handler bumps `last_event_at` so the Tick-based stall watchdog
 // can tell "stream is alive but quiet" from "stream is stalled."
 
-Step stream_update(Model m, msg::StreamMsg sm) {
+Cmd stream_update(Model& m, msg::StreamMsg sm) {
     using maya::overload;
 
     // Every provider addresses tool stream updates by stable ToolCallId. This
@@ -1141,7 +1138,7 @@ Step stream_update(Model m, msg::StreamMsg sm) {
     };
 
     return std::visit(overload{
-        [&](StreamStarted) -> Step {
+        [&](StreamStarted) -> Cmd {
             auto now = std::chrono::steady_clock::now();
             // Stamp the last-request clock for the idle cache-lapse
             // pre-compaction trigger (StreamState::should_compact_on_idle).
@@ -1188,9 +1185,9 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                 last.served_role  = m.s.smart_turn_role;
                 m.ui.view_cache.drop(m.d.current.id, last.id);
             }
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](StreamTextDelta& e) -> Step {
+        [&](StreamTextDelta& e) -> Cmd {
             auto now = std::chrono::steady_clock::now();
             if (auto* a = active_ctx(m.s.phase)) {
                 a->last_event_at = now;
@@ -1256,7 +1253,7 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                     if (e.text.size() <= room) m.s.compaction_buffer += e.text;
                     else m.s.compaction_buffer.append(e.text, 0, room);
                 }
-                return done(std::move(m));
+                return Cmd::none();
             }
             if (!m.d.current.messages.empty()
                 && m.d.current.messages.back().role == Role::Assistant) {
@@ -1309,9 +1306,9 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                 // in meta.cpp so server bursts reveal smoothly instead of
                 // jumping in.
             }
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](StreamTextBlockClosed) -> Step {
+        [&](StreamTextBlockClosed) -> Cmd {
             // The wire closed the assistant's TEXT content block. This is
             // the earliest authoritative "model finished typing prose"
             // signal and ALWAYS precedes a tool_use content_block_start, so
@@ -1331,9 +1328,9 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                 && m.d.current.messages.back().role == Role::Assistant) {
                 m.d.current.messages.back().text_block_closed = true;
             }
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](StreamToolUseStart& e) -> Step {
+        [&](StreamToolUseStart& e) -> Cmd {
             auto now = std::chrono::steady_clock::now();
             if (auto* a = active_ctx(m.s.phase)) {
                 a->last_event_at = now;
@@ -1370,9 +1367,9 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                 // StreamError handler, which clears the in-flight tools.
             }
             resync_live_tool_viewer(m);
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](StreamToolUseDelta& e) -> Step {
+        [&](StreamToolUseDelta& e) -> Cmd {
             auto now = std::chrono::steady_clock::now();
             if (auto* a = active_ctx(m.s.phase)) {
                 a->last_event_at = now;
@@ -1416,9 +1413,9 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                 }
             }
             resync_live_tool_viewer(m);
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](StreamToolUseSnapshot& e) -> Step {
+        [&](StreamToolUseSnapshot& e) -> Cmd {
             auto now = std::chrono::steady_clock::now();
             if (auto* a = active_ctx(m.s.phase)) {
                 a->last_event_at = now;
@@ -1446,9 +1443,9 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                 if (tc->name == "todo") sync_todo_state_from_args(m, tc->args);
             }
             resync_live_tool_viewer(m);
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](StreamToolUseEnd& e) -> Step {
+        [&](StreamToolUseEnd& e) -> Cmd {
             if (auto* a = active_ctx(m.s.phase))
                 a->last_event_at = std::chrono::steady_clock::now();
             if (auto* tcp = find_streaming_tool(e.id)) {
@@ -1560,15 +1557,14 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                         auto cancel = active_ctx(m.s.phase)
                             ? active_ctx(m.s.phase)->cancel
                             : http::CancelTokenPtr{};
-                        return {std::move(m),
-                                cmd::run_tool(tc2.id, tc2.name, tc2.args,
-                                              std::move(cancel), seq)};
+                        return cmd::run_tool(tc2.id, tc2.name, tc2.args,
+                                              std::move(cancel), seq);
                     }
                 }
             }
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](StreamObservedToolResult& e) -> Step {
+        [&](StreamObservedToolResult& e) -> Cmd {
             if (auto* a = active_ctx(m.s.phase))
                 a->last_event_at = std::chrono::steady_clock::now();
             if (auto* tc = find_streaming_tool(e.id)) {
@@ -1585,9 +1581,9 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                                                std::move(output)};
             }
             resync_live_tool_viewer(m);
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](StreamThinkingDelta& e) -> Step {
+        [&](StreamThinkingDelta& e) -> Cmd {
             // Adaptive-thinking block delta. Two shapes arrive: a
             // `thinking_delta` carries reasoning text (usually empty under
             // display:omitted), a `signature_delta` carries the opaque
@@ -1605,7 +1601,7 @@ Step stream_update(Model m, msg::StreamMsg sm) {
             }
             // Captured for replay only — never rendered, and there's no
             // assistant placeholder to attach to during compaction.
-            if (m.s.compacting) return done(std::move(m));
+            if (m.s.compacting) return Cmd::none();
             if (!m.d.current.messages.empty()
                 && m.d.current.messages.back().role == Role::Assistant) {
                 auto& msg = m.d.current.messages.back();
@@ -1652,17 +1648,17 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                     msg.thinking_signature = blk.signature;
                 }
             }
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](StreamReasoning& e) -> Step {
+        [&](StreamReasoning& e) -> Cmd {
             // Codex/Responses reasoning item completed: stash its opaque
             // encrypted_content on the in-flight assistant message so the
             // next request replays it in input[] (preserves chain-of-thought
             // across tool rounds under store:false). Wire-only, never shown.
             if (auto* a = active_ctx(m.s.phase))
                 a->last_event_at = std::chrono::steady_clock::now();
-            if (m.s.compacting) return done(std::move(m));
-            if (e.encrypted.empty()) return done(std::move(m));
+            if (m.s.compacting) return Cmd::none();
+            if (e.encrypted.empty()) return Cmd::none();
             if (!m.d.current.messages.empty()
                 && m.d.current.messages.back().role == Role::Assistant) {
                 auto& msg = m.d.current.messages.back();
@@ -1683,9 +1679,9 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                     msg.reasoning_encrypted += e.encrypted;
                 }
             }
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](StreamUsage& e) -> Step {
+        [&](StreamUsage& e) -> Cmd {
             if (auto* a = active_ctx(m.s.phase))
                 a->last_event_at = std::chrono::steady_clock::now();
             // Suppress token writes during compaction. The compaction
@@ -1701,7 +1697,7 @@ Step stream_update(Model m, msg::StreamMsg sm) {
             // them in place gives a more honest "what's the model
             // actually carrying right now" reading until the next real
             // turn settles.
-            if (m.s.compacting) return done(std::move(m));
+            if (m.s.compacting) return Cmd::none();
             // `input_tokens` from Anthropic is the FULL prefix for this
             // request, NOT the delta. Accumulating across turns triple-counted
             // by turn 5. Replace, don't add. Cache fields are excluded from
@@ -1792,9 +1788,9 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                             static_cast<std::uint32_t>(e.cache_creation_input_tokens);
                 }
             }
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](StreamHeartbeat e) -> Step {
+        [&](StreamHeartbeat e) -> Cmd {
             // No payload or UI effect. Both heartbeat classes refresh the
             // stall clock. Only a real SSE/model heartbeat resets retries;
             // HTTP control traffic proves the path is open, not that the
@@ -1807,9 +1803,9 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                     a->transient_retries = 0;
                 }
             }
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](StreamBufferedWait) -> Step {
+        [&](StreamBufferedWait) -> Cmd {
             if (auto* a = active_ctx(m.s.phase)) {
                 a->last_event_at = std::chrono::steady_clock::now();
                 a->transport_activity = true;
@@ -1817,9 +1813,9 @@ Step stream_update(Model m, msg::StreamMsg sm) {
             m.s.status = "network gateway is buffering output \xE2\x80\x94 waiting\xE2\x80\xA6";
             m.s.status_until = std::chrono::steady_clock::now()
                              + std::chrono::seconds{20};
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](StreamFinished e) -> Step {
+        [&](StreamFinished e) -> Cmd {
             // Which model just ran: the compaction model for a compaction
             // turn (finalize_turn clears the flag, so read it first).
             std::string ran_model = m.d.model_id.value;
@@ -1856,9 +1852,9 @@ Step stream_update(Model m, msg::StreamMsg sm) {
             // top. With the arming gone, the keypress takes the normal
             // diff path and the composer stays where the shrink left
             // it (no "pull down," no duplicate).
-            return {std::move(m), std::move(cmd)};
+            return std::move(cmd);
         },
-        [&](StreamError& e) -> Step {
+        [&](StreamError& e) -> Cmd {
             // THE seam where a failure becomes something the user sees.
             // Logged with the classification that drives what happens next
             // (retry vs surface vs drop to Idle), so a "why did it give up?"
@@ -1878,7 +1874,7 @@ Step stream_update(Model m, msg::StreamMsg sm) {
             // subsequent ones that arrive before that retry runs,
             // otherwise we'd race two worker threads into the same
             // session.
-            if (m.s.in_scheduled()) return done(std::move(m));
+            if (m.s.in_scheduled()) return Cmd::none();
 
             // Compaction failed mid-flight (rate limit, network drop,
             // etc.). Compaction is wire-only — nothing was ever pushed
@@ -1964,9 +1960,8 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                             ++c.no_progress_failures;   // see the latch above
                             c.retry             = retry::Scheduled{};
                         }))
-                        return done(std::move(m));
-                    return {std::move(m),
-                            Cmd::after(delay, Msg{RetryStream{}})};
+                        return Cmd::none();
+                    return Cmd::after(delay, Msg{RetryStream{}});
                 }
 
                 // ── Adaptive shrink-retry on "prompt is too long" ──────────
@@ -2029,12 +2024,11 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                                     c.transient_retries = shrink_tries + 1;
                                     c.retry = retry::Scheduled{};
                                 }))
-                            return done(std::move(m));
+                            return Cmd::none();
                         m.s.status = "forking \xc2\xb7 trimming to fit…";
                         m.s.status_until = {};
-                        return {std::move(m),
-                                Cmd::after(std::chrono::milliseconds{100},
-                                                Msg{RetryStream{}})};
+                        return Cmd::after(std::chrono::milliseconds{100},
+                                                Msg{RetryStream{}});
                     }
                 }
 
@@ -2070,12 +2064,11 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                     m.ui.composer.attachments = std::move(head.attachments);
                     m.ui.composer.cursor      = static_cast<int>(m.ui.composer.text.size());
                     m.ui.composer.queued.erase(m.ui.composer.queued.begin());
-                    auto [mm, sub_cmd] = submit_message(std::move(m));
-                    m = std::move(mm);
-                    return {std::move(m), Cmd::batch(
-                        std::move(status_cmd), std::move(sub_cmd))};
+                    auto sub_cmd = submit_message(m);
+                    return Cmd::batch(
+                        std::move(status_cmd), std::move(sub_cmd));
                 }
-                return {std::move(m), std::move(status_cmd)};
+                return std::move(status_cmd);
             }
 
             // Worker thread is unwinding; drop the token so the next turn
@@ -2209,7 +2202,7 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                             c.last_failure_at   = std::chrono::steady_clock::now();
                             c.retry             = retry::Scheduled{};
                         }))
-                        return done(std::move(m));
+                        return Cmd::none();
                     // A quiet, informative one-liner — the turn still runs.
                     const std::string note = m.d.effort == Effort::None
                         ? "this model takes no reasoning effort — sent without it"
@@ -2218,10 +2211,10 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                             + " (all this model supports)";
                     auto toast = set_status_toast(m, note,
                                                   std::chrono::seconds{6});
-                    return {std::move(m), Cmd::batch(
+                    return Cmd::batch(
                         std::move(toast),
                         Cmd::after(std::chrono::milliseconds{50},
-                                        Msg{RetryStream{}}))};
+                                        Msg{RetryStream{}}));
                 }
             }
 
@@ -2275,15 +2268,15 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                         c.last_failure_at   = std::chrono::steady_clock::now();
                         c.retry             = retry::Scheduled{};
                     }))
-                    return done(std::move(m));
+                    return Cmd::none();
                 auto toast = set_status_toast(m,
                     "this account lacks the 1M-context beta — fell back to "
                     "the standard 200K window and retried",
                     std::chrono::seconds{8});
-                return {std::move(m), Cmd::batch(
+                return Cmd::batch(
                     std::move(toast),
                     Cmd::after(std::chrono::milliseconds{50},
-                                    Msg{RetryStream{}}))};
+                                    Msg{RetryStream{}}));
             }
 
             // ── Vision rejection: learn WHY, then retry without images ──
@@ -2362,7 +2355,7 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                             c.last_failure_at   = std::chrono::steady_clock::now();
                             c.retry             = retry::Scheduled{};
                         }))
-                        return done(std::move(m));
+                        return Cmd::none();
 
                     auto toast = set_status_toast(m,
                         vis == provider::VisionRejection::OrgPolicy
@@ -2377,10 +2370,10 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                             : "this model can't read images — retried "
                               "without them",
                         std::chrono::seconds{8});
-                    return {std::move(m), Cmd::batch(
+                    return Cmd::batch(
                         std::move(toast),
                         Cmd::after(std::chrono::milliseconds{50},
-                                        Msg{RetryStream{}}))};
+                                        Msg{RetryStream{}}));
                 }
             }
 
@@ -2428,7 +2421,7 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                             c.last_failure_at   = std::chrono::steady_clock::now();
                             c.retry             = retry::Scheduled{};
                         }))
-                        return done(std::move(m));
+                        return Cmd::none();
                     if (last) {
                         // Drop before pop — an uncommitted (textless)
                         // placeholder may hold a cache entry (pinned or
@@ -2455,7 +2448,7 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                     // path. (Inline force_redraw is safe here — just
                     // a soft case-(B) redraw, not destructive — but
                     // also unnecessary.)
-                    return {std::move(m), std::move(refresh_cmd)};
+                    return std::move(refresh_cmd);
                 }
                 // No refresh_token on disk (env-var OAuth, api-key with
                 // a stale Bearer, etc.) — fall through to the terminal
@@ -2569,7 +2562,7 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                         ++c.no_progress_failures;
                         c.retry             = retry::Scheduled{};
                     }))
-                    return done(std::move(m));
+                    return Cmd::none();
                 if (last) {
                     // Drop before pop — see the auth-retry pop above (both
                     // the primary and the "#r" reasoning slot).
@@ -2597,7 +2590,7 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                 // before the retry stream feeds new deltas; the normal
                 // diff path handles the rest. (Inline force_redraw is
                 // safe — soft case-(B) — but unnecessary here.)
-                return {std::move(m), std::move(retry_cmd)};
+                return std::move(retry_cmd);
             }
 
             // Terminal path — discard the source ctx and drop to Idle.
@@ -2697,20 +2690,20 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                     std::chrono::duration_cast<std::chrono::milliseconds>(ttl)
                         + std::chrono::milliseconds{50},
                     Msg{ClearStatus{stamp}});
-                return {std::move(m), std::move(status_cmd)};
+                return std::move(status_cmd);
             }
         },
-        [&](RetryStream) -> Step {
+        [&](RetryStream) -> Cmd {
             // Scheduled retry fired. If the user cancelled during the
             // wait (Esc → CancelStream dropped phase to Idle), do
             // nothing. Otherwise transition retry back to Fresh on
             // the in-flight ctx so the freshly-launched stream's own
             // errors flow through the normal classifier path.
             if (auto* a = active_ctx(m.s.phase)) a->retry = retry::Fresh{};
-            if (m.s.is_idle()) return done(std::move(m));
-            return {std::move(m), cmd::launch_stream(m)};
+            if (m.s.is_idle()) return Cmd::none();
+            return cmd::launch_stream(m);
         },
-        [&](CancelStream) -> Step {
+        [&](CancelStream) -> Cmd {
             // Esc — full synchronous teardown.
             if (auto* a = active_ctx(m.s.phase); a && a->cancel) a->cancel->cancel();
 
@@ -2804,15 +2797,14 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                     m.ui.composer.attachments = std::move(head.attachments);
                     m.ui.composer.cursor      = static_cast<int>(m.ui.composer.text.size());
                     m.ui.composer.queued.erase(m.ui.composer.queued.begin());
-                    auto [mm, sub_cmd] = submit_message(std::move(m));
-                    m = std::move(mm);
-                    return {std::move(m), Cmd::batch(
-                        std::move(status_cmd), std::move(sub_cmd))};
+                    auto sub_cmd = submit_message(m);
+                    return Cmd::batch(
+                        std::move(status_cmd), std::move(sub_cmd));
                 }
-                return {std::move(m), std::move(status_cmd)};
+                return std::move(status_cmd);
             }
         },
-        [&](ProactiveContextReady pcr) -> Step {
+        [&](ProactiveContextReady pcr) -> Cmd {
             // The deferred pre-turn retrieval (submit_message held this turn's
             // stream launch behind it) has landed. Inject the grounding into
             // THIS turn — right before the trailing assistant placeholder, so
@@ -2823,7 +2815,7 @@ Step stream_update(Model m, msg::StreamMsg sm) {
             // Guard against a stale arrival: if the user cancelled (Esc →
             // Idle) or otherwise moved on while retrieval was in flight,
             // there's no in-flight turn to ground; drop it.
-            if (m.s.is_idle()) return done(std::move(m));
+            if (m.s.is_idle()) return Cmd::none();
 
             // The trailing message is the empty assistant placeholder pushed
             // by submit_message. Insert the proactive User message just
@@ -2867,7 +2859,7 @@ Step stream_update(Model m, msg::StreamMsg sm) {
             // untouched, so active_ctx is live here.
             m.s.status.clear();
             m.s.status_until = {};
-            return {std::move(m), cmd::launch_stream(m)};
+            return cmd::launch_stream(m);
         },
     }, sm);
 }

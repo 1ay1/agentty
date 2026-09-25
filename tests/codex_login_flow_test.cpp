@@ -42,8 +42,7 @@ TEST_CASE("codex login flow") {
     {
         Model m;
         m.ui.login = login::Picking{};
-        auto [m2, cmd] = agentty::app::detail::login_update(
-            std::move(m), msg::LoginMsg{agentty::LoginPickMethod{U'3'}});
+        auto [m2, cmd] = ::agentty::app::detail::step(agentty::app::detail::login_update, std::move(m), msg::LoginMsg{agentty::LoginPickMethod{U'3'}});
         check(std::holds_alternative<login::ChatGptWaiting>(m2.ui.login),
               "A: '3' from Picking enters ChatGptWaiting");
         // No Cmd any more: entering the state is what starts the worker.
@@ -59,8 +58,7 @@ TEST_CASE("codex login flow") {
         m.ui.login = login::ChatGptWaiting{.attempt_id = 1};
         agentty::auth::OAuthError err{
             agentty::auth::OAuthErrorKind::Network, "callback timed out"};
-        auto [m2, cmd] = agentty::app::detail::login_update(
-            std::move(m),
+        auto [m2, cmd] = ::agentty::app::detail::step(agentty::app::detail::login_update, std::move(m),
             msg::LoginMsg{agentty::CodexLoginDone{
                 .attempt_id = 1,
                 .result = std::unexpected(err),
@@ -78,8 +76,7 @@ TEST_CASE("codex login flow") {
         m.ui.login = login::Closed{};
         agentty::auth::OAuthError err{
             agentty::auth::OAuthErrorKind::Network, "late arrival"};
-        auto [m2, cmd] = agentty::app::detail::login_update(
-            std::move(m),
+        auto [m2, cmd] = ::agentty::app::detail::step(agentty::app::detail::login_update, std::move(m),
             msg::LoginMsg{agentty::CodexLoginDone{
                 .attempt_id = 1,
                 .result = std::unexpected(err),
@@ -93,8 +90,7 @@ TEST_CASE("codex login flow") {
     {
         Model m;
         m.ui.login = login::Picking{.provider = "anthropic"};
-        auto [m2, cmd] = agentty::app::detail::login_update(
-            std::move(m), msg::LoginMsg{agentty::LoginPickMethod{U'3'}});
+        auto [m2, cmd] = ::agentty::app::detail::step(agentty::app::detail::login_update, std::move(m), msg::LoginMsg{agentty::LoginPickMethod{U'3'}});
         auto* picking = std::get_if<login::Picking>(&m2.ui.login);
         check(picking && picking->provider == "anthropic",
               "D: Anthropic add flow ignores ChatGPT choice");
@@ -109,8 +105,7 @@ TEST_CASE("codex login flow") {
         accounts.provider_label = "ChatGPT";
         accounts.cursor = 0; // empty list: row zero is "+ Add another account…"
         m.ui.login = std::move(accounts);
-        auto [m2, cmd] = agentty::app::detail::login_update(
-            std::move(m), msg::LoginMsg{agentty::AccountSelect{}});
+        auto [m2, cmd] = ::agentty::app::detail::step(agentty::app::detail::login_update, std::move(m), msg::LoginMsg{agentty::AccountSelect{}});
         check(std::holds_alternative<login::ChatGptWaiting>(m2.ui.login),
               "E: ChatGPT add row enters ChatGptWaiting directly");
         // Entering the state IS the launch — subscribe() returns the worker's
@@ -126,8 +121,7 @@ TEST_CASE("codex login flow") {
             .attempt_id = 42,
             .device_auth = true,
         };
-        auto [m2, cmd] = agentty::app::detail::login_update(
-            std::move(m), msg::LoginMsg{agentty::CodexDeviceCodeReady{
+        auto [m2, cmd] = ::agentty::app::detail::step(agentty::app::detail::login_update, std::move(m), msg::LoginMsg{agentty::CodexDeviceCodeReady{
                 .attempt_id = 42,
                 .verification_url = "https://auth.openai.com/codex/device",
                 .user_code = "ABCD-EFGH",
@@ -146,8 +140,7 @@ TEST_CASE("codex login flow") {
     {
         Model m;
         m.ui.login = login::Closed{};
-        auto [m2, cmd] = agentty::app::detail::login_update(
-            std::move(m), msg::LoginMsg{agentty::CodexDeviceCodeReady{
+        auto [m2, cmd] = ::agentty::app::detail::step(agentty::app::detail::login_update, std::move(m), msg::LoginMsg{agentty::CodexDeviceCodeReady{
                 .attempt_id = 7,
                 .verification_url = "https://auth.openai.com/codex/device",
                 .user_code = "LATE-CODE",
@@ -165,8 +158,7 @@ TEST_CASE("codex login flow") {
             .device_auth = true,
             .user_code = "CURRENT",
         };
-        auto [m2, cmd] = agentty::app::detail::login_update(
-            std::move(m), msg::LoginMsg{agentty::CodexDeviceCodeReady{
+        auto [m2, cmd] = ::agentty::app::detail::step(agentty::app::detail::login_update, std::move(m), msg::LoginMsg{agentty::CodexDeviceCodeReady{
                 .attempt_id = 199,
                 .verification_url = "https://auth.openai.com/codex/device",
                 .user_code = "STALE",
@@ -195,8 +187,7 @@ TEST_CASE("codex login flow") {
         };
         const int waiting_subs = count(m);
 
-        auto [m2, cmd] = agentty::app::detail::login_update(
-            std::move(m), msg::LoginMsg{agentty::CloseLogin{}});
+        auto [m2, cmd] = ::agentty::app::detail::step(agentty::app::detail::login_update, std::move(m), msg::LoginMsg{agentty::CloseLogin{}});
         check(std::holds_alternative<login::Closed>(m2.ui.login),
               "I: Esc closes ChatGPT login modal");
         check(count(m2) == waiting_subs - 1,

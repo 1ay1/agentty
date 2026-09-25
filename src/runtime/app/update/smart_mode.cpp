@@ -137,13 +137,7 @@ Cmd smart_mode_update(Model& m, msg::SmartModeMsg sm) {
                 // it verbatim. Nothing is parked on Model::UI any more.
                 pn::Models picker{{0, ""}, {}, *role};
                 m.ui.panel.descend(std::move(picker));
-                // Cross-domain hand-off. models_update still returns a pair,
-                // so take its model back; when that domain converts this
-                // becomes a plain call like the two above.
-                auto [next, cmd] = models_update(std::move(m),
-                                                 msg::ModelsMsg{OpenModels{}});
-                m = std::move(next);
-                return std::move(cmd);
+                return models_update(m, msg::ModelsMsg{OpenModels{}});
             }
 
             // 'x' resets the focused slot to auto.

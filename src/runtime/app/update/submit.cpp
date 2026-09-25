@@ -34,14 +34,14 @@ namespace pn = agentty::ui::panel;
 
 namespace agentty::app::detail {
 
-Step submit_message(Model m) {
+Cmd submit_message(Model& m) {
     // Composer is non-empty if it has typed text OR an attachment chip.
     // Even an "empty-looking" buffer with chips should submit — those
     // chips ARE the message (a single dropped @file or paste, with no
     // surrounding prose). The expand pass below pulls each chip's body
     // into the wire text.
     if (m.ui.composer.text.empty() && m.ui.composer.attachments.empty())
-        return done(std::move(m));
+        return Cmd::none();
 
     // No model resolved yet — don't start a turn. Sending `"model": ""` to a
     // local OpenAI-compatible server (llama.cpp / vLLM) is rejected, and the
@@ -57,7 +57,7 @@ Step submit_message(Model m) {
             : "no model selected \xe2\x80\x94 open the model picker (^/) first";
         m.s.status_until = std::chrono::steady_clock::now()
                          + std::chrono::seconds{4};
-        return done(std::move(m));
+        return Cmd::none();
     }
     // STALE-model guard for LOCAL providers. settings.json's per-provider
     // model map recalls the last-picked id PER SPEC STRING — so switching
@@ -81,7 +81,7 @@ Step submit_message(Model m) {
                            + "' isn't served by this host \xe2\x80\x94 pick one (^/)";
                 m.s.status_until = std::chrono::steady_clock::now()
                                  + std::chrono::seconds{5};
-                return done(std::move(m));
+                return Cmd::none();
             }
         }
     }
@@ -198,7 +198,7 @@ Step submit_message(Model m) {
     // The handler drains this queue once new creds are live.
     if (m.s.active() || m.s.oauth_refresh_in_flight) {
         m.ui.composer.queued.push_back(drain_composer(m));
-        return done(std::move(m));
+        return Cmd::none();
     }
 
     // No auto-compaction on submit. Earlier versions queued the
@@ -556,7 +556,7 @@ Step submit_message(Model m) {
     auto cmd = parts.size() == 1
         ? std::move(parts.front())
         : Cmd::batch(std::move(parts));
-    return {std::move(m), std::move(cmd)};
+    return std::move(cmd);
 }
 
 std::string active_provider_id() {
@@ -738,8 +738,8 @@ void persist_settings(Model& m) {
     tools::subagent::set_provider(active_provider_id());
 }
 
-std::pair<Model, Cmd>
-commit_provider_switch(Model m, std::string_view spec,
+Cmd
+commit_provider_switch(Model& m, std::string_view spec,
                        auth::AuthHeader new_auth, std::string_view label,
                        std::string_view desired_model,
                        bool open_panel) {
@@ -870,9 +870,8 @@ commit_provider_switch(Model m, std::string_view spec,
     }
     auto toast = set_status_toast(m, std::move(toast_text),
                                   std::chrono::seconds{4});
-    return {std::move(m),
-            Cmd::batch(std::move(toast), cmd::fetch_models(),
-                            std::move(refresh_cmd))};
+    return Cmd::batch(std::move(toast), cmd::fetch_models(),
+                            std::move(refresh_cmd));
 }
 
 Cmd set_status_toast(Model& m, std::string text,

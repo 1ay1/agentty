@@ -74,7 +74,7 @@ Model make_model(int cursor, const std::string& current_id) {
 }
 
 Model step(Model m, msg::ThreadListMsg tm) {
-    return detail::thread_list_update(std::move(m), std::move(tm)).first;
+    return detail::step(detail::thread_list_update, std::move(m), std::move(tm)).first;
 }
 
 const pick::OpenAt* picker(const Model& m) {

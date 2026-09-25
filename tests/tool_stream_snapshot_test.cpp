@@ -15,7 +15,7 @@ namespace A = agentty;
 namespace D = agentty::app::detail;
 
 static A::Model apply(A::Model m, A::msg::StreamMsg event) {
-    auto [next, cmd] = D::stream_update(std::move(m), std::move(event));
+    auto [next, cmd] = D::step(::agentty::app::detail::stream_update, std::move(m), std::move(event));
     (void)cmd;
     // `next` is a structured binding: no implicit move-on-return before C++23,
     // and Model's copy ctor is deleted.

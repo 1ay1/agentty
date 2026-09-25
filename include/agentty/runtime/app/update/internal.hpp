@@ -137,7 +137,7 @@ void           save_record(Model& m);
 void           refresh_record(Model& m);
 
 // ── update/submit.cpp helpers ─────────────────────────────────────────────
-Step           submit_message(Model m);
+Cmd            submit_message(Model& m);
 // Sync the settings fields that still live as SEPARATE Domain members
 // (model_id, effort, profile, smart, the active provider) into
 // `m.d.persisted`, then save the record. Use this when one of THOSE changed;
@@ -205,8 +205,8 @@ std::string    model_for_provider(std::string_view spec);
 // active on the new provider, taking priority over the per-provider recall —
 // this is what the fused cross-provider picker passes so an Enter is an ATOMIC
 // provider+model switch. Empty (every existing caller) keeps the recall path.
-[[nodiscard]] std::pair<Model, Cmd>
-commit_provider_switch(Model m, std::string_view spec,
+[[nodiscard]] Cmd
+commit_provider_switch(Model& m, std::string_view spec,
                        auth::AuthHeader new_auth, std::string_view label,
                        std::string_view desired_model = {},
                        bool open_panel = true);
@@ -456,13 +456,31 @@ bool with_exec_tool(Model& m, const ToolCallId& id, std::uint64_t seq,
 // effects as values, so it reaches for the seam instead. Converting a
 // domain is what makes its effects expressible — see docs/design/jaal-rewrite.md.
 //
-// Converted so far: mention.
-Step composer_update      (Model m, msg::ComposerMsg       cm);
-Step stream_update        (Model m, msg::StreamMsg         sm);
-Step tool_update          (Model m, msg::ToolMsg           tm);
+// Converted so far: all 23.
+//
+// TEST SHIM. Tests reach past `update(Model, Msg)` and call a domain reducer
+// directly, usually chaining `.first` into the next call. Rewriting ~35 such
+// sites to the in-place form would be churn that tests nothing, so `step()`
+// adapts a converted reducer back to a pair:
+//
+//     auto s = step(detail::tool_update, std::move(m), msg);
+//     //   s.first  == the new model
+//     //   s.second == the Cmd
+//
+// It is the same adapter update.cpp uses, pointed the other way. Nothing in
+// src/ calls it.
+template <class R, class... A>
+[[nodiscard]] inline std::pair<Model, Cmd> step(R reducer, Model m, A&&... a) {
+    Cmd cmd = reducer(m, std::forward<A>(a)...);
+    return {std::move(m), std::move(cmd)};
+}
+
+Cmd  composer_update      (Model& m, msg::ComposerMsg       cm);
+Cmd  stream_update        (Model& m, msg::StreamMsg         sm);
+Cmd  tool_update          (Model& m, msg::ToolMsg           tm);
 Cmd  tool_output_update   (Model& m, msg::ToolOutputMsg     tm);
-Step providers_update(Model m, msg::ProvidersMsg pm);
-Step models_update  (Model m, msg::ModelsMsg     pm);
+Cmd  providers_update(Model& m, msg::ProvidersMsg pm);
+Cmd  models_update  (Model& m, msg::ModelsMsg     pm);
 // Shared fused-row builder (SSOT for reducer + view): enumerates authed
 // providers into catalogs (+ un-authed sign-in offers), applies the current
 // fused_picker query, and returns the ordered/sectioned FusedRow list. The
@@ -476,15 +494,15 @@ Cmd  codeblock_update     (Model& m, msg::CodeBlockMsg      cm);
 Cmd  checkpoint_update    (Model& m, msg::CheckpointMsg     cm);
 Cmd  rag_settings_update  (Model& m, msg::RagMsg    rm);
 Cmd  stats_update         (Model& m, msg::StatsMsg  sm);
-Step settings_list_update (Model m, msg::SettingsListMsg   sm);
+Cmd  settings_list_update (Model& m, msg::SettingsListMsg   sm);
 Cmd  fork_update          (Model& m, msg::ForkMsg           fm);
 Cmd  todo_update          (Model& m, msg::TodoMsg           tm);
-Step login_update         (Model m, msg::LoginMsg          lm);
+Cmd  login_update         (Model& m, msg::LoginMsg          lm);
 Cmd  diff_review_update   (Model& m, msg::DiffReviewMsg     dm);
 Cmd  smart_mode_update    (Model& m, msg::SmartModeMsg      sm);
 Cmd  plugin_edit_update   (Model& m, msg::PluginEditMsg     pm);
 Cmd  appearance_update    (Model& m, msg::AppearanceMsg     am);
-Step meta_update          (Model m, msg::MetaMsg           mm);
+Cmd  meta_update          (Model& m, msg::MetaMsg           mm);
 
 // ── Esc: back one level ───────────────────────────────────────────────
 //

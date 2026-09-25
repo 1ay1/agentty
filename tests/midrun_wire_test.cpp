@@ -1788,8 +1788,7 @@ TEST_CASE("model picker open close no scrollback growth") {
             render_state(m);
             std::this_thread::sleep_for(std::chrono::milliseconds{8});
         }
-        auto [m2, cmd] = app::detail::models_update(
-            std::move(m), msg::ModelsMsg{ModelsSelect{}});  // close
+        auto [m2, cmd] = ::agentty::app::detail::step(::agentty::app::detail::models_update, std::move(m), msg::ModelsMsg{ModelsSelect{}});  // close
         m = std::move(m2);
         (void)cmd;
         for (int f = 0; f < 5; ++f) {

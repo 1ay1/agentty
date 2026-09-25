@@ -110,21 +110,19 @@ int resolved_context_max(const Model& m, std::string_view provider_id) {
     return resolved;
 }
 
-Step meta_update(Model m, msg::MetaMsg mm) {
+Cmd meta_update(Model& m, msg::MetaMsg mm) {
     return std::visit(overload{
-        [&](CompactContext) -> Step {
+        [&](CompactContext) -> Cmd {
             // Refuse if a turn is already in flight or compaction is
             // already running — the next CompactContext lands cleanly
             // on Idle. Refuse on an empty thread (nothing to compact).
             // Toast in both cases: a manual compaction that silently does
             // nothing reads as a broken keybind.
             if (!m.s.is_idle() || m.s.compacting)
-                return {std::move(m),
-                        set_status_toast(m,
-                            "cannot compact while the agent is working")};
+                return set_status_toast(m,
+                            "cannot compact while the agent is working");
             if (m.d.current.messages.empty())
-                return {std::move(m),
-                        set_status_toast(m, "nothing to compact yet")};
+                return set_status_toast(m, "nothing to compact yet");
 
             // Compaction is wire-only: we never mutate the transcript.
             // The summarisation prompt is built and trimmed on the fly
@@ -153,20 +151,20 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             m.s.compacting = true;
             m.s.status      = "compacting context\xe2\x80\xa6";   // …
             m.s.status_until = {};   // sticky until compaction completes
-            return {std::move(m), cmd::launch_stream(m)};
+            return cmd::launch_stream(m);
         },
 
-        [&](ToggleChangesStrip) -> Step {
+        [&](ToggleChangesStrip) -> Cmd {
             m.d.show_changes_strip = !m.d.show_changes_strip;
             // Persist so it survives restarts.
             m.d.persisted.show_changes_strip = m.d.show_changes_strip;
             save_record(m);
             auto cmd = set_status_toast(m, m.d.show_changes_strip
                 ? "changes strip: shown" : "changes strip: hidden (Ctrl+R still reviews)");
-            return {std::move(m), std::move(cmd)};
+            return std::move(cmd);
         },
 
-        [&](CycleProfile) -> Step {
+        [&](CycleProfile) -> Cmd {
             m.d.profile = m.d.profile == Profile::Write   ? Profile::Ask
                       : m.d.profile == Profile::Ask     ? Profile::Minimal
                                                        : Profile::Write;
@@ -197,9 +195,9 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                      + " \xc2\xb7 " + gist
                      + (had_grants ? " \xc2\xb7 always-allow grants reset" : ""),
                 std::chrono::seconds{4});
-            return {std::move(m), std::move(toast)};
+            return std::move(toast);
         },
-        [&](RestoreCheckpoint& e) -> Step {
+        [&](RestoreCheckpoint& e) -> Cmd {
             // Rewind = destructive double restore: worktree files AND the
             // transcript both return to the instant before the checkpointed
             // user turn was submitted (Zed's "restore checkpoint"). Only
@@ -207,8 +205,7 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             // files; racing them against checkout-index would interleave
             // snapshot bytes with fresh tool output.
             if (!m.s.is_idle() || m.s.compacting || m.s.thread_loading)
-                return {std::move(m),
-                        set_status_toast(m, "cannot rewind while the agent is working")};
+                return set_status_toast(m, "cannot rewind while the agent is working");
             // The checkpointed message must still exist (compaction never
             // deletes messages, so this only fails on a stale id).
             const auto& msgs = m.d.current.messages;
@@ -217,8 +214,7 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                     return msg.checkpoint_id && *msg.checkpoint_id == e.id;
                 });
             if (!found)
-                return {std::move(m),
-                        set_status_toast(m, "checkpoint not found in this thread")};
+                return set_status_toast(m, "checkpoint not found in this thread");
             // thread_loading doubles as the "transcript is about to be
             // rewritten" guard: submit_message queues instead of firing,
             // so no message can land between the index computed at
@@ -238,14 +234,13 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                     out.send(Msg{std::move(done)});
                 },
                 e.id);
-            return {std::move(m), std::move(cmd)};
+            return std::move(cmd);
         },
-        [&](CheckpointRestored& e) -> Step {
+        [&](CheckpointRestored& e) -> Cmd {
             m.s.thread_loading = false;
             if (!e.ok) {
-                return {std::move(m),
-                        set_status_toast(m, "rewind failed: " + e.error,
-                                         std::chrono::seconds{6})};
+                return set_status_toast(m, "rewind failed: " + e.error,
+                                         std::chrono::seconds{6});
             }
             // Files are already byte-identical to the snapshot; now cut the
             // transcript back to just before the checkpointed user turn and
@@ -258,8 +253,7 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             if (it == msgs.end()) {
                 // Restored the files but the message vanished (shouldn't
                 // happen — dispatch is gated on Idle + thread_loading).
-                return {std::move(m),
-                        set_status_toast(m, "files rewound (turn already gone)")};
+                return set_status_toast(m, "files rewound (turn already gone)");
             }
             // Composer refill: plain-text render of the old prompt — chip
             // placeholders become their visible labels. Raw placeholders
@@ -318,14 +312,13 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             auto toast = set_status_toast(
                 m, "rewound \xc2\xb7 files restored, prompt back in composer",
                 std::chrono::seconds{5});
-            return {std::move(m),
-                    Cmd::batch(cmd::reset_inline(), std::move(toast))};
+            return Cmd::batch(cmd::reset_inline(), std::move(toast));
         },
-        [&](TerminalFocus& e) -> Step {
+        [&](TerminalFocus& e) -> Cmd {
             m.ui.terminal_focused = e.focused;
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ToggleRetrievedExpanded& e) -> Step {
+        [&](ToggleRetrievedExpanded& e) -> Cmd {
             // Flip the addressed retrieved-context card between its compact
             // snippet form and full-passage expansion. Frozen-prefix gate,
             // same frozen-prefix gate as every id-addressed mutation: a card
@@ -344,9 +337,9 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                     break;
                 }
             }
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](Tick) -> Step {
+        [&](Tick) -> Cmd {
             auto now = std::chrono::steady_clock::now();
             // Wall-clock gap since the previous Tick — kept for the
             // suspend-recovery rebase below (last_event_at += tick_gap).
@@ -383,7 +376,7 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                     m.s.last_update_poll = now;   // startup check just ran
                 else if (now - m.s.last_update_poll >= kUpdatePollInterval) {
                     m.s.last_update_poll = now;
-                    return {std::move(m), cmd::check_for_update()};
+                    return cmd::check_for_update();
                 }
             }
 
@@ -403,14 +396,14 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                     m.ui.composer.attachments = m.ui.composer.loop_attachments;
                     m.ui.composer.cursor =
                         static_cast<int>(m.ui.composer.text.size());
-                    auto step = detail::submit_message(std::move(m));
+                    auto sub_cmd = detail::submit_message(m);
                     // Keep the prompt on screen (the box is read-only while
                     // looping) — same restore finalize_turn does.
-                    auto& sc = step.first.ui.composer;
+                    auto& sc = m.ui.composer;
                     sc.text        = sc.loop_text;
                     sc.attachments = sc.loop_attachments;
                     sc.cursor      = static_cast<int>(sc.text.size());
-                    return step;
+                    return sub_cmd;
                 }
             }
 
@@ -645,9 +638,9 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                                 + std::to_string(since) + "s";
                 StreamError err{std::move(msg)};
                 err.from_stall = true;   // carry stall intent on the message
-                return {std::move(m), Cmd::after(
+                return Cmd::after(
                     std::chrono::milliseconds(0),
-                    Msg{std::move(err)})};
+                    Msg{std::move(err)});
             }
 
             // ── ExecutingTool wedge watchdog ───────────────────────────
@@ -752,7 +745,7 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                 }
                 if (wedged) {
                     auto kick = cmd::kick_pending_tools(m);
-                    return {std::move(m), std::move(kick)};
+                    return kick;
                 }
             }
 
@@ -792,9 +785,9 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                 if (!settle_freeze_trim.is_none())
                     trims.push_back(std::move(settle_freeze_trim));
                 if (trims.size() == 1)
-                    return {std::move(m), std::move(trims.front())};
+                    return std::move(trims.front());
                 if (!trims.empty())
-                    return {std::move(m), Cmd::batch(std::move(trims))};
+                    return Cmd::batch(std::move(trims));
             }
 
             // ── Idle cache-lapse pre-compaction ───────────────────────────
@@ -821,12 +814,12 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                         [](jaal::Sink<Msg> out, std::stop_token) {
                             out.send(Msg{CompactContext{}});
                         });
-                    return {std::move(m), std::move(compact_cmd)};
+                    return std::move(compact_cmd);
                 }
             }
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](Quit) -> Step {
+        [&](Quit) -> Cmd {
             // Trip the active turn's cancel token FIRST. If a stream (or a tool)
             // is in flight — exactly when the spinner/typewriter is animating —
             // its worker is blocked in the HTTP poll/SSL_read. Nothing else
@@ -853,10 +846,10 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             // than on disk. Drain it here — the ONE place a synchronous wait is
             // correct, because no frame is drawn after this.
             settings_cache::flush();
-            return {std::move(m), Cmd::quit()};
+            return Cmd::quit();
         },
-        [&](NoOp) -> Step { return done(std::move(m)); },
-        [&](RedrawScreen) -> Step {
+        [&](NoOp) -> Cmd { return Cmd::none(); },
+        [&](RedrawScreen) -> Cmd {
             // Ctrl-L → viewport-only soft redraw.
             //
             // Drops maya's renderer cell cache (force_redraw zeroes
@@ -900,9 +893,9 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             //     resize stays soft (case-(B), no scrollback wipe).
             //     Either way it's a passive consequence of the
             //     resize event, not bound to a keystroke.
-            return {std::move(m), cmd::force_redraw()};
+            return cmd::force_redraw();
         },
-        [&](ClearStatus& e) -> Step {
+        [&](ClearStatus& e) -> Cmd {
             // No-op if the user (or another handler) wrote a newer
             // status since this cleaner was scheduled — stamps won't
             // match, so the current banner stays.
@@ -910,9 +903,9 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                 m.s.status.clear();
                 m.s.status_until = {};
             }
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](UpdateCheckDone& e) -> Step {
+        [&](UpdateCheckDone& e) -> Cmd {
             // Background release check landed.
             if (e.update_available && !e.latest.empty()) {
                 m.s.update_latest = std::move(e.latest);
@@ -950,16 +943,16 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                     // is actually doing. The status line reports progress
                     // (see UpdateProgress) and the chip reports the outcome;
                     // neither steals focus.
-                    return {std::move(m), cmd::perform_self_update(std::move(v))};
+                    return cmd::perform_self_update(std::move(v));
                 }
             }
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](UpdateProgress& e) -> Step {
+        [&](UpdateProgress& e) -> Cmd {
             // A stale progress line after the download finished would be
             // worse than none — ignore anything arriving once we are no
             // longer updating.
-            if (!m.s.update_in_flight) return done(std::move(m));
+            if (!m.s.update_in_flight) return Cmd::none();
             const auto mib = [](std::size_t b) {
                 char buf[32];
                 std::snprintf(buf, sizeof buf, "%.1f", double(b) / (1024.0 * 1024.0));
@@ -977,9 +970,9 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                            + mib(e.got) + " MiB";
             }
             m.s.status_until = {};
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](UpdateApplied& e) -> Step {
+        [&](UpdateApplied& e) -> Cmd {
             m.s.update_in_flight = false;
             if (e.ok) {
                 // Updated on disk; the running process is the old image.
@@ -991,16 +984,16 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                 m.s.status = "✓ updated to v" + e.detail +
                              " — restart agentty to use it";
                 m.s.status_until = {};       // sticky until overwritten
-                return done(std::move(m));
+                return Cmd::none();
             }
             auto toast = set_status_toast(
                 m, "update failed: " + e.detail +
                    " — try `agentty update` from a shell",
                 std::chrono::seconds{8});
-            return {std::move(m), std::move(toast)};
+            return std::move(toast);
         },
 
-        [&](GitSignalsRefreshed) -> Step {
+        [&](GitSignalsRefreshed) -> Cmd {
             // The background `git status` finished. Clearing the latch is the
             // whole arm — the refreshed map itself lives in the workspace
             // cache the `@` picker reads directly, so there is nothing to
@@ -1011,7 +1004,7 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             // refresh Cmd, so holding the key coalesces instead of spawning
             // a thread per keystroke.
             m.ui.git_refresh_inflight = false;
-            return done(std::move(m));
+            return Cmd::none();
         },
     }, mm);
 }

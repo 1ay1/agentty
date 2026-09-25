@@ -36,7 +36,7 @@ void check_edit(const char* name, bool cond, const std::string& got = {}) {
 
 // Run one ComposerMsg through the reducer, return the resulting model.
 Model step(Model m, msg::ComposerMsg cm) {
-    return composer_update(std::move(m), std::move(cm)).first;
+    return ::agentty::app::detail::step(::agentty::app::detail::composer_update, std::move(m), std::move(cm)).first;
 }
 
 Model with_text(std::string text, int cursor) {

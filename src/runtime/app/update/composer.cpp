@@ -370,7 +370,7 @@ void apply_history_entry(ComposerState& cs, const HistoryEntryRef& entry) {
 //
 // All three routes through this one helper so the behaviour is
 // identical no matter which trigger fired.
-Step smart_paste_from_clipboard(Model m) {
+Cmd smart_paste_from_clipboard(Model& m) {
     std::string img_err;
     if (auto img = read_clipboard_image(&img_err)) {
         begin_edit(m.ui.composer);
@@ -394,14 +394,14 @@ Step smart_paste_from_clipboard(Model m) {
         m.ui.composer.cursor += static_cast<int>(placeholder.size());
         m.ui.composer.expanded = true;
         if (oversized) {
-            return {std::move(m), set_status_toast(
+            return set_status_toast(
                 m, "Image is " + std::to_string(dims.w) + "\xc3\x97"
                 + std::to_string(dims.h) + " px — over the "
                 + std::to_string(util::kMaxWireImageSide)
                 + " px limit, it won't be sent. Resize it first.",
-                std::chrono::seconds{8})};
+                std::chrono::seconds{8});
         }
-        return done(std::move(m));
+        return Cmd::none();
     }
 
     // No image — try text. Re-enter the ComposerPaste arm with the
@@ -409,7 +409,7 @@ Step smart_paste_from_clipboard(Model m) {
     // treatment for free (same path bracketed paste takes).
     std::string txt_err;
     if (auto txt = read_clipboard_text(&txt_err); txt && !txt->empty()) {
-        return composer_update(std::move(m), ComposerPaste{std::move(*txt)});
+        return composer_update(m, ComposerPaste{std::move(*txt)});
     }
 
     // Every local path failed to produce an image or text. Last resort,
@@ -477,12 +477,11 @@ Step smart_paste_from_clipboard(Model m) {
         // terminal answered at all.
         m.ui.clipboard_rx_mark =
             maya::clipboard_rx_bytes().load(std::memory_order_relaxed);
-        return {std::move(m),
-                Cmd::batch(
+        return Cmd::batch(
                     cmd::query_clipboard(),
                     std::move(toast),
                     Cmd::after(deadline,
-                                          Msg{ClipboardQueryTimeout{seq}}))};
+                                          Msg{ClipboardQueryTimeout{seq}}));
     }
 }
 
@@ -490,7 +489,7 @@ Step smart_paste_from_clipboard(Model m) {
 
 using maya::overload;
 
-Step composer_update(Model m, msg::ComposerMsg cm) {
+Cmd composer_update(Model& m, msg::ComposerMsg cm) {
     // Stamp the last-interaction clock on ANY composer message (keystroke,
     // edit, cursor move, paste, history walk). The idle blink-stop in the
     // maya composer widget keys off this: 15 s after the last interaction
@@ -514,7 +513,7 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
     // reducer and are unaffected.
     if (m.ui.composer.looping()
         && !std::holds_alternative<ComposerToggleLoop>(cm)) {
-        return done(std::move(m));
+        return Cmd::none();
     }
     // ── Idle-lapse connection re-warm ──────────────────────────
     // The pool's warm socket dies after ~90 s idle (http idle_ttl), so a
@@ -563,8 +562,8 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             }
         }
     }
-    Step step = std::visit(overload{
-        [&](ComposerCharInput e) -> Step {
+    Cmd step = std::visit(overload{
+        [&](ComposerCharInput e) -> Cmd {
             // '/' opens the command palette when it's LINE-LEADING —
             // the cursor sits at the start of the buffer or right
             // after a newline, with no attachment placeholder
@@ -587,7 +586,7 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             };
             if (e.ch == U'/' && at_line_start()) {
                 m.ui.panel.descend(pn::Palette{});
-                return done(std::move(m));
+                return Cmd::none();
             }
             // '@' opens the file mention picker. Unlike '/' this is
             // permitted mid-prose ("ping @alice tomorrow" is a fine
@@ -631,7 +630,7 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
                             out.send(Msg{GitSignalsRefreshed{}});
                         });
                 }
-                return {std::move(m), std::move(git_cmd)};
+                return std::move(git_cmd);
             }
             // '#' opens the symbol picker — mirrors '@'. Non-blocking:
             // snapshot only if the (parallel) symbol scan has landed;
@@ -639,7 +638,7 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             // fill on the first keystroke. Never blocks the UI on the scan.
             if (e.ch == U'#' && at_word_boundary()) {
                 m.ui.panel.descend(pn::Symbol{symbol::Open{}});
-                return done(std::move(m));
+                return Cmd::none();
             }
             // Coalesce consecutive typing into one undo unit, but
             // break the run on whitespace so Ctrl+Z rewinds word by
@@ -651,9 +650,9 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             auto utf8 = ui::utf8_encode(e.ch);
             m.ui.composer.text.insert(m.ui.composer.cursor, utf8);
             m.ui.composer.cursor += static_cast<int>(utf8.size());
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ComposerBackspace) -> Step {
+        [&](ComposerBackspace) -> Cmd {
             if (m.ui.composer.cursor > 0 && !m.ui.composer.text.empty()) {
                 begin_edit(m.ui.composer);
                 // chip_prev jumps over a whole placeholder if the
@@ -669,22 +668,22 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
                 m.ui.composer.text.erase(p, m.ui.composer.cursor - p);
                 m.ui.composer.cursor = p;
             }
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ComposerEnter)  { return submit_message(std::move(m)); },
-        [&](ComposerSubmit) { return submit_message(std::move(m)); },
-        [&](ComposerNewline) -> Step {
+        [&](ComposerEnter)  { return submit_message(m); },
+        [&](ComposerSubmit) { return submit_message(m); },
+        [&](ComposerNewline) -> Cmd {
             begin_edit(m.ui.composer);
             m.ui.composer.text.insert(m.ui.composer.cursor, "\n");
             m.ui.composer.cursor += 1;
             m.ui.composer.expanded = true;
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ComposerToggleExpand) -> Step {
+        [&](ComposerToggleExpand) -> Cmd {
             m.ui.composer.expanded = !m.ui.composer.expanded;
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ComposerToggleLoop) -> Step {
+        [&](ComposerToggleLoop) -> Cmd {
             auto& c = m.ui.composer;
             // Already looping → disarm. Deliberately does NOT cancel the
             // in-flight turn: you're saying "stop after this one", which is
@@ -698,7 +697,7 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
                 auto toast = set_status_toast(
                     m, n > 0 ? "loop off \xc2\xb7 " + std::to_string(n) + " sent"
                              : std::string{"loop off"});
-                return {std::move(m), std::move(toast)};
+                return std::move(toast);
             }
             // Arming needs something to repeat. An empty composer would arm a
             // loop with no payload — make that unrepresentable rather than
@@ -706,7 +705,7 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             if (c.text.empty()) {
                 auto toast = set_status_toast(
                     m, "loop: type a message first");
-                return {std::move(m), std::move(toast)};
+                return std::move(toast);
             }
             // Snapshot the payload, then submit it. The snapshot (not the
             // live composer) is what repeats, so the user can keep typing.
@@ -714,53 +713,53 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             c.loop_text        = c.text;
             c.loop_attachments = c.attachments;
             c.loop_iterations  = 0;
-            auto step = submit_message(std::move(m));
+            auto sub_cmd = submit_message(m);
             // submit drains the composer; put the armed payload BACK so the
             // box keeps showing what is on repeat. While looping the composer
             // is read-only (see the editing guard), so this is a display of
             // the armed prompt rather than an editable draft — without it the
             // user watches an empty box auto-send something they can't see.
-            auto& sc = step.first.ui.composer;
+            auto& sc = m.ui.composer;
             sc.text        = sc.loop_text;
             sc.attachments = sc.loop_attachments;
             sc.cursor      = static_cast<int>(sc.text.size());
-            return step;
+            return sub_cmd;
         },
-        [&](ComposerCursorLeft) -> Step {
+        [&](ComposerCursorLeft) -> Cmd {
             m.ui.composer.undo_coalescing = false;
             m.ui.composer.cursor = ui::chip_prev(m.ui.composer.text, m.ui.composer.cursor);
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ComposerCursorRight) -> Step {
+        [&](ComposerCursorRight) -> Cmd {
             m.ui.composer.undo_coalescing = false;
             m.ui.composer.cursor = ui::chip_next(m.ui.composer.text, m.ui.composer.cursor);
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ComposerCursorHome) -> Step {
+        [&](ComposerCursorHome) -> Cmd {
             m.ui.composer.undo_coalescing = false;
             m.ui.composer.cursor = 0;
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ComposerCursorEnd) -> Step {
+        [&](ComposerCursorEnd) -> Cmd {
             m.ui.composer.undo_coalescing = false;
             m.ui.composer.cursor = static_cast<int>(m.ui.composer.text.size());
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ComposerCursorWordLeft) -> Step {
+        [&](ComposerCursorWordLeft) -> Cmd {
             m.ui.composer.undo_coalescing = false;
             m.ui.composer.cursor = word_left(m.ui.composer.text, m.ui.composer.cursor);
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ComposerCursorWordRight) -> Step {
+        [&](ComposerCursorWordRight) -> Cmd {
             m.ui.composer.undo_coalescing = false;
             m.ui.composer.cursor = word_right(m.ui.composer.text, m.ui.composer.cursor);
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ComposerKillToEndOfLine) -> Step {
+        [&](ComposerKillToEndOfLine) -> Cmd {
             const auto& s = m.ui.composer.text;
             int n = static_cast<int>(s.size());
             int p = m.ui.composer.cursor;
-            if (p >= n) return done(std::move(m));
+            if (p >= n) return Cmd::none();
             int q = p;
             while (q < n && s[q] != '\n') ++q;
             // Standard readline: Ctrl+K on a line of text deletes to
@@ -769,52 +768,52 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             if (q == p && q < n && s[q] == '\n') ++q;
             begin_edit(m.ui.composer);
             m.ui.composer.text.erase(p, q - p);
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ComposerKillToBeginningOfLine) -> Step {
+        [&](ComposerKillToBeginningOfLine) -> Cmd {
             const auto& s = m.ui.composer.text;
             int p = m.ui.composer.cursor;
-            if (p <= 0) return done(std::move(m));
+            if (p <= 0) return Cmd::none();
             int q = p;
             while (q > 0 && s[q - 1] != '\n') --q;
-            if (q == p) return done(std::move(m));
+            if (q == p) return Cmd::none();
             begin_edit(m.ui.composer);
             m.ui.composer.text.erase(q, p - q);
             m.ui.composer.cursor = q;
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ComposerDeleteWordBack) -> Step {
+        [&](ComposerDeleteWordBack) -> Cmd {
             // Ctrl+W — readline unix-word-rubout. Delete from the
             // previous word boundary up to the cursor. Reuses the
             // chip-aware word_left boundary so a Ctrl+W at the right
             // edge of an attachment chip removes the whole token in
             // one stroke (same mental model as chip-aware Backspace).
             int p = m.ui.composer.cursor;
-            if (p <= 0) return done(std::move(m));
+            if (p <= 0) return Cmd::none();
             int q = word_left(m.ui.composer.text, p);
-            if (q >= p) return done(std::move(m));
+            if (q >= p) return Cmd::none();
             begin_edit(m.ui.composer);
             m.ui.composer.text.erase(static_cast<std::size_t>(q),
                                      static_cast<std::size_t>(p - q));
             m.ui.composer.cursor = q;
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ComposerDeleteWordForward) -> Step {
+        [&](ComposerDeleteWordForward) -> Cmd {
             // Alt+D — readline kill-word. Delete from the cursor up to
             // the next word boundary; cursor stays put. Symmetric to
             // Ctrl+W and chip-aware via word_right.
             const auto& s = m.ui.composer.text;
             int p = m.ui.composer.cursor;
-            if (p >= static_cast<int>(s.size())) return done(std::move(m));
+            if (p >= static_cast<int>(s.size())) return Cmd::none();
             int q = word_right(s, p);
-            if (q <= p) return done(std::move(m));
+            if (q <= p) return Cmd::none();
             begin_edit(m.ui.composer);
             m.ui.composer.text.erase(static_cast<std::size_t>(p),
                                      static_cast<std::size_t>(q - p));
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ComposerUndo) -> Step {
-            if (m.ui.composer.undo_stack.empty()) return done(std::move(m));
+        [&](ComposerUndo) -> Cmd {
+            if (m.ui.composer.undo_stack.empty()) return Cmd::none();
             ComposerState::Snapshot cur;
             cur.text   = std::move(m.ui.composer.text);
             cur.cursor = m.ui.composer.cursor;
@@ -830,10 +829,10 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             m.ui.composer.undo_coalescing = false;
             reset_browsing(m.ui.composer);
             reset_browsing(m.ui.composer);
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ComposerRedo) -> Step {
-            if (m.ui.composer.redo_stack.empty()) return done(std::move(m));
+        [&](ComposerRedo) -> Cmd {
+            if (m.ui.composer.redo_stack.empty()) return Cmd::none();
             ComposerState::Snapshot cur;
             cur.text   = std::move(m.ui.composer.text);
             cur.cursor = m.ui.composer.cursor;
@@ -849,11 +848,11 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             m.ui.composer.undo_coalescing = false;
             reset_browsing(m.ui.composer);
             reset_browsing(m.ui.composer);
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ComposerHistoryPrev) -> Step {
+        [&](ComposerHistoryPrev) -> Cmd {
             auto texts = previous_user_texts(m);
-            if (texts.empty()) return done(std::move(m));
+            if (texts.empty()) return Cmd::none();
             auto& cs = m.ui.composer;
             // Where we are now: browsing history, or anywhere else (Live,
             // or peeking the queue — ↑ leaves that and enters history).
@@ -871,12 +870,12 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             // non-destructive (they leave draft_save intact). Once
             // the user edits, begin_edit fires reset_browsing and
             // the walked text becomes the new live draft.
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ComposerHistoryNext) -> Step {
+        [&](ComposerHistoryNext) -> Cmd {
             auto& cs = m.ui.composer;
             const auto cur = cs.history_index();
-            if (!cur) return done(std::move(m));   // not walking history
+            if (!cur) return Cmd::none();   // not walking history
             cs.undo_coalescing = false;
             auto texts = previous_user_texts(m);
             const int next_idx = *cur - 1;
@@ -886,14 +885,14 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
                 cs.text = cs.draft_save.value_or(std::string{});
                 cs.cursor = static_cast<int>(cs.text.size());
                 cs.draft_save.reset();
-                return done(std::move(m));
+                return Cmd::none();
             }
             cs.browsing = ComposerState::History{next_idx};
             if (next_idx < static_cast<int>(texts.size()))
                 apply_history_entry(cs, texts[static_cast<std::size_t>(next_idx)]);
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ComposerImagePasteFromClipboard) -> Step {
+        [&](ComposerImagePasteFromClipboard) -> Cmd {
             // Bracketed paste delivers UTF-8 text only; for an image-
             // on-clipboard we ask the OS clipboard directly (see
             // io/clipboard.cpp for the per-OS implementation). Sync —
@@ -901,9 +900,9 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             // Same code path as the Alt+V trigger and the empty-
             // bracketed-paste detection (Windows Terminal swallows
             // Ctrl+V, our two fallbacks land here).
-            return smart_paste_from_clipboard(std::move(m));
+            return smart_paste_from_clipboard(m);
         },
-        [&](ComposerPaste& e) -> Step {
+        [&](ComposerPaste& e) -> Cmd {
             // ANY paste (bracketed, OSC 52 reply, OSC 5522 image reply)
             // satisfies an in-flight escape-based clipboard query — cancel
             // the pending no-reply diagnosis.
@@ -919,7 +918,7 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             // same path Alt+V uses so the user gets the image without
             // having to learn an alternate shortcut.
             if (e.text.empty())
-                return smart_paste_from_clipboard(std::move(m));
+                return smart_paste_from_clipboard(m);
 
             // Instrument the paste path. Six turns of this session were
             // spent guessing WHY a 100 KB image showed up as 4 KB, because
@@ -958,7 +957,7 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
                 m.ui.composer.text.insert(m.ui.composer.cursor, placeholder);
                 m.ui.composer.cursor += static_cast<int>(placeholder.size());
                 m.ui.composer.expanded = true;
-                return done(std::move(m));
+                return Cmd::none();
             }
 
             // Image-path paste: a single-line path naming a real image
@@ -980,12 +979,12 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
                 m.ui.composer.text.insert(m.ui.composer.cursor, placeholder);
                 m.ui.composer.cursor += static_cast<int>(placeholder.size());
                 m.ui.composer.expanded = true;
-                return done(std::move(m));
+                return Cmd::none();
             }
 
             // Empty paste (clipboard manager hiccup, terminal dropped
             // a binary clipboard) — nothing to do.
-            if (e.text.empty()) return done(std::move(m));
+            if (e.text.empty()) return Cmd::none();
 
             // Normalize line endings: some terminals (and ssh tty cooked
             // mode) translate \n → \r in bracketed paste so the bytes
@@ -1074,17 +1073,17 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
                     "over SSH (needs kitty's OSC 5522); attach by path, "
                     "or set AGENTTY_CLIPBOARD_CMD",
                     std::chrono::seconds{9});
-                return {std::move(m), std::move(toast)};
+                return std::move(toast);
             }
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ClipboardQueryTimeout& e) -> Step {
+        [&](ClipboardQueryTimeout& e) -> Cmd {
             // The escape-based clipboard read went unanswered. Stale guard:
             // only diagnose if THIS query is still the latest and no paste
             // arrived meanwhile.
             if (e.seq != m.ui.clipboard_query_seq
                 || m.ui.clipboard_query_done >= e.seq)
-                return done(std::move(m));
+                return Cmd::none();
             // The terminal may be ANSWERING, just not finished: an image
             // reply is megabytes of base64 and streams in over seconds on a
             // remote link. Diagnosing "no answer" while bytes are actively
@@ -1099,9 +1098,8 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
                 if (now != m.ui.clipboard_rx_mark) {
                     m.ui.clipboard_rx_mark = now;
                     const auto again = std::chrono::milliseconds{1500};
-                    return {std::move(m),
-                            Cmd::after(again,
-                                Msg{ClipboardQueryTimeout{e.seq}})};
+                    return Cmd::after(again,
+                                Msg{ClipboardQueryTimeout{e.seq}});
                 }
             }
             // This query is dead. Clear the image-intent latch so it cannot
@@ -1239,14 +1237,14 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
                       "terminal with OSC 52 read support";
             }
             auto toast = set_status_toast(m, msg, std::chrono::seconds{8});
-            return {std::move(m), std::move(toast)};
+            return std::move(toast);
         },
-        [&](ComposerRecallQueued) -> Step {
+        [&](ComposerRecallQueued) -> Cmd {
             // No-op when there's nothing to recall — the caller (the
             // Up-arrow keymap) only emits this when the queue is
             // non-empty, but the predicate is racy across frames so
             // be defensive.
-            if (m.ui.composer.queued.empty()) return done(std::move(m));
+            if (m.ui.composer.queued.empty()) return Cmd::none();
 
             // Drain the queue into the composer, joined by '\n', and
             // append any pre-existing composer text after another
@@ -1321,16 +1319,16 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             // trade-off as Claude Code — keeps the data model simple
             // (no "soft-deleted, recallable" intermediate state).
             m.ui.composer.queued.clear();
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ComposerQueuePeekPrev) -> Step {
+        [&](ComposerQueuePeekPrev) -> Cmd {
             // Alt+↑ — step further INTO the queue. Order: queue[last]
             // (most-recently queued, closest to "the one I just
             // typed") → queue[last-1] → … → queue[0]. So the first
             // press loads the tail item, which is what the user
             // usually wants when correcting a typo in their last
             // queued message.
-            if (m.ui.composer.queued.empty()) return done(std::move(m));
+            if (m.ui.composer.queued.empty()) return Cmd::none();
             auto& cs = m.ui.composer;
             cs.undo_coalescing = false;
             const int n = static_cast<int>(cs.queued.size());
@@ -1374,14 +1372,14 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             // Multi-line peeked content → honour expanded cap.
             if (cs.text.find('\n') != std::string::npos)
                 cs.expanded = true;
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ComposerQueuePeekNext) -> Step {
+        [&](ComposerQueuePeekNext) -> Cmd {
             // Alt+↓ — walk back OUT of the queue toward the live draft.
             // No-op when not peeking.
             auto& cs = m.ui.composer;
             const auto peek = cs.queue_peek_index();
-            if (!peek) return done(std::move(m));
+            if (!peek) return Cmd::none();
             cs.undo_coalescing = false;
             const int n = static_cast<int>(cs.queued.size());
             // Commit the current edit back into its slot first.
@@ -1400,7 +1398,7 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
                 cs.draft_save_attachments.clear();
                 cs.cursor = static_cast<int>(cs.text.size());
                 cs.draft_save.reset();
-                return done(std::move(m));
+                return Cmd::none();
             }
             cs.browsing    = ComposerState::QueuePeek{next_idx};
             cs.text        = cs.queued[static_cast<std::size_t>(next_idx)].text;
@@ -1408,9 +1406,9 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             cs.cursor      = static_cast<int>(cs.text.size());
             if (cs.text.find('\n') != std::string::npos)
                 cs.expanded = true;
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ComposerQueuePopLast) -> Step {
+        [&](ComposerQueuePopLast) -> Cmd {
             // Alt+Backspace on an empty composer with no peek active
             // — "undo queue": remove the most recently queued item.
             // Useful when you've fired off a message you immediately
@@ -1418,7 +1416,7 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             // are dropped (not restored to the composer) so this is a
             // pure delete, mirroring how a real Backspace deletes
             // characters. If you want to edit it instead, Alt+↑.
-            if (m.ui.composer.queued.empty()) return done(std::move(m));
+            if (m.ui.composer.queued.empty()) return Cmd::none();
             m.ui.composer.queued.pop_back();
             // If the peek index pointed at or past the dropped tail,
             // invalidate it. (Subscribe gates this Msg on the composer
@@ -1429,17 +1427,15 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
                 m.ui.composer.draft_save.reset();
                 m.ui.composer.draft_save_attachments.clear();
             }
-            return done(std::move(m));
+            return Cmd::none();
         },
     }, cm);
 
     // Fold in the proactive OAuth refresh (if armed above) without
     // disturbing whatever Cmd the matched arm produced. none() short-
     // circuits the common case to zero overhead.
-    if (!proactive_refresh.is_none()) {
-        step.second = Cmd::batch(
-            std::move(step.second), std::move(proactive_refresh));
-    }
+    if (!proactive_refresh.is_none())
+        return Cmd::batch(std::move(step), std::move(proactive_refresh));
     return step;
 }
 

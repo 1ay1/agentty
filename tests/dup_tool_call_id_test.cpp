@@ -65,24 +65,24 @@ static Message asst_placeholder() {
 }
 
 static Step start(Model m, const std::string& id, const std::string& name) {
-    return stream_update(std::move(m),
+    return ::agentty::app::detail::step(::agentty::app::detail::stream_update, std::move(m),
                          msg::StreamMsg{StreamToolUseStart{
                              ToolCallId{id}, ToolName{name}}});
 }
 
 static Step delta(Model m, const std::string& id, std::string js) {
-    return stream_update(std::move(m),
+    return ::agentty::app::detail::step(::agentty::app::detail::stream_update, std::move(m),
                          msg::StreamMsg{StreamToolUseDelta{
                              ToolCallId{id}, std::move(js)}});
 }
 
 static Step end(Model m, const std::string& id) {
-    return stream_update(std::move(m),
+    return ::agentty::app::detail::step(::agentty::app::detail::stream_update, std::move(m),
                          msg::StreamMsg{StreamToolUseEnd{ToolCallId{id}}});
 }
 
 static Step observed(Model m, const std::string& id, std::string out) {
-    return stream_update(std::move(m),
+    return ::agentty::app::detail::step(::agentty::app::detail::stream_update, std::move(m),
                          msg::StreamMsg{StreamObservedToolResult{
                              ToolCallId{id}, /*failed=*/false,
                              std::move(out)}});
@@ -252,7 +252,7 @@ TEST_CASE("stale tool result is dropped by exec seq") {
         ToolUse::Running{now, {}, {}, now, /*exec_seq=*/8}));
 
     ToolExecProgress p{ToolCallId{"call_0"}, "old progress", 7};
-    auto s = tool_update(std::move(m), msg::ToolMsg{std::move(p)});
+    auto s = ::agentty::app::detail::step(::agentty::app::detail::tool_update, std::move(m), msg::ToolMsg{std::move(p)});
     m = std::move(s.first);
     auto* r = std::get_if<ToolUse::Running>(
         &m.d.current.messages[1].tool_calls[0].status);
@@ -260,7 +260,7 @@ TEST_CASE("stale tool result is dropped by exec seq") {
 
     ToolExecOutput o{ToolCallId{"call_0"}, std::string{"old output"}};
     o.exec_seq = 7;
-    s = tool_update(std::move(m), msg::ToolMsg{std::move(o)});
+    s = ::agentty::app::detail::step(::agentty::app::detail::tool_update, std::move(m), msg::ToolMsg{std::move(o)});
     m = std::move(s.first);
     check(std::holds_alternative<ToolUse::Running>(
               m.d.current.messages[1].tool_calls[0].status),
@@ -270,7 +270,7 @@ TEST_CASE("stale tool result is dropped by exec seq") {
 
     ToolExecOutput fresh{ToolCallId{"call_0"}, std::string{"new output"}};
     fresh.exec_seq = 8;
-    s = tool_update(std::move(m), msg::ToolMsg{std::move(fresh)});
+    s = ::agentty::app::detail::step(::agentty::app::detail::tool_update, std::move(m), msg::ToolMsg{std::move(fresh)});
     m = std::move(s.first);
     check(m.d.current.messages[1].tool_calls[0].output() == "new output",
           "T6: the matching result lands");

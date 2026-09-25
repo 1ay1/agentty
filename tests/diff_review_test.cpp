@@ -134,13 +134,13 @@ int main() {
         // Two-press guard (commit 7498bf3f): from the OPEN pane the first
         // ^X arms (no write), the second executes. Palette-driven reject
         // (pane closed) executes on the first press.
-        auto armed = detail::diff_review_update(std::move(m), RejectAllChanges{});
+        auto armed = detail::step(detail::diff_review_update, std::move(m), RejectAllChanges{});
         check(g_writes.count("a.txt") == 0,
               "first reject-all press only arms, no write yet");
         check(armed.first.ui.panel.get<pn::DiffReview>()
                   && armed.first.ui.panel.get<pn::DiffReview>()->confirm_reject_all,
               "first reject-all press arms the confirm flag");
-        auto s = detail::diff_review_update(std::move(armed.first), RejectAllChanges{});
+        auto s = detail::step(detail::diff_review_update, std::move(armed.first), RejectAllChanges{});
         check(g_writes.count("a.txt") == 1, "reject-all wrote the file");
         check(g_writes["a.txt"] == before,
               "reject-all reverted the file to ORIGINAL contents");
@@ -157,7 +157,7 @@ int main() {
             std::expected<std::string, tools::ToolError>{"ok"},
             make_change("b.txt", before, after));
         m.ui.panel.descend(agentty::ui::panel::DiffReview{{0, 0}});
-        auto s = detail::diff_review_update(std::move(m), AcceptAllChanges{});
+        auto s = detail::step(detail::diff_review_update, std::move(m), AcceptAllChanges{});
         check(g_writes.empty(), "accept-all writes nothing (tool already wrote)");
         check(s.first.d.pending_changes.empty(), "queue cleared after accept-all");
     }
@@ -179,9 +179,9 @@ int main() {
         check(fc0.hunks.size() >= 2, "distinct edits produce >=2 hunks");
         m.ui.panel.descend(agentty::ui::panel::DiffReview{{0, 0}});
         // Accept the first hunk, reject the second, then close.
-        auto s1 = detail::diff_review_update(std::move(m), AcceptHunk{});
-        auto s2 = detail::diff_review_update(std::move(s1.first), RejectHunk{});
-        auto s3 = detail::diff_review_update(std::move(s2.first), CloseDiffReview{});
+        auto s1 = detail::step(detail::diff_review_update, std::move(m), AcceptHunk{});
+        auto s2 = detail::step(detail::diff_review_update, std::move(s1.first), RejectHunk{});
+        auto s3 = detail::step(detail::diff_review_update, std::move(s2.first), CloseDiffReview{});
         check(g_writes.count("c.txt") == 1, "close persisted the mixed decision");
         // Written file keeps the accepted hunk (ONE) but reverts the rejected
         // one (FIFTEEN→15): starts with 'ONE', ends with '15'.
@@ -203,7 +203,7 @@ int main() {
         check(!m.d.pending_changes.empty(), "queued before submit");
         m.d.model_id = ModelId{"claude-sonnet-4-5"};  // submit needs a model
         m.ui.composer.text = "next question";
-        auto s = detail::submit_message(std::move(m));
+        auto s = detail::step(detail::submit_message, std::move(m));
         check(s.first.d.pending_changes.empty(),
               "submitting a new message clears the pending-changes queue");
     }
@@ -220,7 +220,7 @@ int main() {
         m.d.model_id = ModelId{""};             // no model resolved yet
         m.ui.composer.text = "hello local model";
         const std::size_t before_n = m.d.current.messages.size();
-        auto s = detail::submit_message(std::move(m));
+        auto s = detail::step(detail::submit_message, std::move(m));
         check(s.first.d.current.messages.size() == before_n,
               "empty-model submit pushes NO message (no dead-loop turn)");
         check(s.first.ui.composer.text == "hello local model",
@@ -237,7 +237,7 @@ int main() {
             ToolCallId{"t1"},
             std::expected<std::string, tools::ToolError>{"edited"},
             make_change("wired.cpp", before, after)};
-        auto s = detail::tool_update(std::move(m), msg::ToolMsg{std::move(e)});
+        auto s = detail::step(detail::tool_update, std::move(m), msg::ToolMsg{std::move(e)});
         check(s.first.d.pending_changes.size() == 1,
               "ToolExecOutput through the reducer queues the change");
         check(!s.first.d.pending_changes.empty()

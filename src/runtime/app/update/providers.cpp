@@ -33,6 +33,22 @@ namespace pn = agentty::ui::panel;
 
 namespace agentty::app::detail {
 
+namespace {
+// Re-enter the whole-Msg reducer, in place.
+//
+// These rows dispatch across FIVE different domains (profile, rag, smart,
+// appearance, meta), which is exactly why they go through the top-level
+// reducer instead of naming a domain reducer each: the row's action IS the
+// dispatch table. update() still returns a pair, so unpack it here — one
+// place rather than at every row.
+[[nodiscard]] Cmd reenter(Model& m, Msg msg) {
+    auto [next, cmd] = agentty::app::update(std::move(m), std::move(msg));
+    m = std::move(next);
+    return std::move(cmd);
+}
+} // namespace
+
+
 namespace pick = agentty::ui::pick;
 using maya::overload;
 // ── Provider picker ────────────────────────────────────────────────────────
@@ -40,7 +56,7 @@ using maya::overload;
 // into a Selection, install it (process-global), persist it, swap the
 // Deps auth to the new provider's resolved credentials, and kick a fresh
 // model fetch so the model list reflects the new backend. No restart.
-Step providers_update(Model m, msg::ProvidersMsg pm) {
+Cmd providers_update(Model& m, msg::ProvidersMsg pm) {
     // The picker's rows are ONE ordered list (presets + ACP agents + saved
     // custom hosts + "Custom host…" sentinel), built once from the current
     // search query. The cursor is an index into THIS list — no offset math,
@@ -56,7 +72,7 @@ Step providers_update(Model m, msg::ProvidersMsg pm) {
     const int n = static_cast<int>(rows.size());
 
     return std::visit(overload{
-        [&](OpenProviders) -> Step {
+        [&](OpenProviders) -> Cmd {
             // Close the model picker if the user cross-hopped here from it
             // (^P in the model picker). Without this the model picker stays
             // open and wins pick_panel's priority order (checked first), so
@@ -99,22 +115,22 @@ Step providers_update(Model m, msg::ProvidersMsg pm) {
             // over whatever is there (usually nothing).
             if (m.ui.panel.is<pn::Models>()) m.ui.panel.replace(pn::Providers{{idx}});
             else                             m.ui.panel.descend(pn::Providers{{idx}});
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](CloseProviders) -> Step {
+        [&](CloseProviders) -> Cmd {
             ascend(m);   // Esc: back to whatever opened this, or close
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ProvidersMove& e) -> Step {
+        [&](ProvidersMove& e) -> Cmd {
             auto* p = m.ui.panel.get<pn::Providers>();
-            if (!p || n == 0) return done(std::move(m));
+            if (!p || n == 0) return Cmd::none();
             p->confirm_remove.clear();   // navigating disarms a pending delete
             p->index = (p->index + e.delta + n) % n;
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ProvidersJump& e) -> Step {
+        [&](ProvidersJump& e) -> Cmd {
             auto* p = m.ui.panel.get<pn::Providers>();
-            if (!p || n == 0) return done(std::move(m));
+            if (!p || n == 0) return Cmd::none();
             p->confirm_remove.clear();   // navigating disarms a pending delete
             using W = ProvidersJump::Where;
             constexpr int kPage = 14;  // matches kViewportH in pickers.cpp
@@ -124,11 +140,11 @@ Step providers_update(Model m, msg::ProvidersMsg pm) {
                 case W::PageUp:   p->index = std::max(0, p->index - kPage); break;
                 case W::PageDown: p->index = std::min(n - 1, p->index + kPage); break;
             }
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ProvidersFilterInput& e) -> Step {
+        [&](ProvidersFilterInput& e) -> Cmd {
             auto* p = m.ui.panel.get<pn::Providers>();
-            if (!p) return done(std::move(m));
+            if (!p) return Cmd::none();
             p->confirm_remove.clear();   // typing disarms a pending ^D delete
             // Append the typed codepoint (UTF-8) and reset the cursor to the
             // top of the freshly-narrowed list.
@@ -152,23 +168,23 @@ Step providers_update(Model m, msg::ProvidersMsg pm) {
                 }
             }
             p->index = 0;
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ProvidersFilterBackspace) -> Step {
+        [&](ProvidersFilterBackspace) -> Cmd {
             auto* p = m.ui.panel.get<pn::Providers>();
-            if (!p || p->query.empty()) return done(std::move(m));
+            if (!p || p->query.empty()) return Cmd::none();
             // Pop one UTF-8 codepoint (trim continuation bytes then the lead).
             while (!p->query.empty()
                    && (static_cast<unsigned char>(p->query.back()) & 0xC0) == 0x80)
                 p->query.pop_back();
             if (!p->query.empty()) p->query.pop_back();
             p->index = 0;
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ProvidersDelete) -> Step {
+        [&](ProvidersDelete) -> Cmd {
             auto* p = m.ui.panel.get<pn::Providers>();
             if (!p || p->index < 0 || p->index >= n)
-                return done(std::move(m));
+                return Cmd::none();
             const ui::ProviderRow& row =
                 rows[static_cast<std::size_t>(p->index)];
 
@@ -191,14 +207,14 @@ Step providers_update(Model m, msg::ProvidersMsg pm) {
             }
             if (target.empty()) {        // nothing removable on this row
                 p->confirm_remove.clear();
-                return done(std::move(m));
+                return Cmd::none();
             }
             // Two-press: first press ARMS (marks confirm_remove on this
             // target), second press on the SAME row COMMITS. Mirrors
             // ThreadListDelete / AccountRemove.
             if (p->confirm_remove != target) {
                 p->confirm_remove = target;
-                return done(std::move(m));
+                return Cmd::none();
             }
             const std::string removed = target;
             {
@@ -236,15 +252,15 @@ Step providers_update(Model m, msg::ProvidersMsg pm) {
                           + " (active) — pick a provider to continue"
                     : (is_custom_host ? "removed custom host: "
                                       : "signed out of ") + removed);
-            return {std::move(m), std::move(toast)};
+            return std::move(toast);
         },
-        [&](ProvidersSelect) -> Step {
+        [&](ProvidersSelect) -> Cmd {
             // Capture the cursor before closing: assigning Closed destroys the
             // OpenAt alternative, so keeping a pointer into it would dangle.
             const auto* p = m.ui.panel.get<pn::Providers>();
             const int selected = p ? p->index : -1;
             m.ui.panel.close<pn::Providers>();
-            if (selected < 0 || selected >= n) return done(std::move(m));
+            if (selected < 0 || selected >= n) return Cmd::none();
             const ui::ProviderRow& chosen = rows[static_cast<std::size_t>(selected)];
 
             // "Custom host…" sentinel: hand off to the free-text endpoint modal.
@@ -261,13 +277,13 @@ Step providers_update(Model m, msg::ProvidersMsg pm) {
                 }
                 ch.origin = ui::login::origin::Providers{};  // Esc = one step back
                 m.ui.login = std::move(ch);
-                return done(std::move(m));
+                return Cmd::none();
             }
 
             // An external ACP agent row: agentty drives the agent subprocess,
             // which does its OWN auth — no key resolution here.
             if (const provider::AcpAgentSpec* agent = chosen.acp()) {
-                return commit_provider_switch(std::move(m), agent->id,
+                return commit_provider_switch(m, agent->id,
                                               auth::AuthHeader{}, agent->id);
             }
 
@@ -286,12 +302,12 @@ Step providers_update(Model m, msg::ProvidersMsg pm) {
                     active.kind == provider::Kind::OpenAI
                     && active.openai_endpoint.label == spec;
                 if (is_active)
-                    return agentty::app::update(std::move(m), Msg{OpenAccounts{}});
+                    return reenter(m, Msg{OpenAccounts{}});
 
                 // Not active — switch to it via the central resolver (the key
                 // is already on disk; resolve reads provider_keys[spec]).
                 auth::AuthHeader new_auth = provider::credentials::resolve(spec);
-                return commit_provider_switch(std::move(m), spec,
+                return commit_provider_switch(m, spec,
                                               std::move(new_auth), spec);
             }
 
@@ -307,8 +323,7 @@ Step providers_update(Model m, msg::ProvidersMsg pm) {
             if (provider::credentials::add_method(preset.id)
                     != provider::credentials::AddMethod::None) {
                 m.ui.panel.close<pn::Providers>();
-                return agentty::app::update(
-                    std::move(m), Msg{OpenAccounts{std::string{preset.id}}});
+                return reenter(m, Msg{OpenAccounts{std::string{preset.id}}});
             }
 
             const std::string spec{preset.id};
@@ -334,7 +349,7 @@ Step providers_update(Model m, msg::ProvidersMsg pm) {
                     .provider_label = std::string{preset.label},
                     .origin         = ui::login::origin::Providers{},
                 };
-                return done(std::move(m));
+                return Cmd::none();
             }
 
             // OAuth providers: if not signed in, launch the login flow rather
@@ -361,20 +376,20 @@ Step providers_update(Model m, msg::ProvidersMsg pm) {
                         .device_auth =
                             provider::chatgpt::codex_device_auth_preferred(),
                     };
-                    return done(std::move(m));
+                    return Cmd::none();
                 }
                 m.ui.login = ui::login::DeviceWaiting{
                     .provider = std::string{spec},
                     .provider_label = std::string{preset.label},
                     .attempt_id = attempt_id,
                 };
-                return done(std::move(m));
+                return Cmd::none();
             }
 
             // Every entry point funnels the actual switch through the ONE
             // helper so provider + per-provider model recall + effort clamp +
             // auth swap + refetch can never drift between call sites.
-            return commit_provider_switch(std::move(m), spec, std::move(new_auth),
+            return commit_provider_switch(m, spec, std::move(new_auth),
                                           std::string{preset.label});
         },
     }, pm);

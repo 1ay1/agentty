@@ -107,27 +107,27 @@ void install_and_close(Model& m, auth::Credentials creds,
 // "close the modal" and "stop the worker" the same act instead of two things
 // that have to be kept in step — they were not, and Esc leaked a polling
 // thread for the rest of its 900 s budget.
-Step launch_device_login(Model m, std::string provider, std::string label) {
+Cmd launch_device_login(Model& m, std::string provider, std::string label) {
     m.ui.login = login::DeviceWaiting{
         .provider = std::move(provider),
         .provider_label = std::move(label),
         .attempt_id = cmd::next_codex_login_attempt_id(),
     };
-    return done(std::move(m));
+    return Cmd::none();
 }
 
-Step open_login(Model m) {
+Cmd open_login(Model& m) {
     m.ui.login = login::Picking{};
-    return done(std::move(m));
+    return Cmd::none();
 }
 
-Step close_login(Model m) {
+Cmd close_login(Model& m) {
     // Leaving the waiting state IS the cancel: subscribe() stops returning
     // the login stream's key, so jaal fires the worker's stop_token. No flag
     // to trip — the two used to be separate, and the flag was the half that
     // stopped being read.
     m.ui.login = login::Closed{};
-    return done(std::move(m));
+    return Cmd::none();
 }
 
 // Esc from a login sub-modal: pop ONE level using the sub-state's recorded
@@ -135,25 +135,25 @@ Step close_login(Model m) {
 // its FULL context (which provider's accounts, which typed host). One visit,
 // no side-channels. States with no parent (Nowhere) or async-waiting states
 // (Esc = cancel) fall through to close_login.
-Step login_back(Model m) {
+Cmd login_back(Model& m) {
     // Reconstruct the recorded parent. `pop` OWNS the origin, so it can move a
     // provider/spec out of it into the rebuilt state.
-    auto pop = [&](login::Origin origin) -> Step {
-        return std::visit([&](auto&& o) -> Step {
+    auto pop = [&](login::Origin origin) -> Cmd {
+        return std::visit([&](auto&& o) -> Cmd {
             using T = std::decay_t<decltype(o)>;
             namespace og = login::origin;
             if constexpr (std::is_same_v<T, og::Providers>) {
                 m.ui.login = login::Closed{};
-                return agentty::app::update(std::move(m), Msg{OpenProviders{}});
+                return providers_update(m, msg::ProvidersMsg{OpenProviders{}});
             } else if constexpr (std::is_same_v<T, og::Models>) {
                 m.ui.login = login::Closed{};
-                return agentty::app::update(std::move(m), Msg{OpenModels{}});
+                return models_update(m, msg::ModelsMsg{OpenModels{}});
             } else if constexpr (std::is_same_v<T, og::Accounts>) {
                 // Return to the SPECIFIC provider's account list — the frame
                 // carries the provider, so this can't drift to the active one.
                 m.ui.login = login::Closed{};
-                return agentty::app::update(
-                    std::move(m), Msg{OpenAccounts{std::move(o.provider)}});
+                return login_update(
+                    m, msg::LoginMsg{OpenAccounts{std::move(o.provider)}});
             } else if constexpr (std::is_same_v<T, og::Method>) {
                 login::Picking p;
                 p.provider = std::move(o.provider);
@@ -163,7 +163,7 @@ Step login_back(Model m) {
                 if (!p.provider.empty())
                     p.origin = login::origin::Accounts{p.provider};
                 m.ui.login = std::move(p);
-                return done(std::move(m));
+                return Cmd::none();
             } else if constexpr (std::is_same_v<T, og::HostInput>) {
                 // Restore the typed spec so backing out of the key/probe prompt
                 // doesn't discard the host the user just entered.
@@ -172,9 +172,9 @@ Step login_back(Model m) {
                 ch.cursor     = static_cast<int>(ch.host_input.size());
                 ch.origin     = login::origin::Providers{};
                 m.ui.login    = std::move(ch);
-                return done(std::move(m));
+                return Cmd::none();
             } else {   // og::Nowhere
-                return close_login(std::move(m));
+                return close_login(m);
             }
         }, std::move(origin));
     };
@@ -192,7 +192,7 @@ Step login_back(Model m) {
         ch.cursor     = static_cast<int>(ch.host_input.size());
         ch.origin     = std::move(origin);
         m.ui.login    = std::move(ch);
-        return done(std::move(m));
+        return Cmd::none();
     }
     if (auto* api = std::get_if<login::ApiKeyInput>(&m.ui.login))
         return pop(std::move(api->origin));
@@ -205,7 +205,7 @@ Step login_back(Model m) {
         return pop(login::origin::Providers{});
     // Every other sub-state (OAuth waits, failures): Esc keeps its original
     // meaning — cancel/close outright.
-    return close_login(std::move(m));
+    return close_login(m);
 }
 
 // Async probe result for a keyless custom host. Success: persist the host
@@ -213,9 +213,9 @@ Step login_back(Model m) {
 // DETECTED dialect. Failure: back to the input with the spec restored and
 // the reason in the status line. Stale results (Esc'd / resubmitted probes)
 // are dropped by attempt-id mismatch.
-Step host_probed(Model m, HostProbed r) {
+Cmd host_probed(Model& m, HostProbed r) {
     auto* hp = std::get_if<login::HostProbing>(&m.ui.login);
-    if (!hp || hp->attempt_id != r.attempt_id) return done(std::move(m));
+    if (!hp || hp->attempt_id != r.attempt_id) return Cmd::none();
     auto origin = std::move(hp->origin);
     if (!r.ok) {
         // A 401/403 means the ADDRESS WAS RIGHT and the server wants a key.
@@ -232,7 +232,7 @@ Step host_probed(Model m, HostProbed r) {
             auto toast = set_status_toast(
                 m, r.spec + " needs an API key \xe2\x80\x94 paste it below",
                 std::chrono::seconds{6});
-            return {std::move(m), std::move(toast)};
+            return std::move(toast);
         }
         login::CustomHostInput ch;
         ch.host_input = std::move(r.spec);
@@ -241,7 +241,7 @@ Step host_probed(Model m, HostProbed r) {
         m.ui.login    = std::move(ch);
         auto toast = set_status_toast(m, "host check failed: " + r.error,
                                       std::chrono::seconds{6});
-        return {std::move(m), std::move(toast)};
+        return std::move(toast);
     }
 
     const std::string spec = std::move(r.spec);
@@ -258,7 +258,7 @@ Step host_probed(Model m, HostProbed r) {
     }
     auth::AuthHeader new_auth = provider::credentials::resolve(spec);
     m.ui.login = login::Closed{};
-    auto step = commit_provider_switch(std::move(m), spec, std::move(new_auth),
+    auto switch_cmd = commit_provider_switch(m, spec, std::move(new_auth),
                                        provider::provider_display_name(
                                            provider::parse_selection(spec)));
     // Enrich the switch toast with what the probe FOUND — the "it just
@@ -323,24 +323,19 @@ Step host_probed(Model m, HostProbed r) {
     // isn't one: the server already told us what it is. Asking the user to
     // confirm it would be asking them to repeat an answer we have.
     if (!r.learned_self_hosted.empty()) {
-        // Onto step.first, NOT `m`: the model was moved into
-        // commit_provider_switch above, so `m` is a husk here and anything
-        // written to it is discarded.
-        auto& sm = step.first;
-        if (sm.d.persisted.probe_hosts.insert(r.learned_self_hosted).second) {
-            save_record(sm);
-            provider::openai::install_probe_hosts(sm.d.persisted.probe_hosts);
+        if (m.d.persisted.probe_hosts.insert(r.learned_self_hosted).second) {
+            save_record(m);
+            provider::openai::install_probe_hosts(m.d.persisted.probe_hosts);
         }
     }
-    auto found = set_status_toast(step.first,
+    auto found = set_status_toast(m,
         std::string{"\xe2\x9c\x93 "} + std::to_string(r.model_count)
         + (r.model_count == 1 ? " model" : " models") + " \xc2\xb7 "
         + (r.native_api ? "ollama native" : "openai-compatible") + " \xc2\xb7 "
         + std::to_string(r.latency_ms) + "ms" + ctx,
         // A remedy needs longer to read than a success.
         std::chrono::seconds{r.probe_skipped ? 12 : 6});
-    return {std::move(step.first),
-            Cmd::batch(std::move(step.second), std::move(found))};
+    return Cmd::batch(std::move(switch_cmd), std::move(found));
 }
 
 // Canonical account/registry id for a provider selection — mirrors the
@@ -354,7 +349,7 @@ static std::string signout_provider_id(const provider::Selection& sel) {
     return {};
 }
 
-Step sign_out(Model m) {
+Cmd sign_out(Model& m) {
     // Clear the ACTIVE provider's credentials, so "Sign out" targets whatever
     // the user is currently signed in to. WHICH store that is (Anthropic's
     // credentials.json, an OAuth token file, a provider_keys entry) is the
@@ -429,7 +424,7 @@ Step sign_out(Model m) {
                              + std::chrono::seconds{5};
             auth::AuthHeader fb_auth = provider::credentials::resolve(fallback);
             return commit_provider_switch(
-                std::move(m), fallback, std::move(fb_auth),
+                m, fallback, std::move(fb_auth),
                 provider::provider_display_name(
                     provider::parse_selection(fallback)));
         }
@@ -440,7 +435,7 @@ Step sign_out(Model m) {
     m.s.status = "signed out of " + what + " \xe2\x80\x94 sign in to continue";
     m.s.status_until = std::chrono::steady_clock::now()
                      + std::chrono::seconds{5};
-    return done(std::move(m));
+    return Cmd::none();
 }
 
 namespace {
@@ -501,7 +496,7 @@ login::AccountList build_account_list(const provider::Selection& sel) {
 
 } // namespace
 
-Step open_accounts(Model m, const std::string& provider_id = {}) {
+Cmd open_accounts(Model& m, const std::string& provider_id = {}) {
     // Target the requested provider if given (Enter on a provider row), else
     // the active one. Building from a parsed Selection means we DON'T have to
     // switch to the provider first — no model-picker pop — the account list
@@ -513,24 +508,24 @@ Step open_accounts(Model m, const std::string& provider_id = {}) {
         // Provider has no switchable accounts — fall back to the normal
         // sign-in / add-key flow rather than showing an empty list.
         m.ui.login = login::Picking{};
-        return done(std::move(m));
+        return Cmd::none();
     }
     m.ui.login = std::move(al);
-    return done(std::move(m));
+    return Cmd::none();
 }
 
-Step account_move(Model m, int delta) {
+Cmd account_move(Model& m, int delta) {
     if (auto* al = std::get_if<login::AccountList>(&m.ui.login)) {
         const int n = static_cast<int>(al->rows.size()) + 1;   // +1 add-new row
         if (n > 0) al->cursor = ((al->cursor + delta) % n + n) % n;
         al->confirm_remove.clear();
     }
-    return done(std::move(m));
+    return Cmd::none();
 }
 
-Step account_select(Model m) {
+Cmd account_select(Model& m) {
     auto* al = std::get_if<login::AccountList>(&m.ui.login);
-    if (!al) return done(std::move(m));
+    if (!al) return Cmd::none();
     const int add_row = static_cast<int>(al->rows.size());
 
     // Trailing "+ Add another account…" row. Keep the continuation scoped
@@ -552,10 +547,10 @@ Step account_select(Model m) {
                 // account list, never the active provider's.
                 .origin         = login::origin::Accounts{provider},
             };
-            return done(std::move(m));
+            return Cmd::none();
         case provider::credentials::AddMethod::None:
             // Local server — no account to add; stay put.
-            return done(std::move(m));
+            return Cmd::none();
         case provider::credentials::AddMethod::OAuthDevice:
             break;   // handled below (provider-specific launch)
         }
@@ -578,7 +573,7 @@ Step account_select(Model m) {
         // the comment rather than the rows.
         const auto* prow = provider::preset_for(provider);
         if (prow && prow->device_login)
-            return launch_device_login(std::move(m), provider,
+            return launch_device_login(m, provider,
                                        std::string{prow->label});
         if (prow && prow->codex_login()) {
             // State only — subscribe() runs the worker, keyed on attempt_id.
@@ -586,19 +581,19 @@ Step account_select(Model m) {
                 .attempt_id = cmd::next_codex_login_attempt_id(),
                 .device_auth = provider::chatgpt::codex_device_auth_preferred(),
             };
-            return done(std::move(m));
+            return Cmd::none();
         }
         // Otherwise: the method menu (OAuth subscription vs API key).
         m.ui.login = login::Picking{
             .provider = provider,
             .origin   = login::origin::Accounts{provider}};
-        return done(std::move(m));
+        return Cmd::none();
     }
 
     const auto& row = al->rows[static_cast<std::size_t>(al->cursor)];
     if (row.active) {                         // already this account
         m.ui.login = login::Closed{};
-        return done(std::move(m));
+        return Cmd::none();
     }
 
     namespace acc = agentty::auth::accounts;
@@ -606,7 +601,7 @@ Step account_select(Model m) {
     const std::string label    = row.label;
     if (!acc::activate(provider, label)) {
         m.ui.login = login::Failed{"could not switch to \"" + label + "\""};
-        return done(std::move(m));
+        return Cmd::none();
     }
 
     // If the chosen account belongs to a provider that ISN'T currently active
@@ -632,7 +627,8 @@ Step account_select(Model m) {
             const std::string plabel = p ? std::string{p->label} : provider;
             std::string recalled = deps().load_settings().provider_models.count(provider)
                 ? deps().load_settings().provider_models.at(provider) : std::string{};
-            return commit_provider_switch(std::move(m), provider,
+            return commit_provider_switch(
+                m, provider,
                                           provider::credentials::resolve(provider),
                                           plabel, recalled, /*open_panel=*/false);
         }
@@ -685,14 +681,14 @@ Step account_select(Model m) {
                : "switched " + provider_label + " to " + label;
     m.s.status_until = std::chrono::steady_clock::now()
                      + std::chrono::seconds{4};
-    return {std::move(m), std::move(refresh_cmd)};
+    return std::move(refresh_cmd);
 }
 
-Step account_remove(Model m) {
+Cmd account_remove(Model& m) {
     auto* al = std::get_if<login::AccountList>(&m.ui.login);
-    if (!al) return done(std::move(m));
+    if (!al) return Cmd::none();
     const int add_row = static_cast<int>(al->rows.size());
-    if (al->cursor >= add_row) return done(std::move(m));   // add-new row: nothing to remove
+    if (al->cursor >= add_row) return Cmd::none();   // add-new row: nothing to remove
 
     namespace acc = agentty::auth::accounts;
     const auto row = al->rows[static_cast<std::size_t>(al->cursor)];
@@ -701,7 +697,7 @@ Step account_remove(Model m) {
     // vim `d` must never erase a saved refresh token with no way back.
     if (al->confirm_remove != row.label) {
         al->confirm_remove = row.label;
-        return done(std::move(m));
+        return Cmd::none();
     }
 
     const bool was_active = row.active;
@@ -759,7 +755,7 @@ Step account_remove(Model m) {
             m.s.status = "removed the last " + provider_label + " account";
             m.s.status_until = std::chrono::steady_clock::now()
                              + std::chrono::seconds{4};
-            return done(std::move(m));
+            return Cmd::none();
         }
     } else {
         m.s.status = "removed " + row.label;
@@ -773,13 +769,13 @@ Step account_remove(Model m) {
     rebuilt.cursor = std::min(old_cursor,
                               static_cast<int>(rebuilt.rows.size()));
     m.ui.login = std::move(rebuilt);
-    return done(std::move(m));
+    return Cmd::none();
 }
 
-Step login_pick_method(Model m, char32_t key) {
+Cmd login_pick_method(Model& m, char32_t key) {
     const auto* picking = std::get_if<login::Picking>(&m.ui.login);
     if (!picking && !std::holds_alternative<login::Failed>(m.ui.login))
-        return done(std::move(m));
+        return Cmd::none();
     // Does this provider offer a CHOICE of auth method? Registry flag, not a
     // name: a second OAuth-or-key provider gets the menu by setting it.
     const auto* mrow = picking ? provider::preset_for(picking->provider) : nullptr;
@@ -803,11 +799,11 @@ Step login_pick_method(Model m, char32_t key) {
             oc.state         = std::move(state);
             oc.authorize_url = url;
             m.ui.login = std::move(oc);
-            return {std::move(m), cmd::open_browser_async(std::move(url))};
+            return cmd::open_browser_async(std::move(url));
         } catch (const std::exception& e) {
             m.ui.login = login::Failed{
                 std::string{"could not start secure login: "} + e.what()};
-            return done(std::move(m));
+            return Cmd::none();
         }
     }
     if (key == U'1') {
@@ -816,7 +812,7 @@ Step login_pick_method(Model m, char32_t key) {
         api.origin = login::origin::Method{
             picking ? picking->provider : std::string{}};
         m.ui.login = std::move(api);
-        return done(std::move(m));
+        return Cmd::none();
     }
     if (key == U'3' && !anthropic_only) {
         // Native ChatGPT OAuth. Local terminals use the browser + loopback
@@ -828,7 +824,7 @@ Step login_pick_method(Model m, char32_t key) {
             .attempt_id = cmd::next_codex_login_attempt_id(),
             .device_auth = provider::chatgpt::codex_device_auth_preferred(),
         };
-        return done(std::move(m));
+        return Cmd::none();
     }
     if (key == U'4' && !anthropic_only) {
         // Custom OpenAI-compatible host (llama.cpp, vLLM, LM Studio,
@@ -844,20 +840,20 @@ Step login_pick_method(Model m, char32_t key) {
                 picking ? picking->provider : std::string{}};
             m.ui.login = std::move(ch);
         }
-        return done(std::move(m));
+        return Cmd::none();
     }
     if (key == U'5' && !anthropic_only) {
         // Native GitHub Copilot OAuth (device flow).
-        return launch_device_login(std::move(m), "copilot", "GitHub Copilot");
+        return launch_device_login(m, "copilot", "GitHub Copilot");
     }
     if (key == U'6' && !anthropic_only) {
         // Native Kimi OAuth (device flow).
-        return launch_device_login(std::move(m), "kimi", "Kimi");
+        return launch_device_login(m, "kimi", "Kimi");
     }
-    return done(std::move(m));
+    return Cmd::none();
 }
 
-Step login_char_input(Model m, char32_t ch) {
+Cmd login_char_input(Model& m, char32_t ch) {
     auto utf8 = ui::utf8_encode(ch);
     std::visit(overload{
         [&](login::OAuthCode& s) {
@@ -874,10 +870,10 @@ Step login_char_input(Model m, char32_t ch) {
         },
         [](auto&) {},
     }, m.ui.login);
-    return done(std::move(m));
+    return Cmd::none();
 }
 
-Step login_backspace(Model m) {
+Cmd login_backspace(Model& m) {
     std::visit(overload{
         [](login::OAuthCode& s) {
             if (s.cursor > 0 && !s.code_input.empty()) {
@@ -902,10 +898,10 @@ Step login_backspace(Model m) {
         },
         [](auto&) {},
     }, m.ui.login);
-    return done(std::move(m));
+    return Cmd::none();
 }
 
-Step login_paste(Model m, std::string text) {
+Cmd login_paste(Model& m, std::string text) {
     std::visit(overload{
         [&](login::OAuthCode& s) {
             s.code_input.insert(s.cursor, text);
@@ -921,10 +917,10 @@ Step login_paste(Model m, std::string text) {
         },
         [](auto&) {},
     }, m.ui.login);
-    return done(std::move(m));
+    return Cmd::none();
 }
 
-Step login_cursor_left(Model m) {
+Cmd login_cursor_left(Model& m) {
     std::visit(overload{
         [](login::OAuthCode& s) {
             s.cursor = ui::utf8_prev(s.code_input, s.cursor);
@@ -937,10 +933,10 @@ Step login_cursor_left(Model m) {
         },
         [](auto&) {},
     }, m.ui.login);
-    return done(std::move(m));
+    return Cmd::none();
 }
 
-Step login_cursor_right(Model m) {
+Cmd login_cursor_right(Model& m) {
     std::visit(overload{
         [](login::OAuthCode& s) {
             s.cursor = ui::utf8_next(s.code_input, s.cursor);
@@ -953,10 +949,10 @@ Step login_cursor_right(Model m) {
         },
         [](auto&) {},
     }, m.ui.login);
-    return done(std::move(m));
+    return Cmd::none();
 }
 
-Step login_submit(Model m) {
+Cmd login_submit(Model& m) {
     if (auto* ch = std::get_if<login::CustomHostInput>(&m.ui.login)) {
         // Canonicalise (trim + strip trailing '/') via the ONE shared helper
         // — the same normalisation the CLI --provider path applies, so the
@@ -965,7 +961,7 @@ Step login_submit(Model m) {
         std::string spec = provider::canonical_spec(ch->host_input);
         if (spec.empty()) {
             m.ui.login = login::Failed{"no host entered"};
-            return done(std::move(m));
+            return Cmd::none();
         }
 
         // Remote (TLS) custom hosts need an API key — local servers
@@ -1005,7 +1001,7 @@ Step login_submit(Model m) {
                 // nothing the user entered is lost.
                 .origin         = login::origin::HostInput{spec},
             };
-            return done(std::move(m));
+            return Cmd::none();
         }
 
         // Non-TLS (local) host: no key needed. PROBE before committing —
@@ -1021,9 +1017,8 @@ Step login_submit(Model m) {
             m.ui.login = login::HostProbing{
                 .spec = spec, .attempt_id = attempt_id,
                 .origin = std::move(origin)};
-            return {std::move(m),
-                    cmd::probe_host_async(spec, attempt_id,
-                                          std::move(probe_auth))};
+            return cmd::probe_host_async(spec, attempt_id,
+                                          std::move(probe_auth));
         }
     }
     if (auto* api = std::get_if<login::ApiKeyInput>(&m.ui.login)) {
@@ -1037,7 +1032,7 @@ Step login_submit(Model m) {
             key.pop_back();
         if (key.empty()) {
             m.ui.login = login::Failed{"no key entered"};
-            return done(std::move(m));
+            return Cmd::none();
         }
 
         // OpenAI-family key: persist under Settings.provider_keys[id], then
@@ -1060,13 +1055,14 @@ Step login_submit(Model m) {
             m.ui.login = login::Closed{};
             // Commit through the ONE shared switch path like every other entry;
             // commit_provider_switch opens the model picker for us.
-            return commit_provider_switch(std::move(m), provider,
+            return commit_provider_switch(
+                m, provider,
                                           std::move(new_auth), provider_label);
         }
 
         install_and_close(m, auth::Credentials{auth::cred::ApiKey{std::move(key)}},
                           std::holds_alternative<login::origin::Accounts>(api->origin));
-        return done(std::move(m));
+        return Cmd::none();
     }
     if (auto* oc = std::get_if<login::OAuthCode>(&m.ui.login)) {
         std::string code_raw = std::move(oc->code_input);
@@ -1076,7 +1072,7 @@ Step login_submit(Model m) {
         if (code_raw.empty()) {
             // Stay in OAuthCode — leaving the verifier intact so the user
             // can re-paste without reopening the browser.
-            return done(std::move(m));
+            return Cmd::none();
         }
         auto verifier = std::move(oc->verifier);
         auto state    = std::move(oc->state);
@@ -1089,14 +1085,13 @@ Step login_submit(Model m) {
         // "OAuth login" slot is honest, not lossy. Multi-account with
         // real identity is served by API keys / ChatGPT.
         m.ui.login = login::OAuthExchanging{/*as_new_account=*/false};
-        return {std::move(m),
-            cmd::oauth_exchange(auth::OAuthCode{std::move(code_raw)},
-                                std::move(verifier), std::move(state))};
+        return cmd::oauth_exchange(auth::OAuthCode{std::move(code_raw)},
+                                std::move(verifier), std::move(state));
     }
-    return done(std::move(m));
+    return Cmd::none();
 }
 
-Step login_copy_auth_url(Model m) {
+Cmd login_copy_auth_url(Model& m) {
     // Copy the verification URL. Works from the OAuth-code screen and from any
     // device-flow modal (Copilot/Kimi) — one path, so every provider behaves
     // the same.
@@ -1104,51 +1099,50 @@ Step login_copy_auth_url(Model m) {
     if (auto* oc = std::get_if<login::OAuthCode>(&m.ui.login)) url = oc->authorize_url;
     else if (auto* dw = std::get_if<login::DeviceWaiting>(&m.ui.login))
         url = dw->browser_url.empty() ? dw->authorize_url : dw->browser_url;
-    if (url.empty()) return done(std::move(m));
+    if (url.empty()) return Cmd::none();
     (void)write_clipboard_text(url);   // native pbcopy/wl-copy/xclip
     auto write_cmd = cmd::write_clipboard(url);
     auto toast = set_status_toast(m, "authorize URL copied to clipboard",
                                   std::chrono::seconds{3});
-    return {std::move(m), Cmd::batch(std::move(write_cmd), std::move(toast))};
+    return Cmd::batch(std::move(write_cmd), std::move(toast));
 }
 
-Step login_copy_code(Model m) {
+Cmd login_copy_code(Model& m) {
     // Copy the one-time CODE (what the user types into the browser). Device
     // flow only — terminal text-selection can't grab it because the modal
     // re-renders every poll tick, wiping any selection, so this keystroke is
     // the reliable way onto the clipboard. One path for every device provider.
     auto* dw = std::get_if<login::DeviceWaiting>(&m.ui.login);
-    if (!dw || dw->user_code.empty()) return done(std::move(m));
+    if (!dw || dw->user_code.empty()) return Cmd::none();
     auto code = dw->user_code;
     (void)write_clipboard_text(code);
     auto write_cmd = cmd::write_clipboard(code);
     auto toast = set_status_toast(m, "code " + code + " copied to clipboard",
                                   std::chrono::seconds{3});
-    return {std::move(m), Cmd::batch(std::move(write_cmd), std::move(toast))};
+    return Cmd::batch(std::move(write_cmd), std::move(toast));
 }
 
-Step login_open_browser_again(Model m) {
+Cmd login_open_browser_again(Model& m) {
     std::string url;
     if (auto* oc = std::get_if<login::OAuthCode>(&m.ui.login)) url = oc->authorize_url;
     else if (auto* dw = std::get_if<login::DeviceWaiting>(&m.ui.login))
         url = dw->browser_url.empty() ? dw->authorize_url : dw->browser_url;
-    if (url.empty()) return done(std::move(m));
+    if (url.empty()) return Cmd::none();
     auto open_cmd = cmd::open_browser_async(std::move(url));
     auto toast = set_status_toast(m,
         "opening browser\xe2\x80\xa6",
         std::chrono::seconds{2});
-    return {std::move(m),
-        Cmd::batch(std::move(open_cmd), std::move(toast))};
+    return Cmd::batch(std::move(open_cmd), std::move(toast));
 }
 
-Step login_exchanged(Model m, auth::TokenResult result) {
+Cmd login_exchanged(Model& m, auth::TokenResult result) {
     auto* xchg = std::get_if<login::OAuthExchanging>(&m.ui.login);
     if (!xchg)
-        return done(std::move(m));
+        return Cmd::none();
     const bool as_new = xchg->as_new_account;
     if (!result) {
         m.ui.login = login::Failed{result.error().render()};
-        return done(std::move(m));
+        return Cmd::none();
     }
     auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
@@ -1158,38 +1152,37 @@ Step login_exchanged(Model m, auth::TokenResult result) {
         std::move(tok.refresh_token),
         tok.expires_in_s ? now_ms + tok.expires_in_s * 1000 : 0,
     }}, as_new);
-    return done(std::move(m));
+    return Cmd::none();
 }
 
-Step login_codex_device_code_ready(Model m, std::uint64_t attempt_id,
+Cmd login_codex_device_code_ready(Model& m, std::uint64_t attempt_id,
                                    std::string verification_url,
                                    std::string user_code) {
     auto* waiting = std::get_if<login::ChatGptWaiting>(&m.ui.login);
     if (!waiting || waiting->attempt_id != attempt_id)
-        return done(std::move(m));
+        return Cmd::none();
     waiting->device_auth = true;
     waiting->authorize_url = std::move(verification_url);
     waiting->user_code = std::move(user_code);
-    return done(std::move(m));
+    return Cmd::none();
 }
 
-Step login_codex_done(
-    Model m, std::uint64_t attempt_id,
+Cmd login_codex_done(Model& m, std::uint64_t attempt_id,
     std::expected<provider::chatgpt::CodexCredentials, auth::OAuthError> result)
 {
     auto* waiting = std::get_if<login::ChatGptWaiting>(&m.ui.login);
     if (!waiting || waiting->attempt_id != attempt_id)
-        return done(std::move(m));
+        return Cmd::none();
     // No cancel to trip: every arm below leaves ChatGptWaiting, which drops
     // the stream's key and stops the worker.
     if (!result) {
         m.ui.login = login::Failed{result.error().render()};
-        return done(std::move(m));
+        return Cmd::none();
     }
     if (!provider::chatgpt::save_codex_credentials(*result)) {
         m.ui.login = login::Failed{
             "signed in, but encrypted credentials could not be saved"};
-        return done(std::move(m));
+        return Cmd::none();
     }
     // Persistence happens only after the attempt identity check above. An
     // abandoned or superseded worker can therefore neither switch provider
@@ -1197,11 +1190,12 @@ Step login_codex_done(
     m.ui.login = login::Closed{};
     m.s.status = "signed in to ChatGPT";
     m.s.status_until = std::chrono::steady_clock::now() + std::chrono::seconds{4};
-    return commit_provider_switch(std::move(m), "chatgpt",
+    return commit_provider_switch(
+                m, "chatgpt",
                                   auth::AuthHeader{}, "ChatGPT");
 }
 
-Step login_device_code_ready(Model m, std::string provider,
+Cmd login_device_code_ready(Model& m, std::string provider,
                              std::uint64_t attempt_id,
                              std::string verification_url,
                              std::string browser_url,
@@ -1209,7 +1203,7 @@ Step login_device_code_ready(Model m, std::string provider,
     auto* waiting = std::get_if<login::DeviceWaiting>(&m.ui.login);
     if (!waiting || waiting->provider != provider
                  || waiting->attempt_id != attempt_id)
-        return done(std::move(m));
+        return Cmd::none();
     waiting->authorize_url = std::move(verification_url);   // bare (code field)
     if (browser_url.empty()) browser_url = waiting->authorize_url;
     waiting->browser_url = browser_url;
@@ -1217,31 +1211,32 @@ Step login_device_code_ready(Model m, std::string provider,
     // Best-effort: open the PRE-FILLED url so the user doesn't have to type the
     // code. Harmless if it can't (SSH/headless) — the panel shows the bare url
     // + code for manual entry.
-    return {std::move(m), cmd::open_browser_async(std::move(browser_url))};
+    return cmd::open_browser_async(std::move(browser_url));
 }
 
-Step login_device_done(Model m, std::string provider, std::string provider_label,
+Cmd login_device_done(Model& m, std::string provider, std::string provider_label,
                        std::uint64_t attempt_id,
                        std::optional<std::string> error) {
     auto* waiting = std::get_if<login::DeviceWaiting>(&m.ui.login);
     if (!waiting || waiting->provider != provider
                  || waiting->attempt_id != attempt_id)
-        return done(std::move(m));
+        return Cmd::none();
     // No cancel to trip — see login_codex_done.
     if (error) {
         m.ui.login = login::Failed{std::move(*error)};
-        return done(std::move(m));
+        return Cmd::none();
     }
     // The worker already persisted the token; the transport reads it lazily on
     // the first turn. Switch the active provider now.
     m.ui.login = login::Closed{};
     m.s.status = "signed in to " + provider_label;
     m.s.status_until = std::chrono::steady_clock::now() + std::chrono::seconds{4};
-    return commit_provider_switch(std::move(m), std::move(provider),
+    return commit_provider_switch(
+                m, std::move(provider),
                                   auth::AuthHeader{}, std::move(provider_label));
 }
 
-Step token_refreshed(Model m, auth::TokenResult result) {
+Cmd token_refreshed(Model& m, auth::TokenResult result) {
     // Background-refresh result. Distinct from login_exchanged: this
     // path was kicked off either by `init()` (stale-but-refreshable
     // token on disk) or by the StreamError handler reacting to a
@@ -1269,10 +1264,9 @@ Step token_refreshed(Model m, auth::TokenResult result) {
             AGT_LOG(Auth, Info, "auth.refresh.superseded_dropped",
                     "stream_parked={}", stream_parked ? 1 : 0);
             if (stream_parked)
-                return {std::move(m),
-                        Cmd::after(std::chrono::milliseconds{0},
-                                        Msg{RetryStream{}})};
-            return {std::move(m), Cmd::none()};
+                return Cmd::after(std::chrono::milliseconds{0},
+                                        Msg{RetryStream{}});
+            return Cmd::none();
         }
         // Refresh failed — surface the typed error in the bottom row.
         // The "error:" prefix triggers shortcut_row.cpp's danger
@@ -1314,7 +1308,7 @@ Step token_refreshed(Model m, auth::TokenResult result) {
         // retyping. The first manual send in that state will hit the
         // stale-token 401 path, but the in-app login modal is the
         // recovery surface.
-        return {std::move(m), std::move(cmd)};
+        return std::move(cmd);
     }
 
     // Refresh OK — install fresh creds into Deps so the next stream uses
@@ -1345,10 +1339,9 @@ Step token_refreshed(Model m, auth::TokenResult result) {
                     "store no longer carries the refreshed token "
                     "(account switched); keeping live header as-is");
             if (stream_parked)
-                return {std::move(m),
-                        Cmd::after(std::chrono::milliseconds{0},
-                                        Msg{RetryStream{}})};
-            return {std::move(m), Cmd::none()};
+                return Cmd::after(std::chrono::milliseconds{0},
+                                        Msg{RetryStream{}});
+            return Cmd::none();
         }
         agentty::app::update_auth(auth::make_auth_header(*on_disk));
     }
@@ -1362,11 +1355,10 @@ Step token_refreshed(Model m, auth::TokenResult result) {
     // flips retry back to Fresh and calls launch_stream, which picks
     // up the freshly-installed bearer from Deps.
     if (stream_parked) {
-        return {std::move(m),
-            Cmd::batch(
+        return Cmd::batch(
                 std::move(toast_cmd),
                 Cmd::after(std::chrono::milliseconds{0},
-                                Msg{RetryStream{}}))};
+                                Msg{RetryStream{}}));
     }
 
     // Drain any text the user queued while the refresh was in flight.
@@ -1380,13 +1372,11 @@ Step token_refreshed(Model m, auth::TokenResult result) {
         m.ui.composer.attachments = std::move(head.attachments);
         m.ui.composer.cursor      = static_cast<int>(m.ui.composer.text.size());
         m.ui.composer.queued.erase(m.ui.composer.queued.begin());
-        auto [mm, sub_cmd] = submit_message(std::move(m));
-        m = std::move(mm);
-        return {std::move(m),
-            Cmd::batch(
-                std::move(toast_cmd), std::move(sub_cmd))};
+        auto sub_cmd = submit_message(m);
+        return Cmd::batch(
+                std::move(toast_cmd), std::move(sub_cmd));
     }
-    return {std::move(m), std::move(toast_cmd)};
+    return std::move(toast_cmd);
 }
 
 // ============================================================================
@@ -1395,46 +1385,46 @@ Step token_refreshed(Model m, auth::TokenResult result) {
 // Thin dispatch over the per-arm helpers above; the typed state-machine
 // guarantees the helpers see a modal in the right state.
 
-Step login_update(Model m, msg::LoginMsg lm) {
+Cmd login_update(Model& m, msg::LoginMsg lm) {
     return std::visit(overload{
-        [&](OpenLogin)              -> Step { return open_login(std::move(m)); },
-        [&](CloseLogin)             -> Step { return close_login(std::move(m)); },
-        [&](LoginBack)              -> Step { return login_back(std::move(m)); },
-        [&](HostProbed& e)          -> Step { return host_probed(std::move(m), std::move(e)); },
-        [&](SignOut)                -> Step { return sign_out(std::move(m)); },
-        [&](OpenAccounts& e)        -> Step { return open_accounts(std::move(m), e.provider); },
-        [&](AccountMove& e)         -> Step { return account_move(std::move(m), e.delta); },
-        [&](AccountSelect)          -> Step { return account_select(std::move(m)); },
-        [&](AccountRemove)          -> Step { return account_remove(std::move(m)); },
-        [&](LoginPickMethod& e)     -> Step { return login_pick_method(std::move(m), e.key); },
-        [&](LoginCharInput& e)      -> Step { return login_char_input(std::move(m), e.ch); },
-        [&](LoginBackspace)         -> Step { return login_backspace(std::move(m)); },
-        [&](LoginPaste& e)          -> Step { return login_paste(std::move(m), std::move(e.text)); },
-        [&](LoginCursorLeft)        -> Step { return login_cursor_left(std::move(m)); },
-        [&](LoginCursorRight)       -> Step { return login_cursor_right(std::move(m)); },
-        [&](LoginSubmit)            -> Step { return login_submit(std::move(m)); },
-        [&](LoginCopyAuthUrl)       -> Step { return login_copy_auth_url(std::move(m)); },
-        [&](LoginCopyCode)          -> Step { return login_copy_code(std::move(m)); },
-        [&](LoginOpenBrowserAgain)  -> Step { return login_open_browser_again(std::move(m)); },
-        [&](LoginExchanged& e)      -> Step { return login_exchanged(std::move(m), std::move(e.result)); },
-        [&](CodexDeviceCodeReady& e) -> Step {
-            return login_codex_device_code_ready(std::move(m), e.attempt_id,
+        [&](OpenLogin)              -> Cmd { return open_login(m); },
+        [&](CloseLogin)             -> Cmd { return close_login(m); },
+        [&](LoginBack)              -> Cmd { return login_back(m); },
+        [&](HostProbed& e)          -> Cmd { return host_probed(m, std::move(e)); },
+        [&](SignOut)                -> Cmd { return sign_out(m); },
+        [&](OpenAccounts& e)        -> Cmd { return open_accounts(m, e.provider); },
+        [&](AccountMove& e)         -> Cmd { return account_move(m, e.delta); },
+        [&](AccountSelect)          -> Cmd { return account_select(m); },
+        [&](AccountRemove)          -> Cmd { return account_remove(m); },
+        [&](LoginPickMethod& e)     -> Cmd { return login_pick_method(m, e.key); },
+        [&](LoginCharInput& e)      -> Cmd { return login_char_input(m, e.ch); },
+        [&](LoginBackspace)         -> Cmd { return login_backspace(m); },
+        [&](LoginPaste& e)          -> Cmd { return login_paste(m, std::move(e.text)); },
+        [&](LoginCursorLeft)        -> Cmd { return login_cursor_left(m); },
+        [&](LoginCursorRight)       -> Cmd { return login_cursor_right(m); },
+        [&](LoginSubmit)            -> Cmd { return login_submit(m); },
+        [&](LoginCopyAuthUrl)       -> Cmd { return login_copy_auth_url(m); },
+        [&](LoginCopyCode)          -> Cmd { return login_copy_code(m); },
+        [&](LoginOpenBrowserAgain)  -> Cmd { return login_open_browser_again(m); },
+        [&](LoginExchanged& e)      -> Cmd { return login_exchanged(m, std::move(e.result)); },
+        [&](CodexDeviceCodeReady& e) -> Cmd {
+            return login_codex_device_code_ready(m, e.attempt_id,
                 std::move(e.verification_url), std::move(e.user_code));
         },
-        [&](CodexLoginDone& e)      -> Step {
-            return login_codex_done(std::move(m), e.attempt_id,
+        [&](CodexLoginDone& e)      -> Cmd {
+            return login_codex_done(m, e.attempt_id,
                                     std::move(e.result));
         },
-        [&](DeviceCodeReady& e) -> Step {
-            return login_device_code_ready(std::move(m), std::move(e.provider),
+        [&](DeviceCodeReady& e) -> Cmd {
+            return login_device_code_ready(m, std::move(e.provider),
                 e.attempt_id, std::move(e.verification_url),
                 std::move(e.browser_url), std::move(e.user_code));
         },
-        [&](DeviceLoginDone& e)    -> Step {
-            return login_device_done(std::move(m), std::move(e.provider),
+        [&](DeviceLoginDone& e)    -> Cmd {
+            return login_device_done(m, std::move(e.provider),
                 std::move(e.provider_label), e.attempt_id, std::move(e.error));
         },
-        [&](TokenRefreshed& e)      -> Step { return token_refreshed(std::move(m), std::move(e.result)); },
+        [&](TokenRefreshed& e)      -> Cmd { return token_refreshed(m, std::move(e.result)); },
     }, lm);
 }
 

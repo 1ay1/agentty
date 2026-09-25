@@ -64,8 +64,7 @@ TEST_CASE("update: finding a release starts the download without being asked") {
     install_stub_deps();
     A::Model m;
 
-    auto [next, cmd] = D::meta_update(
-        std::move(m),
+    auto [next, cmd] = D::step(::agentty::app::detail::meta_update, std::move(m),
         A::msg::MetaMsg{A::UpdateCheckDone{true, "9.9.9",
                                            "https://example/releases"}});
 
@@ -86,8 +85,7 @@ TEST_CASE("update: a staged update does not start a second download") {
     A::Model m;
     m.s.update_pending_restart = "9.9.9";   // already installed, awaiting restart
 
-    auto [next, cmd] = D::meta_update(
-        std::move(m),
+    auto [next, cmd] = D::step(::agentty::app::detail::meta_update, std::move(m),
         A::msg::MetaMsg{A::UpdateCheckDone{true, "9.9.9", "https://example"}});
 
     // Re-downloading a version already written to disk would overwrite the
@@ -101,8 +99,7 @@ TEST_CASE("update: an in-flight download is not restarted by another check") {
     A::Model m;
     m.s.update_in_flight = true;
 
-    auto [next, cmd] = D::meta_update(
-        std::move(m),
+    auto [next, cmd] = D::step(::agentty::app::detail::meta_update, std::move(m),
         A::msg::MetaMsg{A::UpdateCheckDone{true, "9.9.9", "https://example"}});
 
     CHECK(next.s.update_in_flight);   // still the ORIGINAL one
@@ -113,8 +110,7 @@ TEST_CASE("update: download progress reaches the status line") {
     const std::string before = m.s.status;
 
     // 4 MiB of 16 MiB.
-    auto [next, _] = D::meta_update(
-        std::move(m),
+    auto [next, _] = D::step(::agentty::app::detail::meta_update, std::move(m),
         A::msg::MetaMsg{A::UpdateProgress{4u * 1024 * 1024,
                                                16u * 1024 * 1024}});
 
@@ -130,8 +126,7 @@ TEST_CASE("update: unknown content-length shows bytes, not a fake percentage") {
     auto m = updating_model("1.2.3");
 
     // total = 0 → the server sent no Content-Length.
-    auto [next, _] = D::meta_update(
-        std::move(m),
+    auto [next, _] = D::step(::agentty::app::detail::meta_update, std::move(m),
         A::msg::MetaMsg{A::UpdateProgress{2u * 1024 * 1024, 0}});
 
     CHECK(has(next.s.status, "2.0"));
@@ -146,8 +141,7 @@ TEST_CASE("update: progress arriving after the download is ignored") {
     m.s.status           = "✓ updated to v1.2.3 — restart agentty to use it";
     const std::string before = m.s.status;
 
-    auto [next, _] = D::meta_update(
-        std::move(m),
+    auto [next, _] = D::step(::agentty::app::detail::meta_update, std::move(m),
         A::msg::MetaMsg{A::UpdateProgress{1u * 1024 * 1024,
                                                4u * 1024 * 1024}});
 
@@ -159,8 +153,7 @@ TEST_CASE("update: progress arriving after the download is ignored") {
 TEST_CASE("update: a finished update still asks for a restart, persistently") {
     auto m = updating_model("1.2.3");
 
-    auto [next, _] = D::meta_update(
-        std::move(m), A::msg::MetaMsg{A::UpdateApplied{true, "1.2.3"}});
+    auto [next, _] = D::step(::agentty::app::detail::meta_update, std::move(m), A::msg::MetaMsg{A::UpdateApplied{true, "1.2.3"}});
 
     CHECK(!next.s.update_in_flight);
     // The "available" signal is spent…
@@ -175,8 +168,7 @@ TEST_CASE("update: a finished update still asks for a restart, persistently") {
 TEST_CASE("update: a failed update leaves the offer in place") {
     auto m = updating_model("1.2.3");
 
-    auto [next, _] = D::meta_update(
-        std::move(m),
+    auto [next, _] = D::step(::agentty::app::detail::meta_update, std::move(m),
         A::msg::MetaMsg{A::UpdateApplied{false, "connection reset"}});
 
     CHECK(!next.s.update_in_flight);

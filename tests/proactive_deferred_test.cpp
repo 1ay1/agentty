@@ -91,8 +91,7 @@ TEST_CASE("proactive deferred") {
         Model m = make_deferred_model();
         const std::size_t before = m.d.current.messages.size();
 
-        auto [m2, cmd] = agentty::app::detail::stream_update(
-            std::move(m), msg::StreamMsg{agentty::ProactiveContextReady{block, 0.82}});
+        auto [m2, cmd] = ::agentty::app::detail::step(agentty::app::detail::stream_update, std::move(m), msg::StreamMsg{agentty::ProactiveContextReady{block, 0.82}});
 
         auto& msgs = m2.d.current.messages;
         check(msgs.size() == before + 1,
@@ -136,8 +135,7 @@ TEST_CASE("proactive deferred") {
         Model m = make_deferred_model();
         const std::size_t before = m.d.current.messages.size();
 
-        auto [m2, cmd] = agentty::app::detail::stream_update(
-            std::move(m), msg::StreamMsg{agentty::ProactiveContextReady{std::string{}}});
+        auto [m2, cmd] = ::agentty::app::detail::step(agentty::app::detail::stream_update, std::move(m), msg::StreamMsg{agentty::ProactiveContextReady{std::string{}}});
 
         check(m2.d.current.messages.size() == before,
               "deferred(empty): no message injected");
@@ -154,8 +152,7 @@ TEST_CASE("proactive deferred") {
         m.s.phase = phase::Idle{};   // user cancelled
         const std::size_t before = m.d.current.messages.size();
 
-        auto [m2, cmd] = agentty::app::detail::stream_update(
-            std::move(m), msg::StreamMsg{agentty::ProactiveContextReady{block}});
+        auto [m2, cmd] = ::agentty::app::detail::step(agentty::app::detail::stream_update, std::move(m), msg::StreamMsg{agentty::ProactiveContextReady{block}});
 
         check(m2.d.current.messages.size() == before,
               "deferred(stale): no injection after cancel-to-Idle");
