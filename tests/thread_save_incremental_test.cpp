@@ -205,6 +205,104 @@ TEST_CASE("incremental save: a log damaged behind the writer's back heals") {
     persistence::delete_thread(t.id);
 }
 
+// The fingerprint is what decides which messages a save rewrites, so a
+// change it FAILS to notice is silent data loss: the edit stays in memory,
+// never reaches disk, and is gone on the next load. The hash mixes four
+// independent lanes for speed, which is exactly the kind of change that can
+// accidentally drop a byte range — so pin that every persisted field, and a
+// difference at any offset of a long body, moves it.
+TEST_CASE("incremental save: the fingerprint notices every persisted edit") {
+    using persistence::debug_message_fingerprint;
+
+    Message base;
+    base.id   = MessageId{"fp-base"};
+    base.role = Role::Assistant;
+    base.text = "hello";
+    const std::uint64_t h0 = debug_message_fingerprint(base);
+
+    auto differs = [&](Message m, const char* what) {
+        CHECK_MESSAGE(debug_message_fingerprint(m) != h0, what);
+    };
+
+    { Message m = base; m.id = MessageId{"fp-other"};      differs(std::move(m), "id"); }
+    { Message m = base; m.role = Role::User;               differs(std::move(m), "role"); }
+    { Message m = base; m.text = "hellp";                  differs(std::move(m), "text (one byte)"); }
+    { Message m = base; m.text = "hello ";                 differs(std::move(m), "text (length)"); }
+    { Message m = base; m.thinking = "t";                  differs(std::move(m), "thinking"); }
+    { Message m = base; m.thinking_signature = "s";        differs(std::move(m), "thinking signature"); }
+    { Message m = base; m.reasoning_encrypted = "e";       differs(std::move(m), "reasoning blob"); }
+    { Message m = base; m.served_model = ModelId{"x"};     differs(std::move(m), "served model"); }
+    { Message m = base; m.error = "boom";                  differs(std::move(m), "error"); }
+    { Message m = base; m.is_compact_summary = true;       differs(std::move(m), "compact summary flag"); }
+    { Message m = base; m.fork_note = true;                differs(std::move(m), "fork note"); }
+    { Message m = base; m.checkpoint_id = CheckpointId{"c"}; differs(std::move(m), "checkpoint id"); }
+    { Message m = base; m.timestamp += std::chrono::seconds{1};
+                                                          differs(std::move(m), "timestamp"); }
+    {
+        Message m = base;
+        Message::ThinkingBlock b; b.text = "tb";
+        m.thinking_blocks.push_back(std::move(b));
+        differs(std::move(m), "thinking block");
+    }
+    {
+        Message m = base;
+        ToolUse tc;
+        tc.id = ToolCallId{"t1"}; tc.name = ToolName{"read"};
+        tc.status = ToolUse::Done{{}, {}, "out"};
+        m.tool_calls.push_back(std::move(tc));
+        differs(std::move(m), "tool call added");
+    }
+
+    // A settling tool call: same call, different status/output each time.
+    // This is the per-round change the tail save exists to catch.
+    {
+        Message running = base;
+        ToolUse tc;
+        tc.id = ToolCallId{"t1"}; tc.name = ToolName{"bash"};
+        tc.status = ToolUse::Running{};
+        running.tool_calls.push_back(tc);
+
+        Message done = base;
+        tc.status = ToolUse::Done{{}, {}, "finished"};
+        done.tool_calls.push_back(tc);
+
+        CHECK_MESSAGE(debug_message_fingerprint(running) != debug_message_fingerprint(done),
+                      "a tool call settling must move the fingerprint");
+    }
+
+    // A one-byte edit at EVERY offset of a long body, including deep inside
+    // the 32-byte lane loop and in the ragged tail after it.
+    {
+        const std::string body(4096, 'a');
+        Message m = base; m.text = body;
+        const std::uint64_t h = debug_message_fingerprint(m);
+        int missed = 0;
+        for (std::size_t i = 0; i < body.size(); ++i) {
+            Message edited = base;
+            edited.text = body;
+            edited.text[i] = 'b';
+            if (debug_message_fingerprint(edited) == h) ++missed;
+        }
+        CHECK_MESSAGE(missed == 0, "a one-byte edit was invisible to the fingerprint");
+    }
+
+    // Transposed content: same bytes, different order. A lane fold that
+    // ignored position would collide here.
+    {
+        Message a = base; a.text = std::string(32, 'x') + std::string(32, 'y');
+        Message b = base; b.text = std::string(32, 'y') + std::string(32, 'x');
+        CHECK_MESSAGE(debug_message_fingerprint(a) != debug_message_fingerprint(b),
+                      "reordered content must not collide");
+    }
+
+    // Identical content fingerprints identically — otherwise every save
+    // would rewrite the whole thread.
+    {
+        Message a = base, b = base;
+        CHECK(debug_message_fingerprint(a) == debug_message_fingerprint(b));
+    }
+}
+
 TEST_CASE("thread log: truncate_to cuts both files and appends cleanly") {
     const ThreadId id{"inc-truncate-unit"};
     if (auto l = ThreadLog::open(id)) l->remove();

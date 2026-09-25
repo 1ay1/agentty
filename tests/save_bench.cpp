@@ -23,6 +23,10 @@ namespace fs = std::filesystem;
 using namespace agentty;
 using clk = std::chrono::steady_clock;
 
+static double ms(clk::duration d) {
+    return std::chrono::duration<double, std::milli>(d).count();
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) {
         std::fprintf(stderr, "usage: save_bench <thread-file.json|.jsonl> [rounds]\n");
@@ -47,6 +51,28 @@ int main(int argc, char** argv) {
     t.id = ThreadId{"save-bench-" + src.stem().string()};
 
     std::printf("%s: %zu messages\n", src.filename().string().c_str(), t.messages.size());
+
+    // Where does the reducer-side cost actually go? Time the two halves of
+    // enqueue() separately: hashing every message to find what changed, vs
+    // copying the changed tail. Reported before the round table so a
+    // regression in either half is attributable.
+    {
+        std::size_t bytes = 0;
+        for (const auto& m : t.messages) {
+            bytes += m.text.size();
+            for (const auto& tc : m.tool_calls)
+                bytes += tc.output().size() + tc.args_dump().size();
+        }
+        const auto f0 = clk::now();
+        volatile std::uint64_t sink = 0;
+        for (int i = 0; i < 5; ++i)
+            for (const auto& m : t.messages)
+                sink ^= persistence::debug_message_fingerprint(m);
+        const auto f1 = clk::now();
+        (void)sink;
+        std::printf("  fingerprint pass  %7.2f ms   (%zu KB of content)\n",
+                    ms(f1 - f0) / 5.0, bytes / 1024);
+    }
     for (int r = 0; r < rounds; ++r) {
         Message m;
         m.role = (r % 2 == 0) ? Role::User : Role::Assistant;
@@ -58,11 +84,11 @@ int main(int argc, char** argv) {
         const auto b = clk::now();
         persistence::flush_pending_saves();     // + writer-side cost
         const auto c = clk::now();
-        auto ms = [](auto d) {
+        auto ms_local = [](auto d) {
             return std::chrono::duration<double, std::milli>(d).count();
         };
         std::printf("round %2d  %-4s  enqueue %8.2f ms   total %9.2f ms\n",
-                    r, r == 0 ? "full" : "tail", ms(b - a), ms(c - a));
+                    r, r == 0 ? "full" : "tail", ms_local(b - a), ms_local(c - a));
     }
     persistence::delete_thread(t.id);
     return 0;

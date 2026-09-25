@@ -78,6 +78,11 @@ void save_thread(const Thread& t);
 void flush_pending_saves();
 void delete_thread(const ThreadId& id);
 
+// The per-message fingerprint the incremental save path uses to find what
+// changed. Exposed ONLY so the save bench can price that pass separately
+// from the rest of a save; nothing in the app should call it.
+[[nodiscard]] std::uint64_t debug_message_fingerprint(const Message& m);
+
 [[nodiscard]] store::Settings load_settings();
 void save_settings(const store::Settings& s);
 
