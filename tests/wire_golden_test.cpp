@@ -23,6 +23,7 @@
 
 #include "agentty/domain/conversation.hpp"
 #include "agentty/provider/anthropic/transport.hpp"
+#include "agentty/provider/wire.hpp"
 
 using agentty::Message;
 using agentty::Role;
@@ -157,4 +158,60 @@ TEST_CASE("wire_golden") {
                 static_cast<unsigned long long>(kGoldenHash),
                 static_cast<unsigned long long>(got));
     }
+}
+
+// The body escaper copies plain bytes in RUNS rather than one at a time.
+// That is the hot loop of every request (a long thread re-escapes megabytes
+// per round), so it is worth the speed — but a run-batching bug would
+// corrupt exactly the inputs a golden thread of clean ASCII never contains:
+// embedded NULs, lone control bytes, invalid UTF-8, a backslash at the very
+// end of a string. Drive the REAL encoder with those bytes and require the
+// result to parse back to exactly what went in.
+TEST_CASE("wire escaping: hostile bytes round-trip through the encoder") {
+    namespace ap = agentty::provider::anthropic;
+
+    std::vector<std::string> payloads = {
+        "plain", "\"quoted\"", "trailing backslash \\",
+        "nl\nrt\r\ttab", std::string("embedded\0null", 13),
+        "\x01\x02\x1f control", "emoji \xF0\x9F\x98\x80 done",
+        "\x7f\x7f del", "quote-at-end \"",
+    };
+    // Every single byte value, alone and doubled.
+    for (int b = 0; b < 256; ++b) {
+        payloads.push_back(std::string(1, static_cast<char>(b)));
+        payloads.push_back(std::string(2, static_cast<char>(b)));
+    }
+
+    int checked = 0, skipped = 0;
+    for (const auto& p : payloads) {
+        Message u; u.role = Role::User; u.text = p;
+        Thread t; t.messages.push_back(std::move(u));
+
+        const std::string wire = ap::messages_json_string(t, false);
+        nlohmann::json j;
+        bool parsed = true;
+        try { j = nlohmann::json::parse(wire); }
+        catch (...) { parsed = false; }
+        if (!parsed) {
+            check(false, "encoder emitted unparseable JSON for a hostile payload");
+            continue;
+        }
+        // scrub_utf8 may legitimately repair invalid UTF-8 on the way out,
+        // so compare against the scrubbed form rather than the raw input.
+        const std::string want = agentty::provider::wire::scrub_utf8(p);
+        // A payload that scrubs away to nothing emits no content block at
+        // all (an empty message is dropped upstream) — nothing to compare.
+        if (want.empty() || j.empty() || j.at(0).at("content").empty()) {
+            ++skipped;
+            continue;
+        }
+        const std::string got = j.at(0).at("content").at(0).at("text")
+                                 .get<std::string>();
+        if (got != want)
+            check(false, "escaped text did not round-trip");
+        ++checked;
+    }
+    check(checked + skipped == static_cast<int>(payloads.size()),
+          "every hostile payload round-tripped through the encoder");
+    check(checked > 400, "the fuzz actually exercised the escaper");
 }

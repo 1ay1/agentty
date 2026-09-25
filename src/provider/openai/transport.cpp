@@ -1509,7 +1509,7 @@ void feed_sse(StreamCtx& ctx, const char* data, size_t len) {
                 json imgs = json::array();
                 for (const auto& img : m.images)
                     if (!img.bytes().empty())
-                        imgs.push_back(agentty::util::base64_encode(img.bytes()));
+                        imgs.push_back(img.base64());
                 if (!imgs.empty()) msg["images"] = std::move(imgs);
             }
             if (has_tools) {
@@ -1915,7 +1915,7 @@ json build_messages(const Thread& t) {
                 for (const auto& img : m.images) {
                     if (img.bytes().empty()) continue;
                     std::string url = "data:" + img.media_type + ";base64,"
-                                    + agentty::util::base64_encode(img.bytes());
+                                    + img.base64();
                     content.push_back({{"type", "image_url"},
                                        {"image_url", {{"url", url}}}});
                 }
@@ -2166,7 +2166,7 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
             req.endpoint.use_tls ? "https" : "http", req.endpoint.host,
             static_cast<unsigned>(req.endpoint.port), req.endpoint.path,
             req.model, native ? 1 : 0, hreq.body.size());
-    AGT_LOG(Wire, Trace, "openai.request.body", "raw={}", hreq.body);
+    AGT_LOG(Wire, Trace, "openai.request.body", "bytes={} raw={}", hreq.body.size(), ::agentty::logx::body(hreq.body));
 
     provider::StreamScaffold sc;
     sc.dialect = native ? "ollama-native" : "openai-chat";

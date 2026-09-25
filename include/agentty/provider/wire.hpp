@@ -418,6 +418,36 @@ inline constexpr int         kFullResultWindow      = 8;
     return cap_tool_result(raw, faded_tool_budget(recency_rank, is_error));
 }
 
+// Cap WITHOUT copying when nothing needs removing. The body encoder calls
+// this for every tool result on every round and then escapes the result
+// into the output buffer, so when the result already fits (the common case)
+// the intermediate std::string was pure allocate-copy-free churn. Returns a
+// view into `in` on the fast path; `owned` holds the bytes only when a cap
+// actually had to be built, and must outlive the returned view.
+[[nodiscard]] inline std::string_view cap_tool_result_view(std::string_view in,
+                                                           std::size_t budget,
+                                                           std::string& owned) {
+    if (in.size() <= budget) return in;
+    owned = cap_tool_result(in, budget);
+    return owned;
+}
+
+[[nodiscard]] inline std::string_view cap_tool_result_aged_view(std::string_view raw,
+                                                                int recency_rank,
+                                                                bool is_error,
+                                                                std::string& owned) {
+    return cap_tool_result_view(raw, faded_tool_budget(recency_rank, is_error), owned);
+}
+
+// Same idea for the UTF-8 scrub: valid input (almost always) is returned as
+// a view instead of a copy. `owned` carries the repaired bytes otherwise.
+[[nodiscard]] inline std::string_view scrub_utf8_view(std::string_view in,
+                                                      std::string& owned) {
+    if (is_valid_utf8(in)) return in;
+    owned = scrub_utf8(in);
+    return owned;
+}
+
 // ── Leaked-tool-call sniffer ─────────────────────────────────────────────────
 // Weak local models (served over the OpenAI-compat and Ollama-native paths)
 // frequently emit a tool call as PLAIN TEXT instead of using the native

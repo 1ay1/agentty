@@ -71,7 +71,7 @@ namespace {
         for (const auto& image : message.images) {
             if (image.bytes().empty()) continue;
             acp::ImageContent block;
-            block.data = agentty::util::base64_encode(image.bytes());
+            block.data = image.base64();
             block.mimeType = image.media_type.empty() ? "image/png" : image.media_type;
             out.emplace_back(std::move(block));
         }

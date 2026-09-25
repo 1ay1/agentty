@@ -114,7 +114,7 @@ json build_input(const provider::Request& req, std::string_view site) {
                 content.push_back({
                     {"type", "input_image"},
                     {"image_url", "data:" + std::string{wire::wire_media_type(img)}
-                                    + ";base64," + util::base64_encode(img.bytes())},
+                                    + ";base64," + img.base64()},
                 });
             }
             if (content.empty()) continue;
@@ -216,7 +216,7 @@ json build_input(const provider::Request& req, std::string_view site) {
                             {"type", "input_image"},
                             {"image_url",
                              "data:" + std::string{wire::wire_media_type(img)}
-                                 + ";base64," + util::base64_encode(img.bytes())},
+                                 + ";base64," + img.base64()},
                         });
                     }
                     input.push_back({
@@ -960,7 +960,7 @@ provider::StreamResult stream(const Site& site, provider::Request req,
             target->host, static_cast<unsigned>(target->port), target->path,
             site.id, target->model.empty() ? req.model : target->model,
             tool_count, req.show_reasoning ? 1 : 0, hr.body.size());
-    AGT_LOG(Wire, Trace, "responses.request.body", "raw={}", hr.body);
+    AGT_LOG(Wire, Trace, "responses.request.body", "bytes={} raw={}", hr.body.size(), ::agentty::logx::body(hr.body));
 
     StreamCtx ctx;
     ctx.sink = sink;

@@ -21,6 +21,7 @@
 #include "agentty/domain/lazy_bytes.hpp"
 #include "agentty/domain/smart_mode.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
+#include "agentty/util/base64.hpp"
 
 namespace agentty {
 
@@ -56,9 +57,35 @@ public:
     }
 
     [[nodiscard]] const std::string& bytes() const { return data_.bytes(); }
-    void set_bytes(std::string raw) { data_.set_bytes(std::move(raw)); }
+    void set_bytes(std::string raw) {
+        data_.set_bytes(std::move(raw));
+        // A fresh cell, not a reset: copies made earlier keep the encoding
+        // of the bytes they still hold (mirrors LazyBytes::set_bytes).
+        b64_ = std::make_shared<B64Cell>();
+    }
     [[nodiscard]] const Source& source() const noexcept { return data_.source(); }
     [[nodiscard]] bool materialised() const noexcept { return data_.materialised(); }
+
+    // Base64 of bytes(), encoded ONCE and shared by every copy of this
+    // image. The wire encoders need base64 (Anthropic's `data`, OpenAI's
+    // data: URL) while the model state keeps the raw bytes to avoid the
+    // +33% memory, so each request used to re-encode every image from
+    // scratch: a handful of screenshots in a thread is megabytes of base64
+    // rebuilt on EVERY round, which dominated the body encode on any thread
+    // with images in it.
+    //
+    // The cell is a shared_ptr, like LazyBytes' own, so the per-turn Thread
+    // snapshot shares the encoding with the live model rather than copying
+    // or recomputing it. Invalidated by set_bytes(); a lazily-materialised
+    // image encodes on first use, which is also when its bytes first load.
+    [[nodiscard]] const std::string& base64() const {
+        // The cell is created eagerly (cheap, no encoding) so that the
+        // pointer itself is never written concurrently — only the once_flag
+        // inside it is, and that is what it is for. Encoding is pure, so
+        // concurrent readers all observe the same bytes.
+        std::call_once(b64_->once, [&] { b64_->text = util::base64_encode(bytes()); });
+        return b64_->text;
+    }
 
     // Kept so existing call sites that installed the image resolver still
     // compile; both types share one resolver, since both resolve the same
@@ -67,7 +94,14 @@ public:
     static void set_resolver(Resolver r) noexcept { LazyBytes::set_resolver(r); }
 
 private:
+    struct B64Cell {
+        std::once_flag once;
+        std::string    text;
+    };
     LazyBytes data_;
+    // Never null. Copies share the cell (and so the encoding); set_bytes
+    // installs a FRESH one so other copies keep their already-valid text.
+    std::shared_ptr<B64Cell> b64_ = std::make_shared<B64Cell>();
 };
 
 // `ToolUse::Status` is a sum type. Each alternative owns the data that is
