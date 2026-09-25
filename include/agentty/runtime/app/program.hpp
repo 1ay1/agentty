@@ -29,6 +29,11 @@ namespace pn = agentty::ui::panel;   // the exclusive overlay slot's alternative
 struct AgenttyApp {
     using Model = ::agentty::Model;
     using Msg   = ::agentty::Msg;
+    // jaal reads the effect and source ROWS off the program (D2): P::Cmd says
+    // what this program may return, P::Sub what it may listen to, and a host
+    // must serve every entry or the program won't compile against it.
+    using Cmd   = ::agentty::Cmd;
+    using Sub   = ::agentty::Sub;
 
     static std::pair<Model, Cmd> init() { return ::agentty::app::init(); }
 

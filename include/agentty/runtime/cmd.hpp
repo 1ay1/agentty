@@ -106,6 +106,52 @@ inline constexpr bool jaal::sendable_opt_in<nlohmann::json> = true;
 template <>
 inline constexpr bool jaal::sendable_opt_in<agentty::http::CancelTokenPtr> = true;
 
+// ── the message tree, as jaal routes it ───────────────────────────────
+// Msg is a variant of 23 DOMAIN variants, not 231 leaves — agentty grouped
+// them because a flat Msg pinned sizeof(Msg) to the heaviest leaf and cost
+// ~19 s to rebuild after touching one. jaal's D36 is that shape, measured on
+// this app: one domain TU rebuilds in 1.19 s, the loop TU went 6.9 s -> 1.77 s.
+//
+// jaal descends the tree on its own, so by default it wants an update() for
+// every LEAF and says so, one diagnostic per missing case with the path it
+// took (Msg -> AppearanceMsg -> AppearanceThemeCommit). We don't want that:
+// each domain has ONE reducer that takes the whole domain variant and visits
+// it itself, in its own TU. That is what handled_as_group declares.
+//
+// It opts in BY NAME rather than being inferred, and D36 explains why: a
+// catch-all `template <class M> update(Model&, M)` matches a group type as
+// happily as a leaf, so inferring it would let a catch-all silently claim
+// every domain and switch off the exhaustiveness check underneath. Naming
+// each one keeps the check on for every leaf we HAVEN'T grouped.
+#define AGENTTY_MSG_GROUP(T) \
+    template <> inline constexpr bool jaal::handled_as_group<::agentty::msg::T> = true;
+
+AGENTTY_MSG_GROUP(ComposerMsg)
+AGENTTY_MSG_GROUP(StreamMsg)
+AGENTTY_MSG_GROUP(ToolMsg)
+AGENTTY_MSG_GROUP(ToolOutputMsg)
+AGENTTY_MSG_GROUP(ProvidersMsg)
+AGENTTY_MSG_GROUP(ModelsMsg)
+AGENTTY_MSG_GROUP(ThreadListMsg)
+AGENTTY_MSG_GROUP(PaletteMsg)
+AGENTTY_MSG_GROUP(MentionMsg)
+AGENTTY_MSG_GROUP(SymbolMsg)
+AGENTTY_MSG_GROUP(CodeBlockMsg)
+AGENTTY_MSG_GROUP(CheckpointMsg)
+AGENTTY_MSG_GROUP(RagMsg)
+AGENTTY_MSG_GROUP(StatsMsg)
+AGENTTY_MSG_GROUP(SettingsListMsg)
+AGENTTY_MSG_GROUP(ForkMsg)
+AGENTTY_MSG_GROUP(TodoMsg)
+AGENTTY_MSG_GROUP(LoginMsg)
+AGENTTY_MSG_GROUP(DiffReviewMsg)
+AGENTTY_MSG_GROUP(SmartModeMsg)
+AGENTTY_MSG_GROUP(PluginEditMsg)
+AGENTTY_MSG_GROUP(AppearanceMsg)
+AGENTTY_MSG_GROUP(MetaMsg)
+
+#undef AGENTTY_MSG_GROUP
+
 namespace agentty {
 
 /// Every effect an agentty reducer may return.
