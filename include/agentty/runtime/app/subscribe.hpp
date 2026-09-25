@@ -9,6 +9,7 @@
 #include <maya/maya.hpp>
 
 #include "agentty/runtime/model.hpp"
+#include "agentty/runtime/cmd.hpp"
 #include "agentty/runtime/msg.hpp"
 
 namespace agentty::app {
@@ -76,6 +77,6 @@ namespace agentty::app {
 // gate 1; gates 2 and 3 consume its terms via the predicates above.
 [[nodiscard]] bool animation_demand(const Model& m) noexcept;
 
-[[nodiscard]] maya::Sub<Msg> subscribe(const Model& m);
+[[nodiscard]] Sub subscribe(const Model& m);
 
 } // namespace agentty::app

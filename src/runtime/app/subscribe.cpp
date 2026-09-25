@@ -17,7 +17,6 @@ namespace pn = agentty::ui::panel;
 
 namespace agentty::app {
 
-using maya::Sub;
 using maya::KeyEvent;
 using maya::CharKey;
 using maya::SpecialKey;

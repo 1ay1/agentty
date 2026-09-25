@@ -23,12 +23,14 @@
 
 #include <jaal/jaal.hpp>
 #include <maya/host/effects.hpp>
+#include <maya/host/sources.hpp>   // maya::on_key / on_paste / on_resize
 
 #include <string>
 #include <string_view>
 
 #include "agentty/domain/conversation.hpp"   // ImageContent
 #include "agentty/domain/id.hpp"
+#include "agentty/io/http.hpp"               // http::CancelTokenPtr
 #include "agentty/runtime/msg.hpp"
 
 // ── agentty's value types, as jaal sees them ──────────────────────────────
@@ -84,6 +86,26 @@ inline constexpr bool jaal::sendable_opt_in<agentty::ImageContent> = true;
 template <>
 inline constexpr bool jaal::sendable_opt_in<nlohmann::json> = true;
 
+// http::CancelToken is a shared mutable object, and Sendable refuses
+// shared_ptr by default for exactly that reason. This is the case the rule
+// is measured against rather than a hole in it: CancelToken is ONE
+// std::atomic<bool> with a release store and an acquire load, and nothing
+// else. Sharing it is the point — a reducer trips it (Esc in meta.cpp, a new
+// turn in stream.cpp) while the tool worker polls it, and an atomic flag is
+// how that conversation is supposed to happen.
+//
+// Not to be confused with the login flows, which carried their own
+// shared_ptr<atomic_bool> for a job std::stop_token already did: those are
+// gone (see device_login_async). The difference is ownership. A stop_token
+// is tripped by the RUNTIME when the work is no longer subscribed; this flag
+// is tripped by the PROGRAM, from a reducer, and is part of the Model's
+// turn state. jaal has no effect for "cancel that specific in-flight HTTP
+// request from a later reducer step", so this stays the app's own.
+//
+// Opting in the pointer, not the token: the shared_ptr is what crosses.
+template <>
+inline constexpr bool jaal::sendable_opt_in<agentty::http::CancelTokenPtr> = true;
+
 namespace agentty {
 
 /// Every effect an agentty reducer may return.
@@ -102,12 +124,36 @@ using Cmd = jaal::Cmd<Msg,
     maya::suspend              // hand the tty to a child (editor, pager)
 >;
 
+/// Every event source an agentty subscription may name.
+///
+/// The mirror of the Cmd row, for the input side (jaal D2): a program says
+/// which sources it listens to, and a host that can't produce one won't
+/// compile against it. jaal's core sources — `every` and `stream` — are
+/// always in and need no naming; these are maya's, the things only a
+/// TERMINAL reports.
+///
+/// agentty names only the three it actually uses. It has no mouse handler and
+/// no focus handler, and leaving them out of the row is not cosmetic: it is
+/// the difference between "this program needs a mouse" and "this program
+/// would work on a host that has none".
+using Sub = jaal::Sub<Msg,
+    maya::on_key,      // the composer and every panel's keymap
+    maya::on_paste,    // bracketed paste, and the OSC 52 clipboard reply
+    maya::on_resize    // relayout; the inline frame's width changed
+>;
+
 // ── spelling the terminal effects ──────────────────────────────────────
 // jaal builds an effect by handing its PAYLOAD to the Cmd: `Cmd(SetTitle{s})`.
 // That reads fine at one call site and poorly at forty, and the old runtime
-// spelled these as named factories (`cmd::write_clipboard(s)`), so keep
+// spelled these as named factories (`Cmd<Msg>::write_clipboard(s)`), so keep
 // the names. They're free — each is one constructor call.
-namespace cmd {
+//
+// These live in agentty::app::cmd, the same namespace as the app's own effect
+// factories (runtime/app/cmd_factory.hpp): a reducer says `cmd::run_tool(...)`
+// and `cmd::write_clipboard(...)` without caring which side of the seam an
+// effect comes from. That is the point of a row — the program lists what it
+// needs and the host's and the app's own effects sit together.
+namespace app::cmd {
 
 [[nodiscard]] inline Cmd write_clipboard(std::string text) {
     return Cmd(maya::WriteClipboard{std::move(text)});
@@ -138,6 +184,6 @@ namespace cmd {
     return maya::commit_from<Cmd>(debt);
 }
 
-}  // namespace cmd
+}  // namespace app::cmd
 
 }  // namespace agentty

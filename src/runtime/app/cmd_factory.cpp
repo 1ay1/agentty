@@ -1379,12 +1379,9 @@ Cmd run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args,
     // accumulated. Per-call detached thread costs ~100-300 µs of
     // construction; tools run seconds apart so it's noise.
     return Cmd::task_isolated(
-        [id = std::move(id),
-         name = std::move(tool_name),
-         args = std::move(args),
-         cancel = std::move(cancel),
-         exec_seq]
-        (jaal::Sink<Msg> sink, std::stop_token) {
+        [](jaal::Sink<Msg> sink, std::stop_token,
+           ToolCallId id, ToolName name, nlohmann::json args,
+           http::CancelTokenPtr cancel, std::uint64_t exec_seq) {
             // Every result this worker sends carries its exec_seq, so the
             // reducer can drop it if the call it was started for is gone.
             auto out = [exec_seq](ToolExecOutput o) {
@@ -1490,7 +1487,9 @@ Cmd run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args,
                 sink.send(Msg{out(ToolExecOutput{id, std::unexpected(
                     tools::ToolError::unknown("dispatch error: unknown exception"))})});
             }
-        });
+        },
+        std::move(id), std::move(tool_name), std::move(args),
+        std::move(cancel), exec_seq);
 }
 
 namespace {
@@ -2226,7 +2225,8 @@ Cmd oauth_exchange(auth::OAuthCode    code,
                         auth::OAuthState   state) {
     return Cmd::task(
         [](jaal::Sink<Msg> out, std::stop_token,
-           auth::OAuthCode code, std::string verifier, std::string state) {
+           auth::OAuthCode code, auth::PkceVerifier verifier,
+           auth::OAuthState state) {
             try {
                 auto r = auth::exchange_code(code, verifier, state);
                 out.send(Msg{LoginExchanged{std::move(r)}});
@@ -2240,7 +2240,7 @@ Cmd oauth_exchange(auth::OAuthCode    code,
                     "exchange threw: unknown exception"})}});
             }
         },
-        std::move(code), std::move(verifier.value), std::move(state.value));
+        std::move(code), std::move(verifier), std::move(state));
 }
 
 Cmd load_threads_async() {

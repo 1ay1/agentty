@@ -519,13 +519,12 @@ Step submit_message(Model m) {
         // The launch is issued by the ProactiveContextReady handler once the
         // grounding is in the transcript. Here we only kick the retrieval.
         launch = Cmd::task_isolated(
-            [probe = std::move(proactive_probe)]
-            (jaal::Sink<Msg> out, std::stop_token) {
+            [](jaal::Sink<Msg> out, std::stop_token, std::string probe) {
                 auto hit = tools::proactive_retrieve_blocking(probe, /*k=*/3);
                 out.send(Msg{ProactiveContextReady{
                     hit ? std::move(hit->block) : std::string{},
                     hit ? hit->confidence : -1.0}});
-            });
+            }, std::move(proactive_probe));
     } else {
         launch = cmd::launch_stream(m);
     }
@@ -549,10 +548,9 @@ Step submit_message(Model m) {
     // exists and surfaces a toast there instead.
     if (checkpoint_to_create) {
         parts.push_back(Cmd::task_isolated(
-            [id = std::move(*checkpoint_to_create)]
-            (jaal::Sink<Msg>, std::stop_token) {
+            [](jaal::Sink<Msg>, std::stop_token, std::string id) {
                 (void)workspace::create_checkpoint(id);
-            }));
+            }, std::move(*checkpoint_to_create)));
     }
     parts.push_back(std::move(launch));
     auto cmd = parts.size() == 1

@@ -40,7 +40,7 @@ struct AgenttyApp {
         return ::agentty::ui::view(m);
     }
 
-    static auto subscribe(const Model& m) -> maya::Sub<Msg> {
+    static auto subscribe(const Model& m) -> Sub {
         return ::agentty::app::subscribe(m);
     }
 
