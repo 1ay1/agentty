@@ -241,5 +241,43 @@ an exact context type — a derived host never got attached, so agentty opened
 and accepted no keys. `tests/program_hooks_test.cpp` static-asserts both
 layers now, because nothing else would notice.
 
-Still open, and genuinely later: threads as `jaal::children<>`, `sim<P>`
-over the turn state machine, `resume_from`/`journal` for crash recovery.
+Three things were left after the criteria were met — `sim<P>` over the turn
+state machine, threads as `jaal::children<>`, and `resume_from`/`journal`
+for crash recovery. What happened to each is below.
+
+## The three that were "left"
+
+One landed. Two were measured and declined — written down here so the next
+person doesn't re-open them as oversights.
+
+**`sim<P>` — done.** `tests/sim_turn_test.cpp` drives the real program with
+simulated time and a seeded task order, re-checking five structural
+invariants after every message, then over 200 seeds, then with injected
+task crashes and lost tasks. The first invariant is the load-bearing one:
+`active()` iff a turn context exists — the equivalence that replaced the
+stale-turn guards. Verified non-vacuous (a deliberately false invariant
+breaks on step 2).
+
+This needed a jaal change: `sim` hardcoded `kernel::no_events`, so any
+program whose `subscribe()` routes input events couldn't instantiate it.
+It takes the event type now, defaulted.
+
+**`jaal::children<>` — declined.** It manages a keyed list of child
+PROGRAMS: each with its own Model, timers and streams, messages routed back
+per id. `m.d.threads` is not that. It is a vector of thread METADATA for
+the picker — `subscribe()` never reads it, nothing in it runs, and only
+`m.d.current` is live. There is exactly one session. Adopting `children<>`
+would add an id-wrapped Msg layer and a child-program boundary to model a
+list of rows. If agentty ever runs several sessions at once — split view,
+background agents — this becomes the right answer immediately.
+
+**`resume_from` / `journal` — declined.** The contract is that `journal`
+sees every Msg before it is folded, and `replay<P>()` of what was written
+rebuilds the model exactly, because update is pure. agentty's Msg does not
+survive that round trip: `ClearStatus` carries a
+`std::chrono::steady_clock::time_point`, which is process-local — replaying
+it in a new process means nothing. More to the point, the thing worth
+recovering is the transcript, and that is already durable by a cheaper
+route: `AsyncWriter` persists each turn incrementally (truncate + append
+the changed tail), so a crash loses at most the in-flight turn. A journal
+would add a write per KEYSTROKE to recover UI state nobody misses.
