@@ -4,6 +4,16 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Performance
+- **Long threads no longer slow down as they grow.** A big thread got sluggish between turns even though the UI itself stayed responsive: the work done *per round* scaled with the whole transcript, so every extra turn made the next one slower. Four fixes, all measured on real threads:
+  - **Saves only write what changed.** A save ran at the end of every round and rewrote the entire thread — re-encoding every message, fsyncing the full log, then parsing it all back (reading every blob) to verify. agentty now fingerprints each message, cuts the log at the first one that changed, and appends from there, verifying only the new lines. History-rewriting paths (compaction, fork, edit, rewind) and the first save of a thread still do a full write. On a 2519-message thread: **~1178 ms → ~12 ms per round**, and flat as the thread grows.
+  - **Images are base64-encoded once, not every round.** A thread with a handful of screenshots rebuilt megabytes of base64 on every single request. The encoding is now computed once and shared.
+  - **Faster request-body encoding.** The JSON escaper copies runs of plain bytes instead of one byte at a time, the body buffer is sized from the content it is about to write instead of a flat 64 KiB guess, and capping/UTF-8-scrubbing a tool result no longer allocates a copy when the result already fits. Per round on a 1262-message thread: **17.0 ms → 10.8 ms**. The bytes on the wire are unchanged.
+  - **Less copying on the reducer.** Starting a turn no longer deep-copies the part of the transcript a compaction already replaced with its summary, and the todo sync after each tool result stops at the matching call instead of walking the whole thread.
+
+### Changed
+- **Debug builds no longer log entire request bodies.** They logged every request in full (multi-MB on a long thread) on the stream thread right before sending. Now it is the body size plus a 4 KB head; set `AGENTTY_LOG_BODIES=1` for the whole thing.
+
 ## [0.9.10] - 2026-09-24
 
 ### Fixed
