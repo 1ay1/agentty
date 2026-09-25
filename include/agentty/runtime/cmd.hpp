@@ -33,6 +33,7 @@
 #include "agentty/io/http.hpp"               // http::CancelTokenPtr
 #include "agentty/provider/selection.hpp"    // provider::Selection
 #include "agentty/runtime/msg.hpp"
+#include "agentty/runtime/store_fx.hpp"   // save_thread, write_file, …
 
 // ── agentty's value types, as jaal sees them ──────────────────────────────
 // jaal's Sendable walks a type's fields to prove a Msg is safe to hand to
@@ -182,7 +183,7 @@ namespace agentty {
 /// Add to this row when you add an effect; the host that can't run it stops
 /// compiling, with `require_host_for` naming the effect and the program.
 using Cmd = jaal::Cmd<Msg,
-    // ── maya's terminal effects ──────────────────────────────────────
+    // ── maya's terminal effects ──────────────────────────────────
     maya::commit_scrollback,   // hand inline rows to the terminal's scrollback
     maya::write_clipboard,     // OSC 52 write
     maya::query_clipboard,     // OSC 52 read; reply arrives as a paste
@@ -190,7 +191,15 @@ using Cmd = jaal::Cmd<Msg,
     maya::reset_inline,        // drop the inline frame, start fresh below it
     maya::force_redraw,        // repaint from scratch
     maya::set_mouse,           // mouse reporting on/off
-    maya::suspend              // hand the tty to a child (editor, pager)
+    maya::suspend,             // hand the tty to a child (editor, pager)
+    // ── agentty's own: persistence ───────────────────────────────
+    // These were calls through the Deps seam, which made every reducer that
+    // saved impure. As effects they are values the reducer returns and the
+    // host runs — see runtime/store_fx.hpp.
+    save_thread,
+    delete_thread,
+    write_file,
+    save_settings
 >;
 
 /// Every event source an agentty subscription may name.

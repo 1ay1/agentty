@@ -79,8 +79,9 @@ Cmd providers_update(Model& m, msg::ProvidersMsg pm) {
             // the hop would render nothing new. Flush any pending effort-tier
             // change first — the same persist CloseModels does on Esc,
             // so a hop doesn't silently drop it.
+            Cmd effort_save = Cmd::none();
             if (m.ui.effort_dirty) {
-                persist_settings(m);
+                effort_save = persist_settings(m);
                 m.ui.effort_dirty = false;
             }
             // Abandon a pending Smart-Mode slot assignment: hopping away from
@@ -115,7 +116,7 @@ Cmd providers_update(Model& m, msg::ProvidersMsg pm) {
             // over whatever is there (usually nothing).
             if (m.ui.panel.is<pn::Models>()) m.ui.panel.replace(pn::Providers{{idx}});
             else                             m.ui.panel.descend(pn::Providers{{idx}});
-            return Cmd::none();
+            return effort_save;
         },
         [&](CloseProviders) -> Cmd {
             ascend(m);   // Esc: back to whatever opened this, or close
@@ -217,13 +218,14 @@ Cmd providers_update(Model& m, msg::ProvidersMsg pm) {
                 return Cmd::none();
             }
             const std::string removed = target;
+            Cmd key_save = Cmd::none();
             {
                 // provider_keys is vault-owned; re-read before mutating so a
                 // key added since this Model was built isn't written away.
                 refresh_record(m);
                 m.d.persisted.provider_keys.erase(removed);
                 if (is_custom_host) m.d.persisted.provider_models.erase(removed);
-                save_record(m);
+                key_save = save_record(m);
             }
             // Also drop any stored account credentials for a preset sign-out
             // (custom hosts keep everything in provider_keys, handled above).
@@ -252,7 +254,7 @@ Cmd providers_update(Model& m, msg::ProvidersMsg pm) {
                           + " (active) — pick a provider to continue"
                     : (is_custom_host ? "removed custom host: "
                                       : "signed out of ") + removed);
-            return std::move(toast);
+            return Cmd::batch(std::move(key_save), std::move(toast));
         },
         [&](ProvidersSelect) -> Cmd {
             // Capture the cursor before closing: assigning Closed destroys the

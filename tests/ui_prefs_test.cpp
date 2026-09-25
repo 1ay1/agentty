@@ -1,6 +1,7 @@
 // Appearance settings: the rows exist, Enter changes them, and a change
 // both persists and reaches the renderer.
 #include "agtest.hpp"
+#include "agtest_fx.hpp"
 
 #include "agentty/runtime/app/deps.hpp"
 #include "agentty/runtime/app/update.hpp"
@@ -44,9 +45,23 @@ void install_stub_deps() {
     });
 }
 
+// Apply whatever effects a step returned to the stub store.
+//
+// Saving is an EFFECT now: the reducer returns a value describing the write
+// and the HOST performs it. These tests assert on `g_saved`, i.e. on what
+// reached the store, so they have to play the host's part — which is also
+// the point: a save only shows up here if the arm actually returned it.
+void apply_fx(const Cmd& c) {
+    agtest::fx::Store s;
+    s.settings = g_saved;
+    agtest::fx::run(c, s);
+    g_saved = s.settings;
+}
+
 // Open the Appearance pane and hand back the model holding it.
 Model opened() {
-    auto [m, _] = app::update(Model{}, Msg{OpenAppearance{}});
+    auto [m, cmd] = app::update(Model{}, Msg{OpenAppearance{}});
+    apply_fx(cmd);
     return std::move(m);
 }
 
@@ -67,7 +82,8 @@ Model press(Model m, std::string_view id, form::keys::Action a) {
         if (f.fields[(size_t)i].id == id) { idx = i; break; }
     REQUIRE(idx >= 0);
     f.cursor = idx;
-    auto [next, _] = app::update(std::move(m), Msg{AppearanceKey{a}});
+    auto [next, cmd] = app::update(std::move(m), Msg{AppearanceKey{a}});
+    apply_fx(cmd);
     return std::move(next);
 }
 
@@ -132,7 +148,8 @@ TEST_CASE("appearance: moving in the browser previews the theme live") {
     // Moving APPLIES — the list is its own preview, so you judge a scheme
     // on the real UI rather than on its name.
     {
-        auto [n, _] = app::update(std::move(m), Msg{AppearanceThemeMove{+1}});
+        auto [n, fxc] = app::update(std::move(m), Msg{AppearanceThemeMove{+1}});
+        apply_fx(fxc);
         m = std::move(n);
     }
     CHECK(!m.d.ui().theme.empty());
@@ -140,7 +157,8 @@ TEST_CASE("appearance: moving in the browser previews the theme live") {
     // Esc is a true cancel: it puts back what we opened on, in the model
     // AND on disk, so a browse you abandoned leaves nothing behind.
     {
-        auto [n, _] = app::update(std::move(m), Msg{AppearanceThemeCancel{}});
+        auto [n, fxc] = app::update(std::move(m), Msg{AppearanceThemeCancel{}});
+        apply_fx(fxc);
         m = std::move(n);
     }
     CHECK(m.d.ui().theme.empty());
@@ -153,12 +171,14 @@ TEST_CASE("appearance: Enter in the browser keeps what you are looking at") {
     Model m = opened();
     m = press(std::move(m), ui::panel::kApTheme, form::keys::Action{form::keys::Intent::Activate});
     {
-        auto [n, _] = app::update(std::move(m), Msg{AppearanceThemeMove{+1}});
+        auto [n, fxc] = app::update(std::move(m), Msg{AppearanceThemeMove{+1}});
+        apply_fx(fxc);
         m = std::move(n);
     }
     const std::string previewing = m.d.ui().theme;
     {
-        auto [n, _] = app::update(std::move(m), Msg{AppearanceThemeCommit{}});
+        auto [n, fxc] = app::update(std::move(m), Msg{AppearanceThemeCommit{}});
+        apply_fx(fxc);
         m = std::move(n);
     }
     CHECK(m.d.ui().theme == previewing);
@@ -171,7 +191,8 @@ TEST_CASE("appearance: typing filters and previews the top match") {
     Model m = opened();
     m = press(std::move(m), ui::panel::kApTheme, form::keys::Action{form::keys::Intent::Activate});
     for (const char* c : {"d", "r", "a"}) {
-        auto [n, _] = app::update(std::move(m), Msg{AppearanceThemeQuery{c}});
+        auto [n, fxc] = app::update(std::move(m), Msg{AppearanceThemeQuery{c}});
+        apply_fx(fxc);
         m = std::move(n);
     }
     CHECK(pane(m).pane.picker.picker.query() == "dra");
@@ -614,7 +635,8 @@ TEST_CASE("settings: a toggle survives a later whole-record save") {
     Model m;
     m.d.persisted = g_saved;   // as init() seeds it
 
-    auto [m2, _] = app::update(std::move(m), Msg{ToggleChangesStrip{}});
+    auto [m2, toggle_cmd] = app::update(std::move(m), Msg{ToggleChangesStrip{}});
+    apply_fx(toggle_cmd);
     m = std::move(m2);
 
     // The toggle itself works — it reaches both the model and the store.
@@ -622,7 +644,7 @@ TEST_CASE("settings: a toggle survives a later whole-record save") {
     CHECK(g_saved.show_changes_strip == true);
 
     // ...and it must still be there after ANY other save runs.
-    agentty::app::detail::persist_settings(m);
+    apply_fx(agentty::app::detail::persist_settings(m));
     CHECK(g_saved.show_changes_strip == true);
 }
 

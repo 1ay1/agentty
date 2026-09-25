@@ -30,13 +30,14 @@ Cmd diff_review_update(Model& m, msg::DiffReviewMsg dm) {
     // rejected hunk gets rewritten, and an all-accepted file is left as-is.
     // Pending (undecided) hunks are treated as accepted on close (the change
     // is already live; not touching it keeps it).
-    auto persist = [&](const FileChange& fc) {
+    // Returns the write as a VALUE; the caller batches it into its result
+    // and the host performs it. none() when the file needs no rewrite.
+    auto persist = [](const FileChange& fc) -> Cmd {
         bool any_reject = false;
         for (const auto& hk : fc.hunks)
             if (hk.status == Hunk::Status::Rejected) { any_reject = true; break; }
-        if (!any_reject) return;                 // nothing to revert; disk is correct
-        if (deps().write_file)
-            deps().write_file(fc.path, diff::apply_accepted(fc));
+        if (!any_reject) return Cmd::none();     // nothing to revert; disk is correct
+        return Cmd(WriteFile{fc.path, diff::apply_accepted(fc)});
     };
     // Advance the cursor to the next still-PENDING hunk in the current file so
     // a decision flows the reviewer forward (like accepting a git add -p). If
@@ -103,12 +104,13 @@ Cmd diff_review_update(Model& m, msg::DiffReviewMsg dm) {
             // meant: undecided hunks are kept (the change is already live on
             // disk), which is invisible unless we announce it.
             int reverted = 0, kept = 0;
+            std::vector<Cmd> writes;
             for (const auto& fc : m.d.pending_changes) {
                 for (const auto& hk : fc.hunks) {
                     if (hk.status == Hunk::Status::Rejected) ++reverted;
                     else ++kept;   // accepted OR pending — both stay live
                 }
-                persist(fc);
+                writes.push_back(persist(fc));
             }
             m.d.pending_changes.clear();
             ascend(m);   // decision committed above; Esc lands where you came from
@@ -118,7 +120,8 @@ Cmd diff_review_update(Model& m, msg::DiffReviewMsg dm) {
                         + (kept == 1 ? " change" : " changes") + " kept"
                     : "review closed — " + std::to_string(reverted)
                         + " reverted, " + std::to_string(kept) + " kept");
-            return std::move(cmd);
+            writes.push_back(std::move(cmd));
+            return Cmd::batch(std::move(writes));
         },
         [&](DiffReviewMove& e) -> Cmd {
             auto* c = m.ui.panel.get<pn::DiffReview>();
@@ -220,12 +223,11 @@ Cmd diff_review_update(Model& m, msg::DiffReviewMsg dm) {
             // them). apply_accepted() with every hunk Rejected yields exactly
             // original_contents.
             int hunks = 0, files = 0;
+            std::vector<Cmd> writes;
             for (auto& fc : m.d.pending_changes) {
                 for (auto& h : fc.hunks) { h.status = Hunk::Status::Rejected; ++hunks; }
-                if (deps().write_file) {
-                    deps().write_file(fc.path, fc.original_contents);
-                    ++files;
-                }
+                writes.push_back(Cmd(WriteFile{fc.path, fc.original_contents}));
+                ++files;
             }
             m.d.pending_changes.clear();
             ascend(m);   // decision committed above; Esc lands where you came from
@@ -234,7 +236,8 @@ Cmd diff_review_update(Model& m, msg::DiffReviewMsg dm) {
                 + (hunks == 1 ? " hunk" : " hunks")
                 + " across " + std::to_string(files)
                 + (files == 1 ? " file" : " files"));
-            return std::move(cmd);
+            writes.push_back(std::move(cmd));
+            return Cmd::batch(std::move(writes));
         },
     }, dm);
 }

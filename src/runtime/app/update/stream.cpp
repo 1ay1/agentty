@@ -463,7 +463,10 @@ Cmd finalize_turn(Model& m, StopReason stop_reason) {
             m.s.status        = "context compacted";
             m.s.status_until  = now_ts + std::chrono::milliseconds{1500};
         }
-        deps().save_thread(m.d.current);
+        // The compacted transcript is the thing worth persisting. Held as a
+        // value and batched into each of this block's three returns, so the
+        // save happens whichever way we leave.
+        Cmd save = Cmd(SaveThread{m.d.current});
         // Hand the freshly-freed arenas back to the OS. Less to free
         // now that we don't drop tool outputs — the only freed bytes
         // are the compaction stream's input/output buffers — but
@@ -482,14 +485,15 @@ Cmd finalize_turn(Model& m, StopReason stop_reason) {
             m.ui.composer.cursor      = static_cast<int>(m.ui.composer.text.size());
             m.ui.composer.queued.erase(m.ui.composer.queued.begin());
             auto sub_cmd = submit_message(m);
-            return sub_cmd;
+            return Cmd::batch(std::move(save), std::move(sub_cmd));
         }
-        if (m.s.status.empty()) return Cmd::none();
+        if (m.s.status.empty()) return save;
         auto stamp = m.s.status_until;
         auto ttl_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             m.s.status_until - now_ts);
-        return Cmd::after(ttl_ms + std::chrono::milliseconds{50},
-                               Msg{ClearStatus{stamp}});
+        return Cmd::batch(std::move(save),
+                          Cmd::after(ttl_ms + std::chrono::milliseconds{50},
+                                     Msg{ClearStatus{stamp}}));
     }
     bool any_truncated = false;
     const bool max_tokens_hit = (stop_reason == StopReason::MaxTokens);
@@ -869,7 +873,6 @@ Cmd finalize_turn(Model& m, StopReason stop_reason) {
         if (m.s.smart_effort_bias < -kBiasCap) m.s.smart_effort_bias = -kBiasCap;
     }
 
-    deps().save_thread(m.d.current);
     // ── Batch-width KPI ─────────────────────────────────────────
     // Tool calls per model round-trip is THE wall-clock lever in an agent
     // session (each round-trip costs seconds of TTFT + stream). Log the
@@ -893,7 +896,11 @@ Cmd finalize_turn(Model& m, StopReason stop_reason) {
             }
         }
     }
-    auto kp = cmd::kick_pending_tools(m);
+    // The turn is finished, so persist it. Folded into `kp` rather than run
+    // here: every return below already carries kp, so this reaches the host
+    // down all five paths without threading a second local through them.
+    auto kp = Cmd::batch(Cmd(SaveThread{m.d.current}),
+                         cmd::kick_pending_tools(m));
     // Set by the idle-settle block below when the reply carries runnable
     // shell blocks; batched into whichever return path fires.
     Cmd block_toast = Cmd::none();
@@ -2180,9 +2187,10 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
                     std::string key = scoped_caps_key(m.d.model_id.value);
                     if (key.empty()) key = m.d.model_id.value;
                     set_learned_effort_set(key, *learned);
+                    Cmd learned_save = Cmd::none();
                     {   // Persist — tomorrow's session starts correct.
                         m.d.persisted.learned_effort_sets[key] = *learned;
-                        save_record(m);
+                        learned_save = save_record(m);
                     }
                     const auto caps = resolved_caps(m.d.model_id.value);
                     const Effort before = m.d.effort;
@@ -2212,6 +2220,7 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
                     auto toast = set_status_toast(m, note,
                                                   std::chrono::seconds{6});
                     return Cmd::batch(
+                        std::move(learned_save),
                         std::move(toast),
                         Cmd::after(std::chrono::milliseconds{50},
                                         Msg{RetryStream{}}));
@@ -2238,6 +2247,7 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
                 m.s.context_max = ui::context_max_for_model(m.d.model_id.value);
                 // Persist the discovery + the corrected model id so the next
                 // launch doesn't re-offer what this account can't use.
+                Cmd ctx_save = Cmd::none();
                 {
                     auto& s = m.d.persisted;
                     // Account-scoped: this SUBSCRIPTION isn't entitled. Keyed
@@ -2256,7 +2266,7 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
                     // every session.
                     s.provider_models[active_provider_id()] =
                         m.d.model_id.value;
-                    save_record(m);
+                    ctx_save = save_record(m);
                 }
                 // Drop `[1m]` rows from the live catalog so the picker
                 // reflects reality without waiting for a refetch.
@@ -2268,12 +2278,13 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
                         c.last_failure_at   = std::chrono::steady_clock::now();
                         c.retry             = retry::Scheduled{};
                     }))
-                    return Cmd::none();
+                    return ctx_save;
                 auto toast = set_status_toast(m,
                     "this account lacks the 1M-context beta — fell back to "
                     "the standard 200K window and retried",
                     std::chrono::seconds{8});
                 return Cmd::batch(
+                    std::move(ctx_save),
                     std::move(toast),
                     Cmd::after(std::chrono::milliseconds{50},
                                     Msg{RetryStream{}}));
@@ -2316,6 +2327,7 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
 
                     auto& s = m.d.persisted;
                     bool remembered = false;
+                    Cmd vision_save = Cmd::none();
                     switch (vis) {
                         case provider::VisionRejection::OrgPolicy:
                             // ACCOUNT-wide, empty model_id. The model can
@@ -2343,7 +2355,7 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
                         case provider::VisionRejection::None:
                             break;   // unreachable, guarded above
                     }
-                    if (remembered) save_record(m);
+                    if (remembered) vision_save = save_record(m);
 
                     // Strip and retry. The transcript keeps its images for
                     // display — only the wire payload loses them, rebuilt
@@ -2355,7 +2367,7 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
                             c.last_failure_at   = std::chrono::steady_clock::now();
                             c.retry             = retry::Scheduled{};
                         }))
-                        return Cmd::none();
+                        return vision_save;
 
                     auto toast = set_status_toast(m,
                         vis == provider::VisionRejection::OrgPolicy
@@ -2371,6 +2383,7 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
                               "without them",
                         std::chrono::seconds{8});
                     return Cmd::batch(
+                        std::move(vision_save),
                         std::move(toast),
                         Cmd::after(std::chrono::milliseconds{50},
                                         Msg{RetryStream{}}));

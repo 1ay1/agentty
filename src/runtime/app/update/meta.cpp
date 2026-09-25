@@ -158,10 +158,10 @@ Cmd meta_update(Model& m, msg::MetaMsg mm) {
             m.d.show_changes_strip = !m.d.show_changes_strip;
             // Persist so it survives restarts.
             m.d.persisted.show_changes_strip = m.d.show_changes_strip;
-            save_record(m);
+            auto save = save_record(m);
             auto cmd = set_status_toast(m, m.d.show_changes_strip
                 ? "changes strip: shown" : "changes strip: hidden (Ctrl+R still reviews)");
-            return std::move(cmd);
+            return Cmd::batch(std::move(save), std::move(cmd));
         },
 
         [&](CycleProfile) -> Cmd {
@@ -182,7 +182,7 @@ Cmd meta_update(Model& m, msg::MetaMsg mm) {
             // so clearing the grants on it above is enough. Saving them
             // separately first (as this did) only created a window for the
             // save below to write a record that still had them.
-            persist_settings(m);
+            auto profile_save = persist_settings(m);
             // Confirm the switch — a profile change is invisible otherwise
             // (the composer chip updates, but a keyboard-driven cycle needs a
             // beat of feedback naming the new mode + what it does).
@@ -286,7 +286,7 @@ Cmd meta_update(Model& m, msg::MetaMsg mm) {
                               return r.up_to_index > cut;
                           });
             m.d.current.updated_at = std::chrono::system_clock::now();
-            deps().save_thread(m.d.current);
+            Cmd save_restored = Cmd(SaveThread{m.d.current});
 
             reset_composer_draft(m.ui.composer);
             m.ui.composer.text   = std::move(refill);
@@ -312,7 +312,8 @@ Cmd meta_update(Model& m, msg::MetaMsg mm) {
             auto toast = set_status_toast(
                 m, "rewound \xc2\xb7 files restored, prompt back in composer",
                 std::chrono::seconds{5});
-            return Cmd::batch(cmd::reset_inline(), std::move(toast));
+            return Cmd::batch(std::move(save_restored), cmd::reset_inline(),
+                              std::move(toast));
         },
         [&](TerminalFocus& e) -> Cmd {
             m.ui.terminal_focused = e.focused;
@@ -832,7 +833,8 @@ Cmd meta_update(Model& m, msg::MetaMsg mm) {
             // join returns promptly.
             if (auto* a = active_ctx(m.s.phase); a && a->cancel) a->cancel->cancel();
 
-            if (!m.d.current.messages.empty()) deps().save_thread(m.d.current);
+            Cmd save = m.d.current.messages.empty()
+                         ? Cmd::none() : Cmd(SaveThread{m.d.current});
             // Always file the model the user is CURRENTLY on under the active
             // provider before exit, so a relaunch (or a later switch back to
             // this backend) restores exactly this model instead of the
@@ -841,12 +843,21 @@ Cmd meta_update(Model& m, msg::MetaMsg mm) {
             // per-provider recall at all — the "it forgets the model I was
             // using" complaint. persist_settings is load-modify-save, so it
             // preserves every other backend's recall + keys.
-            persist_settings(m);
-            // The settings seam is write-behind, so that save is queued rather
-            // than on disk. Drain it here — the ONE place a synchronous wait is
-            // correct, because no frame is drawn after this.
-            settings_cache::flush();
-            return Cmd::quit();
+            auto quit_save = persist_settings(m);
+            // ORDER, and it is load-bearing twice over.
+            //
+            // 1. The settings save is an EFFECT now, so it reaches the store
+            //    when the host runs the Cmd — after this reducer returns.
+            //    Draining the write-behind queue here would drain it BEFORE
+            //    the save was queued. So the drain moves to the host side:
+            //    main() calls settings_cache::flush() during teardown, after
+            //    the loop has run this Cmd.
+            // 2. Within the Cmd, the save must come BEFORE quit — the
+            //    interpreter stops dispatching the moment it sees a quit
+            //    (kernel.hpp `if (exit_) return`), so anything batched after
+            //    it is silently dropped.
+            return Cmd::batch(std::move(quit_save), std::move(save),
+                              Cmd::quit());
         },
         [&](NoOp) -> Cmd { return Cmd::none(); },
         [&](RedrawScreen) -> Cmd {
@@ -1044,7 +1055,7 @@ void ascend(Model& m) {
     }
 }
 
-void apply_smart(Model& m, smart::RoleConfig cfg) {
+[[nodiscard]] Cmd apply_smart(Model& m, smart::RoleConfig cfg) {
     // Env overrides win over anything a pane or a config file can say, and
     // they win HERE so every holder below sees the same resolved value —
     // rather than each one re-reading the environment and possibly disagreeing.
@@ -1060,12 +1071,13 @@ void apply_smart(Model& m, smart::RoleConfig cfg) {
     //    `m.d.persisted` stale, so the next whole-record save put the old
     //    smart config straight back.
     m.d.persisted.smart = m.d.smart;
-    save_record(m);
+    auto smart_save = save_record(m);
 
     // 3. The subagent router's copy. `task` runs on a worker with no Model, so
     //    it genuinely needs its own snapshot; this is the push that keeps it
     //    from routing on a policy the user already changed.
     tools::subagent::set_smart(m.d.smart);
+    return smart_save;
 }
 
 } // namespace agentty::app::detail

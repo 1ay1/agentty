@@ -57,8 +57,8 @@ namespace {
 //
 // Still write-behind at the Deps seam, so a reducer never stalls a frame on
 // the disk; that is what makes saving on every keystroke affordable.
-void persist(Model& m) {
-    persist_settings(m);
+[[nodiscard]] Cmd persist(Model& m) {
+    return persist_settings(m);
 }
 
 // Rebuild the pane's rows from the prefs. The form is a PROJECTION of
@@ -354,6 +354,9 @@ Cmd appearance_update(Model& m, msg::AppearanceMsg am) {
             // Everything else: read the focused row back onto the prefs and
             // write through. `changed` covers ←/→ in place and a dropdown
             // commit; `left_field` covers finishing a number edit.
+            // Only a real change saves; the arm still has to return a Cmd
+            // either way, so the save starts empty.
+            Cmd save = Cmd::none();
             if (applied.changed || applied.left_field) {
                 bool rebuild = false;
                 if (const auto* row = o->pane.form.focused())
@@ -364,10 +367,10 @@ Cmd appearance_update(Model& m, msg::AppearanceMsg am) {
                 // or a different span tree. A theme swap needs no rebuild
                 // (slots resolve at paint); these do.
                 if (rebuild) rebuild_rendered_content(m);
-                persist(m);
+                save = persist(m);
                 reproject(m);
             }
-            return Cmd::none();
+            return save;
         },
 
         // ── The theme browser ────────────────────────────────────────
@@ -434,9 +437,9 @@ Cmd appearance_update(Model& m, msg::AppearanceMsg am) {
             // is the settle: it puts the sealed transcript under whichever
             // scheme you actually stopped on.
             restyle_sealed_turns(m);
-            persist(m);
+            auto save = persist(m);
             reproject(m);
-            return Cmd::none();
+            return save;
         },
 
         [&](AppearanceThemeCancel&) -> Cmd {
@@ -451,9 +454,9 @@ Cmd appearance_update(Model& m, msg::AppearanceMsg am) {
             // may be carrying a previewed scheme's colours and has to be put
             // back under the restored one.
             restyle_sealed_turns(m);
-            persist(m);
+            auto save = persist(m);
             reproject(m);
-            return Cmd::none();
+            return save;
         },
 
     }, am);

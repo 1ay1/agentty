@@ -20,6 +20,7 @@
 
 #include "agtest.hpp"
 
+#include "agtest_fx.hpp"
 #include "agentty/domain/smart_mode.hpp"
 #include "agentty/domain/smart_tuning.hpp"
 #include "agentty/io/persistence.hpp"
@@ -388,9 +389,9 @@ TEST_CASE("smart tuning: a config change reaches all three holders") {
     isolate_config_dir();
     clear_env();
 
-    // apply_smart persists through deps(); a test binary has none installed.
-    // An in-memory pair is enough and keeps the assertion honest — what comes
-    // back out is what apply_smart put in, with no disk in the way.
+    // apply_smart RETURNS the save as an effect; a test binary has no host to
+    // run it, so run it here. That is the assertion working as intended — the
+    // record only reaches the store if the call actually returned the save.
     static agentty::store::Settings persisted;
     persisted = agentty::store::Settings{};
     agentty::app::install_deps(agentty::app::Deps{
@@ -424,7 +425,13 @@ TEST_CASE("smart tuning: a config change reaches all three holders") {
         .model = "gpt-5", .effort = agentty::Effort::High,
         .set = true, .provider = "openai"};
 
-    agentty::app::detail::apply_smart(m, cfg);
+    {
+        auto save = agentty::app::detail::apply_smart(m, cfg);
+        agtest::fx::Store store;
+        store.settings = persisted;
+        agtest::fx::run(save, store);
+        persisted = store.settings;
+    }
 
     // 1. Persisted — survives a restart.
     CHECK(persisted.smart.enabled);

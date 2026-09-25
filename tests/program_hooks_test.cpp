@@ -17,6 +17,7 @@
 #include "agtest.hpp"
 
 #include "agentty/runtime/app/program.hpp"
+#include "agentty/runtime/app/host.hpp"
 
 #include <maya/host/sources.hpp>
 #include <maya/host/terminal.hpp>
@@ -51,7 +52,48 @@ static_assert(jaal::HasNeedsWarmup<P>,
 
 // The host that actually runs it must be able to carry out every effect in
 // the app's Cmd row. `require_host_for` names the offender when it can't.
-TEST_CASE("program: agentty's Cmd row is runnable by maya's terminal host") {
-    jaal::require_host_for<maya::terminal_host<P>, P>();
+//
+// app::Host, not maya::terminal_host: agentty's row carries its own
+// persistence effects (save_thread, write_file, …) on top of maya's
+// terminal ones, and app::Host is the wrapper that handles both. Asserting
+// maya's host here would be asserting something agentty never runs on.
+TEST_CASE("program: agentty's Cmd row is runnable by its host") {
+    jaal::require_host_for<agentty::app::Host<P>, P>();
     CHECK(true);   // reaching here means the static checks above all passed
 }
+
+// ── The host's OWN optional hooks ─────────────────────────────────────
+//
+// Same requires-means-absent trap as the program hooks above, one layer
+// down — and it cost a real debugging session.
+//
+// jaal calls a host's attach() only `if constexpr (requires { host.attach(cx) })`,
+// where cx is `host_context<TheHost>`. maya's terminal_host originally
+// declared `attach(host_context<terminal_host>&)` — exact type. agentty's
+// Host DERIVES from it to add persistence effects, so its context is
+// `host_context<Host>`, the requires-test failed, and the kernel silently
+// skipped attach(). The terminal's input was never registered with the
+// reactor: agentty opened, painted, and accepted no keys. Nothing logged,
+// nothing failed — it just sat there.
+//
+// Fixed by templating maya's hooks on the context type. These assert the
+// property that fix provides, because nothing else would notice losing it.
+using H = agentty::app::Host<P>;
+
+static_assert(requires(H& h, jaal::host_context<H>& cx) { h.attach(cx); },
+              "Host::attach must accept host_context<Host>. jaal detects it "
+              "with a requires-test, so a signature it can't call means the "
+              "terminal's input is never registered — the app runs but takes "
+              "no keys, silently.");
+
+static_assert(requires(H& h, jaal::host_context<H>& cx, jaal::readiness r) {
+                  h.on_ready(cx, r);
+              },
+              "Host::on_ready must accept host_context<Host>, or input that "
+              "IS registered is never read.");
+
+static_assert(requires(H& h, jaal::host_context<H>& cx, jaal::sig s) {
+                  h.on_signal(cx, s);
+              },
+              "Host::on_signal must accept host_context<Host>, or SIGWINCH "
+              "never reaches the program and a resize is ignored.");

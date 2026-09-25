@@ -20,6 +20,7 @@
 #include "agentty/util/image_dims.hpp"   // image_dimensions — lift-time trace
 #include "agentty/tool/commands.hpp"
 #include "agentty/runtime/view/helpers.hpp"
+#include "agentty/io/persistence.hpp"   // title_from_first_message (pure)
 #include "agentty/provider/chatgpt/provider.hpp"
 #include "agentty/provider/copilot/provider.hpp"
 #include "agentty/provider/registry.hpp"
@@ -315,7 +316,7 @@ Cmd submit_message(Model& m) {
             }
             title_src.push_back(user.text[i++]);
         }
-        m.d.current.title = deps().title_from(title_src);
+        m.d.current.title = persistence::title_from_first_message(title_src);
     }
 
     // ── Git checkpoint (Zed-agent behavior) ─────────────────────────
@@ -675,8 +676,8 @@ void reset_composer_draft(ComposerState& c) {
 
 // The ONE place settings reach the store. See the contract on the
 // declaration in update/internal.hpp.
-void save_record(Model& m) {
-    deps().save_settings(m.d.persisted);
+[[nodiscard]] Cmd save_record(Model& m) {
+    return Cmd(SaveSettings{m.d.persisted});
 }
 
 void refresh_record(Model& m) {
@@ -687,7 +688,7 @@ void refresh_record(Model& m) {
     m.d.persisted.provider_keys = std::move(disk.provider_keys);
 }
 
-void persist_settings(Model& m) {
+[[nodiscard]] Cmd persist_settings(Model& m) {
     // Sync the settings that still live as separate Domain members INTO the
     // record, then save the record. The scattered members are what has not
     // migrated into `m.d.persisted` yet; until they do, this is the function
@@ -729,13 +730,14 @@ void persist_settings(Model& m) {
     const bool was_enabled  = s.smart.enabled;
     s.smart = m.d.smart;
     if (keep_enabled) s.smart.enabled = was_enabled;
-    save_record(m);
+    auto save = save_record(m);
     // Keep the subagent role-router (Layer 3b) in step with any Smart Mode
     // change the user just made in the overlay.
     tools::subagent::set_smart(m.d.smart);
     // …and the provider those pins are scoped to, so a worker resolves the
     // same slot the main turn would.
     tools::subagent::set_provider(active_provider_id());
+    return save;
 }
 
 Cmd
@@ -760,11 +762,12 @@ commit_provider_switch(Model& m, std::string_view spec,
     //      a no-op for locals / ACP. Fire-and-forget.
     provider::prewarm_active_provider();
 
+    Cmd recall_save = Cmd::none();
     {
         if (!m.d.model_id.empty())
             m.d.persisted.provider_models[outgoing_id] = m.d.model_id.value;
         m.d.persisted.provider = spec_s;
-        save_record(m);
+        recall_save = save_record(m);
     }
 
     // (3) Make a valid model active for the NEW backend. Priority:
@@ -810,7 +813,7 @@ commit_provider_switch(Model& m, std::string_view spec,
     // (5) Persist the FULL settings shape (provider + per-provider model +
     //     effort + favorites) through the one owner so effort is never
     //     dropped on a hop, then swap the Deps auth and refetch models.
-    persist_settings(m);
+    auto settings_save = persist_settings(m);
 
     app::switch_provider(std::move(new_auth));
     m.d.available_models.clear();
@@ -870,8 +873,9 @@ commit_provider_switch(Model& m, std::string_view spec,
     }
     auto toast = set_status_toast(m, std::move(toast_text),
                                   std::chrono::seconds{4});
-    return Cmd::batch(std::move(toast), cmd::fetch_models(),
-                            std::move(refresh_cmd));
+    return Cmd::batch(std::move(recall_save), std::move(settings_save),
+                      std::move(toast), cmd::fetch_models(),
+                      std::move(refresh_cmd));
 }
 
 Cmd set_status_toast(Model& m, std::string text,

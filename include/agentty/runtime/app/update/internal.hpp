@@ -117,7 +117,7 @@ void sync_todo_state_from_args(Model& m, const nlohmann::json& args);
 // entirely — see docs/design/jaal-rewrite.md. Routing every writer through
 // one function now is what makes that a mechanical change later, instead of
 // 20 separate ones.)
-void           save_record(Model& m);
+[[nodiscard]] Cmd save_record(Model& m);
 
 // Re-seed `m.d.persisted` from the store before touching a field the Model
 // does NOT own.
@@ -142,7 +142,7 @@ Cmd            submit_message(Model& m);
 // (model_id, effort, profile, smart, the active provider) into
 // `m.d.persisted`, then save the record. Use this when one of THOSE changed;
 // use save_record() when you edited `m.d.persisted` directly.
-void           persist_settings(Model& m);
+[[nodiscard]] Cmd persist_settings(Model& m);
 
 // Clear ALL transient composer draft state (text, cursor, attachments,
 // undo/redo, history walk, queued messages, queue-peek/draft snapshots).
@@ -545,7 +545,9 @@ void ascend(Model& m);
 //
 // Persists as a side effect: "change the config" and "write it down" are the
 // same intent, and splitting them is another pair of steps to get wrong.
-void apply_smart(Model& m, smart::RoleConfig cfg);
+// Returns the save so the caller can batch it — the write is an effect now,
+// not something that happens inside the reducer.
+[[nodiscard]] Cmd apply_smart(Model& m, smart::RoleConfig cfg);
 
 // ── Row estimation (frozen.cpp) ──────────────────────────────────────────
 //

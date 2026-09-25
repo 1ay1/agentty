@@ -64,7 +64,7 @@ constexpr std::int64_t kCatalogTtlMs = 60'000;   // 60s
 
 // Defined further down (with the fused-picker MRU helpers); forward-declared
 // here so the classic model-picker reducer above can feed the same ring.
-void record_recent(Model& m, const std::string& provider_id,
+[[nodiscard]] Cmd record_recent(Model& m, const std::string& provider_id,
                    const std::string& model_id);
 void hydrate_recents(Model& m);
 void rebuild_fused_rows(Model& m, bool sync_sources = true);
@@ -79,9 +79,9 @@ constexpr int kRecentCap = 6;
 // Record (provider,model) at the FRONT of the MRU, deduped, capped. Persists
 // to Settings.recent_models so RECENT + ^Tab survive restart. Mirrors into
 // m.d.recent_models for the live picker build.
-void record_recent(Model& m, const std::string& provider_id,
+[[nodiscard]] Cmd record_recent(Model& m, const std::string& provider_id,
                    const std::string& model_id) {
-    if (provider_id.empty() || model_id.empty()) return;
+    if (provider_id.empty() || model_id.empty()) return Cmd::none();
     ModelRef ref{provider_id, model_id};
     auto& mru = m.d.recent_models;
     // Identity for the ring is the capkey-FOLDED id: providers list the
@@ -102,7 +102,7 @@ void record_recent(Model& m, const std::string& provider_id,
     s.recent_models.clear();
     for (const auto& r : mru)
         s.recent_models.push_back(r.provider_id + "\t" + r.model_id);
-    save_record(m);
+    return save_record(m);
 }
 
 // Hydrate m.d.recent_models from Settings ("<provider>\t<model>" per entry).
@@ -458,8 +458,9 @@ Cmd switch_to_model_ref(Model& m, const ModelRef& ref, bool record = true) {
                                       resolved_caps(m.d.model_id.value,
                                                     ref.provider_id));
         tools::subagent::set_model(m.d.model_id.value);
-        persist_settings(m);
-        if (record) record_recent(m, ref.provider_id, ref.model_id);
+        auto save = persist_settings(m);
+        auto mru  = record ? record_recent(m, ref.provider_id, ref.model_id)
+                           : Cmd::none();
         auto toast = set_status_toast(m,
             ui::pretty_model_label(m.d.model_id.value) + " \xc2\xb7 "
                 + provider::provider_display_name(provider::active()),
@@ -468,17 +469,20 @@ Cmd switch_to_model_ref(Model& m, const ModelRef& ref, bool record = true) {
         // catalog said (or say nothing until it's loaded). Re-check now; the
         // post-turn probe catches it once the first request loads it.
         auto probe = cmd::probe_model_window(m.d.model_id.value);
-        return Cmd::batch(
-            std::move(toast), std::move(probe));
+        return Cmd::batch(std::move(save), std::move(mru),
+                          std::move(toast), std::move(probe));
     }
 
     // Cross-provider — atomic switch through the ONE funnel, model pre-stashed.
     const provider::ProviderPreset* p = provider::preset_for(ref.provider_id);
     const std::string label = p ? std::string{p->label} : ref.provider_id;
     auth::AuthHeader auth = resolve_switch_auth(ref.provider_id);
-    if (record) record_recent(m, ref.provider_id, ref.model_id);
-    return commit_provider_switch(m, ref.provider_id,
-                                  std::move(auth), label, ref.model_id);
+    auto mru = record ? record_recent(m, ref.provider_id, ref.model_id)
+                      : Cmd::none();
+    return Cmd::batch(std::move(mru),
+                      commit_provider_switch(m, ref.provider_id,
+                                             std::move(auth), label,
+                                             ref.model_id));
 }
 
 // Route to the login flow for `provider_id`, popping to `origin` on Esc.
@@ -609,7 +613,11 @@ Cmd models_update(Model& m, msg::ModelsMsg pm) {
         },
         [&](CloseModels) -> Cmd {
             m.d.fused_rows.clear();       // release the cache while closed
-            if (m.ui.effort_dirty) { persist_settings(m); m.ui.effort_dirty = false; }
+            Cmd save = Cmd::none();
+            if (m.ui.effort_dirty) {
+                save = persist_settings(m);
+                m.ui.effort_dirty = false;
+            }
             // Esc unwinds one level — and that ONE path now covers slot-assign
             // too: the assign-mode picker's `from` snapshot IS the SmartMode
             // pane (form, advanced, nested chain), so ascend() restores it
@@ -618,7 +626,7 @@ Cmd models_update(Model& m, msg::ModelsMsg pm) {
             // to reset. Revalidation (the form may be stale) is ascend()'s
             // job, one place for every SmartMode restore.
             ascend(m);
-            return Cmd::none();
+            return save;
         },
         [&](ModelsMove e) -> Cmd {
             if (auto* c = m.ui.panel.get<pn::Models>()) {
@@ -723,12 +731,12 @@ Cmd models_update(Model& m, msg::ModelsMsg pm) {
             const bool now_fav = (it == s.favorite_models.end());
             if (now_fav) s.favorite_models.push_back(mid);
             else         s.favorite_models.erase(it);
-            save_record(m);
+            auto save = save_record(m);
             // Live feedback: flip the star on every cached row for this model
             // (no re-sort — keep the cursor where it is).
             for (auto& r : m.d.fused_rows)
                 if (r.model.id == mid) r.model.favorite = now_fav;
-            return Cmd::none();
+            return save;
         },
         [&](ModelsCycleEffort e) -> Cmd {
             // ←/→ walks the reasoning-effort ladder of the HIGHLIGHTED model
@@ -790,7 +798,7 @@ Cmd models_update(Model& m, msg::ModelsMsg pm) {
 
             if (next <= 0) settings.context_overrides.erase(key);
             else           settings.context_overrides[key] = next;
-            save_record(m);
+            auto save = save_record(m);
 
             // Reflect the change in the LIVE catalog, then rebuild the rows
             // the view reads. Without this the setting is invisible until
@@ -866,7 +874,7 @@ Cmd models_update(Model& m, msg::ModelsMsg pm) {
                 if (auto_win > 0)
                     note += " (" + ui::context_window_label(auto_win) + ")";
             }
-            return set_status_toast(m, std::move(note));
+            return Cmd::batch(std::move(save), set_status_toast(m, std::move(note)));
         },
         [&](ModelsToggleReasoning) -> Cmd {
             // ^E flips the highlighted model's per-model reasoning OVERRIDE
@@ -911,7 +919,7 @@ Cmd models_update(Model& m, msg::ModelsMsg pm) {
                 clear_reasoning_override(id);
                 label = "reasoning: auto (catalog default)";
             }
-            save_record(m);
+            auto save = save_record(m);
             // Clamp against the ROW's provider scope, not the ambient one:
             // the fused picker lists models from providers that are NOT
             // active, and capability facts are keyed "provider/model".
@@ -922,7 +930,7 @@ Cmd models_update(Model& m, msg::ModelsMsg pm) {
             m.d.effort = clamp_effort(m.d.effort,
                                       resolved_caps(id, row.provider_id));
             auto toast = set_status_toast(m, label);
-            return std::move(toast);
+            return Cmd::batch(std::move(save), std::move(toast));
         },
         [&](SwitchToPreviousModel) -> Cmd {
             // ^Tab MRU cycle: walk the recent ring to progressively OLDER
@@ -1017,7 +1025,7 @@ Cmd models_update(Model& m, msg::ModelsMsg pm) {
                 // pushes to the subagent router. Pinning a model and having
                 // `task` keep using the old one is exactly what the open-coded
                 // persist_settings here used to do.
-                apply_smart(m, std::move(cfg));
+                auto slot_save = apply_smart(m, std::move(cfg));
                 m.d.fused_rows.clear();
                 // Pop back to the parent Smart Mode pane — the picker's
                 // `from` snapshot, restored + revalidated by ascend() (which
@@ -1029,7 +1037,7 @@ Cmd models_update(Model& m, msg::ModelsMsg pm) {
                 if (auto* sm = m.ui.panel.get<pn::SmartMode>())
                     smart_form::focus_role(sm->form, assigned);
                 auto toast = set_status_toast(m, "Smart Mode slot set");
-                return std::move(toast);
+                return Cmd::batch(std::move(slot_save), std::move(toast));
             }
 
             // Ordinary pick: a COMPLETED selection means "done" — close
@@ -1063,6 +1071,9 @@ Cmd models_update(Model& m, msg::ModelsMsg pm) {
             }
             if (e.models.empty()) return Cmd::none();
             auto& settings = m.d.persisted;
+            // Set by the persist-on-success branch below; batched into this
+            // arm's return so a proven --provider spec actually reaches disk.
+            Cmd proven_save = Cmd::none();
             // PERSIST-ON-SUCCESS: a custom --provider spec registered at
             // startup as unproven becomes sticky NOW — the host answered a
             // non-empty model fetch, so it's a real endpoint, not a typo.
@@ -1080,7 +1091,7 @@ Cmd models_update(Model& m, msg::ModelsMsg pm) {
                 // so without this a --provider host never showed its models.
                 // Presets are filtered out there, so this is safe for them.
                 settings.provider_keys.try_emplace(proven->first, "");
-                save_record(m);
+                proven_save = save_record(m);
             }
             m.d.available_models.clear();
             for (auto& mi : e.models) {
@@ -1148,7 +1159,8 @@ Cmd models_update(Model& m, msg::ModelsMsg pm) {
                     m.d.effort = clamp_effort(
                         m.d.effort, resolved_caps(m.d.model_id.value));
                 tools::subagent::set_model(m.d.model_id.value);
-                persist_settings(m);
+                proven_save = Cmd::batch(std::move(proven_save),
+                                         persist_settings(m));
             }
             // The active model may have remained valid, in which case the
             // old branch did not refresh its context cap. Codex publishes a
@@ -1177,7 +1189,7 @@ Cmd models_update(Model& m, msg::ModelsMsg pm) {
                 else if (c->index >= n) c->index = n - 1;
                 else if (c->index < 0) c->index = 0;
             }
-            return Cmd::none();
+            return proven_save;
         },
         [&](ModelWindowProbed& e) -> Cmd {
             // Stale (provider switched meanwhile) or nothing measured: keep
@@ -1208,7 +1220,7 @@ Cmd models_update(Model& m, msg::ModelsMsg pm) {
             // survives restarts. Mirrors the ToggleChangesStrip pattern.
             m.d.show_reasoning = !m.d.show_reasoning;
             m.d.persisted.show_reasoning = m.d.show_reasoning;
-            save_record(m);
+            auto save = save_record(m);
             // Anthropic caveat: visible thinking is only REQUESTED when an
             // effort tier is active (the transport gates thinking mode on
             // req.effort). With effort off, ^R would silently show nothing —
@@ -1225,7 +1237,7 @@ Cmd models_update(Model& m, msg::ModelsMsg pm) {
                     ? "reasoning: shown — needs an effort tier on this model "
                       "(\xe2\x86\x90/\xe2\x86\x92 in the picker)"
                     : "reasoning: shown (live thinking + \xe2\x9c\xa6 summary)");
-            return std::move(toast);
+            return Cmd::batch(std::move(save), std::move(toast));
         },
         [&](ModelsScopeProvider&) -> Cmd {
             // ^/ — restrict the list to ONLY the highlighted row's provider,

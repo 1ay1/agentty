@@ -112,8 +112,10 @@ Cmd fork_update(Model& m, msg::ForkMsg fm) {
             if (!m.s.is_idle() || m.s.compacting || m.s.thread_loading)
                 return set_status_toast(m, "cannot fork while the agent is working");
 
-            // 1. Persist the parent untouched.
-            deps().save_thread(m.d.current);
+            // 1. Persist the parent untouched. A VALUE, batched into this
+            //    arm's return below — and taken BEFORE the fork replaces
+            //    m.d.current, so it captures the parent, not the child.
+            Cmd save_parent = Cmd(SaveThread{m.d.current});
             const std::string parent_id = m.d.current.id.value;
 
             // 2. Write the parent's transcript to a clean, readable file
@@ -139,7 +141,7 @@ Cmd fork_update(Model& m, msg::ForkMsg fm) {
             // 3. Build the fork: a FRESH, EMPTY thread with provenance +
             //    per-thread RAG override. No messages carried over.
             Thread fork;
-            fork.id = deps().new_thread_id();
+            fork.id = persistence::new_id();
             fork.forked_from = parent_id;
             fork.rag_mode_override = rag_mode_of(choice);
             fork.created_at = fork.updated_at = std::chrono::system_clock::now();
@@ -197,7 +199,7 @@ Cmd fork_update(Model& m, msg::ForkMsg fm) {
             tools::skills::reset_activations();
             m.ui.view_cache.clear();
             m.d.current = std::move(fork);
-            deps().save_thread(m.d.current);
+            Cmd save_fork = Cmd(SaveThread{m.d.current});
             m.ui.panel.close<pn::ThreadList>();
             rehydrate_frozen(m);
             m.ui.needs_warmup_render = !m.ui.frozen.empty();
@@ -211,7 +213,8 @@ Cmd fork_update(Model& m, msg::ForkMsg fm) {
                        label_of(choice) +
                        " · prior transcript readable on demand",
                 std::chrono::seconds{5});
-            return Cmd::batch(std::move(toast), cmd::reset_inline());
+            return Cmd::batch(std::move(save_parent), std::move(save_fork),
+                              std::move(toast), cmd::reset_inline());
         },
     }, fm);
 }

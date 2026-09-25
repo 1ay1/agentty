@@ -656,12 +656,13 @@ Cmd tool_update(Model& m, msg::ToolMsg tm) {
             // Persist the grant (Zed's always_allow rules): reload-proof.
             // Onto the record, so the next whole-record save carries it
             // instead of writing a copy that predates it.
+            Cmd grant_save = Cmd::none();
             {
                 auto& allow = m.d.persisted.always_allow_tools;
                 if (std::find(allow.begin(), allow.end(), name.value)
                         == allow.end()) {
                     allow.push_back(name.value);
-                    save_record(m);
+                    grant_save = save_record(m);
                 }
             }
             m.s.status = name.value + ": always allowed (persists \xc2\xb7 "
@@ -672,7 +673,8 @@ Cmd tool_update(Model& m, msg::ToolMsg tm) {
                 tc.status = ToolUse::Approved{tc.started_at()};
             });
             m.d.pending_permission.reset();
-            return cmd::kick_pending_tools(m);
+            return Cmd::batch(std::move(grant_save),
+                              cmd::kick_pending_tools(m));
         },
     }, tm);
 }

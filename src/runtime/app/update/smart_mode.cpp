@@ -104,11 +104,11 @@ Cmd smart_mode_update(Model& m, msg::SmartModeMsg sm) {
                                 (void)settings::registry::set(
                                     cfg, *d, std::string{v.id()});
                         }, f->value);
-                    apply_smart(m, std::move(cfg));
+                    auto save = apply_smart(m, std::move(cfg));
                     const int cursor = o->form.cursor;
                     o->form = build_smart_form(m, o->advanced);
                     o->form.cursor = cursor;
-                    return Cmd::none();
+                    return save;
                 }
 
                 // The master toggle. Routed through apply_smart like every
@@ -118,13 +118,13 @@ Cmd smart_mode_update(Model& m, msg::SmartModeMsg sm) {
                 smart::RoleConfig cfg = m.d.smart;
                 cfg.enabled = smart_form::enabled_from_form(o->form,
                                                             m.d.smart.enabled);
-                apply_smart(m, std::move(cfg));
+                auto save = apply_smart(m, std::move(cfg));
                 // The slots' locked state depends on the switch, so rebuild.
                 const int cursor = o->form.cursor;
                 o->form = build_smart_form(m, o->advanced);
                 o->form.cursor = cursor;
-                return set_status_toast(m,
-                    m.d.smart.enabled ? "Smart Mode on" : "Smart Mode off");
+                return Cmd::batch(std::move(save), set_status_toast(m,
+                    m.d.smart.enabled ? "Smart Mode on" : "Smart Mode off"));
             }
 
             // A slot row → hand off to the model picker. The candidate set is
@@ -161,12 +161,13 @@ Cmd smart_mode_update(Model& m, msg::SmartModeMsg sm) {
             // routing on it is the same class of bug as the save-without-apply.
             smart::RoleConfig cfg = m.d.smart;
             cfg.slot(*role) = smart::SlotOverride{};
-            apply_smart(m, std::move(cfg));
+            auto save = apply_smart(m, std::move(cfg));
             // The row shows the RESOLVED model, which just changed.
             const int cursor = o->form.cursor;
             o->form = build_smart_form(m, o->advanced);
             o->form.cursor = cursor;
-            return set_status_toast(m, "slot reset to auto");
+            return Cmd::batch(std::move(save),
+                              set_status_toast(m, "slot reset to auto"));
         },
     }, sm);
 }

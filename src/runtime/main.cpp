@@ -63,6 +63,7 @@
 
 #include <maya/maya.hpp>
 #include <maya/host/run.hpp>   // maya::run: the jaal host
+#include "agentty/runtime/app/host.hpp"   // agentty::app::Host
 
 #include "agentty/acp/server.hpp"
 #include "agentty/airgap/airgap.hpp"
@@ -1643,8 +1644,23 @@ int main(int argc, char** argv) {
         });
     }
 
-    maya::run<app::AgenttyApp>({.title = "agentty", .fps = 0,
-                               .mode = maya::Mode::Inline, .backend = backend});
+    // Run on agentty's host: maya's terminal_host plus the persistence
+    // effects (runtime/app/host.hpp). This is maya::run's four lines,
+    // inlined only because the host type differs — maya::run hardcodes its
+    // own, and it should, since the terminal half is its business.
+    {
+        // Names the effect AND the program if the row and the host ever
+        // disagree, instead of failing as an unsatisfied constraint several
+        // levels inside jaal::run.
+        jaal::require_host_for<app::Host<app::AgenttyApp>, app::AgenttyApp>();
+
+        maya::Options cfg{.title = "agentty", .fps = 0,
+                          .mode = maya::Mode::Inline, .backend = backend};
+        auto term = maya::Screen::open(cfg);
+        if (!term) return 70;                 // couldn't take the terminal
+        app::Host<app::AgenttyApp> host{*term, cfg.fps};
+        jaal::run<app::AgenttyApp>(host);
+    }
 
     // Tear down connected MCP plugin servers FIRST — before the blocking
     // flushes below. Closing each server's stdin (→ EOF) unblocks any

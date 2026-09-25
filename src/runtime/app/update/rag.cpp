@@ -45,14 +45,15 @@ namespace {
 // since — switching retrieval mode would undo a model switch.
 // `configured = true` is the first-run latch — once the user has chosen a
 // mode, the onboarding prompt stops asking.
-void commit_mode(Model& m, store::RagMode mode) {
+[[nodiscard]] Cmd commit_mode(Model& m, store::RagMode mode) {
     auto& rag = m.d.persisted.rag;
     rag.configured = true;
     rag.mode       = mode;
     rag.proactive  = (mode != store::RagMode::Off);
     const auto applied = rag;   // persist_settings may rewrite the record
-    persist_settings(m);
+    auto save = persist_settings(m);
     tools::rag_apply_settings(applied);
+    return save;
 }
 
 // Project an EmbedConfig onto the persisted settings shape. The API key is
@@ -272,6 +273,7 @@ Cmd rag_settings_update(Model& m, msg::RagMsg rm) {
 
             const auto applied = form::keys::apply(f->form, e.action);
 
+            Cmd mode_save = Cmd::none();
             if (applied.changed) {
                 // The mode row commits immediately — it is a policy switch with
                 // nothing to validate and no probe to invalidate, so making the
@@ -280,7 +282,7 @@ Cmd rag_settings_update(Model& m, msg::RagMsg rm) {
                     if (auto* o = m.ui.panel.get<pn::Rag>()) {
                         o->cursor = rs::mode_from_form(f->form, o->cursor);
                         o->active = o->cursor;
-                        commit_mode(m, o->cursor);
+                        mode_save = commit_mode(m, o->cursor);
                     }
                 } else {
                     invalidate_probe(*f);
@@ -296,16 +298,22 @@ Cmd rag_settings_update(Model& m, msg::RagMsg rm) {
             refresh_status(*f);
 
             if (applied.fired)
-                return Cmd::after(std::chrono::milliseconds{0}, Msg{RagEmbedTest{}});
+                return Cmd::batch(
+                    std::move(mode_save),
+                    Cmd::after(std::chrono::milliseconds{0}, Msg{RagEmbedTest{}}));
             // Leaving an edited field IS the save (commit-on-exit — the
             // form-layer contract; there is no ^S). RagEmbedSave validates
             // first, so a bad half-config surfaces as the probe's Failed
             // note rather than a write.
             if (applied.left_field)
-                return Cmd::after(std::chrono::milliseconds{0}, Msg{RagEmbedSave{}});
+                return Cmd::batch(
+                    std::move(mode_save),
+                    Cmd::after(std::chrono::milliseconds{0}, Msg{RagEmbedSave{}}));
             if (applied.close)
-                return Cmd::after(std::chrono::milliseconds{0}, Msg{RagEmbedClose{}});
-            return Cmd::none();
+                return Cmd::batch(
+                    std::move(mode_save),
+                    Cmd::after(std::chrono::milliseconds{0}, Msg{RagEmbedClose{}}));
+            return mode_save;
         },
 
         [&](RagEmbedPaste& e) -> Cmd {
@@ -401,12 +409,14 @@ Cmd rag_settings_update(Model& m, msg::RagMsg rm) {
             rs::apply_form_to_settings(f->form, m.d.persisted);
             // Same reason as commit_mode: save through persist_settings so
             // the scattered Domain fields reach the record first.
-            persist_settings(m);
+            auto save = persist_settings(m);
             tools::rag_apply_settings(m.d.persisted.rag);
 
             const std::string label = eb::describe(f->cfg);
-            return set_status_toast(m, "Embeddings: " + label + note,
-                                     std::chrono::seconds{4});
+            return Cmd::batch(
+                std::move(save),
+                set_status_toast(m, "Embeddings: " + label + note,
+                                 std::chrono::seconds{4}));
         },
     }, rm);
 }

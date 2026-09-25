@@ -14,6 +14,7 @@
 
 #include "agentty/runtime/app/cmd_factory.hpp"
 #include "agentty/runtime/app/deps.hpp"
+#include "agentty/io/persistence.hpp"   // new_id: a pure function, called directly
 #include "agentty/provider/selection.hpp"
 #include "agentty/runtime/login.hpp"
 #include "agentty/runtime/mem.hpp"
@@ -55,7 +56,7 @@ using maya::overload;
     // the old thread's staged/pinned entries so they don't linger.
     m.ui.view_cache.clear();
     m.d.current = Thread{};
-    m.d.current.id = deps().new_thread_id();
+    m.d.current.id = persistence::new_id();
     m.d.current.created_at = m.d.current.updated_at =
         std::chrono::system_clock::now();
     clear_frozen(m);
@@ -259,7 +260,9 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
                 target.title.empty() ? "(untitled)" : target.title;
 
             p->confirm_remove.clear();
-            deps().delete_thread(target_id);
+            // The delete is a VALUE, batched into both of this arm's
+            // returns below — taken here, where target_id is still in hand.
+            Cmd del = Cmd(DeleteThread{target_id});
             m.d.threads.erase(m.d.threads.begin() + idx);
             // Clamp the cursor so it stays valid after removal.
             const int sz = static_cast<int>(m.d.threads.size());
@@ -280,10 +283,10 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
             // that wipes the deleted thread's rendered turns off-screen.
             if (was_current) {
                 auto reset = reset_to_fresh_thread(m);
-                return Cmd::batch(cmd::load_threads_async(),
-                                        std::move(reset), std::move(toast));
+                return Cmd::batch(std::move(del), cmd::load_threads_async(),
+                                  std::move(reset), std::move(toast));
             }
-            return std::move(toast);
+            return Cmd::batch(std::move(del), std::move(toast));
         },
         [&](ThreadCycle& e) -> Cmd {
             // Alt+←/→ — jump to the adjacent thread without the picker.
@@ -333,7 +336,8 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
             // Preserve the thread being left — same courtesy NewThread
             // extends. finalize_turn saves per turn, but a title edit or
             // an un-persisted tail shouldn't be lost to a quick cycle.
-            if (!m.d.current.messages.empty()) deps().save_thread(m.d.current);
+            Cmd save = m.d.current.messages.empty()
+                         ? Cmd::none() : Cmd(SaveThread{m.d.current});
             m.s.thread_loading = true;
             // Warm the socket for the switched-into thread's first turn.
             provider::prewarm_active_provider();
@@ -345,17 +349,19 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
                 "thread " + std::to_string(target + 1) + "/"
                     + std::to_string(sz) + " \xc2\xb7 "
                     + (meta.title.empty() ? "(untitled)" : meta.title));
-            return Cmd::batch(cmd::load_thread_async(meta.id),
-                                    std::move(toast));
+            return Cmd::batch(std::move(save),
+                              cmd::load_thread_async(meta.id),
+                              std::move(toast));
         },
         [&](NewThread) -> Cmd {
             // Persist the outgoing thread before we drop it (delete's
             // active-row path does the opposite — it just removed the
             // thread, so it must NOT save). The shared reset below owns
             // everything after this policy decision.
-            if (!m.d.current.messages.empty()) deps().save_thread(m.d.current);
+            Cmd save = m.d.current.messages.empty()
+                         ? Cmd::none() : Cmd(SaveThread{m.d.current});
             auto reset = reset_to_fresh_thread(m);
-            return std::move(reset);
+            return Cmd::batch(std::move(save), std::move(reset));
         },
         [&](ThreadsLoaded& e) -> Cmd {
             m.d.threads = std::move(e.threads);

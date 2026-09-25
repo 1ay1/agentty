@@ -247,13 +247,14 @@ Cmd host_probed(Model& m, HostProbed r) {
     const std::string spec = std::move(r.spec);
     // PERSIST the keyless host (empty key) so it has a picker row next
     // session — saved_custom_hosts() derives rows from provider_keys.
+    Cmd save = Cmd::none();
     {
         // provider_keys is vault-owned — re-read before adding the row.
         refresh_record(m);
         if (m.d.persisted.provider_keys.find(spec)
                 == m.d.persisted.provider_keys.end()) {
             m.d.persisted.provider_keys[spec] = "";
-            save_record(m);
+            save = save_record(m);
         }
     }
     auth::AuthHeader new_auth = provider::credentials::resolve(spec);
@@ -322,9 +323,10 @@ Cmd host_probed(Model& m, HostProbed r) {
     // This is what a settings toggle would have been for, and why there
     // isn't one: the server already told us what it is. Asking the user to
     // confirm it would be asking them to repeat an answer we have.
+    Cmd probe_save = Cmd::none();
     if (!r.learned_self_hosted.empty()) {
         if (m.d.persisted.probe_hosts.insert(r.learned_self_hosted).second) {
-            save_record(m);
+            probe_save = save_record(m);
             provider::openai::install_probe_hosts(m.d.persisted.probe_hosts);
         }
     }
@@ -335,7 +337,8 @@ Cmd host_probed(Model& m, HostProbed r) {
         + std::to_string(r.latency_ms) + "ms" + ctx,
         // A remedy needs longer to read than a success.
         std::chrono::seconds{r.probe_skipped ? 12 : 6});
-    return Cmd::batch(std::move(switch_cmd), std::move(found));
+    return Cmd::batch(std::move(save), std::move(probe_save),
+                      std::move(switch_cmd), std::move(found));
 }
 
 // Canonical account/registry id for a provider selection — mirrors the
@@ -363,11 +366,12 @@ Cmd sign_out(Model& m) {
     // INJECTED settings door so the write is visible to tests' in-memory
     // stubs and rides the same persistence path as every reducer write.
     // File-backed stores (Anthropic / OAuth token files) are the vault's.
+    Cmd key_save = Cmd::none();
     if (!pid.empty()) {
         if (auth::vault::of(pid).kind == auth::vault::Kind::SettingsKey) {
             refresh_record(m);
             if (m.d.persisted.provider_keys.erase(pid) > 0)
-                save_record(m);
+                key_save = save_record(m);
         } else {
             auth::vault::sign_out(pid);
         }
@@ -423,10 +427,12 @@ Cmd sign_out(Model& m) {
             m.s.status_until = std::chrono::steady_clock::now()
                              + std::chrono::seconds{5};
             auth::AuthHeader fb_auth = provider::credentials::resolve(fallback);
-            return commit_provider_switch(
-                m, fallback, std::move(fb_auth),
-                provider::provider_display_name(
-                    provider::parse_selection(fallback)));
+            return Cmd::batch(
+                std::move(key_save),
+                commit_provider_switch(
+                    m, fallback, std::move(fb_auth),
+                    provider::provider_display_name(
+                        provider::parse_selection(fallback))));
         }
     }
 
@@ -435,7 +441,7 @@ Cmd sign_out(Model& m) {
     m.s.status = "signed out of " + what + " \xe2\x80\x94 sign in to continue";
     m.s.status_until = std::chrono::steady_clock::now()
                      + std::chrono::seconds{5};
-    return Cmd::none();
+    return key_save;
 }
 
 namespace {
@@ -711,12 +717,13 @@ Cmd account_remove(Model& m) {
     // again — and a later re-login may land on a different subscription
     // tier, so keeping them would be wrong as well as dead. This is the one
     // place forgetting is correct: removal, not a switch.
+    Cmd forget_save = Cmd::none();
     {
         auto& s = m.d.persisted;
         const auto before = s.entitlements.size();
         domain::entitlement::forget_account(s.entitlements, row.provider,
                                             row.label);
-        if (s.entitlements.size() != before) save_record(m);
+        if (s.entitlements.size() != before) forget_save = save_record(m);
     }
 
     // If we removed the account we're currently authed as, the newest
@@ -771,7 +778,7 @@ Cmd account_remove(Model& m) {
     rebuilt.cursor = std::min(old_cursor,
                               static_cast<int>(rebuilt.rows.size()));
     m.ui.login = std::move(rebuilt);
-    return Cmd::none();
+    return forget_save;
 }
 
 Cmd login_pick_method(Model& m, char32_t key) {
@@ -1046,20 +1053,22 @@ Cmd login_submit(Model& m) {
             // provider active. add_key is the single implementation of the
             // "paste a key" flow, shared with credentials::.
             provider::credentials::add_key(provider, key);
+            Cmd key_save = Cmd::none();
             {
                 // add_key wrote the vault directly; pull its work into the
                 // record before saving, or this save would drop the key.
                 refresh_record(m);
                 m.d.persisted.provider = provider;
-                save_record(m);
+                key_save = save_record(m);
             }
             auth::AuthHeader new_auth = provider::credentials::resolve(provider);
             m.ui.login = login::Closed{};
             // Commit through the ONE shared switch path like every other entry;
             // commit_provider_switch opens the model picker for us.
-            return commit_provider_switch(
-                m, provider,
-                                          std::move(new_auth), provider_label);
+            return Cmd::batch(
+                std::move(key_save),
+                commit_provider_switch(m, provider, std::move(new_auth),
+                                       provider_label));
         }
 
         install_and_close(m, auth::Credentials{auth::cred::ApiKey{std::move(key)}},

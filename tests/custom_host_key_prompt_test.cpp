@@ -25,6 +25,7 @@
 #include <string>
 
 #include "agtest.hpp"
+#include "agtest_fx.hpp"
 
 namespace fs = std::filesystem;
 namespace login = agentty::ui::login;
@@ -134,6 +135,14 @@ TEST_CASE("custom host key prompt transitions") {
         ok.models_path = "/v1/models";
         ok.model_count = 2;
         auto [m3, cmd3] = ::agentty::app::detail::step(::agentty::app::detail::login_update, std::move(m2), msg::LoginMsg{std::move(ok)});
+        // The keyless-host save is an EFFECT; play the host and run it, or
+        // the assertion below is checking a write nobody performed.
+        {
+            agtest::fx::Store store;
+            store.settings = s;
+            agtest::fx::run(cmd3, store);
+            s = store.settings;
+        }
         check(std::holds_alternative<login::Closed>(m3.ui.login),
               "3: probe success commits (modal closes)");
         check(m3.s.models_loading,

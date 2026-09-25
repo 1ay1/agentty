@@ -26,7 +26,7 @@ set(_AGENTTY_CONSOLIDATED
     wire_shared_test complexity_test copilot_token_test kimi_token_test
     chatgpt_bundled_models_test settings_default_test
     turn_provenance_test subagent_pin_test
-    program_hooks_test login_cancel_test subs_key_test
+    program_hooks_test login_cancel_test subs_key_test reducer_effects_test
     update_check_test update_ux_test mcp_result_type_test
     workspace_index_test
     teardown_test
