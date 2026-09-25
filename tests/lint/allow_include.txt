@@ -1,0 +1,36 @@
+# Header-side allowlist for the concurrency ban-list (see allowlist.txt for
+# the rationale; this file covers include/, that one covers src/).
+#
+# Paths are relative to include/.
+
+# ── Types whose whole job is to be the safe wrapper ──────────────────────
+# isolated_thread: an OWNED worker whose body cannot call std::terminate.
+# It predates the jaal migration and survives it for one reason — the ACP
+# server (`agentty acp`) is a separate process mode with no jaal loop, so
+# there is no task machinery to hand work to. In the TUI path nothing uses
+# it; that work is Cmd::task.
+agentty/util/isolated_thread.hpp: thread detach
+# ranked_lock: lock-ordering enforcement. The mutex IS the subject, and the
+# thread_local is the per-thread rank stack it checks against.
+agentty/util/ranked_lock.hpp: mutex thread_local
+# snapshot: publish-once, read-many across threads.
+agentty/util/snapshot.hpp: mutex atomic
+agentty/util/logx.hpp: atomic
+
+# ── The turn's cancel token ──────────────────────────────────────────────
+# http::CancelToken is the one cancellation jaal cannot express: a reducer
+# tripping a specific in-flight request from a later step. See the Sendable
+# opt-in in runtime/cmd.hpp for why it stays the app's own.
+agentty/io/http.hpp: atomic
+
+# ── Caches and registries below the loop ─────────────────────────────────
+agentty/domain/catalog.hpp: mutex atomic
+agentty/domain/lazy_bytes.hpp: atomic
+agentty/domain/ui_live.hpp: mutex
+agentty/domain/ui_theme.hpp: atomic
+# const_cast on a std::variant alternative accessor, not on shared state.
+agentty/domain/smart_mode.hpp: const_cast
+
+# ── ACP: a separate process mode, no jaal loop ───────────────────────────
+agentty/acp/server.hpp: atomic
+agentty/provider/external_acp_backend.hpp: mutex

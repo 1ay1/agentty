@@ -437,3 +437,33 @@ agentty_add_ctest(reveal_stream_gate_snap COMMAND
     agentty_standalone_tests anthropic_md_stream det ${_RSG_FIXTURE}
     --cps 45 --drain 0.40 --adaptive --snap-at 40 --snap-glide 150
     --assert-max-delta 40 --assert-finalize-max 40 --assert-finalize-ms 3600)
+
+# ── Concurrency ban-list ───────────────────────────────────────────
+# Raw threads, locks, atomics and thread_locals only where a human signed
+# off that they ARE the implementation of a safe type. Everything else goes
+# through jaal (a task instead of a thread, guarded<T> instead of a mutex,
+# loop_bound<T> instead of a thread_local).
+#
+# This is jaal's own check (maya/third_party/jaal/tests/lint/banlist.cmake)
+# pointed at agentty. jaal runs it over ITS tree, which says nothing about a
+# consumer: agentty could spawn a bare thread beside the loop or park
+# reducer state in a thread_local and jaal would never notice. Two roots
+# because the allowlist keys on paths relative to the root it scans.
+#
+# Cost: a file read, no compile. Adding an entry is the deliberate act — it
+# is a claim that someone checked the use by hand.
+set(_BANLIST ${CMAKE_SOURCE_DIR}/maya/third_party/jaal/tests/lint/banlist.cmake)
+if(EXISTS ${_BANLIST})
+    add_test(NAME concurrency_banlist_src
+             COMMAND ${CMAKE_COMMAND}
+                     -DROOT=${CMAKE_SOURCE_DIR}/src
+                     -DALLOW=${CMAKE_SOURCE_DIR}/tests/lint/allowlist.txt
+                     -P ${_BANLIST})
+    add_test(NAME concurrency_banlist_include
+             COMMAND ${CMAKE_COMMAND}
+                     -DROOT=${CMAKE_SOURCE_DIR}/include
+                     -DALLOW=${CMAKE_SOURCE_DIR}/tests/lint/allow_include.txt
+                     -P ${_BANLIST})
+    set_tests_properties(concurrency_banlist_src concurrency_banlist_include
+                         PROPERTIES LABELS "static")
+endif()

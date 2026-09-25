@@ -1,0 +1,139 @@
+# Files allowed to use raw concurrency primitives, and which ones.
+#
+# Everything else must go through jaal's safe types: a task or scope instead
+# of std::thread, guarded<T> instead of std::mutex, loop_bound<T> instead of
+# thread_local. See maya/third_party/jaal/docs/concurrency.md §7, and
+# jaal's tests/lint/banlist.cmake for the check itself.
+#
+# WHY THIS FILE EXISTS. jaal runs that check over its OWN tree, which says
+# nothing about a consumer: agentty could spawn a bare thread beside the
+# loop, park reducer state in a thread_local, or forge a Sink, and jaal
+# would never notice. Pointing the same check at agentty is what closes it.
+#
+# Each entry names the primitives that file may use, so a file allowed
+# std::mutex still cannot sneak in a .detach(). Adding a line is a
+# deliberate act: it says someone checked by hand that the raw primitive IS
+# the implementation of a safe thing, not a shortcut around one.
+#
+# Paths are relative to src/ (the check runs once per scanned root).
+
+# ── Owned background workers ─────────────────────────────────────────────
+# Three subsystems own a thread that outlives any one turn. They are NOT
+# jaal tasks because they are not part of a turn: they start at init and run
+# until teardown, while jaal's task/stream lifetimes are per-Cmd and
+# per-subscription. Each registers its own join with util::teardown, so
+# main() cannot forget one — that registration is the safety property here.
+#
+# settings_cache: the write-behind settings worker. The mutex guards the
+# pending value; the thread is the single writer. This is what keeps a disk
+# round-trip out of the input path (see its header). thread_local: a
+# re-entrancy guard so the worker's own write doesn't invalidate the cache
+# it just filled.
+runtime/app/settings_cache.cpp: thread mutex thread_local
+io/blob_gc.cpp: thread mutex atomic detach
+util/modelsdev.cpp: thread mutex atomic detach
+
+# ── HTTP: the turn's cancel token, and the transport ─────────────────────
+# A streaming turn is a Cmd::task holding an http::CancelToken, tripped from
+# a reducer on Esc. jaal has no effect for "cancel that specific in-flight
+# request from a later step" — its stop_token is the runtime's, and fires
+# when work stops being subscribed — so this atomic is the app's own. The
+# reasoning is written out on the Sendable opt-in in runtime/cmd.hpp.
+io/http.cpp: thread mutex atomic thread_local detach const_cast
+io/tls.cpp: mutex const_cast
+io/inflate.cpp: const_cast
+
+# ── Persistence and credentials ──────────────────────────────────────────
+# Not reducer code: these run on a worker a task already put them on, or on
+# CLI paths with no loop at all.
+io/persistence.cpp: mutex
+io/thread_log.cpp: mutex
+io/auth.cpp: mutex atomic const_cast
+io/accounts.cpp: mutex
+io/keystore.cpp: mutex const_cast
+io/cred_crypt.cpp: mutex const_cast
+io/clipboard.cpp: thread mutex atomic detach
+io/account_switch.cpp: mutex
+io/blob_store.cpp: mutex
+io/vault.cpp: mutex
+airgap/airgap.cpp: const_cast
+
+# ── Tools ────────────────────────────────────────────────────────────────
+# A tool runs on a worker and may spawn a child process. progress.cpp's
+# thread_local is the sink the cmd runner captures — UI-thread only, and
+# documented there.
+tool/registry.cpp: mutex atomic thread_local
+tool/mcp_tools_backends.cpp: thread mutex atomic detach
+tool/mcp_tools_bridge.cpp: mutex atomic
+tool/plugin.cpp: thread mutex atomic
+tool/skills.cpp: mutex atomic
+tool/skills_cli.cpp: mutex atomic
+tool/memory_store.cpp: mutex
+tool/hooks.cpp: mutex atomic
+tool/progress.cpp: mutex atomic thread_local
+tool/subagent.cpp: mutex atomic thread_local
+tool/commands.cpp: mutex
+# Unique temp names for atomic writes, and a parallel directory walk.
+tool/util/fs_helpers.cpp: mutex atomic
+tool/util/sandbox.cpp: atomic
+
+# ── Workspace scans ──────────────────────────────────────────────────
+# The symbol index fans a directory walk across hardware_concurrency()
+# workers and joins them before returning — a data-parallel scan inside one
+# call, not a lifetime the loop has to track. It already runs on a jaal
+# task; this is that task using its own thread.
+workspace/symbols.cpp: thread atomic
+workspace/files.cpp: mutex atomic
+workspace/checkpoint.cpp: mutex
+
+# ── Providers: transports and their shared state ─────────────────────────
+provider/prompt.cpp: mutex atomic
+provider/selection.cpp: mutex atomic
+provider/credentials.cpp: mutex
+provider/auth_state.cpp: mutex atomic
+provider/external_acp_backend.cpp: thread mutex atomic
+provider/acp_provider_adapter.cpp: mutex atomic
+provider/acp_agents.cpp: mutex
+provider/registry.cpp: mutex
+provider/dispatch.cpp: mutex
+provider/dialect.cpp: mutex
+provider/responses/codec.cpp: mutex
+provider/chatgpt/codex_oauth.cpp: mutex
+provider/chatgpt/provider.cpp: mutex
+provider/chatgpt/responses.cpp: mutex thread_local
+provider/copilot/copilot_oauth.cpp: mutex atomic
+provider/copilot/provider.cpp: mutex thread_local
+provider/kimi/kimi_oauth.cpp: mutex atomic
+provider/kimi/provider.cpp: mutex
+provider/openai/responses_site.cpp: thread_local
+provider/ollama/provider.cpp: mutex thread_local
+provider/openai/provider.cpp: mutex thread_local
+
+# ── MCP and RAG: their own servers and index workers ─────────────────────
+mcp/bridge.cpp: mutex atomic async
+mcp/http_server.cpp: thread mutex atomic detach
+mcp/oauth.cpp: mutex atomic
+rag/adapter.cpp: thread mutex atomic
+
+# ── Process-wide plumbing ────────────────────────────────────────────────
+# The teardown registry IS what joins the workers above.
+util/teardown.cpp: mutex atomic
+util/logx.cpp: mutex atomic thread_local
+util/workspace_index.cpp: thread mutex atomic
+util/git.cpp: mutex
+
+# ── The runtime ──────────────────────────────────────────────────────────
+# deps.cpp holds the installed seam behind a mutex: it is written once at
+# startup and read from workers (auth_snapshot), which is the one thing a
+# plain global could get wrong.
+runtime/app/deps.cpp: mutex
+# cmd_factory mints the monotonic ids the stale-result guards compare
+# (tool exec_seq, login attempt ids). An atomic counter is the whole use.
+runtime/app/cmd_factory.cpp: atomic
+runtime/main.cpp: thread atomic
+
+# View-layer render caches. Every one is a bounded LRU on the UI thread,
+# documented at the definition; thread_local is how they say "one thread
+# owns this" without a lock.
+runtime/view/thread/turn/agent_timeline/agent_timeline.cpp: thread_local
+runtime/view/thread/turn/agent_timeline/tool_body_preview.cpp: thread_local
