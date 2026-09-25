@@ -22,7 +22,7 @@ namespace agentty::app::detail {
 namespace pick = agentty::ui::pick;
 using maya::overload;
 
-Step diff_review_update(Model m, msg::DiffReviewMsg dm) {
+Cmd diff_review_update(Model& m, msg::DiffReviewMsg dm) {
     // Persist one file's REVIEW DECISION to disk. The tool already wrote the
     // file when it ran, so `new_contents` is what's on disk now. Accept = keep;
     // Reject = revert. diff::apply_accepted() reconstructs the file with only
@@ -85,19 +85,19 @@ Step diff_review_update(Model m, msg::DiffReviewMsg dm) {
             c->confirm_reject_all = false;
 
     return std::visit(overload{
-        [&](OpenDiffReview) -> Step {
+        [&](OpenDiffReview) -> Cmd {
             // Tell the user when there's nothing to review instead of
             // silently doing nothing — opening an empty pane would just
             // flicker the screen and leave them confused about whether
             // their keystroke registered.
             if (m.d.pending_changes.empty()) {
                 auto cmd = set_status_toast(m, "no pending changes to review");
-                return {std::move(m), std::move(cmd)};
+                return std::move(cmd);
             }
             m.ui.panel.descend(pn::DiffReview{{0, 0}});
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](CloseDiffReview) -> Step {
+        [&](CloseDiffReview) -> Cmd {
             // Persist every file's decision on the way out, then clear the
             // queue — closing the pane commits the review. Say WHAT closing
             // meant: undecided hunks are kept (the change is already live on
@@ -118,22 +118,22 @@ Step diff_review_update(Model m, msg::DiffReviewMsg dm) {
                         + (kept == 1 ? " change" : " changes") + " kept"
                     : "review closed — " + std::to_string(reverted)
                         + " reverted, " + std::to_string(kept) + " kept");
-            return {std::move(m), std::move(cmd)};
+            return std::move(cmd);
         },
-        [&](DiffReviewMove& e) -> Step {
+        [&](DiffReviewMove& e) -> Cmd {
             auto* c = m.ui.panel.get<pn::DiffReview>();
             auto* fc = clamp_cursor(c);
-            if (!fc) return done(std::move(m));
+            if (!fc) return Cmd::none();
             int sz = static_cast<int>(fc->hunks.size());
-            if (sz == 0) return done(std::move(m));
+            if (sz == 0) return Cmd::none();
             c->hunk_index = (c->hunk_index + e.delta + sz) % sz;
             c->body_scroll = 0;   // a newly-focused hunk starts at its top
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](DiffReviewScroll& e) -> Step {
+        [&](DiffReviewScroll& e) -> Cmd {
             auto* c = m.ui.panel.get<pn::DiffReview>();
             auto* fc = clamp_cursor(c);
-            if (!fc || fc->hunks.empty()) return done(std::move(m));
+            if (!fc || fc->hunks.empty()) return Cmd::none();
             const auto& hk =
                 fc->hunks[static_cast<std::size_t>(c->hunk_index)];
             // Upper bound on the hunk's body rows: its patch line count.
@@ -143,27 +143,27 @@ Step diff_review_update(Model m, msg::DiffReviewMsg dm) {
                 std::count(hk.patch.begin(), hk.patch.end(), '\n')) + 1;
             c->body_scroll = std::clamp(c->body_scroll + e.delta,
                                         0, std::max(0, max_rows - 1));
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](DiffReviewNextFile) -> Step {
+        [&](DiffReviewNextFile) -> Cmd {
             auto* c = m.ui.panel.get<pn::DiffReview>();
-            if (!c || m.d.pending_changes.empty()) return done(std::move(m));
+            if (!c || m.d.pending_changes.empty()) return Cmd::none();
             int sz = static_cast<int>(m.d.pending_changes.size());
             c->file_index = (c->file_index + 1) % sz;
             c->hunk_index = 0;
             c->body_scroll = 0;
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](DiffReviewPrevFile) -> Step {
+        [&](DiffReviewPrevFile) -> Cmd {
             auto* c = m.ui.panel.get<pn::DiffReview>();
-            if (!c || m.d.pending_changes.empty()) return done(std::move(m));
+            if (!c || m.d.pending_changes.empty()) return Cmd::none();
             int sz = static_cast<int>(m.d.pending_changes.size());
             c->file_index = (c->file_index - 1 + sz) % sz;
             c->hunk_index = 0;
             c->body_scroll = 0;
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](AcceptHunk) -> Step {
+        [&](AcceptHunk) -> Cmd {
             auto* c = m.ui.panel.get<pn::DiffReview>();
             if (auto* fc = clamp_cursor(c)) {
                 if (!fc->hunks.empty())
@@ -171,9 +171,9 @@ Step diff_review_update(Model m, msg::DiffReviewMsg dm) {
                         Hunk::Status::Accepted;
                 advance(c);
             }
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](RejectHunk) -> Step {
+        [&](RejectHunk) -> Cmd {
             auto* c = m.ui.panel.get<pn::DiffReview>();
             if (auto* fc = clamp_cursor(c)) {
                 if (!fc->hunks.empty())
@@ -181,12 +181,12 @@ Step diff_review_update(Model m, msg::DiffReviewMsg dm) {
                         Hunk::Status::Rejected;
                 advance(c);
             }
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](AcceptAllChanges) -> Step {
+        [&](AcceptAllChanges) -> Cmd {
             if (m.d.pending_changes.empty()) {
                 auto cmd = set_status_toast(m, "no pending changes to accept");
-                return {std::move(m), std::move(cmd)};
+                return std::move(cmd);
             }
             // Accept = keep what the tools already wrote; nothing to persist.
             int hunks = 0;
@@ -197,12 +197,12 @@ Step diff_review_update(Model m, msg::DiffReviewMsg dm) {
             auto cmd = set_status_toast(m,
                 "accepted " + std::to_string(hunks)
                 + (hunks == 1 ? " hunk" : " hunks"));
-            return {std::move(m), std::move(cmd)};
+            return std::move(cmd);
         },
-        [&](RejectAllChanges) -> Step {
+        [&](RejectAllChanges) -> Cmd {
             if (m.d.pending_changes.empty()) {
                 auto cmd = set_status_toast(m, "no pending changes to reject");
-                return {std::move(m), std::move(cmd)};
+                return std::move(cmd);
             }
             // TWO-PRESS guard when driven from the open pane (^X): the first
             // press arms, the second executes. A palette "Reject all" (pane
@@ -213,7 +213,7 @@ Step diff_review_update(Model m, msg::DiffReviewMsg dm) {
                 c->confirm_reject_all = true;
                 auto cmd = set_status_toast(m,
                     "press ^X again to revert ALL changes — any other key cancels");
-                return {std::move(m), std::move(cmd)};
+                return std::move(cmd);
             }
             // Reject ALL = revert every touched file to its original contents
             // on disk (the tools already wrote the new version, so this undoes
@@ -234,7 +234,7 @@ Step diff_review_update(Model m, msg::DiffReviewMsg dm) {
                 + (hunks == 1 ? " hunk" : " hunks")
                 + " across " + std::to_string(files)
                 + (files == 1 ? " file" : " files"));
-            return {std::move(m), std::move(cmd)};
+            return std::move(cmd);
         },
     }, dm);
 }

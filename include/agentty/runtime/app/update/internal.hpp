@@ -460,7 +460,7 @@ bool with_exec_tool(Model& m, const ToolCallId& id, std::uint64_t seq,
 Step composer_update      (Model m, msg::ComposerMsg       cm);
 Step stream_update        (Model m, msg::StreamMsg         sm);
 Step tool_update          (Model m, msg::ToolMsg           tm);
-Step tool_output_update   (Model m, msg::ToolOutputMsg     tm);
+Cmd  tool_output_update   (Model& m, msg::ToolOutputMsg     tm);
 Step providers_update(Model m, msg::ProvidersMsg pm);
 Step models_update  (Model m, msg::ModelsMsg     pm);
 // Shared fused-row builder (SSOT for reducer + view): enumerates authed
@@ -469,19 +469,19 @@ Step models_update  (Model m, msg::ModelsMsg     pm);
 // view renders it and derives the visual cursor; the reducer selects from it.
 [[nodiscard]] std::vector<FusedRow> fused_rows_for_model(const Model& m);
 Step thread_list_update   (Model m, msg::ThreadListMsg     tm);
-Step palette_update       (Model m, msg::PaletteMsg pm);
+Cmd  palette_update       (Model& m, msg::PaletteMsg pm);
 Cmd  mention_update       (Model& m, msg::MentionMsg mm);
-Step symbol_update        (Model m, msg::SymbolMsg  sm);
+Cmd  symbol_update        (Model& m, msg::SymbolMsg  sm);
 Step codeblock_update     (Model m, msg::CodeBlockMsg      cm);
-Step checkpoint_update    (Model m, msg::CheckpointMsg     cm);
+Cmd  checkpoint_update    (Model& m, msg::CheckpointMsg     cm);
 Step rag_settings_update  (Model m, msg::RagMsg    rm);
-Step stats_update         (Model m, msg::StatsMsg  sm);
+Cmd  stats_update         (Model& m, msg::StatsMsg  sm);
 Step settings_list_update (Model m, msg::SettingsListMsg   sm);
-Step fork_update          (Model m, msg::ForkMsg           fm);
-Step todo_update          (Model m, msg::TodoMsg           tm);
+Cmd  fork_update          (Model& m, msg::ForkMsg           fm);
+Cmd  todo_update          (Model& m, msg::TodoMsg           tm);
 Step login_update         (Model m, msg::LoginMsg          lm);
-Step diff_review_update   (Model m, msg::DiffReviewMsg     dm);
-Step smart_mode_update    (Model m, msg::SmartModeMsg      sm);
+Cmd  diff_review_update   (Model& m, msg::DiffReviewMsg     dm);
+Cmd  smart_mode_update    (Model& m, msg::SmartModeMsg      sm);
 Step plugin_edit_update   (Model m, msg::PluginEditMsg     pm);
 Step appearance_update    (Model m, msg::AppearanceMsg     am);
 Step meta_update          (Model m, msg::MetaMsg           mm);

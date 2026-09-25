@@ -75,14 +75,13 @@ const char* label_of(fp::Choice c) {
 
 } // namespace
 
-Step fork_update(Model m, msg::ForkMsg fm) {
+Cmd fork_update(Model& m, msg::ForkMsg fm) {
     return std::visit(overload{
-        [&](OpenFork) -> Step {
+        [&](OpenFork) -> Cmd {
             if (m.d.current.messages.empty())
-                return {std::move(m), set_status_toast(m, "nothing to fork yet")};
+                return set_status_toast(m, "nothing to fork yet");
             if (!m.s.is_idle() || m.s.compacting || m.s.thread_loading)
-                return {std::move(m),
-                        set_status_toast(m, "cannot fork while the agent is working")};
+                return set_status_toast(m, "cannot fork while the agent is working");
             // descend() already replaced whatever was open (the palette, if
             // ^F came from there) and stashed it as this panel's parent, so
             // Esc unwinds back to it. A close<Palette>() here used to follow,
@@ -90,18 +89,18 @@ Step fork_update(Model m, msg::ForkMsg fm) {
             // now (the slot holds Fork), and if it ever stopped being one it
             // would be deleting the parent we just saved.
             m.ui.panel.descend(pn::Fork{{fp::Choice::RagPerTurn}});
-            return {std::move(m), Cmd::none()};
+            return Cmd::none();
         },
-        [&](CloseFork) -> Step {
+        [&](CloseFork) -> Cmd {
             ascend(m);   // Esc: back to the palette that opened this, or close
-            return {std::move(m), Cmd::none()};
+            return Cmd::none();
         },
-        [&](ForkMove& e) -> Step {
+        [&](ForkMove& e) -> Cmd {
             if (auto* o = m.ui.panel.get<pn::Fork>())
                 o->choice = fp::next_choice(o->choice, e.delta);
-            return {std::move(m), Cmd::none()};
+            return Cmd::none();
         },
-        [&](ForkThread&) -> Step {
+        [&](ForkThread&) -> Cmd {
             const auto* picked = m.ui.panel.get<pn::Fork>();
             // No int->enum cast: the cursor already IS the choice, so a
             // reordered or resized row list cannot silently remap it.
@@ -109,10 +108,9 @@ Step fork_update(Model m, msg::ForkMsg fm) {
                                              : fp::Choice::RagOff;
             m.ui.panel.close<pn::Fork>();
             if (m.d.current.messages.empty())
-                return {std::move(m), set_status_toast(m, "nothing to fork yet")};
+                return set_status_toast(m, "nothing to fork yet");
             if (!m.s.is_idle() || m.s.compacting || m.s.thread_loading)
-                return {std::move(m),
-                        set_status_toast(m, "cannot fork while the agent is working")};
+                return set_status_toast(m, "cannot fork while the agent is working");
 
             // 1. Persist the parent untouched.
             deps().save_thread(m.d.current);
@@ -213,8 +211,7 @@ Step fork_update(Model m, msg::ForkMsg fm) {
                        label_of(choice) +
                        " · prior transcript readable on demand",
                 std::chrono::seconds{5});
-            return {std::move(m),
-                    Cmd::batch(std::move(toast), cmd::reset_inline())};
+            return Cmd::batch(std::move(toast), cmd::reset_inline());
         },
     }, fm);
 }

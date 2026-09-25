@@ -24,9 +24,9 @@ namespace agentty::app::detail {
 
 using namespace agentty::msg;
 
-Step stats_update(Model m, msg::StatsMsg sm) {
+Cmd stats_update(Model& m, msg::StatsMsg sm) {
     return std::visit(maya::overload{
-        [&](OpenStats) -> Step {
+        [&](OpenStats) -> Cmd {
             // descend(), not a bare open: the viewer is reachable from the
             // command palette, so Esc must land back where the user came
             // from rather than closing everything. The shared ascend()
@@ -39,17 +39,17 @@ Step stats_update(Model m, msg::StatsMsg sm) {
             // last close against a different tab and a max_y describing
             // neither — a bug that needed an explicit reset here to fix,
             // and that ownership makes unwritable.
-            return done(std::move(m));
+            return Cmd::none();
         },
 
-        [&](CloseStats) -> Step {
+        [&](CloseStats) -> Cmd {
             ascend(m);
-            return done(std::move(m));
+            return Cmd::none();
         },
 
-        [&](StatsTab e) -> Step {
+        [&](StatsTab e) -> Cmd {
             auto* o = m.ui.panel.get<pn::Stats>();
-            if (!o) return done(std::move(m));
+            if (!o) return Cmd::none();
             // Step within the VISIBLE set, so Tab never lands on a view
             // the strip is not drawing. That needs the Facts, because
             // availability is a question about the data — refresh() is
@@ -73,11 +73,11 @@ Step stats_update(Model m, msg::StatsMsg sm) {
             o->scroll.scroll_to_origin();
             // The projection is per-transcript, not per-tab, so switching
             // views re-folds nothing.
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](StatsScroll e) -> Step {
+        [&](StatsScroll e) -> Cmd {
             auto* o = m.ui.panel.get<pn::Stats>();
-            if (!o) return done(std::move(m));
+            if (!o) return Cmd::none();
             // Scroll the body directly. scroll_by() clamps against BOTH
             // ends, so a delta past either settles at the edge rather than
             // scrolling into blank rows — which is what the ±1000000 that
@@ -100,7 +100,7 @@ Step stats_update(Model m, msg::StatsMsg sm) {
             // stale bound is bounded and self-correcting; not clamping at
             // all is not. StatsTab resets y to 0 for the same reason.
             o->scroll.scroll_by(0, e.delta);
-            return done(std::move(m));
+            return Cmd::none();
         },
 
         // ── Skills viewer ──────────────────────────────────────────
@@ -108,7 +108,7 @@ Step stats_update(Model m, msg::StatsMsg sm) {
         // msg.hpp — an approval reachable from a list you are already
         // scrolling is the habituated yes, and the decision belongs where
         // the findings and the body can be shown.
-        [&](OpenSkills) -> Step {
+        [&](OpenSkills) -> Cmd {
             // The scan happens HERE, once, not in the view. The view is a
             // pure formatter; screening every skill's body on every frame
             // to produce a value that cannot change while the panel is
@@ -116,17 +116,17 @@ Step stats_update(Model m, msg::StatsMsg sm) {
             pn::Skills pane{};
             static_cast<skills_panel::Open&>(pane) = skills_panel::scan();
             m.ui.panel.descend(std::move(pane));
-            return done(std::move(m));
+            return Cmd::none();
         },
 
-        [&](CloseSkills) -> Step {
+        [&](CloseSkills) -> Cmd {
             ascend(m);
-            return done(std::move(m));
+            return Cmd::none();
         },
 
-        [&](SkillsMove e) -> Step {
+        [&](SkillsMove e) -> Cmd {
             auto* o = m.ui.panel.get<pn::Skills>();
-            if (!o || o->rows.empty()) return done(std::move(m));
+            if (!o || o->rows.empty()) return Cmd::none();
             // Clamp rather than wrap. The list is ordered worst-first, so
             // wrapping from the last row back to a flagged skill at the
             // top would read as the panel jumping on its own.
@@ -138,7 +138,7 @@ Step stats_update(Model m, msg::StatsMsg sm) {
             // A new selection means a new detail footer; start it at the
             // top for the same reason StatsTab does.
             o->scroll.scroll_to_origin();
-            return done(std::move(m));
+            return Cmd::none();
         },
     }, std::move(sm));
 }

@@ -42,19 +42,33 @@ using maya::overload;
 //
 // A handler is Model-in → Step-out; the driver has already closed the palette
 // before calling it, so handlers only describe the action.
-using CommandHandler = std::function<Step(Model)>;
+using CommandHandler = std::function<Cmd(Model&)>;
 
 namespace {
 // emit<T>: the handler for a command that simply dispatches Msg{T{}} back
 // through the top-level reducer. Covers ~20 of the rows.
+//
+// Still goes through the whole-Msg reducer rather than a per-domain one:
+// the commands span every domain, and routing each to its own reducer by
+// hand is exactly the dispatch table this registry exists to avoid. The
+// pair it returns is unpacked here, so the handlers themselves are already
+// in jaal's shape.
 template <class T>
 [[nodiscard]] CommandHandler emit() {
-    return [](Model m) { return agentty::app::update(std::move(m), Msg{T{}}); };
+    return [](Model& m) {
+        auto [next, cmd] = agentty::app::update(std::move(m), Msg{T{}});
+        m = std::move(next);
+        return std::move(cmd);
+    };
 }
 // emit_val<T>(v): same, for a Msg that carries a payload (settings category).
 template <class T, class V>
 [[nodiscard]] CommandHandler emit_val(V v) {
-    return [v](Model m) { return agentty::app::update(std::move(m), Msg{T{v}}); };
+    return [v](Model& m) {
+        auto [next, cmd] = agentty::app::update(std::move(m), Msg{T{v}});
+        m = std::move(next);
+        return std::move(cmd);
+    };
 }
 // NOTE on Esc chains: the select arm below snapshots the palette and
 // `adopt()`s it onto WHATEVER the command opened — generically, after
@@ -99,14 +113,14 @@ template <class T, class V>
         // ── Account ──
         add(Command::OpenLogin,        emit<OpenLogin>());
         // ── General ──
-        add(Command::UpdateAgentty, [](Model m) -> Step {
+        add(Command::UpdateAgentty, [](Model& m) -> Cmd {
             if (m.s.update_latest.empty() || m.s.update_in_flight)
-                return done(std::move(m));
+                return Cmd::none();
             m.s.update_in_flight = true;
             std::string v = m.s.update_latest;
             m.s.status = "\xe2\xac\x86 downloading agentty v" + v + "\xe2\x80\xa6";
             m.s.status_until = {};
-            return {std::move(m), cmd::perform_self_update(std::move(v))};
+            return cmd::perform_self_update(std::move(v));
         });
         add(Command::Quit,             emit<Quit>());
         return r;
@@ -116,26 +130,26 @@ template <class T, class V>
 
 // Run the command the cursor landed on. The palette is already closed by the
 // caller; unknown commands (no registry entry) are a safe no-op.
-[[nodiscard]] Step dispatch_command(Command sel, Model m) {
+[[nodiscard]] Cmd dispatch_command(Command sel, Model& m) {
     for (const auto& [id, handler] : command_registry())
-        if (id == sel) return handler(std::move(m));
-    return done(std::move(m));
+        if (id == sel) return handler(m);
+    return Cmd::none();
 }
 
-Step palette_update(Model m, msg::PaletteMsg pm) {
+Cmd palette_update(Model& m, msg::PaletteMsg pm) {
     return std::visit(overload{
-        [&](OpenPalette) -> Step {
+        [&](OpenPalette) -> Cmd {
             m.ui.panel.descend(pn::Palette{});
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ClosePalette) -> Step {
+        [&](ClosePalette) -> Cmd {
             // Esc unwinds one level — a palette opened over another panel
             // (rare but possible via chords) restores it; over the thread,
             // closes.
             ascend(m);
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](PanelFilterPaste& e) -> Step {
+        [&](PanelFilterPaste& e) -> Cmd {
             // ONE arm for every filter panel: replay the paste through the
             // open panel's OWN typed-input message, one char at a time — so
             // paste has exactly typing's semantics (ASCII gate, cursor
@@ -143,24 +157,28 @@ Step palette_update(Model m, msg::PaletteMsg pm) {
             // and no cross-TU coupling. Control chars are dropped here so a
             // multi-line clipboard can't smuggle newlines into a filter.
             // Bounded by clipboard size; each step is the cheap typed path.
-            Step st{std::move(m), Cmd::none()};
+            Cmd out = Cmd::none();
             for (char c : e.text) {
                 const auto u = static_cast<unsigned char>(c);
                 if (u < 0x20 || u >= 0x7f) continue;
                 const auto ch = static_cast<char32_t>(u);
                 Msg per_char =
-                    st.first.ui.panel.is<pn::Palette>()   ? Msg{PaletteInput{ch}}
-                  : st.first.ui.panel.is<pn::Models>()    ? Msg{ModelsFilterInput{ch}}
-                  : st.first.ui.panel.is<pn::Providers>() ? Msg{ProvidersFilterInput{ch}}
-                  : st.first.ui.panel.is<pn::Mention>()   ? Msg{MentionInput{ch}}
-                  : st.first.ui.panel.is<pn::Symbol>()    ? Msg{SymbolInput{ch}}
-                                                          : Msg{NoOp{}};
-                st = agentty::app::update(std::move(st.first),
-                                          std::move(per_char));
+                    m.ui.panel.is<pn::Palette>()   ? Msg{PaletteInput{ch}}
+                  : m.ui.panel.is<pn::Models>()    ? Msg{ModelsFilterInput{ch}}
+                  : m.ui.panel.is<pn::Providers>() ? Msg{ProvidersFilterInput{ch}}
+                  : m.ui.panel.is<pn::Mention>()   ? Msg{MentionInput{ch}}
+                  : m.ui.panel.is<pn::Symbol>()    ? Msg{SymbolInput{ch}}
+                                                   : Msg{NoOp{}};
+                auto [next, cmd] = agentty::app::update(std::move(m),
+                                                        std::move(per_char));
+                m = std::move(next);
+                // Last writer wins, as before: the typed path's Cmds are
+                // status toasts, and only the final keystroke's is current.
+                out = std::move(cmd);
             }
-            return st;
+            return out;
         },
-        [&](PaletteInput& e) -> Step {
+        [&](PaletteInput& e) -> Cmd {
             auto* o = m.ui.panel.get<pn::Palette>();
             if (o && static_cast<uint32_t>(e.ch) < 0x80) {
                 o->query.push_back(static_cast<char>(e.ch));
@@ -168,31 +186,31 @@ Step palette_update(Model m, msg::PaletteMsg pm) {
                 // the previous index doesn't point at a now-hidden row.
                 o->index = 0;
             }
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](PaletteBackspace) -> Step {
+        [&](PaletteBackspace) -> Cmd {
             auto* o = m.ui.panel.get<pn::Palette>();
             if (o && !o->query.empty()) {
                 o->query.pop_back();
                 o->index = 0;
             }
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](PaletteMove& e) -> Step {
+        [&](PaletteMove& e) -> Cmd {
             auto* o = m.ui.panel.get<pn::Palette>();
-            if (!o) return done(std::move(m));
+            if (!o) return Cmd::none();
             // Clamp against the *visible* row count, not kCommands.size().
             // Without the upper bound the cursor used to walk off-screen
             // and Enter would silently fall through to the no-match path.
             int sz = static_cast<int>(filtered_commands(
                 o->query, ui::palette_context(m)).size());
-            if (sz <= 0) { o->index = 0; return done(std::move(m)); }
+            if (sz <= 0) { o->index = 0; return Cmd::none(); }
             o->index = std::clamp(o->index + e.delta, 0, sz - 1);
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](PaletteSelect) -> Step {
+        [&](PaletteSelect) -> Cmd {
             auto* o = m.ui.panel.get<pn::Palette>();
-            if (!o) return done(std::move(m));
+            if (!o) return Cmd::none();
             // Resolve cursor → typed Command via the SAME filtered list
             // the view rendered. The previous design switched on the raw
             // o->index against the unfiltered enum, which silently fired
@@ -206,7 +224,7 @@ Step palette_update(Model m, msg::PaletteMsg pm) {
                 || idx < 0
                 || idx >= static_cast<int>(matches.size())) {
                 m.ui.panel.close<pn::Palette>();
-                return done(std::move(m));
+                return Cmd::none();
             }
             const Command sel = matches[static_cast<std::size_t>(idx)]->id;
             // Snapshot the palette — query, cursor, its own parent chain —
@@ -219,22 +237,22 @@ Step palette_update(Model m, msg::PaletteMsg pm) {
             // Behaviour lives in the command registry (dispatch_command), not
             // an inline switch — one declarative table, no drift, and adding a
             // command never touches this arm.
-            auto st = dispatch_command(sel, std::move(m));
-            st.first.ui.panel.adopt(std::move(parent));
-            return st;
+            auto cmd = dispatch_command(sel, m);
+            m.ui.panel.adopt(std::move(parent));
+            return cmd;
         },
     }, pm);
 }
 
-Step todo_update(Model m, msg::TodoMsg tm) {
+Cmd todo_update(Model& m, msg::TodoMsg tm) {
     return std::visit(overload{
-        [&](OpenTodoModal) -> Step {
+        [&](OpenTodoModal) -> Cmd {
             m.ui.todo.open = pick::OpenModal{};
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](CloseTodoModal) -> Step {
+        [&](CloseTodoModal) -> Cmd {
             m.ui.todo.open = pick::Closed{};
-            return done(std::move(m));
+            return Cmd::none();
         },
         // (No UpdateTodos arm: the agent's todo writes land via
         // stream_preview's direct sync — see sync_todos there. A message

@@ -24,43 +24,43 @@ namespace agentty::app::detail {
 
 using maya::overload;
 
-Step smart_mode_update(Model m, msg::SmartModeMsg sm) {
+Cmd smart_mode_update(Model& m, msg::SmartModeMsg sm) {
     return std::visit(overload{
-        [&](OpenSmartMode) -> Step {
+        [&](OpenSmartMode) -> Cmd {
             // descend(): whatever is open right now (palette, settings list,
             // nothing) becomes this pane's Esc target automatically — no
             // caller stamps an origin any more.
             m.ui.panel.descend(pn::SmartMode{{}, build_smart_form(m), false});
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](SmartModeAdvanced) -> Step {
+        [&](SmartModeAdvanced) -> Cmd {
             // Reveal/hide the routing-policy rows. The row SET changes, so the
             // form is rebuilt; the cursor is kept and clamped, since hiding
             // rows can leave it past the end.
             auto* o = m.ui.panel.get<pn::SmartMode>();
-            if (!o) return done(std::move(m));
+            if (!o) return Cmd::none();
             o->advanced = !o->advanced;
             const int cursor = o->form.cursor;
             o->form = build_smart_form(m, o->advanced);
             const int n = static_cast<int>(o->form.fields.size());
             o->form.cursor = n > 0 ? std::min(cursor, n - 1) : 0;
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](CloseSmartMode) -> Step {
+        [&](CloseSmartMode) -> Cmd {
             // Esc unwinds ONE level, to whatever opened this pane — ^S from
             // the thread closes; a palette row or the settings list is
             // restored with its full state (query, cursor) intact.
             ascend(m);
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](SmartModePaste& e) -> Step {
+        [&](SmartModePaste& e) -> Cmd {
             auto* o = m.ui.panel.get<pn::SmartMode>();
             if (o) form::paste_into(o->form, e.text);   // SSOT: guard + dirty
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](SmartModeKey& e) -> Step {
+        [&](SmartModeKey& e) -> Cmd {
             auto* o = m.ui.panel.get<pn::SmartMode>();
-            if (!o) return done(std::move(m));
+            if (!o) return Cmd::none();
 
             // What the cursor is on BEFORE the shared reducer runs — activate
             // may hand off, and we need to know which row asked.
@@ -75,7 +75,7 @@ Step smart_mode_update(Model m, msg::SmartModeMsg sm) {
                 // is where the origin is read, so a direct close would send
                 // Esc to the thread no matter how the pane was opened. Two
                 // ways to close one pane is two behaviours to keep in step.
-                return agentty::app::update(std::move(m), Msg{CloseSmartMode{}});
+                return smart_mode_update(m, msg::SmartModeMsg{CloseSmartMode{}});
             }
 
             // The master toggle. A locked row is never `changed`, so the env
@@ -108,7 +108,7 @@ Step smart_mode_update(Model m, msg::SmartModeMsg sm) {
                     const int cursor = o->form.cursor;
                     o->form = build_smart_form(m, o->advanced);
                     o->form.cursor = cursor;
-                    return done(std::move(m));
+                    return Cmd::none();
                 }
 
                 // The master toggle. Routed through apply_smart like every
@@ -123,8 +123,8 @@ Step smart_mode_update(Model m, msg::SmartModeMsg sm) {
                 const int cursor = o->form.cursor;
                 o->form = build_smart_form(m, o->advanced);
                 o->form.cursor = cursor;
-                return {std::move(m), set_status_toast(m,
-                    m.d.smart.enabled ? "Smart Mode on" : "Smart Mode off")};
+                return set_status_toast(m,
+                    m.d.smart.enabled ? "Smart Mode on" : "Smart Mode off");
             }
 
             // A slot row → hand off to the model picker. The candidate set is
@@ -137,25 +137,31 @@ Step smart_mode_update(Model m, msg::SmartModeMsg sm) {
                 // it verbatim. Nothing is parked on Model::UI any more.
                 pn::Models picker{{0, ""}, {}, *role};
                 m.ui.panel.descend(std::move(picker));
-                return agentty::app::update(std::move(m), Msg{OpenModels{}});
+                // Cross-domain hand-off. models_update still returns a pair,
+                // so take its model back; when that domain converts this
+                // becomes a plain call like the two above.
+                auto [next, cmd] = models_update(std::move(m),
+                                                 msg::ModelsMsg{OpenModels{}});
+                m = std::move(next);
+                return std::move(cmd);
             }
 
             // 'x' resets the focused slot to auto.
             if (e.action.intent == form::keys::Intent::ResetField && role) {
-                return agentty::app::update(std::move(m), Msg{SmartModeClearSlot{}});
+                return smart_mode_update(m, msg::SmartModeMsg{SmartModeClearSlot{}});
             }
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](SmartModeClearSlot) -> Step {
+        [&](SmartModeClearSlot) -> Cmd {
             auto* o = m.ui.panel.get<pn::SmartMode>();
-            if (!o) return done(std::move(m));
+            if (!o) return Cmd::none();
             // `x` only means something on a slot row. role_of_field returns
             // nullopt for the master switch, so "not a slot" cannot fall
             // through into a slot the way an int comparison could.
             const auto* row = o->form.focused();
-            if (!row || row->locked) return done(std::move(m));
+            if (!row || row->locked) return Cmd::none();
             const auto role = smart_form::role_of_field(row->id);
-            if (!role) return done(std::move(m));
+            if (!role) return Cmd::none();
             // Reset to auto through the ONE entry point, so the subagent
             // router loses the pin too. Clearing a slot but leaving a worker
             // routing on it is the same class of bug as the save-without-apply.
@@ -166,7 +172,7 @@ Step smart_mode_update(Model m, msg::SmartModeMsg sm) {
             const int cursor = o->form.cursor;
             o->form = build_smart_form(m, o->advanced);
             o->form.cursor = cursor;
-            return {std::move(m), set_status_toast(m, "slot reset to auto")};
+            return set_status_toast(m, "slot reset to auto");
         },
     }, sm);
 }

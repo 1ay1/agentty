@@ -124,23 +124,20 @@ Cmd load_all_diffs(const std::vector<cp::Entry>& entries) {
 
 } // namespace
 
-Step checkpoint_update(Model m, msg::CheckpointMsg cm) {
+Cmd checkpoint_update(Model& m, msg::CheckpointMsg cm) {
     return std::visit(overload{
-        [&](OpenCheckpoints) -> Step {
+        [&](OpenCheckpoints) -> Cmd {
             // A rewind rewrites the worktree + transcript — only offer it
             // from a settled session (mirrors the RestoreCheckpoint gate).
             if (!m.s.is_idle() || m.s.compacting || m.s.thread_loading) {
-                return {std::move(m),
-                        set_status_toast(m, "cannot rewind while the agent is working")};
+                return set_status_toast(m, "cannot rewind while the agent is working");
             }
             if (!workspace::in_git_repo()) {
-                return {std::move(m),
-                        set_status_toast(m, "checkpoints need a git repo")};
+                return set_status_toast(m, "checkpoints need a git repo");
             }
             auto entries = build_entries(m);
             if (entries.empty()) {
-                return {std::move(m),
-                        set_status_toast(m, "no checkpoints in this thread yet")};
+                return set_status_toast(m, "no checkpoints in this thread yet");
             }
             // Open on the newest (last) entry — the most common rewind
             // target, and the one the old single-shot path always took.
@@ -148,50 +145,55 @@ Step checkpoint_update(Model m, msg::CheckpointMsg cm) {
             auto diffs = load_all_diffs(entries);
             m.ui.panel.descend(pn::Checkpoints{{std::move(entries), last}});
             m.ui.checkpoints_scroll = Model::UI::routed_scroll();
-            return {std::move(m), std::move(diffs)};
+            return std::move(diffs);
         },
-        [&](CloseCheckpoints) -> Step {
+        [&](CloseCheckpoints) -> Cmd {
             ascend(m);   // Esc: back to the palette that opened this, or close
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](CheckpointsMove& e) -> Step {
+        [&](CheckpointsMove& e) -> Cmd {
             auto* o = m.ui.panel.get<pn::Checkpoints>();
-            if (!o || o->entries.empty()) return done(std::move(m));
+            if (!o || o->entries.empty()) return Cmd::none();
             const int n = static_cast<int>(o->entries.size());
             o->index = (o->index + e.delta % n + n) % n;
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](CheckpointDiffLoaded& e) -> Step {
+        [&](CheckpointDiffLoaded& e) -> Cmd {
             auto* o = m.ui.panel.get<pn::Checkpoints>();
-            if (!o) return done(std::move(m));   // picker closed mid-load
+            if (!o) return Cmd::none();   // picker closed mid-load
             if (e.index < 0 || e.index >= static_cast<int>(o->entries.size()))
-                return done(std::move(m));
+                return Cmd::none();
             auto& en = o->entries[static_cast<std::size_t>(e.index)];
             if (!e.ok) {
                 en.diff_state = cp::Entry::DiffState::Failed;
-                return done(std::move(m));
+                return Cmd::none();
             }
             en.diff_state    = cp::Entry::DiffState::Ready;
             en.files_changed = e.files_changed;
             en.insertions    = e.insertions;
             en.deletions     = e.deletions;
             en.clean         = (e.files_changed == 0);
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](CheckpointsSelect) -> Step {
+        [&](CheckpointsSelect) -> Cmd {
             auto* o = m.ui.panel.get<pn::Checkpoints>();
             if (!o || o->entries.empty()
                 || o->index < 0 || o->index >= static_cast<int>(o->entries.size())) {
                 m.ui.panel.close<pn::Checkpoints>();
-                return done(std::move(m));
+                return Cmd::none();
             }
             auto id = o->entries[static_cast<std::size_t>(o->index)].id;
             m.ui.panel.close<pn::Checkpoints>();
             // Hand off to the existing, battle-tested rewind: it re-gates on
             // Idle, restores files on an isolated worker, then truncates the
             // transcript + refills the composer in CheckpointRestored.
-            return agentty::app::update(std::move(m),
-                                        Msg{RestoreCheckpoint{std::move(id)}});
+            // RestoreCheckpoint lives in the META domain, not this one.
+            // meta_update still returns a pair, so take its model back;
+            // that unpacking goes away when meta converts.
+            auto [next, cmd] = meta_update(
+                std::move(m), msg::MetaMsg{RestoreCheckpoint{std::move(id)}});
+            m = std::move(next);
+            return std::move(cmd);
         },
     }, cm);
 }
