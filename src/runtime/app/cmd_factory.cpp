@@ -2079,20 +2079,24 @@ Cmd<Msg> perform_self_update(std::string version) {
 }
 
 Cmd<Msg> fetch_models() {
-    return Cmd<Msg>::task([](std::function<void(Msg)> dispatch) {
-        // Stamp the fetch with the provider it is FOR. The reducer compares
-        // this against the provider active at DELIVERY time and drops a
-        // stale payload — two quick provider switches otherwise interleave
-        // (A's slow fetch lands after B's) and install the wrong catalog.
-        const std::string for_provider = detail::active_provider_id();
+    // Resolve HERE, on the UI thread, and hand the values to the body. This
+    // is the whole fix: the reads that used to happen on a worker
+    // (provider::active(), auth_snapshot(), active_provider_id()) happen on
+    // the thread that owns that state, so there is no race left to guard.
+    return fetch_models(provider::active(), auth_snapshot(),
+                        detail::active_provider_id());
+}
+
+Cmd<Msg> fetch_models(provider::Selection sel, auth::AuthHeader auth,
+                      std::string for_provider) {
+    return Cmd<Msg>::task([sel = std::move(sel), auth = std::move(auth),
+                           for_provider = std::move(for_provider)]
+                          (std::function<void(Msg)> dispatch) {
         try {
             // ONE model-list router (provider/selection.cpp), dispatched on the
             // same axes as the stream path. No is_chatgpt/OpenAI/Anthropic
             // ladder here — a new provider inherits its catalog from its row.
-            // auth_snapshot(), not deps().auth: this runs on a WORKER thread
-            // and a bare read races the UI thread's auth swap mid-switch.
-            auto models = provider::list_models_for(provider::active(),
-                                                    auth_snapshot());
+            auto models = provider::list_models_for(sel, auth);
             // EMPTY catalog on a LOCAL host = the server didn't answer (down,
             // wrong port, wrong path) — list_models returns {} on any HTTP
             // failure rather than throwing. Attach the reason so the reducer
@@ -2102,7 +2106,6 @@ Cmd<Msg> fetch_models() {
             // host is called out within seconds of Enter.
             std::string err;
             if (models.empty()) {
-                const auto& sel = provider::active();
                 if (sel.kind == provider::Kind::OpenAI
                     && !sel.openai_endpoint.use_tls)
                     err = "no response from " + sel.openai_endpoint.host + ":"
@@ -2153,12 +2156,16 @@ Cmd<Msg> probe_model_window(std::string model_id) {
     return Cmd<Msg>::task(
         [model_id = std::move(model_id),
          endpoint = sel.openai_endpoint,
+         // Resolved on the UI thread, like every other input: the body used
+         // to call auth_snapshot() itself, which is a worker reading state
+         // the UI thread swaps on a provider switch.
+         auth = auth_snapshot(),
          for_provider = detail::active_provider_id()](
             std::function<void(Msg)> dispatch) {
             int w = 0;
             try {
-                w = provider::openai::probe_loaded_window(auth_snapshot(),
-                                                          endpoint, model_id);
+                w = provider::openai::probe_loaded_window(auth, endpoint,
+                                                          model_id);
             } catch (...) {}
             AGT_LOG(Wire, Info, "models.window_probe", "provider={} model={} window={}",
                     for_provider, model_id, w);

@@ -16,6 +16,7 @@
 #include "agentty/runtime/model.hpp"
 #include "agentty/runtime/msg.hpp"
 #include "agentty/io/http.hpp"   // http::CancelTokenPtr (run_tool)
+#include "agentty/provider/selection.hpp"  // provider::Selection (fetch_models)
 
 namespace agentty::app::cmd {
 
@@ -183,6 +184,30 @@ struct LoopBreak {
     const std::vector<Message>& messages,
     bool enforce_step_cap = true);
 
+// Fetch the model catalog.
+//
+// The three-argument form takes what the worker needs INSTEAD of reaching
+// for it: the body used to call provider::active(), auth_snapshot() and
+// active_provider_id() from a worker thread, racing the UI thread's
+// provider switch — which is why auth_snapshot() needs a mutex at all.
+// jaal's rule for a task body is that everything it needs is an argument
+// (docs/concurrency.md §4.6), and a reducer on the UI thread simply knows
+// these values.
+//
+// `for_provider` is the staleness stamp the reducer compares at DELIVERY
+// time, so a catalog that lands after a switch is dropped instead of
+// installed against the wrong provider.
+//
+// Declared with the Selection itself: provider::active() already returns a
+// by-value snapshot taken under the selection mutex, so handing one to a
+// worker is exactly what it is for.
+[[nodiscard]] maya::Cmd<Msg> fetch_models(provider::Selection sel,
+                                          auth::AuthHeader   auth,
+                                          std::string        for_provider);
+
+// The common case: fetch for whatever is active RIGHT NOW. Resolves the
+// arguments on the calling (UI) thread and forwards. Call this from a
+// reducer; the overload above is for a caller that already has them.
 [[nodiscard]] maya::Cmd<Msg> fetch_models();
 
 // Fetch a SPECIFIC provider's catalog without switching to it (fused picker

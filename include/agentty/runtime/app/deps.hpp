@@ -75,9 +75,19 @@ struct Deps {
 [[nodiscard]] const Deps& deps();
 void install_deps(Deps d);
 
-// Mutex-guarded copy of Deps::auth for WORKER-thread readers (e.g. the
-// background model-catalog fetch). Same UI/worker split that gives
-// provider::active() its lock — see selection.cpp.
+// Resolve the credential for the ACTIVE provider, as a value.
+//
+// Call this on the UI thread and hand the result to whatever needs it. It
+// used to be called FROM worker bodies (the catalog fetch, the window
+// probe), which is why it takes the lock at all: a worker reading the auth
+// cache races the UI thread's swap mid provider-switch. Those bodies now
+// take the header as an argument — jaal's rule that everything a task
+// needs is an argument — so the remaining callers are all on the UI
+// thread and the lock guards only the login flow's live replace.
+//
+// It resolves through provider::credentials rather than reading the cache
+// directly, so the credential can never drift from provider::active() —
+// the class of bug behind an Anthropic OAuth token being sent to Mistral.
 [[nodiscard]] auth::AuthHeader auth_snapshot();
 
 // Live-replace just the auth context after install. Used by the in-app
