@@ -585,9 +585,9 @@ namespace runner_ui {
 
 } // namespace
 
-Step codeblock_update(Model m, msg::CodeBlockMsg cm) {
+Cmd codeblock_update(Model& m, msg::CodeBlockMsg cm) {
     return std::visit(overload{
-        [&](OpenCodeBlocks) -> Step {
+        [&](OpenCodeBlocks) -> Cmd {
             // Mid-stream is allowed: the network stream runs on a background
             // worker (StreamDelta posts back to the UI thread), so suspending
             // the TUI to run a block does NOT pause the reply — deltas keep
@@ -603,33 +603,33 @@ Step codeblock_update(Model m, msg::CodeBlockMsg cm) {
                         saw_open
                           ? "a code block is still streaming \xe2\x80\x94 try again in a moment"
                           : "no complete code blocks yet");
-                    return {std::move(m), std::move(cmd)};
+                    return std::move(cmd);
                 }
             } else {
                 blocks = latest_assistant_blocks(m);
                 if (blocks.empty()) {
                     auto cmd = set_status_toast(m,
                         "no code blocks in the last reply");
-                    return {std::move(m), std::move(cmd)};
+                    return std::move(cmd);
                 }
             }
             m.ui.panel.descend(pn::CodeBlocks{{std::move(blocks), 0}});
             m.ui.code_blocks_scroll.y = 0;
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](CloseCodeBlocks) -> Step {
+        [&](CloseCodeBlocks) -> Cmd {
             // Result overlay open → both alternatives die and we unwind to
             // the parent; the list alone → same. ascend() restores whatever
             // the picker was opened over (palette → ^K state intact).
             ascend(m);
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](CodeBlocksMove& e) -> Step {
+        [&](CodeBlocksMove& e) -> Cmd {
             if (auto* o = m.ui.panel.get<pn::CodeBlocks>()) {
                 int sz = static_cast<int>(o->blocks.size());
-                if (sz <= 0) return done(std::move(m));
+                if (sz <= 0) return Cmd::none();
                 o->index = std::clamp(o->index + e.delta, 0, sz - 1);
-                return done(std::move(m));
+                return Cmd::none();
             }
             if (m.ui.panel.get<pn::CodeBlockResult>()) {
                 // Read-only result card: Move deltas scroll the capture
@@ -639,14 +639,14 @@ Step codeblock_update(Model m, msg::CodeBlockMsg cm) {
                 auto& sc = m.ui.code_blocks_scroll;
                 sc.y = std::clamp(sc.y + e.delta, 0, std::max(0, sc.max_y));
             }
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](CodeBlocksSelect& e) -> Step {
+        [&](CodeBlocksSelect& e) -> Cmd {
             auto* o = m.ui.panel.get<pn::CodeBlocks>();
-            if (!o) return done(std::move(m));
+            if (!o) return Cmd::none();
             const int idx = e.index.value_or(o->index);
             if (idx < 0 || idx >= static_cast<int>(o->blocks.size()))
-                return done(std::move(m));
+                return Cmd::none();
             CodeBlock block = o->blocks[static_cast<std::size_t>(idx)];
             const cbp::BlockShell shell = cbp::shell_for_language(block.language);
             if (shell == cbp::BlockShell::None) {
@@ -658,17 +658,17 @@ Step codeblock_update(Model m, msg::CodeBlockMsg cm) {
                 auto cmd = set_status_toast(m,
                     tag + " block isn't runnable here — "
                     "press e to edit or y to copy");
-                return {std::move(m), std::move(cmd)};
+                return std::move(cmd);
             }
             m.ui.panel.close<pn::CodeBlocks>(); m.ui.panel.close<pn::CodeBlockResult>();
-            return {std::move(m), run_block_cmd(std::move(block.body), shell)};
+            return run_block_cmd(std::move(block.body), shell);
         },
-        [&](CodeBlocksEdit) -> Step {
+        [&](CodeBlocksEdit) -> Cmd {
             auto* o = m.ui.panel.get<pn::CodeBlocks>();
-            if (!o) return done(std::move(m));
+            if (!o) return Cmd::none();
             const int idx = o->index;
             if (idx < 0 || idx >= static_cast<int>(o->blocks.size()))
-                return done(std::move(m));
+                return Cmd::none();
             std::string body = o->blocks[static_cast<std::size_t>(idx)].body;
             m.ui.panel.close<pn::CodeBlocks>(); m.ui.panel.close<pn::CodeBlockResult>();
             // Splice at the cursor rather than replacing — same
@@ -677,14 +677,14 @@ Step codeblock_update(Model m, msg::CodeBlockMsg cm) {
             m.ui.composer.text.insert(
                 static_cast<std::size_t>(m.ui.composer.cursor), body);
             m.ui.composer.cursor += static_cast<int>(body.size());
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](CodeBlocksCopy) -> Step {
+        [&](CodeBlocksCopy) -> Cmd {
             auto* o = m.ui.panel.get<pn::CodeBlocks>();
-            if (!o) return done(std::move(m));
+            if (!o) return Cmd::none();
             const int idx = o->index;
             if (idx < 0 || idx >= static_cast<int>(o->blocks.size()))
-                return done(std::move(m));
+                return Cmd::none();
             std::string body = o->blocks[static_cast<std::size_t>(idx)].body;
             m.ui.panel.close<pn::CodeBlocks>(); m.ui.panel.close<pn::CodeBlockResult>();
             // Write via native tooling (pbcopy/wl-copy/xclip) synchronously
@@ -694,12 +694,11 @@ Step codeblock_update(Model m, msg::CodeBlockMsg cm) {
             // an SSH/tmux hop to a remote clipboard.
             (void)write_clipboard_text(body);
             auto toast = set_status_toast(m, "copied clean block to clipboard");
-            return {std::move(m),
-                    Cmd::batch(
+            return Cmd::batch(
                         cmd::write_clipboard(std::move(body)),
-                        std::move(toast))};
+                        std::move(toast));
         },
-        [&](CodeBlockRunFinished& e) -> Step {
+        [&](CodeBlockRunFinished& e) -> Cmd {
             // Don't auto-stage — open the RESULT card instead. The user
             // already watched the output live on the real terminal; this
             // is the decision beat: attach the captured copy to the
@@ -712,11 +711,11 @@ Step codeblock_update(Model m, msg::CodeBlockMsg cm) {
                 std::move(e.command), std::move(e.output),
                 e.exit_code, e.timed_out}});
             m.ui.code_blocks_scroll.y = 0;
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](CodeBlockResultAttach) -> Step {
+        [&](CodeBlockResultAttach) -> Cmd {
             auto* r = m.ui.panel.get<pn::CodeBlockResult>();
-            if (!r) return done(std::move(m));
+            if (!r) return Cmd::none();
             // Fold the captured output into the composer as an Output
             // attachment — the SAME collapse-to-chip / expand-on-submit
             // machinery a big paste uses. However huge the log is, the
@@ -742,23 +741,22 @@ Step codeblock_update(Model m, msg::CodeBlockMsg cm) {
             m.ui.composer.expanded = true;
             m.ui.panel.close<pn::CodeBlocks>(); m.ui.panel.close<pn::CodeBlockResult>();
             auto toast = set_status_toast(m, "output attached to composer");
-            return {std::move(m), std::move(toast)};
+            return std::move(toast);
         },
-        [&](CodeBlockResultCopy) -> Step {
+        [&](CodeBlockResultCopy) -> Cmd {
             auto* r = m.ui.panel.get<pn::CodeBlockResult>();
-            if (!r) return done(std::move(m));
+            if (!r) return Cmd::none();
             std::string body = std::move(r->output);
             m.ui.panel.close<pn::CodeBlocks>(); m.ui.panel.close<pn::CodeBlockResult>();
             (void)write_clipboard_text(body);   // native pbcopy/wl-copy/xclip
             auto toast = set_status_toast(m, "output copied to clipboard");
-            return {std::move(m),
-                    Cmd::batch(
+            return Cmd::batch(
                         cmd::write_clipboard(std::move(body)),
-                        std::move(toast))};
+                        std::move(toast));
         },
-        [&](CodeBlockResultDiscard) -> Step {
+        [&](CodeBlockResultDiscard) -> Cmd {
             m.ui.panel.close<pn::CodeBlocks>(); m.ui.panel.close<pn::CodeBlockResult>();
-            return done(std::move(m));
+            return Cmd::none();
         },
     }, cm);
 }

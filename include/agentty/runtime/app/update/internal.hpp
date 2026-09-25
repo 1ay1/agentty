@@ -468,13 +468,13 @@ Step models_update  (Model m, msg::ModelsMsg     pm);
 // fused_picker query, and returns the ordered/sectioned FusedRow list. The
 // view renders it and derives the visual cursor; the reducer selects from it.
 [[nodiscard]] std::vector<FusedRow> fused_rows_for_model(const Model& m);
-Step thread_list_update   (Model m, msg::ThreadListMsg     tm);
+Cmd  thread_list_update   (Model& m, msg::ThreadListMsg     tm);
 Cmd  palette_update       (Model& m, msg::PaletteMsg pm);
 Cmd  mention_update       (Model& m, msg::MentionMsg mm);
 Cmd  symbol_update        (Model& m, msg::SymbolMsg  sm);
-Step codeblock_update     (Model m, msg::CodeBlockMsg      cm);
+Cmd  codeblock_update     (Model& m, msg::CodeBlockMsg      cm);
 Cmd  checkpoint_update    (Model& m, msg::CheckpointMsg     cm);
-Step rag_settings_update  (Model m, msg::RagMsg    rm);
+Cmd  rag_settings_update  (Model& m, msg::RagMsg    rm);
 Cmd  stats_update         (Model& m, msg::StatsMsg  sm);
 Step settings_list_update (Model m, msg::SettingsListMsg   sm);
 Cmd  fork_update          (Model& m, msg::ForkMsg           fm);
@@ -482,8 +482,8 @@ Cmd  todo_update          (Model& m, msg::TodoMsg           tm);
 Step login_update         (Model m, msg::LoginMsg          lm);
 Cmd  diff_review_update   (Model& m, msg::DiffReviewMsg     dm);
 Cmd  smart_mode_update    (Model& m, msg::SmartModeMsg      sm);
-Step plugin_edit_update   (Model m, msg::PluginEditMsg     pm);
-Step appearance_update    (Model m, msg::AppearanceMsg     am);
+Cmd  plugin_edit_update   (Model& m, msg::PluginEditMsg     pm);
+Cmd  appearance_update    (Model& m, msg::AppearanceMsg     am);
 Step meta_update          (Model m, msg::MetaMsg           mm);
 
 // ── Esc: back one level ───────────────────────────────────────────────

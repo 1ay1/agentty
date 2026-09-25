@@ -196,9 +196,9 @@ void refresh_status(rs::EmbedForm& f) {
 
 } // namespace
 
-Step rag_settings_update(Model m, msg::RagMsg rm) {
+Cmd rag_settings_update(Model& m, msg::RagMsg rm) {
     return std::visit(overload{
-        [&](OpenRag) -> Step {
+        [&](OpenRag) -> Cmd {
             // ONE pane. The overlay used to open a three-row mode list, with
             // the embedder settings hidden behind a second keypress that
             // nothing advertised. Mode and embedder are two halves of one
@@ -214,17 +214,17 @@ Step rag_settings_update(Model m, msg::RagMsg rm) {
             const auto mode = s.rag.configured ? s.rag.mode : store::RagMode::On;
             m.ui.panel.descend(
                 pn::Rag{{mode, mode, make_embed_form(mode)}});
-            return {std::move(m), Cmd::none()};
+            return Cmd::none();
         },
-        [&](CloseRag) -> Step {
+        [&](CloseRag) -> Cmd {
             // Esc unwinds ONE level: the parent snapshot (palette or settings
             // list, full state intact) or the thread when there is none.
             // (Selecting a mode, below, commits and drops to the thread —
             // that's "done", not "back".)
             ascend(m);
-            return {std::move(m), Cmd::none()};
+            return Cmd::none();
         },
-        [&](RagAdvanced) -> Step {
+        [&](RagAdvanced) -> Cmd {
             // Reveal/hide the Tier::Advanced rows. The form is rebuilt because
             // the row SET changes; the cursor is kept where it was so the
             // toggle does not also move the selection out from under the user.
@@ -238,10 +238,10 @@ Step rag_settings_update(Model m, msg::RagMsg rm) {
                 const int n = static_cast<int>(o->embed.form.fields.size());
                 o->embed.form.cursor = n > 0 ? std::min(cursor, n - 1) : 0;
             }
-            return {std::move(m), Cmd::none()};
+            return Cmd::none();
         },
         // ── Embeddings rows ─────────────────────────────────────────
-        [&](RagEmbedClose) -> Step {
+        [&](RagEmbedClose) -> Cmd {
             // Esc unwinds one level at a time (menu → field → pane); the form
             // layer owns that ordering so every pane behaves identically.
             //
@@ -251,17 +251,17 @@ Step rag_settings_update(Model m, msg::RagMsg rm) {
             // have escaped it.
             if (auto* o = m.ui.panel.get<pn::Rag>())
                 if (!form::escape(o->embed.form))
-                    return {std::move(m), Cmd::none()};   // unwound a level
-            return agentty::app::update(std::move(m), Msg{CloseRag{}});
+                    return Cmd::none();   // unwound a level
+            return rag_settings_update(m, msg::RagMsg{CloseRag{}});
         },
 
         // Every navigation/editing key arrives here. The shared reducer does
         // the work; this arm only handles what is genuinely pane-specific:
         // a backend change alters WHICH rows exist, and firing the Action row
         // means "probe".
-        [&](RagEmbedKey& e) -> Step {
+        [&](RagEmbedKey& e) -> Cmd {
             auto* f = form_of(m);
-            if (!f) return {std::move(m), Cmd::none()};
+            if (!f) return Cmd::none();
 
             const auto* before = f->form.focused();
             const bool on_backend = before && before->id == rs::kFieldBackend;
@@ -293,42 +293,39 @@ Step rag_settings_update(Model m, msg::RagMsg rm) {
             refresh_status(*f);
 
             if (applied.fired)
-                return {std::move(m),
-                        Cmd::after(std::chrono::milliseconds{0}, Msg{RagEmbedTest{}})};
+                return Cmd::after(std::chrono::milliseconds{0}, Msg{RagEmbedTest{}});
             // Leaving an edited field IS the save (commit-on-exit — the
             // form-layer contract; there is no ^S). RagEmbedSave validates
             // first, so a bad half-config surfaces as the probe's Failed
             // note rather than a write.
             if (applied.left_field)
-                return {std::move(m),
-                        Cmd::after(std::chrono::milliseconds{0}, Msg{RagEmbedSave{}})};
+                return Cmd::after(std::chrono::milliseconds{0}, Msg{RagEmbedSave{}});
             if (applied.close)
-                return {std::move(m),
-                        Cmd::after(std::chrono::milliseconds{0}, Msg{RagEmbedClose{}})};
-            return {std::move(m), Cmd::none()};
+                return Cmd::after(std::chrono::milliseconds{0}, Msg{RagEmbedClose{}});
+            return Cmd::none();
         },
 
-        [&](RagEmbedPaste& e) -> Step {
+        [&](RagEmbedPaste& e) -> Cmd {
             auto* f = form_of(m);
-            if (!f) return {std::move(m), Cmd::none()};
+            if (!f) return Cmd::none();
             // SSOT guard + dirty live in paste_into; only the pane-specific
             // consequence (a changed field invalidates the probe) stays here.
             if (form::paste_into(f->form, e.text)) {
                 invalidate_probe(*f);
                 refresh_status(*f);
             }
-            return {std::move(m), Cmd::none()};
+            return Cmd::none();
         },
 
         // Run the probe on a worker: it dials a network endpoint (or loads a
         // model file) and must never block the UI thread.
-        [&](RagEmbedTest) -> Step {
+        [&](RagEmbedTest) -> Cmd {
             auto* f = form_of(m);
-            if (!f) return {std::move(m), Cmd::none()};
+            if (!f) return Cmd::none();
             sync_cfg(*f);
             if (auto v = eb::validate(f->cfg); auto* bad = std::get_if<eb::Invalid>(&v)) {
                 f->probe = rs::EmbedForm::Failed{bad->why};
-                return {std::move(m), Cmd::none()};
+                return Cmd::none();
             }
             f->probe = rs::EmbedForm::Testing{};
             const std::uint64_t gen = ++f->probe_gen;
@@ -340,8 +337,7 @@ Step rag_settings_update(Model m, msg::RagMsg rm) {
             // a model file, either of which can block for seconds. Keeping it
             // off the shared BG pool means a wedged endpoint cannot starve
             // other background work.
-            return {std::move(m),
-                    Cmd::task_isolated(
+            return Cmd::task_isolated(
                         [](jaal::Sink<Msg> out, std::stop_token,
                            store::RagConfig probe_cfg, std::string key,
                            std::uint64_t gen) {
@@ -350,18 +346,18 @@ Step rag_settings_update(Model m, msg::RagMsg rm) {
                                                           r.latency_ms, r.error,
                                                           gen}});
                         },
-                        std::move(probe_cfg), std::move(key), gen)};
+                        std::move(probe_cfg), std::move(key), gen);
         },
-        [&](RagEmbedTestDone& e) -> Step {
+        [&](RagEmbedTestDone& e) -> Cmd {
             auto* f = form_of(m);
-            if (!f) return {std::move(m), Cmd::none()};
+            if (!f) return Cmd::none();
             // STALENESS GATE (same shape as login's attempt_id): only the
             // completion of the LATEST launch may land. An edit or a re-test
             // bumped probe_gen, making this answer about a config that no
             // longer exists — adopting its dim / Ok would verify bytes the
             // probe never saw.
             if (e.gen != f->probe_gen)
-                return {std::move(m), Cmd::none()};
+                return Cmd::none();
             if (e.ok) {
                 // Adopt the MEASURED dimension. This is the only place `dim`
                 // is ever set: a user-supplied value would be silently
@@ -372,15 +368,15 @@ Step rag_settings_update(Model m, msg::RagMsg rm) {
             } else {
                 f->probe = rs::EmbedForm::Failed{e.error.empty() ? "probe failed" : e.error};
             }
-            return {std::move(m), Cmd::none()};
+            return Cmd::none();
         },
-        [&](RagEmbedSave) -> Step {
+        [&](RagEmbedSave) -> Cmd {
             auto* f = form_of(m);
-            if (!f) return {std::move(m), Cmd::none()};
+            if (!f) return Cmd::none();
             sync_cfg(*f);
             if (auto v = eb::validate(f->cfg); auto* bad = std::get_if<eb::Invalid>(&v)) {
                 f->probe = rs::EmbedForm::Failed{bad->why};
-                return {std::move(m), Cmd::none()};
+                return Cmd::none();
             }
 
             // The credential goes to the keystore (or a sealed file), keyed by
@@ -406,9 +402,8 @@ Step rag_settings_update(Model m, msg::RagMsg rm) {
             tools::rag_apply_settings(m.d.persisted.rag);
 
             const std::string label = eb::describe(f->cfg);
-            return {std::move(m),
-                    set_status_toast(m, "Embeddings: " + label + note,
-                                     std::chrono::seconds{4})};
+            return set_status_toast(m, "Embeddings: " + label + note,
+                                     std::chrono::seconds{4});
         },
     }, rm);
 }

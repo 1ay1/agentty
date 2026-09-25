@@ -307,10 +307,10 @@ void move_highlight(Model& m, int delta) {
 
 }  // namespace
 
-Step appearance_update(Model m, msg::AppearanceMsg am) {
+Cmd appearance_update(Model& m, msg::AppearanceMsg am) {
     return std::visit(overload{
 
-        [&](OpenAppearance&) -> Step {
+        [&](OpenAppearance&) -> Cmd {
             pn::Appearance o;
             o.pane.form = pn::build_appearance_form(m.d.ui(), /*tty=*/true);
             // Land on the first real setting, not the "Theme" section
@@ -323,33 +323,33 @@ Step appearance_update(Model m, msg::AppearanceMsg am) {
                 }
             m.ui.panel.descend(std::move(o));
             m.ui.appearance_scroll.y = 0;
-            return done(std::move(m));
+            return Cmd::none();
         },
 
-        [&](CloseAppearance&) -> Step {
+        [&](CloseAppearance&) -> Cmd {
             // Esc unwinds one level — to the palette snapshot stashed at
             // open, or to the thread. Nothing to save on the way out: it
             // was all saved as it was typed.
             ascend(m);
-            return done(std::move(m));
+            return Cmd::none();
         },
 
-        [&](AppearanceKey& e) -> Step {
+        [&](AppearanceKey& e) -> Cmd {
             auto* o = m.ui.panel.get<pn::Appearance>();
-            if (!o) return done(std::move(m));
+            if (!o) return Cmd::none();
 
             // The browser owns the keyboard while it is up.
-            if (o->pane.picking) return done(std::move(m));
+            if (o->pane.picking) return Cmd::none();
 
             const auto applied = form::keys::apply(o->pane.form, e.action);
 
             if (applied.close)
-                return agentty::app::update(std::move(m), Msg{CloseAppearance{}});
+                return appearance_update(m, msg::AppearanceMsg{CloseAppearance{}});
 
             // A Pick row asked for its picker. Only one row is a Pick, so
             // the hand-off needs no dispatch.
             if (applied.hand_off)
-                return agentty::app::update(std::move(m), Msg{AppearancePickTheme{}});
+                return appearance_update(m, msg::AppearanceMsg{AppearancePickTheme{}});
 
             // Everything else: read the focused row back onto the prefs and
             // write through. `changed` covers ←/→ in place and a dropdown
@@ -367,14 +367,14 @@ Step appearance_update(Model m, msg::AppearanceMsg am) {
                 persist(m);
                 reproject(m);
             }
-            return done(std::move(m));
+            return Cmd::none();
         },
 
         // ── The theme browser ────────────────────────────────────────
 
-        [&](AppearancePickTheme&) -> Step {
+        [&](AppearancePickTheme&) -> Cmd {
             auto* o = m.ui.panel.get<pn::Appearance>();
-            if (!o) return done(std::move(m));
+            if (!o) return Cmd::none();
             o->pane.picking      = true;
             o->pane.picker.picker.clear_query();
             // Open ON the theme in use, so the first thing the list shows is
@@ -397,17 +397,17 @@ Step appearance_update(Model m, msg::AppearanceMsg am) {
             // pane rather than in a message so an Esc always has something
             // to go back to, however the browser was left.
             o->pane.picker.restore = m.d.ui().theme;
-            return done(std::move(m));
+            return Cmd::none();
         },
 
-        [&](AppearanceThemeMove& e) -> Step {
+        [&](AppearanceThemeMove& e) -> Cmd {
             move_highlight(m, e.delta);
-            return done(std::move(m));
+            return Cmd::none();
         },
 
-        [&](AppearanceThemeQuery& e) -> Step {
+        [&](AppearanceThemeQuery& e) -> Cmd {
             auto* o = m.ui.panel.get<pn::Appearance>();
-            if (!o) return done(std::move(m));
+            if (!o) return Cmd::none();
             if (e.text.empty()) o->pane.picker.picker.backspace();
             else                o->pane.picker.picker.type(e.text);
             // The picker resets its own cursor on every query edit — one
@@ -419,12 +419,12 @@ Step appearance_update(Model m, msg::AppearanceMsg am) {
             m.d.ui().theme = highlighted_theme(*o);
             restyle_sealed_turns(m);
             reproject(m);
-            return done(std::move(m));
+            return Cmd::none();
         },
 
-        [&](AppearanceThemeCommit&) -> Step {
+        [&](AppearanceThemeCommit&) -> Cmd {
             auto* o = m.ui.panel.get<pn::Appearance>();
-            if (!o) return done(std::move(m));
+            if (!o) return Cmd::none();
             // The theme is already applied (the highlight applied it); Enter
             // only ends the browse and makes it durable.
             m.d.ui().theme = highlighted_theme(*o);
@@ -436,12 +436,12 @@ Step appearance_update(Model m, msg::AppearanceMsg am) {
             restyle_sealed_turns(m);
             persist(m);
             reproject(m);
-            return done(std::move(m));
+            return Cmd::none();
         },
 
-        [&](AppearanceThemeCancel&) -> Step {
+        [&](AppearanceThemeCancel&) -> Cmd {
             auto* o = m.ui.panel.get<pn::Appearance>();
-            if (!o) return done(std::move(m));
+            if (!o) return Cmd::none();
             // A true cancel: put back the theme we opened on, including on
             // disk — the live previews may have persisted nothing, but the
             // model must not keep the last one we merely looked at.
@@ -453,7 +453,7 @@ Step appearance_update(Model m, msg::AppearanceMsg am) {
             restyle_sealed_turns(m);
             persist(m);
             reproject(m);
-            return done(std::move(m));
+            return Cmd::none();
         },
 
     }, am);

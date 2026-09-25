@@ -184,37 +184,36 @@ void rebuild_add_form(pn::PluginEdit& o, const std::string& kind) {
 
 } // namespace
 
-Step plugin_edit_update(Model m, msg::PluginEditMsg pm) {
+Cmd plugin_edit_update(Model& m, msg::PluginEditMsg pm) {
     return std::visit(overload{
-        [&](OpenPluginEdit& e) -> Step {
+        [&](OpenPluginEdit& e) -> Cmd {
             pf::PluginFormInputs in;
             if (e.server.empty()) {
                 in.add_mode = true;
                 in.project  = e.project;
             } else if (!inputs_for(m, e.server, in)) {
-                return {std::move(m),
-                        set_status_toast(m, "plugin '" + e.server + "' not found")};
+                return set_status_toast(m, "plugin '" + e.server + "' not found");
             }
             pn::PluginEdit pane{{}, pf::build_form(in), e.server,
                                 e.project, in.kind};
             m.ui.panel.descend(std::move(pane));
-            return done(std::move(m));
+            return Cmd::none();
         },
 
-        [&](ClosePluginEdit) -> Step {
+        [&](ClosePluginEdit) -> Cmd {
             ascend(m);   // Esc: back to the pane that opened this, or close
-            return done(std::move(m));
+            return Cmd::none();
         },
 
-        [&](PluginEditPaste& e) -> Step {
+        [&](PluginEditPaste& e) -> Cmd {
             auto* o = m.ui.panel.get<pn::PluginEdit>();
             if (o) form::paste_into(o->form, e.text);   // SSOT guard inside
-            return done(std::move(m));
+            return Cmd::none();
         },
 
-        [&](PluginEditKey& e) -> Step {
+        [&](PluginEditKey& e) -> Cmd {
             auto* o = m.ui.panel.get<pn::PluginEdit>();
-            if (!o) return done(std::move(m));
+            if (!o) return Cmd::none();
 
             const auto* row = o->form.focused();
             const std::string row_id = row ? row->id : std::string{};
@@ -222,7 +221,7 @@ Step plugin_edit_update(Model m, msg::PluginEditMsg pm) {
             const auto applied = form::keys::apply(o->form, e.action);
 
             if (applied.close)
-                return agentty::app::update(std::move(m), Msg{ClosePluginEdit{}});
+                return plugin_edit_update(m, msg::PluginEditMsg{ClosePluginEdit{}});
 
             // Moving off an armed Remove row disarms it — same contract as
             // the settings list's `d` (any navigation cancels a pending
@@ -239,7 +238,7 @@ Step plugin_edit_update(Model m, msg::PluginEditMsg pm) {
             if (applied.changed && row_id == pf::kKind && o->server.empty()) {
                 const std::string kind = choice_of(o->form, pf::kKind);
                 if (kind != o->built_kind) rebuild_add_form(*o, kind);
-                return done(std::move(m));
+                return Cmd::none();
             }
 
             // ── live toggles (detail mode) ────────────────────────────
@@ -250,13 +249,12 @@ Step plugin_edit_update(Model m, msg::PluginEditMsg pm) {
                     auto r = tools::plugin::set_server_disabled(
                         path, o->server, !on);
                     if (r == tools::plugin::EditResult::Ok) {
-                        return {std::move(m), Cmd::batch(
+                        return Cmd::batch(
                             
                                 cmdf::load_plugins_async(/*reconnect=*/true),
-                                set_status_toast(m, on ? "enabled" : "disabled"))};
+                                set_status_toast(m, on ? "enabled" : "disabled"));
                     }
-                    return {std::move(m),
-                            set_status_toast(m, "could not write mcp.json")};
+                    return set_status_toast(m, "could not write mcp.json");
                 }
                 if (row_id.starts_with(pf::kToolPrefix)) {
                     const std::string bare =
@@ -266,14 +264,13 @@ Step plugin_edit_update(Model m, msg::PluginEditMsg pm) {
                         path, o->server, bare, on);
                     if (r == tools::plugin::EditResult::Ok) {
                         tools::invalidate_mcp_catalog();
-                        return {std::move(m), Cmd::batch(
+                        return Cmd::batch(
                             
                                 cmdf::load_plugins_async(/*reconnect=*/false),
                                 set_status_toast(m, (on ? "enabled '" : "disabled '")
-                                                    + bare + "'"))};
+                                                    + bare + "'"));
                     }
-                    return {std::move(m),
-                            set_status_toast(m, "could not toggle '" + bare + "'")};
+                    return set_status_toast(m, "could not toggle '" + bare + "'");
                 }
                 // Any other change (url text etc.) is save-owned; fall out.
             }
@@ -289,21 +286,21 @@ Step plugin_edit_update(Model m, msg::PluginEditMsg pm) {
             const bool want_save = exit_commit
                 || (applied.fired && row_id == pf::kSave);
 
-            if (!applied.fired && !want_save) return done(std::move(m));
+            if (!applied.fired && !want_save) return Cmd::none();
 
             // ── action rows ───────────────────────────────────────────
             if (row_id == pf::kApprove && !o->server.empty()) {
                 const fs::path path = config_target(*o, m);
                 if (tools::plugin::approve_server(path, o->server)) {
-                    return {std::move(m), Cmd::batch(
+                    return Cmd::batch(
                         cmdf::load_plugins_async(/*reconnect=*/true),
                         set_status_toast(m, "approved '" + o->server + "'"),
                         // Reopen once the reload lands so the pane reflects
                         // the post-approval state (trusted → connecting).
                         Cmd::after(std::chrono::milliseconds{50},
-                            Msg{OpenPluginEdit{o->server, o->project}}))};
+                            Msg{OpenPluginEdit{o->server, o->project}}));
                 }
-                return {std::move(m), set_status_toast(m, "approve failed")};
+                return set_status_toast(m, "approve failed");
             }
 
             if (row_id == pf::kRemove && !o->server.empty() && !want_save) {
@@ -311,18 +308,18 @@ Step plugin_edit_update(Model m, msg::PluginEditMsg pm) {
                 if (o->form.note != kNoteRemoveArmed) {
                     o->form.note = kNoteRemoveArmed;
                     o->form.note_replaces_grammar = true;
-                    return done(std::move(m));
+                    return Cmd::none();
                 }
                 const fs::path path = config_target(*o, m);
                 const std::string name = o->server;
                 auto r = tools::plugin::remove_server(path, name);
                 if (r == tools::plugin::EditResult::Ok) {
                     ascend(m);
-                    return {std::move(m), Cmd::batch(
+                    return Cmd::batch(
                         cmdf::load_plugins_async(/*reconnect=*/true),
-                        set_status_toast(m, "removed '" + name + "'"))};
+                        set_status_toast(m, "removed '" + name + "'"));
                 }
-                return {std::move(m), set_status_toast(m, "remove failed")};
+                return set_status_toast(m, "remove failed");
             }
 
             if (want_save) {
@@ -330,7 +327,7 @@ Step plugin_edit_update(Model m, msg::PluginEditMsg pm) {
                     ? choice_of(o->form, pf::kKind) : o->built_kind;
                 tools::plugin::ServerSpec spec;
                 if (!spec_from_form(o->form, kind, o->server, spec))
-                    return done(std::move(m));   // inline errors set
+                    return Cmd::none();   // inline errors set
 
                 const fs::path path = config_target(*o, m);
                 const bool add = o->server.empty();
@@ -340,30 +337,30 @@ Step plugin_edit_update(Model m, msg::PluginEditMsg pm) {
                 if (r == tools::plugin::EditResult::AlreadyExists) {
                     if (auto* fld = o->form.find(pf::kName))
                         fld->error = "'" + spec.name + "' already exists";
-                    return done(std::move(m));
+                    return Cmd::none();
                 }
                 if (r != tools::plugin::EditResult::Ok) {
                     o->form.note = "write failed — is the file valid JSON?";
-                    return done(std::move(m));
+                    return Cmd::none();
                 }
                 o->form.dirty = false;   // committed — the footer drops "unsaved"
                 if (exit_commit) {
                     // Field-exit commit: written + applied, pane stays open.
                     // The catalog reload runs so the new value is live
                     // immediately (same as the toggle path).
-                    return {std::move(m), Cmd::batch(
+                    return Cmd::batch(
                         cmdf::load_plugins_async(/*reconnect=*/true),
-                        set_status_toast(m, "saved '" + spec.name + "'"))};
+                        set_status_toast(m, "saved '" + spec.name + "'"));
                 }
                 const std::string toast = (add ? "added '" : "saved '")
                     + spec.name + "'";
                 ascend(m);
-                return {std::move(m), Cmd::batch(
+                return Cmd::batch(
                     cmdf::load_plugins_async(/*reconnect=*/true),
-                    set_status_toast(m, toast))};
+                    set_status_toast(m, toast));
             }
 
-            return done(std::move(m));
+            return Cmd::none();
         },
     }, pm);
 }
