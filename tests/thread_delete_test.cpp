@@ -15,6 +15,7 @@
 //      though the vector element is destroyed mid-reducer.
 
 #include "agentty/runtime/app/update/internal.hpp"
+#include "agtest_fx.hpp"
 #include "agentty/runtime/model.hpp"
 #include "agentty/runtime/app/deps.hpp"
 #include "agentty/runtime/panel/common.hpp"
@@ -73,8 +74,20 @@ Model make_model(int cursor, const std::string& current_id) {
     return m;
 }
 
+// Drive one message and PERFORM whatever it asked for.
+//
+// Deleting a thread is an effect now: the reducer returns a value saying
+// "remove this id" and the host carries it out. These checks assert on
+// `g_deleted`, i.e. on what reached the store, so the test has to play the
+// host's part — which is the point, since a delete only lands there if the
+// arm actually returned it.
 Model step(Model m, msg::ThreadListMsg tm) {
-    return detail::step(detail::thread_list_update, std::move(m), std::move(tm)).first;
+    auto [next, cmd] =
+        detail::step(detail::thread_list_update, std::move(m), std::move(tm));
+    agtest::fx::Store store;
+    agtest::fx::run(cmd, store);
+    for (const auto& id : store.deleted_threads) g_deleted.push_back(id.value);
+    return std::move(next);
 }
 
 const pick::OpenAt* picker(const Model& m) {
@@ -136,7 +149,17 @@ int main() {
         m = step(std::move(m), ThreadListDelete{});   // commit
 
         check(g_deleted.size() == 1 && g_deleted[0] == "t0", "active thread deleted");
-        check(m.d.current.id.value.rfind("fresh-", 0) == 0,
+        // A BRAND-NEW id, not the deleted one and not any surviving row.
+        //
+        // Asserted by identity rather than by a "fresh-" prefix from the
+        // stub: new_thread_id left the Deps seam — it was a pure function
+        // that never needed erasing, so the reducer calls
+        // persistence::new_id() directly and the stub no longer sees it.
+        // What matters is the property, which this states outright.
+        check(!m.d.current.id.value.empty()
+                  && m.d.current.id.value != "t0"
+                  && m.d.current.id.value != "t1"
+                  && m.d.current.id.value != "t2",
               "deleting the active thread starts a brand-new thread");
         check(m.d.current.messages.empty(), "the fresh thread is empty");
         check(std::holds_alternative<phase::Idle>(m.s.phase),

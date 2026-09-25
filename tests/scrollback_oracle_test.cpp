@@ -465,7 +465,10 @@ static bool check_transcript(TermEmu& emu, const std::string& tag,
 //                 live tail in place, bump nothing else).
 
 struct Ctx {
-    maya::detail::Runtime* rt;
+    // Screen::impl() — maya::detail::Runtime became detail::Device in the
+    // host split (see the note at the driver below). The oracle drives the
+    // DEVICE directly for inline row accounting and commit_inline_prefix.
+    maya::detail::Device* rt;
     TermEmu*   emu;
     Oracle*    orc;
     int        master;

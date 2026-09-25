@@ -42,17 +42,28 @@ int failures = 0;
         }                                                                 \
     } while (0)
 
-/// A scratch AGENTTY_HOME, so the test never touches the real one.
+// A clean threads dir for one case.
+//
+// NOT its own $AGENTTY_HOME: the standalone harness already sandboxes that
+// for the whole binary (agentty_standalone_tests_main.cpp), and user_root()
+// resolves once — so a second setenv here is simply ignored, and every
+// path below would land in the harness's root while this class believed it
+// owned a private one. That mismatch is why these cases read mtime -1: the
+// files were written where the test wasn't looking.
+//
+// So: work inside the harness's root, and just clear the threads dir.
 struct Sandbox {
     fs::path dir;
     Sandbox() {
-        dir = fs::temp_directory_path() /
-              ("agentty-idx-" + std::to_string(::getpid()));
+        dir = persistence::threads_dir();
         fs::remove_all(dir);
         fs::create_directories(dir);
-        ::setenv("AGENTTY_HOME", dir.c_str(), 1);
     }
-    ~Sandbox() { fs::remove_all(dir); }
+    // Clear on the way IN, not on the way out. The dir is the harness's
+    // shared threads_dir(), and the async writer may still be draining a
+    // save when a case returns — removing it here raced the next case's
+    // setup, which then found no thread files at all.
+    ~Sandbox() = default;
 };
 
 Thread make_thread(const std::string& id, const std::string& title) {
@@ -61,6 +72,14 @@ Thread make_thread(const std::string& id, const std::string& title) {
     t.title = title;
     t.created_at = std::chrono::system_clock::now();
     t.updated_at = t.created_at;
+    // NOT optional: persistence::save_thread drops a thread with no
+    // messages on the floor (an empty thread is a thread the user never
+    // used). Without this every case here saved nothing, then asserted on
+    // an index of files that were never written.
+    Message m;
+    m.role = Role::User;
+    m.text = "hello";
+    t.messages.push_back(std::move(m));
     return t;
 }
 
@@ -157,6 +176,14 @@ void an_index_from_an_older_version_is_discarded() {
     persistence::save_thread(make_thread("aaaa000000000004", "four"));
     persistence::flush_pending_saves();
     (void)persistence::load_all_threads();
+
+    // The thread file must be on disk before the forged index goes in —
+    // the whole case is "a stale index is discarded and REBUILT FROM THE
+    // FILES", which proves nothing if there is no file to rebuild from.
+    // `.jsonl`: a thread is an append-only log, not one JSON document.
+    const auto thread_file =
+        persistence::threads_dir() / "aaaa000000000004.jsonl";
+    CHECK(fs::exists(thread_file));
 
     // Forge a v3 index: the shape is right, but its stamps are measured
     // from file_clock's epoch. Reading it would resurrect the bug, so the

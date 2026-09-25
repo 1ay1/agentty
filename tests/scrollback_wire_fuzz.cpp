@@ -552,8 +552,8 @@ static void run_walk(std::uint64_t seed, int width, int term_h) {
                 // cannot fix — the host must commit in lockstep), or none()
                 // when it doesn't trim. Both are acceptable; the invariant
                 // is that no OTHER command type is returned.
-                INV(std::holds_alternative<Cmd::None>(cmd.inner) ||
-                    std::holds_alternative<Cmd::CommitScrollback>(cmd.inner),
+                INV(std::holds_alternative<agentty::Cmd::None>(cmd.inner) ||
+                    std::holds_alternative<maya::CommitScrollback>(cmd.inner),
                     "W5", "trim returned unexpected command type (must be "
                     "none() or commit_scrollback(N))");
                 op("trim");

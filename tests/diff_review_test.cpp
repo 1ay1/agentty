@@ -9,6 +9,7 @@
 // again.
 
 #include "agentty/runtime/app/update/internal.hpp"
+#include "agtest_fx.hpp"
 #include "agentty/runtime/app/update.hpp"
 #include "agentty/runtime/model.hpp"
 #include "agentty/runtime/app/deps.hpp"
@@ -32,9 +33,25 @@ void check(bool ok, const std::string& what) {
     if (!ok) { std::println("  FAIL: {}", what); ++g_fail; }
 }
 
-// Captures every write_file the reducer performs, so we can assert what would
-// hit disk without touching the real filesystem.
+// Captures every write_file the reducer ASKS FOR, so we can assert what
+// would hit disk without touching the real filesystem.
+//
+// Asks for, not performs: writing a file is an effect now — the reducer
+// returns a value describing the write and the host carries it out. These
+// cases assert on g_writes, so they have to play the host's part, which is
+// also the point: a write only shows up here if the arm actually returned
+// it.
 std::map<std::string, std::string> g_writes;
+
+// Run a step's effects into g_writes.
+template <class S>
+S&& apply_fx(S&& step) {
+    agtest::fx::Store store;
+    agtest::fx::run(step.second, store);
+    for (auto& [path, contents] : store.written_files)
+        g_writes[path] = contents;
+    return std::forward<S>(step);
+}
 
 void install_stub_deps() {
     g_writes.clear();
@@ -134,13 +151,13 @@ int main() {
         // Two-press guard (commit 7498bf3f): from the OPEN pane the first
         // ^X arms (no write), the second executes. Palette-driven reject
         // (pane closed) executes on the first press.
-        auto armed = detail::step(detail::diff_review_update, std::move(m), RejectAllChanges{});
+        auto armed = apply_fx(detail::step(detail::diff_review_update, std::move(m), RejectAllChanges{}));
         check(g_writes.count("a.txt") == 0,
               "first reject-all press only arms, no write yet");
         check(armed.first.ui.panel.get<pn::DiffReview>()
                   && armed.first.ui.panel.get<pn::DiffReview>()->confirm_reject_all,
               "first reject-all press arms the confirm flag");
-        auto s = detail::step(detail::diff_review_update, std::move(armed.first), RejectAllChanges{});
+        auto s = apply_fx(detail::step(detail::diff_review_update, std::move(armed.first), RejectAllChanges{}));
         check(g_writes.count("a.txt") == 1, "reject-all wrote the file");
         check(g_writes["a.txt"] == before,
               "reject-all reverted the file to ORIGINAL contents");
@@ -157,7 +174,7 @@ int main() {
             std::expected<std::string, tools::ToolError>{"ok"},
             make_change("b.txt", before, after));
         m.ui.panel.descend(agentty::ui::panel::DiffReview{{0, 0}});
-        auto s = detail::step(detail::diff_review_update, std::move(m), AcceptAllChanges{});
+        auto s = apply_fx(detail::step(detail::diff_review_update, std::move(m), AcceptAllChanges{}));
         check(g_writes.empty(), "accept-all writes nothing (tool already wrote)");
         check(s.first.d.pending_changes.empty(), "queue cleared after accept-all");
     }
@@ -179,9 +196,9 @@ int main() {
         check(fc0.hunks.size() >= 2, "distinct edits produce >=2 hunks");
         m.ui.panel.descend(agentty::ui::panel::DiffReview{{0, 0}});
         // Accept the first hunk, reject the second, then close.
-        auto s1 = detail::step(detail::diff_review_update, std::move(m), AcceptHunk{});
-        auto s2 = detail::step(detail::diff_review_update, std::move(s1.first), RejectHunk{});
-        auto s3 = detail::step(detail::diff_review_update, std::move(s2.first), CloseDiffReview{});
+        auto s1 = apply_fx(detail::step(detail::diff_review_update, std::move(m), AcceptHunk{}));
+        auto s2 = apply_fx(detail::step(detail::diff_review_update, std::move(s1.first), RejectHunk{}));
+        auto s3 = apply_fx(detail::step(detail::diff_review_update, std::move(s2.first), CloseDiffReview{}));
         check(g_writes.count("c.txt") == 1, "close persisted the mixed decision");
         // Written file keeps the accepted hunk (ONE) but reverts the rejected
         // one (FIFTEEN→15): starts with 'ONE', ends with '15'.

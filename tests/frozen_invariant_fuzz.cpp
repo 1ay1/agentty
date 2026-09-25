@@ -201,7 +201,7 @@ static void check_invariants(const Model& m, bool stream_active,
     // whatever maya thinks overflowed, which over-commits).
     if (trim_cmd) {
         const bool is_none =
-            std::holds_alternative<Cmd::None>(trim_cmd->inner);
+            std::holds_alternative<agentty::Cmd::None>(trim_cmd->inner);
         const auto* commit =
             std::get_if<maya::CommitScrollback>(&trim_cmd->inner);
         INV(is_none || commit != nullptr, "I6",
