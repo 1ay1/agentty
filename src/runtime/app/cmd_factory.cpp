@@ -2044,8 +2044,8 @@ Cmd check_for_update() {
 }
 
 Cmd perform_self_update(std::string version) {
-    return Cmd::task([version = std::move(version)](
-                              jaal::Sink<Msg> out, std::stop_token) {
+    return Cmd::task([](jaal::Sink<Msg> out, std::stop_token,
+                        std::string version) {
         try {
             // Throttle: the HTTP layer calls back per chunk, which is
             // thousands of times for a ~15 MB asset. Dispatching each one
@@ -2074,7 +2074,7 @@ Cmd perform_self_update(std::string version) {
         } catch (...) {
             out.send(Msg{UpdateApplied{false, "unknown error"}});
         }
-    });
+    }, std::move(version));
 }
 
 Cmd fetch_models() {
@@ -2225,10 +2225,8 @@ Cmd oauth_exchange(auth::OAuthCode    code,
                         auth::PkceVerifier verifier,
                         auth::OAuthState   state) {
     return Cmd::task(
-        [code = std::move(code),
-         verifier = std::move(verifier),
-         state = std::move(state)]
-        (jaal::Sink<Msg> out, std::stop_token) {
+        [](jaal::Sink<Msg> out, std::stop_token,
+           auth::OAuthCode code, std::string verifier, std::string state) {
             try {
                 auto r = auth::exchange_code(code, verifier, state);
                 out.send(Msg{LoginExchanged{std::move(r)}});
@@ -2241,7 +2239,8 @@ Cmd oauth_exchange(auth::OAuthCode    code,
                     auth::OAuthErrorKind::Network,
                     "exchange threw: unknown exception"})}});
             }
-        });
+        },
+        std::move(code), std::move(verifier.value), std::move(state.value));
 }
 
 Cmd load_threads_async() {
@@ -2324,9 +2323,9 @@ Cmd probe_host_async(std::string spec, std::uint64_t attempt_id,
     // (configured path → /v1/models → Ollama /api/tags) and report the
     // DETECTED dialect. Bounded by probe_host's own 3s/6s timeouts, so the
     // modal's "probing…" state resolves quickly either way.
-    return Cmd::task([spec = std::move(spec), attempt_id,
-                           auth = std::move(auth)]
-                          (jaal::Sink<Msg> out, std::stop_token) {
+    return Cmd::task([](jaal::Sink<Msg> out, std::stop_token,
+                        std::string spec, std::uint64_t attempt_id,
+                        auth::AuthHeader auth) {
         HostProbed r;
         r.attempt_id = attempt_id;
         r.spec       = spec;
@@ -2405,7 +2404,7 @@ Cmd probe_host_async(std::string spec, std::uint64_t attempt_id,
             r.error = "probe failed";
         }
         out.send(Msg{std::move(r)});
-    });
+    }, std::move(spec), attempt_id, std::move(auth));
 }
 
 Cmd device_login_async(std::string provider, std::string provider_label,
@@ -2533,8 +2532,7 @@ Cmd codex_login_async(std::uint64_t attempt_id,
 
 Cmd refresh_oauth(std::string refresh_token) {
     return Cmd::task(
-        [refresh_token = std::move(refresh_token)]
-        (jaal::Sink<Msg> out, std::stop_token) {
+        [](jaal::Sink<Msg> out, std::stop_token, std::string refresh_token) {
             try {
                 auto r = auth::refresh_access_token_locked(
                     auth::RefreshToken{refresh_token});
@@ -2548,7 +2546,7 @@ Cmd refresh_oauth(std::string refresh_token) {
                     auth::OAuthErrorKind::Network,
                     "refresh threw: unknown exception"})}});
             }
-        });
+        }, std::move(refresh_token));
 }
 
 } // namespace agentty::app::cmd

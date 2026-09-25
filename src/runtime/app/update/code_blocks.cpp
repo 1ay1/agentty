@@ -696,7 +696,7 @@ Step codeblock_update(Model m, msg::CodeBlockMsg cm) {
             auto toast = set_status_toast(m, "copied clean block to clipboard");
             return {std::move(m),
                     Cmd::batch(
-                        Cmd::write_clipboard(std::move(body)),
+                        cmd::write_clipboard(std::move(body)),
                         std::move(toast))};
         },
         [&](CodeBlockRunFinished& e) -> Step {
@@ -753,7 +753,7 @@ Step codeblock_update(Model m, msg::CodeBlockMsg cm) {
             auto toast = set_status_toast(m, "output copied to clipboard");
             return {std::move(m),
                     Cmd::batch(
-                        Cmd::write_clipboard(std::move(body)),
+                        cmd::write_clipboard(std::move(body)),
                         std::move(toast))};
         },
         [&](CodeBlockResultDiscard) -> Step {

@@ -967,7 +967,7 @@ Cmd trim_frozen_if_oversized(Model& m) {
     auto debt = m.ui.frozen.harvest();
     if (debt.empty()) return Cmd::none();
 
-    return Cmd::commit_scrollback(std::move(debt));
+    return cmd::commit_scrollback(std::move(debt));
 }
 
 } // namespace agentty::app::detail

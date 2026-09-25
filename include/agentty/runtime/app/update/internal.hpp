@@ -253,7 +253,7 @@ bool live_tail_reveal_settled(const Model& m);
 
 // trim_frozen_if_oversized: when frozen exceeds a soft cap, drop the
 // oldest N blocks to keep maya's prev_cells working set bounded.
-// Returns Cmd::commit_scrollback(ScrollbackDebt) minted by the ledger
+// Returns cmd::commit_scrollback(ScrollbackDebt) minted by the ledger
 // from maya's own paint-recorded heights. No-op if under the cap.
 Cmd trim_frozen_if_oversized(Model& m);
 

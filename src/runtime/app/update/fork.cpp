@@ -214,7 +214,7 @@ Step fork_update(Model m, msg::ForkMsg fm) {
                        " · prior transcript readable on demand",
                 std::chrono::seconds{5});
             return {std::move(m),
-                    Cmd::batch(std::move(toast), Cmd::reset_inline())};
+                    Cmd::batch(std::move(toast), cmd::reset_inline())};
         },
     }, fm);
 }

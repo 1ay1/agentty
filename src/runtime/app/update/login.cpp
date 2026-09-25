@@ -1104,7 +1104,7 @@ Step login_copy_auth_url(Model m) {
         url = dw->browser_url.empty() ? dw->authorize_url : dw->browser_url;
     if (url.empty()) return done(std::move(m));
     (void)write_clipboard_text(url);   // native pbcopy/wl-copy/xclip
-    auto write_cmd = Cmd::write_clipboard(url);
+    auto write_cmd = cmd::write_clipboard(url);
     auto toast = set_status_toast(m, "authorize URL copied to clipboard",
                                   std::chrono::seconds{3});
     return {std::move(m), Cmd::batch(std::move(write_cmd), std::move(toast))};
@@ -1119,7 +1119,7 @@ Step login_copy_code(Model m) {
     if (!dw || dw->user_code.empty()) return done(std::move(m));
     auto code = dw->user_code;
     (void)write_clipboard_text(code);
-    auto write_cmd = Cmd::write_clipboard(code);
+    auto write_cmd = cmd::write_clipboard(code);
     auto toast = set_status_toast(m, "code " + code + " copied to clipboard",
                                   std::chrono::seconds{3});
     return {std::move(m), Cmd::batch(std::move(write_cmd), std::move(toast))};

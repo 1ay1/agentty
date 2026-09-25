@@ -7,7 +7,7 @@
 // point, showing a diff — instead of the user hunting for what changed.
 //
 // The channel is a single private OSC, emitted via maya's frame-safe
-// Cmd::emit_osc (out-of-band with rendering, cursor-neutral):
+// cmd::emit_osc (out-of-band with rendering, cursor-neutral):
 //
 //     OSC 5379 ; agentty ; <json> ST
 //

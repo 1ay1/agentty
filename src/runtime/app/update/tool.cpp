@@ -562,7 +562,7 @@ Step tool_update(Model m, msg::ToolMsg tm) {
             // Cooperating-host follow-along: when running on an editor PTY
             // (Emacs/vterm) that watches for our OSC, tell it which file the
             // agent just touched so it can open / reveal / diff it natively.
-            // Frame-safe (maya Cmd::emit_osc, out-of-band), and a complete
+            // Frame-safe (maya cmd::emit_osc, out-of-band), and a complete
             // no-op on a normal terminal (integration_active() is false).
             Cmd host_cmd = Cmd::none();
             if (ui::host::integration_active()) {
@@ -571,7 +571,7 @@ Step tool_update(Model m, msg::ToolMsg tm) {
                     for (const auto& tc : msg_.tool_calls) {
                         if (tc.id != e.id || !tc.is_done()) continue;
                         if (auto osc = file_event_osc_for(tc))
-                            host_cmd = Cmd::emit_osc(kHostOsc, *osc);
+                            host_cmd = cmd::emit_osc(kHostOsc, *osc);
                         done_scan = true; break;
                     }
                     if (done_scan) break;

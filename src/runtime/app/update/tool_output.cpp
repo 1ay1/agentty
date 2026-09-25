@@ -103,7 +103,7 @@ Step tool_output_update(Model m, msg::ToolOutputMsg tm) {
             (void)write_clipboard_text(body);   // native pbcopy/wl-copy/xclip
             auto toast = set_status_toast(m, "tool output copied to clipboard");
             return {std::move(m), Cmd::batch(
-                Cmd::write_clipboard(std::move(body)),
+                cmd::write_clipboard(std::move(body)),
                 std::move(toast))};
         },
     }, tm);

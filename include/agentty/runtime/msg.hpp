@@ -782,7 +782,7 @@ struct LoginCursorLeft  {};
 struct LoginCursorRight {};
 struct LoginSubmit      {};
 // User pressed the "copy URL to clipboard" key while the OAuthCode
-// modal is up. The reducer issues a Cmd::write_clipboard with
+// modal is up. The reducer issues a cmd::write_clipboard with
 // the active authorize URL, then surfaces a brief status toast so
 // the user has visual confirmation the keystroke registered.
 struct LoginCopyAuthUrl {};
@@ -1041,7 +1041,7 @@ struct Quit {};
 struct NoOp {};
 // User-triggered "drop the renderer's cell cache and repaint from
 // scratch". Bound to Ctrl-L (universal terminal redraw convention).
-// Dispatches `Cmd::force_redraw()`, which mirrors the SIGWINCH
+// Dispatches `cmd::force_redraw()`, which mirrors the SIGWINCH
 // coherence-collapse — no scrollback wipe, just an in-place rebuild
 // of `prev_cells` from the current canvas. Doubles as a debug hatch
 // when something visibly desyncs.

@@ -479,7 +479,7 @@ Step smart_paste_from_clipboard(Model m) {
             maya::clipboard_rx_bytes().load(std::memory_order_relaxed);
         return {std::move(m),
                 Cmd::batch(
-                    Cmd::query_clipboard(),
+                    cmd::query_clipboard(),
                     std::move(toast),
                     Cmd::after(deadline,
                                           Msg{ClipboardQueryTimeout{seq}}))};

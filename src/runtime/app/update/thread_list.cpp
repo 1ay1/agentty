@@ -97,7 +97,7 @@ using maya::overload;
     // explicit, user-initiated content swap. `\x1b[3J` wipes saved-lines
     // (including pre-agentty shell history), acceptable precisely because
     // the user asked to switch threads. Do NOT extend it to per-turn paths.
-    return Cmd::reset_inline();
+    return cmd::reset_inline();
 }
 
 Step thread_list_update(Model m, msg::ThreadListMsg tm) {
@@ -187,7 +187,7 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
         //   wire effect.
         //
         // Why NOT force_redraw:
-        //   Cmd::force_redraw demotes Synced → Stale, routing the
+        //   cmd::force_redraw demotes Synced → Stale, routing the
         //   next render through compose case (B). Case (B)'s
         //   scroll-to-fit branch (scroll_n > 0) emits \n at the
         //   viewport bottom when the new frame is taller than the
@@ -487,7 +487,7 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
             // `\x1b[3J` cost (wipes the user's pre-agentty shell
             // scrollback) is acceptable because the user explicitly
             // asked for the content swap (picker select).
-            return {std::move(m), Cmd::reset_inline()};
+            return {std::move(m), cmd::reset_inline()};
         },
     }, tm);
 }

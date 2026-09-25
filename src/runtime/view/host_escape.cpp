@@ -69,7 +69,7 @@ file_event_osc(std::string_view kind, std::string_view path,
 
     // OSC 5379 ; agentty ; {"event":"file","kind":..,"path":..,"line":N}
     // We return only the OSC PAYLOAD (everything after "ESC ] <code> ;"); the
-    // caller hands 5379 + this to maya's Cmd::emit_osc, which prepends the
+    // caller hands 5379 + this to maya's cmd::emit_osc, which prepends the
     // "ESC ] 5379 ;" and appends the ST terminator.
     std::string out = "agentty;{\"event\":\"file\",\"kind\":\"";
     append_json_escaped(out, kind);

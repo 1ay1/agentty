@@ -321,7 +321,7 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                 m, "rewound \xc2\xb7 files restored, prompt back in composer",
                 std::chrono::seconds{5});
             return {std::move(m),
-                    Cmd::batch(Cmd::reset_inline(), std::move(toast))};
+                    Cmd::batch(cmd::reset_inline(), std::move(toast))};
         },
         [&](TerminalFocus& e) -> Step {
             m.ui.terminal_focused = e.focused;
@@ -902,7 +902,7 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             //     resize stays soft (case-(B), no scrollback wipe).
             //     Either way it's a passive consequence of the
             //     resize event, not bound to a keystroke.
-            return {std::move(m), Cmd::force_redraw()};
+            return {std::move(m), cmd::force_redraw()};
         },
         [&](ClearStatus& e) -> Step {
             // No-op if the user (or another handler) wrote a newer
