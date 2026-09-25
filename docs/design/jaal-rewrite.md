@@ -200,3 +200,46 @@ machine we currently test by hand.
   `expect_effect<save_settings>(1)`.
 - `AgenttyApp` runs on `jaal::headless` with no terminal.
 - The stale-turn guards are gone and the tests that covered them still pass.
+
+## Where it actually landed
+
+All four, with one documented exception.
+
+**`deps()` in `update/`: one call left**, `refresh_record`'s. It is not
+scaffolding — `provider_keys` is the one field the Model does not own,
+because the credential helpers (`credentials::add_key`, `vault::key_clear`,
+`account_switch`) write `settings.json` directly from paths that have no
+`Deps`. A reducer that touches keys has to re-read first. The seam itself is
+gone from every other reducer: persistence is four effects
+(`runtime/store_fx.hpp`) run by `app::Host`, and `new_thread_id` /
+`title_from` turned out to be pure functions that never needed erasing.
+
+**Effect-asserting tests exist** — `tests/reducer_effects_test.cpp`, no deps
+and no disk. Tests that assert on the store use `agtest::fx::run` to play
+the host's part, which is stricter than the old seam: a save only appears
+if the arm actually returned it.
+
+**The turn did NOT become a `Sub::stream`, and does not need to.** Step 6
+assumed the staleness guards were the cost of a turn being a task. They
+weren't: `phase::Active` holds the turn's entire state — cancel token,
+retry budgets, timing — *inside* the variant, so leaving `Streaming`
+destroys it and a late message from a dead turn has nothing to corrupt.
+Staleness is unrepresentable rather than guarded against. `grep 'm.s.active()'`
+in `update/stream.cpp` returns nothing.
+
+The login workers DID become keyed sources, because their bug was real:
+as one-shot tasks their `stop_token` only fired at kernel shutdown, so Esc
+left a worker polling for the rest of its 900 s budget. That is the case
+`Sub::stream` is for — work that must stop when the program stops asking.
+
+**Two hooks failed silently before they were found**, both the same shape:
+jaal detects optional hooks with a `requires` test, so a signature it
+cannot call reads as "this doesn't exist" rather than as an error.
+`AgenttyApp::init` kept the old `pair<Model, Cmd> init()` — every saved
+setting and thread was loaded and thrown away. `terminal_host::attach` took
+an exact context type — a derived host never got attached, so agentty opened
+and accepted no keys. `tests/program_hooks_test.cpp` static-asserts both
+layers now, because nothing else would notice.
+
+Still open, and genuinely later: threads as `jaal::children<>`, `sim<P>`
+over the turn state machine, `resume_from`/`journal` for crash recovery.
