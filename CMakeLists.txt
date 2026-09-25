@@ -323,7 +323,7 @@ function(agentty_objlib name)
     endif()
     # Header-only access to the linked libs (no actual linking for OBJECT).
     target_link_libraries(${name} PRIVATE
-        maya::maya
+        maya::app
         nlohmann_json::nlohmann_json
         simdjson::simdjson
         nghttp2::nghttp2
@@ -409,7 +409,7 @@ else()
     target_compile_definitions(agentty PRIVATE AGENTTY_MCP=0)
 endif()
 target_link_libraries(agentty PRIVATE
-    maya::maya
+    maya::app
     acp::acp
     nlohmann_json::nlohmann_json
     simdjson::simdjson
