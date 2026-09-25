@@ -1089,7 +1089,7 @@ std::optional<Msg> on_composer(ComposerKeyState s, const KeyEvent& ev) {
 
 } // namespace
 
-Sub<Msg> subscribe(const Model& m) {
+Sub subscribe(const Model& m) {
     // THE routing decision: which overlay owns the keyboard. Computed once
     // per subscription rebuild by panel::top() — the SAME function the
     // view uses to decide what renders, so keys and pixels can never go to
@@ -1162,7 +1162,7 @@ Sub<Msg> subscribe(const Model& m) {
     std::optional<ui::login::State> login_state;
     if (in_login) login_state = m.ui.login;
 
-    auto key_sub = Sub<Msg>::on_key(
+    auto key_sub = Sub::on(maya::on_key{}, 
         [=, login_state = std::move(login_state)](const KeyEvent& ev) -> std::optional<Msg> {
             // ^C quits from ANYWHERE, before overlay routing. Every modal
             // picker's handler returns UNCONDITIONALLY (the dispatch below
@@ -1294,7 +1294,7 @@ Sub<Msg> subscribe(const Model& m) {
             return on_composer(composer_state, ev);
         });
 
-    auto paste_sub = Sub<Msg>::on_paste(
+    auto paste_sub = Sub::on(maya::on_paste{}, 
         [in_login, settings_list_adding,
          rag_editing   = rag_form.editing,
          smart_editing = smart_form_snap.editing,
@@ -1388,7 +1388,7 @@ Sub<Msg> subscribe(const Model& m) {
     // Terminal window focus (?1004, maya enables it in inline mode).
     // Gates the hardware caret: unfocused ⇒ the composer stops emitting
     // its caret anchor and the real cursor parks + hides.
-    auto focus_sub = Sub<Msg>::on_focus(
+    auto focus_sub = Sub::on(maya::on_focus{}, 
         [](bool focused) -> Msg { return TerminalFocus{focused}; });
 
     // Tick drives every time-based animation. THREE gates must agree on
@@ -1398,11 +1398,11 @@ Sub<Msg> subscribe(const Model& m) {
     // the visual hash (app/program.hpp) lets the wake reach view(). The
     // per-term rationale lives on animation_demand's definition above.
     if (animation_demand(m)) {
-        auto tick = Sub<Msg>::every(streaming_tick_period(), Tick{});
-        return Sub<Msg>::batch(std::move(key_sub), std::move(paste_sub),
+        auto tick = Sub::every(streaming_tick_period(), Tick{});
+        return Sub::batch(std::move(key_sub), std::move(paste_sub),
                                std::move(focus_sub), std::move(tick));
     }
-    return Sub<Msg>::batch(std::move(key_sub), std::move(paste_sub),
+    return Sub::batch(std::move(key_sub), std::move(paste_sub),
                            std::move(focus_sub));
 }
 

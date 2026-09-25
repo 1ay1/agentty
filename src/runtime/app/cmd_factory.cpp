@@ -997,21 +997,61 @@ Cmd launch_stream(Model& m) {
             m.d.smart.subagent_routing() ? 1 : 0,
             compacting ? 1 : 0);
 
+    // Everything the worker needs, as ONE value.
+    //
+    // jaal wants a captureless body with its inputs as arguments, and there
+    // are eighteen of them here. Eighteen parameters in a fixed order is a
+    // silent-swap waiting to happen — two ints and three strings adjacent,
+    // no compiler help — so they travel as a named struct instead. Same
+    // guarantee (the runtime copies it in, the body owns it), one argument,
+    // and every field reads at the use site.
+    //
+    // Plain aggregate on purpose: jaal walks it field by field to prove it's
+    // Sendable, so this needs no opt-in and stays honest if someone adds a
+    // borrowed field later — it stops compiling.
+    struct TurnInputs {
+        Thread              thread;
+        bool                compacting;
+        CompactionStyle     compaction_style;
+        int                 compaction_ceiling;
+        int                 context_max;
+        int                 retry_count;
+        bool                orchestrate;
+        smart::RoleProfile  turn_profile;
+        smart::Complexity   turn_complexity;
+        std::string         session_key;
+        std::string         model_id;
+        std::string         compaction_model;
+        int                 compaction_model_window;
+        std::string         effort;
+        std::optional<bool> model_supports_tools;
+        std::optional<bool> model_supports_vision;
+        int                 model_context_window;
+        auth::AuthHeader    auth;
+        http::CancelTokenPtr cancel;
+    };
+
     return Cmd::task(
-        [thread = std::move(thread_snapshot),
-         compacting, compaction_style, compaction_ceiling, context_max, retry_count,
-         orchestrate, turn_profile, turn_complexity,
-         session_key = std::move(session_key),
-         model_id = std::move(model_id),
-         compaction_model = std::move(compaction_model),
-         compaction_model_window,
-         effort = std::move(effort),
-         model_supports_tools,
-         model_supports_vision,
-         model_context_window,
-         auth = std::move(auth),
-         cancel]
-        (jaal::Sink<Msg> out, std::stop_token) mutable {
+        [](jaal::Sink<Msg> out, std::stop_token, TurnInputs in) mutable {
+        auto& thread                  = in.thread;
+        const auto compacting         = in.compacting;
+        const auto compaction_style   = in.compaction_style;
+        const auto compaction_ceiling = in.compaction_ceiling;
+        const auto context_max        = in.context_max;
+        const auto retry_count        = in.retry_count;
+        const auto orchestrate        = in.orchestrate;
+        auto& turn_profile            = in.turn_profile;
+        const auto turn_complexity    = in.turn_complexity;
+        auto& session_key             = in.session_key;
+        auto& model_id                = in.model_id;
+        auto& compaction_model        = in.compaction_model;
+        const auto compaction_model_window = in.compaction_model_window;
+        auto& effort                  = in.effort;
+        const auto model_supports_tools  = in.model_supports_tools;
+        const auto model_supports_vision = in.model_supports_vision;
+        const auto model_context_window  = in.model_context_window;
+        auto& auth                    = in.auth;
+        auto& cancel                  = in.cancel;
         // Build wire payload off the UI thread.
         provider::Request req;
         req.model         = compacting ? std::move(compaction_model)
@@ -1359,7 +1399,28 @@ Cmd launch_stream(Model& m) {
         } catch (...) {
             guarded(StreamError{"stream backend: unknown exception"});
         }
-    });
+    },
+        TurnInputs{
+            .thread                  = std::move(thread_snapshot),
+            .compacting              = compacting,
+            .compaction_style        = compaction_style,
+            .compaction_ceiling      = compaction_ceiling,
+            .context_max             = context_max,
+            .retry_count             = retry_count,
+            .orchestrate             = orchestrate,
+            .turn_profile            = turn_profile,
+            .turn_complexity         = turn_complexity,
+            .session_key             = std::move(session_key),
+            .model_id                = std::move(model_id),
+            .compaction_model        = std::move(compaction_model),
+            .compaction_model_window = compaction_model_window,
+            .effort                  = std::move(effort),
+            .model_supports_tools    = model_supports_tools,
+            .model_supports_vision   = model_supports_vision,
+            .model_context_window    = model_context_window,
+            .auth                    = std::move(auth),
+            .cancel                  = cancel,
+        });
 }
 
 std::uint64_t next_tool_exec_seq() noexcept {

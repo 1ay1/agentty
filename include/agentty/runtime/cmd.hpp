@@ -178,13 +178,15 @@ using Cmd = jaal::Cmd<Msg,
 /// always in and need no naming; these are maya's, the things only a
 /// TERMINAL reports.
 ///
-/// agentty names only the three it actually uses. It has no mouse handler and
-/// no focus handler, and leaving them out of the row is not cosmetic: it is
-/// the difference between "this program needs a mouse" and "this program
-/// would work on a host that has none".
+// agentty names four. The omission that matters is on_mouse: there is no
+// mouse handler anywhere in the runtime and main.cpp never sets
+// Options::mouse, so it stays out. That isn't cosmetic — the row is the
+// difference between "this program needs a mouse" and "this program would
+// run on a host that has none".
 using Sub = jaal::Sub<Msg,
     maya::on_key,      // the composer and every panel's keymap
     maya::on_paste,    // bracketed paste, and the OSC 52 clipboard reply
+    maya::on_focus,    // ?1004; gates the hardware caret when unfocused
     maya::on_resize    // relayout; the inline frame's width changed
 >;
 
