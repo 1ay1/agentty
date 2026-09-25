@@ -1,45 +1,64 @@
 # agentty on jaal: the design
 
-This branch is not a port. Moving `maya::Cmd` to `jaal::Cmd` is a rename
-and a weekend; doing only that would carry every shortcut the old runtime
-allowed into a runtime built to forbid them.
+This branch is not a port. Swapping `maya::Cmd` for `jaal::Cmd` is a rename
+and a weekend; doing only that would carry every workaround the old runtime
+forced into a runtime that doesn't need them.
 
-What follows is what agentty should look like when jaal's Elm model is
-taken seriously, what it looks like today, and the order to close the gap.
+The important discovery, on reading jaal properly: **jaal was designed
+against agentty's shape.** D36 in `jaal/docs/decisions.md` cites agentty's
+232 message types and 20 hand-grouped domains by name, and measures the
+rebuild costs we hit. D29's `children<>` exists for "agentty's sessions".
+D7's deep `Sendable` "found a real race in agentty (`LazyBytes`, 19 TSan
+reports → 0) on its first run against real code".
+
+So most of this work is not writing adapters. It is **deleting the
+machinery agentty built because the old runtime had none**, and letting
+jaal's version do the job it was built from.
 
 ## The three properties we are buying
 
-jaal's Elm loop is worth having because of what it makes TRUE, not because
-of how it spells things:
-
 1. **`update` is pure.** A reducer takes the model and a message and
-   produces the next model plus a DESCRIPTION of what should happen. It
-   reads no globals, touches no disk, starts no work. You can call it in a
-   test with no world attached and get the whole behaviour.
-2. **Effects are values.** `Cmd` is data. The runtime performs it. That
-   means a test asserts `expect_effect<save_settings>(1)` instead of
-   mocking a filesystem, and replay can fold a recorded result without
-   re-running the child.
-3. **The host is swappable.** A program that only names its effects in its
-   `Cmd` type can run on the terminal host, on `jaal::headless` in a test,
-   or on a future ACP host — and the compiler checks the host can serve
-   what the program asks for.
+   produces the next model plus a DESCRIPTION of what should happen. No
+   globals, no disk, no threads started. Callable in a test with no world.
+2. **Effects are values.** `Cmd` is data; the runtime performs it. A test
+   asserts `expect_effect<save_settings>(1)` instead of mocking a
+   filesystem, and replay (D23) folds a recorded run without re-running it.
+3. **The host is swappable.** A program that names its effects in its `Cmd`
+   type runs on the terminal host, on `jaal::headless` in a test, or on a
+   future ACP host — and the compiler checks the host can serve every one.
 
-Every item below is here because it breaks one of those three.
+## What jaal already has that agentty hand-rolled
+
+This is the heart of the redesign. Each row is code we delete, not port.
+
+| agentty today | jaal | why theirs is better |
+|---|---|---|
+| `Deps` — a mutable global of 11 `std::function`s, installed at startup, reached from 84 places in reducers | effects as data | the reducer says *what*; the host does it. No global, no erasure, testable without a world |
+| by-hand staleness: `for_provider` stamped into a fetch, compared at delivery | `jaal::debounce<T>` + token | D23's exact bug. `ready(token)` is correct where comparing values is not ("ab" → "a" matches a stale timer) |
+| `auth_snapshot()` + a mutex, because workers read auth the UI thread swaps | `jaal::shared<T>` (`Sendable && Frozen`) | no writer exists, so no race to guard. D8 |
+| `Cmd::task_isolated` + agentty's own thread bookkeeping | `task` with `placement::isolated` | stop tokens, bounded shutdown (D20), abandonment that's safe under ASan/TSan |
+| streaming turn as a task that posts back | `Sub::stream(key, body, args...)` | D21: runs while subscribed, cancelled when not, and **a cancelled stream cannot land a message in a model that no longer expects it** — which is the class of bug `m.s.active()` guards are working around |
+| 23 domain reducers dispatched by a hand-written 10-arm `std::visit` | D36 tree routing + `handled_as_group` | jaal descends the variant tree itself; a missing leaf is a compile error that names the domain file to open |
+| `sizeof(Msg)` pinned by the heaviest leaf; 19 s rebuilds | same tree, measured | 1.19 s per domain TU, 1.77 s for the loop TU |
+
+The `children<>` row is deliberately left out of step 1: agentty's threads
+are a list of child conversations and `jaal::children<>` is the right shape
+for them, but that is a bigger change than this branch should start with.
+It is noted at the end.
 
 ## What is actually wrong today
 
-Measured on this tree, not guessed:
+Measured on this tree:
 
-| | count | what it breaks |
+| | count | breaks |
 |---|---|---|
-| `deps()` reads inside reducers | 84 | (1) purity |
-| ...of which reach the filesystem seam | 36 | (1) and (2) |
-| `pair<Model, Cmd>` returns | 172 | ceremony only |
+| `deps()` reads inside reducers | 84 | (1) |
+| ...of which reach the filesystem seam | 36 | (1), (2) |
+| `pair<Model, Cmd>` returns | 172 | ceremony |
 | `maya::Cmd<Msg>` sites | 126 | (3) |
-| effect factories reading global provider/auth state | 24 | (1) |
+| effect factories reading global provider/auth | 24 | (1) |
 
-### The one that matters: reducers call the world
+### The root cause is a missing type
 
 `update/appearance.cpp`, verbatim:
 
@@ -51,54 +70,36 @@ void persist(const Model& m) {
 }
 ```
 
-Be precise about what is and isn't wrong here, because the existing code
-already solved the obvious problem. `save_settings` is WRITE-BEHIND: it
-publishes to an in-memory cache and a worker does the fsync, explicitly so
-no reducer can block on settings IO "even if it tries". That was the right
-fix for the old runtime and it works. `write_file` (diff-review, 4 sites)
-is the one that still writes synchronously, and it is user-initiated.
+Be fair to this code: `save_settings` is already WRITE-BEHIND, explicitly
+so a reducer can't stall a frame on disk. **This is not a latency bug.**
 
-So this is not a latency bug. It is a PURITY bug, and the cost is
-structural:
-
-- `update` cannot be called without a world attached. Testing a reducer
-  means installing a `Deps` with seven closures in it.
-- `Deps` must exist at all — a mutable global, installed at startup,
-  reached through type erasure, because reducers need to call out.
-- The read-modify-write says the Model is not trusted as the source of
-  truth: we re-read settings from the seam to edit one field we already
-  have in `m.d.ui`.
-- The write-behind cache exists to make an impure reducer safe. Make the
-  reducer pure and the cache has nothing left to protect.
-
-jaal will not stop you doing any of this. Nothing stops you. But it is the
-difference between "we use an Elm runtime" and "we are Elm".
-
-## The target design
-
-### 1. Persistence is an effect
-
-First, the thing that forces the read-modify-write. `store::Settings` has
-~10 fields; the Model does not hold one. It scatters them — `model_id`,
-`profile`, `ui`, `favorite_models`, `provider`, `provider_models`,
-`context_overrides`, `recent_models` all live as separate members of
-`m.d`, and `provider_keys` doesn't live in the Model at all (it is sealed
-to a different file). So a reducer that wants to persist ONE field has no
-way to produce a whole `Settings` — it must re-read the last one from the
-seam and patch it. The impurity is downstream of a missing type.
-
-So: give the Model the settings it owns.
+The question is why the READ is there, and `init()` answers it:
 
 ```cpp
-struct Model {
-    struct Domain {
-        store::Settings persisted;   // the whole record, one field
-        // ...everything else that is NOT persisted
-    };
+auto settings = deps().load_settings();
+m.d.model_id           = settings.model_id;
+m.d.profile            = settings.profile;
+m.d.ui                 = settings.ui;
+m.d.show_changes_strip = settings.show_changes_strip;
+m.d.show_reasoning     = settings.show_reasoning;
+// ...~8 more
+```
+
+`init()` UNPACKS `store::Settings` field-by-field into `m.d`. The Model
+never holds the record. So a reducer that changes one preference has no way
+to produce a `Settings` to save — it must read the last one back and patch
+it. **The impurity is downstream of a missing field.**
+
+Give `Domain` the record:
+
+```cpp
+struct Domain {
+    store::Settings persisted;   // the whole thing, one field
+    // ...everything NOT persisted
 };
 ```
 
-and then persisting is a value, with nothing to read first:
+and persisting becomes a value with nothing to read first:
 
 ```cpp
 struct SaveSettings { store::Settings s; };
@@ -110,105 +111,92 @@ Cmd update(Model& m, AppearanceThemeChanged e) {
 }
 ```
 
-`provider_keys` stays out of the Model and out of `Settings`-at-rest, as
-it is today: the host's save handler merges the sealed key map back in.
-That is a host concern (it owns the keystore), not a reducer's.
+`provider_keys` stays sealed outside the Model as it is today; the host's
+save handler merges it back. That is a host concern — it owns the keystore.
 
-The host performs it, off the UI thread, coalesced — the same write-behind
-guarantee `Deps::save_settings` gives today, except now it is the runtime's
-job instead of a closure the reducer calls. Note what fell out: no
-`load_settings()` first. The Model already holds the settings; if it
-didn't, the reducer had no business editing them.
+**This deletes `Deps`.** Every member is either an effect (`save_thread`,
+`delete_thread`, `write_file`) or a pure function that never needed erasing
+(`title_from`, `new_thread_id`). The write-behind cache goes too: it exists
+to make an impure reducer safe, and the runtime already coalesces effects.
 
-**This deletes `Deps` entirely.** Everything in it is either an effect
-(`save_*`, `write_file`, `delete_thread`) or a pure function that never
-needed erasing (`title_from`, `new_thread_id`). The write-behind cache
-goes with it: the runtime already coalesces effects.
+## The streaming turn is a stream
 
-### 2. Effect factories take what they need
+The biggest structural win, and the one I'd have missed without reading
+D21/D32. Today a turn is a task that posts messages back, and the reducers
+carry `m.s.active()` guards so a late message from a cancelled turn doesn't
+corrupt a new one.
 
-Today `fetch_models()` reaches for `provider::active()` and
-`auth_snapshot()` from inside the task body, on a worker thread, with a
-mutex to make the race survivable. The mutex is a symptom: the effect is
-reading state it wasn't given.
+jaal's answer:
 
 ```cpp
-// before: fetch_models() — reads active provider + auth from globals
-// after:  the reducer, which HAS the model, says which provider
-Cmd update(Model& m, ProviderSwitched e) {
-    m.d.provider = e.id;
-    return Cmd::fx<fetch_models>({e.id, auth_for(m, e.id)});
+static Sub subscribe(const Model& m) {
+    if (!m.s.active()) return Sub::none();
+    return Sub::stream("turn/" + std::to_string(m.s.turn_id),
+                       run_turn, m.s.request);   // args by value, Sendable
 }
 ```
 
-The payload is `Sendable` by construction, the staleness check the
-factory does by hand (`for_provider` vs delivery-time provider) becomes
-comparing the reply's tag against the model, and the mutex disappears
-with the shared read.
+- Cancelling is *not asking any more* — the reducer clears `m.s`, and the
+  reconciler stops the stream by key (D11).
+- D32 closes the stale-message hole in the runtime: a stopped stream's
+  messages cannot be delivered. The guards become unnecessary rather than
+  merely redundant.
+- The turn id in the key means two turns can never reconcile to one
+  subscription (D29's prefix bug, already solved).
 
-### 3. `update` mutates, and says so
-
-jaal's shape is `Cmd update(Model&, Msg)`. 172 `return {std::move(m), ...}`
-become `return {}`. This is the least interesting change and the one that
-touches the most lines — do it mechanically, in its own commit, after the
-two above, so a rename never lands mixed with a behaviour change.
-
-The 10-arm `std::visit` in `update.cpp` stays as-is: it is already the
-right shape, it just loses the pair.
-
-### 4. One effect row, declared once
+## The effect row
 
 ```cpp
 using Cmd = jaal::Cmd<Msg,
     // agentty's own
     save_settings, save_thread, delete_thread, write_file,
-    launch_stream, run_tool, fetch_models, /* ... */
+    fetch_models, run_tool, /* ... */
     // maya's terminal effects
     maya::commit_scrollback, maya::write_clipboard, maya::query_clipboard,
     maya::reset_inline, maya::force_redraw, maya::emit_host_sequence,
     maya::suspend>;
 ```
 
-`jaal::require_host_for<Host, AgenttyApp>()` then proves, at compile
-time, that the host can serve every one. That is property (3): the ACP
-host we keep talking about becomes a host that implements the non-terminal
-subset, and the compiler tells us exactly which effects it still owes.
+`jaal::require_host_for<Host, AgenttyApp>()` then proves at compile time
+that the host serves every one. The ACP host becomes a host implementing
+the non-terminal subset, and the compiler lists what it still owes.
 
 ## What we do NOT change
 
-- **The Model's shape.** `d` / `s` / `ui` is already the right split:
-  persisted domain, live stream state, this session's panels.
-- **The Msg domain variants.** 23 domain arms with a unique-leaf proof is
-  good design; jaal changes nothing about it.
-- **`visual_hash`.** maya's host already uses it to skip `view()`. It
-  survives verbatim.
-- **The reducer file layout.** 23 files by domain, one concern each.
-- **Subscriptions.** `subscribe()` is already a pure function of the model
-  that returns data. It ports as a spelling change.
+- **The `d` / `s` / `ui` split.** Persisted domain, live stream, session UI
+  is the right decomposition.
+- **The 23 domain variants.** D36 says this is the shape that scales;
+  jaal's contribution is routing them for us, with `handled_as_group`.
+- **`visual_hash`.** maya's host uses it to skip `view()`. Survives.
+- **The reducer file layout.** One domain per TU is what keeps rebuilds at
+  1.19 s.
 
 ## Order
 
-Each step builds and passes tests on its own. No step needs the next one
-to make sense.
+Each step builds and passes tests alone.
 
-1. **Settings/threads become effects.** Delete `Deps`. Biggest behaviour
-   win, biggest diff, entirely independent of jaal — this is worth doing
-   even if the migration stalls.
-2. **Effect factories take their inputs.** Drops `auth_snapshot()`'s
-   mutex and the by-hand staleness checks.
-3. **Bump the maya submodule** to the jaal-rewrite maya, link `maya::app`.
-4. **`update` signature**, mechanically, 23 files.
-5. **`maya::Cmd` → `jaal::Cmd`**, declare the row, add
-   `require_host_for`.
-6. **Delete what the old runtime needed** and the new one doesn't.
+1. **`Settings` into the Model; persistence becomes an effect.** Deletes
+   `Deps`. Pure agentty work against the CURRENT maya — worth doing even if
+   the migration stalls.
+2. **Effect factories take their inputs.** Drops `auth_snapshot()`'s mutex
+   and the by-hand staleness stamps (`jaal::debounce` replaces them in 5).
+3. **Bump the maya submodule** to jaal-rewrite maya; link `maya::app`.
+4. **`update` signature** — `Cmd update(Model&, Leaf)`, mechanically, 23
+   files, 172 sites. Add `handled_as_group` per domain so D36 routes it.
+5. **`maya::Cmd` → `jaal::Cmd`**, declare the row, `require_host_for`.
+6. **The turn becomes a `Sub::stream`**; delete the staleness guards D32
+   makes unnecessary.
+7. **Delete `Deps`, `auth_snapshot`, the write-behind cache** and the rest
+   of the old runtime's scaffolding.
 
-Steps 1 and 2 are pure agentty work against the CURRENT maya. They are
-the ones that make this a redesign instead of a rename.
+Later, not this branch: threads as `jaal::children<>`, and `sim<P>`
+(D28) over the turn state machine — 900k seeds/second against a state
+machine we currently test by hand.
 
 ## How we will know it worked
 
-- `update` compiles and runs with no `deps()`, no filesystem, no globals.
-- A reducer test is: build a Model, send a Msg, assert on the new Model
-  and on `expect_effect<save_settings>(1)`.
-- `AgenttyApp` runs on `jaal::headless` with no terminal.
 - `grep -rn 'deps()' src/runtime/app/update/` prints nothing.
+- A reducer test is: build a Model, send a Msg, assert on the new Model and
+  `expect_effect<save_settings>(1)`.
+- `AgenttyApp` runs on `jaal::headless` with no terminal.
+- The stale-turn guards are gone and the tests that covered them still pass.
