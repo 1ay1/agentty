@@ -1342,7 +1342,7 @@ Cmd launch_stream(Model& m) {
         // The check matches the worker's own cancellation gate, so once
         // the token is tripped no further events flow into the reducer
         // from this worker.
-        auto guarded = [dispatch, cancel](Msg m) {
+        auto guarded = [out, cancel](Msg m) {
             if (cancel && cancel->is_cancelled()) return;
             out.send(Msg{std::move(m)});
         };
@@ -1384,7 +1384,7 @@ Cmd run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args,
          args = std::move(args),
          cancel = std::move(cancel),
          exec_seq]
-        (jaal::Sink<Msg> out, std::stop_token) {
+        (jaal::Sink<Msg> sink, std::stop_token) {
             // Every result this worker sends carries its exec_seq, so the
             // reducer can drop it if the call it was started for is gone.
             auto out = [exec_seq](ToolExecOutput o) {
@@ -1397,8 +1397,8 @@ Cmd run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args,
             // cleared even if the tool throws, so the next tool run can't
             // inherit a stale dispatch lambda.
             agentty::tools::progress::Scope progress_scope{
-                [dispatch, id, exec_seq](std::string_view snapshot) {
-                    out.send(Msg{ToolExecProgress{id, std::string{snapshot},
+                [sink, id, exec_seq](std::string_view snapshot) {
+                    sink.send(Msg{ToolExecProgress{id, std::string{snapshot},
                                               exec_seq}});
                 }};
             agentty::tools::cancellation::Scope cancellation_scope{
@@ -1413,7 +1413,7 @@ Cmd run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args,
                 if (auto pre = tools::hooks::run_pre_tool(name.value,
                                                           args_dump);
                     pre.blocked) {
-                    out.send(Msg{out(ToolExecOutput{id, std::unexpected(
+                    sink.send(Msg{out(ToolExecOutput{id, std::unexpected(
                         tools::ToolError::unknown(
                             "blocked by pre_tool hook: " + pre.reason))})});
                     return;
@@ -1469,12 +1469,12 @@ Cmd run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args,
                     // Carry the structured FileChange(s) — single-file (edit/
                     // write/apply_patch) via change, multi-file (replace) via
                     // changes — into the reducer for diff-review.
-                    out.send(Msg{out(ToolExecOutput{id, std::move(result->text),
+                    sink.send(Msg{out(ToolExecOutput{id, std::move(result->text),
                                             std::move(result->change),
                                             std::move(result->changes),
                                             std::move(result->images)})});
                 } else {
-                    out.send(Msg{out(ToolExecOutput{id,
+                    sink.send(Msg{out(ToolExecOutput{id,
                         std::unexpected(std::move(result).error())})});
                 }
             } catch (const std::exception& e) {
@@ -1483,11 +1483,11 @@ Cmd run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args,
                 // the tool never gets stuck in Running with no terminal Msg.
                 AGT_LOG(Tool, Error, "tool.dispatch_throw", "name={} err={}",
                         name.value, e.what());
-                out.send(Msg{out(ToolExecOutput{id, std::unexpected(
+                sink.send(Msg{out(ToolExecOutput{id, std::unexpected(
                     tools::ToolError::unknown(
                         std::string{"dispatch error: "} + e.what()))})});
             } catch (...) {
-                out.send(Msg{out(ToolExecOutput{id, std::unexpected(
+                sink.send(Msg{out(ToolExecOutput{id, std::unexpected(
                     tools::ToolError::unknown("dispatch error: unknown exception"))})});
             }
         });
@@ -2272,7 +2272,7 @@ Cmd load_plugins_async(bool reconnect) {
     // m.ui.plugins — the view reads THAT, never the global pool. This is the
     // Cmd→Msg discipline that makes the panel a pure function of the Model.
     return Cmd::task_isolated(
-        [reconnect](jaal::Sink<Msg> out, std::stop_token) {
+        [](jaal::Sink<Msg> out, std::stop_token, bool reconnect) {
             if (reconnect) {
                 // Force the connect. On a COLD start nothing has accessed the
                 // registry yet, so the pool is unbuilt — touching registry()
@@ -2284,7 +2284,7 @@ Cmd load_plugins_async(bool reconnect) {
                 (void)tools::reload_mcp_plugins();
             }
             out.send(Msg{PluginsUpdated{mcp::plugin_model()}});
-        });
+        }, reconnect);
 }
 
 Cmd load_thread_async(ThreadId id) {
@@ -2294,7 +2294,7 @@ Cmd load_thread_async(ThreadId id) {
     // the load_threads_async policy and keeps the per-thread parse
     // off the same pool that tools/stream contend for.
     return Cmd::task_isolated(
-        [id = std::move(id)](jaal::Sink<Msg> out, std::stop_token) {
+        [](jaal::Sink<Msg> out, std::stop_token, ThreadId id) {
             try {
                 auto loaded = deps().load_thread(id);
                 if (loaded) {
@@ -2309,7 +2309,7 @@ Cmd load_thread_async(ThreadId id) {
             } catch (...) {
                 out.send(Msg{ThreadLoaded{Thread{}}});
             }
-        });
+        }, std::move(id));
 }
 
 std::uint64_t next_codex_login_attempt_id() noexcept {
@@ -2409,18 +2409,28 @@ Cmd probe_host_async(std::string spec, std::uint64_t attempt_id,
 
 Cmd device_login_async(std::string provider, std::string provider_label,
                             std::uint64_t attempt_id,
-                            std::shared_ptr<std::atomic_bool> cancel) {
+                            std::shared_ptr<std::atomic_bool> /*cancel*/) {
     // Native OAuth device flow, provider-generic. Requests a one-time code
     // (dispatched to the modal via DeviceCodeReady), then block-polls until the
     // user approves. Every message carries provider + attempt_id so a stale
-    // worker can't complete a newer login; Esc trips `cancel` for cooperative
-    // shutdown. Runs isolated because login() blocks while the user signs in.
+    // worker can't complete a newer login. Runs isolated because login()
+    // blocks while the user signs in.
+    //
+    // Cancellation is the stop_token, not the shared_ptr<atomic_bool> this
+    // used to carry. jaal refuses a shared_ptr in a task argument on purpose
+    // (core/sendable.hpp: "views and shared_ptr/weak_ptr never") — a shared
+    // mutable flag is two threads writing one object, which is the thing
+    // Sendable exists to stop. Every task gets a stop_token for free, the
+    // runtime trips it on shutdown AND when the subscription that started the
+    // work goes away, so it is strictly more correct than the hand-rolled
+    // flag: Esc now cancels through the same channel as quit.
+    //
+    // The `cancel` parameter stays in the signature for one commit so the
+    // call sites don't have to change in the same diff; it is ignored.
     return Cmd::task_isolated(
-        [provider = std::move(provider), provider_label = std::move(provider_label),
-         attempt_id, cancel = std::move(cancel)](jaal::Sink<Msg> out, std::stop_token) {
-        const auto cancelled = [cancel] {
-            return cancel && cancel->load(std::memory_order_acquire);
-        };
+        [](jaal::Sink<Msg> out, std::stop_token stop, std::string provider,
+           std::string provider_label, std::uint64_t attempt_id) {
+        const auto cancelled = [&stop] { return stop.stop_requested(); };
         auto emit_code = [&](std::string bare_url, std::string browser_url,
                              std::string user_code) {
             out.send(Msg{DeviceCodeReady{
@@ -2485,22 +2495,22 @@ Cmd device_login_async(std::string provider, std::string provider_label,
         } catch (...) {
             done(provider + " login threw");
         }
-    });
+    },
+        std::move(provider), std::move(provider_label), attempt_id);
 }
 
 Cmd codex_login_async(std::uint64_t attempt_id,
-                           std::shared_ptr<std::atomic_bool> cancel) {
+                           std::shared_ptr<std::atomic_bool> /*cancel*/) {
     // Isolated because either OAuth mode blocks while the user signs in. Every
     // message carries attempt_id so a late worker cannot complete a newer
-    // login, and Esc trips cancel for cooperative polling shutdown.
+    // login. Cancellation is the stop_token — see device_login_async above for
+    // why the shared flag went away.
     return Cmd::task_isolated(
-        [attempt_id, cancel = std::move(cancel)](jaal::Sink<Msg> out, std::stop_token) {
-        const auto cancelled = [cancel] {
-            return cancel && cancel->load(std::memory_order_acquire);
-        };
+        [](jaal::Sink<Msg> out, std::stop_token stop, std::uint64_t attempt_id) {
+        const auto cancelled = [&stop] { return stop.stop_requested(); };
         try {
             auto r = provider::chatgpt::codex_login(
-                900, [attempt_id, &dispatch](
+                900, [attempt_id, out](
                          const provider::chatgpt::CodexDeviceCode& code) {
                     out.send(Msg{CodexDeviceCodeReady{
                         .attempt_id = attempt_id,
@@ -2527,7 +2537,7 @@ Cmd codex_login_async(std::uint64_t attempt_id,
                     "ChatGPT login threw: unknown exception"}),
             }});
         }
-    });
+    }, attempt_id);
 }
 
 Cmd refresh_oauth(std::string refresh_token) {
