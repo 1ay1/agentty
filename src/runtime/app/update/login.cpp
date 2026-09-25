@@ -1362,10 +1362,10 @@ Step token_refreshed(Model m, auth::TokenResult result) {
     // up the freshly-installed bearer from Deps.
     if (stream_parked) {
         return {std::move(m),
-            Cmd::batch(std::vector<Cmd>{
+            Cmd::batch(
                 std::move(toast_cmd),
                 Cmd::after(std::chrono::milliseconds{0},
-                                Msg{RetryStream{}})})};
+                                Msg{RetryStream{}}))};
     }
 
     // Drain any text the user queued while the refresh was in flight.
@@ -1382,8 +1382,8 @@ Step token_refreshed(Model m, auth::TokenResult result) {
         auto [mm, sub_cmd] = submit_message(std::move(m));
         m = std::move(mm);
         return {std::move(m),
-            Cmd::batch(std::vector<Cmd>{
-                std::move(toast_cmd), std::move(sub_cmd)})};
+            Cmd::batch(
+                std::move(toast_cmd), std::move(sub_cmd))};
     }
     return {std::move(m), std::move(toast_cmd)};
 }

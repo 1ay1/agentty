@@ -1437,8 +1437,8 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
     // disturbing whatever Cmd the matched arm produced. none() short-
     // circuits the common case to zero overhead.
     if (!proactive_refresh.is_none()) {
-        step.second = Cmd::batch(std::vector<Cmd>{
-            std::move(step.second), std::move(proactive_refresh)});
+        step.second = Cmd::batch(
+            std::move(step.second), std::move(proactive_refresh));
     }
     return step;
 }

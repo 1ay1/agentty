@@ -907,7 +907,7 @@ Cmd finalize_turn(Model& m, StopReason stop_reason) {
         m.ui.composer.queued.erase(m.ui.composer.queued.begin());
         auto [mm, sub_cmd] = submit_message(std::move(m));
         m = std::move(mm);
-        return Cmd::batch(std::vector<Cmd>{std::move(kp), std::move(sub_cmd)});
+        return Cmd::batch(std::move(kp), std::move(sub_cmd));
     }
 
     // LOOP mode (^B): the turn finished and the user armed a message to
@@ -944,7 +944,7 @@ Cmd finalize_turn(Model& m, StopReason stop_reason) {
         m.ui.composer.text        = m.ui.composer.loop_text;
         m.ui.composer.attachments = m.ui.composer.loop_attachments;
         m.ui.composer.cursor      = static_cast<int>(m.ui.composer.text.size());
-        return Cmd::batch(std::vector<Cmd>{std::move(kp), std::move(sub_cmd)});
+        return Cmd::batch(std::move(kp), std::move(sub_cmd));
     }
 
     // Settle freeze. agent_session pushes the assistant Turn into
@@ -1099,13 +1099,13 @@ Cmd finalize_turn(Model& m, StopReason stop_reason) {
             // goes through the timer heap and doesn't arrive until the next
             // step, costing a frame.
             auto compact_cmd = Cmd::send(Msg{CompactContext{}});
-            return Cmd::batch(std::vector<Cmd>{
-                std::move(kp), std::move(block_toast), std::move(compact_cmd)});
+            return Cmd::batch(
+                std::move(kp), std::move(block_toast), std::move(compact_cmd));
         }
     }
 
-    return Cmd::batch(std::vector<Cmd>{
-        std::move(kp), std::move(block_toast)});
+    return Cmd::batch(
+        std::move(kp), std::move(block_toast));
 }
 
 // ============================================================================

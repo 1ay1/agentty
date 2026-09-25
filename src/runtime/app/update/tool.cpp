@@ -608,7 +608,7 @@ Step tool_update(Model m, msg::ToolMsg tm) {
             if (host_cmd.is_none())
                 return {std::move(m), std::move(kick)};
             return {std::move(m), Cmd::batch(
-                std::vector<Cmd>{std::move(kick), std::move(host_cmd)})};
+                std::move(kick), std::move(host_cmd))};
         },
 
         // ── Permission ──────────────────────────────────────────────

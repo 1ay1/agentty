@@ -264,12 +264,12 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
                     Cmd cmd;
                     if (r == tools::plugin::EditResult::Ok) {
                         m.ui.plugins_loading = true;
-                        cmd = Cmd::batch(std::vector<Cmd>{
+                        cmd = Cmd::batch(
                             cmdf::load_plugins_async(/*reconnect=*/true),
                             set_status_toast(m,
                                 (want_disabled ? "disabled plugin '"
                                                : "enabled plugin '")
-                                + row.arg + "'")});
+                                + row.arg + "'"));
                     } else {
                         cmd = set_status_toast(m,
                                   "could not toggle '" + row.arg + "'");
@@ -305,11 +305,11 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
                         // No respawn (only the exclude filter changed), but
                         // the Model snapshot must reflect the new enabled set
                         // — re-snapshot the live pool (reconnect=false).
-                        cmd = Cmd::batch(std::vector<Cmd>{
+                        cmd = Cmd::batch(
                             cmdf::load_plugins_async(/*reconnect=*/false),
                             set_status_toast(m,
                                 (want_enabled ? "enabled tool '" : "disabled tool '")
-                                + row.arg2 + "' on " + row.arg)});
+                                + row.arg2 + "' on " + row.arg));
                     } else {
                         cmd = set_status_toast(m,
                             "could not toggle '" + row.arg2 + "'");
@@ -336,10 +336,10 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
                     Cmd cmd;
                     if (ok) {
                         m.ui.plugins_loading = true;
-                        cmd = Cmd::batch(std::vector<Cmd>{
+                        cmd = Cmd::batch(
                             cmdf::load_plugins_async(/*reconnect=*/true),
                             set_status_toast(m,
-                                "trusted project config — connecting…")});
+                                "trusted project config — connecting…"));
                     } else {
                         cmd = set_status_toast(m,
                             "could not record approval (no project mcp.json?)");
@@ -394,9 +394,9 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
             Cmd cmd;
             if (r == tools::plugin::EditResult::Ok) {
                 m.ui.plugins_loading = true;
-                cmd = Cmd::batch(std::vector<Cmd>{
+                cmd = Cmd::batch(
                     cmdf::load_plugins_async(/*reconnect=*/true),
-                    set_status_toast(m, "removed plugin '" + row.arg + "'")});
+                    set_status_toast(m, "removed plugin '" + row.arg + "'"));
             } else {
                 cmd = set_status_toast(m, "could not remove '" + row.arg + "'");
             }
@@ -520,8 +520,8 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
                 oo->index = std::clamp(oo->index, 0, std::max(0, cnt - 1));
             }
             return {std::move(m), Cmd::batch(
-                std::vector<Cmd>{
-                    std::move(reload), set_status_toast(m, r.message)})};
+                
+                    std::move(reload), set_status_toast(m, r.message))};
         },
     }, sm);
 }

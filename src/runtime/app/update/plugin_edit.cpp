@@ -251,9 +251,9 @@ Step plugin_edit_update(Model m, msg::PluginEditMsg pm) {
                         path, o->server, !on);
                     if (r == tools::plugin::EditResult::Ok) {
                         return {std::move(m), Cmd::batch(
-                            std::vector<Cmd>{
+                            
                                 cmdf::load_plugins_async(/*reconnect=*/true),
-                                set_status_toast(m, on ? "enabled" : "disabled")})};
+                                set_status_toast(m, on ? "enabled" : "disabled"))};
                     }
                     return {std::move(m),
                             set_status_toast(m, "could not write mcp.json")};
@@ -267,10 +267,10 @@ Step plugin_edit_update(Model m, msg::PluginEditMsg pm) {
                     if (r == tools::plugin::EditResult::Ok) {
                         tools::invalidate_mcp_catalog();
                         return {std::move(m), Cmd::batch(
-                            std::vector<Cmd>{
+                            
                                 cmdf::load_plugins_async(/*reconnect=*/false),
                                 set_status_toast(m, (on ? "enabled '" : "disabled '")
-                                                    + bare + "'")})};
+                                                    + bare + "'"))};
                     }
                     return {std::move(m),
                             set_status_toast(m, "could not toggle '" + bare + "'")};
@@ -295,13 +295,13 @@ Step plugin_edit_update(Model m, msg::PluginEditMsg pm) {
             if (row_id == pf::kApprove && !o->server.empty()) {
                 const fs::path path = config_target(*o, m);
                 if (tools::plugin::approve_server(path, o->server)) {
-                    return {std::move(m), Cmd::batch(std::vector<Cmd>{
+                    return {std::move(m), Cmd::batch(
                         cmdf::load_plugins_async(/*reconnect=*/true),
                         set_status_toast(m, "approved '" + o->server + "'"),
                         // Reopen once the reload lands so the pane reflects
                         // the post-approval state (trusted → connecting).
                         Cmd::after(std::chrono::milliseconds{50},
-                            Msg{OpenPluginEdit{o->server, o->project}})})};
+                            Msg{OpenPluginEdit{o->server, o->project}}))};
                 }
                 return {std::move(m), set_status_toast(m, "approve failed")};
             }
@@ -318,9 +318,9 @@ Step plugin_edit_update(Model m, msg::PluginEditMsg pm) {
                 auto r = tools::plugin::remove_server(path, name);
                 if (r == tools::plugin::EditResult::Ok) {
                     ascend(m);
-                    return {std::move(m), Cmd::batch(std::vector<Cmd>{
+                    return {std::move(m), Cmd::batch(
                         cmdf::load_plugins_async(/*reconnect=*/true),
-                        set_status_toast(m, "removed '" + name + "'")})};
+                        set_status_toast(m, "removed '" + name + "'"))};
                 }
                 return {std::move(m), set_status_toast(m, "remove failed")};
             }
@@ -351,16 +351,16 @@ Step plugin_edit_update(Model m, msg::PluginEditMsg pm) {
                     // Field-exit commit: written + applied, pane stays open.
                     // The catalog reload runs so the new value is live
                     // immediately (same as the toggle path).
-                    return {std::move(m), Cmd::batch(std::vector<Cmd>{
+                    return {std::move(m), Cmd::batch(
                         cmdf::load_plugins_async(/*reconnect=*/true),
-                        set_status_toast(m, "saved '" + spec.name + "'")})};
+                        set_status_toast(m, "saved '" + spec.name + "'"))};
                 }
                 const std::string toast = (add ? "added '" : "saved '")
                     + spec.name + "'";
                 ascend(m);
-                return {std::move(m), Cmd::batch(std::vector<Cmd>{
+                return {std::move(m), Cmd::batch(
                     cmdf::load_plugins_async(/*reconnect=*/true),
-                    set_status_toast(m, toast)})};
+                    set_status_toast(m, toast))};
             }
 
             return done(std::move(m));

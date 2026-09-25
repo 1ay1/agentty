@@ -2220,14 +2220,9 @@ Cmd probe_model_window(std::string model_id) {
         || !provider::openai::detail::is_local_endpoint(sel.openai_endpoint))
         return Cmd::none();
     return Cmd::task(
-        [model_id = std::move(model_id),
-         endpoint = sel.openai_endpoint,
-         // Resolved on the UI thread, like every other input: the body used
-         // to call auth_snapshot() itself, which is a worker reading state
-         // the UI thread swaps on a provider switch.
-         auth = auth_snapshot(),
-         for_provider = detail::active_provider_id()](
-            jaal::Sink<Msg> out, std::stop_token) {
+        [](jaal::Sink<Msg> out, std::stop_token,
+           std::string model_id, provider::openai::Endpoint endpoint,
+           auth::AuthHeader auth, std::string for_provider) {
             int w = 0;
             try {
                 w = provider::openai::probe_loaded_window(auth, endpoint,
@@ -2236,7 +2231,12 @@ Cmd probe_model_window(std::string model_id) {
             AGT_LOG(Wire, Info, "models.window_probe", "provider={} model={} window={}",
                     for_provider, model_id, w);
             out.send(Msg{ModelWindowProbed{for_provider, model_id, w}});
-        });
+        },
+        std::move(model_id), sel.openai_endpoint,
+        // Resolved on the UI thread, like every other input: the body used to
+        // call auth_snapshot() itself, which is a worker reading state the UI
+        // thread swaps on a provider switch.
+        auth_snapshot(), detail::active_provider_id());
 }
 
 Cmd fetch_models_for(std::string spec) {
