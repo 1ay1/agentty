@@ -22,6 +22,7 @@
 #include <maya/host/terminal.hpp>
 
 #include "agentty/io/persistence.hpp"
+#include "agentty/runtime/app/deps.hpp"
 #include "agentty/runtime/app/program.hpp"
 #include "agentty/runtime/store_fx.hpp"
 #include "agentty/tool/util/fs_helpers.hpp"
@@ -67,7 +68,25 @@ struct Host : maya::terminal_host<P> {
     // is nothing here borrowing from a Model that has since moved on.
     void handle(SaveThread e)   { persistence::save_thread(e.thread); }
     void handle(DeleteThread e) { persistence::delete_thread(e.id); }
-    void handle(SaveSettings e) { persistence::save_settings(e.settings); }
+
+    // Settings go through the write-behind seam, NOT straight to disk.
+    //
+    // One save is a load-modify-fsync-rename. Effects run on the loop
+    // thread, between two frames, and the appearance pane saves on every
+    // keystroke — so calling persistence::save_settings here would put a
+    // disk round-trip in the input path, which is the exact hitch
+    // runtime/app/settings_cache.hpp exists to remove. `deps().save_settings`
+    // is that seam (install_deps wraps the store in it, so there is no
+    // opt-in to forget): it publishes to memory, returns, and lets one
+    // worker do the IO, coalescing a held-down key into a single write.
+    //
+    // The drain happens once at teardown — the cache registers itself with
+    // util::teardown — so a save queued by the Quit arm still reaches disk.
+    //
+    // This is the one effect that goes through Deps rather than straight to
+    // persistence, and it is worth the asymmetry: the alternative is a
+    // second write-behind implementation living in the host.
+    void handle(SaveSettings e) { deps().save_settings(e.settings); }
 
     void handle(WriteFile e) {
         // Best-effort, exactly as the Deps seam was: diff-review reject
