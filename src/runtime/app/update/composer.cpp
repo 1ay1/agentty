@@ -478,10 +478,10 @@ Step smart_paste_from_clipboard(Model m) {
         m.ui.clipboard_rx_mark =
             maya::clipboard_rx_bytes().load(std::memory_order_relaxed);
         return {std::move(m),
-                maya::Cmd<Msg>::batch(
-                    maya::Cmd<Msg>::query_clipboard(),
+                Cmd::batch(
+                    Cmd::query_clipboard(),
                     std::move(toast),
-                    maya::Cmd<Msg>::after(deadline,
+                    Cmd::after(deadline,
                                           Msg{ClipboardQueryTimeout{seq}}))};
     }
 }
@@ -548,7 +548,7 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
     // handler use, so a fresh bearer is in place before Enter. Gated on
     // oauth_refresh_in_flight (no double-fire; TokenRefreshed clears it) and
     // throttled so key-repeat can't spam the token endpoint.
-    maya::Cmd<Msg> proactive_refresh = maya::Cmd<Msg>::none();
+    Cmd proactive_refresh = Cmd::none();
     {
         static std::chrono::steady_clock::time_point last_refresh_probe{};
         const auto now = std::chrono::steady_clock::now();
@@ -622,10 +622,10 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
                 // the reducer can see whether a refresh is already in flight,
                 // so it simply does not emit a second Cmd. One flag, one
                 // place, visible to tests.
-                maya::Cmd<Msg> git_cmd;
+                Cmd git_cmd;
                 if (!m.ui.git_refresh_inflight) {
                     m.ui.git_refresh_inflight = true;
-                    git_cmd = maya::Cmd<Msg>::task_isolated(
+                    git_cmd = Cmd::task_isolated(
                         [](std::function<void(Msg)> dispatch) {
                             refresh_git_signals();
                             dispatch(Msg{GitSignalsRefreshed{}});
@@ -1100,7 +1100,7 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
                     m.ui.clipboard_rx_mark = now;
                     const auto again = std::chrono::milliseconds{1500};
                     return {std::move(m),
-                            maya::Cmd<Msg>::after(again,
+                            Cmd::after(again,
                                 Msg{ClipboardQueryTimeout{e.seq}})};
                 }
             }
@@ -1437,7 +1437,7 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
     // disturbing whatever Cmd the matched arm produced. none() short-
     // circuits the common case to zero overhead.
     if (!proactive_refresh.is_none()) {
-        step.second = maya::Cmd<Msg>::batch(std::vector<maya::Cmd<Msg>>{
+        step.second = Cmd::batch(std::vector<Cmd>{
             std::move(step.second), std::move(proactive_refresh)});
     }
     return step;

@@ -42,7 +42,6 @@
 namespace agentty::app::detail {
 
 using json = nlohmann::json;
-using maya::Cmd;
 
 namespace {
 
@@ -304,8 +303,7 @@ json salvage_args(const ToolUse& tc) {
     return out;
 }
 
-maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
-    using maya::Cmd;
+Cmd finalize_turn(Model& m, StopReason stop_reason) {
     // Stream is over — drop the cancel handle so a stale Esc can't trip
     // the next turn's stream the moment it launches. Phase transitions
     // below (or in kick_pending_tools) drive whether active() flips off.
@@ -487,11 +485,11 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
             m = std::move(mm);
             return sub_cmd;
         }
-        if (m.s.status.empty()) return Cmd<Msg>::none();
+        if (m.s.status.empty()) return Cmd::none();
         auto stamp = m.s.status_until;
         auto ttl_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             m.s.status_until - now_ts);
-        return Cmd<Msg>::after(ttl_ms + std::chrono::milliseconds{50},
+        return Cmd::after(ttl_ms + std::chrono::milliseconds{50},
                                Msg{ClearStatus{stamp}});
     }
     bool any_truncated = false;
@@ -745,7 +743,7 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
             // counter persists so the kMaxTruncationRetries cap
             // works across retries within the turn.
             if (!reschedule_streaming(m.s.phase, [](phase::Active&) {}))
-                return Cmd<Msg>::none();   // late event from Idle: no-op
+                return Cmd::none();   // late event from Idle: no-op
             m.s.status = "retrying (upstream cut off)…";
             return cmd::launch_stream(m);
         }
@@ -899,7 +897,7 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
     auto kp = cmd::kick_pending_tools(m);
     // Set by the idle-settle block below when the reply carries runnable
     // shell blocks; batched into whichever return path fires.
-    Cmd<Msg> block_toast = Cmd<Msg>::none();
+    Cmd block_toast = Cmd::none();
 
     if (m.s.is_idle() && !m.ui.composer.queued.empty()) {
         auto& head = m.ui.composer.queued.front();
@@ -909,7 +907,7 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
         m.ui.composer.queued.erase(m.ui.composer.queued.begin());
         auto [mm, sub_cmd] = submit_message(std::move(m));
         m = std::move(mm);
-        return Cmd<Msg>::batch(std::vector<Cmd<Msg>>{std::move(kp), std::move(sub_cmd)});
+        return Cmd::batch(std::vector<Cmd>{std::move(kp), std::move(sub_cmd)});
     }
 
     // LOOP mode (^B): the turn finished and the user armed a message to
@@ -946,7 +944,7 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
         m.ui.composer.text        = m.ui.composer.loop_text;
         m.ui.composer.attachments = m.ui.composer.loop_attachments;
         m.ui.composer.cursor      = static_cast<int>(m.ui.composer.text.size());
-        return Cmd<Msg>::batch(std::vector<Cmd<Msg>>{std::move(kp), std::move(sub_cmd)});
+        return Cmd::batch(std::vector<Cmd>{std::move(kp), std::move(sub_cmd)});
     }
 
     // Settle freeze. agent_session pushes the assistant Turn into
@@ -1095,16 +1093,18 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
             // get to it) either lands after compaction finishes
             // (queueing for max ~1-2 turn-times) OR Esc-cancels
             // compaction and fires immediately.
-            auto compact_cmd = Cmd<Msg>::task(
-                [](std::function<void(Msg)> dispatch) {
-                    dispatch(CompactContext{});
-                });
-            return Cmd<Msg>::batch(std::vector<Cmd<Msg>>{
+            // Cmd::send, not a task: this dispatches ONE message and does
+            // no work. jaal added `send` for exactly this (D25) — a task
+            // would burn a pool thread to call dispatch(), and `after(0ms)`
+            // goes through the timer heap and doesn't arrive until the next
+            // step, costing a frame.
+            auto compact_cmd = Cmd::send(Msg{CompactContext{}});
+            return Cmd::batch(std::vector<Cmd>{
                 std::move(kp), std::move(block_toast), std::move(compact_cmd)});
         }
     }
 
-    return Cmd<Msg>::batch(std::vector<Cmd<Msg>>{
+    return Cmd::batch(std::vector<Cmd>{
         std::move(kp), std::move(block_toast)});
 }
 
@@ -1834,7 +1834,7 @@ Step stream_update(Model m, msg::StreamMsg sm) {
             // now can it report the served window. Probe the model that just
             // ran, while it's still the resident one. Cheap: a no-op Cmd for
             // hosted providers, a couple of localhost GETs otherwise.
-            cmd = maya::Cmd<Msg>::batch(std::move(cmd),
+            cmd = Cmd::batch(std::move(cmd),
                                         cmd::probe_model_window(std::move(ran_model)));
             // No force_redraw arming. The previous version armed
             // needs_force_redraw here so the next user input would
@@ -1966,7 +1966,7 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                         }))
                         return done(std::move(m));
                     return {std::move(m),
-                            Cmd<Msg>::after(delay, Msg{RetryStream{}})};
+                            Cmd::after(delay, Msg{RetryStream{}})};
                 }
 
                 // ── Adaptive shrink-retry on "prompt is too long" ──────────
@@ -2033,7 +2033,7 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                         m.s.status = "forking \xc2\xb7 trimming to fit…";
                         m.s.status_until = {};
                         return {std::move(m),
-                                Cmd<Msg>::after(std::chrono::milliseconds{100},
+                                Cmd::after(std::chrono::milliseconds{100},
                                                 Msg{RetryStream{}})};
                     }
                 }
@@ -2056,7 +2056,7 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                     klass == provider::ErrorClass::Cancelled ? 3 : 8};
                 m.s.status_until = now + ttl;
                 auto stamp = m.s.status_until;
-                auto status_cmd = Cmd<Msg>::after(
+                auto status_cmd = Cmd::after(
                     std::chrono::duration_cast<std::chrono::milliseconds>(ttl)
                         + std::chrono::milliseconds{50},
                     Msg{ClearStatus{stamp}});
@@ -2072,7 +2072,7 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                     m.ui.composer.queued.erase(m.ui.composer.queued.begin());
                     auto [mm, sub_cmd] = submit_message(std::move(m));
                     m = std::move(mm);
-                    return {std::move(m), Cmd<Msg>::batch(
+                    return {std::move(m), Cmd::batch(
                         std::move(status_cmd), std::move(sub_cmd))};
                 }
                 return {std::move(m), std::move(status_cmd)};
@@ -2219,9 +2219,9 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                             + " (all this model supports)";
                     auto toast = set_status_toast(m, note,
                                                   std::chrono::seconds{6});
-                    return {std::move(m), Cmd<Msg>::batch(
+                    return {std::move(m), Cmd::batch(
                         std::move(toast),
-                        Cmd<Msg>::after(std::chrono::milliseconds{50},
+                        Cmd::after(std::chrono::milliseconds{50},
                                         Msg{RetryStream{}}))};
                 }
             }
@@ -2281,9 +2281,9 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                     "this account lacks the 1M-context beta — fell back to "
                     "the standard 200K window and retried",
                     std::chrono::seconds{8});
-                return {std::move(m), Cmd<Msg>::batch(
+                return {std::move(m), Cmd::batch(
                     std::move(toast),
-                    Cmd<Msg>::after(std::chrono::milliseconds{50},
+                    Cmd::after(std::chrono::milliseconds{50},
                                     Msg{RetryStream{}}))};
             }
 
@@ -2378,9 +2378,9 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                             : "this model can't read images — retried "
                               "without them",
                         std::chrono::seconds{8});
-                    return {std::move(m), Cmd<Msg>::batch(
+                    return {std::move(m), Cmd::batch(
                         std::move(toast),
-                        Cmd<Msg>::after(std::chrono::milliseconds{50},
+                        Cmd::after(std::chrono::milliseconds{50},
                                         Msg{RetryStream{}}))};
                 }
             }
@@ -2582,7 +2582,7 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                 Message placeholder;
                 placeholder.role = Role::Assistant;
                 m.d.current.messages.push_back(std::move(placeholder));
-                auto retry_cmd = Cmd<Msg>::after(delay, Msg{RetryStream{}});
+                auto retry_cmd = Cmd::after(delay, Msg{RetryStream{}});
                 // Each retry with its delay and remaining budget: the two
                 // questions a stuck turn raises are "is it still trying?"
                 // and "why did it stop?", and both are answered by seeing
@@ -2694,7 +2694,7 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                     klass == provider::ErrorClass::Cancelled ? 3 : 6};
                 m.s.status_until = now + ttl;
                 auto stamp = m.s.status_until;
-                auto status_cmd = Cmd<Msg>::after(
+                auto status_cmd = Cmd::after(
                     std::chrono::duration_cast<std::chrono::milliseconds>(ttl)
                         + std::chrono::milliseconds{50},
                     Msg{ClearStatus{stamp}});
@@ -2785,7 +2785,7 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                 auto ttl = std::chrono::seconds{3};
                 m.s.status_until = now + ttl;
                 auto stamp = m.s.status_until;
-                auto status_cmd = Cmd<Msg>::after(
+                auto status_cmd = Cmd::after(
                     std::chrono::duration_cast<std::chrono::milliseconds>(ttl)
                         + std::chrono::milliseconds{50},
                     Msg{ClearStatus{stamp}});
@@ -2807,7 +2807,7 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                     m.ui.composer.queued.erase(m.ui.composer.queued.begin());
                     auto [mm, sub_cmd] = submit_message(std::move(m));
                     m = std::move(mm);
-                    return {std::move(m), Cmd<Msg>::batch(
+                    return {std::move(m), Cmd::batch(
                         std::move(status_cmd), std::move(sub_cmd))};
                 }
                 return {std::move(m), std::move(status_cmd)};

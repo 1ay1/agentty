@@ -238,7 +238,7 @@ void open_browser(const std::string& url);
 // One-shot channel from `auth::resolve()` (called pre-TUI from main()) to
 // `AgenttyApp::init()` (called from inside maya::run()). resolve() writes the
 // refresh token here if a background refresh is needed; init() takes it
-// to construct a `Cmd<Msg>::task(...)` that performs the refresh
+// to construct a `Cmd::task(...)` that performs the refresh
 // asynchronously and dispatches a `TokenRefreshed` Msg on completion.
 //
 // Both functions run on the main thread (sequentially: main → maya::run

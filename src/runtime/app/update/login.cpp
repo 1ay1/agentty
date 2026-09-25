@@ -35,7 +35,6 @@
 
 namespace agentty::app::detail {
 
-using maya::Cmd;
 using maya::overload;
 namespace login = agentty::ui::login;
 
@@ -338,7 +337,7 @@ Step host_probed(Model m, HostProbed r) {
         // A remedy needs longer to read than a success.
         std::chrono::seconds{r.probe_skipped ? 12 : 6});
     return {std::move(step.first),
-            maya::Cmd<Msg>::batch(std::move(step.second), std::move(found))};
+            Cmd::batch(std::move(step.second), std::move(found))};
 }
 
 // Canonical account/registry id for a provider selection — mirrors the
@@ -646,7 +645,7 @@ Step account_select(Model m) {
     // network round trip, and submit_message queues sends while the refresh
     // is in flight (oauth_refresh_in_flight), so the first turn on the new
     // account can't fire with the stale bearer.
-    maya::Cmd<Msg> refresh_cmd = maya::Cmd<Msg>::none();
+    Cmd refresh_cmd = Cmd::none();
     // UNIFORM: install the live header for the now-active account through the
     // central resolver. Anthropic/custom-host resolve a real header; the
     // oauth-native transports (ChatGPT/Copilot/Kimi) read their token from the
@@ -1105,10 +1104,10 @@ Step login_copy_auth_url(Model m) {
         url = dw->browser_url.empty() ? dw->authorize_url : dw->browser_url;
     if (url.empty()) return done(std::move(m));
     (void)write_clipboard_text(url);   // native pbcopy/wl-copy/xclip
-    auto write_cmd = Cmd<Msg>::write_clipboard(url);
+    auto write_cmd = Cmd::write_clipboard(url);
     auto toast = set_status_toast(m, "authorize URL copied to clipboard",
                                   std::chrono::seconds{3});
-    return {std::move(m), Cmd<Msg>::batch(std::move(write_cmd), std::move(toast))};
+    return {std::move(m), Cmd::batch(std::move(write_cmd), std::move(toast))};
 }
 
 Step login_copy_code(Model m) {
@@ -1120,10 +1119,10 @@ Step login_copy_code(Model m) {
     if (!dw || dw->user_code.empty()) return done(std::move(m));
     auto code = dw->user_code;
     (void)write_clipboard_text(code);
-    auto write_cmd = Cmd<Msg>::write_clipboard(code);
+    auto write_cmd = Cmd::write_clipboard(code);
     auto toast = set_status_toast(m, "code " + code + " copied to clipboard",
                                   std::chrono::seconds{3});
-    return {std::move(m), Cmd<Msg>::batch(std::move(write_cmd), std::move(toast))};
+    return {std::move(m), Cmd::batch(std::move(write_cmd), std::move(toast))};
 }
 
 Step login_open_browser_again(Model m) {
@@ -1137,7 +1136,7 @@ Step login_open_browser_again(Model m) {
         "opening browser\xe2\x80\xa6",
         std::chrono::seconds{2});
     return {std::move(m),
-        Cmd<Msg>::batch(std::move(open_cmd), std::move(toast))};
+        Cmd::batch(std::move(open_cmd), std::move(toast))};
 }
 
 Step login_exchanged(Model m, auth::TokenResult result) {
@@ -1270,9 +1269,9 @@ Step token_refreshed(Model m, auth::TokenResult result) {
                     "stream_parked={}", stream_parked ? 1 : 0);
             if (stream_parked)
                 return {std::move(m),
-                        Cmd<Msg>::after(std::chrono::milliseconds{0},
+                        Cmd::after(std::chrono::milliseconds{0},
                                         Msg{RetryStream{}})};
-            return {std::move(m), Cmd<Msg>::none()};
+            return {std::move(m), Cmd::none()};
         }
         // Refresh failed — surface the typed error in the bottom row.
         // The "error:" prefix triggers shortcut_row.cpp's danger
@@ -1346,9 +1345,9 @@ Step token_refreshed(Model m, auth::TokenResult result) {
                     "(account switched); keeping live header as-is");
             if (stream_parked)
                 return {std::move(m),
-                        Cmd<Msg>::after(std::chrono::milliseconds{0},
+                        Cmd::after(std::chrono::milliseconds{0},
                                         Msg{RetryStream{}})};
-            return {std::move(m), Cmd<Msg>::none()};
+            return {std::move(m), Cmd::none()};
         }
         agentty::app::update_auth(auth::make_auth_header(*on_disk));
     }
@@ -1363,9 +1362,9 @@ Step token_refreshed(Model m, auth::TokenResult result) {
     // up the freshly-installed bearer from Deps.
     if (stream_parked) {
         return {std::move(m),
-            Cmd<Msg>::batch(std::vector<Cmd<Msg>>{
+            Cmd::batch(std::vector<Cmd>{
                 std::move(toast_cmd),
-                Cmd<Msg>::after(std::chrono::milliseconds{0},
+                Cmd::after(std::chrono::milliseconds{0},
                                 Msg{RetryStream{}})})};
     }
 
@@ -1383,7 +1382,7 @@ Step token_refreshed(Model m, auth::TokenResult result) {
         auto [mm, sub_cmd] = submit_message(std::move(m));
         m = std::move(mm);
         return {std::move(m),
-            Cmd<Msg>::batch(std::vector<Cmd<Msg>>{
+            Cmd::batch(std::vector<Cmd>{
                 std::move(toast_cmd), std::move(sub_cmd)})};
     }
     return {std::move(m), std::move(toast_cmd)};

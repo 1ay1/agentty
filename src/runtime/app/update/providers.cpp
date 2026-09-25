@@ -35,7 +35,6 @@ namespace agentty::app::detail {
 
 namespace pick = agentty::ui::pick;
 using maya::overload;
-using maya::Cmd;
 // ── Provider picker ────────────────────────────────────────────────────────
 // Selecting a row live-switches the active backend: parse the preset id
 // into a Selection, install it (process-global), persist it, swap the

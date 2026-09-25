@@ -41,7 +41,6 @@
 
 namespace agentty::app::cmd {
 
-using maya::Cmd;
 
 namespace {
 
@@ -749,7 +748,7 @@ std::optional<Message> build_smart_routing_card(const Model& m) {
     return card;
 }
 
-Cmd<Msg> launch_stream(Model& m) {
+Cmd launch_stream(Model& m) {
     // Defer the wire-payload build to the worker. The UI thread used
     // to spend ~5-50 ms here on long threads (full t.messages deep
     // copy via wire_messages_for_impl, plus soft_trim_to_ceiling's
@@ -998,7 +997,7 @@ Cmd<Msg> launch_stream(Model& m) {
             m.d.smart.subagent_routing() ? 1 : 0,
             compacting ? 1 : 0);
 
-    return Cmd<Msg>::task(
+    return Cmd::task(
         [thread = std::move(thread_snapshot),
          compacting, compaction_style, compaction_ceiling, context_max, retry_count,
          orchestrate, turn_profile, turn_complexity,
@@ -1368,7 +1367,7 @@ std::uint64_t next_tool_exec_seq() noexcept {
     return seq.fetch_add(1, std::memory_order_relaxed) + 1;   // never 0
 }
 
-Cmd<Msg> run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args,
+Cmd run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args,
                   http::CancelTokenPtr cancel, std::uint64_t exec_seq) {
     // task_isolated, NOT task: a tool that wedges (e.g. read on a hung NFS
     // mount, bash on a process that won't unblock) must not consume a slot
@@ -1379,7 +1378,7 @@ Cmd<Msg> run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args,
     // surfaced as "tools randomly get stuck" once enough wedged calls
     // accumulated. Per-call detached thread costs ~100-300 µs of
     // construction; tools run seconds apart so it's noise.
-    return Cmd<Msg>::task_isolated(
+    return Cmd::task_isolated(
         [id = std::move(id),
          name = std::move(tool_name),
          args = std::move(args),
@@ -1748,10 +1747,10 @@ std::optional<LoopBreak> agent_loop_should_break(
     return std::nullopt;
 }
 
-Cmd<Msg> kick_pending_tools(Model& m) {
-    if (m.d.current.messages.empty()) return Cmd<Msg>::none();
+Cmd kick_pending_tools(Model& m) {
+    if (m.d.current.messages.empty()) return Cmd::none();
     auto& last = m.d.current.messages.back();
-    if (last.role != Role::Assistant) return Cmd<Msg>::none();
+    if (last.role != Role::Assistant) return Cmd::none();
 
     // Bail early if the session is already Idle. This is the
     // late-arrival window: a tool worker thread can return a
@@ -1766,7 +1765,7 @@ Cmd<Msg> kick_pending_tools(Model& m) {
     // Tools that were Pending/Approved at cancel-time are already
     // marked Failed/Rejected by CancelStream's teardown loop, so
     // there's nothing left to advance anyway.
-    if (m.s.is_idle()) return Cmd<Msg>::none();
+    if (m.s.is_idle()) return Cmd::none();
 
     // Drop re-leaked salvaged calls (weak local models re-emitting a tool
     // call they already ran this turn) BEFORE any promotion to Running, so a
@@ -1774,7 +1773,7 @@ Cmd<Msg> kick_pending_tools(Model& m) {
     // dedup_releaked_salvage_calls.
     dedup_releaked_salvage_calls(m);
 
-    std::vector<Cmd<Msg>> cmds;
+    std::vector<Cmd> cmds;
     bool any_pending = false;
 
     // Effect- and path-aware scheduler. When the assistant emits multiple
@@ -1816,7 +1815,7 @@ Cmd<Msg> kick_pending_tools(Model& m) {
                 m.s.phase = phase::AwaitingPermission{std::move(*ctx)};
             else
                 m.s.phase = phase::Idle{};   // late arrival: stay Idle
-            return Cmd<Msg>::none();
+            return Cmd::none();
         }
     }
 
@@ -1951,7 +1950,7 @@ Cmd<Msg> kick_pending_tools(Model& m) {
                 note.text = std::move(brk->reason);
                 m.d.current.messages.push_back(std::move(note));
                 deps().save_thread(m.d.current);
-                return Cmd<Msg>::batch(std::move(cmds));
+                return Cmd::batch(std::move(cmds));
             }
 
             // when the prefix estimate crossed 90% of context_max,
@@ -2005,7 +2004,7 @@ Cmd<Msg> kick_pending_tools(Model& m) {
                     c.last_event_at = std::chrono::steady_clock::now();
                     c.retry         = retry::Fresh{};
                 }))
-                return Cmd<Msg>::batch(std::move(cmds));   // late arrival
+                return Cmd::batch(std::move(cmds));   // late arrival
             Message placeholder;
             placeholder.role = Role::Assistant;
             m.d.current.messages.push_back(std::move(placeholder));
@@ -2019,19 +2018,19 @@ Cmd<Msg> kick_pending_tools(Model& m) {
             m.s.phase = phase::Idle{};
         }
     }
-    return Cmd<Msg>::batch(std::move(cmds));
+    return Cmd::batch(std::move(cmds));
 }
 
 // ── Self-update ────────────────────────────────────────────────
 
-Cmd<Msg> check_for_update() {
-    return Cmd<Msg>::task([](std::function<void(Msg)> dispatch) {
+Cmd check_for_update() {
+    return Cmd::task([](jaal::Sink<Msg> out, std::stop_token) {
         // 24h-cached; the fast path is one small file read. Errors are
         // swallowed — an update NOTICE must never surface as a failure.
         try {
             auto c = update::check_latest(/*force=*/false);
             if (c.error.empty() && c.update_available) {
-                dispatch(Msg{UpdateCheckDone{true, std::move(c.latest),
+                out.send(Msg{UpdateCheckDone{true, std::move(c.latest),
                                              std::move(c.url)}});
                 return;
             }
@@ -2040,12 +2039,12 @@ Cmd<Msg> check_for_update() {
         } catch (...) {
             util::dbglog("update.check", "non-std exception");
         }
-        dispatch(Msg{UpdateCheckDone{}});
+        out.send(Msg{UpdateCheckDone{}});
     });
 }
 
-Cmd<Msg> perform_self_update(std::string version) {
-    return Cmd<Msg>::task([version = std::move(version)](
+Cmd perform_self_update(std::string version) {
+    return Cmd::task([version = std::move(version)](
                               std::function<void(Msg)> dispatch) {
         try {
             // Throttle: the HTTP layer calls back per chunk, which is
@@ -2078,7 +2077,7 @@ Cmd<Msg> perform_self_update(std::string version) {
     });
 }
 
-Cmd<Msg> fetch_models() {
+Cmd fetch_models() {
     // Resolve HERE, on the UI thread, and hand the values to the body. This
     // is the whole fix: the reads that used to happen on a worker
     // (provider::active(), auth_snapshot(), active_provider_id()) happen on
@@ -2087,16 +2086,22 @@ Cmd<Msg> fetch_models() {
                         detail::active_provider_id());
 }
 
-Cmd<Msg> fetch_models(provider::Selection sel, auth::AuthHeader auth,
-                      std::string for_provider) {
-    return Cmd<Msg>::task([sel = std::move(sel), auth = std::move(auth),
-                           for_provider = std::move(for_provider)]
-                          (std::function<void(Msg)> dispatch) {
-        try {
-            // ONE model-list router (provider/selection.cpp), dispatched on the
-            // same axes as the stream path. No is_chatgpt/OpenAI/Anthropic
-            // ladder here — a new provider inherits its catalog from its row.
-            auto models = provider::list_models_for(sel, auth);
+Cmd fetch_models(provider::Selection sel, auth::AuthHeader auth,
+                 std::string for_provider) {
+    // Captureless body + args by value: jaal's rule (D7/D19) is that a task
+    // body captures NOTHING, so everything it reads is either an argument
+    // or a global it owns. A capture is a lifetime you have to reason about
+    // on another thread; an argument is a copy the runtime made for you.
+    return Cmd::task(
+        [](jaal::Sink<Msg> out, std::stop_token,
+           provider::Selection sel, auth::AuthHeader auth,
+           std::string for_provider) {
+            try {
+                // ONE model-list router (provider/selection.cpp), dispatched
+                // on the same axes as the stream path. No
+                // is_chatgpt/OpenAI/Anthropic ladder here — a new provider
+                // inherits its catalog from its row.
+                auto models = provider::list_models_for(sel, auth);
             // EMPTY catalog on a LOCAL host = the server didn't answer (down,
             // wrong port, wrong path) — list_models returns {} on any HTTP
             // failure rather than throwing. Attach the reason so the reducer
@@ -2121,8 +2126,8 @@ Cmd<Msg> fetch_models(provider::Selection sel, auth::AuthHeader auth,
                      "models.loaded", "provider={} count={} err={}",
                      for_provider, models.size(),
                      err.empty() ? std::string{"-"} : err);
-            dispatch(ModelsLoaded{std::move(models), for_provider,
-                                  std::move(err)});
+            out.send(Msg{ModelsLoaded{std::move(models), for_provider,
+                                      std::move(err)}});
         } catch (const std::exception& e) {
             // Dispatch an EMPTY ModelsLoaded carrying the reason (NOT a
             // StreamError) so the reducer always clears `models_loading`
@@ -2136,24 +2141,25 @@ Cmd<Msg> fetch_models(provider::Selection sel, auth::AuthHeader auth,
             // surfaces `error` as a transient status toast instead.
             AGT_LOG(Wire, Warn, "models.failed", "provider={} err={}",
                     for_provider, e.what());
-            dispatch(ModelsLoaded{std::vector<ModelInfo>{}, for_provider,
-                                  std::string{"models fetch: "} + e.what()});
+            out.send(Msg{ModelsLoaded{std::vector<ModelInfo>{}, for_provider,
+                                      std::string{"models fetch: "} + e.what()}});
         } catch (...) {
-            dispatch(ModelsLoaded{std::vector<ModelInfo>{}, for_provider,
-                                  "models fetch: unknown exception"});
+            out.send(Msg{ModelsLoaded{std::vector<ModelInfo>{}, for_provider,
+                                      "models fetch: unknown exception"}});
         }
-    });
+        },
+        std::move(sel), std::move(auth), std::move(for_provider));
 }
 
-Cmd<Msg> probe_model_window(std::string model_id) {
+Cmd probe_model_window(std::string model_id) {
     const auto& sel = provider::active();
     // Only a local OpenAI-compatible host has a window that can change under
     // us (a router swapping models). Ollama's native api isn't this route.
     if (model_id.empty() || sel.kind != provider::Kind::OpenAI
         || sel.openai_endpoint.native_api
         || !provider::openai::detail::is_local_endpoint(sel.openai_endpoint))
-        return Cmd<Msg>::none();
-    return Cmd<Msg>::task(
+        return Cmd::none();
+    return Cmd::task(
         [model_id = std::move(model_id),
          endpoint = sel.openai_endpoint,
          // Resolved on the UI thread, like every other input: the body used
@@ -2173,7 +2179,7 @@ Cmd<Msg> probe_model_window(std::string model_id) {
         });
 }
 
-Cmd<Msg> fetch_models_for(std::string spec) {
+Cmd fetch_models_for(std::string spec) {
     // Fetch ANY provider's catalog WITHOUT switching to it — the fused
     // cross-provider picker fans one of these out per authed provider on
     // open. Builds a Selection from `spec` (not active()), so the router
@@ -2182,7 +2188,7 @@ Cmd<Msg> fetch_models_for(std::string spec) {
     // against a provider signed out mid-fetch). list_models_for falls back to
     // the bundled seed on empty auth / unreachable host, so this is fast and
     // non-empty for hosted providers even before a live fetch succeeds.
-    return Cmd<Msg>::task([spec = std::move(spec)](std::function<void(Msg)> dispatch) {
+    return Cmd::task([spec = std::move(spec)](std::function<void(Msg)> dispatch) {
         try {
             auto sel = provider::parse_selection(spec);
             // Resolve credentials for THIS spec — not auth_snapshot(), which
@@ -2202,11 +2208,11 @@ Cmd<Msg> fetch_models_for(std::string spec) {
     });
 }
 
-Cmd<Msg> open_browser_async(std::string url) {
+Cmd open_browser_async(std::string url) {
     // task_isolated rather than task: posix_spawn / ShellExecute can
     // wedge on a hung WindowServer or a bizarre default-opener.
     // Isolated thread keeps a wedge from starving the shared BG pool.
-    return Cmd<Msg>::task_isolated([url = std::move(url)]
+    return Cmd::task_isolated([url = std::move(url)]
                                    (std::function<void(Msg)>) {
         // No dispatch — the reducer doesn't care whether the browser
         // launched. The user can always paste auth_url manually from
@@ -2215,10 +2221,10 @@ Cmd<Msg> open_browser_async(std::string url) {
     });
 }
 
-Cmd<Msg> oauth_exchange(auth::OAuthCode    code,
+Cmd oauth_exchange(auth::OAuthCode    code,
                         auth::PkceVerifier verifier,
                         auth::OAuthState   state) {
-    return Cmd<Msg>::task(
+    return Cmd::task(
         [code = std::move(code),
          verifier = std::move(verifier),
          state = std::move(state)]
@@ -2238,13 +2244,13 @@ Cmd<Msg> oauth_exchange(auth::OAuthCode    code,
         });
 }
 
-Cmd<Msg> load_threads_async() {
+Cmd load_threads_async() {
     // task_isolated rather than task: the JSON parse can take seconds
     // on a deep history (the directory walk is `directory_iterator` +
     // `nlohmann::json::parse` per file). Isolating it keeps the shared
     // worker pool free for stream / tool tasks the user fires in the
     // meantime.
-    return Cmd<Msg>::task_isolated([](std::function<void(Msg)> dispatch) {
+    return Cmd::task_isolated([](std::function<void(Msg)> dispatch) {
         try {
             auto threads = deps().load_threads();
             dispatch(ThreadsLoaded{std::move(threads)});
@@ -2258,7 +2264,7 @@ Cmd<Msg> load_threads_async() {
     });
 }
 
-Cmd<Msg> load_plugins_async(bool reconnect) {
+Cmd load_plugins_async(bool reconnect) {
     // Bring the MCP connection snapshot INTO the Model. reconnect=true runs
     // the full reload (respawn + handshake, bounded by the bridge's 15s
     // deadline) for add/remove/toggle and first open; reconnect=false just
@@ -2266,7 +2272,7 @@ Cmd<Msg> load_plugins_async(bool reconnect) {
     // PluginsUpdated{plugin_model()} so the reducer stores the result in
     // m.ui.plugins — the view reads THAT, never the global pool. This is the
     // Cmd→Msg discipline that makes the panel a pure function of the Model.
-    return Cmd<Msg>::task_isolated(
+    return Cmd::task_isolated(
         [reconnect](std::function<void(Msg)> dispatch) {
             if (reconnect) {
                 // Force the connect. On a COLD start nothing has accessed the
@@ -2282,13 +2288,13 @@ Cmd<Msg> load_plugins_async(bool reconnect) {
         });
 }
 
-Cmd<Msg> load_thread_async(ThreadId id) {
+Cmd load_thread_async(ThreadId id) {
     // task_isolated rather than task: a single big thread (multi-MB,
     // hundreds of messages) still takes 20-50ms of synchronous parse,
     // small enough to keep on the worker pool — but isolating matches
     // the load_threads_async policy and keeps the per-thread parse
     // off the same pool that tools/stream contend for.
-    return Cmd<Msg>::task_isolated(
+    return Cmd::task_isolated(
         [id = std::move(id)](std::function<void(Msg)> dispatch) {
             try {
                 auto loaded = deps().load_thread(id);
@@ -2312,13 +2318,13 @@ std::uint64_t next_codex_login_attempt_id() noexcept {
     return next.fetch_add(1, std::memory_order_relaxed) + 1;
 }
 
-Cmd<Msg> probe_host_async(std::string spec, std::uint64_t attempt_id,
+Cmd probe_host_async(std::string spec, std::uint64_t attempt_id,
                           auth::AuthHeader auth) {
     // Connect-probe a custom host on a worker: dial its model list
     // (configured path → /v1/models → Ollama /api/tags) and report the
     // DETECTED dialect. Bounded by probe_host's own 3s/6s timeouts, so the
     // modal's "probing…" state resolves quickly either way.
-    return Cmd<Msg>::task([spec = std::move(spec), attempt_id,
+    return Cmd::task([spec = std::move(spec), attempt_id,
                            auth = std::move(auth)]
                           (std::function<void(Msg)> dispatch) {
         HostProbed r;
@@ -2402,7 +2408,7 @@ Cmd<Msg> probe_host_async(std::string spec, std::uint64_t attempt_id,
     });
 }
 
-Cmd<Msg> device_login_async(std::string provider, std::string provider_label,
+Cmd device_login_async(std::string provider, std::string provider_label,
                             std::uint64_t attempt_id,
                             std::shared_ptr<std::atomic_bool> cancel) {
     // Native OAuth device flow, provider-generic. Requests a one-time code
@@ -2410,7 +2416,7 @@ Cmd<Msg> device_login_async(std::string provider, std::string provider_label,
     // user approves. Every message carries provider + attempt_id so a stale
     // worker can't complete a newer login; Esc trips `cancel` for cooperative
     // shutdown. Runs isolated because login() blocks while the user signs in.
-    return Cmd<Msg>::task_isolated(
+    return Cmd::task_isolated(
         [provider = std::move(provider), provider_label = std::move(provider_label),
          attempt_id, cancel = std::move(cancel)](std::function<void(Msg)> dispatch) {
         const auto cancelled = [cancel] {
@@ -2483,12 +2489,12 @@ Cmd<Msg> device_login_async(std::string provider, std::string provider_label,
     });
 }
 
-Cmd<Msg> codex_login_async(std::uint64_t attempt_id,
+Cmd codex_login_async(std::uint64_t attempt_id,
                            std::shared_ptr<std::atomic_bool> cancel) {
     // Isolated because either OAuth mode blocks while the user signs in. Every
     // message carries attempt_id so a late worker cannot complete a newer
     // login, and Esc trips cancel for cooperative polling shutdown.
-    return Cmd<Msg>::task_isolated(
+    return Cmd::task_isolated(
         [attempt_id, cancel = std::move(cancel)](std::function<void(Msg)> dispatch) {
         const auto cancelled = [cancel] {
             return cancel && cancel->load(std::memory_order_acquire);
@@ -2525,8 +2531,8 @@ Cmd<Msg> codex_login_async(std::uint64_t attempt_id,
     });
 }
 
-Cmd<Msg> refresh_oauth(std::string refresh_token) {
-    return Cmd<Msg>::task(
+Cmd refresh_oauth(std::string refresh_token) {
+    return Cmd::task(
         [refresh_token = std::move(refresh_token)]
         (std::function<void(Msg)> dispatch) {
             try {

@@ -28,7 +28,6 @@ namespace pn = agentty::ui::panel;
 namespace agentty::app::detail {
 
 namespace cp = agentty::checkpoints;
-using maya::Cmd;
 using maya::overload;
 
 namespace {
@@ -103,11 +102,11 @@ std::vector<cp::Entry> build_entries(const Model& m) {
 // dispatch CheckpointDiffLoaded back. checkpoint_summary shells git, so
 // it must never run on the reducer. Batched so all entries load in
 // parallel on the isolated pool.
-Cmd<Msg> load_all_diffs(const std::vector<cp::Entry>& entries) {
-    std::vector<Cmd<Msg>> parts;
+Cmd load_all_diffs(const std::vector<cp::Entry>& entries) {
+    std::vector<Cmd> parts;
     parts.reserve(entries.size());
     for (int i = 0; i < static_cast<int>(entries.size()); ++i) {
-        parts.push_back(Cmd<Msg>::task_isolated(
+        parts.push_back(Cmd::task_isolated(
             [i, id = entries[static_cast<std::size_t>(i)].id.value]
             (std::function<void(Msg)> dispatch) {
                 auto d = workspace::checkpoint_summary(id);
@@ -120,7 +119,7 @@ Cmd<Msg> load_all_diffs(const std::vector<cp::Entry>& entries) {
                 dispatch(Msg{std::move(ev)});
             }));
     }
-    return parts.empty() ? Cmd<Msg>::none() : Cmd<Msg>::batch(std::move(parts));
+    return parts.empty() ? Cmd::none() : Cmd::batch(std::move(parts));
 }
 
 } // namespace

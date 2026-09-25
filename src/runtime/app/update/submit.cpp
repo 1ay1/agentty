@@ -35,7 +35,6 @@ namespace pn = agentty::ui::panel;
 namespace agentty::app::detail {
 
 Step submit_message(Model m) {
-    using maya::Cmd;
     // Composer is non-empty if it has typed text OR an attachment chip.
     // Even an "empty-looking" buffer with chips should submit — those
     // chips ARE the message (a single dropped @file or paste, with no
@@ -513,13 +512,13 @@ Step submit_message(Model m) {
     // When there's no probe (fast hedge hit, or a non-knowledge query) we
     // launch immediately as before — zero added latency on the common path.
     const bool defer_for_retrieval = !proactive_probe.empty();
-    maya::Cmd<Msg> launch;
+    Cmd launch;
     if (defer_for_retrieval) {
         m.s.status       = "retrieving context\xE2\x80\xA6";   // …
         m.s.status_until = {};   // sticky until the block lands
         // The launch is issued by the ProactiveContextReady handler once the
         // grounding is in the transcript. Here we only kick the retrieval.
-        launch = Cmd<Msg>::task_isolated(
+        launch = Cmd::task_isolated(
             [probe = std::move(proactive_probe)]
             (std::function<void(Msg)> dispatch) {
                 auto hit = tools::proactive_retrieve_blocking(probe, /*k=*/3);
@@ -541,7 +540,7 @@ Step submit_message(Model m) {
     // has actually overflowed, the bookkeeping turns valid scrollback
     // mirror rows into "forget these" and the next diff re-emits
     // them, surfacing as duplicate cards in scrollback.
-    std::vector<Cmd<Msg>> parts;
+    std::vector<Cmd> parts;
     if (!trim.is_none()) parts.push_back(std::move(trim));
     // Worktree snapshot rides the same batch as the stream launch: it
     // runs concurrently with the request's TTFB window, so by the time
@@ -549,7 +548,7 @@ Step submit_message(Model m) {
     // Failure is silent by design — the rewind path re-verifies the ref
     // exists and surfaces a toast there instead.
     if (checkpoint_to_create) {
-        parts.push_back(Cmd<Msg>::task_isolated(
+        parts.push_back(Cmd::task_isolated(
             [id = std::move(*checkpoint_to_create)]
             (std::function<void(Msg)>) {
                 (void)workspace::create_checkpoint(id);
@@ -558,7 +557,7 @@ Step submit_message(Model m) {
     parts.push_back(std::move(launch));
     auto cmd = parts.size() == 1
         ? std::move(parts.front())
-        : Cmd<Msg>::batch(std::move(parts));
+        : Cmd::batch(std::move(parts));
     return {std::move(m), std::move(cmd)};
 }
 
@@ -721,12 +720,11 @@ void persist_settings(const Model& m) {
     tools::subagent::set_provider(active_provider_id());
 }
 
-std::pair<Model, maya::Cmd<Msg>>
+std::pair<Model, Cmd>
 commit_provider_switch(Model m, std::string_view spec,
                        auth::AuthHeader new_auth, std::string_view label,
                        std::string_view desired_model,
                        bool open_panel) {
-    using maya::Cmd;
     const std::string spec_s{spec};
 
     // (1) File the OUTGOING model under its canonical provider id BEFORE
@@ -808,7 +806,7 @@ commit_provider_switch(Model m, std::string_view spec,
     // 401 → reactive refresh → retry, i.e. a visibly slow first turn — or
     // a hard error when the refresh path had any other problem). Same
     // registry-driven gate: only rows that opt into proactive refresh.
-    maya::Cmd<Msg> refresh_cmd = Cmd<Msg>::none();
+    Cmd refresh_cmd = Cmd::none();
     if (const auto* prow = provider::preset_for(spec_s);
         prow && prow->oauth_proactive_refresh && !m.s.oauth_refresh_in_flight) {
         if (auto tok = auth::oauth_proactive_refresh_token()) {
@@ -856,18 +854,17 @@ commit_provider_switch(Model m, std::string_view spec,
     auto toast = set_status_toast(m, std::move(toast_text),
                                   std::chrono::seconds{4});
     return {std::move(m),
-            Cmd<Msg>::batch(std::move(toast), cmd::fetch_models(),
+            Cmd::batch(std::move(toast), cmd::fetch_models(),
                             std::move(refresh_cmd))};
 }
 
-maya::Cmd<Msg> set_status_toast(Model& m, std::string text,
+Cmd set_status_toast(Model& m, std::string text,
                                 std::chrono::seconds ttl) {
-    using maya::Cmd;
     m.s.status = std::move(text);
     auto now = std::chrono::steady_clock::now();
     m.s.status_until = now + ttl;
     auto stamp = m.s.status_until;
-    return Cmd<Msg>::after(
+    return Cmd::after(
         std::chrono::duration_cast<std::chrono::milliseconds>(ttl)
             + std::chrono::milliseconds{50},
         Msg{ClearStatus{stamp}});

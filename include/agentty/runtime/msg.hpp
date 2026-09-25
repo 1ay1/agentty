@@ -782,7 +782,7 @@ struct LoginCursorLeft  {};
 struct LoginCursorRight {};
 struct LoginSubmit      {};
 // User pressed the "copy URL to clipboard" key while the OAuthCode
-// modal is up. The reducer issues a Cmd<Msg>::write_clipboard with
+// modal is up. The reducer issues a Cmd::write_clipboard with
 // the active authorize URL, then surfaces a brief status toast so
 // the user has visual confirmation the keystroke registered.
 struct LoginCopyAuthUrl {};
@@ -1251,7 +1251,7 @@ using MetaMsg = std::variant<
 // implicit:
 //
 //   Msg m = ComposerEnter{};       //  -> Msg{ComposerMsg{ComposerEnter{}}}
-//   Cmd<Msg>::after(d, RetryStream{}); // same path
+//   Cmd::after(d, RetryStream{}); // same path
 //
 // std::visit on a Msg dispatches on domain, not leaf — see update.cpp.
 // ============================================================================

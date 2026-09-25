@@ -874,7 +874,7 @@ void rehydrate_frozen(Model& m) {
     collapse_oversized_offscreen_entries(m);
 }
 
-maya::Cmd<Msg> trim_frozen_if_oversized(Model& m) {
+Cmd trim_frozen_if_oversized(Model& m) {
     // Soft cap on the sealed prefix. Above it, the oldest blocks are
     // dropped — maya's row diff sees a shorter live tree and the
     // already-overflowed rows naturally commit to native scrollback.
@@ -907,7 +907,7 @@ maya::Cmd<Msg> trim_frozen_if_oversized(Model& m) {
 
     const bool over_rows    = m.ui.frozen.row_total() > kFrozenMaxRows;
     const bool over_entries = m.ui.frozen.size() > kFrozenMaxEntries;
-    if (!over_rows && !over_entries) return maya::Cmd<Msg>::none();
+    if (!over_rows && !over_entries) return Cmd::none();
 
     std::size_t budget_entries = 0;
     std::size_t keep_rows      = 0;
@@ -953,7 +953,7 @@ maya::Cmd<Msg> trim_frozen_if_oversized(Model& m) {
         if (first_rows > kFrozenMaxRows && rest >= viewport)
             drop = 1;
     }
-    if (drop == 0) return maya::Cmd<Msg>::none();
+    if (drop == 0) return Cmd::none();
 
     // THE ACCOUNTING. drop_front quantizes the drop to a safe boundary
     // (extends across exposed separators, clamps to the paint-recorded
@@ -965,9 +965,9 @@ maya::Cmd<Msg> trim_frozen_if_oversized(Model& m) {
     // drift.
     (void)m.ui.frozen.drop_front(drop);
     auto debt = m.ui.frozen.harvest();
-    if (debt.empty()) return maya::Cmd<Msg>::none();
+    if (debt.empty()) return Cmd::none();
 
-    return maya::Cmd<Msg>::commit_scrollback(std::move(debt));
+    return Cmd::commit_scrollback(std::move(debt));
 }
 
 } // namespace agentty::app::detail

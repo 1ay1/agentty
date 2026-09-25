@@ -24,15 +24,15 @@ namespace agentty::app {
 
 namespace pn = agentty::ui::panel;   // the exclusive overlay slot's alternatives
 
-[[nodiscard]] std::pair<Model, maya::Cmd<Msg>> init();
+[[nodiscard]] std::pair<Model, Cmd> init();
 
 struct AgenttyApp {
     using Model = ::agentty::Model;
     using Msg   = ::agentty::Msg;
 
-    static std::pair<Model, maya::Cmd<Msg>> init() { return ::agentty::app::init(); }
+    static std::pair<Model, Cmd> init() { return ::agentty::app::init(); }
 
-    static auto update(Model m, Msg msg) -> std::pair<Model, maya::Cmd<Msg>> {
+    static auto update(Model m, Msg msg) -> std::pair<Model, Cmd> {
         return ::agentty::app::update(std::move(m), std::move(msg));
     }
 
@@ -44,7 +44,7 @@ struct AgenttyApp {
         return ::agentty::app::subscribe(m);
     }
 
-    // Optional Program hook (see maya/app/app.hpp — detail::HasVisualHash).
+    // Optional Program hook (see maya/device.hpp — detail::HasVisualHash).
     // The runtime calls this just before view(); when the hash is
     // unchanged from the previous render, view() + render() are skipped
     // entirely. Captures the axes that affect what the user can see;
@@ -454,7 +454,7 @@ struct AgenttyApp {
         // maya's subsequent live-tail→frozen shrink reconciliation — advance
         // ONLY inside frames that actually render, and the run loop's
         // visual_hash gate skips any frame whose hash didn't move
-        // (maya/app/app.hpp). Without a fast time term here the hash falls
+        // (maya/device.hpp). Without a fast time term here the hash falls
         // to the caret-blink PARITY bucket (one flip / 265 ms): the freeze
         // Tick and the post-freeze reconciliation frames get gated away,
         // the collapse never finishes, and a duplicate turn is stranded in
@@ -468,7 +468,7 @@ struct AgenttyApp {
         // where maya reconciles the live-tail→frozen collapse (its
         // detect→commit→demote→repaint shrink chain). request_animation_
         // frame() alone CANNOT drive them: the run loop's visual_hash gate
-        // skips any frame whose hash didn't move (maya/app/app.hpp), so
+        // skips any frame whose hash didn't move (maya/device.hpp), so
         // without advancing the hash here those frames are gated away and
         // the collapse never finishes reconciling — leaving a stranded
         // duplicate turn in scrollback. Advancing the hash while the
@@ -521,7 +521,7 @@ struct AgenttyApp {
         return k;
     }
 
-    // Optional Program hook (see maya/app/app.hpp — detail::HasNeedsWarmup).
+    // Optional Program hook (see maya/device.hpp — detail::HasNeedsWarmup).
     // Returns true when the next view() result contains a freshly
     // rehydrated frozen scrollback whose cells haven't been captured
     // into maya's component cache yet. The runtime fires a one-shot

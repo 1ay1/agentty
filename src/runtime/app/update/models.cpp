@@ -69,7 +69,6 @@ void record_recent(Model& m, const std::string& provider_id,
 void hydrate_recents(Model& m);
 void rebuild_fused_rows(Model& m, bool sync_sources = true);
 } // namespace
-using maya::Cmd;
 
 
 // ── Fused cross-provider model picker ────────────────────────────────────
@@ -469,7 +468,7 @@ Step switch_to_model_ref(Model m, const ModelRef& ref, bool record = true) {
         // catalog said (or say nothing until it's loaded). Re-check now; the
         // post-turn probe catches it once the first request loads it.
         auto probe = cmd::probe_model_window(m.d.model_id.value);
-        return {std::move(m), maya::Cmd<Msg>::batch(
+        return {std::move(m), Cmd::batch(
             std::move(toast), std::move(probe))};
     }
 
@@ -495,7 +494,7 @@ Step open_login_for(Model m, const std::string& provider_id,
         pk.provider = provider_id;
         pk.origin   = std::move(origin);
         m.ui.login = std::move(pk);
-        return {std::move(m), maya::Cmd<Msg>::none()};
+        return {std::move(m), Cmd::none()};
     }
     // Hosted API-key (or Anthropic key): the API-key input, returning to the
     // fused picker on success.
@@ -504,14 +503,14 @@ Step open_login_for(Model m, const std::string& provider_id,
         .provider_label = label,
         .origin         = std::move(origin),
     };
-    return {std::move(m), maya::Cmd<Msg>::none()};
+    return {std::move(m), Cmd::none()};
 }
 
 } // namespace
 
 Step models_update(Model m, msg::ModelsMsg pm) {
     using namespace agentty::msg;
-    auto done = [](Model mm) -> Step { return {std::move(mm), maya::Cmd<Msg>::none()}; };
+    auto done = [](Model mm) -> Step { return {std::move(mm), Cmd::none()}; };
 
     // Clamp the cursor to the current row count after any list change.
     auto clamp_cursor = [](Model& mm) {
@@ -559,11 +558,11 @@ Step models_update(Model m, msg::ModelsMsg pm) {
                                 && (now_ms() - cat.loaded_at_ms) <= kCatalogTtlMs;
                     break;
                 }
-            std::vector<maya::Cmd<Msg>> boot;
+            std::vector<Cmd> boot;
             if (!active_fresh) boot.push_back(cmd::fetch_models());
-            boot.push_back(maya::Cmd<Msg>::after(std::chrono::milliseconds{120},
+            boot.push_back(Cmd::after(std::chrono::milliseconds{120},
                                                  Msg{FusedRefreshOthers{}}));
-            return {std::move(m), maya::Cmd<Msg>::batch(std::move(boot))};
+            return {std::move(m), Cmd::batch(std::move(boot))};
         },
         [&](ModelsRefresh) -> Step {
             // ^L — force a full live refresh: reset every catalog's freshness so
@@ -572,7 +571,7 @@ Step models_update(Model m, msg::ModelsMsg pm) {
             if (!m.ui.panel.get<pn::Models>()) return done(std::move(m));
             for (auto& c : m.d.provider_catalogs) c.loaded_at_ms = 0;
             const std::string apid = active_provider_id();
-            std::vector<maya::Cmd<Msg>> boot;
+            std::vector<Cmd> boot;
             boot.push_back(cmd::fetch_models());   // active now
             for (auto& c : m.d.provider_catalogs) {
                 if (c.provider_id == apid) continue;
@@ -582,7 +581,7 @@ Step models_update(Model m, msg::ModelsMsg pm) {
             auto toast = set_status_toast(m, "refreshing models\xe2\x80\xa6",
                                           std::chrono::seconds{2});
             boot.push_back(std::move(toast));
-            return {std::move(m), maya::Cmd<Msg>::batch(std::move(boot))};
+            return {std::move(m), Cmd::batch(std::move(boot))};
         },
         [&](FusedRefreshOthers) -> Step {
             // Lazy second wave: refresh every OTHER authed provider whose live
@@ -594,7 +593,7 @@ Step models_update(Model m, msg::ModelsMsg pm) {
             if (!m.ui.panel.get<pn::Models>()) return done(std::move(m));
             const std::string active_pid = active_provider_id();
             const std::int64_t t = now_ms();
-            std::vector<maya::Cmd<Msg>> fetches;
+            std::vector<Cmd> fetches;
             for (auto& c : m.d.provider_catalogs) {
                 if (c.provider_id == active_pid) continue;   // done on open
                 if (c.state == ProviderCatalog::State::Loading) continue;
@@ -607,7 +606,7 @@ Step models_update(Model m, msg::ModelsMsg pm) {
                 fetches.push_back(cmd::fetch_models_for(c.provider_id));
             }
             if (fetches.empty()) return done(std::move(m));
-            return {std::move(m), maya::Cmd<Msg>::batch(std::move(fetches))};
+            return {std::move(m), Cmd::batch(std::move(fetches))};
         },
         [&](CloseModels) -> Step {
             m.d.fused_rows.clear();       // release the cache while closed

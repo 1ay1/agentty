@@ -13,7 +13,6 @@
 #include <utility>
 
 #include <maya/core/overload.hpp>
-#include <maya/core/cmd.hpp>      // maya::Cmd
 #include <maya/core/motion.hpp>   // anim::keep_animating — frame requests
 #include <nlohmann/json.hpp>
 
@@ -432,7 +431,6 @@ void mark_tool_rejected(Model& m, const ToolCallId& id,
 
 Step tool_update(Model m, msg::ToolMsg tm) {
     using maya::overload;
-    using maya::Cmd;
 
     return std::visit(overload{
         // ── Live tool progress (streaming subprocess output) ────────────
@@ -566,14 +564,14 @@ Step tool_update(Model m, msg::ToolMsg tm) {
             // agent just touched so it can open / reveal / diff it natively.
             // Frame-safe (maya Cmd::emit_osc, out-of-band), and a complete
             // no-op on a normal terminal (integration_active() is false).
-            maya::Cmd<Msg> host_cmd = maya::Cmd<Msg>::none();
+            Cmd host_cmd = Cmd::none();
             if (ui::host::integration_active()) {
                 for (const auto& msg_ : m.d.current.messages) {
                     bool done_scan = false;
                     for (const auto& tc : msg_.tool_calls) {
                         if (tc.id != e.id || !tc.is_done()) continue;
                         if (auto osc = file_event_osc_for(tc))
-                            host_cmd = maya::Cmd<Msg>::emit_osc(kHostOsc, *osc);
+                            host_cmd = Cmd::emit_osc(kHostOsc, *osc);
                         done_scan = true; break;
                     }
                     if (done_scan) break;
@@ -609,8 +607,8 @@ Step tool_update(Model m, msg::ToolMsg tm) {
             auto kick = cmd::kick_pending_tools(m);
             if (host_cmd.is_none())
                 return {std::move(m), std::move(kick)};
-            return {std::move(m), maya::Cmd<Msg>::batch(
-                std::vector<maya::Cmd<Msg>>{std::move(kick), std::move(host_cmd)})};
+            return {std::move(m), Cmd::batch(
+                std::vector<Cmd>{std::move(kick), std::move(host_cmd)})};
         },
 
         // ── Permission ──────────────────────────────────────────────

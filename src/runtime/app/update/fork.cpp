@@ -50,7 +50,6 @@ namespace agentty::app::detail {
 
 namespace fp   = agentty::fork_panel;
 namespace pick = agentty::ui::pick;
-using maya::Cmd;
 using maya::overload;
 
 namespace {
@@ -91,16 +90,16 @@ Step fork_update(Model m, msg::ForkMsg fm) {
             // now (the slot holds Fork), and if it ever stopped being one it
             // would be deleting the parent we just saved.
             m.ui.panel.descend(pn::Fork{{fp::Choice::RagPerTurn}});
-            return {std::move(m), Cmd<Msg>::none()};
+            return {std::move(m), Cmd::none()};
         },
         [&](CloseFork) -> Step {
             ascend(m);   // Esc: back to the palette that opened this, or close
-            return {std::move(m), Cmd<Msg>::none()};
+            return {std::move(m), Cmd::none()};
         },
         [&](ForkMove& e) -> Step {
             if (auto* o = m.ui.panel.get<pn::Fork>())
                 o->choice = fp::next_choice(o->choice, e.delta);
-            return {std::move(m), Cmd<Msg>::none()};
+            return {std::move(m), Cmd::none()};
         },
         [&](ForkThread&) -> Step {
             const auto* picked = m.ui.panel.get<pn::Fork>();
@@ -215,7 +214,7 @@ Step fork_update(Model m, msg::ForkMsg fm) {
                        " · prior transcript readable on demand",
                 std::chrono::seconds{5});
             return {std::move(m),
-                    Cmd<Msg>::batch(std::move(toast), Cmd<Msg>::reset_inline())};
+                    Cmd::batch(std::move(toast), Cmd::reset_inline())};
         },
     }, fm);
 }

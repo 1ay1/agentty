@@ -12,7 +12,7 @@
 #include <iterator>
 #include <string_view>
 
-#include <maya/app/app.hpp>       // app_set_theme — the renderer-side sink
+#include <maya/device.hpp>       // app_set_theme — the renderer-side sink
 #include <maya/style/schemes.hpp>
 #include <maya/style/theme.hpp>
 

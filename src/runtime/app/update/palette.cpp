@@ -143,7 +143,7 @@ Step palette_update(Model m, msg::PaletteMsg pm) {
             // and no cross-TU coupling. Control chars are dropped here so a
             // multi-line clipboard can't smuggle newlines into a filter.
             // Bounded by clipboard size; each step is the cheap typed path.
-            Step st{std::move(m), maya::Cmd<Msg>::none()};
+            Step st{std::move(m), Cmd::none()};
             for (char c : e.text) {
                 const auto u = static_cast<unsigned char>(c);
                 if (u < 0x20 || u >= 0x7f) continue;

@@ -12,7 +12,6 @@
 #include <utility>
 
 #include <maya/core/overload.hpp>
-#include <maya/core/cmd.hpp>      // maya::Cmd
 #include <maya/core/motion.hpp>   // anim::keep_animating — frame requests
 
 #include "agentty/runtime/app/cmd_factory.hpp"
@@ -38,7 +37,6 @@ namespace pn = agentty::ui::panel;
 namespace agentty::app::detail {
 
 using maya::overload;
-using maya::Cmd;
 
 // Resolve the three role slots for DISPLAY and build the pane.
 //
@@ -233,7 +231,7 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             m.s.status_until   = {};
             // Isolated worker: git checkout-index on a large snapshot can
             // block for seconds; never on the shared BG pool.
-            auto cmd = Cmd<Msg>::task_isolated(
+            auto cmd = Cmd::task_isolated(
                 [id = e.id](std::function<void(Msg)> dispatch) {
                     CheckpointRestored done;
                     done.id = id;
@@ -323,7 +321,7 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                 m, "rewound \xc2\xb7 files restored, prompt back in composer",
                 std::chrono::seconds{5});
             return {std::move(m),
-                    Cmd<Msg>::batch(Cmd<Msg>::reset_inline(), std::move(toast))};
+                    Cmd::batch(Cmd::reset_inline(), std::move(toast))};
         },
         [&](TerminalFocus& e) -> Step {
             m.ui.terminal_focused = e.focused;
@@ -457,7 +455,7 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             // several-fold). Fires once; waits until every block has a
             // recorded height so the drop provability gate in drop_front
             // can actually release rows.
-            maya::Cmd<Msg> rehydrate_trim = maya::Cmd<Msg>::none();
+            Cmd rehydrate_trim = Cmd::none();
             if (m.ui.pending_rehydrate_trim) {
                 bool all_recorded = !m.ui.frozen.empty();
                 for (std::size_t k = 0; k < m.ui.frozen.size(); ++k)
@@ -507,7 +505,7 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             // and arm an animation frame so the typewriter keeps gliding
             // and the gate is re-checked next frame — it never looks
             // stuck and the freeze never fires early.
-            maya::Cmd<Msg> settle_freeze_trim = maya::Cmd<Msg>::none();
+            Cmd settle_freeze_trim = Cmd::none();
             if (m.ui.pending_settle_freeze && m.s.is_idle()) {
                 if (live_tail_reveal_settled(m)) {
                     m.ui.pending_settle_freeze = false;
@@ -608,7 +606,7 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             // mid-stream carves were the ones invalidating that cache.
             // agent_session never carves mid-stream and shows zero
             // corruption / zero slowdown on long runs.
-            maya::Cmd<Msg> midrun_trim = maya::Cmd<Msg>::none();
+            Cmd midrun_trim = Cmd::none();
 
             // ── Stream-stall watchdog ──────────────────────────────────
             // 120 s of total silence is overwhelmingly likely to be a
@@ -649,7 +647,7 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                                 + std::to_string(since) + "s";
                 StreamError err{std::move(msg)};
                 err.from_stall = true;   // carry stall intent on the message
-                return {std::move(m), Cmd<Msg>::after(
+                return {std::move(m), Cmd::after(
                     std::chrono::milliseconds(0),
                     Msg{std::move(err)})};
             }
@@ -788,7 +786,7 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                 }
             }
             {
-                std::vector<Cmd<Msg>> trims;
+                std::vector<Cmd> trims;
                 if (!rehydrate_trim.is_none())
                     trims.push_back(std::move(rehydrate_trim));
                 if (!midrun_trim.is_none())
@@ -798,7 +796,7 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                 if (trims.size() == 1)
                     return {std::move(m), std::move(trims.front())};
                 if (!trims.empty())
-                    return {std::move(m), Cmd<Msg>::batch(std::move(trims))};
+                    return {std::move(m), Cmd::batch(std::move(trims))};
             }
 
             // ── Idle cache-lapse pre-compaction ───────────────────────────
@@ -821,7 +819,7 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                     // the compaction request is being dispatched; StreamStarted
                     // re-stamps it when the summary request actually goes out.
                     m.s.last_wire_at = {};
-                    auto compact_cmd = Cmd<Msg>::task(
+                    auto compact_cmd = Cmd::task(
                         [](std::function<void(Msg)> dispatch) {
                             dispatch(CompactContext{});
                         });
@@ -857,7 +855,7 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             // than on disk. Drain it here — the ONE place a synchronous wait is
             // correct, because no frame is drawn after this.
             settings_cache::flush();
-            return {std::move(m), Cmd<Msg>::quit()};
+            return {std::move(m), Cmd::quit()};
         },
         [&](NoOp) -> Step { return done(std::move(m)); },
         [&](RedrawScreen) -> Step {
@@ -904,7 +902,7 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             //     resize stays soft (case-(B), no scrollback wipe).
             //     Either way it's a passive consequence of the
             //     resize event, not bound to a keystroke.
-            return {std::move(m), Cmd<Msg>::force_redraw()};
+            return {std::move(m), Cmd::force_redraw()};
         },
         [&](ClearStatus& e) -> Step {
             // No-op if the user (or another handler) wrote a newer

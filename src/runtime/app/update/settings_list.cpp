@@ -261,10 +261,10 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
                     const bool want_disabled = row.on;   // on → turn off
                     auto r = tools::plugin::set_server_disabled(
                         path, row.arg, want_disabled);
-                    maya::Cmd<Msg> cmd;
+                    Cmd cmd;
                     if (r == tools::plugin::EditResult::Ok) {
                         m.ui.plugins_loading = true;
-                        cmd = maya::Cmd<Msg>::batch(std::vector<maya::Cmd<Msg>>{
+                        cmd = Cmd::batch(std::vector<Cmd>{
                             cmdf::load_plugins_async(/*reconnect=*/true),
                             set_status_toast(m,
                                 (want_disabled ? "disabled plugin '"
@@ -299,13 +299,13 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
                     const bool want_enabled = !row.on;   // toggle
                     auto r = tools::plugin::set_tool_enabled(
                         path, row.arg, row.arg2, want_enabled);
-                    maya::Cmd<Msg> cmd;
+                    Cmd cmd;
                     if (r == tools::plugin::EditResult::Ok) {
                         tools::invalidate_mcp_catalog();
                         // No respawn (only the exclude filter changed), but
                         // the Model snapshot must reflect the new enabled set
                         // — re-snapshot the live pool (reconnect=false).
-                        cmd = maya::Cmd<Msg>::batch(std::vector<maya::Cmd<Msg>>{
+                        cmd = Cmd::batch(std::vector<Cmd>{
                             cmdf::load_plugins_async(/*reconnect=*/false),
                             set_status_toast(m,
                                 (want_enabled ? "enabled tool '" : "disabled tool '")
@@ -333,10 +333,10 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
                         return done(std::move(m));
                     const bool ok = tools::plugin::approve_server(
                         edit_target(row), row.arg);
-                    maya::Cmd<Msg> cmd;
+                    Cmd cmd;
                     if (ok) {
                         m.ui.plugins_loading = true;
-                        cmd = maya::Cmd<Msg>::batch(std::vector<maya::Cmd<Msg>>{
+                        cmd = Cmd::batch(std::vector<Cmd>{
                             cmdf::load_plugins_async(/*reconnect=*/true),
                             set_status_toast(m,
                                 "trusted project config — connecting…")});
@@ -391,10 +391,10 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
 
             auto path = edit_target(row);
             auto r = tools::plugin::remove_server(path, row.arg);
-            maya::Cmd<Msg> cmd;
+            Cmd cmd;
             if (r == tools::plugin::EditResult::Ok) {
                 m.ui.plugins_loading = true;
-                cmd = maya::Cmd<Msg>::batch(std::vector<maya::Cmd<Msg>>{
+                cmd = Cmd::batch(std::vector<Cmd>{
                     cmdf::load_plugins_async(/*reconnect=*/true),
                     set_status_toast(m, "removed plugin '" + row.arg + "'")});
             } else {
@@ -507,7 +507,7 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
             // fresh per use (create_starter invalidated the cache) and
             // agents are scanned per task-tool call, so both are already
             // live — no reload needed.
-            maya::Cmd<Msg> reload = maya::Cmd<Msg>::none();
+            Cmd reload = Cmd::none();
             if (r.ok && concern == se::Category::Plugins) {
                 m.ui.plugins_loading = true;
                 reload = cmdf::load_plugins_async(/*reconnect=*/true);
@@ -519,8 +519,8 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
                     static_cast<int>(se::items_for(m, oo->concern).size());
                 oo->index = std::clamp(oo->index, 0, std::max(0, cnt - 1));
             }
-            return {std::move(m), maya::Cmd<Msg>::batch(
-                std::vector<maya::Cmd<Msg>>{
+            return {std::move(m), Cmd::batch(
+                std::vector<Cmd>{
                     std::move(reload), set_status_toast(m, r.message)})};
         },
     }, sm);

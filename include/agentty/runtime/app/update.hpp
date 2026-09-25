@@ -1,5 +1,5 @@
 #pragma once
-// agentty::app::update — pure (Model, Msg) -> (Model, Cmd<Msg>) reducer.
+// agentty::app::update — pure (Model, Msg) -> (Model, Cmd) reducer.
 //
 // All side effects are returned as Cmds, never executed inline.  The body is
 // a single std::visit with one overload per Msg variant, grouped by domain.
@@ -9,10 +9,11 @@
 #include <maya/maya.hpp>
 
 #include "agentty/runtime/model.hpp"
+#include "agentty/runtime/cmd.hpp"
 #include "agentty/runtime/msg.hpp"
 
 namespace agentty::app {
 
-[[nodiscard]] std::pair<Model, maya::Cmd<Msg>> update(Model m, Msg msg);
+[[nodiscard]] std::pair<Model, Cmd> update(Model m, Msg msg);
 
 } // namespace agentty::app

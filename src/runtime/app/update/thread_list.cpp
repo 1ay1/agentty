@@ -29,7 +29,6 @@ namespace agentty::app::detail {
 
 namespace pick = agentty::ui::pick;
 using maya::overload;
-using maya::Cmd;
 // ── Fresh-thread reset ────────────────────────────────────────────────────
 // Swap the model over to a brand-new empty thread and return the terminal
 // reset that wipes the departing thread's rendered turns off-screen.
@@ -45,7 +44,7 @@ using maya::Cmd;
 //
 // Returns the reset_inline Cmd so the caller can batch it with its own
 // commands (delete also kicks a thread-list refresh + a toast).
-[[nodiscard]] Cmd<Msg> reset_to_fresh_thread(Model& m) {
+[[nodiscard]] Cmd reset_to_fresh_thread(Model& m) {
     // Skill activations belong to the departing thread's context; the new
     // thread must be able to re-load any skill from scratch.
     tools::skills::reset_activations();
@@ -98,7 +97,7 @@ using maya::Cmd;
     // explicit, user-initiated content swap. `\x1b[3J` wipes saved-lines
     // (including pre-agentty shell history), acceptable precisely because
     // the user asked to switch threads. Do NOT extend it to per-turn paths.
-    return Cmd<Msg>::reset_inline();
+    return Cmd::reset_inline();
 }
 
 Step thread_list_update(Model m, msg::ThreadListMsg tm) {
@@ -109,7 +108,7 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
             // multi-MB thread files) to do synchronously here. The
             // picker opens immediately against the cached list; new
             // entries fade in when ThreadsLoaded lands.
-            Cmd<Msg> cmd = Cmd<Msg>::none();
+            Cmd cmd = Cmd::none();
             if (!m.s.threads_loading) {
                 m.s.threads_loading = true;
                 cmd = cmd::load_threads_async();
@@ -199,7 +198,7 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
         //   8becb88 did exactly that and reverted in 0b24148.
         [&](ThreadListSelect) -> Step {
             auto* p = m.ui.panel.get<pn::ThreadList>();
-            Cmd<Msg> cmd = Cmd<Msg>::none();
+            Cmd cmd = Cmd::none();
             if (p) p->confirm_remove.clear();   // selecting disarms a pending `d`
             if (p && !m.d.threads.empty() && !m.s.thread_loading) {
                 // Re-clamp: p->index can be stale if an async refresh shrank
@@ -282,7 +281,7 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
             if (was_current) {
                 auto reset = reset_to_fresh_thread(m);
                 return {std::move(m),
-                        Cmd<Msg>::batch(cmd::load_threads_async(),
+                        Cmd::batch(cmd::load_threads_async(),
                                         std::move(reset), std::move(toast))};
             }
             return {std::move(m), std::move(toast)};
@@ -303,14 +302,14 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
             if (sz == 0) {
                 // History not loaded yet (or genuinely empty) — kick a
                 // refresh so the NEXT press works, and say so.
-                Cmd<Msg> cmd = Cmd<Msg>::none();
+                Cmd cmd = Cmd::none();
                 if (!m.s.threads_loading) {
                     m.s.threads_loading = true;
                     cmd = cmd::load_threads_async();
                 }
                 auto toast = set_status_toast(m, "no other threads yet");
                 return {std::move(m),
-                        Cmd<Msg>::batch(std::move(cmd), std::move(toast))};
+                        Cmd::batch(std::move(cmd), std::move(toast))};
             }
             // Locate the current thread in the recency list. A fresh
             // unsaved thread isn't in it — treat "newest" as the anchor
@@ -349,7 +348,7 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
                     + std::to_string(sz) + " \xc2\xb7 "
                     + (meta.title.empty() ? "(untitled)" : meta.title));
             return {std::move(m),
-                    Cmd<Msg>::batch(cmd::load_thread_async(meta.id),
+                    Cmd::batch(cmd::load_thread_async(meta.id),
                                     std::move(toast))};
         },
         [&](NewThread) -> Step {
@@ -483,12 +482,12 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
             // erase them. Without it the previous thread's tail turns
             // are visible above the rehydrated thread's first turn.
             //
-            // Per maya/app/app.hpp reset_inline() docs: this is the
+            // Per maya/device.hpp reset_inline() docs: this is the
             // sanctioned recovery for thread switch / new thread. The
             // `\x1b[3J` cost (wipes the user's pre-agentty shell
             // scrollback) is acceptable because the user explicitly
             // asked for the content swap (picker select).
-            return {std::move(m), Cmd<Msg>::reset_inline()};
+            return {std::move(m), Cmd::reset_inline()};
         },
     }, tm);
 }

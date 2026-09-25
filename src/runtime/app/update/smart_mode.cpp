@@ -14,7 +14,6 @@
 #include <variant>
 
 #include <maya/core/overload.hpp>
-#include <maya/core/cmd.hpp>
 
 #include "agentty/runtime/panel/smart_form.hpp"
 #include "agentty/runtime/settings_registry.hpp"   // tuning row write-back
@@ -24,7 +23,6 @@ namespace pn = agentty::ui::panel;
 namespace agentty::app::detail {
 
 using maya::overload;
-using maya::Cmd;
 
 Step smart_mode_update(Model m, msg::SmartModeMsg sm) {
     return std::visit(overload{

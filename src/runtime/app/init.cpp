@@ -35,7 +35,7 @@ std::vector<ModelInfo> seed_models() {
 }
 } // namespace
 
-std::pair<Model, maya::Cmd<Msg>> init() {
+std::pair<Model, Cmd> init() {
     Model m;
     // Seed the composer idle-blink clock at launch so the 15 s
     // blink-stop countdown starts now, not on the first keystroke. A
@@ -239,7 +239,7 @@ std::pair<Model, maya::Cmd<Msg>> init() {
 
     // Deferred startup Cmds (declared early: the first-run branch below may
     // queue an OpenProviders dispatch).
-    std::vector<maya::Cmd<Msg>> cmds;
+    std::vector<Cmd> cmds;
 
     // No credentials installed yet → main() invoked install() with an
     // empty header. Open the login modal so the user can authenticate
@@ -277,7 +277,7 @@ std::pair<Model, maya::Cmd<Msg>> init() {
             }
         }
         if (cred_elsewhere)
-            cmds.push_back(maya::Cmd<Msg>::after(
+            cmds.push_back(Cmd::after(
                 std::chrono::milliseconds{0}, Msg{OpenProviders{}}));
         else
             m.ui.login = ui::login::Picking{};
@@ -388,9 +388,9 @@ std::pair<Model, maya::Cmd<Msg>> init() {
     // hang-prone work its docs describe — a dead NFS/FUSE mount would wedge
     // a shared-pool slot forever and starve every later tool call. A wedged
     // isolated task leaks one thread instead.
-    cmds.push_back(maya::Cmd<Msg>::task_isolated(
+    cmds.push_back(Cmd::task_isolated(
         [](std::function<void(Msg)>) { prewarm_workspace_files(); }));
-    cmds.push_back(maya::Cmd<Msg>::task_isolated(
+    cmds.push_back(Cmd::task_isolated(
         [](std::function<void(Msg)>) { prewarm_workspace_symbols(); }));
 
     // Reclaim blobs no thread references any more (deleted threads,
@@ -400,7 +400,7 @@ std::pair<Model, maya::Cmd<Msg>> init() {
     // still running at exit touched freed statics and crashed Windows CI.
     blobs::start_background_gc();
 
-    return {std::move(m), maya::Cmd<Msg>::batch(std::move(cmds))};
+    return {std::move(m), Cmd::batch(std::move(cmds))};
 }
 
 } // namespace agentty::app

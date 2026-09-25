@@ -1,4 +1,4 @@
-// agentty::app::update — pure (Model, Msg) -> (Model, Cmd<Msg>) reducer.
+// agentty::app::update — pure (Model, Msg) -> (Model, Cmd) reducer.
 //
 // Top-level orchestrator: a single 10-arm std::visit that dispatches on
 // the domain (msg::ComposerMsg / msg::StreamMsg / …) and forwards to
@@ -29,7 +29,6 @@
 
 namespace agentty::app {
 
-using maya::Cmd;
 using maya::overload;
 
 // (Removed) `is_user_input` previously gated the `needs_force_redraw`
@@ -38,7 +37,7 @@ using maya::overload;
 // unnecessary, and firing it on every first keystroke was actively
 // causing the scrollback-duplication symptom it was meant to prevent).
 
-std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
+std::pair<Model, Cmd> update(Model m, Msg msg) {
     // One-shot warmup flag: set by ThreadLoaded, consumed by maya's
     // run loop on the very next render(). Clear on every subsequent
     // reducer step so a later thread load sees a clean false→true

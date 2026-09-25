@@ -472,8 +472,8 @@ namespace runner_ui {
     return fin;
 }
 
-[[nodiscard]] maya::Cmd<Msg> run_block_cmd(std::string command, cbp::BlockShell /*shell*/) {
-    return maya::Cmd<Msg>::suspend(
+[[nodiscard]] Cmd run_block_cmd(std::string command, cbp::BlockShell /*shell*/) {
+    return Cmd::suspend(
         [cmd = std::move(command)]() -> Msg {
             return Msg{run_on_real_tty(cmd)};
         });
@@ -498,8 +498,8 @@ namespace runner_ui {
     return win_shell::powershell_command(body);
 }
 
-[[nodiscard]] maya::Cmd<Msg> run_block_cmd(std::string command, cbp::BlockShell shell) {
-    return maya::Cmd<Msg>::task_isolated(
+[[nodiscard]] Cmd run_block_cmd(std::string command, cbp::BlockShell shell) {
+    return Cmd::task_isolated(
         [cmd = std::move(command), shell](std::function<void(Msg)> dispatch) {
             const std::string wrapped = wrap_for_windows_shell(shell, cmd);
 
@@ -695,8 +695,8 @@ Step codeblock_update(Model m, msg::CodeBlockMsg cm) {
             (void)write_clipboard_text(body);
             auto toast = set_status_toast(m, "copied clean block to clipboard");
             return {std::move(m),
-                    maya::Cmd<Msg>::batch(
-                        maya::Cmd<Msg>::write_clipboard(std::move(body)),
+                    Cmd::batch(
+                        Cmd::write_clipboard(std::move(body)),
                         std::move(toast))};
         },
         [&](CodeBlockRunFinished& e) -> Step {
@@ -752,8 +752,8 @@ Step codeblock_update(Model m, msg::CodeBlockMsg cm) {
             (void)write_clipboard_text(body);   // native pbcopy/wl-copy/xclip
             auto toast = set_status_toast(m, "output copied to clipboard");
             return {std::move(m),
-                    maya::Cmd<Msg>::batch(
-                        maya::Cmd<Msg>::write_clipboard(std::move(body)),
+                    Cmd::batch(
+                        Cmd::write_clipboard(std::move(body)),
                         std::move(toast))};
         },
         [&](CodeBlockResultDiscard) -> Step {

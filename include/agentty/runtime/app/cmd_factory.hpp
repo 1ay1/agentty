@@ -1,7 +1,7 @@
 #pragma once
 // agentty::app::cmd — factories for the side-effecting commands the runtime issues.
 //
-// These wrap maya's Cmd<Msg> with agentty-specific glue: kicking off a streaming
+// These wrap maya's Cmd with agentty-specific glue: kicking off a streaming
 // turn, executing a tool, advancing pending tool execution after a turn ends.
 
 #include <maya/maya.hpp>
@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "agentty/runtime/model.hpp"
+#include "agentty/runtime/cmd.hpp"
 #include "agentty/runtime/msg.hpp"
 #include "agentty/io/http.hpp"   // http::CancelTokenPtr (run_tool)
 #include "agentty/provider/selection.hpp"  // provider::Selection (fetch_models)
@@ -75,7 +76,7 @@ struct TurnRouting {
 // Mutates `m` to install a fresh cancel token in m.stream.cancel, then
 // dispatches the streaming task on a worker. Esc (CancelStream) flips the
 // token to abort the in-flight stream.
-[[nodiscard]] maya::Cmd<Msg> launch_stream(Model& m);
+[[nodiscard]] Cmd launch_stream(Model& m);
 
 // Build the Smart Mode ROUTING CARD for the turn about to launch, or
 // std::nullopt when orchestration is off (nothing to show). A synthetic,
@@ -112,7 +113,7 @@ void soft_trim_to_ceiling(std::vector<Message>& v, int ceiling);
 // ToolUse::Running and pass the same value to run_tool.
 [[nodiscard]] std::uint64_t next_tool_exec_seq() noexcept;
 
-[[nodiscard]] maya::Cmd<Msg> run_tool(ToolCallId id,
+[[nodiscard]] Cmd run_tool(ToolCallId id,
                                       ToolName tool_name,
                                       nlohmann::json args,
                                       http::CancelTokenPtr cancel = {},
@@ -121,7 +122,7 @@ void soft_trim_to_ceiling(std::vector<Message>& v, int ceiling);
 // Inspect the latest assistant turn and either fire off pending tool calls,
 // request permission, or kick the follow-up stream once tool results are in.
 // Mutates `m` (sets phase, may push a placeholder assistant message).
-[[nodiscard]] maya::Cmd<Msg> kick_pending_tools(Model& m);
+[[nodiscard]] Cmd kick_pending_tools(Model& m);
 
 // Resolve every PENDING *salvaged* tool call in the back assistant message
 // that byte-duplicates a call already terminal earlier in the same agent
@@ -201,42 +202,42 @@ struct LoopBreak {
 // Declared with the Selection itself: provider::active() already returns a
 // by-value snapshot taken under the selection mutex, so handing one to a
 // worker is exactly what it is for.
-[[nodiscard]] maya::Cmd<Msg> fetch_models(provider::Selection sel,
+[[nodiscard]] Cmd fetch_models(provider::Selection sel,
                                           auth::AuthHeader   auth,
                                           std::string        for_provider);
 
 // The common case: fetch for whatever is active RIGHT NOW. Resolves the
 // arguments on the calling (UI) thread and forwards. Call this from a
 // reducer; the overload above is for a caller that already has them.
-[[nodiscard]] maya::Cmd<Msg> fetch_models();
+[[nodiscard]] Cmd fetch_models();
 
 // Fetch a SPECIFIC provider's catalog without switching to it (fused picker
 // fan-out). Dispatches FusedCatalogLoaded{spec, models, ok}.
-[[nodiscard]] maya::Cmd<Msg> fetch_models_for(std::string spec);
+[[nodiscard]] Cmd fetch_models_for(std::string spec);
 
 // Re-measure the live context window of `model_id` on the active provider
 // when it is a local OpenAI-compatible endpoint (llama.cpp router, LM Studio,
 // Ollama). Dispatches ModelWindowProbed. A no-op Cmd for hosted providers.
-[[nodiscard]] maya::Cmd<Msg> probe_model_window(std::string model_id);
+[[nodiscard]] Cmd probe_model_window(std::string model_id);
 
 // ── Self-update ─────────────────────────────────────────────
 // Background release check (24h-cached, never blocks a frame): dispatches
 // UpdateCheckDone. check_for_update() is safe to fire on every launch.
-[[nodiscard]] maya::Cmd<Msg> check_for_update();
+[[nodiscard]] Cmd check_for_update();
 // Download + atomically install the given version; dispatches UpdateApplied.
-[[nodiscard]] maya::Cmd<Msg> perform_self_update(std::string version);
+[[nodiscard]] Cmd perform_self_update(std::string version);
 
 // ── In-app login modal ──────────────────────────────────────────────────
 // Fire-and-forget: shells out to the platform browser opener. Wrapped in
 // Cmd::task so a wedged xdg-open / open / ShellExecute can never block
 // the reducer tick.
-[[nodiscard]] maya::Cmd<Msg> open_browser_async(std::string url);
+[[nodiscard]] Cmd open_browser_async(std::string url);
 
 // Run the OAuth code-exchange HTTP POST off the UI thread. Dispatches
 // LoginExchanged{result} on completion regardless of success/failure —
 // the reducer matches on `expected<OAuthToken, OAuthError>` to decide
 // whether to install creds or transition to Failed.
-[[nodiscard]] maya::Cmd<Msg> oauth_exchange(auth::OAuthCode    code,
+[[nodiscard]] Cmd oauth_exchange(auth::OAuthCode    code,
                                             auth::PkceVerifier verifier,
                                             auth::OAuthState   state);
 
@@ -247,7 +248,7 @@ struct LoopBreak {
 // sees a sticky "refreshing OAuth token…" toast in the bottom row
 // instead of the old pre-TUI stderr line, and startup is no longer
 // gated on the network round trip.
-[[nodiscard]] maya::Cmd<Msg> refresh_oauth(std::string refresh_token);
+[[nodiscard]] Cmd refresh_oauth(std::string refresh_token);
 
 // Allocate a process-unique identity for a ChatGPT login attempt. Async
 // progress/completion must carry it so an abandoned attempt cannot mutate a
@@ -258,19 +259,19 @@ struct LoopBreak {
 // (configured path → /v1/models → Ollama /api/tags), detect the dialect,
 // dispatch HostProbed. Shares next_codex_login_attempt_id() so a stale
 // probe result (user Esc'd / resubmitted) is dropped by the reducer.
-[[nodiscard]] maya::Cmd<Msg> probe_host_async(
+[[nodiscard]] Cmd probe_host_async(
     std::string spec, std::uint64_t attempt_id, auth::AuthHeader auth);
 
 // Kick native ChatGPT OAuth off the UI thread. The attempt id correlates all
 // async messages; `cancel` is tripped when Esc closes that exact modal.
-[[nodiscard]] maya::Cmd<Msg> codex_login_async(
+[[nodiscard]] Cmd codex_login_async(
     std::uint64_t attempt_id, std::shared_ptr<std::atomic_bool> cancel);
 
 // Kick a native OAuth device-flow login off the UI thread — provider-generic
 // (GitHub Copilot, Kimi, …). `provider` is the registry id, `provider_label`
 // the display name for the success toast. Shares next_codex_login_attempt_id()
 // for correlation; dispatches DeviceCodeReady then DeviceLoginDone.
-[[nodiscard]] maya::Cmd<Msg> device_login_async(
+[[nodiscard]] Cmd device_login_async(
     std::string provider, std::string provider_label,
     std::uint64_t attempt_id, std::shared_ptr<std::atomic_bool> cancel);
 
@@ -279,14 +280,14 @@ struct LoopBreak {
 // parse can take seconds with hundreds of multi-MB files in real-world
 // use, so it runs as a background task instead of blocking startup;
 // `init()` returns immediately with an empty thread list.
-[[nodiscard]] maya::Cmd<Msg> load_threads_async();
+[[nodiscard]] Cmd load_threads_async();
 
 // Connect/snapshot the MCP servers off the UI thread and dispatch
 // `PluginsUpdated{model}` when done — the reducer stores it in m.ui.plugins,
 // the single source the Plugins panel renders. reconnect=true respawns +
 // re-handshakes (add/remove/toggle/first open); reconnect=false just
 // snapshots the live pool. Mirrors load_threads_async.
-[[nodiscard]] maya::Cmd<Msg> load_plugins_async(bool reconnect);
+[[nodiscard]] Cmd load_plugins_async(bool reconnect);
 
 // Parse a single thread's JSON off the UI thread. Dispatched from the
 // thread picker's Enter handler so the synchronous ~30ms-per-thread
@@ -295,6 +296,6 @@ struct LoopBreak {
 // vanished, parse error) dispatches a `ThreadLoaded` with an empty
 // Thread so the reducer can no-op gracefully without leaving the
 // `thread_loading` flag stuck.
-[[nodiscard]] maya::Cmd<Msg> load_thread_async(ThreadId id);
+[[nodiscard]] Cmd load_thread_async(ThreadId id);
 
 } // namespace agentty::app::cmd

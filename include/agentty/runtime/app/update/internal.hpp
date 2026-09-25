@@ -13,14 +13,26 @@
 #include <maya/maya.hpp>
 #include <nlohmann/json_fwd.hpp>  // only json declarations here; full type lives in the .cpp
 
+#include "agentty/runtime/cmd.hpp"
 #include "agentty/runtime/model.hpp"
 #include "agentty/domain/entitlement.hpp"
 #include "agentty/runtime/msg.hpp"
 
 namespace agentty::app {
 
-using Step = std::pair<Model, maya::Cmd<Msg>>;
-inline Step done(Model m) { return {std::move(m), maya::Cmd<Msg>::none()}; }
+// A reducer step: the next model, and what should happen.
+//
+// This is still the OLD shape (return the model by value). jaal's is
+// `Cmd update(Model&, Leaf)` — mutate in place, return only the effect —
+// which deletes the 172 `return {std::move(m), ...}` sites and with them a
+// real hazard: `return {std::move(m), f(m)}` has unspecified evaluation
+// order and there is at least one of those in the tree today.
+//
+// Converting the signature is its own step (4 in docs/design/jaal-rewrite.md)
+// so a mechanical 23-file change never lands mixed with a behaviour change.
+// For now only the Cmd type moves to jaal's.
+using Step = std::pair<Model, Cmd>;
+inline Step done(Model m) { return {std::move(m), Cmd::none()}; }
 
 namespace detail {
 
@@ -63,7 +75,7 @@ inline constexpr int kSliceChunk = 8;
 void update_stream_preview(ToolUse& tc);
 bool guard_truncated_tool_args(ToolUse& tc);
 nlohmann::json salvage_args(const ToolUse& tc);
-maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason = StopReason::Unspecified);
+Cmd finalize_turn(Model& m, StopReason stop_reason = StopReason::Unspecified);
 
 // Sync the persistent plan state (m.ui.todo.items) from a `todo` tool
 // call's args["todos"] array. Called live during arg streaming AND at
@@ -137,7 +149,7 @@ std::string    model_for_provider(std::string_view spec);
 // active on the new provider, taking priority over the per-provider recall —
 // this is what the fused cross-provider picker passes so an Enter is an ATOMIC
 // provider+model switch. Empty (every existing caller) keeps the recall path.
-[[nodiscard]] std::pair<Model, maya::Cmd<Msg>>
+[[nodiscard]] std::pair<Model, Cmd>
 commit_provider_switch(Model m, std::string_view spec,
                        auth::AuthHeader new_auth, std::string_view label,
                        std::string_view desired_model = {},
@@ -243,7 +255,7 @@ bool live_tail_reveal_settled(const Model& m);
 // oldest N blocks to keep maya's prev_cells working set bounded.
 // Returns Cmd::commit_scrollback(ScrollbackDebt) minted by the ledger
 // from maya's own paint-recorded heights. No-op if under the cap.
-maya::Cmd<Msg> trim_frozen_if_oversized(Model& m);
+Cmd trim_frozen_if_oversized(Model& m);
 
 // Set a transient status toast that auto-clears after `ttl`. Returns a
 // Cmd that schedules the ClearStatus sentinel (stamp-matched so a newer
@@ -251,7 +263,7 @@ maya::Cmd<Msg> trim_frozen_if_oversized(Model& m);
 // "no pending changes" / "nothing to copy" — anywhere the alternative
 // is silent failure that leaves the user wondering if their keystroke
 // even registered.
-maya::Cmd<Msg> set_status_toast(Model& m, std::string text,
+Cmd set_status_toast(Model& m, std::string text,
                                 std::chrono::seconds ttl = std::chrono::seconds{3});
 
 // ── update/stream.cpp helpers ────────────────────────────────────────────

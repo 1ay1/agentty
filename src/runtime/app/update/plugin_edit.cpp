@@ -27,7 +27,6 @@
 #include <vector>
 
 #include <maya/core/overload.hpp>
-#include <maya/core/cmd.hpp>
 
 #include "agentty/mcp/client.hpp"                    // plugin_model
 #include "agentty/runtime/app/cmd_factory.hpp"       // load_plugins_async
@@ -43,7 +42,6 @@ namespace cmdf = agentty::app::cmd;   // cmd_factory (locals named `cmd` shadow)
 namespace agentty::app::detail {
 
 using maya::overload;
-using maya::Cmd;
 
 namespace {
 
@@ -252,8 +250,8 @@ Step plugin_edit_update(Model m, msg::PluginEditMsg pm) {
                     auto r = tools::plugin::set_server_disabled(
                         path, o->server, !on);
                     if (r == tools::plugin::EditResult::Ok) {
-                        return {std::move(m), Cmd<Msg>::batch(
-                            std::vector<Cmd<Msg>>{
+                        return {std::move(m), Cmd::batch(
+                            std::vector<Cmd>{
                                 cmdf::load_plugins_async(/*reconnect=*/true),
                                 set_status_toast(m, on ? "enabled" : "disabled")})};
                     }
@@ -268,8 +266,8 @@ Step plugin_edit_update(Model m, msg::PluginEditMsg pm) {
                         path, o->server, bare, on);
                     if (r == tools::plugin::EditResult::Ok) {
                         tools::invalidate_mcp_catalog();
-                        return {std::move(m), Cmd<Msg>::batch(
-                            std::vector<Cmd<Msg>>{
+                        return {std::move(m), Cmd::batch(
+                            std::vector<Cmd>{
                                 cmdf::load_plugins_async(/*reconnect=*/false),
                                 set_status_toast(m, (on ? "enabled '" : "disabled '")
                                                     + bare + "'")})};
@@ -297,12 +295,12 @@ Step plugin_edit_update(Model m, msg::PluginEditMsg pm) {
             if (row_id == pf::kApprove && !o->server.empty()) {
                 const fs::path path = config_target(*o, m);
                 if (tools::plugin::approve_server(path, o->server)) {
-                    return {std::move(m), Cmd<Msg>::batch(std::vector<Cmd<Msg>>{
+                    return {std::move(m), Cmd::batch(std::vector<Cmd>{
                         cmdf::load_plugins_async(/*reconnect=*/true),
                         set_status_toast(m, "approved '" + o->server + "'"),
                         // Reopen once the reload lands so the pane reflects
                         // the post-approval state (trusted → connecting).
-                        Cmd<Msg>::after(std::chrono::milliseconds{50},
+                        Cmd::after(std::chrono::milliseconds{50},
                             Msg{OpenPluginEdit{o->server, o->project}})})};
                 }
                 return {std::move(m), set_status_toast(m, "approve failed")};
@@ -320,7 +318,7 @@ Step plugin_edit_update(Model m, msg::PluginEditMsg pm) {
                 auto r = tools::plugin::remove_server(path, name);
                 if (r == tools::plugin::EditResult::Ok) {
                     ascend(m);
-                    return {std::move(m), Cmd<Msg>::batch(std::vector<Cmd<Msg>>{
+                    return {std::move(m), Cmd::batch(std::vector<Cmd>{
                         cmdf::load_plugins_async(/*reconnect=*/true),
                         set_status_toast(m, "removed '" + name + "'")})};
                 }
@@ -353,14 +351,14 @@ Step plugin_edit_update(Model m, msg::PluginEditMsg pm) {
                     // Field-exit commit: written + applied, pane stays open.
                     // The catalog reload runs so the new value is live
                     // immediately (same as the toggle path).
-                    return {std::move(m), Cmd<Msg>::batch(std::vector<Cmd<Msg>>{
+                    return {std::move(m), Cmd::batch(std::vector<Cmd>{
                         cmdf::load_plugins_async(/*reconnect=*/true),
                         set_status_toast(m, "saved '" + spec.name + "'")})};
                 }
                 const std::string toast = (add ? "added '" : "saved '")
                     + spec.name + "'";
                 ascend(m);
-                return {std::move(m), Cmd<Msg>::batch(std::vector<Cmd<Msg>>{
+                return {std::move(m), Cmd::batch(std::vector<Cmd>{
                     cmdf::load_plugins_async(/*reconnect=*/true),
                     set_status_toast(m, toast)})};
             }

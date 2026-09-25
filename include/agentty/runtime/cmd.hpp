@@ -50,7 +50,7 @@ using Cmd = jaal::Cmd<Msg,
 // ── spelling the terminal effects ──────────────────────────────────────
 // jaal builds an effect by handing its PAYLOAD to the Cmd: `Cmd(SetTitle{s})`.
 // That reads fine at one call site and poorly at forty, and the old runtime
-// spelled these as named factories (`Cmd<Msg>::write_clipboard(s)`), so keep
+// spelled these as named factories (`Cmd::write_clipboard(s)`), so keep
 // the names. They're free — each is one constructor call.
 namespace cmd {
 
