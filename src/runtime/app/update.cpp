@@ -37,6 +37,38 @@ using maya::overload;
 // unnecessary, and firing it on every first keystroke was actively
 // causing the scrollback-duplication symptom it was meant to prevent).
 
+// Call a reducer of either shape, leaving the new model in `m`.
+//
+// The reducers are mid-conversion to jaal's `Cmd(Model&, DomainMsg)`. The
+// jaal form already writes through the reference and hands back only the
+// effect; the legacy `Step(Model, DomainMsg)` returns (model, effect), so
+// the model has to be moved back. That move IS the adapter, and it
+// disappears with the last unconverted domain.
+//
+// Having it in one place is what lets a domain convert on its own instead
+// of all 23 changing in a single commit.
+namespace {
+
+template <class R, class D>
+[[nodiscard]] Cmd call_reducer(R reducer, Model& m, D d) {
+    if constexpr (std::is_invocable_r_v<Cmd, R, Model&, D>) {
+        return reducer(m, std::move(d));
+    } else {
+        auto [next, cmd] = reducer(std::move(m), std::move(d));
+        m = std::move(next);
+        return std::move(cmd);
+    }
+}
+
+} // namespace
+
+// The pair-returning whole-Msg entry point.
+//
+// jaal does NOT call this — it walks the Msg tree and calls the per-domain
+// `update(Model&, DomainMsg)` overloads below. This stays because ~40 tests
+// drive the reducer as `update(model, msg)` and reading the result as a
+// value is what makes them legible. It delegates, so there is still one
+// implementation per domain.
 std::pair<Model, Cmd> update(Model m, Msg msg) {
     // One-shot warmup flag: set by ThreadLoaded, consumed by maya's
     // run loop on the very next render(). Clear on every subsequent
@@ -53,33 +85,36 @@ std::pair<Model, Cmd> update(Model m, Msg msg) {
     }, msg);
     if (!is_thread_load) m.ui.needs_warmup_render = false;
 
-    auto step = std::visit(overload{
-        [&](msg::ComposerMsg cm)       { return detail::composer_update     (std::move(m), std::move(cm)); },
-        [&](msg::StreamMsg sm)         { return detail::stream_update       (std::move(m), std::move(sm)); },
-        [&](msg::ToolMsg tm)           { return detail::tool_update         (std::move(m), std::move(tm)); },
-        [&](msg::ToolOutputMsg tm)     { return detail::tool_output_update  (std::move(m), std::move(tm)); },
-        [&](msg::ProvidersMsg pm) { return detail::providers_update(std::move(m), std::move(pm)); },
-        [&](msg::ModelsMsg pm)    { return detail::models_update  (std::move(m), std::move(pm)); },
-        [&](msg::ThreadListMsg tm)     { return detail::thread_list_update  (std::move(m), std::move(tm)); },
-        [&](msg::PaletteMsg pm) { return detail::palette_update      (std::move(m), std::move(pm)); },
-        [&](msg::MentionMsg mm) { return detail::mention_update      (std::move(m), std::move(mm)); },
-        [&](msg::SymbolMsg sm)  { return detail::symbol_update       (std::move(m), std::move(sm)); },
-        [&](msg::CodeBlockMsg cm)      { return detail::codeblock_update    (std::move(m), std::move(cm)); },
-        [&](msg::CheckpointMsg cm)     { return detail::checkpoint_update   (std::move(m), std::move(cm)); },
-        [&](msg::RagMsg rm)    { return detail::rag_settings_update (std::move(m), std::move(rm)); },
-        [&](msg::StatsMsg sm)  { return detail::stats_update         (std::move(m), std::move(sm)); },
-        [&](msg::SettingsListMsg sm)   { return detail::settings_list_update(std::move(m), std::move(sm)); },
-        [&](msg::ForkMsg fm)           { return detail::fork_update         (std::move(m), std::move(fm)); },
-        [&](msg::TodoMsg tm)           { return detail::todo_update         (std::move(m), std::move(tm)); },
-        [&](msg::LoginMsg lm)          { return detail::login_update        (std::move(m), std::move(lm)); },
-        [&](msg::DiffReviewMsg dm)     { return detail::diff_review_update  (std::move(m), std::move(dm)); },
-        [&](msg::SmartModeMsg sm)      { return detail::smart_mode_update   (std::move(m), std::move(sm)); },
-        [&](msg::PluginEditMsg pm)     { return detail::plugin_edit_update  (std::move(m), std::move(pm)); },
-        [&](msg::AppearanceMsg am)     { return detail::appearance_update   (std::move(m), std::move(am)); },
-        [&](msg::MetaMsg mm)           { return detail::meta_update         (std::move(m), std::move(mm)); },
+    // Each arm hands the model to its domain reducer through call_reducer,
+    // which copes with both the jaal shape and the legacy one — so this
+    // function does not need to know which domains have been converted.
+    auto cmd = std::visit(overload{
+        [&](msg::ComposerMsg cm)     { return call_reducer(detail::composer_update,      m, std::move(cm)); },
+        [&](msg::StreamMsg sm)       { return call_reducer(detail::stream_update,        m, std::move(sm)); },
+        [&](msg::ToolMsg tm)         { return call_reducer(detail::tool_update,          m, std::move(tm)); },
+        [&](msg::ToolOutputMsg tm)   { return call_reducer(detail::tool_output_update,   m, std::move(tm)); },
+        [&](msg::ProvidersMsg pm)    { return call_reducer(detail::providers_update,     m, std::move(pm)); },
+        [&](msg::ModelsMsg pm)       { return call_reducer(detail::models_update,        m, std::move(pm)); },
+        [&](msg::ThreadListMsg tm)   { return call_reducer(detail::thread_list_update,   m, std::move(tm)); },
+        [&](msg::PaletteMsg pm)      { return call_reducer(detail::palette_update,       m, std::move(pm)); },
+        [&](msg::MentionMsg mm)      { return call_reducer(detail::mention_update,       m, std::move(mm)); },
+        [&](msg::SymbolMsg sm)       { return call_reducer(detail::symbol_update,        m, std::move(sm)); },
+        [&](msg::CodeBlockMsg cm)    { return call_reducer(detail::codeblock_update,     m, std::move(cm)); },
+        [&](msg::CheckpointMsg cm)   { return call_reducer(detail::checkpoint_update,    m, std::move(cm)); },
+        [&](msg::RagMsg rm)          { return call_reducer(detail::rag_settings_update,  m, std::move(rm)); },
+        [&](msg::StatsMsg sm)        { return call_reducer(detail::stats_update,         m, std::move(sm)); },
+        [&](msg::SettingsListMsg sm) { return call_reducer(detail::settings_list_update, m, std::move(sm)); },
+        [&](msg::ForkMsg fm)         { return call_reducer(detail::fork_update,          m, std::move(fm)); },
+        [&](msg::TodoMsg tm)         { return call_reducer(detail::todo_update,          m, std::move(tm)); },
+        [&](msg::LoginMsg lm)        { return call_reducer(detail::login_update,         m, std::move(lm)); },
+        [&](msg::DiffReviewMsg dm)   { return call_reducer(detail::diff_review_update,   m, std::move(dm)); },
+        [&](msg::SmartModeMsg sm)    { return call_reducer(detail::smart_mode_update,    m, std::move(sm)); },
+        [&](msg::PluginEditMsg pm)   { return call_reducer(detail::plugin_edit_update,   m, std::move(pm)); },
+        [&](msg::AppearanceMsg am)   { return call_reducer(detail::appearance_update,    m, std::move(am)); },
+        [&](msg::MetaMsg mm)         { return call_reducer(detail::meta_update,          m, std::move(mm)); },
     }, msg);
 
-    return step;
+    return {std::move(m), std::move(cmd)};
 }
 
 namespace {
@@ -106,11 +141,10 @@ void clear_warmup_unless_thread_load(Model& m, const Domain& d) {
 // One overload per domain. jaal walks the Msg tree and calls the one that
 // matches what it landed on; we no longer write the outer visit.
 //
-// Each is the same three lines: hand the reducer the model, take back the
-// pair it still returns, write the new model into `m`, return the effect.
-// That adapter is the ONLY thing standing between these and jaal's shape —
-// when a domain's reducer is itself converted to `Cmd(Model&, DomainMsg)`,
-// its wrapper here collapses to a direct call and eventually disappears.
+// Each hands the reducer the model and returns the effect. The reducers are
+// mid-conversion to jaal's `Cmd(Model&, DomainMsg)`, so `call_reducer` below
+// accepts BOTH that and the old `Step(Model, DomainMsg)` — which is what
+// lets a domain move on its own instead of all 23 changing in one commit.
 //
 // Done as a macro because 23 identical bodies written out is 23 chances to
 // typo one of them, and a typo here routes a whole domain to the wrong
@@ -124,9 +158,7 @@ void clear_warmup_unless_thread_load(Model& m, const Domain& d) {
 #define AGENTTY_DOMAIN_UPDATE(DomainMsg, reducer)                       \
     Cmd update(Model& m, msg::DomainMsg d) {                            \
         clear_warmup_unless_thread_load(m, d);                          \
-        auto [next, cmd] = detail::reducer(std::move(m), std::move(d)); \
-        m = std::move(next);                                            \
-        return std::move(cmd);                                          \
+        return call_reducer(detail::reducer, m, std::move(d));          \
     }
 
 AGENTTY_DOMAIN_UPDATE(ComposerMsg,     composer_update)

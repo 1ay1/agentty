@@ -444,6 +444,19 @@ bool with_exec_tool(Model& m, const ToolCallId& id, std::uint64_t seq,
 // its domain variant, instantiated in its own TU. Adding a leaf to one
 // domain only recompiles that domain's TU plus msg.hpp's downstream
 // includers — not the other nine reducers.
+//
+// TWO SHAPES, during the conversion:
+//
+//   Cmd  f(Model& m, DomainMsg)   ← jaal's, what everything is becoming
+//   Step f(Model  m, DomainMsg)   ← the old pair-returning one
+//
+// update.cpp dispatches to either (it detects the shape), so a domain can
+// move on its own without a 286-site flag day. The pair form is what keeps
+// `deps()` alive: a reducer that returns its model can't also describe its
+// effects as values, so it reaches for the seam instead. Converting a
+// domain is what makes its effects expressible — see docs/design/jaal-rewrite.md.
+//
+// Converted so far: mention.
 Step composer_update      (Model m, msg::ComposerMsg       cm);
 Step stream_update        (Model m, msg::StreamMsg         sm);
 Step tool_update          (Model m, msg::ToolMsg           tm);
@@ -457,7 +470,7 @@ Step models_update  (Model m, msg::ModelsMsg     pm);
 [[nodiscard]] std::vector<FusedRow> fused_rows_for_model(const Model& m);
 Step thread_list_update   (Model m, msg::ThreadListMsg     tm);
 Step palette_update       (Model m, msg::PaletteMsg pm);
-Step mention_update       (Model m, msg::MentionMsg mm);
+Cmd  mention_update       (Model& m, msg::MentionMsg mm);
 Step symbol_update        (Model m, msg::SymbolMsg  sm);
 Step codeblock_update     (Model m, msg::CodeBlockMsg      cm);
 Step checkpoint_update    (Model m, msg::CheckpointMsg     cm);
