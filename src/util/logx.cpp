@@ -41,6 +41,14 @@ std::atomic<std::uint8_t> g_min_level[kChannels];   // zero-init → Trace; init
 std::atomic<bool>         g_ring_all{false};
 } // namespace detail
 
+bool full_bodies() noexcept {
+    static const bool on = [] {
+        const char* v = std::getenv("AGENTTY_LOG_BODIES");
+        return v && *v && !(v[0] == '0' && v[1] == '\0');
+    }();
+    return on;
+}
+
 namespace {
 
 // ── File sink state (written once by init, read-only after) ───────────

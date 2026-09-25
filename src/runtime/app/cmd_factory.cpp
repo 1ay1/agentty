@@ -793,9 +793,49 @@ Cmd<Msg> launch_stream(Model& m) {
         return 0;
     }();
 
-    // Capture the snapshot the worker needs. The Thread copy is the
-    // one unavoidable cost; everything else is small.
-    Thread thread_snapshot = m.d.current;
+    // Capture the snapshot the worker needs — but only the part of the
+    // transcript the wire can see. Both payload builders start from
+    // wire_messages_for_impl, which replaces messages[0, up_to_index) of
+    // the latest compaction with its summary and never reads them. Copying
+    // them anyway was the reducer's biggest per-round cost on a long
+    // thread: a 29 MB transcript with 17 compactions was deep-copied every
+    // round only for the worker to drop almost all of it. Rebase the
+    // snapshot to start at up_to_index (keeping the one compaction record
+    // the builder uses, re-pointed at index 0 + a placeholder message so
+    // the substitution rule still applies unchanged).
+    Thread thread_snapshot;
+    {
+        const Thread& cur = m.d.current;
+        thread_snapshot.id          = cur.id;
+        thread_snapshot.title       = cur.title;
+        thread_snapshot.forked_from = cur.forked_from;
+        thread_snapshot.rag_mode_override = cur.rag_mode_override;
+        thread_snapshot.created_at  = cur.created_at;
+        thread_snapshot.updated_at  = cur.updated_at;
+        std::size_t start = 0;
+        if (!cur.compactions.empty()) {
+            const auto& rec = cur.compactions.back();
+            if (rec.up_to_index > 0 && rec.up_to_index <= cur.messages.size())
+                start = rec.up_to_index;
+        }
+        if (start > 0) {
+            // One stand-in for the summarised prefix, so the rebased
+            // record (up_to_index = 1) passes the builder's bounds check and
+            // substitutes exactly as it would have on the full thread.
+            auto rec = cur.compactions.back();
+            rec.up_to_index = 1;
+            thread_snapshot.compactions.push_back(std::move(rec));
+            thread_snapshot.messages.reserve(1 + cur.messages.size() - start);
+            thread_snapshot.messages.emplace_back();
+        } else {
+            thread_snapshot.compactions = cur.compactions;
+            thread_snapshot.messages.reserve(cur.messages.size());
+        }
+        thread_snapshot.messages.insert(
+            thread_snapshot.messages.end(),
+            cur.messages.begin() + static_cast<std::ptrdiff_t>(start),
+            cur.messages.end());
+    }
     std::string session_key = thread_snapshot.id.value;
     const bool compacting  = m.s.compacting;
     const CompactionStyle compaction_style = m.s.compaction_style;

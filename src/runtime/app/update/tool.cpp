@@ -541,10 +541,18 @@ Step tool_update(Model m, msg::ToolMsg tm) {
             // a plan. The final exact state lands here even if the live
             // streaming sync (stream.cpp) raced a partial array.
             if (e.result) {
-                for (const auto& msg_ : m.d.current.messages)
-                    for (const auto& tc : msg_.tool_calls)
-                        if (tc.id == e.id && tc.name == "todo")
-                            sync_todo_state_from_args(m, tc.args);
+                // Newest-first and stop at the match: the call is in the
+                // current turn, so this is O(1) in practice instead of a
+                // walk over every tool call in the thread per result.
+                bool found = false;
+                for (auto mit = m.d.current.messages.rbegin();
+                     !found && mit != m.d.current.messages.rend(); ++mit)
+                    for (const auto& tc : mit->tool_calls)
+                        if (tc.id == e.id) {
+                            if (tc.name == "todo") sync_todo_state_from_args(m, tc.args);
+                            found = true;
+                            break;
+                        }
             }
             apply_tool_output(m, e.id, std::move(e.result), std::move(e.change),
                               std::move(e.changes), std::move(e.images),

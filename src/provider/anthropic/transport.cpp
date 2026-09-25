@@ -507,7 +507,7 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
         body_str.replace(pos, kDumpedPlaceholder.size(), messages_str);
     }
 
-    AGT_LOG(Wire, Trace, "anthropic.request.body", "raw={}", body_str);
+    AGT_LOG(Wire, Trace, "anthropic.request.body", "bytes={} raw={}", body_str.size(), ::agentty::logx::body(body_str));
 
     StreamCtx ctx;
     ctx.sink = std::move(sink);

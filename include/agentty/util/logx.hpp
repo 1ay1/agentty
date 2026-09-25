@@ -122,6 +122,19 @@ inline bool inited() {
 }
 } // namespace detail
 
+// Whole request bodies are the biggest thing we log: a long thread sends a
+// multi-MB body every round, and the default debug-build level (Trace)
+// used to write all of it, then run redact() over it, on the stream
+// thread right before the request went out. body() returns the text to
+// log for one: the whole thing only when AGENTTY_LOG_BODIES is set (any
+// value but "0"), otherwise a bounded head plus the total size. Cheap to
+// call: the flag is read once.
+[[nodiscard]] bool full_bodies() noexcept;
+[[nodiscard]] inline std::string_view body(std::string_view b) noexcept {
+    constexpr std::size_t kHead = 4096;
+    return (full_bodies() || b.size() <= kHead) ? b : b.substr(0, kHead);
+}
+
 // True iff an event on (ch, lv) would be written to the FILE. The macro
 // calls this before evaluating its format arguments.
 [[nodiscard]] inline bool enabled(Channel ch, Level lv) noexcept {
