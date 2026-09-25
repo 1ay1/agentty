@@ -9,6 +9,7 @@
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <iomanip>
 #include <iterator>
@@ -1549,15 +1550,20 @@ static bool settled(const ToolUse& t) noexcept {
            || std::holds_alternative<ToolUse::Rejected>(t.status);
 }
 
-static LogMismatch log_diff(const ThreadLog& log, const std::vector<Message>& want) {
+// Compare what was read back (`got`) against what was meant to be written
+// (`want`), both starting at message `base` of the thread. Shared by the
+// full save (base 0, whole log) and the tail save (only the new lines).
+static LogMismatch log_diff_range(const std::vector<Message>& got,
+                                  const std::vector<Message>& want,
+                                  std::size_t base) {
     using K = LogMismatch::Kind;
-    const auto got = log.all();
     if (got.size() != want.size())
-        return {K::Count, want.size(), std::to_string(want.size()),
-                std::to_string(got.size())};
-    for (std::size_t i = 0; i < got.size(); ++i) {
-        const auto& a = want[i];
-        const auto& b = got[i];
+        return {K::Count, base + want.size(), std::to_string(base + want.size()),
+                std::to_string(base + got.size())};
+    for (std::size_t j = 0; j < got.size(); ++j) {
+        const std::size_t i = base + j;
+        const auto& a = want[j];
+        const auto& b = got[j];
         if (a.id.value != b.id.value)
             return {K::Id, i, a.id.value, b.id.value};
         if (a.role != b.role)
@@ -1584,8 +1590,15 @@ static LogMismatch log_diff(const ThreadLog& log, const std::vector<Message>& wa
     return {};
 }
 
-static void save_thread_sync(const Thread& t) {
-    if (t.id.empty() || t.messages.empty()) return;
+static LogMismatch log_diff(const ThreadLog& log, const std::vector<Message>& want) {
+    return log_diff_range(log.all(), want, 0);
+}
+
+// Returns true iff the thread is now on disk in the LOG format and that
+// log was verified. The incremental writer only trusts its per-thread
+// bookkeeping after a true here; false means the next save must be full.
+static bool save_thread_sync(const Thread& t) {
+    if (t.id.empty() || t.messages.empty()) return false;
 
     // ── Write the log, and only then retire the legacy document ──────
     //
@@ -1623,7 +1636,7 @@ static void save_thread_sync(const Thread& t) {
                         t.id.value, t.messages.size());
             }
             reindex_thread(t);
-            return;
+            return true;
         }
         // Wrote, but it did not read back correctly. Keep the legacy file
         // (written below) and say so loudly — this is a bug in the log
@@ -1660,6 +1673,198 @@ static void save_thread_sync(const Thread& t) {
     // Keep the metadata index in lock-step with the file we just
     // wrote so the next startup's fast path picks it up.
     reindex_thread(t);
+    return false;
+}
+
+// ── Incremental saves ────────────────────────────────────────────────
+//
+// A save fires at the end of every model round, and it used to write the
+// WHOLE thread: re-encode every message, fsync the full log, then parse it
+// all back (reading every blob off disk) to verify. On a 30 MB thread that
+// is tens of MB of work per round, so a long agent loop got slower the
+// longer it ran. Almost none of it is needed: history before the open turn
+// does not change between two rounds.
+//
+// So the writer keeps, per thread, a cheap fingerprint of every message it
+// last put in the log. A save finds the first message whose fingerprint
+// changed (normally the open turn or a tool that just settled), cuts the
+// log there (O(1), offsets are known) and appends from that point on.
+// Only the appended lines are read back and verified.
+//
+// Anything that rewrites history (compaction, fork, edit, rewind, the
+// image clear on a vision error) changes an early fingerprint or the
+// count, so it falls back to the same full write as before. The full path
+// is also taken for the first save of a thread in this process (nothing
+// is known about the files yet) and after any failure. The bookkeeping is
+// only trusted after a verified log write, so the worst case is one extra
+// full save, never a wrong file.
+
+// Fingerprint of everything message_to_json persists. Hashes the content
+// (not just sizes) so an in-place edit of the same length still shows up,
+// but touches no blobs, does no I/O and allocates nothing. It runs on the
+// reducer over the whole thread each save, so it reads 8 bytes per step
+// (a multiply-xorshift mix) rather than FNV's byte loop — several GB/s,
+// i.e. a few ms for a 30 MB thread. Not cryptographic: it only has to
+// notice that a message changed, and nothing adversarial feeds it.
+struct Fnv {
+    std::uint64_t h = 0x9E3779B97F4A7C15ull;
+    static constexpr std::uint64_t kMul = 0xFF51AFD7ED558CCDull;
+    void word(std::uint64_t w) noexcept {
+        h ^= w;
+        h *= kMul;
+        h ^= h >> 32;
+    }
+    void bytes(const void* p, std::size_t n) noexcept {
+        const auto* c = static_cast<const unsigned char*>(p);
+        std::size_t i = 0;
+        for (; i + 8 <= n; i += 8) {
+            std::uint64_t w;
+            std::memcpy(&w, c + i, 8);
+            word(w);
+        }
+        std::uint64_t last = 0;
+        if (i < n) std::memcpy(&last, c + i, n - i);
+        word(last ^ (static_cast<std::uint64_t>(n - i) << 56));
+    }
+    void str(std::string_view s) noexcept { word(s.size()); bytes(s.data(), s.size()); }
+    template <class N> void num(N v) noexcept {
+        std::uint64_t w = 0;
+        std::memcpy(&w, &v, sizeof v < 8 ? sizeof v : 8);
+        word(w);
+    }
+};
+
+// A lazy payload (image, attachment body). A payload that came from disk
+// is identified by its source (blob name / legacy base64) and is persisted
+// by that same reference, so hashing the source is exact and never loads
+// the bytes. Deliberately ignores materialised(): the view can resolve an
+// image on another thread at any moment, and that must not make an old
+// message look edited. Only raw payloads (a fresh paste) hash their bytes.
+template <class Payload>
+static void fp_payload(Fnv& f, const Payload& p) {
+    const auto& src = p.source();
+    if (!src.blob.empty() || !src.b64.empty()) {
+        f.num(1); f.str(src.blob); f.str(src.b64);
+    } else {
+        f.num(2); f.str(p.bytes());
+    }
+}
+
+static std::uint64_t message_fingerprint(const Message& m) {
+    Fnv f;
+    f.str(m.id.value);
+    f.num(static_cast<int>(m.role));
+    f.str(m.text);
+    f.num(m.timestamp.time_since_epoch().count());
+    f.str(m.served_model.value);
+    f.num(m.served_role.has_value());
+    if (m.served_role) f.num(static_cast<int>(*m.served_role));
+    f.str(m.thinking);
+    f.str(m.thinking_signature);
+    f.num(m.reasoning_ms);
+    f.str(m.reasoning_encrypted);
+    f.str(m.reasoning_site);
+    f.str(m.reasoning_summary);
+    f.num(m.thinking_blocks.size());
+    for (const auto& b : m.thinking_blocks) {
+        f.str(b.text); f.str(b.signature); f.str(b.redacted_data);
+    }
+    f.num(m.tool_calls.size());
+    for (const auto& tc : m.tool_calls) {
+        f.str(tc.id.value);
+        f.str(tc.name.value);
+        f.str(tc.args_dump());
+        f.str(tc.status_name());
+        f.str(tc.output());
+        f.num(tc.done_images().size());
+        for (const auto& img : tc.done_images()) {
+            f.str(img.media_type);
+            fp_payload(f, img);
+        }
+    }
+    f.num(m.images.size());
+    for (const auto& img : m.images) {
+        f.str(img.media_type);
+        fp_payload(f, img);
+    }
+    f.num(m.attachments.size());
+    for (const auto& a : m.attachments) {
+        f.num(static_cast<int>(a.kind));
+        fp_payload(f, a.body);
+        f.str(a.path); f.str(a.media_type); f.str(a.name);
+        f.num(a.line_number); f.num(a.line_count); f.num(a.byte_count);
+    }
+    f.num(m.checkpoint_id.has_value());
+    if (m.checkpoint_id) f.str(m.checkpoint_id->value);
+    f.num(m.error.has_value());
+    if (m.error) f.str(*m.error);
+    f.num(m.is_compact_summary);
+    f.num(m.proactive.has_value());
+    if (m.proactive) {
+        f.num(m.proactive->confidence.has_value());
+        if (m.proactive->confidence) f.num(*m.proactive->confidence);
+    }
+    f.num(m.telemetry.has_value());
+    if (m.telemetry) {
+        const auto& t = *m.telemetry;
+        f.num(t.ttft_ms); f.num(t.stream_ms); f.num(t.input_tokens);
+        f.num(t.output_tokens); f.num(t.reasoning_tokens); f.num(t.cache_read);
+        f.num(t.cache_creation); f.num(t.transient_retries);
+        f.num(t.mid_stream_failures); f.num(t.no_progress_failures);
+        f.num(t.wire_bytes);
+    }
+    f.num(m.fork_note);
+    f.str(m.fork_transcript);
+    return f.h;
+}
+
+// What the writer knows is in the log for one thread: one fingerprint per
+// persisted message, in log order. Only ever set after a verified write.
+struct LogState {
+    std::vector<std::uint64_t> fps;
+};
+
+// A queued save. `from` is the index (into the persistable messages) of
+// the first one that may differ from the log; `tail` is those messages.
+// `full` carries the whole thread when the tail path can't be used.
+struct SaveJob {
+    Thread                     meta;         // header only, messages empty
+    std::size_t                from = 0;
+    std::vector<Message>       tail;
+    std::vector<std::uint64_t> fps;          // fingerprints for ALL messages
+    std::optional<Thread>      full;
+};
+
+// Encode + append [from, end) after cutting the log at `from`, then verify
+// only the new lines. Returns false on any failure; the caller then does a
+// full save, which also repairs whatever this left behind.
+static bool save_tail_sync(const SaveJob& job) {
+    auto log = ThreadLog::open(job.meta.id);
+    if (!log || !log->exists() || log->size() < job.from) return false;
+    if (!log->truncate_to(job.from)) return false;
+    for (const auto& m : job.tail)
+        if (!log->append(m)) return false;
+    if (!log->set_meta(job.meta)) return false;
+    if (log->size() != job.fps.size()) return false;
+
+    // Same gate as the full path, scoped to what this save wrote. Reads
+    // back the appended lines from the FILES, via a fresh open.
+    auto check = ThreadLog::open(job.meta.id);
+    if (!check) return false;
+    const auto got = check->range(job.from, check->size());
+    const LogMismatch diff = log_diff_range(got, job.tail, job.from);
+    if (!diff.ok()) {
+        AGT_LOG(Persist, Error, "thread.save",
+                "tail verification FAILED id={} from={} kind={} index={} "
+                "want={} got={} — falling back to a full save",
+                job.meta.id.value, job.from, diff.kind_name(), diff.index,
+                diff.want, diff.got);
+        return false;
+    }
+    AGT_LOG(Persist, Debug, "thread.save",
+            "result=ok format=log mode=tail id={} from={} wrote={} messages={}",
+            job.meta.id.value, job.from, job.tail.size(), job.fps.size());
+    return true;
 }
 
 // ── Async writer ─────────────────────────────────────────────────────
@@ -1678,22 +1883,65 @@ static void save_thread_sync(const Thread& t) {
 // before maya returns; we wait for the queue to drain inside
 // flush_and_stop() which `main` calls right after maya::run returns.
 struct AsyncWriter {
-    std::mutex                              mu;
-    std::condition_variable                 cv;
-    std::unordered_map<std::string, Thread> pending;
-    bool                                    stopping = false;
-    std::thread                             worker;
+    std::mutex                               mu;
+    std::condition_variable                  cv;
+    std::unordered_map<std::string, SaveJob> pending;
+    // Per-thread knowledge of the log, owned under `mu`. The reducer reads
+    // it to build a tail-only job; the worker writes it after a verified
+    // save. Dropped on delete, and on any failure.
+    std::unordered_map<std::string, LogState> known;
+    bool                                     stopping = false;
+    std::thread                              worker;
 
-    void enqueue(Thread t) {
-        {
-            std::lock_guard<std::mutex> lk(mu);
-            // Newer snapshot supersedes any older one still queued
-            // for the same thread id. Move-assign so we don't copy
-            // the messages vector twice.
-            pending.insert_or_assign(t.id.value, std::move(t));
-            if (!worker.joinable()) start_locked();
+    // Build the job on the CALLER's thread, copying only what changed.
+    // Fingerprinting is one pass of hashing with no allocation or I/O —
+    // far cheaper than the full Thread copy this replaces, and the writer
+    // no longer re-encodes or re-reads anything before `from`.
+    void enqueue(const Thread& t) {
+        std::vector<std::uint64_t> fps;
+        fps.reserve(t.messages.size());
+        for (const auto& m : t.messages)
+            if (!m.smart_routing) fps.push_back(message_fingerprint(m));
+
+        std::lock_guard<std::mutex> lk(mu);
+        const std::string& key = t.id.value;
+
+        // Diff against what is CONFIRMED on disk. If a save for this thread
+        // is queued or mid-write, its outcome isn't known yet: a tail built
+        // on top of it would be wrong if it fails. That case is rare (saves
+        // are one per round, a tail write takes milliseconds), so just send
+        // the whole thread then — exactly the old behaviour.
+        const std::vector<std::uint64_t>* base = nullptr;
+        const bool busy = pending.contains(key) || in_flight_ == key;
+        if (!busy)
+            if (auto k = known.find(key); k != known.end()) base = &k->second.fps;
+
+        SaveJob job;
+        job.meta = t;              // header copy; messages cleared below
+        job.meta.messages.clear();
+        job.fps = fps;
+
+        if (!base) {
+            job.full = t;
+        } else {
+            const std::size_t n = std::min(base->size(), fps.size());
+            std::size_t from = 0;
+            while (from < n && (*base)[from] == fps[from]) ++from;
+            job.from = from;
+            std::size_t i = 0;
+            for (const auto& m : t.messages) {
+                if (m.smart_routing) continue;
+                if (i++ >= from) job.tail.push_back(m);
+            }
         }
+        pending.insert_or_assign(key, std::move(job));
+        if (!worker.joinable()) start_locked();
         cv.notify_one();
+    }
+
+    void forget(const std::string& key) {
+        std::lock_guard<std::mutex> lk(mu);
+        known.erase(key);
     }
 
     void flush_and_stop() {
@@ -1721,7 +1969,8 @@ private:
 
     void run() {
         for (;;) {
-            Thread next;
+            SaveJob next;
+            std::string key;
             {
                 std::unique_lock<std::mutex> lk(mu);
                 cv.wait(lk, [this] { return !pending.empty() || stopping; });
@@ -1733,19 +1982,94 @@ private:
                     continue;
                 }
                 auto it = pending.begin();
+                key  = it->first;
                 next = std::move(it->second);
                 pending.erase(it);
+                // Marks the key busy so enqueue() won't build a tail on an
+                // outcome it can't see yet. `known` is only set after the
+                // write is verified, below.
+                in_flight_ = key;
             }
             // Run outside the lock so concurrent enqueue() calls don't
             // block on the (potentially slow) fsync.
-            try { save_thread_sync(next); }
+            bool ok = false;
+            try {
+                if (!next.full) {
+                    ok = save_tail_sync(next);
+                    if (!ok) {
+                        // The tail write failed partway. The head before
+                        // `from` is the confirmed, verified state (no other
+                        // job for this key can have run in between), so
+                        // rebuild the whole thread from it and do a full
+                        // write, which also repairs whatever the tail left.
+                        if (auto log = ThreadLog::open(next.meta.id);
+                            log && log->size() >= next.from) {
+                            Thread t = next.meta;
+                            t.messages = log->range(0, next.from);
+                            if (t.messages.size() == next.from) {
+                                for (auto& m : next.tail) t.messages.push_back(std::move(m));
+                                ok = save_thread_sync(t);
+                            }
+                        }
+                        // The head is gone too (log emptied or replaced
+                        // behind our back). This job only carries the
+                        // tail, so it can't be written whole. Dropping
+                        // `known` below makes the NEXT save full, which
+                        // heals it; the reducer saves every round and on
+                        // quit, so the gap is one round at most.
+                        if (!ok)
+                            AGT_LOG(Persist, Error, "thread.save",
+                                    "tail save failed and log head unreadable "
+                                    "id={} from={} — next save will be full",
+                                    next.meta.id.value, next.from);
+                    }
+                } else {
+                    ok = save_thread_sync(*next.full);
+                }
+                // The picker index only needs refreshing when what it
+                // shows changes (title, timestamps) or at the first save.
+                // It is a read-modify-write of one JSON file covering every
+                // thread, so doing it every round was pure waste.
+                if (ok && !next.full) maybe_reindex(next.meta);
+            }
             catch (const std::exception& e) {
                 // best-effort, same policy as the sync path
                 util::dbglog("persistence.async_save", e.what());
             }
             catch (...) { util::dbglog("persistence.async_save", "non-std exception"); }
+
+            std::lock_guard<std::mutex> lk(mu);
+            in_flight_.clear();
+            if (!ok) known.erase(key);
+            else     known[key].fps = std::move(next.fps);
+            if (ok && next.full) indexed_[key] = index_key(next.full->title,
+                                                            next.full->updated_at);
         }
     }
+
+    // Title + updated_at, the fields the picker index holds. updated_at is
+    // second-resolution on disk, so compare at that grain.
+    static std::string index_key(const std::string& title,
+                                 std::chrono::system_clock::time_point up) {
+        return title + '\x1f' + std::to_string(
+            std::chrono::duration_cast<std::chrono::seconds>(
+                up.time_since_epoch()).count());
+    }
+
+    void maybe_reindex(const Thread& meta) {
+        const std::string k = index_key(meta.title, meta.updated_at);
+        {
+            std::lock_guard<std::mutex> lk(mu);
+            auto it = indexed_.find(meta.id.value);
+            if (it != indexed_.end() && it->second == k) return;
+            indexed_[meta.id.value] = k;
+        }
+        reindex_thread(meta);
+    }
+
+    std::string in_flight_;
+    // Last (title, updated_at) written to index.json per thread.
+    std::unordered_map<std::string, std::string> indexed_;
 };
 
 static AsyncWriter& async_writer() {
@@ -1757,6 +2081,12 @@ void save_thread(const Thread& t) {
     if (t.id.empty() || t.messages.empty()) return;
     async_writer().enqueue(t);
 }
+
+namespace {
+// Test/diagnostic hook, internal linkage: drop what the writer knows so
+// the next save of `id` is full. Used by delete_thread.
+void forget_log_state(const ThreadId& id) { async_writer().forget(id.value); }
+} // namespace
 
 void flush_pending_saves() {
     async_writer().flush_and_stop();
@@ -1800,6 +2130,7 @@ std::optional<Thread> load_thread_by_id(const ThreadId& id) {
 }
 
 void delete_thread(const ThreadId& id) {
+    forget_log_state(id);
     std::error_code ec;
     fs::remove(threads_dir() / (id.value + ".json"), ec);
     // The log format is three files (.jsonl, .ofs, .meta.json). A thread

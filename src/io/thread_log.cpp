@@ -448,6 +448,42 @@ bool ThreadLog::append(const Message& m) {
     return true;
 }
 
+bool ThreadLog::truncate_to(std::size_t n) {
+    if (n >= offsets_.size()) return true;
+    const std::uint64_t cut = offsets_[n];
+
+    // Log FIRST, index second. A crash between the two leaves an index
+    // whose offset n equals the new log size, which open() already rejects
+    // (offsets_.back() >= log_bytes) and rebuilds by scanning. The other
+    // order would leave a short index over a long log, and the last indexed
+    // message would silently absorb the lines after it.
+    std::error_code ec;
+    fs::resize_file(log_, static_cast<std::uintmax_t>(cut), ec);
+    if (ec) {
+        AGT_LOG(General, Error, "thread_log.truncate",
+                "cannot cut {} at {}: {}", log_.string(), cut, ec.message());
+        return false;
+    }
+    offsets_.resize(n);
+    // Everything after `cut` is gone, including any torn final line.
+    torn_tail_at_ = kNoTear;
+
+    // The index may be shorter than offsets_ if an earlier append_offset_
+    // failed; resizing it would pad with zeros. Rewrite it whole in that
+    // case (rare, O(n) of 8-byte entries), otherwise cut it in place.
+    const auto want = static_cast<std::uintmax_t>(n) * kOffsetWidth;
+    if (file_size_or_zero(idx_) >= want) {
+        fs::resize_file(idx_, want, ec);
+        if (!ec) return true;
+    }
+    if (!write_index_()) {
+        AGT_LOG(General, Warn, "thread_log.truncate",
+                "index cut failed for {} (will rebuild on next open)",
+                log_.string());
+    }
+    return true;
+}
+
 bool ThreadLog::rewrite(const std::vector<Message>& msgs) {
     std::string body;
     std::vector<std::uint64_t> offs;

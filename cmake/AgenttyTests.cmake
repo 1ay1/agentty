@@ -78,7 +78,7 @@ set(_AGENTTY_CONSOLIDATED
     stats_render_probe
     context_window_test
     thread_blob_test lazy_image_test thread_log_test
-    thread_migration_test blob_gc_test)
+    thread_migration_test thread_save_incremental_test blob_gc_test)
 foreach(_t ${_AGENTTY_CONSOLIDATED})
     agentty_test(${_t} MODE consolidated)
 endforeach()
@@ -98,6 +98,8 @@ agentty_fold_test(long_session_bench       TIMEOUT 600 LABELS perf)
 agentty_fold_test(tool_latency_bench ARGS  TIMEOUT 600 LABELS perf)
 agentty_fold_test(turn_prep_bench ARGS     TIMEOUT 600 LABELS perf)
 agentty_fold_test(cache_churn_bench ARGS   TIMEOUT 600 LABELS perf)
+agentty_fold_test(save_bench ARGS          TIMEOUT 600 LABELS perf)
+agentty_fold_test(wire_encode_bench ARGS   TIMEOUT 600 LABELS perf)
 agentty_fold_test(symbol_read_corpus ARGS  TIMEOUT 600 LABELS perf)
 agentty_fold_test(cross_process_lock_test  TIMEOUT 30)
 # Drives skills::catalog_block()/activation_payload() with a COLD all() cache
