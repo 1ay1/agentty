@@ -97,21 +97,23 @@ void install_and_close(Model& m, auth::Credentials creds,
 } // namespace
 
 // Start a native device-flow OAuth login for `provider` (registry id) with the
-// given display `label`. Sets the DeviceWaiting modal state and returns the
-// worker Cmd. One place so the picker, the login menu, and the account manager
-// all launch device login identically.
+// given display `label`. One place so the picker, the login menu, and the
+// account manager all launch device login identically.
+//
+// Returns NO Cmd: the worker is a SUBSCRIPTION now, keyed on this attempt.
+// subscribe() sees the DeviceWaiting state and asks jaal to run the poll
+// loop; when the state goes away (Esc, success, a newer attempt) the key
+// goes with it and jaal fires the body's stop_token. That is what makes
+// "close the modal" and "stop the worker" the same act instead of two things
+// that have to be kept in step — they were not, and Esc leaked a polling
+// thread for the rest of its 900 s budget.
 Step launch_device_login(Model m, std::string provider, std::string label) {
-    const auto attempt_id = cmd::next_codex_login_attempt_id();
-    auto cancel = std::make_shared<std::atomic_bool>(false);
     m.ui.login = login::DeviceWaiting{
-        .provider = provider,
-        .provider_label = label,
-        .attempt_id = attempt_id,
-        .cancel = cancel,
+        .provider = std::move(provider),
+        .provider_label = std::move(label),
+        .attempt_id = cmd::next_codex_login_attempt_id(),
     };
-    return {std::move(m),
-            cmd::device_login_async(std::move(provider), std::move(label),
-                                    attempt_id, std::move(cancel))};
+    return done(std::move(m));
 }
 
 Step open_login(Model m) {
@@ -120,14 +122,10 @@ Step open_login(Model m) {
 }
 
 Step close_login(Model m) {
-    if (auto* waiting = std::get_if<login::ChatGptWaiting>(&m.ui.login);
-        waiting && waiting->cancel) {
-        waiting->cancel->store(true, std::memory_order_release);
-    }
-    if (auto* waiting = std::get_if<login::DeviceWaiting>(&m.ui.login);
-        waiting && waiting->cancel) {
-        waiting->cancel->store(true, std::memory_order_release);
-    }
+    // Leaving the waiting state IS the cancel: subscribe() stops returning
+    // the login stream's key, so jaal fires the worker's stop_token. No flag
+    // to trip — the two used to be separate, and the flag was the half that
+    // stopped being read.
     m.ui.login = login::Closed{};
     return done(std::move(m));
 }
@@ -583,14 +581,12 @@ Step account_select(Model m) {
             return launch_device_login(std::move(m), provider,
                                        std::string{prow->label});
         if (prow && prow->codex_login()) {
-            const auto attempt_id = cmd::next_codex_login_attempt_id();
-            auto cancel = std::make_shared<std::atomic_bool>(false);
+            // State only — subscribe() runs the worker, keyed on attempt_id.
             m.ui.login = login::ChatGptWaiting{
-                .attempt_id = attempt_id,
-                .cancel = cancel,
+                .attempt_id = cmd::next_codex_login_attempt_id(),
                 .device_auth = provider::chatgpt::codex_device_auth_preferred(),
             };
-            return {std::move(m), cmd::codex_login_async(attempt_id, std::move(cancel))};
+            return done(std::move(m));
         }
         // Otherwise: the method menu (OAuth subscription vs API key).
         m.ui.login = login::Picking{
@@ -826,14 +822,13 @@ Step login_pick_method(Model m, char32_t key) {
         // Native ChatGPT OAuth. Local terminals use the browser + loopback
         // callback; SSH terminals automatically use OpenAI device auth and
         // receive a one-time code through CodexDeviceCodeReady.
-        const auto attempt_id = cmd::next_codex_login_attempt_id();
-        auto cancel = std::make_shared<std::atomic_bool>(false);
+        //
+        // State only — subscribe() runs the worker, keyed on attempt_id.
         m.ui.login = login::ChatGptWaiting{
-            .attempt_id = attempt_id,
-            .cancel = cancel,
+            .attempt_id = cmd::next_codex_login_attempt_id(),
             .device_auth = provider::chatgpt::codex_device_auth_preferred(),
         };
-        return {std::move(m), cmd::codex_login_async(attempt_id, std::move(cancel))};
+        return done(std::move(m));
     }
     if (key == U'4' && !anthropic_only) {
         // Custom OpenAI-compatible host (llama.cpp, vLLM, LM Studio,
@@ -1185,8 +1180,8 @@ Step login_codex_done(
     auto* waiting = std::get_if<login::ChatGptWaiting>(&m.ui.login);
     if (!waiting || waiting->attempt_id != attempt_id)
         return done(std::move(m));
-    if (waiting->cancel)
-        waiting->cancel->store(true, std::memory_order_release);
+    // No cancel to trip: every arm below leaves ChatGptWaiting, which drops
+    // the stream's key and stops the worker.
     if (!result) {
         m.ui.login = login::Failed{result.error().render()};
         return done(std::move(m));
@@ -1232,8 +1227,7 @@ Step login_device_done(Model m, std::string provider, std::string provider_label
     if (!waiting || waiting->provider != provider
                  || waiting->attempt_id != attempt_id)
         return done(std::move(m));
-    if (waiting->cancel)
-        waiting->cancel->store(true, std::memory_order_release);
+    // No cancel to trip — see login_codex_done.
     if (error) {
         m.ui.login = login::Failed{std::move(*error)};
         return done(std::move(m));

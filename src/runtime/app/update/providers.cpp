@@ -352,27 +352,23 @@ Step providers_update(Model m, msg::ProvidersMsg pm) {
             // every OAuth row through one table.
             if (preset.token_in_transport
                 && !auth::vault::signed_in(std::string{spec})) {
+                // State only — subscribe() runs the worker, keyed on the
+                // attempt, so leaving the state cancels it.
                 const auto attempt_id = cmd::next_codex_login_attempt_id();
-                auto cancel = std::make_shared<std::atomic_bool>(false);
                 if (preset.codex_login()) {
                     m.ui.login = ui::login::ChatGptWaiting{
                         .attempt_id = attempt_id,
-                        .cancel = cancel,
                         .device_auth =
                             provider::chatgpt::codex_device_auth_preferred(),
                     };
-                    return {std::move(m),
-                            cmd::codex_login_async(attempt_id, std::move(cancel))};
+                    return done(std::move(m));
                 }
                 m.ui.login = ui::login::DeviceWaiting{
                     .provider = std::string{spec},
                     .provider_label = std::string{preset.label},
-                    .attempt_id = attempt_id, .cancel = cancel,
+                    .attempt_id = attempt_id,
                 };
-                return {std::move(m),
-                        cmd::device_login_async(std::string{spec},
-                                                std::string{preset.label},
-                                                attempt_id, std::move(cancel))};
+                return done(std::move(m));
             }
 
             // Every entry point funnels the actual switch through the ONE

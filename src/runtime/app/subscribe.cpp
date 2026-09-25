@@ -12,6 +12,7 @@
 #include "agentty/runtime/panel/top.hpp"
 #include "agentty/runtime/panel/nav.hpp"
 #include "agentty/runtime/app/update/internal.hpp"
+#include "agentty/runtime/app/cmd_factory.hpp"   // device_login_sub / codex_login_sub
 
 namespace pn = agentty::ui::panel;
 
@@ -1392,6 +1393,30 @@ Sub subscribe(const Model& m) {
     auto focus_sub = Sub::on(maya::on_focus{}, 
         [](const maya::FocusEvent& fe) -> Msg { return TerminalFocus{fe.focused}; });
 
+    // ── The login workers ────────────────────────────────────────────
+    //
+    // A device/ChatGPT login block-polls its provider for up to 900 s. As a
+    // Cmd that was fire-and-forget: Esc closed the modal and the worker
+    // carried on to the end of its budget, one leaked thread per attempt.
+    //
+    // As a keyed source it stops itself. While the model holds the waiting
+    // state we ask for the stream; when the state goes (Esc, success, a
+    // newer attempt) the key goes with it and jaal fires the body's
+    // stop_token. "Close the modal" and "cancel the worker" become one act,
+    // which is the only way they can't drift apart. jaal also discards
+    // messages from a stopped generation, so a late result can't land in a
+    // model that moved on.
+    //
+    // Computed BEFORE the Tick gate below, and included in both returns: a
+    // login can be open while a turn animates, and dropping it from the
+    // animating branch would silently stop the worker mid-sign-in.
+    Sub login_sub = Sub::none();
+    if (const auto* dw = std::get_if<ui::login::DeviceWaiting>(&m.ui.login))
+        login_sub = cmd::device_login_sub(dw->provider, dw->provider_label,
+                                          dw->attempt_id);
+    else if (const auto* cw = std::get_if<ui::login::ChatGptWaiting>(&m.ui.login))
+        login_sub = cmd::codex_login_sub(cw->attempt_id);
+
     // Tick drives every time-based animation. THREE gates must agree on
     // WHAT is animating, and animation_demand (subscribe.hpp) is now the
     // one definition they share — this subscription arms the timer, the
@@ -1401,10 +1426,100 @@ Sub subscribe(const Model& m) {
     if (animation_demand(m)) {
         auto tick = Sub::every(streaming_tick_period(), Tick{});
         return Sub::batch(std::move(key_sub), std::move(paste_sub),
-                               std::move(focus_sub), std::move(tick));
+                               std::move(focus_sub), std::move(tick),
+                               std::move(login_sub));
     }
     return Sub::batch(std::move(key_sub), std::move(paste_sub),
-                           std::move(focus_sub));
+                           std::move(focus_sub), std::move(login_sub));
+}
+
+// Keep this in step with subscribe() above: every field it reads, and every
+// local the key router captures by `[=]`, has to be represented here. The
+// contract and the reasoning are on SubsKey in app/subscribe.hpp.
+//
+// Read it top-down against subscribe(): the order below is deliberately the
+// order the values are computed there, so the two can be diffed by eye.
+SubsKey subs_key(const Model& m) noexcept {
+    SubsKey k;
+
+    // Which overlay owns the keyboard (panel::top()), plus the two pane
+    // sub-modes that change routing without changing the Kind.
+    const auto top = ui::panel::top(m);
+    k.active_panel = static_cast<int>(top);
+
+    if (const auto* o = m.ui.panel.get<ui::panel::SettingsList>())
+        k.settings_adding = o->input_active;
+
+    // focus_of() for each form-backed pane. Packed rather than four structs:
+    // the router only branches on these bits, and packing keeps the key
+    // trivially comparable. 3 bits per pane, in a fixed order.
+    const auto pack = [](FormFocus f) -> unsigned {
+        return (f.open ? 1u : 0u) | (f.editing ? 2u : 0u) | (f.choosing ? 4u : 0u);
+    };
+    unsigned modes = 0;
+    if (const auto* o = m.ui.panel.get<ui::panel::Rag>())
+        modes |= pack(focus_of(o->embed.form));
+    if (const auto* o = m.ui.panel.get<ui::panel::SmartMode>())
+        modes |= pack(focus_of(o->form)) << 3;
+    if (const auto* o = m.ui.panel.get<ui::panel::PluginEdit>())
+        modes |= pack(focus_of(o->form)) << 6;
+    if (const auto* o = m.ui.panel.get<ui::panel::Appearance>()) {
+        modes |= pack(focus_of(o->pane.form)) << 9;
+        k.appearance_picking = o->pane.picking;
+    }
+    k.form_modes = modes;
+
+    // Turn gates. animation_demand is what arms the Tick subscription, so a
+    // change in it must rebuild — this is the term that starts and stops a
+    // real timer. `streaming` carves out awaiting-permission (so Esc keeps
+    // meaning "cancel"); `turn_active` does not. Both matter to routing, so
+    // both are here — mirroring subscribe() exactly.
+    k.streaming        = m.s.active() && !m.s.is_awaiting_permission();
+    k.turn_active      = m.s.active();
+    k.animation_demand = animation_demand(m);
+
+    // The composer predicates the router closes over (ComposerKeyState),
+    // plus the has_history scan subscribe() performs — including the
+    // !text.empty() term, which decides whether ↑ recalls anything.
+    k.text_empty    = m.ui.composer.text.empty();
+    k.has_queued    = !m.ui.composer.queued.empty();
+    k.in_history    = m.ui.composer.history_index().has_value();
+    k.peeking_queue = m.ui.composer.queue_peek_index().has_value();
+    for (const auto& msg : m.d.current.messages)
+        if (msg.role == Role::User && !msg.text.empty()) { k.has_history = true; break; }
+
+    // Ctrl+U's target: the newest LIVE (not-yet-frozen) retrieved card.
+    // Same walk as subscribe(), bounded by frozen_through — which means a
+    // card settling into the frozen prefix changes the key, as it must.
+    for (std::size_t i = m.d.current.messages.size(); i-- > m.ui.frozen_through; ) {
+        if (m.d.current.messages[i].is_proactive_context()) {
+            k.live_retrieved_id = m.d.current.messages[i].id;
+            break;
+        }
+    }
+
+    // The login payload's identity. Only meaningful while login owns the
+    // keyboard — that is exactly when subscribe() snapshots it.
+    if (top == ui::panel::Kind::Login) {
+        k.login_alt = static_cast<int>(m.ui.login.index());
+        if (const auto* oc = std::get_if<ui::login::OAuthCode>(&m.ui.login))
+            k.login_code_empty = oc->code_input.empty();
+    }
+
+    // The login worker's SOURCE KEY — not just a capture.
+    //
+    // subscribe() returns a keyed stream while a login is waiting, so this
+    // decides whether the worker runs at all. It is deliberately read off
+    // m.ui.login directly rather than under the Kind::Login guard above: a
+    // waiting login keeps polling while another overlay is on top, and
+    // gating it on "login owns the keyboard" would stop the worker the
+    // moment the user opened anything over it.
+    if (const auto* dw = std::get_if<ui::login::DeviceWaiting>(&m.ui.login))
+        k.login_worker = {dw->attempt_id, dw->provider};
+    else if (const auto* cw = std::get_if<ui::login::ChatGptWaiting>(&m.ui.login))
+        k.login_worker = {cw->attempt_id, std::string{"codex"}};
+
+    return k;
 }
 
 } // namespace agentty::app

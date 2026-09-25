@@ -262,18 +262,26 @@ struct LoopBreak {
 [[nodiscard]] Cmd probe_host_async(
     std::string spec, std::uint64_t attempt_id, auth::AuthHeader auth);
 
-// Kick native ChatGPT OAuth off the UI thread. The attempt id correlates all
-// async messages; `cancel` is tripped when Esc closes that exact modal.
-[[nodiscard]] Cmd codex_login_async(
-    std::uint64_t attempt_id, std::shared_ptr<std::atomic_bool> cancel);
+// The login workers are SUBSCRIPTIONS, not Cmds.
+//
+// Both block-poll a provider for up to 900 s while the user signs in, and
+// both must stop the moment the user presses Esc. That is precisely what a
+// keyed source is for: subscribe() returns one while the modal is up, and
+// jaal fires the body's stop_token when the key stops being returned — so
+// closing the modal IS cancelling the worker, rather than a second thing
+// that has to be remembered. (It was not remembered: as Cmds they polled on
+// after Esc, one leaked thread per abandoned attempt.)
+//
+// jaal also drops messages from a stopped generation, so a late result can
+// never land in a model that moved on. attempt_id stays anyway — it is what
+// the reducers match on, and it costs nothing.
+[[nodiscard]] Sub codex_login_sub(std::uint64_t attempt_id);
 
-// Kick a native OAuth device-flow login off the UI thread — provider-generic
-// (GitHub Copilot, Kimi, …). `provider` is the registry id, `provider_label`
-// the display name for the success toast. Shares next_codex_login_attempt_id()
-// for correlation; dispatches DeviceCodeReady then DeviceLoginDone.
-[[nodiscard]] Cmd device_login_async(
-    std::string provider, std::string provider_label,
-    std::uint64_t attempt_id, std::shared_ptr<std::atomic_bool> cancel);
+// Provider-generic device flow (GitHub Copilot, Kimi, …). `provider` is the
+// registry id, `provider_label` the display name for the success toast.
+// Dispatches DeviceCodeReady then DeviceLoginDone.
+[[nodiscard]] Sub device_login_sub(
+    std::string provider, std::string provider_label, std::uint64_t attempt_id);
 
 // Walk ~/.agentty/threads/ and parse every thread JSON off the UI thread.
 // Dispatches `ThreadsLoaded{vec}` on completion. The directory walk +

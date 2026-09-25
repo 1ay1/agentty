@@ -24,6 +24,7 @@
 #include "agtest.hpp"
 
 #include "agentty/runtime/app/update/internal.hpp"
+#include "agentty/runtime/app/subscribe.hpp"
 #include "agentty/runtime/login.hpp"
 #include "agentty/runtime/model.hpp"
 #include "agentty/runtime/msg.hpp"
@@ -45,8 +46,11 @@ TEST_CASE("codex login flow") {
             std::move(m), msg::LoginMsg{agentty::LoginPickMethod{U'3'}});
         check(std::holds_alternative<login::ChatGptWaiting>(m2.ui.login),
               "A: '3' from Picking enters ChatGptWaiting");
-        check(!cmd.is_none(),
-              "A: the async ChatGPT login Cmd is launched");
+        // No Cmd any more: entering the state is what starts the worker.
+        // subscribe() returns a stream keyed on the attempt, so the state
+        // IS the launch — and leaving it is the cancel.
+        check(cmd.is_none(),
+              "A: the worker is a subscription, not a launch Cmd");
     }
 
     // B. A failed CodexLoginDone while waiting → Failed with the message.
@@ -109,7 +113,10 @@ TEST_CASE("codex login flow") {
             std::move(m), msg::LoginMsg{agentty::AccountSelect{}});
         check(std::holds_alternative<login::ChatGptWaiting>(m2.ui.login),
               "E: ChatGPT add row enters ChatGptWaiting directly");
-        check(!cmd.is_none(), "E: ChatGPT add row launches OAuth command");
+        // Entering the state IS the launch — subscribe() returns the worker's
+        // stream keyed on the attempt. See case A.
+        check(cmd.is_none(),
+              "E: ChatGPT add row starts the worker via the state, not a Cmd");
     }
 
     // F. Device-code progress updates the live waiting panel.
@@ -170,21 +177,30 @@ TEST_CASE("codex login flow") {
         check(cmd.is_none(), "H: stale progress launches no command");
     }
 
-    // I. Closing a waiting modal trips its cooperative cancellation token.
+    // I. Closing a waiting modal cancels its worker.
+    //
+    // The worker is a keyed Sub::stream now, so cancellation is not a flag
+    // the reducer trips — it is the subscription going away, which is what
+    // fires the body's stop_token. Assert the thing that actually stops it.
     {
         Model m;
-        auto cancel = std::make_shared<std::atomic_bool>(false);
         m.ui.login = login::ChatGptWaiting{
             .attempt_id = 300,
-            .cancel = cancel,
             .device_auth = true,
         };
+        const auto count = [](const Model& mm) {
+            int n = 0;
+            agentty::app::subscribe(mm).for_each([&](const auto&) { ++n; });
+            return n;
+        };
+        const int waiting_subs = count(m);
+
         auto [m2, cmd] = agentty::app::detail::login_update(
             std::move(m), msg::LoginMsg{agentty::CloseLogin{}});
         check(std::holds_alternative<login::Closed>(m2.ui.login),
               "I: Esc closes ChatGPT login modal");
-        check(cancel->load(std::memory_order_acquire),
-              "I: Esc cancels the active ChatGPT login worker");
+        check(count(m2) == waiting_subs - 1,
+              "I: Esc drops the ChatGPT login worker's subscription");
         check(cmd.is_none(), "I: close launches no command");
     }
 }

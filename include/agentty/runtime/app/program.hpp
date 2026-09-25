@@ -103,6 +103,15 @@ struct AgenttyApp {
         return ::agentty::app::subscribe(m);
     }
 
+    // Optional Program hook (jaal core/program.hpp — HasSubsKey). jaal
+    // re-runs subscribe() only when this value changes; without it the
+    // subscription tree is rebuilt and re-diffed after EVERY message.
+    // The value and the rule it has to obey live with subscribe() itself,
+    // in app/subscribe.hpp — they only stay correct if they change together.
+    static auto subs_key(const Model& m) noexcept {
+        return ::agentty::app::subs_key(m);
+    }
+
     // Optional Program hook (see maya/device.hpp — detail::HasVisualHash).
     // The runtime calls this just before view(); when the hash is
     // unchanged from the previous render, view() + render() are skipped

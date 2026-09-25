@@ -95,34 +95,21 @@ inline constexpr bool jaal::sendable_opt_in<nlohmann::json> = true;
 // turn in stream.cpp) while the tool worker polls it, and an atomic flag is
 // how that conversation is supposed to happen.
 //
-// Not to be confused with the login flows, which carry their own
-// shared_ptr<atomic_bool>. Those are the SAME ownership shape, and for the
-// same reason — see the opt-in just below.
+// Not to be confused with the login flows, which used to carry their own
+// shared_ptr<atomic_bool>. Those are gone: a login worker is a keyed
+// Sub::stream now, so not asking for the subscription IS the cancel and
+// there is no flag to pass (see cmd_factory's device_login_sub).
 //
-// The difference that matters is who trips it. A stop_token is tripped by
-// the RUNTIME, and only when the work is no longer subscribed — which for a
-// one-shot Cmd::task means "at shutdown", because a task has no subscription
-// to drop (docs/concurrency.md 4.9: on-demand cancellation is a keyed
-// SOURCE). This flag is tripped by the PROGRAM, from a reducer, and is part
-// of the Model's state. jaal has no effect for "cancel that specific
-// in-flight job from a later reducer step", so this stays the app's own.
+// The difference that made them different in the first place, and still
+// makes THIS one an app concern: a stop_token is tripped by the RUNTIME
+// when the work is no longer subscribed. A streaming turn is a Cmd::task,
+// not a subscription, and the reducer needs to cancel that specific
+// in-flight HTTP request from a later step. jaal has no effect for that,
+// so the token stays the app's own.
 //
 // Opting in the pointer, not the token: the shared_ptr is what crosses.
 template <>
 inline constexpr bool jaal::sendable_opt_in<agentty::http::CancelTokenPtr> = true;
-
-// The login flows' cancel flag, for exactly the reason above: Esc must stop
-// a device-login worker that is block-polling a provider, and only a reducer
-// knows Esc happened.
-//
-// This is a deliberate exception to "no shared_ptr across a task". The
-// sharing is one atomic<bool>, written by the UI thread and read by the
-// worker — the narrowest possible conversation, and the one atomics exist
-// for. Dropping it (which this branch briefly did, on the belief the
-// stop_token covered it) leaked one isolated thread per abandoned login.
-template <>
-inline constexpr bool
-    jaal::sendable_opt_in<std::shared_ptr<std::atomic_bool>> = true;
 
 // provider::Selection carries `const ProviderPreset* row`, and Sendable
 // refuses raw pointers — "may point at memory another thread frees" — which

@@ -2468,44 +2468,25 @@ Cmd probe_host_async(std::string spec, std::uint64_t attempt_id,
     }, std::move(spec), attempt_id, std::move(auth));
 }
 
-Cmd device_login_async(std::string provider, std::string provider_label,
-                            std::uint64_t attempt_id,
-                            std::shared_ptr<std::atomic_bool> cancel) {
+Sub device_login_sub(std::string provider, std::string provider_label,
+                     std::uint64_t attempt_id) {
     // Native OAuth device flow, provider-generic. Requests a one-time code
-    // (dispatched to the modal via DeviceCodeReady), then block-polls until the
-    // user approves. Every message carries provider + attempt_id so a stale
-    // worker can't complete a newer login. Runs isolated because login()
-    // blocks while the user signs in.
+    // (dispatched to the modal via DeviceCodeReady), then block-polls until
+    // the user approves.
     //
-    // CANCELLATION reads BOTH the stop_token and the flag, and it has to.
+    // A STREAM, keyed on the attempt. jaal keeps one run alive while
+    // subscribe() keeps returning this key, and fires the stop_token the
+    // moment it stops — which is exactly when the DeviceWaiting state goes
+    // away (Esc, success, or a newer attempt). So cancellation needs no flag
+    // and no bookkeeping: not asking for the subscription IS the cancel.
     //
-    // This briefly read only the stop_token, on the reasoning that jaal trips
-    // it "on shutdown AND when the subscription that started the work goes
-    // away". The second half is true of a SOURCE (jaal keys those and stops
-    // the old one — docs/concurrency.md 4.9). A one-shot Cmd::task has no
-    // subscription to drop, so its token only fires at kernel shutdown. Esc
-    // therefore closed the modal while this worker kept polling the provider
-    // for the rest of its 900 s budget — one leaked isolated thread per
-    // abandoned attempt. (Not corruption: attempt_id still makes the reducers
-    // drop a late result.)
-    //
-    // So honour the flag the reducers actually set (close_login,
-    // login_device_done). shared_ptr<atomic_bool> is opted into Sendable in
-    // runtime/cmd.hpp for exactly this: one atomic, written by the UI thread,
-    // read here.
-    //
-    // The principled version is a Sub::source keyed by attempt_id, so the
-    // kernel cancels the old attempt when the model stops asking for it. That
-    // is the shape to move to; it is a bigger change than this branch should
-    // carry, and this restores the behaviour in the meantime.
-    return Cmd::task_isolated(
+    // Dedicated thread per stream, which is what this needs: login() blocks
+    // for as long as the user takes.
+    return Sub::stream(
+        "login/device/" + provider + "/" + std::to_string(attempt_id),
         [](jaal::Sink<Msg> out, std::stop_token stop, std::string provider,
-           std::string provider_label, std::uint64_t attempt_id,
-           std::shared_ptr<std::atomic_bool> cancel) {
-        const auto cancelled = [&stop, &cancel] {
-            return stop.stop_requested()
-                || (cancel && cancel->load(std::memory_order_acquire));
-        };
+           std::string provider_label, std::uint64_t attempt_id) {
+        const auto cancelled = [&stop] { return stop.stop_requested(); };
         auto emit_code = [&](std::string bare_url, std::string browser_url,
                              std::string user_code) {
             out.send(Msg{DeviceCodeReady{
@@ -2571,24 +2552,16 @@ Cmd device_login_async(std::string provider, std::string provider_label,
             done(provider + " login threw");
         }
     },
-        std::move(provider), std::move(provider_label), attempt_id,
-        std::move(cancel));
+        std::move(provider), std::move(provider_label), attempt_id);
 }
 
-Cmd codex_login_async(std::uint64_t attempt_id,
-                           std::shared_ptr<std::atomic_bool> cancel) {
-    // Isolated because either OAuth mode blocks while the user signs in. Every
-    // message carries attempt_id so a late worker cannot complete a newer
-    // login. Cancellation reads the stop_token AND the reducer's flag — see
-    // device_login_async above for why the token alone is not enough for a
-    // one-shot task.
-    return Cmd::task_isolated(
-        [](jaal::Sink<Msg> out, std::stop_token stop, std::uint64_t attempt_id,
-           std::shared_ptr<std::atomic_bool> cancel) {
-        const auto cancelled = [&stop, &cancel] {
-            return stop.stop_requested()
-                || (cancel && cancel->load(std::memory_order_acquire));
-        };
+Sub codex_login_sub(std::uint64_t attempt_id) {
+    // Same shape as device_login_sub: a keyed stream, so Esc stops it. Either
+    // OAuth mode blocks while the user signs in.
+    return Sub::stream(
+        "login/codex/" + std::to_string(attempt_id),
+        [](jaal::Sink<Msg> out, std::stop_token stop, std::uint64_t attempt_id) {
+        const auto cancelled = [&stop] { return stop.stop_requested(); };
         try {
             auto r = provider::chatgpt::codex_login(
                 900, [attempt_id, out](
@@ -2618,7 +2591,7 @@ Cmd codex_login_async(std::uint64_t attempt_id,
                     "ChatGPT login threw: unknown exception"}),
             }});
         }
-    }, attempt_id, std::move(cancel));
+    }, attempt_id);
 }
 
 Cmd refresh_oauth(std::string refresh_token) {

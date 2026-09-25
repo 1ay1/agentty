@@ -79,4 +79,66 @@ namespace agentty::app {
 
 [[nodiscard]] Sub subscribe(const Model& m);
 
+// ── The fields subscribe() reads ───────────────────────────────────────
+//
+// jaal calls subscribe() again only when this value CHANGES (the optional
+// `subs_key` hook — core/program.hpp). Without it the kernel rebuilds and
+// re-diffs the whole subscription tree after every single message: every
+// keystroke, every SSE delta, every 30 fps tick. subscribe() is not cheap
+// here — it walks the message list twice and snapshots four form panes — so
+// that is real work on the input path, which is exactly the lag the
+// FormFocus/optional<login::State> snapshots were introduced to avoid.
+//
+// A VALUE, not a hash: a collision would silently keep a stale subscription
+// (a timer that should have stopped, a router closed over old text), and
+// equality cannot be wrong in that direction.
+//
+// THE RULE: this must cover everything subscribe() reads AND everything its
+// routers CAPTURE. The key router captures by `[=]`, so every local computed
+// in subscribe() before it is part of the dependency — that is the half that
+// bites, because a captured copy going stale is invisible until a key routes
+// against last frame's state.
+struct SubsKey {
+    // Which overlay owns the keyboard, and the per-pane modes the routers
+    // close over.
+    int  active_panel      = 0;
+    bool settings_adding   = false;
+    bool appearance_picking = false;
+    // focus_of() per form-backed pane: open/editing/choosing, packed.
+    unsigned form_modes    = 0;
+
+    // Gates on the turn.
+    bool streaming         = false;
+    bool turn_active       = false;
+    bool animation_demand  = false;
+
+    // Composer-derived predicates the router branches on.
+    bool text_empty        = true;
+    bool has_queued        = false;
+    bool in_history        = false;
+    bool has_history       = false;
+    bool peeking_queue     = false;
+
+    // The Ctrl+U target, and the login payload's IDENTITY.
+    //
+    // login::State is a variant of up to a dozen strings; it has no
+    // operator== and copying it per frame is what the optional snapshot
+    // exists to avoid. The router only reads the ALTERNATIVE INDEX plus
+    // "is the OAuth code box empty", so those two are the whole dependency
+    // — carrying them is both correct and cheap.
+    std::optional<MessageId> live_retrieved_id;
+    int  login_alt         = -1;    // -1 = login doesn't own the keyboard
+    bool login_code_empty  = true;
+
+    // The login worker's SOURCE key: (attempt, provider). subscribe()
+    // returns a keyed stream while a login is waiting, so unlike everything
+    // above this doesn't just feed a capture — it decides whether a
+    // background poll loop RUNS. Empty when no login is in flight.
+    std::optional<std::pair<std::uint64_t, std::string>> login_worker;
+
+    [[nodiscard]] bool operator==(const SubsKey&) const = default;
+};
+
+[[nodiscard]] SubsKey subs_key(const Model& m) noexcept;
+
 } // namespace agentty::app

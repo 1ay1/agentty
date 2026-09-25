@@ -421,7 +421,6 @@ static_assert(visual::parts_cover_all<ApiKeyInput>);
 
 inline auto visual_parts(const ChatGptWaiting& s) {
     return std::make_tuple(s.attempt_id,
-                           visual::exempt,          // cancel: worker plumbing
                            s.device_auth,
                            visual::ref(s.authorize_url),
                            visual::ref(s.user_code));
@@ -432,7 +431,6 @@ inline auto visual_parts(const DeviceWaiting& s) {
     return std::make_tuple(visual::ref(s.provider),
                            visual::ref(s.provider_label),
                            s.attempt_id,
-                           visual::exempt,          // cancel: worker plumbing
                            visual::ref(s.authorize_url),
                            visual::ref(s.browser_url),
                            visual::ref(s.user_code));
