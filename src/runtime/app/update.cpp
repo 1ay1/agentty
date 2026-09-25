@@ -82,4 +82,77 @@ std::pair<Model, Cmd> update(Model m, Msg msg) {
     return step;
 }
 
+namespace {
+
+// One-shot warmup flag: set by ThreadLoaded, consumed by maya's host on the
+// very next render(). Clear it on every OTHER reducer step so a later thread
+// load still produces a clean false->true edge (the host only fires
+// warmup_render on a rising edge). The ThreadLoaded handler in picker.cpp
+// sets it back true for its own swap, after this runs.
+//
+// Lives here rather than inline in each overload because it must happen for
+// EVERY domain, exactly once per step, before the reducer sees the model.
+template <class Domain>
+void clear_warmup_unless_thread_load(Model& m, const Domain& d) {
+    bool is_thread_load = false;
+    if constexpr (std::is_same_v<Domain, msg::ThreadListMsg>)
+        is_thread_load = std::holds_alternative<::agentty::ThreadLoaded>(d);
+    if (!is_thread_load) m.ui.needs_warmup_render = false;
+}
+
+} // namespace
+
+// ── jaal's entry points ───────────────────────────────────────────────────
+// One overload per domain. jaal walks the Msg tree and calls the one that
+// matches what it landed on; we no longer write the outer visit.
+//
+// Each is the same three lines: hand the reducer the model, take back the
+// pair it still returns, write the new model into `m`, return the effect.
+// That adapter is the ONLY thing standing between these and jaal's shape —
+// when a domain's reducer is itself converted to `Cmd(Model&, DomainMsg)`,
+// its wrapper here collapses to a direct call and eventually disappears.
+//
+// Done as a macro because 23 identical bodies written out is 23 chances to
+// typo one of them, and a typo here routes a whole domain to the wrong
+// reducer — a bug the compiler cannot see, since every reducer has the same
+// shape. The macro is undefined immediately after.
+//
+// `clear_warmup_unless_thread_load` is not incidental: the old dispatcher ran
+// it before EVERY step, and dropping it would have left the warmup flag stuck
+// on after the first thread load, so maya re-warmed the render cache on every
+// frame. It fires here for the same reason it did there — see its comment.
+#define AGENTTY_DOMAIN_UPDATE(DomainMsg, reducer)                       \
+    Cmd update(Model& m, msg::DomainMsg d) {                            \
+        clear_warmup_unless_thread_load(m, d);                          \
+        auto [next, cmd] = detail::reducer(std::move(m), std::move(d)); \
+        m = std::move(next);                                            \
+        return std::move(cmd);                                          \
+    }
+
+AGENTTY_DOMAIN_UPDATE(ComposerMsg,     composer_update)
+AGENTTY_DOMAIN_UPDATE(StreamMsg,       stream_update)
+AGENTTY_DOMAIN_UPDATE(ToolMsg,         tool_update)
+AGENTTY_DOMAIN_UPDATE(ToolOutputMsg,   tool_output_update)
+AGENTTY_DOMAIN_UPDATE(ProvidersMsg,    providers_update)
+AGENTTY_DOMAIN_UPDATE(ModelsMsg,       models_update)
+AGENTTY_DOMAIN_UPDATE(ThreadListMsg,   thread_list_update)
+AGENTTY_DOMAIN_UPDATE(PaletteMsg,      palette_update)
+AGENTTY_DOMAIN_UPDATE(MentionMsg,      mention_update)
+AGENTTY_DOMAIN_UPDATE(SymbolMsg,       symbol_update)
+AGENTTY_DOMAIN_UPDATE(CodeBlockMsg,    codeblock_update)
+AGENTTY_DOMAIN_UPDATE(CheckpointMsg,   checkpoint_update)
+AGENTTY_DOMAIN_UPDATE(RagMsg,          rag_settings_update)
+AGENTTY_DOMAIN_UPDATE(StatsMsg,        stats_update)
+AGENTTY_DOMAIN_UPDATE(SettingsListMsg, settings_list_update)
+AGENTTY_DOMAIN_UPDATE(ForkMsg,         fork_update)
+AGENTTY_DOMAIN_UPDATE(TodoMsg,         todo_update)
+AGENTTY_DOMAIN_UPDATE(LoginMsg,        login_update)
+AGENTTY_DOMAIN_UPDATE(DiffReviewMsg,   diff_review_update)
+AGENTTY_DOMAIN_UPDATE(SmartModeMsg,    smart_mode_update)
+AGENTTY_DOMAIN_UPDATE(PluginEditMsg,   plugin_edit_update)
+AGENTTY_DOMAIN_UPDATE(AppearanceMsg,   appearance_update)
+AGENTTY_DOMAIN_UPDATE(MetaMsg,         meta_update)
+
+#undef AGENTTY_DOMAIN_UPDATE
+
 } // namespace agentty::app

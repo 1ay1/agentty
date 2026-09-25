@@ -37,9 +37,45 @@ struct AgenttyApp {
 
     static std::pair<Model, Cmd> init() { return ::agentty::app::init(); }
 
-    static auto update(Model m, Msg msg) -> std::pair<Model, Cmd> {
-        return ::agentty::app::update(std::move(m), std::move(msg));
+    // jaal calls P::update(Model&, T) for whatever it lands on as it walks the
+    // Msg tree, so the 23 domain reducers are static members here. Each
+    // forwards to the free function of the same name in its own TU, which is
+    // what keeps a one-leaf edit to a ~1.2 s rebuild.
+    //
+    // The domains are declared groups (handled_as_group in runtime/cmd.hpp),
+    // and these are the handlers that declaration CLAIMS exist — jaal only
+    // honours a group when it finds one, so without these it correctly keeps
+    // descending and asks for all 231 leaves instead.
+#define AGENTTY_FWD_UPDATE(DomainMsg)                                    \
+    static Cmd update(Model& m, msg::DomainMsg d) {                      \
+        return ::agentty::app::update(m, std::move(d));                  \
     }
+
+    AGENTTY_FWD_UPDATE(ComposerMsg)
+    AGENTTY_FWD_UPDATE(StreamMsg)
+    AGENTTY_FWD_UPDATE(ToolMsg)
+    AGENTTY_FWD_UPDATE(ToolOutputMsg)
+    AGENTTY_FWD_UPDATE(ProvidersMsg)
+    AGENTTY_FWD_UPDATE(ModelsMsg)
+    AGENTTY_FWD_UPDATE(ThreadListMsg)
+    AGENTTY_FWD_UPDATE(PaletteMsg)
+    AGENTTY_FWD_UPDATE(MentionMsg)
+    AGENTTY_FWD_UPDATE(SymbolMsg)
+    AGENTTY_FWD_UPDATE(CodeBlockMsg)
+    AGENTTY_FWD_UPDATE(CheckpointMsg)
+    AGENTTY_FWD_UPDATE(RagMsg)
+    AGENTTY_FWD_UPDATE(StatsMsg)
+    AGENTTY_FWD_UPDATE(SettingsListMsg)
+    AGENTTY_FWD_UPDATE(ForkMsg)
+    AGENTTY_FWD_UPDATE(TodoMsg)
+    AGENTTY_FWD_UPDATE(LoginMsg)
+    AGENTTY_FWD_UPDATE(DiffReviewMsg)
+    AGENTTY_FWD_UPDATE(SmartModeMsg)
+    AGENTTY_FWD_UPDATE(PluginEditMsg)
+    AGENTTY_FWD_UPDATE(AppearanceMsg)
+    AGENTTY_FWD_UPDATE(MetaMsg)
+
+#undef AGENTTY_FWD_UPDATE
 
     static maya::Element view(const Model& m) {
         return ::agentty::ui::view(m);
