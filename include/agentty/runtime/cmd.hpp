@@ -27,7 +27,62 @@
 #include <string>
 #include <string_view>
 
+#include "agentty/domain/conversation.hpp"   // ImageContent
+#include "agentty/domain/id.hpp"
 #include "agentty/runtime/msg.hpp"
+
+// ── agentty's value types, as jaal sees them ──────────────────────────────
+// jaal's Sendable walks a type's fields to prove a Msg is safe to hand to
+// another thread (D7). Id<Tag> is a strong newtype around one std::string,
+// but it has user-declared constructors, so it isn't an aggregate and jaal
+// can't look inside — it refuses rather than guess:
+//
+//   it contains 'agentty::Id<agentty::ToolCallIdTag>', a class jaal can't
+//   see inside; if it owns everything it holds, specialise
+//   jaal::sendable_opt_in for it
+//
+// It does own everything it holds: one std::string, by value, no views and
+// no pointers. So it is Sendable, and Frozen too — nothing reachable
+// through a const Id can change.
+//
+// Declared HERE rather than in domain/id.hpp so the domain header stays
+// free of jaal: the same rule maya follows (host/interop.hpp), and the same
+// reason — a value type shouldn't know which runtime is carrying it.
+template <class Tag>
+inline constexpr bool jaal::sendable_opt_in<agentty::Id<Tag>> = true;
+template <class Tag>
+inline constexpr bool jaal::frozen_opt_in<agentty::Id<Tag>> = true;
+
+// ImageContent owns its bytes (LazyBytes) and a shared base64 cell, and
+// LazyBytes owns a content-addressed Source plus the bytes it resolves to.
+// Moving either to another thread is safe: every lazily-filled slot is
+// written exactly once under std::call_once and read through an acquire load
+// after, so a thread either runs the fill or waits for it and then sees the
+// finished bytes. (That discipline is not incidental — jaal's Sendable found
+// a real race in LazyBytes on its first run against this code, 19 TSan
+// reports to zero, and it is D7's worked example. The fix is what makes
+// these opt-ins honest rather than silencers.)
+//
+// Sendable, NOT Frozen. Frozen means nothing reachable through a const T can
+// change, and here the memoised bytes and the memoised base64 both can,
+// behind const accessors. That is D8's distinction exactly — safe to MOVE to
+// one other thread, not safe to SHARE between two — so these say Sendable
+// only, and jaal::shared<ImageContent> stays correctly impossible.
+template <>
+inline constexpr bool jaal::sendable_opt_in<agentty::LazyBytes> = true;
+template <>
+inline constexpr bool jaal::sendable_opt_in<agentty::ImageContent> = true;
+
+// nlohmann::json owns its whole tree by value (a variant over string, array,
+// object, number, bool, null — every branch an owning container). jaal can't
+// walk it because the payload is behind a private union, not because there
+// is anything borrowed in there. Tool arguments and results are json, so
+// they cross to worker threads constantly.
+//
+// Sendable, not Frozen: a json is freely mutable through a non-const
+// reference, and nothing here pretends otherwise.
+template <>
+inline constexpr bool jaal::sendable_opt_in<nlohmann::json> = true;
 
 namespace agentty {
 
