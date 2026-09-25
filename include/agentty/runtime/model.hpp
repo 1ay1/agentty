@@ -30,6 +30,7 @@
 #include "agentty/runtime/login.hpp"
 #include "agentty/runtime/panel/common.hpp"
 #include "agentty/runtime/view/cache.hpp"
+#include "agentty/store/store.hpp"          // store::Settings (the persisted record)
 
 namespace agentty {
 
@@ -270,14 +271,39 @@ struct TodoState {
 
 struct Model {
     struct Domain {
+        // THE persisted record, held whole.
+        //
+        // init() used to unpack this field-by-field into the members below,
+        // which meant a reducer that changed one preference could not
+        // produce a Settings to save — it had to read the last one back
+        // through the Deps seam and patch it (the read-modify-write in
+        // update/appearance.cpp). That read is why reducers were impure.
+        //
+        // Holding the record makes saving a pure derivation: edit the field
+        // here, hand `persisted` to the save effect, done. Fields are
+        // migrating into it one at a time (each move is its own commit, so
+        // a regression has one suspect); the members below are what has not
+        // moved yet.
+        //
+        // NOT in here: provider_keys. Those are sealed to a separate
+        // keystore and never reach settings.json; the host's save handler
+        // merges them back. That is a host concern — it owns the keystore.
+        store::Settings     persisted;
+
         Thread              current;
         std::vector<Thread> threads;
         Profile             profile = Profile::Write;
 
-        // How agentty LOOKS. Domain, not ui, because it is persisted state
-        // the user chose — `ui` is this session's transient panels and
-        // cursors, which these outlive.
-        ui_prefs::Prefs     ui;
+        // How agentty LOOKS. The storage is `persisted.ui`; this is the
+        // name 34 call sites already use. Domain, not Model::ui, because it
+        // is persisted state the user chose — `Model::ui` is this session's
+        // transient panels and cursors, which these outlive.
+        //
+        // Deliberately an accessor and not a reference member: a reference
+        // would delete Domain's copy-assignment, and the Model is copied and
+        // moved on every reducer step.
+        [[nodiscard]] ::agentty::ui_prefs::Prefs&       ui()       noexcept { return persisted.ui; }
+        [[nodiscard]] const ::agentty::ui_prefs::Prefs& ui() const noexcept { return persisted.ui; }
 
         std::vector<ModelInfo> available_models;
         ModelId                model_id{std::string{"claude-opus-4-5"}};

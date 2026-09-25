@@ -7,7 +7,7 @@
 // A theme is judged by LOOKING at it. If choosing and seeing are separated
 // by a save keystroke (never mind a restart) the only way to evaluate a
 // scheme is to commit to it first, which is exactly backwards. So each row
-// writes through on the keystroke that changes it: mutate `m.d.ui`, persist
+// writes through on the keystroke that changes it: mutate `m.d.ui()`, persist
 // to the user store, rebuild the form, and the next frame is painted with
 // it. `Form::dirty` is never set here, because it can never be true.
 //
@@ -45,17 +45,23 @@ namespace up = agentty::ui_prefs;
 
 namespace {
 
-// Persist the prefs to the USER store. Write-behind at the Deps seam, so a
-// reducer never stalls a frame on the disk — which is what makes saving on
-// every keystroke affordable in the first place.
+// Persist the prefs to the USER store.
+//
+// No load_settings() first: `m.d.persisted` IS the record, so the prefs the
+// reducer just edited are already in it. This used to read the last saved
+// settings back through the seam and patch one field, which is what made
+// every reducer that saves impure — see docs/design/jaal-rewrite.md.
+//
+// Still write-behind at the Deps seam, so a reducer never stalls a frame on
+// the disk; that is what makes saving on every keystroke affordable. When
+// this becomes a jaal effect the write-behind moves into the host and this
+// function turns into `return Cmd::fx<save_settings>({m.d.persisted})`.
 void persist(const Model& m) {
-    auto s = deps().load_settings();
-    s.ui = m.d.ui;
-    deps().save_settings(s);
+    deps().save_settings(m.d.persisted);
 }
 
 // Rebuild the pane's rows from the prefs. The form is a PROJECTION of
-// `m.d.ui`, never a second copy of it: the reducer edits the prefs and
+// `m.d.ui()`, never a second copy of it: the reducer edits the prefs and
 // re-derives, so there is no path on which the rows and the truth disagree.
 // Cursor and focus are carried across because the user's place in the list
 // is not part of what changed.
@@ -64,7 +70,7 @@ void reproject(Model& m) {
     if (!o) return;
     const int cursor = o->pane.form.cursor;
     auto focus = o->pane.form.focus;
-    o->pane.form = pn::build_appearance_form(m.d.ui, /*tty=*/true);
+    o->pane.form = pn::build_appearance_form(m.d.ui(), /*tty=*/true);
     o->pane.form.cursor = std::clamp(cursor, 0,
                                 std::max(0, static_cast<int>(o->pane.form.fields.size()) - 1));
     o->pane.form.focus = focus;
@@ -152,7 +158,7 @@ void restyle_sealed_turns(Model& m) {
     //
     // Cheap and idempotent: view() publishes the same value again next
     // frame, and publish is a pointer store plus a value compare.
-    ui_prefs::publish_theme(*ui_prefs::resolve(m.d.ui, /*tty=*/true).theme);
+    ui_prefs::publish_theme(*ui_prefs::resolve(m.d.ui(), /*tty=*/true).theme);
 
     // NOTHING ELSE TO DO.
     //
@@ -193,7 +199,7 @@ void restyle_sealed_turns(Model& m) {
 // All three reach the same already-built Elements, and all three used to
 // change nothing until the next turn redrew.
 void rebuild_rendered_content(Model& m) {
-    ui_prefs::publish_theme(*ui_prefs::resolve(m.d.ui, /*tty=*/true).theme);
+    ui_prefs::publish_theme(*ui_prefs::resolve(m.d.ui(), /*tty=*/true).theme);
     m.ui.view_cache.clear_settled();
     if (m.ui.frozen_through == 0) return;
     rehydrate_frozen(m);
@@ -229,7 +235,7 @@ namespace {
         return t && t->on;
     };
 
-    up::Prefs& p = m.d.ui;
+    up::Prefs& p = m.d.ui();
     if (f.id == pn::kApTier)            { p.tier     = static_cast<up::ColorTier>(idx()); return true; }
     else if (f.id == pn::kApPolarity)   { p.polarity = static_cast<up::Polarity>(idx());  return true; }
     else if (f.id == pn::kApSyntax)     { p.syntax   = on();                              return true; }
@@ -286,9 +292,9 @@ void move_highlight(Model& m, int delta) {
     std::string next = highlighted_theme(*o);
     // Landing on the scheme already in force is a no-op, not a rebuild. With
     // 615 rows a wrap or a repeated key hits this often enough to matter.
-    if (next == m.d.ui.theme) { reproject(m); return; }
+    if (next == m.d.ui().theme) { reproject(m); return; }
 
-    m.d.ui.theme = std::move(next);
+    m.d.ui().theme = std::move(next);
     // Re-style everything on screen, including the frozen prefix — it is
     // painted every frame, so a preview that skipped it would show the new
     // scheme on the newest turns and the old one above. Bounded to ~3
@@ -305,7 +311,7 @@ Step appearance_update(Model m, msg::AppearanceMsg am) {
 
         [&](OpenAppearance&) -> Step {
             pn::Appearance o;
-            o.pane.form = pn::build_appearance_form(m.d.ui, /*tty=*/true);
+            o.pane.form = pn::build_appearance_form(m.d.ui(), /*tty=*/true);
             // Land on the first real setting, not the "Theme" section
             // header — a cursor parked on a row that does nothing reads as
             // a broken pane for the one keystroke it takes to notice.
@@ -380,7 +386,7 @@ Step appearance_update(Model m, msg::AppearanceMsg am) {
                 const auto& src = pk.entries();
                 const auto& idx = pk.filtered();
                 for (std::size_t i = 0; i < idx.size(); ++i) {
-                    if (src[idx[i]] == m.d.ui.theme) {
+                    if (src[idx[i]] == m.d.ui().theme) {
                         pk.jump_to(static_cast<int>(i));
                         break;
                     }
@@ -389,7 +395,7 @@ Step appearance_update(Model m, msg::AppearanceMsg am) {
             // What to restore if the user changes their mind. Stashed on the
             // pane rather than in a message so an Esc always has something
             // to go back to, however the browser was left.
-            o->pane.picker.restore = m.d.ui.theme;
+            o->pane.picker.restore = m.d.ui().theme;
             return done(std::move(m));
         },
 
@@ -409,7 +415,7 @@ Step appearance_update(Model m, msg::AppearanceMsg am) {
             //
             // Live-apply the new top match. Typing narrows AND previews, so
             // "dra" shows you Dracula without a second keystroke.
-            m.d.ui.theme = highlighted_theme(*o);
+            m.d.ui().theme = highlighted_theme(*o);
             restyle_sealed_turns(m);
             reproject(m);
             return done(std::move(m));
@@ -420,7 +426,7 @@ Step appearance_update(Model m, msg::AppearanceMsg am) {
             if (!o) return done(std::move(m));
             // The theme is already applied (the highlight applied it); Enter
             // only ends the browse and makes it durable.
-            m.d.ui.theme = highlighted_theme(*o);
+            m.d.ui().theme = highlighted_theme(*o);
             o->pane.picking = false;
             // The full restyle, once, on the way out. Browsing already
             // re-styled on each move (the list is its own preview), so this
@@ -438,7 +444,7 @@ Step appearance_update(Model m, msg::AppearanceMsg am) {
             // A true cancel: put back the theme we opened on, including on
             // disk — the live previews may have persisted nothing, but the
             // model must not keep the last one we merely looked at.
-            m.d.ui.theme = o->pane.picker.restore;
+            m.d.ui().theme = o->pane.picker.restore;
             o->pane.picking = false;
             // Full restyle on the way out, as with Commit: the frozen prefix
             // may be carrying a previewed scheme's colours and has to be put

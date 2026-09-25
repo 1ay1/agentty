@@ -141,18 +141,18 @@ struct AgenttyApp {
         //
         // A scheme name is ~15 bytes and this runs once per frame, so
         // there is nothing to save by sampling it.
-        for (unsigned char c : m.d.ui.theme) mix(c);
-        mix(m.d.ui.theme.size());
-        mix(static_cast<std::uint64_t>(m.d.ui.tier));
-        mix(static_cast<std::uint64_t>(m.d.ui.polarity));
-        mix(static_cast<std::uint64_t>(m.d.ui.density));
-        mix(static_cast<std::uint64_t>(m.d.ui.motion));
-        mix(static_cast<std::uint64_t>(m.d.ui.tool_output));
-        mix(static_cast<std::uint64_t>(m.d.ui.thinking));
-        mix(static_cast<std::uint64_t>(m.d.ui.timestamps));
-        mix(static_cast<std::uint64_t>(m.d.ui.prose_width));
-        mix(m.d.ui.syntax ? 1ULL : 0ULL);
-        mix(m.d.ui.compact_turns ? 1ULL : 0ULL);
+        for (unsigned char c : m.d.ui().theme) mix(c);
+        mix(m.d.ui().theme.size());
+        mix(static_cast<std::uint64_t>(m.d.ui().tier));
+        mix(static_cast<std::uint64_t>(m.d.ui().polarity));
+        mix(static_cast<std::uint64_t>(m.d.ui().density));
+        mix(static_cast<std::uint64_t>(m.d.ui().motion));
+        mix(static_cast<std::uint64_t>(m.d.ui().tool_output));
+        mix(static_cast<std::uint64_t>(m.d.ui().thinking));
+        mix(static_cast<std::uint64_t>(m.d.ui().timestamps));
+        mix(static_cast<std::uint64_t>(m.d.ui().prose_width));
+        mix(m.d.ui().syntax ? 1ULL : 0ULL);
+        mix(m.d.ui().compact_turns ? 1ULL : 0ULL);
 
         // ── Session / phase.
         mix(static_cast<std::uint64_t>(m.s.phase.index()));

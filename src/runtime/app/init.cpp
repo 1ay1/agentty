@@ -53,6 +53,7 @@ std::pair<Model, maya::Cmd<Msg>> init() {
     m.d.available_models = seed_models();
 
     auto settings = deps().load_settings();
+
     // Bake the seeded rows through the SAME ladder the refresh path uses.
     //
     // seed_models() returns the bundled catalog's raw figures, and it runs
@@ -99,6 +100,17 @@ std::pair<Model, maya::Cmd<Msg>> init() {
         && detail::entitlement_blocked(settings, domain::entitlement::Fact::Context1M,
                                wire_model_id(settings.model_id.value)))
         settings.model_id = ModelId{wire_model_id(settings.model_id.value)};
+
+    // Seat the WHOLE record, after the two fixups above have corrected it
+    // (the 1M-entitlement clear and the [1m] marker strip) and before the
+    // code below derives the scattered members from it.
+    //
+    // `m.d.persisted` is the source of truth a reducer hands to the save
+    // effect. Anything init() reads out of `settings` but never copies into
+    // the Model would be silently dropped by the next save, so the record
+    // is assigned ONCE, whole, rather than field by field: a preference
+    // nobody has migrated yet still round-trips.
+    m.d.persisted = settings;
     if (!settings.model_id.empty()) {
         // Guard against a cross-provider model id collision. A persisted
         // model id belongs to whatever provider was active when it was
@@ -149,11 +161,10 @@ std::pair<Model, maya::Cmd<Msg>> init() {
     // the user's first message lands.
     m.s.context_max = ui::context_max_for_model(m.d.model_id.value);
     m.d.profile = settings.profile;
-    // Appearance, straight from the user store. Nothing to resolve here —
-    // the view resolves prefs against the live terminal every frame, so a
-    // theme survives a resize, a tmux detach and an ssh hop without this
-    // having to re-detect anything.
-    m.d.ui = settings.ui;
+    // Appearance needs no line here: `m.d.ui()` IS `m.d.persisted.ui`, seated
+    // with the whole record above. Nothing to resolve either — the view
+    // resolves prefs against the live terminal every frame, so a theme
+    // survives a resize, a tmux detach and an ssh hop on its own.
     m.d.effort  = effort_from_wire(settings.effort);
     // Publish the user's per-model reasoning-effort overrides into the catalog
     // registry so resolved_caps() (and thus supports_effort / the picker /

@@ -109,7 +109,7 @@ maya::Element view(const Model& m) {
     // costs two getenvs and means the look follows the terminal it is
     // actually on.
     {
-        const auto r = ui_prefs::resolve(m.d.ui, /*tty=*/true);
+        const auto r = ui_prefs::resolve(m.d.ui(), /*tty=*/true);
         // ONE call, two sinks. There used to be a `static const Theme*
         // applied` cache here that skipped the push when the pointer had not
         // moved, which duplicated a guard maya already owns — app_set_theme()
@@ -135,13 +135,13 @@ maya::Element view(const Model& m) {
         // motion by the StreamingMarkdown setup deep in turn.cpp. Publishing
         // here keeps them a pure projection of the Model — refreshed every
         // frame, written nowhere else.
-        ui_prefs::publish(m.d.ui);
+        ui_prefs::publish(m.d.ui());
         // Motion::Off freezes maya's stepped animations at their source —
         // one gate under every spinner, blink and frame counter, including
         // widgets that do not know this setting exists. It also stops the
         // frame REQUESTS, so "off" means the render loop goes quiet rather
         // than repainting an unchanging glyph 11× a second.
-        maya::anim::set_reduce_motion(m.d.ui.motion == ui_prefs::Motion::Off);
+        maya::anim::set_reduce_motion(m.d.ui().motion == ui_prefs::Motion::Off);
         // Reduced sits between the two: keep the motion, thin the REPAINTS.
         // Measured on a recorded stream, Reduced used to change exactly as
         // many frames as Full (1753 of them) because it only dropped
@@ -154,7 +154,7 @@ maya::Element view(const Model& m) {
         // to be published rather than threaded. It was persisted and hashed
         // into the render key but read by NOTHING until maya grew a switch
         // for it — a toggle that moved, saved, and changed no pixel.
-        maya::set_syntax_highlighting(m.d.ui.syntax);
+        maya::set_syntax_highlighting(m.d.ui().syntax);
     }
 
     // ── Terminal dimensions for the BUILD phase ──
