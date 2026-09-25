@@ -336,14 +336,15 @@ Step rag_settings_update(Model m, msg::RagMsg rm) {
             // other background work.
             return {std::move(m),
                     Cmd::task_isolated(
-                        [probe_cfg = std::move(probe_cfg), key = std::move(key),
-                         gen]
-                        (jaal::Sink<Msg> out, std::stop_token) {
+                        [](jaal::Sink<Msg> out, std::stop_token,
+                           store::RagConfig probe_cfg, std::string key,
+                           std::uint64_t gen) {
                             const auto r = tools::rag_probe_embedder(probe_cfg, key);
                             out.send(Msg{RagEmbedTestDone{r.ok, r.dim,
                                                           r.latency_ms, r.error,
                                                           gen}});
-                        })};
+                        },
+                        std::move(probe_cfg), std::move(key), gen)};
         },
         [&](RagEmbedTestDone& e) -> Step {
             auto* f = form_of(m);

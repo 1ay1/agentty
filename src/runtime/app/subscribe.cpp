@@ -1303,7 +1303,8 @@ Sub subscribe(const Model& m) {
                       || active_panel == ui::panel::Kind::Models
                       || active_panel == ui::panel::Kind::Providers
                       || active_panel == ui::panel::Kind::Mention
-                      || active_panel == ui::panel::Kind::Symbol](std::string s) -> Msg {
+                      || active_panel == ui::panel::Kind::Symbol](const maya::PasteEvent& pe) -> Msg {
+        const std::string& s = pe.content;
         // Route a bracketed paste to whatever modal currently owns text
         // input, so it lands in that field's buffer — NOT the composer.
         //   • login modal open      → its code/key fields (OAuth codes, keys)
@@ -1389,7 +1390,7 @@ Sub subscribe(const Model& m) {
     // Gates the hardware caret: unfocused ⇒ the composer stops emitting
     // its caret anchor and the real cursor parks + hides.
     auto focus_sub = Sub::on(maya::on_focus{}, 
-        [](bool focused) -> Msg { return TerminalFocus{focused}; });
+        [](const maya::FocusEvent& fe) -> Msg { return TerminalFocus{fe.focused}; });
 
     // Tick drives every time-based animation. THREE gates must agree on
     // WHAT is animating, and animation_demand (subscribe.hpp) is now the

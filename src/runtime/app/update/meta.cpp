@@ -232,14 +232,15 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             // Isolated worker: git checkout-index on a large snapshot can
             // block for seconds; never on the shared BG pool.
             auto cmd = Cmd::task_isolated(
-                [id = e.id](jaal::Sink<Msg> out, std::stop_token) {
+                [](jaal::Sink<Msg> out, std::stop_token, CheckpointId id) {
                     CheckpointRestored done;
                     done.id = id;
                     std::string err;
                     done.ok = workspace::restore_checkpoint(id.value, &err);
                     if (!done.ok) done.error = err.empty() ? "restore failed" : err;
                     out.send(Msg{std::move(done)});
-                });
+                },
+                e.id);
             return {std::move(m), std::move(cmd)};
         },
         [&](CheckpointRestored& e) -> Step {
