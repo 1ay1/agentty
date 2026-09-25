@@ -36,13 +36,18 @@ namespace {
 // `save_settings` is write-behind at the Deps seam, and `rag_apply_settings`
 // does its probe + rebuild on a worker. A reducer cannot stall a frame on
 // either even if it wanted to.
-void commit_mode(store::RagMode mode) {
-    auto s = deps().load_settings();
-    s.rag.configured = true;
-    s.rag.mode = mode;
-    s.rag.proactive = (mode != store::RagMode::Off);
-    deps().save_settings(s);
-    tools::rag_apply_settings(s.rag);
+// Persist the retrieval mode.
+//
+// Edits `m.d.persisted` and saves it: no load_settings() first, because the
+// Model holds the record. `configured = true` is the first-run latch — once
+// the user has chosen a mode, the onboarding prompt stops asking.
+void commit_mode(Model& m, store::RagMode mode) {
+    auto& rag = m.d.persisted.rag;
+    rag.configured = true;
+    rag.mode       = mode;
+    rag.proactive  = (mode != store::RagMode::Off);
+    deps().save_settings(m.d.persisted);
+    tools::rag_apply_settings(rag);
 }
 
 // Project an EmbedConfig onto the persisted settings shape. The API key is
@@ -267,7 +272,7 @@ Step rag_settings_update(Model m, msg::RagMsg rm) {
                     if (auto* o = m.ui.panel.get<pn::Rag>()) {
                         o->cursor = rs::mode_from_form(f->form, o->cursor);
                         o->active = o->cursor;
-                        commit_mode(o->cursor);
+                        commit_mode(m, o->cursor);
                     }
                 } else {
                     invalidate_probe(*f);
@@ -381,14 +386,16 @@ Step rag_settings_update(Model m, msg::RagMsg rm) {
                     note = " (key not saved: no secure store)";
             }
 
-            auto s = deps().load_settings();
-            s.rag.configured = true;
-            write_embed_into(s.rag, f->cfg);
+            // Edit the record the Model holds, then save it. The read this
+            // replaced (`auto s = deps().load_settings()`) existed only
+            // because the Model had no Settings to patch.
+            m.d.persisted.rag.configured = true;
+            write_embed_into(m.d.persisted.rag, f->cfg);
             // The pipeline knobs, read back through the same table that
             // generated their rows.
-            rs::apply_form_to_settings(f->form, s);
-            deps().save_settings(s);
-            tools::rag_apply_settings(s.rag);
+            rs::apply_form_to_settings(f->form, m.d.persisted);
+            deps().save_settings(m.d.persisted);
+            tools::rag_apply_settings(m.d.persisted.rag);
 
             const std::string label = eb::describe(f->cfg);
             return {std::move(m),
