@@ -1783,6 +1783,41 @@ void install_host_backends(::mcp::tools::HostServices& svc) {
     // parses the rendered text — there is no structured sink to feed.
 }
 
+bool is_known_agent_type(std::string_view name) {
+    // resolve_agent_type() answers with `general` for anything it doesn't
+    // recognise, so "did it match" has to be asked by IDENTITY, not by
+    // whether a result came back. Comparing the returned name to the
+    // requested one is exactly that question, and it stays correct as
+    // built-ins and user agents come and go because it reuses the same
+    // resolver rather than a second copy of the list.
+    if (name.empty()) return false;
+    return resolve_agent_type(name).name == name;
+}
+
+std::string known_agent_types() {
+    std::string out;
+    for (std::string_view n :
+         {"general", "explorer", "reviewer", "tester", "coder"}) {
+        if (!out.empty()) out += ", ";
+        out.append(n);
+    }
+    // User-defined roles are real answers to --agent, so a user who wrote
+    // one should see it listed rather than be told their own agent is
+    // invalid-looking.
+    try {
+        auto& store = user_agents();
+        std::lock_guard lk(store.mu);
+        refresh_user_agents_locked(store);
+        for (const auto& ua : store.types) {
+            out += ", ";
+            out += ua->name;
+        }
+    } catch (...) {
+        // Listing user agents is a nicety; never fail an error message.
+    }
+    return out;
+}
+
 std::string run_one_shot(const std::string& prompt,
                          const std::string& agent_type,
                          bool& is_error) {

@@ -34,6 +34,18 @@ void install_host_backends(::mcp::tools::HostServices& svc);
                                        const std::string& agent_type,
                                        bool& is_error);
 
+// True iff `name` resolves to a real agent role — a built-in (explorer,
+// reviewer, tester, coder, general) or a user-defined one from
+// .agentty/agents/*.md. Exists so `agentty run --agent X` can REJECT a
+// typo instead of silently running as `general`: resolve_agent_type()
+// falls back on purpose (a model naming a role that doesn't exist should
+// still get work done), but for a human at a CLI that fallback turns a
+// typo into the wrong agent with no warning.
+[[nodiscard]] bool is_known_agent_type(std::string_view name);
+
+// Comma-separated list of the valid names, for that error message.
+[[nodiscard]] std::string known_agent_types();
+
 // Live-apply user RAG configuration (the RAG settings picker's commit path)
 // to the process-wide retriever. Rebuilds indexes lazily. Never throws.
 void rag_apply_settings(const store::RagConfig& cfg);

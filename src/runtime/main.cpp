@@ -112,6 +112,9 @@ namespace agentty::tools {
 std::string run_one_shot(const std::string& prompt,
                          const std::string& agent_type,
                          bool& is_error);
+// Validates `--agent` before any work happens (see the run subcommand).
+bool is_known_agent_type(std::string_view name);
+std::string known_agent_types();
 // Stops the RAG retriever's background warm at teardown (see call site below).
 void rag_shutdown();
 }
@@ -647,6 +650,8 @@ struct Args {
     std::string cli_mcp_metadata; // mcp-login: explicit resource-metadata URL
     std::string cli_mcp_client_id; // mcp-login: pre-registered / CIMD client_id
     std::string cli_run_prompt;    // run: the one-shot prompt (positional)
+    bool cli_run_prompt_claimed = false;  // ...and whether the scan took one
+                                          // (an empty prompt is still a claim)
     std::string cli_run_agent;     // run: --agent explorer|reviewer|…|general
     std::vector<std::string> plugin_argv;  // plugin: verb + tail, verbatim
     int         airgap_argc = 0;
@@ -726,7 +731,16 @@ Args parse_args(int argc, char** argv) {
                 // mistake worth reporting, not a second prompt to silently
                 // concatenate.
                 if (opt.empty() || opt[0] != '-' || opt == "-") {
-                    if (out.cli_run_prompt.empty()) out.cli_run_prompt = opt;
+                    // `claimed`, not `!prompt.empty()`: an EMPTY positional
+                    // (`agentty run ""`) is still a prompt the scan took
+                    // ownership of. Keying off emptiness meant it could
+                    // never match itself in the unknown-arg check below, so
+                    // `agentty run ""` reported `unknown arg:` with a blank
+                    // name instead of the real "no prompt" error.
+                    if (!out.cli_run_prompt_claimed) {
+                        out.cli_run_prompt = opt;
+                        out.cli_run_prompt_claimed = true;
+                    }
                     continue;
                 }
                 // A flag this subcommand doesn't own — and possibly its
@@ -824,7 +838,7 @@ Args parse_args(int argc, char** argv) {
             // prompt rather than the ordering.
             if (out.subcommand == "run") {
                 if (a == "--agent") { ++i; continue; }   // flag + its value
-                if (!out.cli_run_prompt.empty() && a == out.cli_run_prompt)
+                if (out.cli_run_prompt_claimed && a == out.cli_run_prompt)
                     continue;
             }
             std::fprintf(stderr, "unknown arg: %s\n\n", a.c_str());
@@ -1472,6 +1486,19 @@ int main(int argc, char** argv) {
     // bounded turns — and prints the final report to stdout. Perfect for
     // scripting/CI: `git diff | agentty run "review this change"`.
     if (args.subcommand == "run") {
+        // Reject a typo'd role BEFORE reading stdin or talking to a
+        // provider. resolve_agent_type() falls back to `general` on
+        // purpose — a model naming a role that doesn't exist should still
+        // get work done — but at a CLI that silently ran
+        // `--agent reviwer` as `general` and reported success, so the
+        // user got the wrong agent with no signal at all.
+        if (!args.cli_run_agent.empty()
+            && !tools::is_known_agent_type(args.cli_run_agent)) {
+            std::fprintf(stderr, "agentty run: unknown --agent '%s'\n  known: %s\n",
+                         args.cli_run_agent.c_str(),
+                         tools::known_agent_types().c_str());
+            return 2;
+        }
         std::string prompt = args.cli_run_prompt;
         const bool want_stdin = prompt.empty() || prompt == "-";
         std::string piped;
