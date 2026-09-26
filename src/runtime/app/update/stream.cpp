@@ -506,7 +506,15 @@ Cmd finalize_turn(Model& m, StopReason stop_reason) {
         // StreamUsage; timings and transport health are only knowable here.
         if (last.role == Role::Assistant) {
             if (const auto* a = active_ctx(m.s.phase)) {
-                if (!last.telemetry) last.telemetry.emplace();
+                // `= Telemetry{}` rather than `.emplace()`. Both do the same
+                // thing, but clang refuses the emplace: it evaluates
+                // is_constructible_v<Message::Telemetry> as FALSE for this
+                // nested aggregate while is_default_constructible_v is TRUE,
+                // and optional::emplace is constrained on the former. gcc
+                // says true for both, so the musl release legs (clang 22)
+                // failed on a file that had built cleanly for months.
+                // Telemetry{} itself compiles on both compilers.
+                if (!last.telemetry) last.telemetry = Message::Telemetry{};
                 auto& t = *last.telemetry;
                 const auto now_st = std::chrono::steady_clock::now();
                 auto ms_between = [](auto from, auto to) -> std::uint32_t {
@@ -1778,7 +1786,12 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
             if (!m.d.current.messages.empty()) {
                 auto& last = m.d.current.messages.back();
                 if (last.role == Role::Assistant) {
-                    if (!last.telemetry) last.telemetry.emplace();
+                    // `= Telemetry{}` rather than `.emplace()`: clang treats
+                    // is_constructible_v<Message::Telemetry> as false for this
+                    // nested aggregate even though is_default_constructible_v
+                    // is true, and emplace is constrained on the former. See
+                    // the fuller note at the other telemetry site above.
+                    if (!last.telemetry) last.telemetry = Message::Telemetry{};
                     auto& t = *last.telemetry;
                     if (e.input_tokens)
                         t.input_tokens = static_cast<std::uint32_t>(e.input_tokens);
