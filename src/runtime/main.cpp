@@ -594,6 +594,10 @@ void print_usage() {
         "                      captured is AGENTTY_LOG (default: warnings\n"
         "                      and errors) — e.g. AGENTTY_LOG=debug, or\n"
         "                      AGENTTY_LOG=wire=trace for raw HTTP bytes.\n"
+        "      --events jsonl  Headless `run`: emit one JSON object per\n"
+        "                      line to stderr for each tool executed\n"
+        "                      (tool, ms, ok, err, args_sha). stdout keeps\n"
+        "                      the report, so both can be captured.\n"
         "  -p, --profile MODE  ACP permission tier (Zed shows the prompts):\n"
         "                             ask     (default: prompt write/exec/net),\n"
         "                             minimal (also prompt reads),\n"
@@ -763,6 +767,24 @@ Args parse_args(int argc, char** argv) {
             out.cli_workspace = argv[++i];
         } else if (a == "--sandbox" && i + 1 < argc) {
             out.cli_sandbox = argv[++i];
+        } else if (a == "--events" && i + 1 < argc) {
+            // Selects the headless machine-readable event stream. Applied
+            // to the environment rather than Args because the emitter
+            // lives in the tool backend, well below main() — and it reads
+            // the setting once, lazily, so setting it here during argv
+            // parsing is early enough for every consumer.
+            const std::string_view fmt = argv[++i];
+            if (fmt != "jsonl") {
+                std::fprintf(stderr,
+                    "unknown --events format: %.*s (only 'jsonl')\n",
+                    static_cast<int>(fmt.size()), fmt.data());
+                std::exit(2);
+            }
+#if defined(_WIN32)
+            _putenv_s("AGENTTY_EVENTS", "jsonl");
+#else
+            ::setenv("AGENTTY_EVENTS", "jsonl", 1);
+#endif
         } else if (a == "--log-file" && i + 1 < argc) {
             // Applied immediately, not stashed on Args: the log sink
             // resolves lazily on its FIRST use, and something between

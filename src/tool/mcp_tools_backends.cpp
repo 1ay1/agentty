@@ -78,16 +78,84 @@ namespace mt  = ::mcp::tools;
 namespace fs  = std::filesystem;
 using json    = nlohmann::json;
 
-// AGENTTY_TRACE_TOOLS=1 — emit a `TOOL <name> <ok|error>` line to stderr for
-// each tool the headless agent loop executes. Read once (the env can't change
-// mid-process). Used by run_one_shot's runner and the Tier-2 agentic evals.
-[[nodiscard]] bool trace_tools_enabled() {
-    static const bool on = [] {
+// Machine-readable event stream for headless runs, enabled by
+// `agentty run --events jsonl` (and the older AGENTTY_TRACE_TOOLS=1,
+// which now selects the same stream).
+//
+// WHY THIS EXISTS. A benchmark harness driving `agentty run` needs to
+// know which tools were called and whether they worked. Until this, the
+// only machine-visible signal was a Unicode gear glyph in the rendered
+// Activity view — and that glyph is only emitted on the SUBAGENT path,
+// never by a plain `run`. At least one external harness grepped for it,
+// got nothing, and recorded its tool-call columns as "NA" rather than a
+// misleading zero. The data existed (tool.exec, with timings) but only
+// in the log file, which a sandboxed run throws away on teardown.
+//
+// So: one JSON object per line, on STDERR. stderr because run/acp/
+// mcp-serve keep stdout for the report itself, and a harness that merges
+// the two streams still gets both.
+//
+//   {"ev":"tool","seq":3,"tool":"read","ms":12,"ok":true,
+//    "args_sha":"a3f1c09d"}
+//   {"ev":"tool","seq":4,"tool":"edit","ms":4,"ok":false,
+//    "err":"invalid_args: no such file","args_sha":"77b2e410"}
+//
+// args_sha, not args: a repeat-detector needs to know two calls were
+// IDENTICAL, not what they contained. Tool arguments carry paths, env
+// values and command lines, and the harnesses that want this run agentty
+// sandboxed precisely to keep that data in. A hash answers the question
+// without being a leak, and needs no AGENTTY_LOG_BODIES-style gate.
+enum class EventFormat { Off, Jsonl };
+
+[[nodiscard]] EventFormat event_format() {
+    static const EventFormat fmt = [] {
+        // --events jsonl wins; AGENTTY_TRACE_TOOLS is the older spelling.
+        if (const char* e = std::getenv("AGENTTY_EVENTS");
+            e && e[0] && std::string_view{e} == "jsonl")
+            return EventFormat::Jsonl;
         const char* v = std::getenv("AGENTTY_TRACE_TOOLS");
-        return v && v[0] && v[0] != '0' && v[0] != 'f' && v[0] != 'F'
-                 && v[0] != 'n' && v[0] != 'N';
+        const bool on = v && v[0] && v[0] != '0' && v[0] != 'f' && v[0] != 'F'
+                          && v[0] != 'n' && v[0] != 'N';
+        return on ? EventFormat::Jsonl : EventFormat::Off;
     }();
-    return on;
+    return fmt;
+}
+
+[[nodiscard]] bool trace_tools_enabled() {
+    return event_format() != EventFormat::Off;
+}
+
+// FNV-1a over the argument JSON. Short, stable across runs and
+// processes, and not reversible into the arguments it stands for.
+[[nodiscard]] std::string args_digest(std::string_view args) {
+    std::uint32_t h = 2166136261u;
+    for (unsigned char c : args) { h ^= c; h *= 16777619u; }
+    char buf[9];
+    std::snprintf(buf, sizeof(buf), "%08x", h);
+    return std::string{buf};
+}
+
+// One event line. Never throws: a diagnostic stream must not be able to
+// take down the run it is describing.
+void emit_tool_event(std::string_view tool, long long ms, bool ok,
+                     std::string_view err, std::string_view args) noexcept {
+    if (event_format() == EventFormat::Off) return;
+    try {
+        static std::atomic<unsigned long long> seq{0};
+        nlohmann::json j{
+            {"ev",   "tool"},
+            {"seq",  seq.fetch_add(1, std::memory_order_relaxed)},
+            {"tool", tool},
+            {"ms",   ms},
+            {"ok",   ok},
+            {"args_sha", args_digest(args)},
+        };
+        if (!ok && !err.empty()) j["err"] = err;
+        const std::string line = j.dump();
+        std::fprintf(stderr, "%s\n", line.c_str());
+    } catch (...) {
+        // Out of memory formatting a diagnostic line: drop the line.
+    }
 }
 
 // ── MemoryStore ────────────────────────────────────────────────────────
@@ -1546,26 +1614,25 @@ public:
                     // in the crash flight recorder) with the args that caused
                     // it — the evidence that was missing while Copilot's tool
                     // calls were arriving empty.
+                    const auto t_ms =
+                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - t_start).count();
+                    const std::string err_text =
+                        res ? std::string{"-"}
+                            : std::string{tools::to_string(res.error().kind)}
+                                  + ": " + res.error().detail;
                     AGT_LOGL(Tool, res ? ::agentty::logx::Level::Debug
                                        : ::agentty::logx::Level::Warn,
                              "tool.exec", "name={} ms={} ok={} err={} args={}",
-                             tc.name.value,
-                             std::chrono::duration_cast<std::chrono::milliseconds>(
-                                 std::chrono::steady_clock::now() - t_start).count(),
-                             res ? 1 : 0,
-                             res ? std::string{"-"}
-                                 : std::string{tools::to_string(res.error().kind)}
-                                       + ": " + res.error().detail,
+                             tc.name.value, t_ms, res ? 1 : 0, err_text,
                              tc.args.dump());
-                    // AGENTTY_TRACE_TOOLS=1 emits one machine-parseable line per
-                    // executed tool to STDERR (run/acp/mcp-serve keep stderr as
-                    // their diagnostic channel, so the stdout report stays
-                    // clean). Independently useful for debugging/scripting a
-                    // headless `agentty run`, and the observation hook the
-                    // Tier-2 agentic evals need to assert on tool SELECTION.
-                    if (trace_tools_enabled())
-                        std::fprintf(stderr, "TOOL %s %s\n", tc.name.value.c_str(),
-                                     res ? "ok" : "error");
+                    // The same facts as the log line above, but on stderr and
+                    // machine-readable — a sandboxed harness never sees the
+                    // log file. See emit_tool_event for why args are hashed.
+                    emit_tool_event(tc.name.value, t_ms, static_cast<bool>(res),
+                                    res ? std::string_view{}
+                                        : std::string_view{err_text},
+                                    tc.args.dump());
                     if (res) {
                         // ECONOMY: a subagent is a focused, tool-heavy burst
                         // (read/grep/repo_map outputs run to tens of KiB
