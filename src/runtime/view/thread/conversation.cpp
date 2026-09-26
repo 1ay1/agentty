@@ -435,7 +435,7 @@ maya::Conversation::Config conversation_config(const Model& m) {
             live_text_bytes += msg.text.size() + msg.streaming_text.size();
             live_tool_count += msg.tool_calls.size();
         }
-        AGT_LOG(Perf, Trace, "view.shape",
+        AGT_LOG_HOT(Perf, Trace, "view.shape",
                 "frozen={} live_tail={} live_msgs={} "
                 "live_text={} live_tools={} frozen_through={} msgs={}",
                 m.ui.frozen.size(), cfg.live_tail.size(), live_msgs,

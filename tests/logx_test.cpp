@@ -41,7 +41,10 @@ int main() {
     const std::string log_path = "/tmp/agentty-logx-test.log";
     std::remove(log_path.c_str());
     setenv("AGENTTY_LOG", "warn,wire=trace,rag=off", 1);
-    setenv("AGENTTY_LOG_FILE", log_path.c_str(), 1);
+    // AGENTTY_LOG_FILE is gone — the destination is set through the same
+    // seam `--log-file` uses. Must happen before the first log call, which
+    // is exactly the contract set_log_path() documents.
+    logx::set_log_path(log_path);
 
     // ── Gate semantics ────────────────────────────────────────────────
     CHECK(logx::enabled(logx::Channel::Wire, logx::Level::Trace),

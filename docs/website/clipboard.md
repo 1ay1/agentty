@@ -310,7 +310,7 @@ the terminal is the one refusing.
 Still stuck? Run with logging and include the output in an issue:
 
 ```bash
-AGENTTY_LOG=general=debug AGENTTY_LOG_FILE=/tmp/agentty.log agentty
+AGENTTY_LOG=general=debug agentty --log-file /tmp/agentty.log
 ```
 
 The log records which clipboard path was attempted and why it gave up — which

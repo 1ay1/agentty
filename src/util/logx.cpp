@@ -80,6 +80,12 @@ constexpr std::int64_t kRotateBytesDefault = 32ll * 1024 * 1024;
 // nothing else references it.
 namespace detail {
 std::atomic<std::int64_t> g_rotate_bytes{kRotateBytesDefault};
+
+// Destination set by `--log-file` before the first log call. Not atomic
+// and not locked: main() writes it while parsing argv, before any thread
+// exists and before the lazy init() that reads it can have run. A later
+// write would be a bug, which is why set_log_path() says so out loud.
+std::string g_path_override;
 }
 
 namespace {
@@ -467,11 +473,25 @@ bool init() {
         lv.store(static_cast<std::uint8_t>(kDefault), std::memory_order_relaxed);
 
     const char* spec = std::getenv("AGENTTY_LOG");
-    const char* file = std::getenv("AGENTTY_LOG_FILE");
-    // Legacy shim: AGENTTY_DEBUG_LOG=<path> = file + debug default.
-    const char* legacy = std::getenv("AGENTTY_DEBUG_LOG");
-    if ((!file || !*file) && legacy && *legacy) file = legacy;
-    if ((!spec || !*spec) && legacy && *legacy)  spec = "debug";
+    // WHERE the log goes is a FLAG (`--log-file`), not an environment
+    // variable. Two reasons it moved:
+    //
+    //   * AGENTTY_LOG says WHAT to capture; a path says WHERE to put it.
+    //     Two unrelated decisions do not belong in the same mechanism,
+    //     and having both as env vars meant three spellings of one idea
+    //     (AGENTTY_LOG_FILE, AGENTTY_DEBUG_LOG=<path>, and the implicit
+    //     default) with no obvious precedence between them.
+    //   * a flag shows up in --help. An env var is only findable if you
+    //     already know it exists, which is how a documented knob still
+    //     goes unused.
+    //
+    // So the environment now has exactly two logging variables, both
+    // answering "what to capture": AGENTTY_LOG and AGENTTY_LOG_BODIES.
+    // Retired here: AGENTTY_LOG_FILE (-> --log-file) and
+    // AGENTTY_DEBUG_LOG (-> --log-file plus AGENTTY_LOG=debug).
+    const char* file = detail::g_path_override.empty()
+                           ? nullptr
+                           : detail::g_path_override.c_str();
 
     if (spec && *spec) parse_filter(spec);
     // A filter without a file logs to <user-root>/logs/agentty.log
@@ -516,6 +536,20 @@ bool init() {
 std::string_view log_file() noexcept {
     (void)detail::inited();
     return g_path;
+}
+
+void set_log_path(std::string_view path) noexcept {
+    // Deliberately does NOT call inited(): the whole point is to land the
+    // override BEFORE the sink resolves. Once a file is open, reopening it
+    // under live writers is the fd-reuse hazard rotate_if_needed() exists
+    // to avoid, so a late call is dropped instead.
+    if (g_fd.load(std::memory_order_relaxed) >= 0) return;
+    try {
+        detail::g_path_override.assign(path);
+    } catch (...) {
+        // An allocation failure here means no override; the default path
+        // still applies. Never let the logger throw at its own setup.
+    }
 }
 
 unsigned long redaction_count() noexcept {

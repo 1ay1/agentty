@@ -92,7 +92,7 @@ filter of `warn` passes `warn` and `error`; `off` silences a channel entirely.
 
 ### Where it writes
 
-- `AGENTTY_LOG_FILE=<path>` sets the file explicitly.
+- `--log-file <path>` sets the file explicitly.
 - Otherwise: `~/.agentty/logs/agentty.log` (or `$AGENTTY_HOME/logs/`). So
   `AGENTTY_LOG=debug agentty` just works — no path needed.
 - Append-only, rotated once at startup past **32 MB** (the previous log
@@ -309,22 +309,27 @@ handler dumps that ring to stderr right after the backtrace:
 Every crash report ships with *what was happening right before it*, at
 essentially zero steady-state cost. Capture it with `agentty 2> crash.log`.
 
-## Legacy variable
+## Retired variables
 
-`AGENTTY_DEBUG_LOG=<path>` (the older single-file debug var) still works: it
-sets the log file *and* implies `AGENTTY_LOG=debug` when `AGENTTY_LOG` is
-unset. Existing scripts keep working; new setups should prefer `AGENTTY_LOG`.
+The environment holds exactly **two** logging variables, and both answer the
+same question — *what to capture*: `AGENTTY_LOG` and `AGENTTY_LOG_BODIES`.
+*Where* it goes is `--log-file`, a flag, because a destination is not a capture
+policy and a flag is the part that shows up in `--help`.
 
-Retired in favour of the single log: `AGENTTY_DEBUG_API`, `AGENTTY_DEBUG_FILE`,
-and `AGENTTY_ACP_TRACE`. Their output now lands on the `wire` and `acp`
-channels above.
+Removed, with their replacements:
 
-Also retired, onto the `perf` channel: `AGENTTY_CACHE_PROF`,
-`AGENTTY_LOAD_PROF`, `AGENTTY_STREAM_PROF` and `AGENTTY_VIEW_PROF`. Each used
-to `fopen` its own file under `/tmp`, which meant the timings sat outside the
-level filter, the crash ring and the redaction step — and you had to know four
-more variable names to find them. Use `AGENTTY_LOG=perf=debug` (or `perf=trace`
-for the per-frame pacing lines, which fire on every streaming frame).
+| Was | Now |
+|-----|-----|
+| `AGENTTY_LOG_FILE=<path>` | `--log-file <path>` |
+| `AGENTTY_DEBUG_LOG=<path>` | `--log-file <path>` plus `AGENTTY_LOG=debug` |
+| `AGENTTY_DEBUG_API`, `AGENTTY_DEBUG_FILE` | the `wire` channel |
+| `AGENTTY_ACP_TRACE` | the `acp` channel |
+| `AGENTTY_CACHE_PROF`, `AGENTTY_LOAD_PROF`, `AGENTTY_STREAM_PROF`, `AGENTTY_VIEW_PROF` | the `perf` channel |
+
+The `_PROF` four each used to `fopen` their own file under `/tmp`, which put
+the timings outside the level filter, the crash ring and redaction — and meant
+four more names to know. Use `AGENTTY_LOG=perf=debug` (or `perf=trace` for the
+per-frame pacing lines, which fire on every streaming frame).
 
 ## Debugging model heterogeneity
 
@@ -472,7 +477,7 @@ Worth knowing:
   interleave:
 
   ```bash
-  AGENTTY_LOG_FILE=/tmp/agentty-$$.log ./build/agentty
+  --log-file /tmp/agentty-$$.log ./build/agentty
   ```
 
 Suggested muscle memory — the whole workflow is: see bug → mark → snapshot
@@ -526,7 +531,7 @@ agentty diagnostics            # then collect
 ### Manual collection
 
 ```bash
-AGENTTY_LOG=trace AGENTTY_LOG_FILE=/tmp/agentty.log agentty
+AGENTTY_LOG=trace agentty --log-file /tmp/agentty.log
 # reproduce, then attach /tmp/agentty.log
 ```
 

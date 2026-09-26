@@ -27,8 +27,7 @@ channel list and line format.
 | Variable | Effect |
 |----------|--------|
 | `AGENTTY_LOG` | The diagnostic filter. `trace` · `debug` · `info` · `warn` · `error` · `off`, plus `channel=level` overrides (`warn,wire=trace`). **Release builds default to `warn`** (~2 lines per healthy session) so `agentty diagnostics` works with no setup; non-release builds default to everything. |
-| `AGENTTY_LOG_FILE` | Log destination. Default `~/.agentty/logs/agentty.log`. |
-| `AGENTTY_DEBUG_LOG` | Legacy: sets the file *and* implies `AGENTTY_LOG=debug`. Prefer the two above. |
+| `AGENTTY_LOG_BODIES` | Include payloads (wire bodies, tool args) in the log. Off by default — these carry user data. |
 | `AGENTTY_TRACE_TOOLS` | `=1` emits one `TOOL <name> <ok\|error>` line to **stderr** per tool a headless `agentty run` executes. stdout stays clean, so it's safe to pipe. |
 | `AGENTTY_RAG_TRACE` | Fold rag-cpp's per-stage trace into the retrieval `mode` string shown on the tool card. On by default; `=0` disables. |
 | `AGENTTY_NO_STDERR_REDIRECT` | Keep subsystem stderr (MCP servers, sandbox) on the terminal instead of capturing it. Debug-only — it will scribble over the TUI. |

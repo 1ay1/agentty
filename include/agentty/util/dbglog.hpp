@@ -4,10 +4,12 @@
 // corruption and make field bugs unreproducible).
 //
 // agentty owns the terminal, so a bare fprintf(stderr, ...) would scribble
-// over the TUI. Instead this appends a timestamped line to the file named
-// by the AGENTTY_DEBUG_LOG env var. When the var is unset (the default for
-// every normal run) the call is a couple of cheap loads and returns — no
-// file is opened, no formatting happens, zero behaviour change.
+// over the TUI. Instead this forwards to logx (General channel), which
+// appends a timestamped line to the diagnostic log. When that channel is
+// filtered out — the default for every normal run — the call is a couple
+// of cheap loads and returns: no file is opened, no formatting happens,
+// zero behaviour change. AGENTTY_DEBUG_LOG is gone; capture is
+// AGENTTY_LOG, destination is `--log-file`.
 //
 // Usage at a previously-silent catch site:
 //     } catch (const std::exception& e) {
@@ -25,12 +27,13 @@
 
 namespace agentty::util {
 
-// True iff AGENTTY_DEBUG_LOG is set to a non-empty path. Cached after the
-// first call. Lets a hot catch site skip building a message string when
-// logging is off: `if (dbglog_enabled()) dbglog(where, expensive())`.
+// True iff the underlying logx sink would keep a General-channel line.
+// Cached after the first call. Lets a hot catch site skip building a
+// message string when logging is off:
+//   `if (dbglog_enabled()) dbglog(where, expensive())`.
 bool dbglog_enabled() noexcept;
 
-// Append "<ISO-ish timestamp> [where] msg\n" to $AGENTTY_DEBUG_LOG.
+// Append "<ISO-ish timestamp> [where] msg\n" to the diagnostic log.
 // No-op (and does not touch the filesystem) when logging is disabled.
 // Thread-safe: serialized by an internal mutex.
 void dbglog(std::string_view where, std::string_view msg) noexcept;

@@ -1270,7 +1270,7 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m,
                                        ? source.size() : clip)
           - static_cast<long long>(prev_clip);
         prev_clip = (clip == static_cast<std::size_t>(-1)) ? source.size() : clip;
-        AGT_LOG(Perf, Trace, "stream.frame",
+        AGT_LOG_HOT(Perf, Trace, "stream.frame",
                 "src={} clip={} dclip={:+} live={} finalizing={} "
                 "settled={} fastpath={} build_us={}",
                 source.size(),

@@ -51,12 +51,18 @@
 //   2026-08-28T01:23:45.678 +0012345ms 1a2b W wire     openai.stream: connect refused host=localhost:8080
 //   └─ wall clock ─────────┘ └ mono ─┘ tid  L channel  site: message
 //
-// LEGACY COMPAT: AGENTTY_DEBUG_LOG=<path> (the old dbglog var) still
-// works — it sets the file AND acts as AGENTTY_LOG=debug when AGENTTY_LOG
-// is unset. The old util::dbglog(where,msg) API forwards here (General/
-// Error). Raw wire bytes are NOT a separate system: full request/chunk
-// bodies land here too, on the `wire` channel at Trace, so a byte-level
-// question and a behavioural one are answered from the same file.
+// TWO VARIABLES, BOTH ABOUT WHAT TO CAPTURE: AGENTTY_LOG (level +
+// channel filter) and AGENTTY_LOG_BODIES (include payloads). WHERE the
+// file goes is `--log-file`, a flag, because a destination is not a
+// capture policy and a flag is the part that shows up in --help.
+// Retired: AGENTTY_LOG_FILE and AGENTTY_DEBUG_LOG (both destinations),
+// plus AGENTTY_DEBUG_API / AGENTTY_DEBUG_FILE / AGENTTY_ACP_TRACE and
+// the four AGENTTY_*_PROF profilers, all now channels here. The old
+// util::dbglog(where,msg) API still forwards here (General/Error) — the
+// function stayed, only its env var went away. Raw wire bytes are NOT a
+// separate system: full request/chunk bodies land here too, on the
+// `wire` channel at Trace, so a byte-level question and a behavioural
+// one are answered from the same file.
 //
 // THREADING: format on the caller's stack; publish to the ring with a
 // relaxed fetch_add claim; append with one write(2). No background
@@ -196,6 +202,14 @@ void session_banner(std::string_view info) noexcept;
 // The resolved log-file path ("" = file logging disabled). For status UI.
 [[nodiscard]] std::string_view log_file() noexcept;
 
+// Point the log at `path`. Backs `--log-file`, and MUST be called before
+// the first log call — the sink resolves lazily on first use, so a later
+// call is silently ignored rather than reopening a file other threads may
+// already be writing to. main() calls it while parsing argv, which is
+// before any thread exists. Empty path = no override (the default under
+// the user root still applies).
+void set_log_path(std::string_view path) noexcept;
+
 // How many secrets have been stripped from log lines so far. Surfaced to the
 // user when they go looking for the log: seeing "redacted 47 secrets" is what
 // makes someone comfortable attaching it to a bug report.
@@ -279,3 +293,38 @@ void logf(Channel ch, Level lv, std::string_view site,
 // scope need distinct names (deliberate: nested spans should be visible).
 #define AGT_SPAN(ch, name)                                                  \
     ::agentty::logx::Span agt_span_##ch{::agentty::logx::Channel::ch, name}
+
+// ── AGT_LOG_HOT — for sites that fire per frame or faster ─────────────
+//
+// THE COST ASYMMETRY THIS EXISTS TO ENFORCE. A log site that does NOT
+// fire costs ~0.5 ns (one relaxed atomic load; the arguments are never
+// evaluated). A site that DOES fire costs ~4.4 us — format, then one
+// write(2). Four orders of magnitude apart, both measured -O2 NDEBUG.
+//
+// That ratio is why "log everywhere" is free in release: the default is
+// Warn, so the whole fleet of Debug/Trace sites sits on the 0.5 ns path
+// and a healthy session writes about two lines. It is ALSO why one
+// careless site can wreck a frame budget: at 4.4 us, a Debug log in a
+// per-token path costs ~4.4 ms per 1000 tokens, and in a 60fps render
+// path it eats a quarter of the frame on its own.
+//
+// The rule: anything on a per-frame-or-hotter path logs at Trace, never
+// Debug. Trace is off even under AGENTTY_LOG=debug, so the site stays on
+// the 0.5 ns path for everyone who didn't explicitly ask for it.
+//
+// Use this macro at those sites and the rule is a COMPILE ERROR instead
+// of a convention someone has to remember:
+//
+//     AGT_LOG_HOT(Perf, Trace, "stream.frame", "build_us={}", us);  // ok
+//     AGT_LOG_HOT(Perf, Debug, "stream.frame", "build_us={}", us);  // won't compile
+#define AGT_LOG_HOT(ch, lv, site, ...)                                      \
+    do {                                                                    \
+        static_assert(::agentty::logx::Level::lv                            \
+                          == ::agentty::logx::Level::Trace,                 \
+            "AGT_LOG_HOT is for sites that fire per frame or faster, and "  \
+            "those must log at Trace. An enabled site costs ~4.4us against "\
+            "~0.5ns disabled, so a Debug site here would burn the frame "   \
+            "budget for every user who ran AGENTTY_LOG=debug. Use Trace, "  \
+            "or use plain AGT_LOG if this path is not actually hot.");      \
+        AGT_LOG(ch, lv, site, __VA_ARGS__);                                 \
+    } while (0)

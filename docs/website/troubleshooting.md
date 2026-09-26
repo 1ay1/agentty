@@ -79,7 +79,7 @@ See [Providers › Custom hosts](/docs/providers#custom-hosts) for the full mode
 ## Turning on logs for a bug report
 
 ```bash
-AGENTTY_LOG=debug AGENTTY_LOG_FILE=/tmp/agentty.log agentty
+AGENTTY_LOG=debug agentty --log-file /tmp/agentty.log
 # reproduce, then attach /tmp/agentty.log
 ```
 

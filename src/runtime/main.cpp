@@ -589,6 +589,11 @@ void print_usage() {
         "                      MODE = auto (default: use if available),\n"
         "                             on  (require backend; fail otherwise),\n"
         "                             off (disable wrapping).\n"
+        "      --log-file PATH Write the diagnostic log here instead of\n"
+        "                      ~/.agentty/logs/agentty.log. What gets\n"
+        "                      captured is AGENTTY_LOG (default: warnings\n"
+        "                      and errors) — e.g. AGENTTY_LOG=debug, or\n"
+        "                      AGENTTY_LOG=wire=trace for raw HTTP bytes.\n"
         "  -p, --profile MODE  ACP permission tier (Zed shows the prompts):\n"
         "                             ask     (default: prompt write/exec/net),\n"
         "                             minimal (also prompt reads),\n"
@@ -758,6 +763,12 @@ Args parse_args(int argc, char** argv) {
             out.cli_workspace = argv[++i];
         } else if (a == "--sandbox" && i + 1 < argc) {
             out.cli_sandbox = argv[++i];
+        } else if (a == "--log-file" && i + 1 < argc) {
+            // Applied immediately, not stashed on Args: the log sink
+            // resolves lazily on its FIRST use, and something between
+            // here and the end of parsing may log. Setting it now is
+            // what guarantees the override lands before the file opens.
+            ::agentty::logx::set_log_path(argv[++i]);
         } else if ((a == "-p" || a == "--profile") && i + 1 < argc) {
             out.cli_profile = argv[++i];
         } else if (a == "--provider" && i + 1 < argc) {
