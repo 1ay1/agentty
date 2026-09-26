@@ -42,7 +42,9 @@
 //   4. SPANS. AGT_SPAN(channel, "name") logs entry at trace and exit
 //      with a monotonic duration — RAII, exception-safe, nestable. The
 //      poor-man's tracing profile that replaces the one-off
-//      AGENTTY_LOAD_PROF / AGENTTY_CACHE_PROF fopen sites.
+//      AGENTTY_LOAD_PROF / AGENTTY_CACHE_PROF fopen sites (all now folded
+//      onto the `perf` channel — the migration this header called for is
+//      finished; no profiler writes its own file any more).
 //
 // FORMAT (logfmt-ish, one line per event, grep-friendly):
 //
@@ -90,6 +92,12 @@ enum class Channel : std::uint8_t {
                // clamp, learned capability facts, weak-model fallbacks,
                // tool-call salvage. The channel to open when a model
                // "behaves weird" on one provider but not another.
+    Perf,      // timings and cache accounting: prompt-cache hit/miss per
+               // turn, thread-load and view-build cost, stream frame
+               // pacing, retrieval latency. Answers "why did that take so
+               // long", which is a different question from "what did it
+               // do" and would otherwise drown the other channels at the
+               // level it needs.
     kCount_,   // sentinel — keep last
 };
 inline constexpr std::size_t kChannels =
@@ -97,7 +105,7 @@ inline constexpr std::size_t kChannels =
 
 inline constexpr std::string_view kChannelNames[kChannels] = {
     "general", "wire", "auth", "persist", "tool", "ui",
-    "rag", "mcp", "acp", "smart", "net", "model",
+    "rag", "mcp", "acp", "smart", "net", "model", "perf",
 };
 
 // ── Levels ────────────────────────────────────────────────────────────

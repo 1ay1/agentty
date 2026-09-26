@@ -14,6 +14,8 @@
 
 #include "agentty/runtime/view/thread/conversation.hpp"
 
+#include "agentty/util/logx.hpp"
+
 #include <filesystem>
 
 #include <algorithm>
@@ -416,44 +418,29 @@ maya::Conversation::Config conversation_config(const Model& m) {
             cfg.live_tail.push_back(std::move(*e));
     }
 
-    // Optional shape probe. Set AGENTTY_VIEW_PROF=1 to log every
-    // conversation_config invocation's frozen/live_tail sizes plus
-    // a rough live-tail message-content sketch. One line per call.
-    static const bool view_prof = []{
-        const char* e = std::getenv("AGENTTY_VIEW_PROF");
-        return e && *e && *e != '0';
-    }();
-    if (view_prof) {
-        // Dev-only profiling log. Use the platform temp dir so the knob
-        // also works on Windows (which has no /tmp); computed once.
-        static std::FILE* out = []() -> std::FILE* {
-            std::error_code ec;
-            auto p = std::filesystem::temp_directory_path(ec);
-            if (ec) return nullptr;
-            p /= "agentty-view-prof.log";
-            return std::fopen(p.string().c_str(), "a");
-        }();
-        if (out) {
-            std::size_t live_msgs = (m.d.current.messages.size()
-                > m.ui.frozen_through)
-                ? (m.d.current.messages.size() - m.ui.frozen_through)
-                : 0;
-            std::size_t live_text_bytes = 0;
-            std::size_t live_tool_count = 0;
-            for (std::size_t i = m.ui.frozen_through;
-                 i < m.d.current.messages.size(); ++i) {
-                const auto& msg = m.d.current.messages[i];
-                live_text_bytes += msg.text.size() + msg.streaming_text.size();
-                live_tool_count += msg.tool_calls.size();
-            }
-            std::fprintf(out,
-                "[view] frozen=%zu live_tail=%zu live_msgs=%zu "
-                "live_text=%zu live_tools=%zu frozen_through=%zu msgs=%zu\n",
+    // Shape probe: every conversation_config invocation's frozen/live_tail
+    // sizes plus a rough live-tail content sketch. AGENTTY_LOG=perf=trace
+    // surfaces it — trace, because it is one line per view build.
+    if (::agentty::logx::enabled(::agentty::logx::Channel::Perf,
+                                 ::agentty::logx::Level::Trace)) {
+        std::size_t live_msgs = (m.d.current.messages.size()
+            > m.ui.frozen_through)
+            ? (m.d.current.messages.size() - m.ui.frozen_through)
+            : 0;
+        std::size_t live_text_bytes = 0;
+        std::size_t live_tool_count = 0;
+        for (std::size_t i = m.ui.frozen_through;
+             i < m.d.current.messages.size(); ++i) {
+            const auto& msg = m.d.current.messages[i];
+            live_text_bytes += msg.text.size() + msg.streaming_text.size();
+            live_tool_count += msg.tool_calls.size();
+        }
+        AGT_LOG(Perf, Trace, "view.shape",
+                "frozen={} live_tail={} live_msgs={} "
+                "live_text={} live_tools={} frozen_through={} msgs={}",
                 m.ui.frozen.size(), cfg.live_tail.size(), live_msgs,
                 live_text_bytes, live_tool_count, m.ui.frozen_through,
                 m.d.current.messages.size());
-            std::fflush(out);
-        }
     }
 
     // No separate in_flight indicator — the empty-placeholder

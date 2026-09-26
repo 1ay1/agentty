@@ -1,5 +1,7 @@
 #include "agentty/runtime/view/thread/turn/turn.hpp"
 
+#include "agentty/util/logx.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -476,18 +478,17 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m,
         && cache.last_settled_size == source.size()
         && cache.revealed_size == source.size();
 
-    // Optional per-frame timer for the streaming-markdown widget. Set
-    // AGENTTY_STREAM_PROF=1 to log set_content+finish+build() cost for
-    // each non-fast-path call to /tmp/agentty-stream-prof.log. Isolates
-    // the in-flight widget cost from the (separately-profiled) timeline
-    // render. One line per call; skips the settled fast-path entirely.
-    static const bool stream_prof = []{
-        const char* e = std::getenv("AGENTTY_STREAM_PROF");
-        return e && *e && *e != '0';
-    }();
-    const auto prof_t0 = stream_prof
-        ? std::chrono::steady_clock::now()
-        : std::chrono::steady_clock::time_point{};
+    // Optional per-frame timer for the streaming-markdown widget: logs
+    // set_content+finish+build() cost for each non-fast-path call.
+    // Isolates the in-flight widget cost from the (separately-profiled)
+    // timeline render. One line per call; skips the settled fast-path.
+    // Frame-build cost + reveal pacing. AGENTTY_LOG=perf=trace surfaces it:
+    // trace, not debug, because this fires on every streaming frame.
+    const auto prof_t0 = ::agentty::logx::enabled(
+                             ::agentty::logx::Channel::Perf,
+                             ::agentty::logx::Level::Trace)
+                       ? std::chrono::steady_clock::now()
+                       : std::chrono::steady_clock::time_point{};
 
     if (!already_settled_into_cache) {
         // Skip set_content_async entirely on a sizes-unchanged frame.
@@ -1254,34 +1255,24 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m,
         ::maya::anim::keep_animating();
     }
 
-    if (stream_prof) {
+    if (prof_t0.time_since_epoch().count() != 0) {
         const auto us = std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now() - prof_t0).count();
-        static std::FILE* out = []() -> std::FILE* {
-            // Use the platform temp dir so the AGENTTY_STREAM_PROF knob
-            // works on Windows (no /tmp) too; computed once.
-            std::error_code ec;
-            auto p = std::filesystem::temp_directory_path(ec);
-            if (ec) return nullptr;
-            p /= "agentty-stream-prof.log";
-            return std::fopen(p.string().c_str(), "a");
-        }();
-        if (out) {
-            // Real reveal cursor (the byte the typewriter has reached) and
-            // the per-call jump in it — the number that shows a BURST. A
-            // smooth glide moves the clip a few bytes per frame; a paste
-            // (tool-boundary snap, in-progress-line reveal) jumps it by
-            // hundreds in one call. dclip is the honest burst signal.
-            const std::size_t clip = cache.streaming->debug_reveal_byte_clip();
-            static std::size_t prev_clip = 0;
-            const long long dclip =
-                static_cast<long long>(clip == static_cast<std::size_t>(-1)
-                                           ? source.size() : clip)
-              - static_cast<long long>(prev_clip);
-            prev_clip = (clip == static_cast<std::size_t>(-1)) ? source.size() : clip;
-            std::fprintf(out,
-                "[stream] src=%zu clip=%zu dclip=%+lld live=%d finalizing=%d "
-                "settled=%d fastpath=%d build_us=%lld\n",
+        // Real reveal cursor (the byte the typewriter has reached) and
+        // the per-call jump in it — the number that shows a BURST. A
+        // smooth glide moves the clip a few bytes per frame; a paste
+        // (tool-boundary snap, in-progress-line reveal) jumps it by
+        // hundreds in one call. dclip is the honest burst signal.
+        const std::size_t clip = cache.streaming->debug_reveal_byte_clip();
+        static std::size_t prev_clip = 0;
+        const long long dclip =
+            static_cast<long long>(clip == static_cast<std::size_t>(-1)
+                                       ? source.size() : clip)
+          - static_cast<long long>(prev_clip);
+        prev_clip = (clip == static_cast<std::size_t>(-1)) ? source.size() : clip;
+        AGT_LOG(Perf, Trace, "stream.frame",
+                "src={} clip={} dclip={:+} live={} finalizing={} "
+                "settled={} fastpath={} build_us={}",
                 source.size(),
                 clip == static_cast<std::size_t>(-1) ? source.size() : clip,
                 dclip,
@@ -1289,8 +1280,6 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m,
                 cache.streaming->is_finalizing() ? 1 : 0,
                 settled ? 1 : 0, already_settled_into_cache ? 1 : 0,
                 static_cast<long long>(us));
-            std::fflush(out);
-        }
     }
 
     // Live markdown body returned UNPADDED. Composer anti-bounce — the

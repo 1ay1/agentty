@@ -4,6 +4,7 @@
 
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/runtime/app/update.hpp"
+#include "agentty/util/logx.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -391,24 +392,14 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
             // momentum and its first follow-up trains the old signature.
             m.s.smart_turn_complexity  = smart::Complexity::Standard;
             m.s.smart_effort_bias      = 0;
-            // Optional timing probe. AGENTTY_LOAD_PROF=1 keeps surfacing
-            // the synchronous portion of the load (rehydrate +
-            // release_to_kernel) that still lives on the UI thread.
-            const bool prof = []{
-                static const bool on = [] {
-                    const char* e = std::getenv("AGENTTY_LOAD_PROF");
-                    return e && *e && *e != '0';
-                }();
-                return on;
-            }();
-            std::FILE* prof_out = nullptr;
-            if (prof) prof_out = std::fopen("/tmp/agentty-load-prof.log", "a");
-            auto stamp = [&](const char* tag, auto t0) {
-                if (!prof_out) return;
+            // Timing probe for the synchronous portion of the load
+            // (rehydrate + release_to_kernel) that still lives on the UI
+            // thread. AGENTTY_LOG=perf=debug surfaces it.
+            auto stamp = [](const char* tag, auto t0) {
                 auto dt = std::chrono::duration<double, std::milli>(
                     std::chrono::steady_clock::now() - t0).count();
-                std::fprintf(prof_out, "[load-async] %s: %.2f ms\n", tag, dt);
-                std::fflush(prof_out);
+                AGT_LOG(Perf, Debug, "thread.load", "stage={} ms={:.2f}",
+                        tag, dt);
             };
             m.d.current = std::move(e.thread);
             // The loaded thread has no live turn, so any run state still
@@ -464,19 +455,17 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
             auto t2 = std::chrono::steady_clock::now();
             release_to_kernel();
             stamp("release_to_kernel", t2);
-            if (prof_out) {
+            {
                 const auto _ts = maya::platform::query_terminal_size(
                     maya::platform::stdout_handle());
-                std::fprintf(prof_out,
-                    "[load-async] msgs=%zu frozen=%zu frozen_rows=%zu "
-                    "frozen_through=%zu term_h=%d\n",
-                    m.d.current.messages.size(),
-                    m.ui.frozen.size(),
-                    m.ui.frozen.row_total(),
-                    m.ui.frozen_through,
-                    _ts.height.value);
-                std::fflush(prof_out);
-                std::fclose(prof_out);
+                AGT_LOG(Perf, Debug, "thread.load_done",
+                        "msgs={} frozen={} frozen_rows={} "
+                        "frozen_through={} term_h={}",
+                        m.d.current.messages.size(),
+                        m.ui.frozen.size(),
+                        m.ui.frozen.row_total(),
+                        m.ui.frozen_through,
+                        _ts.height.value);
             }
             // Wholesale model swap into the loaded thread. Same
             // rationale as NewThread above: the previous thread's

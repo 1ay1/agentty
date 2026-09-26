@@ -886,23 +886,11 @@ Cmd finalize_turn(Model& m, StopReason stop_reason) {
     // session (each round-trip costs seconds of TTFT + stream). Log the
     // width of this turn's tool batch so prompt-shaping work has a
     // measurable target: rising avg width = fewer round-trips per task.
-    // Rides the same opt-in as the cache telemetry.
-    {
-        static const bool prof = [] {
-            const char* v = std::getenv("AGENTTY_CACHE_PROF");
-            return v && *v && *v != '0';
-        }();
-        if (prof && !m.d.current.messages.empty()
-            && m.d.current.messages.back().role == Role::Assistant
-            && !m.d.current.messages.back().tool_calls.empty()) {
-            static std::FILE* out =
-                std::fopen("/tmp/agentty-cache-prof.log", "a");
-            if (out) {
-                std::fprintf(out, "[batch] width=%zu\n",
-                    m.d.current.messages.back().tool_calls.size());
-                std::fflush(out);
-            }
-        }
+    if (!m.d.current.messages.empty()
+        && m.d.current.messages.back().role == Role::Assistant
+        && !m.d.current.messages.back().tool_calls.empty()) {
+        AGT_LOG(Perf, Debug, "turn.tool_batch", "width={}",
+                m.d.current.messages.back().tool_calls.size());
     }
     // The turn is finished, so persist it. Folded into `kp` rather than run
     // here: every return below already carries kp, so this reaches the host
@@ -1210,29 +1198,17 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
                     if (a->first_delta_at.time_since_epoch().count() == 0) {
                         a->first_delta_at = now;
                         // TTFT sample — request launch to first content
-                        // byte, per model. Same opt-in as the cache
-                        // telemetry; feeds latency-aware routing with live
-                        // data (which model is FAST now, not just cheap).
-                        {
-                            static const bool prof = [] {
-                                const char* v = std::getenv("AGENTTY_CACHE_PROF");
-                                return v && *v && *v != '0';
-                            }();
-                            if (prof
-                                && a->started.time_since_epoch().count() != 0) {
-                                static std::FILE* out = std::fopen(
-                                    "/tmp/agentty-cache-prof.log", "a");
-                                if (out) {
-                                    const auto ttft = std::chrono::duration_cast<
-                                        std::chrono::milliseconds>(
-                                            now - a->started).count();
-                                    std::fprintf(out,
-                                        "[ttft] model=%s ms=%lld\n",
-                                        m.d.model_id.value.c_str(),
-                                        static_cast<long long>(ttft));
-                                    std::fflush(out);
-                                }
-                            }
+                        // byte, per model. Feeds latency-aware routing
+                        // with live data (which model is FAST now, not
+                        // just cheap).
+                        if (a->started.time_since_epoch().count() != 0) {
+                            const auto ttft = std::chrono::duration_cast<
+                                std::chrono::milliseconds>(
+                                    now - a->started).count();
+                            AGT_LOG(Perf, Debug, "turn.ttft",
+                                    "model={} ms={}",
+                                    m.d.model_id.value,
+                                    static_cast<long long>(ttft));
                         }
                         // First real byte of this stream attempt —
                         // the connection demonstrably works. Reset
@@ -1727,29 +1703,18 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
                 // turn means the cached prefix was invalidated — the #1
                 // hidden TTFT cost on big sessions (a cold re-price of a
                 // 100k prefix is 10-20x slower than a cache read). Track
-                // it every turn; AGENTTY_CACHE_PROF=1 appends one line
-                // per pricing so prefix-stability bugs are catchable.
+                // it every turn so prefix-stability bugs are catchable:
+                // AGENTTY_LOG=perf=debug.
                 m.s.cache_read_tokens     = e.cache_read_input_tokens;
                 m.s.cache_creation_tokens = e.cache_creation_input_tokens;
                 m.s.cache_hit_ratio =
                     static_cast<double>(e.cache_read_input_tokens)
                     / static_cast<double>(m.s.tokens_in);
-                static const bool cache_prof = [] {
-                    const char* v = std::getenv("AGENTTY_CACHE_PROF");
-                    return v && *v && *v != '0';
-                }();
-                if (cache_prof) {
-                    static std::FILE* out =
-                        std::fopen("/tmp/agentty-cache-prof.log", "a");
-                    if (out) {
-                        std::fprintf(out,
-                            "[cache] in=%d read=%d create=%d hit=%.3f\n",
-                            e.input_tokens, e.cache_read_input_tokens,
-                            e.cache_creation_input_tokens,
-                            m.s.cache_hit_ratio);
-                        std::fflush(out);
-                    }
-                }
+                AGT_LOG(Perf, Debug, "turn.cache",
+                        "in={} read={} create={} hit={:.3f}",
+                        e.input_tokens, e.cache_read_input_tokens,
+                        e.cache_creation_input_tokens,
+                        m.s.cache_hit_ratio);
                 // Recalibrate the local byte-estimator against ground
                 // truth. The wire prefix the model just priced is the
                 // same transcript estimate_wire_tokens() would score, so

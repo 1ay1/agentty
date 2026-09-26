@@ -37,6 +37,7 @@ Either way the file is `~/.agentty/logs/agentty.log`.
 | Plugin tools missing | `grep 'mcp.connect' ~/.agentty/logs/agentty.log` |
 | Signed out unexpectedly | `grep 'auth.refresh' ~/.agentty/logs/agentty.log` |
 | Settings / history not persisting | `grep 'settings.save\|thread.save' ~/.agentty/logs/agentty.log` |
+| **Something feels slow** | `AGENTTY_LOG=perf=debug agentty`, then `grep 'turn.ttft\|thread.load' …` |
 | Everything, maximum detail | `AGENTTY_LOG=trace agentty` |
 
 ## Quick start
@@ -86,6 +87,7 @@ filter of `warn` passes `warn` and `error`; `off` silences a channel entirely.
 | `smart` | Smart Mode routing decisions |
 | `net` | sockets, TLS, proxy, prewarm, and per-attempt **connect failures** with the endpoint tried |
 | `model` | **provider/model heterogeneity**: which dialect adapter a turn routed through, what effort survived the capability clamp, capability facts learned from provider rejections, weak-model fallbacks, tool-call salvage |
+| `perf` | timings and cache accounting: TTFT per model, tool-batch width, thread-load and view-build cost, per-frame stream pacing. Answers "why was that slow", which is a different question from "what did it do" |
 | `general` | uncategorised (swallowed exceptions land here) |
 
 ### Where it writes
@@ -316,6 +318,13 @@ unset. Existing scripts keep working; new setups should prefer `AGENTTY_LOG`.
 Retired in favour of the single log: `AGENTTY_DEBUG_API`, `AGENTTY_DEBUG_FILE`,
 and `AGENTTY_ACP_TRACE`. Their output now lands on the `wire` and `acp`
 channels above.
+
+Also retired, onto the `perf` channel: `AGENTTY_CACHE_PROF`,
+`AGENTTY_LOAD_PROF`, `AGENTTY_STREAM_PROF` and `AGENTTY_VIEW_PROF`. Each used
+to `fopen` its own file under `/tmp`, which meant the timings sat outside the
+level filter, the crash ring and the redaction step — and you had to know four
+more variable names to find them. Use `AGENTTY_LOG=perf=debug` (or `perf=trace`
+for the per-frame pacing lines, which fire on every streaming frame).
 
 ## Debugging model heterogeneity
 

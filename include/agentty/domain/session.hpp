@@ -472,7 +472,7 @@ struct StreamState {
     // large context). A LOW ratio on an interior turn of a session is a
     // bug signal: something (tool-catalog reorder, MCP reload, prompt
     // nondeterminism) mutated the cached prefix and torched the cache.
-    // Surfaced via AGENTTY_CACHE_PROF=1 logging; -1 = no data yet.
+    // Surfaced on the `perf` channel (AGENTTY_LOG=perf=debug); -1 = no data yet.
     double cache_hit_ratio = -1.0;
     int    cache_read_tokens     = 0;
     int    cache_creation_tokens = 0;
