@@ -132,17 +132,26 @@ jobs:
             sleep $((attempt * 10))
           done
           git submodule update --init --recursive --force
-      - name: Build static binary (Alpine 3.21 / musl / GCC 14)
+      - name: Build static binary (Alpine edge / musl / clang 22)
         run: |
           docker run --rm --platform linux/amd64 \
             -e CMARCH='sse2' \
-            -v "$PWD":/src -w /src alpine:3.21 sh -c '
+            -v "$PWD":/src -w /src alpine:edge sh -c '
               set -ex
-              apk add --no-cache build-base cmake ninja git linux-headers pkgconfig \
+              # alpine:edge + clang 22, NOT 3.21 + gcc: maya vendors jaal, which
+              # needs C++26 structured binding packs (P1061) to check messages
+              # are Sendable, and without them its meta/fields.hpp is a hard
+              # #error. P1061 needs gcc 16 or clang 22. Alpine has no gcc 16 in
+              # any branch (3.23 and edge both cap at gcc 15), so the musl legs
+              # go to clang 22, which edge does carry. musl is what matters here
+              # — it is what makes the binary fully static — and edge keeps it.
+              apk add --no-cache clang22 clang22-static lld llvm22 \
+                musl-dev cmake ninja git linux-headers pkgconfig \
                 openssl-dev openssl-libs-static nghttp2-dev nghttp2-static zlib-static
               git config --global --add safe.directory /src
               rm -rf build-rel
               cmake -S . -B build-rel -GNinja -DCMAKE_BUILD_TYPE=Release \
+                    -DCMAKE_C_COMPILER=clang-22 -DCMAKE_CXX_COMPILER=clang++-22 \
                     -DAGENTTY_STANDALONE=ON -DAGENTTY_FULLY_STATIC=ON \
                     -DAGENTTY_AUTO_PULL_MAYA=OFF -DAGENTTY_USE_MIMALLOC=OFF \
                     -DAGENTTY_ARCH="$CMARCH"
@@ -214,19 +223,28 @@ jobs:
             sleep $((attempt * 10))
           done
           git submodule update --init --recursive --force
-      - name: Build static binary (Alpine 3.21 / musl / GCC 14)
+      - name: Build static binary (Alpine edge / musl / clang 22)
         # Host is already arm64, so a plain alpine:3.21 container builds
         # natively — no --platform, no QEMU.
         run: |
           docker run --rm \
             -e CMARCH='native' \
-            -v "$PWD":/src -w /src alpine:3.21 sh -c '
+            -v "$PWD":/src -w /src alpine:edge sh -c '
               set -ex
-              apk add --no-cache build-base cmake ninja git linux-headers pkgconfig \
+              # alpine:edge + clang 22, NOT 3.21 + gcc: maya vendors jaal, which
+              # needs C++26 structured binding packs (P1061) to check messages
+              # are Sendable, and without them its meta/fields.hpp is a hard
+              # #error. P1061 needs gcc 16 or clang 22. Alpine has no gcc 16 in
+              # any branch (3.23 and edge both cap at gcc 15), so the musl legs
+              # go to clang 22, which edge does carry. musl is what matters here
+              # — it is what makes the binary fully static — and edge keeps it.
+              apk add --no-cache clang22 clang22-static lld llvm22 \
+                musl-dev cmake ninja git linux-headers pkgconfig \
                 openssl-dev openssl-libs-static nghttp2-dev nghttp2-static zlib-static
               git config --global --add safe.directory /src
               rm -rf build-rel
               cmake -S . -B build-rel -GNinja -DCMAKE_BUILD_TYPE=Release \
+                    -DCMAKE_C_COMPILER=clang-22 -DCMAKE_CXX_COMPILER=clang++-22 \
                     -DAGENTTY_STANDALONE=ON -DAGENTTY_FULLY_STATIC=ON \
                     -DAGENTTY_AUTO_PULL_MAYA=OFF -DAGENTTY_USE_MIMALLOC=OFF \
                     -DAGENTTY_ARCH="$CMARCH"
@@ -300,17 +318,26 @@ jobs:
           git submodule update --init --recursive --force
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
-      - name: Build static binary (Alpine 3.21 / musl / GCC 14)
+      - name: Build static binary (Alpine edge / musl / clang 22)
         run: |
           docker run --rm --platform linux/386 \
             -e CMARCH='sse2' \
-            -v "$PWD":/src -w /src alpine:3.21 sh -c '
+            -v "$PWD":/src -w /src alpine:edge sh -c '
               set -ex
-              apk add --no-cache build-base cmake ninja git linux-headers pkgconfig \
+              # alpine:edge + clang 22, NOT 3.21 + gcc: maya vendors jaal, which
+              # needs C++26 structured binding packs (P1061) to check messages
+              # are Sendable, and without them its meta/fields.hpp is a hard
+              # #error. P1061 needs gcc 16 or clang 22. Alpine has no gcc 16 in
+              # any branch (3.23 and edge both cap at gcc 15), so the musl legs
+              # go to clang 22, which edge does carry. musl is what matters here
+              # — it is what makes the binary fully static — and edge keeps it.
+              apk add --no-cache clang22 clang22-static lld llvm22 \
+                musl-dev cmake ninja git linux-headers pkgconfig \
                 openssl-dev openssl-libs-static nghttp2-dev nghttp2-static zlib-static
               git config --global --add safe.directory /src
               rm -rf build-rel
               cmake -S . -B build-rel -GNinja -DCMAKE_BUILD_TYPE=Release \
+                    -DCMAKE_C_COMPILER=clang-22 -DCMAKE_CXX_COMPILER=clang++-22 \
                     -DAGENTTY_STANDALONE=ON -DAGENTTY_FULLY_STATIC=ON \
                     -DAGENTTY_AUTO_PULL_MAYA=OFF -DAGENTTY_USE_MIMALLOC=OFF \
                     -DAGENTTY_ARCH="$CMARCH"
