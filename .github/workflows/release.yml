@@ -145,8 +145,13 @@ jobs:
               # any branch (3.23 and edge both cap at gcc 15), so the musl legs
               # go to clang 22, which edge does carry. musl is what matters here
               # — it is what makes the binary fully static — and edge keeps it.
-              apk add --no-cache clang22 clang22-static lld llvm22 \
-                musl-dev cmake ninja git linux-headers pkgconfig \
+              # Package names differ from 3.21: lld is versioned (lld22),
+              # pkgconfig is pkgconf, and `ninja` in main is the samurai
+              # package (it provides cmd:ninja). build-base pulls the musl
+              # headers, binutils and make that dropping gcc would otherwise
+              # take with it.
+              apk add --no-cache build-base clang22 clang22-static lld22 llvm22 \
+                cmake samurai git linux-headers pkgconf \
                 openssl-dev openssl-libs-static nghttp2-dev nghttp2-static zlib-static
               git config --global --add safe.directory /src
               rm -rf build-rel
@@ -238,8 +243,13 @@ jobs:
               # any branch (3.23 and edge both cap at gcc 15), so the musl legs
               # go to clang 22, which edge does carry. musl is what matters here
               # — it is what makes the binary fully static — and edge keeps it.
-              apk add --no-cache clang22 clang22-static lld llvm22 \
-                musl-dev cmake ninja git linux-headers pkgconfig \
+              # Package names differ from 3.21: lld is versioned (lld22),
+              # pkgconfig is pkgconf, and `ninja` in main is the samurai
+              # package (it provides cmd:ninja). build-base pulls the musl
+              # headers, binutils and make that dropping gcc would otherwise
+              # take with it.
+              apk add --no-cache build-base clang22 clang22-static lld22 llvm22 \
+                cmake samurai git linux-headers pkgconf \
                 openssl-dev openssl-libs-static nghttp2-dev nghttp2-static zlib-static
               git config --global --add safe.directory /src
               rm -rf build-rel
@@ -331,8 +341,13 @@ jobs:
               # any branch (3.23 and edge both cap at gcc 15), so the musl legs
               # go to clang 22, which edge does carry. musl is what matters here
               # — it is what makes the binary fully static — and edge keeps it.
-              apk add --no-cache clang22 clang22-static lld llvm22 \
-                musl-dev cmake ninja git linux-headers pkgconfig \
+              # Package names differ from 3.21: lld is versioned (lld22),
+              # pkgconfig is pkgconf, and `ninja` in main is the samurai
+              # package (it provides cmd:ninja). build-base pulls the musl
+              # headers, binutils and make that dropping gcc would otherwise
+              # take with it.
+              apk add --no-cache build-base clang22 clang22-static lld22 llvm22 \
+                cmake samurai git linux-headers pkgconf \
                 openssl-dev openssl-libs-static nghttp2-dev nghttp2-static zlib-static
               git config --global --add safe.directory /src
               rm -rf build-rel
