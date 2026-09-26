@@ -4,6 +4,27 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.12] - 2026-09-26
+
+The runtime underneath agentty was replaced. If nothing about this release is
+visible to you, it went the way it was meant to.
+
+### Changed
+- **agentty now runs on [jaal](https://github.com/1ay1/jaal), a typed Elm runtime, instead of its own hand-rolled one.** The shape of the program is unchanged — `(Model, Msg) -> (Model, Cmd)`, one pure reducer, maya drawing every pixel — but almost everything holding that shape up is gone, replaced by something that does the same job as a checked property rather than a convention:
+  - **Effects are values, not calls through a global.** `Deps` was a mutable global of 11 `std::function`s installed at startup and reached from 84 places inside reducers. A reducer now returns a *description* of what should happen and the host performs it, so a turn can be tested with no filesystem, no network and no threads.
+  - **A cancelled stream can no longer land a message in a model that stopped expecting it.** That was a real class of bug, previously held off by `m.s.active()` guards written by hand at each site. The streaming turn is a subscription now: it runs while subscribed and is cancelled when it isn't.
+  - **Auth needs no lock.** Workers used to read credentials the UI thread could swap underneath them, guarded by a snapshot plus a mutex. The shared value is now immutable, so there is no writer and nothing to race.
+  - **Message routing is checked by the compiler.** 23 domain reducers used to be dispatched through a hand-written 10-arm `visit`; a leaf nobody handled was silently dropped. It is now a compile error naming the domain file to open.
+  - Incremental builds got faster as a side effect: **1.19 s** for a domain translation unit, **1.77 s** for the loop, against 19 s before.
+
+### Fixed
+- **Windows: agentty no longer hangs when stdin is a pipe that closes immediately.** `type NUL | agentty.exe` — and any launch whose input ends before it begins — waited forever instead of exiting. Two causes, both now fixed: a pipe read at end-of-file reported "no bytes yet" rather than EOF, and the event loop could not tell an idle pipe from a finished one, so it waited on bytes that could never arrive.
+- **Windows: the code-block runner is back.** Running a fenced code block from a thread failed to compile into the Windows binary at all, so the feature was missing there.
+- **MSVC builds work again.** Every program built with MSVC was rejected at compile time with a claim that its own message types were unsafe to send between threads — a check that cannot run on a compiler without C++26 structured binding packs, and that now correctly falls back instead of failing. Consumers of maya's headers also get the flags needed to parse them, so a UTF-8 glyph in a header no longer breaks the build.
+
+### Internal
+- **CI actually gates the Windows and macOS builds now.** The toolchain floor moved to GCC 16 / clang 22 (jaal needs P1061 structured binding packs), which unblocked lanes that had been failing on every push — including `examples (windows-msvc)`, which had never passed. Three of the bugs above were found by those lanes once they could run.
+
 ## [0.9.11] - 2026-09-25
 
 ### Performance
