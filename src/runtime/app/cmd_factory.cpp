@@ -1474,9 +1474,33 @@ Cmd run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args,
                 // tool's own isolated thread, so a slow hook never wedges
                 // the UI — only this one call.
                 const std::string args_dump = args.dump();
+
+                // BEFORE the call, not just after. tool.exec below records
+                // the outcome, but it only ever runs if the tool RETURNS —
+                // so a tool that hangs, blocks on a prompt, or takes the
+                // process down with it leaves no trace at all, which is
+                // precisely the case you need the log for. This line is the
+                // "we went in" half of the pair; match it to tool.exec by
+                // (name, exec_seq).
+                //
+                // Args ride behind logx::body() because they are user data
+                // and routinely carry paths, env values and command lines;
+                // they appear only with AGENTTY_LOG_BODIES, same contract as
+                // the wire channel.
+                AGT_LOG(Tool, Debug, "tool.dispatch",
+                        "name={} seq={} args={}",
+                        name.value, exec_seq,
+                        ::agentty::logx::body(args_dump));
+
                 if (auto pre = tools::hooks::run_pre_tool(name.value,
                                                           args_dump);
                     pre.blocked) {
+                    // A hook refusing the call is a decision someone made
+                    // about this run; without it the tool just reports an
+                    // error and the reason lives nowhere.
+                    AGT_LOG(Tool, Info, "tool.pre_hook_blocked",
+                            "name={} seq={} reason={}",
+                            name.value, exec_seq, pre.reason);
                     sink.send(Msg{out(ToolExecOutput{id, std::unexpected(
                         tools::ToolError::unknown(
                             "blocked by pre_tool hook: " + pre.reason))})});
@@ -1519,8 +1543,8 @@ Cmd run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args,
 #endif
                 AGT_LOGL(Tool, result ? ::agentty::logx::Level::Debug
                                       : ::agentty::logx::Level::Warn,
-                         "tool.exec", "name={} ms={} ok={} err={} shell={} args={}",
-                         name.value, t_ms, result ? 1 : 0,
+                         "tool.exec", "name={} seq={} ms={} ok={} err={} shell={} args={}",
+                         name.value, exec_seq, t_ms, result ? 1 : 0,
                          result ? std::string{"-"}
                                 : std::string{tools::to_string(result.error().kind)}
                                       + ": " + result.error().detail,

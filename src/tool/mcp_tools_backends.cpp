@@ -1614,6 +1614,12 @@ public:
                     // in the crash flight recorder) with the args that caused
                     // it — the evidence that was missing while Copilot's tool
                     // calls were arriving empty.
+                    //
+                    // No seq= here, unlike the reducer's copy: exec_seq is
+                    // minted by cmd::next_tool_exec_seq() to let the reducer
+                    // drop results from a superseded turn, and this path has no
+                    // reducer and no turn to supersede — it runs each call to
+                    // completion in order. Matching on name+args is enough.
                     const auto t_ms =
                         std::chrono::duration_cast<std::chrono::milliseconds>(
                             std::chrono::steady_clock::now() - t_start).count();
@@ -1621,11 +1627,20 @@ public:
                         res ? std::string{"-"}
                             : std::string{tools::to_string(res.error().kind)}
                                   + ": " + res.error().detail;
+                    // Args go through logx::body(), which bounds them to a
+                    // 4 KB head unless AGENTTY_LOG_BODIES is set — same
+                    // treatment the wire channel and the reducer's
+                    // tool.dispatch/tool.exec pair give user data. It is a SIZE
+                    // bound, not a redaction: a short args blob still appears in
+                    // full, which is what you want when diagnosing a tool call.
+                    // What it prevents is one edit tool call with a 2 MB payload
+                    // becoming 2 MB of log. This line used to pass the dump
+                    // straight through with no bound at all.
                     AGT_LOGL(Tool, res ? ::agentty::logx::Level::Debug
                                        : ::agentty::logx::Level::Warn,
                              "tool.exec", "name={} ms={} ok={} err={} args={}",
                              tc.name.value, t_ms, res ? 1 : 0, err_text,
-                             tc.args.dump());
+                             ::agentty::logx::body(tc.args.dump()));
                     // The same facts as the log line above, but on stderr and
                     // machine-readable — a sandboxed harness never sees the
                     // log file. See emit_tool_event for why args are hashed.

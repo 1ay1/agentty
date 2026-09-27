@@ -46,6 +46,21 @@ rejects() {
     esac
 }
 
+# Says: the output CONTAINS this message. Used for the empty-prompt case,
+# where the point is WHICH error you get, not merely that parsing
+# succeeded — `run ""` used to report a blank `unknown arg:`. Matched
+# against the whole output because a banner (e.g. the sandbox line) may
+# precede it.
+says() {
+    desc="$1"; want="$2"; shift 2
+    out=$("$BIN" "$@" 2>&1)
+    case "$out" in
+        *"$want"*) printf 'ok   %-44s\n' "$desc" ;;
+        *)         printf 'FAIL %-44s -> %s\n' "$desc" "$(printf '%s' "$out" | tr '\n' ' ')"
+                   fails=$((fails+1)) ;;
+    esac
+}
+
 echo "argument order:"
 ok 'run PROMPT'                       run "p"
 ok 'run --agent R PROMPT'             run --agent coder "p"
@@ -56,6 +71,13 @@ ok 'run --agent R -w DIR PROMPT'      run --agent coder -w /tmp "p"
 ok 'run -w DIR --agent R PROMPT'      run -w /tmp --agent coder "p"
 ok 'run -m MODEL --agent R PROMPT'    run -m some-model --agent tester "p"
 ok 'run - (stdin)'                    run -
+
+echo
+echo "empty prompt:"
+# An empty positional is still a prompt the scan CLAIMED: it must produce
+# the real "no prompt" error, never `unknown arg:` with a blank name.
+says 'run ""'        'no prompt'      run ""
+says 'run "" -w DIR' 'no prompt'      run "" -w /tmp
 
 echo
 echo "still strict:"
