@@ -534,106 +534,176 @@ int cmd_diagnostics() {
     return 0;
 }
 
+// ── Help, rendered ────────────────────────────────────────────────────
+//
+// This was ~97 string literals in one fprintf, with the description
+// column aligned by hand-counted spaces. Two things were wrong with that
+// beyond the tedium: the wrap width was baked in at ~78 columns, so a
+// narrow terminal double-wrapped every entry into a mess and a wide one
+// wasted half the screen; and adding a flag meant re-counting spaces (I
+// did exactly that for --log-file and --events earlier and got lucky).
+//
+// maya already renders this shape — it is Ink's renderToString, no
+// runtime and no terminal mode changes. hstack does the alignment, so
+// the source carries the CONTENT and maya decides the geometry.
+//
+// TTY-AWARENESS IS NOT OPTIONAL HERE. maya::print() writes cursor and
+// tmux-passthrough control sequences even when stdout is a pipe —
+// measured, 5 escape-bearing lines through `| cat`. `agentty --help |
+// less` would be garbage. So: print() only for a real terminal,
+// render_to_string() (plain, no SGR) otherwise, which is also what a
+// `--help | grep` wants.
+namespace help_ui {
+
+using namespace maya::dsl;
+
+// A palette, not scattered literals: one place to retune, and every
+// entry stays consistent with the rest.
+constexpr auto kFlag    = Fg<130, 200, 255>;   // flag / subcommand
+constexpr auto kHeading = Fg<120, 230, 170>;   // section heading
+
+// One row: name in the left gutter, description wrapping in the right.
+// The gutter is a fixed width so every row lines up; the description
+// grows into whatever is left, which is what makes this responsive.
+maya::Element entry(std::string name, std::string desc, int gutter) {
+    // width() alone is a REQUEST, not a clamp: a name longer than the
+    // gutter ("  mcp-logout <srv>") pushes the description column right
+    // and the row stops lining up with its neighbours. Pinning min and
+    // max to the same value makes the gutter exact, so the description
+    // starts at the same column on every line — including the wrapped
+    // continuation lines, which is the whole point of doing this in a
+    // layout engine rather than with spaces.
+    auto left = maya::hstack();
+    left.width(maya::Dimension::fixed(gutter));
+    left.min_width(maya::Dimension::fixed(gutter));
+    left.max_width(maya::Dimension::fixed(gutter));
+    auto right = maya::hstack();
+    right.grow();
+    auto row = maya::hstack();
+    return row(left(text(std::move(name)) | kFlag),
+               right(text(std::move(desc)) | Dim));
+}
+
+maya::Element heading(std::string s) {
+    return text(std::move(s)) | kHeading | Bold;
+}
+
+maya::Element blank() { return text(""); }
+
+} // namespace help_ui
+
 void print_usage() {
-    std::fprintf(stderr,
-        "agentty %s\n"
-        "\n"
-        "usage: agentty [subcommand] [options]\n"
-        "\n"
-        "subcommands:\n"
-        "  login             Authenticate (API key, or OAuth via claude.ai)\n"
-        "  logout            Remove saved credentials\n"
-        "  status            Show current auth status\n"
-        "  airgap            Launch agentty on an air-gapped host via SSH tunnel\n"
-        "                    (`agentty airgap --help` for details)\n"
-        "  acp               Run as an ACP agent over stdio (for Zed et al.)\n"
-        "  run [PROMPT]      Headless one-shot: run PROMPT through the full\n"
-        "                    agent loop (tools, sandbox) and print the final\n"
-        "                    answer to stdout. PROMPT `-` or absent reads\n"
-        "                    stdin: `git diff | agentty run \"review this\"`.\n"
-        "                    --agent TYPE picks the role (general default,\n"
-        "                    explorer/reviewer/tester/coder). Exit 1 on error.\n"
-        "  mcp-serve         Serve agentty's native tools over MCP (stdio).\n"
-        "                    Point any MCP client at `agentty mcp-serve`.\n"
-        "  mcp-login <srv>   Authorize an OAuth-gated MCP server from mcp.json\n"
-        "                    (2026-07-28 OAuth 2.1 + PKCE via your browser).\n"
-        "  mcp-logout <srv>  Remove a stored MCP server token.\n"
-        "  mcp-status        List MCP servers and their authorization state.\n"
-        "  diagnostics       Collect a redacted diagnostic bundle for a bug\n"
-        "                    report (build info, logs, config \u2014 no secrets)\n"
-        "  skills            List discovered skills with spec-lint diagnostics\n"
-        "                    (exit 1 on warnings — CI-friendly validate)\n"
-        "  hooks [list]      Show configured lifecycle hooks + approval state\n"
-        "  hooks approve     Inspect + approve the active hooks file (hooks\n"
-        "                    NEVER run unapproved; any change re-gates)\n"
-        "  plugin add|list|remove|approve\n"
-        "                    Manage plugins — a plugin IS an MCP server\n"
-        "                    (any language, mcp.json entry): `agentty plugin\n"
-        "                    add today --python today.py`, `--uvx pkg`,\n"
-        "                    `--npx pkg`, `--http <url>`, or `-- cmd args`;\n"
-        "                    add --project for the repo config (approve it\n"
-        "                    with `plugin approve <name> --project`). Docs:\n"
-        "                    /docs/plugins\n"
-        "  rag-bench [dir]   Benchmark search_docs retrieval on your own corpus\n"
-        "                    (recall@k / MRR / nDCG per pipeline stage)\n"
-        "  update            Update agentty to the latest release\n"
-        "                    (--check: only report, don't install)\n"
-        "  version           Print the agentty version and exit\n"
-        "  help              Show this message\n"
-        "\n"
-        "options:\n"
-        "  -k, --key KEY       API-key override for this session\n"
-        "  -m, --model ID      Model id (e.g. claude-opus-4-5)\n"
-        "  -w, --workspace DIR Sandbox filesystem tools to this directory\n"
-        "                      (default: cwd). Tools refuse paths outside it.\n"
-        "                      Pass `--workspace /` to disable the gate.\n"
-        "      --sandbox MODE  Wrap bash/diagnostics in an OS-native sandbox\n"
-        "                      (Linux: bwrap, macOS: sandbox-exec).\n"
-        "                      MODE = auto (default: use if available),\n"
-        "                             on  (require backend; fail otherwise),\n"
-        "                             off (disable wrapping).\n"
-        "      --log-file PATH Write the diagnostic log here instead of\n"
-        "                      ~/.agentty/logs/agentty.log. What gets\n"
-        "                      captured is AGENTTY_LOG (default: warnings\n"
-        "                      and errors) — e.g. AGENTTY_LOG=debug, or\n"
-        "                      AGENTTY_LOG=wire=trace for raw HTTP bytes.\n"
-        "      --events jsonl  Headless `run`: emit one JSON object per\n"
-        "                      line to stderr for each tool executed\n"
-        "                      (tool, ms, ok, err, args_sha). stdout keeps\n"
-        "                      the report, so both can be captured.\n"
-        "  -p, --profile MODE  ACP permission tier (Zed shows the prompts):\n"
-        "                             ask     (default: prompt write/exec/net),\n"
-        "                             minimal (also prompt reads),\n"
-        "                             write   (never prompt reads).\n"
-        "      --provider P    LLM backend. anthropic (default, OAuth/Pro/Max)\n"
-        "                      or an OpenAI-compatible one: openai | codex | groq |\n"
-        "                      openrouter | together | cerebras | deepseek | xai |\n"
-        "                      mistral | gemini | fireworks | ollama | llama.cpp,\n"
-        "                      or a raw host[:port] for any other\n"
-        "                      OpenAI-compatible server. Reads OPENAI_API_KEY\n"
-        "                      (or the provider-specific *_API_KEY) / -k for\n"
-        "                      the key; local backends need no key. Persisted\n"
-        "                      like -m. (Switch live in-app with Ctrl-P \xe2\x80\x94 the\n"
-        "                      picker has a \"Custom host\xe2\x80\xa6\" entry too.)\n"
-        "                      chatgpt talks to ChatGPT natively via the\n"
-        "                      reverse-engineered OAuth login (`agentty login`\n"
-        "                      \xe2\x86\x92 ChatGPT); no Codex binary is needed.\n"
-        "                      copilot and kimi sign in the same way via their\n"
-        "                      device-flow OAuth (`agentty login` \xe2\x86\x92 GitHub\n"
-        "                      Copilot / Kimi) \xe2\x80\x94 no API key needed.\n"
-        "                      Note: hosted Claude output is watermarked per\n"
-        "                      the EU AI Act (invisible, no opt-out, set\n"
-        "                      server-side). Local/open-weight backends\n"
-        "                      (ollama, llama.cpp) carry no provider watermark.\n"
-        "  -V, --version       Print the agentty version and exit.\n"
-        "      --auth-header N Auth header NAME for OpenAI-compatible backends\n"
-        "                      whose gateway doesn't accept `Authorization:\n"
-        "                      Bearer` (e.g. X-API-Key). The key (-k /\n"
-        "                      OPENAI_API_KEY) is sent raw under that name.\n"
-        "                      Session-scoped like -k; default: Bearer.\n"
-        "  -h, --help          Show this message.\n"
-        "\n",
-        AGENTTY_VERSION);
+    using namespace help_ui;
+    constexpr int kCmdGutter  = 20;   // "  mcp-logout <srv>  "
+    constexpr int kOptGutter  = 22;   // "  -w, --workspace DIR "
+
+    auto doc = maya::vstack();
+    doc.gap(0);
+    auto body = doc(
+        text(std::string{"agentty "} + AGENTTY_VERSION) | Bold,
+        blank(),
+        text("usage: agentty [subcommand] [options]") | Dim,
+        blank(),
+        heading("subcommands"),
+        entry("  login", "Authenticate (API key, or OAuth via claude.ai)", kCmdGutter),
+        entry("  logout", "Remove saved credentials", kCmdGutter),
+        entry("  status", "Show current auth status", kCmdGutter),
+        entry("  airgap", "Launch agentty on an air-gapped host via SSH tunnel "
+                          "(`agentty airgap --help` for details)", kCmdGutter),
+        entry("  acp", "Run as an ACP agent over stdio (for Zed et al.)", kCmdGutter),
+        entry("  run [PROMPT]", "Headless one-shot: run PROMPT through the full agent "
+                                "loop (tools, sandbox) and print the final answer to "
+                                "stdout. PROMPT `-` or absent reads stdin: "
+                                "`git diff | agentty run \"review this\"`. --agent TYPE "
+                                "picks the role (general default, "
+                                "explorer/reviewer/tester/coder). Exit 1 on error.",
+              kCmdGutter),
+        entry("  mcp-serve", "Serve agentty's native tools over MCP (stdio). Point any "
+                             "MCP client at `agentty mcp-serve`.", kCmdGutter),
+        entry("  mcp-login <srv>", "Authorize an OAuth-gated MCP server from mcp.json "
+                                   "(2026-07-28 OAuth 2.1 + PKCE via your browser).",
+              kCmdGutter),
+        entry("  mcp-logout <srv>", "Remove a stored MCP server token.", kCmdGutter),
+        entry("  mcp-status", "List MCP servers and their authorization state.", kCmdGutter),
+        entry("  diagnostics", "Collect a redacted diagnostic bundle for a bug report "
+                               "(build info, logs, config \u2014 no secrets)", kCmdGutter),
+        entry("  skills", "List discovered skills with spec-lint diagnostics "
+                          "(exit 1 on warnings \u2014 CI-friendly validate)", kCmdGutter),
+        entry("  hooks [list]", "Show configured lifecycle hooks + approval state", kCmdGutter),
+        entry("  hooks approve", "Inspect + approve the active hooks file (hooks NEVER "
+                                 "run unapproved; any change re-gates)", kCmdGutter),
+        entry("  plugin add|list|remove|approve",
+              "Manage plugins \u2014 a plugin IS an MCP server (any language, mcp.json "
+              "entry): `agentty plugin add today --python today.py`, `--uvx pkg`, "
+              "`--npx pkg`, `--http <url>`, or `-- cmd args`; add --project for the "
+              "repo config (approve it with `plugin approve <name> --project`). "
+              "Docs: /docs/plugins", kCmdGutter),
+        entry("  rag-bench [dir]", "Benchmark search_docs retrieval on your own corpus "
+                                   "(recall@k / MRR / nDCG per pipeline stage)", kCmdGutter),
+        entry("  update", "Update agentty to the latest release "
+                          "(--check: only report, don't install)", kCmdGutter),
+        entry("  version", "Print the agentty version and exit", kCmdGutter),
+        entry("  help", "Show this message", kCmdGutter),
+        blank(),
+        heading("options"),
+        entry("  -k, --key KEY", "API-key override for this session", kOptGutter),
+        entry("  -m, --model ID", "Model id (e.g. claude-opus-4-5)", kOptGutter),
+        entry("  -w, --workspace DIR", "Sandbox filesystem tools to this directory "
+                                       "(default: cwd). Tools refuse paths outside it. "
+                                       "Pass `--workspace /` to disable the gate.", kOptGutter),
+        entry("      --sandbox MODE", "Wrap bash/diagnostics in an OS-native sandbox "
+                                      "(Linux: bwrap, macOS: sandbox-exec). MODE = auto "
+                                      "(default: use if available), on (require backend; "
+                                      "fail otherwise), off (disable wrapping).", kOptGutter),
+        entry("      --log-file PATH", "Write the diagnostic log here instead of "
+                                       "~/.agentty/logs/agentty.log. What gets captured "
+                                       "is AGENTTY_LOG (default: warnings and errors) \u2014 "
+                                       "e.g. AGENTTY_LOG=debug, or AGENTTY_LOG=wire=trace "
+                                       "for raw HTTP bytes.", kOptGutter),
+        entry("      --events jsonl", "Headless `run`: emit one JSON object per line to "
+                                      "stderr for each tool executed (tool, ms, ok, err, "
+                                      "args_sha). stdout keeps the report, so both can "
+                                      "be captured.", kOptGutter),
+        entry("  -p, --profile MODE", "ACP permission tier (Zed shows the prompts): "
+                                      "ask (default: prompt write/exec/net), minimal "
+                                      "(also prompt reads), write (never prompt reads).",
+              kOptGutter),
+        entry("      --provider P", "LLM backend. anthropic (default, OAuth/Pro/Max) or an "
+                                    "OpenAI-compatible one: openai | codex | groq | "
+                                    "openrouter | together | cerebras | deepseek | xai | "
+                                    "mistral | gemini | fireworks | ollama | llama.cpp, or "
+                                    "a raw host[:port] for any other OpenAI-compatible "
+                                    "server. Reads OPENAI_API_KEY (or the "
+                                    "provider-specific *_API_KEY) / -k for the key; local "
+                                    "backends need no key. Persisted like -m. (Switch live "
+                                    "in-app with Ctrl-P \u2014 the picker has a "
+                                    "\"Custom host\u2026\" entry too.) chatgpt talks to ChatGPT "
+                                    "natively via the reverse-engineered OAuth login "
+                                    "(`agentty login` \u2192 ChatGPT); no Codex binary is "
+                                    "needed. copilot and kimi sign in the same way via "
+                                    "their device-flow OAuth (`agentty login` \u2192 GitHub "
+                                    "Copilot / Kimi) \u2014 no API key needed. Note: hosted "
+                                    "Claude output is watermarked per the EU AI Act "
+                                    "(invisible, no opt-out, set server-side). "
+                                    "Local/open-weight backends (ollama, llama.cpp) carry "
+                                    "no provider watermark.", kOptGutter),
+        entry("  -V, --version", "Print the agentty version and exit.", kOptGutter),
+        entry("      --auth-header N", "Auth header NAME for OpenAI-compatible backends "
+                                       "whose gateway doesn't accept `Authorization: "
+                                       "Bearer` (e.g. X-API-Key). The key (-k / "
+                                       "OPENAI_API_KEY) is sent raw under that name. "
+                                       "Session-scoped like -k; default: Bearer.", kOptGutter),
+        entry("  -h, --help", "Show this message.", kOptGutter),
+        blank());
+
+    // Help goes to stderr (it always has — `agentty` with a bad flag
+    // should not pollute a pipeline's stdout), so TTY-test fd 2.
+    if (::isatty(fileno(stderr))) {
+        const int w = maya::detail::detect_terminal_width();
+        std::fputs(maya::render_to_string_ansi(body, w).c_str(), stderr);
+    } else {
+        std::fputs(maya::render_to_string(body, 80).c_str(), stderr);
+    }
 }
 
 struct Args {
