@@ -4,6 +4,29 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.13] - 2026-09-27
+
+Diagnostics. Fewer knobs, more of them documented, and a headless run you
+can actually measure.
+
+### Added
+- **`agentty run --events jsonl`** — one JSON object per line on stderr for each tool a headless run executes: `{"ev":"tool","seq":3,"tool":"read","ms":12,"ok":true,"args_sha":"a3f1c09d"}`. stdout keeps the answer, so a script can capture both. Until now the only machine-visible signal was a glyph in the rendered activity view — which a plain `run` never emits — so harnesses driving agentty had no way to count tool calls at all. `args_sha` is a hash rather than the arguments: it answers "were these two calls identical" without putting your paths and command lines in a log.
+- **`--log-file PATH`** sets where the diagnostic log goes. It's a flag now rather than an environment variable, because a destination is not a capture policy — and a flag is the part that shows up in `--help`.
+
+### Changed
+- **The diagnostic log is genuinely one switch now.** Four profiling variables (`AGENTTY_CACHE_PROF` and friends) each used to write their own file under `/tmp`, which put timings outside the level filter, the crash-time ring buffer and the redaction pass. They're a `perf` channel: `AGENTTY_LOG=perf=debug` gives you TTFT per model, prompt-cache hit ratio, tool-batch width and thread-load cost, in the same file as everything else. Six logging variables became two, both answering "what to capture".
+- **Logging got ~3× cheaper.** An emitted event was ~4 µs, and most of it turned out to be the secret-redaction scan testing every byte against every key pattern. With a first-byte prefilter that's ~1.3 µs, and a site that *doesn't* fire costs ~0.5 ns — so `AGENTTY_LOG=perf=debug` is now something you can leave on in a release build when you want numbers.
+- **`--help` reflows to your terminal.** It was hand-aligned with counted spaces and a wrap width baked in at ~78 columns, so it broke on both narrow and wide terminals. Same plain text, no colour, no escape sequences — identical bytes whether you read it or pipe it — but the description column now follows the width you actually have.
+
+### Fixed
+- **`agentty run --agent <typo>` silently ran the wrong agent.** An unrecognised role fell back to `general` and reported success, so `--agent reviwer` quietly did something else. It's now rejected before the run starts, listing the roles that exist (including your own user-defined ones).
+- **`agentty run ""` reported `unknown arg:` with a blank name** instead of saying there was no prompt.
+- **Windows: `agentty` hung when stdin was a pipe that closed immediately** — `type NUL | agentty.exe`, or any launch whose input ends before it begins. The event loop couldn't tell an idle pipe from a finished one and waited on bytes that could never arrive.
+
+### Internal
+- A log site on a per-frame path must log at `trace`, never `debug` — at ~1.3 µs an enabled per-token site costs milliseconds per thousand tokens. That rule is now a compile error (`AGT_LOG_HOT`) rather than a convention.
+- The redaction tests were running with no log sink and passing vacuously — every assertion is "the secret is absent", which an empty string satisfies. They now fail if they can't read what they're checking. A leak in an unreleased commit was caught by CI because of it.
+
 ## [0.9.12] - 2026-09-26
 
 The runtime underneath agentty was replaced. If nothing about this release is
