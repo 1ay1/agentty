@@ -449,7 +449,7 @@ agentty_add_ctest(reveal_stream_gate_snap COMMAND
 # through jaal (a task instead of a thread, guarded<T> instead of a mutex,
 # loop_bound<T> instead of a thread_local).
 #
-# This is jaal's own check (maya/third_party/jaal/tests/lint/banlist.cmake)
+# This is jaal's own check (third_party/maya/third_party/jaal/tests/lint/banlist.cmake)
 # pointed at agentty. jaal runs it over ITS tree, which says nothing about a
 # consumer: agentty could spawn a bare thread beside the loop or park
 # reducer state in a thread_local and jaal would never notice. Two roots
@@ -457,7 +457,7 @@ agentty_add_ctest(reveal_stream_gate_snap COMMAND
 #
 # Cost: a file read, no compile. Adding an entry is the deliberate act — it
 # is a claim that someone checked the use by hand.
-set(_BANLIST ${CMAKE_SOURCE_DIR}/maya/third_party/jaal/tests/lint/banlist.cmake)
+set(_BANLIST ${CMAKE_SOURCE_DIR}/third_party/maya/third_party/jaal/tests/lint/banlist.cmake)
 if(EXISTS ${_BANLIST})
     add_test(NAME concurrency_banlist_src
              COMMAND ${CMAKE_COMMAND}

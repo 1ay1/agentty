@@ -56,10 +56,12 @@ int main() {
     const char* bin = std::getenv("AGENTTY_DATE_SERVER");
     fs::path date_server = bin && *bin
         ? fs::path{bin}
-        : fs::path{"mcp-cpp/build/examples/date-mcp/date_server"};
+        : fs::path{"build/third_party/mcp-cpp/examples/date-mcp/date_server"};
     if (!fs::exists(date_server)) {
-        for (const char* c : {"../mcp-cpp/build/examples/date-mcp/date_server",
-                              "./mcp-cpp/build/examples/date-mcp/date_server"}) {
+        for (const char* c : {"third_party/mcp-cpp/examples/date-mcp/date_server",
+                              "../build/third_party/mcp-cpp/examples/date-mcp/date_server",
+                              "third_party/mcp-cpp/build/examples/date-mcp/date_server",
+                              "../third_party/mcp-cpp/build/examples/date-mcp/date_server"}) {
             if (fs::exists(c)) { date_server = c; break; }
         }
     }

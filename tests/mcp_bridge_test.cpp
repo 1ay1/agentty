@@ -37,9 +37,16 @@ static std::string find_server() {
         if (fs::exists(e)) return e;
     }
     const char* candidates[] = {
-        "mcp-cpp/build/examples/mcp_server_example",
-        "../mcp-cpp/build/examples/mcp_server_example",
-        "mcp-cpp/build/examples/Release/mcp_server_example",
+        // agentty's own build tree: add_subdirectory(third_party/mcp-cpp)
+        // mirrors the source path, so the examples land under
+        // build/third_party/mcp-cpp/. Checked from the repo root and build/.
+        "build/third_party/mcp-cpp/examples/mcp_server_example",
+        "third_party/mcp-cpp/examples/mcp_server_example",
+        "../build/third_party/mcp-cpp/examples/mcp_server_example",
+        // mcp-cpp's own standalone build tree inside the submodule.
+        "third_party/mcp-cpp/build/examples/mcp_server_example",
+        "../third_party/mcp-cpp/build/examples/mcp_server_example",
+        "third_party/mcp-cpp/build/examples/Release/mcp_server_example",
     };
     std::error_code ec;
     for (const char* c : candidates)

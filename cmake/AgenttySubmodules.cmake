@@ -4,7 +4,13 @@
 # the nghttp2 imported-target discovery. Included as one contiguous block so
 # ordering (toggles BEFORE add_subdirectory; deps BEFORE the targets that link
 # them) is preserved exactly. include() keeps CMAKE_CURRENT_SOURCE_DIR at the
-# top level, so add_subdirectory(maya) etc. resolve as before.
+# top level, so add_subdirectory(third_party/maya) etc. resolve as before.
+#
+# Every in-tree submodule lives under third_party/ (maya, mcp-cpp, acp-cpp,
+# rag-cpp — and maya carries jaal at third_party/maya/third_party/jaal). The
+# helper below takes the BARE name (it keys target names and the per-submodule
+# overrides off it) and resolves the checkout under AGENTTY_THIRD_PARTY_DIR.
+set(AGENTTY_THIRD_PARTY_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party")
 
 # ── Submodule auto-pull ────────────────────────────────────────────────────
 # When AGENTTY_AUTO_PULL_SUBMODULES is ON (default), every in-tree submodule
@@ -28,7 +34,7 @@ function(agentty_pull_submodule_latest sub branch lib)
     if(NOT GIT_FOUND)
         return()
     endif()
-    set(_sd "${CMAKE_CURRENT_SOURCE_DIR}/${sub}")
+    set(_sd "${AGENTTY_THIRD_PARTY_DIR}/${sub}")
     # The guard is deliberately paranoid so a developer's LOCAL work in the
     # submodule is never clobbered by the reset --hard. We refuse to pull if
     # ANY of these hold:
@@ -82,8 +88,8 @@ function(agentty_pull_submodule_latest sub branch lib)
 endfunction()
 
 # Prefer the in-tree submodule when present; only fall back to fetch.
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/maya/CMakeLists.txt")
-    add_subdirectory(maya)
+if(EXISTS "${AGENTTY_THIRD_PARTY_DIR}/maya/CMakeLists.txt")
+    add_subdirectory(third_party/maya)
     # Called unconditionally so maya joins the on-demand `submodules_sync`
     # target; per-build auto-pull stays gated inside the function.
     agentty_pull_submodule_latest(maya master maya)
@@ -204,7 +210,7 @@ endif()
 # above (its own FetchContent_MakeAvailable is a no-op when already present).
 set(ACP_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
 set(ACP_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-add_subdirectory(acp-cpp)
+add_subdirectory(third_party/acp-cpp)
 agentty_pull_submodule_latest(acp-cpp main acp)
 if(TARGET acp)
     set_target_properties(acp PROPERTIES SYSTEM TRUE)
@@ -224,7 +230,7 @@ if(NOT AGENTTY_MCP)
         "served exclusively by the mcp-cpp toolset. Configure with "
         "-DAGENTTY_MCP=ON (the default).")
 endif()
-if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/mcp-cpp/CMakeLists.txt")
+if(NOT EXISTS "${AGENTTY_THIRD_PARTY_DIR}/mcp-cpp/CMakeLists.txt")
     message(FATAL_ERROR
         "agentty: the mcp-cpp submodule is missing but it now provides the "
         "entire tool set. Run `git submodule update --init --recursive`.")
@@ -235,7 +241,7 @@ endif()
 # only needs the mcp LIBRARY here, not mcp_tests in agentty's ctest run.
 set(MCP_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
 set(MCP_BUILD_EXAMPLES ON  CACHE BOOL "" FORCE)
-add_subdirectory(mcp-cpp)
+add_subdirectory(third_party/mcp-cpp)
 agentty_pull_submodule_latest(mcp-cpp master mcp)
 if(TARGET mcp)
     set_target_properties(mcp PROPERTIES SYSTEM TRUE)
@@ -350,14 +356,14 @@ endif()
 
 # ── rag-cpp: the retrieval (RAG) engine ────────────────────────────────────
 # agentty's retrieval is powered by the external rag-cpp library (submodule
-# rag-cpp/, target ragcpp::ragcpp) — a production-grade hybrid engine
+# third_party/rag-cpp/, target ragcpp::ragcpp) — a production-grade hybrid engine
 # (contextual chunking, BM25 + dense/HNSW, RRF fusion, CRAG, HyDE, MMR /
 # dartboard rerank, GraphRAG, .ragdb persistence). The thin adapter in
 # src/rag/adapter.cpp maps agentty's retrieval boundary onto rag::Engine, so
 # the rest of the app never sees a rag:: type. Built from source in-tree so
 # agentty carries its RAG engine with it and compiles ANYWHERE.
 set(AGENTTY_HAS_RAGCPP FALSE)
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/rag-cpp/CMakeLists.txt")
+if(EXISTS "${AGENTTY_THIRD_PARTY_DIR}/rag-cpp/CMakeLists.txt")
     # rag-cpp is portable across GCC, Clang, MinGW, and MSVC. Its durability
     # layer uses posix_compat.hpp on Windows, while SIMD/prefetch kernels use
     # compiler-specific wrappers and retain scalar/runtime-dispatched fallbacks.
@@ -380,17 +386,17 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/rag-cpp/CMakeLists.txt")
     #     dynamic dependency to a binary that's meant to be standalone.
     set(RAGCPP_WITH_METAL     OFF CACHE BOOL "" FORCE)
     set(RAGCPP_WITH_OPENCL    OFF CACHE BOOL "" FORCE)
-    add_subdirectory(rag-cpp EXCLUDE_FROM_ALL)
+    add_subdirectory(third_party/rag-cpp EXCLUDE_FROM_ALL)
     set(AGENTTY_HAS_RAGCPP TRUE)
     # Opt-in upstream tracking, off by default so local rag-cpp edits compile
     # without CMake changing the submodule checkout. Called UNCONDITIONALLY so
     # rag-cpp is always part of the on-demand `submodules_sync` target; the
     # per-build auto-pull stays gated inside the function by
     # AGENTTY_AUTO_PULL_SUBMODULES (and the rag-specific override below).
-    option(AGENTTY_AUTO_PULL_RAGCPP "Fast-forward rag-cpp/ to origin/master on every build" OFF)
+    option(AGENTTY_AUTO_PULL_RAGCPP "Fast-forward third_party/rag-cpp/ to origin/master on every build" OFF)
     agentty_pull_submodule_latest(rag-cpp master ragcpp)
 else()
-    message(FATAL_ERROR "agentty: rag-cpp/ submodule is empty. Run "
+    message(FATAL_ERROR "agentty: third_party/rag-cpp/ submodule is empty. Run "
                         "`git submodule update --init --recursive` to vendor "
                         "the RAG engine, then reconfigure.")
 endif()
