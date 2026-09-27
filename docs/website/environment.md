@@ -161,7 +161,6 @@ Not for normal use. Listed so a reader of the source isn't left guessing.
 
 | Variable | Effect |
 |----------|--------|
-| `AGENTTY_CACHE_PROF` · `AGENTTY_LOAD_PROF` · `AGENTTY_STREAM_PROF` · `AGENTTY_VIEW_PROF` | Profiling counters for the render cache, thread load, streaming, and view paths. |
 | `AGENTTY_STRICT_TEST_ROOT` · `AGENTTY_TEST_FAKE_PASSWD_HOME` | Test-harness isolation: enforce a sandboxed user root and fake the passwd home lookup. |
 | `AGENTTY_UNDER_TEST` | Set by the test mains before anything renders: arms the user-root tripwire so a test can never touch the real `~/.agentty`. |
 

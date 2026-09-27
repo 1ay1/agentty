@@ -34,6 +34,7 @@ Either way the file is `~/.agentty/logs/agentty.log`.
 | Custom host / local server won't answer | `grep 'http\.\|provider.select' ~/.agentty/logs/agentty.log` |
 | Turn failed and you don't know why | `grep 'stream\.' ~/.agentty/logs/agentty.log` |
 | A tool keeps failing | `grep 'tool.exec' ~/.agentty/logs/agentty.log` |
+| A tool **hung** (no outcome was ever logged) | `grep 'tool.dispatch' ~/.agentty/logs/agentty.log` — a `dispatch` with no matching `exec` is the wedge |
 | Plugin tools missing | `grep 'mcp.connect' ~/.agentty/logs/agentty.log` |
 | Signed out unexpectedly | `grep 'auth.refresh' ~/.agentty/logs/agentty.log` |
 | Settings / history not persisting | `grep 'settings.save\|thread.save' ~/.agentty/logs/agentty.log` |
@@ -90,6 +91,36 @@ filter of `warn` passes `warn` and `error`; `off` silences a channel entirely.
 | `perf` | timings and cache accounting: TTFT per model, tool-batch width, thread-load and view-build cost, per-frame stream pacing. Answers "why was that slow", which is a different question from "what did it do" |
 | `general` | uncategorised (swallowed exceptions land here) |
 
+### What it costs
+
+The numbers matter because they decide whether you can leave something
+on. Measured `-O2 -DNDEBUG`:
+
+| | Cost |
+|---|---|
+| A site that **doesn't** fire | **~0.5 ns** — one relaxed atomic load |
+| A site that **does** fire | **~1.3 µs** — format, redact, one `write(2)` |
+| A whole healthy release session, no variable set | **~200 bytes** |
+
+The gap is what makes "instrument everything" free: the macro checks the
+filter *before* evaluating its arguments, so a disabled
+`AGT_LOG(..., "{}", expensive())` never calls `expensive()`. Release
+defaults to `warn`, so the whole fleet of debug/trace sites sits on the
+0.5 ns path.
+
+The same gap is why a site on a per-frame path logs at `trace`, never
+`debug` — at 1.3 µs, a per-token log costs milliseconds per thousand
+tokens. That rule is enforced by the compiler: `AGT_LOG_HOT` won't build
+at any level but `trace`.
+
+:::note Everything works on a release build
+No log site is compiled out. All of them are in the shipped binary — the
+build type only changes the *default* level (`warn` for release, `trace`
+otherwise). `AGENTTY_LOG=trace` on a release binary gives you exactly
+what a debug build gives you, which is the point: you can ask a user
+running the released binary for a full trace.
+:::
+
 ### Where it writes
 
 - `--log-file <path>` sets the file explicitly.
@@ -140,6 +171,8 @@ questions — grep for the tag, not for prose:
 | `salvage.tool_call` / `salvage.dropped_*` | A tool call recovered from (or lost in) leaked content JSON — the "model ignores tools" signature |
 | `responses.tool_args_unroutable` | Tool arguments arrived but couldn't be attached to a call — the upstream shape of every `invalid args` report on the Responses dialect |
 | `copilot.models.*` / `copilot.auto_session.*` | Why Copilot fell back to the bundled catalog / lost its Auto session |
+| `tool.dispatch` | Every tool call **before** it runs: name, `seq`, and args (behind `AGENTTY_LOG_BODIES`). A `dispatch` with no matching `tool.exec` at the same `seq` is a tool that hung, blocked on a prompt, or took the process down — the one case `tool.exec` can never record |
+| `tool.pre_hook_blocked` | A `pre_tool` hook refused the call, and the reason it gave |
 | `tool.exec` | Every tool call: name, duration, outcome, and the **arguments** on failure |
 | `mcp.connect` | Did each plugin server connect, and how many tools did it advertise? |
 | `auth.refresh` | Did the OAuth token refresh succeed? |
