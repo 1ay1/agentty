@@ -1071,6 +1071,40 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # Fast-forward our winget-pkgs fork onto upstream BEFORE submitting.
+      #
+      # This is the step that makes winget publishing unattended.
+      # microsoft/winget-pkgs takes hundreds of commits a week, and a fork
+      # only advances when something syncs it — so ours drifts until komac
+      # cannot rebase onto it and the submission fails. Measured at
+      # v0.9.13: the fork was 552 commits behind, and a single
+      # merge-upstream call fixed it.
+      #
+      # Before this, the failure message asked a human to regenerate
+      # WINGET_TOKEN and sync by hand on every release. That advice led
+      # with the wrong cause — the token was fine, the fork was stale — so
+      # the token got rotated, the fork got synced as a side effect, and
+      # the same failure returned on the next tag.
+      #
+      # Idempotent and cheap: an already-current fork just reports
+      # "already merged". continue-on-error because a sync failure is not
+      # necessarily terminal — the submit below may still succeed, and if
+      # it doesn't, the classify step reports the real reason.
+      - name: Sync the winget-pkgs fork with upstream
+        if: ${{ env.WINGET_TOKEN != '' }}
+        continue-on-error: true
+        run: |
+          behind() {
+            gh api repos/1ay1/winget-pkgs/compare/microsoft:master...1ay1:master \
+              --jq '.behind_by' 2>/dev/null || echo '?'
+          }
+          echo "fork was $(behind) commits behind upstream"
+          gh api repos/1ay1/winget-pkgs/merge-upstream -X POST -f branch=master \
+            || echo "merge-upstream failed — continuing; submit will report"
+          echo "fork is now $(behind) commits behind upstream"
+        env:
+          GH_TOKEN: ${{ secrets.WINGET_TOKEN }}
+
       # Does agentty.agentty already have a manifest folder upstream? Drives
       # which of the two paths below actually runs.
       - name: Check if package exists in winget-pkgs
@@ -1135,12 +1169,25 @@ jobs:
             exit 0
           fi
           echo "::error::winget submission FAILED and no PR exists for $V."
-          echo "::error::Most likely the 1ay1/winget-pkgs fork is stale and WINGET_TOKEN"
-          echo "::error::lacks the 'workflow' scope, so komac cannot sync it (upstream"
-          echo "::error::carries .github/workflows/*.yml, which needs that scope)."
-          echo "::error::Fix: regenerate WINGET_TOKEN as a classic PAT with 'repo' AND"
-          echo "::error::'workflow', then sync the fork:"
-          echo "::error::  gh api repos/1ay1/winget-pkgs/merge-upstream -X POST -f branch=master"
+          # Report the fork's ACTUAL state instead of guessing. The old text
+          # led with "regenerate WINGET_TOKEN", which was the wrong cause
+          # every time it fired: the token was fine and the fork was stale.
+          # Rotating the token appeared to fix it only because syncing the
+          # fork by hand was step two of the same instructions.
+          behind=$(gh api repos/1ay1/winget-pkgs/compare/microsoft:master...1ay1:master \
+                     --jq '.behind_by' 2>/dev/null || echo '?')
+          echo "::error::1ay1/winget-pkgs is $behind commits behind upstream (the sync"
+          echo "::error::step at the top of this job should have brought it to 0)."
+          if [ "${behind:-0}" != "0" ] && [ "$behind" != "?" ]; then
+            echo "::error::The fork is STALE and the automatic sync did not take. That"
+            echo "::error::usually means WINGET_TOKEN cannot fast-forward it — a classic"
+            echo "::error::PAT needs 'repo' AND 'workflow', because upstream carries"
+            echo "::error::.github/workflows/*.yml. Check the sync step's log above."
+          else
+            echo "::error::The fork is current, so this is NOT a stale-fork or token-scope"
+            echo "::error::problem. Read komac's output above for the real reason"
+            echo "::error::(manifest schema change, validation failure, upstream policy)."
+          fi
           exit 1
 
       # FIRST-SUBMISSION path — package not yet upstream. Render the templates
