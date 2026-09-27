@@ -164,21 +164,32 @@ std::atomic<unsigned long> g_redactions{0};
         "password", "passphrase", "code_verifier",
     };
 
-    // Bytes that can begin one of kKeys, both cases. Built at compile
-    // time from kKeys itself, so adding a key above cannot leave the
-    // prefilter stale — the table and the list can't drift apart.
-    struct KeyFirst {
+    // Bytes that can begin a redaction match, both cases. Seeded from
+    // BOTH tables — kKeys ("authorization:", "api_key=") and kPrefixes
+    // (bare "sk-", "ghu_", a JWT's "eyJ") — because the scan below has
+    // two independent matchers and skipping a byte skips both.
+    //
+    // Seeding it from kKeys alone is exactly the bug CI caught: a bare
+    // `ghu_16CharsOfTokenHere123456` with no key in front of it starts
+    // with 'g', 'g' was in no key, so the prefilter skipped the byte and
+    // the token-prefix matcher never ran. The secret went to the log.
+    // Built at compile time from the tables themselves so adding an
+    // entry to either cannot leave this stale.
+    struct FirstBytes {
         bool b[256] {};
-        constexpr KeyFirst() {
-            for (std::string_view k : kKeys) {
-                const unsigned char lo = static_cast<unsigned char>(k[0]);
-                b[lo] = true;
-                if (lo >= 'a' && lo <= 'z')
-                    b[lo - ('a' - 'A')] = true;   // the uppercase spelling
-            }
+        constexpr void add(std::string_view s) {
+            if (s.empty()) return;
+            const unsigned char lo = static_cast<unsigned char>(s[0]);
+            b[lo] = true;
+            if (lo >= 'a' && lo <= 'z') b[lo - ('a' - 'A')] = true;
+            if (lo >= 'A' && lo <= 'Z') b[lo + ('a' - 'A')] = true;
+        }
+        constexpr FirstBytes() {
+            for (std::string_view k : kKeys)     add(k);
+            for (std::string_view p : kPrefixes) add(p);
         }
     };
-    static constexpr KeyFirst kFirstTbl{};
+    static constexpr FirstBytes kFirstTbl{};
     constexpr const bool* kKeyFirst = kFirstTbl.b;
 
     std::size_t out = 0;

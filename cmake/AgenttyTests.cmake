@@ -350,9 +350,14 @@ foreach(_logx_t logx_redaction_test logx_format_test logx_lifecycle_test)
     # fatal "no such file" on a test that links nothing json-related.
     target_link_libraries(${_logx_t} PRIVATE
         doctest::doctest maya::maya nlohmann_json::nlohmann_json)
+    # AGENTTY_HOME, not the retired AGENTTY_LOG_FILE: the destination is
+    # `--log-file` now, and these binaries are doctest mains that never see
+    # agentty's argv parser. Pointing the user root at the build dir makes
+    # the sink resolve to <root>/logs/agentty.log, which is what the tests
+    # read back through logx::log_file().
     add_test(NAME ${_logx_t} COMMAND ${_logx_t})
     set_tests_properties(${_logx_t} PROPERTIES TIMEOUT 30
-        ENVIRONMENT "AGENTTY_LOG=trace;AGENTTY_LOG_FILE=${CMAKE_CURRENT_BINARY_DIR}/${_logx_t}.log")
+        ENVIRONMENT "AGENTTY_LOG=trace;AGENTTY_HOME=${CMAKE_CURRENT_BINARY_DIR}/${_logx_t}.home")
 endforeach()
 
 # logx rotation: same standalone-process reason as the block above. It also
@@ -372,7 +377,7 @@ target_link_libraries(logx_rotation_test PRIVATE
     doctest::doctest maya::maya nlohmann_json::nlohmann_json)
 add_test(NAME logx_rotation_test COMMAND logx_rotation_test)
 set_tests_properties(logx_rotation_test PROPERTIES TIMEOUT 30
-    ENVIRONMENT "AGENTTY_LOG=trace;AGENTTY_LOG_FILE=${CMAKE_CURRENT_BINARY_DIR}/logx_rotation_test.log")
+    ENVIRONMENT "AGENTTY_LOG=trace;AGENTTY_HOME=${CMAKE_CURRENT_BINARY_DIR}/logx_rotation_test.home")
 
 agentty_test(keystore_test MODE raw LABELS sanitizer)
 add_executable(keystore_test EXCLUDE_FROM_ALL

@@ -33,14 +33,19 @@ std::string emit_and_read(const std::string& msg) {
     // read back through the public accessor rather than re-opening a sink.
     logx::emit(logx::Channel::Wire, logx::Level::Error, "test.probe", msg);
     const auto lf = logx::log_file();
-    if (lf.empty()) return {};
+    // A missing sink must FAIL, not return "" — every assertion here is of
+    // the form find(secret) == npos, which an empty string satisfies. When
+    // ctest's env stopped naming a log file (AGENTTY_LOG_FILE was retired
+    // and this wiring wasn't updated), that turned the whole redaction
+    // suite green while it checked nothing, and a real leak shipped.
+    REQUIRE_MESSAGE(!lf.empty(),
+                    "no log sink: the probe would pass vacuously");
     std::ifstream in{std::string{lf}, std::ios::binary};
     std::string all{std::istreambuf_iterator<char>(in),
                     std::istreambuf_iterator<char>()};
-    // Return only the last line — earlier tests share the file.
-    if (all.empty()) return {};
+    REQUIRE_MESSAGE(!all.empty(), "log file is empty: nothing was emitted");
     auto end = all.find_last_not_of('\n');
-    if (end == std::string::npos) return {};
+    REQUIRE(end != std::string::npos);
     auto start = all.rfind('\n', end);
     return all.substr(start == std::string::npos ? 0 : start + 1);
 }
