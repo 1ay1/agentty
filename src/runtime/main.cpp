@@ -534,45 +534,60 @@ int cmd_diagnostics() {
     return 0;
 }
 
-// ── Help, rendered ────────────────────────────────────────────────────
+// ── Help, laid out ─────────────────────────────────────────────────
 //
-// This was ~97 string literals in one fprintf, with the description
-// column aligned by hand-counted spaces. Two things were wrong with that
-// beyond the tedium: the wrap width was baked in at ~78 columns, so a
-// narrow terminal double-wrapped every entry into a mess and a wide one
-// wasted half the screen; and adding a flag meant re-counting spaces (I
-// did exactly that for --log-file and --events earlier and got lucky).
+// This was ~97 string literals in one fprintf with the description
+// column aligned by hand-counted spaces, and a wrap width baked in at
+// ~78 columns — so a narrow terminal double-wrapped every entry and a
+// wide one wasted half the screen. Adding a flag meant re-counting
+// spaces.
 //
-// maya already renders this shape — it is Ink's renderToString, no
-// runtime and no terminal mode changes. hstack does the alignment, so
-// the source carries the CONTENT and maya decides the geometry.
+// maya renders this shape without a runtime (Ink's renderToString), so
+// the source carries CONTENT and the layout engine decides geometry.
 //
-// TTY-AWARENESS IS NOT OPTIONAL HERE. maya::print() writes cursor and
-// tmux-passthrough control sequences even when stdout is a pipe —
-// measured, 5 escape-bearing lines through `| cat`. `agentty --help |
-// less` would be garbage. So: print() only for a real terminal,
-// render_to_string() (plain, no SGR) otherwise, which is also what a
-// `--help | grep` wants.
+// PLAIN TEXT ON PURPOSE. maya is used here as a FORMATTER, not a
+// styler: no colour, no bold, no escape sequences, and the same bytes
+// whether stdout is a terminal, a pipe, or a file. CLI output is an
+// interface — something greps it, something pastes it into an issue —
+// and styling only adds ways for that to break. The one thing a layout
+// engine gives us that printf cannot is a description column that
+// reflows to the ACTUAL terminal width, which is the bug this fixes.
+//
+// (maya::print() is deliberately not used: it writes cursor and
+// tmux-passthrough sequences even into a pipe — measured — so
+// `agentty --help | less` would be garbage.)
 namespace help_ui {
 
 using namespace maya::dsl;
 
-// A palette, not scattered literals: one place to retune, and every
-// entry stays consistent with the rest.
-constexpr auto kFlag    = Fg<130, 200, 255>;   // flag / subcommand
-constexpr auto kHeading = Fg<120, 230, 170>;   // section heading
-
 // One row: name in the left gutter, description wrapping in the right.
-// The gutter is a fixed width so every row lines up; the description
-// grows into whatever is left, which is what makes this responsive.
 maya::Element entry(std::string name, std::string desc, int gutter) {
     // width() alone is a REQUEST, not a clamp: a name longer than the
     // gutter ("  mcp-logout <srv>") pushes the description column right
     // and the row stops lining up with its neighbours. Pinning min and
-    // max to the same value makes the gutter exact, so the description
-    // starts at the same column on every line — including the wrapped
-    // continuation lines, which is the whole point of doing this in a
-    // layout engine rather than with spaces.
+    // max to the same value makes the gutter exact, so descriptions —
+    // including wrapped continuation lines — all start at one column.
+    //
+    // A name that does not FIT the gutter is a different problem, and
+    // the clamp alone makes it worse: the name wraps inside its own
+    // column and the second line collides with the description. That is
+    // a content bug (shorten the name), but it should degrade into
+    // something readable rather than a scramble, so an overlong name
+    // gets its own line with the description indented underneath.
+    const int name_w = static_cast<int>(maya::unicode::str_width(name));
+    if (name_w >= gutter) {
+        auto indent = maya::hstack();
+        indent.width(maya::Dimension::fixed(gutter));
+        indent.min_width(maya::Dimension::fixed(gutter));
+        indent.max_width(maya::Dimension::fixed(gutter));
+        auto rest = maya::hstack();
+        rest.grow();
+        auto second = maya::hstack();
+        auto stack = maya::vstack();
+        return stack(text(std::move(name)),
+                     second(indent(text("")), rest(text(std::move(desc)))));
+    }
+
     auto left = maya::hstack();
     left.width(maya::Dimension::fixed(gutter));
     left.min_width(maya::Dimension::fixed(gutter));
@@ -580,14 +595,10 @@ maya::Element entry(std::string name, std::string desc, int gutter) {
     auto right = maya::hstack();
     right.grow();
     auto row = maya::hstack();
-    return row(left(text(std::move(name)) | kFlag),
-               right(text(std::move(desc)) | Dim));
+    return row(left(text(std::move(name))), right(text(std::move(desc))));
 }
 
-maya::Element heading(std::string s) {
-    return text(std::move(s)) | kHeading | Bold;
-}
-
+maya::Element heading(std::string s) { return text(std::move(s)); }
 maya::Element blank() { return text(""); }
 
 } // namespace help_ui
@@ -595,7 +606,7 @@ maya::Element blank() { return text(""); }
 void print_usage() {
     using namespace help_ui;
     constexpr int kCmdGutter  = 20;   // "  mcp-logout <srv>  "
-    constexpr int kOptGutter  = 22;   // "  -w, --workspace DIR "
+    constexpr int kOptGutter  = 23;   // "  -w, --workspace DIR " + a space
 
     auto doc = maya::vstack();
     doc.gap(0);
@@ -632,12 +643,12 @@ void print_usage() {
         entry("  hooks [list]", "Show configured lifecycle hooks + approval state", kCmdGutter),
         entry("  hooks approve", "Inspect + approve the active hooks file (hooks NEVER "
                                  "run unapproved; any change re-gates)", kCmdGutter),
-        entry("  plugin add|list|remove|approve",
-              "Manage plugins \u2014 a plugin IS an MCP server (any language, mcp.json "
-              "entry): `agentty plugin add today --python today.py`, `--uvx pkg`, "
-              "`--npx pkg`, `--http <url>`, or `-- cmd args`; add --project for the "
-              "repo config (approve it with `plugin approve <name> --project`). "
-              "Docs: /docs/plugins", kCmdGutter),
+        entry("  plugin <verb>",
+              "Manage plugins (add | list | remove | approve) \u2014 a plugin IS an MCP "
+              "server, any language, one mcp.json entry: `agentty plugin add today "
+              "--python today.py`, `--uvx pkg`, `--npx pkg`, `--http <url>`, or "
+              "`-- cmd args`; add --project for the repo config (approve it with "
+              "`plugin approve <name> --project`). Docs: /docs/plugins", kCmdGutter),
         entry("  rag-bench [dir]", "Benchmark search_docs retrieval on your own corpus "
                                    "(recall@k / MRR / nDCG per pipeline stage)", kCmdGutter),
         entry("  update", "Update agentty to the latest release "
@@ -696,14 +707,17 @@ void print_usage() {
         entry("  -h, --help", "Show this message.", kOptGutter),
         blank());
 
-    // Help goes to stderr (it always has — `agentty` with a bad flag
-    // should not pollute a pipeline's stdout), so TTY-test fd 2.
+    // ONE output path, plain, everywhere. The only thing that varies is
+    // the width we lay out for: a real terminal gets its own, anything
+    // else gets 80. Clamped to [60, 100] because neither extreme reads
+    // well — below 60 the description column is too narrow to be worth
+    // having, and beyond 100 the eye loses the line on the way back.
+    int w = 80;
     if (::isatty(fileno(stderr))) {
-        const int w = maya::detail::detect_terminal_width();
-        std::fputs(maya::render_to_string_ansi(body, w).c_str(), stderr);
-    } else {
-        std::fputs(maya::render_to_string(body, 80).c_str(), stderr);
+        const int tw = maya::detail::detect_terminal_width();
+        if (tw > 0) w = std::clamp(tw, 60, 100);
     }
+    std::fputs(maya::render_to_string(body, w).c_str(), stderr);
 }
 
 struct Args {
