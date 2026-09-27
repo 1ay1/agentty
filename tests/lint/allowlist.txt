@@ -31,7 +31,7 @@
 # it just filled.
 runtime/app/settings_cache.cpp: thread mutex thread_local
 io/blob_gc.cpp: thread mutex atomic detach
-util/modelsdev.cpp: thread mutex atomic detach
+util/modelsdev.cpp: thread mutex detach
 
 # ── HTTP: the turn's cancel token, and the transport ─────────────────────
 # A streaming turn is a Cmd::task holding an http::CancelToken, tripped from
@@ -41,37 +41,28 @@ util/modelsdev.cpp: thread mutex atomic detach
 # reasoning is written out on the Sendable opt-in in runtime/cmd.hpp.
 io/http.cpp: thread mutex atomic thread_local detach const_cast
 io/tls.cpp: mutex const_cast
-io/inflate.cpp: const_cast
 
 # ── Persistence and credentials ──────────────────────────────────────────
 # Not reducer code: these run on a worker a task already put them on, or on
 # CLI paths with no loop at all.
 io/persistence.cpp: mutex
-io/thread_log.cpp: mutex
 io/auth.cpp: mutex atomic const_cast
-io/accounts.cpp: mutex
-io/keystore.cpp: mutex const_cast
-io/cred_crypt.cpp: mutex const_cast
-io/clipboard.cpp: thread mutex atomic detach
-io/account_switch.cpp: mutex
-io/blob_store.cpp: mutex
-io/vault.cpp: mutex
+io/keystore.cpp: const_cast
+io/cred_crypt.cpp: const_cast
 airgap/airgap.cpp: const_cast
 
 # ── Tools ────────────────────────────────────────────────────────────────
 # A tool runs on a worker and may spawn a child process. progress.cpp's
 # thread_local is the sink the cmd runner captures — UI-thread only, and
 # documented there.
-tool/registry.cpp: mutex atomic thread_local
+tool/registry.cpp: mutex atomic
 tool/mcp_tools_backends.cpp: thread mutex atomic detach
-tool/mcp_tools_bridge.cpp: mutex atomic
-tool/plugin.cpp: thread mutex atomic
+tool/plugin.cpp: mutex atomic
 tool/skills.cpp: mutex atomic
-tool/skills_cli.cpp: mutex atomic
 tool/memory_store.cpp: mutex
-tool/hooks.cpp: mutex atomic
-tool/progress.cpp: mutex atomic thread_local
-tool/subagent.cpp: mutex atomic thread_local
+tool/hooks.cpp: mutex
+tool/progress.cpp: thread_local
+tool/subagent.cpp: mutex thread_local
 tool/commands.cpp: mutex
 # Unique temp names for atomic writes, and a parallel directory walk.
 tool/util/fs_helpers.cpp: mutex atomic
@@ -87,15 +78,11 @@ workspace/files.cpp: mutex atomic
 workspace/checkpoint.cpp: mutex
 
 # ── Providers: transports and their shared state ─────────────────────────
-provider/prompt.cpp: mutex atomic
-provider/selection.cpp: mutex atomic
-provider/credentials.cpp: mutex
-provider/auth_state.cpp: mutex atomic
-provider/external_acp_backend.cpp: thread mutex atomic
-provider/acp_provider_adapter.cpp: mutex atomic
+provider/prompt.cpp: mutex
+provider/selection.cpp: mutex
+provider/external_acp_backend.cpp: thread mutex
+provider/acp_provider_adapter.cpp: mutex
 provider/acp_agents.cpp: mutex
-provider/registry.cpp: mutex
-provider/dispatch.cpp: mutex
 provider/dialect.cpp: mutex
 provider/responses/codec.cpp: mutex
 provider/chatgpt/codex_oauth.cpp: mutex
@@ -106,8 +93,6 @@ provider/copilot/provider.cpp: mutex thread_local
 provider/kimi/kimi_oauth.cpp: mutex atomic
 provider/kimi/provider.cpp: mutex
 provider/openai/responses_site.cpp: thread_local
-provider/ollama/provider.cpp: mutex thread_local
-provider/openai/provider.cpp: mutex thread_local
 
 # ── MCP and RAG: their own servers and index workers ─────────────────────
 mcp/bridge.cpp: mutex atomic async
@@ -117,20 +102,14 @@ rag/adapter.cpp: thread mutex atomic
 
 # ── Process-wide plumbing ────────────────────────────────────────────────
 # The teardown registry IS what joins the workers above.
-util/teardown.cpp: mutex atomic
-util/logx.cpp: mutex atomic thread_local
-util/workspace_index.cpp: thread mutex atomic
-util/git.cpp: mutex
+util/teardown.cpp: mutex
+util/logx.cpp: mutex atomic
 
 # ── The runtime ──────────────────────────────────────────────────────────
 # deps.cpp holds the installed seam behind a mutex: it is written once at
 # startup and read from workers (auth_snapshot), which is the one thing a
 # plain global could get wrong.
 runtime/app/deps.cpp: mutex
-# cmd_factory mints the monotonic ids the stale-result guards compare
-# (tool exec_seq, login attempt ids). An atomic counter is the whole use.
-runtime/app/cmd_factory.cpp: atomic
-runtime/main.cpp: thread atomic
 
 # View-layer render caches. Every one is a bounded LRU on the UI thread,
 # documented at the definition; thread_local is how they say "one thread

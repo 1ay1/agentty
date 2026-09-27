@@ -483,3 +483,31 @@ if(EXISTS ${_BANLIST})
     set_tests_properties(concurrency_banlist_src concurrency_banlist_include
                          PROPERTIES LABELS "static")
 endif()
+
+# ── Allowlist rot ──────────────────────────────────────────────────────────
+# The banlist walks the files on disk and only ever LOOKS UP the allowlist, so
+# a grant whose justification is gone is silently ignored rather than reported.
+# That rots one way: the exemption outlives the code, and the next person to add
+# a std::mutex to that file inherits a pass nobody granted them. Measured when
+# this was added: 4 entries named files that no longer existed and 28 granted
+# primitives the file had stopped using -- including provider/ollama/provider.cpp,
+# renamed to transport.cpp long enough ago that the successor uses neither of
+# the two primitives its entry still allowed.
+#
+# Cost is a file read, no compile. Narrowing a grant is the cheap half of
+# keeping the banlist honest.
+set(_PRUNE ${CMAKE_SOURCE_DIR}/tests/lint/prune_allowlist.cmake)
+if(EXISTS ${_PRUNE})
+    add_test(NAME allowlist_tight_src
+             COMMAND ${CMAKE_COMMAND}
+                     -DROOT=${CMAKE_SOURCE_DIR}/src
+                     -DALLOW=${CMAKE_SOURCE_DIR}/tests/lint/allowlist.txt
+                     -P ${_PRUNE})
+    add_test(NAME allowlist_tight_include
+             COMMAND ${CMAKE_COMMAND}
+                     -DROOT=${CMAKE_SOURCE_DIR}/include
+                     -DALLOW=${CMAKE_SOURCE_DIR}/tests/lint/allow_include.txt
+                     -P ${_PRUNE})
+    set_tests_properties(allowlist_tight_src allowlist_tight_include
+                         PROPERTIES LABELS "static")
+endif()
