@@ -47,3 +47,8 @@ resume/
 
 __pycache__/
 docs/cpp-book/
+
+# ThreadLog writes a sibling `<name>.ofs` offset cache for any thread file it
+# opens, including the checked-in bench fixture. It is a regenerable cache, not
+# truth (see include/agentty/io/thread_log.hpp), so never commit it.
+tests/fixtures/*.ofs

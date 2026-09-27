@@ -50,5 +50,13 @@ int main(int argc, char** argv) {
         }
     }
     std::printf("resolved %d / %d\n", ok, total);
-    return 0;
+    if (total == 0) {
+        std::printf("corpus had no usable `<path>\\t<symbol>` lines\n");
+        return 1;
+    }
+    // Every line is a symbol KNOWN to be in that file, so a miss is a
+    // regression in `read symbol=`, not a property of the corpus. Fail loudly
+    // instead of printing MISS and exiting 0 — a probe that cannot fail is
+    // not a test.
+    return ok == total ? 0 : 1;
 }

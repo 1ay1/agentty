@@ -1,0 +1,9 @@
+src/runtime/panel/form.cpp	visible_options
+src/runtime/panel/form.cpp	paste_into
+src/runtime/panel/form.cpp	dropdown_commit
+src/tool/registry.cpp	wire_tools_snapshot
+src/tool/registry.cpp	reload_mcp_plugins
+src/tool/registry.cpp	unknown_tool_error
+src/io/thread_log.cpp	load_thread
+src/provider/dialect.cpp	dialect_for
+cmake/AgenttyTestRegistry.cmake	agentty_fold_test

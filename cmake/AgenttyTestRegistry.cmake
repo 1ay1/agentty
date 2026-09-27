@@ -204,7 +204,7 @@ define_property(DIRECTORY PROPERTY AGENTTY_FOLD_NAMES
     BRIEF_DOCS "folded standalone test names" FULL_DOCS "AgenttyTestRegistry")
 
 function(agentty_fold_test name)
-    cmake_parse_arguments(F "ARGS" "TIMEOUT;SKIP_CODE" "LABELS;UNIX_LIBS" ${ARGN})
+    cmake_parse_arguments(F "ARGS" "TIMEOUT;SKIP_CODE;FIXTURE" "LABELS;UNIX_LIBS" ${ARGN})
     set_property(DIRECTORY APPEND PROPERTY AGENTTY_FOLD_NAMES ${name})
     # Rename this TU's main() to <name>_main so the dispatcher can call it.
     set_source_files_properties(${CMAKE_SOURCE_DIR}/tests/${name}.cpp
@@ -216,8 +216,29 @@ function(agentty_fold_test name)
     if(NOT F_TIMEOUT)
         set(F_TIMEOUT 60)
     endif()
-    add_test(NAME ${name} COMMAND agentty_standalone_tests ${name})
+    # FIXTURE supplies the operand a bench needs, resolved against the source
+    # tree so the test does not depend on ctest's working directory.
+    if(F_FIXTURE)
+        add_test(NAME ${name}
+                 COMMAND agentty_standalone_tests ${name}
+                         ${CMAKE_SOURCE_DIR}/${F_FIXTURE})
+        # Run from the source root: a fixture may itself name repo-relative
+        # paths (symbol_read_corpus's TSV does), and ctest's default cwd is
+        # the build tree, where none of them resolve.
+        set_tests_properties(${name} PROPERTIES
+                             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    else()
+        add_test(NAME ${name} COMMAND agentty_standalone_tests ${name})
+    endif()
     set_tests_properties(${name} PROPERTIES TIMEOUT ${F_TIMEOUT})
+    if(F_ARGS AND NOT F_SKIP_CODE AND NOT F_FIXTURE)
+        # ARGS marks a test that takes OPTIONAL operands (a thread file, a
+        # corpus) and is run by hand with them. ctest runs it with none, where
+        # it prints its usage and exits 2. That is "nothing to do here", not a
+        # failure — without this the test is permanently red and everyone
+        # learns to ignore it. Give it a fixture instead when one exists.
+        set_tests_properties(${name} PROPERTIES SKIP_RETURN_CODE 2)
+    endif()
     if(F_SKIP_CODE)
         # A test may bail with this exit code when its environment can't
         # produce the geometry it needs (e.g. a PTY-driven repro whose
@@ -229,12 +250,19 @@ function(agentty_fold_test name)
         if("perf" IN_LIST F_LABELS)
             set_property(DIRECTORY APPEND PROPERTY AGENTTY_T_PERF ${name})
             # A wall-clock probe measured against a threshold cannot share a
-            # machine with another one. Run in parallel they steal each
-            # other's CPU and fail intermittently on a busy box -- which
-            # reads as a flaky test rather than the resource contention it
-            # is. RESOURCE_LOCK makes ctest serialise them against each
-            # other while everything else still runs -j12.
-            set_tests_properties(${name} PROPERTIES RESOURCE_LOCK wallclock)
+            # machine with anything. RESOURCE_LOCK only serialises the perf
+            # tests against EACH OTHER -- the other ~1100 tests still run
+            # alongside at -j12, which is what made md_cache_probe flaky: its
+            # quote_fence_300 shape sits at ~2.9x against a 3.0x growth
+            # threshold, so any stolen CPU or memory bandwidth tipped it over
+            # and it read as a broken cache rather than a busy box.
+            #
+            # RUN_SERIAL is the property that actually means "give this test
+            # the machine": ctest runs it with no other test in flight. Cost
+            # is small (the perf label is ~19s total) and it buys a probe
+            # whose failure means something.
+            set_tests_properties(${name} PROPERTIES RESOURCE_LOCK wallclock
+                                                    RUN_SERIAL TRUE)
         endif()
     endif()
 endfunction()

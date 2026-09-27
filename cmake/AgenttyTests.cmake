@@ -97,12 +97,23 @@ endforeach()
 # Each TU's main() is renamed to <name>_main via a per-source -Dmain=; the
 # dispatcher (tests/agentty_standalone_tests_main.cpp + .def) calls it.
 agentty_fold_test(long_session_bench       TIMEOUT 600 LABELS perf)
+# The thread benches take a thread file; symbol_read_corpus takes a TSV of
+# <path>\t<symbol> pairs. FIXTURE feeds each a small checked-in input so ctest
+# actually EXERCISES them instead of running them bare, watching them print
+# usage, and calling that a pass. Run by hand against a real thread
+# (~/.agentty/threads/<id>.jsonl) when you want numbers that reflect your own
+# history — the fixture is for catching breakage, not for benchmarking.
 agentty_fold_test(tool_latency_bench ARGS  TIMEOUT 600 LABELS perf)
-agentty_fold_test(turn_prep_bench ARGS     TIMEOUT 600 LABELS perf)
-agentty_fold_test(cache_churn_bench ARGS   TIMEOUT 600 LABELS perf)
-agentty_fold_test(save_bench ARGS          TIMEOUT 600 LABELS perf)
-agentty_fold_test(wire_encode_bench ARGS   TIMEOUT 600 LABELS perf)
-agentty_fold_test(symbol_read_corpus ARGS  TIMEOUT 600 LABELS perf)
+agentty_fold_test(turn_prep_bench          TIMEOUT 600 LABELS perf
+                  FIXTURE tests/fixtures/bench_thread.jsonl)
+agentty_fold_test(cache_churn_bench        TIMEOUT 600 LABELS perf
+                  FIXTURE tests/fixtures/bench_thread.jsonl)
+agentty_fold_test(save_bench               TIMEOUT 600 LABELS perf
+                  FIXTURE tests/fixtures/bench_thread.jsonl)
+agentty_fold_test(wire_encode_bench        TIMEOUT 600 LABELS perf
+                  FIXTURE tests/fixtures/bench_thread.jsonl)
+agentty_fold_test(symbol_read_corpus       TIMEOUT 600 LABELS perf
+                  FIXTURE tests/fixtures/symbol_read_corpus.tsv)
 agentty_fold_test(cross_process_lock_test  TIMEOUT 30)
 # Drives skills::catalog_block()/activation_payload() with a COLD all() cache
 # and its own HOME — in the shared binary another case has already warmed the
