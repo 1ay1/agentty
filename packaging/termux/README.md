@@ -15,10 +15,13 @@ clang + system OpenSSL / nghttp2.
 
 Two source-layout facts shape the recipe:
 
-- **Submodules.** agentty vendors `maya`, `acp-cpp`, and `mcp-cpp` as git
-  submodules. A GitHub source *tarball* (`archive/refs/tags/…`) contains none
-  of them, so the recipe uses `TERMUX_PKG_SRCURL=git+…` + `TERMUX_PKG_GIT_BRANCH`
-  and a `termux_step_post_get_source` hook that runs
+- **Submodules.** agentty vendors `maya`, `acp-cpp`, `mcp-cpp` and `rag-cpp` as
+  git submodules under `third_party/` (and `maya` carries `jaal` under its own
+  `third_party/`). All four are hard requirements — a missing checkout is a
+  configure `FATAL_ERROR`, not a silent degrade. A GitHub source *tarball*
+  (`archive/refs/tags/…`) contains none of them, so the recipe uses
+  `TERMUX_PKG_SRCURL=git+…` + `TERMUX_PKG_GIT_BRANCH` and a
+  `termux_step_post_get_source` hook that runs
   `git submodule update --init --recursive`.
 - **FetchContent.** The top-level CMake `FetchContent`s `nlohmann-json` and
   `simdjson` at configure time. That step needs network, which Termux allows
@@ -31,7 +34,7 @@ Two source-layout facts shape the recipe:
 
 | Flag | Why |
 |------|-----|
-| `-DAGENTTY_AUTO_PULL_MAYA=OFF` | The default runs `git reset --hard origin/master` on the maya submodule — a network op that must not happen in a package build. |
+| `-DAGENTTY_AUTO_PULL_SUBMODULES=OFF` | Already the default, passed explicitly so a future default flip can't put a network op (submodule fetch) inside a package build. |
 | `-DAGENTTY_STANDALONE=OFF`     | Produce a normal dynamically-linked Termux (PIE) binary that links Termux's shared OpenSSL/nghttp2 — the fully-static release layout doesn't apply here. |
 | `-DAGENTTY_BUILD_TESTS=OFF`    | Ship the binary only. |
 
@@ -68,7 +71,7 @@ pkg install git cmake ninja clang openssl libnghttp2 nlohmann-json simdjson
 git clone --recursive https://github.com/1ay1/agentty
 cd agentty
 cmake -B build -DCMAKE_BUILD_TYPE=Release \
-      -DAGENTTY_AUTO_PULL_MAYA=OFF \
+      -DAGENTTY_AUTO_PULL_SUBMODULES=OFF \
       -DAGENTTY_STANDALONE=OFF -DAGENTTY_BUILD_TESTS=OFF
 cmake --build build -j4
 install -Dm755 build/agentty "$PREFIX/bin/agentty"
