@@ -21,7 +21,7 @@ References:
 - Zed: `crates/agent_ui/src/agent_panel.rs`,
   `crates/agent_ui/src/thread_view.rs:6240-7550` (tool card render
   paths). The `ToolUseCard` struct is the per-tool render entry point.
-- maya: `maya/include/maya/widget/tool_call.hpp` (generic shell),
+- maya: `third_party/maya/include/maya/widget/tool_call.hpp` (generic shell),
   plus per-tool widgets `bash_tool.hpp`, `edit_tool.hpp`,
   `read_tool.hpp`, `write_tool.hpp`, `fetch_tool.hpp`,
   `agent_tool.hpp`. These already implement the shape — this doc tells
@@ -382,7 +382,7 @@ via `set_content(...)` — pass a pre-rendered Element. The body is a
 list of `<path>:<line>` followed by a 1-line preview (dim).
 
 When we add a typed `SearchTool` widget, extract this into
-`maya/include/maya/widget/search_tool.hpp` with:
+`third_party/maya/include/maya/widget/search_tool.hpp` with:
 ```cpp
 struct Match { std::string path; int line; std::string preview; };
 class SearchTool {

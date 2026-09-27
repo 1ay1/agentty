@@ -4,9 +4,9 @@ how agentty gets the model to use `read`, `grep`, `list_dir`, `glob` and the
 `git_*` tools instead of `cat`, `sed -n`, `grep -rn`, `ls` and `git log` in
 the shell. and why it does it with advice, not by rewriting shell calls.
 
-code: `mcp-cpp/src/tools/util/bash_validate.cpp` (`analyze_detour`,
-`bash_tool_suggestion`), `mcp-cpp/src/tools/util/shellx.cpp` (parser),
-`mcp-cpp/src/tools/shell.cpp` (where the tip is added),
+code: `third_party/mcp-cpp/src/tools/util/bash_validate.cpp` (`analyze_detour`,
+`bash_tool_suggestion`), `third_party/mcp-cpp/src/tools/util/shellx.cpp` (parser),
+`third_party/mcp-cpp/src/tools/shell.cpp` (where the tip is added),
 `src/provider/prompt.cpp` (the `<shell>` section),
 `src/runtime/app/cmd_factory.cpp` (the `shell=` log field).
 
@@ -179,7 +179,7 @@ codex parses commands only to label them. neither rewrites them.
   parse is the whole cost (~0.2us/byte, linear); our own analysis is under
   1% of it. commands over 16 KiB get no advice (the longest real tipped
   call was 7 KB), which caps the worst case.
-- tests: `mcp-cpp/tests/bash_validate_test.cpp` (writes in every shape,
+- tests: `third_party/mcp-cpp/tests/bash_validate_test.cpp` (writes in every shape,
   silent cases, exact params, git, chained steps, exclude),
   `search_tools_test.cpp` (grep limit, wide context, exclude),
   `tests/shell_detour_streak_test.cpp` (the drift reminder).

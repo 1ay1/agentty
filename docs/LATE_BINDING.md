@@ -130,7 +130,7 @@ applied there.
 So the answer was never a fourth mechanism. It was: **make the existing
 discipline unavoidable.**
 
-`maya/style/binding.hpp` does that. A `LitColor` reaching storage that
+`third_party/maya/include/maya/style/binding.hpp` does that. A `LitColor` reaching storage that
 outlives a frame is now a compile error:
 
 ```

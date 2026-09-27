@@ -55,7 +55,7 @@ if you have.
 ## Conventions used in these docs
 
 - **`zed/path/to/file.rs:N`** — refers to `/Users/ayush/projects/zed/crates/...`
-- **`maya/include/maya/foo.hpp:N`** — refers to `maya/include/maya/...`
+- **`third_party/maya/include/maya/foo.hpp:N`** — refers to `third_party/maya/include/maya/...`
 - **`src/main.cpp:N`** — refers to agentty's source
 - **TUI constraints** — terminals are monospaced, integer-cell, no
   sub-pixel rendering, no true hover (focus instead). When a Zed pattern

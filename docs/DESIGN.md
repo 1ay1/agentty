@@ -96,7 +96,7 @@ permission` (one permission decider), `update` (one reducer with one
 include/agentty/domain/      ← pure value types only. No I/O. No UI. No threads.
 include/agentty/{io,provider,tool}/ ← satisfies a concept; injected via deps.
 src/runtime/              ← Elm loop. update is pure. Cmd carries the IO.
-maya/                     ← presentation. Consumes a Model, emits Msg.
+third_party/maya/         ← presentation. Consumes a Model, emits Msg.
 ```
 
 A function in `domain/` that opens a file is a violation. A reducer that

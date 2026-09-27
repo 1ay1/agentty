@@ -16,8 +16,8 @@
 //   asserts the append-only-prefix property. It builds with ONE g++ line
 //   (no CMake, no maya test target) and runs in well under a second:
 //
-//     g++ -std=c++23 -I maya/include tests/scrollback_prefix_harness.cpp
-//         build/maya/libmaya.a -o /tmp/sbh && /tmp/sbh
+//     g++ -std=c++23 -I third_party/maya/include tests/scrollback_prefix_harness.cpp
+//         build/third_party/maya/libmaya.a -o /tmp/sbh && /tmp/sbh
 //
 //   (Any libmaya.a / object set providing InlineFrameState + Canvas +
 //   Writer works; the harness only touches those three public headers.)

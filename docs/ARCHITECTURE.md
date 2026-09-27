@@ -440,11 +440,13 @@ input, or timer tick. Two host-side optimizations keep it cheap under load:
   library with its C and C++ allocation overrides enabled.
   `release_to_kernel()` calls `mi_collect(true)` at coarse memory-release
   boundaries.
-- **Gotcha:** `AGENTTY_AUTO_PULL_MAYA=ON` is the default and runs
-  `git reset --hard origin/master` on the `maya/` submodule during build. Its
-  only guard checks for *uncommitted* changes, so committed local maya work
-  still gets wiped. Build with `-DAGENTTY_AUTO_PULL_MAYA=OFF` when iterating on
-  maya.
+- **Submodules don't move on their own.** Auto-pull is OFF by default
+  (`AGENTTY_AUTO_PULL_SUBMODULES`), because fetching during a normal build
+  perturbs header mtimes and needlessly rebuilds the ~64 TUs that include
+  them. Sync on demand with `cmake --build build --target submodules_sync`
+  (or `./resync.sh`). The pull refuses to touch a submodule that has unstaged
+  changes, staged-uncommitted work, or local commits not on origin, and uses
+  `merge --ff-only`, so it never discards local work.
 
 ---
 

@@ -882,7 +882,7 @@ Cmd meta_update(Model& m, msg::MetaMsg mm) {
             // repainted by an inline-mode application without also
             // overwriting any non-agentty content above the frame.
             // The hard contract lives at
-            // maya/src/render/serialize.cpp’s case-(B) emit — see
+            // third_party/maya/src/render/serialize.cpp’s case-(B) emit — see
             // the SCOPE CONTRACT comment there for the full rationale.
             //
             // If the user's scrollback is mangled (a stray subprocess

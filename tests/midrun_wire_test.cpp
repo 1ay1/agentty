@@ -205,9 +205,9 @@ TEST_CASE("growing live run no committed rewrite") {
     // Seed the first frame fresh, then carry Synced state across appends.
     std::optional<InlineFrame<Synced>> synced;
     const char* files[] = {
-        "maya/src/render/serialize.cpp", "maya/src/render/renderer.cpp",
-        "maya/include/maya/app/app.hpp", "src/runtime/app/update/frozen.cpp",
-        "src/runtime/app/update/stream.cpp", "maya/examples/agent_session.cpp",
+        "third_party/maya/src/render/serialize.cpp", "third_party/maya/src/render/renderer.cpp",
+        "third_party/maya/include/maya/app/app.hpp", "src/runtime/app/update/frozen.cpp",
+        "src/runtime/app/update/stream.cpp", "third_party/maya/examples/agent_session.cpp",
     };
     constexpr int kCards = 6;
     bool ok_all = true;
@@ -331,7 +331,7 @@ static ToolUse settled_grep(const std::string& tag, const std::string& path,
 TEST_CASE("grep read highlight no stale blit") {
     constexpr int kWidth = 100;
     constexpr int kTermH = 30;
-    const std::string path = "maya/src/render/serialize.cpp";
+    const std::string path = "third_party/maya/src/render/serialize.cpp";
 
     Model m;
     m.d.current.id = agentty::ThreadId{"wirehl"};

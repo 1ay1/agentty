@@ -122,7 +122,7 @@ becomes structurally impossible.
 
 ## 4. Each repo runs only its own tests
 
-- **agentty**: drop the 6 `maya/tests/*.cpp` targets (`reveal_pacing_test`,
+- **agentty**: drop the 6 `third_party/maya/tests/*.cpp` targets (`reveal_pacing_test`,
   `reveal_resume_test`, `stream_async_freeze_test`, `stream_md_lag_test`,
   `reveal_smoothness_probe`, `reveal_lag_probe`). maya's own CI already gates
   them (they're in `MAYA_TEST_SOURCES`). Verified: zero coverage lost.

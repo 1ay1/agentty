@@ -146,7 +146,7 @@ elseif(AGENTTY_IPO_OK AND (CMAKE_BUILD_TYPE STREQUAL "Release"
                      OR CMAKE_BUILD_TYPE STREQUAL "MinSizeRel"))
     set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
 else()
-    # Set a DEFINED false value, not just "leave it unset". maya/CMakeLists.txt
+    # Set a DEFINED false value, not just "leave it unset". third_party/maya/CMakeLists.txt
     # has its own `if(NOT DEFINED CMAKE_INTERPROCEDURAL_OPTIMIZATION) set(...
     # ON)` fallback (so a bare `add_subdirectory(maya)` from an external
     # project still gets LTO) — if we only skip the TRUE branch above without

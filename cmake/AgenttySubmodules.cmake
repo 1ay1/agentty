@@ -13,11 +13,12 @@
 set(AGENTTY_THIRD_PARTY_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party")
 
 # ── Submodule auto-pull ────────────────────────────────────────────────────
-# When AGENTTY_AUTO_PULL_SUBMODULES is ON (default), every in-tree submodule
-# is synced to the tip of its tracking branch on each build before its library
-# target compiles. SAFE: the pull is skipped for any submodule that has
-# uncommitted changes, so local edits are never clobbered. Skipped entirely
-# if the parent isn't a git checkout (release tarballs / FetchContent paths).
+# When AGENTTY_AUTO_PULL_SUBMODULES is ON, every in-tree submodule is synced
+# to the tip of its tracking branch on each build before its library target
+# compiles. It is OFF by default — a normal build must never fetch or reset a
+# submodule. SAFE regardless: the pull is skipped for any submodule carrying
+# local work, so edits are never clobbered. Skipped entirely if the parent
+# isn't a git checkout (release tarballs / FetchContent paths).
 #
 # Call AFTER add_subdirectory(<sub>) so the library target exists to depend on.
 #   agentty_pull_submodule_latest(<dir> <branch> <library-target>)
@@ -381,7 +382,7 @@ if(EXISTS "${AGENTTY_THIRD_PARTY_DIR}/rag-cpp/CMakeLists.txt")
     #     clang into the build via a try_compile probe. That probe inherits our
     #     CMAKE_EXE_LINKER_FLAGS (the GCC-static release passes -static-libgcc /
     #     -static-libstdc++), and Apple clang rejects -static-libgcc — so the
-    #     whole macOS standalone configure died at rag-cpp/CMakeLists.txt.
+    #     whole macOS standalone configure died at third_party/rag-cpp/CMakeLists.txt.
     #   * OPENCL auto-detects any system libOpenCL and would silently add a
     #     dynamic dependency to a binary that's meant to be standalone.
     set(RAGCPP_WITH_METAL     OFF CACHE BOOL "" FORCE)

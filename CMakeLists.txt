@@ -261,7 +261,7 @@ function(agentty_objlib name)
     # OPTION and refuses to cache the TU. Measured: 100% uncacheable calls with
     # scanning on, so `ccache` was installed and doing nothing.
     #
-    # maya already does this for the same reason (see maya/CMakeLists.txt,
+    # maya already does this for the same reason (see third_party/maya/CMakeLists.txt,
     # which also hit a scan-vs-archive ordering bug). Turning it off here makes
     # the object libraries cacheable and is otherwise a no-op.
     set_target_properties(${name} PROPERTIES CXX_SCAN_FOR_MODULES OFF)

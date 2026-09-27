@@ -38,7 +38,7 @@ The runtime should never see them.
 
 agentty is already an ACP **agent**: `agentty acp` (`src/acp/server.cpp`)
 maps agentty's engine onto the ACP `session/update` stream for Zed. That
-stream — `acp::SessionUpdate` in `acp-cpp/include/acp/updates.hpp` — is a
+stream — `acp::SessionUpdate` in `third_party/acp-cpp/include/acp/updates.hpp` — is a
 complete, normalized description of a streaming agent turn:
 
 ```

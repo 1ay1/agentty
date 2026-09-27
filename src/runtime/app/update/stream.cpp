@@ -1823,7 +1823,7 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
             // any prev_cells/wire desync left by streaming. That
             // desync's only real source was the shrink path's
             // \r\n\x1b[2K loop scrolling at viewport bottom, which is
-            // now a single \x1b[J in maya/src/render/serialize.cpp;
+            // now a single \x1b[J in third_party/maya/src/render/serialize.cpp;
             // prev_cells stays in sync with the wire on its own.
             //
             // Re-arming case (B) on every first keypress was actively

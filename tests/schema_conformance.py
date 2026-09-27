@@ -488,9 +488,9 @@ def main():
 
     bad = []
     if a.mcp and Path(a.mcp).exists():
-        bad += check("mcp", a.mcp, cpp_sources("mcp-cpp/include"))
+        bad += check("mcp", a.mcp, cpp_sources("third_party/mcp-cpp/include"))
     if a.acp and Path(a.acp).exists():
-        bad += check("acp", a.acp, cpp_sources("acp-cpp/include"))
+        bad += check("acp", a.acp, cpp_sources("third_party/acp-cpp/include"))
 
     print()
     if bad:

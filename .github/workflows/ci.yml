@@ -293,7 +293,7 @@ jobs:
         # Same compiler as the ASan tree above. Without this the step falls
         # back to the runner's DEFAULT gcc (13), which does not implement
         # deducing `this` (P0847) — so maya's type-state Terminal fails to
-        # parse and the whole lane dies at maya/src/app/app.cpp with
+        # parse and the whole lane dies at third_party/maya/src/app/app.cpp with
         # "expected identifier before 'this'". The ASan configure has always
         # set this; the TSan one was missed, so the lane only ever built
         # when the runner image happened to default to a new enough gcc.

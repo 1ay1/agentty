@@ -9,7 +9,7 @@
 // corporate machines) or who already has an internal embeddings gateway.
 //
 // This header makes the backend a VALUE. rag-cpp already registers every
-// factory we need (see rag-cpp/src/plugin/builtins.cpp); agentty's job is only
+// factory we need (see third_party/rag-cpp/src/plugin/builtins.cpp); agentty's job is only
 // to name one and hand over its keys. So this file is deliberately thin:
 //
 //   * `Backend`  — the closed set of backends agentty exposes.

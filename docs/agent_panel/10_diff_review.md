@@ -17,8 +17,8 @@ References:
   view) and `crates/edit_prediction/...` for the per-hunk accept
   logic.
 - maya: `maya::widget::InlineDiff`
-  (`maya/include/maya/widget/inline_diff.hpp`) and
-  `maya::widget::DiffView` (`maya/include/maya/widget/diff_view.hpp`).
+  (`third_party/maya/include/maya/widget/inline_diff.hpp`) and
+  `maya::widget::DiffView` (`third_party/maya/include/maya/widget/diff_view.hpp`).
   Plus `maya::widget::FileChanges` for the file-list summary.
 
 ## 1. When does the diff review surface open?
@@ -140,7 +140,7 @@ governs the right pane.
 
 Use `maya::widget::FileChanges` if it provides this — otherwise
 hand-roll with `dsl::v(...)` over the file list. The widget exists
-(`maya/include/maya/widget/file_changes.hpp`) but check its API
+(`third_party/maya/include/maya/widget/file_changes.hpp`) but check its API
 matches what we need.
 
 ### File status icons

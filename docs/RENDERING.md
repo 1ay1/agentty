@@ -168,7 +168,7 @@ maya::AppLayout                               top-level chat-app frame
                                              opaque background to mask the base
 ```
 
-Every name above is a real widget at `maya/include/maya/widget/<name>.hpp`.
+Every name above is a real widget at `third_party/maya/include/maya/widget/<name>.hpp`.
 
 ---
 
@@ -633,7 +633,7 @@ participates only at the entry: building the top-level Config tree.
 ### maya widgets — flat directory, hierarchy in headers
 
 ```
-maya/include/maya/widget/
+third_party/maya/include/maya/widget/
 ├── app_layout.hpp                top-level frame: Thread + ChangesStrip + Composer + StatusBar + Overlay
 ├── thread.hpp                    welcome | conversation branch
 ├── conversation.hpp              list of typed Turn::Configs + optional in-flight

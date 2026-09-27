@@ -25,7 +25,7 @@ discarded, not banked. That violated two assumptions:
 
 ## What the reference does instead
 
-`maya/examples/agent_session.cpp` builds the composer + status bar
+`third_party/maya/examples/agent_session.cpp` builds the composer + status bar
 as the tail of a normal `vstack`, no anchor pipe. It exhibits zero
 ghosting because the standard per-row diff already handles the
 streaming case correctly when `prev_cells` is in sync — the bytes
@@ -41,16 +41,16 @@ needs DECSTBM.
 
 ## Files left clean by the revert
 
-- `maya/include/maya/element/box.hpp` — `anchor_bottom` field gone.
-- `maya/include/maya/dsl.hpp` — `| anchor_bottom()` pipe gone.
-- `maya/include/maya/render/canvas.hpp` + `src/render/canvas.cpp` —
+- `third_party/maya/include/maya/element/box.hpp` — `anchor_bottom` field gone.
+- `third_party/maya/include/maya/dsl.hpp` — `| anchor_bottom()` pipe gone.
+- `third_party/maya/include/maya/render/canvas.hpp` + `src/render/canvas.cpp` —
   `anchor_top_y_` field + resets gone.
-- `maya/include/maya/render/serialize.hpp` — `anchor_rows_` /
+- `third_party/maya/include/maya/render/serialize.hpp` — `anchor_rows_` /
   `anchor_term_h_` state fields gone.
-- `maya/src/render/serialize.cpp` — DECSTBM decision, tear-down,
+- `third_party/maya/src/render/serialize.cpp` — DECSTBM decision, tear-down,
   activate hook, anchored-steady diff branch all gone. Back to
   legacy emit on every frame.
-- `maya/include/maya/widget/app_layout.hpp` — composer group no
+- `third_party/maya/include/maya/widget/app_layout.hpp` — composer group no
   longer wrapped.
 
 ## What stays from the session

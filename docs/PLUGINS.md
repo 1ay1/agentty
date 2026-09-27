@@ -302,7 +302,7 @@ docstring + type hints, `register_tool` lambda = the decorated function,
 integration, different language — which is the whole point. (You can
 sanity-check any stdio server by piping `initialize` / `tools/list`
 JSON-RPC lines into it by hand; it's just newline-delimited JSON. See
-`mcp-cpp/examples/server_example.cpp` for the full-featured reference —
+`third_party/mcp-cpp/examples/server_example.cpp` for the full-featured reference —
 resources, prompts, structured output.)
 
 ## A real one: the Git Time-Machine (Python example)

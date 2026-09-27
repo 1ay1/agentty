@@ -1,7 +1,7 @@
 // external_acp_backend_test — the ExternalAcpBackend core, driven against an
 // in-memory FAKE ACP agent.
 //
-// Harness (mirrors acp-cpp/tests/loopback.cpp): a fake agent (acp::Client
+// Harness (mirrors third_party/acp-cpp/tests/loopback.cpp): a fake agent (acp::Client
 // Connection) is wired to an acp::AgentConnection through a pair of mailbox
 // queues + pump threads. ExternalAcpBackend takes that AgentConnection and its
 // handlers, so we drive prompt() end to end WITHOUT any subprocess or sandbox.

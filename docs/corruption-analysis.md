@@ -25,7 +25,7 @@ mode.
 ## Architecture recap (one-screen mental model)
 
 - **Inline render path**: `maya::compose_inline_frame`
-  (`maya/src/render/serialize.cpp`) does a per-row, per-cell-span diff
+  (`third_party/maya/src/render/serialize.cpp`) does a per-row, per-cell-span diff
   against `InlineFrameState::prev_cells` and emits cursor moves + the
   changed cells. Three first-frame sub-cases distinguished by
   `(prev_width, prev_rows)`:
@@ -46,7 +46,7 @@ mode.
   `maybe_virtualize` (`src/runtime/app/update/submit.cpp:84-103`)
   advances `m.ui.thread_view_start` and emits
   `Cmd::commit_scrollback_overflow()`. That Cmd routes through
-  `Runtime::commit_inline_overflow` (`maya/include/maya/app/app.hpp:390-399`)
+  `Runtime::commit_inline_overflow` (`third_party/maya/include/maya/app/app.hpp:390-399`)
   which calls `state.commit(state.scrollback_marker(prev_rows - term_h))`
   — strictly `max(0, prev_rows - term_h)` rows, a tight lower bound
   on what's already off-screen.
@@ -60,7 +60,7 @@ mode.
   `clamp(size/8, 32, 256)` bytes per Tick (~30 Hz) in
   `meta.cpp:181-198`. The drained `streaming_text` is what the view
   feeds to `StreamingMarkdown::set_content` every frame.
-- **Cmd ordering**: `execute_cmd` (`maya/include/maya/app/app.hpp:752+`)
+- **Cmd ordering**: `execute_cmd` (`third_party/maya/include/maya/app/app.hpp:752+`)
   runs *synchronously* on the UI thread immediately after the
   reducer. `render(view(model))` happens later in the same loop tick
   (line 1247). Batched Cmds execute left-to-right.
@@ -149,8 +149,8 @@ scrollback↔viewport seam mismatch.
 
 - `src/runtime/app/update/stream.cpp` (StreamError arm, ~line 749 onwards)
 - `src/runtime/view/thread/turn/turn.cpp:44-83` (`cached_markdown_for`)
-- `maya/src/widget/markdown.cpp:4785-4815` (`StreamingMarkdown::set_content`)
-- `maya/src/widget/markdown.cpp:4840-4870` (`StreamingMarkdown::clear`)
+- `third_party/maya/src/widget/markdown.cpp:4785-4815` (`StreamingMarkdown::set_content`)
+- `third_party/maya/src/widget/markdown.cpp:4840-4870` (`StreamingMarkdown::clear`)
 
 **The hot path**
 
@@ -330,8 +330,8 @@ turn baseline in the model.
 
 - `src/runtime/app/cmd_factory.cpp:295-313` (post-tool sub-turn launch)
 - `src/runtime/view/thread/turn/turn.cpp:44-83` (`cached_markdown_for` + `finish()`)
-- `maya/src/render/serialize.cpp:17-52` (`commit_prefix`)
-- `maya/include/maya/app/app.hpp:390-399` (`commit_inline_overflow`)
+- `third_party/maya/src/render/serialize.cpp:17-52` (`commit_prefix`)
+- `third_party/maya/include/maya/app/app.hpp:390-399` (`commit_inline_overflow`)
 
 After a tool result returns and a new sub-turn begins:
 
@@ -483,7 +483,7 @@ terminal mid-frame.
 
 **Files**
 
-- `maya/src/app/app.cpp:245-249`
+- `third_party/maya/src/app/app.cpp:245-249`
 
 ```cpp
 const int w = is_inline()
@@ -544,7 +544,7 @@ Fix is three-pronged:
 
 **Files**
 
-- `maya/src/widget/markdown/streaming.cpp` — `set_content_async`,
+- `third_party/maya/src/widget/markdown/streaming.cpp` — `set_content_async`,
   `finish`, `maybe_apply_async_`.
 
 **Reachability in agentty's host flow.** The async path is only

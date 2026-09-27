@@ -106,14 +106,14 @@ still backstops panels whose handlers mishandle Esc — see
 ## The widget — one Panel, items, kinds
 
 maya has exactly **one** overlay widget: `maya::Panel`
-(`maya/include/maya/widget/panel.hpp`, umbrella). It replaced Picker and
+(`third_party/maya/include/maya/widget/panel.hpp`, umbrella). It replaced Picker and
 Form, which were two implementations of the same box; every fix to one had
 to be repeated in the other, and the ones that weren't became bugs.
 
 The family is modular, one file per concern:
 
 ```
-maya/include/maya/widget/panel/
+third_party/maya/include/maya/widget/panel/
 ├── item.hpp      the ONE Item (badge · leading · highlight · trailing ·
 │                 help-under-focused-row · error · locked · origin)
 ├── item/         ★ one widget per kind: value struct + renderer, side by side
@@ -400,7 +400,7 @@ list is reviewed prose, flagged as such at the definition.
 | `tests/palette_nav_test.cpp` | header-aware cursor motion |
 | `tests/panel_sections_render_test.cpp` | section headers in the model panel |
 | `tests/smart_slot_panel_stack_test.cpp` | the fused-picker hand-off round-trip |
-| `maya/tests/test_widgets.cpp` | Panel rendering + scroll behaviour |
+| `third_party/maya/tests/test_widgets.cpp` | Panel rendering + scroll behaviour |
 
 History: the merge and renames landed as maya `315e4f2` (item-kind widgets),
 `03ef3a0` (Row→Item), `6d9cdb6` (Header as kind); agentty `caada52d`

@@ -169,7 +169,7 @@ tint.
 ## 6. Phase 5 — Tool cards (one tool kind at a time)
 
 **Goal**: Replace the current ad-hoc tool rendering with the typed
-widgets from `maya/include/maya/widget/*_tool.hpp`.
+widgets from `third_party/maya/include/maya/widget/*_tool.hpp`.
 
 This is the biggest phase. Subdivide by tool kind. Suggested order:
 
@@ -446,7 +446,7 @@ When new features arrive:
 
 - Adding a new tool kind:
   1. Update `tool_kind_from_name()` in `07_tool_cards § 7`
-  2. Add a typed widget in `maya/include/maya/widget/<kind>_tool.hpp`
+  2. Add a typed widget in `third_party/maya/include/maya/widget/<kind>_tool.hpp`
   3. Add `render_<kind>_tool` in agentty
   4. Update permission gating-key in `09_permissions § 3`
   5. Add icon to `05_design_tokens § 4`

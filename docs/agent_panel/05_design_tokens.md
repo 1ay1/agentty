@@ -84,7 +84,7 @@ above plus their `bright_*` variants are what agentty uses.
 | Edit applied | `Round` | `Color::green()` | success outline |
 
 These match what's hard-coded in the maya widgets after the cleanup —
-`maya/include/maya/widget/tool_call.hpp`, `bash_tool.hpp`,
+`third_party/maya/include/maya/widget/tool_call.hpp`, `bash_tool.hpp`,
 `edit_tool.hpp`, etc.
 
 ## 4. Diff colors (named-ANSI version)

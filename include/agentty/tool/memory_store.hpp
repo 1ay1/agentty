@@ -151,7 +151,7 @@ struct AppendOptions {
     bool no_dedup = false;
 };
 
-// MIRROR of mcp::tools::MemoryAppendResult (mcp-cpp/include/mcp/tools/host.hpp):
+// MIRROR of mcp::tools::MemoryAppendResult (third_party/mcp-cpp/include/mcp/tools/host.hpp):
 // the two carry identical fields and are bridged field-by-field in
 // AgenttyMemoryStore::append (src/tool/mcp_tools_backends.cpp), which holds a
 // static_assert that trips if their sizes drift. Every field needs an in-class
