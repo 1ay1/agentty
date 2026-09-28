@@ -498,7 +498,7 @@ jobs:
           CC: gcc-16
           CXX: g++-16
         run: |
-          cmake -S mcp-cpp -B fuzzbuild -G Ninja \
+          cmake -S third_party/mcp-cpp -B fuzzbuild -G Ninja \
             -DCMAKE_BUILD_TYPE=Debug \
             -DMCP_BUILD_FUZZERS=ON \
             -DMCP_BUILD_TESTS=OFF \
