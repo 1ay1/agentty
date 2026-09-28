@@ -522,7 +522,7 @@ Cmd tool_update(Model& m, msg::ToolMsg tm) {
             });
             if (!flipped) return Cmd::none();
             auto cmd = cmd::kick_pending_tools(m);
-            return std::move(cmd);
+            return cmd;
         },
 
         // ── Tool execution result ───────────────────────────────────────
@@ -602,11 +602,11 @@ Cmd tool_update(Model& m, msg::ToolMsg tm) {
             // kick and finds this tool already terminal.
             if (m.s.is_streaming()) {
                 if (host_cmd.is_none()) return Cmd::none();
-                return std::move(host_cmd);
+                return host_cmd;
             }
             auto kick = cmd::kick_pending_tools(m);
             if (host_cmd.is_none())
-                return std::move(kick);
+                return kick;
             return Cmd::batch(
                 std::move(kick), std::move(host_cmd));
         },
@@ -638,7 +638,7 @@ Cmd tool_update(Model& m, msg::ToolMsg tm) {
             mark_tool_rejected(m, id, "User rejected this tool call.");
             m.d.pending_permission.reset();
             auto cmd = cmd::kick_pending_tools(m);
-            return std::move(cmd);
+            return cmd;
         },
         [&](PermissionApproveAlways) -> Cmd {
             if (!m.d.pending_permission) return Cmd::none();

@@ -557,7 +557,7 @@ Cmd submit_message(Model& m) {
     auto cmd = parts.size() == 1
         ? std::move(parts.front())
         : Cmd::batch(std::move(parts));
-    return std::move(cmd);
+    return cmd;
 }
 
 std::string active_provider_id() {

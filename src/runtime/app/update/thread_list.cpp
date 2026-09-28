@@ -125,7 +125,7 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
                     break;
                 }
             m.ui.panel.descend(pn::ThreadList{{at}});
-            return std::move(cmd);
+            return cmd;
         },
         [&](CloseThreadList) -> Cmd {
             ascend(m);   // Esc: back to whatever opened this, or close
@@ -224,7 +224,7 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
                 cmd = cmd::load_thread_async(meta.id);
             }
             m.ui.panel.close<pn::ThreadList>();
-            return std::move(cmd);
+            return cmd;
         },
         [&](ThreadListDelete) -> Cmd {
             // `d` / `D` in the thread picker — two-press delete with
@@ -298,7 +298,7 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
             if (m.s.active()) {
                 auto cmd = set_status_toast(m,
                     "wait for the reply to finish before switching threads");
-                return std::move(cmd);
+                return cmd;
             }
             if (m.s.thread_loading) return Cmd::none();
             const int sz = static_cast<int>(m.d.threads.size());
@@ -328,7 +328,7 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
             } else {
                 if (sz == 1) {
                     auto toast = set_status_toast(m, "only one thread");
-                    return std::move(toast);
+                    return toast;
                 }
                 target = ((cur + e.delta) % sz + sz) % sz;
             }

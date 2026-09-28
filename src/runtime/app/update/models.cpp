@@ -900,7 +900,7 @@ Cmd models_update(Model& m, msg::ModelsMsg pm) {
                     auto toast = set_status_toast(m,
                         "reasoning effort is model-managed here "
                         "(\xe2\x86\x90/\xe2\x86\x92 to set the tier)");
-                    return std::move(toast);
+                    return toast;
                 }
             }
             const int cur = reasoning_override_for(id);   // -1 auto, 0 off, 1 on
@@ -1067,7 +1067,7 @@ Cmd models_update(Model& m, msg::ModelsMsg pm) {
             if (!e.error.empty()) {
                 auto toast = set_status_toast(m, std::move(e.error),
                                               std::chrono::seconds{6});
-                return std::move(toast);
+                return toast;
             }
             if (e.models.empty()) return Cmd::none();
             auto& settings = m.d.persisted;
@@ -1251,7 +1251,7 @@ Cmd models_update(Model& m, msg::ModelsMsg pm) {
                 rebuild_fused_rows(m);
                 clamp_cursor(m);
                 auto toast = set_status_toast(m, "scope: all providers");
-                return std::move(toast);
+                return toast;
             }
             const int n = static_cast<int>(m.d.fused_rows.size());
             if (c->index < 0 || c->index >= n) return Cmd::none();
@@ -1270,7 +1270,7 @@ Cmd models_update(Model& m, msg::ModelsMsg pm) {
             clamp_cursor(m);
             auto toast = set_status_toast(
                 m, "scope: " + label + " only (^/ to clear)");
-            return std::move(toast);
+            return toast;
         },
     }, pm);
 }

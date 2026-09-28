@@ -195,7 +195,7 @@ Cmd meta_update(Model& m, msg::MetaMsg mm) {
                      + " \xc2\xb7 " + gist
                      + (had_grants ? " \xc2\xb7 always-allow grants reset" : ""),
                 std::chrono::seconds{4});
-            return std::move(toast);
+            return toast;
         },
         [&](RestoreCheckpoint& e) -> Cmd {
             // Rewind = destructive double restore: worktree files AND the
@@ -234,7 +234,7 @@ Cmd meta_update(Model& m, msg::MetaMsg mm) {
                     out.send(Msg{std::move(done)});
                 },
                 e.id);
-            return std::move(cmd);
+            return cmd;
         },
         [&](CheckpointRestored& e) -> Cmd {
             m.s.thread_loading = false;
@@ -815,7 +815,7 @@ Cmd meta_update(Model& m, msg::MetaMsg mm) {
                         [](jaal::Sink<Msg> out, std::stop_token) {
                             out.send(Msg{CompactContext{}});
                         });
-                    return std::move(compact_cmd);
+                    return compact_cmd;
                 }
             }
             return Cmd::none();
@@ -1001,7 +1001,7 @@ Cmd meta_update(Model& m, msg::MetaMsg mm) {
                 m, "update failed: " + e.detail +
                    " — try `agentty update` from a shell",
                 std::chrono::seconds{8});
-            return std::move(toast);
+            return toast;
         },
 
         [&](GitSignalsRefreshed) -> Cmd {

@@ -221,10 +221,10 @@ extern "C" void agentty_release_crash_handler(int sig) {
     }
     in_handler = 1;
 
-    static const char hdr[] = "\n=== agentty crash ===\n";
 #if defined(_WIN32)
     (void)agentty::logx::dump_flight_recorder(2);
 #else
+    static const char hdr[] = "\n=== agentty crash ===\n";
     (void)!write(2, hdr, sizeof(hdr) - 1);
     (void)agentty::logx::dump_flight_recorder(2);
 #endif

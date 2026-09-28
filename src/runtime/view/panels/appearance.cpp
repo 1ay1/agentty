@@ -25,7 +25,7 @@ namespace {
 // The browser, floating. Narrow on purpose (kPanelNarrow): every column it
 // does not take is a column of real UI left visible in the scheme you are
 // looking at.
-[[nodiscard]] Element theme_browser(const Model& m, const pn::Appearance& o) {
+[[nodiscard]] Element theme_browser(const pn::Appearance& o) {
     const auto& pick = o.pane.picker.picker;
 
     Panel::Config cfg;
@@ -116,7 +116,7 @@ namespace {
 Element appearance_panel(const Model& m) {
     auto* o = m.ui.panel.get<pn::Appearance>();
     if (!o) return nothing();
-    if (o->pane.picking) return theme_browser(m, *o);
+    if (o->pane.picking) return theme_browser(*o);
     return maya::Panel{form_config(o->pane.form, info,
                                    &m.ui.appearance_scroll,
                                    panel_viewport_h(),

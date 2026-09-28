@@ -232,7 +232,7 @@ Cmd host_probed(Model& m, HostProbed r) {
             auto toast = set_status_toast(
                 m, r.spec + " needs an API key \xe2\x80\x94 paste it below",
                 std::chrono::seconds{6});
-            return std::move(toast);
+            return toast;
         }
         login::CustomHostInput ch;
         ch.host_input = std::move(r.spec);
@@ -241,7 +241,7 @@ Cmd host_probed(Model& m, HostProbed r) {
         m.ui.login    = std::move(ch);
         auto toast = set_status_toast(m, "host check failed: " + r.error,
                                       std::chrono::seconds{6});
-        return std::move(toast);
+        return toast;
     }
 
     const std::string spec = std::move(r.spec);
@@ -689,7 +689,7 @@ Cmd account_select(Model& m) {
                : "switched " + provider_label + " to " + label;
     m.s.status_until = std::chrono::steady_clock::now()
                      + std::chrono::seconds{4};
-    return std::move(refresh_cmd);
+    return refresh_cmd;
 }
 
 Cmd account_remove(Model& m) {
@@ -1319,7 +1319,7 @@ Cmd token_refreshed(Model& m, auth::TokenResult result) {
         // retyping. The first manual send in that state will hit the
         // stale-token 401 path, but the in-app login modal is the
         // recovery surface.
-        return std::move(cmd);
+        return cmd;
     }
 
     // Refresh OK — install fresh creds into Deps so the next stream uses
@@ -1387,7 +1387,7 @@ Cmd token_refreshed(Model& m, auth::TokenResult result) {
         return Cmd::batch(
                 std::move(toast_cmd), std::move(sub_cmd));
     }
-    return std::move(toast_cmd);
+    return toast_cmd;
 }
 
 // ============================================================================

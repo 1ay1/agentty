@@ -630,7 +630,7 @@ Cmd composer_update(Model& m, msg::ComposerMsg cm) {
                             out.send(Msg{GitSignalsRefreshed{}});
                         });
                 }
-                return std::move(git_cmd);
+                return git_cmd;
             }
             // '#' opens the symbol picker — mirrors '@'. Non-blocking:
             // snapshot only if the (parallel) symbol scan has landed;
@@ -697,7 +697,7 @@ Cmd composer_update(Model& m, msg::ComposerMsg cm) {
                 auto toast = set_status_toast(
                     m, n > 0 ? "loop off \xc2\xb7 " + std::to_string(n) + " sent"
                              : std::string{"loop off"});
-                return std::move(toast);
+                return toast;
             }
             // Arming needs something to repeat. An empty composer would arm a
             // loop with no payload — make that unrepresentable rather than
@@ -705,7 +705,7 @@ Cmd composer_update(Model& m, msg::ComposerMsg cm) {
             if (c.text.empty()) {
                 auto toast = set_status_toast(
                     m, "loop: type a message first");
-                return std::move(toast);
+                return toast;
             }
             // Snapshot the payload, then submit it. The snapshot (not the
             // live composer) is what repeats, so the user can keep typing.
@@ -1073,7 +1073,7 @@ Cmd composer_update(Model& m, msg::ComposerMsg cm) {
                     "over SSH (needs kitty's OSC 5522); attach by path, "
                     "or set AGENTTY_CLIPBOARD_CMD",
                     std::chrono::seconds{9});
-                return std::move(toast);
+                return toast;
             }
             return Cmd::none();
         },
@@ -1237,7 +1237,7 @@ Cmd composer_update(Model& m, msg::ComposerMsg cm) {
                       "terminal with OSC 52 read support";
             }
             auto toast = set_status_toast(m, msg, std::chrono::seconds{8});
-            return std::move(toast);
+            return toast;
         },
         [&](ComposerRecallQueued) -> Cmd {
             // No-op when there's nothing to recall — the caller (the

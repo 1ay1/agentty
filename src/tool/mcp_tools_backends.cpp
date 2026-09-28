@@ -121,10 +121,6 @@ enum class EventFormat { Off, Jsonl };
     return fmt;
 }
 
-[[nodiscard]] bool trace_tools_enabled() {
-    return event_format() != EventFormat::Off;
-}
-
 // FNV-1a over the argument JSON. Short, stable across runs and
 // processes, and not reversible into the arguments it stands for.
 [[nodiscard]] std::string args_digest(std::string_view args) {

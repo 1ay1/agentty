@@ -28,7 +28,7 @@ Cmd tool_output_update(Model& m, msg::ToolOutputMsg tm) {
             auto entries = collect_viewer_entries(m);
             if (entries.empty()) {
                 auto cmd = set_status_toast(m, "nothing to inspect yet");
-                return std::move(cmd);
+                return cmd;
             }
             m.ui.panel.descend(pn::ToolOutput{{std::move(entries), 0, false}});
             m.ui.tool_viewer_scroll.y = 0;

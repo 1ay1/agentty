@@ -145,7 +145,7 @@ Cmd checkpoint_update(Model& m, msg::CheckpointMsg cm) {
             auto diffs = load_all_diffs(entries);
             m.ui.panel.descend(pn::Checkpoints{{std::move(entries), last}});
             m.ui.checkpoints_scroll = Model::UI::routed_scroll();
-            return std::move(diffs);
+            return diffs;
         },
         [&](CloseCheckpoints) -> Cmd {
             ascend(m);   // Esc: back to the palette that opened this, or close

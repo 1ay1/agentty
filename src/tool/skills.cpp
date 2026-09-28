@@ -610,7 +610,7 @@ const std::vector<Skill>& all() {
 }
 
 const std::vector<Shadowed>& shadowed() {
-    all();                 // ensure a discovery has run
+    (void)all();           // ensure a discovery has run
     return shadow_log();
 }
 

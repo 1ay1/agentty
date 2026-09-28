@@ -286,7 +286,7 @@ Cmd settings_list_update(Model& m, msg::SettingsListMsg sm) {
                         cmd = set_status_toast(m,
                                   "could not toggle '" + row.arg + "'");
                     }
-                    return std::move(cmd);
+                    return cmd;
                 }
                 case se::Action::ToggleTool: {
                     if (m.ui.plugins_loading)
@@ -332,7 +332,7 @@ Cmd settings_list_update(Model& m, msg::SettingsListMsg sm) {
                             se::items_for(m, oo->concern).size());
                         oo->index = std::clamp(oo->index, 0, std::max(0, n - 1));
                     }
-                    return std::move(cmd);
+                    return cmd;
                 }
                 case se::Action::ApprovePlugin: {
                     // Enter on an untrusted project server = a deliberate
@@ -356,7 +356,7 @@ Cmd settings_list_update(Model& m, msg::SettingsListMsg sm) {
                         cmd = set_status_toast(m,
                             "could not record approval (no project mcp.json?)");
                     }
-                    return std::move(cmd);
+                    return cmd;
                 }
                 case se::Action::ApproveHooks:
                     // Consent MUST be a deliberate terminal action — the
@@ -416,7 +416,7 @@ Cmd settings_list_update(Model& m, msg::SettingsListMsg sm) {
                 const int n = static_cast<int>(se::items_for(m, oo->concern).size());
                 oo->index = std::clamp(oo->index, 0, std::max(0, n - 1));
             }
-            return std::move(cmd);
+            return cmd;
         },
         [&](SettingsListEditOpen& e) -> Cmd {
             auto* o = m.ui.panel.get<pn::SettingsList>();

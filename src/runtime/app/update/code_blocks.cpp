@@ -618,14 +618,14 @@ Cmd codeblock_update(Model& m, msg::CodeBlockMsg cm) {
                         saw_open
                           ? "a code block is still streaming \xe2\x80\x94 try again in a moment"
                           : "no complete code blocks yet");
-                    return std::move(cmd);
+                    return cmd;
                 }
             } else {
                 blocks = latest_assistant_blocks(m);
                 if (blocks.empty()) {
                     auto cmd = set_status_toast(m,
                         "no code blocks in the last reply");
-                    return std::move(cmd);
+                    return cmd;
                 }
             }
             m.ui.panel.descend(pn::CodeBlocks{{std::move(blocks), 0}});
@@ -673,7 +673,7 @@ Cmd codeblock_update(Model& m, msg::CodeBlockMsg cm) {
                 auto cmd = set_status_toast(m,
                     tag + " block isn't runnable here — "
                     "press e to edit or y to copy");
-                return std::move(cmd);
+                return cmd;
             }
             m.ui.panel.close<pn::CodeBlocks>(); m.ui.panel.close<pn::CodeBlockResult>();
             return run_block_cmd(std::move(block.body), shell);
@@ -756,7 +756,7 @@ Cmd codeblock_update(Model& m, msg::CodeBlockMsg cm) {
             m.ui.composer.expanded = true;
             m.ui.panel.close<pn::CodeBlocks>(); m.ui.panel.close<pn::CodeBlockResult>();
             auto toast = set_status_toast(m, "output attached to composer");
-            return std::move(toast);
+            return toast;
         },
         [&](CodeBlockResultCopy) -> Cmd {
             auto* r = m.ui.panel.get<pn::CodeBlockResult>();

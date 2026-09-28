@@ -93,7 +93,7 @@ Cmd diff_review_update(Model& m, msg::DiffReviewMsg dm) {
             // their keystroke registered.
             if (m.d.pending_changes.empty()) {
                 auto cmd = set_status_toast(m, "no pending changes to review");
-                return std::move(cmd);
+                return cmd;
             }
             m.ui.panel.descend(pn::DiffReview{{0, 0}});
             return Cmd::none();
@@ -189,7 +189,7 @@ Cmd diff_review_update(Model& m, msg::DiffReviewMsg dm) {
         [&](AcceptAllChanges) -> Cmd {
             if (m.d.pending_changes.empty()) {
                 auto cmd = set_status_toast(m, "no pending changes to accept");
-                return std::move(cmd);
+                return cmd;
             }
             // Accept = keep what the tools already wrote; nothing to persist.
             int hunks = 0;
@@ -200,12 +200,12 @@ Cmd diff_review_update(Model& m, msg::DiffReviewMsg dm) {
             auto cmd = set_status_toast(m,
                 "accepted " + std::to_string(hunks)
                 + (hunks == 1 ? " hunk" : " hunks"));
-            return std::move(cmd);
+            return cmd;
         },
         [&](RejectAllChanges) -> Cmd {
             if (m.d.pending_changes.empty()) {
                 auto cmd = set_status_toast(m, "no pending changes to reject");
-                return std::move(cmd);
+                return cmd;
             }
             // TWO-PRESS guard when driven from the open pane (^X): the first
             // press arms, the second executes. A palette "Reject all" (pane
@@ -216,7 +216,7 @@ Cmd diff_review_update(Model& m, msg::DiffReviewMsg dm) {
                 c->confirm_reject_all = true;
                 auto cmd = set_status_toast(m,
                     "press ^X again to revert ALL changes — any other key cancels");
-                return std::move(cmd);
+                return cmd;
             }
             // Reject ALL = revert every touched file to its original contents
             // on disk (the tools already wrote the new version, so this undoes

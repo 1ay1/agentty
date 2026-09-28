@@ -1837,7 +1837,7 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
             // top. With the arming gone, the keypress takes the normal
             // diff path and the composer stays where the shrink left
             // it (no "pull down," no duplicate).
-            return std::move(cmd);
+            return cmd;
         },
         [&](StreamError& e) -> Cmd {
             // THE seam where a failure becomes something the user sees.
@@ -2053,7 +2053,7 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
                     return Cmd::batch(
                         std::move(status_cmd), std::move(sub_cmd));
                 }
-                return std::move(status_cmd);
+                return status_cmd;
             }
 
             // Worker thread is unwinding; drop the token so the next turn
@@ -2439,7 +2439,7 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
                     // path. (Inline force_redraw is safe here — just
                     // a soft case-(B) redraw, not destructive — but
                     // also unnecessary.)
-                    return std::move(refresh_cmd);
+                    return refresh_cmd;
                 }
                 // No refresh_token on disk (env-var OAuth, api-key with
                 // a stale Bearer, etc.) — fall through to the terminal
@@ -2581,7 +2581,7 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
                 // before the retry stream feeds new deltas; the normal
                 // diff path handles the rest. (Inline force_redraw is
                 // safe — soft case-(B) — but unnecessary here.)
-                return std::move(retry_cmd);
+                return retry_cmd;
             }
 
             // Terminal path — discard the source ctx and drop to Idle.
@@ -2681,7 +2681,7 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
                     std::chrono::duration_cast<std::chrono::milliseconds>(ttl)
                         + std::chrono::milliseconds{50},
                     Msg{ClearStatus{stamp}});
-                return std::move(status_cmd);
+                return status_cmd;
             }
         },
         [&](RetryStream) -> Cmd {
@@ -2792,7 +2792,7 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
                     return Cmd::batch(
                         std::move(status_cmd), std::move(sub_cmd));
                 }
-                return std::move(status_cmd);
+                return status_cmd;
             }
         },
         [&](ProactiveContextReady pcr) -> Cmd {
