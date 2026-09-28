@@ -45,6 +45,7 @@
 
 #ifndef _WIN32
 #include <unistd.h>   // isatty (headless `run` stdin detection)
+#include <poll.h>     // poll (non-blocking stdin peek, see the run subcommand)
 #else
 #include <io.h>
 #include <process.h>  // _getpid
@@ -1584,12 +1585,49 @@ int main(int argc, char** argv) {
             return 2;
         }
         std::string prompt = args.cli_run_prompt;
-        const bool want_stdin = prompt.empty() || prompt == "-";
+        // `-` asks for stdin explicitly; so does giving no positional at all.
+        // An EXPLICIT empty prompt (`agentty run ""`) does not: the scan
+        // claimed it, so the user did supply one, it just happens to be empty.
+        // Without this distinction `run ""` fell into the non-tty branch below
+        // and hung.
+        const bool want_stdin =
+            prompt == "-" || (prompt.empty() && !args.cli_run_prompt_claimed);
         std::string piped;
-        // Read piped stdin when the prompt asks for it (`-` / absent) OR
-        // when input is a pipe (attach `git diff | agentty run "review"`:
-        // the piped bytes become context appended after the prompt).
+        // Attach piped stdin when it exists. The idiom is `git diff | agentty
+        // run "review"` — the diff bytes become context after the prompt — so
+        // this must trigger on any non-tty stdin that has data.
+        //
+        // But `isatty == false` alone is not enough. A ctest child inherits
+        // the ctest agent's stdin, which stays open for the whole run: no
+        // writer ever closes it, no bytes ever arrive, and `cin.rdbuf()` on it
+        // waits forever. Measured: `cli_arg_order_test` fell into this exact
+        // shape and timed out ctest at 60 s, cascading 15 later tests into
+        // Not Run — every earlier case in that test appended `--help` (exits
+        // before touching stdin) or piped through `head` (closes early), so
+        // the ONE bare invocation (`agentty run ""`) was the trip.
+        //
+        // poll() with a zero timeout answers "is there data or EOF now?"
+        // without reading. Empty and open → skip; bytes ready or writer closed
+        // → drain (a closed pipe returns POLLHUP and cin hits EOF at once,
+        // matching the interactive case where a shell hands us a tty and
+        // there is nothing to drain). want_stdin bypasses the peek so
+        // `agentty run -` still waits, which is its whole point.
+        //
+        // Windows has no poll(); keep the old permissive behaviour there
+        // (drain any non-tty). No easy WaitForSingleObject dance reliably
+        // distinguishes an empty-but-open pipe from a ready one on every
+        // Windows console/redirect combination, and Windows CI never hit
+        // this shape.
+#ifndef _WIN32
+        auto stdin_has_data = []() noexcept {
+            pollfd pfd{fileno(stdin), POLLIN, 0};
+            return ::poll(&pfd, 1, 0) > 0
+                && (pfd.revents & (POLLIN | POLLHUP | POLLERR)) != 0;
+        };
+        if (want_stdin || (!isatty(fileno(stdin)) && stdin_has_data())) {
+#else
         if (want_stdin || !isatty(fileno(stdin))) {
+#endif
             std::ostringstream ss;
             ss << std::cin.rdbuf();
             piped = ss.str();

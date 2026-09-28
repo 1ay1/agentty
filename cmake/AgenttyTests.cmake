@@ -180,9 +180,15 @@ agentty_fold_test(streaming_markdown_lifetime_test TIMEOUT 60)
 # a user reports a render crash the synthetic bench doesn't reproduce.
 agentty_fold_test(real_thread_render_probe TIMEOUT 60 ARGS)
 # Round-trips every REAL thread in ~/.agentty/threads through ThreadLog.
-# ARGS + no-op when the corpus is absent, so CI passes trivially; the
-# value is running it BY HAND before trusting the migration with history.
-agentty_fold_test(thread_log_corpus_probe TIMEOUT 300 ARGS)
+# ARGS + no-op when the corpus is absent, so CI passes trivially; the value
+# is running it BY HAND before trusting the migration with history.
+#
+# LABELS perf: on a machine that HAS a real corpus this walks the whole thing
+# (measured: ~75 s for 609 threads / 594 MB). RUN_SERIAL follows from perf and
+# is what keeps a slow probe from starving faster tests at -j8 — without it
+# the probe blew through the 60 s ctest run budget and cascaded 15 later
+# tests into Not Run.
+agentty_fold_test(thread_log_corpus_probe TIMEOUT 300 ARGS LABELS perf)
 # Proves the STORE SEAM prefers the log: converts a real thread, reads it
 # back through load_thread_by_id, and compares. Needs AGENTTY_HOME + an id.
 agentty_fold_test(thread_log_seam_probe   TIMEOUT 120 ARGS)
