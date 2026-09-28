@@ -26,7 +26,9 @@ LLAMA_MODELS = {
             "meta": {
                 "vocab_type": 2,
                 "n_vocab": 152064,
-                "n_ctx": 8192,          # served window (-c 8192)
+                # Intentionally omit n_ctx here: the row only carries the
+                # larger train-time ceiling. The served window comes from
+                # /props below, which is the bug path we want to guard.
                 "n_ctx_train": 32768,   # architectural ceiling
                 "n_embd": 3584,
                 "n_params": 7615616512,
@@ -179,8 +181,16 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self):
         path = self.path.split("?")[0]
         if MODE == "llama":
+            if path == "/props":
+                return self._send({
+                    "default_generation_settings": {"n_ctx": 8192},
+                    "total_slots": 1,
+                    "model_alias": "qwen2.5-coder-7b",
+                })
             if path in ("/v1/models", "/models"):
                 return self._send(LLAMA_MODELS)
+            if path == "/health":
+                return self._send({"status": "ok"})
         elif MODE == "ollama":
             if path in ("/v1/models", "/models"):
                 return self._send({"object": "list", "data": [

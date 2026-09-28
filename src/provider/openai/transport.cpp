@@ -3523,10 +3523,16 @@ std::vector<ModelInfo> list_models(const AuthHeader& auth, const Endpoint& endpo
                             if (mi.context_window <= 0
                                 || (probe.measured && it->second < mi.context_window))
                                 mi.context_window = it->second;
-                        } else if (mi.context_window <= 0 && probe.server_wide > 0) {
-                            // server_wide is NOT applied over a declared
-                            // window: on a multi-model gateway it describes
-                            // whichever model is loaded, not this row.
+                        } else if (probe.server_wide > 0
+                                   && (mi.context_window <= 0
+                                       || (probe.measured && local
+                                           && probe.server_wide < mi.context_window))) {
+                            // server_wide is the measured window for a
+                            // single-model local server (llama.cpp /props,
+                            // LM Studio loaded instance). It may shrink a
+                            // stale declaration, but only on local endpoints
+                            // where it is a measurement of the running server,
+                            // not a gateway-wide catalog hint.
                             mi.context_window = probe.server_wide;
                         }
                     }
