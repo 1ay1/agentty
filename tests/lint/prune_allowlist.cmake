@@ -30,7 +30,7 @@ if(NOT IS_DIRECTORY "${ROOT}")
 endif()
 
 # Verbatim from jaal's banlist.cmake — keep in sync if that file changes.
-set(ban_thread       "std::j?thread[^_]")
+set(ban_thread       "std::j?thread([^_:]|$)")
 set(ban_detach       "\\.detach\\(\\)")
 set(ban_async        "std::async[^_]")
 set(ban_mutex        "std::(shared_|recursive_|timed_)?mutex[^_]")
@@ -75,22 +75,40 @@ foreach(line IN LISTS allow_lines)
         continue()
     endif()
 
-    # Same scan the banlist does: skip comment-only lines, strip trailing
-    # comments, then look for each allowed name.
-    file(STRINGS "${ROOT}/${f}" lines)
+    # Ask grep whether each allowed name appears in this file. Same reason
+    # the banlist does: CMake's file(STRINGS) collapses `;`-ending lines into
+    # merged blobs and the greedy `//.*` strip below then hides half the
+    # file, silently marking real uses as "unused". grep is line-oriented so
+    # it can't lose data at a `;`. Kept in sync with the banlist's approach.
+    find_program(GREP_EXE grep REQUIRED)
     set(unused "")
     foreach(name IN LISTS names)
+        execute_process(
+            COMMAND ${GREP_EXE} -E "${ban_${name}}" "${ROOT}/${f}"
+            OUTPUT_VARIABLE hits
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            RESULT_VARIABLE grep_rc
+            ERROR_QUIET)
         set(found FALSE)
-        foreach(l IN LISTS lines)
-            if(l MATCHES "^[ \t]*//")
-                continue()
-            endif()
-            string(REGEX REPLACE "//.*" "" code "${l}")
-            if(code MATCHES "${ban_${name}}")
-                set(found TRUE)
-                break()
-            endif()
-        endforeach()
+        if(hits)
+            # Filter comment-only lines the same way the banlist does; a
+            # match that's ONLY in prose (e.g. "// once used std::mutex")
+            # doesn't justify keeping the grant.
+            string(ASCII 1 _sc)
+            string(REPLACE ";" "${_sc}" hits "${hits}")
+            string(REGEX MATCHALL "[^\n]+" hit_lines "${hits}")
+            foreach(hl IN LISTS hit_lines)
+                string(REPLACE "${_sc}" ";" hl "${hl}")
+                if(hl MATCHES "^[ \t]*//")
+                    continue()
+                endif()
+                string(REGEX REPLACE "//.*" "" code "${hl}")
+                if(code MATCHES "${ban_${name}}")
+                    set(found TRUE)
+                    break()
+                endif()
+            endforeach()
+        endif()
         if(NOT found)
             list(APPEND unused "${name}")
         endif()

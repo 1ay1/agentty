@@ -22,6 +22,11 @@ agentty/util/logx.hpp: atomic
 # tripping a specific in-flight request from a later step. See the Sendable
 # opt-in in runtime/cmd.hpp for why it stays the app's own.
 agentty/io/http.hpp: atomic
+# backoff_with_jitter(): per-thread mt19937 for retry jitter. The generator
+# holds no shared state; each caller thread gets its own seeded from
+# random_device. thread_local is what makes this branch-free at the call
+# site without a per-turn allocation.
+agentty/provider/error_class.hpp: thread_local
 
 # ── Caches and registries below the loop ─────────────────────────────────
 agentty/domain/catalog.hpp: mutex atomic

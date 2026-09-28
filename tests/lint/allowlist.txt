@@ -45,7 +45,9 @@ io/tls.cpp: mutex const_cast
 # ── Persistence and credentials ──────────────────────────────────────────
 # Not reducer code: these run on a worker a task already put them on, or on
 # CLI paths with no loop at all.
-io/persistence.cpp: mutex
+# The AsyncWriter owns a background worker thread that batches JSONL appends;
+# see persistence.cpp AsyncWriter. Joined at shutdown via the teardown registry.
+io/persistence.cpp: mutex thread
 io/auth.cpp: mutex atomic const_cast
 io/keystore.cpp: const_cast
 io/cred_crypt.cpp: const_cast
@@ -64,6 +66,10 @@ tool/hooks.cpp: mutex
 tool/progress.cpp: thread_local
 tool/subagent.cpp: mutex thread_local
 tool/commands.cpp: mutex
+# Windows: run_command_s spawns a reader std::thread + mutex-guarded buffer to
+# tee child output. jaal doesn't paper over the platform boundary here — this
+# runs inside a jaal task, and the thread is joined before the task returns.
+tool/util/subprocess.cpp: thread mutex atomic
 # Unique temp names for atomic writes, and a parallel directory walk.
 tool/util/fs_helpers.cpp: mutex atomic
 tool/util/sandbox.cpp: atomic
@@ -93,6 +99,9 @@ provider/copilot/provider.cpp: mutex thread_local
 provider/kimi/kimi_oauth.cpp: mutex atomic
 provider/kimi/provider.cpp: mutex
 provider/openai/responses_site.cpp: thread_local
+# probe_opt_in cache: a process-wide shared_mutex behind a small set that maps
+# thread ids to opt-in tokens for the /responses probe.
+provider/openai/transport.cpp: mutex
 
 # ── MCP and RAG: their own servers and index workers ─────────────────────
 mcp/bridge.cpp: mutex atomic async
@@ -110,6 +119,16 @@ util/logx.cpp: mutex atomic
 # startup and read from workers (auth_snapshot), which is the one thing a
 # plain global could get wrong.
 runtime/app/deps.cpp: mutex
+# next_tool_exec_seq(): a static atomic counter minted per dispatch, echoed by
+# the worker so the reducer can drop stale results from a superseded turn.
+runtime/app/cmd_factory.cpp: atomic
+# ACP dispatch fans a tool call out to std::async so a permission-request
+# round-trip can happen alongside; the shared_future is awaited before return.
+acp/server.cpp: async
+# The Windows code-block runner ticks a heartbeat title/line via a background
+# std::thread flagged by an atomic while a blocking subprocess call runs.
+# Inside a jaal task; joined before return.
+runtime/app/update/code_blocks.cpp: thread atomic
 
 # View-layer render caches. Every one is a bounded LRU on the UI thread,
 # documented at the definition; thread_local is how they say "one thread
