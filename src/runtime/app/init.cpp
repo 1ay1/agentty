@@ -12,6 +12,8 @@
 #include "agentty/provider/copilot/copilot_oauth.hpp"
 #include "agentty/provider/kimi/kimi_oauth.hpp"
 #include "agentty/workspace/files.hpp"
+#include "agentty/workspace/checkpoint.hpp"
+#include "agentty/tool/registry.hpp"   // tools::registry (warm at startup)
 #include "agentty/workspace/symbols.hpp"
 #include "agentty/io/blob_gc.hpp"
 #include "agentty/util/modelsdev.hpp"
@@ -308,6 +310,15 @@ std::pair<Model, Cmd> init() {
     // it opens — the connection is loop-driven, never a lazy side effect.
     if (mcp::mcp_config_present())
         cmds.push_back(cmd::load_plugins_async(/*reconnect=*/true));
+    else
+        // No MCP servers to connect, but the FIRST access to tools::registry()
+        // still builds the whole native-tool wire snapshot cold — and on the
+        // first turn that build lands on launch_stream's worker, in the TTFB
+        // window before the model's reply streams. Warm it here so the first
+        // turn finds the snapshot already built. (When MCP config IS present,
+        // load_plugins_async above already touches registry() and warms it.)
+        cmds.push_back(Cmd::task_isolated(
+            [](jaal::Sink<Msg>, std::stop_token) { (void)tools::registry(); }));
 
     // OpenAI-family backends (Ollama, llama.cpp, groq, …) have no fixed
     // built-in model list — seed_models() only knows Claude ids. A saved
@@ -392,6 +403,16 @@ std::pair<Model, Cmd> init() {
         [](jaal::Sink<Msg>, std::stop_token) { prewarm_workspace_files(); }));
     cmds.push_back(Cmd::task_isolated(
         [](jaal::Sink<Msg>, std::stop_token) { prewarm_workspace_symbols(); }));
+
+    // Warm the checkpoint module's repo discovery too. submit_message()
+    // calls workspace::in_git_repo() SYNCHRONOUSLY on the first turn, and
+    // its uncached path spawns two blocking `git rev-parse` subprocesses --
+    // negligible on POSIX but a visible stall on Windows, where process
+    // creation is expensive, right on the first turn's critical path.
+    // Priming it here (isolated: it too is subprocess-spawning work) moves
+    // that cost off the reducer thread while the user is still typing.
+    cmds.push_back(Cmd::task_isolated(
+        [](jaal::Sink<Msg>, std::stop_token) { workspace::prewarm_repo_info(); }));
 
     // Reclaim blobs no thread references any more (deleted threads,
     // replaced outputs). Once a day at most, 24 h grace so a save in

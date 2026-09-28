@@ -23,6 +23,15 @@ namespace agentty::workspace {
 // the first call (repo-ness doesn't change mid-session).
 [[nodiscard]] bool in_git_repo();
 
+// Warm the cached repo discovery on a detached background thread at
+// launch. The first call to in_git_repo()/create_checkpoint() otherwise
+// spawns two blocking `git rev-parse` subprocesses on the submit path --
+// cheap on POSIX, but process creation is heavy on Windows and lands
+// squarely on the first turn's critical path. Priming it while the user
+// is still typing moves that cost off the hot path. Idempotent and safe
+// to call once at startup.
+void prewarm_repo_info();
+
 // A one-glance summary of what the worktree has changed SINCE a
 // checkpoint was taken — the diff between the pinned snapshot tree and
 // the current working tree (tracked + newly-added; ignored files never

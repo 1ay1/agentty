@@ -221,6 +221,15 @@ bool current_paths(std::vector<std::string>& out) {
 
 bool in_git_repo() { return repo().in_repo; }
 
+void prewarm_repo_info() {
+    // SYNCHRONOUS. Touching repo() forces its function-local static to
+    // initialise, running the two `git rev-parse` probes here instead of
+    // on the first submit. The caller (init.cpp) runs this on maya's
+    // isolated pool, which owns the thread and joins it at teardown, so
+    // the blocking subprocess spawns never touch the reducer thread.
+    (void)repo();
+}
+
 CheckpointDiff checkpoint_summary(const std::string& id) {
     CheckpointDiff out;
     if (!repo().in_repo || id.empty()) return out;
