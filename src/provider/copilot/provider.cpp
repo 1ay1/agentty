@@ -55,10 +55,10 @@ HostPort parse_api_base(const std::string& base) {
 std::vector<std::pair<std::string, std::string>> copilot_headers() {
     return {
         {"copilot-integration-id", "vscode-chat"},
-        {"editor-version", "vscode/1.104.3"},
-        {"editor-plugin-version", "copilot-chat/0.26.7"},
+        {"editor-version", client_editor_version()},
+        {"editor-plugin-version", client_plugin_version()},
         {"openai-intent", "conversation-panel"},
-        {"user-agent", "GitHubCopilotChat/0.26.7"},
+        {"user-agent", client_user_agent()},
     };
 }
 
@@ -221,7 +221,7 @@ copilot_authorize(provider::Request&) {
         // The Auto-session token is what unlocks /responses at all: without
         // it every model — including gpt-5-mini — 400s model_not_supported.
         {"copilot-session-token", t.session_token},
-        {"x-github-api-version", kAutoApiVersion},
+        {"x-github-api-version", client_api_version()},
     };
     for (auto& h : copilot_headers()) target.headers.push_back({h.first, h.second});
     return target;
@@ -276,7 +276,7 @@ provider::openai::Endpoint make_auto_endpoint(const std::string& api_base,
     ep.models_path = "/models";
     ep.label       = "copilot";
     ep.extra_headers = copilot_headers();
-    ep.extra_headers.push_back({"x-github-api-version", kAutoApiVersion});
+    ep.extra_headers.push_back({"x-github-api-version", client_api_version()});
     ep.extra_headers.push_back({"copilot-session-token", session_token});
     return ep;
 }
@@ -335,27 +335,18 @@ provider::StreamResult CopilotProvider::stream(provider::Request req,
         // turns are byte-identical to before this fork existed.
         if (as && as->valid()) {
             const std::string picked = pick_auto_model(*as, requested);
-            // A concrete pin the session can't serve is an ERROR, not a cue to
-            // pick something else. Smart Mode pins a model per role slot; a
-            // silent swap there spends the wrong model's budget and, when the
-            // substitute is Responses-only, 400s on the chat path with a
-            // message that blames the model the user never chose.
-            if (picked.empty() && requested != kAutoId) {
-                std::string avail;
-                for (const auto& m : as->available_models) {
-                    if (!avail.empty()) avail += ", ";
-                    avail += m;
-                }
-                sink(StreamError{
-                    "copilot: this account's Auto session does not offer `"
-                    + requested + "`. Available: "
-                    + (avail.empty() ? std::string{"(none)"} : avail)
-                    + ". Pick one of those, or select Auto to let Copilot choose.",
-                    std::nullopt});
-                return provider::StreamResult{
-                    .end   = provider::StreamEnd::TransportError,
-                    .error = "copilot: model not in Auto session"};
-            }
+            // A concrete pin the Auto session doesn't list is NOT an error and
+            // NOT a cue to swap models: the account may be entitled to it on
+            // the DIRECT chat endpoint. That's exactly how the official VS Code
+            // client streams e.g. Claude Opus — a concretely-picked model goes
+            // straight to /chat/completions with the proxy token, never through
+            // /models/session routing. So when `picked` is empty for a concrete
+            // pin we simply fall through: the chat block below leaves `picked`
+            // empty ⇒ make_endpoint (direct, no session token) and streams the
+            // exact model requested. If the account isn't entitled the server
+            // answers model_not_supported, learned + surfaced below — the same
+            // failure the official client would show. (Smart Mode role pins are
+            // honoured verbatim here, never silently substituted.)
             const bool responses_capable =
                 !picked.empty() && session_lists_model(*as, picked)
                 && prefers_responses_dialect(picked);
@@ -412,11 +403,24 @@ provider::StreamResult CopilotProvider::stream(provider::Request req,
     // LEARN direct model support (only meaningful for a directly-requested
     // model, not the auto pseudo-id).
     if (requested != kAutoId) {
+        // Did this turn stream through the Auto session, or go direct? The
+        // session serves a model only when it lists it; anything else (a
+        // concrete pin the session omits, or no session at all) was streamed
+        // direct against /chat/completions.
+        const bool via_session =
+            as && as->valid() && session_lists_model(*as, requested);
         if (result.http_status == 400 && result.error
             && result.error->find("not supported") != std::string::npos) {
             note_unsupported_model(requested);
             invalidate_model_cache();
-        } else if (result.ok() && !wants_auto) {
+        } else if (result.ok() && !via_session) {
+            // A DIRECT stream succeeded — either an already-direct model, or a
+            // pin the Auto session doesn't list that the account is entitled to
+            // directly (the VS Code path). Remember it so the next turn skips
+            // the Auto probe and streams direct immediately. Persisted to disk,
+            // so it survives restarts. Models that need the session (gpt-5
+            // reasoning via /responses) keep wants_auto set through
+            // prefers_responses_dialect, so this never strands them on chat.
             note_supported_model(requested);
         }
     }

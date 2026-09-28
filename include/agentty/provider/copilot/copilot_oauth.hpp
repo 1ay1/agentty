@@ -16,6 +16,7 @@
 // a refresh_token, Copilot uses the durable ghu_ token as the refresh source.
 
 #include <cstdint>
+#include <cstdlib>
 #include <expected>
 #include <functional>
 #include <optional>
@@ -27,6 +28,27 @@
 namespace agentty::provider::copilot {
 
 using auth::OAuthError;
+
+// ── Editor/plugin identity presented to Copilot ───────────────────────────
+// Copilot keys its per-account MODEL ROLLOUT to the (editor × plugin × api)
+// version it sees, not just the account — so a stale pin makes newer models
+// (e.g. a just-shipped Claude/GPT) absent from the Auto session even though the
+// same login sees them in an up-to-date VS Code. These are overridable at
+// runtime so you can mirror your installed VS Code Copilot Chat EXACTLY (Help →
+// About for the vscode/<ver>; Extensions → GitHub Copilot Chat for the
+// copilot-chat/<ver>) without recompiling. Defaults track a recent VS Code.
+[[nodiscard]] inline const char* client_editor_version() {
+    if (const char* e = std::getenv("AGENTTY_COPILOT_EDITOR_VERSION"); e && *e) return e;
+    return "vscode/1.105.1";
+}
+[[nodiscard]] inline const char* client_plugin_version() {
+    if (const char* e = std::getenv("AGENTTY_COPILOT_PLUGIN_VERSION"); e && *e) return e;
+    return "copilot-chat/0.32.0";
+}
+[[nodiscard]] inline const char* client_user_agent() {
+    if (const char* e = std::getenv("AGENTTY_COPILOT_USER_AGENT"); e && *e) return e;
+    return "GitHubCopilotChat/0.32.0";
+}
 
 // The durable GitHub credential from the device flow. This is what `agentty
 // login → GitHub Copilot` persists; it does not expire on its own (revocation
@@ -109,7 +131,13 @@ struct AutoSession {
     }
 };
 // The CAPI api-version the /models/session + auto-routed chat calls require.
+// Overridable (AGENTTY_COPILOT_API_VERSION) to match a newer VS Code Copilot
+// Chat, since the api-version also gates which models the Auto session lists.
 inline constexpr const char* kAutoApiVersion = "2026-08-01";
+[[nodiscard]] inline const char* client_api_version() {
+    if (const char* e = std::getenv("AGENTTY_COPILOT_API_VERSION"); e && *e) return e;
+    return kAutoApiVersion;
+}
 
 // Return a valid Auto session, fetching/refreshing as needed. nullopt when not
 // signed in or the endpoint is unavailable. Single-flight cached.

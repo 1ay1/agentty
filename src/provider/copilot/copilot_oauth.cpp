@@ -57,9 +57,9 @@ constexpr const char* kTokenPath   = "/login/oauth/access_token";
 constexpr const char* kExchangePath= "/copilot_internal/v2/token";
 constexpr const char* kScope       = "read:user";
 constexpr const char* kGrantType   = "urn:ietf:params:oauth:grant-type:device_code";
-constexpr const char* kEditorVer   = "vscode/1.104.3";
-constexpr const char* kPluginVer   = "copilot-chat/0.26.7";
-constexpr const char* kUserAgent   = "GitHubCopilotChat/0.26.7";
+// Editor/plugin/user-agent identity now lives in copilot_oauth.hpp as runtime-
+// overridable accessors (client_editor_version() etc.) — Copilot gates model
+// rollout on these, so they must be tunable without a rebuild.
 constexpr const char* kIntegration = "vscode-chat";
 // Fallback inference base when the token response omits endpoints.api.
 constexpr const char* kDefaultApi  = "https://api.githubcopilot.com";
@@ -105,9 +105,9 @@ HttpResult request(http::HttpMethod method, std::string_view host,
     req.path   = std::string{path};
     req.headers = {
         {"accept",       "application/json"},
-        {"user-agent",   kUserAgent},
-        {"editor-version", kEditorVer},
-        {"editor-plugin-version", kPluginVer},
+        {"user-agent",   client_user_agent()},
+        {"editor-version", client_editor_version()},
+        {"editor-plugin-version", client_plugin_version()},
     };
     for (auto& h : headers) req.headers.push_back({h.first, h.second});
     if (const auto& ov = http::agentty_oauth_host_override(); ov.active()) {
@@ -637,7 +637,7 @@ std::optional<AutoSession> auto_session() {
     auto r = request(http::HttpMethod::Post, host, "/models/session",
         {{"authorization", "Bearer " + tok->token},
          {"copilot-integration-id", kIntegration},
-         {"x-github-api-version", kAutoApiVersion},
+         {"x-github-api-version", client_api_version()},
          {"content-type", "application/json"}},
         R"({"auto_mode":{"model_hints":["auto"]}})");
     if (!r.transport_error.empty() || r.status < 200 || r.status >= 300) {
