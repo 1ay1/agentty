@@ -1044,10 +1044,12 @@ int main(int argc, char** argv) {
             join_workspace_prewarm();
             join_workspace_symbols_prewarm();
             // Same class, different owner: this one runs on jaal's ISOLATED
-            // pool, which asks isolated threads to stop and never waits for
-            // them (kernel/pool.hpp). So there is nothing to join — only a
-            // flag to trip, so a prewarm that hasn't reached its `git`
-            // spawns yet gives up instead of racing static destruction.
+            // pool. jaal waits for isolated tasks inside its shutdown grace
+            // (kernel/pool.hpp), but only a task that RETURNS can be waited
+            // for, and this one returns when it sees the flag. Host::release()
+            // trips it while the kernel is still stopping, which is the call
+            // that matters; this one covers the exit paths that never built a
+            // Host. Idempotent, so both firing is fine.
             agentty::workspace::cancel_repo_info_prewarm();
             modelsdev::join_background_refresh();
             blobs::join_background_gc();

@@ -34,11 +34,11 @@ void prewarm_repo_info();
 
 // Make a not-yet-started prewarm_repo_info() a no-op. Called at teardown.
 //
-// The prewarm runs on jaal's ISOLATED pool, and jaal asks isolated threads
-// to stop but never waits for them (kernel/pool.hpp) — deliberately, so a
-// wedged `git` can't block quit. That means nobody joins this one for us,
-// and it touches an agentty static, so on a fast exit it can still be
-// spawning subprocesses while the CRT destroys statics underneath it.
+// The prewarm runs on jaal's ISOLATED pool. jaal waits for isolated tasks
+// inside its shutdown grace (kernel/pool.hpp), but only a task that RETURNS
+// can be waited for — and this one's body is a pair of blocking `git`
+// spawns that fill an agentty static. This flag is how it returns early.
+// Host::release() trips it before the pool's wait begins.
 void cancel_repo_info_prewarm() noexcept;
 
 // A one-glance summary of what the worktree has changed SINCE a

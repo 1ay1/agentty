@@ -238,25 +238,23 @@ void prewarm_repo_info() {
     // initialise, running the two `git rev-parse` probes here instead of
     // on the first submit.
     //
-    // The caller (init.cpp) runs this via Cmd::task_isolated. jaal's pool
-    // gives an isolated task its own thread and, at shutdown, REQUESTS STOP
-    // ON IT BUT NEVER WAITS FOR IT -- see jaal/kernel/pool.hpp: "Isolated
-    // threads are asked to stop but never waited for." That is deliberate
-    // (a wedged `git` on a dead NFS mount must not block quit), and jaal's
-    // own lifetime story holds because a worker only touches memory it
-    // co-owns through the pool's shared core.
+    // The caller (init.cpp) runs this via Cmd::task_isolated. jaal gives an
+    // isolated task its own thread, DETACHES it, and at shutdown requests
+    // stop and then waits for it to return — bounded by the shutdown grace,
+    // so a wedged `git` on a dead NFS mount still can't block quit
+    // (jaal/kernel/pool.hpp).
     //
-    // It does NOT extend to us. This function touches an agentty static,
-    // which jaal knows nothing about. On a fast exit -- `type NUL |
-    // agentty.exe` under MSYS2, where stdin is at EOF before the first
-    // frame -- the two `git rev-parse` subprocess spawns are still running
-    // while main() returns and the CRT starts destroying statics. That is
-    // the intermittent 0xC0000005 the Windows smoke test caught: 2 of 5
-    // launches, on byte-identical code.
+    // "Waits for it to return" only helps if the task returns, and a task
+    // that never checks anything doesn't. That is what the flag is for: the
+    // probe below is a pair of blocking subprocess spawns, so the check has
+    // to happen before them, and Host::release() trips the flag while the
+    // kernel is still stopping — before the pool starts its wait.
     //
-    // So the flag, checked here and again after the probe: an isolated task
-    // must leave nothing behind that outlives what it touches, because
-    // nobody is going to join it for us.
+    // Without both halves this raced static destruction: the two `git
+    // rev-parse` spawns kept running while main() returned and the CRT
+    // destroyed the static they were filling. Intermittent abort on Linux,
+    // 0xC0000005 on Windows, on essentially every fast exit (stdin already
+    // at EOF, e.g. `type NUL | agentty.exe` under MSYS2).
     if (g_repo_prewarm_cancelled.load(std::memory_order_relaxed)) return;
     (void)repo();
 }

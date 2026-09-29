@@ -249,8 +249,10 @@ namespace {
 // Single-flight latch. NOT a thread — this module does not own one.
 //
 // WHO runs the scan is the caller's business: init.cpp hands it to maya's
-// Cmd::task_isolated, which owns the thread, joins it at teardown and
-// swallows exceptions. What has to live HERE is only "don't scan twice at
+// Cmd::task_isolated, which owns the thread and swallows exceptions. (Owns
+// is not joins — jaal detaches it and waits for it to RETURN, inside the
+// shutdown grace; see join_workspace_symbols_prewarm below.) What has to
+// live HERE is only "don't scan twice at
 // once", because that is a property of the cache being filled, not of the
 // scheduler filling it.
 std::atomic<bool>& sym_building() {
@@ -278,9 +280,18 @@ void prewarm_workspace_symbols(std::size_t cap) {
 }
 
 void join_workspace_symbols_prewarm() {
-    // Nothing to join: the scan runs on maya's pool, which owns and joins its
-    // own threads. Tripping the cooperative cancel is still load-bearing so a
-    // big-repo scan stops promptly instead of delaying maya's shutdown.
+    // Trips the cooperative cancel; the WAITING is jaal's. Same contract as
+    // join_workspace_prewarm() in files.cpp — see the note there for why
+    // "nothing to join" was the wrong way to think about it.
+    //
+    // It matters more here than for the file walk. This scan holds a
+    // reference to symbol_patterns(), a function-local
+    // `static vector<std::regex>`, for its whole run. If the task is still
+    // inside scan_file() when main() returns, the CRT destroys that vector
+    // out from under a live regex_search: TSan catches it as ~_NFA on the
+    // main thread racing _M_dfs on the worker, and it surfaces as
+    // __glibcxx_assert(false) in _M_node() — the executor reading an opcode
+    // out of freed memory.
     request_prewarm_cancel();
 }
 

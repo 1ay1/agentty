@@ -414,10 +414,14 @@ std::atomic<bool>& files_building() {
 
 void prewarm_workspace_files(std::size_t cap) {
     // SYNCHRONOUS. The caller decides where this runs — init.cpp hands it to
-    // maya's Cmd::task_isolated, which owns the thread, joins it at teardown,
-    // and swallows exceptions. This module used to hand-roll all three, in
-    // parallel with maya's pool doing the same job two lines away in the same
-    // function.
+    // maya's Cmd::task_isolated, which owns the thread and swallows
+    // exceptions. This module used to hand-roll both, in parallel with
+    // maya's pool doing the same job two lines away in the same function.
+    //
+    // "Owns the thread" is not "joins it": jaal DETACHES isolated threads,
+    // and waits for them to return only inside its shutdown grace, and only
+    // if something trips the cancel flag they poll. That is what
+    // join_workspace_prewarm() below is for.
     if (g_files.has_value()) return;   // already warm
     bool expected = false;
     if (!files_building().compare_exchange_strong(expected, true)) return;
@@ -462,14 +466,35 @@ void deprioritize_prewarm_thread() noexcept {
 }
 
 void join_workspace_prewarm() {
-    // Nothing to join anymore: the walk runs on maya's worker pool, which
-    // owns and joins its own threads at teardown. All this still does is trip
-    // the cooperative cancel flag so a big-repo scan stops promptly instead of
-    // making maya's shutdown wait for it.
+    // Trips the cooperative cancel; the WAITING is jaal's.
     //
-    // Kept as a named no-op-ish entry point rather than deleted because the
-    // CANCEL half is still load-bearing, and because `agentty run` / acp /
-    // mcp-serve (which have no maya runtime) call the prewarm synchronously.
+    // The name is a historical wart — there is no handle here to join. The
+    // walk runs as Cmd::task_isolated, and jaal's pool detaches isolated
+    // threads, so neither we nor anything else can wait on one directly.
+    // What jaal does instead is wait for the task to RETURN, inside its
+    // shutdown grace (kernel/pool.hpp). A cooperative task returns when it
+    // sees this flag, which is why setting it is load-bearing rather than a
+    // nicety.
+    //
+    // The previous comment here claimed "the walk runs on maya's worker
+    // pool, which owns and joins its own threads at teardown". That was
+    // wrong in the way that matters: jaal USED to ask isolated threads to
+    // stop and never wait for them at all, and this walk touches
+    // process-wide caches (and, in the symbols sibling, a static
+    // vector<std::regex>). The gap between "asked to stop" and "actually
+    // gone" is where a scan kept reading a static the CRT was destroying —
+    // an abort on Linux, 0xC0000005 on Windows, on ~every fast exit.
+    //
+    // Two things closed it, and both are load-bearing:
+    //   * jaal waits for isolated tasks now, bounded by the same grace.
+    //   * Host::release() trips this flag while the kernel is still
+    //     stopping, so the task has something to see BEFORE that wait
+    //     starts. Calling it only from main()'s teardown was one scope too
+    //     late: the grace expired on a scan nobody had told to stop.
+    //
+    // Still called from main()'s teardown as well, for the exit paths that
+    // never construct a Host, and because `agentty run` / acp / mcp-serve
+    // call the prewarm synchronously and have no kernel at all. Idempotent.
     request_prewarm_cancel();
 }
 
