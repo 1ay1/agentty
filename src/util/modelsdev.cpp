@@ -18,6 +18,7 @@
 #include "agentty/domain/catalog.hpp"   // set_catalog_reasoning / set_catalog_effort_set
 #include "agentty/io/http.hpp"
 #include "agentty/util/dbglog.hpp"
+#include "agentty/util/teardown.hpp"
 
 namespace agentty::modelsdev {
 
@@ -276,6 +277,23 @@ constexpr auto kStartDelay = std::chrono::seconds(5);
 
 void start_background_refresh(bool no_net) {
     auto& b = bg();
+    // Register the join with the teardown registry the moment a thread is
+    // about to exist, rather than relying on main() to know this subsystem
+    // is threaded. main()'s hand-written teardown list is the thing that
+    // misses one: settings_cache shipped with a join nobody called, and its
+    // worker sat joinable in a function-local static until ~std::thread
+    // terminated the process at exit.
+    //
+    // bg() is a function-local static that lives to process exit, so the
+    // callback can never outlive its target and needs no cancel(). Doing
+    // this inside the once-flag keeps it to one registration no matter how
+    // many times start_background_refresh is called.
+    static std::once_flag registered;
+    std::call_once(registered, [] {
+        util::teardown::on_shutdown("modelsdev.refresh",
+                                    [] { join_background_refresh(); });
+    });
+
     std::lock_guard lk(b.mu);
     if (b.th.joinable() || b.stop) return;
     b.no_net = no_net;

@@ -312,6 +312,7 @@ jobs:
       - name: Build race test set
         run: |
           cmake --build build-tsan -j"$(nproc)" --target race_harness_test
+          cmake --build build-tsan -j"$(nproc)" --target real_subsystem_race_test
           cmake --build build-tsan -j"$(nproc)" --target agentty_standalone_tests
       - name: Run under TSan
         env:

@@ -5,6 +5,7 @@
 #include "agentty/io/blob_store.hpp"
 #include "agentty/io/persistence.hpp"
 #include "agentty/util/logx.hpp"
+#include "agentty/util/teardown.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -226,6 +227,15 @@ constexpr auto kStartDelay = std::chrono::seconds(20);
 
 void start_background_gc() {
     auto& b = bg();
+    // Same reasoning as modelsdev: register the join where the thread is
+    // created, so main() never has to know this subsystem is threaded.
+    // bg() is a process-lifetime function-local static, so the callback
+    // cannot outlive its target and needs no cancel().
+    static std::once_flag registered;
+    std::call_once(registered, [] {
+        util::teardown::on_shutdown("blobs.gc", [] { join_background_gc(); });
+    });
+
     std::lock_guard lk(b.mu);
     if (b.th.joinable() || b.stop) return;
     try {

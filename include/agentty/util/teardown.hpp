@@ -30,6 +30,23 @@
 // depend on one registered earlier, so it is torn down first.
 //
 // `run()` is idempotent and safe to call when nothing registered.
+//
+// ── The rule, for anything that starts a thread ──────────────────────────
+//
+//     Register the join in the function that CREATES the thread,
+//     not in main().
+//
+// Wrap it in a `std::call_once` so repeated starts register once, and skip
+// `cancel()` only when the target is a process-lifetime static (the common
+// case: a function-local `Bg&`). Anything shorter-lived MUST cancel in its
+// destructor, or run() would call into freed memory.
+//
+// Adoption is partial, and deliberately visible here rather than implied:
+// settings_cache, modelsdev and blob_gc self-register; the remaining joins
+// in main() (workspace prewarm, symbol prewarm, persistence flush, ACP
+// agent release) are still spelled out by hand and should move here as
+// each is touched. tests/teardown_registration_test.cpp pins the ones that
+// have moved, so they cannot silently regress to the old arrangement.
 
 #include <cstddef>
 #include <cstdint>

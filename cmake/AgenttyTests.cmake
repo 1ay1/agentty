@@ -167,6 +167,11 @@ agentty_fold_test(form_edit_nav_test       TIMEOUT 30)
 agentty_fold_test(login_render_probe       TIMEOUT 30 ARGS)
 agentty_fold_test(settings_add_render_probe TIMEOUT 30 ARGS)
 agentty_fold_test(thread_delete_test       TIMEOUT 30)
+# Pins that every threaded subsystem registers its OWN join, instead of
+# main() keeping a hand-written list of them. That list already lost one
+# (settings_cache's worker sat joinable in a static until ~std::thread
+# terminated the process); this fails loudly instead.
+agentty_fold_test(teardown_registration_test TIMEOUT 60)
 agentty_fold_test(diff_review_test         TIMEOUT 30)
 agentty_fold_test(reveal_freeze_gate_probe TIMEOUT 30)
 # Regression for maya 54ad00d: the settled markdown tree outlives its widget
@@ -326,6 +331,20 @@ add_executable(race_harness_test EXCLUDE_FROM_ALL
 target_include_directories(race_harness_test PRIVATE include)
 add_test(NAME race_harness_test COMMAND race_harness_test)
 set_tests_properties(race_harness_test PROPERTIES TIMEOUT 120 LABELS "sanitizer;race")
+
+# real_subsystem_race_test: the same TSan lane, but driving the REAL shared
+# seams instead of hand-written models of them. race_harness_test exercises a
+# model of the snapshot cell / teardown registry / write-behind queue, which
+# catches a mistake in the PATTERN; this one links the actual translation
+# units, which catches a mistake in the CODE. The two drift apart otherwise,
+# and it is the code that ships.
+agentty_test(real_subsystem_race_test MODE raw LABELS sanitizer)
+add_executable(real_subsystem_race_test EXCLUDE_FROM_ALL
+    tests/real_subsystem_race_test.cpp src/util/teardown.cpp
+    src/util/logx.cpp src/util/dbglog.cpp)
+target_include_directories(real_subsystem_race_test PRIVATE include)
+add_test(NAME real_subsystem_race_test COMMAND real_subsystem_race_test)
+set_tests_properties(real_subsystem_race_test PROPERTIES TIMEOUT 120 LABELS "sanitizer;race")
 
 
 agentty_test(cred_crypt_test MODE raw LABELS sanitizer)
