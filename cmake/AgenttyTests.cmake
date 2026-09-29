@@ -178,6 +178,11 @@ agentty_fold_test(teardown_registration_test TIMEOUT 60)
 # into the TSan lane (see persistence_race_test below). The TSan lane gets
 # it through the narrow target instead.
 agentty_fold_test(seam_stress_test TIMEOUT 120)
+# Pins that a resumed thread leaves real history in native scrollback: the
+# rehydrate seed is wider than the live canvas, and the post-paint trim
+# COMMITS the difference rather than dropping it. Before this split, a
+# thread switch showed one turn with nothing scrollable above it.
+agentty_fold_test(rehydrate_scrollback_test TIMEOUT 60)
 agentty_fold_test(diff_review_test         TIMEOUT 30)
 agentty_fold_test(reveal_freeze_gate_probe TIMEOUT 30)
 # Regression for maya 54ad00d: the settled markdown tree outlives its widget

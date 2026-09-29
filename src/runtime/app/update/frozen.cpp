@@ -109,9 +109,15 @@ int estimate_wrap_cols() { return estimate_wrap_cols(term_dims().cols); }
 // survives only for the coarse text-byte POLICY estimates
 // (estimate_msg_rows), where ±2 columns is noise.
 
+}  // namespace
+
 // Live-canvas row budget = a small multiple of the terminal viewport,
 // derived from an explicit terminal-row count (see estimate_wrap_cols for
 // the one-snapshot rationale).
+//
+// NOT in the anonymous namespace: declared in internal.hpp so
+// rehydrate_scrollback_test can pin the live-vs-seed relationship at a
+// fixed row count. Same reasoning as estimate_msg_rows below.
 // The live m.ui.frozen vector IS the inline canvas; every full repaint
 // (resume swap, resize→HardReset re-emit, Ctrl-L) walks it top to bottom
 // and the user sees the paint. Older rows live on disk (recall via
@@ -128,6 +134,48 @@ std::size_t frozen_row_budget(int term_rows) {
     return static_cast<std::size_t>(std::max(48, term_rows * 3));
 }
 std::size_t frozen_row_budget() { return frozen_row_budget(term_dims().rows); }
+
+// How much transcript a RESUME paints, as opposed to how much stays live.
+//
+// These were one number, and conflating them cost the user their history.
+// The comment above is right that the LIVE canvas must stay ~3 viewports:
+// it is re-walked on every resize and Ctrl-L, and the user watches that
+// paint. But it also claimed the older rows were safe because they "live
+// on disk (recall via picker)" and, in trim_frozen_if_oversized, because
+// they were "committed to native scrollback when they overflowed live".
+//
+// Neither holds on a thread SWITCH. Nothing overflowed live — the thread
+// was just read off disk — and reset_inline() emits \x1b[3J first, which
+// wipes whatever native scrollback was there. Measured on a 3326-message
+// thread: the switch emitted one 3J and then 174 newlines. Everything
+// before the 82-row window was not rendered AND not scrollable. Scrolling
+// up showed nothing.
+//
+// So rehydrate seeds this WIDER window, and the existing trim immediately
+// walks it back down to frozen_row_budget(). That is not wasted work: the
+// trim's drop_front accrues each dropped block's paint-recorded height as
+// ScrollbackDebt, and harvest() mints the commit_scrollback token — the
+// same mechanism that puts live overflow into native scrollback. The rows
+// physically scroll off the top into the terminal's saved-lines, which is
+// exactly what makes them scrollable.
+//
+// Net effect: the live canvas is unchanged (so resize and Ctrl-L cost what
+// they cost today), and the user gets ~10 viewports of real, scrollable
+// history on a resumed thread instead of nothing.
+//
+// 10x rather than larger: the seed is a one-shot synchronous parse of the
+// kept window (settle_message_md per assistant message), and that is the
+// only part the user waits on. Measured at 82 rows the whole UI-thread
+// cost of a switch is 1.5 ms; this trades a few ms of it for the history.
+// Raising it further is a real cost with diminishing return — past ~10
+// screens nobody scrolls.
+std::size_t rehydrate_row_budget(int term_rows) {
+    const int rows = term_rows > 0 ? term_rows : 24;
+    return static_cast<std::size_t>(std::max(480, rows * 10));
+}
+std::size_t rehydrate_row_budget() { return rehydrate_row_budget(term_dims().rows); }
+
+namespace {
 
 // Inter-turn gap + compaction divider now come from the SHARED seam
 // header (agentty/runtime/view/thread/seam.hpp) — one definition site
@@ -769,7 +817,7 @@ void rehydrate_frozen(Model& m) {
     // the budget, cut INSIDE it at sub-turn granularity (keep the
     // trailing sub-turns that fit) so even a giant final auto-pilot run
     // resumes fast.
-    const std::size_t kRehydrateRowBudget = frozen_row_budget();
+    const std::size_t kRehydrateRowBudget = rehydrate_row_budget();
     std::size_t row_budget = 0;
     std::size_t start      = total;
     std::size_t cursor     = total;

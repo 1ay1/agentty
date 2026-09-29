@@ -262,6 +262,29 @@ void clear_frozen(Model& m);
 // it as a regression test.
 void restyle_sealed_turns(Model& m);
 
+// The two row budgets, and why they are two numbers.
+//
+// frozen_row_budget  the LIVE canvas: what stays in m.ui.frozen for
+//                    re-rendering. Every resize and Ctrl-L walks it top
+//                    to bottom and the user watches that paint, so it is
+//                    bounded to ~3 viewports.
+// rehydrate_row_budget  what a RESUME paints, ~10 viewports. The excess
+//                    over the live budget is not wasted: the post-paint
+//                    trim commits it to the terminal's native scrollback
+//                    (drop_front accrues ScrollbackDebt, harvest() mints
+//                    the commit token), which is what makes a resumed
+//                    thread's history scrollable at all.
+//
+// These were one number. On a thread switch that left the user with one
+// turn of context and nothing above it: nothing had overflowed live, so
+// nothing was in native scrollback, and reset_inline()'s \x1b[3J had just
+// wiped whatever was. Exported so rehydrate_scrollback_test can pin the
+// relationship at a fixed row count.
+[[nodiscard]] std::size_t frozen_row_budget(int term_rows);
+[[nodiscard]] std::size_t frozen_row_budget();
+[[nodiscard]] std::size_t rehydrate_row_budget(int term_rows);
+[[nodiscard]] std::size_t rehydrate_row_budget();
+
 // Settle one Assistant message's StreamingMarkdown widget: feed the
 // final bytes, finish() (flush tail → prefix, flip live_ off), apply the
 // same auto-fold preset cached_markdown_for uses, and stamp the cache
