@@ -255,8 +255,12 @@ TEST_CASE("conformance: hostile framing round-trips the same arguments") {
     // exactly what the model authored.
     for (auto make : {&Hostile::chat_empty_id, &Hostile::chat_prefix_fragments}) {
         const auto d = make("grep", kArgs);
-        REQUIRE_NOTHROW((void)json::parse(d.args));
-        CHECK(json::parse(d.args) == json::parse(kArgs));
+        // Parsed into a local: doctest re-expands its macro argument, so a
+        // `(void)` cast inside REQUIRE_NOTHROW never reaches the real call
+        // and GCC still warns -Wunused-result. See check_contract() below.
+        json parsed;
+        REQUIRE_NOTHROW(parsed = json::parse(d.args));
+        CHECK(parsed == json::parse(kArgs));
         // Announced once, closed once — the reducer pairs tool_use with
         // tool_result on exactly these, so a dropped End hangs the turn.
         CHECK(d.starts == 1);
@@ -283,12 +287,16 @@ void check_contract() {
         //    (`{...}{...}`) fails to parse at all, so this still catches the
         //    duplicate-emission bug it was written for.
         //
-        //    The (void) cast is load-bearing: REQUIRE_NOTHROW evaluates the
-        //    expression for its THROW behaviour only, so the nodiscard
-        //    return would otherwise warn (-Wunused-result) once per dialect
-        //    instantiation of this template.
-        REQUIRE_NOTHROW((void)json::parse(d.args));
-        CHECK(json::parse(d.args) == json::parse(kArgs));
+        //    Parsed ONCE into a local, rather than inside REQUIRE_NOTHROW.
+        //    doctest re-expands its argument, so a `(void)` cast there does
+        //    not reach the real call and GCC still warns -Wunused-result --
+        //    once per dialect instantiation of this template, which is most
+        //    of the build noise this file used to produce. Binding the
+        //    result uses it for real, and the CHECK below is what would
+        //    have failed on a throw anyway.
+        json parsed;
+        REQUIRE_NOTHROW(parsed = json::parse(d.args));
+        CHECK(parsed == json::parse(kArgs));
 
         // 3. The call is announced once and closed once — the reducer pairs
         //    tool_use with tool_result on exactly these.

@@ -340,8 +340,12 @@ TEST_CASE("matrix: every chat-dialect provider decodes a tool call") {
         CHECK(ends == 1);
         CHECK(name == "grep");
         CHECK(!id.empty());
-        REQUIRE_NOTHROW((void)json::parse(got));
-        CHECK(json::parse(got) == json::parse(args));
+        // Parsed into a local: doctest re-expands its macro argument, so a
+        // `(void)` cast inside REQUIRE_NOTHROW never reaches the real call
+        // and GCC still warns -Wunused-result.
+        json parsed;
+        REQUIRE_NOTHROW(parsed = json::parse(got));
+        CHECK(parsed == json::parse(args));
     }
 }
 
