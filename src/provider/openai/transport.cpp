@@ -3127,6 +3127,39 @@ std::shared_mutex& probe_opt_in_mu() {
                 if (!row.is_object()) continue;
                 const std::string id = row.value("key", std::string{});
                 if (id.empty()) continue;
+
+                // Declared capability, recorded BEFORE the loaded-instance
+                // check below returns early.
+                //
+                // This row is the only place LM Studio states what a model
+                // can do:
+                //
+                //     "capabilities": {"vision": true,
+                //                      "trained_for_tool_use": true,
+                //                      "reasoning": {"default": "on", ...}}
+                //
+                // The /v1 shim's rows carry no such object, so without this
+                // every LM Studio model falls through resolved_caps() to
+                // the id-inference rung — a heuristic tuned for hosted
+                // naming (`:7b` tags, known family prefixes) that cannot
+                // read a `publisher/model` key. Reasoning support ended up
+                // decided by filename.
+                //
+                // Deliberately ABOVE the `loaded_instances` early-continue:
+                // capability is a property of the MODEL and is knowable
+                // while it is unloaded, unlike the runtime window, which is
+                // a property of the instance and is not. Recording it here
+                // means the picker shows the right affordances before the
+                // first load rather than after it.
+                if (const auto ci = row.find("capabilities");
+                    ci != row.end() && ci->is_object()) {
+                    // Endpoint-scoped, like every other catalog write: the
+                    // same key on another host may have a different build.
+                    const std::string scoped = ep.label + "/" + id;
+                    if (const auto reasons = dialect::declared_reasoning()(*ci))
+                        set_catalog_reasoning(scoped, *reasons);
+                }
+
                 const auto li = row.find("loaded_instances");
                 if (li == row.end() || !li->is_array()) continue;
                 // Several instances of one model can be loaded at different
@@ -3428,22 +3461,31 @@ std::vector<ModelInfo> list_models(const AuthHeader& auth, const Endpoint& endpo
                 // none of which an agent can drive. Drop them so they never
                 // pollute the picker OR get chosen by the subagent router.
                 if (!is_dispatchable_model(id)) continue;
-                // Providers that DECLARE per-model reasoning support in the
-                // catalog (Mistral: capabilities.reasoning) get that truth
-                // recorded — resolved_caps() folds it in over id inference,
-                // so the effort ladder tracks the provider's live dispatch
-                // table instead of our static guesses (which drift: dated
-                // mistral-medium revisions reject reasoning_effort while
-                // magistral now accepts it).
-                if (auto ci = m.find("capabilities");
-                    ci != m.end() && ci->is_object()
-                    && ci->contains("reasoning")
-                    && (*ci)["reasoning"].is_boolean()) {
+                // Providers that DECLARE per-model capability in the
+                // catalog get that truth recorded — resolved_caps() folds
+                // it in OVER id inference, so the effort ladder tracks the
+                // server's live dispatch table instead of our static
+                // guesses (which drift: dated mistral-medium revisions
+                // reject reasoning_effort while magistral now accepts it).
+                //
+                // Read through the dialect table, not by hand. Two shapes
+                // exist in the wild — Mistral's plain bool and LM Studio's
+                // object — and this call site used to test is_boolean()
+                // and skip anything else. That silently dropped EVERY LM
+                // Studio model onto the id-inference rung, which is a
+                // heuristic over hosted naming conventions and cannot
+                // classify a `publisher/model` key. Reasoning support was
+                // then decided by filename. dialect::declared_reasoning()
+                // states both spellings in one place; a third server adds
+                // a line there, not a branch here.
+                if (const auto ci = m.find("capabilities");
+                    ci != m.end() && ci->is_object()) {
                     // Provider-scoped key: the same bare id on another host
                     // (gpt-oss on Groq vs Cerebras) may have a different
                     // contract, so never let one host's declaration bleed.
-                    set_catalog_reasoning(endpoint.label + "/" + id,
-                                          (*ci)["reasoning"].get<bool>());
+                    const std::string scoped = endpoint.label + "/" + id;
+                    if (const auto reasons = dialect::declared_reasoning()(*ci))
+                        set_catalog_reasoning(scoped, *reasons);
                 }
                 result.push_back(ModelInfo{
                     .id           = ModelId{id},

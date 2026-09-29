@@ -120,6 +120,14 @@ template <class T>
         if constexpr (std::is_same_v<T, std::string>) {
             if (!it->is_string()) return std::nullopt;
             return it->template get<std::string>();
+        } else if constexpr (std::is_same_v<T, bool>) {
+            // BEFORE the integral arm: std::is_integral_v<bool> is TRUE, so
+            // a bool would otherwise be tested with is_number_integer() and
+            // rejected — `"reasoning": true` reads as "absent", which is
+            // indistinguishable from a provider that never declared it.
+            // Strict: only a real JSON boolean, never 0/1 or "true".
+            if (!it->is_boolean()) return std::nullopt;
+            return it->template get<bool>();
         } else if constexpr (std::is_integral_v<T>) {
             if (!it->is_number_integer()) return std::nullopt;
             return it->template get<T>();
@@ -145,6 +153,32 @@ template <class T>
             if (v && !v->empty()) return v;
             return std::nullopt;
         }};
+}
+
+// ── truthy_object : Lens<bool> ───────────────────────────────────────────
+// Observe "this capability object is PRESENT" as a boolean true.
+//
+// Some servers declare a capability as a bare bool, others as an object
+// describing how to use it, and the object's mere presence is the claim:
+//
+//     "reasoning": true                                   Mistral
+//     "reasoning": {"allowed_options":["off","on"],       LM Studio
+//                   "default":"on"}
+//
+// A model that cannot reason omits the key entirely, so there is nothing to
+// read INSIDE the object to answer yes/no — presence is the answer. This
+// composes with `key<bool>` under `|` so a table states both spellings as
+// one expression instead of branching on is_boolean() at a call site.
+//
+// Empty object = present but says nothing; treated as a declaration, since
+// a server that meant "no" would omit the key.
+[[nodiscard]] inline Lens<bool> truthy_object(std::string name) {
+    return Lens<bool>{[name = std::move(name)](const Json& j) -> std::optional<bool> {
+        if (!j.is_object()) return std::nullopt;
+        const auto it = j.find(name);
+        if (it == j.end() || !it->is_object()) return std::nullopt;
+        return true;
+    }};
 }
 
 // ── under : (key, Lens<T>) → Lens<T> ─────────────────────────────────────

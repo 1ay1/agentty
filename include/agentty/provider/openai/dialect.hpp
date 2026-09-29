@@ -145,4 +145,67 @@ inline const Lens<int>& model_context_window_flat() {
     return l;
 }
 
+// ── declared reasoning support, from a /models row ───────────────────────
+//
+// Whether a model CAN reason, as the server itself declares it — distinct
+// from reasoning_delta() above, which reads the thinking TEXT off a stream.
+// This is the fact that decides whether agentty offers an effort ladder and
+// whether it sends `reasoning_effort` at all.
+//
+// It matters most for LOCAL servers. resolved_caps() resolves capability as
+//
+//     per-model override  >  env  >  live catalog  >  id inference
+//
+// and the id-inference rung is a heuristic over hosted naming conventions
+// (`:7b` tags, known family prefixes). A llama.cpp server reports GGUF
+// filenames and an LM Studio server reports `publisher/model` keys, so that
+// rung is close to useless there — which is exactly why the catalog rung
+// has to be filled from what the server says.
+//
+// Two spellings observed:
+//
+//   "reasoning": true                    Mistral's /v1/models. A plain bool.
+//   "reasoning": {"allowed_options":     LM Studio's /api/v1/models
+//                   ["off","on"],        (documented in its REST reference;
+//                 "default":"on"}        a model with NO reasoning support
+//                                        omits the key entirely).
+//
+// The object form is why LM Studio silently got no reasoning: the reader
+// tested is_boolean() and skipped anything else, so every LM Studio model
+// fell through to id inference and was classified by its filename.
+//
+// Presence of the object IS the declaration — a model that cannot reason
+// has no `reasoning` key at all, so `allowed_options` never needs parsing
+// to answer the yes/no question. (What the ladder should be is a separate
+// question; see declared_reasoning_default below.)
+inline const Lens<bool>& declared_reasoning() {
+    static const Lens<bool> l =
+          key<bool>("reasoning")                       // Mistral: plain bool
+        | truthy_object("reasoning");                  // LM Studio: object
+    return l;
+}
+
+// Whether a model that CAN reason has it on by default.
+//
+// LM Studio's object carries `"default": "on" | "off"`. A model whose
+// default is "off" still supports reasoning — it just needs asking — so
+// this is deliberately separate from declared_reasoning() rather than
+// folded into it.
+inline const Lens<std::string>& declared_reasoning_default() {
+    static const Lens<std::string> l =
+        under("reasoning", key<std::string>("default"));
+    return l;
+}
+
+// ── declared tool support, from a /models row ────────────────────────────
+//
+// LM Studio's capability object again (`trained_for_tool_use`). Named for
+// what it is: the model was TRAINED for tool use, which is a stronger claim
+// than "the server will accept a tools array" — llama.cpp will accept one
+// for any model and let it fail at generation time.
+inline const Lens<bool>& declared_tool_use() {
+    static const Lens<bool> l = key<bool>("trained_for_tool_use");
+    return l;
+}
+
 } // namespace agentty::provider::openai::dialect

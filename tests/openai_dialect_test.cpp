@@ -251,3 +251,83 @@ TEST_CASE("Observed: the PR-53 failure mode, as a type") {
     // And the two genuinely disagree, which is the fact that matters.
     CHECK(row_claims.value != probe_saw.value);
 }
+
+// ── declared capability: the two spellings of "this model can reason" ────
+//
+// The fact that decides whether agentty offers an effort ladder and sends
+// `reasoning_effort` at all. resolved_caps() resolves it as
+//
+//     per-model override  >  env  >  live catalog  >  id inference
+//
+// and these fixtures are what fill the CATALOG rung for a local server.
+// Without them a llama.cpp / LM Studio model falls through to id
+// inference — a heuristic over hosted naming (`:7b` tags, known family
+// prefixes) that cannot classify a GGUF filename or a `publisher/model`
+// key, so reasoning support ends up decided by filename.
+
+TEST_CASE("Observed: Mistral declares reasoning as a bare bool") {
+    // /v1/models row, Mistral (the shape the reader was originally written
+    // for). Both polarities matter: `false` is a real declaration that the
+    // model CANNOT reason, and must not read as "absent".
+    CHECK(oa::dialect::declared_reasoning()(json::parse(R"({"reasoning":true})"))
+              == std::optional<bool>{true});
+    CHECK(oa::dialect::declared_reasoning()(json::parse(R"({"reasoning":false})"))
+              == std::optional<bool>{false});
+}
+
+TEST_CASE("Observed: LM Studio declares reasoning as an OBJECT") {
+    // GET /api/v1/models, LM Studio's native API (documented in its REST
+    // reference). A model that cannot reason OMITS the key entirely, so the
+    // object's presence is the declaration — there is nothing inside it to
+    // read for the yes/no question.
+    //
+    // THE BUG THIS PINS: the reader used to require is_boolean() and skip
+    // anything else, so every LM Studio model silently fell through to id
+    // inference.
+    const auto on = json::parse(
+        R"({"vision":true,"trained_for_tool_use":true,
+            "reasoning":{"allowed_options":["off","on"],"default":"on"}})");
+    CHECK(oa::dialect::declared_reasoning()(on) == std::optional<bool>{true});
+
+    // default:"off" still means SUPPORTED — it just needs asking. The
+    // ladder default is a separate observation, deliberately not folded
+    // into the yes/no.
+    const auto off = json::parse(
+        R"({"reasoning":{"allowed_options":["off","on"],"default":"off"}})");
+    CHECK(oa::dialect::declared_reasoning()(off) == std::optional<bool>{true});
+    CHECK(oa::dialect::declared_reasoning_default()(off)
+              == std::optional<std::string>{"off"});
+}
+
+TEST_CASE("Observed: no reasoning key is ABSENT, not false") {
+    // The distinction the catalog depends on. "Absent" leaves the rung
+    // empty so id inference still gets a say; "false" would overwrite it
+    // with a claim the server never made.
+    CHECK(!oa::dialect::declared_reasoning()(json::parse(R"({"vision":true})")));
+    CHECK(!oa::dialect::declared_reasoning()(json::parse(R"({})")));
+}
+
+TEST_CASE("key<bool> reads a JSON boolean, not an integer") {
+    // Regression: std::is_integral_v<bool> is TRUE, so `key<bool>` fell into
+    // the integral arm and tested is_number_integer() — which is false for a
+    // real JSON bool. Every `"reasoning": true` read as ABSENT, which is
+    // exactly the failure this whole table exists to prevent, and it would
+    // have broken Mistral while fixing LM Studio.
+    CHECK(oa::key<bool>("x")(json::parse(R"({"x":true})")) == std::optional<bool>{true});
+    CHECK(oa::key<bool>("x")(json::parse(R"({"x":false})")) == std::optional<bool>{false});
+    // Strict: 0/1 and "true" are NOT booleans. A server that means a bool
+    // sends a bool; anything else is a different field shape and should
+    // fall through to the next lens in the chain rather than be coerced.
+    CHECK(!oa::key<bool>("x")(json::parse(R"({"x":1})")));
+    CHECK(!oa::key<bool>("x")(json::parse(R"({"x":"true"})")));
+}
+
+TEST_CASE("Observed: LM Studio declares tool training") {
+    // Same capability object. Named for what it claims: the model was
+    // TRAINED for tool use — stronger than "the server accepts a tools
+    // array", which llama.cpp will do for any model and let fail at
+    // generation time.
+    const auto caps = json::parse(R"({"trained_for_tool_use":true,"vision":false})");
+    CHECK(oa::dialect::declared_tool_use()(caps) == std::optional<bool>{true});
+    CHECK(!oa::dialect::declared_tool_use()(json::parse(R"({"vision":true})")));
+}
