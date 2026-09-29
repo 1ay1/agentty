@@ -1022,8 +1022,26 @@ int main(int argc, char** argv) {
     // stays correct as subsystems are added — nobody has to update a list.
     struct TeardownGuard {
         ~TeardownGuard() {
-            // Before util::teardown::run(): these walks log through logx,
-            // whose worker is one of the registered teardowns.
+            // These four run on EVERY exit path, not just the normal one.
+            //
+            // They used to sit inline after jaal::run() returns, which covers
+            // a clean quit and nothing else: an early `return` from a
+            // subcommand, a failed Screen::open, or an exception unwinding
+            // main() all skipped them and left a background thread running
+            // into CRT/OpenSSL/mimalloc atexit teardown. That is the
+            // 0xC0000005 the MSYS2 pipe-stdin smoke test hits
+            // intermittently: `type NUL | agentty.exe` closes stdin before
+            // the TUI has drawn, so the prewarm dial and the workspace walks
+            // are still starting up while main() is already on its way out.
+            // Whether it faults depends on who wins, which is why it fails
+            // maybe one run in three on byte-identical code.
+            //
+            // Order matters: stop the workers that LOG before running the
+            // registry, because logx's own worker is one of the registered
+            // teardowns.
+            http::default_client().join_prewarm();
+            join_workspace_prewarm();
+            join_workspace_symbols_prewarm();
             modelsdev::join_background_refresh();
             blobs::join_background_gc();
             util::teardown::run();
@@ -1854,33 +1872,22 @@ int main(int argc, char** argv) {
     // the second Ctrl-C.
     mcp::release_servers();
 
-    // Stop the RAG retriever's background warm NOW, not at static destruction.
-    // Its warm worker (a jthread that embeds the whole corpus) is otherwise
-    // joined when the function-local `static Retriever` in mcp_tools_backends
-    // is destroyed AFTER main returns — blocking ^C for 4–10 s on a large
-    // corpus. rag_shutdown() trips the cooperative cancel flag + joins the
-    // now-interruptible worker, so exit stays instant.
+    // The fast-exit joins (TLS prewarm dial, the workspace `@`/`#` walks,
+    // the modelsdev refresh, the blob GC) live in TeardownGuard's destructor
+    // at the top of main(), so they run on EVERY exit path rather than only
+    // this one. See the comment there for the 0xC0000005 they defend
+    // against.
+    //
+    // rag_shutdown() stays here, and BEFORE the guard fires: its warm worker
+    // is a jthread on a function-local static that would otherwise only be
+    // joined after main() returns, blocking ^C for 4-10 s on a large corpus.
+    // Tripping it now keeps exit instant.
     tools::rag_shutdown();
 
-    // Join any in-flight TLS prewarm dial BEFORE the process tears down. On a
-    // fast exit (e.g. immediate pipe-stdin EOF under MSYS2/mintty) the detached
-    // dial would otherwise still be inside SSL_connect when the CRT/OpenSSL
-    // static state is freed, corrupting the heap (Windows 0xC0000374). Trips
-    // the dial's cancel token then joins; a no-op if no prewarm ran.
-    http::default_client().join_prewarm();
-
-    // Same fast-exit race for the workspace `@`/`#` prewarms: init() kicks a
-    // filesystem walk and a symbol scan on background threads. On an immediate
-    // pipe-EOF exit (MSYS2/mintty smoke test) they'd still be running when the
-    // CRT/mimalloc atexit handlers free their captured state — a use-after-
-    // free that faults on Windows (0xC0000005). Join them before teardown.
-    join_workspace_prewarm();
-    join_workspace_symbols_prewarm();
-    // The modelsdev refresh (http call to models.dev): same race, same fault.
-    modelsdev::join_background_refresh();
-    // And the blob GC (io/blob_gc): same race, same fault. Joined before
-    // the persistence flush below so the two never walk the threads dir
-    // at once during shutdown.
+    // Join the blob GC before the flush below: both walk the threads dir,
+    // and letting them overlap during shutdown is the race this ordering
+    // exists to prevent. The guard would join it too, but that runs AFTER
+    // this function body — too late for the flush.
     blobs::join_background_gc();
 
     // Drain the async persistence queue. The Quit reducer arm enqueues

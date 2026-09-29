@@ -519,19 +519,45 @@ jobs:
           # `type NUL` writes zero bytes then closes its pipe end. agentty must
           # select its pipe-terminal implementation, observe EOF/hangup, and
           # exit normally — no hidden console, MSYS shell shim, or NUL device.
+          #
+          # Run it several times. This has failed INTERMITTENTLY with
+          # 0xC0000005 (access violation) on byte-identical code — run
+          # 36416000161 passed and 36545165818 crashed with only a version
+          # bump between them — so a single attempt cannot tell "works" from
+          # "happened to win the race this time". A startup/teardown race on
+          # the pipe path is the live hypothesis; N attempts make it show up
+          # on the run that introduces it rather than three merges later.
           $cmd = 'type NUL | "' + $bin + '"'
-          & cmd.exe /d /s /c $cmd 1>smoke.out 2>smoke.err
-          $rc = $LASTEXITCODE
-          Write-Host "exit=$rc"
-          Write-Host '----- stdout (head) -----'
-          if (Test-Path smoke.out) { Get-Content smoke.out -TotalCount 50 }
-          Write-Host '----- stderr -----'
-          if (Test-Path smoke.err) { Get-Content smoke.err }
-          if ($rc -ne 0) {
-            Write-Error "agentty exited non-zero ($rc) on a native pipe stdin"
+          $attempts = 5
+          $failures = @()
+          for ($i = 1; $i -le $attempts; $i++) {
+            & cmd.exe /d /s /c $cmd 1>smoke.out 2>smoke.err
+            $rc = $LASTEXITCODE
+            # Windows reports a crash as a negative NTSTATUS. Name the common
+            # ones: an exit code alone sends you reading kernel docs.
+            $why = switch ($rc) {
+              0           { 'ok' }
+              -1073741819 { 'CRASH 0xC0000005 access violation' }
+              -1073741571 { 'CRASH 0xC00000FD stack overflow' }
+              -1073740791 { 'CRASH 0xC0000409 stack buffer overrun' }
+              -1073741510 { 'CRASH 0xC000013A interrupted (ctrl-c)' }
+              default     { "exit $rc" }
+            }
+            Write-Host "attempt ${i}/${attempts}: $why"
+            if ($rc -ne 0) {
+              $failures += "attempt ${i}: $why"
+              Write-Host '----- stdout (head) -----'
+              if (Test-Path smoke.out) { Get-Content smoke.out -TotalCount 50 }
+              Write-Host '----- stderr -----'
+              if (Test-Path smoke.err) { Get-Content smoke.err }
+            }
+          }
+          if ($failures.Count -gt 0) {
+            Write-Error ("agentty failed $($failures.Count)/$attempts pipe-stdin launches:`n" +
+                         ($failures -join "`n"))
             exit 1
           }
-          Write-Host 'smoke test passed: launched and exited cleanly under a native pipe'
+          Write-Host "smoke test passed: $attempts/$attempts clean launches under a native pipe"
 
   # Bounded fuzz smoke of the mcp-cpp harnesses (fuzz/). libFuzzer needs Clang,
   # which ubuntu-latest doesn't ship by default; the harnesses double as a
