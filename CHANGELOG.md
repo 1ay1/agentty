@@ -4,6 +4,19 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.14] - 2026-09-28
+
+Runtime hardening. The jaal runtime underneath agentty now catches a whole
+class of silent optional-hook bugs at compile time instead of at first
+user-visible symptom.
+
+### Fixed
+- **A hook whose signature drifted was silently absent, not a compile error.** jaal detects every optional program hook with a requires-test, so a hook it can't call reads as "this program has no such hook" — twice this shipped as a bug: `AgenttyApp::init` kept the old `pair<Model,Cmd> init()` shape instead of the new `Cmd init(Model&)` and the kernel value-initialised a blank Model, discarding every setting and thread `init()` had just loaded; and maya's `terminal_host::attach` was written against a base host_context, so a derived host in agentty never had its attach called at all. Both are now `static_assert`s naming the exact hook that drifted.
+
+### Internal
+- `jaal::host_context` is keyed on the program's event type rather than on the host class, so a derived host inherits the base's `attach` / `on_ready` overloads correctly.
+- `jaal::declares_init` / `declares_subscribe` / `declares_subs_key` / `declares_view` / `declares_visual_hash` / `declares_needs_warmup` probes plus a consteval `check_hooks<P>()` that pairs each `declares_` with the shape concept and fires a targeted static_assert on mismatch. Wired into `kernel::start()` and the host attach path, with compile-fail tests for each hook.
+
 ## [0.9.13] - 2026-09-27
 
 Diagnostics. Fewer knobs, more of them documented, and a headless run you
