@@ -172,6 +172,12 @@ agentty_fold_test(thread_delete_test       TIMEOUT 30)
 # (settings_cache's worker sat joinable in a static until ~std::thread
 # terminated the process); this fails loudly instead.
 agentty_fold_test(teardown_registration_test TIMEOUT 60)
+# seam_stress_test: the process-wide seams (provider selection, the tool
+# catalog, the capability registry) driven from many threads at once. NOT
+# labelled `race` — it folds, and a label inside the fold drags all 375 TUs
+# into the TSan lane (see persistence_race_test below). The TSan lane gets
+# it through the narrow target instead.
+agentty_fold_test(seam_stress_test TIMEOUT 120)
 agentty_fold_test(diff_review_test         TIMEOUT 30)
 agentty_fold_test(reveal_freeze_gate_probe TIMEOUT 30)
 # Regression for maya 54ad00d: the settled markdown tree outlives its widget
@@ -387,6 +393,23 @@ target_compile_definitions(persistence_race_test_narrow PRIVATE
     AGENTTY_MCP=0 AGENTTY_VERSION="${PROJECT_VERSION}")
 add_test(NAME persistence_race_test_narrow COMMAND persistence_race_test_narrow)
 set_tests_properties(persistence_race_test_narrow PROPERTIES TIMEOUT 120 LABELS "race")
+
+# NOTE: seam_stress_test gets no narrow TSan target, on purpose.
+#
+# The seams it drives — provider::select/active, the tool catalog, the
+# capability registry — are the ones the whole app converges on, so they
+# transitively need auth, accounts, the keystore, cred_crypt, the vault and
+# the HTTP client. A "narrow" build of it is most of the fold with extra
+# steps, and the stub file needed to fake that chain would be large enough
+# to be its own maintenance hazard (and would fake exactly the code whose
+# locking is under test).
+#
+# So it runs UNINSTRUMENTED in the normal suite, where its assertions (no
+# torn Selection, no malformed snapshot) still hold, and TSan coverage of
+# these seams comes from real_subsystem_race_test, which drives the same
+# publish/consume shapes through narrow TUs. If that stops feeling like
+# enough, the move is to give the TSan lane the fold and accept the cost —
+# not to stub out the subsystem being tested.
 
 
 agentty_test(cred_crypt_test MODE raw LABELS sanitizer)

@@ -15,6 +15,28 @@
 # deliberate act: it says someone checked by hand that the raw primitive IS
 # the implementation of a safe thing, not a shortcut around one.
 #
+# WHAT THIS BUYS, HONESTLY. jaal grades its guarantees (concurrency.md §6):
+# Level A is "the bug cannot be written", B is "a tool catches it", C is
+# "convention". Everything on this list is Level B. A file here has been
+# READ and judged correct; nothing stops the next edit to it from adding a
+# second lock and an inversion. jaal's guarded<T> would make that Level A
+# (a second lock cannot be named inside with()/read()), and agentty uses it
+# in zero places — 44 files hold a raw std::mutex instead.
+#
+# That is a deliberate position, not an oversight: most of these locks guard
+# a process-wide cache read from CLI paths that have no kernel in scope, and
+# guarded<T> binds to one. But it means the list is a promise to keep
+# checking, not a proof. Two things keep it honest:
+#
+#   tests/seam_stress_test.cpp   drives the process-wide seams (provider
+#                                selection, tool catalog, capability
+#                                registry) from many threads under TSan.
+#   allowlist_tight_*            fails the build when an entry outlives the
+#                                code that justified it.
+#
+# When a file here gains a SECOND mutex, that is the moment to reach for
+# guarded<T> or an owner thread instead of extending the grant.
+#
 # Paths are relative to src/ (the check runs once per scanned root).
 
 # ── Owned background workers ─────────────────────────────────────────────
