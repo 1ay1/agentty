@@ -39,11 +39,19 @@ int main(int argc, char** argv) {
     // themselves — this is only the default floor. AGENTTY_UNDER_TEST
     // additionally arms the tripwire in util/user_root.cpp, which aborts
     // if anything ever reaches the real root despite this.
+    //
+    // REMOVED on the way out. This used to leak: one directory per process,
+    // and ctest runs this binary once per test case, so a single full suite
+    // left ~1150 of them behind. Found the hard way — /tmp is a 16 GB tmpfs
+    // here and it hit 100% with 89,373 `agentty_tests_home_*` directories,
+    // which then failed an unrelated BUILD with "No space left on device".
+    // A test harness must not need a janitor.
+    namespace fs = std::filesystem;
+    fs::path sandbox;
     {
-        namespace fs = std::filesystem;
         const auto stamp = std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
-        const auto sandbox = fs::temp_directory_path() /
+        sandbox = fs::temp_directory_path() /
             ("agentty_tests_home_" + std::to_string(stamp));
         std::error_code ec;
         fs::create_directories(sandbox, ec);
@@ -55,6 +63,24 @@ int main(int argc, char** argv) {
         ::setenv("AGENTTY_UNDER_TEST", "1", 1);
 #endif
     }
+    // Sweep any sandbox an EARLIER run abandoned (a crash or a SIGKILL skips
+    // the cleanup below, and those are exactly the runs worth investigating
+    // — so this only removes directories older than a day, never a sibling
+    // ctest worker's live one).
+    {
+        std::error_code ec;
+        const auto now = fs::file_time_type::clock::now();
+        for (fs::directory_iterator it(fs::temp_directory_path(), ec), end;
+             !ec && it != end; it.increment(ec)) {
+            const auto name = it->path().filename().string();
+            if (!name.starts_with("agentty_tests_home_")) continue;
+            std::error_code sec;
+            const auto mt = fs::last_write_time(it->path(), sec);
+            if (sec || now - mt < std::chrono::hours(24)) continue;
+            std::error_code rec;
+            fs::remove_all(it->path(), rec);
+        }
+    }
     // Pin the animation clock for the whole binary. Several render/seam tests
     // (midrun_*, turn_settle, reveal) drive frames synchronously and assert on
     // committed-scrollback stability; they require maya::anim_now_ms() frozen
@@ -62,5 +88,12 @@ int main(int argc, char** argv) {
     // Harmless for tests that don't read it. Formerly each such test froze it
     // in its own main(); with one shared binary we do it once here.
     maya::testing::freeze_anim_clock();
-    return doctest::Context(argc, argv).run();
+    const int rc = doctest::Context(argc, argv).run();
+    // Best-effort: a leaked sandbox is a slow leak, a failed remove is not
+    // worth failing a green suite over.
+    if (!sandbox.empty()) {
+        std::error_code ec;
+        fs::remove_all(sandbox, ec);
+    }
+    return rc;
 }
