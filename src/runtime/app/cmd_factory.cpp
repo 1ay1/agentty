@@ -2019,19 +2019,51 @@ Cmd kick_pending_tools(Model& m) {
             //
             //   • RUNAWAY step cap (25 tool turns) — NOT something production
             //     tools impose on a capable model: Claude Code's max_turns is
-            //     UNLIMITED by default, aider never step-caps. So it's enforced
-            //     ONLY for weak local models (qwen2.5-coder/codellama on the
-            //     Ollama native path) that doom-loop without a completion
-            //     signal. Claude (Kind::Anthropic) and capable hosted models
-            //     run as long as the task legitimately needs.
+            //     UNLIMITED by default, aider never step-caps. So it is not
+            //     applied to a model we have positive evidence is capable.
+            //
+            //     "Capable" means KNOWN capable, not "unrecognised". That
+            //     polarity used to be inverted: the cap was enforced only
+            //     for `is_weak_model(id)`, an id heuristic tuned for hosted
+            //     and Ollama naming (`:7b` tags, known family prefixes). A
+            //     llama.cpp server reports GGUF filenames and LM Studio
+            //     reports `publisher/model` keys, so the heuristic says
+            //     "not weak" for essentially every local model — and the
+            //     LESS agentty knew about a model, the LESS protection it
+            //     got. Measured: qwen3-30b-a3b, gpt-oss-20b,
+            //     GLM-4.6-Q4_K_M.gguf all classify not-weak, so an
+            //     unbounded loop on a local server ran with no step cap at
+            //     all. That is the "trips and loops forever in tool calls"
+            //     report, and the same shape was seen before with
+            //     `igpu/laguna-xs-2.1` behind a private gateway at 80 turns.
+            //
+            //     Now: skip the cap when the provider row is a KNOWN hosted
+            //     backend (Anthropic, OpenAI proper, the preset rows) —
+            //     those are the capable models the exemption was written
+            //     for. An unrecognised endpoint gets the cap, because 25
+            //     tool turns with no text answer is not a working agent
+            //     loop on any model, and a wrong cap costs one nudge
+            //     message while a missing one costs the user's afternoon.
             //
             // If a cap trips, DON'T re-stream: surface the nudge as the run's
             // final assistant turn and drop to Idle so the loop ends in seconds
             // instead of spinning until the user hits Esc. The nudge also lands
             // in history, so a follow-up shows the model why it stopped.
-            const bool weak_step_cap =
-                provider::active().kind == provider::Kind::OpenAI
-                && is_weak_model(m.d.model_id.value);
+            const bool weak_step_cap = [&] {
+                const auto sel = provider::active();
+                // Not the OpenAI-compat wire at all (Anthropic, ACP): the
+                // original exemption, unchanged.
+                if (sel.kind != provider::Kind::OpenAI) return false;
+                // A custom host has no registry row. We cannot vouch for it,
+                // so it gets the backstop.
+                if (sel.row == nullptr) return true;
+                // A preset row that talks to someone else's hosted service
+                // is a known-capable backend. A row for a LOCAL server is
+                // not — cap it unless the id heuristic recognises the model
+                // as one of the capable ones.
+                if (sel.row->is_local) return true;
+                return is_weak_model(m.d.model_id.value);
+            }();
             if (auto brk = agent_loop_should_break(m.d.current.messages,
                                                    /*enforce_step_cap=*/weak_step_cap)) {
                 m.s.phase = phase::Idle{};

@@ -2525,10 +2525,31 @@ json build_request_body(const Request& req) {
     // that can't (or must not) take it — e.g. Mistral MAGISTRAL reasons
     // natively and REJECTS reasoning_effort (422), so the catalog excludes
     // it and effort arrives empty here. So this needs no capability
-    // re-check. Hosted TLS only; local servers reject the field. NOTE:
-    // reasoning TEXT still streams for excluded models — the response-side
-    // reasoning handler is unconditional (see handle_delta).
-    if (req.endpoint.use_tls && !req.effort.empty())
+    // re-check. NOTE: reasoning TEXT still streams for excluded models —
+    // the response-side reasoning handler is unconditional (see
+    // handle_delta).
+    //
+    // NOT gated on use_tls, i.e. not on "is this a hosted server".
+    //
+    // It used to be, with the reason "local servers reject the field".
+    // That was true of the server it was written for and false in general:
+    //
+    //   • Ollama, the one that does reject it, uses the NATIVE /api/chat
+    //     branch above and returns before this line. It was never reachable
+    //     for the server the guard names.
+    //   • llama.cpp documents --reasoning-effort and accepts the request
+    //     field. So did the guard: it dropped the user's per-turn choice
+    //     silently, leaving the server's command-line default as the only
+    //     channel that worked. That is the "forcing server side sorta
+    //     works" in the bug report.
+    //
+    // What guards this now is the thing that should: `req.effort` is only
+    // non-empty when resolved_caps() says the model takes an effort ladder,
+    // and for a local server that answer now comes from the server's own
+    // declaration (see declared_reasoning in dialect.hpp) rather than a
+    // filename heuristic. Transport encryption was never evidence about a
+    // model's capabilities.
+    if (!req.effort.empty())
         body["reasoning_effort"] = req.effort;
 
     return body;

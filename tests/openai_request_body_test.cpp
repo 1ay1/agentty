@@ -147,10 +147,36 @@ TEST_CASE("body: reasoning_effort is gated, never assumed") {
     gated.effort = "";
     CHECK(!oa::build_request_body(gated).contains("reasoning_effort"));
 
-    // Local servers reject it outright.
+    // A LOCAL server gets it too. This used to assert the opposite —
+    // "local servers reject it outright" — which was true of the server it
+    // was written for and false of the one in this fixture: `local()` is
+    // labelled llama.cpp, and llama.cpp documents --reasoning-effort and
+    // accepts the request field.
+    //
+    // Ollama IS the server that rejects it, and it never reaches this code:
+    // native_api routes to the /api/chat branch, which returns before the
+    // reasoning_effort line (see the native dialect cases below).
+    //
+    // The gate that matters is `effort` being empty, and that is decided
+    // upstream by resolved_caps() — which for a local server now reads the
+    // server's own capability declaration rather than guessing from the
+    // model id. Transport encryption was never evidence about a model.
     auto l = base(local());
     l.effort = "high";
-    CHECK(!oa::build_request_body(l).contains("reasoning_effort"));
+    CHECK(oa::build_request_body(l)["reasoning_effort"] == "high");
+
+    // ...and an ungated local model still sends nothing.
+    auto l_gated = base(local());
+    l_gated.effort = "";
+    CHECK(!oa::build_request_body(l_gated).contains("reasoning_effort"));
+
+    // The server that DOES reject the field never sees it — proven, not
+    // asserted in a comment. Ollama's native branch builds its own body
+    // and returns early, so effort="high" cannot leak onto /api/chat even
+    // though the chat path would now send it.
+    auto n = base(ollama_native());
+    n.effort = "high";
+    CHECK(!oa::build_request_body(n).contains("reasoning_effort"));
 }
 
 // ═══ The native dialect is a different wire ══════════════════════════════

@@ -936,3 +936,64 @@ TEST_CASE("wire dialect reasoning-text transmissibility") {
     // Unknown / custom host: assume yes rather than hiding a real feature.
     CHECK(wire_streams_reasoning_text("localhost:8080"));
 }
+
+// ── the runaway step cap applies to models we cannot vouch for ───────────
+//
+// The cap (25 tool turns with no text answer) is the last backstop against
+// a doom loop. The two caps above it key on IDENTICAL arguments — same
+// failing call 3×, same succeeding call 6× — so a model that cycles
+// through DIFFERENT calls escapes both and only this one is left.
+//
+// It used to be enforced only when `is_weak_model(id)` said yes, which
+// inverted the polarity: the LESS agentty knew about a model, the LESS
+// protection it got. The heuristic is tuned for hosted and Ollama naming
+// (`:7b` tags, known family prefixes), so every llama.cpp GGUF filename
+// and every LM Studio `publisher/model` key reads as "not weak" and ran
+// uncapped. That is the "loops forever in tool calls" report.
+//
+// These lock the CLASSIFICATION the gate is built from. The gate itself
+// lives in cmd_factory (it reads provider::active()); what is pinned here
+// is the fact that made the old gate wrong.
+
+TEST_CASE("local model ids are NOT recognised as weak") {
+    // Exactly the shapes a local server reports. Every one of these is a
+    // capable model running locally, and every one reads not-weak — so a
+    // cap gated on is_weak_model() never fires for any of them.
+    //
+    // This is not a bug in is_weak_model: it answers "is this a SMALL
+    // model I recognise", and none of these are that. It is a bug in using
+    // that answer as "is this model safe to run uncapped".
+    CHECK(!weak("qwen3-30b-a3b"));                  // llama.cpp --alias
+    CHECK(!weak("Qwen3-30B-A3B-Q4_K_M.gguf"));      // llama.cpp default id (-m path)
+    CHECK(!weak("gpt-oss-20b"));
+    CHECK(!weak("GLM-4.6-Q4_K_M.gguf"));
+    CHECK(!weak("Devstral-Small-2507-Q8_0.gguf"));
+    CHECK(!weak("qwen/qwen3.5-9b"));                // LM Studio key shape
+    CHECK(!weak("igpu/laguna-xs-2.1"));             // private gateway, from the 80-turn report
+}
+
+TEST_CASE("the ollama-shaped ids the heuristic DOES catch") {
+    // Not deleted: on the Ollama native path these tags are real and the
+    // heuristic is right. The point is that this shape is the only one it
+    // covers, which is why it cannot be the sole gate.
+    CHECK(weak("qwen2.5-coder:7b"));
+    CHECK(weak("codellama:7b"));
+    CHECK(weak("phi3:3.8b"));
+}
+
+TEST_CASE("provider rows know which backends are local") {
+    // The fact the corrected gate keys on. A row that runs on this machine
+    // cannot vouch for its model's loop behaviour the way a hosted backend
+    // can, so it gets the backstop regardless of what the id looks like.
+    const auto* ollama = provider::preset_for("ollama");
+    REQUIRE(ollama != nullptr);
+    CHECK(ollama->is_local);
+
+    const auto* anthropic = provider::preset_for("anthropic");
+    REQUIRE(anthropic != nullptr);
+    CHECK(!anthropic->is_local);
+
+    const auto* openai = provider::preset_for("openai");
+    REQUIRE(openai != nullptr);
+    CHECK(!openai->is_local);
+}
