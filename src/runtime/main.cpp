@@ -1869,6 +1869,23 @@ int main(int argc, char** argv) {
         jaal::run<app::AgenttyApp>(host);
     }
 
+    // Tell the speculative prewarms to stop, FIRST.
+    //
+    // They run as Cmd::task_isolated, and jaal's pool waits for isolated
+    // tasks inside its shutdown grace (kernel/pool.hpp) — but that wait
+    // happens INSIDE jaal::run above, and a task only leaves when it sees
+    // this flag. Setting it in the TeardownGuard destructor, as it used to
+    // be, is too late by exactly one scope: the pool has already spent its
+    // grace on a scan that was never told to stop, given up, and abandoned
+    // it. The scan then walks its `static vector<std::regex>` while the CRT
+    // destroys it — an abort on Linux, 0xC0000005 on Windows.
+    //
+    // The guard still calls these (they are idempotent), for the exit paths
+    // that never reach this line.
+    join_workspace_prewarm();
+    join_workspace_symbols_prewarm();
+    agentty::workspace::cancel_repo_info_prewarm();
+
     // Tear down connected MCP plugin servers FIRST — before the blocking
     // flushes below. Closing each server's stdin (→ EOF) unblocks any
     // in-flight tool-call worker still reading from it, so a tool that was

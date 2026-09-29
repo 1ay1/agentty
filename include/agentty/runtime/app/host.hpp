@@ -26,6 +26,8 @@
 #include "agentty/runtime/app/program.hpp"
 #include "agentty/runtime/store_fx.hpp"
 #include "agentty/tool/util/fs_helpers.hpp"
+#include "agentty/workspace/files.hpp"      // request_prewarm_cancel
+#include "agentty/workspace/checkpoint.hpp" // cancel_repo_info_prewarm
 
 namespace agentty::app {
 
@@ -68,6 +70,28 @@ struct Host : maya::terminal_host<P> {
     // is nothing here borrowing from a Model that has since moved on.
     void handle(SaveThread e)   { persistence::save_thread(e.thread); }
     void handle(DeleteThread e) { persistence::delete_thread(e.id); }
+
+    // Teardown, and the ONE thing that has to happen before jaal's pool
+    // spends its shutdown grace.
+    //
+    // jaal calls release() while the kernel is stopping, BEFORE
+    // pool::shutdown() waits for isolated tasks. agentty's speculative
+    // prewarms (`@` files, `#` symbols) run as Cmd::task_isolated and only
+    // leave when they see this cooperative flag, so it has to be set here.
+    //
+    // Setting it later -- in main()'s teardown, where it used to live --
+    // is too late by exactly one scope: the pool has already spent its
+    // grace waiting on a scan nobody told to stop, given up, and abandoned
+    // it. That scan then walks its function-local `static
+    // vector<std::regex>` while the CRT destroys it, which is an abort on
+    // Linux and 0xC0000005 on Windows (~7 launches in 10 when stdin is
+    // already at EOF). main() still calls these too; they are idempotent,
+    // and the exit paths that never construct a Host need them.
+    void release() {
+        ::agentty::request_prewarm_cancel();
+        ::agentty::workspace::cancel_repo_info_prewarm();
+        maya::terminal_host<P>::release();
+    }
 
     // Settings go through the write-behind seam, NOT straight to disk.
     //
