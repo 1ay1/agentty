@@ -606,3 +606,34 @@ if(EXISTS ${_PRUNE})
     set_tests_properties(allowlist_tight_src allowlist_tight_include
                          PROPERTIES LABELS "static")
 endif()
+
+# local_stub_claims: does tests/fake_local_server.py still serve every shape
+# tests/verify_stub_against_real.py claims a real server sends?
+#
+# Those two files are the only thing standing between us and a repeat of the
+# LM Studio bug, where the reader required is_boolean() on a field the server
+# sends as an object and every model silently fell through to guessing from
+# its filename. The stub is where we write down what we believe each local
+# server returns; CLAIMS is where we write down what to go check against a
+# real one.
+#
+# They drifted, in the direction that hides: the stub's lmstudio mode had no
+# capability object at all, so the reader that commit added never executed in
+# any test, and CLAIMS never mentioned the field either. Nothing failed. The
+# feature simply had no coverage and looked like it did.
+#
+# This asks the weaker of the two questions -- does the stub serve what we
+# claim -- because it is the half that needs no hardware. It cannot tell you
+# the claim matches reality; only pointing the script at a real llama.cpp or
+# LM Studio does that. What it does buy: adding a shape to the stub without
+# stating the claim (or vice versa) now fails here instead of years later.
+find_package(Python3 COMPONENTS Interpreter QUIET)
+set(_STUBCHK ${CMAKE_SOURCE_DIR}/tests/verify_stub_against_real.py)
+if(Python3_Interpreter_FOUND AND EXISTS ${_STUBCHK})
+    add_test(NAME local_stub_claims
+             COMMAND ${Python3_EXECUTABLE} ${_STUBCHK} --self-check)
+    # Binds loopback ports to run the stub, so keep it off the parallel
+    # sanitizer lanes and give it room for five sequential server starts.
+    set_tests_properties(local_stub_claims PROPERTIES
+                         LABELS "static" TIMEOUT 120 RUN_SERIAL TRUE)
+endif()

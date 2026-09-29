@@ -196,6 +196,20 @@ inline const Lens<bool>& declared_reasoning() {
 // default is "off" still supports reasoning — it just needs asking — so
 // this is deliberately separate from declared_reasoning() rather than
 // folded into it.
+//
+// NOT catalog::reasons_by_default, despite how close the names read. That
+// one asks whether the model starts emitting THOUGHTS with no opening
+// <think> tag (Magistral, DeepSeek-R1). It decides how to PARSE the stream
+// and is a fact about how the model was trained, identical on every host.
+// THIS asks which way LM Studio has the switch flipped — a fact about one
+// server's config. Feeding this into that would mis-parse every stream
+// from a reasoning model whose default is on: leading prose would be
+// swallowed as implicit reasoning and disappear from the answer.
+//
+// Unwired, like declared_tool_use. The honest consumer is a per-model
+// initial effort tier, and agentty's effort is one global user choice, not
+// a per-model setting. Stated here because it reads for free off a
+// response we already fetch.
 inline const Lens<std::string>& declared_reasoning_default() {
     static const Lens<std::string> l =
         under("reasoning", key<std::string>("default"));
@@ -217,10 +231,15 @@ inline const Lens<std::string>& declared_reasoning_default() {
 // them and was unhelpful — the exact failure ModelInfo::supports_tools
 // documents, and the reason that tri-state SENDS on unknown.
 //
-// It stays here because it is a real field in a shape this table owns, and
-// because the honest consumer is the step cap (bound the damage) rather
-// than the wire (remove the capability). Wire it there when that cap grows
-// a per-model input; do not repurpose it into a withhold.
+// Nor does it feed the step cap, which was the other plausible consumer:
+// that cap already fires for every model on a local row (is_local ⇒ capped,
+// see cmd_factory's weak_step_cap), so a per-model "badly trained for tools"
+// signal cannot make it fire any harder. Checked; it changes nothing.
+//
+// So it is read and deliberately dropped. It stays in the table because it
+// is a real field in a shape this table owns — the point of the table is to
+// state every spelling in one place — and because the next person to find
+// it should get this paragraph instead of wiring it into a withhold.
 inline const Lens<bool>& declared_tool_use() {
     static const Lens<bool> l = key<bool>("trained_for_tool_use");
     return l;
@@ -256,6 +275,16 @@ inline const Lens<bool>& declared_tool_use() {
 // whose template ignores reasoning_effort will happily accept the field and
 // drop it on the floor, which is the worst outcome: the picker offers a dial
 // that is wired to nothing.
+//
+// supports_preserve_reasoning is deliberately NOT read. It says the template
+// can keep earlier turns' thinking in history rather than only the last
+// one — which would matter if agentty replayed thinking on this wire, and it
+// does not. The Anthropic path replays thinking blocks because that wire
+// REQUIRES it (a tool_use turn 400s without the signed block before it);
+// build_messages() on the chat wire sends role/content/tool_calls and no
+// reasoning field at all. There is nothing to preserve, so reading the flag
+// would only create the impression that something acts on it. It becomes
+// interesting the day this wire replays thinking, not before.
 inline const Lens<bool>& template_reasoning_effort() {
     static const Lens<bool> l =
         under("chat_template_caps", key<bool>("supports_reasoning_effort"));

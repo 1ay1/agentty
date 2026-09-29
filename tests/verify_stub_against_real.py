@@ -14,9 +14,25 @@ JSON types only, never values (those legitimately differ per model/host).
     python3 tests/verify_stub_against_real.py lmstudio http://127.0.0.1:1234
 
 Exit 0 = the stub is faithful for every route the real server serves.
+
+There is also a --self-check mode, which runs every claim against the STUB
+instead of a real server:
+
+    python3 tests/verify_stub_against_real.py --self-check
+
+That is a weaker question on purpose — it cannot tell you the stub matches
+reality, only that the stub matches the claims. It exists because the two
+used to drift silently in the SAME direction: a field added to the stub but
+not to CLAIMS is never verified against anything, and a field in CLAIMS the
+stub doesn't serve reports "skip" forever and looks fine. Wiring this into
+ctest means adding a shape to the stub without stating the claim fails the
+build, so the manual real-server run has something honest to check.
 """
 import json
+import os
+import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -64,6 +80,26 @@ CLAIMS = {
             ("models[].key", str),
             ("models[].max_context_length", int),
             ("models[].loaded_instances[].config.context_length", int),
+            # The capability object — the field the whole LM Studio bug was
+            # in. `reasoning` is an OBJECT here ({allowed_options, default}),
+            # not the bare bool Mistral uses, and the reader used to require
+            # is_boolean() and skip anything else. Every model then fell
+            # through to inference over a `publisher/model` key.
+            #
+            # Checked as dict on purpose: if LM Studio ever flattens it to a
+            # bool, this fails loudly rather than the object arm quietly
+            # never matching. Note only the reasoning-capable rows carry it,
+            # so point this at a server with one loaded.
+            ("models[].capabilities", dict),
+            ("models[].capabilities.trained_for_tool_use", bool),
+            # The OBJECT arm itself. Worth stating separately from the
+            # parent: this exact type is what declared_reasoning()'s
+            # truthy_object combinator exists for, and if LM Studio ever
+            # flattens it to a bare bool the lens still matches (the bool
+            # arm catches it) while every comment here becomes a lie. Pin
+            # the shape so that change is visible rather than silent.
+            ("models[].capabilities.reasoning", dict),
+            ("models[].capabilities.reasoning.default", str),
         ],
     },
 }
@@ -122,15 +158,14 @@ def resolve(doc, path):
     return cur, None
 
 
-def main():
-    if len(sys.argv) < 3:
-        print(__doc__)
-        return 2
-    mode, base = sys.argv[1], sys.argv[2]
-    claims = CLAIMS.get(mode)
-    if not claims:
-        print(f"unknown mode '{mode}' (have: {', '.join(CLAIMS)})")
-        return 2
+def verify(mode, base, quiet=False):
+    """Check every claim for `mode` against the server at `base`.
+
+    Returns (checked, bad). A route the server doesn't serve is SKIPPED,
+    not counted — the point is "is what you do serve the shape we claim",
+    and a real llama.cpp has no /api/ps to answer for.
+    """
+    claims = CLAIMS[mode]
 
     # /api/show needs a model name; take the first one the server lists.
     model = None
@@ -149,10 +184,12 @@ def main():
         try:
             doc = fetch(base, route, model)
         except urllib.error.HTTPError as e:
-            print(f"  skip {route}: HTTP {e.code} (route not served here)")
+            if not quiet:
+                print(f"  skip {route}: HTTP {e.code} (route not served here)")
             continue
         except Exception as e:
-            print(f"  skip {route}: {e}")
+            if not quiet:
+                print(f"  skip {route}: {e}")
             continue
         for path, want in fields:
             checked += 1
@@ -167,9 +204,78 @@ def main():
                 print(f"  TYPE {route} {path}: stub says {wname}, "
                       f"server sent {type(got).__name__} ({got!r})")
                 bad += 1
-            else:
+            elif not quiet:
                 print(f"  ok   {route} {path} = {got!r}")
+    return checked, bad
 
+
+# Claims that a real server answers but the STUB deliberately does not, with
+# the reason. Without this list --self-check would force the stub to serve
+# every field, which would destroy the cases it exists to cover.
+SELF_CHECK_EXEMPT = {
+    # The llama.cpp row carries only the train-time ceiling on purpose: the
+    # served window comes from /props, and that gap IS the bug the window
+    # probe guards. Adding n_ctx here would delete the test.
+    ("llama", "GET /v1/models", "data[].meta.n_ctx"),
+}
+
+
+def self_check():
+    """Run every claim against the stub instead of a real server."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    stub = os.path.join(here, "fake_local_server.py")
+    total_bad = 0
+    port = 18400
+    for mode in CLAIMS:
+        port += 1
+        proc = subprocess.Popen([sys.executable, stub, mode, str(port)],
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL)
+        try:
+            base = f"http://127.0.0.1:{port}"
+            # Wait for the listener rather than sleeping a guessed amount.
+            for _ in range(100):
+                try:
+                    urllib.request.urlopen(base + "/v1/models", timeout=0.2)
+                    break
+                except urllib.error.HTTPError:
+                    break          # answered, just not that route
+                except Exception:
+                    time.sleep(0.05)
+            print(f"== {mode}")
+            checked, bad = verify(mode, base, quiet=True)
+            exempt = sum(1 for (m, _r, _p) in SELF_CHECK_EXEMPT if m == mode)
+            bad -= exempt
+            if bad > 0:
+                print(f"   {bad} claim(s) the stub does not serve")
+                total_bad += bad
+            else:
+                print(f"   {checked} claims served"
+                      + (f" ({exempt} exempt)" if exempt else ""))
+        finally:
+            proc.terminate()
+            proc.wait(timeout=5)
+    if total_bad:
+        print(f"\n{total_bad} claim(s) unserved by the stub")
+        print("either serve the shape in fake_local_server.py, or drop the")
+        print("claim from CLAIMS — an unserved claim is verified by nothing")
+        return 1
+    print("\nstub serves every claim")
+    return 0
+
+
+def main():
+    if len(sys.argv) >= 2 and sys.argv[1] == "--self-check":
+        return self_check()
+    if len(sys.argv) < 3:
+        print(__doc__)
+        return 2
+    mode, base = sys.argv[1], sys.argv[2]
+    if mode not in CLAIMS:
+        print(f"unknown mode '{mode}' (have: {', '.join(CLAIMS)})")
+        return 2
+
+    checked, bad = verify(mode, base)
     print(f"\n{checked - bad}/{checked} claims verified against the real server")
     return 1 if bad else 0
 
