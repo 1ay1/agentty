@@ -32,6 +32,15 @@ namespace agentty::workspace {
 // to call once at startup.
 void prewarm_repo_info();
 
+// Make a not-yet-started prewarm_repo_info() a no-op. Called at teardown.
+//
+// The prewarm runs on jaal's ISOLATED pool, and jaal asks isolated threads
+// to stop but never waits for them (kernel/pool.hpp) — deliberately, so a
+// wedged `git` can't block quit. That means nobody joins this one for us,
+// and it touches an agentty static, so on a fast exit it can still be
+// spawning subprocesses while the CRT destroys statics underneath it.
+void cancel_repo_info_prewarm() noexcept;
+
 // A one-glance summary of what the worktree has changed SINCE a
 // checkpoint was taken — the diff between the pinned snapshot tree and
 // the current working tree (tracked + newly-added; ignored files never

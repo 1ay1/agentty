@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <atomic>
 #include <filesystem>
 #include <mutex>
 #include <sstream>
@@ -221,12 +222,42 @@ bool current_paths(std::vector<std::string>& out) {
 
 bool in_git_repo() { return repo().in_repo; }
 
+// Set once the process is tearing down. prewarm_repo_info() checks it before
+// forcing the static, so a prewarm that hasn't started yet becomes a no-op
+// rather than reaching for statics on their way out.
+namespace {
+std::atomic<bool> g_repo_prewarm_cancelled{false};
+}
+
+void cancel_repo_info_prewarm() noexcept {
+    g_repo_prewarm_cancelled.store(true, std::memory_order_relaxed);
+}
+
 void prewarm_repo_info() {
     // SYNCHRONOUS. Touching repo() forces its function-local static to
     // initialise, running the two `git rev-parse` probes here instead of
-    // on the first submit. The caller (init.cpp) runs this on maya's
-    // isolated pool, which owns the thread and joins it at teardown, so
-    // the blocking subprocess spawns never touch the reducer thread.
+    // on the first submit.
+    //
+    // The caller (init.cpp) runs this via Cmd::task_isolated. jaal's pool
+    // gives an isolated task its own thread and, at shutdown, REQUESTS STOP
+    // ON IT BUT NEVER WAITS FOR IT -- see jaal/kernel/pool.hpp: "Isolated
+    // threads are asked to stop but never waited for." That is deliberate
+    // (a wedged `git` on a dead NFS mount must not block quit), and jaal's
+    // own lifetime story holds because a worker only touches memory it
+    // co-owns through the pool's shared core.
+    //
+    // It does NOT extend to us. This function touches an agentty static,
+    // which jaal knows nothing about. On a fast exit -- `type NUL |
+    // agentty.exe` under MSYS2, where stdin is at EOF before the first
+    // frame -- the two `git rev-parse` subprocess spawns are still running
+    // while main() returns and the CRT starts destroying statics. That is
+    // the intermittent 0xC0000005 the Windows smoke test caught: 2 of 5
+    // launches, on byte-identical code.
+    //
+    // So the flag, checked here and again after the probe: an isolated task
+    // must leave nothing behind that outlives what it touches, because
+    // nobody is going to join it for us.
+    if (g_repo_prewarm_cancelled.load(std::memory_order_relaxed)) return;
     (void)repo();
 }
 

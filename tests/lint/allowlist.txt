@@ -103,7 +103,22 @@ tool/util/sandbox.cpp: atomic
 # task; this is that task using its own thread.
 workspace/symbols.cpp: thread atomic
 workspace/files.cpp: mutex atomic
-workspace/checkpoint.cpp: mutex
+# checkpoint.cpp's atomic is a teardown cancel flag, and it is the one place
+# here where the raw primitive is load-bearing rather than incidental.
+#
+# prewarm_repo_info() runs on jaal's ISOLATED pool, and jaal asks isolated
+# threads to stop but NEVER waits for them (kernel/pool.hpp) — deliberately,
+# so a wedged `git` on a dead mount can't block quit. jaal's own lifetime
+# story survives that because an abandoned worker only touches memory it
+# co-owns. This function doesn't: it forces an agentty function-local
+# static by spawning `git rev-parse`. On a fast exit that races static
+# destruction, which is the intermittent 0xC0000005 the Windows smoke test
+# caught at 2/5 launches on byte-identical code.
+#
+# The flag is what an unjoinable task gets instead of a join. A mutex would
+# be wrong (the teardown path must not block on a subprocess spawn) and
+# there is no kernel in scope for guarded<T>.
+workspace/checkpoint.cpp: mutex atomic
 
 # ── Providers: transports and their shared state ─────────────────────────
 provider/prompt.cpp: mutex

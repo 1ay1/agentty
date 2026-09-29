@@ -101,6 +101,7 @@
 #include "agentty/tool/plugin.hpp"
 #include "agentty/tool/util/fs_helpers.hpp"
 #include "agentty/workspace/files.hpp"     // join_workspace_prewarm
+#include "agentty/workspace/checkpoint.hpp" // cancel_repo_info_prewarm
 #include "agentty/workspace/symbols.hpp"   // join_workspace_symbols_prewarm
 #include "agentty/util/modelsdev.hpp"       // join_background_refresh
 #include "agentty/tool/util/sandbox.hpp"
@@ -1042,6 +1043,12 @@ int main(int argc, char** argv) {
             http::default_client().join_prewarm();
             join_workspace_prewarm();
             join_workspace_symbols_prewarm();
+            // Same class, different owner: this one runs on jaal's ISOLATED
+            // pool, which asks isolated threads to stop and never waits for
+            // them (kernel/pool.hpp). So there is nothing to join — only a
+            // flag to trip, so a prewarm that hasn't reached its `git`
+            // spawns yet gives up instead of racing static destruction.
+            agentty::workspace::cancel_repo_info_prewarm();
             modelsdev::join_background_refresh();
             blobs::join_background_gc();
             util::teardown::run();
