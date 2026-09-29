@@ -3197,6 +3197,20 @@ std::shared_mutex& probe_opt_in_mu() {
                     const std::string scoped = ep.label + "/" + id;
                     if (const auto reasons = dialect::declared_reasoning()(*ci))
                         set_catalog_reasoning(scoped, *reasons);
+                    // Deliberately NOT writing an effort set here, unlike
+                    // the Ollama branch below. reasoning_compat already
+                    // derives exactly low|medium|high, which is the ladder
+                    // the OpenAI wire carries — so a set would restate what
+                    // the default already says. Ollama needs its explicit
+                    // write because `think` is its own field with its own
+                    // contract, not the OpenAI enum.
+                    //
+                    // The one thing that WOULD justify a write here is an
+                    // allowed_options list that disagrees (LM Studio has
+                    // shipped `xhigh` on some gpt-oss builds). Reading it
+                    // needs a real payload showing the disagreement; until
+                    // then, restating the default would just be a second
+                    // place to keep in sync.
                 }
 
                 const auto li = row.find("loaded_instances");

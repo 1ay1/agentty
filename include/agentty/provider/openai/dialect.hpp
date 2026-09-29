@@ -166,18 +166,23 @@ inline const Lens<int>& model_context_window_flat() {
 //
 //   "reasoning": true                    Mistral's /v1/models. A plain bool.
 //   "reasoning": {"allowed_options":     LM Studio's /api/v1/models
-//                   ["off","on"],        (documented in its REST reference;
-//                 "default":"on"}        a model with NO reasoning support
-//                                        omits the key entirely).
+//                   ["off","on"],        (documented in its REST reference).
+//                 "default":"on"}
 //
 // The object form is why LM Studio silently got no reasoning: the reader
 // tested is_boolean() and skipped anything else, so every LM Studio model
 // fell through to id inference and was classified by its filename.
 //
-// Presence of the object IS the declaration — a model that cannot reason
-// has no `reasoning` key at all, so `allowed_options` never needs parsing
-// to answer the yes/no question. (What the ladder should be is a separate
-// question; see declared_reasoning_default below.)
+// Presence of the object IS the declaration — `allowed_options` never needs
+// parsing to answer the yes/no question. (What the ladder should be is a
+// separate question; see declared_reasoning_default below.)
+//
+// ABSENCE IS NOT A NO. A missing key returns nullopt, and the caller must
+// leave the catalog rung EMPTY rather than record false. "Missing" covers
+// both "cannot reason" and "this entry does not say", and those are not the
+// same claim — writing false would override the id-inference rung beneath
+// it, pinning e.g. a DeepSeek-R1 distill to no-reasoning on a listing that
+// merely omitted the field. Silence is not evidence.
 inline const Lens<bool>& declared_reasoning() {
     static const Lens<bool> l =
           key<bool>("reasoning")                       // Mistral: plain bool
@@ -203,6 +208,19 @@ inline const Lens<std::string>& declared_reasoning_default() {
 // what it is: the model was TRAINED for tool use, which is a stronger claim
 // than "the server will accept a tools array" — llama.cpp will accept one
 // for any model and let it fail at generation time.
+//
+// NOT WIRED to ModelInfo::supports_tools, and the asymmetry with
+// declared_reasoning is deliberate. Withholding tools on a false here would
+// be acting on the wrong claim: LM Studio is describing the model's
+// TRAINING, while the server accepts a tools array either way. A model that
+// silently never receives tools is indistinguishable from one that received
+// them and was unhelpful — the exact failure ModelInfo::supports_tools
+// documents, and the reason that tri-state SENDS on unknown.
+//
+// It stays here because it is a real field in a shape this table owns, and
+// because the honest consumer is the step cap (bound the damage) rather
+// than the wire (remove the capability). Wire it there when that cap grows
+// a per-model input; do not repurpose it into a withhold.
 inline const Lens<bool>& declared_tool_use() {
     static const Lens<bool> l = key<bool>("trained_for_tool_use");
     return l;

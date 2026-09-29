@@ -42,9 +42,12 @@ LLAMA_MODELS = {
 LMSTUDIO_V1 = {
     "object": "list",
     "data": [
-        # The /v1 shim: only the ARCHITECTURAL maximum.
+        # The /v1 shim: only the ARCHITECTURAL maximum, and no capability
+        # object at all. This is why the native route below has to be read.
         {"id": "qwen/qwen3-coder-30b", "object": "model",
          "max_context_length": 262144},
+        {"id": "mistralai/mistral-7b-instruct-v0.3", "object": "model",
+         "max_context_length": 32768},
     ],
 }
 
@@ -54,6 +57,23 @@ LMSTUDIO_NATIVE = {
             "key": "qwen/qwen3-coder-30b",
             "type": "llm",
             "max_context_length": 262144,
+            # LM Studio's capability object, from its REST reference. Two
+            # shapes matter here and both are deliberate:
+            #
+            #   reasoning is an OBJECT, not a bool. Mistral spells the same
+            #   claim as a bare `true`, and the reader used to test
+            #   is_boolean() and skip anything else — so every LM Studio
+            #   model fell through to inference over a `publisher/model`
+            #   key, and reasoning was decided by filename.
+            #
+            #   a model that CANNOT reason omits the key entirely (see
+            #   the second row), so presence is the declaration.
+            "capabilities": {
+                "vision": False,
+                "trained_for_tool_use": True,
+                "reasoning": {"allowed_options": ["off", "on"],
+                              "default": "on"},
+            },
             "loaded_instances": [
                 # Loaded at 16k, far below what the model supports.
                 {"instance_id": "qwen/qwen3-coder-30b",
@@ -61,7 +81,22 @@ LMSTUDIO_NATIVE = {
                  "config": {"context_length": 16384,
                             "eval_batch_size": 512}},
             ],
-        }
+        },
+        # A non-reasoning model, and an UNLOADED one. Both halves matter:
+        # the missing `reasoning` key must read as a declared NO (not as
+        # "unknown"), and capability must be recorded even though there is
+        # no loaded instance — capability belongs to the model, the window
+        # belongs to the instance.
+        {
+            "key": "mistralai/mistral-7b-instruct-v0.3",
+            "type": "llm",
+            "max_context_length": 32768,
+            "capabilities": {
+                "vision": False,
+                "trained_for_tool_use": False,
+            },
+            "loaded_instances": [],
+        },
     ]
 }
 

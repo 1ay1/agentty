@@ -2415,5 +2415,49 @@ TEST_CASE("live: a local server's RUNTIME window reaches ModelInfo") {
         // /v1 declares max_context_length 262144; the native API reports the
         // instance loaded at 16384. The smaller, measured one must win.
         CHECK(models.front().context_window == 16384);
+
+        // ── Capability, not window ──────────────────────────────────
+        // The /v1 shim carries no capability object, so this all comes off
+        // the native /api/v1/models route — the same request that answered
+        // the window above.
+        using agentty::catalog_reasoning_for;
+
+        // Declared as an OBJECT ({allowed_options, default}), not a bare
+        // bool. That shape is the whole LM Studio bug: the reader tested
+        // is_boolean() and skipped anything else, so every model here fell
+        // through to id inference — a heuristic over hosted naming that
+        // cannot classify a `publisher/model` key. Reasoning was decided
+        // by filename.
+        //
+        // This row is also UNLOADED-adjacent in the way that matters: the
+        // capability write sits ABOVE the loaded_instances early-continue,
+        // because capability belongs to the MODEL and is knowable while it
+        // is unloaded, unlike the window, which belongs to the instance.
+        // So the picker shows the right affordances before the first load.
+        CHECK(catalog_reasoning_for("qwen/qwen3-coder-30b", ep.label) == 1);
+
+        // A model with NO `reasoning` key gets NOTHING recorded — not a
+        // declared no. That is deliberate and it is the opposite of what
+        // it looks like.
+        //
+        // LM Studio's capability object is built per model from what the
+        // app knows, and "the key is missing" covers both "this model
+        // cannot reason" and "this build/model entry does not say". Those
+        // are not the same claim, and treating absence as a hard NO would
+        // POISON the id-inference rung underneath: a DeepSeek-R1 distill
+        // listed without the key would be pinned to no-reasoning even
+        // though its id says otherwise and it plainly reasons. Silence is
+        // not evidence. Leave the rung empty and let inference speak.
+        CHECK(catalog_reasoning_for("mistralai/mistral-7b-instruct-v0.3",
+                                    ep.label) == -1);
+
+        // trained_for_tool_use is false on that second row, and it must
+        // NOT become a hard withhold — see the tri-state in
+        // ModelInfo::supports_tools. It is a claim about TRAINING, not
+        // about whether the server will accept a tools array, and a model
+        // that silently never gets tools is indistinguishable from one
+        // that is merely bad at them.
+        for (const auto& mi : models)
+            CHECK(mi.tools_allowed());
     }
 }
