@@ -516,14 +516,38 @@ TEST_CASE("rehydrate bounds a LATER oversized run") {
 
     agentty::app::detail::rehydrate_frozen(m);
 
-    // frozen_row_budget() is internal, but its contract is "~3 viewports"
-    // and it floors at 48 — so on any terminal this test could run on it
-    // is at most a few hundred rows. 1000 is far above the legitimate
-    // bound and far below the 2247 this test exists to catch.
-    const std::size_t rows = m.ui.frozen.row_total();
-    CHECK_MESSAGE(rows < 1000,
-                  "frozen canvas is " << rows << " rows — an oversized run "
-                  "behind the newest one was taken whole instead of cut");
+    // What this test is really about: the oversized run must not be taken
+    // WHOLE. It used to check `rows < 1000`, which worked only because
+    // rehydrate seeded the live budget (~3 viewports) — 1000 was "far
+    // above the legitimate bound, far below the 2247 bug".
+    //
+    // Rehydrate now seeds a WIDER window on purpose, so the canvas can
+    // legitimately exceed 1000 rows before the post-paint trim runs. The
+    // row count stopped being the invariant; check the invariant itself.
+    //
+    // Two ways the run is prevented from being one indivisible lump, and
+    // either is a pass: the keep-walk CUT it (so only part of it is
+    // present), or freeze_range SPLIT it into per-sub-turn blocks (so the
+    // trim can shed them one at a time). The bug this test exists for
+    // produced neither — one giant block, every row of it.
+    const std::size_t rows    = m.ui.frozen.row_total();
+    const std::size_t entries = m.ui.frozen.size();
+
+    // The 60-tool run would be ONE block if taken whole. Splitting or
+    // cutting both leave many blocks, so entry count is the tell.
+    CHECK_MESSAGE(entries > 4,
+                  "frozen canvas is " << entries << " entries / " << rows
+                  << " rows — an oversized run behind the newest one was "
+                  "taken whole instead of being cut or split");
+
+    // And no single block may dominate: that is what pins the canvas,
+    // because a block is the trim's atom (it drops whole blocks or none).
+    std::size_t tallest = 0;
+    for (std::size_t k = 0; k < entries; ++k)
+        tallest = std::max(tallest, m.ui.frozen.block_rows(k));
+    CHECK_MESSAGE(tallest < 1000,
+                  "one block is " << tallest << " rows — the trim can only "
+                  "drop whole blocks, so this pins the canvas forever");
 
     // And the canvas must still be usable: bounding it must not empty it.
     CHECK_MESSAGE(rows > 0, "the bound must keep SOME history, not none");

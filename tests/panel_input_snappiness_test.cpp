@@ -50,6 +50,20 @@ Model seeded(int msgs) {
         m.d.current.messages.push_back(std::move(msg));
     }
     app::detail::rehydrate_frozen(m);
+
+    // Model the post-paint trim, or this measures a canvas the user never
+    // types against. rehydrate seeds a wide window so a resumed thread
+    // has real scrollback; the first frame paints it, then meta.cpp's
+    // Tick arm trims to frozen_row_budget() once every block has a
+    // recorded height. Every keystroke after that renders the SMALL
+    // canvas, which is what this test is about.
+    //
+    // Headless there is no paint, so record the heights the renderer
+    // would (the ledger refuses to drop a block whose height was never
+    // recorded -- scrollback_ledger.hpp's provability gate).
+    for (std::size_t k = 0; k < m.ui.frozen.size(); ++k)
+        m.ui.frozen.record_paint(k, static_cast<int>(m.ui.frozen.block_rows(k)));
+    (void)app::detail::trim_frozen_if_oversized(m);
     return m;
 }
 

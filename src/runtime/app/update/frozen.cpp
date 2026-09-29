@@ -171,7 +171,7 @@ std::size_t frozen_row_budget() { return frozen_row_budget(term_dims().rows); }
 // screens nobody scrolls.
 std::size_t rehydrate_row_budget(int term_rows) {
     const int rows = term_rows > 0 ? term_rows : 24;
-    return static_cast<std::size_t>(std::max(480, rows * 10));
+    return static_cast<std::size_t>(std::max(1200, rows * 20));
 }
 std::size_t rehydrate_row_budget() { return rehydrate_row_budget(term_dims().rows); }
 
@@ -629,7 +629,19 @@ bool run_is_freezable(const Model& m, std::size_t from, std::size_t run_end) {
 // Advances `m.ui.frozen_turn` once per Assistant run (one logical
 // agent turn equals one display number) so the running turn count
 // the live tail will compute next stays in sync.
-void freeze_range(Model& m, std::size_t from, std::size_t to) {
+// `split_oversized_runs` — seal a too-tall assistant run as one block per
+// sub-turn instead of one block for the whole run.
+//
+// OFF for the live path (freeze_through). There the run that just settled
+// is the one build_live_tail was rendering a frame ago, and the two must
+// produce byte-identical rows or the freeze seam shifts under the user.
+//
+// ON for rehydrate. That path sets frozen_through = total, so the live
+// tail is EMPTY — nothing re-renders these runs and there is no seam to
+// match. It is also the path that needs it: the trim's atom is a block,
+// so one huge run pins the canvas at its own height forever.
+void freeze_range(Model& m, std::size_t from, std::size_t to,
+                  bool split_oversized_runs = false) {
     const std::size_t total = m.d.current.messages.size();
     if (from >= to || to > total) return;
     // Frozen Elements are painted once then blitted forever, so tool
@@ -683,20 +695,64 @@ void freeze_range(Model& m, std::size_t from, std::size_t to) {
         }
 
         if (head.role == Role::Assistant) {
-            int turn_num = m.ui.frozen_turn + 1;
-            auto cfg = ui::turn_config_for_assistant_run(
-                i, run_end, turn_num, m);
+            // A run normally seals as ONE block, because that is what the
+            // live tail builds and the two must stay byte-identical
+            // across the freeze seam (see build_live_tail).
+            //
+            // But a block is also the TRIM'S ATOM: drop_front can shed a
+            // whole block or none of it. So a single huge run pins the
+            // canvas at its own height forever — the trim can't split it,
+            // and collapse_oversized_offscreen_entries deliberately skips
+            // the trailing entry (it is the current result). On a resumed
+            // thread whose newest run is a long auto-pilot sequence, that
+            // trailing entry IS the giant: measured 488 rows in ONE entry
+            // against a 180-row budget, with steady-state resize at 18 ms
+            // instead of 4.
+            //
+            // Split it. Safe when the CALLER says so — see the
+            // split_oversized_runs note on this function. rehydrate sets
+            // frozen_through = total, so its runs have no live
+            // counterpart and no seam to keep byte-identical; the live
+            // settle path leaves it off.
+            //
+            // Sub-turn boundaries are the natural split: each is a
+            // text+tools unit the run builder already lays out
+            // independently, so N blocks paint the same rows as one.
+            const std::size_t run_rows = estimate_run_rows(m, i, run_end);
+            const std::size_t split_at = frozen_row_budget();
 
-            // Hash key: settled assistant run — built through the shared
-            // ui::assistant_run_hash_id so the live tail and the freeze
-            // stamp a byte-identical key (cache HIT, zero row shift at
-            // the freeze seam). Once frozen, none of the underlying
-            // bytes change — the key is stable for the lifetime of this
-            // entry.
-            cfg.hash_id = ui::assistant_run_hash_id(m, i, run_end);
-            push_frozen(m, maya::Turn{std::move(cfg)}.build(),
-                        estimate_run_rows(m, i, run_end));
-            ++m.ui.frozen_turn;
+            if (split_oversized_runs && run_rows > split_at && (run_end - i) > 1) {
+                int turn_num = m.ui.frozen_turn + 1;
+                for (std::size_t sub = i; sub < run_end; ++sub) {
+                    if (sub > i)
+                        push_frozen(m, gap_row(),
+                                    static_cast<std::size_t>(gap_rows()),
+                                    /*separator=*/true);
+                    auto scfg = ui::turn_config_for_assistant_run(
+                        sub, sub + 1, turn_num, m);
+                    // Keyed on the SUB-RANGE, so each block caches
+                    // independently and a later whole-run build cannot
+                    // collide with a split one.
+                    scfg.hash_id = ui::assistant_run_hash_id(m, sub, sub + 1);
+                    push_frozen(m, maya::Turn{std::move(scfg)}.build(),
+                                estimate_run_rows(m, sub, sub + 1));
+                }
+                ++m.ui.frozen_turn;
+            } else {
+                int turn_num = m.ui.frozen_turn + 1;
+                auto cfg = ui::turn_config_for_assistant_run(
+                    i, run_end, turn_num, m);
+
+                // Hash key: settled assistant run — built through the shared
+                // ui::assistant_run_hash_id so the live tail and the freeze
+                // stamp a byte-identical key (cache HIT, zero row shift at
+                // the freeze seam). Once frozen, none of the underlying
+                // bytes change — the key is stable for the lifetime of this
+                // entry.
+                cfg.hash_id = ui::assistant_run_hash_id(m, i, run_end);
+                push_frozen(m, maya::Turn{std::move(cfg)}.build(), run_rows);
+                ++m.ui.frozen_turn;
+            }
         } else {
             // User / compaction-summary single-message Turn.
             int turn_num = m.ui.frozen_turn;
@@ -908,7 +964,7 @@ void rehydrate_frozen(Model& m) {
             settle_message_md(m, mm);
     }
 
-    freeze_range(m, start, total);
+    freeze_range(m, start, total, /*split_oversized_runs=*/true);
 
     // A mid-run cut (giant final run) can make the first frozen entry a
     // continuation whose own header was skipped, OR the run-boundary
