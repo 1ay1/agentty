@@ -331,3 +331,71 @@ TEST_CASE("Observed: LM Studio declares tool training") {
     CHECK(oa::dialect::declared_tool_use()(caps) == std::optional<bool>{true});
     CHECK(!oa::dialect::declared_tool_use()(json::parse(R"({"vision":true})")));
 }
+
+// ═══ llama.cpp: chat_template_caps ═════════════════════════════════════
+//
+// llama.cpp's /v1/models rows carry NO capability object, so the two lenses
+// above never fire for it and every model fell to id inference over a GGUF
+// path. /props does carry one, and it is the best evidence available: the
+// server RUNS the model's own jinja template against probe inputs and diffs
+// the output to see what it reacts to (common/jinja/caps.cpp, caps_get).
+//
+// Key spellings are fixed by caps::to_map() in that file. If upstream
+// renames one these fixtures keep failing loudly instead of the feature
+// silently going dark.
+
+TEST_CASE("dialect: llama.cpp declares reasoning-effort support in /props") {
+    // Trimmed real /props shape. The window fields live beside the caps and
+    // are read by a different lens — both come off the one request.
+    const auto props = json::parse(R"({
+        "model_path": "/models/Qwen3-30B-A3B-Q4_K_M.gguf",
+        "default_generation_settings": {"n_ctx": 65536},
+        "chat_template_caps": {
+            "supports_tools": true,
+            "supports_tool_calls": true,
+            "supports_reasoning_effort": true,
+            "supports_preserve_reasoning": false
+        }
+    })");
+    CHECK(oa::dialect::template_reasoning_effort()(props)
+              == std::optional<bool>{true});
+    CHECK(oa::dialect::template_tool_calls()(props) == std::optional<bool>{true});
+}
+
+TEST_CASE("dialect: a template that ignores reasoning_effort says so") {
+    // The case that matters most. llama.cpp ACCEPTS reasoning_effort on any
+    // request and forwards it to the template as a kwarg; a template that
+    // does not read the kwarg drops it silently. So "server took the field"
+    // is not evidence of anything, and without this declaration agentty
+    // would offer an effort ladder wired to nothing.
+    const auto props = json::parse(
+        R"({"chat_template_caps":{"supports_reasoning_effort":false}})");
+    CHECK(oa::dialect::template_reasoning_effort()(props)
+              == std::optional<bool>{false});
+}
+
+TEST_CASE("dialect: an older llama.cpp build is ABSENT, not false") {
+    // chat_template_caps is newer than llama.cpp's server, so a build
+    // without it must leave the catalog rung EMPTY and let id inference
+    // still get a say. Recording `false` here would actively disable
+    // reasoning on a server that never said anything.
+    const auto old = json::parse(
+        R"({"default_generation_settings":{"n_ctx":4096},"total_slots":1})");
+    CHECK(!oa::dialect::template_reasoning_effort()(old));
+    CHECK(!oa::dialect::template_tool_calls()(old));
+
+    // Present but missing the one key: same answer.
+    const auto partial = json::parse(
+        R"({"chat_template_caps":{"supports_tools":true}})");
+    CHECK(!oa::dialect::template_reasoning_effort()(partial));
+}
+
+TEST_CASE("dialect: tool-call support reads supports_tool_calls, not supports_tools") {
+    // A template can render the tools array and still fail to render the
+    // assistant's tool_calls back into history. That breaks on turn TWO,
+    // which presents as the model forgetting it ever called anything — a
+    // much more confusing failure than plainly having no tools.
+    const auto props = json::parse(R"({"chat_template_caps":{
+        "supports_tools": true, "supports_tool_calls": false}})");
+    CHECK(oa::dialect::template_tool_calls()(props) == std::optional<bool>{false});
+}

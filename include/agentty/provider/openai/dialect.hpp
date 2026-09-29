@@ -208,4 +208,53 @@ inline const Lens<bool>& declared_tool_use() {
     return l;
 }
 
+// ── declared capability, from llama.cpp /props ───────────────────────────
+//
+// llama.cpp has no capability object on /v1/models rows, so the two lenses
+// above never fire there. But it does answer /props — which agentty already
+// fetches for the runtime context window — and that response carries
+// `chat_template_caps`.
+//
+// Those caps are not metadata somebody typed in. llama.cpp RUNS the model's
+// own jinja chat template against probe inputs at load time and diffs the
+// rendered output to see what the template actually reacts to (see
+// common/jinja/caps.cpp, caps_get). So it is a measurement of the exact
+// template this server will apply to our request — strictly better evidence
+// than any filename or third-party catalog, and it self-corrects when the
+// user swaps the GGUF.
+//
+// The key names are fixed by caps::to_map() in that same file:
+//
+//   supports_tools                the template renders a tools array
+//   supports_tool_calls           ... and assistant tool_calls back
+//   supports_parallel_tool_calls
+//   supports_system_role
+//   supports_string_content / supports_typed_content
+//   supports_object_arguments
+//   supports_preserve_reasoning   keeps thinking across turns, not just last
+//   supports_reasoning_effort     the template honours a reasoning_effort kwarg
+//
+// Only the last one answers "should agentty show an effort ladder". A server
+// whose template ignores reasoning_effort will happily accept the field and
+// drop it on the floor, which is the worst outcome: the picker offers a dial
+// that is wired to nothing.
+inline const Lens<bool>& template_reasoning_effort() {
+    static const Lens<bool> l =
+        under("chat_template_caps", key<bool>("supports_reasoning_effort"));
+    return l;
+}
+
+// Whether the template can render tool calls at all.
+//
+// Read supports_tool_calls, not supports_tools: a template that renders the
+// tools array but cannot render the assistant's tool_calls back into history
+// breaks on turn two, which looks like the model "forgetting" it called
+// anything. Both default to true in llama.cpp's caps struct, so a false here
+// is a template that demonstrably failed the probe.
+inline const Lens<bool>& template_tool_calls() {
+    static const Lens<bool> l =
+        under("chat_template_caps", key<bool>("supports_tool_calls"));
+    return l;
+}
+
 } // namespace agentty::provider::openai::dialect

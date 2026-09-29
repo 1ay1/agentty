@@ -47,6 +47,16 @@ CLAIMS = {
         ],
         "GET /props": [
             ("default_generation_settings.n_ctx", int),
+            # The capability object. llama.cpp builds it by RUNNING the
+            # model's jinja template against probe inputs and diffing the
+            # output (common/jinja/caps.cpp, caps_get), so the key names
+            # are fixed by caps::to_map() in that file. If upstream renames
+            # one, agentty silently loses reasoning on every llama.cpp
+            # model and falls back to guessing from the GGUF filename —
+            # exactly the bug this replaced. Check the spelling, loudly.
+            ("chat_template_caps", dict),
+            ("chat_template_caps.supports_reasoning_effort", bool),
+            ("chat_template_caps.supports_tool_calls", bool),
         ],
     },
     "lmstudio": {

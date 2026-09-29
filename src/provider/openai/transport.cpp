@@ -2933,6 +2933,24 @@ struct WindowProbe {
     // compact a conversation that never needed compacting, and the user
     // sees history disappear for no reason.
     bool measured = false;
+
+    // ── Capability, not window ───────────────────────────────────────────
+    // Riding along on the same trip. /props is the ONLY place llama.cpp
+    // says anything about capability — its /v1/models rows are bare id +
+    // object, with no capability object for dialect::declared_reasoning()
+    // to read — and we are already making this request for the window.
+    //
+    // Keyed like per_model so a multi-model router answers per model; a
+    // single-model server writes the one id it serves. Empty = the server
+    // never mentioned chat_template_caps (not llama.cpp, or a build older
+    // than the field), which must stay distinct from "said false".
+    std::map<std::string, bool> reasoning_effort;
+    // Same shape for tool-call support (chat_template_caps.supports_tool_calls).
+    std::map<std::string, bool> tool_calls;
+    // Server-wide fallbacks, for the single-model shape where /props answers
+    // for the one loaded model and we have no id to key on yet.
+    std::optional<bool> reasoning_effort_wide;
+    std::optional<bool> tool_calls_wide;
 };
 
 // Hosts the user has explicitly opted into runtime probing for.
@@ -3225,6 +3243,15 @@ std::shared_mutex& probe_opt_in_mu() {
     if (auto body = get("/props")) {
         try {
             auto j = json::parse(*body);
+            // Capability rides along on the window trip. Record it BEFORE
+            // the window logic and before any early return, because the
+            // two answers are independent: a router's bare /props has a
+            // dummy n_ctx of 0 but still carries the real template caps,
+            // and a server whose window we already knew still needs this.
+            const auto wide_effort = dialect::template_reasoning_effort()(j);
+            const auto wide_tools  = dialect::template_tool_calls()(j);
+            if (wide_effort) out.reasoning_effort_wide = *wide_effort;
+            if (wide_tools)  out.tool_calls_wide       = *wide_tools;
             if (auto dg = j.find("default_generation_settings");
                 dg != j.end() && dg->is_object()) {
                 if (const int w = advertised_context_window(*dg); w > 0)
@@ -3253,6 +3280,13 @@ std::shared_mutex& probe_opt_in_mu() {
                     if (!pb) continue;
                     try {
                         auto pj = json::parse(*pb);
+                        // Per-model caps: on a router each model has its
+                        // OWN chat template, so the server-wide answer
+                        // above (a dummy) does not describe any of them.
+                        if (auto e = dialect::template_reasoning_effort()(pj))
+                            out.reasoning_effort[id] = *e;
+                        if (auto t = dialect::template_tool_calls()(pj))
+                            out.tool_calls[id] = *t;
                         int w = 0;
                         if (auto dg = pj.find("default_generation_settings");
                             dg != pj.end() && dg->is_object())
@@ -3572,6 +3606,43 @@ std::vector<ModelInfo> list_models(const AuthHeader& auth, const Endpoint& endpo
                 for (const auto& mi : result) ids.push_back(mi.id.value);
                 const auto probe =
                     detail::probe_endpoint_windows(auth, endpoint, ids);
+                // Capability first, and on its OWN condition: the window
+                // block below is gated on the probe having found a window,
+                // but a llama.cpp build can answer chat_template_caps while
+                // reporting n_ctx 0 (router dummy), and a row that already
+                // declared its window still needs its caps recorded.
+                for (auto& mi : result) {
+                    const auto pick = [&](const std::map<std::string, bool>& per,
+                                          const std::optional<bool>& wide)
+                        -> std::optional<bool> {
+                        if (const auto it = per.find(mi.id.value); it != per.end())
+                            return it->second;
+                        // server_wide only speaks for a single-model server.
+                        // On a router it is the dummy, which describes no
+                        // real model — same asymmetry as the window above.
+                        return per.empty() ? wide : std::nullopt;
+                    };
+                    // Endpoint-scoped key, like every other catalog write:
+                    // the same model id on another host may be a different
+                    // quant with a different template.
+                    const std::string scoped = endpoint.label + "/" + mi.id.value;
+                    if (const auto e = pick(probe.reasoning_effort,
+                                            probe.reasoning_effort_wide)) {
+                        // This is the fix for "no reasoning on llama.cpp".
+                        // Without it these rows fall through resolved_caps()
+                        // to id inference, which reads a GGUF path and
+                        // guesses — so the effort ladder appeared or vanished
+                        // based on what the file happened to be named.
+                        set_catalog_reasoning(scoped, *e);
+                    }
+                    if (const auto t = pick(probe.tool_calls, probe.tool_calls_wide)) {
+                        // Only ever WITHHOLD on an explicit false. Unknown
+                        // still sends tools (see ModelInfo::tools_allowed):
+                        // a model that silently never gets tools looks
+                        // identical to a model that is just bad at them.
+                        if (!*t) mi.supports_tools = false;
+                    }
+                }
                 if (!probe.per_model.empty() || probe.server_wide > 0) {
                     for (auto& mi : result) {
                         const auto it = probe.per_model.find(mi.id.value);

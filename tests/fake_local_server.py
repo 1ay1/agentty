@@ -148,6 +148,28 @@ ROUTER_PROPS_PER_MODEL = {
 }
 
 
+# llama.cpp's chat_template_caps, verified against common/jinja/caps.h +
+# caps::to_map() in caps.cpp. The server RUNS the model's own jinja template
+# against probe inputs at load and diffs the output to see what it reacts to,
+# so this is a measurement of the template that will actually be applied to
+# our request — not metadata anyone typed in.
+#
+# It is the ONLY capability llama.cpp declares anywhere: its /v1/models rows
+# are bare id + meta, which is why every model there used to fall through to
+# inference over a GGUF filename.
+LLAMA_TEMPLATE_CAPS = {
+    "supports_string_content": True,
+    "supports_typed_content": False,
+    "supports_tools": True,
+    "supports_tool_calls": True,
+    "supports_parallel_tool_calls": True,
+    "supports_system_role": True,
+    "supports_preserve_reasoning": False,
+    "supports_reasoning_effort": True,
+    "supports_object_arguments": False,
+}
+
+
 class H(BaseHTTPRequestHandler):
     def _send(self, obj, code=200):
         body = json.dumps(obj).encode()
@@ -186,6 +208,7 @@ class H(BaseHTTPRequestHandler):
                     "default_generation_settings": {"n_ctx": 8192},
                     "total_slots": 1,
                     "model_alias": "qwen2.5-coder-7b",
+                    "chat_template_caps": LLAMA_TEMPLATE_CAPS,
                 })
             if path in ("/v1/models", "/models"):
                 return self._send(LLAMA_MODELS)
@@ -220,7 +243,18 @@ class H(BaseHTTPRequestHandler):
                 w = ROUTER_LOADED_WINDOW.get(name) if name == ROUTER_STATE["loaded"] else None
                 if w is None:
                     return self._send({"error": {"message": "model is not loaded"}}, 400)
-                return self._send({"default_generation_settings": {"n_ctx": w}})
+                # Per-model caps: on a router each model has its OWN chat
+                # template, so the bare /props dummy above describes none of
+                # them. Only a LOADED model gets here at all (the branch
+                # above 400s otherwise, matching router_validate_model with
+                # autoload=false), so an unloaded one declares nothing and
+                # must stay UNKNOWN on the client rather than "no reasoning".
+                caps = dict(LLAMA_TEMPLATE_CAPS)
+                caps["supports_reasoning_effort"] = name == "qwen3-coder"
+                return self._send({
+                    "default_generation_settings": {"n_ctx": w},
+                    "chat_template_caps": caps,
+                })
         elif MODE == "litellm":
             if path in ("/v1/models", "/models"):
                 return self._send(LITELLM_V1)

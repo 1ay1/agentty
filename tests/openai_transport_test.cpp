@@ -2277,6 +2277,11 @@ TEST_CASE("live: a local server's RUNTIME window reaches ModelInfo") {
     ep.path        = "/v1/chat/completions";
     ep.models_path = "/v1/models";
     ep.use_tls     = false;
+    // A non-empty label so the catalog writes land on a SCOPED key
+    // ("provider/model"), which is what the product does and what the
+    // capability reads below resolve. An empty scope silently falls back
+    // to the bare key and would test a path no real endpoint takes.
+    ep.label       = "local-test";
 
     // force_probe mirrors what the ADD-HOST flow does: ask the runtime
     // routes regardless of what the address looks like, so a self-hosted
@@ -2351,6 +2356,26 @@ TEST_CASE("live: a local server's RUNTIME window reaches ModelInfo") {
         }
         CHECK(oai::probe_loaded_window(auth::AuthHeader{}, ep, "gemma3:27b") == 131072);
         CHECK(oai::probe_loaded_window(auth::AuthHeader{}, ep, "qwen3-coder") == 0);
+
+        // ── Capability, not window ──────────────────────────────────
+        // Same asymmetry as the window above, for the same reason. On a
+        // router each model has its OWN chat template, so caps are per
+        // model and the bare /props dummy (role:"router", n_ctx 0, no
+        // chat_template_caps — see server-models.cpp get_router_props)
+        // describes none of them.
+        //
+        // The LOADED model answers, so its template caps are recorded.
+        using agentty::catalog_reasoning_for;
+        CHECK(catalog_reasoning_for("qwen3-coder", ep.label) == 1);
+
+        // The UNLOADED one gets -1, not 0. We ask with autoload=false, so
+        // the router refuses rather than spawning a process — which is the
+        // right trade, but it means we learned nothing. Recording `false`
+        // on "we did not ask hard enough" would disable reasoning on a
+        // model that supports it, and the user would have no way to tell
+        // that from a real answer. Leave the rung empty and let inference
+        // speak until the model loads and a later refresh sees the truth.
+        CHECK(catalog_reasoning_for("gemma3:27b", ep.label) == -1);
     } else if (m == "litellm") {
         // THE REGRESSION GUARD. /v1/models advertises 128000; the proxy's
         // /v1/model/info declares a stale 8192. A DECLARATION must never
@@ -2369,6 +2394,23 @@ TEST_CASE("live: a local server's RUNTIME window reaches ModelInfo") {
         // Before the fix this row advertised nothing and resolved to the
         // 200k default.
         CHECK(models.front().context_window == 8192);
+
+        // The other half of the same request. llama.cpp's /v1/models rows
+        // carry no capability object at all, so before this every model
+        // here fell through resolved_caps() to id inference over a GGUF
+        // filename — which is how "no reasoning on llama.cpp" happened
+        // even on a model whose template supports it.
+        //
+        // /props answers, and its answer is a MEASUREMENT: llama.cpp runs
+        // the model's own jinja template against probe inputs at load and
+        // diffs the output (common/jinja/caps.cpp). Single-model server,
+        // so one server-wide answer covers the one model it serves.
+        using agentty::catalog_reasoning_for;
+        CHECK(catalog_reasoning_for(models.front().id.value, ep.label) == 1);
+
+        // supports_tool_calls is true in the stub, so tools stay allowed.
+        // The tri-state must be unknown-or-true, never a hard false.
+        CHECK(models.front().tools_allowed());
     } else {
         // /v1 declares max_context_length 262144; the native API reports the
         // instance loaded at 16384. The smaller, measured one must win.
