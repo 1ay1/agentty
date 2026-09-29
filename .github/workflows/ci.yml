@@ -84,6 +84,23 @@ jobs:
           # content-addressed — a new one means the CONTENT changed, and the
           # old one is still a valid restore target for an older branch — so
           # they are still never touched.
+          #
+          # sccache is the exception, and it needed its own rule. Its GHA
+          # backend writes ONE CACHE ENTRY PER OBJECT FILE
+          # (`sccache/<a>/<b>/<c>/<64-hex>`), so the msvc lane alone produced
+          # 198 entries — which is how the linux sanitizer ccache and the
+          # mingw ccache both vanished while the total sat at 3 GiB of a
+          # 10 GB budget. GitHub's cap is not the only limit that matters;
+          # thousands of small entries starve the few big ones that actually
+          # save time. Keep the newest 40 and drop the rest: a partial
+          # sccache still hits on most objects, and it regrows every run.
+          gh api --paginate "repos/$REPO/actions/caches?per_page=100" \
+            --jq '.actions_caches[] | select(.key|startswith("sccache/")) | "\(.created_at)\t\(.id)\t\(.key)"' \
+            | sort -r | tail -n +41 \
+            | while IFS="$(printf '\t')" read -r created id key; do
+                echo "delete surplus sccache: $key"
+                gh api -X DELETE "repos/$REPO/actions/caches/$id" >/dev/null || true
+              done
           gh api --paginate "repos/$REPO/actions/caches?per_page=100" \
             --jq '.actions_caches[] | "\(.created_at)\t\(.id)\t\(.key)"' \
             | sort -r \
@@ -496,18 +513,27 @@ jobs:
             mingw-w64-ucrt-x86_64-openssl
             mingw-w64-ucrt-x86_64-nghttp2
             git
-      - name: ccache dir
-        # Keyed per-SHA with a prefix restore-key: every run writes a NEW ~2 GB
-        # entry and the previous one becomes dead weight. That is fine on its
-        # own (the prune job below keeps the newest per prefix), but combined
-        # with two oversized linux ccaches it meant this entry was the first
-        # thing LRU-evicted — measured 2026-09, there were ZERO surviving
-        # windows-mingw-ucrt64-ccache-* entries, so this lane had been
-        # configured for ccache and running stone cold for weeks.
+      - name: ccache dir (restore)
+        # RESTORE ONLY, with an explicit save step after the build.
         #
-        # The fix is upstream, in the linux max-size values; CCACHE_MAXSIZE
-        # here is already modest and stays as it is.
-        uses: actions/cache@v4
+        # actions/cache's combined form saves in a post step, and a post step
+        # is SKIPPED when the job is cancelled. This lane takes ~31 min cold
+        # and `cancel-in-progress: true` kills it whenever a newer commit
+        # lands, so the post step almost never ran: measured 2026-09, ZERO
+        # surviving windows-mingw-ucrt64-ccache-* entries.
+        #
+        # That is a self-sustaining loop, and it is what actually kept this
+        # lane cold -- not LRU eviction, which is what the previous comment
+        # here blamed. The cache total was 3.09 GiB against a 10 GB cap with
+        # no mingw entry in sight, so nothing was being evicted; the entry
+        # was never written. Never saved -> always cold -> always slow ->
+        # always cancelled -> never saved.
+        #
+        # Splitting restore from save with `if: always()` breaks it: a
+        # cancelled build still banks the objects it managed to compile, so
+        # the next run starts warmer, finishes sooner, and eventually stops
+        # being cancelled at all.
+        uses: actions/cache/restore@v4
         with:
           path: D:\a\_temp\msys64\home\runneradmin\.ccache
           key: windows-mingw-ucrt64-ccache-${{ github.sha }}
@@ -521,6 +547,20 @@ jobs:
             -DAGENTTY_STANDALONE=ON -DAGENTTY_AUTO_PULL_MAYA=OFF
           cmake --build build -j
           ccache -s
+
+      # Save whatever got compiled, even if the build was cancelled or
+      # failed. This is the half that breaks the never-warms loop described
+      # on the restore step: with `if: always()` a killed 31-minute build
+      # still banks its objects, so the next run starts from them.
+      #
+      # Keyed on the SHA, so this only writes when that exact key is absent
+      # (a re-run of the same commit is a no-op, not an error).
+      - name: ccache dir (save)
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: D:\a\_temp\msys64\home\runneradmin\.ccache
+          key: windows-mingw-ucrt64-ccache-${{ github.sha }}
 
       # Runtime smoke test. Compile-only cannot catch MSYS2/mintty's runtime
       # path: mintty gives a native executable PIPE-backed stdio handles, not
