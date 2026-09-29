@@ -4,6 +4,10 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **The optional-hook drift check couldn't see half the hooks it guarded.** 0.9.14 made a hook with a drifted signature a build error instead of a silent "this program has no such hook". It asked whether a hook existed by taking its address, and you can't take the address of a member template or an overload set — so both came back as "doesn't exist". maya's terminal host declares `present`, `present_frame` and `handle` as templates, which meant the host half of the check was blind to the hook that draws every frame: a renderer whose `present` drifted compiled clean and simply never drew. The check now asks about the hook's name rather than its address, and sees every shape a hook can take — including one inherited from a base, which is how both original bugs actually reached users.
+- **A `view()` that can't be called with the model is now an error.** The probe for it was written but never used, so this one case fell through.
+
 ## [0.9.14] - 2026-09-28
 
 Runtime hardening. The jaal runtime underneath agentty now catches a whole
