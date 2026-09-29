@@ -310,10 +310,16 @@ jobs:
             -DAGENTTY_BUILD_TESTS=ON \
             -DAGENTTY_SANITIZE_ALL=thread
       - name: Build race test set
+        # Three narrow targets, ~4-11 TUs each. This lane used to also build
+        # agentty_standalone_tests (375 TUs, every provider + the ACP server
+        # + the RAG adapter + all of maya) because persistence_race_test
+        # lived inside it and carried the `race` label. TSan roughly doubles
+        # compile time, so that one test was the most expensive thing in CI.
+        # It now has a narrow target of its own; coverage is unchanged.
         run: |
           cmake --build build-tsan -j"$(nproc)" --target race_harness_test
           cmake --build build-tsan -j"$(nproc)" --target real_subsystem_race_test
-          cmake --build build-tsan -j"$(nproc)" --target agentty_standalone_tests
+          cmake --build build-tsan -j"$(nproc)" --target persistence_race_test_narrow
       - name: Run under TSan
         env:
           TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1

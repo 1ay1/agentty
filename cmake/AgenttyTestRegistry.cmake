@@ -334,5 +334,18 @@ function(agentty_finalize_tests)
     endif()
     add_custom_target(tests_gating DEPENDS agentty_tests ${_gating})
 
-    add_custom_target(sanitizer_tests DEPENDS agentty_tests ${_sanitizer})
+    # sanitizer_tests deliberately does NOT depend on agentty_tests.
+    #
+    # Every `sanitizer`-labelled entry is a narrow-source binary of its own
+    # (concurrency_primitives, cred_crypt, keystore, race_harness,
+    # real_subsystem_race) — they are narrow precisely so they stay
+    # asan-clean without linking maya's un-instrumented renderer. Not one
+    # test in the label comes out of agentty_tests, so depending on it made
+    # the ASan CI lane compile and link the ~1.1 GB doctest binary, with
+    # instrumentation, to then run nothing from it.
+    #
+    # If a doctest case ever needs to run under a sanitizer, give it its own
+    # narrow target and the `sanitizer` label — that is the pattern here,
+    # and it is what keeps this lane from rebuilding the world.
+    add_custom_target(sanitizer_tests DEPENDS ${_sanitizer})
 endfunction()

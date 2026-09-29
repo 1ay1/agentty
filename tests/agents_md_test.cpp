@@ -382,7 +382,16 @@ static void test_resolve_global_agentty_wins() {
     write_file(fake_home / ".agentty" / "AGENTS.md", "agentty-global");
     write_file(fake_home / ".agents"  / "AGENTS.md", "agents-global");
     // Temporarily set HOME to our fake home.
+    //
+    // AGENTTY_HOME must come off too: user_root() checks it BEFORE HOME, and
+    // the standalone fold's dispatcher sets it to a per-run sandbox so folded
+    // tests can't write into a real ~/.agentty. With it set, this test's fake
+    // HOME is ignored and resolve_global_agents_md() looks in the sandbox,
+    // which has neither file.
     const char* orig_home = std::getenv("HOME");
+    const char* orig_agentty_home = std::getenv("AGENTTY_HOME");
+    const std::string saved_agentty_home = orig_agentty_home ? orig_agentty_home : "";
+    unsetenv("AGENTTY_HOME");
     setenv("HOME", fake_home.string().c_str(), 1);
     const auto resolved = wire::resolve_global_agents_md();
     CHECK(!resolved.empty());
@@ -394,6 +403,8 @@ static void test_resolve_global_agentty_wins() {
     // Restore HOME.
     if (orig_home) setenv("HOME", orig_home, 1);
     else unsetenv("HOME");
+    if (!saved_agentty_home.empty())
+        setenv("AGENTTY_HOME", saved_agentty_home.c_str(), 1);
     fs::remove_all(fake_home);
 }
 

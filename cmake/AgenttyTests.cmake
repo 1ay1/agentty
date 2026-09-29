@@ -277,23 +277,37 @@ set_property(DIRECTORY APPEND PROPERTY AGENTTY_FOLD_NAMES anthropic_md_stream)
 # Build the one binary: union of every folded test's extra objs/libs.
 # persistence_race: the REAL async save queue under TSan, not a model of it.
 # Folded (it owns main + AGENTTY_HOME, and needs the full io object set), so
-# it is registered in agentty_standalone_tests.def alongside its siblings. It
-# only runs instrumented in the TSan tree, where everything is rebuilt anyway.
-agentty_fold_test(persistence_race_test TIMEOUT 180 LABELS race)
+# it is registered in agentty_standalone_tests.def alongside its siblings.
+#
+# NOT labelled `race`: that label is what the TSan CI lane selects on, and
+# this being the only `race` test inside the fold forced that lane to build
+# all 375 TUs of agentty_standalone_tests under -fsanitize=thread to run one
+# test. persistence_race_test_narrow (below) is the same source built from
+# the ~11 TUs it actually needs, and carries the `race` label instead. This
+# entry still runs uninstrumented in the normal suite, which is where its
+# non-race assertions (flush drains, late writes land) belong anyway.
+agentty_fold_test(persistence_race_test TIMEOUT 180)
 # thread_index: the mtime cache actually caches. Folded for the same reason
 # as persistence_race — it owns AGENTTY_HOME and needs the io object set.
 agentty_fold_test(thread_index_test TIMEOUT 60)
 agentty_fold_test(theme_preview_cost_probe TIMEOUT 120 NO_TEST)
 
+# agents_md_test — locks wire::agents_md_block (AAIF AGENTS.md standard).
+# checkpoint_test — git-backed worktree snapshots.
+#
+# Both FOLDED. They were their own binaries on the grounds that they chdir()
+# into temp workspaces, but the fold already runs each entry as a separate
+# PROCESS (agentty_standalone_tests <name>), so a chdir is no more shared
+# than it was before — and ten already-folded tests do exactly the same
+# thing (skills_engine, toolset_e2e, workspace_index, ...). Two 531 MB links
+# for that was the last of the per-test link cost the fold exists to remove.
+agentty_fold_test(agents_md_test  TIMEOUT 30)
+agentty_fold_test(checkpoint_test TIMEOUT 60)
+
+# Build the one binary: union of every folded test's extra objs/libs.
 agentty_finalize_fold(
     OBJS $<TARGET_OBJECTS:agentty_acp_obj>
     LIBS acp::acp)
-
-# agents_md_test — locks wire::agents_md_block (AAIF AGENTS.md standard).
-# Kept as its OWN binary: it chdir()s into temp workspaces, and it's new enough
-# that folding it hasn't been validated.
-agentty_test(agents_md_test          MODE standalone TIMEOUT 30)
-agentty_test(checkpoint_test         MODE standalone TIMEOUT 60)
 
 # stats_visual — dump every stats tab in real ANSI, for a human to LOOK at.
 # NO_TEST on purpose: its output is colour and layout, and a test asserting
@@ -345,6 +359,34 @@ add_executable(real_subsystem_race_test EXCLUDE_FROM_ALL
 target_include_directories(real_subsystem_race_test PRIVATE include)
 add_test(NAME real_subsystem_race_test COMMAND real_subsystem_race_test)
 set_tests_properties(real_subsystem_race_test PROPERTIES TIMEOUT 120 LABELS "sanitizer;race")
+
+# persistence_race_test_narrow — the SAME test as the folded
+# `persistence_race_test` entry, built from the ~11 TUs it actually needs
+# instead of the whole 375-TU standalone fold.
+#
+# Why: it is the only `race`-labelled test living in agentty_standalone_tests,
+# so the TSan CI lane was compiling that entire binary — every provider, the
+# ACP server, the RAG adapter, all of maya — under -fsanitize=thread to run
+# ONE test. TSan roughly doubles compile time, so that was the single most
+# expensive thing in CI, and none of it was instrumented code the test reads.
+#
+# Registered under `race` only. The folded entry keeps the `sanitizer` label
+# for the asan lane (which builds that binary anyway for its own reasons), so
+# coverage is identical and neither lane loses a check.
+agentty_test(persistence_race_test_narrow MODE raw LABELS race)
+add_executable(persistence_race_test_narrow EXCLUDE_FROM_ALL
+    tests/persistence_race_test.cpp tests/persistence_race_stubs.cpp
+    src/io/persistence.cpp src/io/blob_store.cpp src/io/thread_log.cpp
+    src/runtime/settings_registry.cpp src/tool/util/utf8.cpp
+    src/util/logx.cpp src/util/dbglog.cpp src/util/home_dir.cpp
+    src/util/user_root.cpp src/util/base64.cpp src/util/teardown.cpp)
+target_include_directories(persistence_race_test_narrow PRIVATE include)
+target_link_libraries(persistence_race_test_narrow PRIVATE
+    nlohmann_json::nlohmann_json simdjson::simdjson Threads::Threads)
+target_compile_definitions(persistence_race_test_narrow PRIVATE
+    AGENTTY_MCP=0 AGENTTY_VERSION="${PROJECT_VERSION}")
+add_test(NAME persistence_race_test_narrow COMMAND persistence_race_test_narrow)
+set_tests_properties(persistence_race_test_narrow PROPERTIES TIMEOUT 120 LABELS "race")
 
 
 agentty_test(cred_crypt_test MODE raw LABELS sanitizer)
