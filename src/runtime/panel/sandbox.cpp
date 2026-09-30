@@ -251,6 +251,18 @@ form::Form build_sandbox_form(const sandbox_cfg::Config& cfg, bool claybin_avail
         "bubblewrap leaks one.",
         cfg.close_inherited_fds));
 
+    // The trust-handoff row goes LAST and under its own heading, because it is
+    // not the same kind of control as the rest. Everything above confines the
+    // process; this one governs what the agent may hand to the host to run
+    // later -- the escape class in Pillar's July 2026 series, where the agent
+    // never broke out and did not need to.
+    form.fields.push_back(header("Trust handoff"));
+    form.fields.push_back(choice(
+        kSbHandoff, "Agent writes host-executed files",
+        "hooks, .vscode tasks, git config, venv interpreters \xc2\xb7 "
+        "the shape of CVE-2026-48124 \xc2\xb7 refuse is the default on purpose",
+        {"refuse", "warn", "allow"}, static_cast<int>(cfg.handoff)));
+
     return form;
 }
 
@@ -301,6 +313,8 @@ sandbox_cfg::Config read_sandbox_form(const form::Form& f,
 
     cfg.scope_ipc = toggle_of(kSbScopeIpc, base.scope_ipc);
     cfg.close_inherited_fds = toggle_of(kSbCloseFds, base.close_inherited_fds);
+    cfg.handoff = static_cast<sandbox_cfg::HandoffPolicy>(
+        choice_of(kSbHandoff, static_cast<int>(base.handoff)));
     return cfg;
 }
 

@@ -73,6 +73,9 @@ inline constexpr std::string_view kSbCpuPercent  = "cpu_percent";
 inline constexpr std::string_view kSbTmpMb       = "tmp_mb";
 inline constexpr std::string_view kSbScopeIpc    = "scope_ipc";
 inline constexpr std::string_view kSbCloseFds    = "close_fds";
+// The row that defends the escape class nobody else defends. See
+// domain/sandbox_provenance.hpp for why it is its own control.
+inline constexpr std::string_view kSbHandoff     = "handoff";
 
 // ── The live wall report ────────────────────────────────────────────────
 //

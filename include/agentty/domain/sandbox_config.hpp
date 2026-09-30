@@ -30,6 +30,8 @@
 #include <string>
 #include <vector>
 
+#include "agentty/domain/sandbox_provenance.hpp"
+
 namespace agentty::sandbox_cfg {
 
 // How much of the filesystem the sandbox exposes read-only.
@@ -181,6 +183,19 @@ struct Config {
     // its shipped posture, so an upgrade changes nothing until a deliberate
     // edit -- the same contract RagConfig::configured has.
     bool configured = false;
+
+    // ── Trust handoff ────────────────────────────────────────────────────
+    //
+    // What to do when the agent writes a file the HOST later executes -- a
+    // hooks config, a .vscode task, a git config, a venv interpreter. This is
+    // the shape of every escape in Pillar Security's July 2026 series
+    // (CVE-2026-48124 and friends): the agent never broke the sandbox, it just
+    // wrote something a trusted component outside the sandbox ran later.
+    //
+    // Refuse by default, which is stricter than how anything else here
+    // behaves. An approval prompt is right for "this might be risky"; a trust
+    // handoff is the shape of a known escape class, so the answer starts at no.
+    HandoffPolicy handoff = HandoffPolicy::Refuse;
 };
 
 }  // namespace agentty::sandbox_cfg
