@@ -123,11 +123,32 @@ Cmd sandbox_update(Model& m, msg::SandboxMsg sm) {
             o.pane.backend = sb::is_active()
                 ? (sb::detected_backend() == sb::Backend::Claybin ? "claybin" : "bwrap")
                 : "none";
-            // Seeded from the policy IN FORCE, not from defaults: the pane
-            // has to open on what is actually enforcing, or the first thing
-            // the user sees is a lie about their own boundary.
-            o.pane.form = pn::build_sandbox_form(sb::config(), o.pane.claybin_available,
+
+            // Seeded from the SAVED policy (m.d.persisted), not the live one.
+            //
+            // These differ, and only since the policy became sealed: the
+            // live config is frozen at whatever this process started with,
+            // while `persisted` holds any save made during this session. If
+            // the pane opened on the live one it would silently discard an
+            // earlier save -- you would set a syscall profile, reopen, and
+            // find your edit gone.
+            //
+            // `configured` is the discriminator: an untouched config means
+            // nobody has been here, so fall back to what is actually
+            // enforcing rather than to struct defaults.
+            const auto& seed = m.d.persisted.sandbox.configured
+                                   ? m.d.persisted.sandbox
+                                   : sb::config();
+            o.pane.form = pn::build_sandbox_form(seed, o.pane.claybin_available,
                                                  landlock_abi_here());
+
+            // Already-saved-this-session is worth carrying into the reopened
+            // pane, so the "applies on restart" footer does not vanish just
+            // because the overlay closed and came back.
+            o.pane.saved_pending_restart =
+                m.d.persisted.sandbox.configured &&
+                !(m.d.persisted.sandbox == sb::config());
+
             // Land on the first real setting, not a section header -- a
             // cursor parked on a row that does nothing reads as broken for
             // the one keystroke it takes to notice.
@@ -212,17 +233,30 @@ Cmd sandbox_update(Model& m, msg::SandboxMsg sm) {
             // has actually been here. Saving is the act that sets it.
             cfg.configured = true;
 
-            // Install for the rest of this session AND persist. Both, because
-            // either alone is a trap: install-only forgets the policy on
-            // restart, persist-only leaves the running session enforcing
-            // something the pane no longer shows.
-            sb::set_config(cfg);
+            // PERSIST ONLY. No set_config() here, deliberately.
+            //
+            // The live policy was sealed at startup and set_config() would
+            // refuse this anyway (it logs and returns), so calling it would
+            // be theatre -- but the reason it refuses is the point: a
+            // boundary must not move under a process that is already running.
+            // Switching claybin -> bwrap mid-session silently drops the
+            // seccomp filter, the cgroup caps and the secret masks, and
+            // re-tightening later does not un-read a key that already left.
+            //
+            // So this writes the policy for the NEXT launch and says so. The
+            // pane's footer carries "applies on restart" (see the view), so
+            // the user is never left believing a wall went up when it did
+            // not. Restart is the apply step; that is the cost of a boundary
+            // you can trust for the whole session.
             m.d.persisted.sandbox = cfg;
 
-            // Re-derive from the config we actually committed, so the rows
-            // show the normalised result (a port list gets sorted, a blank
-            // number becomes 0) rather than the raw text that produced it.
+            // Re-derive the rows from the config we committed, so they show
+            // the normalised result (ports sorted, a blank number as 0)
+            // rather than the raw text that produced it. Seeded from `cfg`,
+            // NOT from sb::config() -- the live policy is the old one and
+            // reprojecting off it would throw the edit away.
             reproject(*o, cfg);
+            o->pane.saved_pending_restart = true;
             return persist_settings(m);
         },
 

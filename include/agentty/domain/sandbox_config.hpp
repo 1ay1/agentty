@@ -281,6 +281,20 @@ struct Config {
     // behaves. An approval prompt is right for "this might be risky"; a trust
     // handoff is the shape of a known escape class, so the answer starts at no.
     HandoffPolicy handoff = HandoffPolicy::Refuse;
+
+    // Defaulted equality, so the Sandbox pane can ask "is the saved policy
+    // different from the one actually enforcing?" and answer honestly.
+    //
+    // That question only exists because the live policy is SEALED at startup
+    // (see tool/util/sandbox.hpp): a save during the session goes to disk and
+    // does not take effect, so the pane has two configs to compare and has to
+    // tell the user when they diverge. Before the seal there was only one.
+    //
+    // Defaulted rather than hand-written on purpose: a hand-rolled comparison
+    // that forgets a field would report "no change" for a policy that did
+    // change, which is the wrong direction for a security control to fail.
+    // This way adding a field to the struct keeps the comparison complete.
+    [[nodiscard]] bool operator==(const Config&) const = default;
 };
 
 }  // namespace agentty::sandbox_cfg

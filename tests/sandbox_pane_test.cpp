@@ -72,6 +72,18 @@ const form::field::Number& num_at(const form::Form& f, int i) {
 
 Msg key(form::keys::Intent i) { return Msg{SandboxKey{form::keys::Action{i, 0}}}; }
 
+// Install a policy as if this were startup.
+//
+// set_config() is SEALED after its first call, which is the property most of
+// this file exists to pin -- so a test that wants to start from a known
+// policy has to break the seal first. Every case below arranges its own
+// starting state through this, rather than depending on which case ran
+// before it.
+void install(const sandbox_cfg::Config& cfg) {
+    sb::reset_config_for_test();
+    sb::set_config(cfg);
+}
+
 }  // namespace
 
 TEST_CASE("sandbox pane: the General list has a door that opens it") {
@@ -102,7 +114,7 @@ TEST_CASE("sandbox pane: opens onto the policy in force, not defaults") {
     cfg.configured = true;
     cfg.net_mode   = sandbox_cfg::NetMode::None;
     cfg.memory_mb  = 4096;
-    sb::set_config(cfg);
+    install(cfg);
 
     const Model m = opened();
     const auto& f = pane(m).pane.form;
@@ -125,7 +137,7 @@ TEST_CASE("sandbox pane: Esc discards, so walking away changes nothing") {
     sandbox_cfg::Config cfg;
     cfg.configured = true;
     cfg.net_mode   = sandbox_cfg::NetMode::Full;
-    sb::set_config(cfg);
+    install(cfg);
 
     Model m = opened();
     // Move a row, then leave without saving.
@@ -141,28 +153,85 @@ TEST_CASE("sandbox pane: Esc discards, so walking away changes nothing") {
     CHECK(sb::config().net_mode == sandbox_cfg::NetMode::Full);
 }
 
-TEST_CASE("sandbox pane: save installs the policy and stages it to persist") {
-    sandbox_cfg::Config cfg;   // fresh: configured == false
-    sb::set_config(cfg);
-    REQUIRE(!sb::config().configured);
+TEST_CASE("sandbox pane: save persists but does NOT touch the live boundary") {
+    // The security property, stated as a test: saving writes the policy for
+    // the next launch and leaves the running sandbox exactly as it was.
+    //
+    // Why this is the right behaviour, since it is the opposite of every
+    // other pane: a boundary that can move mid-session only moves usefully
+    // in the WEAKENING direction, the weakening is invisible and cannot be
+    // undone (re-tightening does not un-read a key that already left), and
+    // two commands in one session under two different policies makes the
+    // sandbox unauditable.
+    sandbox_cfg::Config live;
+    live.configured   = true;
+    live.memory_mb    = 512;
+    live.syscall_mode = sandbox_cfg::SyscallMode::Compiler;
+    install(live);   // arranges the sealed starting state
+    REQUIRE(sb::config_sealed());
 
     Model m = opened();
-
-    // Type a memory cap, then save.
     const int mem = row_of(pane(m).pane.form, pn::kSbMemoryMb);
     REQUIRE(mem >= 0);
     num_at(m.ui.panel.get<pn::Sandbox>()->pane.form, mem).value = 2048;
 
     auto [saved, cmd] = app::update(std::move(m), Msg{SandboxSave{}});
 
-    // Installed for this session...
-    CHECK(sb::config().memory_mb == 2048);
-    // ...and marked as the user's own choice, which is what stops an upgrade
-    // from applying a saved block nobody asked for.
-    CHECK(sb::config().configured);
-    // ...and staged on the model, so the save effect has something to write.
+    // Staged for the next launch...
     CHECK(saved.d.persisted.sandbox.memory_mb == 2048);
     CHECK(saved.d.persisted.sandbox.configured);
+
+    // ...and the LIVE policy is untouched. This is the assertion that
+    // matters: if it ever flips, a prompt-injected agent that can reach the
+    // settings reducer can lower the walls of the session it is running in.
+    CHECK(sb::config().memory_mb == 512);
+
+    // And the pane says so, rather than letting the user believe the wall
+    // went up. An unsaid "applies on restart" is the same class of lie as
+    // "sandbox: active" on a host that cannot sandbox.
+    const auto* o = saved.ui.panel.get<pn::Sandbox>();
+    REQUIRE(o != nullptr);
+    CHECK(o->pane.saved_pending_restart);
+}
+
+TEST_CASE("sandbox config: the policy is sealed after the first install") {
+    // Enforced in code, not by comment. It WAS a comment ("call before
+    // init()") and the settings pane broke it within a day of existing, so
+    // the invariant now refuses rather than trusts.
+    sandbox_cfg::Config first;
+    first.configured = true;
+    first.memory_mb  = 111;
+    first.backend    = sandbox_cfg::LinuxBackend::Claybin;
+    install(first);
+    REQUIRE(sb::config_sealed());
+    REQUIRE(sb::config().memory_mb == 111);
+
+    // Every later call is a no-op, whichever direction it goes.
+    sandbox_cfg::Config weaker;
+    weaker.configured   = true;
+    weaker.memory_mb    = 0;      // no cap
+    weaker.syscall_mode = sandbox_cfg::SyscallMode::Off;
+    weaker.backend      = sandbox_cfg::LinuxBackend::Bwrap;
+    sb::set_config(weaker);
+    CHECK(sb::config().memory_mb == 111);
+    CHECK(sb::config().syscall_mode == sandbox_cfg::SyscallMode::Compiler);
+
+    // Including the ENGINE. Downgrading claybin -> bwrap silently drops the
+    // seccomp filter, the cgroup caps AND the non-configurable secret masks
+    // (measured: the same workspace .env reads back empty under claybin and
+    // in full under bwrap), so the backend has to be sealed with the rest of
+    // the policy rather than alongside it.
+    CHECK(sb::requested_linux_backend() == sb::LinuxPreference::Claybin);
+
+    // Tightening is refused too. Not because tightening is dangerous, but
+    // because "the policy can change, but only in ways we judge safe" is a
+    // rule with a judgement call in it, and this one is worth having none.
+    sandbox_cfg::Config tighter;
+    tighter.configured   = true;
+    tighter.memory_mb    = 64;
+    tighter.syscall_mode = sandbox_cfg::SyscallMode::Strict;
+    sb::set_config(tighter);
+    CHECK(sb::config().memory_mb == 111);
 }
 
 TEST_CASE("sandbox pane: the backend row is first and always offers both") {
@@ -171,7 +240,7 @@ TEST_CASE("sandbox pane: the backend row is first and always offers both") {
     // where "claybin" was not an option at all.
     sandbox_cfg::Config cfg;
     cfg.configured = true;
-    sb::set_config(cfg);
+    install(cfg);
 
     const Model m = opened();
     const auto& f = pane(m).pane.form;
@@ -197,7 +266,7 @@ TEST_CASE("sandbox pane: bwrap locks the rows it cannot enforce") {
     sandbox_cfg::Config cfg;
     cfg.configured = true;
     cfg.backend    = sandbox_cfg::LinuxBackend::Bwrap;
-    sb::set_config(cfg);
+    install(cfg);
 
     const Model m = opened();
     const auto& f = pane(m).pane.form;
@@ -233,7 +302,7 @@ TEST_CASE("sandbox pane: switching the backend row relocks live") {
     sandbox_cfg::Config cfg;
     cfg.configured = true;
     cfg.backend    = sandbox_cfg::LinuxBackend::Bwrap;
-    sb::set_config(cfg);
+    install(cfg);
 
     Model m = opened();
     const int b = row_of(pane(m).pane.form, pn::kSbBackend);
@@ -270,7 +339,7 @@ TEST_CASE("sandbox pane: a locked row keeps its value through a round trip") {
     cfg.backend    = sandbox_cfg::LinuxBackend::Bwrap;
     cfg.memory_mb  = 4096;
     cfg.syscall_mode = sandbox_cfg::SyscallMode::Strict;
-    sb::set_config(cfg);
+    install(cfg);
 
     const Model m = opened();
     const auto back = pn::read_sandbox_form(pane(m).pane.form, sb::config());
@@ -287,18 +356,18 @@ TEST_CASE("sandbox pane: saving the backend switches the live engine") {
     sandbox_cfg::Config cfg;
     cfg.configured = true;
     cfg.backend    = sandbox_cfg::LinuxBackend::Claybin;
-    sb::set_config(cfg);
+    install(cfg);
     CHECK(sb::requested_linux_backend() == sb::LinuxPreference::Claybin);
 
     cfg.backend = sandbox_cfg::LinuxBackend::Bwrap;
-    sb::set_config(cfg);
+    install(cfg);
     CHECK(sb::requested_linux_backend() == sb::LinuxPreference::Bwrap);
 
     // An UNCONFIGURED config must not move it: main.cpp calls set_config()
     // before the CLI flag, so letting a default config publish its default
     // backend would silently undo --sandbox-backend.
     sb::prefer_linux_backend(sb::LinuxPreference::Claybin);
-    sb::set_config(sandbox_cfg::Config{});   // configured == false
+    install(sandbox_cfg::Config{});   // configured == false
     CHECK(sb::requested_linux_backend() == sb::LinuxPreference::Claybin);
 }
 

@@ -276,9 +276,13 @@ static_assert(visual::parts_cover_all<Sandbox>);
 //   blocked   append-only log; painted, but nothing navigates it
 //   observing learning capture, read only when building a recommendation
 //   backend / claybin_available   host facts, settled at open
+//   saved_pending_restart        a latch; it only ever goes false->true, and
+//                                the footer it drives is inside the form's
+//                                own frame
 inline auto visual_parts(const SandboxPane& p) {
     return std::make_tuple(visual::ref(p.form), visual::exempt, visual::exempt,
-                           visual::exempt, visual::exempt, visual::exempt);
+                           visual::exempt, visual::exempt, visual::exempt,
+                           visual::exempt);
 }
 static_assert(visual::parts_cover_all<SandboxPane>);
 

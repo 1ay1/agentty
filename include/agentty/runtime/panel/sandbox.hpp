@@ -58,7 +58,14 @@ namespace agentty::ui::panel {
 // Row ids. Named constants at both the build and read site, for the reason
 // appearance.hpp gives: a typo across two matching string literals is a
 // silently dead setting and the compiler cannot see it.
-inline constexpr std::string_view kSbMode        = "mode";
+//
+// There is deliberately NO `mode` row. Turning the sandbox off is a launch
+// decision (`--sandbox off`), not a setting: a saved "off" is a foot-gun that
+// survives reboots silently, and the pane cannot change the live boundary
+// anyway (the policy is sealed at startup -- see tool/util/sandbox.hpp). A row
+// id for a row that must not exist is an invitation to wire it up "for
+// consistency", so it is not here to be found. See docs/design/
+// sandbox-boundary.md §3.
 inline constexpr std::string_view kSbBackend     = "backend";
 inline constexpr std::string_view kSbFsScope     = "fs_scope";
 inline constexpr std::string_view kSbReadPaths   = "read_paths";
@@ -162,6 +169,18 @@ struct SandboxPane {
     // hiding them would make the limitation invisible.
     std::string backend;        // "claybin" | "bwrap" | "none"
     bool claybin_available = false;
+
+    // A save has landed on disk but the LIVE boundary is still the one this
+    // process started with. Drives the "applies on restart" footer.
+    //
+    // Needed because this pane's save is the one place in agentty where
+    // saving does not take effect: the sandbox policy is sealed at startup
+    // (see tool/util/sandbox.hpp's set_config). Without saying so, a user
+    // who tightens the syscall profile and keeps working would believe in a
+    // wall that is not up until they relaunch -- which is the exact class of
+    // lie this pane exists to prevent, just pointed at the future instead of
+    // the present.
+    bool saved_pending_restart = false;
 };
 
 // (visual_parts for this pane lives in panel/visual_parts.hpp, alongside

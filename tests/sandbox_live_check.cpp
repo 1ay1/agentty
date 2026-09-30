@@ -10,11 +10,13 @@
 //   1. under the compiler profile, realloc() works           (the mremap fix)
 //   2. with net_mode=None, a socket to a raw IP cannot connect (the net rule)
 #include "agentty/tool/util/sandbox_claybin.hpp"
+#include "agentty/domain/sandbox_config.hpp"   // kAlwaysMasked*
 
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <fcntl.h>
 #include <sys/wait.h>
@@ -47,6 +49,19 @@ cb::Posture base_posture() {
     p.syscall_mode      = 1;   // Compiler -- the default, and where the bug was
     p.net_mode          = 0;   // Full
     p.tmp_bytes         = 512ull * 1024 * 1024;
+
+    // The non-configurable masks, exactly as build_claybin_posture() sets
+    // them. Mirrored rather than left empty: an empty mask list is why the
+    // first version of the .env check below "failed" for the wrong reason --
+    // it was measuring a posture nobody ever spawns.
+    if (const char* home = std::getenv("HOME"); home && *home) {
+        for (const char* m : agentty::sandbox_cfg::kAlwaysMasked)
+            p.masked.emplace_back(std::string{home} + m);
+    }
+    for (const char* n : agentty::sandbox_cfg::kAlwaysMaskedNames) {
+        if (n[0] != '.' || std::string_view{n} == ".pem") continue;
+        p.masked.emplace_back(std::string{kWorkspace} + "/" + n);
+    }
     return p;
 }
 
@@ -173,6 +188,51 @@ int main() {
             "    print(\"blocked:\", e)' 2>&1", out);
         std::printf("  exit=%d, child said: %s", rc, out.c_str());
         expect(out.find("CONNECTED") != std::string::npos, "reached the network");
+    }
+
+    // ── 4. the masks that are NOT configurable ────────────────────────
+    // kAlwaysMasked/kAlwaysMaskedNames are the one part of the policy a user
+    // cannot switch off, so they are the part most worth measuring rather
+    // than trusting. A workspace .env is the sharpest case: the workspace is
+    // bound READ-WRITE by both backends, so scope does not save us and the
+    // mask is the only thing standing between an agent and a real secret.
+    std::printf("workspace .env is masked:\n");
+    {
+        const std::string envp = std::string{kWorkspace} + "/.env";
+        {
+            std::FILE* f = std::fopen(envp.c_str(), "w");
+            if (!f) { std::printf("  cannot plant .env\n"); ++failures; }
+            else { std::fputs("SECRET=canary\n", f); std::fclose(f); }
+        }
+        auto p = base_posture();
+        std::string out;
+        int rc = run(p, "cat .env 2>&1", out);
+        std::printf("  exit=%d, child said: %s", rc, out.c_str());
+        expect(out.find("SECRET=canary") == std::string::npos,
+               "the secret did NOT reach the child");
+        std::error_code ec;
+        std::filesystem::remove(envp, ec);
+    }
+
+    // ── 5. curl, specifically ─────────────────────────────────────
+    // Its own case because curl reports EVERY early failure as
+    // CURLE_OUT_OF_MEMORY (27), which sends you looking at memory caps and
+    // the network rules when the cause is neither. python3 fetches the same
+    // URL fine under this exact posture, so a curl failure here is about
+    // curl's startup, not about the boundary.
+    //
+    // Kept as a check rather than a note because curl is what users reach
+    // for, and "the sandbox broke curl" is indistinguishable from "the
+    // sandbox is broken" from the outside.
+    std::printf("curl reaches the network (net_mode=Full):\n");
+    {
+        auto p = base_posture();
+        std::string out;
+        int rc = run(p,
+            "curl -sS -m 5 -o /dev/null -w 'H:%{http_code}' https://example.com 2>&1",
+            out);
+        std::printf("  exit=%d, child said: %s\n", rc, out.c_str());
+        expect(out.find("H:200") != std::string::npos, "curl got a 200");
     }
 
     std::printf("\n%s\n", failures ? "LIVE CHECK FAILURES" : "all live checks passed");

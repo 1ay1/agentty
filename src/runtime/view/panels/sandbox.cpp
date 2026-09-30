@@ -82,6 +82,28 @@ maya::Element sandbox_panel(const Model& m) {
     auto form = o->pane.form;
     form.note = wall_summary(o->pane);
 
+    // The one thing this pane must never leave unsaid: a save here does NOT
+    // change the running sandbox.
+    //
+    // The policy is sealed when the process starts (tool/util/sandbox.hpp),
+    // so edits land on disk and take effect next launch. Everywhere else in
+    // agentty saving means "in force now", so the exception has to be stated
+    // rather than assumed -- a user who tightens the syscall filter and keeps
+    // working would otherwise trust a wall that is not up yet. That is the
+    // same class of lie as "sandbox: active" on a host that cannot sandbox,
+    // only pointed at the future.
+    //
+    // Rendered FIRST in the note and marked as replacing the shared grammar,
+    // because it outranks the wall report: the walls describe what WOULD be
+    // enforced, and this says when.
+    if (o->pane.saved_pending_restart) {
+        form.note = "saved \xc2\xb7 applies on restart (the running sandbox is "
+                    "unchanged)\n" + form.note;
+    } else if (form.dirty) {
+        form.note = "^S saves for the next launch \xc2\xb7 the running sandbox "
+                    "cannot be changed\n" + form.note;
+    }
+
     return maya::Panel{form_config(form, info,
                                    &m.ui.sandbox_scroll,
                                    panel_viewport_h(),

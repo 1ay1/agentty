@@ -11,6 +11,21 @@ crosses this boundary. What the sandbox constrains is what a *tool* can do.
 --sandbox off    never wrap
 ```
 
+The sandbox policy is **fixed when agentty starts** and does not change while
+it runs. The Sandbox settings pane edits the policy for your *next* launch and
+says so; there is no way to loosen the boundary of a session already in
+progress, deliberately. `--sandbox off` is a launch flag for the same reason:
+a saved "off" is a setting that silently survives reboots.
+
+That is a real cost — you cannot try a tighter profile without relaunching —
+and it buys one property: whatever confined the first command in a session
+confined the last one too. The pane compiles your edits and shows the walls
+they would produce without running anything, so you can see the effect before
+you restart.
+
+For the reasoning, the per-backend capability table and the known gaps, see
+[docs/design/sandbox-boundary.md](design/sandbox-boundary.md).
+
 ## Backends
 
 | backend | platform | selected |

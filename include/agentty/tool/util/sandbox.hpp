@@ -87,14 +87,49 @@ enum class LinuxPreference : std::uint8_t {
 // the preference.
 void prefer_linux_backend(LinuxPreference p) noexcept;
 
-// Install the user's saved sandbox policy. Also before init(): the policy
-// decides what the probe should be checking, so a config asking for a wall
-// this kernel cannot build is caught at startup where it can be reported,
-// rather than per-command where it looks like a broken tool.
+// Install the user's saved sandbox policy. Call ONCE, at startup, before
+// init(): the policy decides what the probe should be checking, so a config
+// asking for a wall this kernel cannot build is caught at startup where it
+// can be reported, rather than per-command where it looks like a broken tool.
 //
-// Never called ⇒ the shipped defaults, which reproduce the pre-config
-// behaviour exactly.
+// SEALED after the first call -- a later call is ignored and logs a warning.
+// The sandbox policy is the one setting in agentty that is NOT live, and that
+// is a deliberate trade rather than an implementation limit.
+//
+// A boundary that can move mid-session only ever moves usefully in the
+// WEAKENING direction. The weakening is invisible (switching claybin -> bwrap
+// silently drops the seccomp filter, the cgroup caps, and the
+// non-configurable secret masks) and it cannot be undone, because
+// re-tightening does not un-read a key that already left. It also makes the
+// sandbox unauditable: two commands in one session get two different walls,
+// with nothing recording which got which.
+//
+// So the pane writes to disk for the NEXT launch, and restart is the apply
+// step. Every other setting in agentty stays live.
 void set_config(const sandbox_cfg::Config& cfg);
+
+// Has the policy been sealed (i.e. has set_config already run)? The Sandbox
+// pane asks so it can tell the user that edits apply on restart, not now.
+[[nodiscard]] bool config_sealed() noexcept;
+
+// Break the seal. TESTS ONLY -- production code has no business calling this.
+//
+// Worth being precise about what the seal is and isn't, so this hook is not
+// mistaken for a hole in it. The seal defends against a specific, real bug:
+// the settings reducer calling set_config() on a live process, which is how
+// the pane shipped and which silently moved the boundary mid-session. It is
+// an invariant enforced in code because the same rule as a comment lasted one
+// day.
+//
+// It is NOT a defence against arbitrary in-process code. Anything that can
+// call agentty's own functions has already won -- it could spawn without the
+// sandbox entirely. So a clearly-named test hook costs nothing against the
+// threat this actually addresses, and the alternative (a fresh process per
+// case) would make the sealing behaviour itself untestable.
+//
+// Named for_test like bwrap_argv_for_test above, so a grep for `_for_test`
+// finds every seam that exists only for the suite.
+void reset_config_for_test() noexcept;
 
 // The policy in force. Read by the settings pane to seed its form, and by
 // anything that wants to report the posture.

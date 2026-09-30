@@ -1,6 +1,7 @@
 #include "agentty/tool/util/sandbox.hpp"
 
 #include "agentty/tool/util/fs_helpers.hpp"
+#include "agentty/util/logx.hpp"   // AGT_LOG — the sealed-policy refusal
 
 #include <atomic>
 #include <cstdio>
@@ -65,24 +66,35 @@ std::atomic<Backend> g_backend{Backend::None};
 // migration.
 std::atomic<LinuxPreference> g_linux_pref{LinuxPreference::Bwrap};
 
-// The user's saved sandbox policy, as an IMMUTABLE snapshot behind an
-// atomically-swapped pointer. Never mutated in place.
+// The user's saved sandbox policy. Written ONCE, at startup, then frozen.
 //
-// Not a plain global, and the history matters: it WAS one, on the premise
-// "written once before maya starts, read by every bash call after" -- the
-// same set-once lifecycle the mode and backend atomics have. The settings
-// pane retired that premise. SandboxSave publishes a new policy from the
-// reducer thread while tools are mid-flight on task_isolated workers, and
-// Config holds three vectors and a string, so an in-place assignment is a
-// reader walking a freed pointer.
+// Sealed rather than republishable, and that seal is the pane's security
+// model -- see set_config() for the full reasoning. The short version: a
+// boundary that can move mid-session only ever moves usefully in the
+// weakening direction, the weakening is invisible and cannot be undone, and
+// it makes the sandbox unauditable because two commands in one session get
+// two different walls.
 //
-// Publish-and-swap instead. A reader takes a shared_ptr copy for the whole
-// command, which is both memory-safe and the right semantics: the boundary a
-// running command is already inside cannot change underneath it.
+// This is the ONLY setting in agentty that behaves this way. Everything else
+// in the settings store is live by design; a theme is judged by looking at
+// it. The sandbox is judged by reading what it promises, so it trades
+// immediacy for a property nothing else here needs.
+//
+// Still a shared_ptr-to-const behind an atomic rather than a plain global:
+// written once but READ from tool worker threads and the UI thread at the
+// same time, and this is how a reader gets a coherent view without a lock.
 //
 // Defaults reproduce today's behaviour, so a user who never opens the pane
 // gets exactly the sandbox they already had.
 std::shared_ptr<const sandbox_cfg::Config> g_cfg{};
+
+// Has the policy been sealed? Set by the first set_config() call.
+//
+// A plain atomic bool rather than "g_cfg != nullptr", because the two are
+// not the same question: sealing must latch even if someone seals with a
+// default-constructed config, and conflating them would let a second call
+// through whenever the first happened to publish something falsy.
+std::atomic<bool> g_cfg_sealed{false};
 
 // Only the POSIX backends (Linux bwrap, macOS sandbox-exec) need the
 // "can we run this binary?" probe — the Windows/unsupported branch
@@ -620,41 +632,84 @@ void prefer_linux_backend(LinuxPreference p) noexcept {
 }
 
 void set_config(const sandbox_cfg::Config& cfg) {
-    // Publish a NEW immutable snapshot and swap the pointer. Never mutate the
-    // one readers may be holding.
+    // SEALED AFTER THE FIRST CALL. A later call is ignored, and says so.
     //
-    // This used to be a plain `g_cfg = cfg` on a plain global, documented as
-    // "set once before init(), read-only after". The settings pane broke that
-    // premise: SandboxSave writes the policy from the REDUCER thread while
-    // tools -- which is to say, every reader of this config -- are running on
-    // task_isolated worker threads. Assigning a struct with three
-    // std::vectors and a std::string out from under a concurrent reader is a
-    // straight data race: the reader can observe a half-swapped vector and
-    // walk a freed pointer.
+    // This is the whole security model of the pane, so it is worth stating
+    // plainly. Every other setting in agentty is live: change the theme and
+    // the next frame is painted with it. A sandbox cannot work that way,
+    // because the thing it configures is a BOUNDARY, and a boundary that can
+    // move while the process runs has three problems no amount of care fixes:
     //
-    // The fix is the shape the lifetime actually wants. A config is immutable
-    // once published; "changing" it means publishing a different one. Readers
-    // take a shared_ptr copy (config_snapshot()) and keep their whole
-    // command on that one value, so a save mid-command cannot change the
-    // boundary a running command is already inside -- which is a correctness
-    // property in its own right, not just a memory-safety one.
+    //   1. It only ever gets WEAKER usefully. Tightening mid-session is
+    //      fine but pointless (whatever already ran, ran); loosening is what
+    //      an attacker wants, and a prompt-injected agent that can reach the
+    //      settings reducer is exactly who would want it.
+    //
+    //   2. The weakening is INVISIBLE and IRREVERSIBLE. Switching claybin ->
+    //      bwrap silently drops the seccomp filter, the cgroup caps AND the
+    //      non-configurable secret masks -- measured: the same workspace
+    //      .env reads back as zero bytes under claybin and `SECRET=leaked`
+    //      under bwrap. Re-tightening afterwards does not un-read a key that
+    //      already left.
+    //
+    //   3. Two commands in one session get two different boundaries, with
+    //      nothing in the transcript saying which got which. That makes the
+    //      sandbox unauditable, which is worse than a weaker sandbox that is
+    //      at least one known thing.
+    //
+    // So the policy is fixed at startup, from the saved settings plus the
+    // CLI, and the pane WRITES TO DISK for the next launch rather than
+    // mutating the live one. Restart is the apply step. That is a real cost
+    // -- you cannot try a tighter profile without relaunching -- and it buys
+    // the only property that matters here: whatever confined the first
+    // command in this session confines the last one too.
+    //
+    // Enforced in code, not by comment. It was a comment before ("call
+    // before init()") and the pane broke it within a day of existing.
+    if (g_cfg_sealed.exchange(true, std::memory_order_acq_rel)) {
+        AGT_LOG(Tool, Warn, "sandbox.seal",
+                "refused a live sandbox policy change: the boundary is sealed "
+                "at startup and only a restart applies a new one");
+        return;
+    }
+
+    // First call: publish the one snapshot this process will ever use.
+    //
+    // Still an immutable snapshot behind an atomic pointer rather than a
+    // plain global. The seal means it is written once, but it is READ from
+    // tool worker threads while the UI thread reads it too, and
+    // shared_ptr-to-const is how a reader gets a coherent view without a
+    // lock. (It also kept a real use-after-free out of the tree back when
+    // this was republishable: Config holds three vectors, and assigning one
+    // under a concurrent reader is a freed-buffer walk.)
     auto next = std::make_shared<const sandbox_cfg::Config>(cfg);
     std::atomic_store_explicit(&g_cfg, std::move(next), std::memory_order_release);
 
-    // The policy carries the ENGINE too, so publishing it has to move the
-    // backend preference with it -- otherwise the pane's Backend row saves
-    // and nothing switches, which is the same class of bug as the pane
-    // saving a policy nothing enforced.
+    // The policy carries the ENGINE, so sealing it seals the backend too.
     //
     // Only when the user has actually chosen: an unconfigured config holds
     // the struct default (bwrap), and letting that overwrite the preference
     // would make a bare set_config() silently undo --sandbox-backend.
-    // main.cpp calls both, CLI first, so this order matters.
+    // main.cpp calls this BEFORE parsing the flag, so the flag still wins.
     if (cfg.configured) {
         prefer_linux_backend(cfg.backend == sandbox_cfg::LinuxBackend::Claybin
                                  ? LinuxPreference::Claybin
                                  : LinuxPreference::Bwrap);
     }
+}
+
+bool config_sealed() noexcept {
+    return g_cfg_sealed.load(std::memory_order_acquire);
+}
+
+void reset_config_for_test() noexcept {
+    // Order matters even here: drop the config first, then the seal, so a
+    // concurrent reader never sees "unsealed but still holding the old
+    // policy" -- which is the one state that would let a second set_config
+    // land while a reader is mid-snapshot.
+    std::atomic_store_explicit(&g_cfg, std::shared_ptr<const sandbox_cfg::Config>{},
+                               std::memory_order_release);
+    g_cfg_sealed.store(false, std::memory_order_release);
 }
 
 std::shared_ptr<const sandbox_cfg::Config> config_snapshot() noexcept {

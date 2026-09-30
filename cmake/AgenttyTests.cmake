@@ -460,12 +460,13 @@ add_executable(sandbox_config_race_test EXCLUDE_FROM_ALL
     tests/sandbox_config_race_test.cpp tests/test_main.cpp
     tests/sandbox_config_race_stubs.cpp
     src/tool/util/sandbox.cpp src/tool/util/subprocess.cpp
+    src/tool/util/sandbox_claybin.cpp
     src/tool/util/utf8.cpp
     src/util/logx.cpp src/util/dbglog.cpp src/util/home_dir.cpp
     src/util/user_root.cpp src/util/teardown.cpp)
 target_include_directories(sandbox_config_race_test PRIVATE include)
 target_link_libraries(sandbox_config_race_test PRIVATE
-    doctest::doctest nlohmann_json::nlohmann_json Threads::Threads)
+    doctest::doctest nlohmann_json::nlohmann_json Threads::Threads claybin)
 # maya headers only (sandbox.cpp's transitive includes reach scroll_state /
 # anim_clock); no maya linking, so the TSan build stays small.
 if(TARGET maya::app)

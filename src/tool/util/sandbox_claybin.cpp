@@ -108,6 +108,24 @@ using namespace ::clay::literals;
     if (!p.workspace.empty()) {
         d = std::move(d).bind(p.workspace, p.workspace);
         d = std::move(d).workdir(p.cwd.empty() ? p.workspace : p.cwd);
+
+        // Re-apply any mask that lives INSIDE the workspace, because the bind
+        // above just remounted over it.
+        //
+        // This is an ordering bug I shipped and then measured: masks are
+        // applied at line ~94, the workspace bind lands here, and a bind of
+        // the workspace root covers every mount underneath it. So
+        // `<workspace>/.env` was masked and then un-masked one line later,
+        // and a planted .env came back readable IN FULL under both backends.
+        // Every table-level check passed the whole time -- the mask really
+        // was in the policy, it just lost a race with a later mount.
+        //
+        // Order is the only fix: a mask must come after every bind that could
+        // cover it. The $HOME masks are unaffected (nothing rebinds $HOME),
+        // which is why ~/.ssh was safe and .env was not.
+        for (const auto& m : p.masked) {
+            if (m.starts_with(p.workspace)) d = std::move(d).mask(m);
+        }
     }
 
     // ── network ─────────────────────────────────────────────────────────
