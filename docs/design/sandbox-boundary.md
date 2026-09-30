@@ -201,11 +201,14 @@ cgroup2. So most rows mean nothing under bwrap.
 |---|---|---|
 | readable scope, extra read/write | yes (binds) | yes (landlock) |
 | masked paths | yes (mask mounts, §7) | yes (mask mounts) |
+| secret scan depth | yes (feeds the mask list) | yes |
 | network mode | no | yes |
 | syscall profile | no | yes (§8) |
 | W^X | no | yes |
-| memory / procs / CPU / tmp | no | yes (cgroup2) |
+| memory / procs / CPU% / tmp | no | yes (cgroup2) |
+| open files / CPU secs / wall clock | no | yes (rlimit + cgroup2) |
 | scope IPC | no | yes (landlock abi 6+) |
+| hostname | no | yes |
 | close inherited fds | yes | yes |
 
 **The honesty rule.** A row the active backend cannot enforce is *locked,
@@ -293,11 +296,47 @@ Three details that are not optional:
 
 The Masked row is now live on both backends (§6).
 
+### `.pem` and nested secrets: the bounded sweep
+
+`kAlwaysMaskedNames` are **basenames** — `.env`, `id_rsa`, `*.pem`. A name
+cannot become a mount without knowing where the file is, so the first version
+masked only `<workspace>/.env` and missed the layout that actually occurs:
+`services/api/.env` in any monorepo. `*.pem` could not be expressed at all,
+because it is a *suffix* rule.
+
+So `sandbox_cfg::mask_paths()` walks. One function, consumed by **both**
+backends — that is the point. The credential list is the least negotiable part
+of the policy, and a list applied by one backend and not the other is exactly
+how `.env` leaked under bwrap while reading back empty under claybin. Computed
+once, it is either right everywhere or wrong everywhere, and wrong everywhere
+is much easier to notice.
+
+It is **bounded**, and the bound is a setting (`mask_scan_depth`, default 3):
+
+- it runs on **every spawn**, so an unbounded walk of a large tree would put a
+  full directory scan in the latency path of every shell command
+- `.git`, `node_modules`, `target`, `build`, `.venv` … are skipped. Two
+  properties justify each: reliably enormous, *and* not somewhere a credential
+  file legitimately lives. The second is the safety argument — if one of those
+  ever becomes somewhere secrets do live, skipping it stops being a
+  performance decision and becomes a hole.
+- `.git` is the interesting case: no `.env`, but `.git/config` can carry a
+  credential helper. Covered by the trust-handoff rules (§11) rather than by
+  masking, so skipping it loses nothing.
+- directory symlinks are **not** followed. Following one out of the workspace
+  would mask host paths the user never asked about; one pointing back inside
+  would walk the tree twice.
+- a symlink *named* `.env` is masked as the link rather than followed —
+  following it would mask the target and leave the link readable.
+
 ### Proof
 
-`sandbox_live_check` plants a `.env` and reads it back through the **real**
-bwrap argv. Verified by reverting: `SECRET=canary` leaks → red; restored →
-`cat: .env: Permission denied`.
+`sandbox_live_check` plants a `.env` at the workspace root and reads it back
+through the **real** bwrap argv. Verified by reverting the masking: it leaks →
+red; restored → `cat: .env: Permission denied`.
+
+It also plants `services/api/.env` and `services/api/key.pem`. Verified by
+forcing the sweep depth to 0: both leak → red; at depth 3 both are masked.
 
 One trap worth recording: `sandbox_escape_test` asserted that `~/.ssh` never
 appears in the argv, which broke the moment masking landed — because a mask
@@ -305,6 +344,54 @@ appears in the argv, which broke the moment masking landed — because a mask
 hiding; the check now distinguishes them by the preceding argument. A tightening
 change should never fail a security test, and when it does the test is what is
 wrong.
+
+---
+
+## 7a. Everything claybin can enforce is configurable
+
+The pane used to expose a subset of claybin's policy surface, which meant the
+engine could enforce walls the user had no way to ask for. Audited against
+`claybin/policy/policy.hpp` and closed:
+
+| claybin capability | pane row |
+|---|---|
+| `read` / `read_write` / `deny` | Readable scope, Also readable/writable, Masked |
+| `memory` | Memory (MB) |
+| `processes` | Processes |
+| `cpu_percent` | CPU (%) |
+| `open_files` | Open files |
+| `cpu_time` | CPU seconds |
+| `wall_clock` | Wall clock (s) |
+| `tmpfs` size | /tmp size (MB) |
+| `syscall_profile` | Filter |
+| W^X | W^X |
+| network isolation / ports | Access, Allowed ports |
+| landlock IPC scoping | Scope IPC |
+| `close_inherited_fds` | Close inherited fds |
+| `hostname` | Report hostname as `sandbox` |
+
+Three of those deserve a note, because they look redundant and are not:
+
+- **`open_files` is not `processes`.** A runaway that leaks descriptors
+  exhausts the host's file table without ever forking, so a pid cap does not
+  bound it.
+- **`cpu_time` is not `wall_clock` is not the tool timeout.** CPU time bounds
+  total compute (a process that sleeps forever is untouched); wall clock bounds
+  elapsed time (one that blocks forever is not); the tool layer's own timeout
+  is a third thing that a child trapping SIGTERM can ignore — these cannot.
+- **`hostname` is not a wall.** The guest cannot escalate either way. It is
+  there because the real host name leaks into build output and test snapshots,
+  which makes those non-reproducible. The row says so rather than sitting among
+  the walls looking like containment.
+
+**Deliberately not exposed:** `bind_fd` / `file_from_fd` (an fd is not
+something a settings row can name), `keep_cap` (any capability inside a sandbox
+is a hole — claybin already refuses `CAP_SYS_ADMIN`, and the rest have no
+legitimate use here), `uid`/`gid` (changing them buys nothing the namespace
+does not already give), `as_pid_1` (changes signal semantics in ways a user
+cannot reason about), `isolation(microvm)` (no backend for it yet), and
+`unsafe_inherit_fds` — which is named to be uncomfortable and should stay that
+way.
 
 ---
 
@@ -451,10 +538,10 @@ lowering the walls of the session it is running in.
 - **Network egress under `NetMode::Full`.** Read access plus network is read
   plus exfiltrate. That is why the default read set is narrow rather than
   convenient.
-- **`.pem` files, and secrets below the workspace root.** Both need a tree
-  walk rather than a path list (§7). Equally uncovered on both backends, which
-  is the least-bad version of a gap — nobody gets a false sense of which
-  backend is safer.
+- **Secrets the name list does not know about, or that sit deeper than
+  `mask_scan_depth` / inside a skipped directory.** The sweep is bounded by
+  design (§7); the bound is a setting so the trade is the user's. A secret in
+  `config.local.yaml` is invisible to a basename list regardless.
 - **Windows.** No backend. `--sandbox on` fails loudly rather than pretending.
 
 ---
@@ -518,10 +605,14 @@ change broke what.
 
 ### Still open
 
-- **`.pem` masking.** A suffix rule needs a tree walk; neither backend covers
-  it (§7). Equal on both, which is the least-bad version of a gap.
-- **`kAlwaysMaskedNames` only at the workspace root.** A `.env` in a
-  subdirectory is not masked by either backend. Same walk problem.
+- **Secrets deeper than `mask_scan_depth`.** A `.env` eight levels down is not
+  masked at the default 3. Bounded on purpose (§7) — the bound is a setting, so
+  it is a trade the user can make rather than one made for them.
+- **Secrets inside a skipped directory.** A credential in `node_modules/` is
+  not masked. Same trade, and the skip list is chosen so that each entry is
+  somewhere a credential file does not legitimately live.
+- **Names we do not know about.** The list is `kAlwaysMaskedNames` plus
+  whatever the user adds. A secret in `config.local.yaml` is invisible to it.
 - **The bwrap/claybin asymmetry in §6** is inherent, not a bug list. bwrap
   cannot express seccomp or cgroups; the honesty rule is the mitigation.
 

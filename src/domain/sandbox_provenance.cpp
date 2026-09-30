@@ -12,8 +12,11 @@
 // statement about how developer tooling behaves, not about the kernel.
 
 #include "agentty/domain/sandbox_provenance.hpp"
+#include "agentty/domain/sandbox_config.hpp"   // Config, kAlwaysMasked*, mask_paths
 
+#include <algorithm>
 #include <array>
+#include <filesystem>
 #include <span>
 
 // The matcher lives in claybin, which is a required submodule -- so this is a
@@ -103,6 +106,118 @@ bool is_host_trusted(std::string_view path, TrustKind* out_kind) {
     if (!shape_matches(path, std::span<const ShapeRule>{kRules}, &t)) return false;
     if (out_kind) *out_kind = static_cast<TrustKind>(t);
     return true;
+}
+
+namespace {
+
+// Directories never worth walking for a credential file.
+//
+// Two properties, and BOTH are needed to justify skipping one: it is reliably
+// enormous (so walking it costs real time on every spawn), and a credential
+// file does not legitimately live there. The second is the safety argument --
+// if a name on this list ever becomes somewhere secrets DO live, skipping it
+// stops being a performance decision and becomes a hole.
+//
+// .git is the interesting case: it holds no `.env`, but it DOES hold
+// `.git/config`, which can carry a credential helper. That is covered by the
+// trust-handoff rules above (TrustKind::GitConfig) rather than by masking, so
+// skipping it here loses nothing.
+constexpr std::string_view kNeverWalk[] = {
+    ".git", "node_modules", "target", "build", "dist", ".venv", "venv",
+    "__pycache__", ".mypy_cache", ".pytest_cache", ".cache", ".next",
+    ".gradle", ".tox", "vendor", "Pods", ".terraform",
+};
+
+[[nodiscard]] bool never_walk(std::string_view name) {
+    for (auto d : kNeverWalk) if (name == d) return true;
+    return false;
+}
+
+// Does this basename name a credential file?
+//
+// `.pem` is a SUFFIX rule rather than a name, and it is the reason the walk
+// had to exist at all: a suffix cannot be turned into a path without looking
+// at what is actually on disk.
+[[nodiscard]] bool is_masked_name(std::string_view name) {
+    for (const char* n : kAlwaysMaskedNames) {
+        const std::string_view rule{n};
+        if (rule == ".pem") {
+            if (name.size() > 4 && name.ends_with(".pem")) return true;
+            continue;
+        }
+        if (name == rule) return true;
+    }
+    return false;
+}
+
+// Walk `dir` to `depth_left` levels, appending every file whose basename is a
+// credential name.
+//
+// Recursive, and safe to be: the depth is bounded by mask_scan_depth before
+// the first call, and directory symlinks are never followed, so no input can
+// drive this deeper than the bound.
+void sweep(const std::filesystem::path& dir, int depth_left,
+           std::vector<std::string>& out) {
+    std::error_code ec;
+    // skip_permission_denied: a workspace can contain directories we cannot
+    // read, and a masking sweep must not fail the whole spawn over one of
+    // them. Directory symlinks are NOT followed -- following one out of the
+    // workspace would mask host paths the user never asked about, and one
+    // pointing back inside would walk the tree twice.
+    std::filesystem::directory_iterator it{
+        dir, std::filesystem::directory_options::skip_permission_denied, ec};
+    if (ec) return;
+
+    for (const auto& entry : it) {
+        std::error_code sec;
+        const auto name = entry.path().filename().string();
+        // symlink_status, not status: a symlink NAMED .env is masked as the
+        // link rather than followed. Following it would mask wherever it
+        // points and leave the link itself readable.
+        const auto st = entry.symlink_status(sec);
+        if (sec) continue;
+
+        if (std::filesystem::is_directory(st)) {
+            if (depth_left > 0 && !never_walk(name))
+                sweep(entry.path(), depth_left - 1, out);
+            continue;
+        }
+        if (is_masked_name(name)) out.push_back(entry.path().string());
+    }
+}
+
+}  // namespace
+
+std::vector<std::string> mask_paths(const Config& cfg, std::string_view workspace,
+                                   std::string_view home) {
+    std::vector<std::string> out;
+
+    // 1. $HOME credentials. Not configurable, by design: a control the user
+    //    can switch off to make their build work is a control that is off.
+    if (!home.empty()) {
+        const std::string h{home};
+        for (const char* m : kAlwaysMasked) out.push_back(h + m);
+    }
+
+    // 2. Credential names inside the workspace, found by walking. The
+    //    workspace is bound READ-WRITE by both backends, so scope cannot save
+    //    anything in here and the mask is the only wall.
+    if (!workspace.empty()) {
+        sweep(std::filesystem::path{workspace},
+              static_cast<int>(cfg.mask_scan_depth), out);
+    }
+
+    // 3. The user's own denials, last, so an explicit deny cannot be undone
+    //    by one of ours.
+    for (const auto& d : cfg.deny_paths) out.push_back(d);
+
+    // Deduplicate: a path can arrive from the sweep and from deny_paths, and
+    // emitting the same mount twice is at best noise in the plan. Sorting is
+    // also what makes the argv stable across runs -- a test asserting order
+    // would otherwise be flaky on directory-iteration order.
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
+    return out;
 }
 
 }  // namespace agentty::sandbox_cfg

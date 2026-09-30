@@ -51,11 +51,19 @@ struct Posture {
     bool scope_ipc{true};
     bool close_inherited_fds{true};
 
-    // ── resources ────────────────────────────────────────────────────────
+    // ── resources ────────────────────────────────────────────────
     std::uint64_t tmp_bytes{512ull * 1024 * 1024};
     std::uint64_t memory_bytes{0};   // 0 = no cap
     std::uint64_t max_processes{0};  // 0 = no cap
     std::uint32_t cpu_percent{0};    // 0 = no cap, 100 = one core
+    std::uint32_t max_open_files{0}; // 0 = no cap (RLIMIT_NOFILE)
+    std::uint32_t wall_clock_secs{0};// 0 = no cap
+    std::uint32_t cpu_secs{0};       // 0 = no cap (RLIMIT_CPU)
+
+    // ── identity ────────────────────────────────────────────────
+    // Not containment -- the guest cannot escalate either way. This is about
+    // what leaks into build output and test fixtures.
+    bool fake_hostname{false};
 };
 
 // One wall and how strongly it is enforced, straight from claybin's guarantee

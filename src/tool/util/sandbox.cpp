@@ -321,18 +321,18 @@ constexpr const char* kHomeToolSubdirs[] = {
 
     // ── Credential masks, AFTER every bind that could cover them ─────────
     //
-    // bwrap used to apply no masks at all: kAlwaysMasked was referenced only
-    // by the claybin posture, and this function did not even take the config.
-    // So `deny_paths` from the settings pane was dropped, and so was the
-    // non-configurable credential list -- measured, a workspace `.env` read
-    // back in full under bwrap while claybin showed zero bytes.
+    // The path LIST comes from sandbox_cfg::mask_paths(), shared with the
+    // claybin posture. Only the mechanism differs per backend -- bwrap says it
+    // with mount arguments, claybin with MountKind::mask. A list computed
+    // twice is how `.env` leaked under bwrap while reading back empty under
+    // claybin, so there is exactly one now.
     //
-    // $HOME credentials happened to be safe anyway, because the only $HOME
-    // paths bound above are kHomeToolSubdirs and an unbound path simply is not
-    // in the mount namespace. Safe by WHITELIST, not by masking -- which is
-    // why ~/.ssh looked fine and hid the real hole. The workspace is bound
-    // read-write on both backends, so scope cannot save anything inside it and
-    // the mask is the only thing between an agent and a real secret.
+    // $HOME credentials happened to be safe under bwrap anyway, because the
+    // only $HOME paths bound above are kHomeToolSubdirs and an unbound path
+    // simply is not in the mount namespace. Safe by WHITELIST, not by masking
+    // -- which is why ~/.ssh looked fine and hid the real hole. The workspace
+    // is bound read-write on both backends, so scope cannot save anything
+    // inside it and the mask is the only wall.
     //
     // ORDER IS THE WHOLE TRICK, and getting it wrong is this subsystem's
     // recurring bug (three times now). bwrap applies arguments in sequence and
@@ -370,20 +370,10 @@ constexpr const char* kHomeToolSubdirs[] = {
     };
 
     if (const char* home = std::getenv("HOME"); home && *home) {
-        const std::string h = home;
-        for (const char* m : sandbox_cfg::kAlwaysMasked) push_mask(h + m);
+        for (const auto& m : sandbox_cfg::mask_paths(cfg, ws, home)) push_mask(m);
+    } else {
+        for (const auto& m : sandbox_cfg::mask_paths(cfg, ws, {})) push_mask(m);
     }
-    // Basename masks, inside the workspace. `.pem` is a SUFFIX rule rather
-    // than a name, so it cannot be masked by path -- it needs a walk, which
-    // this argv builder is the wrong place for. Skipped here exactly as the
-    // claybin posture skips it, so the two backends agree on what is covered.
-    for (const char* n : sandbox_cfg::kAlwaysMaskedNames) {
-        if (n[0] != '.' || std::string_view{n} == ".pem") continue;
-        push_mask(ws + "/" + n);
-    }
-    // The user's own masks last, so an explicit deny cannot be undone by one
-    // of ours.
-    for (const auto& d : cfg.deny_paths) push_mask(d);
 
     // Network: keep it. Removing this breaks git push / package
     // installs / curl — flows users explicitly want to work.
@@ -478,20 +468,24 @@ constexpr const char* kHomeToolSubdirs[] = {
     p.workspace = workspace_root().string();
     p.cwd = p.workspace;
 
-    // ── secrets, always, plus the user's own masks ────────────────────────
+    // ── secrets, always, plus the user's own masks ────────────────────
     //
     // kAlwaysMasked is not configurable, and that is the point: a control the
     // user can switch off to make their build work is a control that is off.
     // The pane can ADD masks, never remove these.
-    if (const char* home = std::getenv("HOME"); home && *home) {
-        for (const char* m : sandbox_cfg::kAlwaysMasked)
-            p.masked.emplace_back(std::string{home} + m);
+    //
+    // The LIST is shared with the bwrap path (sandbox_cfg::mask_paths), so the
+    // two backends cannot disagree about what is covered. Only the mechanism
+    // is per-backend: MountKind::mask here, mount arguments there. It used to
+    // be computed twice, and the copies drifted -- bwrap's didn't exist at all.
+    {
+        const char* home = std::getenv("HOME");
+        auto masks = sandbox_cfg::mask_paths(cfg, p.workspace,
+                                            home ? home : "");
+        p.masked.insert(p.masked.end(),
+                        std::make_move_iterator(masks.begin()),
+                        std::make_move_iterator(masks.end()));
     }
-    for (const char* n : sandbox_cfg::kAlwaysMaskedNames) {
-        if (n[0] != '.' || std::string_view{n} == ".pem") continue;
-        p.masked.emplace_back(p.workspace + "/" + n);
-    }
-    for (const auto& d : cfg.deny_paths) p.masked.push_back(d);
 
     // ── network ──────────────────────────────────────────────────────────
     p.net_mode = static_cast<int>(cfg.net_mode);
@@ -506,6 +500,10 @@ constexpr const char* kHomeToolSubdirs[] = {
     p.memory_bytes = cfg.memory_mb * 1024ull * 1024;
     p.max_processes = cfg.max_procs;
     p.cpu_percent = cfg.cpu_percent;
+    p.max_open_files = cfg.max_open_files;
+    p.wall_clock_secs = cfg.wall_clock_secs;
+    p.cpu_secs = cfg.cpu_secs;
+    p.fake_hostname = cfg.fake_hostname;
     return p;
 }
 #endif

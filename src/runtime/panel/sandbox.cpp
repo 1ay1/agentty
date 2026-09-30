@@ -304,8 +304,24 @@ form::Form build_sandbox_form(const sandbox_cfg::Config& cfg, bool claybin_avail
                "a runaway build hits ENOSPC inside the sandbox "
                "instead of filling host RAM",
                static_cast<std::int64_t>(cfg.tmp_mb), 16, 65536));
+    form.fields.push_back(
+        number(kSbOpenFiles, "Open files",
+               "0 = no cap \xc2\xb7 a leak exhausts the host's file table "
+               "without ever forking, so Processes does not bound it",
+               static_cast<std::int64_t>(cfg.max_open_files), 0, 1048576));
+    form.fields.push_back(
+        number(kSbCpuSecs, "CPU seconds",
+               "0 = no cap \xc2\xb7 total compute, so a process that sleeps "
+               "forever is untouched",
+               static_cast<std::int64_t>(cfg.cpu_secs), 0, 86400));
+    form.fields.push_back(
+        number(kSbWallClock, "Wall clock (s)",
+               "0 = no cap \xc2\xb7 elapsed time, enforced by the sandbox \xc2\xb7 "
+               "still applies to a child that ignores SIGTERM",
+               static_cast<std::int64_t>(cfg.wall_clock_secs), 0, 86400));
     if (!claybin_live)
-        for (const auto id : {kSbMemoryMb, kSbMaxProcs, kSbCpuPercent, kSbTmpMb})
+        for (const auto id : {kSbMemoryMb, kSbMaxProcs, kSbCpuPercent, kSbTmpMb,
+                              kSbOpenFiles, kSbCpuSecs, kSbWallClock})
             lock_row(form, id, why_locked);
 
     // ── Hardening ─────────────────────────────────────────────────────
@@ -330,6 +346,30 @@ form::Form build_sandbox_form(const sandbox_cfg::Config& cfg, bool claybin_avail
         "an inherited descriptor is authority the sandbox cannot revoke. "
         "bubblewrap leaks one.",
         cfg.close_inherited_fds));
+
+    // Hostname. NOT a containment control, and the help says so rather than
+    // letting it sit among the walls looking like one -- the guest cannot
+    // escalate either way. It is here because the real host name leaks into
+    // build output and test snapshots, which makes those non-reproducible.
+    form.fields.push_back(toggle(
+        kSbFakeHost, "Report hostname as `sandbox`",
+        "not a wall \xc2\xb7 keeps the real host name out of build output and "
+        "test snapshots",
+        cfg.fake_hostname));
+    if (!claybin_live) lock_row(form, kSbFakeHost, why_locked);
+
+    // How deep to hunt for credential FILES by name (.env, id_rsa, *.pem).
+    // Applies to both backends, because the sweep produces a path list and
+    // both know how to mask a path.
+    //
+    // A cost row, unusually: every level is more stat() calls on every spawn,
+    // and the sweep runs in the latency path of each shell command. Saying so
+    // is better than picking a number and hiding the trade.
+    form.fields.push_back(
+        number(kSbMaskDepth, "Secret scan depth",
+               "0 = workspace root only \xc2\xb7 3 finds services/*/.env \xc2\xb7 "
+               "each level costs stat() calls on every command",
+               static_cast<std::int64_t>(cfg.mask_scan_depth), 0, 8));
 
     // The trust-handoff row goes LAST and under its own heading, because it is
     // not the same kind of control as the rest. Everything above confines the
@@ -397,6 +437,12 @@ sandbox_cfg::Config read_sandbox_form(const form::Form& f,
     cfg.max_procs = static_cast<std::uint32_t>(num_of(kSbMaxProcs, 0));
     cfg.cpu_percent = static_cast<std::uint32_t>(num_of(kSbCpuPercent, 0));
     cfg.tmp_mb = static_cast<std::uint64_t>(num_of(kSbTmpMb, 512));
+    cfg.max_open_files = static_cast<std::uint32_t>(num_of(kSbOpenFiles, 0));
+    cfg.cpu_secs = static_cast<std::uint32_t>(num_of(kSbCpuSecs, 0));
+    cfg.wall_clock_secs = static_cast<std::uint32_t>(num_of(kSbWallClock, 0));
+    cfg.mask_scan_depth = static_cast<std::uint32_t>(
+        num_of(kSbMaskDepth, static_cast<std::int64_t>(base.mask_scan_depth)));
+    cfg.fake_hostname = toggle_of(kSbFakeHost, base.fake_hostname);
 
     cfg.scope_ipc = toggle_of(kSbScopeIpc, base.scope_ipc);
     cfg.close_inherited_fds = toggle_of(kSbCloseFds, base.close_inherited_fds);

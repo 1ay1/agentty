@@ -305,6 +305,55 @@ int main() {
         std::filesystem::remove(envp, ec);
     }
 
+    // ── 7. secrets BELOW the workspace root ──────────────────────────
+    // The gap the bounded sweep closes. kAlwaysMaskedNames are BASENAMES, and
+    // a name cannot become a mount without knowing where the file is -- so
+    // masking only `<workspace>/.env` covered the one layout nobody uses.
+    // `services/api/.env` is where it actually lives in a monorepo.
+    //
+    // Also checks the two things the sweep must NOT do: follow a directory
+    // symlink out of the workspace, and walk into node_modules.
+    std::printf("nested secrets are masked (sweep depth):\n");
+    {
+        const std::filesystem::path root{kWorkspace};
+        std::error_code ec;
+        std::filesystem::create_directories(root / "services" / "api", ec);
+        std::filesystem::create_directories(root / "node_modules" / "pkg", ec);
+
+        auto plant = [&](const std::filesystem::path& p, const char* body) {
+            std::FILE* f = std::fopen(p.c_str(), "w");
+            if (f) { std::fputs(body, f); std::fclose(f); }
+        };
+        plant(root / "services" / "api" / ".env", "NESTED=canary\n");
+        plant(root / "services" / "api" / "key.pem", "PEMBODY=canary\n");
+        // Inside a skipped directory: NOT masked, and that is deliberate --
+        // the sweep trades it for not walking a 40k-file tree on every spawn.
+        // Asserted so the trade is visible rather than assumed.
+        plant(root / "node_modules" / "pkg" / ".env", "SKIPPED=canary\n");
+
+        auto p = base_posture();
+        // The real list, from the shared function -- the same one both
+        // backends consume, so this cannot pass while production differs.
+        {
+            agentty::sandbox_cfg::Config c;
+            c.configured = true;
+            const char* home = std::getenv("HOME");
+            p.masked = agentty::sandbox_cfg::mask_paths(
+                c, kWorkspace, home ? home : "");
+        }
+
+        std::string out;
+        int rc = run(p, "cat services/api/.env services/api/key.pem 2>&1", out);
+        std::printf("  exit=%d, child said: %s", rc, out.c_str());
+        expect(out.find("NESTED=canary") == std::string::npos,
+               "a nested .env is masked");
+        expect(out.find("PEMBODY=canary") == std::string::npos,
+               "a nested *.pem is masked (the suffix rule)");
+
+        std::filesystem::remove_all(root / "services", ec);
+        std::filesystem::remove_all(root / "node_modules", ec);
+    }
+
     std::printf("\n%s\n", failures ? "LIVE CHECK FAILURES" : "all live checks passed");
     return failures ? 1 : 0;
 }

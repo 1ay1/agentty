@@ -2374,6 +2374,15 @@ store::Settings load_settings() {
             c.handoff      = static_cast<sandbox_cfg::HandoffPolicy>(
                                  b.value("handoff", static_cast<int>(c.handoff)));
             c.wx_protect   = b.value("wx_protect", c.wx_protect);
+            c.max_open_files  = b.value("max_open_files", c.max_open_files);
+            c.wall_clock_secs = b.value("wall_clock_secs", c.wall_clock_secs);
+            c.cpu_secs        = b.value("cpu_secs", c.cpu_secs);
+            c.fake_hostname   = b.value("fake_hostname", c.fake_hostname);
+            // Clamped, not trusted: this bounds a directory walk that runs on
+            // every spawn, so a hand-edited 10000 would put a full-tree scan
+            // in the latency path of every shell command.
+            c.mask_scan_depth = std::min<std::uint32_t>(
+                b.value("mask_scan_depth", c.mask_scan_depth), 8u);
             c.scope_ipc    = b.value("scope_ipc", c.scope_ipc);
             c.close_inherited_fds = b.value("close_fds", c.close_inherited_fds);
             c.memory_mb    = b.value("memory_mb", c.memory_mb);
@@ -2639,6 +2648,11 @@ void save_settings(const store::Settings& s) {
             {"syscall_mode", static_cast<int>(c.syscall_mode)},
             {"handoff",      static_cast<int>(c.handoff)},
             {"wx_protect",   c.wx_protect},
+            {"max_open_files",  c.max_open_files},
+            {"wall_clock_secs", c.wall_clock_secs},
+            {"cpu_secs",        c.cpu_secs},
+            {"fake_hostname",   c.fake_hostname},
+            {"mask_scan_depth", c.mask_scan_depth},
             {"scope_ipc",    c.scope_ipc},
             {"close_fds",    c.close_inherited_fds},
             {"memory_mb",    c.memory_mb},

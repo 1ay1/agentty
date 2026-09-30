@@ -186,6 +186,7 @@ add_executable(sandbox_live_check EXCLUDE_FROM_ALL
     ${CMAKE_SOURCE_DIR}/tests/sandbox_config_race_stubs.cpp
     ${CMAKE_SOURCE_DIR}/src/tool/util/sandbox.cpp
     ${CMAKE_SOURCE_DIR}/src/tool/util/sandbox_claybin.cpp
+    ${CMAKE_SOURCE_DIR}/src/domain/sandbox_provenance.cpp
     ${CMAKE_SOURCE_DIR}/src/tool/util/subprocess.cpp
     ${CMAKE_SOURCE_DIR}/src/tool/util/utf8.cpp
     ${CMAKE_SOURCE_DIR}/src/util/logx.cpp
@@ -480,6 +481,7 @@ add_executable(sandbox_config_race_test EXCLUDE_FROM_ALL
     tests/sandbox_config_race_stubs.cpp
     src/tool/util/sandbox.cpp src/tool/util/subprocess.cpp
     src/tool/util/sandbox_claybin.cpp
+    src/domain/sandbox_provenance.cpp
     src/tool/util/utf8.cpp
     src/util/logx.cpp src/util/dbglog.cpp src/util/home_dir.cpp
     src/util/user_root.cpp src/util/teardown.cpp)

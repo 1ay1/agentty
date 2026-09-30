@@ -171,6 +171,26 @@ using namespace ::clay::literals;
     if (p.memory_bytes) d = std::move(d).memory(Bytes{p.memory_bytes});
     if (p.max_processes) d = std::move(d).processes(p.max_processes);
     if (p.cpu_percent) d = std::move(d).cpu_percent(p.cpu_percent);
+    // Descriptors: a separate lever from processes, because a runaway that
+    // leaks fds exhausts the host's file table without ever forking.
+    if (p.max_open_files) d = std::move(d).open_files(p.max_open_files);
+    // Two different ceilings, deliberately both available. cpu_time bounds
+    // total compute, so a process that sleeps forever is untouched; wall_clock
+    // bounds elapsed time, so one that blocks forever is not. Neither
+    // subsumes the other, and the tool layer's own timeout is a third thing
+    // (it can be ignored by a child that traps SIGTERM -- these cannot).
+    if (p.cpu_secs)
+        d = std::move(d).cpu_time(Nanos{std::uint64_t{p.cpu_secs} * 1'000'000'000ull});
+    if (p.wall_clock_secs)
+        d = std::move(d).wall_clock(Nanos{std::uint64_t{p.wall_clock_secs} * 1'000'000'000ull});
+
+    // Hostname. Not containment -- the guest cannot escalate either way -- but
+    // the real host name leaks into build output, test snapshots and anything
+    // that shells out to `hostname`, which makes those non-reproducible and
+    // mildly fingerprintable. claybin already defaults its PolicyData to
+    // "sandbox"; this is the row that lets a user keep the real one when a
+    // build genuinely depends on it.
+    if (p.fake_hostname) d = std::move(d).hostname("sandbox");
 
     return std::move(d).seal();
 }

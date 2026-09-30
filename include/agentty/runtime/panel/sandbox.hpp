@@ -78,9 +78,14 @@ inline constexpr std::string_view kSbWxProtect   = "wx_protect";
 inline constexpr std::string_view kSbMemoryMb    = "memory_mb";
 inline constexpr std::string_view kSbMaxProcs    = "max_procs";
 inline constexpr std::string_view kSbCpuPercent  = "cpu_percent";
+inline constexpr std::string_view kSbOpenFiles   = "max_open_files";
+inline constexpr std::string_view kSbWallClock   = "wall_clock_secs";
+inline constexpr std::string_view kSbCpuSecs     = "cpu_secs";
 inline constexpr std::string_view kSbTmpMb       = "tmp_mb";
 inline constexpr std::string_view kSbScopeIpc    = "scope_ipc";
 inline constexpr std::string_view kSbCloseFds    = "close_fds";
+inline constexpr std::string_view kSbFakeHost    = "fake_hostname";
+inline constexpr std::string_view kSbMaskDepth   = "mask_scan_depth";
 // The row that defends the escape class nobody else defends. See
 // domain/sandbox_provenance.hpp for why it is its own control.
 inline constexpr std::string_view kSbHandoff     = "handoff";

@@ -248,6 +248,19 @@ struct Config {
     std::uint64_t memory_mb   = 0;
     std::uint32_t max_procs   = 0;
     std::uint32_t cpu_percent = 0;   // 100 = one core
+    // Open descriptors (RLIMIT_NOFILE). A separate lever from max_procs: a
+    // runaway that leaks fds exhausts the host's file table without ever
+    // forking, so a pid cap does not bound it.
+    std::uint32_t max_open_files = 0;
+    // Wall-clock ceiling for one command, in seconds. Distinct from the tool
+    // layer's own timeout: this one is enforced by the sandbox, so it still
+    // applies to a child that ignores SIGTERM or wedges in a syscall.
+    std::uint32_t wall_clock_secs = 0;
+    // CPU-time ceiling (RLIMIT_CPU), in seconds. Bounds total compute rather
+    // than elapsed time, so a process that sleeps forever is unaffected while
+    // a busy loop is killed. Separate from cpu_percent, which throttles
+    // instead of killing.
+    std::uint32_t cpu_secs = 0;
     // /tmp size. Enforced as a mount option, so a runaway build hits ENOSPC
     // inside the sandbox instead of filling the host's RAM. bwrap cannot
     // express this at all.
@@ -263,6 +276,31 @@ struct Config {
     // Close descriptors inherited from agentty. An inherited fd is authority
     // the sandbox cannot see or revoke; bubblewrap leaks one here.
     bool close_inherited_fds = true;
+
+    // Hide the host's identity from the guest.
+    //
+    // A distinct concern from the filesystem: the hostname and the guest's
+    // apparent uid/gid leak into build output, test fixtures and anything that
+    // shells out to `id`. Neither is a capability, so this is about
+    // reproducibility and fingerprinting rather than containment -- which is
+    // why it is a separate row and defaults to off.
+    bool fake_hostname = false;   // claim "sandbox" instead of the real host
+
+    // Depth for the credential-name sweep (kAlwaysMaskedNames).
+    //
+    // Those are BASENAMES -- `.env`, `id_rsa` -- and a name rule cannot be
+    // turned into a mount without knowing where the file is, so the paths have
+    // to be found by walking. Only the workspace root was swept before, which
+    // missed the common case: `services/api/.env` in any monorepo.
+    //
+    // Bounded rather than recursive-to-the-leaves, and the bound is a setting
+    // because the right value depends on the repo. Every extra level is more
+    // stat() calls on every spawn, and an unbounded walk of a big tree would
+    // put a directory scan in the latency path of every shell command.
+    //
+    // 0 = root only (the old behaviour). 3 covers the layouts that actually
+    // occur -- services/*/.env, packages/*/.env, apps/*/web/.env.
+    std::uint32_t mask_scan_depth = 3;
 
     // Has the user ever saved sandbox settings? While false the runtime keeps
     // its shipped posture, so an upgrade changes nothing until a deliberate
@@ -296,5 +334,39 @@ struct Config {
     // This way adding a field to the struct keeps the comparison complete.
     [[nodiscard]] bool operator==(const Config&) const = default;
 };
+
+// Every absolute path that must be masked, for a given config and workspace.
+//
+// ONE function, used by BOTH backends. That is the point: the credential list
+// is the least negotiable part of the policy, and a list applied by one
+// backend and not the other is how `.env` leaked under bwrap for a week while
+// reading back empty under claybin. If this is wrong it is wrong everywhere,
+// which is much easier to notice.
+//
+// Three sources, in order of how much they are the user's business:
+//
+//   1. kAlwaysMasked      — $HOME credential paths. Not configurable.
+//   2. kAlwaysMaskedNames — credential BASENAMES, found by walking the
+//                           workspace to cfg.mask_scan_depth. Not
+//                           configurable except for the depth.
+//   3. cfg.deny_paths     — whatever the user added. Last, so an explicit
+//                           deny cannot be undone by one of ours.
+//
+// Why the walk exists: a basename rule cannot become a mount without knowing
+// where the file is. Masking only `<workspace>/.env` missed
+// `services/api/.env`, which is where it actually lives in any monorepo.
+//
+// Why it is BOUNDED: this runs on every spawn, so an unbounded walk of a large
+// tree would put a full directory scan in the latency path of every shell
+// command. Depth-limited, and it skips the directories that are always huge
+// and never hold secrets (.git, node_modules, target, build) — skipping those
+// is a performance decision, and it is safe only because none of them is
+// somewhere a credential file legitimately lives. Revisit that if the list
+// ever grows a directory where one might.
+//
+// `$HOME` comes in as a parameter rather than being read from the environment,
+// so this stays pure and testable without touching a real home directory.
+[[nodiscard]] std::vector<std::string> mask_paths(
+    const Config& cfg, std::string_view workspace, std::string_view home);
 
 }  // namespace agentty::sandbox_cfg
