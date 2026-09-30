@@ -10,6 +10,7 @@ namespace agentty::settings {
 enum class Category : std::uint8_t {
     General,    // profile, RAG mode, Smart Mode — the live toggles
     Appearance, // theme, colors, density, motion — how agentty looks
+    Sandbox,    // filesystem, network, syscalls, resources — what a command may do
     Plugins,   // MCP servers (mcp.json): list + remove
     Commands,  // slash commands: discovered list (read-only)
     Agents,    // user subagents: discovered list (read-only)
@@ -20,6 +21,7 @@ enum class Category : std::uint8_t {
     switch (c) {
         case Category::General:    return "General";
         case Category::Appearance: return "Appearance";
+        case Category::Sandbox:    return "Sandbox";
         case Category::Plugins:  return "Plugins";
         case Category::Commands: return "Commands";
         // "Subagents", not "Agents", to disambiguate from the AGENTS.md project-
@@ -39,6 +41,12 @@ enum class Category : std::uint8_t {
         // a list a new reader scans once, and it is the only one of them
         // whose name has to survive not knowing the codebase.
         case Category::Appearance: return "theme, density, motion \xc2\xb7 saved per user";
+        // The one row whose subtitle names a GUARANTEE rather than a list of
+        // knobs. "filesystem, network, syscalls" describes the form; "what a
+        // command can reach" describes the question the user actually has,
+        // and this is the pane where that distinction decides whether they
+        // open it at all.
+        case Category::Sandbox:    return "what a command can reach \xc2\xb7 live wall report";
         case Category::Plugins:  return "MCP servers \xc2\xb7 agentty plugin add \xe2\x80\xa6";
         case Category::Commands: return "slash commands \xc2\xb7 .agentty/commands/*.md";
         case Category::Agents:   return "subagents \xc2\xb7 .agentty/agents/*.md";
