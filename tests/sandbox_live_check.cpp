@@ -13,7 +13,9 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <string>
+#include <system_error>
 #include <fcntl.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -21,6 +23,10 @@
 namespace cb = agentty::tools::util::sandbox::claybin_backend;
 
 namespace {
+
+// The sandbox's workspace for this check. Created in main(); a missing one
+// makes every spawn fail on mount(ENOENT).
+constexpr const char* kWorkspace = "/tmp/agentty-sandbox-live-check";
 
 int failures = 0;
 void expect(bool ok, const char* what) {
@@ -36,7 +42,8 @@ cb::Posture base_posture() {
                            "/etc/resolv.conf", "/etc/hosts", "/etc/nsswitch.conf",
                            "/etc/passwd", "/etc/group", "/etc/localtime",
                            "/etc/ssl", "/etc/ca-certificates", "/etc/pki"};
-    p.workspace         = "/tmp/sbtest";
+    p.workspace         = kWorkspace;
+    p.cwd               = kWorkspace;
     p.syscall_mode      = 1;   // Compiler -- the default, and where the bug was
     p.net_mode          = 0;   // Full
     p.tmp_bytes         = 512ull * 1024 * 1024;
@@ -51,7 +58,15 @@ int run(const cb::Posture& p, const std::string& cmd, std::string& out) {
     auto sp = cb::spawn_shell(p, cmd, fds[1], fds[1]);
     ::close(fds[1]);
     if (!sp.started) {
+        // A spawn failure is a HARD failure of the whole check, not a quiet
+        // -1 the caller might read as "blocked". That distinction bit once
+        // already: with the workspace directory missing, claybin failed with
+        // mount(ENOENT), the child never ran, and the "did not reach the
+        // network" assertion passed -- because nothing reached anything. A
+        // negative test that passes when the subject never executed is worse
+        // than no test.
         std::printf("  spawn failed: %s\n", sp.start_error.c_str());
+        ++failures;
         ::close(fds[0]);
         return -1;
     }
@@ -71,6 +86,20 @@ int main() {
     if (!cb::available()) {
         std::printf("claybin unavailable on this host (no user/mount namespaces) -- skipping\n");
         return 0;
+    }
+
+    // The workspace has to EXIST before claybin can bind it -- otherwise
+    // every spawn dies on mount(ENOENT) and the negative tests below pass
+    // vacuously. Created here rather than assumed, so the check is
+    // self-contained and cannot be broken by someone cleaning /tmp.
+    {
+        std::error_code ec;
+        std::filesystem::create_directories(kWorkspace, ec);
+        if (ec) {
+            std::printf("cannot create workspace %s: %s\n", kWorkspace,
+                        ec.message().c_str());
+            return 1;
+        }
     }
 
     // ── 1. realloc under the compiler profile ────────────────────────

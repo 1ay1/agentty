@@ -59,6 +59,7 @@ namespace agentty::ui::panel {
 // appearance.hpp gives: a typo across two matching string literals is a
 // silently dead setting and the compiler cannot see it.
 inline constexpr std::string_view kSbMode        = "mode";
+inline constexpr std::string_view kSbBackend     = "backend";
 inline constexpr std::string_view kSbFsScope     = "fs_scope";
 inline constexpr std::string_view kSbReadPaths   = "read_paths";
 inline constexpr std::string_view kSbWritePaths  = "write_paths";

@@ -17,7 +17,9 @@
 // answer, and the settings pane has to work in both.
 #include "agentty/domain/sandbox_config.hpp"
 
-#if defined(AGENTTY_HAVE_CLAYBIN)
+// claybin is a required submodule, so the only question left is PLATFORM: it
+// compiles a plan anywhere but can only apply one on Linux.
+#if defined(__linux__)
 #include <unistd.h>  // ::close, for the pidfd the runner does not use
 
 #include "agentty/tool/util/sandbox_claybin.hpp"
@@ -146,7 +148,7 @@ std::shared_ptr<const sandbox_cfg::Config> g_cfg{};
     // note the fallback direction: asking for claybin on a host where it cannot
     // build still yields bwrap, not None. a user who opts into the newer
     // backend should not silently lose their sandbox because of it.
-#if defined(AGENTTY_HAVE_CLAYBIN)
+#if defined(__linux__)
     if (g_linux_pref.load(std::memory_order_acquire) == LinuxPreference::Claybin &&
         claybin_backend::available())
         return Backend::Claybin;
@@ -348,7 +350,7 @@ constexpr const char* kHomeToolSubdirs[] = {
 // boundary applies to both or neither. A previous backend restated the set by
 // hand and ended up granting read on `/` -- handing ~/.ssh and ~/.aws to any
 // approved bash call while still reporting "sandbox: active".
-#if defined(AGENTTY_HAVE_CLAYBIN)
+#if defined(__linux__)
 [[nodiscard]] claybin_backend::Posture build_claybin_posture() {
     claybin_backend::Posture p;
 
@@ -429,7 +431,7 @@ constexpr const char* kHomeToolSubdirs[] = {
     opts.timeout = timeout;
     opts.on_progress = [](std::string_view snap) { progress::emit(snap); };
 
-#if defined(AGENTTY_HAVE_CLAYBIN)
+#if defined(__linux__)
     if (detected_backend() == Backend::Claybin) {
         // claybin is a library, so there is no argv prefix to build. It forks,
         // applies the plan, and execs itself -- but only the SPAWN; the
@@ -606,6 +608,10 @@ bool init(Mode requested) {
 Mode    requested_mode()   noexcept { return g_mode.load(std::memory_order_acquire); }
 Backend detected_backend() noexcept { return g_backend.load(std::memory_order_acquire); }
 
+LinuxPreference requested_linux_backend() noexcept {
+    return g_linux_pref.load(std::memory_order_acquire);
+}
+
 void prefer_linux_backend(LinuxPreference p) noexcept {
     // Must be called BEFORE init(), which is what probes. Setting it afterwards
     // would leave g_backend disagreeing with the preference, and every bash
@@ -634,6 +640,21 @@ void set_config(const sandbox_cfg::Config& cfg) {
     // property in its own right, not just a memory-safety one.
     auto next = std::make_shared<const sandbox_cfg::Config>(cfg);
     std::atomic_store_explicit(&g_cfg, std::move(next), std::memory_order_release);
+
+    // The policy carries the ENGINE too, so publishing it has to move the
+    // backend preference with it -- otherwise the pane's Backend row saves
+    // and nothing switches, which is the same class of bug as the pane
+    // saving a policy nothing enforced.
+    //
+    // Only when the user has actually chosen: an unconfigured config holds
+    // the struct default (bwrap), and letting that overwrite the preference
+    // would make a bare set_config() silently undo --sandbox-backend.
+    // main.cpp calls both, CLI first, so this order matters.
+    if (cfg.configured) {
+        prefer_linux_backend(cfg.backend == sandbox_cfg::LinuxBackend::Claybin
+                                 ? LinuxPreference::Claybin
+                                 : LinuxPreference::Bwrap);
+    }
 }
 
 std::shared_ptr<const sandbox_cfg::Config> config_snapshot() noexcept {
@@ -672,7 +693,7 @@ bool config_enforceable() noexcept {
     // Nothing configured ⇒ nothing to ignore. A default config is exactly the
     // posture the bwrap argv already builds, so both backends "enforce" it.
     if (!cfg->configured) return true;
-#if defined(AGENTTY_HAVE_CLAYBIN)
+#if defined(__linux__)
     // Off is not a failure to enforce, it is a choice not to sandbox, which
     // the banner already reports on its own.
     if (requested_mode() == Mode::Off) return true;

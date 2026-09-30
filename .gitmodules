@@ -12,6 +12,7 @@
 	path = third_party/rag-cpp
 	url = https://github.com/1ay1/rag-cpp.git
 	branch = main
-[submodule "third_party/claybin"]
+[submodule "claybin"]
 	path = third_party/claybin
 	url = https://github.com/1ay1/claybin.git
+	branch = master

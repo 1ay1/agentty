@@ -16,90 +16,25 @@
 #include <array>
 #include <span>
 
-// The matcher lives in claybin. A build without it still needs this file to
-// compile -- the trust-handoff TABLE is agentty's, the boundary is a product
-// decision, and a default build that cannot even name the risk is worse than
-// one that names it and says the enforcement is unavailable.
+// The matcher lives in claybin, which is a required submodule -- so this is a
+// plain include, not a guarded one.
 //
-// So: the same table either way, with a local fallback matcher when claybin is
-// absent. The fallback is deliberately the SAME shape logic, not a looser one,
-// because a classification that differs by build flag is a bug waiting for
-// whoever tests the other configuration.
-#if defined(AGENTTY_HAVE_CLAYBIN)
+// This used to carry a second, local copy of the same shape logic for builds
+// without claybin, on the reasoning that the trust-handoff TABLE is agentty's
+// opinion and should compile either way. That reasoning was sound and the
+// conclusion was wrong: it meant sixty lines of duplicated matching, two
+// configurations where a classification could differ, and a comment admitting
+// the duplication was "deliberate". With claybin required there is exactly one
+// matcher, which is what the boundary audit wanted in the first place.
 #include "claybin/policy/path_shape.hpp"
-#endif
 
 namespace agentty::sandbox_cfg {
 
 namespace {
 
-#if defined(AGENTTY_HAVE_CLAYBIN)
-
 using clay::ShapeMatch;
 using clay::ShapeRule;
 using clay::shape_matches;
-
-#else
-
-// The same three modes and the same matching, for a build without claybin.
-//
-// Duplicated deliberately rather than shared through a third header: it is
-// twenty lines, and the alternative is agentty growing a path-utilities module
-// that exists only to be included by two files. If these ever disagree the
-// tests catch it -- the trust-handoff cases run in both configurations.
-enum class ShapeMatch : std::uint8_t { Component, Basename, Suffix };
-
-struct ShapeRule {
-    std::string_view needle;
-    std::uint32_t tag = 0;
-    ShapeMatch match = ShapeMatch::Component;
-};
-
-[[nodiscard]] std::string_view basename_of(std::string_view p) {
-    const auto slash = p.rfind('/');
-    return slash == std::string_view::npos ? p : p.substr(slash + 1);
-}
-
-[[nodiscard]] bool has_component(std::string_view p, std::string_view needle) {
-    if (needle.empty()) return false;
-    std::size_t pos = 0;
-    while (pos <= p.size()) {
-        const std::size_t next = p.find('/', pos);
-        const std::string_view comp =
-            p.substr(pos, next == std::string_view::npos ? p.size() - pos : next - pos);
-        if (comp == needle) return true;
-        if (needle.find('/') != std::string_view::npos &&
-            p.compare(pos, needle.size(), needle) == 0) {
-            const std::size_t after = pos + needle.size();
-            if (after == p.size() || p[after] == '/') return true;
-        }
-        if (next == std::string_view::npos) break;
-        pos = next + 1;
-    }
-    return false;
-}
-
-[[nodiscard]] bool shape_matches(std::string_view p, std::span<const ShapeRule> rules,
-                                 std::uint32_t* out_tag = nullptr) {
-    const std::string_view base = basename_of(p);
-    for (const auto& r : rules) {
-        bool hit = false;
-        switch (r.match) {
-            case ShapeMatch::Component: hit = has_component(p, r.needle); break;
-            case ShapeMatch::Basename:  hit = base == r.needle; break;
-            case ShapeMatch::Suffix:
-                hit = base.size() > r.needle.size() && base.ends_with(r.needle);
-                break;
-        }
-        if (hit) {
-            if (out_tag) *out_tag = r.tag;
-            return true;
-        }
-    }
-    return false;
-}
-
-#endif
 
 // tag == TrustKind, cast through the opaque integer claybin carries.
 constexpr std::uint32_t tag(TrustKind k) { return static_cast<std::uint32_t>(k); }

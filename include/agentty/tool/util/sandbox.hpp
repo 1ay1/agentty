@@ -59,17 +59,28 @@ enum class Backend : std::uint8_t {
     SandboxExec,  // macOS sandbox-exec
 };
 
-// Which Linux backend to prefer when both are usable.
+// Which Linux engine applies the policy. Both are always compiled in --
+// claybin is a required submodule, not a build flag -- so this is purely a
+// runtime choice, settable with --sandbox-backend or in the Sandbox pane.
 //
-// bwrap stays the default deliberately. it has a decade of hardening behind it
-// and it demonstrably works on users' machines; claybin is new, and the walls
-// it adds (a syscall filter, landlock, cgroup2 caps) are worth having but not
-// worth a silent migration. so this is opt-in, and a failure to build the
-// claybin sandbox falls back to bwrap rather than to nothing.
+// bwrap stays the DEFAULT: it is what users already have and has a decade of
+// upstream hardening, so an upgrade changes nobody's boundary. claybin adds
+// the walls bwrap cannot express (a syscall filter, landlock, cgroup2 caps),
+// which is why most of the pane's rows only apply under it.
+//
+// Asking for claybin on a host where it cannot build still yields bwrap, not
+// None: opting into the newer backend must not cost you your sandbox.
 enum class LinuxPreference : std::uint8_t {
     Bwrap,    // default
-    Claybin,  // --sandbox-backend=claybin
+    Claybin,  // --sandbox-backend=claybin, or the pane's Backend row
 };
+
+// Which Linux backend the user ASKED for. Distinct from
+// detected_backend(), which is what the probe could actually deliver: asking
+// for claybin on a host without user namespaces still yields bwrap, and the
+// difference between "asked" and "got" is exactly what the Sandbox pane
+// needs to explain a locked row.
+[[nodiscard]] LinuxPreference requested_linux_backend() noexcept;
 
 // Choose the Linux backend. MUST be called before init(), which is what
 // probes -- setting it later would leave the cached backend disagreeing with

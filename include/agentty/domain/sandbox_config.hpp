@@ -179,8 +179,39 @@ inline constexpr const char* kAlwaysMaskedNames[] = {
     ".pem",  // suffix, handled as such by the matcher
 };
 
+// Which Linux engine applies the policy.
+//
+// A RUNTIME choice, not a build one: both backends are always compiled in
+// (claybin is a required submodule). It lives in the saved config because it
+// decides what the rest of the config can even mean -- bwrap confines with
+// mount namespaces and nothing else, so the syscall profile, per-port
+// network, W^X and the cgroup caps have no bwrap spelling at all.
+enum class LinuxBackend : std::uint8_t {
+    // bubblewrap, via the binary the user already has. What agentty shipped
+    // first, and still the default: a decade of upstream hardening, and it
+    // does not change anyone's boundary on upgrade.
+    Bwrap,
+    // The in-process library. Adds a seccomp filter, landlock and cgroup2
+    // limits -- i.e. everything the pane's other rows describe.
+    Claybin,
+};
+
+[[nodiscard]] constexpr const char* to_string(LinuxBackend b) noexcept {
+    switch (b) {
+        case LinuxBackend::Bwrap:   return "bwrap";
+        case LinuxBackend::Claybin: return "claybin";
+    }
+    return "bwrap";
+}
+
 struct Config {
-    // ── Filesystem ───────────────────────────────────────────────────────
+    // ── Engine ────────────────────────────────────────────────────────
+    // First field because it gates the meaning of most of the others. The
+    // pane renders it first and locks the rows the chosen backend cannot
+    // enforce, rather than accepting a setting that does nothing.
+    LinuxBackend backend = LinuxBackend::Bwrap;
+
+    // ── Filesystem ───────────────────────────────────────────────────
     FsScope fs_scope = FsScope::Toolchain;
 
     // Extra paths, beyond the scope above. Read-only unless listed in

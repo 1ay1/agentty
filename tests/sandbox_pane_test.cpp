@@ -21,11 +21,15 @@
 #include <doctest/doctest.h>
 
 #include "agentty/runtime/app/update.hpp"
+#include "agentty/io/persistence.hpp"
 #include "agentty/runtime/model.hpp"
 #include "agentty/runtime/msg.hpp"
 #include "agentty/runtime/panel/sandbox.hpp"
 #include "agentty/runtime/panel/settings/items.hpp"
 #include "agentty/tool/util/sandbox.hpp"
+
+#include <cstdlib>
+#include <filesystem>
 
 using namespace agentty;
 namespace pn = agentty::ui::panel;
@@ -159,6 +163,182 @@ TEST_CASE("sandbox pane: save installs the policy and stages it to persist") {
     // ...and staged on the model, so the save effect has something to write.
     CHECK(saved.d.persisted.sandbox.memory_mb == 2048);
     CHECK(saved.d.persisted.sandbox.configured);
+}
+
+TEST_CASE("sandbox pane: the backend row is first and always offers both") {
+    // claybin is a required submodule now, not a build flag, so the choice is
+    // always a real runtime choice. It used to be possible to ship a binary
+    // where "claybin" was not an option at all.
+    sandbox_cfg::Config cfg;
+    cfg.configured = true;
+    sb::set_config(cfg);
+
+    const Model m = opened();
+    const auto& f = pane(m).pane.form;
+
+    const int b = row_of(f, pn::kSbBackend);
+    REQUIRE(b >= 0);
+    const auto& ch = choice_at(f, b);
+    REQUIRE(ch.count() == 2);
+    CHECK(ch.labels[0] == "bwrap");
+    CHECK(ch.labels[1] == "claybin");
+
+    // FIRST real row: it decides what every row below can mean, so tuning ten
+    // rows before discovering eight are inert is the thing to prevent.
+    for (int i = 0; i < b; ++i)
+        CHECK(f.fields[static_cast<std::size_t>(i)].is_header());
+}
+
+TEST_CASE("sandbox pane: bwrap locks the rows it cannot enforce") {
+    // The shipped bug this pins: the pane rendered the syscall profile, W^X
+    // and all four resource caps as live rows under bwrap, where agentty
+    // passes no seccomp filter and no cgroup at all. A control that looks set
+    // and enforces nothing is the one failure mode a sandbox must not have.
+    sandbox_cfg::Config cfg;
+    cfg.configured = true;
+    cfg.backend    = sandbox_cfg::LinuxBackend::Bwrap;
+    sb::set_config(cfg);
+
+    const Model m = opened();
+    const auto& f = pane(m).pane.form;
+
+    // Every claybin-only row must be locked, and must SAY why -- a lock with
+    // no reason reads as a bug in the pane.
+    for (const auto id : {pn::kSbNetMode, pn::kSbSyscalls, pn::kSbWxProtect,
+                          pn::kSbMemoryMb, pn::kSbMaxProcs, pn::kSbCpuPercent,
+                          pn::kSbTmpMb, pn::kSbScopeIpc}) {
+        const int i = row_of(f, id);
+        REQUIRE_MESSAGE(i >= 0, id);
+        const auto& fld = f.fields[static_cast<std::size_t>(i)];
+        CHECK_MESSAGE(fld.locked, id);
+        CHECK_MESSAGE(!fld.help.empty(), id);
+    }
+
+    // And the rows bwrap CAN honour stay live. Gating these would be a lie in
+    // the other direction: scope/read/write are binds, and a mask is a bind
+    // of an empty file.
+    for (const auto id : {pn::kSbFsScope, pn::kSbReadPaths, pn::kSbWritePaths,
+                          pn::kSbDenyPaths, pn::kSbCloseFds}) {
+        const int i = row_of(f, id);
+        REQUIRE_MESSAGE(i >= 0, id);
+        CHECK_MESSAGE(!f.fields[static_cast<std::size_t>(i)].locked, id);
+    }
+}
+
+TEST_CASE("sandbox pane: switching the backend row relocks live") {
+    // The locks are computed when the form is BUILT, so changing the engine
+    // has to reproject rather than just re-price. Without that you could
+    // switch to claybin and the syscall row would still say "bwrap cannot
+    // express this" until the pane was reopened.
+    sandbox_cfg::Config cfg;
+    cfg.configured = true;
+    cfg.backend    = sandbox_cfg::LinuxBackend::Bwrap;
+    sb::set_config(cfg);
+
+    Model m = opened();
+    const int b = row_of(pane(m).pane.form, pn::kSbBackend);
+    REQUIRE(b >= 0);
+    const int sys_before = row_of(pane(m).pane.form, pn::kSbSyscalls);
+    REQUIRE(sys_before >= 0);
+    REQUIRE(pane(m).pane.form.fields[static_cast<std::size_t>(sys_before)].locked);
+
+    // Move onto the backend row and cycle it to claybin.
+    m.ui.panel.get<pn::Sandbox>()->pane.form.cursor = b;
+    auto [m2, _] = app::update(std::move(m), key(form::keys::Intent::AdjustUp));
+
+    const auto& f = pane(m2).pane.form;
+    const int nb = row_of(f, pn::kSbBackend);
+    REQUIRE(nb >= 0);
+    REQUIRE(choice_at(f, nb).id() == "claybin");
+
+    // On a host that can actually run claybin the row unlocks; on one that
+    // cannot it stays locked but for the OTHER reason. Both are correct, and
+    // which applies is a property of the machine -- so assert the thing that
+    // holds either way: the reason tracks the selection.
+    const int sys = row_of(f, pn::kSbSyscalls);
+    REQUIRE(sys >= 0);
+    const auto& help = f.fields[static_cast<std::size_t>(sys)].help;
+    CHECK(help.find("switch Backend to claybin") == std::string::npos);
+}
+
+TEST_CASE("sandbox pane: a locked row keeps its value through a round trip") {
+    // Switching to bwrap must not ZERO the claybin-only settings. They are
+    // still the user's choices; they are merely not in force. Losing them on
+    // a backend flip would make the pane destructive to look at.
+    sandbox_cfg::Config cfg;
+    cfg.configured = true;
+    cfg.backend    = sandbox_cfg::LinuxBackend::Bwrap;
+    cfg.memory_mb  = 4096;
+    cfg.syscall_mode = sandbox_cfg::SyscallMode::Strict;
+    sb::set_config(cfg);
+
+    const Model m = opened();
+    const auto back = pn::read_sandbox_form(pane(m).pane.form, sb::config());
+
+    CHECK(back.memory_mb == 4096);
+    CHECK(back.syscall_mode == sandbox_cfg::SyscallMode::Strict);
+    CHECK(back.backend == sandbox_cfg::LinuxBackend::Bwrap);
+}
+
+TEST_CASE("sandbox pane: saving the backend switches the live engine") {
+    // The row has to MOVE the engine, not just record a preference. A Backend
+    // row that saves and switches nothing is the same class of bug as a pane
+    // that saves a policy nothing enforces.
+    sandbox_cfg::Config cfg;
+    cfg.configured = true;
+    cfg.backend    = sandbox_cfg::LinuxBackend::Claybin;
+    sb::set_config(cfg);
+    CHECK(sb::requested_linux_backend() == sb::LinuxPreference::Claybin);
+
+    cfg.backend = sandbox_cfg::LinuxBackend::Bwrap;
+    sb::set_config(cfg);
+    CHECK(sb::requested_linux_backend() == sb::LinuxPreference::Bwrap);
+
+    // An UNCONFIGURED config must not move it: main.cpp calls set_config()
+    // before the CLI flag, so letting a default config publish its default
+    // backend would silently undo --sandbox-backend.
+    sb::prefer_linux_backend(sb::LinuxPreference::Claybin);
+    sb::set_config(sandbox_cfg::Config{});   // configured == false
+    CHECK(sb::requested_linux_backend() == sb::LinuxPreference::Claybin);
+}
+
+TEST_CASE("sandbox config: the backend survives a save/load round trip") {
+    // The pane can only mean anything if the choice OUTLIVES the session.
+    // Driven through the real save_settings/load_settings pair rather than a
+    // JSON helper, because that pair is what the reducer actually calls --
+    // testing a private serializer would prove the wrong thing.
+    //
+    // AGENTTY_HOME is repointed at a temp dir so this never writes the
+    // developer's own settings.json, and RESTORED afterwards: it is
+    // process-wide state and other cases in this binary resolve paths
+    // through it, so leaking it would make an unrelated test fail depending
+    // on run order. (Learned the hard way -- a stray AGENTTY_HOME is exactly
+    // the kind of cross-test coupling that presents as a flaky suite.)
+    const char* prev = std::getenv("AGENTTY_HOME");
+    const std::string saved = prev ? prev : "";
+    const bool had = prev != nullptr;
+
+    const auto tmp = std::filesystem::temp_directory_path() /
+                     "agentty-sbtest-roundtrip";
+    std::filesystem::remove_all(tmp);
+    std::filesystem::create_directories(tmp);
+    ::setenv("AGENTTY_HOME", tmp.string().c_str(), 1);
+
+    auto s = persistence::load_settings();
+    s.sandbox.configured = true;
+    s.sandbox.backend    = sandbox_cfg::LinuxBackend::Claybin;
+    s.sandbox.memory_mb  = 2048;
+    persistence::save_settings(s);
+
+    const auto back = persistence::load_settings();
+
+    if (had) ::setenv("AGENTTY_HOME", saved.c_str(), 1);
+    else     ::unsetenv("AGENTTY_HOME");
+    std::filesystem::remove_all(tmp);
+
+    CHECK(back.sandbox.backend == sandbox_cfg::LinuxBackend::Claybin);
+    CHECK(back.sandbox.memory_mb == 2048);
+    CHECK(back.sandbox.configured);
 }
 
 TEST_CASE("sandbox pane: the wall report tracks the rows") {

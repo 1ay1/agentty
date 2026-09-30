@@ -22,7 +22,10 @@
 // still reporting "sandbox: active". One list, two backends.
 #include "agentty/tool/util/sandbox_claybin.hpp"
 
-#if defined(AGENTTY_HAVE_CLAYBIN) && defined(__linux__)
+// Linux-only, and that is claybin's own split rather than a build toggle:
+// its plan compiler is portable (and the pane's preview uses it on any host),
+// but only Linux can APPLY a plan -- namespaces, landlock, seccomp, cgroup2.
+#if defined(__linux__)
 
 #include <cerrno>
 #include <cstdlib>
@@ -227,4 +230,4 @@ SpawnResult spawn_shell(const Posture& p, const std::string& shell_cmd, int stdo
 
 }  // namespace agentty::tools::util::sandbox::claybin_backend
 
-#endif  // AGENTTY_HAVE_CLAYBIN && __linux__
+#endif  // __linux__

@@ -252,46 +252,45 @@ if(NOT TARGET maya::maya)
     add_library(maya::maya ALIAS maya)
 endif()
 
-# ── claybin — the in-process Linux sandbox backend ───────────────────
+# ── claybin — the in-process sandbox backend ───────────────────
 #
-# COMPILED IN by default; not SELECTED by default. Those are two different
-# questions and the answers differ.
+# A REQUIRED submodule, on the same footing as maya, acp-cpp, mcp-cpp and
+# rag-cpp: always present, always compiled, no feature toggle.
 #
-# Compiled in, because a backend nobody can reach is a backend nobody tests.
-# While this was OFF the entire claybin dispatch path was dead code in every
-# normal build: the settings pane rendered "build with -DAGENTTY_CLAYBIN=ON",
-# the policy the pane saved had no engine that could enforce it, and
-# --sandbox-backend=claybin was refused on the binary people actually run.
-# The cost of shipping it is a static library and a few seconds of build time.
+# It used to be an option (AGENTTY_CLAYBIN, and for a while defaulted OFF),
+# and that was a mistake worth naming. An optional backend is a backend that
+# does not exist: with the flag off, the whole claybin dispatch path was dead
+# code in the binary people actually run, the Sandbox pane rendered "build
+# with -DAGENTTY_CLAYBIN=ON", the policy it saved had no engine to enforce it,
+# and --sandbox-backend=claybin was refused. Two compile-time answers to the
+# same question also meant two configurations to test and an ODR hazard if
+# the define ever reached some objlibs and not others.
 #
-# Not selected, because bwrap is what users already have, is what has a decade
-# of upstream hardening behind it, and is a fine default. So the RUNTIME
-# default stays bwrap and claybin is one flag away (--sandbox-backend=claybin,
-# or the Sandbox pane). Nobody's boundary changes on upgrade; the stronger one
-# is merely reachable now.
+# So it is not a build-time choice any more. WHICH backend confines a command
+# is a RUNTIME choice -- the Sandbox pane, or --sandbox-backend -- and both
+# backends are always there to choose between. bwrap remains the default
+# because it is what users already have and has a decade of hardening behind
+# it; claybin is one setting away.
 #
-# Linux-only: claybin compiles a plan on macOS and Windows but cannot apply
-# one, so building it elsewhere would buy a dependency and no sandbox.
-option(AGENTTY_CLAYBIN "Build the claybin in-process sandbox backend (Linux)" ON)
-if(AGENTTY_CLAYBIN AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    if(NOT EXISTS "${AGENTTY_THIRD_PARTY_DIR}/claybin/CMakeLists.txt")
-        # A missing submodule is a warning, not an error, now that this is ON
-        # by default: the default must not break a plain `cmake` on a shallow
-        # or tarball checkout. bwrap still works, so degrade to it and say so.
-        message(WARNING
-            "agentty: third_party/claybin is missing, so the claybin sandbox "
-            "backend will not be built and --sandbox-backend=claybin will be "
-            "refused. The bwrap backend is unaffected. Run "
-            "`git submodule update --init --recursive` to get it.")
-    else()
-        # claybin's own suite is thorough and runs in its own CI; agentty needs
-        # the library, not another 19 test binaries in its ctest run.
-        set(CLAYBIN_TESTS OFF CACHE BOOL "" FORCE)
-        add_subdirectory(third_party/claybin)
-        if(TARGET claybin)
-            set_target_properties(claybin PROPERTIES SYSTEM TRUE)
-        endif()
+# It compiles everywhere (its plan compiler is portable and covered by tests
+# on any host); only the APPLY step is Linux-only, which claybin's own
+# CMakeLists already handles by adding src/linux/* conditionally. So there is
+# no platform guard here either -- guarding it would just reintroduce the
+# two-configurations problem on a different axis.
+if(EXISTS "${AGENTTY_THIRD_PARTY_DIR}/claybin/CMakeLists.txt")
+    # claybin's own suite is thorough and runs in its own CI; agentty needs
+    # the library, not another 20 test binaries in its ctest run.
+    set(CLAYBIN_TESTS OFF CACHE BOOL "" FORCE)
+    add_subdirectory(third_party/claybin)
+    agentty_pull_submodule_latest(claybin master claybin)
+    if(TARGET claybin)
+        set_target_properties(claybin PROPERTIES SYSTEM TRUE)
     endif()
+else()
+    message(FATAL_ERROR
+        "agentty: third_party/claybin/ submodule is empty. Run "
+        "`git submodule update --init --recursive` to vendor the sandbox "
+        "backend, then reconfigure.")
 endif()
 
 # Treat maya's headers as system so its warnings don't surface in agentty builds.

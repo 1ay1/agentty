@@ -671,9 +671,10 @@ void print_usage() {
         entry("      --sandbox-backend B", "Linux sandbox implementation: bwrap (default, "
                                             "uses the bubblewrap binary) or claybin "
                                             "(in-process library; adds a seccomp filter, "
-                                            "landlock and cgroup2 limits). The Sandbox "
-                                            "settings pane only takes effect under "
-                                            "claybin — bwrap cannot express those rules.",
+                                            "landlock and cgroup2 limits). Most Sandbox "
+                                            "settings only apply under claybin — bwrap "
+                                            "cannot express them. Settable in the "
+                                            "Sandbox settings pane too.",
               kOptGutter),
         entry("      --log-file PATH", "Write the diagnostic log here instead of "
                                        "~/.agentty/logs/agentty.log. What gets captured "
@@ -735,9 +736,9 @@ struct Args {
     std::string cli_model;
     std::string cli_workspace;
     std::string cli_sandbox;   // "auto" | "on" | "off"; empty = auto default
-    // "bwrap" (default) | "claybin". Linux only, and only meaningful in a build
-    // configured with -DAGENTTY_CLAYBIN=ON -- otherwise claybin is not linked
-    // and asking for it is refused rather than silently ignored.
+    // "bwrap" (default) | "claybin". Linux only. Both backends are always
+    // linked -- claybin is a required submodule -- so this is a pure runtime
+    // choice, and it OVERRIDES the backend saved in the Sandbox pane.
     std::string cli_sandbox_backend;
     std::string cli_profile;   // "write" | "ask" | "minimal"; ACP only
     std::string cli_provider;  // "anthropic" | "openai" | "ollama" | "llama.cpp" | host[:port]
@@ -1308,11 +1309,30 @@ int main(int argc, char** argv) {
                 args.cli_sandbox.c_str());
             return 2;
         }
+        // The saved policy, before init() -- init probes, and the policy
+        // decides what is worth probing for. A config that never touched the
+        // pane carries the shipped defaults, so this is a no-op for anyone
+        // who has not opened it.
+        //
+        // Loaded here rather than threaded down: this block runs once at
+        // startup, load_settings() is cached, and passing it through the two
+        // intervening scopes would be more plumbing than the one read costs.
+        //
+        // ORDER: set_config() also applies the policy's own backend choice,
+        // so it has to run BEFORE the CLI flag or an explicit
+        // --sandbox-backend would be silently overwritten by the saved one.
+        // A flag the user typed this run beats a setting they saved once.
+        tools::util::sandbox::set_config(persistence::load_settings().sandbox);
+
         // Backend choice, before init() -- init is what probes, so setting the
         // preference afterwards would leave the cached backend disagreeing
         // with what was asked for.
+        //
+        // No build guard: claybin is a required submodule, so both backends
+        // are always present and this is purely a runtime choice. It used to
+        // have an #else arm that refused --sandbox-backend=claybin on a build
+        // without it, which was honest but should never have been reachable.
         if (!args.cli_sandbox_backend.empty()) {
-#if defined(AGENTTY_HAVE_CLAYBIN)
             if (args.cli_sandbox_backend == "claybin") {
                 tools::util::sandbox::prefer_linux_backend(
                     tools::util::sandbox::LinuxPreference::Claybin);
@@ -1325,30 +1345,7 @@ int main(int argc, char** argv) {
                     args.cli_sandbox_backend.c_str());
                 return 2;
             }
-#else
-            // Refuse rather than ignore. A user who asks for a backend this
-            // binary cannot provide should be told, not silently given the
-            // other one -- that is the same class of lie as reporting
-            // "sandbox: active" on a host that cannot sandbox.
-            if (args.cli_sandbox_backend != "bwrap") {
-                std::fprintf(stderr,
-                    "agentty: --sandbox-backend=%s but this build has no claybin "
-                    "support. Rebuild with -DAGENTTY_CLAYBIN=ON, or pass "
-                    "--sandbox-backend=bwrap.\n",
-                    args.cli_sandbox_backend.c_str());
-                return 2;
-            }
-#endif
         }
-        // The saved policy, before init() -- init probes, and the policy
-        // decides what is worth probing for. A config that never touched the
-        // pane carries the shipped defaults, so this is a no-op for anyone
-        // who has not opened it.
-        //
-        // Loaded here rather than threaded down: this block runs once at
-        // startup, load_settings() is cached, and passing it through the two
-        // intervening scopes would be more plumbing than the one read costs.
-        tools::util::sandbox::set_config(persistence::load_settings().sandbox);
         bool ok = tools::util::sandbox::init(mode);
         if (!ok) {
             std::fprintf(stderr,

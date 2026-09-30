@@ -51,8 +51,8 @@
 
 #include "agentty/runtime/panel/sandbox.hpp"
 #include "agentty/runtime/panel/form_keys.hpp"
-#if defined(AGENTTY_HAVE_CLAYBIN)
 #include "agentty/tool/util/sandbox_claybin.hpp"
+#if defined(__linux__)
 #include <claybin/plan/compile.hpp>   // probe_host() -> HostCapabilities
 #endif
 
@@ -73,18 +73,20 @@ namespace sb = agentty::tools::util::sandbox;
 // make the limitation invisible, which is the failure mode this whole pane
 // exists to avoid.
 [[nodiscard]] bool claybin_here() {
-#if defined(AGENTTY_HAVE_CLAYBIN)
+#if defined(__linux__)
     // The real probe: forks and attempts the uid_map write, so it predicts
     // spawn() instead of guessing from sysctls. Guessing is how issue #21
     // happened -- "sandbox: active" while every command died on the denial.
     return sb::claybin_backend::available();
 #else
+    // claybin compiles a plan on every platform but can only APPLY one on
+    // Linux, so elsewhere the answer is no regardless of the library.
     return false;
 #endif
 }
 
 [[nodiscard]] std::uint32_t landlock_abi_here() {
-#if defined(AGENTTY_HAVE_CLAYBIN)
+#if defined(__linux__)
     return ::clay::probe_host().landlock_abi;   // 0 = absent
 #else
     return 0;
@@ -153,10 +155,29 @@ Cmd sandbox_update(Model& m, msg::SandboxMsg sm) {
             auto* o = m.ui.panel.get<pn::Sandbox>();
             if (!o) return Cmd::none();
 
+            // Which row the key landed on, captured BEFORE apply() -- an
+            // arrow key can move the cursor, and we need the row that was
+            // actually edited.
+            const std::string row_id =
+                (o->pane.form.cursor >= 0 &&
+                 o->pane.form.cursor < static_cast<int>(o->pane.form.fields.size()))
+                    ? o->pane.form.fields[static_cast<std::size_t>(o->pane.form.cursor)].id
+                    : std::string{};
+
             const auto applied = form::keys::apply(o->pane.form, e.action);
 
             if (applied.close)
                 return sandbox_update(m, msg::SandboxMsg{CloseSandbox{}});
+
+            // Changing the ENGINE changes which rows can mean anything, so
+            // it reprojects rather than just repricing: the locks and their
+            // reasons are computed at build time. Without this you could
+            // switch to claybin and the syscall row would still say "bwrap
+            // cannot express this" until the pane was reopened.
+            if (applied.changed && row_id == pn::kSbBackend) {
+                reproject(*o, pn::read_sandbox_form(o->pane.form, sb::config()));
+                return Cmd::none();
+            }
 
             // No `hand_off` or `fired` arm, and that is a property of the
             // form rather than an omission: this pane has no Pick rows (its

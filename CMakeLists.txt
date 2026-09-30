@@ -321,15 +321,13 @@ function(agentty_objlib name)
     else()
         target_compile_definitions(${name} PRIVATE AGENTTY_HAS_RAGCPP=0)
     endif()
-    # The claybin sandbox backend. Only sandbox_claybin.cpp uses it, but the
-    # define has to reach every objlib because sandbox.hpp's Backend enum and
-    # sandbox.cpp's dispatch are both guarded on it -- a partial define would
-    # give two TUs different ideas about the enum, which is an ODR violation
-    # rather than a compile error.
-    if(TARGET claybin)
-        target_link_libraries(${name} PRIVATE claybin)
-        target_compile_definitions(${name} PRIVATE AGENTTY_HAVE_CLAYBIN=1)
-    endif()
+    # The claybin sandbox backend. A required submodule, so it links
+    # unconditionally and there is no define to get half-applied -- which is
+    # what the old AGENTTY_HAVE_CLAYBIN guard risked: sandbox.hpp's Backend
+    # enum and sandbox.cpp's dispatch were both gated on it, so a define that
+    # reached some objlibs and not others gave two TUs different ideas about
+    # the enum. An ODR violation, and not a compile error.
+    target_link_libraries(${name} PRIVATE claybin)
     # Header-only access to the linked libs (no actual linking for OBJECT).
     target_link_libraries(${name} PRIVATE
         maya::app
@@ -433,10 +431,7 @@ endif()
 if(AGENTTY_MCP AND TARGET mcp::tools)
     target_link_libraries(agentty PRIVATE mcp::tools)
 endif()
-if(TARGET claybin)
-    target_link_libraries(agentty PRIVATE claybin)
-    target_compile_definitions(agentty PRIVATE AGENTTY_HAVE_CLAYBIN=1)
-endif()
+target_link_libraries(agentty PRIVATE claybin)
 if(AGENTTY_HAS_MIMALLOC)
     # The static target contains both C allocation and global C++ new/delete
     # overrides when MI_OVERRIDE is enabled.

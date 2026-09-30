@@ -175,18 +175,15 @@ set_property(DIRECTORY APPEND PROPERTY AGENTTY_T_SANITIZER
 # covers the engine. This closes the last gap between "the plan says X" and
 # "the child experiences X" -- which is exactly where the mremap bug lived:
 # every table-level test passed while realloc() failed in the guest.
-if(TARGET claybin)
-    # Compiles sandbox_claybin.cpp straight in rather than linking
-    # agentty_tool_obj: that objlib drags the whole tool layer (mcp config,
-    # auth, teardown) behind it, and this check only needs the backend.
-    add_executable(sandbox_live_check EXCLUDE_FROM_ALL
-        ${CMAKE_SOURCE_DIR}/tests/sandbox_live_check.cpp
-        ${CMAKE_SOURCE_DIR}/src/tool/util/sandbox_claybin.cpp)
-    target_include_directories(sandbox_live_check PRIVATE
-        ${CMAKE_SOURCE_DIR}/include)
-    target_link_libraries(sandbox_live_check PRIVATE claybin)
-    target_compile_definitions(sandbox_live_check PRIVATE AGENTTY_HAVE_CLAYBIN=1)
-endif()
+# Compiles sandbox_claybin.cpp straight in rather than linking
+# agentty_tool_obj: that objlib drags the whole tool layer (mcp config,
+# auth, teardown) behind it, and this check only needs the backend.
+add_executable(sandbox_live_check EXCLUDE_FROM_ALL
+    ${CMAKE_SOURCE_DIR}/tests/sandbox_live_check.cpp
+    ${CMAKE_SOURCE_DIR}/src/tool/util/sandbox_claybin.cpp)
+target_include_directories(sandbox_live_check PRIVATE
+    ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(sandbox_live_check PRIVATE claybin)
 
 agentty_fold_test(fork_test                TIMEOUT 30)
 agentty_fold_test(palette_render_probe     TIMEOUT 30)

@@ -2356,6 +2356,15 @@ store::Settings load_settings() {
             const auto& b = j["sandbox"];
             auto& c = s.sandbox;
             c.configured   = b.value("configured", true);  // present ⇒ user-set
+            // The engine. Clamped rather than cast blind: a hand-edited
+            // settings.json is a supported input, and an out-of-range value
+            // here would pick a backend that does not exist.
+            {
+                const int raw = b.value("backend", static_cast<int>(c.backend));
+                c.backend = raw == static_cast<int>(sandbox_cfg::LinuxBackend::Claybin)
+                                ? sandbox_cfg::LinuxBackend::Claybin
+                                : sandbox_cfg::LinuxBackend::Bwrap;
+            }
             c.fs_scope     = static_cast<sandbox_cfg::FsScope>(
                                  b.value("fs_scope", static_cast<int>(c.fs_scope)));
             c.net_mode     = static_cast<sandbox_cfg::NetMode>(
@@ -2624,6 +2633,7 @@ void save_settings(const store::Settings& s) {
         const auto& c = s.sandbox;
         json sb = {
             {"configured",   true},
+            {"backend",      static_cast<int>(c.backend)},
             {"fs_scope",     static_cast<int>(c.fs_scope)},
             {"net_mode",     static_cast<int>(c.net_mode)},
             {"syscall_mode", static_cast<int>(c.syscall_mode)},
