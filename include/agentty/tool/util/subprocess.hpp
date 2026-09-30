@@ -82,6 +82,31 @@ struct SubprocessOptions {
     // This keeps callers such as a provider bridge responsive to UI cancel
     // without coupling this low-level utility to a particular token type.
     std::function<bool()> stop_requested;
+
+    // Optional replacement for the fork/exec step ONLY.
+    //
+    // A sandbox that is a LIBRARY rather than a binary cannot be expressed as
+    // an argv prefix: claybin has to fork, apply the namespace/landlock/seccomp
+    // plan in the child, and exec there. But everything after that -- poll the
+    // pipe, throttle progress, enforce the idle deadline, SIGTERM then SIGKILL,
+    // reap -- is identical to the normal path and is the part that is easy to
+    // get wrong. Duplicating it per backend would mean two implementations of
+    // the hard half.
+    //
+    // So a backend supplies just the spawn: it receives the write end of the
+    // pipe the runner already created, wires it to the child's stdout+stderr,
+    // and returns the pid. The runner keeps ownership of the read end, the
+    // deadline, and the reaping.
+    //
+    // Returning a pid of -1 (with `error` set) is a start failure and surfaces
+    // as started==false, exactly like a posix_spawn failure.
+    struct SpawnedChild {
+        int pid{-1};
+        std::string error;
+    };
+    // (command, pipe_write_fd) -> child. `command` is the resolved shell string
+    // or argv, already chosen by the variant above.
+    std::function<SpawnedChild(const SubprocessOptions&, int pipe_write_fd)> spawner;
 };
 
 struct SubprocessResult {

@@ -668,6 +668,12 @@ void print_usage() {
                                       "(Linux: bwrap, macOS: sandbox-exec). MODE = auto "
                                       "(default: use if available), on (require backend; "
                                       "fail otherwise), off (disable wrapping).", kOptGutter),
+        entry("      --sandbox-backend B", "Linux sandbox implementation: bwrap (default, "
+                                            "uses the bubblewrap binary) or claybin "
+                                            "(in-process library; adds a seccomp filter, "
+                                            "landlock and cgroup2 limits). claybin "
+                                            "requires a build with -DAGENTTY_CLAYBIN=ON.",
+              kOptGutter),
         entry("      --log-file PATH", "Write the diagnostic log here instead of "
                                        "~/.agentty/logs/agentty.log. What gets captured "
                                        "is AGENTTY_LOG (default: warnings and errors) \u2014 "
@@ -728,6 +734,10 @@ struct Args {
     std::string cli_model;
     std::string cli_workspace;
     std::string cli_sandbox;   // "auto" | "on" | "off"; empty = auto default
+    // "bwrap" (default) | "claybin". Linux only, and only meaningful in a build
+    // configured with -DAGENTTY_CLAYBIN=ON -- otherwise claybin is not linked
+    // and asking for it is refused rather than silently ignored.
+    std::string cli_sandbox_backend;
     std::string cli_profile;   // "write" | "ask" | "minimal"; ACP only
     std::string cli_provider;  // "anthropic" | "openai" | "ollama" | "llama.cpp" | host[:port]
     std::string cli_auth_header; // custom auth header NAME (e.g. "X-API-Key")
@@ -867,6 +877,8 @@ Args parse_args(int argc, char** argv) {
             out.cli_workspace = argv[++i];
         } else if (a == "--sandbox" && i + 1 < argc) {
             out.cli_sandbox = argv[++i];
+        } else if (a == "--sandbox-backend" && i + 1 < argc) {
+            out.cli_sandbox_backend = argv[++i];
         } else if (a == "--events" && i + 1 < argc) {
             // Selects the headless machine-readable event stream. Applied
             // to the environment rather than Args because the emitter
@@ -1294,6 +1306,38 @@ int main(int argc, char** argv) {
                 "agentty: --sandbox must be auto, on, or off (got '%s')\n",
                 args.cli_sandbox.c_str());
             return 2;
+        }
+        // Backend choice, before init() -- init is what probes, so setting the
+        // preference afterwards would leave the cached backend disagreeing
+        // with what was asked for.
+        if (!args.cli_sandbox_backend.empty()) {
+#if defined(AGENTTY_HAVE_CLAYBIN)
+            if (args.cli_sandbox_backend == "claybin") {
+                tools::util::sandbox::prefer_linux_backend(
+                    tools::util::sandbox::LinuxPreference::Claybin);
+            } else if (args.cli_sandbox_backend == "bwrap") {
+                tools::util::sandbox::prefer_linux_backend(
+                    tools::util::sandbox::LinuxPreference::Bwrap);
+            } else {
+                std::fprintf(stderr,
+                    "agentty: --sandbox-backend must be bwrap or claybin (got '%s')\n",
+                    args.cli_sandbox_backend.c_str());
+                return 2;
+            }
+#else
+            // Refuse rather than ignore. A user who asks for a backend this
+            // binary cannot provide should be told, not silently given the
+            // other one -- that is the same class of lie as reporting
+            // "sandbox: active" on a host that cannot sandbox.
+            if (args.cli_sandbox_backend != "bwrap") {
+                std::fprintf(stderr,
+                    "agentty: --sandbox-backend=%s but this build has no claybin "
+                    "support. Rebuild with -DAGENTTY_CLAYBIN=ON, or pass "
+                    "--sandbox-backend=bwrap.\n",
+                    args.cli_sandbox_backend.c_str());
+                return 2;
+            }
+#endif
         }
         bool ok = tools::util::sandbox::init(mode);
         if (!ok) {

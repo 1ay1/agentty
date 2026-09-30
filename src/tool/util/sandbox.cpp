@@ -9,6 +9,12 @@
 #include <string>
 #include <vector>
 
+#if defined(AGENTTY_HAVE_CLAYBIN)
+#include <unistd.h>  // ::close, for the pidfd the runner does not use
+
+#include "agentty/tool/util/sandbox_claybin.hpp"
+#endif
+
 namespace agentty::tools::util::sandbox {
 
 namespace fs = std::filesystem;
@@ -42,6 +48,12 @@ namespace {
 // and document the read-many lifecycle.
 std::atomic<Mode>    g_mode{Mode::Auto};
 std::atomic<Backend> g_backend{Backend::None};
+
+// Which Linux backend to prefer when both could work. bwrap is the default on
+// purpose -- see the note on LinuxPreference in the header: a decade of
+// hardening versus days, so the newer one is opt-in rather than a silent
+// migration.
+std::atomic<LinuxPreference> g_linux_pref{LinuxPreference::Bwrap};
 
 // Only the POSIX backends (Linux bwrap, macOS sandbox-exec) need the
 // "can we run this binary?" probe — the Windows/unsupported branch
@@ -99,6 +111,19 @@ std::atomic<Backend> g_backend{Backend::None};
 }
 
 [[nodiscard]] Backend probe() {
+    // claybin only when asked for AND usable. its availability() forks and
+    // attempts the uid_map write, the same faithful check bwrap_can_sandbox()
+    // does -- so "usable" here means spawn() will work, not that the kernel
+    // advertises the feature.
+    //
+    // note the fallback direction: asking for claybin on a host where it cannot
+    // build still yields bwrap, not None. a user who opts into the newer
+    // backend should not silently lose their sandbox because of it.
+#if defined(AGENTTY_HAVE_CLAYBIN)
+    if (g_linux_pref.load(std::memory_order_acquire) == LinuxPreference::Claybin &&
+        claybin_backend::available())
+        return Backend::Claybin;
+#endif
     return bwrap_can_sandbox() ? Backend::Bwrap : Backend::None;
 }
 
@@ -289,14 +314,72 @@ constexpr const char* kHomeToolSubdirs[] = {
 }
 
 
+// The read set, handed to claybin as DATA rather than restated in its backend.
+//
+// This function is what keeps the two backends honest. Both consume
+// kSystemReadRoots / kEtcReadable / kHomeToolSubdirs, so a change to the
+// boundary applies to both or neither. A previous backend restated the set by
+// hand and ended up granting read on `/` -- handing ~/.ssh and ~/.aws to any
+// approved bash call while still reporting "sandbox: active".
+#if defined(AGENTTY_HAVE_CLAYBIN)
+[[nodiscard]] claybin_backend::Posture build_claybin_posture() {
+    claybin_backend::Posture p;
+    for (const char* r : kSystemReadRoots) p.system_read_roots.emplace_back(r);
+    for (const char* f : kEtcReadable) p.etc_readable.emplace_back(f);
+    if (const char* home = std::getenv("HOME"); home && *home) {
+        for (const char* sub : kHomeToolSubdirs)
+            p.home_tool_dirs.emplace_back(std::string{home} + sub);
+    }
+    p.workspace = workspace_root().string();
+    p.cwd = p.workspace;
+    // Same call the bwrap path makes: agent flows (git push, npm install) need
+    // the network, so the netns is shared and the report says `partial` for
+    // network isolation rather than claiming a wall we did not build.
+    p.network = true;
+    return p;
+}
+#endif
+
 [[nodiscard]] SubprocessResult run_wrapped(std::string_view cmd,
                                            std::size_t max_bytes,
                                            std::chrono::seconds timeout) {
     SubprocessOptions opts;
-    opts.command = SubprocessOptions::Argv{build_bwrap_argv(cmd)};
     opts.max_bytes = max_bytes;
     opts.timeout = timeout;
     opts.on_progress = [](std::string_view snap) { progress::emit(snap); };
+
+#if defined(AGENTTY_HAVE_CLAYBIN)
+    if (detected_backend() == Backend::Claybin) {
+        // claybin is a library, so there is no argv prefix to build. It forks,
+        // applies the plan, and execs itself -- but only the SPAWN; the
+        // supervise loop (poll, progress, idle deadline, SIGTERM/SIGKILL, reap)
+        // stays in Subprocess::run, shared with every other path.
+        //
+        // `command` still carries the shell string so the runner's logging and
+        // error messages read the same for both backends.
+        opts.command = SubprocessOptions::Shell{std::string{cmd}};
+        std::string shell_cmd{cmd};
+        opts.spawner = [shell_cmd](const SubprocessOptions&,
+                                   int pipe_write_fd) -> SubprocessOptions::SpawnedChild {
+            SubprocessOptions::SpawnedChild out;
+            auto posture = build_claybin_posture();
+            // Both streams onto the one pipe the runner already made, which is
+            // what the bwrap path gets from its file_actions.
+            auto r = claybin_backend::spawn_shell(posture, shell_cmd, pipe_write_fd,
+                                                  pipe_write_fd);
+            if (!r.started) {
+                out.error = r.start_error;
+                return out;
+            }
+            if (r.pidfd >= 0) ::close(r.pidfd);  // the runner reaps by pid
+            out.pid = r.pid;
+            return out;
+        };
+        return Subprocess::run(std::move(opts));
+    }
+#endif
+
+    opts.command = SubprocessOptions::Argv{build_bwrap_argv(cmd)};
     return Subprocess::run(std::move(opts));
 }
 
@@ -442,6 +525,13 @@ bool init(Mode requested) {
 Mode    requested_mode()   noexcept { return g_mode.load(std::memory_order_acquire); }
 Backend detected_backend() noexcept { return g_backend.load(std::memory_order_acquire); }
 
+void prefer_linux_backend(LinuxPreference p) noexcept {
+    // Must be called BEFORE init(), which is what probes. Setting it afterwards
+    // would leave g_backend disagreeing with the preference, and every bash
+    // call reads g_backend.
+    g_linux_pref.store(p, std::memory_order_release);
+}
+
 bool is_active() noexcept {
     return requested_mode() != Mode::Off
         && detected_backend() != Backend::None;
@@ -454,6 +544,7 @@ std::string describe_state() {
     const char* tag = nullptr;
     switch (b) {
         case Backend::Bwrap:       tag = "bwrap";        break;
+        case Backend::Claybin:     tag = "claybin";      break;
         case Backend::SandboxExec: tag = "sandbox-exec"; break;
         case Backend::None:        tag = nullptr;        break;
     }

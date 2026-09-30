@@ -252,6 +252,34 @@ if(NOT TARGET maya::maya)
     add_library(maya::maya ALIAS maya)
 endif()
 
+# ── claybin — the in-process Linux sandbox backend (optional) ───────────
+#
+# OFF by default, and deliberately so. agentty's bwrap backend works, is what
+# users have on their machines, and has a decade of upstream hardening behind
+# it. claybin is new; the walls it adds over bwrap-as-we-invoke-it (a seccomp
+# filter, landlock, cgroup2 caps) are worth having but not worth a silent
+# migration, so it is opt-in at BOTH layers: this build flag, and then
+# --sandbox-backend=claybin at runtime.
+#
+# Linux-only: claybin compiles a plan on macOS and Windows but cannot apply
+# one, so building it elsewhere would buy a dependency and no sandbox.
+option(AGENTTY_CLAYBIN "Build the claybin in-process sandbox backend (Linux)" OFF)
+if(AGENTTY_CLAYBIN AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    if(NOT EXISTS "${AGENTTY_THIRD_PARTY_DIR}/claybin/CMakeLists.txt")
+        message(FATAL_ERROR
+            "agentty: AGENTTY_CLAYBIN=ON but third_party/claybin is missing. "
+            "Run `git submodule update --init --recursive`, or configure with "
+            "-DAGENTTY_CLAYBIN=OFF to use the bwrap backend.")
+    endif()
+    # claybin's own suite is thorough and runs in its own CI; agentty needs the
+    # library, not another 19 test binaries in its ctest run.
+    set(CLAYBIN_TESTS OFF CACHE BOOL "" FORCE)
+    add_subdirectory(third_party/claybin)
+    if(TARGET claybin)
+        set_target_properties(claybin PROPERTIES SYSTEM TRUE)
+    endif()
+endif()
+
 # Treat maya's headers as system so its warnings don't surface in agentty builds.
 set_target_properties(maya PROPERTIES SYSTEM TRUE)
 

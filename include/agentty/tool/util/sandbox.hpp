@@ -52,9 +52,27 @@ enum class Mode : std::uint8_t {
 
 enum class Backend : std::uint8_t {
     None,         // no backend detected / sandbox disabled
-    Bwrap,        // Linux bubblewrap
+    Bwrap,        // Linux bubblewrap, exec'd as a binary
+    Claybin,      // Linux, in-process via the claybin library
     SandboxExec,  // macOS sandbox-exec
 };
+
+// Which Linux backend to prefer when both are usable.
+//
+// bwrap stays the default deliberately. it has a decade of hardening behind it
+// and it demonstrably works on users' machines; claybin is new, and the walls
+// it adds (a syscall filter, landlock, cgroup2 caps) are worth having but not
+// worth a silent migration. so this is opt-in, and a failure to build the
+// claybin sandbox falls back to bwrap rather than to nothing.
+enum class LinuxPreference : std::uint8_t {
+    Bwrap,    // default
+    Claybin,  // --sandbox-backend=claybin
+};
+
+// Choose the Linux backend. MUST be called before init(), which is what
+// probes -- setting it later would leave the cached backend disagreeing with
+// the preference.
+void prefer_linux_backend(LinuxPreference p) noexcept;
 
 // Set the requested mode (from --sandbox CLI flag) and probe the
 // system for a usable backend. Idempotent; the result is cached.

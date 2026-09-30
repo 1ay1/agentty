@@ -586,7 +586,32 @@ SubprocessResult run_posix(const std::vector<std::string>& argv_in,
     io::fsm::assert_legal_edge<Piped, Spawned>();
     pid_t pid = -1;
     int rc = 0;
+
+    // A backend may replace the fork/exec step only.
+    //
+    // This is how the claybin sandbox plugs in: it is a library, not a binary,
+    // so it cannot be expressed as an argv prefix the way bwrap and
+    // sandbox-exec are -- it has to fork, apply the namespace/landlock/seccomp
+    // plan in the child, and exec there itself. Everything below this point
+    // (poll, progress throttle, idle deadline, SIGTERM then SIGKILL, reap) is
+    // the same either way, and it is the part that is easy to get wrong, so it
+    // is not duplicated per backend.
+    //
+    // The spawner gets the write end of the pipe we already made and is
+    // responsible for putting it on the child's stdout and stderr. We keep the
+    // read end and the deadline.
+    if (opts.spawner) {
+        auto child = opts.spawner(opts, piped.write_end.fd);
+        if (child.pid < 0) {
+            SubprocessResult r;
+            r.started = false;
+            r.start_error = child.error.empty() ? "sandbox spawner failed" : child.error;
+            return r;
+        }
+        pid = child.pid;
+    } else
 #if AGENTTY_HAVE_POSIX_SPAWN
+    {
     // Own session (or at least own process group) so timeout/cancel can
     // signal the whole tree: `sh -c` plus anything it forks. Signalling
     // only the leader left `cmd &`, pipelines and dev servers running.
@@ -615,7 +640,9 @@ SubprocessResult run_posix(const std::vector<std::string>& argv_in,
                             arg_ptrs.data(), environ);
 #  endif
     if (have_attr) ::posix_spawnattr_destroy(&attr);
+    }
 #else
+    {
     // Fork/exec fallback (Bionic without <spawn.h> below API 28). Perform
     // the same fd wiring the file_actions would have — stdin<-/dev/null,
     // stdout+stderr->pipe write end, close the read end — in the forked
@@ -633,6 +660,7 @@ SubprocessResult run_posix(const std::vector<std::string>& argv_in,
         ::_exit(127);   // exec only returns on failure
     } else if (pid < 0) {
         rc = errno;
+    }
     }
 #endif
     // file_actions no longer needed; the write end is parent-side dead
