@@ -1446,7 +1446,7 @@ Cmd run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args,
     // accumulated. Per-call detached thread costs ~100-300 µs of
     // construction; tools run seconds apart so it's noise.
     return Cmd::task_isolated(
-        [](jaal::Sink<Msg> sink, std::stop_token,
+        [](jaal::Sink<Msg> sink, std::stop_token stop,
            ToolCallId id, ToolName name, nlohmann::json args,
            http::CancelTokenPtr cancel, std::uint64_t exec_seq) {
             // Every result this worker sends carries its exec_seq, so the
@@ -1465,8 +1465,27 @@ Cmd run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args,
                     sink.send(Msg{ToolExecProgress{id, std::string{snapshot},
                                               exec_seq}});
                 }};
+            // The probe answers YES on EITHER the turn's cancel token (user
+            // pressed escape) or jaal's stop_token (the app is shutting
+            // down). The second half used to be missing — this parameter was
+            // unnamed, so `request_stop()` at shutdown was silently dropped
+            // and a tool kept running.
+            //
+            // That is not just a slow exit, it is a use-after-free. These
+            // run on task_isolated threads, which jaal asks to stop but
+            // NEVER waits for (kernel/pool.hpp: "Isolated threads are asked
+            // to stop but never waited for"). A `task` subagent mid-stream
+            // therefore keeps calling cfg.stream(), which holds
+            // anthropic_provider / chatgpt_provider BY REFERENCE off main's
+            // stack — and main is unwinding. It only faults when a subagent
+            // happens to be streaming at quit, which is precisely when the
+            // user gives up on a long-running one and hits escape, so it
+            // reads as "subagents crash sometimes".
             agentty::tools::cancellation::Scope cancellation_scope{
-                [cancel] { return cancel && cancel->is_cancelled(); }};
+                [cancel, stop] {
+                    return (cancel && cancel->is_cancelled())
+                        || stop.stop_requested();
+                }};
             try {
                 // ── pre_tool hooks (consent-gated, see hooks.hpp) ─────
                 // A blocking decision becomes the tool's error result: the

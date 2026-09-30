@@ -1424,9 +1424,20 @@ public:
         // never seen. That is not theoretical: a coder subagent spent all 23
         // of its turns re-requesting one file, got the sentinel every time,
         // and made zero edits. RAII-restored so nesting can't leak the id.
+        //
+        // The id is a PROCESS-WIDE COUNTER, not `&thread`. A stack address
+        // looks unique and is not: subagents run on isolated worker threads,
+        // and sequential runs of the same role reuse the same stack, so
+        // `&thread` came out byte-identical every time (measured: six
+        // sequential threads, one address). Two explorers in a row therefore
+        // shared a context and the second was refused every file the first
+        // had read — reintroducing, for the sequential case, exactly the bug
+        // this scope exists to prevent.
+        static std::atomic<std::uint64_t> subagent_run_seq{0};
         ::mcp::tools::util::ReadContextScope read_scope{
             "subagent:" + std::string{type.name} + ":"
-            + std::to_string(reinterpret_cast<std::uintptr_t>(&thread))};
+            + std::to_string(subagent_run_seq.fetch_add(
+                  1, std::memory_order_relaxed))};
         // Transient stream failures (429/529 brown-out, TLS reset, transport
         // hiccup) are RETRIED with backoff instead of aborting the whole
         // subagent — "task fails a lot" was mostly one flaky completion
@@ -1434,6 +1445,31 @@ public:
         // successful completion resets it.
         constexpr int kMaxStreamRetries = 3;
         int stream_failures = 0;
+        // Wall-clock ceiling for the WHOLE run, independent of turns.
+        //
+        // kMaxTurns bounds how many completions a subagent may take; it
+        // bounds nothing about how long each one takes. The per-stream
+        // budget is 30 min total with a 90 s idle timeout, and idle only
+        // fires on true silence — a gateway that dribbles a keepalive every
+        // 60 s and never finishes is "healthy" to every layer below. Stack
+        // the ladder up and the loop's real ceiling was 80 turns x 3 retries
+        // x 30 min, i.e. days. What the user sees is a `task` card that
+        // never comes back and a parent turn wedged behind it.
+        //
+        // 15 minutes is chosen against the work, not the transport: the
+        // per-role budgets assume an explorer converges in a handful of
+        // turns and a coder runs several build/fix cycles. A subagent still
+        // going at 15 minutes is not thorough, it is stuck — the same
+        // argument kMaxTurnsReadOnly makes about turn 40. Like the turn cap
+        // this is a CEILING, not a quota: a run that finishes in 20 s costs
+        // nothing, and only runs that would otherwise have hung pay it.
+        //
+        // On expiry the loop STOPS and reports what it has, exactly as the
+        // turn cap does — partial findings beat a hang, and the is_error
+        // flag below keeps it from rendering as a green success.
+        constexpr auto kMaxWallClock = std::chrono::minutes(15);
+        const auto run_deadline = std::chrono::steady_clock::now() + kMaxWallClock;
+        bool deadline_hit = false;
         // Repeat-failure breaker (same rule as the parent's doom-loop
         // breaker): the identical tool call failing 3× means the loop is
         // stuck — stop burning turns and report what we have.
@@ -1463,6 +1499,15 @@ public:
         const int max_turns = subagent::max_turns_for(type.read_only);
 
         while (turns < max_turns && !doomed) {
+            // Wall-clock stop, checked at the top of every turn. Placed here
+            // rather than in the while() condition so `deadline_hit` is set
+            // before the loop exits and the report below can say WHICH
+            // ceiling ended the run — "out of turns" and "out of time" call
+            // for different fixes from whoever reads it.
+            if (std::chrono::steady_clock::now() >= run_deadline) {
+                deadline_hit = true;
+                break;
+            }
             ++turns;
 
             // FINAL-TURN NUDGE: when the remaining budget is nearly spent,
@@ -1477,8 +1522,20 @@ public:
             // the current edit, re-run the build) before summarising. Too
             // early wastes budget; too late produces the very "ran out of
             // turns with nothing to show" report this exists to prevent.
+            //
+            // The same nudge also fires on TIME. A subagent can be at turn 6
+            // of 80 and still out of budget — a few slow builds or a
+            // dribbling gateway is all it takes — and without this it hits
+            // the deadline mid-tool-call and returns no report at all, which
+            // is exactly the failure the turn-based nudge prevents. Two
+            // minutes is the same shape of lead: enough to land the current
+            // step and summarise, not enough to start something new.
+            const bool near_deadline =
+                std::chrono::steady_clock::now() + std::chrono::minutes(2)
+                    >= run_deadline;
             const int wrapup_lead = max_turns >= 48 ? 3 : 1;
-            if (!wrapup_nudged && turns >= max_turns - wrapup_lead
+            if (!wrapup_nudged
+                && (turns >= max_turns - wrapup_lead || near_deadline)
                 && !thread.messages.empty()
                 && thread.messages.back().role != Role::User) {
                 Message nudge;
@@ -1727,7 +1784,7 @@ public:
         // and the UI rendered a green ✓ DONE over a self-declared failure.
         // Observed exactly that. Treat hitting the cap as a reportable
         // condition in its own right.
-        const bool budget_exhausted = turns >= max_turns;
+        const bool budget_exhausted = turns >= max_turns || deadline_hit;
 
         if (report.empty() || salvaged_stale) {
             std::string why;
@@ -1736,6 +1793,14 @@ public:
             else if (doomed)
                 why = "[subagent stopped: the same tool call failed 3\xc3\x97 "
                       "in a row without converging]";
+            else if (deadline_hit)
+                // Named separately from the turn cap on purpose: "out of
+                // time" and "out of turns" point at different causes (a slow
+                // or stalling backend vs a task too big for the budget) and
+                // the reader can only act on the difference if we say which.
+                why = "[subagent hit its 15-minute wall-clock limit without "
+                      "producing a final report \xe2\x80\x94 the summary below is "
+                      "incomplete]";
             else if (budget_exhausted)
                 why = "[subagent hit its turn budget without producing a final "
                       "report \xe2\x80\x94 the summary below is incomplete]";

@@ -25,6 +25,7 @@
 //   J. cancellation reaches the active provider Request token.
 
 #include <atomic>
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -47,6 +48,7 @@ namespace fs = std::filesystem;
 #include "agentty/tool/registry.hpp"
 #include "agentty/tool/subagent.hpp"
 #include "agentty/runtime/msg.hpp"
+#include "mcp/tools/util/fs_helpers.hpp"   // util::read_context (case N)
 
 using nlohmann::json;
 using namespace agentty;
@@ -584,6 +586,57 @@ int main() {
               "M: lean prompt keeps the operational file-editing discipline");
         check(has(lean, "<environment>"),
               "M: lean prompt keeps the environment block");
+    }
+
+    // ── N. Sequential subagents of the SAME ROLE must not share a
+    // read-dedup context.
+    //
+    // The runner scopes `read`'s dedup per subagent, because the cache is
+    // process-global and answers a repeat of the same (path, range) with
+    // "refer to the earlier tool_result" — a claim only true for the context
+    // that actually received those bytes. The id used to be derived from
+    // `&thread`, a LOCAL in run().
+    //
+    // That looks unique and is not. Subagents run on isolated worker
+    // threads, and sequential runs reuse the same stack, so `&thread` came
+    // back byte-identical every time (measured: six sequential threads, one
+    // address). Two explorers in a row therefore shared one context, and the
+    // second was refused every file the first had read — it saw "File
+    // unchanged since last read" for files it had never opened, burned its
+    // turns re-asking, and reported nothing useful. Exactly the bug the
+    // scope exists to prevent, reintroduced for the sequential case.
+    //
+    // Asserted through the observable consequence: run the same role twice
+    // and require the two runs to be given DIFFERENT read contexts.
+    {
+        std::vector<std::string> contexts;
+        install_scripted_stream(
+            [&](int, const provider::Request&, const provider::EventSink& sink) {
+                // Record on EVERY turn and dedup below. The scripted stream's
+                // turn counter is per-install, not per-run, so "turn == 0"
+                // does not mean "first turn of this run" once run_task is
+                // called twice — an earlier draft keyed on that and silently
+                // recorded nothing.
+                contexts.push_back(::mcp::tools::util::read_context());
+                emit_text(sink, "REPORT_N");
+                emit_finish(sink);
+            });
+
+        (void)run_task("same role, run one");
+        (void)run_task("same role, run two");
+
+        std::vector<std::string> uniq;
+        for (const auto& c : contexts)
+            if (std::find(uniq.begin(), uniq.end(), c) == uniq.end())
+                uniq.push_back(c);
+
+        check(contexts.size() >= 2,
+              "N: both sequential subagent runs were observed");
+        check(!contexts.empty() && !contexts.front().empty(),
+              "N: a subagent run gets a non-empty read context");
+        check(uniq.size() >= 2,
+              "N: sequential same-role subagents get DISTINCT read "
+              "contexts (a stack address would collide)");
     }
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);
