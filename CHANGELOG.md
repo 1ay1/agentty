@@ -4,6 +4,8 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.16] - 2026-09-30
+
 ### Fixed
 - **Windows had no artifact in 0.9.15.** The release job built with the Visual Studio generator while CI built with Ninja, and that difference alone made the build fail: jaal detects optional host hooks by *name* using a deliberately ambiguous lookup, and MSBuild reported that ambiguity as a hard error (`C2385`) where every other toolchain treats it as the substitution failure it is meant to be. Every other platform shipped, so the gap was easy to miss. The release lane now builds exactly the way the CI lane does — which also makes it faster, since MSBuild parallelises across projects rather than translation units.
 - **Subagents could hang for hours.** `task` bounded how many *turns* a subagent could take but nothing bounded how long it could take. A backend that keeps a stream technically alive without ever finishing it looks healthy to every layer underneath, so the real ceiling was turns × retries × the 30-minute per-stream budget. There is now a 15-minute wall clock for the whole run (`AGENTTY_SUBAGENT_MAX_SECONDS`), it composes across nesting rather than resetting per level, and the report says whether the run ran out of *time* or out of *turns* — those point at different fixes.
