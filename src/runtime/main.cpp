@@ -1388,12 +1388,32 @@ int main(int argc, char** argv) {
     }
 
     // ── Wire the Provider + Store seams ─────────────────────────────────
-    // Both providers live on main's stack so whichever the install lambda
-    // captures by reference outlives maya::run / the ACP serve loop.
-    provider::anthropic::AnthropicProvider anthropic_provider;
-    provider::chatgpt::ChatGptProvider chatgpt_provider;
-    provider::copilot::CopilotProvider copilot_provider;
-    provider::kimi::KimiProvider           kimi_provider;
+    // The long-lived providers are SHARED-OWNED, not stack objects captured
+    // by reference.
+    //
+    // They used to live on main's stack, on the reasoning that main outlives
+    // maya::run. That holds for every thread the runtime waits for — and
+    // subagents are precisely the threads it does not. A `task` runs on a
+    // Cmd::task_isolated thread, which jaal DETACHES (kernel/pool.hpp:
+    // isolated threads are "asked to stop but never waited for"), so one
+    // still inside cfg.stream() at quit kept calling into these objects
+    // while main unwound. Shutdown now asks it to stop and waits 1.5 s, but
+    // that wait is bounded on purpose — a thread wedged in a syscall is
+    // abandoned, and with a stack capture that abandonment was a
+    // use-after-free.
+    //
+    // shared_ptr closes it for good: the stream lambda holds its own strong
+    // reference, so an abandoned worker keeps the provider alive for exactly
+    // as long as it is still touching it, and the last one out destroys it.
+    // No ordering to get right, no grace period to tune, nothing to race.
+    // The cost is one allocation per provider at startup.
+    auto anthropic_provider =
+        std::make_shared<provider::anthropic::AnthropicProvider>();
+    auto chatgpt_provider =
+        std::make_shared<provider::chatgpt::ChatGptProvider>();
+    auto copilot_provider =
+        std::make_shared<provider::copilot::CopilotProvider>();
+    auto kimi_provider = std::make_shared<provider::kimi::KimiProvider>();
     io::FsStore                            store;
 
     // The seam: a single std::function the runtime calls. It dispatches on
@@ -1407,33 +1427,35 @@ int main(int argc, char** argv) {
     // (provider/dispatch.cpp) is the ONE routing point — it reads
     // provider::active() AT CALL TIME so the picker can live-switch the
     // backend mid-session and the next request targets it, with no seam
-    // rebuild. The two long-lived native providers are captured by ref;
-    // short-lived OpenAI-compat / Ollama transports are built per call inside
-    // dispatch from the active endpoint.
+    // rebuild. The two long-lived native providers are captured BY VALUE as
+    // shared_ptr (see above: a detached subagent may outlive main, and a
+    // reference capture made that a use-after-free); short-lived
+    // OpenAI-compat / Ollama transports are built per call inside dispatch
+    // from the active endpoint.
     std::function<provider::StreamResult(provider::Request,
                                          provider::EventSink)> stream_fn =
-        [&anthropic_provider, &chatgpt_provider, &copilot_provider, &kimi_provider]
+        [anthropic_provider, chatgpt_provider, copilot_provider, kimi_provider]
         (provider::Request req, provider::EventSink sink) {
             provider::ProviderRouter router;
             router.set(provider::LongLived::Anthropic,
-                       [&anthropic_provider](provider::Request r,
-                                             provider::EventSink s) {
-                           return anthropic_provider.stream(std::move(r), std::move(s));
+                       [anthropic_provider](provider::Request r,
+                                            provider::EventSink s) {
+                           return anthropic_provider->stream(std::move(r), std::move(s));
                        })
                   .set(provider::LongLived::ChatGpt,
-                       [&chatgpt_provider](provider::Request r,
-                                           provider::EventSink s) {
-                           return chatgpt_provider.stream(std::move(r), std::move(s));
+                       [chatgpt_provider](provider::Request r,
+                                          provider::EventSink s) {
+                           return chatgpt_provider->stream(std::move(r), std::move(s));
                        })
                   .set(provider::LongLived::Copilot,
-                       [&copilot_provider](provider::Request r,
-                                           provider::EventSink s) {
-                           return copilot_provider.stream(std::move(r), std::move(s));
+                       [copilot_provider](provider::Request r,
+                                          provider::EventSink s) {
+                           return copilot_provider->stream(std::move(r), std::move(s));
                        })
                   .set(provider::LongLived::Kimi,
-                       [&kimi_provider](provider::Request r,
-                                        provider::EventSink s) {
-                           return kimi_provider.stream(std::move(r), std::move(s));
+                       [kimi_provider](provider::Request r,
+                                       provider::EventSink s) {
+                           return kimi_provider->stream(std::move(r), std::move(s));
                        });
             router.external_acp = [](const std::string& agent_id,
                                      provider::Request r, provider::EventSink s) {

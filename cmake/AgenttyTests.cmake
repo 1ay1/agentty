@@ -340,6 +340,25 @@ target_include_directories(concurrency_primitives_test PRIVATE include)
 add_test(NAME concurrency_primitives_test COMMAND concurrency_primitives_test)
 set_tests_properties(concurrency_primitives_test PROPERTIES TIMEOUT 30 LABELS sanitizer)
 
+# subagent_lifetime: the provider seam must survive an ABANDONED worker.
+#
+# Subagents run on Cmd::task_isolated threads, which jaal detaches and never
+# waits for; shutdown's wait is bounded on purpose, so abandonment is a
+# DESIGNED outcome. The providers therefore cannot be stack objects captured
+# by reference (they were) — an abandoned worker mid-stream called into freed
+# stack while main unwound, which is the intermittent "subagents crash"
+# report. Ownership is the fix; this pins it.
+#
+# ASan lane because the broken shape is a hard stack-use-after-scope there
+# and merely probable elsewhere. Narrow-source like its neighbours: no maya
+# renderer to ODR-clash with the instrumented build.
+agentty_test(subagent_lifetime_test MODE raw LABELS sanitizer)
+add_executable(subagent_lifetime_test EXCLUDE_FROM_ALL
+    tests/subagent_lifetime_test.cpp)
+target_include_directories(subagent_lifetime_test PRIVATE include)
+add_test(NAME subagent_lifetime_test COMMAND subagent_lifetime_test)
+set_tests_properties(subagent_lifetime_test PROPERTIES TIMEOUT 30 LABELS sanitizer)
+
 # race_harness: the THREAD-sanitizer lane. Registered raw + narrow-source for
 # the same reason as its neighbours (no maya renderer to ODR-clash), and
 # labelled BOTH `sanitizer` and `race` so CI can run it under TSan separately
