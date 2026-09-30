@@ -705,9 +705,6 @@ struct SandboxKey { form::keys::Action action; };
 struct SandboxRefreshPreview {};
 // Persist the form's config and install it for the rest of the session.
 struct SandboxSave {};
-// Accept the policy the learning mode recommends (see Observation): replaces
-// the form's config with the narrowest one that allows everything observed.
-struct SandboxAcceptObserved {};
 
 // ── In-app login modal ───────────────────────────────────────────────────
 // Shown when the user starts agentty with no valid credentials, OR
@@ -1262,7 +1259,7 @@ using AppearanceMsg = std::variant<
 // ── Sandbox (filesystem / network / syscalls / limits) ─────
 using SandboxMsg = std::variant<
     OpenSandbox, CloseSandbox, SandboxKey, SandboxRefreshPreview,
-    SandboxSave, SandboxAcceptObserved>;
+    SandboxSave>;
 
 using MetaMsg = std::variant<
     CompactContext, CycleProfile, ToggleChangesStrip,

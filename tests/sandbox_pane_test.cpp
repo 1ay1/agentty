@@ -410,6 +410,80 @@ TEST_CASE("sandbox config: the backend survives a save/load round trip") {
     CHECK(back.sandbox.configured);
 }
 
+TEST_CASE("sandbox pane: every row round-trips into the config") {
+    // The bug class this catches, three times over in this subsystem:
+    //
+    //   kSbMode                 a row id for a row that must not exist
+    //   Observation/BlockedEvent  types with a reducer arm and no producer
+    //   the Masked row           configured nothing under bwrap
+    //
+    // Each read as a shipped feature and enforced nothing. The shape is always
+    // the same: a control exists at one layer and is dead at another, and no
+    // single-layer test notices.
+    //
+    // So: build the form, MUTATE every editable row away from its current
+    // value, read it back, and require the config actually changed. A row that
+    // does not survive that is either dead or misspelled at one of its two
+    // sites -- which is exactly what the kSb* constants exist to prevent and
+    // cannot prevent on their own.
+    sandbox_cfg::Config cfg;
+    cfg.configured = true;
+    cfg.backend    = sandbox_cfg::LinuxBackend::Claybin;
+    install(cfg);
+
+    Model m = opened();
+    auto& f = m.ui.panel.get<pn::Sandbox>()->pane.form;
+
+    int checked = 0;
+    for (std::size_t i = 0; i < f.fields.size(); ++i) {
+        auto& fld = f.fields[i];
+        if (fld.is_header() || fld.is_action() || fld.is_pick()) continue;
+        // A LOCKED row is not dead, it is honestly unavailable: the backend or
+        // the kernel cannot enforce it, and the pane says so. read_sandbox_form
+        // still reads it (a locked row keeps its value through a round trip,
+        // which is its own test above), but on a host where claybin cannot
+        // start every claybin row is locked, so requiring them to move here
+        // would make this case fail for a property of the machine.
+        if (fld.locked) continue;
+
+        const auto before = pn::read_sandbox_form(f, cfg);
+
+        // Move the row off whatever it holds. Each kind has one obvious way.
+        if (auto* c = std::get_if<form::field::Choice>(&fld.value)) {
+            if (c->count() < 2) continue;
+            c->index = c->normalized(c->index + 1);
+        } else if (auto* t = std::get_if<form::field::Toggle>(&fld.value)) {
+            t->on = !t->on;
+        } else if (auto* n = std::get_if<form::field::Number>(&fld.value)) {
+            // Move to a value that is inside the row's bounds AND cannot
+            // coincide with what the config already holds.
+            //
+            // `(value == min) ? max : min` was wrong and failed only under
+            // ctest: read_sandbox_form falls back to `base` for some rows, so
+            // landing on the base value makes the read a no-op and the check
+            // reports a dead row that is fine. Order-dependent, which is the
+            // worst kind of flake -- it passed standalone and failed in the
+            // suite. Stepping off the CURRENT value by one, clamped into
+            // range, cannot collide with anything.
+            n->value = (n->value < n->max) ? n->value + 1 : n->value - 1;
+        } else if (auto* tx = std::get_if<form::field::Text>(&fld.value)) {
+            tx->value = tx->value.empty() ? std::string{"/tmp/roundtrip"}
+                                          : std::string{};
+        } else {
+            continue;   // Secret, or a kind with no value to move
+        }
+
+        const auto after = pn::read_sandbox_form(f, cfg);
+        const std::string why = "row '" + fld.id + "' does not reach the config";
+        CHECK_MESSAGE(!(before == after), why);
+        ++checked;
+    }
+
+    // And the sweep actually ran. A loop that skipped everything would report
+    // zero failures, which is the failure mode this whole file is about.
+    CHECK(checked >= 10);
+}
+
 TEST_CASE("sandbox pane: the wall report tracks the rows") {
     // The pane's whole reason to exist: a boundary you cannot observe is one
     // you cannot trust. So the report must never describe a config the rows

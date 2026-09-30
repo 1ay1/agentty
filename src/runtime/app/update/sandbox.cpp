@@ -260,19 +260,6 @@ Cmd sandbox_update(Model& m, msg::SandboxMsg sm) {
             return persist_settings(m);
         },
 
-        [&](SandboxAcceptObserved&) -> Cmd {
-            auto* o = m.ui.panel.get<pn::Sandbox>();
-            if (!o) return Cmd::none();
-            // The recommendation, not the commitment: this only loads the
-            // narrowest policy that would have allowed everything observed
-            // into the form. The user still has to Save it, and still sees
-            // the walls it produces first.
-            auto cfg = pn::policy_from_observation(
-                o->pane.observing, pn::read_sandbox_form(o->pane.form, sb::config()));
-            reproject(*o, cfg);
-            return Cmd::none();
-        },
-
     }, sm);
 }
 

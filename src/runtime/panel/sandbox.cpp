@@ -451,42 +451,6 @@ sandbox_cfg::Config read_sandbox_form(const form::Form& f,
     return cfg;
 }
 
-sandbox_cfg::Config policy_from_observation(const Observation& obs,
-                                            const sandbox_cfg::Config& base) {
-    sandbox_cfg::Config cfg = base;
-    cfg.configured = true;
-
-    // Start from the narrowest thing that still covers what was seen. The
-    // recommendation is deliberately tight: a user reviewing a diff will widen
-    // something that is too strict, but will not notice something too loose.
-    cfg.fs_scope = sandbox_cfg::FsScope::Minimal;
-
-    cfg.read_paths = obs.paths_read;
-    cfg.write_paths = obs.paths_written;
-    std::sort(cfg.read_paths.begin(), cfg.read_paths.end());
-    cfg.read_paths.erase(std::unique(cfg.read_paths.begin(), cfg.read_paths.end()),
-                         cfg.read_paths.end());
-    std::sort(cfg.write_paths.begin(), cfg.write_paths.end());
-    cfg.write_paths.erase(std::unique(cfg.write_paths.begin(), cfg.write_paths.end()),
-                          cfg.write_paths.end());
-
-    // Network: if nothing connected, propose none -- that is the single
-    // biggest win available and the one a hand-written policy never takes,
-    // because nobody believes their build works without the internet until
-    // they have watched it do so.
-    if (obs.ports.empty()) {
-        cfg.net_mode = sandbox_cfg::NetMode::None;
-    } else {
-        cfg.net_mode = sandbox_cfg::NetMode::Ports;
-        cfg.allow_ports = obs.ports;
-    }
-
-    // Syscalls stay where the user had them: the observation records what the
-    // profile WOULD have denied, which is information for the user, not a
-    // licence to widen the filter automatically.
-    return cfg;
-}
-
 #if defined(__linux__)
 
 Preview preview_sandbox(const sandbox_cfg::Config& cfg) {

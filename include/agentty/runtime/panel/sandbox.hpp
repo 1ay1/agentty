@@ -116,43 +116,30 @@ struct Preview {
     std::vector<std::string> unenforceable;
 };
 
-// ── Observe mode ────────────────────────────────────────────────────────
+// ── Deliberately not here yet ─────────────────────────────────────────────
 //
-// The learning loop. While active, the sandbox runs PERMISSIVELY but records
-// every access it would have had to grant, so a user can run `npm install`
-// once and be handed the allowlist instead of deriving it from a sequence of
-// failures.
+// Two features were designed here before they existed, and their types sat in
+// this header for a while with nothing populating them:
 //
-// Deliberately explicit and deliberately loud: it is a weaker sandbox while
-// it runs, and a mode that silently weakens a boundary is worse than no mode.
-// The pane paints it as a warning banner, not a checkbox.
-struct Observation {
-    bool active = false;
-    // Paths actually read/written outside the granted scope.
-    std::vector<std::string> paths_read;
-    std::vector<std::string> paths_written;
-    // Ports actually connected to.
-    std::vector<std::uint16_t> ports;
-    // Syscalls the chosen profile would have denied, by name.
-    std::vector<std::string> denied_syscalls;
-    std::size_t sample_count = 0;   // how many commands were observed
-};
-
-// ── The blocked-activity feed ───────────────────────────────────────────
+//   Observation   — a "learning mode" that runs permissively and records what
+//                   it would have had to grant, so `npm install` once hands
+//                   you the allowlist instead of a sequence of failures.
+//   BlockedEvent  — a feed of what the sandbox actually stopped, from
+//                   seccomp-notify and landlock denials. "cargo tried
+//                   ptrace(PTRACE_ATTACH) and was denied" teaches what your
+//                   toolchain does; "your build failed" teaches nothing, and
+//                   is the difference between adding one allowlist line and
+//                   turning the sandbox off.
 //
-// What the sandbox actually stopped, most recent first. Populated from
-// seccomp-notify and from landlock denials visible in the child's exit path.
+// Both are worth building. Neither is built, so the structs are gone: a type
+// with a reducer arm and no producer is the same trap kSbMode was -- it reads
+// as a shipped feature to the next person, and it makes the pane look like it
+// reports things it cannot. See docs/design/sandbox-boundary.md §13 for the
+// implementation notes.
 //
-// This is the row that changes behaviour. "Your build failed" teaches nothing;
-// "cargo tried ptrace(PTRACE_ATTACH) and was denied" teaches you what your
-// toolchain does, and is the difference between turning the sandbox off and
-// adding one line to an allowlist.
-struct BlockedEvent {
-    std::string what;    // "ptrace", "connect :6379", "/etc/shadow"
-    std::string by;      // "seccomp", "landlock", "mount"
-    std::string command; // the shell command that tried it
-    std::uint32_t count = 1;  // coalesced repeats
-};
+// The learning mode carries a warning if it ever lands: it is a WEAKER sandbox
+// while it runs, and a mode that silently weakens a boundary is worse than no
+// mode. It has to be loud, and it cannot be the default.
 
 // The pane. Named SandboxPane, not Sandbox, because panel/slot.hpp needs the
 // bare name for the SLOT that holds it -- same split as AppearancePane.
@@ -161,12 +148,6 @@ struct SandboxPane {
 
     // Recomputed on every edit, so the walls track the rows.
     Preview preview;
-
-    // The last N things the sandbox blocked, across this session.
-    std::vector<BlockedEvent> blocked;
-
-    // Learning state, when the user has asked for it.
-    Observation observing;
 
     // Which backend is actually in use, for the header line. A pane that
     // offers per-port network while running under bwrap would be lying, so
@@ -204,11 +185,5 @@ struct SandboxPane {
 
 // Compile the config and describe the resulting walls, without spawning.
 [[nodiscard]] Preview preview_sandbox(const sandbox_cfg::Config& cfg);
-
-// Turn an observation into the narrowest config that would have allowed
-// everything observed. The recommendation, not the commitment: the user sees
-// the diff and accepts it.
-[[nodiscard]] sandbox_cfg::Config policy_from_observation(const Observation& obs,
-                                                           const sandbox_cfg::Config& base);
 
 }  // namespace agentty::ui::panel

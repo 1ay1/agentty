@@ -480,6 +480,60 @@ order* is wrong — so it needs live verification (§10).
 
 ---
 
+## 9a. The recurring bug: a control that is dead at one layer
+
+Three times in this subsystem, a control existed at one layer and was inert at
+another. Worth naming as a class, because the fix is the same each time and no
+single-layer test catches any of them.
+
+| what | looked like | actually |
+|---|---|---|
+| `kSbMode` | a row id, so a row | no row, no field, no reducer |
+| `Observation` / `BlockedEvent` | a learning mode and a blocked feed, with a reducer arm | nothing ever populated them |
+| the Masked row | a live setting on both backends | bwrap applied no masks at all |
+
+The shape is always: **the layer that declares it and the layer that enforces
+it disagree, and each is internally consistent.** A header compiles. A reducer
+arm compiles. A row renders. The policy-level test passes. Only the child
+notices, and only if you look.
+
+### Two guards, and they catch different things
+
+**`sandbox pane: every row round-trips into the config`** mutates every
+editable row away from its value, reads the form back, and requires the config
+to have changed. That catches a row misspelled at one of its two sites, or one
+wired to nothing — verified by breaking `kSbOpenFiles` and `kSbMaskDepth` on
+purpose, which report the offending row by name.
+
+It **skips locked rows**, and that is a real limit worth stating: on a host
+where claybin cannot start, every claybin-only row is locked, so the guard
+covers only the handful that work on both backends. It would have caught
+`kSbMode` and the dead `Observation` arm; it would NOT have caught a
+claybin-only row wired to nothing, on a machine without user namespaces. The
+live check is what covers those, and only where claybin runs.
+
+**`sandbox_live_check`** proves the child experiences it. The round-trip test
+would have passed happily while bwrap ignored every mask, because the config
+was right; it was the *application* that was missing.
+
+Neither is sufficient. A row has to survive both.
+
+### The rule
+
+> Do not declare a type, a row id, or a message for something that is not
+> wired end to end. An unimplemented control reads as a shipped feature to the
+> next person, and "we'll fill it in later" is indistinguishable from a
+> security hole in review.
+
+The learning mode and the blocked feed are genuinely worth building — "cargo
+tried `ptrace(PTRACE_ATTACH)` and was denied" teaches what your toolchain does,
+where "your build failed" teaches nothing and pushes people to turn the sandbox
+off. But they are described in a comment now, not declared in a struct, until
+something populates them. If the learning mode lands it must be **loud**: it is
+a weaker sandbox while it runs, and it cannot be the default.
+
+---
+
 ## 10. How this gets verified
 
 Four layers. Each catches something the others cannot.
@@ -487,7 +541,7 @@ Four layers. Each catches something the others cannot.
 | layer | what it proves | runs |
 |---|---|---|
 | policy tests | the table says the right thing | always |
-| `sandbox_pane_test` | door → open → edit → save → discard; the seal holds | always |
+| `sandbox_pane_test` | door → open → edit → save → discard; the seal holds; **every row reaches the config** | always |
 | `sandbox_config_race_test` | concurrent readers see one whole policy | TSan lane |
 | `sandbox_live_check` | **the child actually experiences it** | by hand |
 
@@ -620,6 +674,10 @@ change broke what.
 
 - Never call `set_config` outside startup. If you need to, the design is
   wrong — change the design, not the call site.
+- **Do not declare a control that is not wired end to end.** A row id, a
+  struct, or a message for an unbuilt feature reads as shipped to the next
+  person (§9a). Describe it in a comment; declare it when something populates
+  it.
 - A new pane row needs an entry in the §6 table and a lock reason. A row with
   no honest answer for one backend is not ready.
 - A new form pane goes in **both** `subscribe()` and `subs_key()`. Present in
