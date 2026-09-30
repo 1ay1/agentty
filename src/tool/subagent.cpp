@@ -60,4 +60,18 @@ int current_depth() noexcept { return g_depth; }
 void push_depth() noexcept { ++g_depth; }
 void pop_depth() noexcept { if (g_depth > 0) --g_depth; }
 
+namespace {
+// Same thread-local discipline as g_depth: a subagent runs synchronously on
+// its own worker thread, so parallel subagents each see only their own
+// enclosing deadline.
+thread_local RunDeadline g_deadline{};
+} // namespace
+
+RunDeadline current_deadline() noexcept { return g_deadline; }
+
+DeadlineScope::DeadlineScope(RunDeadline d) noexcept : prev_{g_deadline} {
+    g_deadline = d;
+}
+DeadlineScope::~DeadlineScope() { g_deadline = prev_; }
+
 } // namespace agentty::tools::subagent

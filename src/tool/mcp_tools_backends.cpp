@@ -999,8 +999,31 @@ provider::StreamResult run_one_completion(Thread& thread,
         req.effort = std::string(effort_wire_for(
             role_prof.effort, resolved_caps(role_prof.model)));
     } else {
+        // Read-only roles are routed DOWN from the parent, but only to the
+        // Mid tier, not the cheapest thing on the provider.
+        //
+        // The floor used to be Cheap, which on Anthropic means every
+        // explorer ran on Haiku while the parent was Opus — tier 1 doing the
+        // investigation for tier 3. That is the single biggest reason a
+        // `task` came back with a thin or confused report: exploring a
+        // codebase is not mechanical. It is deciding which of 40 grep hits
+        // matter, and a weaker model spends its turns reading the wrong
+        // files and then summarises them confidently. The user cannot see
+        // why, because the routing is silent and the report looks plausible.
+        //
+        // Zed does not downgrade at all — `Thread::new_subagent` copies the
+        // parent's model verbatim. Mid is the middle position: still cheaper
+        // than a flagship parent (Sonnet vs Opus), still a real saving on a
+        // fan-out, but competent at the judgement the role actually needs.
+        //
+        // The router never routes UP and never crosses providers, so a
+        // single-model account, or one whose cheapest capable model is
+        // already the parent, sees no change. Smart Mode (above) still wins
+        // outright when the user has pinned slots explicitly.
         req.model = type.read_only
-                      ? agentty::cheapest_capable_model(cfg.model, cfg.candidates)
+                      ? agentty::cheapest_capable_model(
+                            cfg.model, cfg.candidates,
+                            ModelCapabilities::Tier::Mid)
                       : cfg.model;
     }
     // A subagent NEVER needs the 1M/2M extended-context window: it does a
@@ -1467,8 +1490,32 @@ public:
         // On expiry the loop STOPS and reports what it has, exactly as the
         // turn cap does — partial findings beat a hang, and the is_error
         // flag below keeps it from rendering as a green success.
-        constexpr auto kMaxWallClock = std::chrono::minutes(15);
-        const auto run_deadline = std::chrono::steady_clock::now() + kMaxWallClock;
+        //
+        // Overridable by AGENTTY_SUBAGENT_MAX_SECONDS so the behaviour is
+        // TESTABLE. A 15-minute constant cannot be exercised by a test
+        // suite, and an untested stop path is one that quietly stops
+        // working — which is how the read-context scope regressed. The env
+        // var is read once per run; unset or unparseable means the default.
+        const auto max_wall_clock = [] {
+            if (const char* s = std::getenv("AGENTTY_SUBAGENT_MAX_SECONDS")) {
+                char* end = nullptr;
+                const long v = std::strtol(s, &end, 10);
+                if (end != s && v > 0 && v < 86'400)
+                    return std::chrono::seconds(v);
+            }
+            return std::chrono::seconds(15 * 60);
+        }();
+        // NESTED runs inherit the enclosing deadline rather than starting a
+        // fresh one — see subagent::DeadlineScope for why (kMaxDepth is 2, so
+        // a per-run clock would make the real bound depth x the advertised
+        // one). The thread-local itself lives in subagent.cpp, which is the
+        // TU allowed to hold it.
+        const auto own_deadline =
+            subagent::RunClock::now() + max_wall_clock;
+        const auto enclosing = subagent::current_deadline();
+        const auto run_deadline =
+            enclosing ? std::min(*enclosing, own_deadline) : own_deadline;
+        const subagent::DeadlineScope deadline_scope{run_deadline};
         bool deadline_hit = false;
         // Repeat-failure breaker (same rule as the parent's doom-loop
         // breaker): the identical tool call failing 3× means the loop is
@@ -1798,9 +1845,8 @@ public:
                 // time" and "out of turns" point at different causes (a slow
                 // or stalling backend vs a task too big for the budget) and
                 // the reader can only act on the difference if we say which.
-                why = "[subagent hit its 15-minute wall-clock limit without "
-                      "producing a final report \xe2\x80\x94 the summary below is "
-                      "incomplete]";
+                why = "[subagent hit its wall-clock limit without producing a "
+                      "final report \xe2\x80\x94 the summary below is incomplete]";
             else if (budget_exhausted)
                 why = "[subagent hit its turn budget without producing a final "
                       "report \xe2\x80\x94 the summary below is incomplete]";
@@ -1823,11 +1869,20 @@ public:
             // work that was asked for. Both are failures; say so.
             if (doomed || budget_exhausted) is_error = true;
         } else if (budget_exhausted) {
-            // Ran out of turns but signed off cleanly. The prose is worth
+            // Ran out of budget but signed off cleanly. The prose is worth
             // keeping — it is the agent's own account of how far it got — but
             // it must not be mistaken for success by the caller or the UI.
-            report = "[subagent hit its turn budget \xe2\x80\x94 the task may be "
-                     "incomplete; verify before relying on it]\n\n" + report;
+            //
+            // Says WHICH budget for the same reason the empty-report branch
+            // above does. A run stopped by the clock while it happened to be
+            // writing prose used to land here and be labelled "turn budget",
+            // pointing whoever read it at the wrong fix.
+            report = (deadline_hit
+                          ? "[subagent hit its wall-clock limit \xe2\x80\x94 the task "
+                            "may be incomplete; verify before relying on it]"
+                          : "[subagent hit its turn budget \xe2\x80\x94 the task may "
+                            "be incomplete; verify before relying on it]")
+                   + std::string{"\n\n"} + report;
             is_error = true;
         }
 

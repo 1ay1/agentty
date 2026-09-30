@@ -639,6 +639,111 @@ int main() {
               "contexts (a stack address would collide)");
     }
 
+    // ── O. The wall-clock deadline actually stops a run, and says so.
+    //
+    // kMaxTurns bounds COMPLETIONS, not time, and nothing else did either:
+    // a stream gets 30 min total with a 90 s idle timeout, and idle only
+    // fires on true silence — a backend that dribbles a keepalive and never
+    // finishes looks healthy to every layer below. Stacked against the turn
+    // and retry caps that was 80 x 3 x 30 min before the loop gave up, i.e.
+    // a `task` card that never comes back.
+    //
+    // Driven through the REAL runner with a deliberately slow stream and a
+    // 1-second budget (AGENTTY_SUBAGENT_MAX_SECONDS exists for exactly this
+    // — a 15-minute constant is not testable, and an untested stop path
+    // quietly stops working).
+    {
+        ::setenv("AGENTTY_SUBAGENT_MAX_SECONDS", "1", 1);
+        std::atomic<int> completions{0};
+        install_scripted_stream(
+            [&](int, const provider::Request&, const provider::EventSink& sink) {
+                const int n = completions.fetch_add(1) + 1;
+                // Slower than the budget / turn, so the deadline is what
+                // ends this run rather than the turn cap. Never emits a
+                // final report: the run must be stopped from OUTSIDE.
+                //
+                // Args must VARY per turn. The runner also has a
+                // repeat-success breaker (the identical call succeeding
+                // over and over is a loop too), and an earlier draft that
+                // re-read the same path tripped THAT at turn 3 instead of
+                // the clock — the test passed its timing checks while
+                // proving nothing about the deadline.
+                std::this_thread::sleep_for(std::chrono::milliseconds(400));
+                emit_tool_call(sink, "t" + std::to_string(n), "read",
+                               json{{"path", "README.md"},
+                                    {"offset", n * 10}});
+                emit_finish(sink, StopReason::ToolUse);
+            });
+
+        const auto t0 = std::chrono::steady_clock::now();
+        auto out = run_task("loop until the clock runs out");
+        const auto elapsed = std::chrono::steady_clock::now() - t0;
+        ::unsetenv("AGENTTY_SUBAGENT_MAX_SECONDS");
+
+        const auto secs =
+            std::chrono::duration_cast<std::chrono::seconds>(elapsed).count();
+        // Bounded: without the deadline this runs to the turn cap (32 for a
+        // read-only role) at 400 ms each = 12 s+, or forever on a real hang.
+        check(secs < 8,
+              "O: the run is stopped by the clock, not left to the turn cap");
+        check(completions.load() < 32,
+              "O: it stopped before exhausting the turn budget");
+        // And the report must NAME the clock. "out of time" and "out of
+        // turns" point at different causes (a slow backend vs a task too
+        // big), and the reader can only act on the difference if we say so.
+        check(has(out.text, "wall-clock"),
+              "O: the report names the wall-clock limit as the reason");
+        check(out.is_error,
+              "O: a deadline stop is an error, not a green success");
+    }
+
+    // ── P. A read-only subagent is routed DOWN, but not to the bottom.
+    //
+    // Read-only roles (explorer/reviewer) run on a cheaper model than the
+    // parent, because a fan-out of four explorers on a flagship is a lot of
+    // money for work that is mostly reading. The floor for that search used
+    // to be Tier::Cheap, which on Anthropic means every explorer ran on
+    // Haiku while the parent was Opus — tier 1 doing the investigation for
+    // tier 3.
+    //
+    // That is a silent quality cliff and the likeliest reason a `task`
+    // comes back thin: exploring is not mechanical, it is deciding which of
+    // 40 grep hits matter, and a weaker model reads the wrong files and
+    // then summarises them confidently. Nothing in the UI says why.
+    //
+    // Zed does not downgrade at all (Thread::new_subagent copies the
+    // parent's model). Mid is the middle position — real savings, no cliff.
+    // Pinned here because the floor is one enum argument, and dropping it
+    // back to Cheap would look like a harmless simplification.
+    {
+        std::vector<ModelInfo> rows;
+        for (const char* id : {"claude-haiku-4-5", "claude-sonnet-4-5",
+                               "claude-opus-4-5"}) {
+            ModelInfo mi;
+            mi.id = ModelId{id};
+            mi.supports_tools = true;
+            rows.push_back(std::move(mi));
+        }
+        const auto floor = ModelCapabilities::Tier::Mid;
+
+        check(cheapest_capable_model("claude-opus-4-5", rows, floor)
+                  == "claude-sonnet-4-5",
+              "P: a flagship parent routes read-only work to Mid, not Cheap");
+        // Never routes UP, and never sideways into a needless switch.
+        check(cheapest_capable_model("claude-sonnet-4-5", rows, floor)
+                  == "claude-sonnet-4-5",
+              "P: a Mid parent keeps its own model");
+        check(cheapest_capable_model("claude-haiku-4-5", rows, floor)
+                  == "claude-haiku-4-5",
+              "P: a Cheap parent is never routed UP");
+        // And the old floor is what it was: this documents the change rather
+        // than asserting a tautology.
+        check(cheapest_capable_model("claude-opus-4-5", rows,
+                                     ModelCapabilities::Tier::Cheap)
+                  == "claude-haiku-4-5",
+              "P: the old Cheap floor really did land on the weakest model");
+    }
+
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);
     return g_fails == 0 ? 0 : 1;
 }

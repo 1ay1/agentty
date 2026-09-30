@@ -147,6 +147,42 @@ static_assert(kMaxTurnsWrite    <= kMaxTurns);
 void push_depth() noexcept;
 void pop_depth() noexcept;
 
+// ── Run deadline, inherited across nesting ────────────────────────────
+//
+// The wall-clock ceiling for one subagent run. It exists because kMaxTurns
+// bounds COMPLETIONS, not time: a backend that keeps a stream technically
+// alive without finishing it is healthy to every layer below, so the loop's
+// real ceiling was turns x retries x the 30-minute per-stream budget.
+//
+// A NESTED run takes the min of its own budget and whatever is left of the
+// run above it. kMaxDepth is 2, so without that a leaf could start at minute
+// 14 of its parent and run a full fresh budget — making the real bound
+// depth x the advertised one. The min makes the ceiling hold for the whole
+// tree, which is the only version worth telling a user about.
+//
+// Thread-local for the same reason as the depth counter: a subagent runs
+// synchronously on its own worker thread, so parallel subagents must not see
+// each other's deadlines. Lives here rather than at the call site because
+// this TU is the one allowed thread-local state (see tests/lint/allowlist).
+using RunClock    = std::chrono::steady_clock;
+using RunDeadline = std::optional<RunClock::time_point>;
+
+// The deadline in force on THIS thread, if any.
+[[nodiscard]] RunDeadline current_deadline() noexcept;
+
+// RAII: install `d` for the duration, restore the previous one after. The
+// restore matters for siblings — a second subagent started later must get
+// its own budget, not inherit a finished one's.
+class DeadlineScope {
+public:
+    explicit DeadlineScope(RunDeadline d) noexcept;
+    ~DeadlineScope();
+    DeadlineScope(const DeadlineScope&)            = delete;
+    DeadlineScope& operator=(const DeadlineScope&) = delete;
+private:
+    RunDeadline prev_;
+};
+
 // Provenance of an agent persona by name, for the task card's transparency
 // tag: "builtin" (explorer/reviewer/…), "user" (~/.agentty/agents), or
 // "project" (a workspace-local .agentty/agents that rode in on the repo).

@@ -118,6 +118,7 @@ common ones are `AGENTTY_DOCS_DIR` and `AGENTTY_EMBED_MODEL`.
 | `AGENTTY_MCP_TIMEOUT_MS` · `AGENTTY_MCP_CONNECT_TIMEOUT_MS` | Per-call and initial-connect timeouts for MCP servers. |
 | `AGENTTY_MCP_TOOL_BUDGET` | Soft cap on total tools on the wire (native + enabled MCP), default 100. Past it, MCP tools are trimmed and the picker warns. `0` disables the cap; unparsable values keep the default. |
 | `AGENTTY_MCP_CLIENT_ID` | OAuth client id for MCP servers that require one. |
+| `AGENTTY_SUBAGENT_MAX_SECONDS` | Wall-clock ceiling for one `task` subagent run, default 900 (15 min). Bounds the case the turn cap cannot: a backend that keeps a stream technically alive without finishing it, where the per-stream budget alone allowed hours. On expiry the subagent stops and reports what it has, flagged incomplete. Values outside 1–86399 keep the default. |
 | `AGENTTY_ACP_AGENTS` | Path to the ACP agent config (same precedence chain as MCP). |
 | `AGENTTY_ACP_ALLOW_PROJECT` | Allow a project-local ACP agent config. Off by default, same reasoning as MCP. |
 | `AGENTTY_NO_HOOKS` | Disable all lifecycle hooks for this run. |
