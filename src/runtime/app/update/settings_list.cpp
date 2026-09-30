@@ -248,6 +248,9 @@ Cmd settings_list_update(Model& m, msg::SettingsListMsg sm) {
                 case se::Action::OpenAppearance: {
                     return reenter(m, Msg{OpenAppearance{}});
                 }
+                case se::Action::OpenSandbox: {
+                    return reenter(m, Msg{OpenSandbox{}});
+                }
                 case se::Action::ToggleChangesStrip: {
                     return reenter(m, Msg{ToggleChangesStrip{}});
                 }

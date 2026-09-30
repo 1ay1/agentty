@@ -69,6 +69,7 @@
 #include "agentty/runtime/panel/settings/list.hpp"
 #include "agentty/runtime/panel/fork.hpp"
 #include "agentty/runtime/panel/appearance.hpp"
+#include "agentty/runtime/panel/sandbox.hpp"
 #include "agentty/runtime/panel/form.hpp"
 
 namespace agentty::ui::panel {
@@ -181,6 +182,13 @@ struct PluginEdit : WithFrom {
 struct Appearance : WithFrom {
     agentty::ui::panel::AppearancePane pane;
 };
+// The Sandbox pane. Also composed rather than doubly-inherited, for the same
+// structured-binding reason. Carries the whole pane (form + live wall
+// preview + blocked log) because the preview is recomputed from the form on
+// every edit, so the two have to travel together.
+struct Sandbox : WithFrom {
+    agentty::ui::panel::SandboxPane pane;
+};
 struct Fork            : agentty::fork_panel::Open, WithFrom {};
 struct DiffReview      : pick::OpenAtCell, WithFrom {};
 struct Stats           : agentty::stats_panel::Open, WithFrom {};
@@ -191,7 +199,7 @@ using Variant = std::variant<
     Models, Providers, ThreadList, SmartMode,
     Palette, Mention, Symbol,
     CodeBlocks, CodeBlockResult, ToolOutput, Checkpoints,
-    Rag, SettingsList, PluginEdit, Appearance, Fork,
+    Rag, SettingsList, PluginEdit, Appearance, Sandbox, Fork,
     DiffReview, Stats, Skills>;
 
 // The one indirection that lets the type refer to itself: a stashed parent
@@ -407,6 +415,7 @@ enum class Kind {
     SettingsList,
     PluginEdit,
     Appearance,
+    Sandbox,
     Fork,
     Models,
     Providers,
@@ -438,6 +447,7 @@ enum class Kind {
         Kind operator()(const SettingsList&)    const { return Kind::SettingsList; }
         Kind operator()(const PluginEdit&)      const { return Kind::PluginEdit; }
         Kind operator()(const Appearance&)      const { return Kind::Appearance; }
+        Kind operator()(const Sandbox&)         const { return Kind::Sandbox; }
         Kind operator()(const Fork&)            const { return Kind::Fork; }
         Kind operator()(const DiffReview&)      const { return Kind::DiffReview; }
         Kind operator()(const Stats&)           const { return Kind::Stats; }

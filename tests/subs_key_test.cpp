@@ -83,3 +83,33 @@ TEST_CASE("subs_key: covers the pane sub-modes that change routing") {
     CHECK_MESSAGE(!(browsing == app::subs_key(m)),
                   "appearance picking mode changes key routing");
 }
+
+TEST_CASE("subs_key: the sandbox pane's focus is part of the key") {
+    // The bug this pins, found by hand after the pane shipped: the Sandbox
+    // pane was added to subscribe() (it snapshots focus_of(form) and closes
+    // the router over it) but NOT to subs_key. So the memo never invalidated
+    // when the pane's focus changed, and the router kept translating keys
+    // against a focus the pane had already left.
+    //
+    // It presented as "the dropdowns don't move, and sometimes input doesn't
+    // reach" -- not as a crash, because nothing is racy here: it is a stale
+    // captured copy, which is exactly the hazard SubsKey's header comment
+    // warns about. Invisible until a key routes against last frame's state.
+    Model m;
+    m.ui.panel.descend(ui::panel::Sandbox{});
+    auto* o = m.ui.panel.get<ui::panel::Sandbox>();
+    REQUIRE(o != nullptr);
+    // One row, so the form has something to focus.
+    o->pane.form.fields.push_back(
+        form::Field{.id = "r", .label = "row",
+                    .value = form::field::Text{}});
+
+    const auto browsing = app::subs_key(m);
+
+    // Editing a text row means printable keys INSERT instead of navigating.
+    // If the key does not change, the router is not rebuilt and they keep
+    // navigating.
+    o->pane.form.focus = form::focus::Editing{};
+    CHECK_MESSAGE(!(browsing == app::subs_key(m)),
+                  "sandbox editing mode changes key routing");
+}

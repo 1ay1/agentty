@@ -26,15 +26,36 @@ struct Posture {
     std::vector<std::string> system_read_roots;  // kSystemReadRoots
     std::vector<std::string> etc_readable;       // kEtcReadable
     std::vector<std::string> home_tool_dirs;     // $HOME + kHomeToolSubdirs
-    // Absolute paths denied after every grant. Credentials, agent state, and
+    // Extra read/write grants the user added in the pane, on top of the scope.
+    std::vector<std::string> read_paths;
+    std::vector<std::string> write_paths;
+    // Absolute paths masked after every grant. Credentials, agent state, and
     // whatever the user added to deny_paths. See kAlwaysMasked.
     std::vector<std::string> masked;
     std::string workspace;                       // read-write, bound last
     std::string cwd;                             // where the shell starts
-    bool network{true};                          // keep the host netns
+
+    // ── network ──────────────────────────────────────────────────────────
+    // Mirrors sandbox_cfg::NetMode as an int, so this header stays free of
+    // the domain type and a build without claybin does not need it.
+    //   0 = Full (share the host netns), 1 = None, 2 = Ports
+    int net_mode{0};
+    std::vector<std::uint16_t> allow_ports;
+
+    // ── syscalls ─────────────────────────────────────────────────────────
+    // sandbox_cfg::SyscallMode as an int: 0 = Off, 1 = Compiler, 2 = Strict.
+    int syscall_mode{1};
+    bool wx_protect{true};
+
+    // ── hardening ────────────────────────────────────────────────────────
+    bool scope_ipc{true};
+    bool close_inherited_fds{true};
+
+    // ── resources ────────────────────────────────────────────────────────
     std::uint64_t tmp_bytes{512ull * 1024 * 1024};
-    std::uint64_t memory_bytes{0};  // 0 = no cap
+    std::uint64_t memory_bytes{0};   // 0 = no cap
     std::uint64_t max_processes{0};  // 0 = no cap
+    std::uint32_t cpu_percent{0};    // 0 = no cap, 100 = one core
 };
 
 // One wall and how strongly it is enforced, straight from claybin's guarantee

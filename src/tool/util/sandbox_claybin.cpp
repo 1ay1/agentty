@@ -65,6 +65,11 @@ using namespace ::clay::literals;
     }
     for (const auto& f : p.etc_readable) d = std::move(d).bind_try(f, f);
     for (const auto& h : p.home_tool_dirs) d = std::move(d).bind_try(h, h);
+    // Extra grants from the pane. read_paths are read-only; write_paths are
+    // separate because granting write is a different decision from granting
+    // read, and one combined list would make the dangerous one the easy one.
+    for (const auto& r : p.read_paths) d = std::move(d).bind_try(r, r);
+    for (const auto& w : p.write_paths) d = std::move(d).bind_try(w, w, false);
 
     // ── secrets, masked with MOUNTS ──────────────────────────────────────
     //
@@ -85,55 +90,66 @@ using namespace ::clay::literals;
     // and mask() is optional by default for exactly that reason.
     for (const auto& m : p.masked) d = std::move(d).mask(m);
 
-    // ── pseudo-filesystems ───────────────────────────────────────────────
+    // ── pseudo-filesystems ───────────────────────────────────────────
     // A fresh procfs shows only our own pid namespace. dev_fs binds the handful
     // of device nodes a program needs rather than mounting devtmpfs, so
     // /dev/mem and friends are ABSENT rather than present-and-denied.
     d = std::move(d).proc_fs("/proc");
     d = std::move(d).dev_fs("/dev");
 
-    // ── /tmp, then the workspace ─────────────────────────────────────────
-    // A tmpfs so nothing leaks into the host /tmp, and sized: claybin enforces
-    // it via the mount option, so a runaway build hits ENOSPC inside the
-    // sandbox instead of filling the host's memory. bwrap cannot express this.
+    // ── /tmp, then the workspace ───────────────────────────────────────
+    // A tmpfs so nothing leaks into the host /tmp, and SIZED: claybin enforces
+    // it as a mount option, so a runaway build hits ENOSPC inside the sandbox
+    // instead of filling the host's memory. bwrap cannot express this.
     d = std::move(d).tmpfs("/tmp", Bytes{p.tmp_bytes});
     if (!p.workspace.empty()) {
         d = std::move(d).bind(p.workspace, p.workspace);
         d = std::move(d).workdir(p.cwd.empty() ? p.workspace : p.cwd);
     }
 
-    // ── network ──────────────────────────────────────────────────────────
-    // Kept, deliberately and identically to the bwrap path: `git push`,
-    // `npm install` and `curl` are legitimate agent flows. A blanket grant, so
-    // the guarantee report will say `partial` for network isolation rather than
-    // claiming a boundary we did not build.
-    if (p.network) d = std::move(d).connect("", 0);
+    // ── network ─────────────────────────────────────────────────────────
+    //
+    // Three modes, and the middle one is the interesting one:
+    //
+    //   Full  a blanket grant. The report says `partial` for network
+    //         isolation, because a shared netns is not a boundary -- which is
+    //         honest rather than flattering.
+    //   None  no grant at all, so claybin leaves the netns empty. `strong`.
+    //   Ports one grant per port, enforced by landlock (abi 4+). `strong`,
+    //         and the thing no proxy-based allowlist can claim: an agent
+    //         cannot be talked into bypassing a kernel rule.
+    switch (p.net_mode) {
+        case 1: break;  // None
+        case 2:
+            for (auto port : p.allow_ports) d = std::move(d).connect("", port);
+            break;
+        default: d = std::move(d).connect("", 0); break;  // Full
+    }
 
-    // ── process hardening, matching the bwrap flags ──────────────────────
+    // ── process hardening ──────────────────────────────────────────────
     // new_session: the child cannot steal the controlling tty (bwrap's
-    //   --new-session, and the reason TIOCSTI injection is not reachable).
+    //   --new-session, and why TIOCSTI injection is unreachable).
     // die_with_parent: no detached zombies if agentty dies.
     d = std::move(d).new_session();
     d = std::move(d).die_with_parent();
 
-    // ── the walls bwrap is given none of ─────────────────────────────────
+    // ── the walls bwrap is given none of ────────────────────────────────
     //
-    // A syscall filter. compiler_with_network() is the profile whose shape
-    // matches what a shell running builds needs: files, subprocesses, sockets.
-    // It denies ptrace, mount, unshare, setns, bpf, kexec and the module
-    // syscalls outright, filters clone's namespace flags by argument, denies
-    // clone3 with ENOSYS so glibc falls back to filterable clone, enforces W^X
-    // on mmap/mprotect, and reduces ioctl to an allow-list that excludes the
-    // TIOCSTI keystroke-injection family.
-    //
-    // This is the piece worth having: bwrap accepts --seccomp FD and agentty
-    // passes it nothing, so today there is no syscall filter at all.
-    d = std::move(d).syscall_profile(profiles::compiler_with_network());
+    // Off is everything(), NOT "no profile": a default-constructed
+    // SyscallPolicy is kill-by-default with no rules, which compiles to a
+    // sandbox that kills the guest at execve. claybin refuses it outright.
+    // The settings pane's live preview caught that the first time it ran.
+    switch (p.syscall_mode) {
+        case 0: d = std::move(d).syscall_profile(SyscallPolicy::everything()); break;
+        case 2: d = std::move(d).syscall_profile(profiles::with_filesystem()); break;
+        default: d = std::move(d).syscall_profile(profiles::compiler_with_network()); break;
+    }
 
-    // Resource caps. cgroup2 when the host delegates, rlimit as a backstop
-    // otherwise; the report distinguishes the two rather than claiming both.
+    // Resource caps. cgroup2 when the host delegates, rlimit as a backstop;
+    // the report distinguishes the two rather than claiming both.
     if (p.memory_bytes) d = std::move(d).memory(Bytes{p.memory_bytes});
     if (p.max_processes) d = std::move(d).processes(p.max_processes);
+    if (p.cpu_percent) d = std::move(d).cpu_percent(p.cpu_percent);
 
     return std::move(d).seal();
 }

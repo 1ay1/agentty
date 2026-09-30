@@ -31,8 +31,11 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>    // std::isalnum — env-name validation in the sandbox hook
+#include <chrono>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -541,6 +544,79 @@ void wire_mcp_runtime(std::string_view sandbox_mode) {
     // "auto" / "" → Auto. main.cpp already rejected any other value.
     (void)mu::sandbox::init(mode);
 
+    // Hand mcp-cpp OUR sandbox, so every tool it runs goes through the same
+    // engine — and therefore the same user policy — as agentty's own
+    // execution paths (hooks, ACP terminals).
+    //
+    // Without this the two layers each probe independently and each pick
+    // their own backend: the `shell` tool would run under mcp's built-in
+    // bwrap while agentty's hooks ran under claybin, and the settings pane
+    // would configure a boundary that the tool the user actually invokes
+    // never reads. One status banner described both, which made the split
+    // invisible. mcp-cpp cannot reach claybin on its own (it is a standalone
+    // library and claybin is OUR submodule), which is exactly why the hook
+    // exists.
+    if (mode != mu::sandbox::Mode::Off) {
+        mu::sandbox::HostSandbox hs;
+        hs.label = util::sandbox::describe_state();
+        hs.run = [](const std::vector<std::string>& argv,
+                    std::size_t max_bytes,
+                    std::chrono::seconds timeout,
+                    std::string_view cwd,
+                    const std::vector<std::pair<std::string, std::string>>& env)
+                    -> std::optional<::mcp::tools::util::SubprocessResult> {
+            // Decline when we have nothing better to offer, so mcp falls back
+            // to its own backend rather than running the command unconfined.
+            if (!util::sandbox::is_active()) return std::nullopt;
+
+            // agentty's runner takes neither cwd nor env, so a request for
+            // either has to be expressed IN the command. Both are prefixed as
+            // shell builtins: `cd` before the command, `VAR=val` exports
+            // ahead of it. Single-quote wrapping is the only escaping a
+            // POSIX shell needs — inside '' every byte but ' is literal.
+            auto shq = [](std::string_view s) {
+                std::string q = "'";
+                for (char c : s) { if (c == '\'') q += "'\\''"; else q += c; }
+                q += "'";
+                return q;
+            };
+            std::string cmd;
+            if (!cwd.empty()) cmd += "cd " + shq(cwd) + " && ";
+            for (const auto& [k, v] : env) {
+                // Only well-formed names; a bogus key would otherwise become
+                // a command to run.
+                if (k.empty()) continue;
+                bool ok = !(k[0] >= '0' && k[0] <= '9');
+                for (char c : k)
+                    if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '_')) ok = false;
+                if (!ok) continue;
+                cmd += k + "=" + shq(v) + " ";
+            }
+            for (std::size_t i = 0; i < argv.size(); ++i) {
+                if (i) cmd += " ";
+                cmd += shq(argv[i]);
+            }
+
+            auto r = util::sandbox::run_shell_command(cmd, max_bytes, timeout);
+
+            ::mcp::tools::util::SubprocessResult out;
+            out.output      = std::move(r.output);
+            out.exit_code   = r.exit_code;
+            out.timed_out   = r.timed_out;
+            out.truncated   = r.truncated;
+            out.started     = r.started;
+            out.start_error = std::move(r.start_error);
+            return out;
+        };
+        mu::sandbox::set_host_sandbox(std::move(hs));
+    } else {
+        // Explicitly CLEAR it, rather than just not installing. This function
+        // is callable more than once (tests, and any future re-wire), so
+        // "off" has to mean off and not "keep whatever was installed last
+        // time" -- a stale hook would quietly confine commands the user asked
+        // to run unconfined.
+        mu::sandbox::set_host_sandbox({});
+    }
 }
 
 

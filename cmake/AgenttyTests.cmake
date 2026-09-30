@@ -59,7 +59,7 @@ set(_AGENTTY_CONSOLIDATED
     palette_nav_test panel_test panel_nav_test status_bar_cache_test
     appearance_rows_test
     issue37_terminal_respect_test
-    param_tag_repair_test sandbox_escape_test scope_test table_render_test
+    param_tag_repair_test sandbox_escape_test sandbox_pane_test scope_test table_render_test
     ssrf_guard_test render_key_coverage_test reasoning_render_test
     plugin_config_test skills_engine_test skill_effects_trust_test
     skill_screen_test
@@ -160,6 +160,34 @@ set_property(DIRECTORY APPEND PROPERTY AGENTTY_T_STANDALONE
              snapshot_mutex_fallback_test)
 set_property(DIRECTORY APPEND PROPERTY AGENTTY_T_SANITIZER
              snapshot_mutex_fallback_test)
+# sandbox_live_check: does the sandbox actually ENFORCE, on this host, right
+# now. Not a ctest, and deliberately: it needs working user+mount namespaces,
+# it makes a real outbound connection to check that the permissive setting
+# still permits, and both of those are properties of the machine rather than
+# of the code. In CI it would either skip itself (proving nothing, greenly) or
+# fail for reasons unrelated to the change.
+#
+# So it is a target you run by hand when touching the sandbox:
+#     cmake --build build --target sandbox_live_check && ./build/sandbox_live_check
+#
+# What the automated suite covers instead: sandbox_escape_test asserts the
+# ARGV/plan we build (no namespaces needed), and claybin's own 20-test suite
+# covers the engine. This closes the last gap between "the plan says X" and
+# "the child experiences X" -- which is exactly where the mremap bug lived:
+# every table-level test passed while realloc() failed in the guest.
+if(TARGET claybin)
+    # Compiles sandbox_claybin.cpp straight in rather than linking
+    # agentty_tool_obj: that objlib drags the whole tool layer (mcp config,
+    # auth, teardown) behind it, and this check only needs the backend.
+    add_executable(sandbox_live_check EXCLUDE_FROM_ALL
+        ${CMAKE_SOURCE_DIR}/tests/sandbox_live_check.cpp
+        ${CMAKE_SOURCE_DIR}/src/tool/util/sandbox_claybin.cpp)
+    target_include_directories(sandbox_live_check PRIVATE
+        ${CMAKE_SOURCE_DIR}/include)
+    target_link_libraries(sandbox_live_check PRIVATE claybin)
+    target_compile_definitions(sandbox_live_check PRIVATE AGENTTY_HAVE_CLAYBIN=1)
+endif()
+
 agentty_fold_test(fork_test                TIMEOUT 30)
 agentty_fold_test(palette_render_probe     TIMEOUT 30)
 agentty_fold_test(embed_render_probe       TIMEOUT 30)
@@ -417,6 +445,40 @@ target_compile_definitions(persistence_race_test_narrow PRIVATE
     AGENTTY_MCP=0 AGENTTY_VERSION="${PROJECT_VERSION}")
 add_test(NAME persistence_race_test_narrow COMMAND persistence_race_test_narrow)
 set_tests_properties(persistence_race_test_narrow PROPERTIES TIMEOUT 120 LABELS "race")
+
+# sandbox_config_race_test — publishing the sandbox policy while tools read it.
+#
+# Narrow on purpose, same reasoning as persistence_race_test_narrow above: it
+# needs sandbox.cpp and the handful of utils it pulls, not the 375-TU fold,
+# so the TSan lane instruments ~6 TUs to check the thing that was actually
+# racy.
+#
+# What it guards: the settings pane made the sandbox config a
+# published-at-runtime value, and it had been a plain global on a "set once
+# before maya starts" premise. Assigning a struct of three vectors out from
+# under a worker thread is a use-after-free with a very narrow window — the
+# kind that ships and then crashes on someone else's machine.
+agentty_test(sandbox_config_race_test MODE raw LABELS race)
+add_executable(sandbox_config_race_test EXCLUDE_FROM_ALL
+    tests/sandbox_config_race_test.cpp tests/test_main.cpp
+    tests/sandbox_config_race_stubs.cpp
+    src/tool/util/sandbox.cpp src/tool/util/subprocess.cpp
+    src/tool/util/utf8.cpp
+    src/util/logx.cpp src/util/dbglog.cpp src/util/home_dir.cpp
+    src/util/user_root.cpp src/util/teardown.cpp)
+target_include_directories(sandbox_config_race_test PRIVATE include)
+target_link_libraries(sandbox_config_race_test PRIVATE
+    doctest::doctest nlohmann_json::nlohmann_json Threads::Threads)
+# maya headers only (sandbox.cpp's transitive includes reach scroll_state /
+# anim_clock); no maya linking, so the TSan build stays small.
+if(TARGET maya::app)
+    target_include_directories(sandbox_config_race_test SYSTEM PRIVATE
+        $<TARGET_PROPERTY:maya::app,INTERFACE_INCLUDE_DIRECTORIES>)
+endif()
+target_compile_definitions(sandbox_config_race_test PRIVATE
+    AGENTTY_MCP=0 AGENTTY_VERSION="${PROJECT_VERSION}")
+add_test(NAME sandbox_config_race_test COMMAND sandbox_config_race_test)
+set_tests_properties(sandbox_config_race_test PROPERTIES TIMEOUT 120 LABELS "race")
 
 # NOTE: seam_stress_test gets no narrow TSan target, on purpose.
 #

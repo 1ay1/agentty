@@ -83,6 +83,16 @@ function(_agentty_test_link_full name)
     if(TARGET mcp::tools)
         target_link_libraries(${name} PRIVATE mcp::tools)
     endif()
+    # The claybin sandbox backend. Needed by every test binary, not just the
+    # sandbox ones: the shared object set includes sandbox_claybin.cpp, so
+    # without the library any test that links the tool layer fails to resolve
+    # clay::* at link time. The define has to match what the objlibs were
+    # built with (see the ODR note in the root CMakeLists) rather than being
+    # decided per target.
+    if(TARGET claybin)
+        target_link_libraries(${name} PRIVATE claybin)
+        target_compile_definitions(${name} PRIVATE AGENTTY_HAVE_CLAYBIN=1)
+    endif()
     if(AGENTTY_HAS_RAGCPP)
         target_link_libraries(${name} PRIVATE ragcpp::ragcpp)
         target_compile_definitions(${name} PRIVATE AGENTTY_HAS_RAGCPP=1)

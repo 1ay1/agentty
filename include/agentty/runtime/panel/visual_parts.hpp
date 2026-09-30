@@ -262,6 +262,26 @@ inline auto visual_parts(const AppearancePane& p) {
 }
 static_assert(visual::parts_cover_all<AppearancePane>);
 
+// Same two facets as Appearance: the parent snapshot and the pane.
+inline auto visual_parts(const Sandbox& p) {
+    return std::make_tuple(visual::ref(static_cast<const WithFrom&>(p)),
+                           visual::ref(p.pane));
+}
+static_assert(visual::parts_cover_all<Sandbox>);
+
+// `form` is the only member carrying an axis the user can move. The rest is
+// derived from it or fixed for the session, so none of it can drift against
+// the rows:
+//   preview   recomputed from the form after every edit (see the reducer)
+//   blocked   append-only log; painted, but nothing navigates it
+//   observing learning capture, read only when building a recommendation
+//   backend / claybin_available   host facts, settled at open
+inline auto visual_parts(const SandboxPane& p) {
+    return std::make_tuple(visual::ref(p.form), visual::exempt, visual::exempt,
+                           visual::exempt, visual::exempt, visual::exempt);
+}
+static_assert(visual::parts_cover_all<SandboxPane>);
+
 // AppearancePane::ThemePicker declares its own visual_parts next to the type
 // (panel/appearance.hpp) — it holds a FilteredPicker, which has a
 // user-provided constructor, so the brace-arity probe reads 0 and the

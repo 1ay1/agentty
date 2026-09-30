@@ -671,8 +671,9 @@ void print_usage() {
         entry("      --sandbox-backend B", "Linux sandbox implementation: bwrap (default, "
                                             "uses the bubblewrap binary) or claybin "
                                             "(in-process library; adds a seccomp filter, "
-                                            "landlock and cgroup2 limits). claybin "
-                                            "requires a build with -DAGENTTY_CLAYBIN=ON.",
+                                            "landlock and cgroup2 limits). The Sandbox "
+                                            "settings pane only takes effect under "
+                                            "claybin — bwrap cannot express those rules.",
               kOptGutter),
         entry("      --log-file PATH", "Write the diagnostic log here instead of "
                                        "~/.agentty/logs/agentty.log. What gets captured "
@@ -1339,6 +1340,15 @@ int main(int argc, char** argv) {
             }
 #endif
         }
+        // The saved policy, before init() -- init probes, and the policy
+        // decides what is worth probing for. A config that never touched the
+        // pane carries the shipped defaults, so this is a no-op for anyone
+        // who has not opened it.
+        //
+        // Loaded here rather than threaded down: this block runs once at
+        // startup, load_settings() is cached, and passing it through the two
+        // intervening scopes would be more plumbing than the one read costs.
+        tools::util::sandbox::set_config(persistence::load_settings().sandbox);
         bool ok = tools::util::sandbox::init(mode);
         if (!ok) {
             std::fprintf(stderr,
@@ -1350,6 +1360,19 @@ int main(int argc, char** argv) {
         // maya runs after this returns, no clobbering.
         std::fprintf(stderr, "agentty: %s\n",
                      tools::util::sandbox::describe_state().c_str());
+
+        // And say it plainly when the saved policy is not the thing running.
+        // The pane can save a syscall profile, port rules and cgroup caps,
+        // and only claybin speaks that language — under bwrap those rows are
+        // inert. Staying quiet here would leave the user believing in a wall
+        // that isn't there, which is the one failure mode a sandbox must not
+        // have.
+        if (!tools::util::sandbox::config_enforceable()) {
+            std::fprintf(stderr,
+                "agentty: a saved sandbox policy exists but the active backend "
+                "cannot enforce it — only claybin can. Pass "
+                "--sandbox-backend claybin to apply it.\n");
+        }
     }
 
     // ── Mirror the tool runtime into mcp-cpp ────────────────────────────
@@ -1359,6 +1382,13 @@ int main(int argc, char** argv) {
     // bridged read/write/edit/bash/git tools enforce the SAME --workspace
     // gate and bwrap/sandbox-exec isolation the native tools did. Must run
     // before any tool can dispatch (TUI, ACP, and mcp-serve all reach this).
+    //
+    // It also hands mcp OUR sandbox as its host sandbox, so the bridged
+    // tools run under the same engine and the same saved policy as agentty's
+    // own paths. That is why it has to come AFTER set_config()/init() above:
+    // the hook it installs closes over our backend choice, and installing it
+    // before the policy was loaded would publish a boundary we had not
+    // decided yet.
     tools::wire_mcp_runtime(args.cli_sandbox);
 
     // ── Resolve the active provider ──────────────────────────────

@@ -105,6 +105,12 @@ struct SubsKey {
     bool settings_adding   = false;
     bool appearance_picking = false;
     // focus_of() per form-backed pane: open/editing/choosing, packed.
+    // 3 bits each, in the order subs_key() packs them: rag, smart, plugin,
+    // appearance, sandbox. A pane added to subscribe() and NOT here keeps
+    // the router closed over last frame's focus -- which presents as a
+    // dropdown that will not move and keystrokes that sometimes do not
+    // arrive, because the router is still translating against a focus the
+    // pane has left.
     unsigned form_modes    = 0;
 
     // Gates on the turn.

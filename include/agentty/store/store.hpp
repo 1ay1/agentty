@@ -13,6 +13,7 @@
 #include "agentty/domain/conversation.hpp"
 #include "agentty/domain/catalog.hpp"
 #include "agentty/domain/profile.hpp"
+#include "agentty/domain/sandbox_config.hpp"
 #include "agentty/domain/ui_prefs.hpp"
 #include "agentty/domain/smart_mode.hpp"
 
@@ -242,6 +243,14 @@ struct Settings {
     // User-configured RAG behaviour (the RAG settings picker). Defaults to
     // configured=false ⇒ the adapter keeps its env-derived config.
     RagConfig rag;
+
+    // Sandbox policy (what a shell command may reach). Composed whole for the
+    // same reason RoleConfig is: a flat set of fields on Settings makes
+    // "network off but the port allowlist populated" representable, and forces
+    // a hand-written mapping at every boundary -- which is a place to forget a
+    // field. `configured` stays false until a deliberate edit, so upgrading
+    // never changes anyone's sandbox.
+    sandbox_cfg::Config sandbox;
 
     // Smart Mode (role-based execution routing, docs/design/smart-mode.md).
     // Off by default.

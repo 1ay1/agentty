@@ -35,6 +35,7 @@ enum class Action : std::uint8_t {
     OpenRag,       // General: open the RAG mode picker
     OpenAppearance,// General: open the Appearance pane (theme, density, motion)
     OpenSmart,     // General: open Smart Mode config
+    OpenSandbox,   // General: open the Sandbox pane (walls, syscalls, limits)
 
     ToggleChangesStrip, // General: show/hide the persistent "N changes" banner
     // (No RemovePlugin: removal is the two-step `d` → SettingsListRemove
@@ -70,7 +71,7 @@ enum class Action : std::uint8_t {
 // went wrong before: Appearance was added to the enum, wired to a reducer,
 // given a row, and left out of the one switch that paints the handle.
 [[nodiscard]] constexpr bool opens_pane(Action a) noexcept {
-    return a >= Action::OpenRag && a <= Action::OpenSmart;
+    return a >= Action::OpenRag && a <= Action::OpenSandbox;
 }
 
 struct Item {

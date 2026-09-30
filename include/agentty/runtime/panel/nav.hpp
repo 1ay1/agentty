@@ -230,6 +230,7 @@ namespace agentty::ui::panel {
         case Kind::SettingsList:    return Msg{CloseSettingsList{}};
         case Kind::PluginEdit:      return Msg{ClosePluginEdit{}};
         case Kind::Appearance:      return Msg{CloseAppearance{}};
+        case Kind::Sandbox:         return Msg{CloseSandbox{}};
         case Kind::Fork:            return Msg{CloseFork{}};
         case Kind::Models:     return Msg{CloseModels{}};
         case Kind::Providers:  return Msg{CloseProviders{}};

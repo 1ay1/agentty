@@ -609,6 +609,24 @@ std::optional<Msg> on_appearance(const FormFocus& f, bool picking,
     return on_form(f, ev, [](form::keys::Action a) { return Msg{AppearanceKey{a}}; });
 }
 
+// Sandbox. A form pane with one pane-specific chord: ^S saves.
+//
+// It is the only form pane with an explicit save, and that is deliberate.
+// Appearance writes through on every keystroke because a theme is judged by
+// looking at it. A boundary is the opposite: a half-typed port list is a
+// policy nobody asked for, and the policy must not change under a command
+// that is already running. So edits accumulate, the pane shows the walls
+// they would produce, and ^S commits the whole thing at once.
+//
+// Guarded on !editing, like the other panes' chords, so ^S while typing in a
+// path row stays whatever the form layer claims it as.
+std::optional<Msg> on_sandbox(const FormFocus& f, const KeyEvent& ev) {
+    if (f.open && !f.editing)
+        if (const auto v = nav::char_view(ev); v && v->ctrl && v->c == U's')
+            return Msg{SandboxSave{}};
+    return on_form(f, ev, [](form::keys::Action a) { return Msg{SandboxKey{a}}; });
+}
+
 std::optional<Msg> on_diff_review(const KeyEvent& ev) {
     if (std::holds_alternative<SpecialKey>(ev.key)) {
         auto sk = std::get<SpecialKey>(ev.key);
@@ -1135,6 +1153,7 @@ Sub subscribe(const Model& m) {
     // Which mode each form-backed pane is in. Three bools per pane — NOT the
     // pane's rows, which would be a per-frame deep copy on the input path.
     FormFocus rag_form, smart_form_snap, plugin_form_snap, appearance_form_snap;
+    FormFocus sandbox_form_snap;
     bool appearance_picking = false;
     if (const auto* o = m.ui.panel.get<ui::panel::Rag>())
         rag_form = focus_of(o->embed.form);
@@ -1146,6 +1165,8 @@ Sub subscribe(const Model& m) {
         appearance_form_snap = focus_of(o->pane.form);
         appearance_picking   = o->pane.picking;
     }
+    if (const auto* o = m.ui.panel.get<ui::panel::Sandbox>())
+        sandbox_form_snap = focus_of(o->pane.form);
 
     // Snapshot the login state ONLY when login actually owns the keyboard.
     //
@@ -1233,6 +1254,7 @@ Sub subscribe(const Model& m) {
                     case OK::Appearance:
                         return on_appearance(appearance_form_snap,
                                              appearance_picking, ev);
+                    case OK::Sandbox:        return on_sandbox(sandbox_form_snap, ev);
                     case OK::DiffReview:     return on_diff_review(ev);
                     case OK::Todo:           return on_todo_modal(ev);
                     case OK::None:           break;
@@ -1467,6 +1489,8 @@ SubsKey subs_key(const Model& m) noexcept {
         modes |= pack(focus_of(o->pane.form)) << 9;
         k.appearance_picking = o->pane.picking;
     }
+    if (const auto* o = m.ui.panel.get<ui::panel::Sandbox>())
+        modes |= pack(focus_of(o->pane.form)) << 12;
     k.form_modes = modes;
 
     // Turn gates. animation_demand is what arms the Tick subscription, so a

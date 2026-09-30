@@ -85,6 +85,7 @@ std::pair<Model, Cmd> update(Model m, Msg msg) {
         [&](msg::SmartModeMsg sm)    { return detail::smart_mode_update   (m, std::move(sm)); },
         [&](msg::PluginEditMsg pm)   { return detail::plugin_edit_update  (m, std::move(pm)); },
         [&](msg::AppearanceMsg am)   { return detail::appearance_update   (m, std::move(am)); },
+        [&](msg::SandboxMsg sm)      { return detail::sandbox_update      (m, std::move(sm)); },
         [&](msg::MetaMsg mm)         { return detail::meta_update         (m, std::move(mm)); },
     }, msg);
 
@@ -155,6 +156,7 @@ AGENTTY_DOMAIN_UPDATE(DiffReviewMsg,   diff_review_update)
 AGENTTY_DOMAIN_UPDATE(SmartModeMsg,    smart_mode_update)
 AGENTTY_DOMAIN_UPDATE(PluginEditMsg,   plugin_edit_update)
 AGENTTY_DOMAIN_UPDATE(AppearanceMsg,   appearance_update)
+AGENTTY_DOMAIN_UPDATE(SandboxMsg,      sandbox_update)
 AGENTTY_DOMAIN_UPDATE(MetaMsg,         meta_update)
 
 #undef AGENTTY_DOMAIN_UPDATE

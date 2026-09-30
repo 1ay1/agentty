@@ -685,6 +685,30 @@ struct AppearanceThemeQuery { std::string text; };   // "" = backspace one
 struct AppearanceThemeCommit {};      // Enter: keep the highlighted scheme
 struct AppearanceThemeCancel {};      // Esc: restore the theme we came in on
 
+// ── Sandbox pane ─────────────────────────────────────────
+// What a command may touch: filesystem scope, network, syscall profile,
+// resource caps, and the trust-handoff policy.
+//
+// Unlike Appearance, this pane is NOT live. A boundary must not change under
+// a command that is already running, and a half-applied policy is a policy
+// nobody can reason about -- so edits accumulate in the form, the pane shows
+// the walls they WOULD produce (a compile, not a spawn), and SandboxSave
+// commits the whole config at once. That is also why there is a Save message
+// here and none in Appearance: a theme is judged by looking, a sandbox by
+// reading what it promises before you trust it.
+struct OpenSandbox {};
+struct CloseSandbox {};
+struct SandboxKey { form::keys::Action action; };
+// Recompile the preview from the current form. The reducer raises this after
+// any edit, so the wall report can never describe a config the rows no
+// longer say.
+struct SandboxRefreshPreview {};
+// Persist the form's config and install it for the rest of the session.
+struct SandboxSave {};
+// Accept the policy the learning mode recommends (see Observation): replaces
+// the form's config with the narrowest one that allows everything observed.
+struct SandboxAcceptObserved {};
+
 // ── In-app login modal ───────────────────────────────────────────────────
 // Shown when the user starts agentty with no valid credentials, OR
 // triggered explicitly in-app to sign in or add an account.
@@ -1229,10 +1253,16 @@ using PluginEditMsg = std::variant<
     OpenPluginEdit, ClosePluginEdit, PluginEditKey, PluginEditPaste>;
 
 // ── Appearance (theme / density / motion) ──────────────────────
+// ── Appearance (theme / density / motion) ─────────────
 using AppearanceMsg = std::variant<
     OpenAppearance, CloseAppearance, AppearanceKey, AppearancePickTheme,
     AppearanceThemeMove, AppearanceThemeQuery, AppearanceThemeCommit,
     AppearanceThemeCancel>;
+
+// ── Sandbox (filesystem / network / syscalls / limits) ─────
+using SandboxMsg = std::variant<
+    OpenSandbox, CloseSandbox, SandboxKey, SandboxRefreshPreview,
+    SandboxSave, SandboxAcceptObserved>;
 
 using MetaMsg = std::variant<
     CompactContext, CycleProfile, ToggleChangesStrip,
@@ -1278,6 +1308,7 @@ using Msg = std::variant<
     msg::SmartModeMsg,
     msg::PluginEditMsg,
     msg::AppearanceMsg,
+    msg::SandboxMsg,
     msg::MetaMsg
 >;
 
@@ -1325,6 +1356,7 @@ consteval int leaf_domain_count() {
          + int{in_variant_v<L, msg::SmartModeMsg>}
          + int{in_variant_v<L, msg::PluginEditMsg>}
          + int{in_variant_v<L, msg::AppearanceMsg>}
+         + int{in_variant_v<L, msg::SandboxMsg>}
          + int{in_variant_v<L, msg::ToolOutputMsg>}
          + int{in_variant_v<L, msg::MetaMsg>};
 }
@@ -1385,7 +1417,7 @@ static_assert(leaf_domain_count<Tick>()                      == 1,
 // they must also update the kDomains array used by the dispatcher in
 // update.cpp, which currently exhausts on 12 arms. Mismatch → dispatch
 // switch loses a domain silently.
-static_assert(std::variant_size_v<Msg> == 23,
+static_assert(std::variant_size_v<Msg> == 24,
               "Msg domain count changed — update the dispatcher in "
               "src/runtime/app/update.cpp and this proof to match");
 

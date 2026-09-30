@@ -11,6 +11,7 @@
 #include "agentty/tool/registry.hpp"
 #include "agentty/tool/commands.hpp"
 #include "agentty/tool/hooks.hpp"
+#include "agentty/tool/util/sandbox.hpp"   // is_active/describe_state/config_enforceable
 
 #include <algorithm>
 #include <filesystem>
@@ -93,6 +94,33 @@ std::vector<Item> general(const Model& m) {
             : (m.d.ui().theme + " \xc2\xb7 theme, density, motion");
         i.hint      = "Enter: configure";
         i.action    = Action::OpenAppearance;
+        out.push_back(std::move(i));
+    }
+
+    // Sandbox. Also a pane: it carries a live wall report and a dozen
+    // grouped rows. The secondary line is the one thing worth saying from out
+    // here -- which backend is actually enforcing, because that decides
+    // whether the rows inside do anything at all. Only claybin can apply this
+    // policy, so a bwrap session gets told before it opens the pane and
+    // configures something inert.
+    {
+        Item i;
+        i.primary = "Sandbox";
+        namespace sb = tools::util::sandbox;
+        // describe_state() already renders "sandbox: active (claybin)" and the
+        // no-backend cases; strip its prefix rather than re-deriving the text
+        // from the enum, so this row cannot disagree with the startup banner.
+        std::string st = sb::describe_state();
+        if (const auto c = st.find(": "); c != std::string::npos) st = st.substr(c + 2);
+        if (!sb::is_active()) {
+            i.secondary = st + " \xc2\xb7 commands run unconfined";
+        } else if (sb::config_enforceable()) {
+            i.secondary = st + " \xc2\xb7 files, network, syscalls, limits";
+        } else {
+            i.secondary = st + " \xc2\xb7 saved policy not enforced (needs claybin)";
+        }
+        i.hint      = "Enter: configure";
+        i.action    = Action::OpenSandbox;
         out.push_back(std::move(i));
     }
     return out;
@@ -302,6 +330,9 @@ std::vector<Item> items_for(const Model& m, Category cat) {
         // list — the General category carries the single door row that opens
         // it. Return empty rather than leaving the enum unhandled.
         case Category::Appearance: return {};
+        // Sandbox is a form pane too (panel/sandbox.hpp), for the same reason:
+        // the General category carries the door row that opens it.
+        case Category::Sandbox: return {};
         case Category::Plugins:  return plugins(m.ui.plugins, m.ui.plugins_loading);
         case Category::Commands: return commands();
         case Category::Agents:   return agents();

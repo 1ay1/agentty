@@ -2347,6 +2347,52 @@ store::Settings load_settings() {
         }
         s.show_changes_strip = j.value("show_changes_strip", false);
         s.show_reasoning     = j.value("show_reasoning", false);
+
+        // Sandbox policy. Every field falls back to the CURRENT value rather
+        // than a literal, so the defaults live in one place (the struct) and a
+        // key added later reads as "keep whatever the struct says" on an older
+        // settings.json instead of silently becoming zero.
+        if (j.contains("sandbox") && j["sandbox"].is_object()) {
+            const auto& b = j["sandbox"];
+            auto& c = s.sandbox;
+            c.configured   = b.value("configured", true);  // present ⇒ user-set
+            c.fs_scope     = static_cast<sandbox_cfg::FsScope>(
+                                 b.value("fs_scope", static_cast<int>(c.fs_scope)));
+            c.net_mode     = static_cast<sandbox_cfg::NetMode>(
+                                 b.value("net_mode", static_cast<int>(c.net_mode)));
+            c.syscall_mode = static_cast<sandbox_cfg::SyscallMode>(
+                                 b.value("syscall_mode", static_cast<int>(c.syscall_mode)));
+            c.handoff      = static_cast<sandbox_cfg::HandoffPolicy>(
+                                 b.value("handoff", static_cast<int>(c.handoff)));
+            c.wx_protect   = b.value("wx_protect", c.wx_protect);
+            c.scope_ipc    = b.value("scope_ipc", c.scope_ipc);
+            c.close_inherited_fds = b.value("close_fds", c.close_inherited_fds);
+            c.memory_mb    = b.value("memory_mb", c.memory_mb);
+            c.max_procs    = b.value("max_procs", c.max_procs);
+            c.cpu_percent  = b.value("cpu_percent", c.cpu_percent);
+            c.tmp_mb       = b.value("tmp_mb", c.tmp_mb);
+            // Lists are absent when empty, so read them only when present --
+            // and type-check, because a hand-edited settings.json is a
+            // supported input and a string where an array belongs should not
+            // throw.
+            auto strs = [&](const char* k, std::vector<std::string>& out) {
+                if (b.contains(k) && b[k].is_array())
+                    for (const auto& v : b[k])
+                        if (v.is_string()) out.push_back(v.get<std::string>());
+            };
+            strs("read_paths", c.read_paths);
+            strs("write_paths", c.write_paths);
+            strs("deny_paths", c.deny_paths);
+            if (b.contains("allow_ports") && b["allow_ports"].is_array()) {
+                c.allow_ports.clear();
+                for (const auto& v : b["allow_ports"])
+                    if (v.is_number_unsigned()) {
+                        const auto p = v.get<std::uint64_t>();
+                        if (p > 0 && p <= 65535)
+                            c.allow_ports.push_back(static_cast<std::uint16_t>(p));
+                    }
+            }
+        }
         if (j.contains("rag") && j["rag"].is_object()) {
             const auto& r = j["rag"];
             auto& c = s.rag;
@@ -2568,6 +2614,37 @@ void save_settings(const store::Settings& s) {
     // Only persisted when turned ON (default is off), keeping fresh configs clean.
     if (s.show_changes_strip) j["show_changes_strip"] = true;
     if (s.show_reasoning)     j["show_reasoning"] = true;
+
+    // Sandbox policy, written only once the user has edited it. Until then
+    // the runtime keeps its shipped posture, so upgrading never silently
+    // changes anyone's boundary -- the same contract rag.configured has, and
+    // the reason a security default can be strict without breaking people on
+    // the version where it lands.
+    if (s.sandbox.configured) {
+        const auto& c = s.sandbox;
+        json sb = {
+            {"configured",   true},
+            {"fs_scope",     static_cast<int>(c.fs_scope)},
+            {"net_mode",     static_cast<int>(c.net_mode)},
+            {"syscall_mode", static_cast<int>(c.syscall_mode)},
+            {"handoff",      static_cast<int>(c.handoff)},
+            {"wx_protect",   c.wx_protect},
+            {"scope_ipc",    c.scope_ipc},
+            {"close_fds",    c.close_inherited_fds},
+            {"memory_mb",    c.memory_mb},
+            {"max_procs",    c.max_procs},
+            {"cpu_percent",  c.cpu_percent},
+            {"tmp_mb",       c.tmp_mb},
+        };
+        // Lists only when non-empty: a fresh config should not carry four
+        // empty arrays, and an absent key reads as "nothing added" on load
+        // without needing a special case.
+        if (!c.read_paths.empty())  sb["read_paths"]  = c.read_paths;
+        if (!c.write_paths.empty()) sb["write_paths"] = c.write_paths;
+        if (!c.deny_paths.empty())  sb["deny_paths"]  = c.deny_paths;
+        if (!c.allow_ports.empty()) sb["allow_ports"] = c.allow_ports;
+        j["sandbox"] = std::move(sb);
+    }
     if (s.rag.configured) {
         const auto& c = s.rag;
         // The picker only sets `mode`; the rest are internal defaults, still

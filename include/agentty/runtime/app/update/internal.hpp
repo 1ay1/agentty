@@ -529,6 +529,7 @@ Cmd  diff_review_update   (Model& m, msg::DiffReviewMsg     dm);
 Cmd  smart_mode_update    (Model& m, msg::SmartModeMsg      sm);
 Cmd  plugin_edit_update   (Model& m, msg::PluginEditMsg     pm);
 Cmd  appearance_update    (Model& m, msg::AppearanceMsg     am);
+Cmd  sandbox_update       (Model& m, msg::SandboxMsg        sm);
 Cmd  meta_update          (Model& m, msg::MetaMsg           mm);
 
 // ── Esc: back one level ───────────────────────────────────────────────

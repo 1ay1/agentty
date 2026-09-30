@@ -141,7 +141,9 @@ struct BlockedEvent {
     std::uint32_t count = 1;  // coalesced repeats
 };
 
-struct Sandbox {
+// The pane. Named SandboxPane, not Sandbox, because panel/slot.hpp needs the
+// bare name for the SLOT that holds it -- same split as AppearancePane.
+struct SandboxPane {
     form::Form form;
 
     // Recomputed on every edit, so the walls track the rows.
@@ -160,6 +162,9 @@ struct Sandbox {
     std::string backend;        // "claybin" | "bwrap" | "none"
     bool claybin_available = false;
 };
+
+// (visual_parts for this pane lives in panel/visual_parts.hpp, alongside
+// every other panel's -- that header is where the gate's proofs are kept.)
 
 // Build the form from a config. Pure: no I/O, no probe -- the caller supplies
 // what the host can do, so this is testable without a kernel.

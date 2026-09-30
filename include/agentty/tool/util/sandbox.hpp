@@ -36,10 +36,12 @@
 
 #include <chrono>
 #include <cstdint>
+#include <memory>   // shared_ptr — config_snapshot's return type
 #include <string>
 #include <string_view>
 #include <vector>
 
+#include "agentty/domain/sandbox_config.hpp"
 #include "agentty/tool/util/subprocess.hpp"
 
 namespace agentty::tools::util::sandbox {
@@ -73,6 +75,51 @@ enum class LinuxPreference : std::uint8_t {
 // probes -- setting it later would leave the cached backend disagreeing with
 // the preference.
 void prefer_linux_backend(LinuxPreference p) noexcept;
+
+// Install the user's saved sandbox policy. Also before init(): the policy
+// decides what the probe should be checking, so a config asking for a wall
+// this kernel cannot build is caught at startup where it can be reported,
+// rather than per-command where it looks like a broken tool.
+//
+// Never called ⇒ the shipped defaults, which reproduce the pre-config
+// behaviour exactly.
+void set_config(const sandbox_cfg::Config& cfg);
+
+// The policy in force. Read by the settings pane to seed its form, and by
+// anything that wants to report the posture.
+//
+// BY VALUE, not by reference, and not optional: the policy is republished
+// (see set_config) while tool threads are reading it, so a reference into
+// the live value would be a dangling pointer with a delay on it. Callers are
+// form builders and status lines; the copy is three small vectors.
+[[nodiscard]] sandbox_cfg::Config config();
+
+// The policy as a shared, immutable snapshot.
+//
+// This is what anything on a WORKER thread should use, and what the spawn
+// path uses: take one snapshot at the top of a command and read the whole
+// policy from it. That is cheaper than config() (a refcount, no copy) and it
+// is the only way to get a coherent read -- a save landing halfway through
+// building a posture would otherwise mix two policies into one sandbox.
+//
+// Never null; before anyone calls set_config it is the default config, which
+// is exactly the posture the bwrap path has always built.
+[[nodiscard]] std::shared_ptr<const sandbox_cfg::Config> config_snapshot() noexcept;
+
+// Whether the ACTIVE backend can actually enforce the saved policy.
+//
+// Only claybin can. The policy's vocabulary -- a syscall profile, per-port
+// network rules, W^X, cgroup2 caps, deny-under-grant path masks -- is
+// claybin's; bwrap as we invoke it has no spelling for most of it, and the
+// parts it could express are fixed at the argv we build. So under bwrap the
+// pane is configuring something inert.
+//
+// That has to be SAID rather than silently tolerated: a security control the
+// user believes they set and that is not running is worse than one they know
+// they don't have. main.cpp warns at startup and the pane shows it inline.
+// Returns true when there is no policy to enforce (nobody configured one),
+// because then there is nothing being ignored.
+[[nodiscard]] bool config_enforceable() noexcept;
 
 // Set the requested mode (from --sandbox CLI flag) and probe the
 // system for a usable backend. Idempotent; the result is cached.

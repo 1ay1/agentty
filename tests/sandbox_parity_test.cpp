@@ -47,6 +47,27 @@ std::string name_of(mc::Backend b) {
 
 }  // namespace
 
+TEST_CASE("sandbox: wiring the runtime hands mcp OUR sandbox") {
+    // The hook is the mechanism the parity check below now rests on, so it
+    // gets its own case: if wire_mcp_runtime ever stops installing it, this
+    // fails with a clear cause instead of the parity case failing with a
+    // confusing one.
+    //
+    // The gap it closes: mcp-cpp probes for its OWN backend, and it cannot
+    // reach claybin (standalone library, our submodule). So before the hook,
+    // `shell` ran under mcp's bwrap while agentty's hooks and the settings
+    // pane used claybin -- two engines, one banner, and a pane configuring a
+    // boundary the tool the user actually invokes never read.
+    agentty::tools::wire_mcp_runtime("auto");
+    CHECK(mc::has_host_sandbox());
+
+    // And "off" must NOT install it: with no sandbox requested there is
+    // nothing to delegate, and a hook that declined every call would just be
+    // an indirection.
+    agentty::tools::wire_mcp_runtime("off");
+    CHECK(!mc::has_host_sandbox());
+}
+
 TEST_CASE("sandbox: both implementations know the same backends") {
     // A backend added to one side only is the bug. This is a compile-time
     // check in practice — a backend missing from either enum won't build in
@@ -67,18 +88,34 @@ TEST_CASE("sandbox: the two implementations select the SAME backend") {
     // takes and miss the very wiring this case exists to check.
     agentty::tools::wire_mcp_runtime("auto");
 
-    // Compare what actually CONFINES a command, not merely what each side
-    // probed: if a host sandbox is ever installed again, the engine a command
-    // ends up in is the invariant that matters, and comparing detections
-    // alone would fail on a correct system and pass on a broken one.
-    const std::string effective_mcp =
-        mc::has_host_sandbox() ? std::string{"host"} : name_of(mc::detected_backend());
-    const auto a = name_of(ag::detected_backend());
+    // agentty installs itself as mcp's HOST SANDBOX, which settles this
+    // invariant by construction rather than by coincidence: mcp does not
+    // pick an engine at all, it hands every command to ours. Two independent
+    // probes agreeing is luck that holds until the two probes drift; one
+    // engine cannot disagree with itself.
+    //
+    // That delegation is also the only way the settings pane can mean
+    // anything. mcp-cpp is a standalone library and claybin is OUR submodule,
+    // so mcp cannot reach claybin on its own -- without the hook the `shell`
+    // tool ran under mcp's built-in bwrap while the pane configured claybin,
+    // and one banner described both. Which is exactly the issue #21 shape
+    // this file exists to pin.
+    if (mc::has_host_sandbox()) {
+        // Delegation is in force. Nothing left to compare: the tools run in
+        // whatever ag:: selected, whatever that is.
+        CHECK(ag::is_active() == mc::is_active());
+        return;
+    }
 
-    if (a != effective_mcp)
+    // No host sandbox (a build or platform where we install none): fall back
+    // to requiring the two independent probes to have landed in the same
+    // place.
+    const auto a = name_of(ag::detected_backend());
+    const auto b = name_of(mc::detected_backend());
+    if (a != b)
         std::printf("MISMATCH: hooks/ACP use %s, tools use %s\n",
-                    a.c_str(), effective_mcp.c_str());
-    CHECK(a == effective_mcp);
+                    a.c_str(), b.c_str());
+    CHECK(a == b);
 
     // And they must agree on whether a sandbox is active at all, which is
     // what the startup banner reports.

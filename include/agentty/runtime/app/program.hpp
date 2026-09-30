@@ -91,6 +91,7 @@ struct AgenttyApp {
     AGENTTY_FWD_UPDATE(SmartModeMsg)
     AGENTTY_FWD_UPDATE(PluginEditMsg)
     AGENTTY_FWD_UPDATE(AppearanceMsg)
+    AGENTTY_FWD_UPDATE(SandboxMsg)
     AGENTTY_FWD_UPDATE(MetaMsg)
 
 #undef AGENTTY_FWD_UPDATE

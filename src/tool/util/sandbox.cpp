@@ -6,13 +6,20 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <memory>   // shared_ptr — the config snapshot
 #include <string>
 #include <vector>
+
+// The policy type is a PRODUCT concept, not a claybin one: a build without
+// claybin still has a sandbox posture, it just cannot enforce most of it. So
+// this include is unconditional and the enforcement is what is guarded --
+// otherwise "what is my policy" would be a question only some builds could
+// answer, and the settings pane has to work in both.
+#include "agentty/domain/sandbox_config.hpp"
 
 #if defined(AGENTTY_HAVE_CLAYBIN)
 #include <unistd.h>  // ::close, for the pidfd the runner does not use
 
-#include "agentty/domain/sandbox_config.hpp"  // kAlwaysMasked
 #include "agentty/tool/util/sandbox_claybin.hpp"
 #endif
 
@@ -55,6 +62,25 @@ std::atomic<Backend> g_backend{Backend::None};
 // hardening versus days, so the newer one is opt-in rather than a silent
 // migration.
 std::atomic<LinuxPreference> g_linux_pref{LinuxPreference::Bwrap};
+
+// The user's saved sandbox policy, as an IMMUTABLE snapshot behind an
+// atomically-swapped pointer. Never mutated in place.
+//
+// Not a plain global, and the history matters: it WAS one, on the premise
+// "written once before maya starts, read by every bash call after" -- the
+// same set-once lifecycle the mode and backend atomics have. The settings
+// pane retired that premise. SandboxSave publishes a new policy from the
+// reducer thread while tools are mid-flight on task_isolated workers, and
+// Config holds three vectors and a string, so an in-place assignment is a
+// reader walking a freed pointer.
+//
+// Publish-and-swap instead. A reader takes a shared_ptr copy for the whole
+// command, which is both memory-safe and the right semantics: the boundary a
+// running command is already inside cannot change underneath it.
+//
+// Defaults reproduce today's behaviour, so a user who never opens the pane
+// gets exactly the sandbox they already had.
+std::shared_ptr<const sandbox_cfg::Config> g_cfg{};
 
 // Only the POSIX backends (Linux bwrap, macOS sandbox-exec) need the
 // "can we run this binary?" probe — the Windows/unsupported branch
@@ -325,32 +351,72 @@ constexpr const char* kHomeToolSubdirs[] = {
 #if defined(AGENTTY_HAVE_CLAYBIN)
 [[nodiscard]] claybin_backend::Posture build_claybin_posture() {
     claybin_backend::Posture p;
+
+    // The user's saved policy, or the shipped default when they have never
+    // opened the pane. `configured` is what keeps an upgrade from changing
+    // anyone's boundary.
+    //
+    // ONE snapshot, held for the whole function. This runs on a tool worker
+    // thread while the reducer thread may be publishing a new policy, so
+    // re-reading the global per field could mix two policies into one
+    // sandbox -- read paths from the old one, syscall profile from the new.
+    // Holding the snapshot also means a save cannot change the boundary of a
+    // command that is already being built.
+    const auto snap = config_snapshot();
+    const auto& cfg = *snap;
+
+    // ── the read set, by scope ────────────────────────────────────────────
+    //
+    // Minimal deliberately omits the $HOME toolchain dirs: for a
+    // self-contained repo, anything under $HOME is suspicious. HostReadable
+    // is the convenient answer other agents take, named honestly -- it is
+    // still a mount namespace and still read-only outside the workspace, but
+    // your other projects are readable by an approved command.
     for (const char* r : kSystemReadRoots) p.system_read_roots.emplace_back(r);
     for (const char* f : kEtcReadable) p.etc_readable.emplace_back(f);
-    if (const char* home = std::getenv("HOME"); home && *home) {
-        for (const char* sub : kHomeToolSubdirs)
-            p.home_tool_dirs.emplace_back(std::string{home} + sub);
+    if (cfg.fs_scope == sandbox_cfg::FsScope::Toolchain) {
+        if (const char* home = std::getenv("HOME"); home && *home) {
+            for (const char* sub : kHomeToolSubdirs)
+                p.home_tool_dirs.emplace_back(std::string{home} + sub);
+        }
+    } else if (cfg.fs_scope == sandbox_cfg::FsScope::HostReadable) {
+        p.system_read_roots.emplace_back("/");
     }
+    // Whatever the user added on top.
+    for (const auto& r : cfg.read_paths) p.read_paths.push_back(r);
+    for (const auto& w : cfg.write_paths) p.write_paths.push_back(w);
+
     p.workspace = workspace_root().string();
     p.cwd = p.workspace;
-    // Credentials and agent state, masked after every grant. $HOME-relative,
-    // so they follow the user rather than assuming a layout.
+
+    // ── secrets, always, plus the user's own masks ────────────────────────
+    //
+    // kAlwaysMasked is not configurable, and that is the point: a control the
+    // user can switch off to make their build work is a control that is off.
+    // The pane can ADD masks, never remove these.
     if (const char* home = std::getenv("HOME"); home && *home) {
         for (const char* m : sandbox_cfg::kAlwaysMasked)
             p.masked.emplace_back(std::string{home} + m);
     }
-    // And the workspace's own .env family: the most common place a real
-    // secret sits, and the workspace is read-WRITE, so scope does not cover
-    // it. Only the names that are whole files -- the ".pem" suffix entry needs
-    // a glob the mount layer does not have, so it is left to deny_paths.
     for (const char* n : sandbox_cfg::kAlwaysMaskedNames) {
         if (n[0] != '.' || std::string_view{n} == ".pem") continue;
         p.masked.emplace_back(p.workspace + "/" + n);
     }
-    // Same call the bwrap path makes: agent flows (git push, npm install) need
-    // the network, so the netns is shared and the report says `partial` for
-    // network isolation rather than claiming a wall we did not build.
-    p.network = true;
+    for (const auto& d : cfg.deny_paths) p.masked.push_back(d);
+
+    // ── network ──────────────────────────────────────────────────────────
+    p.net_mode = static_cast<int>(cfg.net_mode);
+    p.allow_ports = cfg.allow_ports;
+
+    // ── syscalls and caps ────────────────────────────────────────────────
+    p.syscall_mode = static_cast<int>(cfg.syscall_mode);
+    p.wx_protect = cfg.wx_protect;
+    p.scope_ipc = cfg.scope_ipc;
+    p.close_inherited_fds = cfg.close_inherited_fds;
+    p.tmp_bytes = cfg.tmp_mb * 1024ull * 1024;
+    p.memory_bytes = cfg.memory_mb * 1024ull * 1024;
+    p.max_processes = cfg.max_procs;
+    p.cpu_percent = cfg.cpu_percent;
     return p;
 }
 #endif
@@ -545,6 +611,75 @@ void prefer_linux_backend(LinuxPreference p) noexcept {
     // would leave g_backend disagreeing with the preference, and every bash
     // call reads g_backend.
     g_linux_pref.store(p, std::memory_order_release);
+}
+
+void set_config(const sandbox_cfg::Config& cfg) {
+    // Publish a NEW immutable snapshot and swap the pointer. Never mutate the
+    // one readers may be holding.
+    //
+    // This used to be a plain `g_cfg = cfg` on a plain global, documented as
+    // "set once before init(), read-only after". The settings pane broke that
+    // premise: SandboxSave writes the policy from the REDUCER thread while
+    // tools -- which is to say, every reader of this config -- are running on
+    // task_isolated worker threads. Assigning a struct with three
+    // std::vectors and a std::string out from under a concurrent reader is a
+    // straight data race: the reader can observe a half-swapped vector and
+    // walk a freed pointer.
+    //
+    // The fix is the shape the lifetime actually wants. A config is immutable
+    // once published; "changing" it means publishing a different one. Readers
+    // take a shared_ptr copy (config_snapshot()) and keep their whole
+    // command on that one value, so a save mid-command cannot change the
+    // boundary a running command is already inside -- which is a correctness
+    // property in its own right, not just a memory-safety one.
+    auto next = std::make_shared<const sandbox_cfg::Config>(cfg);
+    std::atomic_store_explicit(&g_cfg, std::move(next), std::memory_order_release);
+}
+
+std::shared_ptr<const sandbox_cfg::Config> config_snapshot() noexcept {
+    auto snap = std::atomic_load_explicit(&g_cfg, std::memory_order_acquire);
+    // Never hand back null, so callers can dereference without checking. A
+    // default config is the correct answer before anyone has set one: it is
+    // exactly the posture the bwrap argv has always built.
+    if (!snap) {
+        static const auto kDefault =
+            std::make_shared<const sandbox_cfg::Config>();
+        return kDefault;
+    }
+    return snap;
+}
+
+sandbox_cfg::Config config() {
+    // BY VALUE, deliberately, and this is the one place the cost is worth
+    // arguing about.
+    //
+    // It used to return `const Config&` into a plain global. That reference
+    // cannot be made safe now that the value is republished under readers:
+    // handing out a reference into a snapshot means the snapshot's last
+    // owner can drop while the caller still holds the reference, and the
+    // caller has no way to know. A reference into shared, swappable state is
+    // a dangling pointer with a delay on it.
+    //
+    // So the UI-facing accessor copies. Callers are form builders and status
+    // lines -- a handful per keystroke, three small vectors each. Readers on
+    // the hot path (the spawn path, once per command) use config_snapshot()
+    // and pay nothing but a refcount.
+    return *config_snapshot();
+}
+
+bool config_enforceable() noexcept {
+    const auto cfg = config_snapshot();
+    // Nothing configured ⇒ nothing to ignore. A default config is exactly the
+    // posture the bwrap argv already builds, so both backends "enforce" it.
+    if (!cfg->configured) return true;
+#if defined(AGENTTY_HAVE_CLAYBIN)
+    // Off is not a failure to enforce, it is a choice not to sandbox, which
+    // the banner already reports on its own.
+    if (requested_mode() == Mode::Off) return true;
+    return detected_backend() == Backend::Claybin;
+#else
+    return false;
+#endif
 }
 
 bool is_active() noexcept {

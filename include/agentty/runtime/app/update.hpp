@@ -53,6 +53,7 @@ Cmd update(Model& m, msg::DiffReviewMsg   dm);
 Cmd update(Model& m, msg::SmartModeMsg    sm);
 Cmd update(Model& m, msg::PluginEditMsg   pm);
 Cmd update(Model& m, msg::AppearanceMsg   am);
+Cmd update(Model& m, msg::SandboxMsg      sm);
 Cmd update(Model& m, msg::MetaMsg         mm);
 
 // The old entry point, still here while the domain reducers keep their
