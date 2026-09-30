@@ -4,6 +4,15 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **Windows had no artifact in 0.9.15.** The release job built with the Visual Studio generator while CI built with Ninja, and that difference alone made the build fail: jaal detects optional host hooks by *name* using a deliberately ambiguous lookup, and MSBuild reported that ambiguity as a hard error (`C2385`) where every other toolchain treats it as the substitution failure it is meant to be. Every other platform shipped, so the gap was easy to miss. The release lane now builds exactly the way the CI lane does — which also makes it faster, since MSBuild parallelises across projects rather than translation units.
+- **Subagents could hang for hours.** `task` bounded how many *turns* a subagent could take but nothing bounded how long it could take. A backend that keeps a stream technically alive without ever finishing it looks healthy to every layer underneath, so the real ceiling was turns × retries × the 30-minute per-stream budget. There is now a 15-minute wall clock for the whole run (`AGENTTY_SUBAGENT_MAX_SECONDS`), it composes across nesting rather than resetting per level, and the report says whether the run ran out of *time* or out of *turns* — those point at different fixes.
+- **Subagents could crash agentty on exit.** A subagent runs on a detached worker, and the app could return from `main` while one was still mid-stream, calling into objects that no longer existed. It only faulted when a subagent happened to be running at quit, which is exactly when you give up on a slow one and press escape — so it surfaced as "subagents crash sometimes". Three things now have to all fail for that to happen: shutdown reaches a running tool, waits for it, and the objects it might still touch outlive it regardless.
+- **A second subagent of the same kind could be starved of files.** Each run gets its own read-dedup scope so it never inherits another's history, but the scope's identity was derived from a stack address — and sequential runs reuse the same stack. Two explorers in a row therefore shared one scope, and the second was told "File unchanged since last read" for files it had never opened. It then spent its turns re-asking and reported nothing useful.
+
+### Changed
+- **Read-only subagents are no longer routed to the weakest available model.** Explorers and reviewers run on a cheaper model than the parent, which is right for a fan-out — but the floor was the cheapest model on the provider, so an Opus parent sent its exploring to Haiku. Exploring is not mechanical work; it is deciding which of forty search hits matter, and a weaker model reads the wrong files and then summarises them confidently. The floor is now mid-tier: still a real saving, without the cliff. A single-model account, or one already on a mid-tier model, sees no change.
+
 ## [0.9.15] - 2026-09-30
 
 ### Fixed
