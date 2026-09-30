@@ -273,52 +273,64 @@ Ordering is the trap. See §9.
 
 ---
 
-## 8. Gap: the default syscall profile breaks ordinary tools
+## 8. Fixed: the default syscall profile broke ordinary tools
 
-`compiler_with_network()` denies eleven syscalls that normal CLI programs
+*Resolved in claybin. Kept here because the failure mode is the instructive
+part, and because the reasoning is what a future widening has to match.*
+
+`compiler_with_network()` denied eleven syscalls that normal CLI programs
 need. Measured against the profile table, not guessed:
 
-| syscall | who needs it |
-|---|---|
-| `mlock`, `munlock`, `mlockall` | openssl pinning key material |
-| `membarrier` | glibc / rseq fast paths |
-| `memfd_create` | anonymous temp files |
-| `eventfd2`, `timerfd_create` | event loops |
-| `socketpair` | AF_UNIX pairs (git, ssh) |
-| `nanosleep` | `sleep()`, retry backoff |
-| `clock_getres` | timer setup |
-| `getcpu` | NUMA / topology probes |
+| syscall | who needs it | verdict |
+|---|---|---|
+| `mlock`, `munlock` | openssl pinning key material | allow |
+| `nanosleep`, `clock_getres` | `sleep()`, retry backoff, timer setup | allow |
+| `membarrier` | glibc / rseq fast paths | allow |
+| `getcpu` | NUMA / topology probes | allow |
+| `eventfd2`, `timerfd_create` | event loops | allow |
+| `socketpair` | AF_UNIX pairs (git, ssh) | allow |
+| `memfd_create` | anonymous temp files | allow |
+| `mlockall` | gnupg, some JVMs | **stays denied** |
 
-Observable effect: `curl` fails with `CURLE_OUT_OF_MEMORY (27)` on a machine
-with free RAM, while `python3` fetches the same URL fine. `mremap` was the
-same bug, already fixed — it was simply the one hit first.
+Observable effect: `curl` failed with `CURLE_OUT_OF_MEMORY (27)` on a machine
+with gigabytes free, while `python3` fetched the same URL fine. `mremap` was
+the same bug, fixed earlier — it was simply the one hit first.
 
 **A filter whose failures lie about their cause is worse than a looser one.**
-Error 27 sends you to memory caps and network rules. It took a profile-table
-dump to find the real cause; a user gets "the sandbox broke curl", which is
-indistinguishable from "the sandbox is broken".
+Error 27 sends you to memory caps and network rules. It took dumping the
+profile table to find the real cause; a user gets "the sandbox broke curl",
+which is indistinguishable from "the sandbox is broken".
 
-### Implementation
+### The bar that was applied
 
-Decide what the profile is *for* before widening it. `compiler_with_network`
-currently aims at "a compiler can build". The rows offer it as the default for
-running arbitrary tools. Those are different profiles and the name should say
-which.
+Authority, not convenience: *does this let the guest reach something it could
+not already reach?* For the ten allowed, no — they pin the caller's own pages,
+read a clock, or open a descriptor that refers to nothing outside the sandbox.
+`socketpair` is AF_UNIX only and the net namespace still governs anything
+routable.
 
-Then, for each of the eleven, the question is authority, not convenience:
+`mlockall` is the deliberate exception, and the asymmetry with `mlock` is the
+whole point: `mlock` pins a range the caller already owns, `mlockall` pins
+*everything including future mappings*, which under a cgroup memory cap is a
+denial-of-service lever rather than a convenience. EPERM, not a kill — it is a
+refusal, not an attack signature.
 
-- `mlock`/`munlock` — bounded by `RLIMIT_MEMLOCK`; grants no reach. Allow.
-- `nanosleep`, `clock_getres`, `getcpu`, `membarrier` — no authority. Allow.
-- `eventfd2`, `timerfd_create`, `socketpair` — new descriptors, no new reach.
-  Allow; `socketpair` is AF_UNIX only and the net namespace still governs
-  sockets.
-- `memfd_create` — anonymous memory that can be made executable. Allow, but
-  note it interacts with W^X and should be re-checked under `wx_protect`.
-- `mlockall` — can pin all memory; a DoS lever under a cgroup cap. Keep
-  denied unless something real needs it.
+### Why it stayed safe
 
-This is claybin's security surface, so it lands upstream in claybin with the
-live check as the proof, not as a local patch.
+claybin's own 20-test suite, including the 39-attack escape corpus and the
+compile fuzzer, stays green. Widening a filter is exactly when that corpus
+earns its keep.
+
+aarch64 numbers were taken from the kernel's `asm-generic/unistd.h`, not
+hand-translated from the x86_64 list — hand-translating is how `122`/`124` got
+mislabelled the first time. The syscall table test resolves every name through
+the kernel headers so a bad number fails a test instead of sitting in the
+table.
+
+### Proof
+
+`sandbox_live_check` carries a curl case. Verified by reverting the widening
+and watching it go `H:000` → red, then restoring it: `H:200` → green.
 
 ---
 
@@ -409,7 +421,45 @@ lowering the walls of the session it is running in.
 
 ---
 
-## 12. Implementation order
+## 12. Working on this quickly
+
+The subsystem is small but it sits inside `runtime_obj`, the tree's heaviest
+object library, so the edit loop is worth getting right before you start.
+
+**Use the `debug` preset.** `cmake --preset debug`. A bare `cmake -S . -B
+build` defaults to **Release with LTO**, where a one-file change costs minutes
+— I spent most of a session that way before noticing. The preset's display
+name says "DEFAULT — fastest edit-build-test loop" and it means it.
+
+**The loop is link-bound, not compile-bound.** Measured on GCC 16 / 12 cores /
+mold, one-file change, reconfigure excluded:
+
+| | compile | link | binary |
+|---|---|---|---|
+| `-g1` | 22 ms | 10.5 s | 801 MB |
+| `-g1 -gsplit-dwarf` | 22 ms | ~4 s | 428 MB |
+
+ccache already makes the compile free. Everything left was mold walking DWARF
+the executable does not need at link time, so `AGENTTY_FAST_DEBUG` now adds
+`-gsplit-dwarf`. gdb still resolves source lines — the `.dwo` files live beside
+the objects and nobody ships a debug build.
+
+**Why not the other knobs.** Both were already measured and left off for good
+reasons that still hold: a shared PCH was net-negative (the libc++ prefix
+expands to ~19 MB and the per-TU load cost exceeds the parse saving), and unity
+builds win 3.2x *cold* but penalise incremental, which is the wrong trade for
+this loop. Neither is the bottleneck anyway.
+
+**The tree is instantiation-bound.** `subscribe.cpp` produces a 118 MB object,
+of which 34,607 of 38,250 symbols are `std::variant` instantiations — 90%. That
+is `Msg`: 264 leaves across 24 domains, and `std::visit` generates a 24×N
+dispatch table per visit site. Adding `SandboxMsg` cost about 4% (113 MB → 118
+MB), so it is structural rather than anything this subsystem did. Worth knowing
+before you add a domain.
+
+---
+
+## 13. Implementation order
 
 Each step is independently shippable and independently verifiable. Do not
 batch them — the whole point of the live check is that it tells you which
@@ -419,12 +469,12 @@ change broke what.
    from pending; footer states restart. Tests: seal holds against weaker
    *and* tighter re-installs, backend included. *(done)*
 2. **Delete `kSbMode`.** A row id for a row that must not exist is an
-   invitation to wire it up "for consistency". Mode is CLI-only (§3).
+   invitation to wire it up "for consistency". Mode is CLI-only (§3). *(done)*
 3. **Fix the syscall profile** upstream in claybin (§8). Proof: the curl case
    in the live check goes from red to green, and the escape corpus stays
-   green.
+   green. *(done)*
 4. **Mask under bwrap** (§7), respecting §9 ordering. Proof: the `.env` case
-   passes with `backend=bwrap`. Then unlock the Masked row.
+   passes with `backend=bwrap`. Then unlock the Masked row. *(next)*
 5. **Re-audit the §6 table** against what the code now does, not what it did
    when the table was written.
 

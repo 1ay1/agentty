@@ -231,6 +231,39 @@ if(AGENTTY_FAST_DEBUG AND NOT MSVC AND CMAKE_BUILD_TYPE STREQUAL "Debug")
     string(REGEX REPLACE "(^| )-g( |$)" "\\1-g1\\2"
            CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG}")
 
+    # Split DWARF: debug info goes to per-object .dwo files instead of into
+    # the objects, so the LINKER never reads it.
+    #
+    # This is the biggest single edit-loop win left on this tree, because the
+    # debug loop here is link-bound, not compile-bound. Measured, GCC 16 /
+    # 12 cores / mold, one-file change with reconfigure excluded:
+    #
+    #   -g1                 compile 22ms  link 10.5s   binary 801 MB
+    #   -g1 -gsplit-dwarf   compile 22ms  link  ~4s    binary 428 MB
+    #
+    # The compile is already 22ms thanks to ccache; every remaining second
+    # was mold walking 801 MB of DWARF that the executable does not need at
+    # link time. Halving the image halves the link.
+    #
+    # Costs, both small: ~370 .dwo files alongside the objects (they live in
+    # the build tree and die with it), and gdb needs the .dwo present to show
+    # source lines -- which it is, since nobody ships or moves a debug build.
+    # `-DAGENTTY_FAST_DEBUG=OFF` (the `debug-full` preset) still gives plain
+    # -g with everything inline for anyone who wants a self-contained image.
+    #
+    # Probed rather than assumed: -gsplit-dwarf is GCC/Clang-only, and a
+    # toolchain that takes the flag but cannot emit .dwo would silently
+    # produce a debug build with no debug info.
+    include(CheckCXXCompilerFlag)
+    set(CMAKE_REQUIRED_FLAGS -gsplit-dwarf)
+    check_cxx_compiler_flag("" AGENTTY_HAS_SPLIT_DWARF)
+    unset(CMAKE_REQUIRED_FLAGS)
+    if(AGENTTY_HAS_SPLIT_DWARF)
+        string(APPEND CMAKE_CXX_FLAGS_DEBUG " -gsplit-dwarf")
+        string(APPEND CMAKE_C_FLAGS_DEBUG   " -gsplit-dwarf")
+        message(STATUS "agentty: split DWARF on (debug info in .dwo; halves the link).")
+    endif()
+
     # A faster linker, if one is installed. mold beats lld beats ld.bfd, and
     # both are drop-in for ELF. Probed by ACTUALLY LINKING rather than by
     # looking for the binary: a present-but-unusable linker would otherwise
