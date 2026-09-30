@@ -411,14 +411,45 @@ jobs:
           git -C "$env:VCPKG_INSTALLATION_ROOT" reset --hard FETCH_HEAD
           & "$env:VCPKG_INSTALLATION_ROOT\bootstrap-vcpkg.bat"
           & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install openssl nghttp2 --triplet x64-windows-static
+      - name: MSVC dev environment
+        uses: ilammy/msvc-dev-cmd@v1.13.0
+        with:
+          arch: x64
       - name: Configure + build
         shell: pwsh
         run: |
-          cmake -B build -DCMAKE_BUILD_TYPE=Release `
+          # NINJA, not the default Visual Studio generator — the same choice
+          # the CI lane makes, for one reason that only shows up here.
+          #
+          # v0.9.15's release died with ~40 x `error C2385: ambiguous access
+          # of 'attach' / 'on_ready' / 'present' / ...` in jaal's run.hpp,
+          # while the CI MSVC lane compiled the identical commit clean. The
+          # difference was the generator.
+          #
+          # jaal detects optional host hooks by NAME using a deliberate
+          # ambiguity (meta/declares.hpp): mix the host with a `pill` struct
+          # declaring the same name and ask whether `&mixin<T>::hook` is
+          # formable. If the host declares it too the lookup is ambiguous,
+          # the requires-expression is false, and that FALSE is the signal.
+          # Under MSBuild that ambiguity surfaced as a hard C2385 instead of
+          # a substitution failure; under Ninja it does not.
+          #
+          # Beyond this, MSBuild was the wrong tool anyway: it parallelises
+          # across PROJECTS rather than translation units (agentty is a few
+          # object libraries, so the runner sits mostly idle), and being a
+          # multi-config generator it ignored CMAKE_BUILD_TYPE on configure
+          # — which worked only because --config repeated the same value.
+          #
+          # Keep this in step with the `windows compile (msvc)` lane in
+          # ci.yml. A release that builds differently from CI is a release
+          # CI cannot vouch for, which is exactly what happened.
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release `
             -DAGENTTY_STANDALONE=ON -DAGENTTY_AUTO_PULL_MAYA=OFF `
             -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
-            -DVCPKG_TARGET_TRIPLET=x64-windows-static
-          cmake --build build --config Release -j
+            -DVCPKG_TARGET_TRIPLET=x64-windows-static `
+            -DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded `
+            -DCMAKE_POLICY_DEFAULT_CMP0141=NEW
+          cmake --build build
       - name: Smoke test retrieval engine
         shell: pwsh
         run: |
