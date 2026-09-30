@@ -744,6 +744,65 @@ int main() {
               "P: the old Cheap floor really did land on the weakest model");
     }
 
+    // ── Q. Shutdown stops a running subagent, and WAITS for it.
+    //
+    // A subagent runs on a Cmd::task_isolated thread, which jaal detaches:
+    // "isolated threads are asked to stop but never waited for". So without
+    // a registry, main() can return while a subagent is still inside
+    // cfg.stream() — and that stream holds the provider objects by reference
+    // off main's stack. It only faults when a subagent happens to be
+    // streaming at quit, which is exactly when a user gives up on a slow one
+    // and hits escape, so it presents as "subagents crash sometimes".
+    //
+    // Zed avoids this structurally: a subagent is an owned Entity in a
+    // `running_subagents` list, and cancelling the parent awaits each one.
+    // We keep jaal's detach (a wedged syscall must not hold the process
+    // open) and add the registry + a BOUNDED wait, which is what turns the
+    // race into a handshake for every stream that is merely slow.
+    {
+        std::atomic<bool> in_stream{false};
+        std::atomic<bool> left_stream{false};
+        install_scripted_stream(
+            [&](int, const provider::Request& req,
+                const provider::EventSink& sink) {
+                // Model a stream that is alive but not finishing: sit here
+                // until the request's own cancel token trips, exactly as a
+                // real transport does when the bridge cancels it.
+                in_stream = true;
+                for (int i = 0; i < 400; ++i) {
+                    if (req.cancel && req.cancel->is_cancelled()) break;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                }
+                left_stream = true;
+                emit_text(sink, "REPORT_Q");
+                emit_finish(sink);
+            });
+
+        std::thread runner([&] { (void)run_task("hold a stream open"); });
+        // Wait until it is genuinely inside the stream, so we are testing
+        // the interesting case and not a race we won by luck.
+        for (int i = 0; i < 200 && !in_stream.load(); ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        check(in_stream.load(), "Q: the subagent reached its provider stream");
+
+        const auto t0 = std::chrono::steady_clock::now();
+        const std::size_t stuck = tools::subagent::shutdown_running(
+            std::chrono::milliseconds(3000));
+        const auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - t0).count();
+        runner.join();
+
+        check(stuck == 0,
+              "Q: shutdown reports every run left within the grace");
+        check(left_stream.load(),
+              "Q: the run actually left the provider stream, not just "
+              "got marked cancelled");
+        // The whole point is that it RETURNS rather than racing main's
+        // unwind — and returns promptly, since the bridge polls at 20 ms.
+        check(waited < 2000,
+              "Q: the wait is bounded, not an indefinite join");
+    }
+
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);
     return g_fails == 0 ? 0 : 1;
 }

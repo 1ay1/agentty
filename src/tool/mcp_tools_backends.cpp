@@ -963,7 +963,8 @@ std::string summarize_call(const ToolUse& tc) {
 provider::StreamResult run_one_completion(Thread& thread,
                               const subagent::Config& cfg,
                               const AgentType& type,
-                              std::string& log) {
+                              std::string& log,
+                              const subagent::RunRegistration* run_reg = nullptr) {
     // Provider-agnostic request — the generic shape every transport accepts.
     // fresh_auth_header refreshes the ANTHROPIC OAuth token from disk; on any
     // other backend it would CLOBBER the provider's key with Anthropic
@@ -1334,15 +1335,30 @@ provider::StreamResult run_one_completion(Thread& thread,
     auto cancel = req.cancel;
     auto parent_cancel = cancellation::current();
     std::jthread cancel_bridge;
-    if (parent_cancel) {
-        cancel_bridge = std::jthread([parent_cancel, cancel](std::stop_token st) {
+    // The bridge watches TWO sources and trips the stream's token on either:
+    //
+    //   parent_cancel  the user pressed escape, or (since run_tool started
+    //                  reading its stop_token) the app is shutting down.
+    //   run_reg        this specific run was asked to stop by
+    //                  subagent::shutdown_running(), which then WAITS for it.
+    //
+    // The second is what closes the crash window rather than just narrowing
+    // it: without something that waits, main() can unwind while this thread
+    // is still inside cfg.stream(), which holds the provider objects by
+    // reference off main's stack.
+    const bool watch_run = run_reg != nullptr;
+    if (parent_cancel || watch_run) {
+        cancel_bridge = std::jthread([parent_cancel, cancel, run_reg](
+                                         std::stop_token st) {
             while (!st.stop_requested() && !cancel->is_cancelled()) {
-                if (parent_cancel()) { cancel->cancel(); return; }
+                if (parent_cancel && parent_cancel()) { cancel->cancel(); return; }
+                if (run_reg && run_reg->cancelled()) { cancel->cancel(); return; }
                 std::this_thread::sleep_for(std::chrono::milliseconds(20));
             }
         });
     }
-    if (cancellation::requested()) cancel->cancel();
+    if (cancellation::requested()
+        || (run_reg && run_reg->cancelled())) cancel->cancel();
     if (cfg.stream) {
         result = cfg.stream(std::move(req), sink);
     } else {
@@ -1516,6 +1532,14 @@ public:
         const auto run_deadline =
             enclosing ? std::min(*enclosing, own_deadline) : own_deadline;
         const subagent::DeadlineScope deadline_scope{run_deadline};
+        // Publish this run so teardown can find it. Without this, shutdown
+        // asks the TOOL thread to stop (run_tool's probe) but nothing waits
+        // for the provider stream to unwind, and main() can return while
+        // this loop is still inside cfg.stream() — which holds the provider
+        // objects by reference off main's stack. The registration's
+        // destructor latches "done", which is what shutdown_running() waits
+        // on. See subagent::RunRegistration.
+        const subagent::RunRegistration run_reg;
         bool deadline_hit = false;
         // Repeat-failure breaker (same rule as the parent's doom-loop
         // breaker): the identical tool call failing 3× means the loop is
@@ -1555,6 +1579,11 @@ public:
                 deadline_hit = true;
                 break;
             }
+            // Shutdown asked us to stop. Checked here as well as inside the
+            // stream (via the cancel bridge) so a run between turns — not
+            // holding a stream at all — still leaves promptly instead of
+            // starting one more completion that teardown then waits on.
+            if (run_reg.cancelled()) break;
             ++turns;
 
             // FINAL-TURN NUDGE: when the remaining budget is nearly spent,
@@ -1599,7 +1628,7 @@ public:
             }
 
             provider::StreamResult stream_result =
-                run_one_completion(thread, cfg, type, log);
+                run_one_completion(thread, cfg, type, log, &run_reg);
 
             if (!stream_result.ok()) {
                 const std::string err = stream_result.error.value_or("stream failed");

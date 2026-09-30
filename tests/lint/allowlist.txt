@@ -86,7 +86,19 @@ tool/skills.cpp: mutex atomic
 tool/memory_store.cpp: mutex
 tool/hooks.cpp: mutex
 tool/progress.cpp: thread_local
-tool/subagent.cpp: mutex thread_local
+# The subagent run registry. A subagent runs on a Cmd::task_isolated thread,
+# which jaal DETACHES — see jaal's kernel/pool.hpp, which says isolated
+# threads are "asked to stop but never waited for". So the app can return
+# from main() while a subagent is still inside its provider stream, and that
+# stream holds the provider objects by reference off main's stack.
+#
+# The fix mirrors Zed's `running_subagents`: each live run publishes a cancel
+# flag + a done latch, teardown trips them all and waits a bounded moment.
+# That wait is the point, and it cannot be expressed as a jaal task — the
+# threads being waited on are ones jaal has already disowned. atomic for the
+# two flags (read from the run's thread, written from teardown's),
+# condition_variable so a clean exit costs no fixed sleep.
+tool/subagent.cpp: mutex thread_local atomic condition_variable
 tool/commands.cpp: mutex
 # Windows: run_command_s spawns a reader std::thread + mutex-guarded buffer to
 # tee child output. jaal doesn't paper over the platform boundary here — this

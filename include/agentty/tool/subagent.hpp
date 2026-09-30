@@ -8,7 +8,11 @@
 // without a default model), the tool returns a clear "unavailable"
 // error instead of crashing.
 
+#include <chrono>
+#include <cstddef>
 #include <functional>
+#include <memory>
+#include <optional>
 #include <string>
 
 #include "agentty/auth/auth.hpp"
@@ -182,6 +186,55 @@ public:
 private:
     RunDeadline prev_;
 };
+
+// ── Running-run registry, for a bounded shutdown ──────────────────────
+//
+// A subagent runs on a Cmd::task_isolated thread, and jaal DETACHES those:
+// kernel/pool.hpp says outright that isolated threads are "asked to stop but
+// never waited for". The ask does now arrive (run_tool's cancellation probe
+// reads its stop_token), but nothing waits for the answer — so main() can
+// return while a subagent is still inside its provider stream, and that
+// stream holds the provider objects BY REFERENCE off main's stack.
+//
+// Zed does not have this problem because a subagent there is an owned
+// `Entity<Thread>` in a `running_subagents` list, and cancelling the parent
+// turn awaits each one (`turn.cancel()` returns a `Task<()>`). We cannot
+// adopt the ownership model without rewriting the Cmd layer, but we can
+// adopt the REGISTRY: every live run publishes a cancel flag plus a
+// "finished" latch, teardown trips them all and waits a bounded moment for
+// the threads to leave the provider call.
+//
+// Bounded, not indefinite, on purpose: a wedged syscall must not hold the
+// process open (the reason jaal detaches in the first place). The win is
+// that the common case — a stream that notices the cancel in tens of
+// milliseconds — stops being a race against main's unwind.
+
+// Per-run handle. `run()` below holds one for the whole subagent loop.
+class RunRegistration {
+public:
+    RunRegistration();
+    ~RunRegistration();
+    RunRegistration(const RunRegistration&)            = delete;
+    RunRegistration& operator=(const RunRegistration&) = delete;
+
+    // Has shutdown asked this run to stop? The loop polls it between turns,
+    // and the cancel bridge folds it into the stream's cancel token.
+    [[nodiscard]] bool cancelled() const noexcept;
+
+    // Per-run flags. Public because the registry that trips them lives in
+    // the .cpp and must name the type; nothing outside constructs one.
+    struct State;
+
+private:
+    std::shared_ptr<State> state_;
+};
+
+// Ask every live run to stop and wait up to `grace` for them to leave.
+// Returns how many were still running when the grace expired (0 = clean).
+// Idempotent; safe with no runs in flight. Registered with util::teardown by
+// the first run that starts, so main() needs no knowledge of this.
+std::size_t shutdown_running(std::chrono::milliseconds grace
+                                 = std::chrono::milliseconds(1500)) noexcept;
 
 // Provenance of an agent persona by name, for the task card's transparency
 // tag: "builtin" (explorer/reviewer/…), "user" (~/.agentty/agents), or
