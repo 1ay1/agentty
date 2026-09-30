@@ -206,7 +206,39 @@ bool available() {
     // reading sysctls -- so this is a faithful predictor of spawn(), not a
     // guess about the kernel's feature list.
     auto host = probe_host();
-    return host.user_namespaces && host.mount_namespaces;
+
+    // NOT gated on user namespaces, and that is the whole reason claybin is
+    // worth having as a second backend.
+    //
+    // This used to require `user_namespaces && mount_namespaces`, which made
+    // claybin useless on exactly the host that needs it most. Ubuntu 24.04
+    // ships an AppArmor profile that denies the uid_map write to unconfined
+    // binaries, so bwrap fails with "setting up uid map: permission denied"
+    // and agentty reported no backend at all (issue from KhazAkar). Copying
+    // bwrap's precondition meant copying bwrap's failure.
+    //
+    // But landlock and seccomp are UNPRIVILEGED mechanisms. Neither needs a
+    // namespace, and AppArmor's userns restriction does not touch them. So on
+    // that host claybin still delivers, measured through compile():
+    //
+    //   filesystem.read/write/exec  strong   landlock
+    //   syscall.filter              strong   seccomp-bpf
+    //   resource.memory             strong   cgroup2 memory.max
+    //   privilege.drop              strong   no_new_privs + empty bounding set
+    //   network.isolation           none     (needs a netns)
+    //   process.isolation           none     (needs userns + pidns)
+    //
+    // That is a real sandbox where bwrap has none: the filesystem boundary --
+    // the one that keeps an approved command out of ~/.ssh -- survives intact.
+    // Losing network and pid isolation is a genuine downgrade and the pane's
+    // wall report says so per capability, which is the honest way to ship a
+    // partial boundary.
+    //
+    // The floor is landlock OR seccomp. With neither there is nothing left to
+    // enforce and claiming a sandbox would be the lie this whole subsystem is
+    // built to avoid, so we decline and let the caller fall back to bwrap (or
+    // to a loud failure under --sandbox on).
+    return host.landlock_abi > 0 || host.seccomp;
 }
 
 Report describe(const Posture& p) {

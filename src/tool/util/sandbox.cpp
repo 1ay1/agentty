@@ -152,10 +152,10 @@ std::atomic<bool> g_cfg_sealed{false};
 }
 
 [[nodiscard]] Backend probe() {
-    // claybin only when asked for AND usable. its availability() forks and
-    // attempts the uid_map write, the same faithful check bwrap_can_sandbox()
-    // does -- so "usable" here means spawn() will work, not that the kernel
-    // advertises the feature.
+    // claybin when asked for AND usable. its available() is a faithful
+    // predictor of spawn() -- probe_host() forks and attempts the uid_map
+    // write rather than reading sysctls -- so "usable" means it will work,
+    // not that the kernel advertises the feature.
     //
     // note the fallback direction: asking for claybin on a host where it cannot
     // build still yields bwrap, not None. a user who opts into the newer
@@ -165,7 +165,30 @@ std::atomic<bool> g_cfg_sealed{false};
         claybin_backend::available())
         return Backend::Claybin;
 #endif
-    return bwrap_can_sandbox() ? Backend::Bwrap : Backend::None;
+    if (bwrap_can_sandbox()) return Backend::Bwrap;
+
+#if defined(__linux__)
+    // bwrap cannot build a sandbox here -- but claybin may still be able to.
+    //
+    // This is the Ubuntu 24.04 case, and it is why the fallback runs in BOTH
+    // directions. That host ships an AppArmor profile denying the uid_map
+    // write to unconfined binaries, so bwrap dies with "setting up uid map:
+    // permission denied" and agentty used to report no backend at all: the
+    // default is bwrap, bwrap failed, and nothing looked further.
+    //
+    // claybin does not need a user namespace to enforce landlock and seccomp,
+    // so it still gets the filesystem boundary and the syscall filter -- the
+    // walls that keep an approved command out of ~/.ssh. Taking that instead
+    // of nothing is strictly better, and the wall report says per capability
+    // what was lost (network and pid isolation), so it is not a silent
+    // substitution.
+    //
+    // Only as a LAST resort, after bwrap has actually been tried: when both
+    // work, the default stays bwrap, because a decade of hardening beats a
+    // better feature list and nobody's boundary should change on upgrade.
+    if (claybin_backend::available()) return Backend::Claybin;
+#endif
+    return Backend::None;
 }
 
 // Build the bwrap argv prefix. Workspace gets read-write bound to
@@ -237,6 +260,10 @@ constexpr const char* kEtcReadable[] = {
 // ~/.local/state (logs/history) — and of course ~/.ssh and ~/.aws.
 constexpr const char* kHomeToolSubdirs[] = {
     "/.local/bin", "/.local/opt", "/.local/lib", // webinstall.dev etc.
+    // webinstall puts some packages under ~/.local/xbin rather than bin --
+    // same tool, different directory, and a tool the agent cannot find is
+    // indistinguishable from a broken sandbox from the user's side.
+    "/.local/xbin",
     "/.cargo/bin", "/.rustup",   // Rust (bin only from .cargo)
     "/go/bin", "/.go",           // Go (GOPATH bin + webinstall)
     "/.nvm",                     // Node version manager

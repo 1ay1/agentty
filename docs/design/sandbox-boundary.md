@@ -128,6 +128,83 @@ one sandbox.
 
 ---
 
+## 3a. Hosts that deny user namespaces
+
+The first real field report against this subsystem, and the reason claybin
+earns its place as a second backend rather than a nicer one.
+
+Ubuntu 24.04 ships an AppArmor profile that denies the `uid_map` write to
+unconfined binaries. bwrap needs a user namespace to do *anything* — no userns,
+no sandbox — so it dies with:
+
+```
+bwrap: setting up uid map: permission denied
+```
+
+The user's workaround was to write an AppArmor profile granting `userns` to
+`/usr/bin/bwrap`. That works and is a reasonable thing to do, but it asks
+someone to widen a system security policy to get a sandbox, which is the wrong
+way round.
+
+### What claybin does instead
+
+**landlock and seccomp are unprivileged mechanisms.** Neither needs a
+namespace, and AppArmor's userns restriction does not touch them. So claybin
+degrades rather than failing. Measured through `compile()` on a host described
+with `user_namespaces = false`:
+
+| capability | with userns | without |
+|---|---|---|
+| `filesystem.read` | strong (mount-ns) | **strong (landlock)** |
+| `filesystem.write` | strong (mount-ns) | **strong (landlock)** |
+| `filesystem.exec` | strong (landlock) | **strong (landlock)** |
+| `syscall.filter` | strong (seccomp-bpf) | **strong (seccomp-bpf)** |
+| `resource.memory` | strong (cgroup2) | **strong (cgroup2)** |
+| `privilege.drop` | strong | **strong** |
+| `network.isolation` | strong (netns) | none |
+| `process.isolation` | strong (userns+pidns) | none |
+
+The plan drops from 29 ops to 9 and emits no `unshare` at all, so there is
+nothing left to fail.
+
+That is a **real sandbox where bwrap has none**: the filesystem boundary — the
+one that keeps an approved command out of `~/.ssh` — survives intact, as does
+the syscall filter. Losing network and pid isolation is a genuine downgrade,
+and the wall report says so per capability, which is the honest way to ship a
+partial boundary.
+
+### Two changes this needed
+
+1. **`claybin_backend::available()` no longer requires user namespaces.** It
+   used to gate on `user_namespaces && mount_namespaces` — copying bwrap's
+   precondition, and therefore copying bwrap's failure, on exactly the host
+   that needed the alternative. The floor is now landlock **or** seccomp: with
+   neither there is nothing to enforce, and claiming a sandbox would be the
+   lie this subsystem exists to avoid.
+
+2. **`probe()` falls back in both directions.** It tried claybin only when
+   explicitly asked, then bwrap, then gave up. So the default (bwrap) failing
+   meant no backend, even with claybin sitting right there. It now tries
+   claybin as a last resort *after* bwrap has actually been tried — order
+   matters: when both work the default stays bwrap, because a decade of
+   upstream hardening beats a better feature list and nobody's boundary should
+   change on upgrade.
+
+### Toolchain paths
+
+The same report hit a second problem: `go`/`gofmt` installed via
+[webinstall.dev](https://webinstall.dev) live under `~/.local/opt` with links
+in `~/.local/bin`, and the sandbox could not see them. Those are in
+`kHomeToolSubdirs` now, along with `~/.local/xbin` (webinstall uses it for some
+packages).
+
+That list is the shared read set — **both** backends consume it, so a path
+added there applies to both or neither. It deliberately excludes the broad
+`$HOME` directories that mix tools with secrets: `~/.local/share`, `~/.npm`
+(can hold an `_auth` token), `~/.config`, `~/.local/state`.
+
+---
+
 ## 4. Precedence
 
 ```

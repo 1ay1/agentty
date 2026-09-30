@@ -18,6 +18,15 @@
 #include "agentty/tool/mcp_tools_bridge.hpp"
 #include <mcp/tools/util/sandbox.hpp>
 
+// Linux-only, like claybin's apply step. The userns case below compiles a
+// plan for a DESCRIBED host, which is portable, but the policy types it needs
+// are not.
+#if defined(__linux__)
+#include <claybin/plan/compile.hpp>
+#include <claybin/policy/policy.hpp>
+#include <claybin/policy/profiles.hpp>
+#endif
+
 #include <cstdlib>
 #include <string>
 
@@ -46,6 +55,71 @@ std::string name_of(mc::Backend b) {
 }
 
 }  // namespace
+
+#if defined(__linux__)
+TEST_CASE("sandbox: claybin does not need a user namespace to be useful") {
+    // The Ubuntu 24.04 case (KhazAkar's issue). That host ships an AppArmor
+    // profile denying the uid_map write to unconfined binaries, so bwrap dies
+    // with "setting up uid map: permission denied" and agentty reported no
+    // backend at all -- the default is bwrap, bwrap failed, nothing looked
+    // further.
+    //
+    // claybin's availability used to copy bwrap's precondition
+    // (user_namespaces && mount_namespaces), which meant copying bwrap's
+    // failure and made the second backend useless on exactly the host that
+    // needed it. landlock and seccomp are UNPRIVILEGED mechanisms: neither
+    // needs a namespace, and AppArmor's userns restriction does not touch
+    // them.
+    //
+    // Measured through compile() on a described host, because this machine
+    // has working namespaces and cannot be made not to. What survives with
+    // userns off:
+    //
+    //   filesystem.read/write/exec  strong   landlock
+    //   syscall.filter              strong   seccomp-bpf
+    //   resource.memory             strong   cgroup2 memory.max
+    //   privilege.drop              strong   no_new_privs + empty bounding set
+    //
+    // ...and what does not: network.isolation and process.isolation, both of
+    // which genuinely need namespaces. That is a real downgrade, reported per
+    // capability rather than papered over.
+    using namespace ::clay;
+
+    auto host = probe_host();
+    host.user_namespaces = false;
+    host.mount_namespaces = false;
+    host.pid_namespaces = false;
+    host.net_namespaces = false;
+    host.uts_namespaces = false;
+
+    // Skip where the machine cannot answer the question either way.
+    if (host.landlock_abi == 0 && !host.seccomp) return;
+
+    auto d = Policy<Draft>{};
+    d = std::move(d).ro_bind("/usr", "/usr");
+    d = std::move(d).bind("/tmp", "/tmp");
+    d = std::move(d).syscall_profile(profiles::compiler_with_network());
+
+    auto compiled = compile(std::move(d).seal(), host);
+    REQUIRE(compiled.has_value());
+
+    // The filesystem boundary is the one that matters: it is what keeps an
+    // approved command out of ~/.ssh. If this is `none`, claybin has nothing
+    // to offer on such a host and the availability floor below is wrong.
+    if (host.landlock_abi > 0) {
+        CHECK(compiled->guarantees.strength(CapId::fs_read) != Enforcement::none);
+        CHECK(compiled->guarantees.strength(CapId::fs_write) != Enforcement::none);
+    }
+    if (host.seccomp)
+        CHECK(compiled->guarantees.strength(CapId::syscall_filter) !=
+              Enforcement::none);
+
+    // And the honest part: namespace-backed walls are gone, not silently
+    // claimed. A report that said `strong` here would be the exact lie this
+    // subsystem exists to prevent.
+    CHECK(compiled->guarantees.strength(CapId::proc_isolation) == Enforcement::none);
+}
+#endif  // __linux__
 
 TEST_CASE("sandbox: wiring the runtime hands mcp OUR sandbox") {
     // The hook is the mechanism the parity check below now rests on, so it
