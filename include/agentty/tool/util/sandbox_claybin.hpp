@@ -26,6 +26,9 @@ struct Posture {
     std::vector<std::string> system_read_roots;  // kSystemReadRoots
     std::vector<std::string> etc_readable;       // kEtcReadable
     std::vector<std::string> home_tool_dirs;     // $HOME + kHomeToolSubdirs
+    // Absolute paths denied after every grant. Credentials, agent state, and
+    // whatever the user added to deny_paths. See kAlwaysMasked.
+    std::vector<std::string> masked;
     std::string workspace;                       // read-write, bound last
     std::string cwd;                             // where the shell starts
     bool network{true};                          // keep the host netns

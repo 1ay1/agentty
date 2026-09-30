@@ -12,6 +12,7 @@
 #if defined(AGENTTY_HAVE_CLAYBIN)
 #include <unistd.h>  // ::close, for the pidfd the runner does not use
 
+#include "agentty/domain/sandbox_config.hpp"  // kAlwaysMasked
 #include "agentty/tool/util/sandbox_claybin.hpp"
 #endif
 
@@ -332,6 +333,20 @@ constexpr const char* kHomeToolSubdirs[] = {
     }
     p.workspace = workspace_root().string();
     p.cwd = p.workspace;
+    // Credentials and agent state, masked after every grant. $HOME-relative,
+    // so they follow the user rather than assuming a layout.
+    if (const char* home = std::getenv("HOME"); home && *home) {
+        for (const char* m : sandbox_cfg::kAlwaysMasked)
+            p.masked.emplace_back(std::string{home} + m);
+    }
+    // And the workspace's own .env family: the most common place a real
+    // secret sits, and the workspace is read-WRITE, so scope does not cover
+    // it. Only the names that are whole files -- the ".pem" suffix entry needs
+    // a glob the mount layer does not have, so it is left to deny_paths.
+    for (const char* n : sandbox_cfg::kAlwaysMaskedNames) {
+        if (n[0] != '.' || std::string_view{n} == ".pem") continue;
+        p.masked.emplace_back(p.workspace + "/" + n);
+    }
     // Same call the bwrap path makes: agent flows (git push, npm install) need
     // the network, so the netns is shared and the report says `partial` for
     // network isolation rather than claiming a wall we did not build.

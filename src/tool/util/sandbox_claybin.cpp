@@ -66,6 +66,25 @@ using namespace ::clay::literals;
     for (const auto& f : p.etc_readable) d = std::move(d).bind_try(f, f);
     for (const auto& h : p.home_tool_dirs) d = std::move(d).bind_try(h, h);
 
+    // ── secrets, masked with MOUNTS ──────────────────────────────────────
+    //
+    // A mount, not a landlock deny, and that distinction cost me an
+    // afternoon. landlock has no negative rule: add_rule() with zero rights
+    // is ENOMSG (measured on abi 10), and omitting the rule means the path
+    // INHERITS its ancestor's grant. So "bind $HOME, deny $HOME/.aws" is not
+    // expressible in landlock at all -- I wrote it, watched the rule reach
+    // the plan, and read the credentials anyway.
+    //
+    // What DOES work is making the path not be the file: bind something empty
+    // over it. tmpfs for a directory, an empty file for a file. The guest
+    // sees an empty ~/.aws rather than a denied one, which is also the better
+    // failure mode -- a tool that reads it gets no credentials instead of an
+    // EACCES it might report as a bug.
+    //
+    // bind_try semantics: a secret the user does not have is not an error,
+    // and mask() is optional by default for exactly that reason.
+    for (const auto& m : p.masked) d = std::move(d).mask(m);
+
     // ── pseudo-filesystems ───────────────────────────────────────────────
     // A fresh procfs shows only our own pid namespace. dev_fs binds the handful
     // of device nodes a program needs rather than mounting devtmpfs, so

@@ -125,6 +125,60 @@ enum class SyscallMode : std::uint8_t {
     return "compiler";
 }
 
+// Paths that are NEVER exposed, whatever the scope says.
+//
+// Today these are absent by accident: the toolchain scope binds ~/.cargo/bin
+// rather than ~/.cargo, so credentials never come along. That is the right
+// outcome from a careful read set, but it is fragile -- it holds because
+// somebody chose the narrow path, and the next person adding "~/.config" for
+// some tool's config would take ~/.config/gh with it.
+//
+// Every source in the 2026 sandbox literature lists secret hygiene as a
+// separate control for this reason ("no ambient production secrets"), so it
+// gets to be one: a deny list applied AFTER every grant, including
+// HostReadable and including anything the user typed into read_paths.
+//
+// Landlock makes this cheap and exact -- a deny rule on a subtree beats the
+// grants above it -- which is a thing a mount-only sandbox cannot do without
+// masking each path with a bind.
+inline constexpr const char* kAlwaysMasked[] = {
+    // credentials, in rough order of how badly you would mind losing them
+    "/.ssh",
+    "/.aws",
+    "/.gnupg",
+    "/.kube",
+    "/.docker/config.json",
+    "/.config/gh",           // github cli token
+    "/.config/gcloud",
+    "/.azure",
+    "/.netrc",
+    "/.npmrc",               // npm auth token
+    "/.pypirc",
+    "/.cargo/credentials",
+    "/.cargo/credentials.toml",
+    "/.git-credentials",
+    // agentty's own state: the memory store can contain anything the user
+    // told it, and the credential store obviously counts.
+    "/.agentty/memory.jsonl",
+    "/.agentty/credentials.json",
+};
+
+// Basenames masked anywhere they appear, including inside the workspace.
+//
+// A .env in the repo is the single most common place a real secret sits, and
+// the workspace is READ-WRITE -- so unlike the list above, scope does not save
+// us here. Matched on basename because .env lives wherever the framework put
+// it.
+inline constexpr const char* kAlwaysMaskedNames[] = {
+    ".env",
+    ".env.local",
+    ".env.production",
+    ".envrc.local",
+    "id_rsa",
+    "id_ed25519",
+    ".pem",  // suffix, handled as such by the matcher
+};
+
 struct Config {
     // ── Filesystem ───────────────────────────────────────────────────────
     FsScope fs_scope = FsScope::Toolchain;
