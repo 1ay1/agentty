@@ -249,6 +249,15 @@ constexpr const char* kHomeToolSubdirs[] = {
     std::string ws = workspace_root().string();
     std::vector<std::string> argv = {"bwrap"};
 
+    // ONE snapshot of the policy, for the whole argv. Same reason
+    // build_claybin_posture() takes one: this runs on a tool worker thread,
+    // and re-reading a global per field could mix two policies into one
+    // sandbox. (The policy is sealed at startup so it cannot actually change
+    // now -- holding the snapshot is what keeps that true if the seal is ever
+    // relaxed, instead of silently degrading here.)
+    const auto snap = config_snapshot();
+    const auto& cfg = *snap;
+
     auto push = [&](const char* a) { argv.emplace_back(a); };
     auto push_pair = [&](const char* k, std::string v) {
         argv.emplace_back(k);
@@ -309,6 +318,72 @@ constexpr const char* kHomeToolSubdirs[] = {
     argv.emplace_back("--bind");
     argv.emplace_back(ws);
     argv.emplace_back(ws);
+
+    // ── Credential masks, AFTER every bind that could cover them ─────────
+    //
+    // bwrap used to apply no masks at all: kAlwaysMasked was referenced only
+    // by the claybin posture, and this function did not even take the config.
+    // So `deny_paths` from the settings pane was dropped, and so was the
+    // non-configurable credential list -- measured, a workspace `.env` read
+    // back in full under bwrap while claybin showed zero bytes.
+    //
+    // $HOME credentials happened to be safe anyway, because the only $HOME
+    // paths bound above are kHomeToolSubdirs and an unbound path simply is not
+    // in the mount namespace. Safe by WHITELIST, not by masking -- which is
+    // why ~/.ssh looked fine and hid the real hole. The workspace is bound
+    // read-write on both backends, so scope cannot save anything inside it and
+    // the mask is the only thing between an agent and a real secret.
+    //
+    // ORDER IS THE WHOLE TRICK, and getting it wrong is this subsystem's
+    // recurring bug (three times now). bwrap applies arguments in sequence and
+    // a later mount covers an earlier one, so a mask emitted before the
+    // workspace bind is silently undone by it. claybin had exactly this bug:
+    // masks applied, workspace bound over them, `<workspace>/.env` readable
+    // again -- and every policy-level test passed, because the mask really was
+    // in the policy. It just lost to a later mount.
+    //
+    // Mechanism: make the path not BE the file, the same way claybin's
+    // MountKind::mask does. An empty read-only file over a file, an empty
+    // tmpfs over a directory. The guest sees an empty ~/.aws rather than a
+    // denied one, which is also the better failure mode -- a tool reading it
+    // gets no credentials instead of an EACCES it may report as a bug.
+    //
+    // We must stat to choose, because `--ro-bind /dev/null <dir>` fails and
+    // `--tmpfs <file>` fails. A path that does not exist needs no mask at all,
+    // and emitting one would make bwrap fail on a host where the file is
+    // simply absent.
+    auto push_mask = [&](const std::string& target) {
+        std::error_code ec;
+        const auto st = std::filesystem::symlink_status(target, ec);
+        if (ec) return;                       // absent: nothing to hide
+        if (std::filesystem::is_directory(st)) {
+            argv.emplace_back("--tmpfs");
+            argv.emplace_back(target);
+        } else {
+            // Covers regular files, symlinks and sockets. A symlink is masked
+            // rather than followed: following it would mask wherever it points
+            // and leave the link itself readable.
+            argv.emplace_back("--ro-bind");
+            argv.emplace_back("/dev/null");
+            argv.emplace_back(target);
+        }
+    };
+
+    if (const char* home = std::getenv("HOME"); home && *home) {
+        const std::string h = home;
+        for (const char* m : sandbox_cfg::kAlwaysMasked) push_mask(h + m);
+    }
+    // Basename masks, inside the workspace. `.pem` is a SUFFIX rule rather
+    // than a name, so it cannot be masked by path -- it needs a walk, which
+    // this argv builder is the wrong place for. Skipped here exactly as the
+    // claybin posture skips it, so the two backends agree on what is covered.
+    for (const char* n : sandbox_cfg::kAlwaysMaskedNames) {
+        if (n[0] != '.' || std::string_view{n} == ".pem") continue;
+        push_mask(ws + "/" + n);
+    }
+    // The user's own masks last, so an explicit deny cannot be undone by one
+    // of ours.
+    for (const auto& d : cfg.deny_paths) push_mask(d);
 
     // Network: keep it. Removing this breaks git push / package
     // installs / curl — flows users explicitly want to work.

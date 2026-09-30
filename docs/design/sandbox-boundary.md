@@ -200,7 +200,7 @@ cgroup2. So most rows mean nothing under bwrap.
 | row | bwrap | claybin |
 |---|---|---|
 | readable scope, extra read/write | yes (binds) | yes (landlock) |
-| masked paths | **no** (§7) | yes (mask mounts) |
+| masked paths | yes (mask mounts, §7) | yes (mask mounts) |
 | network mode | no | yes |
 | syscall profile | no | yes (§8) |
 | W^X | no | yes |
@@ -234,42 +234,77 @@ this to fail. An id lookup cannot dangle.
 
 ---
 
-## 7. Gap: bwrap applies no masks
+## 7. Fixed: bwrap applied no masks
 
-`kAlwaysMasked` / `kAlwaysMaskedNames` are referenced in exactly one place,
-`build_claybin_posture`. `build_bwrap_argv(std::string_view shell_cmd)` takes
-no config at all.
+*Resolved. Kept because the shape of the hole is worth remembering: it was
+invisible for the one path anybody would test by hand.*
+
+`kAlwaysMasked` / `kAlwaysMaskedNames` were referenced in exactly one place,
+`build_claybin_posture`. `build_bwrap_argv(std::string_view shell_cmd)` did not
+even take the config.
 
 So under bwrap:
 
-- `deny_paths` from the pane is dropped
-- the non-configurable credential list is dropped
-- `~/.ssh` happens to be safe anyway, because bwrap binds only
+- `deny_paths` from the pane was dropped
+- the non-configurable credential list was dropped
+- `~/.ssh` happened to be safe anyway, because bwrap binds only
   `kHomeToolSubdirs` and unlisted `$HOME` paths are never mounted — safe by
   *whitelist*, not by masking
-- a workspace `.env` **leaks in full**, because the workspace is bound
+- a workspace `.env` **leaked in full**, because the workspace is bound
   read-write on both backends and scope cannot save it
 
-The header says that list is "not configurable, and that is the point: a
+That last pair is why it survived: the path a person checks first (`~/.ssh`)
+was fine for an unrelated reason, and the path that actually leaked needed a
+planted file to notice.
+
+The header said that list is "not configurable, and that is the point: a
 control the user can switch off to make their build work is a control that is
-off." With a Backend row, it currently is switch-off-able. That sentence is
-the specification; the code does not meet it.
+off." With a Backend row, it was switch-off-able. That sentence was the
+specification and the code did not meet it.
 
-### Implementation
+### How it works now
 
-Teach the bwrap path to mask. One empty-file bind per path, after the
-workspace bind:
+`build_bwrap_argv` takes a config snapshot and emits, **after** the workspace
+bind:
 
 ```
---ro-bind /dev/null <path>           # files
---tmpfs             <path>           # directories
+--ro-bind /dev/null <path>     # files, symlinks, sockets
+--tmpfs             <path>     # directories
 ```
 
-`build_bwrap_argv` must take the config, like `build_claybin_posture` does.
-Then unlock the Masked row for bwrap and move it to the "both" side of the
-§6 table.
+Same mechanism as claybin's `MountKind::mask`: make the path not *be* the
+file. The guest sees an empty `~/.aws` rather than a denied one, which is the
+better failure mode — a tool that reads it gets no credentials instead of an
+EACCES it may report as a bug.
 
-Ordering is the trap. See §9.
+Three details that are not optional:
+
+- **Stat to choose.** `--ro-bind /dev/null <dir>` fails and `--tmpfs <file>`
+  fails. A path that does not exist needs no mask, and emitting one makes
+  bwrap refuse to start on a host where the file is simply absent.
+- **Order.** bwrap applies arguments in sequence and a later mount covers an
+  earlier one, so a mask before the workspace bind is silently undone by it
+  (§9). Asserted directly in `sandbox_escape_test`, since here the ordering
+  *is* the argv order.
+- **`.pem` is still uncovered.** It is a suffix rule, not a name, so it cannot
+  be masked by path without walking the tree. Skipped identically in both
+  backends so the two agree on what is covered — an asymmetry would be worse
+  than the gap.
+
+The Masked row is now live on both backends (§6).
+
+### Proof
+
+`sandbox_live_check` plants a `.env` and reads it back through the **real**
+bwrap argv. Verified by reverting: `SECRET=canary` leaks → red; restored →
+`cat: .env: Permission denied`.
+
+One trap worth recording: `sandbox_escape_test` asserted that `~/.ssh` never
+appears in the argv, which broke the moment masking landed — because a mask
+*binds `/dev/null` to* that path. Presence in the argv conflated granting with
+hiding; the check now distinguishes them by the preceding argument. A tightening
+change should never fail a security test, and when it does the test is what is
+wrong.
 
 ---
 
@@ -416,7 +451,10 @@ lowering the walls of the session it is running in.
 - **Network egress under `NetMode::Full`.** Read access plus network is read
   plus exfiltrate. That is why the default read set is narrow rather than
   convenient.
-- **bwrap masking, today.** §7.
+- **`.pem` files, and secrets below the workspace root.** Both need a tree
+  walk rather than a path list (§7). Equally uncovered on both backends, which
+  is the least-bad version of a gap — nobody gets a false sense of which
+  backend is safer.
 - **Windows.** No backend. `--sandbox on` fails loudly rather than pretending.
 
 ---
@@ -474,9 +512,18 @@ change broke what.
    in the live check goes from red to green, and the escape corpus stays
    green. *(done)*
 4. **Mask under bwrap** (§7), respecting §9 ordering. Proof: the `.env` case
-   passes with `backend=bwrap`. Then unlock the Masked row. *(next)*
+   passes with `backend=bwrap`. Then unlock the Masked row. *(done)*
 5. **Re-audit the §6 table** against what the code now does, not what it did
-   when the table was written.
+   when the table was written. *(done — masked paths moved to "both")*
+
+### Still open
+
+- **`.pem` masking.** A suffix rule needs a tree walk; neither backend covers
+  it (§7). Equal on both, which is the least-bad version of a gap.
+- **`kAlwaysMaskedNames` only at the workspace root.** A `.env` in a
+  subdirectory is not masked by either backend. Same walk problem.
+- **The bwrap/claybin asymmetry in §6** is inherent, not a bug list. bwrap
+  cannot express seccomp or cgroups; the honesty rule is the mitigation.
 
 ### Rules for whoever does this
 

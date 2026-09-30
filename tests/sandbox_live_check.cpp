@@ -10,6 +10,7 @@
 //   1. under the compiler profile, realloc() works           (the mremap fix)
 //   2. with net_mode=None, a socket to a raw IP cannot connect (the net rule)
 #include "agentty/tool/util/sandbox_claybin.hpp"
+#include "agentty/tool/util/sandbox.hpp"       // bwrap_argv_for_test
 #include "agentty/domain/sandbox_config.hpp"   // kAlwaysMasked*
 
 #include <cstdio>
@@ -23,6 +24,11 @@
 #include <unistd.h>
 
 namespace cb = agentty::tools::util::sandbox::claybin_backend;
+
+// The stub setter from sandbox_config_race_stubs.cpp. Declared here rather
+// than pulled from fs_helpers.hpp, because including that header is exactly
+// what this target avoids (it reaches into mcp and drags the tool layer in).
+namespace agentty::tools::util { void set_workspace_root(std::filesystem::path p); }
 
 namespace {
 
@@ -116,6 +122,13 @@ int main() {
             return 1;
         }
     }
+
+    // build_bwrap_argv() binds workspace_root(), so the stub has to point at
+    // the directory we just made. Without this the bwrap case would bind /tmp
+    // and mask /tmp/.env -- and then pass, because the canary it is looking
+    // for lives somewhere else entirely. A check that passes for the wrong
+    // reason is the failure mode this harness has already hit twice.
+    agentty::tools::util::set_workspace_root(kWorkspace);
 
     // ── 1. realloc under the compiler profile ────────────────────────
     // The regression: mremap was absent from base(), so realloc() of a large
@@ -233,6 +246,63 @@ int main() {
             out);
         std::printf("  exit=%d, child said: %s\n", rc, out.c_str());
         expect(out.find("H:200") != std::string::npos, "curl got a 200");
+    }
+
+    // ── 6. the SAME secret, under bwrap ───────────────────────────────
+    // The gap this closes: bwrap applied NO masks at all. kAlwaysMasked was
+    // referenced only by the claybin posture, and build_bwrap_argv did not
+    // even take the config -- so the same workspace .env that reads back
+    // empty under claybin came back in full under bwrap, and the Masked row
+    // in the settings pane configured nothing.
+    //
+    // Driven through the real bwrap binary rather than by inspecting argv,
+    // because the argv-level claim is already pinned in sandbox_escape_test
+    // and the thing that was actually wrong is what the CHILD sees. Skips
+    // itself when bwrap is absent; that is a property of the host, not of the
+    // code, and a skip here is honest where a pass would not be.
+    std::printf("workspace .env is masked under BWRAP too:\n");
+    {
+        const std::string envp = std::string{kWorkspace} + "/.env";
+        {
+            std::FILE* f = std::fopen(envp.c_str(), "w");
+            if (f) { std::fputs("SECRET=canary\n", f); std::fclose(f); }
+        }
+
+        // The real argv agentty would use, so this cannot drift from
+        // production the way a hand-built command would.
+        auto argv = agentty::tools::util::sandbox::bwrap_argv_for_test(
+            "cat .env 2>&1");
+        std::string cmd;
+        for (const auto& a : argv) {
+            // Single-quote each word: paths contain no quotes here, but a
+            // workspace under a directory with a space would otherwise split.
+            cmd += '\'';
+            for (char c : a) { if (c == '\'') cmd += "'\\''"; else cmd += c; }
+            cmd += "' ";
+        }
+        cmd += "2>&1";
+
+        std::string out;
+        FILE* p = ::popen(cmd.c_str(), "r");
+        if (!p) {
+            std::printf("  cannot run bwrap -- skipped\n");
+        } else {
+            char buf[4096];
+            while (std::fgets(buf, sizeof buf, p)) out += buf;
+            const int rc = ::pclose(p);
+            if (out.find("bwrap: ") != std::string::npos &&
+                out.find("SECRET") == std::string::npos && rc != 0) {
+                // bwrap itself refused to start (no user namespaces, etc.).
+                std::printf("  bwrap unavailable on this host -- skipped (%s)",
+                            out.c_str());
+            } else {
+                std::printf("  child said: %s", out.c_str());
+                expect(out.find("SECRET=canary") == std::string::npos,
+                       "the secret did NOT reach the child under bwrap");
+            }
+        }
+        std::error_code ec;
+        std::filesystem::remove(envp, ec);
     }
 
     std::printf("\n%s\n", failures ? "LIVE CHECK FAILURES" : "all live checks passed");

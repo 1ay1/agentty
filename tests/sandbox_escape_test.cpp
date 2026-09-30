@@ -13,8 +13,10 @@
 #include "agtest.hpp"
 
 #include "agentty/tool/util/sandbox.hpp"
+#include "agentty/tool/util/fs_helpers.hpp"   // workspace_root
 
 #include <cstdlib>
+#include <filesystem>
 #include <string>
 #include <string_view>
 
@@ -93,11 +95,71 @@ TEST_CASE("sandbox escape") {
         check(has(h + "/.local/bin"), "bwrap: ~/.local/bin bound (webinstall)");
         check(has(h + "/.cargo/bin"), "bwrap: ~/.cargo/bin bound (rust)");
         check(has(h + "/go/bin"),     "bwrap: ~/go/bin bound (go)");
-        for (const auto& a : argv) {
-            check(a != h + "/.ssh",    "bwrap: ~/.ssh NEVER bound");
-            check(a != h + "/.aws",    "bwrap: ~/.aws NEVER bound");
-            check(a != h + "/.config", "bwrap: ~/.config NEVER bound");
-            check(a != h + "/.local/share", "bwrap: ~/.local/share NEVER bound");
+
+        // A secret path must never be GRANTED -- but it may legitimately
+        // appear as the destination of a MASK, which is the opposite thing.
+        //
+        // The distinction is the argument before it. `--ro-bind /usr /usr`
+        // grants; `--ro-bind /dev/null ~/.ssh` hides. Testing for mere
+        // presence in the argv conflated the two: this check went red the
+        // moment bwrap learned to mask, for a change that made the sandbox
+        // strictly tighter.
+        //
+        // So: find every occurrence, and require that each one is a mask.
+        auto granted = [&](const std::string& p) {
+            for (std::size_t i = 0; i < argv.size(); ++i) {
+                if (argv[i] != p) continue;
+                // Masked as a directory: `--tmpfs <p>`.
+                if (i >= 1 && argv[i - 1] == "--tmpfs") continue;
+                // Masked as a file: `--ro-bind /dev/null <p>`.
+                if (i >= 2 && argv[i - 1] == "/dev/null") continue;
+                return true;   // a real bind of the secret itself
+            }
+            return false;
+        };
+        check(!granted(h + "/.ssh"),         "bwrap: ~/.ssh never granted");
+        check(!granted(h + "/.aws"),         "bwrap: ~/.aws never granted");
+        check(!granted(h + "/.config"),      "bwrap: ~/.config never granted");
+        check(!granted(h + "/.local/share"), "bwrap: ~/.local/share never granted");
+
+        // And the masks are actually EMITTED, not merely not-granted. A
+        // missing mask also passes the check above, so assert the positive:
+        // if the path exists on this host, something must be covering it.
+        auto masked = [&](const std::string& p) {
+            for (std::size_t i = 1; i < argv.size(); ++i)
+                if (argv[i] == p &&
+                    (argv[i - 1] == "--tmpfs" || argv[i - 1] == "/dev/null"))
+                    return true;
+            return false;
+        };
+        std::error_code ec;
+        if (std::filesystem::exists(h + "/.ssh", ec))
+            check(masked(h + "/.ssh"), "bwrap: ~/.ssh masked when present");
+
+        // The masks must come AFTER the workspace bind, or the bind remounts
+        // over them. This is the ordering bug claybin shipped -- masks in the
+        // policy, workspace bound on top, secret readable again, every
+        // policy-level test green. bwrap applies argv in sequence, so here the
+        // ordering IS the argv order and can be asserted directly.
+        //
+        // Only CREDENTIAL masks count. `--tmpfs /tmp` is a legitimate scratch
+        // mount emitted long before the workspace bind, and treating every
+        // --tmpfs as a mask made this assertion fire on it -- a false positive
+        // that cost a debugging round. So anchor on a path we know is a mask:
+        // ~/.ssh, which kAlwaysMasked always covers when it exists.
+        std::error_code ec2;
+        if (std::filesystem::exists(h + "/.ssh", ec2)) {
+            std::size_t ws_at = 0, ssh_at = 0;
+            const std::string ws = agentty::tools::util::workspace_root().string();
+            for (std::size_t i = 1; i < argv.size(); ++i) {
+                if (argv[i - 1] == "--bind" && argv[i] == ws) ws_at = i;
+                if (argv[i] == h + "/.ssh" &&
+                    (argv[i - 1] == "--tmpfs" || argv[i - 1] == "/dev/null"))
+                    ssh_at = i;
+            }
+            check(ws_at != 0, "bwrap: the workspace is bound");
+            check(ssh_at > ws_at,
+                  "bwrap: credential masks come after the workspace bind");
         }
     }
     // The command is the tail of the argv (after the closing "--").

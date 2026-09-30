@@ -175,15 +175,34 @@ set_property(DIRECTORY APPEND PROPERTY AGENTTY_T_SANITIZER
 # covers the engine. This closes the last gap between "the plan says X" and
 # "the child experiences X" -- which is exactly where the mremap bug lived:
 # every table-level test passed while realloc() failed in the guest.
-# Compiles sandbox_claybin.cpp straight in rather than linking
+# Compiles the two backend sources straight in rather than linking
 # agentty_tool_obj: that objlib drags the whole tool layer (mcp config,
-# auth, teardown) behind it, and this check only needs the backend.
+# auth, teardown) behind it, and this check only needs the spawn paths.
+# sandbox.cpp comes along for build_bwrap_argv -- the bwrap masking case
+# drives the REAL argv rather than a hand-built one, so it cannot drift from
+# what production passes to bwrap.
 add_executable(sandbox_live_check EXCLUDE_FROM_ALL
     ${CMAKE_SOURCE_DIR}/tests/sandbox_live_check.cpp
-    ${CMAKE_SOURCE_DIR}/src/tool/util/sandbox_claybin.cpp)
+    ${CMAKE_SOURCE_DIR}/tests/sandbox_config_race_stubs.cpp
+    ${CMAKE_SOURCE_DIR}/src/tool/util/sandbox.cpp
+    ${CMAKE_SOURCE_DIR}/src/tool/util/sandbox_claybin.cpp
+    ${CMAKE_SOURCE_DIR}/src/tool/util/subprocess.cpp
+    ${CMAKE_SOURCE_DIR}/src/tool/util/utf8.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/logx.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/dbglog.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/home_dir.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/user_root.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/teardown.cpp)
 target_include_directories(sandbox_live_check PRIVATE
     ${CMAKE_SOURCE_DIR}/include)
-target_link_libraries(sandbox_live_check PRIVATE claybin)
+target_link_libraries(sandbox_live_check PRIVATE
+    claybin nlohmann_json::nlohmann_json Threads::Threads)
+if(TARGET maya::app)
+    target_include_directories(sandbox_live_check SYSTEM PRIVATE
+        $<TARGET_PROPERTY:maya::app,INTERFACE_INCLUDE_DIRECTORIES>)
+endif()
+target_compile_definitions(sandbox_live_check PRIVATE
+    AGENTTY_MCP=0 AGENTTY_VERSION="${PROJECT_VERSION}")
 
 agentty_fold_test(fork_test                TIMEOUT 30)
 agentty_fold_test(palette_render_probe     TIMEOUT 30)

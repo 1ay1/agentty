@@ -211,10 +211,14 @@ form::Form build_sandbox_form(const sandbox_cfg::Config& cfg, bool claybin_avail
                         : std::string{"bwrap \xc2\xb7 mount namespaces only"};
 
     // ── Filesystem ───────────────────────────────────────────────────────
-    // These four are the rows bwrap CAN honour: scope, extra reads, extra
-    // writes are all binds, and a mask is a bind of an empty file. So they
-    // stay live on both backends -- gating them would be a lie in the other
-    // direction.
+    // These four are the rows bwrap CAN honour: scope, extra reads and extra
+    // writes are all binds, and a mask is a bind of an empty file over the
+    // path. So they stay live on both backends -- gating them would be a lie
+    // in the other direction.
+    //
+    // Masked was locked under bwrap until the bwrap path learned to emit
+    // masks; it applied none at all, so the row configured nothing. Both
+    // backends honour it now (see build_bwrap_argv).
     form.fields.push_back(header("Filesystem"));
     form.fields.push_back(choice(
         kSbFsScope, "Readable scope",
