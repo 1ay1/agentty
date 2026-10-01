@@ -207,6 +207,37 @@ endif()
 target_compile_definitions(sandbox_live_check PRIVATE
     AGENTTY_MCP=0 AGENTTY_VERSION="${PROJECT_VERSION}")
 
+# ws_bind_probe: a hand-run answer to "is the workspace actually bound, and is
+# the rest of $HOME actually read-only" -- driven through run_shell_command
+# (the shipped path) rather than a hand-built posture, because a bug report
+# claimed the two disagree. Same build shape and same rationale as
+# sandbox_live_check above (needs real namespaces; not a ctest).
+#
+#     cmake --build build --target ws_bind_probe && ./build/ws_bind_probe <dir>
+add_executable(ws_bind_probe EXCLUDE_FROM_ALL
+    ${CMAKE_SOURCE_DIR}/tests/ws_bind_probe.cpp
+    ${CMAKE_SOURCE_DIR}/tests/sandbox_config_race_stubs.cpp
+    ${CMAKE_SOURCE_DIR}/src/tool/util/sandbox.cpp
+    ${CMAKE_SOURCE_DIR}/src/tool/util/sandbox_claybin.cpp
+    ${CMAKE_SOURCE_DIR}/src/tool/util/sandbox_broker.cpp
+    ${CMAKE_SOURCE_DIR}/src/domain/sandbox_provenance.cpp
+    ${CMAKE_SOURCE_DIR}/src/tool/util/subprocess.cpp
+    ${CMAKE_SOURCE_DIR}/src/tool/util/utf8.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/logx.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/dbglog.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/home_dir.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/user_root.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/teardown.cpp)
+target_include_directories(ws_bind_probe PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(ws_bind_probe PRIVATE
+    claybin nlohmann_json::nlohmann_json Threads::Threads)
+if(TARGET maya::app)
+    target_include_directories(ws_bind_probe SYSTEM PRIVATE
+        $<TARGET_PROPERTY:maya::app,INTERFACE_INCLUDE_DIRECTORIES>)
+endif()
+target_compile_definitions(ws_bind_probe PRIVATE
+    AGENTTY_MCP=0 AGENTTY_VERSION="${PROJECT_VERSION}")
+
 # sandbox_audit: what does agentty ACTUALLY enforce on THIS host?
 #
 # Not a test -- it asserts nothing. It prints the real posture, capability by

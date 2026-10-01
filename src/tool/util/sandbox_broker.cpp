@@ -14,6 +14,13 @@
 #include <sys/ptrace.h>
 #include <sys/syscall.h>
 #include <signal.h>
+#include <fcntl.h>          // open  (reading /proc/<pid>/...)
+#include <unistd.h>         // read, close
+#include <dirent.h>         // opendir/readdir  (/proc/<pid>/task)
+#include <cstdio>           // snprintf
+#include <cstdlib>          // strtol
+#include <cstring>
+#include <vector>
 #endif
 
 namespace agentty::tools::util::sandbox::broker {
@@ -58,6 +65,123 @@ namespace {
         case SIGCONT:  return "SIGCONT";
         default:       return std::to_string(sig);
     }
+}
+
+// Is `target` a process the REQUESTER may signal -- i.e. itself or one of its
+// descendants -- where `target` is a pid as the REQUESTER sees it?
+//
+// THE GAP THIS CLOSES, and it is two gaps stacked.
+//
+// (1) Both target rules below used to be equality tests against guest_pid /
+//     guest_pgid, which answers "is the target the group LEADER". A child is
+//     neither: it has its own pid and inherits the leader's pgid. So every
+//     kill(child, sig) was denied -- while the comment two lines away already
+//     called that case routine ("`make` on failure, `timeout`, a test runner
+//     reaping workers").
+//
+// (2) The numbers were not even in the same space. claybin gives the guest its
+//     own PID NAMESPACE, so the guest is pid 1 in there and the pid it passes
+//     to kill() is namespace-local. `guest_pid` is the HOST-side pid from
+//     spawn(). Comparing them is a category error that happened to be
+//     invisible because it always said "no": measured, the guest saw itself as
+//     pid 3, pgid 1, and its child as pid 4, while the supervisor was
+//     comparing against a host pid in the hundreds of thousands.
+//
+// Observed: `timeout 1 sleep 5` ran the full 5 seconds and exited 0. The timer
+// fires, the kill is refused with EPERM, and coreutils gives up silently -- so
+// a hung command in the sandbox was never killed and anything using `timeout`
+// as a watchdog had none.
+//
+// The fix is to stop guessing and ask the kernel in the REQUESTER's own terms.
+// /proc/<requester>/task/<tid>/children is a host-pid list of that thread's
+// direct children; walking it transitively gives the descendant set. To turn
+// the guest's namespace-local target into a host pid we read NSpid out of
+// /proc/<host_pid>/status, whose LAST field is the pid in the innermost
+// namespace -- exactly the number the guest used.
+//
+// Fails CLOSED at every step: an unreadable proc file, a missing NSpid line,
+// or a walk that exceeds its bound all mean "not a descendant".
+//
+// Bounded deliberately. The walk is a DoS surface otherwise: a guest that
+// forks a deep tree would make the SUPERVISOR do unbounded work inside the
+// poll loop that the guest is blocked on.
+[[nodiscard]] bool is_descendant_of(std::uint32_t requester_host_pid,
+                                    std::int32_t  target_ns_pid) noexcept {
+    if (target_ns_pid <= 0 || requester_host_pid == 0) return false;
+
+    constexpr int kMaxVisit = 4096;    // generous for a build, bounded for a bomb
+
+    // Read a whole small proc file. Returns empty on any failure.
+    const auto slurp = [](const char* path) -> std::string {
+        const int fd = ::open(path, O_RDONLY | O_CLOEXEC);
+        if (fd < 0) return {};
+        std::string out;
+        char buf[4096];
+        for (;;) {
+            const auto n = ::read(fd, buf, sizeof buf);
+            if (n <= 0) break;
+            out.append(buf, static_cast<std::size_t>(n));
+            if (out.size() > 64 * 1024) break;     // a children list this big is a bomb
+        }
+        ::close(fd);
+        return out;
+    };
+
+    // The pid `host_pid` has in its INNERMOST namespace, from NSpid. A kernel
+    // without NSpid (pre-4.1) reports nothing, and we fail closed.
+    const auto ns_pid_of = [&](std::uint32_t host_pid) -> std::int32_t {
+        char path[64];
+        std::snprintf(path, sizeof path, "/proc/%u/status", host_pid);
+        const std::string st = slurp(path);
+        const auto at = st.find("\nNSpid:");
+        if (at == std::string::npos) return -1;
+        const auto eol = st.find('\n', at + 1);
+        const std::string line = st.substr(at + 1, eol - at - 1);
+        // "NSpid:\t<outer>\t<...>\t<innermost>" -- take the LAST field.
+        const auto sp = line.find_last_of(" \t");
+        if (sp == std::string::npos) return -1;
+        return static_cast<std::int32_t>(std::strtol(line.c_str() + sp + 1,
+                                                     nullptr, 10));
+    };
+
+    // Walk the requester's descendants, breadth-first, and ask each one what
+    // pid it thinks it has. Comparing in the GUEST's number space is what
+    // makes this correct regardless of how many namespaces are nested.
+    std::vector<std::uint32_t> frontier{requester_host_pid};
+    int visited = 0;
+    while (!frontier.empty() && visited < kMaxVisit) {
+        const std::uint32_t pid = frontier.back();
+        frontier.pop_back();
+        ++visited;
+
+        if (pid != requester_host_pid && ns_pid_of(pid) == target_ns_pid)
+            return true;
+
+        // Children are per-THREAD, so every task of this process contributes.
+        char tdir[64];
+        std::snprintf(tdir, sizeof tdir, "/proc/%u/task", pid);
+        DIR* d = ::opendir(tdir);
+        if (!d) continue;
+        while (const dirent* e = ::readdir(d)) {
+            if (e->d_name[0] < '0' || e->d_name[0] > '9') continue;
+            char cpath[128];
+            std::snprintf(cpath, sizeof cpath, "/proc/%u/task/%s/children",
+                          pid, e->d_name);
+            const std::string kids = slurp(cpath);
+            const char* p = kids.c_str();
+            while (*p) {
+                while (*p == ' ' || *p == '\n') ++p;
+                if (!*p) break;
+                char* end = nullptr;
+                const long v = std::strtol(p, &end, 10);
+                if (end == p) break;
+                if (v > 0) frontier.push_back(static_cast<std::uint32_t>(v));
+                p = end;
+            }
+        }
+        ::closedir(d);
+    }
+    return false;
 }
 
 #endif  // __linux__
@@ -218,6 +342,12 @@ Verdict decide(std::uint32_t nr, const std::uint64_t args[6],
             return record("ptrace", std::move(detail), true);
         if (guest_pgid != 0 && target == guest_pgid)
             return record("ptrace", std::move(detail), true);
+        // ...and a DESCENDANT, which is the ordinary debugger case the
+        // paragraph above describes ("a debugger attaching to its own child").
+        // Equality alone could never express it: a child's pid is neither the
+        // leader's pid nor the pgid.
+        if (is_descendant_of(guest_pid, static_cast<std::int32_t>(target)))
+            return record("ptrace", std::move(detail), true);
         return record("ptrace", std::move(detail), false);
     }
 
@@ -237,9 +367,29 @@ Verdict decide(std::uint32_t nr, const std::uint64_t args[6],
             const auto grp = static_cast<std::uint32_t>(-target);
             if (grp == guest_pgid || grp == guest_pid)
                 return record("kill", std::move(detail), true);
+            // ...or a group LED BY one of our descendants. `timeout` does
+            // exactly this: it putpgid()s the command into its own group and
+            // then signals kill(-pgid), so the pgid it passes is the child's
+            // namespace-local pid. The equality tests above are both
+            // host-side, so this form was always denied -- which is why
+            // `timeout 1 sleep 5` still ran the full five seconds even after
+            // the per-pid case started working.
+            //
+            // Safe for the same reason the per-pid case is: a group led by
+            // our descendant contains only processes that descendant could
+            // signal itself, and it cannot move a foreign process into a
+            // group it leads.
+            if (is_descendant_of(guest_pid, static_cast<std::int32_t>(grp)))
+                return record("kill", std::move(detail), true);
             return record("kill", std::move(detail), false);
         }
         if (guest_pgid != 0 && static_cast<std::uint32_t>(target) == guest_pgid)
+            return record("kill", std::move(detail), true);
+        // A process in our own group -- i.e. one of our descendants. This is
+        // the case the comment above promises and the equality tests could
+        // not deliver: `timeout` killing the command it supervises, `make`
+        // killing a failed recipe, a runner reaping its workers.
+        if (is_descendant_of(guest_pid, target))
             return record("kill", std::move(detail), true);
 
         // kill(-1, sig) is "every process I may signal". Inside a pid
