@@ -118,24 +118,25 @@ struct Preview {
 
 // ── Deliberately not here yet ─────────────────────────────────────────────
 //
-// Two features were designed here before they existed, and their types sat in
-// this header for a while with nothing populating them:
+// One of these two has since been built, and the note is updated rather than
+// deleted because the reasoning is still the rule:
 //
 //   Observation   — a "learning mode" that runs permissively and records what
 //                   it would have had to grant, so `npm install` once hands
 //                   you the allowlist instead of a sequence of failures.
-//   BlockedEvent  — a feed of what the sandbox actually stopped, from
-//                   seccomp-notify and landlock denials. "cargo tried
-//                   ptrace(PTRACE_ATTACH) and was denied" teaches what your
-//                   toolchain does; "your build failed" teaches nothing, and
-//                   is the difference between adding one allowlist line and
-//                   turning the sandbox off.
+//                   STILL NOT BUILT.
+//   BlockedEvent  — a feed of what the sandbox actually stopped. BUILT: it
+//                   lives in tool/util/sandbox_broker.hpp (seccomp-notify
+//                   denials) with a sibling in tool/util/handoff_gate.hpp for
+//                   trust handoffs, and the pane footer renders both. It is
+//                   not declared here because the producer owns the type —
+//                   the pane reads the feed, it does not define it.
 //
-// Both are worth building. Neither is built, so the structs are gone: a type
-// with a reducer arm and no producer is the same trap kSbMode was -- it reads
-// as a shipped feature to the next person, and it makes the pane look like it
-// reports things it cannot. See docs/design/sandbox-boundary.md §13 for the
-// implementation notes.
+// The rule that kept the structs out of this header until something populated
+// them: a type with a reducer arm and no producer is the same trap kSbMode
+// was. It reads as a shipped feature to the next person, and it makes the pane
+// look like it reports things it cannot. See docs/design/sandbox-boundary.md
+// §13 for the learning mode's implementation notes and §14 for the feeds.
 //
 // The learning mode carries a warning if it ever lands: it is a WEAKER sandbox
 // while it runs, and a mode that silently weakens a boundary is worse than no
@@ -185,5 +186,35 @@ struct SandboxPane {
 
 // Compile the config and describe the resulting walls, without spawning.
 [[nodiscard]] Preview preview_sandbox(const sandbox_cfg::Config& cfg);
+
+// Attach the wall report to the ROWS, and validate what the user typed.
+//
+// ── Why this is a separate pass ─────────────────────────────────────────
+//
+// Because the honesty only exists after the compile. build_sandbox_form()
+// knows the config and the host, which is enough to LOCK a row ("this kernel
+// cannot do per-port network") but not enough to annotate one ("your network
+// rule is enforced by landlock abi 10"). That second fact comes out of
+// claybin's GuaranteeReport, which needs the finished config. So: build, then
+// compile, then annotate.
+//
+// ── Why per-row and not just the footer ────────────────────────────────
+//
+// The footer already carried all of this, and that was the problem. Twelve
+// capabilities folded into one run-on line is a paragraph, and a paragraph is
+// what you skip. The user's actual question is never "what are all the walls",
+// it is "is the thing I just changed real" -- which is a question about ONE
+// row. Answering it next to that row turns a wall of text into a glance, and
+// it costs nothing: `Field::origin` already renders dim and right-aligned, for
+// exactly this ("where did this value come from") on the other panes.
+//
+// Validation lands in the same pass for the same reason. `Field::error` has
+// been in the form model since the beginning and no pane set it; meanwhile
+// this pane could accept `net_mode = ports` with an empty port list, which
+// compiles to an isolated namespace that denies everything -- the user asked
+// for "these ports" and silently got "nothing". A row that is self-defeating
+// should say so where it is typed.
+void annotate_sandbox_form(form::Form& f, const Preview& preview,
+                           const sandbox_cfg::Config& cfg);
 
 }  // namespace agentty::ui::panel

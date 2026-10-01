@@ -32,6 +32,7 @@
 #include "agentty/runtime/view/form_panel.hpp"
 #include "agentty/runtime/panel/sandbox.hpp"
 #include "agentty/tool/util/sandbox_broker.hpp"   // blocked_feed()
+#include "agentty/tool/util/handoff_gate.hpp"     // handoff_feed()
 
 #include <string>
 
@@ -51,12 +52,33 @@ namespace {
         return "cannot enforce: " + p.preview.error;
     }
 
+    // Only the walls that are NOT strong.
+    //
+    // This used to list all twelve, and that was the mistake. Every capability
+    // folded into one run-on line is a paragraph, and a paragraph next to a
+    // form is what the eye skips -- so the one `none` in the list read exactly
+    // like the eleven `strong`s around it. The full report now lives on the
+    // ROWS (annotate_sandbox_form), where it answers the question the user
+    // actually has, which is about the row they just changed.
+    //
+    // What stays here is the part no row owns: the walls that came out weaker
+    // than asked for. Those are the pane's reason to exist, and a short list
+    // of three is read where a list of twelve is not.
     std::string out;
     for (const auto& w : p.preview.walls) {
+        if (w.strength == "strong") continue;
+        // host.kernel_isolation is `none` on every process backend by
+        // definition, not as a degradation -- see docs/design/
+        // sandbox-boundary.md §13. Listing it here every time would train the
+        // user to ignore this line, which is the opposite of the point.
+        if (w.name == "host.kernel_isolation") continue;
         if (!out.empty()) out += "  \xc2\xb7  ";
         out += w.name + ": " + w.strength;
         if (!w.mechanism.empty()) out += " (" + w.mechanism + ")";
     }
+    if (!out.empty()) out = "weaker than asked \xe2\x80\xa2 " + out;
+    else
+        out = "every wall this policy asks for is enforced strongly";
 
     // Anything the policy ASKED for that this host cannot deliver. Never
     // folded in with the walls above: a capability that silently degraded is
@@ -102,6 +124,42 @@ namespace {
     return out;
 }
 
+// What the agent wrote that the HOST will later trust.
+//
+// Structurally separate from blocked_summary() above, and that is the point
+// rather than tidiness: a blocked syscall is the sandbox working, and a trust
+// handoff is the sandbox being *bypassed* -- the agent wrote an ordinary file
+// in a directory it is allowed to write, and something outside the sandbox will
+// execute it later. No wall in the report above can see that, because by the
+// time VS Code runs .vscode/tasks.json there is no sandbox in the picture.
+//
+// So this is the one line in the footer that reports on a boundary the wall
+// report cannot describe, which is exactly why it gets its own line instead of
+// being folded in.
+[[nodiscard]] std::string handoff_summary() {
+    const auto feed = tools::util::handoff::handoff_feed();
+    if (feed.empty()) return {};
+
+    std::string out = "host-trusted writes: ";
+    std::size_t shown = 0;
+    for (auto it = feed.rbegin(); it != feed.rend() && shown < 2; ++it, ++shown) {
+        if (shown) out += "  \xc2\xb7  ";
+        // The basename, not the full path: the footer is narrow and the
+        // interesting half of "/home/x/repo/.vscode/tasks.json" is the end.
+        std::string_view p{it->write.path};
+        if (const auto slash = p.rfind('/'); slash != std::string_view::npos)
+            p.remove_prefix(slash + 1);
+        // The KIND, not just the name. "tasks.json" means nothing to most
+        // people; "an editor task -- VS Code can run this when the folder
+        // opens" is the whole reason to care.
+        out += std::string{p} + " (" +
+               std::string{sandbox_cfg::explain(it->kind)} + ")";
+    }
+    if (feed.size() > shown)
+        out += "  (+" + std::to_string(feed.size() - shown) + " more)";
+    return out;
+}
+
 }  // namespace
 
 maya::Element sandbox_panel(const Model& m) {
@@ -118,6 +176,13 @@ maya::Element sandbox_panel(const Model& m) {
     // describe what would be enforced, and this is what actually happened.
     if (const auto blocked = blocked_summary(); !blocked.empty())
         form.note = blocked + "\n" + form.note;
+
+    // And trust handoffs above THOSE, because they outrank a denial. A blocked
+    // syscall is the sandbox holding; a handoff is the one thing here that
+    // escapes it without breaking it, and it is the escape class every incident
+    // in Pillar's July 2026 series actually used.
+    if (const auto hand = handoff_summary(); !hand.empty())
+        form.note = hand + "\n" + form.note;
 
     // The one thing this pane must never leave unsaid: a save here does NOT
     // change the running sandbox.

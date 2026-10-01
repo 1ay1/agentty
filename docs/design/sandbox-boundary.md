@@ -1106,6 +1106,10 @@ change broke what.
   whatever the user adds. A secret in `config.local.yaml` is invisible to it.
 - **The bwrap/claybin asymmetry in §6** is inherent, not a bug list. bwrap
   cannot express seccomp or cgroups; the honesty rule is the mitigation.
+- **The handoff row enforced nothing** until §14. It is wired now (all four
+  authoring tools, `ErrorKind::Denied`, a recorded feed), which leaves the
+  shape table itself as the bound: a trusted path whose shape is not in
+  `kRules` is not caught. That is the same trade as the mask name list.
 
 ### Rules for whoever does this
 
@@ -1123,3 +1127,118 @@ change broke what.
   crash — a stale captured copy, which is the hazard `SubsKey`'s own header
   warns about.
 - Prove enforcement in the child, not in the table (§10).
+
+---
+
+## 14. The trust-handoff gate, and why it is not a wall
+
+The `handoff` row shipped before its enforcement did. For a while the pane
+offered refuse/warn/allow, persistence round-tripped the value, and
+`is_host_trusted()` had **zero callers** outside its own unit test. That is
+§9a's rule broken by the file that argues for it: a declared control that
+enforces nothing.
+
+It is closed now (`tool/util/handoff_gate.{hpp,cpp}`), and the interesting part
+is *where*.
+
+### The sandbox is the wrong altitude
+
+Every wall in §6 confines the **process**. A trust handoff is not a process
+doing something forbidden — it is the agent writing a perfectly ordinary file,
+inside the workspace it is allowed to write, which something **outside** the
+sandbox executes later. By the time VS Code runs `.vscode/tasks.json` there is
+no sandbox in the picture at all. There is no landlock rule, no seccomp filter
+and no cgroup that can see that sequence, because the dangerous half happens
+after the sandboxed process is gone.
+
+So the gate is not a wall. It sits on the **tool call**, before the bytes land:
+`write`, `edit`, `apply_patch` and `move` all route their destination path
+through `handoff::check()` in the mcp bridge.
+
+It also cannot be a seccomp rule, for the reason `sandbox_broker.hpp` spells
+out at length: a decision made from a path read out of a syscall argument is a
+TOCTOU bug, not a policy. The gate works on a path the *caller* passed us
+in-process, which is a completely different thing from a pointer into guest
+memory.
+
+### Why all four tools
+
+Gating only `write` would leave three doors open and read as covered:
+
+- `edit` can add a credential helper to an existing `.git/config`
+- `apply_patch` can do the same inside a diff
+- `move` can walk an inert file into a trusted *name* — which is the Cursor
+  3.0.0 bug (a git directory under another name) run backwards
+
+For `move` the **destination** is what matters. The source being innocuous is
+precisely the attack.
+
+### Why the feed records allows
+
+`handoff_feed()` records every handoff, including the ones policy permitted.
+A feed that only listed refusals would go blank exactly when the user has
+turned the gate off — which is when they most need to see what the agent is
+authoring. Recording happens *before* the policy branch for that reason.
+
+Bounded at 32 (vs the broker's 64) and keyed by **path** rather than by order:
+a handoff is a fact about a file, so the same file rewritten three times in a
+turn is one entry, not three. The broker's feed is the opposite — there the
+order is the information.
+
+### Refuse is the default, and the message is load-bearing
+
+A refusal that only says "no" gets retried, and a retry loop against a security
+gate is worse than either outcome. So the message names the mechanism *and* the
+alternative ("write the content somewhere inert and ask the user to wire it
+up"), which ends the loop in one turn. `handoff_gate_test` asserts both halves
+are present, so a reword cannot quietly drop the half that does the work.
+
+The error kind is `ErrorKind::Denied`, new and deliberately distinct from
+`OutOfWorkspace`: that one is a path error the model fixes by picking another
+path, this one means the call was well-formed and the answer is still no.
+
+---
+
+## 15. Per-row honesty
+
+The wall report was correct and **unread**. Twelve capabilities folded into one
+footer line is a paragraph, and a paragraph next to a form is what the eye
+skips — so the single `none` in that list looked exactly like the eleven
+`strong`s around it. The pane was technically honest and practically silent,
+which on a security surface is most of the way back to "sandbox: active".
+
+The fix is that the report now reaches the **row**
+(`annotate_sandbox_form()`), because the user's question is never "what are all
+twelve walls" — it is "is the thing I just changed real", and that is a
+question about one row.
+
+- `Field::origin` carries `strong via landlock abi 10`. The **mechanism**, not
+  just the strength: a strength on its own is the same unfalsifiable claim as
+  "sandbox: active", and the mechanism is its receipt.
+- Rows with no capability behind them stay blank. `Also readable` is a bind
+  list, not a capability; annotating it with `filesystem.read` would be noise
+  pretending to be rigour.
+- When the compile **fails**, no row claims a strength. A confident per-row
+  "strong" read off a stale preview is the worst available lie, and there is a
+  test pinning that it cannot happen.
+
+`Field::error` now carries the configs that *compile and do not mean what they
+read like* — the class with no other surface to appear on, because claybin has
+nothing to refuse:
+
+| row | what it catches |
+|---|---|
+| ports | `net_mode=ports` with an empty list denies **all** network |
+| readable scope | `host-readable` grants read on `/` |
+| syscalls | `off` also disables **brokering** (the broker is the filter deciding at runtime) |
+| handoff | anything but `refuse` widens the blast radius, outside where walls reach |
+| scan depth | `0` is root-only, so a nested `services/*/.env` stays readable |
+
+The footer kept only what no row owns: walls that came out **weaker than
+asked**, and `host.kernel_isolation` is excluded from that list because it is
+`none` on every process backend by definition (§13) rather than as a
+degradation. Listing it every time would train the user to ignore the line.
+
+Above it sit the two feeds, in escalating order: blocked syscalls (the sandbox
+holding), then trust handoffs (the one thing here that escapes it without
+breaking it).

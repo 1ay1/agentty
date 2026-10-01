@@ -25,6 +25,7 @@
 #include <mcp/tools/util/progress.hpp>
 #include <mcp/tools/util/sandbox.hpp>
 #include "agentty/tool/util/sandbox.hpp"
+#include "agentty/tool/util/handoff_gate.hpp"
 #include <mcp/cap/capability.hpp>
 #include <mcp/cap/local.hpp>
 #include <mcp/codec.hpp>
@@ -489,6 +490,39 @@ std::vector<ToolDef> build_mcp_tool_defs() {
                          fp != args.end() && fp->is_string())
                     rag::feedback::note_file_opened(fp->get_ref<const std::string&>());
             }
+            // TRUST HANDOFF GATE. Before the bytes land, not after.
+            //
+            // This is the enforcement half of the Sandbox pane's "Agent writes
+            // host-executed files" row, which until now persisted a policy
+            // that nothing read. It sits here rather than inside the sandbox
+            // because the sandbox is the wrong altitude: writing
+            // .vscode/tasks.json is an ordinary write to a path the agent is
+            // allowed to write, and the escape happens later, outside, when
+            // VS Code runs it. No mount namespace sees that.
+            //
+            // All four authoring tools, not just `write`: `edit` can add a
+            // credential helper to an existing .git/config, `apply_patch` can
+            // do it in a diff, and `move` can walk an inert file into a
+            // trusted name -- which is the Cursor 3.0.0 bug (a .git directory
+            // under another name) in reverse. Gating only `write` would leave
+            // three doors open and read as covered.
+            if (tool_name == "write" || tool_name == "edit" ||
+                tool_name == "apply_patch" || tool_name == "move") {
+                // `move` names its target `destination`; the rest use `path`
+                // or `file_path`. Checking the DESTINATION is the point for a
+                // move -- the source being inert is exactly the attack.
+                for (const char* key : {"destination", "path", "file_path"}) {
+                    auto it = args.find(key);
+                    if (it == args.end() || !it->is_string()) continue;
+                    auto v = tools::util::handoff::check(
+                        it->get_ref<const std::string&>(), tool_name);
+                    if (!v.allowed)
+                        return std::unexpected(
+                            ToolError::denied(std::move(v.reason)));
+                    break;   // one path per call; first key present wins
+                }
+            }
+
             auto r = provider->execute(::mcp::cap::Request{tool_name, args});
             return decode_result(tool_name, std::move(r));
         };

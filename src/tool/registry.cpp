@@ -33,6 +33,7 @@ std::string_view to_string(ErrorKind k) noexcept {
         case ErrorKind::Subprocess:     return "subprocess failed";
         case ErrorKind::Io:             return "io";
         case ErrorKind::OutOfWorkspace: return "out of workspace";
+        case ErrorKind::Denied:         return "denied";
         case ErrorKind::Unknown:        return "unknown";
     }
     return "unknown";

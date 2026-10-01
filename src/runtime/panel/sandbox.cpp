@@ -562,6 +562,118 @@ Preview preview_sandbox(const sandbox_cfg::Config& cfg) {
     return out;
 }
 
+void annotate_sandbox_form(form::Form& f, const Preview& preview,
+                          const sandbox_cfg::Config& cfg) {
+    // Which capability answers for which row. The mapping is the whole point of
+    // the function and the only interesting thing in it: a row the user edits
+    // is a POLICY axis, and the wall report is indexed by CAPABILITY, so
+    // without this table the honest answer sits one translation away from the
+    // question. claybin's cap_name() strings are the keys (see
+    // claybin/core/witness.hpp).
+    //
+    // Not every row has one, and the gaps are honest rather than missing:
+    // `Also readable` is a bind list, not a capability -- the wall that governs
+    // it is filesystem.read, already shown on the scope row above it, and
+    // repeating it on four path rows would be noise pretending to be rigour.
+    struct RowCap { std::string_view row; std::string_view cap; };
+    static constexpr RowCap kRowCaps[] = {
+        {kSbFsScope,    "filesystem.read"},
+        {kSbNetMode,    "network.isolation"},
+        {kSbSyscalls,   "syscall.filter"},
+        {kSbMemoryMb,   "resource.memory"},
+        {kSbMaxProcs,   "resource.pids"},
+        {kSbCpuPercent, "resource.cpu"},
+    };
+
+    auto row_of = [&](std::string_view id) -> form::Field* {
+        for (auto& fld : f.fields)
+            if (fld.id == id) return &fld;
+        return nullptr;
+    };
+    auto wall_of = [&](std::string_view cap) -> const Wall* {
+        for (const auto& w : preview.walls)
+            if (w.name == cap) return &w;
+        return nullptr;
+    };
+
+    // ── the walls, next to the rows that ask for them ────────────────────
+    for (const auto& [row_id, cap] : kRowCaps) {
+        auto* fld = row_of(row_id);
+        if (!fld) continue;
+
+        if (!preview.compiled) {
+            // The policy does not compile, so NO row's wall is known. Saying
+            // "strong" here off a stale preview would be the worst possible
+            // lie: confident, per-row, and wrong.
+            fld->origin = "\xe2\x80\x94";
+            continue;
+        }
+        const auto* w = wall_of(cap);
+        if (!w) continue;
+
+        // "strong via landlock abi 10", not "strong". The mechanism IS the
+        // receipt -- a strength on its own is the same unfalsifiable claim as
+        // "sandbox: active", which is the bug this pane was built after.
+        fld->origin = w->mechanism.empty()
+            ? w->strength
+            : w->strength + " via " + w->mechanism;
+    }
+
+    // ── validation: rows that defeat themselves ──────────────────────────
+    //
+    // Each of these is a setting that COMPILES and does not do what it reads
+    // like. That is the dangerous class: a config error claybin would reject is
+    // already reported in the footer, but a config that quietly means something
+    // else has no other surface to appear on.
+
+    // Per-port network with no ports is an empty namespace: the user asked to
+    // allow a specific set and allowed nothing.
+    if (cfg.net_mode == sandbox_cfg::NetMode::Ports && cfg.allow_ports.empty()) {
+        if (auto* fld = row_of(kSbPorts))
+            fld->error = "no ports listed, so this denies all network \xc2\xb7 "
+                         "set Access to none if that is what you meant";
+    }
+
+    // Host-readable is not a scope, it is the absence of one. Not an error --
+    // it is a legitimate choice for a user who wants only the write wall -- but
+    // it must not read like one more option on a list.
+    if (cfg.fs_scope == sandbox_cfg::FsScope::HostReadable) {
+        if (auto* fld = row_of(kSbFsScope))
+            fld->error = "grants read on / \xc2\xb7 secrets outside the mask list "
+                         "are reachable";
+    }
+
+    // Off is a real choice (a user whose toolchain breaks under the filter
+    // should be able to say so) but it also disables BROKERING, because the
+    // broker is the filter deciding at runtime. Turning off one row silently
+    // turning off another is exactly the kind of coupling a user cannot infer.
+    if (cfg.syscall_mode == sandbox_cfg::SyscallMode::Off) {
+        if (auto* fld = row_of(kSbSyscalls))
+            fld->error = "no filter, and no brokering either \xc2\xb7 "
+                         "ptrace and kill stop being supervised";
+    }
+
+    // A handoff policy other than refuse is the one setting here that widens
+    // the blast radius rather than narrowing it, and it does so OUTSIDE the
+    // sandbox where no wall reports on it. The footer's wall report structurally
+    // cannot mention it, so the row has to carry its own warning.
+    if (cfg.handoff != sandbox_cfg::HandoffPolicy::Refuse) {
+        if (auto* fld = row_of(kSbHandoff))
+            fld->error = cfg.handoff == sandbox_cfg::HandoffPolicy::Allow
+                ? "the agent may author files your host later executes \xc2\xb7 "
+                  "this is the shape of every escape in Pillar's 2026 series"
+                : "allowed and recorded \xc2\xb7 the write still happens";
+    }
+
+    // Secret masking off entirely. Depth 0 still covers the workspace root, so
+    // this is not "no masking" -- saying which is better than letting the user
+    // guess from a 0.
+    if (cfg.mask_scan_depth == 0) {
+        if (auto* fld = row_of(kSbMaskDepth))
+            fld->error = "root only \xc2\xb7 a nested services/*/.env stays readable";
+    }
+}
+
 #else
 
 Preview preview_sandbox(const sandbox_cfg::Config&) {
@@ -574,6 +686,14 @@ Preview preview_sandbox(const sandbox_cfg::Config&) {
     out.compiled = false;
     out.error = "the configurable sandbox is Linux-only on this build";
     return out;
+}
+
+void annotate_sandbox_form(form::Form&, const Preview&,
+                           const sandbox_cfg::Config&) {
+    // Nothing to annotate: there are no walls to report and every row is
+    // already locked by build_sandbox_form on a host with no backend. A
+    // per-row "none" next to a row that already says why would be the same
+    // fact twice.
 }
 
 #endif

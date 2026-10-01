@@ -507,3 +507,142 @@ TEST_CASE("sandbox pane: the wall report tracks the rows") {
     if (after.compiled) CHECK(!after.walls.empty());
     (void)before;
 }
+
+// ── Per-row honesty ──────────────────────────────────────────────────────
+//
+// The wall report was correct and unread: twelve capabilities folded into one
+// footer line, where the single `none` looked exactly like the eleven
+// `strong`s beside it. These pin the fix -- the report reaching the ROW the
+// user is editing, which is the only place the question gets asked.
+
+TEST_CASE("sandbox pane: a row carries the wall that enforces it") {
+    sandbox_cfg::Config cfg;
+    cfg.configured = true;
+    cfg.backend = sandbox_cfg::LinuxBackend::Claybin;
+    install(cfg);
+
+    auto form = pn::build_sandbox_form(cfg, /*claybin_available=*/true, 10);
+    const auto preview = pn::preview_sandbox(cfg);
+    pn::annotate_sandbox_form(form, preview, cfg);
+
+#if defined(__linux__)
+    if (preview.compiled) {
+        // The mechanism, not just the strength. "strong" alone is the same
+        // unfalsifiable claim as "sandbox: active"; "strong via landlock abi
+        // 10" has its receipt attached, and that distinction is the entire
+        // reason this annotation exists.
+        const int sys = row_of(form, pn::kSbSyscalls);
+        REQUIRE(sys >= 0);
+        const auto& origin = form.fields[static_cast<std::size_t>(sys)].origin;
+        CHECK(!origin.empty());
+        CHECK(origin.find("via") != std::string::npos);
+    }
+#endif
+    // A row with no capability behind it must stay unannotated rather than
+    // borrow a neighbour's: "Also readable" is a bind list, and labelling it
+    // with filesystem.read would be a claim about the wrong thing.
+    const int extra = row_of(form, pn::kSbReadPaths);
+    REQUIRE(extra >= 0);
+    CHECK(form.fields[static_cast<std::size_t>(extra)].origin.empty());
+}
+
+TEST_CASE("sandbox pane: per-port network with no ports says it denies all") {
+    // The dangerous shape: this COMPILES, and it does not mean what it reads
+    // like. The user asked to allow a specific set and allowed nothing, so
+    // claybin has nothing to refuse and the footer stays quiet. Only the row
+    // can catch it.
+    sandbox_cfg::Config cfg;
+    cfg.configured = true;
+    cfg.backend = sandbox_cfg::LinuxBackend::Claybin;
+    cfg.net_mode = sandbox_cfg::NetMode::Ports;
+    cfg.allow_ports.clear();
+    install(cfg);
+
+    auto form = pn::build_sandbox_form(cfg, true, 10);
+    pn::annotate_sandbox_form(form, pn::preview_sandbox(cfg), cfg);
+
+    const int ports = row_of(form, pn::kSbPorts);
+    REQUIRE(ports >= 0);
+    CHECK(!form.fields[static_cast<std::size_t>(ports)].error.empty());
+
+    // And it goes away once the config is coherent -- an error that never
+    // clears is a label, and users learn to read past labels.
+    cfg.allow_ports = {443};
+    auto ok = pn::build_sandbox_form(cfg, true, 10);
+    pn::annotate_sandbox_form(ok, pn::preview_sandbox(cfg), cfg);
+    const int ports2 = row_of(ok, pn::kSbPorts);
+    REQUIRE(ports2 >= 0);
+    CHECK(ok.fields[static_cast<std::size_t>(ports2)].error.empty());
+}
+
+TEST_CASE("sandbox pane: turning the syscall filter off says brokering goes too") {
+    // Coupling the user cannot infer: the broker IS the filter deciding at
+    // runtime, so Off disables supervision of ptrace and kill as well. One row
+    // silently disarming another is exactly what a settings pane must not do.
+    sandbox_cfg::Config cfg;
+    cfg.configured = true;
+    cfg.backend = sandbox_cfg::LinuxBackend::Claybin;
+    cfg.syscall_mode = sandbox_cfg::SyscallMode::Off;
+    install(cfg);
+
+    auto form = pn::build_sandbox_form(cfg, true, 10);
+    pn::annotate_sandbox_form(form, pn::preview_sandbox(cfg), cfg);
+
+    const int sys = row_of(form, pn::kSbSyscalls);
+    REQUIRE(sys >= 0);
+    const auto& err = form.fields[static_cast<std::size_t>(sys)].error;
+    CHECK(!err.empty());
+    CHECK(err.find("brokering") != std::string::npos);
+}
+
+TEST_CASE("sandbox pane: loosening the handoff policy warns on the row") {
+    // The one setting here that WIDENS the blast radius, and it does so
+    // outside the sandbox where no wall reports on it -- the footer's wall
+    // report structurally cannot mention it. So the row has to carry it.
+    sandbox_cfg::Config cfg;
+    cfg.configured = true;
+    cfg.backend = sandbox_cfg::LinuxBackend::Claybin;
+    cfg.handoff = sandbox_cfg::HandoffPolicy::Allow;
+    install(cfg);
+
+    auto form = pn::build_sandbox_form(cfg, true, 10);
+    pn::annotate_sandbox_form(form, pn::preview_sandbox(cfg), cfg);
+
+    const int h = row_of(form, pn::kSbHandoff);
+    REQUIRE(h >= 0);
+    CHECK(!form.fields[static_cast<std::size_t>(h)].error.empty());
+
+    // Refuse is the default and must be silent: a warning on the SAFE setting
+    // trains the user to ignore the warning on the unsafe one.
+    cfg.handoff = sandbox_cfg::HandoffPolicy::Refuse;
+    auto safe = pn::build_sandbox_form(cfg, true, 10);
+    pn::annotate_sandbox_form(safe, pn::preview_sandbox(cfg), cfg);
+    const int h2 = row_of(safe, pn::kSbHandoff);
+    REQUIRE(h2 >= 0);
+    CHECK(safe.fields[static_cast<std::size_t>(h2)].error.empty());
+}
+
+TEST_CASE("sandbox pane: a policy that will not compile annotates no walls") {
+    // The worst possible lie would be a confident per-row "strong" read off a
+    // stale preview. When the compile fails, every annotated row must say it
+    // does not know rather than repeat the last thing that worked.
+    sandbox_cfg::Config cfg;
+    cfg.configured = true;
+    cfg.backend = sandbox_cfg::LinuxBackend::Claybin;
+    install(cfg);
+
+    auto form = pn::build_sandbox_form(cfg, true, 10);
+    pn::Preview broken;
+    broken.compiled = false;
+    broken.error = "fabricated: the host cannot build this";
+    pn::annotate_sandbox_form(form, broken, cfg);
+
+    for (auto id : {pn::kSbFsScope, pn::kSbNetMode, pn::kSbSyscalls}) {
+        const int i = row_of(form, id);
+        if (i < 0) continue;
+        const auto& origin = form.fields[static_cast<std::size_t>(i)].origin;
+        // Not a strength claim. Either empty or the em-dash placeholder, but
+        // never "strong".
+        CHECK(origin.find("strong") == std::string::npos);
+    }
+}

@@ -59,7 +59,7 @@ set(_AGENTTY_CONSOLIDATED
     palette_nav_test panel_test panel_nav_test status_bar_cache_test
     appearance_rows_test
     issue37_terminal_respect_test
-    param_tag_repair_test sandbox_escape_test sandbox_pane_test sandbox_broker_test scope_test table_render_test
+    param_tag_repair_test sandbox_escape_test sandbox_pane_test sandbox_broker_test handoff_gate_test scope_test table_render_test
     ssrf_guard_test render_key_coverage_test reasoning_render_test
     plugin_config_test skills_engine_test skill_effects_trust_test
     skill_screen_test

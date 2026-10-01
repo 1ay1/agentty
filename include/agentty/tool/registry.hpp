@@ -47,6 +47,12 @@ enum class ErrorKind : std::uint8_t {
     Subprocess,     // subprocess returned non-zero
     Io,             // generic I/O (write_file failed, etc.)
     OutOfWorkspace, // path is outside the configured workspace root
+    // Refused by policy, not by the filesystem. Distinct from OutOfWorkspace
+    // (a path error the model fixes by picking another path) because the
+    // remedy is different: the call was well-formed and the answer is still
+    // no. Retrying it verbatim is always wrong, and a kind that reads as an
+    // I/O hiccup invites exactly that retry.
+    Denied,
     Unknown,        // uncaught exception / unknown tool
 };
 
@@ -72,6 +78,7 @@ struct ToolError {
     [[nodiscard]] static ToolError subprocess(std::string d)      noexcept { return {ErrorKind::Subprocess,    std::move(d)}; }
     [[nodiscard]] static ToolError io(std::string d)              noexcept { return {ErrorKind::Io,            std::move(d)}; }
     [[nodiscard]] static ToolError out_of_workspace(std::string d) noexcept { return {ErrorKind::OutOfWorkspace, std::move(d)}; }
+    [[nodiscard]] static ToolError denied(std::string d)          noexcept { return {ErrorKind::Denied,         std::move(d)}; }
     [[nodiscard]] static ToolError unknown(std::string d)         noexcept { return {ErrorKind::Unknown,       std::move(d)}; }
 
     // "[not found] path/to/file" — the UI's default stringification when it

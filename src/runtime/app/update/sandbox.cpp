@@ -95,8 +95,15 @@ namespace sb = agentty::tools::util::sandbox;
 
 // Recompute the walls from the form. Runs after every edit, so the report
 // and the rows cannot disagree.
+//
+// Annotation happens HERE rather than in build_sandbox_form because it needs
+// the compile result, and the compile needs the finished config. Doing it in
+// the same function as the compile is what keeps the per-row wall from going
+// stale: there is no path that reprices without re-annotating.
 void reprice(pn::Sandbox& o) {
-    o.pane.preview = pn::preview_sandbox(pn::read_sandbox_form(o.pane.form, sb::config()));
+    const auto cfg = pn::read_sandbox_form(o.pane.form, sb::config());
+    o.pane.preview = pn::preview_sandbox(cfg);
+    pn::annotate_sandbox_form(o.pane.form, o.pane.preview, cfg);
 }
 
 // Rebuild the rows from a config, keeping the user's place in the list --
