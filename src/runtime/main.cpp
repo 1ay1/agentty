@@ -668,13 +668,14 @@ void print_usage() {
                                       "(Linux: bwrap, macOS: sandbox-exec). MODE = auto "
                                       "(default: use if available), on (require backend; "
                                       "fail otherwise), off (disable wrapping).", kOptGutter),
-        entry("      --sandbox-backend B", "Linux sandbox implementation: bwrap (default, "
-                                            "uses the bubblewrap binary) or claybin "
-                                            "(in-process library; adds a seccomp filter, "
-                                            "landlock and cgroup2 limits). Most Sandbox "
-                                            "settings only apply under claybin — bwrap "
-                                            "cannot express them. Settable in the "
-                                            "Sandbox settings pane too.",
+        entry("      --sandbox-backend B", "Linux sandbox implementation: claybin (default, "
+                                            "in-process; adds seccomp + landlock + cgroup2) "
+                                            "or bwrap (fallback, uses the bubblewrap binary; "
+                                            "mount namespaces only). A host that cannot run "
+                                            "claybin falls back to bwrap automatically. "
+                                            "Most Sandbox settings only apply under "
+                                            "claybin \u2014 bwrap cannot express them. "
+                                            "Settable in the Sandbox settings pane too.",
               kOptGutter),
         entry("      --log-file PATH", "Write the diagnostic log here instead of "
                                        "~/.agentty/logs/agentty.log. What gets captured "

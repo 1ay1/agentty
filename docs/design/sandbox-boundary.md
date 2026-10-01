@@ -186,9 +186,11 @@ partial boundary.
    explicitly asked, then bwrap, then gave up. So the default (bwrap) failing
    meant no backend, even with claybin sitting right there. It now tries
    claybin as a last resort *after* bwrap has actually been tried — order
-   matters: when both work the default stays bwrap, because a decade of
-   upstream hardening beats a better feature list and nobody's boundary should
-   change on upgrade.
+   matters: when both work the default is now claybin, because the measured
+   comparison retired the old argument. agentty's bwrap path emits no
+   `--seccomp`, no cgroup limits and no landlock, so bwrap is strictly weaker
+   on syscall.filter, all three resource caps, filesystem.exec and brokering,
+   and wins nothing. See §18.
 
 ### Toolchain paths
 
@@ -1417,3 +1419,74 @@ inverse (running claybin must still get credit — a pane that never credits
 claybin is as useless as one that always does), the inactive-sandbox case, the
 `describe_running` invariance, the `engine_status` truth table, and the per-row
 tense.
+
+---
+
+## 18. claybin is the default now, and bwrap is not deleted
+
+The ask was "prove claybin is as secure as bwrap, then delete bwrap". The first
+half measured out stronger than the claim. The second half would have been a
+security regression, so it did not happen.
+
+### The measurement
+
+`sandbox_audit` prints the real `GuaranteeReport` for this host. Against what
+`build_bwrap_argv` actually emits — and the flag list is short: `--unshare-*`,
+`--ro-bind`, `--bind`, `--tmpfs`, `--proc`, `--dev`, `--die-with-parent`:
+
+| capability | claybin | agentty's bwrap path |
+|---|---|---|
+| filesystem.read / write | strong (mount-ns) | strong (mount-ns) |
+| filesystem.exec | strong (landlock) | partial (binds only) |
+| network.isolation | strong (netns) | none (`--share-net`) |
+| syscall.filter | **strong** (seccomp-bpf) | **none** — we never pass `--seccomp` |
+| resource.memory / cpu / pids | **strong** (cgroup2) | **none** |
+| privilege.drop | strong | strong |
+| ptrace + kill brokering | yes (seccomp-notify) | **none** |
+
+bwrap *can* take a seccomp BPF program on an fd, and agentty does not give it
+one — writing a BPF compiler to feed it would be rebuilding claybin inside the
+bwrap path. So "as secure as" understates it: **there is no capability where
+bwrap wins.** Defaulting to it was costing every user walls they could have had.
+
+The old argument for bwrap-by-default was that a decade of upstream hardening
+beats days, and that an upgrade should not silently move anyone's boundary.
+The first half is about *bubblewrap the project*, not about the four flags we
+pass it — those are mount namespaces, and claybin builds the same ones. The
+second half is fair, and the answer is that every change here is **upward**,
+and the pane now states exactly which engine is in force (§17) rather than
+leaving it to be inferred.
+
+### Why bwrap stays
+
+Because the two engines are **complementary, not ranked**. They fail on
+different hosts:
+
+- **bwrap dies** where unprivileged user namespaces are denied — Ubuntu 24.04's
+  AppArmor profile blocks the `uid_map` write. That host is precisely why
+  claybin was added (§3a).
+- **claybin dies** where its walls do not exist. Landlock landed in 5.13, so a
+  RHEL/CentOS kernel older than that has none of it; a container host without
+  cgroup2 delegation loses the resource caps.
+
+On that second class of host, deleting bwrap does not leave the user with
+claybin. `claybin_backend::available()` returns false and they get
+`Backend::None` — **no sandbox at all**, where today they get real mount
+namespaces. Trading a weaker boundary for no boundary, on the machines least
+equipped to notice, is issue #21 wearing a different hat.
+
+That is why the fallback is a *security property* and has its own test, not a
+piece of legacy waiting to be cleaned up.
+
+### What changed, concretely
+
+- `g_linux_pref` defaults to `Claybin`
+- `Config::backend` defaults to `LinuxBackend::Claybin`
+- `--sandbox-backend` help and `docs/SANDBOX.md` describe claybin as default,
+  bwrap as fallback
+- the existing fallback direction is unchanged and now load-bearing: asking for
+  claybin on a host that refuses it still yields **bwrap, not None**
+
+Two tests pin it: the default is claybin and a usable host is never `None`, and
+a claybin request on a refusing host lands on one of the two Linux engines
+rather than falling through.

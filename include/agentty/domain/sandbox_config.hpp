@@ -187,12 +187,16 @@ inline constexpr const char* kAlwaysMaskedNames[] = {
 // mount namespaces and nothing else, so the syscall profile, per-port
 // network, W^X and the cgroup caps have no bwrap spelling at all.
 enum class LinuxBackend : std::uint8_t {
-    // bubblewrap, via the binary the user already has. What agentty shipped
-    // first, and still the default: a decade of upstream hardening, and it
-    // does not change anyone's boundary on upgrade.
+    // bubblewrap, via the binary the user already has. The FALLBACK: kept
+    // because the two engines fail on different hosts, not because it is
+    // weaker-but-safer. A kernel older than landlock (RHEL < 5.13) cannot
+    // build claybin's walls at all, and removing bwrap there would leave the
+    // user with no sandbox rather than a lesser one.
     Bwrap,
-    // The in-process library. Adds a seccomp filter, landlock and cgroup2
-    // limits -- i.e. everything the pane's other rows describe.
+    // The in-process library, and the DEFAULT. Adds a seccomp filter,
+    // landlock and cgroup2 limits -- i.e. everything the pane's other rows
+    // describe. Strictly stronger than bwrap on every measured capability;
+    // see tool/util/sandbox.hpp's LinuxPreference for the table.
     Claybin,
 };
 
@@ -286,7 +290,11 @@ struct Config {
     // First field because it gates the meaning of most of the others. The
     // pane renders it first and locks the rows the chosen backend cannot
     // enforce, rather than accepting a setting that does nothing.
-    LinuxBackend backend = LinuxBackend::Bwrap;
+    //
+    // Defaults to claybin: it is strictly stronger on every measured
+    // capability, and a host that cannot run it falls back to bwrap rather
+    // than to nothing.
+    LinuxBackend backend = LinuxBackend::Claybin;
 
     // ── Filesystem ───────────────────────────────────────────────────
     FsScope fs_scope = FsScope::Toolchain;

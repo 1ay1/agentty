@@ -60,11 +60,23 @@ namespace {
 std::atomic<Mode>    g_mode{Mode::Auto};
 std::atomic<Backend> g_backend{Backend::None};
 
-// Which Linux backend to prefer when both could work. bwrap is the default on
-// purpose -- see the note on LinuxPreference in the header: a decade of
-// hardening versus days, so the newer one is opt-in rather than a silent
-// migration.
-std::atomic<LinuxPreference> g_linux_pref{LinuxPreference::Bwrap};
+// Which Linux backend to prefer when both could work.
+//
+// claybin is the default. The fallback below means this is a PREFERENCE and
+// not a requirement -- a host that cannot build claybin's walls still gets
+// bwrap, never None.
+//
+// It used to be bwrap, on the reasoning that a decade of upstream hardening
+// beat days and that an upgrade should not silently move anyone's boundary.
+// The measurement retired that argument: agentty's bwrap path emits no
+// --seccomp, no cgroup limits and no landlock, so against claybin it is
+// strictly weaker on syscall.filter (none vs strong), all three resource caps
+// (none vs strong), filesystem.exec (binds vs landlock) and brokering (none vs
+// seccomp-notify). There is no capability where bwrap wins. Defaulting to the
+// weaker engine was costing every user walls they could have had, and "the
+// upgrade changes your boundary" is defensible when every change is upward and
+// the pane states exactly which engine is in force (see HostFacts).
+std::atomic<LinuxPreference> g_linux_pref{LinuxPreference::Claybin};
 
 // The user's saved sandbox policy. Written ONCE, at startup, then frozen.
 //

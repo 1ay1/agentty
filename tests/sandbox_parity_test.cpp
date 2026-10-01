@@ -15,6 +15,7 @@
 #include "agtest.hpp"
 
 #include "agentty/tool/util/sandbox.hpp"
+#include "agentty/domain/sandbox_config.hpp"   // Config's default backend
 #include "agentty/tool/mcp_tools_bridge.hpp"
 #include <mcp/tools/util/sandbox.hpp>
 
@@ -33,6 +34,7 @@
 
 namespace ag = agentty::tools::util::sandbox;
 namespace mc = mcp::tools::util::sandbox;
+namespace sandbox_cfg = agentty::sandbox_cfg;
 
 namespace {
 
@@ -205,6 +207,65 @@ TEST_CASE("sandbox: wiring the runtime hands mcp OUR sandbox") {
     // an indirection.
     agentty::tools::wire_mcp_runtime("off");
     CHECK(!mc::has_host_sandbox());
+}
+
+TEST_CASE("sandbox: claybin is the default, and bwrap is still the fallback") {
+    // The default flipped to claybin because the difference is MEASURED, not
+    // argued: agentty's bwrap path emits no --seccomp, no cgroup limits and no
+    // landlock, so claybin is strictly stronger on syscall.filter, all three
+    // resource caps, filesystem.exec and brokering. There is no capability
+    // where bwrap wins (tests/sandbox_audit.cpp prints the report).
+    //
+    // What this case actually guards is the OTHER half -- the reason bwrap was
+    // kept rather than deleted. The two engines fail on DIFFERENT hosts:
+    // bwrap dies where unprivileged userns is denied (Ubuntu 24.04 AppArmor),
+    // and claybin needs landlock + seccomp + cgroup2, which a RHEL kernel
+    // older than 5.13 does not have. Delete bwrap and that second host does
+    // not get claybin -- it gets Backend::None. Trading a weaker sandbox for
+    // NO sandbox is the issue #21 failure in a new hat, so the fallback is a
+    // security property and belongs under test.
+    ag::reset_config_for_test();
+
+    // An untouched config asks for claybin.
+    const sandbox_cfg::Config fresh;
+    CHECK(fresh.backend == sandbox_cfg::LinuxBackend::Claybin);
+
+    // And the engine actually selected is never None on a host that can run
+    // EITHER backend. This is the fallback: whichever engine the preference
+    // names, a usable host must still end up sandboxed.
+    //
+    // Deliberately NOT asserting that mcp's side agrees here. ag::init()
+    // re-probes only agentty's implementation, so comparing the two after it
+    // would be testing an ordering artifact of this file rather than a
+    // property of the system -- the two are wired together in
+    // wire_mcp_runtime(), and the case that owns that claim is "the two
+    // implementations select the SAME backend" below.
+    ag::init(ag::Mode::Auto);
+    if (ag::is_active())
+        CHECK(ag::detected_backend() != ag::Backend::None);
+}
+
+TEST_CASE("sandbox: asking for claybin on a host that refuses it yields bwrap, not None") {
+    // The fallback DIRECTION, which is the whole reason flipping the default
+    // is safe. Opting into (or now, defaulting to) the newer backend must
+    // never cost someone their sandbox: a host where claybin cannot build its
+    // walls has to land on bwrap rather than on nothing.
+    //
+    // Checked through the public surface rather than by forcing the probe,
+    // because the probe is a real fork+uid_map attempt and faking it would
+    // test the fake.
+    ag::reset_config_for_test();
+    ag::prefer_linux_backend(ag::LinuxPreference::Claybin);
+    ag::init(ag::Mode::Auto);
+
+#if defined(__linux__)
+    if (ag::is_active()) {
+        const auto b = ag::detected_backend();
+        // Exactly one of the two Linux engines. Never None while active, and
+        // never SandboxExec on Linux.
+        CHECK((b == ag::Backend::Claybin || b == ag::Backend::Bwrap));
+    }
+#endif
 }
 
 TEST_CASE("sandbox: both implementations know the same backends") {

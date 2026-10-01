@@ -30,13 +30,39 @@ For the reasoning, the per-backend capability table and the known gaps, see
 
 | backend | platform | selected |
 |---|---|---|
-| `bwrap` (bubblewrap) | Linux | default |
+| `claybin` | Linux | **default** |
+| `bwrap` (bubblewrap) | Linux | fallback |
 | `sandbox-exec` | macOS | default |
+
+On Linux, `claybin` is the default because it is strictly stronger and the
+difference is measured, not asserted — agentty's bwrap path emits no
+`--seccomp`, no cgroup limits and no landlock:
+
+| capability | claybin | bwrap |
+|---|---|---|
+| filesystem read/write | strong (mount ns) | strong (mount ns) |
+| filesystem exec | strong (landlock) | partial (binds only) |
+| syscall filter | strong (seccomp-bpf) | **none** |
+| memory / cpu / pids caps | strong (cgroup2) | **none** |
+| ptrace + kill brokering | yes (seccomp-notify) | **none** |
+
+There is no capability where bwrap wins. Run `sandbox_audit` to print this
+report for your own host.
+
+`bwrap` stays as the fallback because the two fail on *different* hosts, not
+because it is a safer default. bwrap dies where unprivileged user namespaces
+are denied (Ubuntu 24.04's AppArmor profile); claybin needs landlock, which a
+kernel older than 5.13 does not have. Asking for claybin on a host that cannot
+run it gives you bwrap, never "no sandbox" — opting into the stronger backend
+must not cost you your boundary.
+
+Override with `--sandbox-backend bwrap|claybin`, or the Backend row in the
+Sandbox settings pane.
 
 The startup banner names the one you actually got:
 
 ```
-agentty: sandbox: active (bwrap)
+agentty: sandbox: active (claybin)
 ```
 
 Availability is a **capability probe**, not a `which`. agentty runs a real

@@ -63,16 +63,32 @@ enum class Backend : std::uint8_t {
 // claybin is a required submodule, not a build flag -- so this is purely a
 // runtime choice, settable with --sandbox-backend or in the Sandbox pane.
 //
-// bwrap stays the DEFAULT: it is what users already have and has a decade of
-// upstream hardening, so an upgrade changes nobody's boundary. claybin adds
-// the walls bwrap cannot express (a syscall filter, landlock, cgroup2 caps),
-// which is why most of the pane's rows only apply under it.
+// claybin is the DEFAULT, because it is strictly stronger and the difference
+// is measured rather than argued. agentty's bwrap path emits no --seccomp, no
+// cgroup limits and no landlock, so per capability:
+//
+//     syscall.filter      claybin strong (seccomp-bpf)  vs bwrap NONE
+//     resource.mem/cpu/pids  strong (cgroup2)           vs bwrap NONE
+//     filesystem.exec     strong (landlock)             vs bwrap partial
+//     ptrace/kill broker  yes (seccomp-notify)          vs bwrap NONE
+//
+// There is no capability where bwrap wins. See tests/sandbox_audit.cpp for
+// the report this table comes from.
+//
+// bwrap REMAINS, as the fallback, and deleting it would be a security
+// regression rather than a simplification: the two engines fail on different
+// hosts. bwrap dies where unprivileged user namespaces are denied (Ubuntu
+// 24.04's AppArmor profile), which is why claybin was added -- but claybin's
+// walls are landlock + seccomp + cgroup2, and a RHEL kernel older than 5.13
+// has no landlock at all. On that host, removing bwrap does not leave the user
+// with claybin; it leaves them with Backend::None. Trading a weaker sandbox
+// for no sandbox is the issue #21 failure wearing a different hat.
 //
 // Asking for claybin on a host where it cannot build still yields bwrap, not
 // None: opting into the newer backend must not cost you your sandbox.
 enum class LinuxPreference : std::uint8_t {
-    Bwrap,    // default
-    Claybin,  // --sandbox-backend=claybin, or the pane's Backend row
+    Bwrap,    // fallback, and what --sandbox-backend=bwrap selects
+    Claybin,  // default
 };
 
 // Which Linux backend the user ASKED for. Distinct from
