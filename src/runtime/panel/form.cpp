@@ -100,13 +100,29 @@ void move_at(const std::string& value, std::size_t& cursor, int delta) {
 
 // Digits-only editing with clamping, expressed as decimal arithmetic rather
 // than string surgery: the field can then never HOLD a value outside its
-// range — validation by construction instead of validate-later.
-void number_insert(field::Number& n, char32_t ch) {
+// range -- validation by construction instead of validate-later.
+//
+// `fresh` means this is the FIRST digit of an edit session, and it replaces
+// rather than appends. Without it a Number row reads as broken, which is
+// exactly how it was reported:
+//
+//   Secret scan depth is 3, range 0-8. You type 5 wanting 5. Append gives
+//   3*10+5 = 35, which clamps to 8 -- and because the row is now AT max,
+//   every subsequent digit also clamps to 8. The field is dead to typing and
+//   nothing on screen says why.
+//
+// Appending is only ever right when the user can see what they are extending,
+// which is true of the second digit and never of the first: the value on
+// screen when editing starts is the SAVED one, not something they typed. So
+// "type 8 into a row showing 4096" means 8, the way every other settings field
+// in the world behaves, and 4-0-9-6 still types 4096.
+void number_insert(field::Number& n, char32_t ch, bool fresh) {
     if (ch < U'0' || ch > U'9') return;
     const std::int64_t digit = static_cast<std::int64_t>(ch - U'0');
-    if (n.max > 0 && n.value > (n.max - digit) / 10) { n.value = n.max; return; }
-    const std::int64_t next = n.value * 10 + digit;
-    n.value = std::clamp(next, n.min, n.max);
+    const std::int64_t base = fresh ? 0 : n.value;
+    // Overflow guard BEFORE the multiply, on the same base the result uses.
+    if (n.max > 0 && base > (n.max - digit) / 10) { n.value = n.max; return; }
+    n.value = std::clamp(base * 10 + digit, n.min, n.max);
 }
 
 // Keep the highlight inside the list, and the scroll window near it.
@@ -169,7 +185,7 @@ std::size_t caret_chars(const FieldValue& v, bool editing) noexcept {
 
 // ── Editing ──────────────────────────────────────────────────────────────
 
-void insert(FieldValue& v, char32_t ch) {
+void insert(FieldValue& v, char32_t ch, bool fresh) {
     std::visit([&](auto& f) {
         using T = std::decay_t<decltype(f)>;
         if constexpr (std::is_same_v<T, field::Text>
@@ -177,7 +193,7 @@ void insert(FieldValue& v, char32_t ch) {
                    || std::is_same_v<T, field::Path>)
             insert_at(f.value, f.cursor, ch);
         else if constexpr (std::is_same_v<T, field::Number>)
-            number_insert(f, ch);
+            number_insert(f, ch, fresh);
     }, v);
 }
 
@@ -251,8 +267,15 @@ void paste(FieldValue& v, std::string_view text) {
             f.value.insert(f.cursor, clean);
             f.cursor += clean.size();
         } else if constexpr (std::is_same_v<T, field::Number>) {
+            // Pasting "4096" means 4096, not "append 4096 to what is there".
+            // Only the FIRST digit replaces; the rest build the number, which
+            // is the same fresh-vs-continuing rule typing uses.
+            bool first = true;
             for (char c : clean)
-                if (c >= '0' && c <= '9') number_insert(f, static_cast<char32_t>(c));
+                if (c >= '0' && c <= '9') {
+                    number_insert(f, static_cast<char32_t>(c), first);
+                    first = false;
+                }
         }
     }, v);
 }

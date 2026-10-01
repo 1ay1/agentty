@@ -421,7 +421,14 @@ struct Options {
 // Each is a no-op on a kind it doesn't apply to, so call sites never switch
 // on the alternative. All of them clamp; none can leave a field invalid.
 
-void insert(FieldValue& v, char32_t ch);
+// Insert one character into a text-like field.
+//
+// `fresh` = this is the first keystroke of an edit session. Text fields ignore
+// it (a caret already says where the character lands); a Number field uses it
+// to REPLACE rather than append, because the value on screen when editing
+// starts is the saved one and nobody means to extend a number they did not
+// type. Pass `!f.edit_dirty`.
+void insert(FieldValue& v, char32_t ch, bool fresh = false);
 void backspace(FieldValue& v);
 void delete_forward(FieldValue& v);
 void move_cursor(FieldValue& v, int delta);

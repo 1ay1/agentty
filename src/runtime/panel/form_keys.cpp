@@ -212,14 +212,20 @@ Applied apply(Form& f, Action a) {
                 && row->editable() && !row->locked) {
                 f.focus = focus::Editing{};
                 f.edit_dirty = false;
-                insert(row->value, a.ch);
+                // Unambiguously the first keystroke of the session, so a
+                // Number row takes this digit as the whole value rather than
+                // appending it to the saved one.
+                insert(row->value, a.ch, /*fresh=*/true);
                 out.changed = true;
                 f.edit_dirty = true;
             }
             break;
         case Intent::Insert:
             if (f.editing() && row && row->editable()) {
-                insert(row->value, a.ch);
+                // Fresh until something in THIS session has changed the value.
+                // That makes Enter-then-type behave like type-to-edit above:
+                // the first digit replaces, the rest append.
+                insert(row->value, a.ch, /*fresh=*/!f.edit_dirty);
                 out.changed = true;
                 f.edit_dirty = true;
             }

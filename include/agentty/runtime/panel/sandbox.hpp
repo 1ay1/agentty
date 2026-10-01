@@ -100,6 +100,17 @@ struct Wall {
     std::string name;       // "filesystem.write", "network.isolation", …
     std::string strength;   // "strong" | "partial" | "none"
     std::string mechanism;  // "landlock abi 10", "cgroup2 memory.max", …
+
+    // The policy never ASKED for this capability, so a `none` here is a
+    // choice rather than a gap.
+    //
+    // Without this the footer listed `resource.memory: none (none)` on a
+    // default policy -- where memory_mb = 0 means "no cap wanted" ever since
+    // sandbox_config.hpp decided the right ceiling is a property of the
+    // machine. Three such rows sat beside the real degradations and taught the
+    // user to read the whole line as noise, which is the opposite of what a
+    // wall report is for.
+    bool not_requested = false;
 };
 
 // What the pane knows about the current policy, recomputed whenever a row

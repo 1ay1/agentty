@@ -660,6 +660,14 @@ Preview preview_sandbox(const sandbox_cfg::Config& cfg) {
                      : s == Enforcement::partial ? "partial"
                                                  : "none";
         w.mechanism = compiled->guarantees.mechanism(id);
+        // A capability the policy never asked for is not a gap in it. The three
+        // resource caps ship at 0 = "no cap" on purpose (sandbox_config.hpp:
+        // the right ceiling is a property of the machine), so without this the
+        // default policy reports three `none`s that nothing is wrong with.
+        w.not_requested =
+            (id == CapId::mem_limit && cfg.memory_mb == 0) ||
+            (id == CapId::cpu_limit && cfg.cpu_percent == 0) ||
+            (id == CapId::pid_limit && cfg.max_procs == 0);
         out.walls.push_back(std::move(w));
     }
 
@@ -754,6 +762,14 @@ void annotate_sandbox_form(form::Form& f, const Preview& preview,
         const auto* w = wall_of(cap);
         if (!w) continue;
 
+        // A cap the user did not ask for reads as a CHOICE, not a failure.
+        // "none (none)" next to Memory (MB) = 0 is technically accurate and
+        // tells the user nothing except that something might be broken.
+        if (w->not_requested) {
+            fld->origin = "no cap set";
+            continue;
+        }
+
         // "strong via landlock abi 10", not "strong". The mechanism IS the
         // receipt -- a strength on its own is the same unfalsifiable claim as
         // "sandbox: active", which is the bug this pane was built after.
@@ -778,6 +794,11 @@ void annotate_sandbox_form(form::Form& f, const Preview& preview,
             std::size_t strong = 0, total = 0;
             for (const auto& w : preview.walls) {
                 if (w.name == "host.kernel_isolation") continue;
+                // Same reasoning as the footer: a cap nobody asked for is not
+                // a wall that failed. Counting it made Balanced score 8/11 on
+                // a host where every requested wall was strong, which reads as
+                // "three things are broken" and is simply false.
+                if (w.not_requested) continue;
                 ++total;
                 if (w.strength == "strong") ++strong;
             }
@@ -785,6 +806,17 @@ void annotate_sandbox_form(form::Form& f, const Preview& preview,
                 fld->origin = std::to_string(strong) + "/" +
                               std::to_string(total) + " strong" + tense;
         }
+    }
+
+    // Empty path rows render as a blank line, which reads as broken rather
+    // than as "nothing added yet". `origin` is the dim right-hand column, so a
+    // word there says the row is working and empty without competing with the
+    // wall annotations on the rows that have them.
+    for (auto id : {kSbReadPaths, kSbWritePaths, kSbDenyPaths, kSbPorts}) {
+        auto* fld = row_of(id);
+        if (!fld || !fld->origin.empty()) continue;
+        if (const auto* t = std::get_if<form::field::Text>(&fld->value))
+            if (t->value.empty()) fld->origin = "none";
     }
 
     // ── validation: rows that defeat themselves ──────────────────────────

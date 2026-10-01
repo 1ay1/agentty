@@ -761,6 +761,89 @@ TEST_CASE("sandbox pane: the posture row scores the walls") {
 #endif
 }
 
+TEST_CASE("sandbox pane: a cap nobody asked for is not reported as a gap") {
+    // From a screenshot: the footer read `resource.memory: none (none) ·
+    // resource.cpu: none (none)` on a policy where nothing was wrong. Those
+    // rows ship at 0 = "no cap", deliberately -- sandbox_config.hpp says the
+    // right ceiling is a property of the machine and picking one for someone
+    // else's laptop turns a working build into an OOM kill.
+    //
+    // Reporting them beside real degradations is how a wall report teaches the
+    // user to ignore it.
+    sandbox_cfg::Config cfg;
+    cfg.configured = true;
+    cfg.backend = sandbox_cfg::LinuxBackend::Claybin;
+    cfg.memory_mb = 0;      // no cap wanted
+    cfg.cpu_percent = 0;
+    cfg.max_procs = 0;
+
+    const auto preview = pn::preview_sandbox(cfg);
+#if defined(__linux__)
+    if (preview.compiled) {
+        for (const auto& w : preview.walls) {
+            if (w.name == "resource.memory" || w.name == "resource.cpu" ||
+                w.name == "resource.pids")
+                CHECK(w.not_requested);
+        }
+    }
+#endif
+
+    // And asking for one flips it back: the flag tracks the REQUEST, not the
+    // capability, so a cap that was asked for and failed is still a gap.
+    cfg.memory_mb = 4096;
+    const auto asked = pn::preview_sandbox(cfg);
+#if defined(__linux__)
+    if (asked.compiled) {
+        for (const auto& w : asked.walls)
+            if (w.name == "resource.memory") CHECK_FALSE(w.not_requested);
+    }
+#endif
+}
+
+TEST_CASE("sandbox pane: an unset cap row says so instead of showing none") {
+    sandbox_cfg::Config cfg;
+    cfg.configured = true;
+    cfg.backend = sandbox_cfg::LinuxBackend::Claybin;
+    cfg.memory_mb = 0;
+
+    auto form = pn::build_sandbox_form(cfg, facts_for(cfg));
+    const auto preview = pn::preview_sandbox(cfg);
+    pn::annotate_sandbox_form(form, preview, cfg, pn::EngineStatus::InForce);
+
+    const int mem = row_of(form, pn::kSbMemoryMb);
+    REQUIRE(mem >= 0);
+    const auto& origin = form.fields[static_cast<std::size_t>(mem)].origin;
+#if defined(__linux__)
+    if (preview.compiled) {
+        // "none (none)" is accurate and useless -- it reads as a failure. The
+        // row has to say the cap is unset, which is a choice.
+        CHECK(origin.find("no cap") != std::string::npos);
+        CHECK(origin.find("none") == std::string::npos);
+    }
+#endif
+}
+
+TEST_CASE("sandbox pane: empty path rows are labelled, not blank") {
+    // An empty Text row renders as an empty line. Next to rows that DO show a
+    // value that reads as broken rather than as "nothing added yet".
+    sandbox_cfg::Config cfg;
+    cfg.configured = true;
+    cfg.backend = sandbox_cfg::LinuxBackend::Claybin;
+    cfg.read_paths.clear();
+    cfg.write_paths.clear();
+    cfg.deny_paths.clear();
+
+    auto form = pn::build_sandbox_form(cfg, facts_for(cfg));
+    pn::annotate_sandbox_form(form, pn::preview_sandbox(cfg), cfg,
+                              pn::EngineStatus::InForce);
+
+    for (auto id : {pn::kSbReadPaths, pn::kSbWritePaths, pn::kSbDenyPaths}) {
+        const int i = row_of(form, id);
+        REQUIRE(i >= 0);
+        CHECK(!form.fields[static_cast<std::size_t>(i)].origin.empty());
+    }
+}
+
 // ── "applies on restart" has to be a checked claim ─────────────────────
 //
 // The footer promised "saved · applies on restart" with NOTHING checking that
@@ -1075,12 +1158,16 @@ TEST_CASE("sandbox pane: a row carries the wall that enforces it") {
         CHECK(origin.find("via") != std::string::npos);
     }
 #endif
-    // A row with no capability behind it must stay unannotated rather than
-    // borrow a neighbour's: "Also readable" is a bind list, and labelling it
-    // with filesystem.read would be a claim about the wrong thing.
+    // A row with no capability behind it must not borrow a neighbour's wall:
+    // "Also readable" is a bind list, and labelling it with filesystem.read
+    // would be a claim about the wrong thing. It may still carry a plain
+    // "none" to say the list is empty (see "empty path rows are labelled"),
+    // which is a statement about ITS OWN value rather than about a wall.
     const int extra = row_of(form, pn::kSbReadPaths);
     REQUIRE(extra >= 0);
-    CHECK(form.fields[static_cast<std::size_t>(extra)].origin.empty());
+    const auto& extra_origin = form.fields[static_cast<std::size_t>(extra)].origin;
+    CHECK(extra_origin.find("via") == std::string::npos);
+    CHECK(extra_origin.find("strong") == std::string::npos);
 }
 
 TEST_CASE("sandbox pane: per-port network with no ports says it denies all") {

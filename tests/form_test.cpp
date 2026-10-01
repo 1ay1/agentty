@@ -190,6 +190,69 @@ TEST_CASE("form: dropdown commit resolves through the same list the view shows")
     CHECK(std::get<field::Choice>(f.find("m")->value).label() == "model-3");
 }
 
+TEST_CASE("form: the first digit typed REPLACES, it does not append") {
+    // Reported as "input doesn't work on all fields sometimes", and this is
+    // the mechanism.
+    //
+    // Appending made a Number row behave like no other settings field: the
+    // value on screen when you start typing is the SAVED one, so extending it
+    // is never what the keystroke meant. Typing 8 into a row showing 4096 gave
+    // 40968.
+    //
+    // On a SMALL range it was worse than surprising, it was dead input: a row
+    // with max 8 showing 3, type 5 -> 3*10+5 = 35 -> clamps to 8. The row is
+    // now at max, so every later digit also clamps to 8 and NOTHING the user
+    // types moves it. No caret, no error, no way to tell why.
+    auto f = demo();
+    f.cursor = 2;                               // port, 11434, range 1-65535
+
+    // Type-to-edit: the first printable starts the session.
+    press(f, chr(U'8'));
+    CHECK(std::get<field::Number>(f.find("port")->value).value == 8);
+
+    // And the SECOND digit still appends -- 4-0-9-6 must type 4096, so this is
+    // a fresh-vs-continuing distinction rather than "replace always".
+    press(f, chr(U'0'));
+    CHECK(std::get<field::Number>(f.find("port")->value).value == 80);
+    press(f, chr(U'8'));
+    CHECK(std::get<field::Number>(f.find("port")->value).value == 808);
+}
+
+TEST_CASE("form: Enter-then-type replaces too") {
+    // The other way into an edit session must behave identically, or the
+    // field's response depends on how you opened it -- which is its own kind
+    // of "sometimes input doesn't work".
+    auto f = demo();
+    f.cursor = 2;
+    press(f, key(maya::SpecialKey::Enter));
+    press(f, chr(U'7'));
+    CHECK(std::get<field::Number>(f.find("port")->value).value == 7);
+}
+
+TEST_CASE("form: a small-range number row never goes deaf to typing") {
+    // The exact shape of the reported bug, on the row that showed it: the
+    // sandbox pane's "Secret scan depth" is 0-8 and ships at 3.
+    //
+    // Every value in range must be reachable by typing it. Under the old
+    // append rule the row latched at max after one keystroke and stayed there.
+    auto f = Builder{"Depth"}.number("depth", "Secret scan depth", 3, 0, 8).build();
+    f.cursor = 0;
+
+    press(f, chr(U'5'));
+    CHECK(std::get<field::Number>(f.find("depth")->value).value == 5);
+
+    // Leave and come back, then type a different digit. The row must answer
+    // again rather than being stuck at whatever it latched to.
+    press(f, key(maya::SpecialKey::Escape));
+    press(f, chr(U'2'));
+    CHECK(std::get<field::Number>(f.find("depth")->value).value == 2);
+
+    // Including 0, which append could never produce from a non-zero start.
+    press(f, key(maya::SpecialKey::Escape));
+    press(f, chr(U'0'));
+    CHECK(std::get<field::Number>(f.find("depth")->value).value == 0);
+}
+
 TEST_CASE("form: number and slider clamp on every mutation") {
     auto f = demo();
     f.cursor = 2;                               // port

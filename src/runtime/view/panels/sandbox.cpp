@@ -64,6 +64,13 @@ namespace {
     // What stays here is the part no row owns: the walls that came out weaker
     // than asked for. Those are the pane's reason to exist, and a short list
     // of three is read where a list of twelve is not.
+    //
+    // "Weaker than ASKED" is the load-bearing word. A capability the user did
+    // not request is not a failure to enforce it -- `resource.memory: none`
+    // with memory_mb = 0 means "no cap wanted", and listing it beside a real
+    // degradation taught the user to read this line as noise. That is what the
+    // screenshot showed: `resource.memory: none (none) · resource.cpu: none
+    // (none)` under a policy where nothing was wrong.
     std::string out;
     for (const auto& w : p.preview.walls) {
         if (w.strength == "strong") continue;
@@ -72,6 +79,11 @@ namespace {
         // sandbox-boundary.md §13. Listing it here every time would train the
         // user to ignore this line, which is the opposite of the point.
         if (w.name == "host.kernel_isolation") continue;
+        // Not asked for ⇒ not a gap. The resource caps default to 0 ("the
+        // right ceiling is a property of the machine", sandbox_config.hpp), so
+        // on a default policy these are the common case and would dominate a
+        // line meant for real problems.
+        if (w.not_requested) continue;
         if (!out.empty()) out += "  \xc2\xb7  ";
         out += w.name + ": " + w.strength;
         if (!w.mechanism.empty()) out += " (" + w.mechanism + ")";
