@@ -508,6 +508,72 @@ int main() {
         expect(rc == 0, "the child exited cleanly");
     }
 
+    // ── 9. the REAL entry point, not a posture we built ourselves ──────
+    //
+    // Everything above drives claybin::spawn with a Posture this file
+    // constructs. That proves claybin enforces what it is told — it does NOT
+    // prove that the posture agentty actually builds says the same thing.
+    //
+    // The gap is real and has bitten before: build_claybin_posture() reads the
+    // sealed config, applies kAlwaysMasked, runs the workspace sweep, and
+    // decides the syscall profile. A mirror of that logic in a test is a
+    // SECOND implementation, and the two drifted once already (bwrap emitted
+    // no masks at all while this file's mirror did).
+    //
+    // So: call the same function a `bash` tool call reaches, with the config
+    // installed the same way main.cpp installs it, and read what the child
+    // actually got. Anything that passes here is true of the shipped product.
+    std::printf("\nthe REAL path (run_shell_command, production posture):\n");
+    {
+        namespace sb = agentty::tools::util::sandbox;
+        agentty::tools::util::set_workspace_root(kWorkspace);
+        sb::reset_config_for_test();
+        agentty::sandbox_cfg::Config cfg;
+        cfg.configured = true;            // defaults = the Balanced posture
+        sb::set_config(cfg);
+        sb::init(sb::Mode::On);
+
+        if (!sb::is_active()) {
+            std::printf("  no backend on this host -- skipped\n");
+        } else {
+            std::printf("  %s\n", sb::describe_state().c_str());
+
+            // Plant one of every masked SHAPE: a plain name, a nested name
+            // (needs the sweep), and both suffix rules.
+            const std::string ws{kWorkspace};
+            std::filesystem::create_directories(ws + "/services/api");
+            auto plant = [&](const std::string& rel, const char* body) {
+                std::FILE* f = std::fopen((ws + "/" + rel).c_str(), "w");
+                if (f) { std::fputs(body, f); std::fclose(f); }
+            };
+            plant(".env",                 "ROOT_SECRET=should_never_appear\n");
+            plant(".npmrc",               "//r/:_authToken=npm_should_never\n");
+            plant("credentials.json",     "{\"key\":\"gcp_should_never\"}\n");
+            plant("server.pem",           "PEM_should_never\n");
+            plant("prod.tfvars",          "tf_should_never\n");
+            plant("services/api/.env",    "NESTED_should_never=1\n");
+            plant("main.cpp",             "int main(){}\n");
+
+            auto r = sb::run_shell_command(
+                "cat .env .npmrc credentials.json server.pem prod.tfvars "
+                "services/api/.env 2>&1; echo ---; cat main.cpp",
+                64 * 1024, std::chrono::seconds{30});
+
+            // Not one of the planted secrets may appear. `should_never` is the
+            // shared marker so a single find() covers all six.
+            const bool leaked = r.output.find("should_never") != std::string::npos;
+            if (leaked)
+                std::printf("  LEAKED: %s\n", r.output.c_str());
+            expect(!leaked, "no masked secret reached a real bash call");
+
+            // And the sandbox did not break ordinary work: a non-secret file
+            // in the same directory still reads. A mask list that caught
+            // main.cpp would pass the test above and break every build.
+            expect(r.output.find("int main") != std::string::npos,
+                   "an ordinary workspace file is still readable");
+        }
+    }
+
     std::printf("\n%s\n", failures ? "LIVE CHECK FAILURES" : "all live checks passed");
     return failures ? 1 : 0;
 }
