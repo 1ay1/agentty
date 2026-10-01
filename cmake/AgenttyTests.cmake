@@ -23,6 +23,7 @@ set(_AGENTTY_CONSOLIDATED
     quit_cancels_stream_test
     midrun_freeze_test smart_mode_test stream_liveness_test wire_golden_test
     smart_tuning_settings_test smart_routing_card_test settings_nav_test
+    effort_auto_test
     wire_shared_test complexity_test copilot_token_test kimi_token_test
     chatgpt_bundled_models_test settings_default_test
     turn_provenance_test subagent_pin_test
@@ -254,9 +255,12 @@ target_compile_definitions(ws_bind_probe PRIVATE
 add_executable(sandbox_audit EXCLUDE_FROM_ALL
     ${CMAKE_SOURCE_DIR}/tests/sandbox_audit.cpp
     ${CMAKE_SOURCE_DIR}/tests/sandbox_config_race_stubs.cpp
+    ${CMAKE_SOURCE_DIR}/src/tool/util/sandbox.cpp
     ${CMAKE_SOURCE_DIR}/src/tool/util/sandbox_claybin.cpp
     ${CMAKE_SOURCE_DIR}/src/tool/util/sandbox_broker.cpp
     ${CMAKE_SOURCE_DIR}/src/domain/sandbox_provenance.cpp
+    ${CMAKE_SOURCE_DIR}/src/tool/util/subprocess.cpp
+    ${CMAKE_SOURCE_DIR}/src/tool/util/utf8.cpp
     # logx: sandbox_claybin.cpp logs the broker's decisions, so the audit
     # needs the real logger rather than a stub -- a stubbed one would compile
     # and then not prove the audit trail exists.

@@ -196,11 +196,12 @@ TEST_CASE("gpt5 codex caps") {
         const auto c = ModelCapabilities::from_id("gpt-5.6-sol");
         CHECK(effort_wire_for(Effort::Minimal, c) == "minimal");
         const auto ladder = agentty::available_efforts(c);
-        // off + minimal + low + medium + high + xhigh + max
-        REQUIRE(ladder.size() >= 3);
-        CHECK(ladder[0] == Effort::None);
-        CHECK(ladder[1] == Effort::Minimal);
-        CHECK(ladder[2] == Effort::Low);
+        // auto + off + minimal + low + medium + high + xhigh + max
+        REQUIRE(ladder.size() >= 4);
+        CHECK(ladder[0] == Effort::Auto);
+        CHECK(ladder[1] == Effort::None);
+        CHECK(ladder[2] == Effort::Minimal);
+        CHECK(ladder[3] == Effort::Low);
         // A Minimal request stays minimal (nearest at-or-below is itself).
         CHECK(agentty::clamp_effort(Effort::Minimal, c) == Effort::Minimal);
     }
@@ -318,10 +319,16 @@ TEST_CASE("compat reasoning effort (chat wire)") {
         CHECK(effort_wire_for(Effort::None, c)   == "");
         CHECK(agentty::clamp_effort(Effort::Medium, c) == Effort::High);
         CHECK(agentty::clamp_effort(Effort::None, c)   == Effort::None);
+        // The ladder leads with `auto` (the default anchor) then off, then the
+        // one ON rung this model accepts.
         const auto ladder = agentty::available_efforts(c);
-        REQUIRE(ladder.size() == 2);
-        CHECK(ladder[0] == Effort::None);
-        CHECK(ladder[1] == Effort::High);
+        REQUIRE(ladder.size() == 3);
+        CHECK(ladder[0] == Effort::Auto);
+        CHECK(ladder[1] == Effort::None);
+        CHECK(ladder[2] == Effort::High);
+        // On a one-rung ladder the midpoint IS that rung, so auto means high.
+        CHECK(agentty::auto_base_effort(c) == Effort::High);
+        CHECK(effort_wire_for(Effort::Auto, c) == "high");
     }
 
     // Non-reasoning / native-reasoning lines that share a prefix must NOT light

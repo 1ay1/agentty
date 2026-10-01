@@ -397,10 +397,14 @@ TEST_CASE("learned effort set drives ladder, clamp and wire") {
     {
         const auto caps = resolved_caps(id);
         const auto ladder = available_efforts(caps);
-        REQUIRE(ladder.size() == 3);
-        CHECK(ladder[0] == Effort::None);
-        CHECK(ladder[1] == Effort::Low);
-        CHECK(ladder[2] == Effort::High);
+        REQUIRE(ladder.size() == 4);
+        CHECK(ladder[0] == Effort::Auto);
+        CHECK(ladder[1] == Effort::None);
+        CHECK(ladder[2] == Effort::Low);
+        CHECK(ladder[3] == Effort::High);
+        // Auto anchors at the midpoint of the LEARNED ladder {low,high}:
+        // (2-1)/2 = 0 -> low. A learned set narrows the anchor too.
+        CHECK(agentty::auto_base_effort(caps) == Effort::Low);
         // Medium maps DOWN to low (nearest at-or-below), max down to high.
         CHECK(clamp_effort(Effort::Medium, caps) == Effort::Low);
         CHECK(effort_wire_for(Effort::Medium, caps) == "low");
@@ -414,7 +418,12 @@ TEST_CASE("learned effort set drives ladder, clamp and wire") {
         const auto caps = resolved_caps(id);
         CHECK(!agentty::effort_capable(caps));
         CHECK(effort_wire_for(Effort::High, caps) == "");
+        // No ladder: `auto` is not offered, because it would resolve to off
+        // and an "auto" that can only ever mean off is a lie.
         CHECK(available_efforts(caps).size() == 1);   // just off
+        CHECK(available_efforts(caps)[0] == Effort::None);
+        CHECK(agentty::auto_base_effort(caps) == Effort::None);
+        CHECK(effort_wire_for(Effort::Auto, caps) == "");
     }
 
     set_learned_effort_sets({});   // reset global state for other tests

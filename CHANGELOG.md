@@ -4,6 +4,48 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- **Reasoning effort defaults to `auto`, so Smart Mode's classifier can actually
+  move the dial.** Smart Mode reads your effort setting as the *midpoint* of a
+  ladder — a Standard turn keeps it, Complex steps up, Simple steps down. But
+  the default was `off`, which is the bottom rung, and the setting had no way
+  to tell "never configured" from "explicitly chose off" (both persisted as an
+  empty string). So out of the box a turn classified **Complex** could only
+  climb one rung to `minimal`, where the same turn from a `medium` base reaches
+  `high`. The classifier was doing its job and the dial had nowhere to go.
+
+  `auto` is now its own setting, and it anchors at the **middle rung of
+  whatever ladder your current model exposes** — a position, not a fixed level,
+  so it is right on a six-level flagship and on a model with a single on/off
+  switch. On a `low·medium·high·max` model a complex turn now lands on `high`.
+
+  Trivial turns still send **no** reasoning at any setting ("commit it" never
+  buys a budget), which is what makes a centred default safe — you pay on the
+  turns that earned it, not as a floor tax. Picking **off** explicitly is still
+  a real choice and still sends nothing on every turn, including complex ones;
+  it now persists distinctly so it survives a restart. If you had deliberately
+  set effort off before upgrading, set it once more — an untouched setting is
+  read as `auto`.
+
+### Fixed
+- **The `permissive` sandbox posture shipped no fork-bomb cap.** `max_procs`
+  defaults to 4096 precisely because, unlike memory or CPU, there is a process
+  ceiling that is safe on every machine — no legitimate build needs 4096
+  concurrent processes, while `:(){ :|:& };:` wants millions. The preset zeroed
+  it along with the memory/CPU/time limits it legitimately drops, and `0` means
+  *unlimited* at the boundary (claybin sets no rlimit and no `pids.max` at all),
+  so any approved command under `permissive` could fork without bound. This is
+  the finding `sandbox_audit` was written for, reintroduced through a preset.
+  Permissive now keeps the cap: it means "the walls are off", not "the machine
+  is forfeit". A regression test asserts every posture keeps a non-zero ceiling.
+
+- **The Smart Mode routing card showed a line that didn't mean anything.** It
+  rendered as `effort high · complex   off → complex` — an arrow between an
+  *effort* and a *complexity*, two different units, with the tier then repeated
+  verbatim one segment to its left. The arrow now tracks the thing that
+  actually moved (`medium → high`), and disappears entirely when the effort
+  didn't change, leaving only the reason it held still.
+
 ## [0.9.16] - 2026-09-30
 
 ### Fixed

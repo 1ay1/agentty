@@ -90,7 +90,12 @@ TEST_CASE("smart card: the card's effort is the wire's effort") {
         const auto caps = ModelCapabilities::from_id(card->smart_route_model);
         // The card names the model it routed to; the effort ladder is
         // per-model, so the comparison has to use THAT model's capabilities.
-        const auto base = m.d.effort;
+        //
+        // resolve_auto_effort mirrors what resolve_role does at the real call
+        // site: `auto` is the default now, and it anchors per model, so a
+        // recomputation that skipped this would compare against a different
+        // base than the wire used.
+        const auto base = resolve_auto_effort(m.d.effort, caps);
         const Effort wire_effort =
             sm::effort_for_score(base, wire_cx, caps, m.s.smart_effort_bias,
                                  cfg.deep_margin);

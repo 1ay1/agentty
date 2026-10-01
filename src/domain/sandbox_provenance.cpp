@@ -378,7 +378,33 @@ Config apply_posture(const Config& base, Posture p) {
             c.syscall_mode = SyscallMode::Off;
             c.wx_protect = false;
             c.memory_mb = 0;
-            c.max_procs = 0;
+            // The fork-bomb cap SURVIVES Permissive, and it is the one
+            // resource wall that does.
+            //
+            // memory/cpu/nofile/time all go to 0 here for the reason the field
+            // comments give: the right ceiling is a property of the machine and
+            // the build, so a wrong guess turns a working `cargo build` into an
+            // OOM kill that looks like agentty's fault. Dropping them is what
+            // makes Permissive a real answer to "my toolchain breaks".
+            //
+            // max_procs is different, and the field's own comment says why:
+            // "unlike memory, there IS a number that is safe everywhere. No
+            // legitimate build needs 4096 concurrent processes; `make -j` on a
+            // 64-core box peaks in the low hundreds, and the pathological case
+            // is not 'a big build' but `:(){ :|:& };:`, which wants millions."
+            //
+            // It was being zeroed with the rest, which handed every Permissive
+            // user an unbounded fork bomb from any approved command -- the
+            // exact finding tests/sandbox_audit.cpp was written for (it saw
+            // resource.pids as `none` and that is why 4096 became the default),
+            // reintroduced through the preset. claybin treats 0 as unlimited
+            // and sets no rlimit and no pids.max at all, so this was not a
+            // softer cap; it was no cap.
+            //
+            // Permissive means "the walls are off", not "the machine is
+            // forfeit". A fork bomb is not a toolchain compatibility problem,
+            // so there is nothing for this to unbreak.
+            c.max_procs = 4096;
             c.cpu_percent = 0;
             c.max_open_files = 0;
             c.wall_clock_secs = 0;

@@ -8,6 +8,7 @@
 // Run it when touching the sandbox:
 //   cmake --build build --target sandbox_audit && ./build/sandbox_audit
 #include "agentty/tool/util/sandbox_claybin.hpp"
+#include "agentty/tool/util/sandbox.hpp"
 #include "agentty/domain/sandbox_config.hpp"
 
 #include <claybin/plan/compile.hpp>
@@ -20,6 +21,7 @@
 
 namespace cb = agentty::tools::util::sandbox::claybin_backend;
 namespace cfgn = agentty::sandbox_cfg;
+namespace sb = agentty::tools::util::sandbox;
 
 namespace agentty::tools::util { void set_workspace_root(std::filesystem::path p); }
 
@@ -50,6 +52,12 @@ void audit(const char* label, const cb::Posture& p, ::clay::HostCapabilities hos
     (void)host;
 }
 
+void audit_cfg(const char* label, const cfgn::Config& cfg, ::clay::HostCapabilities host) {
+    sb::reset_config_for_test();
+    sb::set_config(cfg);
+    audit(label, sb::claybin_posture_for_test(), host);
+}
+
 }  // namespace
 
 int main() {
@@ -77,56 +85,48 @@ int main() {
     // 1. The SHIPPED default: what a user who never opens the pane gets.
     //    This is the number that matters most, because it is what almost
     //    everyone runs.
-    //
-    //    The resource caps come from a default-constructed Config rather than
-    //    being written out here, so this case cannot drift from what the
-    //    product actually ships. Writing them by hand is how an audit ends up
-    //    auditing itself.
+    // 1. What a user gets if they never open the pane at all: the shipped
+    //    default, through the SAME config -> posture builder the runtime uses.
     {
         const cfgn::Config def{};
-        cb::Posture p;
-        p.system_read_roots = {"/usr", "/bin", "/sbin", "/lib", "/lib64"};
-        p.workspace = ws;
-        p.cwd = ws;
-        p.syscall_mode = static_cast<int>(def.syscall_mode);
-        p.net_mode = static_cast<int>(def.net_mode);
-        p.wx_protect = def.wx_protect;
-        p.scope_ipc = def.scope_ipc;
-        p.close_inherited_fds = def.close_inherited_fds;
-        p.tmp_bytes = def.tmp_mb * 1024ull * 1024;
-        p.memory_bytes = def.memory_mb * 1024ull * 1024;
-        p.max_processes = def.max_procs;
-        p.cpu_percent = def.cpu_percent;
-        p.max_open_files = def.max_open_files;
-        p.cpu_secs = def.cpu_secs;
-        p.wall_clock_secs = def.wall_clock_secs;
-        p.fake_hostname = def.fake_hostname;
-        audit("shipped default (no pane visit)", p, host);
+        audit_cfg("shipped default (no pane visit)", def, host);
     }
 
-    // 2. Everything the pane can ask for, turned up. The ceiling: if a
+    // 2. Every named posture, again through the real builder rather than a
+    //    mirror. If two labels collapse to the same walls here, the product's
+    //    preset ladder has collapsed too.
+    for (const auto posture : {cfgn::Posture::Permissive,
+                               cfgn::Posture::Balanced,
+                               cfgn::Posture::Hardened,
+                               cfgn::Posture::Airgapped}) {
+        auto cfg = cfgn::apply_posture(cfgn::Config{}, posture);
+        cfg.configured = true;
+        const std::string label = std::string{"preset: "} + cfgn::to_string(posture);
+        audit_cfg(label.c_str(), cfg, host);
+    }
+
+    // 3. Everything the pane can ask for, turned up. The ceiling: if a
     //    capability is `none` HERE, agentty cannot deliver it at all and it is
     //    a genuine gap rather than a default.
     {
-        cb::Posture p;
-        p.system_read_roots = {"/usr", "/bin", "/sbin", "/lib", "/lib64"};
-        p.workspace = ws;
-        p.cwd = ws;
-        p.syscall_mode = 2;          // strict
-        p.net_mode = 1;              // none
-        p.wx_protect = true;
-        p.scope_ipc = true;
-        p.close_inherited_fds = true;
-        p.tmp_bytes = 64ull << 20;
-        p.memory_bytes = 512ull << 20;
-        p.max_processes = 256;
-        p.cpu_percent = 100;
-        p.max_open_files = 1024;
-        p.cpu_secs = 60;
-        p.wall_clock_secs = 120;
-        p.fake_hostname = true;
-        audit("everything the pane can ask for", p, host);
+        cfgn::Config cfg;
+        cfg.configured = true;
+        cfg.syscall_mode = cfgn::SyscallMode::Strict;
+        cfg.net_mode = cfgn::NetMode::None;
+        cfg.wx_protect = true;
+        cfg.scope_ipc = true;
+        cfg.close_inherited_fds = true;
+        cfg.tmp_mb = 64;
+        cfg.memory_mb = 512;
+        cfg.max_procs = 256;
+        cfg.cpu_percent = 100;
+        cfg.max_open_files = 1024;
+        cfg.cpu_secs = 60;
+        cfg.wall_clock_secs = 120;
+        cfg.fake_hostname = true;
+        audit_cfg("everything the pane can ask for", cfg, host);
     }
 
+    sb::reset_config_for_test();
     std::filesystem::remove_all(ws);
 }

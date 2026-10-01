@@ -510,11 +510,18 @@ namespace detail {
 [[nodiscard]] inline RoleProfile resolve_role(
         ModelRole role,
         std::string_view parent_model,
-        Effort parent_effort,
+        Effort parent_effort_in,
         const std::vector<ModelInfo>& candidates,
         const RoleConfig& cfg,
         std::string_view active_provider = {}) {
     const std::string parent_wire = wire_model_id(parent_model);
+    // THE resolution point for the main turn. Auto means "no choice yet", and
+    // what it resolves to depends on the model in hand — so it is resolved
+    // HERE, against the parent's caps, before any stepping or clamping. Every
+    // line below (and effort_for_complexity downstream) then works on a real
+    // rung and never has to know Auto exists.
+    const Effort parent_effort =
+        resolve_auto_effort(parent_effort_in, resolved_caps(parent_wire));
     RoleProfile pass{parent_wire,
                      clamp_effort(parent_effort,
                                   resolved_caps(parent_wire))};

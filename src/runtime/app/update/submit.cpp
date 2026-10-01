@@ -721,7 +721,7 @@ void refresh_record(Model& m) {
     // later switch back to it restores exactly this model.
     if (!m.d.model_id.empty())
         s.provider_models[active_provider_id()] = m.d.model_id.value;
-    s.effort = std::string{effort_wire(m.d.effort)};
+    s.effort = std::string{effort_to_wire_setting(m.d.effort)};
     // Smart Mode: the whole config, one assignment. While the
     // AGENTTY_SMART_MODE session pin is active the in-memory `enabled` flag is
     // the ENV's value, not the user's choice — so the persisted preference is

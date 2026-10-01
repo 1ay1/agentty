@@ -106,11 +106,38 @@ writes every other row:
 
 | posture | what it is | what it costs |
 |---|---|---|
-| `permissive` | mount walls only | no syscall filter, no resource caps |
+| `permissive` | mount walls only | no syscall filter, no memory/cpu/time caps |
 | `balanced` | the default, byte for byte | network is open, so read access is also exfiltration |
 | `hardened` | every wall claybin can build | a build needing an unusual syscall may fail |
 | `airgapped` | hardened + no network at all | `git push`, `npm install`, `curl` all stop working |
 | `custom` | not selectable | what the pane *reports* when the rows match no preset |
+
+**`permissive` keeps the fork-bomb cap.** It drops memory, CPU, file-descriptor
+and time limits, because the right ceiling for those is a property of the
+machine and a wrong guess turns a working `cargo build` into an OOM kill that
+looks like agentty's fault. `max_procs` is the exception the field comment
+already argued for: there *is* a number safe everywhere (no build needs 4096
+concurrent processes; `:(){ :|:& };:` wants millions). It used to be zeroed
+along with the rest, and `0` means *unlimited* at the boundary — claybin sets
+no rlimit and no `pids.max` at all — so permissive shipped an unbounded fork
+bomb. That is the exact finding `tests/sandbox_audit.cpp` was written for,
+reintroduced through a preset. Permissive means "the walls are off", not "the
+machine is forfeit".
+
+### What the label asserts — and what it doesn't
+
+`detect_posture` is a fixpoint test, so a field `apply_posture` does not *write*
+is outside the posture's definition by construction. Two such fields are
+genuinely enforced: `write_paths` and `allow_ports`. A config can therefore read
+**Hardened** while carrying extra grants you added.
+
+That is deliberate — invariant 3 below says a preset never touches your path
+lists, because wiping a project's `read_paths` when you *tried* a preset would
+make presets hostile to explore. So read the label as **"the walls this preset
+sets are in force"**, not "this is all there is". The pane shows all 28 rows for
+exactly this reason (invariant 1): the label summarises, the rows are the truth.
+Pinned by `sandbox_pane_test` so the reading is on the record rather than
+inferred.
 
 `airgapped` is the one worth singling out: it is the only configuration where
 the admission in [Threat model](#threat-model) — *read access plus network is

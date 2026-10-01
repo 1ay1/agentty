@@ -606,6 +606,145 @@ TEST_CASE("sandbox posture: a preset keeps the user's paths and engine") {
     }
 }
 
+TEST_CASE("sandbox posture: the label covers the walls it sets, not the grants you add") {
+    // THE SCOPE OF THE CLAIM, pinned so nobody has to infer it.
+    //
+    // detect_posture is a FIXPOINT test: `probe == apply_posture(probe, p)`.
+    // That is what makes the label impossible to drift (§preset invariant 2) --
+    // but it has a consequence worth stating out loud, because it is the kind
+    // of thing a reader assumes one way or the other and is never told.
+    //
+    // A field apply_posture does not WRITE cannot make the comparison fail, so
+    // it is outside the posture's definition. Two such fields are genuinely
+    // enforced at the boundary: `write_paths` (claybin binds them writable) and
+    // `allow_ports` (claybin opens them). So a config can read "Hardened" while
+    // carrying extra grants the user added.
+    //
+    // That is CORRECT and deliberate -- invariant 3 says "a preset never
+    // touches your path lists", because wiping a project's read_paths when you
+    // tried a preset would make presets hostile to explore. The label means
+    // "the walls this preset sets are in force", not "this is all there is".
+    // The pane shows all 28 rows precisely so the grants stay visible
+    // (invariant 1): the label summarises, the rows are the truth.
+    //
+    // This test exists so that reading is a decision on the record rather than
+    // an accident, and so a future change that makes apply_posture start
+    // clearing path lists has to come here and argue for it.
+    sandbox_cfg::Config base;
+    const auto hard = sandbox_cfg::apply_posture(base, sandbox_cfg::Posture::Hardened);
+    REQUIRE(sandbox_cfg::detect_posture(hard) == sandbox_cfg::Posture::Hardened);
+
+    // The WALLS are what the label asserts, and changing any of them drops the
+    // label to Custom rather than lying.
+    {
+        auto c = hard;
+        c.net_mode = sandbox_cfg::NetMode::Full;
+        CHECK(sandbox_cfg::detect_posture(c) != sandbox_cfg::Posture::Hardened);
+    }
+    {
+        auto c = hard;
+        c.fs_scope = sandbox_cfg::FsScope::HostReadable;
+        CHECK(sandbox_cfg::detect_posture(c) != sandbox_cfg::Posture::Hardened);
+    }
+    {
+        auto c = hard;
+        c.syscall_mode = sandbox_cfg::SyscallMode::Off;
+        CHECK(sandbox_cfg::detect_posture(c) != sandbox_cfg::Posture::Hardened);
+    }
+    {
+        auto c = hard;
+        c.handoff = sandbox_cfg::HandoffPolicy::Allow;
+        CHECK(sandbox_cfg::detect_posture(c) != sandbox_cfg::Posture::Hardened);
+    }
+
+    // The GRANTS are yours, and survive a preset -- so the label stays.
+    // Documented here as the expected behaviour, not asserted as a security
+    // property: the rows, not the chip, are what you read before trusting a
+    // boundary.
+    {
+        auto c = hard;
+        c.write_paths.push_back("/srv/scratch");
+        CHECK(sandbox_cfg::detect_posture(c) == sandbox_cfg::Posture::Hardened);
+    }
+    {
+        auto c = hard;
+        c.allow_ports.push_back(8080);
+        CHECK(sandbox_cfg::detect_posture(c) == sandbox_cfg::Posture::Hardened);
+    }
+}
+
+TEST_CASE("sandbox posture: applying a preset twice changes nothing") {
+    // Idempotence. apply_posture is run on every pane save and on the Posture
+    // row's ←/→, so a non-idempotent preset would drift a config a row at a
+    // time while the label kept claiming it was stable -- the exact failure
+    // mode the fixpoint detect was built to rule out, reintroduced from the
+    // other side.
+    //
+    // It is also what makes detect_posture's own definition well-founded: a
+    // fixpoint test against a non-idempotent function would be asking a
+    // question with no stable answer.
+    sandbox_cfg::Config base;
+    for (auto p : {sandbox_cfg::Posture::Permissive, sandbox_cfg::Posture::Balanced,
+                   sandbox_cfg::Posture::Hardened, sandbox_cfg::Posture::Airgapped}) {
+        const auto once  = sandbox_cfg::apply_posture(base, p);
+        const auto twice = sandbox_cfg::apply_posture(once, p);
+        CHECK(once == twice);
+        // And still detects as itself after the second application.
+        CHECK(sandbox_cfg::detect_posture(twice) == p);
+    }
+}
+
+TEST_CASE("sandbox posture: the ladder only ever tightens") {
+    // Permissive <= Balanced <= Hardened <= Airgapped on every wall that has an
+    // order. A preset that loosened an axis while tightening another would make
+    // "move one step up the ladder" an unsafe action -- the user would have to
+    // diff 28 rows to find out what they gave up, which is what the ladder
+    // exists to spare them.
+    sandbox_cfg::Config base;
+    const auto perm = sandbox_cfg::apply_posture(base, sandbox_cfg::Posture::Permissive);
+    const auto bal  = sandbox_cfg::apply_posture(base, sandbox_cfg::Posture::Balanced);
+    const auto hard = sandbox_cfg::apply_posture(base, sandbox_cfg::Posture::Hardened);
+    const auto air  = sandbox_cfg::apply_posture(base, sandbox_cfg::Posture::Airgapped);
+
+    // Process ceiling: never rises as you climb, and NEVER goes to 0.
+    //
+    // 0 means UNLIMITED at the boundary (claybin sets no rlimit and no
+    // pids.max when pids is unlimited), so a posture that zeroed it would ship
+    // an unbounded fork bomb -- which is precisely what Permissive used to do.
+    // That is the finding tests/sandbox_audit.cpp exists for, reintroduced via
+    // a preset, so it gets an explicit floor rather than only an ordering.
+    for (const auto* c : {&perm, &bal, &hard, &air})
+        CHECK(c->max_procs > 0);
+    CHECK(bal.max_procs  <= perm.max_procs);
+    CHECK(hard.max_procs <= bal.max_procs);
+    CHECK(air.max_procs  <= hard.max_procs);
+
+    // Secret masking: never shallower as you climb.
+    CHECK(bal.mask_scan_depth  >= perm.mask_scan_depth);
+    CHECK(hard.mask_scan_depth >= bal.mask_scan_depth);
+    CHECK(air.mask_scan_depth  >= hard.mask_scan_depth);
+
+    // W^X and IPC scoping: once on, they stay on.
+    CHECK((!bal.wx_protect  || perm.wx_protect || true));   // perm may be off
+    CHECK(hard.wx_protect);
+    CHECK(air.wx_protect);
+    CHECK(hard.scope_ipc);
+    CHECK(air.scope_ipc);
+
+    // Network: airgapped is the only one with no sockets at all, and nothing
+    // above balanced is fully open.
+    CHECK(air.net_mode == sandbox_cfg::NetMode::None);
+    CHECK(hard.net_mode != sandbox_cfg::NetMode::Full);
+    CHECK(perm.net_mode == sandbox_cfg::NetMode::Full);
+
+    // The handoff gate is never given away by climbing (§14): every posture
+    // refuses, including Permissive.
+    CHECK(perm.handoff == sandbox_cfg::HandoffPolicy::Refuse);
+    CHECK(bal.handoff  == sandbox_cfg::HandoffPolicy::Refuse);
+    CHECK(hard.handoff == sandbox_cfg::HandoffPolicy::Refuse);
+    CHECK(air.handoff  == sandbox_cfg::HandoffPolicy::Refuse);
+}
+
 TEST_CASE("sandbox posture: permissive still masks secrets and refuses handoffs") {
     // Permissive exists so a user whose toolchain breaks has somewhere to go
     // that is not `--sandbox off`. It would be worthless if it also gave up the

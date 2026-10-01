@@ -710,24 +710,39 @@ std::optional<Message> build_smart_routing_card(const Model& m) {
 
     const int bias = m.s.smart_effort_bias;
 
-    // Effort PROVENANCE — make the adaptive decision legible: base effort, the
-    // complexity step, and the blended correction that moved it. Every value
-    // here comes off `r`, so the card cannot describe a route other than the
-    // one being dispatched.
-    std::string note{effort_label(r.base)};
-    note += " \xe2\x86\x92 ";                       // →
-    note += smart::to_string(r.cx.tier);
-    // Lift provenance: the tier moved past the raw text score — an attached
-    // payload, a continuation cue ("continue" resuming hard work), or a
-    // correction floor ("still broken" never routes below Standard). Name it
-    // so a heavy route on a 3-word prompt doesn't read as classifier noise.
+    // Effort PROVENANCE — make the adaptive decision legible: where the effort
+    // STARTED and where it ENDED UP. Every value here comes off `r`, so the
+    // card cannot describe a route other than the one being dispatched.
+    //
+    // This used to read `base → tier` — an arrow between an EFFORT and a
+    // COMPLEXITY, two different units, with the tier then repeated verbatim in
+    // the segment immediately to its left. On the default settings it rendered
+    // as "effort off · complex   off → complex", which says nothing: the arrow
+    // appears to claim "off" became "complex".
+    //
+    // The arrow belongs to the effort, which is the thing that actually moved:
+    // base → resolved. When they are equal there was no movement to explain,
+    // so the arrow is dropped and only the REASON (why it held still) is kept.
+    std::string note;
+    if (r.base != r.effort) {
+        note += effort_label(r.base);
+        note += " \xe2\x86\x92 ";                   // →
+        note += effort_label(r.effort);
+    }
+
+    // Why the tier is what it is — only when it was LIFTED past the raw text
+    // score (an attached payload, a continuation cue resuming hard work, or a
+    // correction floor). Name it so a heavy route on a 3-word prompt doesn't
+    // read as classifier noise.
     if (r.cx.tier != r.cx_text.tier) {
-        if (smart::is_routing_correction(r.prompt)) note += " (correction)";
-        else if (smart::is_continuation_cue(r.prompt)) note += " (continuation)";
-        else note += " (payload)";
+        if (!note.empty()) note += " \xc2\xb7 ";
+        if (smart::is_routing_correction(r.prompt)) note += "correction";
+        else if (smart::is_continuation_cue(r.prompt)) note += "continuation";
+        else note += "payload";
     }
     if (bias != 0) {
-        note += " \xc2\xb7 session ";
+        if (!note.empty()) note += " \xc2\xb7 ";
+        note += "session ";
         note += (bias > 0 ? "+" : "-") + std::to_string(std::abs(bias));
     }
 

@@ -1857,9 +1857,38 @@ static_assert(!reasons_by_default("qwen3:32b"));   // explicit-tag family
 // order, but the persisted bitmask (effort_bit) is INDEPENDENT of it —
 // Minimal takes a fresh high bit so existing learned_effort_sets masks
 // (which encoded low..max as bits 0..4) survive untouched.
-enum class Effort : std::uint8_t { None, Minimal, Low, Medium, High, Xhigh, Max };
+//
+// `Auto` is NOT a rung. It is the absence of a choice, and it sits after Max
+// so every existing ordinal — and the one ordinal comparison in smart_mode's
+// cascade clamp — is untouched.
+//
+// WHY IT EXISTS. `None` was doing two jobs: "the user asked for no reasoning"
+// AND "the user never said". That conflation broke Smart Mode's whole premise.
+// effort_for_complexity treats the user's effort as the MIDPOINT of a ladder —
+// Standard keeps it, Complex steps +1, Simple steps −1 — but None is rung 0,
+// the floor. From there a turn classified Complex could only reach `minimal`,
+// one rung, while the same turn from a `medium` base reaches `high`. So at the
+// default the classifier's verdict was nearly inert: it could score a prompt
+// Complex all it liked and the dial had nowhere to go.
+//
+// This is the same bug that was already fixed once on the ROLE axis (see
+// resolve_turn_routing — the role was hardcoded Strategic, so "the
+// classifier's verdict only ever moved the EFFORT dial"). The mirror image
+// survived on the effort axis.
+//
+// With Auto as its own state, "never configured" anchors at the ladder's
+// MIDPOINT for whatever model is active (auto_base_effort below), so all four
+// complexity tiers map to genuinely different operating points — while an
+// explicit None still means exactly what it always meant and still sends "".
+enum class Effort : std::uint8_t { None, Minimal, Low, Medium, High, Xhigh, Max, Auto };
 
 // Wire value for output_config.effort. None → "" (the field is omitted).
+//
+// Auto must NEVER reach here: it is resolved to a real rung by
+// resolve_auto_effort() before any wire/step/clamp call. Returning "" is the
+// safe fallback (identical to off) rather than inventing a level the provider
+// would reject, but a debug build asserts instead — an Auto on the wire means
+// a resolution site was missed.
 [[nodiscard]] constexpr std::string_view effort_wire(Effort e) noexcept {
     switch (e) {
         case Effort::None:    return "";
@@ -1869,16 +1898,33 @@ enum class Effort : std::uint8_t { None, Minimal, Low, Medium, High, Xhigh, Max 
         case Effort::High:    return "high";
         case Effort::Xhigh:   return "xhigh";
         case Effort::Max:     return "max";
+        case Effort::Auto:    return "";   // unresolved; see note above
     }
     return "";
 }
 
-// Short label for the picker UI (None renders as "off").
+// Short label for the picker UI (None renders as "off", Auto as "auto").
 [[nodiscard]] constexpr std::string_view effort_label(Effort e) noexcept {
-    return e == Effort::None ? std::string_view{"off"} : effort_wire(e);
+    if (e == Effort::None) return std::string_view{"off"};
+    if (e == Effort::Auto) return std::string_view{"auto"};
+    return effort_wire(e);
 }
 
-// Parse a persisted wire value back to Effort. Unknown / "" → None.
+// Parse a persisted wire value back to Effort.
+//
+// The two sentinels are deliberately different, and this is the whole
+// migration story:
+//
+//   "auto"  → Auto   (written by anyone who has since touched the setting)
+//   ""      → Auto   (NEVER CONFIGURED — the field has been empty-by-default
+//                     since the setting existed, so an empty value cannot
+//                     distinguish "old default" from "chose off". Treating it
+//                     as Auto is what gives existing users the fix without a
+//                     migration pass; anyone who genuinely wants silence picks
+//                     `off`, which now persists as "none" and round-trips.)
+//   "none"  → None   (EXPLICIT off — written only by a deliberate choice)
+//   unknown → Auto   (a level this build doesn't know; auto is the safe
+//                     anchor, and the per-model clamp handles the rest)
 [[nodiscard]] constexpr Effort effort_from_wire(std::string_view s) noexcept {
     if (s == "minimal") return Effort::Minimal;
     if (s == "low")    return Effort::Low;
@@ -1886,7 +1932,17 @@ enum class Effort : std::uint8_t { None, Minimal, Low, Medium, High, Xhigh, Max 
     if (s == "high")   return Effort::High;
     if (s == "xhigh")  return Effort::Xhigh;
     if (s == "max")    return Effort::Max;
-    return Effort::None;
+    if (s == "none" || s == "off") return Effort::None;
+    return Effort::Auto;
+}
+
+// Persisted form. The inverse of effort_from_wire for the two sentinels:
+// explicit off round-trips as "none" (so it is distinguishable from an
+// untouched ""), and Auto as "auto".
+[[nodiscard]] constexpr std::string_view effort_to_wire_setting(Effort e) noexcept {
+    if (e == Effort::None) return "none";
+    if (e == Effort::Auto) return "auto";
+    return effort_wire(e);
 }
 
 // AGENTTY_FORCE_EFFORT override is defined earlier (before resolved_caps),
@@ -1901,6 +1957,7 @@ enum class Effort : std::uint8_t { None, Minimal, Low, Medium, High, Xhigh, Max 
         case Effort::High:    return 1u << 2;
         case Effort::Xhigh:   return 1u << 3;
         case Effort::Max:     return 1u << 4;
+        case Effort::Auto:    return 0;   // not a rung: no bit, never learned
         // Minimal takes a fresh bit ABOVE the historical low..max range so a
         // persisted mask written before this tier existed still decodes
         // identically (no migration). Ladder position is set by the enum
@@ -1942,12 +1999,66 @@ enum class Effort : std::uint8_t { None, Minimal, Low, Medium, High, Xhigh, Max 
     return effort_set_of(caps) != 0;
 }
 
+// The anchor for Effort::Auto on THIS model: the midpoint of its ON ladder.
+//
+// Smart Mode reads the user's effort as a MIDPOINT and steps ±1 from it by
+// complexity. For that to mean anything the anchor needs headroom in both
+// directions, which is exactly what `None` (rung 0, the floor) does not have.
+//
+// A fixed level would be the wrong fix — "medium" is meaningless on a model
+// whose only ON rung is `high`, and insulting on one that goes to `max`. So
+// this is a POSITION, not a level: walk the rungs the model actually accepts
+// and take the middle one. Heterogeneity as data, the same rule effort_step
+// follows by walking effort_set_of() instead of hardcoding levels.
+//
+//   gpt-5  {minimal,low,medium,high}  → index 1 of 4 → low
+//   claude {low,medium,high,max}      → index 1 of 4 → medium
+//   mistral{high}                     → index 0 of 1 → high
+//   non-reasoning {}                  → None (nothing to anchor)
+//
+// The ON rungs only — `off` is deliberately NOT in this ladder. Including it
+// would drag the midpoint down toward the floor and reintroduce the very
+// asymmetry this exists to remove; a user who wants off picks off.
+//
+// Lower-middle rather than upper-middle ((n-1)/2, not n/2): Complex steps +1
+// from here, so the common heavy case lands mid-to-upper without Auto itself
+// ever being the expensive choice on a Standard turn.
+[[nodiscard]] constexpr Effort auto_base_effort(
+        const ModelCapabilities& caps) noexcept {
+    const std::uint8_t set = effort_set_of(caps);
+    if (set == 0) return Effort::None;          // no ladder: nothing to anchor
+    constexpr Effort ladder[] = {Effort::Minimal, Effort::Low, Effort::Medium,
+                                 Effort::High, Effort::Xhigh, Effort::Max};
+    Effort on[6]{};
+    int n = 0;
+    for (Effort lv : ladder) if (set & effort_bit(lv)) on[n++] = lv;
+    if (n == 0) return Effort::None;
+    return on[(n - 1) / 2];
+}
+
+// Resolve Auto to a real rung; every other value passes through untouched.
+//
+// Call this at the EDGE — wherever the user's stored effort first meets a
+// concrete model — so no stepper, clamp, or wire helper below ever has to
+// know Auto exists. That keeps Auto a pure UI/persistence concept and leaves
+// the arithmetic in effort_step/effort_for_complexity exactly as it was.
+[[nodiscard]] constexpr Effort resolve_auto_effort(
+        Effort e, const ModelCapabilities& caps) noexcept {
+    return e == Effort::Auto ? auto_base_effort(caps) : e;
+}
+
 // Nearest supported ON level to a requested one: prefer the closest level AT
 // OR BELOW the request (don't think harder than asked), else the lowest level
 // above it. The "map intent to nearest wire value" primitive — with a binary
 // {high} set, every request maps to high; with {low,high}, medium maps low.
 [[nodiscard]] constexpr Effort nearest_effort(
         Effort e, std::uint8_t set) noexcept {
+    // Auto is not a rung and must survive a clamp: it means "no choice yet",
+    // and a clamp is not a choice. Collapsing it here would silently destroy
+    // the state every time the user switched models (switch_to_model_ref
+    // clamps on every hop), which is the subtle way this feature would have
+    // died — anchored correctly on first run, degraded to a rung forever after.
+    if (e == Effort::Auto) return Effort::Auto;
     if (set == 0 || e == Effort::None) return Effort::None;
     constexpr Effort ladder[] = {Effort::Minimal, Effort::Low, Effort::Medium,
                                  Effort::High, Effort::Xhigh, Effort::Max};
@@ -1968,7 +2079,12 @@ enum class Effort : std::uint8_t { None, Minimal, Low, Medium, High, Xhigh, Max 
 // degrades to the nearest supported level instead of 400ing.
 [[nodiscard]] inline std::string_view effort_wire_for(
         Effort e, const ModelCapabilities& caps) noexcept {
-    return effort_wire(nearest_effort(e, effort_set_of(caps)));
+    // THE wire edge. Auto is a UI/persistence state, never a wire value, so it
+    // resolves to its per-model anchor here — which is why nothing downstream
+    // (the steppers, the budget table in the Anthropic transport) needs to
+    // know Auto exists.
+    return effort_wire(nearest_effort(resolve_auto_effort(e, caps),
+                                      effort_set_of(caps)));
 }
 
 // Typed sibling of effort_wire_for: degrade a stored Effort to what `caps`
@@ -1981,14 +2097,23 @@ enum class Effort : std::uint8_t { None, Minimal, Low, Medium, High, Xhigh, Max 
     return nearest_effort(e, effort_set_of(caps));
 }
 
-// Ordered efforts the user may cycle for a given model: off + exactly the ON
-// levels the model's API accepts, in ladder order. The picker renders THIS,
-// so the user can never land on a level that would 400 — a binary-enum model
-// shows off·high, a full-ladder flagship shows off·low·medium·high·xhigh·max.
+// Ordered efforts the user may cycle for a given model: auto + off + exactly
+// the ON levels the model's API accepts, in ladder order. The picker renders
+// THIS, so the user can never land on a level that would 400 — a binary-enum
+// model shows auto·off·high, a full-ladder flagship shows
+// auto·off·low·medium·high·xhigh·max.
+//
+// Auto leads because it is the default and the recommended position: the
+// first ← from it is `off`, so turning reasoning off outright is still one
+// keystroke, and the → walk through real levels is unchanged.
+//
+// On a model with no ladder there is nothing to choose, so the list stays
+// {off} — offering "auto" where auto resolves to off would be a lie.
 [[nodiscard]] inline std::vector<Effort> available_efforts(
         const ModelCapabilities& caps) {
     const std::uint8_t set = effort_set_of(caps);
-    std::vector<Effort> out{Effort::None};
+    if (set == 0) return std::vector<Effort>{Effort::None};
+    std::vector<Effort> out{Effort::Auto, Effort::None};
     for (Effort e : {Effort::Minimal, Effort::Low, Effort::Medium, Effort::High,
                      Effort::Xhigh, Effort::Max})
         if (set & effort_bit(e)) out.push_back(e);

@@ -42,6 +42,7 @@
 #include <vector>
 
 #include "agentty/domain/sandbox_config.hpp"
+#include "agentty/tool/util/sandbox_claybin.hpp"
 #include "agentty/tool/util/subprocess.hpp"
 
 namespace agentty::tools::util::sandbox {
@@ -240,5 +241,10 @@ void reset_config_for_test() noexcept;
 // user namespaces). Empty on non-Linux builds. Exposed for the unit test only;
 // production code calls run_shell_command / run_argv.
 [[nodiscard]] std::vector<std::string> bwrap_argv_for_test(std::string_view shell_cmd);
+
+// Testing hook: the REAL claybin posture this process would build from the
+// sealed config snapshot right now, including the non-configurable masks and
+// workspace sweep in sandbox.cpp. Empty/default on non-Linux builds.
+[[nodiscard]] claybin_backend::Posture claybin_posture_for_test();
 
 } // namespace agentty::tools::util::sandbox
