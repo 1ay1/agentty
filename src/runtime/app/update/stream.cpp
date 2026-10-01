@@ -557,6 +557,62 @@ Cmd finalize_turn(Model& m, StopReason stop_reason) {
             std::string{}.swap(last.streaming_text);
         }
 
+        // ── A turn that produced NOTHING has to say so ───────────────────
+        //
+        // Reported as "it just goes silent" and reproduced from the saved
+        // thread: three consecutive turns with text_len=0, tool_calls=0, a
+        // valid thinking block, out=2..4 tokens, and NO ttft/wire_bytes at
+        // all -- no content byte ever arrived. The HTTP was 200 and the SSE
+        // was well-formed, so nothing anywhere reported an error. The user
+        // saw an empty bubble and had no way to tell a refusal from a hang.
+        //
+        // The OpenAI transport has had ensure_nonempty_turn() for exactly
+        // this since the qwen salvage work; the Anthropic path never grew an
+        // equivalent. Doing it HERE rather than in that transport is
+        // deliberate -- it is the one place every provider's stream
+        // converges, so a wire that goes quiet can never again be silent on
+        // only some of them.
+        //
+        // Mid-turn settles are NOT empty turns: StopReason::ToolUse means
+        // the model is mid-flight and the text may legitimately be blank
+        // (tool call with no preamble). Only a TERMINAL stop with nothing to
+        // show qualifies.
+        if (last.role == Role::Assistant
+            && last.text.empty()
+            && last.tool_calls.empty()
+            && stop_reason != StopReason::ToolUse) {
+            // Name the cause when the wire gave one. `refusal` is a real
+            // stop_reason (docs.claude.com/en/api/handling-stop-reasons) that
+            // parse_stop_reason silently folded into Unspecified until now,
+            // which is why this turn looked identical to a clean end.
+            switch (stop_reason) {
+                case StopReason::Refusal:
+                    last.text = "_The model declined to answer. "
+                                "Rephrasing, or asking in a new thread, "
+                                "usually works._";
+                    break;
+                case StopReason::MaxTokens:
+                    last.text = "_The reply hit the output token limit "
+                                "before any text arrived._";
+                    break;
+                case StopReason::ContextExceeded:
+                    last.text = "_The context window filled up before the "
+                                "model could reply. Try /compact._";
+                    break;
+                // EndTurn / StopSequence / Unspecified: the wire claims a
+                // normal finish but handed us nothing. Say exactly that and
+                // nothing more -- a guess at the cause is worse than none
+                // (the same reasoning as guard_truncated_tool_args above).
+                default:
+                    last.text = "_The model ended the turn without "
+                                "producing any output._";
+                    break;
+            }
+            AGT_LOG(Wire, Warn, "stream.empty_turn",
+                    "terminal stop with no content stop_reason={}",
+                    to_string(stop_reason));
+        }
+
         // Pre-settle StreamingMarkdown so the message's rendered height
         // is locked in BEFORE the next view() runs. Lazy finish() during
         // view shifts the assistant message height by 1+ rows when the

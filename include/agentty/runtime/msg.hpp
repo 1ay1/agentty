@@ -246,6 +246,19 @@ enum class StopReason : std::uint8_t {
     ToolUse,        // model wants tool results before continuing
     MaxTokens,      // hit the output token cap mid-stream
     StopSequence,   // matched a configured stop_sequence
+    // Safety classifiers declined the request. Arrives as a NORMAL HTTP 200
+    // with a well-formed stream -- a thinking block, a handful of output
+    // tokens, and no content blocks at all. Nothing about the transport
+    // looks wrong, which is exactly why this needs its own value: folded
+    // into Unspecified it was "treat as a clean stream end", and a clean
+    // end with no content renders as an empty bubble. Observed live: a
+    // turn with out=4, no text, no tool calls, and no visible explanation.
+    Refusal,
+    // The response filled the model's context window (as opposed to the
+    // request's own max_tokens cap, which is MaxTokens). Same truncation
+    // semantics, different cause, and the fix the user needs differs:
+    // raising max_tokens cannot help here.
+    ContextExceeded,
     Unspecified,    // wire absent, empty, or unknown
 };
 
@@ -255,6 +268,9 @@ enum class StopReason : std::uint8_t {
         case StopReason::ToolUse:      return "tool_use";
         case StopReason::MaxTokens:    return "max_tokens";
         case StopReason::StopSequence: return "stop_sequence";
+        case StopReason::Refusal:      return "refusal";
+        case StopReason::ContextExceeded:
+            return "model_context_window_exceeded";
         case StopReason::Unspecified:  return "";
     }
     return "";
@@ -269,6 +285,13 @@ enum class StopReason : std::uint8_t {
     if (s == "tool_use")      return StopReason::ToolUse;
     if (s == "max_tokens")    return StopReason::MaxTokens;
     if (s == "stop_sequence") return StopReason::StopSequence;
+    if (s == "refusal")       return StopReason::Refusal;
+    if (s == "model_context_window_exceeded")
+        return StopReason::ContextExceeded;
+    // pause_turn: a server-tool sampling loop hit its iteration limit. We
+    // send no server tools, so it cannot arrive today; when it can, it needs
+    // RESUME semantics (send the assistant content back), not a stop. Left
+    // deliberately unmapped rather than given a value nothing implements.
     return StopReason::Unspecified;
 }
 

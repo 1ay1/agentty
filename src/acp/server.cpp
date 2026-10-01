@@ -469,6 +469,16 @@ a::StopReason acp_stop_reason(StopReason r, bool cancelled, bool errored) {
     if (cancelled) return a::StopReason::Cancelled;
     if (errored)   return a::StopReason::Refusal;
     switch (r) {
+        // ACP has a native Refusal, so a decline keeps its identity across the
+        // bridge instead of arriving in Zed as a normal end_turn.
+        case StopReason::Refusal:      return a::StopReason::Refusal;
+        // Truncation is truncation to a client: both leave the answer cut
+        // off mid-thought, and MaxTokens is the signal ACP has for it. The
+        // CAUSE differs (request cap vs model window) and that distinction
+        // matters for what the user should do about it, but ACP has no
+        // separate value, and silently calling a truncated turn EndTurn
+        // would tell the client the answer is complete.
+        case StopReason::ContextExceeded:
         case StopReason::MaxTokens:    return a::StopReason::MaxTokens;
         case StopReason::EndTurn:
         case StopReason::ToolUse:
