@@ -9,6 +9,7 @@
 
 #include "agentty/runtime/panel/sandbox.hpp"
 #include "agentty/runtime/panel/mention.hpp"   // file_source/file_filter, shared with @
+#include "agentty/i18n/i18n.hpp"              // t() — row labels and help
 
 #include <algorithm>
 #include <string>
@@ -415,19 +416,16 @@ form::Form build_sandbox_form(const sandbox_cfg::Config& cfg,
          "system dirs only \xc2\xb7 no $HOME toolchains, so some builds break",
          "read on / \xc2\xb7 every secret outside the mask list is reachable"}));
     form.fields.push_back(
-        list_row(kSbReadPaths, "Also readable",
-                 "extra paths a command may read, beyond the scope above \xc2\xb7 "
-                 "for a dependency outside the workspace",
+        list_row(kSbReadPaths, std::string{i18n::t("sandbox.read_paths")},
+                 std::string{i18n::t("sandbox.help.read_paths")},
                  cfg.read_paths.size(), "path"));
     form.fields.push_back(
-        list_row(kSbWritePaths, "Also writable",
-                 "separate from readable on purpose: granting write is a "
-                 "different decision",
+        list_row(kSbWritePaths, std::string{i18n::t("sandbox.write_paths")},
+                 std::string{i18n::t("sandbox.help.write_paths")},
                  cfg.write_paths.size(), "path"));
     form.fields.push_back(
-        list_row(kSbDenyPaths, "Masked",
-                 "carved out even inside the scope above \xc2\xb7 e.g. "
-                 "~/.cargo/credentials. credential files are masked anyway.",
+        list_row(kSbDenyPaths, std::string{i18n::t("sandbox.deny_paths")},
+                 std::string{i18n::t("sandbox.help.deny_paths")},
                  cfg.deny_paths.size(), "path"));
 
     // ── Network ──────────────────────────────────────────────────────────
@@ -451,9 +449,8 @@ form::Form build_sandbox_form(const sandbox_cfg::Config& cfg,
                      std::to_string(landlock_abi));
 
     form.fields.push_back(
-        list_row(kSbPorts, "Allowed ports",
-                 "443 https \xc2\xb7 80 http \xc2\xb7 22 git-ssh \xc2\xb7 53 dns. "
-                 "forgetting 53 breaks everything.",
+        list_row(kSbPorts, std::string{i18n::t("sandbox.ports")},
+                 std::string{i18n::t("sandbox.help.ports")},
                  cfg.allow_ports.size(), "port"));
     // Deliberately NOT locked when Access is not `ports`.
     //
@@ -503,10 +500,12 @@ form::Form build_sandbox_form(const sandbox_cfg::Config& cfg,
     // which is the exact failure this pane exists to prevent.
     form.fields.push_back(header("Resources"));
     form.fields.push_back(
-        number(kSbMemoryMb, "Memory (MB)", "0 = no cap",
+        number(kSbMemoryMb, std::string{i18n::t("sandbox.memory")},
+               std::string{i18n::t("sandbox.help.memory")},
                static_cast<std::int64_t>(cfg.memory_mb), 0, 131072));
     form.fields.push_back(
-        number(kSbMaxProcs, "Processes", "0 = no cap \xc2\xb7 stops fork bombs",
+        number(kSbMaxProcs, std::string{i18n::t("sandbox.procs")},
+               std::string{i18n::t("sandbox.help.procs")},
                static_cast<std::int64_t>(cfg.max_procs), 0, 65536));
     form.fields.push_back(
         number(kSbCpuPercent, "CPU (%)", "0 = no cap \xc2\xb7 100 = one core",
@@ -587,9 +586,8 @@ form::Form build_sandbox_form(const sandbox_cfg::Config& cfg,
     // and the sweep runs in the latency path of each shell command. Saying so
     // is better than picking a number and hiding the trade.
     form.fields.push_back(
-        number(kSbMaskDepth, "Secret scan depth",
-               "0 = workspace root only \xc2\xb7 3 finds services/*/.env \xc2\xb7 "
-               "each level costs stat() calls on every command",
+        number(kSbMaskDepth, std::string{i18n::t("sandbox.scan_depth")},
+               std::string{i18n::t("sandbox.help.scan_depth")},
                static_cast<std::int64_t>(cfg.mask_scan_depth), 0, 8));
 
     // The trust-handoff row goes LAST and under its own heading, because it is

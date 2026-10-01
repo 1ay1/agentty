@@ -100,6 +100,21 @@ struct Prefs {
     ColorTier  tier        = ColorTier::Auto;
     Polarity   polarity    = Polarity::Auto;
 
+    // UI language, as a BCP-47 tag ("de", "pt-BR"). EMPTY means "follow the
+    // environment" -- $LC_ALL / $LC_MESSAGES / $LANG, then English.
+    //
+    // Empty-as-auto rather than defaulting to "en", for the same reason
+    // `theme` is empty-as-native: a user who never opened the picker should
+    // get their system's language, and a stored "en" would be
+    // indistinguishable from an explicit choice of English. Someone who
+    // deliberately picks English gets "en" written out, and then a later
+    // `LANG=de_DE` does not override them.
+    //
+    // This is agentty's CHROME only. What language the model answers in is
+    // decided by what the user types to it, and is deliberately not coupled
+    // to this -- see docs/design/i18n.md.
+    std::string lang;
+
     Density    density     = Density::Normal;
     // Reading measure for assistant prose, in columns. Long lines are hard
     // to track back to the next line's start; 0 means "no cap".

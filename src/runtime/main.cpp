@@ -76,6 +76,7 @@
 #include "agentty/runtime/app/program.hpp"
 #include "agentty/auth/auth.hpp"
 #include "agentty/io/persistence.hpp"
+#include "agentty/i18n/startup.hpp"   // i18n::init — before anything renders
 #include "agentty/io/blob_gc.hpp"
 #include "agentty/io/http.hpp"
 #include "agentty/mcp/serve.hpp"
@@ -741,6 +742,10 @@ struct Args {
     // linked -- claybin is a required submodule -- so this is a pure runtime
     // choice, and it OVERRIDES the backend saved in the Sandbox pane.
     std::string cli_sandbox_backend;
+    // UI language for THIS run, as a BCP-47 tag ("de", "pt-BR", "zh-CN").
+    // Beats the saved setting and the environment, like every other flag:
+    // what the user typed this run is not second-guessed.
+    std::string cli_lang;
     std::string cli_profile;   // "write" | "ask" | "minimal"; ACP only
     std::string cli_provider;  // "anthropic" | "openai" | "ollama" | "llama.cpp" | host[:port]
     std::string cli_auth_header; // custom auth header NAME (e.g. "X-API-Key")
@@ -882,6 +887,8 @@ Args parse_args(int argc, char** argv) {
             out.cli_sandbox = argv[++i];
         } else if (a == "--sandbox-backend" && i + 1 < argc) {
             out.cli_sandbox_backend = argv[++i];
+        } else if (a == "--lang" && i + 1 < argc) {
+            out.cli_lang = argv[++i];
         } else if (a == "--events" && i + 1 < argc) {
             // Selects the headless machine-readable event stream. Applied
             // to the environment rather than Args because the emitter
@@ -1289,6 +1296,29 @@ int main(int argc, char** argv) {
         std::error_code ec;
         auto cwd = std::filesystem::current_path(ec);
         if (!ec) tools::util::set_workspace_root(std::move(cwd));
+    }
+
+    // ── UI language ─────────────────────────────────────────────────────
+    // Before ANYTHING renders or prints, so a status line, an error, or a
+    // first paint cannot escape in the wrong language. Cheap: parse one
+    // embedded JSON catalog and store a pointer.
+    //
+    // Reads the saved setting through load_settings(), which is the same
+    // call the sandbox block below makes -- settings.json is read once and
+    // this is a field on it, not a second file.
+    //
+    // A failure here means the EMBEDDED English catalog did not parse, which
+    // is a build defect rather than a runtime condition. Not fatal: t()
+    // returns ids when no catalog is installed, so the app still runs and
+    // the ids on screen are an unmissable bug report. Refusing to start over
+    // a label table would be a worse trade.
+    {
+        const auto saved = persistence::load_settings().ui.lang;
+        if (!i18n::init(args.cli_lang, saved)) {
+            std::fprintf(stderr,
+                "agentty: the embedded English string catalog failed to "
+                "parse; labels will show as ids. This is a build defect.\n");
+        }
     }
 
     // ── Bash / diagnostics sandbox ──────────────────────────────────────

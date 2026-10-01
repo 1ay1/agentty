@@ -108,11 +108,17 @@ bool set_active(Lang l);
 
 // One translated string.
 //
-// A missing id returns THE ID ITSELF. Visibly wrong beats blank: a screen
-// reading "sandbox.row.read_paths.label" is a bug report, an empty row is a
-// user wondering if they broke something. The lint makes it unreachable in a
-// shipped build (every t() id must exist in en.json), so this is the
-// behaviour of a build that failed its own gate, not a design we rely on.
+// Falls back ACTIVE -> ENGLISH -> the id itself.
+//
+// The English rung is the one that matters in practice: every translation is
+// partial for a while, and a 60%-complete German pane must show English for
+// the rest, not raw ids. (A render test caught this -- the first version
+// skipped straight to the id and painted `sandbox.ports` as a row label.)
+//
+// The last rung is reachable only when ENGLISH is missing the id, which the
+// lint makes a build failure. It returns the id rather than blank because
+// visibly wrong beats invisible: a screen reading "sandbox.ports" is a bug
+// report, an empty row is a user wondering what they broke.
 [[nodiscard]] std::string_view t(std::string_view id) noexcept;
 
 // A translated string with a count, picking the CLDR plural category for the

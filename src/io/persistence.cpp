@@ -2261,6 +2261,9 @@ store::Settings load_settings() {
                 return static_cast<E>(u.value(k, static_cast<int>(def)));
             };
             s.ui.theme         = u.value("theme", std::string{});
+            // Empty = auto (follow the environment). Same shape as theme:
+            // an absent key and an explicit "" both mean "nobody chose".
+            s.ui.lang          = u.value("lang", std::string{});
             s.ui.tier          = en("tier",       ui_prefs::ColorTier::Auto);
             s.ui.polarity      = en("polarity",   ui_prefs::Polarity::Auto);
             s.ui.density       = en("density",    ui_prefs::Density::Normal);
@@ -2560,6 +2563,10 @@ void save_settings(const store::Settings& s) {
     if (s.ui != ui_prefs::Prefs{}) {
         json u;
         if (!s.ui.theme.empty())  u["theme"] = s.ui.theme;
+        // Only when CHOSEN. Writing "en" for a user who never opened the
+        // picker would freeze them to English the moment they move to a
+        // German machine -- the absence is what makes `auto` work.
+        if (!s.ui.lang.empty())   u["lang"]  = s.ui.lang;
         u["tier"]          = static_cast<int>(s.ui.tier);
         u["polarity"]      = static_cast<int>(s.ui.polarity);
         u["density"]       = static_cast<int>(s.ui.density);

@@ -47,6 +47,7 @@ set(AGENTTY_IO_SOURCES
     src/domain/complexity.cpp
     src/domain/sandbox_provenance.cpp
     src/i18n/i18n.cpp
+    src/i18n/startup.cpp
     src/domain/model_name.cpp
     src/domain/stats/fold.cpp
     src/domain/stats/extract.cpp

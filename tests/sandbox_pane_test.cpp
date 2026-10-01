@@ -27,6 +27,7 @@
 #include "agentty/runtime/panel/sandbox.hpp"
 #include "agentty/runtime/panel/settings/items.hpp"
 #include "agentty/runtime/view/form_panel.hpp"   // form_config — the render checks
+#include "agentty/i18n/i18n.hpp"                   // the translated-pane check
 #include "agentty/tool/util/sandbox.hpp"
 
 #include <cstdlib>
@@ -2345,4 +2346,80 @@ TEST_CASE("sandbox pane: a policy that will not compile annotates no walls") {
         // never "strong".
         CHECK(origin.find("strong") == std::string::npos);
     }
+}
+
+// ── The pane actually renders in another language ────────────────────────
+//
+// The piece every other i18n test leaves out. The core test proves t()
+// returns German; the width test proves German fits. Neither proves the PANE
+// calls t() at all -- a row still holding a literal would pass both and ship
+// in English forever.
+//
+// So: install a German catalog, build the real form, and look at the painted
+// bytes. This is the gate that says the sweep actually happened.
+TEST_CASE("sandbox render: the pane paints the ACTIVE language") {
+    // The test binary does not run main()'s startup, so install English
+    // first. Only the ids this pane reads -- the real catalog lives in
+    // src/i18n/startup.cpp and the lint keeps the two from diverging (an id
+    // used here but absent there fails the build).
+    const char* en = R"({
+        "sandbox.read_paths":  {"text": "Also readable"},
+        "sandbox.write_paths": {"text": "Also writable"},
+        "sandbox.deny_paths":  {"text": "Masked"},
+        "sandbox.ports":       {"text": "Allowed ports"},
+        "sandbox.help.read_paths":  {"text": "extra paths a command may read"},
+        "sandbox.help.write_paths": {"text": "granting write is a different decision"},
+        "sandbox.help.deny_paths":  {"text": "carved out even inside the scope above"},
+        "sandbox.help.ports":       {"text": "443 https, 80 http, 22 git-ssh, 53 dns"}
+    })";
+    REQUIRE(agentty::i18n::install_catalog(agentty::i18n::Lang::en, en));
+
+    // Only the ids the pane uses. A partial catalog on purpose: it proves the
+    // untranslated rows fall back to English rather than to raw ids, which is
+    // what every real translation looks like before it is finished.
+    const char* de = R"({
+        "sandbox.read_paths":  {"text": "Auch lesbar"},
+        "sandbox.write_paths": {"text": "Auch beschreibbar"},
+        "sandbox.deny_paths":  {"text": "Maskiert"},
+        "sandbox.help.read_paths": {"text": "zusätzliche Pfade zum Lesen"}
+    })";
+    REQUIRE(agentty::i18n::install_catalog(agentty::i18n::Lang::de, de));
+
+    sandbox_cfg::Config cfg;
+    cfg.configured = true;
+    cfg.backend = sandbox_cfg::LinuxBackend::Claybin;
+    install(cfg);
+
+    const auto paint = [&] {
+        auto form = pn::build_sandbox_form(cfg, facts_for(cfg));
+        pn::annotate_sandbox_form(form, pn::preview_sandbox(cfg), cfg,
+                                  pn::EngineStatus::InForce);
+        return maya::render_to_string(
+            maya::Panel{agentty::ui::form_config(form, maya::Color::blue(),
+                                                 nullptr, 0, 120)}.build(),
+            120);
+    };
+
+    REQUIRE(agentty::i18n::set_active(agentty::i18n::Lang::en));
+    const auto en_out = paint();
+    CHECK(en_out.find("Also readable") != std::string::npos);
+
+    // THE LIVE SWAP, through the real pane. One store, rebuild, translated --
+    // no restart, which is the behaviour docs/design/i18n.md promises.
+    REQUIRE(agentty::i18n::set_active(agentty::i18n::Lang::de));
+    const auto de_out = paint();
+    CHECK(de_out.find("Auch lesbar") != std::string::npos);
+    CHECK(de_out.find("Auch beschreibbar") != std::string::npos);
+    CHECK(de_out.find("Maskiert") != std::string::npos);
+    // The English is GONE, not merely joined -- a row that painted both would
+    // mean the form was rebuilt against a stale catalog.
+    CHECK(de_out.find("Also readable") == std::string::npos);
+
+    // An id the German catalog lacks falls back to ENGLISH, never to the raw
+    // id. Every real translation is partial for a while, and a half-German
+    // pane showing "sandbox.ports" is worse than one showing English.
+    CHECK(de_out.find("Allowed ports") != std::string::npos);
+    CHECK(de_out.find("sandbox.ports") == std::string::npos);
+
+    REQUIRE(agentty::i18n::set_active(agentty::i18n::Lang::en));
 }

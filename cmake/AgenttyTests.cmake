@@ -750,6 +750,22 @@ if(EXISTS ${_BANLIST})
                          PROPERTIES LABELS "static")
 endif()
 
+# ── i18n catalog ───────────────────────────────────────────────────────────
+# Three gates: every t() id exists in the English catalog, every catalog id is
+# used, and nothing in src/provider or src/tool translates (model-facing
+# strings stay English -- docs/design/i18n.md section 3).
+#
+# The first is what makes the string sweep reviewable: "did we drop one" is
+# not a question a human can answer across hundreds of moved literals, and a
+# missing id renders as the id on screen rather than failing loudly.
+#
+# Same shape and cost as the banlist above: a text scan, no compile.
+add_test(NAME i18n_catalog_lint
+         COMMAND ${CMAKE_COMMAND}
+                 -DROOT=${CMAKE_SOURCE_DIR}
+                 -P ${CMAKE_SOURCE_DIR}/tests/lint/i18n_lint.cmake)
+set_tests_properties(i18n_catalog_lint PROPERTIES LABELS "static")
+
 # ── Allowlist rot ──────────────────────────────────────────────────────────
 # The banlist walks the files on disk and only ever LOOKS UP the allowlist, so
 # a grant whose justification is gone is silently ignored rather than reported.

@@ -157,6 +157,22 @@ std::atomic<Lang>& current_lang() {
     return out;
 }
 
+// An id the ACTIVE catalog does not carry: try English before giving up.
+//
+// THE CASE THIS EXISTS FOR, and a render test caught it rather than a reader:
+// every real translation is partial for a while. A German catalog at 60%
+// used to paint `sandbox.ports` as a row label -- the raw id -- next to
+// perfectly good German. That is worse than English in every way: it is not
+// a word in any language, it is wider than the label it replaced, and it
+// tells the user nothing except that something is broken.
+//
+// English is the one catalog guaranteed installed (i18n::init loads it
+// whatever the choice), and it is the language the ids are written in
+// anyway. So the ladder is: active -> English -> the id. The last rung is
+// reachable only when the English catalog itself is missing an entry, which
+// the lint makes a build failure.
+[[nodiscard]] std::string_view fallback(std::string_view id) noexcept;
+
 }  // namespace
 
 std::string_view tag_of(Lang l) noexcept {
@@ -221,6 +237,19 @@ bool parse_tag(std::string_view tag, Lang& out) noexcept {
 
 Lang active() noexcept { return current_lang().load(std::memory_order_acquire); }
 
+namespace {
+std::string_view fallback(std::string_view id) noexcept {
+    const auto en = store()[static_cast<std::size_t>(Lang::en)]
+                        .load(std::memory_order_acquire);
+    if (!en) return id;
+    const auto it = en->table.find(id);
+    if (it == en->table.end()) return id;
+    if (it->second.plural)
+        return it->second.forms[static_cast<std::size_t>(Plural::Other)];
+    return it->second.text;
+}
+}  // namespace
+
 bool set_active(Lang l) {
     auto cat = store()[static_cast<std::size_t>(l)].load(std::memory_order_acquire);
     if (!cat) return false;     // no catalog compiled in: keep what we have
@@ -233,7 +262,7 @@ std::string_view t(std::string_view id) noexcept {
     const auto cat = current().load(std::memory_order_acquire);
     if (!cat) return id;        // before load(): the id, never blank
     const auto it = cat->table.find(id);
-    if (it == cat->table.end()) return id;
+    if (it == cat->table.end()) return fallback(id);
     // A plural entry read through t() has no count to select on. `other` is
     // the one category every rule can produce, so it is the honest fallback.
     if (it->second.plural)
@@ -245,7 +274,7 @@ std::string_view tn(std::string_view id, long long n) noexcept {
     const auto cat = current().load(std::memory_order_acquire);
     if (!cat) return id;
     const auto it = cat->table.find(id);
-    if (it == cat->table.end()) return id;
+    if (it == cat->table.end()) return fallback(id);
     if (!it->second.plural) return it->second.text;
 
     const Plural p = select(cat->lang, n);
