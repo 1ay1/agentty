@@ -29,6 +29,7 @@
 
 #include <cstdlib>
 #include <string>
+#include <string_view>
 
 namespace ag = agentty::tools::util::sandbox;
 namespace mc = mcp::tools::util::sandbox;
@@ -118,6 +119,70 @@ TEST_CASE("sandbox: claybin does not need a user namespace to be useful") {
     // claimed. A report that said `strong` here would be the exact lie this
     // subsystem exists to prevent.
     CHECK(compiled->guarantees.strength(CapId::proc_isolation) == Enforcement::none);
+}
+#endif  // __linux__
+
+#if defined(__linux__)
+TEST_CASE("sandbox: a microvm request is REFUSED, never downgraded") {
+    // The invariant that makes "we do not implement kernel isolation" an honest
+    // position rather than a gap.
+    //
+    // If compile() silently downgraded Isolation::microvm to a process sandbox,
+    // a caller asking for a separate kernel would get a namespace and be told
+    // nothing -- their threat model would say "separate kernel" while the
+    // reality said "shared". That is the worst failure this subsystem could
+    // have, and it is worse than not having the feature at all.
+    //
+    // Pinned from agentty rather than trusted, because it is a one-line check
+    // in a submodule that a well-meaning "make the sandbox more forgiving"
+    // change could delete, and nothing on this side would notice.
+    using namespace ::clay;
+    using namespace ::clay::literals;
+
+    auto d = Policy<Draft>{};
+    d = std::move(d).ro_bind("/usr", "/usr");
+    d = std::move(d).isolation(Isolation::microvm);
+
+    auto compiled = compile(std::move(d).seal(), probe_host());
+    REQUIRE(!compiled.has_value());
+    // And the reason names the missing piece, so the error is actionable
+    // rather than a bare refusal.
+    CHECK(std::string_view{compiled.error().mechanism}.find("microvm") !=
+          std::string_view::npos);
+}
+
+TEST_CASE("sandbox: the kernel-isolation gap says whose fault it is") {
+    // host.kernel_isolation is `none` for two very different reasons, and a
+    // caller deciding whether to care deserves the real one: "we did not build
+    // it" versus "this host could not run it anyway". A flat "process-backend"
+    // invited the first reading, which is wrong on most CI runners.
+    using namespace ::clay;
+
+    auto report_with = [](bool kvm) {
+        auto host = probe_host();
+        host.kvm = kvm;
+        // A policy complete enough to compile. A bare ro_bind is not: claybin
+        // refuses a draft with no root, no /proc and no workdir, which is
+        // correct of it and was my first mistake here.
+        auto d = Policy<Draft>{};
+        d = std::move(d).ro_bind("/usr", "/usr");
+        d = std::move(d).proc_fs("/proc");
+        d = std::move(d).dev_fs("/dev");
+        d = std::move(d).tmpfs("/tmp", Bytes{64ull << 20});
+        d = std::move(d).workdir("/");
+        d = std::move(d).syscall_profile(profiles::compiler_with_network());
+        auto compiled = compile(std::move(d).seal(), host);
+        REQUIRE(compiled.has_value());
+        // Always `none` on a process backend, whatever the host can do. That
+        // part is machine-checked by claybin's own fuzzer too.
+        CHECK(compiled->guarantees.strength(CapId::host_kernel_isolation) ==
+              Enforcement::none);
+        return std::string{
+            compiled->guarantees.mechanism(CapId::host_kernel_isolation)};
+    };
+
+    CHECK(report_with(true).find("kvm available") != std::string::npos);
+    CHECK(report_with(false).find("no kvm") != std::string::npos);
 }
 #endif  // __linux__
 

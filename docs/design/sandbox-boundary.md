@@ -779,52 +779,45 @@ before you add a domain.
 
 ---
 
-## 13. Kernel isolation: why claybin reports `none` honestly
+## 13. Kernel isolation: should claybin even have it?
 
-The last `none` in the audit, and the only capability no amount of work on the
-process backend can change. Worth a section because the obvious question —
-*can't claybin do that too?* — has a more interesting answer than yes or no.
+The last `none` in the audit. The interesting question is not *can* we — it is
+whether this belongs in claybin at all. I think it does not, and the reason is
+about what claybin **is**.
 
-### claybin already models it
+### claybin's own premise forbids it
 
-`Isolation::microvm` exists in the policy lattice, and it is modelled properly:
+From its README: *"a drop-in replacement for bubblewrap, and the authority
+compiler underneath it."* And from its CMakeLists:
 
-- `compile()` **refuses** rather than silently downgrading when a policy asks
-  for an isolation level the host cannot deliver.
-- the lattice treats it as the strongest point — `Policy::nothing()` starts at
-  `microvm` (bottom authority = strongest boundary), and a meet of two policies
-  takes the stronger isolation, so composing can never weaken it.
-- the compile fuzzer asserts a process backend can **never** report
-  `host.kernel_isolation` as anything but `none`.
+```cmake
+# the whole point: no libseccomp, no libcap, no libmount. raw syscalls only.
+target_link_libraries(claybin PUBLIC)
+```
 
-So the type system already knows the difference. What is missing is a backend:
-a VMM, a guest kernel, and a root filesystem.
+Zero dependencies. 3 MB. Everything it does, it does by calling the kernel
+directly — that is the product. A microVM backend would mean orchestrating two
+external binaries (cloud-hypervisor, virtiofsd) plus a guest kernel image whose
+provenance someone has to vouch for. That is not a stronger version of the same
+thing; it is a different kind of software wearing the same name.
 
-### Why that is not a tweak
+The lattice already says so, if you read it carefully. `Isolation` is
+`process` → `hardened_process` → `microvm`, and the first two are *modes of the
+same mechanism* — same syscalls, more of them. `microvm` is in that enum as the
+honest top of the ordering, not as a roadmap item. It exists so a caller can
+**ask** for a guarantee claybin will refuse, rather than asking for the strongest
+thing claybin happens to implement and being quietly given less.
 
-Researching what it would actually take (Firecracker and gVisor are the two
-production-grade answers; Firecracker is what AWS Lambda runs on, gVisor backs
-Cloud Run, GKE Sandbox and the code execution in claude.ai):
+That is a real feature. `compile()` returning `"microvm backend not
+implemented"` is more useful than a claybin that silently hands back a process
+sandbox, and far more useful than a claybin with a half-finished VMM in it.
 
-- **A microVM is a different execution model, not a stronger flag.** It needs a
-  guest kernel image and a root filesystem. agentty's sandbox binds the *host's*
-  `/usr` and the user's real workspace so `cargo` finds its toolchain and edits
-  land in the actual repo. A VM has none of that by construction — you get a
-  disk image, and the workspace arrives over virtio-fs with its own semantics.
-  The whole point of our boundary is that the command runs *here*.
-- **Cold start is ~125 ms for Firecracker**, against a `fork`+`unshare` that
-  costs well under a millisecond. For a shell tool invoked dozens of times a
-  turn that is a different product.
-- **It is not strictly stronger on the axes we already cover.** A microVM gives
-  a separate kernel; it does not give you landlock's per-path rules or our
-  credential masks. The right comparison is "both", which is what Kata does, and
-  that is a container runtime's worth of machinery.
+### What the measurement showed
 
-### The measurement that settles it
-
-Not a thought experiment — measured on a developer box with working KVM
-(`firecracker 1.17.0` is one `pacman -S` away, and `KVM_CREATE_VM` succeeds
-unprivileged because `/dev/kvm` is mode 0666 there):
+This is not only an architecture argument; the numbers point the same way.
+Measured on a developer box with working KVM — `firecracker 1.17.0` is one
+`pacman -S` away, and `KVM_CREATE_VM` succeeds unprivileged because `/dev/kvm`
+is mode 0666 there:
 
 | what the process backend binds | size |
 |---|---|
@@ -837,18 +830,39 @@ bind is not an implementation shortcut — it *is* the feature. An agent that
 cannot see your actual `cargo`, your actual `node_modules`, and your actual repo
 is not doing the job.
 
-So the blocker is not the VMM, the kernel image, or KVM access. All three are
-available. The blocker is that a microVM changes what "run this command in my
-project" means, and that is a product decision rather than a sandbox one.
+And **Firecracker cannot do it at all**: no virtio-fs support, not on their
+roadmap (upstream issue #1180). It shares block devices, not directories — Lambda
+does not need directories, because the function's code arrives as an image. So
+the obvious answer ("use what Lambda uses") is also the wrong one. A microVM
+backend here means cloud-hypervisor plus virtiofsd: three process lifetimes per
+command instead of one, where a leaked virtiofsd outlives the command it served.
 
-### What was built instead: an honest answer
+Cold start is ~125 ms against a `fork`+`unshare` well under a millisecond. For a
+shell tool invoked dozens of times a turn, that is a different product.
 
-The gap was already reported, but the *reason* was not. `HostCapabilities` had
-no KVM field, so the report said a flat `process-backend` — which invites the
-reader to assume "they could have, and didn't". That is wrong on most CI runners
-and in every container without `/dev/kvm` passed through.
+### So where does it belong?
 
-So `probe_host()` now probes KVM and the mechanism string distinguishes:
+If agentty ever wants kernel isolation, it is a **third backend beside bwrap and
+claybin** — not inside claybin — for a different job: running genuinely
+untrusted code you do not intend to integrate, where a disk image is the right
+model and 125 ms is fine. That is what Fly and Modal sell. It would be
+`Backend::Microvm` in agentty's own enum, orchestrating external processes, and
+claybin would stay what it is.
+
+It is also not strictly stronger. A separate kernel does not give you landlock's
+per-path rules or our credential masks, and §7's masking has **no analogue** over
+virtio-fs — `--ro-bind /dev/null` is a mount trick, and the guest sees a
+different tree. A microVM backend could easily end up *weaker* on the axis that
+matters most here, which is keeping an approved command out of `~/.ssh`.
+
+### What was built instead
+
+Not a backend — an honest answer. The gap was already reported, but the *reason*
+was not: the report said a flat `process-backend`, which invites "they could
+have, and didn't". That is wrong on most CI runners and in every container
+without `/dev/kvm` passed through.
+
+So `probe_host()` probes KVM and the mechanism string distinguishes:
 
 | report | means |
 |---|---|
@@ -856,26 +870,25 @@ So `probe_host()` now probes KVM and the mechanism string distinguishes:
 | `process-backend, no kvm` | the hardware boundary is unavailable here, so no backend could give it — **the gap is the host's** |
 
 The probe **opens** `/dev/kvm` rather than stat-ing it, for the same reason
-`probe_userns()` forks and attempts the uid_map write: the device exists on
-hosts where it is root-only, which is the common desktop case. A capability that
-reads as present and fails on use is the failure mode this whole file exists to
-avoid. `O_RDWR`, because read-only access cannot create a VM.
+`probe_userns()` forks and attempts the uid_map write: the device exists on hosts
+where it is root-only, which is the common desktop case. A capability that reads
+as present and fails on use is the failure mode that file exists to avoid.
+`O_RDWR`, because read-only access cannot create a VM.
 
-`kvm` is otherwise **unused** by the process backend. It exists so this one
-sentence is measurable rather than a matter of opinion.
+`kvm` is otherwise **unused** by the process backend. It exists so one sentence
+is measurable rather than a matter of opinion.
 
-### If a microVM backend is ever built
+### The invariant to keep
 
-It is a new backend beside bwrap and claybin, not a claybin feature:
+`compile()` refuses `Isolation::microvm`. **Do not relax that into a downgrade.**
+A caller asking for a separate kernel and silently getting a namespace is the
+worst failure this subsystem could have — their threat model says "separate
+kernel" and the reality says "shared". The refusal is what makes leaving the
+capability unimplemented an honest position rather than a gap.
 
-1. `Backend::Microvm`, selected explicitly — never by fallback. A 125 ms
-   cold start must be something the user asked for.
-2. The workspace crosses as virtio-fs, and that changes file semantics. Every
-   assumption in §7 about masking a host path needs re-deriving.
-3. `compile()` already refuses `Isolation::microvm` without support, so the
-   failure mode is correct before the backend exists. Keep it that way.
-4. The capability table in §6 grows a column, and the honesty rule applies
-   per-backend exactly as it does now.
+The compile fuzzer already asserts a process backend can never report
+`host.kernel_isolation` as anything but `none`, so the invariant is
+machine-checked rather than remembered.
 
 ---
 
