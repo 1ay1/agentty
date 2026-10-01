@@ -698,6 +698,37 @@ TEST_CASE("sandbox pane: the posture row writes every other row") {
     CHECK(out.syscall_mode == sandbox_cfg::SyscallMode::Strict);
     CHECK(out.memory_mb == 8192);
     CHECK(sandbox_cfg::detect_posture(out) == sandbox_cfg::Posture::Hardened);
+
+    // ...AND IT REACHED THE RECORD THAT GETS SAVED.
+    //
+    // THE BUG THIS PINS. Everything above passed while picking a preset
+    // persisted NOTHING: the kSbPosture arm repainted the rows and then
+    // `return Cmd::none()`, so it was the one row that never reached the
+    // autosave every other row goes through. The pane showed Hardened, the
+    // footer said "applies on restart", and the next launch loaded the old
+    // config -- where the posture row, derived by comparison, correctly
+    // reported Custom.
+    //
+    // Reported as "I changed the preset to Hardened, restarted, it was Custom
+    // again". The derivation was right the whole time; the config really was
+    // unchanged on disk.
+    //
+    // Checking the FORM is not enough and that is the lesson: the form is
+    // what the user sees, m.d.persisted is what survives. A test that only
+    // reads the form cannot tell those apart, which is why this one failed to
+    // catch a bug it was otherwise perfectly placed to catch.
+    CHECK(m.d.persisted.sandbox.syscall_mode == sandbox_cfg::SyscallMode::Strict);
+    CHECK(m.d.persisted.sandbox.memory_mb == 8192);
+    CHECK(m.d.persisted.sandbox.fake_hostname);
+    CHECK(m.d.persisted.sandbox.mask_scan_depth == 5);
+    CHECK(sandbox_cfg::detect_posture(m.d.persisted.sandbox)
+          == sandbox_cfg::Posture::Hardened);
+
+    // The seal still holds: persisting is not applying. A preset must not move
+    // the boundary under a process that is already running, same as every
+    // other row (see "sandbox pane: a save persists but does NOT touch the
+    // live boundary").
+    CHECK(sb::config().syscall_mode != sandbox_cfg::SyscallMode::Strict);
 }
 
 TEST_CASE("sandbox pane: a preset does not re-stamp a row edited after it") {

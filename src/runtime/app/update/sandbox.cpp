@@ -246,7 +246,9 @@ Cmd sandbox_update(Model& m, msg::SandboxMsg sm) {
             // cannot express this" until the pane was reopened.
             if (applied.changed && row_id == pn::kSbBackend) {
                 reproject(*o, pn::read_sandbox_form(o->pane.form, o->pane.working));
-                return Cmd::none();
+                // ...and PERSIST, same as every other row. See the posture
+                // branch below for why returning early here was a bug.
+                return sandbox_update(m, msg::SandboxMsg{SandboxSave{}});
             }
 
             // The POSTURE row is the only one that writes OTHER rows, and it is
@@ -277,7 +279,21 @@ Cmd sandbox_update(Model& m, msg::SandboxMsg sm) {
                 const auto cfg = sandbox_cfg::apply_posture(
                     pn::read_sandbox_form(o->pane.form, o->pane.working), chosen);
                 reproject(*o, cfg);
-                return Cmd::none();
+                // AND SAVE. This returned Cmd::none(), which meant the one row
+                // that rewrites every OTHER row was the one row that never
+                // reached the autosave below -- so picking Hardened repainted
+                // 26 rows, said "applies on restart", and persisted nothing.
+                // Next launch loaded the old config and the posture row,
+                // derived by comparison, correctly reported Custom.
+                //
+                // Reported as "I changed the preset to Hardened, restarted,
+                // it was Custom again", and the derivation was right the whole
+                // time: the config really was unchanged on disk.
+                //
+                // Not a special case worth its own save path -- it is the
+                // same SandboxSave the generic branch sends. The early return
+                // was the whole defect.
+                return sandbox_update(m, msg::SandboxMsg{SandboxSave{}});
             }
 
             // A Pick row asked for its editor. The path and port rows are the
