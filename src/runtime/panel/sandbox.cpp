@@ -699,125 +699,6 @@ sandbox_cfg::Config read_sandbox_form(const form::Form& f,
     return cfg;
 }
 
-#if defined(__linux__)
-
-Preview preview_sandbox(const sandbox_cfg::Config& cfg) {
-    using namespace ::clay;
-    using namespace ::clay::literals;
-
-    Preview out;
-
-    auto d = Policy<Draft>{};
-    // Only the axes that change the WALLS need to be faithful here; the exact
-    // bind list does not move a guarantee, so the preview uses the shape
-    // rather than the full read set. (The spawn path builds the real thing.)
-    d = std::move(d).ro_bind("/usr", "/usr");
-    d = std::move(d).proc_fs("/proc");
-    d = std::move(d).dev_fs("/dev");
-    d = std::move(d).tmpfs("/tmp", Bytes{cfg.tmp_mb * 1024 * 1024});
-
-    switch (cfg.net_mode) {
-        case sandbox_cfg::NetMode::Full:
-            d = std::move(d).connect("", 0);
-            break;
-        case sandbox_cfg::NetMode::None:
-            break;  // no grant at all: an empty netns
-        case sandbox_cfg::NetMode::Ports:
-            for (auto p : cfg.allow_ports) d = std::move(d).connect("", p);
-            break;
-    }
-
-    switch (cfg.syscall_mode) {
-        case sandbox_cfg::SyscallMode::Off:
-            // everything(), NOT "leave it alone".
-            //
-            // A default-constructed SyscallPolicy is kill-by-default with no
-            // rules, so omitting this is not "no filter" -- it is a filter
-            // that kills the guest at execve, and claybin refuses to compile
-            // it: "empty allow-list would kill on exec".
-            //
-            // The preview caught this the first time it ran. The row LOOKED
-            // like a sensible off switch and would have produced a sandbox
-            // that killed every command. That is the argument for having a
-            // live preview at all -- the mistake is invisible in the settings
-            // UI and obvious the moment you compile the policy.
-            d = std::move(d).syscall_profile(SyscallPolicy::everything());
-            break;
-        case sandbox_cfg::SyscallMode::Compiler:
-            d = std::move(d).syscall_profile(profiles::compiler_with_network());
-            break;
-        case sandbox_cfg::SyscallMode::Strict:
-            d = std::move(d).syscall_profile(profiles::with_filesystem());
-            break;
-    }
-
-    if (cfg.memory_mb) d = std::move(d).memory(Bytes{cfg.memory_mb * 1024 * 1024});
-    if (cfg.max_procs) d = std::move(d).processes(cfg.max_procs);
-    if (cfg.cpu_percent) d = std::move(d).cpu_percent(cfg.cpu_percent);
-
-    d = std::move(d).new_session();
-    d = std::move(d).die_with_parent();
-
-    auto compiled = compile(std::move(d).seal(), probe_host());
-    if (!compiled) {
-        out.compiled = false;
-        out.error = std::string{compiled.error().mechanism};
-        return out;
-    }
-    out.compiled = true;
-    out.plan_ops = compiled->plan.op_count();
-    for (int i = 0; i < static_cast<int>(CapId::count_); ++i) {
-        auto id = static_cast<CapId>(i);
-        Wall w;
-        w.name = cap_name(id);
-        auto s = compiled->guarantees.strength(id);
-        w.strength = s == Enforcement::strong    ? "strong"
-                     : s == Enforcement::partial ? "partial"
-                                                 : "none";
-        w.mechanism = compiled->guarantees.mechanism(id);
-        // A capability the policy never asked for is not a gap in it. The three
-        // resource caps ship at 0 = "no cap" on purpose (sandbox_config.hpp:
-        // the right ceiling is a property of the machine), so without this the
-        // default policy reports three `none`s that nothing is wrong with.
-        w.not_requested =
-            (id == CapId::mem_limit && cfg.memory_mb == 0) ||
-            (id == CapId::cpu_limit && cfg.cpu_percent == 0) ||
-            (id == CapId::pid_limit && cfg.max_procs == 0);
-        out.walls.push_back(std::move(w));
-    }
-
-    // Under BWRAP the report above describes a wall claybin would build and
-    // bwrap will not. Saying "filesystem.write: strong via landlock abi 10"
-    // while the command actually runs under a bwrap bind is precisely the
-    // lie this pane exists to prevent -- a stronger lie than saying nothing,
-    // because it comes with a receipt.
-    //
-    // So the compile still runs (it is how we know the policy is coherent at
-    // all, and the error above is worth having either way), but the walls it
-    // predicts are replaced by what bwrap actually gives: mount namespaces,
-    // and nothing else.
-    if (cfg.backend != sandbox_cfg::LinuxBackend::Claybin) {
-        for (auto& w : out.walls) {
-            // The three capabilities a bwrap bind genuinely delivers. Every
-            // other CapId is seccomp, landlock or cgroup2, none of which
-            // agentty hands bwrap.
-            const bool via_mounts =
-                w.name.starts_with("filesystem") || w.name.starts_with("mount");
-            if (via_mounts) {
-                w.strength  = "partial";
-                w.mechanism = "bwrap bind mounts";
-            } else {
-                w.strength  = "none";
-                w.mechanism = "bwrap cannot express this";
-            }
-        }
-        out.unenforceable.push_back(
-            "most of this policy needs the claybin backend \xc2\xb7 "
-            "switch Backend above");
-    }
-    return out;
-}
-
 // Candidates are workspace files PLUS their directories.
 //
 // Files come from the same source the `@` picker uses, so a path that
@@ -994,6 +875,125 @@ std::vector<std::string> read_sandbox_list(const SandboxListPane& p) {
         if (std::find(uniq.begin(), uniq.end(), v) == uniq.end())
             uniq.push_back(std::move(v));
     return uniq;
+}
+
+#if defined(__linux__)
+
+Preview preview_sandbox(const sandbox_cfg::Config& cfg) {
+    using namespace ::clay;
+    using namespace ::clay::literals;
+
+    Preview out;
+
+    auto d = Policy<Draft>{};
+    // Only the axes that change the WALLS need to be faithful here; the exact
+    // bind list does not move a guarantee, so the preview uses the shape
+    // rather than the full read set. (The spawn path builds the real thing.)
+    d = std::move(d).ro_bind("/usr", "/usr");
+    d = std::move(d).proc_fs("/proc");
+    d = std::move(d).dev_fs("/dev");
+    d = std::move(d).tmpfs("/tmp", Bytes{cfg.tmp_mb * 1024 * 1024});
+
+    switch (cfg.net_mode) {
+        case sandbox_cfg::NetMode::Full:
+            d = std::move(d).connect("", 0);
+            break;
+        case sandbox_cfg::NetMode::None:
+            break;  // no grant at all: an empty netns
+        case sandbox_cfg::NetMode::Ports:
+            for (auto p : cfg.allow_ports) d = std::move(d).connect("", p);
+            break;
+    }
+
+    switch (cfg.syscall_mode) {
+        case sandbox_cfg::SyscallMode::Off:
+            // everything(), NOT "leave it alone".
+            //
+            // A default-constructed SyscallPolicy is kill-by-default with no
+            // rules, so omitting this is not "no filter" -- it is a filter
+            // that kills the guest at execve, and claybin refuses to compile
+            // it: "empty allow-list would kill on exec".
+            //
+            // The preview caught this the first time it ran. The row LOOKED
+            // like a sensible off switch and would have produced a sandbox
+            // that killed every command. That is the argument for having a
+            // live preview at all -- the mistake is invisible in the settings
+            // UI and obvious the moment you compile the policy.
+            d = std::move(d).syscall_profile(SyscallPolicy::everything());
+            break;
+        case sandbox_cfg::SyscallMode::Compiler:
+            d = std::move(d).syscall_profile(profiles::compiler_with_network());
+            break;
+        case sandbox_cfg::SyscallMode::Strict:
+            d = std::move(d).syscall_profile(profiles::with_filesystem());
+            break;
+    }
+
+    if (cfg.memory_mb) d = std::move(d).memory(Bytes{cfg.memory_mb * 1024 * 1024});
+    if (cfg.max_procs) d = std::move(d).processes(cfg.max_procs);
+    if (cfg.cpu_percent) d = std::move(d).cpu_percent(cfg.cpu_percent);
+
+    d = std::move(d).new_session();
+    d = std::move(d).die_with_parent();
+
+    auto compiled = compile(std::move(d).seal(), probe_host());
+    if (!compiled) {
+        out.compiled = false;
+        out.error = std::string{compiled.error().mechanism};
+        return out;
+    }
+    out.compiled = true;
+    out.plan_ops = compiled->plan.op_count();
+    for (int i = 0; i < static_cast<int>(CapId::count_); ++i) {
+        auto id = static_cast<CapId>(i);
+        Wall w;
+        w.name = cap_name(id);
+        auto s = compiled->guarantees.strength(id);
+        w.strength = s == Enforcement::strong    ? "strong"
+                     : s == Enforcement::partial ? "partial"
+                                                 : "none";
+        w.mechanism = compiled->guarantees.mechanism(id);
+        // A capability the policy never asked for is not a gap in it. The three
+        // resource caps ship at 0 = "no cap" on purpose (sandbox_config.hpp:
+        // the right ceiling is a property of the machine), so without this the
+        // default policy reports three `none`s that nothing is wrong with.
+        w.not_requested =
+            (id == CapId::mem_limit && cfg.memory_mb == 0) ||
+            (id == CapId::cpu_limit && cfg.cpu_percent == 0) ||
+            (id == CapId::pid_limit && cfg.max_procs == 0);
+        out.walls.push_back(std::move(w));
+    }
+
+    // Under BWRAP the report above describes a wall claybin would build and
+    // bwrap will not. Saying "filesystem.write: strong via landlock abi 10"
+    // while the command actually runs under a bwrap bind is precisely the
+    // lie this pane exists to prevent -- a stronger lie than saying nothing,
+    // because it comes with a receipt.
+    //
+    // So the compile still runs (it is how we know the policy is coherent at
+    // all, and the error above is worth having either way), but the walls it
+    // predicts are replaced by what bwrap actually gives: mount namespaces,
+    // and nothing else.
+    if (cfg.backend != sandbox_cfg::LinuxBackend::Claybin) {
+        for (auto& w : out.walls) {
+            // The three capabilities a bwrap bind genuinely delivers. Every
+            // other CapId is seccomp, landlock or cgroup2, none of which
+            // agentty hands bwrap.
+            const bool via_mounts =
+                w.name.starts_with("filesystem") || w.name.starts_with("mount");
+            if (via_mounts) {
+                w.strength  = "partial";
+                w.mechanism = "bwrap bind mounts";
+            } else {
+                w.strength  = "none";
+                w.mechanism = "bwrap cannot express this";
+            }
+        }
+        out.unenforceable.push_back(
+            "most of this policy needs the claybin backend \xc2\xb7 "
+            "switch Backend above");
+    }
+    return out;
 }
 
 void annotate_sandbox_form(form::Form& f, const Preview& preview,
