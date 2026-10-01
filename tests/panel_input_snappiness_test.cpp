@@ -147,6 +147,46 @@ int main() {
         CHECK(worst <= kBudget, "appearance form %.1f ms > %.1f budget", worst, kBudget);
     }
 
+    // The LANGUAGE row specifically, cycled rather than passed over.
+    //
+    // It is the heaviest row in the pane and the only one whose cost scales
+    // with something other than itself: building it calls completeness()
+    // once per language, and each of those walks the English catalog. That
+    // is 20 walks per form build, and the form is rebuilt on every keystroke
+    // in the pane.
+    //
+    // Measured at 3.8 us for all twenty -- 0.02% of a 33 ms budget, which is
+    // why it ships as a straight loop rather than a cache. This case is here
+    // so that stays true: a future id-count in the hundreds, or a
+    // completeness() that got slower, shows up as a number here instead of
+    // as "the settings pane feels sticky" in a bug report.
+    //
+    // ALSO the row that applies LIVE. Each cycle swaps the catalog pointer
+    // and rebuilds the form in the new language, so this measures the whole
+    // switch path, not just the row.
+    {
+        Model m = seeded(msgs);
+        m = app::update(std::move(m), Msg{OpenAppearance{}}).first;
+        {
+            AppearanceKey k;
+            k.action = form::keys::Action{form::keys::Intent::MoveFirst, 0};
+            m = app::update(std::move(m), Msg{k}).first;
+        }
+        double worst = 0;
+        for (int i = 0; i < 20; ++i) {
+            AppearanceKey k;
+            // -> on a Choice row: the gesture that actually SWITCHES
+            // language, so each iteration swaps the catalog pointer and
+            // rebuilds the form in the new language.
+            k.action = form::keys::Action{form::keys::Intent::AdjustUp, 0};
+            worst = std::max(worst, key_ms(m, Msg{k}));
+        }
+        std::printf("%-26s %10.2f  %s\n", "language row cycle",
+                    worst, verdict(worst, kBudget));
+        CHECK(worst <= kBudget, "language row %.1f ms > %.1f budget",
+              worst, kBudget);
+    }
+
     // The other panels a user holds an arrow in. Same budget, same reason:
     // every one of them repaints the transcript behind it, so a slow one
     // would show up here rather than in a bug report.

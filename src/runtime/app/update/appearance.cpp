@@ -264,10 +264,30 @@ namespace {
         else if (!i18n::parse_tag(p.lang, want)) want = i18n::Lang::en;
         (void)i18n::set_active(want);   // refuses if no catalog; keeps current
 
-        // Returns true: every label on screen is now a different string, so
-        // the caller must rebuild. Same reason the colour rows return true,
-        // one layer up -- the Elements are stale, not merely restyled.
-        return true;
+        // FALSE, and this is the performance-critical half of the row.
+        //
+        // Returning true runs rebuild_rendered_content(), which drops every
+        // settled Element and rehydrates the frozen prefix. That is right
+        // for tier/polarity/syntax, whose change is baked INTO a built
+        // Element. It is catastrophic here because the language row is a
+        // CHOICE: holding -> cycles it, so the rebuild runs per keystroke
+        // against the whole transcript.
+        //
+        // Measured on an 800-message thread: 43 ms per key against a 33 ms
+        // key-repeat slot. Past that budget keys outrun frames, frames
+        // coalesce, and the row visibly updates on every SECOND language you
+        // pass -- the exact failure the theme browser already fixed once
+        // (see restyle_sealed_turns, and the note above it).
+        //
+        // The pane itself still re-translates: reproject() rebuilds the form
+        // from the new catalog on the very next line, and that is bounded by
+        // the pane rather than the transcript. What stays in the old
+        // language is TRANSCRIPT text already settled -- which is the same
+        // forward-only rule density and compact-turns follow, for the same
+        // reason (docs/design/i18n.md): a translated row is a different
+        // width and often a different height, so re-sealing it at a new
+        // height tears the scrollback ledger.
+        return false;
     }
     else if (f.id == pn::kApPolarity)   { p.polarity = static_cast<up::Polarity>(idx());  return true; }
     else if (f.id == pn::kApSyntax)     { p.syntax   = on();                              return true; }
