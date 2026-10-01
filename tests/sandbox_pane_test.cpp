@@ -1269,6 +1269,86 @@ TEST_CASE("sandbox pane: emptying the port list leaves `ports` mode") {
     CHECK(o->pane.working.net_mode != sandbox_cfg::NetMode::Ports);
 }
 
+TEST_CASE("sandbox pane: the form teaches itself") {
+    // The standard: a user should be able to learn this pane FROM the pane.
+    // Nobody arrives knowing what W^X is, what `toolchain` grants, or what
+    // turning Scope IPC off costs them -- and a security control you cannot
+    // reason about is one you leave at its default forever, which makes every
+    // row below the first one dead weight.
+    //
+    // So this is a completeness check, not a spelling check: every settable
+    // row explains itself, and every ENUM OPTION explains itself separately,
+    // because "which of these three" is a different question from "what is
+    // this row".
+    sandbox_cfg::Config cfg;
+    cfg.configured = true;
+    cfg.backend = sandbox_cfg::LinuxBackend::Claybin;
+    install(cfg);
+
+    const auto form = pn::build_sandbox_form(cfg, facts_for(cfg));
+
+    int rows = 0;
+    for (const auto& f : form.fields) {
+        if (f.is_header()) continue;
+        ++rows;
+
+        // Every row says what it is. A label alone is a name, not an
+        // explanation -- "W^X" means nothing to someone who has not met it.
+        //
+        // Messages are built COMPLETELY before the macro: doctest streams its
+        // argument into a MessageBuilder, so any `+` inside the call tries to
+        // concatenate onto the builder instead of onto a string.
+        const std::string who = "row '" + f.id + "'";
+        const std::string no_help = who + " has no help text";
+        CHECK_MESSAGE(!f.help.empty(), no_help);
+
+        // Every option of a pick-one row says what IT does. Without this the
+        // row explains the question and leaves the answers as bare words:
+        // "toolchain / minimal / host-readable" names three things and
+        // defines none of them.
+        if (const auto* c = std::get_if<form::field::Choice>(&f.value)) {
+            const std::string miss = who + " is missing per-option hints";
+            CHECK_MESSAGE(c->hints.size() == c->labels.size(), miss);
+            for (std::size_t i = 0; i < c->hints.size(); ++i) {
+                const std::string blank =
+                    who + " option " + std::to_string(i) + " has an empty hint";
+                CHECK_MESSAGE(!c->hints[i].empty(), blank);
+            }
+        }
+    }
+    // And the sweep actually ran -- a loop that skipped everything would
+    // report zero failures, which is the failure mode this file is about.
+    CHECK(rows >= 15);
+}
+
+TEST_CASE("sandbox pane: a toggle says what its CURRENT state does") {
+    // A toggle renders as nothing but on/off, so a single help line can only
+    // describe the row, never the choice. Without state-dependent help the
+    // only way to learn what turning something off costs is to turn it off --
+    // the wrong way round for a security control.
+    sandbox_cfg::Config cfg;
+    cfg.configured = true;
+    cfg.backend = sandbox_cfg::LinuxBackend::Claybin;
+
+    cfg.wx_protect = true;
+    install(cfg);
+    const auto on = pn::build_sandbox_form(cfg, facts_for(cfg));
+    const int i = row_of(on, pn::kSbWxProtect);
+    REQUIRE(i >= 0);
+    const auto help_on = on.fields[static_cast<std::size_t>(i)].help;
+
+    // build_sandbox_form is pure over (config, facts), so flipping the config
+    // and rebuilding is the whole test -- no reinstall needed.
+    cfg.wx_protect = false;
+    const auto off = pn::build_sandbox_form(cfg, facts_for(cfg));
+    const auto help_off = off.fields[static_cast<std::size_t>(i)].help;
+
+    // The two states read differently, and each names its own consequence.
+    CHECK(help_on != help_off);
+    CHECK(help_on.find("on:") != std::string::npos);
+    CHECK(help_off.find("off:") != std::string::npos);
+}
+
 // ── "applies on restart" has to be a checked claim ─────────────────────
 //
 // The footer promised "saved · applies on restart" with NOTHING checking that

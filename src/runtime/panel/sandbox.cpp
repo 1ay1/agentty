@@ -130,15 +130,6 @@ form::Field list_row(std::string_view id, std::string label, std::string help,
     return f;
 }
 
-form::Field toggle(std::string_view id, std::string label, std::string help, bool on) {
-    form::Field f;
-    f.id = std::string{id};
-    f.label = std::move(label);
-    f.help = std::move(help);
-    f.value = form::field::Toggle{on};
-    return f;
-}
-
 form::Field text(std::string_view id, std::string label, std::string help,
                  std::string value) {
     form::Field f;
@@ -147,6 +138,31 @@ form::Field text(std::string_view id, std::string label, std::string help,
     f.help = std::move(help);
     form::field::Text t;
     t.value = std::move(value);
+    f.value = std::move(t);
+    return f;
+}
+
+// A boolean row.
+//
+// `when_on` / `when_off` is the toggle's answer to a Choice's per-option
+// hints: the help line describes what the CURRENT state does, and flips when
+// you flip it. A toggle renders as nothing but on/off, so without this the
+// only way to learn what turning it off costs you is to turn it off and find
+// out -- which on a security control is the wrong way round.
+//
+// Phrased as consequence, not restatement. "off: no filter" teaches nothing;
+// "off: a JIT works, and a bug can rewrite its own code" is the actual trade.
+form::Field toggle(std::string_view id, std::string label, std::string help,
+                   bool on, std::string when_on = {}, std::string when_off = {}) {
+    form::Field f;
+    f.id = std::string{id};
+    f.label = std::move(label);
+    const auto& state = on ? when_on : when_off;
+    f.help = state.empty()
+        ? std::move(help)
+        : (help.empty() ? state : help + " \xc2\xb7 " + state);
+    form::field::Toggle t;
+    t.on = on;
     f.value = std::move(t);
     return f;
 }
@@ -281,8 +297,10 @@ form::Form build_sandbox_form(const sandbox_cfg::Config& cfg,
         "fallback for hosts it cannot run on.",
         {"bwrap", "claybin"},
         static_cast<int>(cfg.backend),
-        {"mount namespaces only \xc2\xb7 no syscall filter, no resource caps",
-         "adds seccomp, landlock and cgroup2 \xc2\xb7 needs user namespaces"}));
+        {"mount namespaces only \xc2\xb7 filesystem and masks work; the syscall "
+         "filter, resource limits and per-port network do NOT",
+         "every row below works \xc2\xb7 seccomp + landlock + cgroup2, needs "
+         "unprivileged user namespaces"}));
     // Asking for claybin on a host that cannot build a sandbox is worth
     // saying here rather than at spawn time. The probe actually forks and
     // attempts the uid_map write, so this is a real answer, not a guess.
@@ -470,9 +488,12 @@ form::Form build_sandbox_form(const sandbox_cfg::Config& cfg,
 
     form.fields.push_back(
         toggle(kSbWxProtect, "W^X",
-               "no page both writable and executable. breaks JITs (some node "
-               "flags, any JVM).",
-               cfg.wx_protect));
+               "no page may be both writable and executable",
+               cfg.wx_protect,
+               "on: a bug that writes code cannot then run it \xc2\xb7 "
+               "breaks JITs (some node flags, any JVM)",
+               "off: JITs work \xc2\xb7 a memory bug can write new code and "
+               "execute it"));
     if (!claybin_live) lock_row(form, kSbWxProtect, why_locked);
 
     // ── Resources ─────────────────────────────────────────────────────
@@ -519,9 +540,12 @@ form::Form build_sandbox_form(const sandbox_cfg::Config& cfg,
     form.fields.push_back(header("Hardening"));
     form.fields.push_back(toggle(
         kSbScopeIpc, "Scope IPC",
-        "abstract unix sockets and cross-boundary signals. these ignore the "
-        "filesystem entirely, so nothing else here covers them.",
-        cfg.scope_ipc));
+        "abstract unix sockets and cross-boundary signals \xc2\xb7 these ignore "
+        "the filesystem entirely, so nothing else here covers them",
+        cfg.scope_ipc,
+        "on: the command cannot talk to host processes over an abstract "
+        "socket or signal them",
+        "off: it can reach any listening host process, sandbox or not"));
     if (!claybin_live)
         lock_row(form, kSbScopeIpc, why_locked);
     else if (landlock_abi < 6)
@@ -534,9 +558,12 @@ form::Form build_sandbox_form(const sandbox_cfg::Config& cfg,
     // itself leaks one and that is the reason the row exists.
     form.fields.push_back(toggle(
         kSbCloseFds, "Close inherited fds",
-        "an inherited descriptor is authority the sandbox cannot revoke. "
-        "bubblewrap leaks one.",
-        cfg.close_inherited_fds));
+        "an inherited descriptor is authority the sandbox cannot revoke \xc2\xb7 "
+        "bubblewrap leaks one",
+        cfg.close_inherited_fds,
+        "on: the command starts with only stdin/stdout/stderr",
+        "off: it inherits agentty's open files \xc2\xb7 a handle to a masked "
+        "file still reads it"));
 
     // Hostname. NOT a containment control, and the help says so rather than
     // letting it sit among the walls looking like one -- the guest cannot
@@ -544,9 +571,12 @@ form::Form build_sandbox_form(const sandbox_cfg::Config& cfg,
     // build output and test snapshots, which makes those non-reproducible.
     form.fields.push_back(toggle(
         kSbFakeHost, "Report hostname as `sandbox`",
-        "not a wall \xc2\xb7 keeps the real host name out of build output and "
-        "test snapshots",
-        cfg.fake_hostname));
+        "not a wall \xc2\xb7 a privacy and reproducibility setting",
+        cfg.fake_hostname,
+        "on: builds and test snapshots see `sandbox` instead of your "
+        "machine name",
+        "off: the real host name appears in build output and any snapshot "
+        "that records it"));
     if (!claybin_live) lock_row(form, kSbFakeHost, why_locked);
 
     // How deep to hunt for credential FILES by name (.env, id_rsa, *.pem).
