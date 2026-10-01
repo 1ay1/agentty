@@ -1490,3 +1490,77 @@ piece of legacy waiting to be cleaned up.
 Two tests pin it: the default is claybin and a usable host is never `None`, and
 a claybin request on a refusing host lands on one of the two Linux engines
 rather than falling through.
+
+---
+
+## 19. "applies on restart" was a promise with nothing behind it
+
+The footer said:
+
+> `saved · applies on restart (the running sandbox is unchanged)`
+
+and **nothing checked that it would**. Every ingredient of the answer was
+already being computed — the compile result, the `unenforceable` list, the host
+probe — and none of them was joined into the claim the footer was making.
+
+This is the same bug as §1 ("sandbox: active" with no sandbox) and §17 (a
+subtitle naming walls that were not up), pointed at the **future** instead of
+the present. A promise about the next launch is exactly as falsifiable as a
+statement about this one, and it was being made unconditionally.
+
+### Three ways the promise can be false
+
+`restart_outcome(cfg, facts, preview)` returns empty when the restart really
+will deliver what the rows describe, and otherwise returns what the footer must
+say **instead** of the bare promise. Checked worst-first, because the footer has
+one line:
+
+1. **It will not compile.** claybin refuses rather than degrading, so there is
+   no "partly" — the next launch gets nothing from this config. The verdict
+   carries the compiler's reason, not just the refusal, because a refusal
+   without a reason is unactionable.
+2. **The engine cannot start here.** Saving is still legitimate (the config is
+   portable; the user may be on another machine tomorrow), but the promise must
+   name the fallback rather than imply the claybin walls will be up — "claybin
+   cannot start" on its own reads as "no sandbox", when the truth is bwrap and
+   the mount walls.
+3. **A capability silently degrades.** It compiles, it starts, and some wall
+   still comes out weaker than asked. This is the quiet one and the reason the
+   function exists: without it the user believes in precisely the part that
+   went missing.
+
+The ordering is not cosmetic. A policy that will not compile makes the
+`unenforceable` list *irrelevant*, not merely less important, so it has to win
+the line. There is a test for that specifically.
+
+### Where it is computed, and why that matters
+
+In `reprice()`, next to the preview it judges — so the verdict and the walls it
+is describing are derived from the **same config** and cannot disagree.
+
+The view only reads `SandboxPane::restart_note`. It deliberately does not
+re-derive the config or probe the host: a view must stay pure, and a `uid_map`
+fork mid-render is not something it may do. That is the same reason `HostFacts`
+is stored on the pane rather than reconstructed in the view — reconstructing
+reality from fields that only approximate it is how §17 happened.
+
+Both new fields are `visual::ref` rather than `visual::exempt` in
+`visual_parts.hpp`. Exempting them would let the pane keep rendering a stale
+verdict after the facts changed, which is the same bug class again. The
+completeness `static_assert` caught the omission at build time — adding a field
+to a pane forces a decision about whether it is visually significant, and here
+it is.
+
+### Now
+
+| state | footer |
+|---|---|
+| clean, saved | `saved · applies on restart, verified against this host` |
+| clean, dirty | `^S saves for the next launch · the running sandbox cannot be changed` |
+| will not compile | `^S saves, but will NOT apply on restart · <reason>` |
+| engine refused | `saved · claybin cannot start on this host · restart falls back to bwrap…` |
+| degraded | `saved · applies on restart, but this host cannot enforce: …` |
+
+The last row of that table is also reported when the pane is **neither dirty nor
+just-saved** — if the policy already on disk is one this host cannot fully
+deliver, the user should not have to edit something to find out.
