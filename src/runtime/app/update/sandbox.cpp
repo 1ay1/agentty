@@ -423,6 +423,23 @@ Cmd sandbox_update(Model& m, msg::SandboxMsg sm) {
             auto* ed = m.ui.panel.get<pn::SandboxList>();
             if (!ed) return Cmd::none();
 
+            // THE invariant, re-established before anything reads it:
+            // suggestions exist only while a field is live.
+            //
+            // apply() can end an edit session on the PREVIOUS keystroke
+            // (MoveFirst, MoveLast, PageUp/PageDown and Activate all commit
+            // the field and leave) without any of this arm's early returns
+            // running. The flag then outlives its cause, and the next key is
+            // interpreted against a list nobody can see -- Up/Down steering an
+            // invisible selection instead of moving rows, Tab overwriting a
+            // row nobody was editing.
+            //
+            // Asserting it HERE rather than at each exit is the difference
+            // between a rule and a habit: every handler below gets a
+            // consistent state, and a new one cannot forget to restore it. A
+            // state sweep found this; reading the control flow did not.
+            if (!ed->pane.form.editing()) ed->pane.completing = false;
+
             // Tab accepts the highlighted suggestion.
             //
             // Tab rather than Enter, because Enter already means "commit this
@@ -430,7 +447,12 @@ Cmd sandbox_update(Model& m, msg::SandboxMsg sm) {
             // here would make the one list that has completion behave unlike
             // every other field. Tab has no other meaning in a form, so it
             // costs nothing.
-            if (ed->pane.completing && e.action.intent == form::keys::Intent::Complete) {
+            //
+            // editing() for the same reason as the arrows below: this returns
+            // early, so a stale flag would let Tab overwrite a row nobody was
+            // editing.
+            if (ed->pane.completing && ed->pane.form.editing() &&
+                e.action.intent == form::keys::Intent::Complete) {
                 if (const auto* hit = ed->pane.complete.selected()) {
                     if (auto* row = ed->pane.form.focused())
                         if (auto* t = std::get_if<form::field::Text>(&row->value)) {
@@ -520,22 +542,35 @@ Cmd sandbox_update(Model& m, msg::SandboxMsg sm) {
 
             // Arrows move the SUGGESTIONS while they are open.
             //
-            // Without this the highlight rendered by the footer could never
-            // move, so Tab only ever accepted the first match and the "\xe2\x96\xb8"
-            // marker was decoration -- a list you can see, cannot steer, and
-            // whose other entries exist only to taunt you.
-            //
-            // Up/Down rather than a second key, because the suggestions are a
-            // vertical list and that is what moving in one means. The row
-            // cursor is not needed while completing: you are inside a field,
-            // and leaving it is what Esc is for.
-            if (ed->pane.completing &&
+            // Guarded on editing() as well as `completing`, because this sits
+            // BEFORE apply() and returns early: a stale flag from a session
+            // that ended on the previous keystroke would make Up/Down steer an
+            // invisible list instead of moving between rows, and the pane
+            // would look frozen. The invariant is re-asserted after apply()
+            // too, but an early return never reaches that.
+            if (ed->pane.completing && ed->pane.form.editing() &&
                 (e.action.intent == form::keys::Intent::MovePrev ||
                  e.action.intent == form::keys::Intent::MoveNext)) {
                 ed->pane.complete.move_wrapping(
                     e.action.intent == form::keys::Intent::MoveNext ? +1 : -1);
                 return Cmd::none();
             }
+
+            // Anything that ENDED the edit session closes the suggestions
+            // with it.
+            //
+            // Several intents end an edit inside apply() without being Esc --
+            // MoveFirst, MoveLast, PageUp/PageDown and Activate all commit the
+            // field and leave. The resync at the bottom of this arm recomputes
+            // `completing` and would catch that, but only on paths that REACH
+            // it; every early return above is a way for the flag to outlive
+            // the session that justified it.
+            //
+            // Asserting it here, right after apply(), makes the invariant
+            // "suggestions imply an edit session" hold at every exit rather
+            // than at most of them. A state sweep found this; reading the
+            // control flow did not.
+            if (!ed->pane.form.editing()) ed->pane.completing = false;
 
             // Backspace on a browsing row ENTERS the edit session.
             //

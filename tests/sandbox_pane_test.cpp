@@ -1580,6 +1580,83 @@ TEST_CASE("sandbox list: accepting a suggestion settles instead of looping") {
     CHECK(t.cursor == t.value.size());
 }
 
+TEST_CASE("sandbox list: no key sequence leaves the editor inconsistent") {
+    // A state sweep rather than another named case.
+    //
+    // This pane now has three overlapping modes (browsing, editing,
+    // completing) and a dozen keys that each touch two of them. Every bug in
+    // the last several rounds was a SEAM between two of those -- a flag that
+    // outlived its cause, a key that meant different things depending on an
+    // invisible bit -- and naming them one at a time only ever finds the ones
+    // already reported.
+    //
+    // So: drive every intent from every reachable state and assert the
+    // invariants that must hold no matter what.
+    sandbox_cfg::Config cfg;
+    cfg.configured = true;
+    cfg.backend = sandbox_cfg::LinuxBackend::Claybin;
+    cfg.read_paths = {"/opt/a", "/opt/b"};
+    install(cfg);
+
+    using I = form::keys::Intent;
+    const I keys[] = {
+        I::MoveNext, I::MovePrev, I::MoveFirst, I::MoveLast,
+        I::TypeToEdit, I::Insert, I::Backspace, I::DeleteForward,
+        I::CaretLeft, I::CaretRight, I::CaretHome, I::CaretEnd,
+        I::Complete, I::ResetField, I::Activate, I::AdjustUp, I::AdjustDown,
+    };
+
+    // A few deterministic orderings rather than a random walk: a seeded
+    // shuffle would make a failure depend on a seed nobody has, and these
+    // cover the interleavings the real bugs came from.
+    for (std::size_t start = 0; start < std::size(keys); ++start) {
+        Model m = opened();
+        auto [m1, _] = app::update(
+            std::move(m), Msg{SandboxEditList{std::string{pn::kSbReadPaths}}});
+        m = std::move(m1);
+
+        for (std::size_t step = 0; step < std::size(keys); ++step) {
+            const auto k = keys[(start + step) % std::size(keys)];
+            auto [next, __] = app::update(
+                std::move(m),
+                Msg{SandboxListKey{form::keys::Action{k, U'a'}}});
+            m = std::move(next);
+
+            const auto* ed = m.ui.panel.get<pn::SandboxList>();
+            if (!ed) break;   // Esc-equivalent closed it; nothing left to check
+
+            // 1. Suggestions imply an edit session. The converse is false (you
+            //    can edit without suggestions), but a completion list floating
+            //    over a row nobody is writing is what ate the user's Esc.
+            if (ed->pane.completing)
+                CHECK(ed->pane.form.editing());
+
+            // 2. The cursor is always on a real row. An erase that forgot to
+            //    clamp would index past the end on the next keystroke.
+            CHECK(ed->pane.form.cursor >= 0);
+            CHECK(ed->pane.form.cursor <
+                  static_cast<int>(ed->pane.form.fields.size()));
+
+            // 3. There is always exactly one trailing add row, and it is the
+            //    last one. Lose it and the list can never grow again.
+            REQUIRE(!ed->pane.form.fields.empty());
+            CHECK(ed->pane.form.fields.back().label == "+");
+
+            // 4. Entry labels stay in order: 1., 2., ... with no gaps. A
+            //    removal that skipped renumbering reads as the list having
+            //    lost an entry it still holds.
+            for (std::size_t i = 0; i + 1 < ed->pane.form.fields.size(); ++i)
+                CHECK(ed->pane.form.fields[i].label ==
+                      std::to_string(i + 1) + ".");
+
+            // 5. Every row is a Text row. The port list uses them too, and a
+            //    stray Number would silently lose its caret.
+            for (const auto& f : ed->pane.form.fields)
+                CHECK(std::holds_alternative<form::field::Text>(f.value));
+        }
+    }
+}
+
 // ── "applies on restart" has to be a checked claim ─────────────────────
 //
 // The footer promised "saved · applies on restart" with NOTHING checking that
