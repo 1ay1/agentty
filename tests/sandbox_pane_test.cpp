@@ -2438,56 +2438,111 @@ TEST_CASE("sandbox render: the pane paints the ACTIVE language") {
 // decoration". It measures display COLUMNS via string_width rather than
 // counting bytes, because German is Latin-1-heavy (ü, ö, ß) and a byte count
 // over-measures it exactly as badly as it under-measures Chinese.
-TEST_CASE("sandbox render: the shipped German catalog fits every width") {
-    REQUIRE(agentty::i18n::init("de", ""));
-    REQUIRE(agentty::i18n::completeness(agentty::i18n::Lang::de) > 0.999);
-
-    const auto widest_cols = [](const std::string& out) {
-        std::size_t start = 0, worst = 0;
-        while (start <= out.size()) {
-            const auto nl = out.find('\n', start);
-            const auto end = (nl == std::string::npos) ? out.size() : nl;
-            worst = std::max<std::size_t>(
-                worst, static_cast<std::size_t>(maya::string_width(
-                           std::string_view{out}.substr(start, end - start))));
-            if (nl == std::string::npos) break;
-            start = nl + 1;
+TEST_CASE("sandbox render: the shipped catalogs fit every width") {
+    // Both extremes, because they fail in OPPOSITE directions.
+    //
+    //   de     1.1-2.83x English. Stresses the FRAME: a label that does not
+    //          fit is truncated and the row loses its meaning.
+    //   zh-CN  ~0.6x English in columns but DOUBLE-WIDTH per character.
+    //          Stresses the MEASUREMENT: sandbox.help.read_paths is 33
+    //          codepoints and 63 columns, so anything counting characters
+    //          scores it at half its true width and waves an overflow
+    //          through.
+    //
+    // A gate running only German would miss every Chinese bug and vice
+    // versa, which is why they share a case rather than having one each.
+    // Width of a PAINTED line, in terminal cells.
+    //
+    // NOT string_width on the emitted bytes, and the difference is the whole
+    // subtlety of measuring a CJK render. render_to_string writes one entry
+    // per CELL, so a double-width glyph appears as the glyph followed by a
+    // PAD SPACE for the column it also occupies. Re-measuring those bytes
+    // scores 额 as 2 and the pad as 1 -- three columns for a glyph the
+    // terminal draws in two -- and every Chinese line comes out ~3% over.
+    //
+    // Measured: string_width("额 ") == 3 where the terminal shows 2. That
+    // reported a 206-column line at width 200 and looked exactly like a real
+    // overflow.
+    //
+    // So count CELLS: one per codepoint, pads included. That is what the
+    // terminal actually allocates, and it is right for both scripts -- a
+    // Latin line has no pads, so the two agree there.
+    const auto widest_cells = [](const std::string& out) {
+        std::size_t worst = 0, cur = 0;
+        for (std::size_t i = 0; i < out.size(); ++i) {
+            if (out[i] == '\n') { worst = std::max(worst, cur); cur = 0; continue; }
+            if ((static_cast<unsigned char>(out[i]) & 0xC0u) != 0x80u) ++cur;
         }
-        return worst;
+        return std::max(worst, cur);
     };
 
-    sandbox_cfg::Config cfg;
-    cfg.configured = true;
-    cfg.backend = sandbox_cfg::LinuxBackend::Claybin;
-    // The worst case the pane can carry: a long path AND an inline error on
-    // the same row, under the longest translation.
-    cfg.read_paths = {"/ein/ziemlich/langer/pfad/zu/einem/abhaengigkeitsbaum"};
-    cfg.net_mode = sandbox_cfg::NetMode::Ports;
-    cfg.allow_ports.clear();
-    install(cfg);
+    struct Cat { agentty::i18n::Lang lang; const char* tag; const char* marker; };
+    const Cat cats[] = {
+        {agentty::i18n::Lang::de,    "de",    "Auch lesbar"},
+        // 额外可读 -- "also readable". Spelled as bytes so the file stays
+        // greppable whatever an editor does to it.
+        {agentty::i18n::Lang::zh_CN, "zh-CN",
+         "\xe9\xa2\x9d\xe5\xa4\x96\xe5\x8f\xaf\xe8\xaf\xbb"},
+    };
 
-    auto form = pn::build_sandbox_form(cfg, facts_for(cfg));
-    pn::annotate_sandbox_form(form, pn::preview_sandbox(cfg), cfg,
-                              pn::EngineStatus::InForce);
+    for (const auto& c : cats) {
+        REQUIRE(agentty::i18n::init(c.tag, ""));
+        REQUIRE(agentty::i18n::completeness(c.lang) > 0.999);
 
-    for (int width : {60, 80, 100, 120, 200}) {
+        sandbox_cfg::Config cfg;
+        cfg.configured = true;
+        cfg.backend = sandbox_cfg::LinuxBackend::Claybin;
+        // The worst case a row can carry: a long path AND an inline error on
+        // the same line, under the translation.
+        cfg.read_paths = {"/ein/ziemlich/langer/pfad/zu/einem/abhaengigkeit"};
+        cfg.net_mode = sandbox_cfg::NetMode::Ports;
+        cfg.allow_ports.clear();
+        install(cfg);
+
+        // Built INSIDE the loop: the form bakes its labels at build time, so
+        // a form built before the language changed is a form in the old
+        // language. (The first version of this test hoisted it and the
+        // Chinese pass silently rendered German.)
+        auto form = pn::build_sandbox_form(cfg, facts_for(cfg));
+        pn::annotate_sandbox_form(form, pn::preview_sandbox(cfg), cfg,
+                                  pn::EngineStatus::InForce);
+
+        for (int width : {60, 80, 100, 120, 200}) {
+            const auto out = maya::render_to_string(
+                maya::Panel{agentty::ui::form_config(form, maya::Color::blue(),
+                                                     nullptr, 0, width)}.build(),
+                width);
+            INFO(std::string{c.tag} << " at width " << width
+                 << ": widest line " << widest_cells(out) << " cells");
+            CHECK(widest_cells(out) <= static_cast<std::size_t>(width));
+        }
+
+        // ...and the translation really is on screen. A pane that fell back
+        // to English would pass every width check above without translating
+        // anything, which is the failure these checks cannot see.
         const auto out = maya::render_to_string(
             maya::Panel{agentty::ui::form_config(form, maya::Color::blue(),
-                                                 nullptr, 0, width)}.build(),
-            width);
-        const auto worst = widest_cols(out);
-        INFO("German sandbox pane at width " << width
-             << ": widest line " << worst << " columns");
-        CHECK(worst <= static_cast<std::size_t>(width));
+                                                 nullptr, 0, 120)}.build(), 120);
+        // Searched with the SPACES STRIPPED, and that is not a convenience.
+        //
+        // render_to_string emits one cell per column, so a double-width
+        // glyph occupies two and the second is written as a space: 额外可读
+        // paints as "额 外 可 读". The bytes are all there and in order, but
+        // not contiguous, so a plain find() on the source string fails on
+        // every CJK language while passing on every Latin one.
+        //
+        // That is exactly the shape of bug this whole gate exists to catch,
+        // and it caught the TEST first: the first version reported "Chinese
+        // never reached the pane" when the pane was rendering it correctly.
+        const auto despaced = [](std::string_view in) {
+            std::string o;
+            o.reserve(in.size());
+            for (const char ch : in) if (ch != ' ') o.push_back(ch);
+            return o;
+        };
+        INFO("looking for the " << std::string{c.tag} << " marker");
+        CHECK(despaced(out).find(despaced(c.marker)) != std::string::npos);
     }
-
-    // And the German really is on screen -- a pane that silently fell back
-    // to English would pass every width check above.
-    const auto out = maya::render_to_string(
-        maya::Panel{agentty::ui::form_config(form, maya::Color::blue(),
-                                             nullptr, 0, 120)}.build(), 120);
-    CHECK(out.find("Auch lesbar") != std::string::npos);
-    CHECK(out.find("Maskiert") != std::string::npos);
 
     REQUIRE(agentty::i18n::set_active(agentty::i18n::Lang::en));
 }

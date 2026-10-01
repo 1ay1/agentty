@@ -164,18 +164,27 @@ endif()
 # translator rendering a label as a sentence -- which is a translation bug,
 # not a layout one.
 #
-# Counted in CODEPOINTS here rather than columns: CMake cannot measure
-# display width, and for the Latin-script languages this gate applies to the
-# two are the same. CJK is EXEMPT for exactly that reason -- a Chinese label
-# is half the codepoints and the same columns, so a codepoint budget would
-# fire on every correct translation. Their widths are checked by the render
-# test instead, which can measure properly.
+# COUNTING. For Latin scripts a codepoint is a column and the two agree. For
+# CJK they do not: 额外可读 is 4 codepoints and 8 columns, so a codepoint
+# count scores a Chinese label at HALF its true width -- and passes exactly
+# the overflow this gate exists to catch.
+#
+# So CJK gets its own count: every codepoint in the CJK/Hangul/Kana blocks
+# is worth 2, everything else 1. That is not a general Unicode width
+# implementation (maya has one, and CMake cannot call it) -- it is the
+# narrow claim that the characters these three languages are written in are
+# double-width, which is true and is all this needs.
+#
+# The render test is still the authority on whether the FRAME holds; this is
+# the authority on whether the LABEL survives, and neither can see the
+# other's failures.
 file(GLOB _catalogs "${ROOT}/src/i18n/catalog_*.hpp")
 foreach(_cf IN LISTS _catalogs)
     get_filename_component(_cname "${_cf}" NAME_WE)
     string(REPLACE "catalog_" "" _lang "${_cname}")
+    set(_wide 0)
     if(_lang MATCHES "^(zh|ja|ko)")
-        continue()
+        set(_wide 1)
     endif()
     file(READ "${_cf}" _ctext)
 
@@ -195,6 +204,18 @@ foreach(_cf IN LISTS _catalogs)
             continue()
         endif()
         string(LENGTH "${CMAKE_MATCH_1}" _len)
+        if(_wide)
+            # Re-count in COLUMNS. CMake strings are bytes, and a CJK
+            # codepoint is 3 UTF-8 bytes wide and 2 columns wide, so the
+            # byte length over-counts by 1.5x while LENGTH on the decoded
+            # text would under-count by 2x. Convert: bytes/3 gives the CJK
+            # codepoint count, times 2 gives columns, and the ASCII
+            # remainder (paths, numbers, latin tech terms) counts 1 each.
+            string(REGEX REPLACE "[^ -~]" "" _ascii "${CMAKE_MATCH_1}")
+            string(LENGTH "${_ascii}" _n_ascii)
+            math(EXPR _n_wide "(${_len} - ${_n_ascii}) / 3")
+            math(EXPR _len "${_n_ascii} + ${_n_wide} * 2")
+        endif()
         if(_len GREATER _max)
             message("")
             message("i18n: ${_lang}/${_id} is ${_len} chars against a budget of "

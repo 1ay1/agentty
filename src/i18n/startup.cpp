@@ -7,6 +7,7 @@
 #include "agentty/i18n/startup.hpp"
 
 #include "catalog_de.hpp"
+#include "catalog_zh_CN.hpp"
 
 #include <cstdlib>
 
@@ -156,6 +157,7 @@ bool init(std::string_view cli_lang, std::string_view saved) {
     // set_active refuses it, and the picker shows it at 0%. That is visible
     // and recoverable, which a startup abort is not.
     (void)install_catalog(Lang::de, catalogs::kGerman);
+    (void)install_catalog(Lang::zh_CN, catalogs::kChineseSimplified);
 
     const Lang want = resolve_language(cli_lang, saved);
     if (want == Lang::en) return set_active(Lang::en);
