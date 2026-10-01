@@ -165,6 +165,47 @@ TEST_CASE("sandbox escape") {
     // The command is the tail of the argv (after the closing "--").
     check(!argv.empty() && argv.back() == "echo hi",
           "bwrap: shell cmd is the argv tail");
+
+    // ── /dev/tty is masked: the terminal is not the child's to write ─────
+    //
+    // Reported as "the output disappears when I ask the model to stress-test
+    // the sandbox". It was not a rendering bug. --dev builds a fresh
+    // devtmpfs whose /dev/tty still resolves to the CALLING process's
+    // controlling terminal -- agentty's own screen -- so a sandboxed child
+    // could write it directly:
+    //
+    //     printf 'INJECTED\033[2J' > /dev/tty    (measured: TTY-WRITE-OK)
+    //
+    // \033[2J\033[3J is erase-display + erase-scrollback. The transcript went
+    // blank and agentty re-rendered the welcome logo into the empty screen.
+    //
+    // Everything we CAPTURE is already scrubbed (clean_capture =
+    // strip_terminal_controls + to_valid_utf8) exactly so a child cannot
+    // paint the UI. /dev/tty bypasses that: it is not our pipe. Stress tests
+    // are just the likeliest way to emit raw escapes by accident -- the same
+    // primitive aimed deliberately (a hostile repo's build script) can forge
+    // agentty's own prompts, which is why this is a security gate and not a
+    // cosmetic one.
+    //
+    // /dev/null, not --tmpfs: open() and write() must still SUCCEED so a
+    // program probing for a terminal behaves normally. The bytes go nowhere.
+    {
+        std::size_t dev_at = 0, tty_at = 0;
+        for (std::size_t i = 1; i < argv.size(); ++i) {
+            if (argv[i - 1] == "--dev" && argv[i] == "/dev") dev_at = i;
+            if (argv[i] == "/dev/tty" && i >= 2
+                && argv[i - 1] == "/dev/null"
+                && (argv[i - 2] == "--dev-bind" || argv[i - 2] == "--ro-bind"))
+                tty_at = i;
+        }
+        check(tty_at != 0, "bwrap: /dev/tty masked with /dev/null");
+        // ORDER: bwrap applies argv in sequence, so a mask emitted BEFORE
+        // --dev is silently replaced by the devtmpfs mount. Same class of
+        // bug as the credential-mask ordering asserted above, and just as
+        // invisible -- the argument is present either way.
+        check(dev_at != 0, "bwrap: /dev is mounted");
+        check(tty_at > dev_at, "bwrap: the /dev/tty mask comes after --dev");
+    }
 #endif
 
 }

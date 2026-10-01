@@ -52,7 +52,14 @@
 // the occasional (bool, std::string).
 namespace agtest {
 inline void check(bool ok) { DOCTEST_CHECK(ok); }
-inline void check(bool ok, const char* what) { DOCTEST_CHECK_MESSAGE(ok, what); }
+// std::string, not the raw const char*. doctest streams a bare char pointer
+// as an ADDRESS, so every failure in every legacy test printed
+// "logged: 0x55ea50991fb0" instead of the message explaining what broke --
+// the one thing the second argument exists for. Costs an allocation on the
+// FAILURE path only (doctest builds the message lazily).
+inline void check(bool ok, const char* what) {
+    DOCTEST_CHECK_MESSAGE(ok, std::string{what ? what : ""});
+}
 inline void check(bool ok, const std::string& what) {
     DOCTEST_CHECK_MESSAGE(ok, what);
 }

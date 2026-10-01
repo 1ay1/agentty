@@ -340,6 +340,41 @@ constexpr const char* kHomeToolSubdirs[] = {
     push_pair("--proc", "/proc");
     push_pair("--dev",  "/dev");
 
+    // ── /dev/tty: the hole --dev leaves open ─────────────────────────
+    //
+    // bwrap's --dev builds a fresh devtmpfs, and the /dev/tty it creates is
+    // NOT isolated: it is the character device that resolves to the calling
+    // process's CONTROLLING terminal, which is agentty's own terminal. A
+    // child that opens it writes straight to the screen.
+    //
+    // Everything else we capture goes through a pipe and gets scrubbed by
+    // clean_capture() (strip_terminal_controls + to_valid_utf8), precisely
+    // so a child painting CSI bytes cannot corrupt the UI. /dev/tty bypasses
+    // that entirely — it is not our pipe, so nothing we do to stdout matters.
+    //
+    // Measured, under a real controlling terminal:
+    //
+    //     printf 'INJECTED\033[2J' > /dev/tty   →  TTY-WRITE-OK, screen cleared
+    //
+    // \033[2J\033[3J is erase-display + erase-scrollback. A `bash` call that
+    // emits it wipes the transcript, and agentty then renders the welcome
+    // logo into the blank screen — the reported "output disappears when I ask
+    // the model to stress-test the sandbox" bug. Stress tests are just the
+    // likeliest way to emit raw escapes; a hostile repo's build script is the
+    // same primitive aimed deliberately, and it can forge agentty's own
+    // prompts.
+    //
+    // Mask it with /dev/null: open() and write() still SUCCEED, so nothing
+    // that probes for a tty breaks — the bytes just go nowhere. (A --tmpfs
+    // over it would make opens fail, which changes program behaviour rather
+    // than only its reach.)
+    //
+    // ORDER IS LOAD-BEARING: bwrap applies arguments in sequence, so this
+    // must come AFTER --dev or the devtmpfs mount replaces it.
+    argv.emplace_back("--dev-bind");
+    argv.emplace_back("/dev/null");
+    argv.emplace_back("/dev/tty");
+
     // Fresh /tmp inside the sandbox. MUST come before the workspace
     // bind: when workspace lives under /tmp (common in test setups),
     // bwrap applies args in order and a later --tmpfs would wipe the
@@ -526,6 +561,23 @@ constexpr const char* kHomeToolSubdirs[] = {
                         std::make_move_iterator(masks.end()));
     }
 
+    // ── /dev/tty: the controlling terminal is agentty's own screen ───────
+    //
+    // Not a credential, so it is not in kAlwaysMasked (that list is $HOME
+    // secrets) -- but it is masked for the same reason, on every backend.
+    //
+    // claybin's devtmpfs binds the HOST /dev/tty into the sandbox, following
+    // bubblewrap's node list exactly. That node resolves to the calling
+    // process's controlling terminal, so a child that opens it writes
+    // straight to the screen -- bypassing the pipe whose bytes clean_capture()
+    // scrubs. `printf '\033[2J\033[3J' > /dev/tty` wipes the transcript.
+    //
+    // Masking is the right mechanism rather than dropping the node: an
+    // absent /dev/tty changes behaviour for programs that probe for a
+    // terminal, while a masked one still opens and still accepts writes --
+    // they just go nowhere. Captured stdout/stderr are untouched.
+    p.masked.emplace_back("/dev/tty");
+
     // ── network ──────────────────────────────────────────────────────────
     p.net_mode = static_cast<int>(cfg.net_mode);
     p.allow_ports = cfg.allow_ports;
@@ -662,7 +714,12 @@ constexpr const char* kHomeToolSubdirs[] = {
     p += "(allow file-write* (subpath \"/private/tmp\"))\n";
     p += "(allow file-write* (subpath \"/private/var/folders\"))\n";   // user caches
     p += "(allow file-write* (subpath \"/dev/null\"))\n";
-    p += "(allow file-write* (subpath \"/dev/tty\"))\n";
+    // /dev/tty is deliberately NOT allowed — see the long note on the bwrap
+    // backend's --dev-bind /dev/null /dev/tty. It is the controlling
+    // terminal, i.e. agentty's own screen, and it bypasses the pipe that
+    // clean_capture() scrubs. A child writing \033[2J\033[3J there wipes the
+    // transcript. Captured stdout/stderr are unaffected; this only removes a
+    // child's ability to paint the UI directly.
     // Network: open. Restricting would break git push / curl / npm.
     p += "(allow network*)\n";
     p += "(allow system-socket)\n";
