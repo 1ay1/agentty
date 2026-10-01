@@ -445,6 +445,11 @@ TEST_CASE("sandbox pane: every row round-trips into the config") {
         // start every claybin row is locked, so requiring them to move here
         // would make this case fail for a property of the machine.
         if (fld.locked) continue;
+        // The POSTURE row is an action, not a value: it is applied by the
+        // reducer when it moves and deliberately not read back (see
+        // read_sandbox_form). Moving it here changes nothing by design, and
+        // its real behaviour has its own two cases above.
+        if (fld.id == pn::kSbPosture) continue;
 
         const auto before = pn::read_sandbox_form(f, cfg);
 
@@ -506,6 +511,237 @@ TEST_CASE("sandbox pane: the wall report tracks the rows") {
     CHECK((after.compiled || !after.error.empty()));
     if (after.compiled) CHECK(!after.walls.empty());
     (void)before;
+}
+
+// ── Postures ─────────────────────────────────────────────────────────────
+//
+// The pane had 28 individually-correct rows and no way to express intent. Every
+// row was real and enforced; assembling a security boundary out of 28
+// primitives is still the wrong question, and a control nobody can reason about
+// is a control nobody touches -- which for a security setting means off.
+//
+// The presets are only safe if two properties hold, and both are checked here:
+// the label can never be wrong (it is DERIVED, not stored), and picking one
+// cannot stomp a row the user edited afterwards.
+
+TEST_CASE("sandbox posture: apply then detect round-trips for every preset") {
+    // The property the whole feature rests on. detect_posture() asks
+    // apply_posture() rather than re-encoding what a posture means in a second
+    // place -- so this also guards the real hazard: ADD a field to Config, and
+    // if detect had its own hand-written comparison it would start claiming
+    // "Hardened" for a config that is not.
+    for (auto p : {sandbox_cfg::Posture::Permissive,
+                   sandbox_cfg::Posture::Balanced,
+                   sandbox_cfg::Posture::Hardened,
+                   sandbox_cfg::Posture::Airgapped}) {
+        sandbox_cfg::Config base;
+        const auto applied = sandbox_cfg::apply_posture(base, p);
+        CHECK(sandbox_cfg::detect_posture(applied) == p);
+    }
+}
+
+TEST_CASE("sandbox posture: the four presets are genuinely different") {
+    // A preset list where two entries mean the same thing is a menu that lies
+    // about having four options.
+    sandbox_cfg::Config base;
+    const auto perm = sandbox_cfg::apply_posture(base, sandbox_cfg::Posture::Permissive);
+    const auto bal  = sandbox_cfg::apply_posture(base, sandbox_cfg::Posture::Balanced);
+    const auto hard = sandbox_cfg::apply_posture(base, sandbox_cfg::Posture::Hardened);
+    const auto air  = sandbox_cfg::apply_posture(base, sandbox_cfg::Posture::Airgapped);
+
+    CHECK(!(perm == bal));
+    CHECK(!(bal == hard));
+    CHECK(!(hard == air));
+
+    // And they are ordered the way their names claim. Permissive really has no
+    // filter; airgapped really has no network. A preset called "airgapped" that
+    // left the network on would be the worst bug in this file.
+    CHECK(perm.syscall_mode == sandbox_cfg::SyscallMode::Off);
+    CHECK(bal.net_mode == sandbox_cfg::NetMode::Full);
+    CHECK(hard.syscall_mode == sandbox_cfg::SyscallMode::Strict);
+    CHECK(air.net_mode == sandbox_cfg::NetMode::None);
+}
+
+TEST_CASE("sandbox posture: a preset keeps the user's paths and engine") {
+    // A posture is a statement about how tight the walls are. Wiping the
+    // project-specific path list because someone tried Hardened would make the
+    // presets hostile -- you would lose work by exploring.
+    sandbox_cfg::Config base;
+    base.read_paths  = {"/opt/weird-sdk"};
+    base.write_paths = {"/var/cache/project"};
+    base.deny_paths  = {"/home/me/.cargo/credentials"};
+    base.backend     = sandbox_cfg::LinuxBackend::Claybin;
+
+    for (auto p : {sandbox_cfg::Posture::Permissive,
+                   sandbox_cfg::Posture::Hardened,
+                   sandbox_cfg::Posture::Airgapped}) {
+        const auto out = sandbox_cfg::apply_posture(base, p);
+        CHECK(out.read_paths == base.read_paths);
+        CHECK(out.write_paths == base.write_paths);
+        CHECK(out.deny_paths == base.deny_paths);
+        // The engine especially: picking Hardened must not silently switch
+        // engines on a host where claybin cannot start. The pane locks and
+        // reports that instead.
+        CHECK(out.backend == base.backend);
+    }
+}
+
+TEST_CASE("sandbox posture: permissive still masks secrets and refuses handoffs") {
+    // Permissive exists so a user whose toolchain breaks has somewhere to go
+    // that is not `--sandbox off`. It would be worthless if it also gave up the
+    // two protections that cost nothing in compatibility.
+    sandbox_cfg::Config base;
+    const auto perm = sandbox_cfg::apply_posture(base, sandbox_cfg::Posture::Permissive);
+
+    // Secrets stay masked REGARDLESS: a mask is a bind, it breaks nothing.
+    CHECK(perm.mask_scan_depth > 0);
+    // And the handoff gate is a different question from the walls (§14) -- a
+    // loose sandbox is a choice, letting the agent author your git hooks as a
+    // side effect of that choice is not one anybody made.
+    CHECK(perm.handoff == sandbox_cfg::HandoffPolicy::Refuse);
+}
+
+TEST_CASE("sandbox posture: balanced is exactly the unconfigured default") {
+    // So a user who picks Balanced explicitly gets the same boundary as one who
+    // never opened the pane. If these drift, the pane's own default row is
+    // describing a policy nobody runs.
+    sandbox_cfg::Config fresh;             // configured = false
+    const auto bal = sandbox_cfg::apply_posture(fresh, sandbox_cfg::Posture::Balanced);
+
+    sandbox_cfg::Config expected = fresh;
+    expected.configured = true;            // the only legitimate difference
+    CHECK(bal == expected);
+
+    // And an untouched config already reads as Balanced, so the pane opens on a
+    // name rather than on "Custom".
+    CHECK(sandbox_cfg::detect_posture(fresh) == sandbox_cfg::Posture::Balanced);
+}
+
+TEST_CASE("sandbox posture: editing one row off a preset reports Custom") {
+    // The honesty property. A STORED posture field would still say "Hardened"
+    // here, and the pane would be claiming a boundary the config no longer
+    // describes -- the same lie as "sandbox: active".
+    auto hard = sandbox_cfg::apply_posture(sandbox_cfg::Config{},
+                                           sandbox_cfg::Posture::Hardened);
+    REQUIRE(sandbox_cfg::detect_posture(hard) == sandbox_cfg::Posture::Hardened);
+
+    hard.memory_mb = 2048;   // one row, by hand
+    CHECK(sandbox_cfg::detect_posture(hard) == sandbox_cfg::Posture::Custom);
+}
+
+TEST_CASE("sandbox posture: selecting Custom changes nothing") {
+    // Custom is a label the row REPORTS, not a command. Applying it has to be a
+    // no-op or the row would destroy the config it is describing.
+    const auto hard = sandbox_cfg::apply_posture(sandbox_cfg::Config{},
+                                                 sandbox_cfg::Posture::Hardened);
+    const auto after = sandbox_cfg::apply_posture(hard, sandbox_cfg::Posture::Custom);
+    CHECK(after == hard);
+}
+
+TEST_CASE("sandbox pane: the posture row writes every other row") {
+    // Through the REDUCER, because that is where a preset is applied: picking
+    // one is an action, and only the reducer knows an action happened. See the
+    // kSbPosture arm in update/sandbox.cpp for why readback cannot do it.
+    sandbox_cfg::Config cfg;   // balanced
+    cfg.configured = true;
+    install(cfg);
+
+    Model m = opened();
+    const int p = row_of(pane(m).pane.form, pn::kSbPosture);
+    REQUIRE(p >= 0);
+    m.ui.panel.get<pn::Sandbox>()->pane.form.cursor = p;
+
+    // Drive the row to Hardened from wherever it actually starts, rather than
+    // assuming an index. The pane seeds from `m.d.persisted` (so a fresh Model
+    // opens on its defaults, not on what install() sealed), and a test that
+    // hard-codes "one step down" silently tests a different preset the moment
+    // that seed changes.
+    const auto start = std::get<form::field::Choice>(
+        pane(m).pane.form.fields[static_cast<std::size_t>(p)].value).index;
+    const int want = static_cast<int>(sandbox_cfg::Posture::Hardened);
+    // AdjustUp is +1 on a Choice (form_keys.cpp), so stepping toward a HIGHER
+    // index is Up, not Down.
+    for (int i = start; i < want; ++i) {
+        auto [next, _] = app::update(std::move(m), key(form::keys::Intent::AdjustUp));
+        m = std::move(next);
+    }
+    for (int i = start; i > want; --i) {
+        auto [next, _] = app::update(std::move(m), key(form::keys::Intent::AdjustDown));
+        m = std::move(next);
+    }
+
+    // The row really is where we drove it -- otherwise the checks below would
+    // pass or fail for a reason that has nothing to do with presets.
+    REQUIRE(std::get<form::field::Choice>(
+        pane(m).pane.form.fields[static_cast<std::size_t>(p)].value).index == want);
+
+    const auto out = pn::read_sandbox_form(pane(m).pane.form, cfg);
+    // The preset wrote the OTHER rows, which is the whole point.
+    CHECK(out.syscall_mode == sandbox_cfg::SyscallMode::Strict);
+    CHECK(out.memory_mb == 8192);
+    CHECK(sandbox_cfg::detect_posture(out) == sandbox_cfg::Posture::Hardened);
+}
+
+TEST_CASE("sandbox pane: a preset does not re-stamp a row edited after it") {
+    // The failure this design exists to avoid, and the test that caught it.
+    //
+    // read_sandbox_form runs on EVERY keystroke and every reprice. The first
+    // version applied the posture there, comparing the row against
+    // detect_posture() -- which cannot work, because the row still displays the
+    // posture the config USED to be. So editing Memory after choosing Hardened
+    // put 8192 straight back on the next repaint: the user's edit vanishing
+    // with no message, which is worse than refusing it.
+    //
+    // Applying in the reducer instead makes this exact, because the reducer
+    // knows WHICH row moved.
+    auto hard = sandbox_cfg::apply_posture(sandbox_cfg::Config{},
+                                           sandbox_cfg::Posture::Hardened);
+    hard.backend = sandbox_cfg::LinuxBackend::Claybin;
+    install(hard);
+
+    auto form = pn::build_sandbox_form(hard, true, 10);
+    // The row shows Hardened, as it should.
+    const int p = row_of(form, pn::kSbPosture);
+    REQUIRE(p >= 0);
+    CHECK(std::get<form::field::Choice>(form.fields[static_cast<std::size_t>(p)].value).index
+          == static_cast<int>(sandbox_cfg::Posture::Hardened));
+
+    // Now edit a resource row by hand, exactly as the user would.
+    const int mem = row_of(form, pn::kSbMemoryMb);
+    REQUIRE(mem >= 0);
+    std::get<form::field::Number>(form.fields[static_cast<std::size_t>(mem)].value).value = 2048;
+
+    // Read back REPEATEDLY -- the repaint loop. The edit must survive all of
+    // them, and the posture must settle on Custom rather than fighting back.
+    auto out = pn::read_sandbox_form(form, hard);
+    for (int i = 0; i < 3; ++i) out = pn::read_sandbox_form(form, out);
+
+    CHECK(out.memory_mb == 2048);
+    CHECK(sandbox_cfg::detect_posture(out) == sandbox_cfg::Posture::Custom);
+}
+
+TEST_CASE("sandbox pane: the posture row scores the walls") {
+    sandbox_cfg::Config cfg;
+    cfg.configured = true;
+    cfg.backend = sandbox_cfg::LinuxBackend::Claybin;
+    install(cfg);
+
+    auto form = pn::build_sandbox_form(cfg, true, 10);
+    const auto preview = pn::preview_sandbox(cfg);
+    pn::annotate_sandbox_form(form, preview, cfg);
+
+    const int p = row_of(form, pn::kSbPosture);
+    REQUIRE(p >= 0);
+    const auto& origin = form.fields[static_cast<std::size_t>(p)].origin;
+    CHECK(!origin.empty());
+#if defined(__linux__)
+    if (preview.compiled) {
+        // "N/M strong" -- the number is what makes two postures comparable at a
+        // glance, where four safe-sounding names are not.
+        CHECK(origin.find('/') != std::string::npos);
+        CHECK(origin.find("strong") != std::string::npos);
+    }
+#endif
 }
 
 // ── Per-row honesty ──────────────────────────────────────────────────────

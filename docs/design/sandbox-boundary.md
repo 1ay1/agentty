@@ -1242,3 +1242,95 @@ degradation. Listing it every time would train the user to ignore the line.
 Above it sit the two feeds, in escalating order: blocked syscalls (the sandbox
 holding), then trust handoffs (the one thing here that escapes it without
 breaking it).
+
+---
+
+## 16. Postures: 28 correct rows was still the wrong question
+
+Every row in the pane is real, enforced, and individually justified. The pane
+still failed at the thing a settings screen is for, because **nobody opens it
+wanting to choose a pids cgroup limit.** They open it wanting "tighter than
+this", and the honest UI is the one that asks which.
+
+This is the same argument the rest of the subsystem makes about honesty, applied
+to effort instead of truth: a control nobody can reason about is a control
+nobody touches, and for a security setting that means it is **off**. Twenty-eight
+correct switches that sit at their defaults forever are worth less than one
+choice a user actually makes.
+
+So there are four, and `Custom`:
+
+| posture | what it is | what it costs |
+|---|---|---|
+| permissive | mount walls only — no filter, no caps | the syscall filter and every cgroup cap |
+| balanced | the struct defaults, byte for byte | network is open, so read is also exfiltration |
+| hardened | every wall claybin can build | a build needing an unusual syscall may fail |
+| airgapped | hardened + no network at all | `git push`, `npm install`, `curl` stop working |
+
+The help text shows the **cost**, not the benefit. All four names sound safe;
+what a user needs before picking is what will stop working.
+
+`airgapped` is the one worth singling out: it is the only configuration in this
+whole document where §11's admission — *read access plus network is read plus
+exfiltrate* — stops being true. For reading and editing code it costs nothing,
+and a leaked credential cannot leave the machine.
+
+### Three things that keep a preset from becoming a lie
+
+**1. It writes the rows, it does not replace them.** All 28 stay visible and
+editable. A preset that hid the detail would be another "sandbox: active" — a
+label standing in for a boundary you can no longer inspect.
+
+**2. The label is derived, never stored.** `detect_posture()` works by asking
+`apply_posture()` what each preset would produce and comparing. A stored field
+would drift the moment a user edited one row, and then the pane would claim
+"Hardened" for a config that is not. Deriving it means the label can only ever
+be right, or `Custom`. It also survives schema growth: add a field to `Config`
+and this keeps working, where a hand-written comparison silently rots the day
+someone forgets to extend it.
+
+`configured` is normalised out of that comparison, because it is bookkeeping
+about whether the pane was ever opened rather than part of the boundary —
+without that, a brand-new install would report `Custom` despite being exactly
+Balanced.
+
+**3. Applying is an ACTION, in the reducer — not a value, in readback.**
+
+This one cost a bug and a test caught it, so it is worth stating plainly. The
+first version applied the posture inside `read_sandbox_form`, guarded by
+"only if it differs from `detect_posture`". That cannot work, and the reason is
+structural rather than a slip: **readback sees only values, and this row's value
+is the posture the config used to be.** After picking Hardened and then editing
+Memory, the row still reads `hardened` while the config is genuinely `Custom` —
+so the guard fired and re-stamped 8192 over the user's 2048 on the next repaint.
+An edit vanishing with no message is worse than an edit refused.
+
+The reducer has the **row id that changed**, so there the distinction is exact
+and free. `apply_posture` runs once per keystroke that moves that row, and
+readback stays a pure projection of the other 27. Like the engine row it
+*reprojects* rather than reprices — the engine row changes which rows are
+locked, this changes their values, and repricing alone would leave 26 rows
+showing the old policy under a footer describing the new one.
+
+### What a posture deliberately does not touch
+
+- **The engine.** Picking Hardened on a host where claybin cannot start must not
+  silently switch backends. The pane locks and reports that instead.
+- **The path lists.** Wiping someone's `read_paths` because they tried a preset
+  would make the presets hostile — you would lose work by exploring.
+- **The handoff policy, in `permissive`.** A loose sandbox is a choice; letting
+  the agent author your git hooks as a side effect of that choice is not one
+  anybody made. Those are different questions (§14), so `permissive` still
+  refuses handoffs and still masks secrets — both cost nothing in
+  compatibility, which is the whole reason `permissive` exists instead of
+  people reaching for `--sandbox off`.
+
+### The score
+
+The posture row's annotation is `9/11 strong` rather than a mechanism, because
+it is not one capability — it is the whole set. That number is what makes two
+presets comparable at a glance, where four safe-sounding names are not.
+`host.kernel_isolation` is excluded from the denominator rather than counted as
+a failure: no process backend can satisfy it (§13), and leaving it in would cap
+every posture below 100% for a reason that has nothing to do with the user's
+choice.

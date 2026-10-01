@@ -67,6 +67,7 @@ namespace agentty::ui::panel {
 // consistency", so it is not here to be found. See docs/design/
 // sandbox-boundary.md §3.
 inline constexpr std::string_view kSbBackend     = "backend";
+inline constexpr std::string_view kSbPosture     = "posture";
 inline constexpr std::string_view kSbFsScope     = "fs_scope";
 inline constexpr std::string_view kSbReadPaths   = "read_paths";
 inline constexpr std::string_view kSbWritePaths  = "write_paths";

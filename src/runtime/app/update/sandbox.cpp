@@ -207,6 +207,37 @@ Cmd sandbox_update(Model& m, msg::SandboxMsg sm) {
                 return Cmd::none();
             }
 
+            // The POSTURE row is the only one that writes OTHER rows, and it is
+            // applied HERE rather than in readback because it is an ACTION, not
+            // a value.
+            //
+            // Readback sees only values, and this row's value is the posture the
+            // config used to be -- so it cannot distinguish "the user just
+            // picked Hardened" from "the user picked Hardened earlier and has
+            // since edited Memory". Inferring it there re-stamped the preset
+            // over the user's edit on the next repaint, which is an edit
+            // vanishing with no message. The reducer has the row id, so here the
+            // distinction is free and exact.
+            //
+            // Reprojects rather than reprices for a stronger reason than the
+            // engine row: the engine changes which rows are LOCKED, this changes
+            // their VALUES. Repricing alone would leave 26 rows showing the old
+            // policy while the footer described the new one, which is exactly
+            // the rows/report disagreement this pane exists to prevent.
+            if (applied.changed && row_id == pn::kSbPosture) {
+                const auto chosen = static_cast<sandbox_cfg::Posture>(
+                    std::get<form::field::Choice>(
+                        o->pane.form.fields[static_cast<std::size_t>(
+                            o->pane.form.cursor)].value).index);
+                // Custom is a label the row REPORTS, not a command;
+                // apply_posture returns the config untouched for it, so landing
+                // on Custom while cycling leaves the rows alone.
+                const auto cfg = sandbox_cfg::apply_posture(
+                    pn::read_sandbox_form(o->pane.form, sb::config()), chosen);
+                reproject(*o, cfg);
+                return Cmd::none();
+            }
+
             // No `hand_off` or `fired` arm, and that is a property of the
             // form rather than an omission: this pane has no Pick rows (its
             // longest list is three options, which is a Choice) and no Action

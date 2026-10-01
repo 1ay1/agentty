@@ -210,6 +210,32 @@ form::Form build_sandbox_form(const sandbox_cfg::Config& cfg, bool claybin_avail
                               std::to_string(landlock_abi) + " \xc2\xb7 seccomp \xc2\xb7 cgroup2"
                         : std::string{"bwrap \xc2\xb7 mount namespaces only"};
 
+    // ── Posture ───────────────────────────────────────────────────
+    //
+    // Second row, directly under the engine, because it is the question the
+    // user actually has. Twenty-eight individually-correct switches is still
+    // the wrong thing to hand someone who wants "tighter than this" -- and a
+    // control nobody can reason about is a control nobody touches, which for a
+    // security setting means it is off.
+    //
+    // It does not REPLACE the rows, it writes them. Everything below stays
+    // visible and editable, so this is a starting point rather than a mode:
+    // the moment a preset hid the detail it would be another "sandbox: active"
+    // — a label standing in for a boundary you can no longer inspect.
+    //
+    // `Custom` is in the list but is never a thing you pick: it is what the
+    // row REPORTS when the config matches no preset, so editing one row off
+    // Hardened stops the pane claiming Hardened. Selecting it is a no-op by
+    // construction (apply_posture returns the config untouched).
+    const auto posture = sandbox_cfg::detect_posture(cfg);
+    form.fields.push_back(choice(
+        kSbPosture, "Posture",
+        // The COST, not the benefit. All four names sound safe, so the thing a
+        // user needs before choosing is what will stop working.
+        sandbox_cfg::cost_of(posture),
+        {"permissive", "balanced", "hardened", "airgapped", "custom"},
+        static_cast<int>(posture)));
+
     // ── Filesystem ───────────────────────────────────────────────────────
     // These four are the rows bwrap CAN honour: scope, extra reads and extra
     // writes are all binds, and a mask is a bind of an empty file over the
@@ -448,6 +474,22 @@ sandbox_cfg::Config read_sandbox_form(const form::Form& f,
     cfg.close_inherited_fds = toggle_of(kSbCloseFds, base.close_inherited_fds);
     cfg.handoff = static_cast<sandbox_cfg::HandoffPolicy>(
         choice_of(kSbHandoff, static_cast<int>(base.handoff)));
+
+    // The POSTURE row is deliberately NOT read back here.
+    //
+    // It cannot be, soundly. Readback sees only values, and the posture row's
+    // value is the posture the config USED to be -- so after the user picks
+    // Hardened and then edits Memory, the row still reads "hardened" while the
+    // config is genuinely Custom. Any rule inferring intent from that pair gets
+    // it wrong in one direction or the other: compare-and-apply re-stamps 8192
+    // over the user's 2048 on the next repaint, and apply-always is worse.
+    //
+    // Applying a preset is an ACTION, and only the reducer knows an action
+    // happened -- it has the row id that changed. So `apply_posture` is called
+    // there (update/sandbox.cpp, the kSbPosture arm) exactly once per keystroke
+    // that moves this row, and readback stays a pure projection of the other
+    // rows. The row's displayed value comes from `detect_posture` at build time,
+    // which is derived and therefore cannot drift.
     return cfg;
 }
 
@@ -617,6 +659,31 @@ void annotate_sandbox_form(form::Form& f, const Preview& preview,
         fld->origin = w->mechanism.empty()
             ? w->strength
             : w->strength + " via " + w->mechanism;
+    }
+
+    // The posture row gets the SCORE instead of a mechanism: it is not one
+    // capability, it is the whole set. "9/11 strong" turns the preset from a
+    // name you have to trust into a number you can compare, and it is the one
+    // annotation that makes two postures orderable at a glance.
+    //
+    // Kernel isolation is excluded from the denominator rather than counted as
+    // a failure, because no process backend can ever satisfy it (§13). Leaving
+    // it in would cap every posture below 100% for a reason that has nothing
+    // to do with the user's choice.
+    if (auto* fld = row_of(kSbPosture)) {
+        if (!preview.compiled) {
+            fld->origin = "will not compile";
+        } else {
+            std::size_t strong = 0, total = 0;
+            for (const auto& w : preview.walls) {
+                if (w.name == "host.kernel_isolation") continue;
+                ++total;
+                if (w.strength == "strong") ++strong;
+            }
+            if (total)
+                fld->origin = std::to_string(strong) + "/" +
+                              std::to_string(total) + " strong";
+        }
     }
 
     // ── validation: rows that defeat themselves ──────────────────────────

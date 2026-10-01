@@ -204,6 +204,83 @@ enum class LinuxBackend : std::uint8_t {
     return "bwrap";
 }
 
+// A named posture: the whole policy as one decision.
+//
+// ── Why this exists ────────────────────────────────────────────────
+//
+// The pane has 28 rows. Every one of them is a real, enforced, individually
+// justified control -- and asking a user to assemble a security boundary out
+// of 28 primitives is still the wrong question. Nobody opens this screen
+// wanting to choose a pids cgroup limit. They open it wanting one of about
+// four things, and the honest UI is the one that asks which.
+//
+// This is the same lesson the rest of the pane already learned about honesty,
+// applied to effort: a control nobody can reason about is a control nobody
+// uses, and an unused security control is off. 28 correct switches that all
+// stay at their defaults forever are worth less than one choice a user
+// actually makes.
+//
+// ── Why presets and not a wizard ──────────────────────────────────
+//
+// Because the rows stay. A preset WRITES the 28 values and leaves every one of
+// them visible and editable -- it is a starting point, not a mode. The moment a
+// preset hid the detail it would become another "sandbox: active": a label
+// standing in for a boundary you can no longer inspect.
+//
+// So `Custom` is not a preset you pick, it is what the pane REPORTS when the
+// config matches none of the others. Tweaking one row off Hardened does not
+// silently keep claiming Hardened.
+enum class Posture : std::uint8_t {
+    // No sandbox beyond the mount namespace. For a user whose toolchain
+    // genuinely breaks under a filter and who would otherwise pass
+    // --sandbox off, which is strictly worse.
+    Permissive,
+    // The default, and what `configured = false` means: toolchain-readable,
+    // network on, compiler syscall profile, fork-bomb cap. Chosen so an
+    // ordinary `cargo build` / `npm install` works untouched.
+    Balanced,
+    // Every wall claybin can build, with resource caps that still let a real
+    // build finish. The posture to pick if you are running agents you have
+    // not read.
+    Hardened,
+    // No network at all, and the tightest filter. For reading and editing
+    // code without letting anything phone out -- the posture that makes
+    // "read access plus network is read plus exfiltrate" (§11) untrue.
+    Airgapped,
+    // Not selectable. What the pane says when the rows match no preset.
+    Custom,
+};
+
+[[nodiscard]] constexpr const char* to_string(Posture p) noexcept {
+    switch (p) {
+        case Posture::Permissive: return "permissive";
+        case Posture::Balanced:   return "balanced";
+        case Posture::Hardened:   return "hardened";
+        case Posture::Airgapped:  return "airgapped";
+        case Posture::Custom:     return "custom";
+    }
+    return "custom";
+}
+
+// One line on what the posture gives up, for the row's help text. Phrased as
+// the COST rather than the benefit: every one of these is safe-sounding, and
+// the thing a user needs to know before picking is what will stop working.
+[[nodiscard]] constexpr const char* cost_of(Posture p) noexcept {
+    switch (p) {
+        case Posture::Permissive:
+            return "no syscall filter, no caps \xc2\xb7 only the mount walls";
+        case Posture::Balanced:
+            return "network is open, so read access is also exfiltration";
+        case Posture::Hardened:
+            return "a build that needs an unusual syscall may fail";
+        case Posture::Airgapped:
+            return "git push, npm install and curl all stop working";
+        case Posture::Custom:
+            return "your own mix \xc2\xb7 the rows below are the truth";
+    }
+    return "";
+}
+
 struct Config {
     // ── Engine ────────────────────────────────────────────────────────
     // First field because it gates the meaning of most of the others. The
@@ -385,5 +462,29 @@ struct Config {
 // so this stays pure and testable without touching a real home directory.
 [[nodiscard]] std::vector<std::string> mask_paths(
     const Config& cfg, std::string_view workspace, std::string_view home);
+
+// ── Postures ───────────────────────────────────────────────────
+
+// Write a posture's values over a config, preserving the parts that are the
+// USER's rather than the posture's.
+//
+// What survives: the path lists (read/write/deny) and the engine. A posture is
+// a statement about how tight the walls are, not about which extra dependency
+// directory this particular project needs -- wiping someone's `read_paths`
+// because they tried Hardened would make the presets hostile to use.
+//
+// What a posture does NOT touch is `backend`. Picking Hardened on a host where
+// claybin is unavailable must not silently switch engines; the pane locks that
+// row and reports it, which is the honest answer.
+[[nodiscard]] Config apply_posture(const Config& base, Posture p);
+
+// Which posture this config IS, or Custom.
+//
+// Derived by comparison rather than stored, and that is the load-bearing
+// choice: a STORED posture field would drift from the rows the moment a user
+// edited one, and then the pane would be claiming a boundary the config no
+// longer describes -- the same lie as "sandbox: active". Deriving it means the
+// label cannot be wrong, only "Custom".
+[[nodiscard]] Posture detect_posture(const Config& cfg);
 
 }  // namespace agentty::sandbox_cfg

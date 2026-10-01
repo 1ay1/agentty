@@ -220,4 +220,156 @@ std::vector<std::string> mask_paths(const Config& cfg, std::string_view workspac
     return out;
 }
 
+Config apply_posture(const Config& base, Posture p) {
+    Config c = base;
+    c.configured = true;
+
+    // Deliberately NOT touched: backend, read_paths, write_paths, deny_paths.
+    // A posture is a statement about how tight the walls are; the engine and
+    // the user's project-specific path list are not the posture's business.
+    // See the header.
+
+    switch (p) {
+        case Posture::Permissive:
+            // Off, not "loose". There is no filter, no caps and no netns --
+            // only the mount walls, which both backends always build. This
+            // exists so that a user whose toolchain breaks has somewhere to go
+            // that is not `--sandbox off`: the masks and the mount namespace
+            // still hold, which is strictly more than nothing.
+            c.fs_scope = FsScope::Toolchain;
+            c.net_mode = NetMode::Full;
+            c.syscall_mode = SyscallMode::Off;
+            c.wx_protect = false;
+            c.memory_mb = 0;
+            c.max_procs = 0;
+            c.cpu_percent = 0;
+            c.max_open_files = 0;
+            c.wall_clock_secs = 0;
+            c.cpu_secs = 0;
+            c.scope_ipc = false;
+            c.close_inherited_fds = true;   // never a compatibility problem
+            c.fake_hostname = false;
+            c.mask_scan_depth = 3;          // secrets stay masked REGARDLESS
+            // Handoff stays at the caller's value rather than being loosened.
+            // Permissive is about the walls around the process; the handoff
+            // gate is about what the agent writes for the HOST to run, and
+            // those are different questions (§14). A loose sandbox is a
+            // choice; letting the agent author your git hooks as a side effect
+            // of that choice is not one anybody made.
+            break;
+
+        case Posture::Balanced:
+            // Exactly the struct defaults, by construction: this is what
+            // `configured = false` already means, so a user who picks Balanced
+            // explicitly gets the same boundary as one who never opened the
+            // pane. Writing them out rather than default-constructing keeps
+            // the four postures readable side by side.
+            c.fs_scope = FsScope::Toolchain;
+            c.net_mode = NetMode::Full;
+            c.syscall_mode = SyscallMode::Compiler;
+            c.wx_protect = true;
+            c.memory_mb = 0;        // the machine's business, not ours
+            c.max_procs = 4096;     // fork-bomb cap; the audit found this none
+            c.cpu_percent = 0;
+            c.max_open_files = 0;
+            c.wall_clock_secs = 0;
+            c.cpu_secs = 0;
+            c.scope_ipc = true;
+            c.close_inherited_fds = true;
+            c.fake_hostname = false;
+            c.mask_scan_depth = 3;
+            c.handoff = HandoffPolicy::Refuse;
+            break;
+
+        case Posture::Hardened:
+            // Every wall claybin can build, with caps a real build survives.
+            //
+            // The numbers are the interesting part. They are chosen to be
+            // survivable rather than impressive: 8 GB and 400% (four cores)
+            // because a linker peaks high and an OOM kill mid-build reads as
+            // an agentty bug, and no wall-clock cap at all because a long
+            // build is not an attack and a timeout that fires on one teaches
+            // the user to turn the sandbox off.
+            c.fs_scope = FsScope::Minimal;
+            c.net_mode = NetMode::Ports;   // 443/80/22/53 by default
+            c.syscall_mode = SyscallMode::Strict;
+            c.wx_protect = true;
+            c.memory_mb = 8192;
+            c.max_procs = 2048;
+            c.cpu_percent = 400;
+            c.max_open_files = 4096;
+            c.wall_clock_secs = 0;
+            c.cpu_secs = 0;
+            c.scope_ipc = true;
+            c.close_inherited_fds = true;
+            c.fake_hostname = true;        // keeps the host name out of logs
+            c.mask_scan_depth = 5;         // deeper sweep; it is a cost row
+            c.handoff = HandoffPolicy::Refuse;
+            break;
+
+        case Posture::Airgapped:
+            // The posture that makes §11's admission untrue.
+            //
+            // Everywhere else in this subsystem, network is open and the
+            // documentation says plainly that read access plus network is read
+            // plus exfiltrate. This is the one setting where that stops being
+            // true, which is why it is worth a preset even though it breaks
+            // most workflows: for reading and editing code it costs nothing,
+            // and it is the only configuration here where a leaked credential
+            // cannot leave the machine.
+            c.fs_scope = FsScope::Minimal;
+            c.net_mode = NetMode::None;
+            c.syscall_mode = SyscallMode::Strict;
+            c.wx_protect = true;
+            c.memory_mb = 8192;
+            c.max_procs = 2048;
+            c.cpu_percent = 400;
+            c.max_open_files = 4096;
+            c.wall_clock_secs = 0;
+            c.cpu_secs = 0;
+            c.scope_ipc = true;
+            c.close_inherited_fds = true;
+            c.fake_hostname = true;
+            c.mask_scan_depth = 5;
+            c.handoff = HandoffPolicy::Refuse;
+            break;
+
+        case Posture::Custom:
+            // Not selectable: it is what detect_posture REPORTS, not a thing
+            // to apply. Returning the config untouched is the only sound
+            // answer -- there is nothing to write.
+            break;
+    }
+    return c;
+}
+
+Posture detect_posture(const Config& cfg) {
+    // By COMPARISON against what each posture would produce, not by inspecting
+    // fields one at a time.
+    //
+    // This is why the label cannot be wrong. apply_posture is the single
+    // definition of what a posture means, and detect asks it rather than
+    // re-encoding the same knowledge in a second place that can drift. Add a
+    // field to Config and this keeps working; add a field and hand-write the
+    // comparison, and the day you forget one the pane starts claiming
+    // "Hardened" for a config that is not.
+    //
+    // `configured` is normalised out of the comparison on both sides. It is
+    // bookkeeping about whether the user has ever touched the pane, not part of
+    // the boundary -- and apply_posture always sets it, so without this a
+    // never-opened config (configured = false) would report Custom even though
+    // its walls are exactly Balanced. The pane would open on "Custom" for every
+    // new user, which is both wrong and the least useful thing it could say.
+    Config probe = cfg;
+    probe.configured = true;
+
+    // Order matters only for display: Balanced is checked first because it is
+    // the overwhelmingly common answer, so the common case costs one compare.
+    for (auto p : {Posture::Balanced, Posture::Hardened, Posture::Airgapped,
+                   Posture::Permissive}) {
+        if (probe == apply_posture(probe, p)) return p;
+    }
+    return Posture::Custom;
+}
+
 }  // namespace agentty::sandbox_cfg
