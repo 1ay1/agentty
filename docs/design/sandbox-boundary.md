@@ -820,6 +820,27 @@ Cloud Run, GKE Sandbox and the code execution in claude.ai):
   credential masks. The right comparison is "both", which is what Kata does, and
   that is a container runtime's worth of machinery.
 
+### The measurement that settles it
+
+Not a thought experiment — measured on a developer box with working KVM
+(`firecracker 1.17.0` is one `pacman -S` away, and `KVM_CREATE_VM` succeeds
+unprivileged because `/dev/kvm` is mode 0666 there):
+
+| what the process backend binds | size |
+|---|---|
+| `/usr` (the toolchain) | **31 GB** |
+| the workspace, read-write | **16 GB** |
+
+A rootfs image would have to contain or mirror that 31 GB, and the 16 GB
+workspace would have to cross as virtio-fs with different file semantics. The
+bind is not an implementation shortcut — it *is* the feature. An agent that
+cannot see your actual `cargo`, your actual `node_modules`, and your actual repo
+is not doing the job.
+
+So the blocker is not the VMM, the kernel image, or KVM access. All three are
+available. The blocker is that a microVM changes what "run this command in my
+project" means, and that is a product decision rather than a sandbox one.
+
 ### What was built instead: an honest answer
 
 The gap was already reported, but the *reason* was not. `HostCapabilities` had
