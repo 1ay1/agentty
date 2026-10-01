@@ -27,6 +27,7 @@
 #include <vector>
 
 #include "agentty/tool/util/handoff_gate.hpp"
+#include "agentty/tool/util/sandbox.hpp"   // Mode::Off, for the "off means off" case
 
 using namespace agentty;
 namespace hg = tools::util::handoff;
@@ -43,6 +44,34 @@ struct Fresh {
 };
 
 }  // namespace
+
+TEST_CASE("handoff: --sandbox off turns the gate off too") {
+    Fresh fresh;
+
+    // "off" has to mean off. The gate is not a sandbox WALL -- it lives on the
+    // tool call rather than in the kernel -- but it is part of the same
+    // control, and a user who disabled sandboxing did not opt into one
+    // surviving piece of it refusing their writes.
+    //
+    // Driven through check() rather than check_with(), because the mode test
+    // IS the thing under test: check_with() takes an explicit policy and
+    // deliberately knows nothing about modes.
+    namespace sb = agentty::tools::util::sandbox;
+    sb::reset_config_for_test();
+    sandbox_cfg::Config cfg;
+    cfg.configured = true;
+    cfg.handoff = sandbox_cfg::HandoffPolicy::Refuse;   // the strictest setting
+    sb::set_config(cfg);
+    sb::init(sb::Mode::Off);
+
+    auto v = hg::check("/work/.vscode/tasks.json", "write");
+    CHECK(v.allowed);
+    CHECK_FALSE(v.is_handoff);
+
+    // And nothing is recorded: a disabled control should not be filling a feed
+    // the pane will render as if it were watching.
+    CHECK(hg::handoff_feed().empty());
+}
 
 // ── The policy ───────────────────────────────────────────────────────────
 

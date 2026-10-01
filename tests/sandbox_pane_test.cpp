@@ -823,9 +823,11 @@ TEST_CASE("sandbox pane: an unset cap row says so instead of showing none") {
 #endif
 }
 
-TEST_CASE("sandbox pane: empty path rows are labelled, not blank") {
-    // An empty Text row renders as an empty line. Next to rows that DO show a
-    // value that reads as broken rather than as "nothing added yet".
+TEST_CASE("sandbox pane: empty path rows say they are empty") {
+    // These rows used to be a Text field holding "a, b, c", and an empty one
+    // rendered as a blank line that read as broken. They are Picks now -- they
+    // show a count and open the list editor -- so the emptiness has to be
+    // visible in the PICK's placeholder instead.
     sandbox_cfg::Config cfg;
     cfg.configured = true;
     cfg.backend = sandbox_cfg::LinuxBackend::Claybin;
@@ -840,8 +842,142 @@ TEST_CASE("sandbox pane: empty path rows are labelled, not blank") {
     for (auto id : {pn::kSbReadPaths, pn::kSbWritePaths, pn::kSbDenyPaths}) {
         const int i = row_of(form, id);
         REQUIRE(i >= 0);
-        CHECK(!form.fields[static_cast<std::size_t>(i)].origin.empty());
+        const auto& fld = form.fields[static_cast<std::size_t>(i)];
+        const auto* p = std::get_if<form::field::Pick>(&fld.value);
+        REQUIRE(p != nullptr);
+        // Empty list => no count, and a placeholder that says how to add.
+        CHECK(p->label.empty());
+        CHECK(!p->placeholder.empty());
     }
+
+    // And a NON-empty list reports its size rather than its contents: three
+    // truncated paths in a narrow column tell you less than "3 paths" while
+    // looking like they tell you more.
+    cfg.read_paths = {"/opt/a", "/opt/b"};
+    auto filled = pn::build_sandbox_form(cfg, facts_for(cfg));
+    const int i = row_of(filled, pn::kSbReadPaths);
+    REQUIRE(i >= 0);
+    const auto* p = std::get_if<form::field::Pick>(
+        &filled.fields[static_cast<std::size_t>(i)].value);
+    REQUIRE(p != nullptr);
+    CHECK(p->label == "2 paths");
+}
+
+// ── The path list editor ────────────────────────────────────────
+//
+// Comma-separated text was a serialisation format pretending to be an
+// interface. These pin the list behaving like a list.
+
+TEST_CASE("sandbox list: round-trips its entries") {
+    const std::vector<std::string> paths{"/opt/sdk", "/var/cache/x"};
+    auto ed = pn::build_sandbox_list(pn::kSbReadPaths, "Also readable", "help",
+                                     paths, /*numeric=*/false);
+
+    // One row per entry, plus the trailing blank that IS the add affordance.
+    CHECK(ed.form.fields.size() == paths.size() + 1);
+    CHECK(pn::read_sandbox_list(ed) == paths);
+}
+
+TEST_CASE("sandbox list: a blank entry is an absent entry") {
+    // This is what makes add and remove the same gesture: typing into the
+    // trailing blank adds, and clearing a line removes. No separate delete key
+    // to discover, and no way to end up storing an empty path.
+    auto ed = pn::build_sandbox_list(pn::kSbReadPaths, "t", "h",
+                                     {"/a", "/b", "/c"}, false);
+    // Clear the middle one.
+    std::get<form::field::Text>(ed.form.fields[1].value).value.clear();
+    const std::vector<std::string> want{"/a", "/c"};
+    CHECK(pn::read_sandbox_list(ed) == want);
+}
+
+TEST_CASE("sandbox list: entries are trimmed") {
+    // A path with a stray space does not error, it silently fails to match --
+    // the exact failure mode the comma format had, and the reason this editor
+    // exists.
+    auto ed = pn::build_sandbox_list(pn::kSbReadPaths, "t", "h", {"x"}, false);
+    std::get<form::field::Text>(ed.form.fields[0].value).value = "  /opt/sdk  ";
+    const std::vector<std::string> want{"/opt/sdk"};
+    CHECK(pn::read_sandbox_list(ed) == want);
+}
+
+TEST_CASE("sandbox list: a port list is numeric and bounded") {
+    auto ed = pn::build_sandbox_list(pn::kSbPorts, "Allowed ports", "h",
+                                     {"443", "80"}, /*numeric=*/true);
+    CHECK(ed.numeric);
+    // Number rows, so a path cannot be typed into a port list at all and the
+    // range clamp is the form layer's rather than a validator we could forget
+    // to call.
+    CHECK(std::holds_alternative<form::field::Number>(ed.form.fields[0].value));
+
+    const std::vector<std::string> want{"443", "80"};
+    CHECK(pn::read_sandbox_list(ed) == want);
+
+    // 0 is the empty port, matching the blank-is-absent rule for paths.
+    std::get<form::field::Number>(ed.form.fields[0].value).value = 0;
+    const std::vector<std::string> after{"80"};
+    CHECK(pn::read_sandbox_list(ed) == after);
+}
+
+TEST_CASE("sandbox list: opening one from the pane carries the current values") {
+    // End to end: the Pick row hands off, and the editor is seeded from the
+    // config the FORM describes rather than from the saved policy -- so an
+    // unsaved posture change is not silently discarded by editing a list.
+    sandbox_cfg::Config cfg;
+    cfg.configured = true;
+    cfg.backend = sandbox_cfg::LinuxBackend::Claybin;
+    cfg.read_paths = {"/opt/sdk"};
+    install(cfg);
+
+    Model m = opened();
+    auto [m2, _] = app::update(std::move(m),
+                               Msg{SandboxEditList{std::string{pn::kSbReadPaths}}});
+
+    const auto* ed = m2.ui.panel.get<pn::SandboxList>();
+    REQUIRE(ed != nullptr);
+    CHECK(ed->pane.row_id == pn::kSbReadPaths);
+    CHECK_FALSE(ed->pane.numeric);
+    const std::vector<std::string> want{"/opt/sdk"};
+    CHECK(pn::read_sandbox_list(ed->pane) == want);
+}
+
+TEST_CASE("sandbox list: closing commits back into the pane") {
+    sandbox_cfg::Config cfg;
+    cfg.configured = true;
+    cfg.backend = sandbox_cfg::LinuxBackend::Claybin;
+    cfg.read_paths.clear();
+    install(cfg);
+
+    Model m = opened();
+    auto [m2, _] = app::update(std::move(m),
+                               Msg{SandboxEditList{std::string{pn::kSbReadPaths}}});
+
+    // Type a path into the trailing blank row.
+    {
+        auto* ed = m2.ui.panel.get<pn::SandboxList>();
+        REQUIRE(ed != nullptr);
+        std::get<form::field::Text>(ed->pane.form.fields.back().value).value =
+            "/opt/sdk";
+    }
+
+    auto [m3, __] = app::update(std::move(m2), Msg{SandboxListClose{}});
+
+    // Back on the sandbox pane, with the value in the config and the row
+    // showing a count.
+    const auto* o = m3.ui.panel.get<pn::Sandbox>();
+    REQUIRE(o != nullptr);
+
+    // Read back against the pane's WORKING config, not the sealed policy: the
+    // path lists live outside the form (the row is a Pick showing a count), so
+    // read_sandbox_form passes them through from its base. Using sb::config()
+    // here would be asking the OLD policy what the new paths are.
+    const auto out = pn::read_sandbox_form(o->pane.form, o->pane.working);
+    const std::vector<std::string> want{"/opt/sdk"};
+    CHECK(out.read_paths == want);
+
+    // And it is already on disk. There is no ^S any more -- persisting and
+    // applying were two different things, and only applying had to wait for a
+    // restart (see the autosave note in the reducer).
+    CHECK(m3.d.persisted.sandbox.read_paths == want);
 }
 
 // ── "applies on restart" has to be a checked claim ─────────────────────

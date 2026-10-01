@@ -706,6 +706,22 @@ struct SandboxRefreshPreview {};
 // Persist the form's config and install it for the rest of the session.
 struct SandboxSave {};
 
+// ── Path list editor ──────────────────────────────────────────
+//
+// The path rows ("Also readable", "Masked", allowed ports) were ONE text
+// field holding a comma-separated string. That is a serialisation format, not
+// an interface: you cannot see where one entry ends, a stray comma silently
+// changes the policy, and editing the third of four paths means cursoring
+// through the other three. For a security control whose whole job is being
+// legible, that is the wrong shape.
+//
+// So the row becomes a Pick that opens a real list: one entry per line, add
+// and remove as discrete acts. The parent form is untouched until the editor
+// commits, so Esc is a true cancel.
+struct SandboxEditList { std::string row_id; };   // open the editor for a row
+struct SandboxListKey  { form::keys::Action action; };
+struct SandboxListClose {};                       // commit back into the row
+
 // ── In-app login modal ───────────────────────────────────────────────────
 // Shown when the user starts agentty with no valid credentials, OR
 // triggered explicitly in-app to sign in or add an account.
@@ -1259,7 +1275,8 @@ using AppearanceMsg = std::variant<
 // ── Sandbox (filesystem / network / syscalls / limits) ─────
 using SandboxMsg = std::variant<
     OpenSandbox, CloseSandbox, SandboxKey, SandboxRefreshPreview,
-    SandboxSave>;
+    SandboxSave,
+    SandboxEditList, SandboxListKey, SandboxListClose>;
 
 using MetaMsg = std::variant<
     CompactContext, CycleProfile, ToggleChangesStrip,

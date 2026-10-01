@@ -59,6 +59,7 @@ std::optional<maya::Element> pick_panel(const Model& m) {
         case OK::PluginEdit:     return plugin_edit_panel(m);
         case OK::Appearance:     return appearance_panel(m);
         case OK::Sandbox:        return sandbox_panel(m);
+        case OK::SandboxList:    return sandbox_list_panel(m);
         case OK::DiffReview:     return diff_review(m);
         case OK::Todo:           return todo_panel(m);
         case OK::None:           return std::nullopt;

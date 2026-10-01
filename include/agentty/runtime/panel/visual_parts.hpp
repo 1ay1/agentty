@@ -269,6 +269,13 @@ inline auto visual_parts(const Sandbox& p) {
 }
 static_assert(visual::parts_cover_all<Sandbox>);
 
+// The list editor slot: the parent snapshot and the pane, same two facets.
+inline auto visual_parts(const SandboxList& p) {
+    return std::make_tuple(visual::ref(static_cast<const WithFrom&>(p)),
+                           visual::ref(p.pane));
+}
+static_assert(visual::parts_cover_all<SandboxList>);
+
 // `form` is the only member carrying an axis the user can move. The rest is
 // derived from it or fixed for the session, so none of it can drift against
 // the rows:
@@ -285,6 +292,10 @@ inline auto visual_parts(const SandboxPane& p) {
     // this pane exists to prevent.
     return std::make_tuple(visual::ref(p.form), visual::exempt,
                            visual::ref(p.restart_note),
+                           // `working` holds the path/port lists, which the
+                           // Pick rows render as a count -- so it is visible
+                           // state even though no row holds it.
+                           visual::exempt,
                            visual::exempt,
                            visual::ref(p.facts),
                            visual::exempt, visual::exempt);

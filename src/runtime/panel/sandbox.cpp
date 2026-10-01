@@ -8,6 +8,7 @@
 // came to mean nothing in issue #21.
 
 #include "agentty/runtime/panel/sandbox.hpp"
+#include "agentty/runtime/panel/mention.hpp"   // file_source/file_filter, shared with @
 
 #include <algorithm>
 #include <string>
@@ -83,16 +84,48 @@ form::Field header(std::string label) {
     return f;
 }
 
+// A pick-one row.
+//
+// `hints` is per-OPTION and is the difference between a row you can operate
+// and a row you have to already understand. The help line explains what the
+// row is; the hint explains what the option you are looking at DOES, as you
+// cycle onto it. Every other form pane in agentty passes these and this one
+// did not, which is most of why its enum rows read as jargon: "toolchain /
+// minimal / host-readable" names three things without saying what any of them
+// grants.
 form::Field choice(std::string_view id, std::string label, std::string help,
-                   std::vector<std::string> labels, int index) {
+                   std::vector<std::string> labels, int index,
+                   std::vector<std::string> hints = {}) {
     form::Field f;
     f.id = std::string{id};
     f.label = std::move(label);
     f.help = std::move(help);
     form::field::Choice c;
     c.labels = std::move(labels);
+    c.hints = std::move(hints);
     c.index = index;
     f.value = std::move(c);
+    return f;
+}
+
+// A row that OPENS a list editor instead of holding a comma-separated string.
+//
+// Rendered as the entry count rather than the contents: the row's job is to
+// say whether the list is empty and get you into it, and a truncated preview of
+// three paths in a narrow column tells you less than "3 paths" does while
+// looking like it is telling you more.
+form::Field list_row(std::string_view id, std::string label, std::string help,
+                     std::size_t count, const char* noun) {
+    form::Field f;
+    f.id = std::string{id};
+    f.label = std::move(label);
+    f.help = std::move(help);
+    form::field::Pick p;
+    p.label = count == 0
+        ? std::string{}
+        : std::to_string(count) + " " + noun + (count == 1 ? "" : "s");
+    p.placeholder = "none \xc2\xb7 Enter to add";
+    f.value = std::move(p);
     return f;
 }
 
@@ -213,6 +246,8 @@ std::string describe_running(const HostFacts& facts) {
     // this function answers "what is confining commands right now", and the
     // bug it exists to prevent was exactly that question being answered from
     // the row the user had just moved.
+    if (facts.mode_off)
+        return "sandboxing is OFF (--sandbox off) \xc2\xb7 nothing below is enforced";
     if (!facts.sandbox_active)
         return "no sandbox \xc2\xb7 commands run unconfined";
     if (facts.running == sandbox_cfg::LinuxBackend::Claybin)
@@ -241,10 +276,12 @@ form::Form build_sandbox_form(const sandbox_cfg::Config& cfg,
     form.fields.push_back(header("Engine"));
     form.fields.push_back(choice(
         kSbBackend, "Backend",
-        "bwrap: mounts only, the binary you already have. "
-        "claybin: in-process, adds seccomp + landlock + cgroup2.",
+        "which engine builds the walls. claybin is stronger; bwrap is the "
+        "fallback for hosts it cannot run on.",
         {"bwrap", "claybin"},
-        static_cast<int>(cfg.backend)));
+        static_cast<int>(cfg.backend),
+        {"mount namespaces only \xc2\xb7 no syscall filter, no resource caps",
+         "adds seccomp, landlock and cgroup2 \xc2\xb7 needs user namespaces"}));
     // Asking for claybin on a host that cannot build a sandbox is worth
     // saying here rather than at spawn time. The probe actually forks and
     // attempts the uid_map write, so this is a real answer, not a guess.
@@ -319,13 +356,24 @@ form::Form build_sandbox_form(const sandbox_cfg::Config& cfg,
     // Hardened stops the pane claiming Hardened. Selecting it is a no-op by
     // construction (apply_posture returns the config untouched).
     const auto posture = sandbox_cfg::detect_posture(cfg);
+    form.fields.push_back(header("Posture \xe2\x80\x94 a preset for every row below"));
     form.fields.push_back(choice(
-        kSbPosture, "Posture",
-        // The COST, not the benefit. All four names sound safe, so the thing a
-        // user needs before choosing is what will stop working.
-        sandbox_cfg::cost_of(posture),
+        kSbPosture, "Preset",
+        // Say what the control IS before what it costs. "Posture" was a word
+        // the pane used without ever defining, and a settings row whose label
+        // you have to already understand is a row people skip.
+        posture == sandbox_cfg::Posture::Custom
+            ? std::string{"your own mix \xc2\xb7 pick one to overwrite every row below"}
+            : std::string{"sets every row below in one go \xc2\xb7 "} +
+                  sandbox_cfg::cost_of(posture),
         {"permissive", "balanced", "hardened", "airgapped", "custom"},
-        static_cast<int>(posture)));
+        static_cast<int>(posture),
+        {"mount walls only \xc2\xb7 no syscall filter, no limits \xc2\xb7 for a "
+         "toolchain that breaks under one",
+         "the default \xc2\xb7 network on, compiler syscall profile, fork-bomb cap",
+         "every wall claybin can build \xc2\xb7 limits a real build still survives",
+         "hardened + no network \xc2\xb7 nothing can send your code anywhere",
+         "not a preset \xc2\xb7 what the pane shows once you edit a row yourself"}));
 
     // ── Filesystem ───────────────────────────────────────────────────────
     // These four are the rows bwrap CAN honour: scope, extra reads and extra
@@ -339,30 +387,40 @@ form::Form build_sandbox_form(const sandbox_cfg::Config& cfg,
     form.fields.push_back(header("Filesystem"));
     form.fields.push_back(choice(
         kSbFsScope, "Readable scope",
-        "what the command can READ. the workspace is always writable.",
+        "what a command can READ. the workspace is always readable and "
+        "writable; this is everything else.",
         {"toolchain", "minimal", "host-readable"},
-        static_cast<int>(cfg.fs_scope)));
+        static_cast<int>(cfg.fs_scope),
+        {"/usr, /bin, /lib, /etc + ~/.cargo, ~/.npm and friends \xc2\xb7 what a "
+         "build needs",
+         "system dirs only \xc2\xb7 no $HOME toolchains, so some builds break",
+         "read on / \xc2\xb7 every secret outside the mask list is reachable"}));
     form.fields.push_back(
-        text(kSbReadPaths, "Also readable",
-             "extra paths, comma-separated. for a dependency outside the workspace.",
-             join(cfg.read_paths)));
+        list_row(kSbReadPaths, "Also readable",
+                 "extra paths a command may read, beyond the scope above \xc2\xb7 "
+                 "for a dependency outside the workspace",
+                 cfg.read_paths.size(), "path"));
     form.fields.push_back(
-        text(kSbWritePaths, "Also writable",
-             "separate from readable on purpose: granting write is a different "
-             "decision.",
-             join(cfg.write_paths)));
+        list_row(kSbWritePaths, "Also writable",
+                 "separate from readable on purpose: granting write is a "
+                 "different decision",
+                 cfg.write_paths.size(), "path"));
     form.fields.push_back(
-        text(kSbDenyPaths, "Masked",
-             "carved out even inside the scope above \xc2\xb7 e.g. ~/.cargo/credentials",
-             join(cfg.deny_paths)));
+        list_row(kSbDenyPaths, "Masked",
+                 "carved out even inside the scope above \xc2\xb7 e.g. "
+                 "~/.cargo/credentials. credential files are masked anyway.",
+                 cfg.deny_paths.size(), "path"));
 
     // ── Network ──────────────────────────────────────────────────────────
     form.fields.push_back(header("Network"));
     form.fields.push_back(choice(
         kSbNetMode, "Access",
-        "full shares the host network \xc2\xb7 none is an empty namespace \xc2\xb7 "
-        "ports is per-port, enforced by landlock",
-        {"full", "none", "ports"}, static_cast<int>(cfg.net_mode)));
+        "whether a command can reach the network at all.",
+        {"full", "none", "ports"}, static_cast<int>(cfg.net_mode),
+        {"shares the host network \xc2\xb7 git push and npm install work, and so "
+         "does exfiltration",
+         "an empty network namespace \xc2\xb7 nothing can connect out",
+         "only the ports listed below \xc2\xb7 needs landlock abi 4+"}));
     // Per-port needs landlock abi 4. Below that the kernel cannot express it,
     // so say so on the row rather than accepting a setting that silently
     // degrades to Full.
@@ -374,10 +432,10 @@ form::Form build_sandbox_form(const sandbox_cfg::Config& cfg,
                      std::to_string(landlock_abi));
 
     form.fields.push_back(
-        text(kSbPorts, "Allowed ports",
-             "443 https \xc2\xb7 80 http \xc2\xb7 22 git-ssh \xc2\xb7 53 dns. "
-             "forgetting 53 breaks everything.",
-             join_ports(cfg.allow_ports)));
+        list_row(kSbPorts, "Allowed ports",
+                 "443 https \xc2\xb7 80 http \xc2\xb7 22 git-ssh \xc2\xb7 53 dns. "
+                 "forgetting 53 breaks everything.",
+                 cfg.allow_ports.size(), "port"));
     // A dependent row: meaningless unless Access is `ports`. Locked for a
     // different reason than the claybin rows -- this one is about the policy
     // being incoherent, not the backend being unable to enforce it.
@@ -388,9 +446,13 @@ form::Form build_sandbox_form(const sandbox_cfg::Config& cfg,
     form.fields.push_back(header("Syscalls"));
     form.fields.push_back(choice(
         kSbSyscalls, "Filter",
-        "compiler denies ptrace/mount/unshare/bpf and filters clone flags \xc2\xb7 "
-        "strict also blocks subprocesses",
-        {"off", "compiler", "strict"}, static_cast<int>(cfg.syscall_mode)));
+        "which syscalls a command may make. the filter also decides ptrace and "
+        "kill at runtime rather than killing the process.",
+        {"off", "compiler", "strict"}, static_cast<int>(cfg.syscall_mode),
+        {"no filter, and no ptrace/kill supervision either",
+         "denies ptrace, mount, unshare, bpf and filters clone flags \xc2\xb7 "
+         "what a compiler needs",
+         "compiler, plus no subprocesses at all"}));
     if (!claybin_live)
         lock_row(form, kSbSyscalls, why_locked);
 
@@ -496,9 +558,12 @@ form::Form build_sandbox_form(const sandbox_cfg::Config& cfg,
     form.fields.push_back(header("Trust handoff"));
     form.fields.push_back(choice(
         kSbHandoff, "Agent writes host-executed files",
-        "hooks, .vscode tasks, git config, venv interpreters \xc2\xb7 "
-        "the shape of CVE-2026-48124 \xc2\xb7 refuse is the default on purpose",
-        {"refuse", "warn", "allow"}, static_cast<int>(cfg.handoff)));
+        "hooks, .vscode tasks, git config, venv interpreters. the sandbox "
+        "cannot see this \xe2\x80\x94 the file runs later, outside it.",
+        {"refuse", "warn", "allow"}, static_cast<int>(cfg.handoff),
+        {"the write fails with a message telling the agent what to do instead",
+         "the write happens and is recorded in the feed below",
+         "no gate \xc2\xb7 the shape every escape in Pillar's 2026 series used"}));
 
     return form;
 }
@@ -538,13 +603,21 @@ sandbox_cfg::Config read_sandbox_form(const form::Form& f,
 
     cfg.fs_scope = static_cast<sandbox_cfg::FsScope>(
         choice_of(kSbFsScope, static_cast<int>(base.fs_scope)));
-    cfg.read_paths = split(text_of(kSbReadPaths));
-    cfg.write_paths = split(text_of(kSbWritePaths));
-    cfg.deny_paths = split(text_of(kSbDenyPaths));
+
+    // The path and port LISTS are not read back from the form.
+    //
+    // Those rows are Picks now -- they display a count and open an editor, so
+    // the form holds no list data to read. The editor writes straight into the
+    // config when it commits (SandboxListClose), and `base` carries the result
+    // here. Parsing the Pick's label back into paths would be reading the UI's
+    // own summary as if it were the model.
+    cfg.read_paths  = base.read_paths;
+    cfg.write_paths = base.write_paths;
+    cfg.deny_paths  = base.deny_paths;
+    cfg.allow_ports = base.allow_ports;
 
     cfg.net_mode = static_cast<sandbox_cfg::NetMode>(
         choice_of(kSbNetMode, static_cast<int>(base.net_mode)));
-    cfg.allow_ports = split_ports(text_of(kSbPorts));
 
     cfg.syscall_mode = static_cast<sandbox_cfg::SyscallMode>(
         choice_of(kSbSyscalls, static_cast<int>(base.syscall_mode)));
@@ -699,6 +772,77 @@ Preview preview_sandbox(const sandbox_cfg::Config& cfg) {
         out.unenforceable.push_back(
             "most of this policy needs the claybin backend \xc2\xb7 "
             "switch Backend above");
+    }
+    return out;
+}
+
+// Candidates are workspace files, same source the `@` picker uses -- so a path
+// that completes here is one that actually exists, which is the entire point.
+//
+// Directories are what these rows usually want ("also readable:
+// /opt/weird-sdk"), and the file list gives them for free: every directory is
+// a prefix of some file in it, and the fuzzy filter matches prefixes.
+SandboxListPane::SandboxListPane()
+    : complete(agentty::mention::file_source(),
+               agentty::mention::file_filter()) {}
+
+SandboxListPane build_sandbox_list(std::string_view row_id, std::string title,
+                                   std::string help,
+                                   const std::vector<std::string>& values,
+                                   bool numeric) {
+    SandboxListPane p;
+    p.row_id = std::string{row_id};
+    p.title = std::move(title);
+    p.help = std::move(help);
+    p.numeric = numeric;
+
+    // One row per entry. The id carries the index so the readback order is the
+    // display order -- a list where saving reorders your paths would be its own
+    // small betrayal.
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        const auto id = "e" + std::to_string(i);
+        if (numeric) {
+            std::int64_t v = 0;
+            try { v = std::stoll(values[i]); } catch (...) { v = 0; }
+            p.form.fields.push_back(
+                number(id, std::to_string(i + 1) + ".", {}, v, 0, 65535));
+        } else {
+            p.form.fields.push_back(
+                text(id, std::to_string(i + 1) + ".", {}, values[i]));
+        }
+    }
+
+    // A trailing blank row IS the add affordance.
+    //
+    // Not an "Add" button: a button would need its own key handling, its own
+    // focus rules and a second way to create an entry. An empty row is already
+    // editable by every rule the form has, and read_sandbox_list drops blanks
+    // -- so "type into the empty row" adds, and "clear a row" removes, with no
+    // new gesture to learn and no way to end up with a stray empty entry.
+    const auto add_id = "e" + std::to_string(values.size());
+    if (numeric)
+        p.form.fields.push_back(number(add_id, "+", "type a port", 0, 0, 65535));
+    else
+        p.form.fields.push_back(text(add_id, "+", "type a path", {}));
+
+    p.form.title = p.title;
+    return p;
+}
+
+std::vector<std::string> read_sandbox_list(const SandboxListPane& p) {
+    std::vector<std::string> out;
+    for (const auto& f : p.form.fields) {
+        if (const auto* t = std::get_if<form::field::Text>(&f.value)) {
+            auto v = t->value;
+            // Trim: a path with a stray space is a path that silently does not
+            // match, which is exactly the failure the comma format had.
+            while (!v.empty() && (v.front() == ' ' || v.front() == '\t')) v.erase(v.begin());
+            while (!v.empty() && (v.back() == ' ' || v.back() == '\t')) v.pop_back();
+            if (!v.empty()) out.push_back(std::move(v));
+        } else if (const auto* n = std::get_if<form::field::Number>(&f.value)) {
+            // 0 is the empty port, matching the blank-is-absent rule above.
+            if (n->value > 0) out.push_back(std::to_string(n->value));
+        }
     }
     return out;
 }

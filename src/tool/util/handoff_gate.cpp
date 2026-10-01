@@ -129,6 +129,21 @@ Verdict check_with(std::string_view path, std::string_view tool,
 }
 
 Verdict check(std::string_view path, std::string_view tool) {
+    // `--sandbox off` turns this off as well.
+    //
+    // The gate is not a sandbox WALL (it lives on the tool call, §14) but it is
+    // part of the same control, and a user who disabled sandboxing did not opt
+    // into one surviving piece of it refusing their writes. "off" has to mean
+    // off, or the flag is a lie in the other direction -- the same honesty rule
+    // the rest of this subsystem is built on.
+    //
+    // Checked through requested_mode() rather than is_active(): a host with no
+    // usable backend still gets the gate, because that is a host that FAILED to
+    // sandbox rather than a user who asked not to be. Those are different
+    // answers and conflating them would quietly drop the gate on exactly the
+    // machines with the fewest other walls.
+    if (sandbox::requested_mode() == sandbox::Mode::Off) return {};
+
     // Reads the SEALED config, so the policy cannot change under a running
     // turn -- the same guarantee every other wall here has.
     return check_with(path, tool, sandbox::config_snapshot()->handoff);

@@ -105,6 +105,7 @@ namespace sb = agentty::tools::util::sandbox;
     f.claybin_available = claybin_here();
     f.landlock_abi = landlock_abi_here();
     f.sandbox_active = sb::is_active();
+    f.mode_off = sb::requested_mode() == sb::Mode::Off;
     f.running = sb::detected_backend() == sb::Backend::Claybin
                     ? sandbox_cfg::LinuxBackend::Claybin
                     : sandbox_cfg::LinuxBackend::Bwrap;
@@ -119,7 +120,12 @@ namespace sb = agentty::tools::util::sandbox;
 // the same function as the compile is what keeps the per-row wall from going
 // stale: there is no path that reprices without re-annotating.
 void reprice(pn::Sandbox& o) {
-    const auto cfg = pn::read_sandbox_form(o.pane.form, sb::config());
+    const auto cfg = pn::read_sandbox_form(o.pane.form, o.pane.working);
+    // The rows are a projection of THIS config, so it is what the next
+    // readback must build on -- otherwise the settings that live outside the
+    // form (the path and port lists) would be re-read from a stale base and
+    // every list edit would evaporate on the next keystroke.
+    o.pane.working = cfg;
     o.pane.preview = pn::preview_sandbox(cfg);
     // The status decides the TENSE of every annotation: walls for an engine
     // that is not running are a forecast and have to read as one.
@@ -136,6 +142,7 @@ void reprice(pn::Sandbox& o) {
 void reproject(pn::Sandbox& o, const sandbox_cfg::Config& cfg) {
     const int cursor = o.pane.form.cursor;
     auto focus = o.pane.form.focus;
+    o.pane.working = cfg;
     // Re-measure and STORE. The view needs these to answer "will this work on
     // restart" and must not probe for itself -- a uid_map fork mid-render is
     // not something a pure view may do.
@@ -182,6 +189,7 @@ Cmd sandbox_update(Model& m, msg::SandboxMsg sm) {
                                    ? m.d.persisted.sandbox
                                    : sb::config();
             o.pane.form = pn::build_sandbox_form(seed, facts);
+            o.pane.working = seed;
 
             // Already-saved-this-session is worth carrying into the reopened
             // pane, so the "applies on restart" footer does not vanish just
@@ -237,7 +245,7 @@ Cmd sandbox_update(Model& m, msg::SandboxMsg sm) {
             // switch to claybin and the syscall row would still say "bwrap
             // cannot express this" until the pane was reopened.
             if (applied.changed && row_id == pn::kSbBackend) {
-                reproject(*o, pn::read_sandbox_form(o->pane.form, sb::config()));
+                reproject(*o, pn::read_sandbox_form(o->pane.form, o->pane.working));
                 return Cmd::none();
             }
 
@@ -267,17 +275,22 @@ Cmd sandbox_update(Model& m, msg::SandboxMsg sm) {
                 // apply_posture returns the config untouched for it, so landing
                 // on Custom while cycling leaves the rows alone.
                 const auto cfg = sandbox_cfg::apply_posture(
-                    pn::read_sandbox_form(o->pane.form, sb::config()), chosen);
+                    pn::read_sandbox_form(o->pane.form, o->pane.working), chosen);
                 reproject(*o, cfg);
                 return Cmd::none();
             }
 
-            // No `hand_off` or `fired` arm, and that is a property of the
-            // form rather than an omission: this pane has no Pick rows (its
-            // longest list is three options, which is a Choice) and no Action
-            // rows (the one thing to DO is save, and that is a chord, not a
-            // row). If either kind is ever added, apply() will report it here
-            // and it needs handling -- see appearance.cpp for hand_off and
+            // A Pick row asked for its editor. The path and port rows are the
+            // only Picks here, and each opens the same list editor -- which is
+            // why the message carries the row id rather than there being four
+            // near-identical messages.
+            if (applied.hand_off && !row_id.empty())
+                return sandbox_update(m, msg::SandboxMsg{SandboxEditList{row_id}});
+
+            // No `fired` arm, and that is a property of the form rather than
+            // an omission: this pane has no Action rows (the one thing to DO
+            // is save, and that is a chord, not a row). If one is ever added,
+            // apply() will report it here and it needs handling -- see
             // plugin_edit.cpp for fired.
             //
             // Re-price on ANY mutation. `changed` covers a dropdown move and
@@ -286,7 +299,28 @@ Cmd sandbox_update(Model& m, msg::SandboxMsg sm) {
             // half-typed value never rewrites config). Narrower than this and
             // the wall report describes a config the rows no longer say --
             // which is the whole thing this pane exists to prevent.
-            if (applied.changed || applied.left_field) reprice(*o);
+            if (applied.changed || applied.left_field) {
+                reprice(*o);
+                // AUTOSAVE.
+                //
+                // There is no ^S any more, and dropping it does not weaken the
+                // seal. Two different things were being conflated:
+                //
+                //   persisting   writing the policy to disk
+                //   applying     installing it as the live boundary
+                //
+                // Only the SECOND is dangerous mid-session (a boundary that
+                // moves under a running command), and it still never happens --
+                // set_config() stays sealed and this path never calls it. The
+                // first is just a file write, and making the user remember a
+                // chord for it only ever produced lost edits: every other pane
+                // in agentty persists as you go.
+                //
+                // The footer already says the policy applies on restart, so
+                // what the user sees is unchanged except that it is now true
+                // without a keystroke.
+                return sandbox_update(m, msg::SandboxMsg{SandboxSave{}});
+            }
             return Cmd::none();
         },
 
@@ -299,7 +333,7 @@ Cmd sandbox_update(Model& m, msg::SandboxMsg sm) {
             auto* o = m.ui.panel.get<pn::Sandbox>();
             if (!o) return Cmd::none();
 
-            auto cfg = pn::read_sandbox_form(o->pane.form, sb::config());
+            auto cfg = pn::read_sandbox_form(o->pane.form, o->pane.working);
             // `configured` is what keeps an upgrade from changing anyone's
             // boundary: persistence only applies a saved block when the user
             // has actually been here. Saving is the act that sets it.
@@ -330,6 +364,208 @@ Cmd sandbox_update(Model& m, msg::SandboxMsg sm) {
             reproject(*o, cfg);
             o->pane.saved_pending_restart = true;
             return persist_settings(m);
+        },
+
+        [&](SandboxEditList& e) -> Cmd {
+            auto* o = m.ui.panel.get<pn::Sandbox>();
+            if (!o) return Cmd::none();
+
+            // Seed from the CONFIG the form currently describes, not from the
+            // saved policy: the user may have changed the posture (which
+            // rewrites paths) without saving yet, and editing a stale list
+            // would silently discard that.
+            const auto cfg = pn::read_sandbox_form(o->pane.form, o->pane.working);
+
+            const bool ports = e.row_id == pn::kSbPorts;
+            const std::vector<std::string>* src = nullptr;
+            std::vector<std::string> port_strings;
+            std::string title, help;
+
+            if (ports) {
+                for (auto p : cfg.allow_ports) port_strings.push_back(std::to_string(p));
+                src = &port_strings;
+                title = "Allowed ports";
+                help  = "only these ports may be reached \xc2\xb7 53 is DNS, and "
+                        "forgetting it breaks name lookup for everything";
+            } else if (e.row_id == pn::kSbReadPaths) {
+                src = &cfg.read_paths;
+                title = "Also readable";
+                help  = "extra paths a command may READ, beyond the scope "
+                        "setting \xc2\xb7 one per line";
+            } else if (e.row_id == pn::kSbWritePaths) {
+                src = &cfg.write_paths;
+                title = "Also writable";
+                help  = "extra paths a command may WRITE \xc2\xb7 the workspace is "
+                        "already writable";
+            } else if (e.row_id == pn::kSbDenyPaths) {
+                src = &cfg.deny_paths;
+                title = "Masked";
+                help  = "made unreadable even inside the scope above \xc2\xb7 "
+                        "credential files are masked whether listed or not";
+            } else {
+                return Cmd::none();   // not a list row
+            }
+
+            pn::SandboxList ed;
+            ed.pane = pn::build_sandbox_list(e.row_id, std::move(title),
+                                             std::move(help), *src, ports);
+            // Remember the pane we came from so Esc returns to it rather than
+            // closing the overlay stack -- the same WithFrom stash every other
+            // nested pane uses.
+            // descend(), not a bare assignment: it stashes the sandbox pane as
+            // this editor's parent, so Esc returns to the pane rather than
+            // exiting the overlay stack.
+            m.ui.panel.descend(std::move(ed));
+            return Cmd::none();
+        },
+
+        [&](SandboxListKey& e) -> Cmd {
+            auto* ed = m.ui.panel.get<pn::SandboxList>();
+            if (!ed) return Cmd::none();
+
+            // Tab accepts the highlighted suggestion.
+            //
+            // Tab rather than Enter, because Enter already means "commit this
+            // field and move on" everywhere in the form layer and stealing it
+            // here would make the one list that has completion behave unlike
+            // every other field. Tab has no other meaning in a form, so it
+            // costs nothing.
+            if (ed->pane.completing && e.action.intent == form::keys::Intent::Complete) {
+                if (const auto* hit = ed->pane.complete.selected()) {
+                    if (auto* row = ed->pane.form.focused())
+                        if (auto* t = std::get_if<form::field::Text>(&row->value)) {
+                            t->value = *hit;
+                            t->cursor = t->value.size();
+                            ed->pane.form.edit_dirty = true;
+                        }
+                }
+                ed->pane.completing = false;
+                return Cmd::none();
+            }
+
+            const auto applied = form::keys::apply(ed->pane.form, e.action);
+            if (applied.close) {
+                // Esc with suggestions open dismisses THEM, not the editor --
+                // otherwise the completion you opened by typing costs you the
+                // whole list to get rid of.
+                if (ed->pane.completing) {
+                    ed->pane.completing = false;
+                    return Cmd::none();
+                }
+                return sandbox_update(m, msg::SandboxMsg{SandboxListClose{}});
+            }
+
+            // Typing in the trailing blank row means "add", so the moment it
+            // stops being blank the list needs ANOTHER blank row after it.
+            // Doing this here rather than on commit is what makes adding three
+            // paths in a row feel like a list instead of like reopening a
+            // dialog three times.
+            auto values = pn::read_sandbox_list(ed->pane);
+            if (values.size() + 1 != ed->pane.form.fields.size()) {
+                // Copy the inputs OUT before rebuilding.
+                //
+                // `ed->pane = build(ed->pane.row_id, ...)` reads members of the
+                // object it is assigning to: the arguments are evaluated first,
+                // but they bind to strings that the assignment then destroys.
+                // Taking copies first makes the order irrelevant instead of
+                // load-bearing.
+                const auto row_id = ed->pane.row_id;
+                const auto title  = ed->pane.title;
+                const auto help   = ed->pane.help;
+                const bool num    = ed->pane.numeric;
+                const int cursor  = ed->pane.form.cursor;
+                auto focus        = ed->pane.form.focus;
+
+                auto rebuilt = pn::build_sandbox_list(row_id, title, help,
+                                                      values, num);
+                // Keep the picker rather than reconstructing it: a fresh one
+                // drops the snapshot and the memo, so every added row would
+                // re-list and re-filter the whole workspace.
+                rebuilt.complete   = std::move(ed->pane.complete);
+                rebuilt.completing = ed->pane.completing;
+                rebuilt.form.cursor = std::clamp(
+                    cursor, 0,
+                    std::max(0, static_cast<int>(rebuilt.form.fields.size()) - 1));
+                rebuilt.form.focus = focus;
+                ed->pane = std::move(rebuilt);
+            }
+
+            // Keep the suggestion list in step with what is typed.
+            //
+            // Paths only: a port is four digits from a closed set and has
+            // nothing to complete against. Empty text closes the list rather
+            // than offering the whole workspace -- an empty row is how you add
+            // a path you are about to type in full, and burying it under a
+            // thousand candidates would make the common case the loud one.
+            if (!ed->pane.numeric) {
+                std::string q;
+                if (const auto* row = ed->pane.form.focused())
+                    if (const auto* t = std::get_if<form::field::Text>(&row->value))
+                        q = t->value;
+                ed->pane.completing = !q.empty();
+                if (ed->pane.completing && q != ed->pane.complete.query()) {
+                    // Only when it actually CHANGED.
+                    //
+                    // This runs on every keystroke, and the naive version
+                    // (clear_query() then type()) invalidated the memo twice
+                    // per key and reset the selection each time -- so the
+                    // O(N x query) filter re-ran on every arrow press too, and
+                    // the highlight jumped back to the top while you were
+                    // moving through it. Guarding on inequality means a
+                    // navigation key costs nothing and the filter runs exactly
+                    // once per actual edit.
+                    ed->pane.complete.clear_query();
+                    ed->pane.complete.type(std::string_view{q});
+                }
+            }
+            return Cmd::none();
+        },
+
+        [&](SandboxListClose&) -> Cmd {
+            auto* ed = m.ui.panel.get<pn::SandboxList>();
+            if (!ed) return Cmd::none();
+
+            const auto row_id = ed->pane.row_id;
+            const auto values = pn::read_sandbox_list(ed->pane);
+            const bool ports  = ed->pane.numeric;
+
+            // ascend() restores the stashed parent, which is the sandbox pane
+            // descend() put there. Not close(): that would leave None and drop
+            // the whole overlay stack, so editing a path list would exit
+            // Settings entirely.
+            m.ui.panel.ascend();
+
+            auto* o = m.ui.panel.get<pn::Sandbox>();
+            if (!o) return Cmd::none();
+
+            // Write into the config, then rebuild the rows from it. The list
+            // rows display a COUNT, so the parent row only changes by being
+            // reprojected -- there is no value in the form to poke.
+            auto cfg = pn::read_sandbox_form(o->pane.form, o->pane.working);
+            if (ports) {
+                cfg.allow_ports.clear();
+                for (const auto& v : values) {
+                    const auto n = std::strtoul(v.c_str(), nullptr, 10);
+                    if (n > 0 && n <= 65535)
+                        cfg.allow_ports.push_back(static_cast<std::uint16_t>(n));
+                }
+                std::sort(cfg.allow_ports.begin(), cfg.allow_ports.end());
+                cfg.allow_ports.erase(
+                    std::unique(cfg.allow_ports.begin(), cfg.allow_ports.end()),
+                    cfg.allow_ports.end());
+            } else if (row_id == pn::kSbReadPaths) {
+                cfg.read_paths = values;
+            } else if (row_id == pn::kSbWritePaths) {
+                cfg.write_paths = values;
+            } else if (row_id == pn::kSbDenyPaths) {
+                cfg.deny_paths = values;
+            }
+
+            reproject(*o, cfg);
+            // Autosave, same as any other edit in the pane -- a list commit is
+            // not a special case, and requiring a second gesture after Esc
+            // would make it one.
+            return sandbox_update(m, msg::SandboxMsg{SandboxSave{}});
         },
 
     }, sm);

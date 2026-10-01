@@ -609,21 +609,19 @@ std::optional<Msg> on_appearance(const FormFocus& f, bool picking,
     return on_form(f, ev, [](form::keys::Action a) { return Msg{AppearanceKey{a}}; });
 }
 
-// Sandbox. A form pane with one pane-specific chord: ^S saves.
+// Sandbox. A plain form pane -- no chord of its own.
 //
-// It is the only form pane with an explicit save, and that is deliberate.
-// Appearance writes through on every keystroke because a theme is judged by
-// looking at it. A boundary is the opposite: a half-typed port list is a
-// policy nobody asked for, and the policy must not change under a command
-// that is already running. So edits accumulate, the pane shows the walls
-// they would produce, and ^S commits the whole thing at once.
+// It used to have ^S, on the reasoning that a half-typed port list is a policy
+// nobody asked for. That conflated two things: PERSISTING the policy (a file
+// write) and APPLYING it (installing the live boundary). Only the second is
+// dangerous mid-session, and it still never happens -- the policy is sealed at
+// startup and no pane path calls set_config(). The first is just a save, and
+// requiring a chord for it only ever lost people's edits.
 //
-// Guarded on !editing, like the other panes' chords, so ^S while typing in a
-// path row stays whatever the form layer claims it as.
+// So edits persist as you type, exactly like every other pane, and the footer
+// still says the policy applies on restart -- which was always the honest
+// statement and is now true without a keystroke.
 std::optional<Msg> on_sandbox(const FormFocus& f, const KeyEvent& ev) {
-    if (f.open && !f.editing)
-        if (const auto v = nav::char_view(ev); v && v->ctrl && v->c == U's')
-            return Msg{SandboxSave{}};
     return on_form(f, ev, [](form::keys::Action a) { return Msg{SandboxKey{a}}; });
 }
 
@@ -1167,6 +1165,9 @@ Sub subscribe(const Model& m) {
     }
     if (const auto* o = m.ui.panel.get<ui::panel::Sandbox>())
         sandbox_form_snap = focus_of(o->pane.form);
+    FormFocus sandbox_list_snap;
+    if (const auto* o = m.ui.panel.get<ui::panel::SandboxList>())
+        sandbox_list_snap = focus_of(o->pane.form);
 
     // Snapshot the login state ONLY when login actually owns the keyboard.
     //
@@ -1255,6 +1256,14 @@ Sub subscribe(const Model& m) {
                         return on_appearance(appearance_form_snap,
                                              appearance_picking, ev);
                     case OK::Sandbox:        return on_sandbox(sandbox_form_snap, ev);
+                    // The path list editor. A plain form pane -- no chord of
+                    // its own, because Esc already commits (the form layer's
+                    // rule) and a list with a save key would be the only one.
+                    case OK::SandboxList:
+                        return on_form(sandbox_list_snap, ev,
+                                       [](form::keys::Action a) {
+                                           return Msg{SandboxListKey{a}};
+                                       });
                     case OK::DiffReview:     return on_diff_review(ev);
                     case OK::Todo:           return on_todo_modal(ev);
                     case OK::None:           break;
@@ -1491,6 +1500,16 @@ SubsKey subs_key(const Model& m) noexcept {
     }
     if (const auto* o = m.ui.panel.get<ui::panel::Sandbox>())
         modes |= pack(focus_of(o->pane.form)) << 12;
+    // The path list editor. Missing this is why typing in it did nothing: the
+    // key router closes over ONE focus snapshot per subscription rebuild, so a
+    // pane whose focus is not part of the key keeps the snapshot from whenever
+    // the subs last changed -- it reads as Browsing forever, and every
+    // printable dies on apply()'s editing guard. Exactly the hazard
+    // SubsKey's own header warns about, and the rule in
+    // docs/design/sandbox-boundary.md: a new form pane goes in BOTH
+    // subscribe() and subs_key().
+    if (const auto* o = m.ui.panel.get<ui::panel::SandboxList>())
+        modes |= pack(focus_of(o->pane.form)) << 15;
     k.form_modes = modes;
 
     // Turn gates. animation_demand is what arms the Tick subscription, so a

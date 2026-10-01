@@ -52,6 +52,8 @@
 
 #include "agentty/domain/sandbox_config.hpp"
 #include "agentty/runtime/panel/form.hpp"
+#include "agentty/runtime/panel/filtered_picker.hpp"   // path completion
+#include "agentty/workspace/files.hpp"                 // the candidate set
 
 namespace agentty::ui::panel {
 
@@ -187,7 +189,101 @@ struct HostFacts {
     // `running` is meaningless then, and the subtitle must say so rather than
     // naming an engine that is not confining anything.
     bool sandbox_active = false;
+
+    // The user passed `--sandbox off`.
+    //
+    // Distinct from `!sandbox_active`, and the distinction is the point: a host
+    // that FAILED to sandbox is a problem to report, while a user who asked not
+    // to be sandboxed is a choice to respect. The pane says different things
+    // for each, and the handoff gate stands down only for the second.
+    bool mode_off = false;
 };
+
+// ── The path list editor ────────────────────────────────────────
+//
+// The path rows used to be a single Text field holding "a, b, c". That is a
+// serialisation format pretending to be an interface: entries have no visible
+// boundary, a stray comma silently rewrites the policy, and reaching the third
+// of four paths means cursoring past the other three. On a security control
+// whose entire purpose is legibility, it was the wrong shape.
+//
+// This is the list as a LIST: one entry per row, add and remove as discrete
+// acts, each entry its own editable field.
+//
+// It reuses form::Form rather than inventing a widget, so navigation, text
+// editing, the caret and commit-on-exit all come for free and behave exactly
+// as they do everywhere else. The rows ARE the entries -- there is no model
+// behind them to drift out of sync.
+struct SandboxListPane {
+    // Which parent row is being edited, so the commit knows where to write
+    // back. By id rather than index: the parent form is rebuilt on every
+    // reproject, and an index would address a different row afterwards.
+    std::string row_id;
+    std::string title;      // "Also readable", "Masked", …
+    std::string help;       // what this list means, shown above the entries
+
+    // One field per entry, plus a trailing "add" action row. Editing happens
+    // here and nowhere else; the parent row is untouched until commit, which
+    // is what makes Esc a true cancel.
+    form::Form form;
+
+    // Ports are digits-only and bounded; paths are free text. The editor
+    // builds Number or Text rows accordingly, so a port list cannot be given
+    // a path and the clamp is the form layer's rather than a validator's.
+    bool numeric = false;
+
+    // ── Completion ──────────────────────────────────────────────
+    //
+    // Typing a path by hand is where this control actually fails people: a
+    // mistyped path does not error, it silently does not match, and the user
+    // discovers it when a command cannot read a file weeks later. Completion
+    // is not a convenience here, it is how the list stops being a guess.
+    //
+    // Reuses ui::FilteredPicker rather than growing a private matcher: `@`
+    // mentions, `#` symbols and the palette all already share it, and the
+    // header of filtered_picker.hpp lists the three bugs that came from
+    // hand-copying this logic. The memo, the cold-open refill and the cursor
+    // clamp all come with it.
+    //
+    // Suggestions are OFF unless the focused entry has text: an empty row
+    // offering the whole workspace is a wall of noise, and the row is also how
+    // you add a path you are about to type in full.
+    bool completing = false;
+    ui::FilteredPicker<std::string> complete;
+
+    SandboxListPane();
+};
+
+// Declared HERE rather than in the shared visual_parts.hpp because this type
+// has a user-provided constructor (the picker needs its source + filter), so
+// the brace-arity probe reads 0 and the completeness proof needs the explicit
+// opt-in to live beside the thing it describes -- same as mention::Open and
+// AppearancePane::ThemePicker.
+//
+// `completing` and `complete` are both visual: they decide whether the
+// suggestion list is on screen and what is in it. row_id/title/help/numeric
+// are fixed for the editor's lifetime, so they cannot drive a repaint.
+inline auto visual_parts(const SandboxListPane& p) {
+    return std::make_tuple(visual::exempt, visual::exempt, visual::exempt,
+                           visual::ref(p.form),
+                           visual::exempt,
+                           p.completing,
+                           visual::ref(p.complete));
+}
+
+// Build the editor for one parent row. `values` is the current list.
+[[nodiscard]] SandboxListPane build_sandbox_list(std::string_view row_id,
+                                                std::string title,
+                                                std::string help,
+                                                const std::vector<std::string>& values,
+                                                bool numeric);
+
+// Read the editor back into a list, dropping blanks.
+//
+// Blank-dropping is why "add" can insert an empty row and why deleting is just
+// clearing one: both become the same operation, and the user never has to find
+// a separate remove gesture.
+[[nodiscard]] std::vector<std::string> read_sandbox_list(const SandboxListPane& p);
 
 // The pane. Named SandboxPane, not Sandbox, because panel/slot.hpp needs the
 // bare name for the SLOT that holds it -- same split as AppearancePane.
@@ -204,6 +300,16 @@ struct SandboxPane {
     // `facts` is stored: the view cannot probe, and it must not re-derive the
     // config to find out. See restart_outcome().
     std::string restart_note;
+
+    // The config the rows are a projection OF.
+    //
+    // Needed because some settings no longer live in the form at all: the path
+    // and port lists are Pick rows showing a count, with the real values held
+    // here and edited in a separate pane. read_sandbox_form() passes those
+    // through from its `base` argument, so the base has to be the config this
+    // pane is building -- not the saved policy, which is the OLD one and would
+    // silently discard every list edit on the next repaint.
+    sandbox_cfg::Config working;
 
     // Which backend is actually in use, for the header line. A pane that
     // offers per-port network while running under bwrap would be lying, so
@@ -337,3 +443,12 @@ void annotate_sandbox_form(form::Form& f, const Preview& preview,
                            const sandbox_cfg::Config& cfg, EngineStatus status);
 
 }  // namespace agentty::ui::panel
+
+namespace agentty::visual {
+// SandboxListPane has a user-provided constructor (the picker needs its source
+// and filter), so the brace-arity probe reads 0 and parts_cover_all cannot
+// verify the tuple mechanically. Same opt-in mention::Open and
+// AppearancePane::ThemePicker use, and the same obligation: the visual_parts
+// above is checked by HAND, so adding a member means updating it.
+template <> inline constexpr bool trusted_parts<ui::panel::SandboxListPane> = true;
+}  // namespace agentty::visual

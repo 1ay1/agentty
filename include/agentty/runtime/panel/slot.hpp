@@ -189,6 +189,15 @@ struct Appearance : WithFrom {
 struct Sandbox : WithFrom {
     agentty::ui::panel::SandboxPane pane;
 };
+// The path/port list editor, opened FROM a Sandbox Pick row.
+//
+// Its own slot rather than a mode of Sandbox: it has its own form, its own
+// keys, its own commit and its own completer. Folding it in would give one
+// pane two forms plus a "which am I editing" flag -- the two-bools-for-three-
+// states shape that has already produced two bugs in this pane.
+struct SandboxList : WithFrom {
+    agentty::ui::panel::SandboxListPane pane;
+};
 struct Fork            : agentty::fork_panel::Open, WithFrom {};
 struct DiffReview      : pick::OpenAtCell, WithFrom {};
 struct Stats           : agentty::stats_panel::Open, WithFrom {};
@@ -199,7 +208,7 @@ using Variant = std::variant<
     Models, Providers, ThreadList, SmartMode,
     Palette, Mention, Symbol,
     CodeBlocks, CodeBlockResult, ToolOutput, Checkpoints,
-    Rag, SettingsList, PluginEdit, Appearance, Sandbox, Fork,
+    Rag, SettingsList, PluginEdit, Appearance, Sandbox, SandboxList, Fork,
     DiffReview, Stats, Skills>;
 
 // The one indirection that lets the type refer to itself: a stashed parent
@@ -416,6 +425,7 @@ enum class Kind {
     PluginEdit,
     Appearance,
     Sandbox,
+    SandboxList,
     Fork,
     Models,
     Providers,
@@ -448,6 +458,7 @@ enum class Kind {
         Kind operator()(const PluginEdit&)      const { return Kind::PluginEdit; }
         Kind operator()(const Appearance&)      const { return Kind::Appearance; }
         Kind operator()(const Sandbox&)         const { return Kind::Sandbox; }
+        Kind operator()(const SandboxList&)     const { return Kind::SandboxList; }
         Kind operator()(const Fork&)            const { return Kind::Fork; }
         Kind operator()(const DiffReview&)      const { return Kind::DiffReview; }
         Kind operator()(const Stats&)           const { return Kind::Stats; }

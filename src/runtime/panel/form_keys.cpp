@@ -52,6 +52,10 @@ std::optional<Action> translate(bool editing, bool choosing, const KeyEvent& ev)
         if (sk) switch (*sk) {
             case SpecialKey::Escape:
             case SpecialKey::Enter:     return Action{Intent::LeaveField};
+            // Tab asks the PANE to complete. Forms without a completer ignore
+            // it (apply() has no arm), so this is inert everywhere it is not
+            // wanted and costs nothing to translate unconditionally.
+            case SpecialKey::Tab:       return Action{Intent::Complete};
             // ↑/↓ leave the field AND move (apply() ends the edit first).
             // Without this the editing table swallowed them — Enter on a
             // text row then any arrow read as "the panel froze", because
@@ -168,6 +172,14 @@ Applied apply(Form& f, Action a) {
                 f.dirty = true;
                 out.changed = true;
             }
+            break;
+
+        case Intent::Complete:
+            // Deliberately nothing. Completion is a PANE concern -- it needs the
+            // candidate set, which the form layer has no business knowing
+            // about. The pane checks for this intent before calling apply()
+            // (see update/sandbox.cpp's list editor); reaching here means no
+            // completer was offered, and the keystroke is inert.
             break;
 
         case Intent::Activate: {

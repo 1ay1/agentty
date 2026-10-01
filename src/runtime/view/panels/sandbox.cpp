@@ -229,21 +229,66 @@ maya::Element sandbox_panel(const Model& m) {
                                       "this host (the running sandbox is unchanged)"}
                         : "saved \xc2\xb7 " + outcome)
                   + "\n" + form.note;
-    } else if (form.dirty) {
-        form.note = (outcome.empty()
-                        ? std::string{"^S saves for the next launch \xc2\xb7 the running "
-                                      "sandbox cannot be changed"}
-                        : "^S saves, but " + outcome)
-                  + "\n" + form.note;
     } else if (!outcome.empty()) {
-        // Not dirty and not saved: the policy already on disk is one this host
-        // cannot fully deliver. Worth saying unprompted -- otherwise the only
-        // way to discover it is to edit something.
+        // Nothing saved this session, but the policy already on disk is one
+        // this host cannot fully deliver. Worth saying unprompted -- otherwise
+        // the only way to find out is to edit something.
         form.note = outcome + "\n" + form.note;
     }
 
     return maya::Panel{form_config(form, info,
                                    &m.ui.sandbox_scroll,
+                                   panel_viewport_h(),
+                                   panel_terminal_cols())}.build();
+}
+
+maya::Element sandbox_list_panel(const Model& m) {
+    auto* o = m.ui.panel.get<ui::panel::SandboxList>();
+    if (!o) return nothing();
+
+    auto form = o->pane.form;
+
+    // The help goes in the SUBTITLE, where every form pane puts "what am I
+    // looking at". The per-entry rows carry no help of their own -- numbering
+    // them is enough, and repeating the explanation on each line would bury
+    // the list in its own documentation.
+    form.subtitle = o->pane.help;
+
+    // The completion list, as the footer.
+    //
+    // Rendered as text rather than as a floating overlay: the entries are
+    // already a vertical list, so a second floating list over them would be two
+    // competing cursors on one screen. A few lines under the form, with the
+    // highlighted one marked, keeps one place to look.
+    if (o->pane.completing) {
+        // visible_entries() gives pointers into the snapshot for the top N
+        // matches, already clamped -- the same call every other picker's view
+        // makes, so the window arithmetic has one owner.
+        const auto hits = o->pane.complete.visible_entries(3);
+        if (hits.empty()) {
+            form.note = "no match in the workspace \xc2\xb7 the path is still "
+                        "accepted (it may be outside, or not exist yet)";
+        } else {
+            const auto total = o->pane.complete.filtered().size();
+            const auto sel = o->pane.complete.index();
+            std::string line = "Tab completes \xc2\xb7 ";
+            for (std::size_t i = 0; i < hits.size(); ++i) {
+                if (i) line += "   ";
+                if (static_cast<int>(i) == sel) line += "\xe2\x96\xb8 ";
+                line += *hits[i];
+            }
+            if (total > hits.size())
+                line += "   (+" + std::to_string(total - hits.size()) + " more)";
+            form.note = std::move(line);
+        }
+        form.note_replaces_grammar = true;
+    } else {
+        form.note = "type a path \xc2\xb7 clear a line to remove it \xc2\xb7 "
+                    "Esc saves and goes back";
+    }
+
+    return maya::Panel{form_config(form, info,
+                                   nullptr,
                                    panel_viewport_h(),
                                    panel_terminal_cols())}.build();
 }
