@@ -67,6 +67,12 @@ int main() {
     std::printf("      cgroups=%d mem=%d pids=%d cpu=%d\n",
                 (int)host.cgroups, (int)host.cgroup_memory,
                 (int)host.cgroup_pids, (int)host.cgroup_cpu);
+    // kvm is not used by the process backend. It is printed because it is the
+    // difference between "we do not implement a microvm" and "this host could
+    // not run one anyway" -- two very different answers to why
+    // host.kernel_isolation is none.
+    std::printf("      kvm=%d%s\n", (int)host.kvm,
+                host.kvm ? "  (a microvm backend COULD run here)" : "");
 
     // 1. The SHIPPED default: what a user who never opens the pane gets.
     //    This is the number that matters most, because it is what almost
