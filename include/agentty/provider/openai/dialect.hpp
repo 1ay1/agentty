@@ -168,10 +168,27 @@ inline const Lens<int>& model_context_window_flat() {
 //   "reasoning": {"allowed_options":     LM Studio's /api/v1/models
 //                   ["off","on"],        (documented in its REST reference).
 //                 "default":"on"}
+//   "supports_reasoning": true           LiteLLM. Flat on the row, and/or
+//   "model_info": {"supports_reasoning" nested under model_info — which is
+//                    : true}             the shape a proxy config's
+//                                        `model_info:` block passes straight
+//                                        through to both /v1/models and
+//                                        /model/info.
 //
 // The object form is why LM Studio silently got no reasoning: the reader
 // tested is_boolean() and skipped anything else, so every LM Studio model
 // fell through to id inference and was classified by its filename.
+//
+// LiteLLM's spelling is why a LiteLLM user who had done everything right —
+// `supports_reasoning: true` in model_info, a `reasoning_effort` the proxy
+// forwards — still saw no thinking, while pointing agentty straight at the
+// SAME llama.cpp behind it worked. Nothing was wrong with their config and
+// nothing was wrong with the proxy: llama.cpp is detected through a
+// different door entirely (/props → chat_template_caps, see
+// template_reasoning_effort below), and this lens — the only door a gateway
+// row goes through — had never been told the word `supports_reasoning`.
+// Adding a gateway means adding its spelling here; there is no fallback that
+// can guess one.
 //
 // Presence of the object IS the declaration — `allowed_options` never needs
 // parsing to answer the yes/no question. (What the ladder should be is a
@@ -186,7 +203,10 @@ inline const Lens<int>& model_context_window_flat() {
 inline const Lens<bool>& declared_reasoning() {
     static const Lens<bool> l =
           key<bool>("reasoning")                       // Mistral: plain bool
-        | truthy_object("reasoning");                  // LM Studio: object
+        | truthy_object("reasoning")                   // LM Studio: object
+        | key<bool>("supports_reasoning")              // LiteLLM: flat
+        | under("model_info",                          // LiteLLM: nested
+                key<bool>("supports_reasoning"));
     return l;
 }
 

@@ -299,6 +299,43 @@ TEST_CASE("Observed: LM Studio declares reasoning as an OBJECT") {
               == std::optional<std::string>{"off"});
 }
 
+TEST_CASE("Observed: LiteLLM declares reasoning as supports_reasoning") {
+    // LiteLLM names the capability `supports_reasoning` — see
+    // ProviderSpecificModelInfo in litellm/types/utils.py — and surfaces it
+    // on BOTH shapes a client can reach: flat on the row, and nested under
+    // `model_info`, which is what a proxy config's `model_info:` block
+    // passes through to /v1/models and /model/info.
+    //
+    // THE BUG THIS PINS: this table knew `reasoning` (Mistral, LM Studio)
+    // and nothing else, so a LiteLLM user who had correctly set
+    // `supports_reasoning: true` got no thinking at all, while pointing
+    // agentty at the same llama.cpp DIRECTLY worked — because llama.cpp is
+    // detected through a different door (/props → chat_template_caps). The
+    // config was right; the reader had never heard the word.
+    CHECK(oa::dialect::declared_reasoning()(
+              json::parse(R"({"id":"gpt-oss","supports_reasoning":true})"))
+          == std::optional<bool>{true});
+    CHECK(oa::dialect::declared_reasoning()(json::parse(
+              R"({"model_name":"gpt-oss",
+                  "model_info":{"supports_reasoning":true,
+                                "max_input_tokens":131072}})"))
+          == std::optional<bool>{true});
+
+    // Both polarities, both shapes: a proxy that says false has made a real
+    // declaration and must not read as absent.
+    CHECK(oa::dialect::declared_reasoning()(
+              json::parse(R"({"supports_reasoning":false})"))
+          == std::optional<bool>{false});
+    CHECK(oa::dialect::declared_reasoning()(
+              json::parse(R"({"model_info":{"supports_reasoning":false}})"))
+          == std::optional<bool>{false});
+
+    // A LiteLLM row that carries a window but no capability key is still
+    // ABSENT — the window is not evidence about reasoning either way.
+    CHECK(!oa::dialect::declared_reasoning()(json::parse(
+              R"({"model_info":{"max_input_tokens":131072}})")));
+}
+
 TEST_CASE("Observed: no reasoning key is ABSENT, not false") {
     // The distinction the catalog depends on. "Absent" leaves the rung
     // empty so id inference still gets a say; "false" would overwrite it

@@ -3120,6 +3120,17 @@ std::shared_mutex& probe_opt_in_mu() {
                 std::string id = row.value("model_name", std::string{});
                 if (id.empty()) id = row.value("id", std::string{});
                 if (id.empty()) continue;
+                // Capability BEFORE the window guard. These are independent
+                // facts on one row, and a LiteLLM admin who declared
+                // `supports_reasoning: true` without touching token limits
+                // is the common case — `continue`ing on a missing window
+                // would throw away the only reasoning declaration the proxy
+                // ever makes. (This route is also the ONLY place a stock
+                // LiteLLM says anything about capability: its /v1/models
+                // rows are frequently bare id + object, exactly like
+                // llama.cpp's, which is why that server needed /props.)
+                if (const auto reasons = dialect::declared_reasoning()(row))
+                    out.reasoning_effort[id] = *reasons;
                 // Reuse the same tolerant ladder as the catalog path: the
                 // window may be flat on the row or nested under model_info,
                 // and LiteLLM emits it as a FLOAT (16385.0).
@@ -3133,7 +3144,12 @@ std::shared_mutex& probe_opt_in_mu() {
     }
     // NOT measured: /v1/model/info is the proxy's own config, a declaration
     // like the row's, so it fills holes but never shrinks a larger one.
-    if (!out.per_model.empty()) return out;
+    //
+    // Return on a CAPABILITY hit too, not just a window one. A proxy that
+    // declared reasoning but no limits has still answered this probe, and
+    // falling through to the LM Studio / llama.cpp branches below would ask
+    // a LiteLLM endpoint for routes it does not serve.
+    if (!out.per_model.empty() || !out.reasoning_effort.empty()) return out;
 
     // 2. LM Studio /api/v1/models — the NATIVE API, not the /v1 shim.
     //
