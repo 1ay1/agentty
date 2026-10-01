@@ -437,6 +437,16 @@ Cmd sandbox_update(Model& m, msg::SandboxMsg sm) {
                             t->value = *hit;
                             t->cursor = t->value.size();
                             ed->pane.form.edit_dirty = true;
+                            // Sync the picker's query to what we just wrote.
+                            //
+                            // Otherwise the NEXT keystroke sees row text that
+                            // differs from the query, decides the user typed
+                            // something, and reopens the list -- now matching
+                            // the full accepted path, so Tab had the effect of
+                            // accepting a suggestion and immediately offering
+                            // it back. Accepting must settle, not loop.
+                            ed->pane.complete.clear_query();
+                            ed->pane.complete.type(std::string_view{t->value});
                         }
                 }
                 ed->pane.completing = false;
@@ -619,7 +629,17 @@ Cmd sandbox_update(Model& m, msg::SandboxMsg sm) {
                 if (const auto* row = ed->pane.form.focused())
                     if (const auto* t = std::get_if<form::field::Text>(&row->value))
                         q = t->value;
-                ed->pane.completing = !q.empty();
+
+                // Suggestions require an EDIT SESSION, not just a non-empty
+                // row.
+                //
+                // Without the editing() term, arrowing onto an existing entry
+                // popped the completion list open for a row the user had not
+                // typed a character into -- and then stole their next Esc to
+                // dismiss a list they never asked for, which reads as Esc
+                // being swallowed. Completion is an affordance for the thing
+                // you are WRITING; browsing past a value is not writing it.
+                ed->pane.completing = ed->pane.form.editing() && !q.empty();
                 if (ed->pane.completing && q != ed->pane.complete.query()) {
                     // Only when it actually CHANGED.
                     //

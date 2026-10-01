@@ -1496,6 +1496,90 @@ TEST_CASE("sandbox pane: a relative path is flagged") {
     CHECK(ok.fields[static_cast<std::size_t>(r2)].error.empty());
 }
 
+TEST_CASE("sandbox list: browsing past an entry does not open suggestions") {
+    // `completing` used to be computed from the row's TEXT alone, so arrowing
+    // onto an existing entry popped the completion list open for a row the
+    // user had not typed a character into -- and then stole their next Esc to
+    // dismiss a list they never asked for, which reads as Esc being swallowed.
+    //
+    // Completion is an affordance for the thing you are WRITING. Browsing past
+    // a value is not writing it.
+    sandbox_cfg::Config cfg;
+    cfg.configured = true;
+    cfg.backend = sandbox_cfg::LinuxBackend::Claybin;
+    cfg.read_paths = {"src", "include"};
+    install(cfg);
+
+    Model m = opened();
+    auto [m1, _] = app::update(std::move(m),
+                               Msg{SandboxEditList{std::string{pn::kSbReadPaths}}});
+    m = std::move(m1);
+
+    // Move down a row -- no typing anywhere.
+    auto [m2, __] = app::update(
+        std::move(m),
+        Msg{SandboxListKey{form::keys::Action{form::keys::Intent::MoveNext, 0}}});
+    m = std::move(m2);
+
+    const auto* ed = m.ui.panel.get<pn::SandboxList>();
+    REQUIRE(ed != nullptr);
+    CHECK_FALSE(ed->pane.form.editing());
+    CHECK_FALSE(ed->pane.completing);
+}
+
+TEST_CASE("sandbox list: accepting a suggestion settles instead of looping") {
+    // Tab writes the hit into the row and closes the list. But `completing` is
+    // recomputed on the NEXT keystroke from the row text, and the picker's
+    // query still held the half-typed prefix -- so the list reopened
+    // immediately, now matching the full accepted path. Tab had the effect of
+    // accepting a suggestion and being offered it straight back.
+    //
+    // Syncing the query to what was written is what makes accepting terminal.
+    sandbox_cfg::Config cfg;
+    cfg.configured = true;
+    cfg.backend = sandbox_cfg::LinuxBackend::Claybin;
+    cfg.read_paths.clear();
+    install(cfg);
+
+    Model m = opened();
+    auto [m1, _] = app::update(std::move(m),
+                               Msg{SandboxEditList{std::string{pn::kSbReadPaths}}});
+    m = std::move(m1);
+
+    // Type into the trailing blank row to open suggestions.
+    {
+        auto* ed = m.ui.panel.get<pn::SandboxList>();
+        REQUIRE(ed != nullptr);
+        ed->pane.form.cursor =
+            static_cast<int>(ed->pane.form.fields.size()) - 1;
+    }
+    auto [m2, __] = app::update(
+        std::move(m),
+        Msg{SandboxListKey{form::keys::Action{form::keys::Intent::TypeToEdit, U's'}}});
+    m = std::move(m2);
+
+    // Only meaningful if the workspace index actually produced candidates;
+    // otherwise there is nothing to accept and nothing to assert.
+    if (!m.ui.panel.get<pn::SandboxList>()->pane.completing) return;
+
+    auto [m3, ___] = app::update(
+        std::move(m),
+        Msg{SandboxListKey{form::keys::Action{form::keys::Intent::Complete, 0}}});
+    m = std::move(m3);
+
+    const auto* ed = m.ui.panel.get<pn::SandboxList>();
+    REQUIRE(ed != nullptr);
+    CHECK_FALSE(ed->pane.completing);
+
+    // The query now matches the accepted value, so the next repaint-driving
+    // key cannot decide the user typed something and reopen the list.
+    const auto* row = ed->pane.form.focused();
+    REQUIRE(row != nullptr);
+    const auto& t = std::get<form::field::Text>(row->value);
+    CHECK(ed->pane.complete.query() == t.value);
+    CHECK(t.cursor == t.value.size());
+}
+
 // ── "applies on restart" has to be a checked claim ─────────────────────
 //
 // The footer promised "saved · applies on restart" with NOTHING checking that
