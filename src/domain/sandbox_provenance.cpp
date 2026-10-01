@@ -16,8 +16,11 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <filesystem>
 #include <span>
+
+#include <jaal/kernel/guarded.hpp>   // guarded<T> — the mask-sweep cache
 
 // The matcher lives in claybin, which is a required submodule -- so this is a
 // plain include, not a guarded one.
@@ -201,6 +204,52 @@ void sweep(const std::filesystem::path& dir, int depth_left,
     }
 }
 
+// A fingerprint of the DIRECTORY SHAPE that `sweep` above traverses: the
+// mtime of every directory it would descend into, folded together.
+//
+// Why this is the right key for sweep's cache, and why it is exact rather
+// than approximate: creating, deleting or renaming an entry updates the
+// mtime of the directory CONTAINING it. That is the only mutation that can
+// change which files sweep returns -- editing a file's CONTENTS cannot add
+// or remove it from the list, and that is the operation whose parent mtime
+// does not move. So "same stamp" really does imply "same answer".
+//
+// It must mirror sweep's traversal EXACTLY -- same depth arithmetic, same
+// never_walk skips, same no-follow rule. A stamp that visited fewer
+// directories than the sweep would be blind to changes inside the ones it
+// skipped, which is a stale mask, which is a hole. Both functions therefore
+// take the same shape deliberately; change one and you must change the other.
+//
+// Cheap on purpose: one status() per DIRECTORY, no readdir of its entries
+// beyond what the iterator already yields, and no per-file symlink_status.
+std::uint64_t dir_stamp(const std::filesystem::path& dir, int depth_left) {
+    std::error_code ec;
+    std::uint64_t h = 1469598103934665603ull;          // FNV-1a offset basis
+    const auto mix = [&h](std::uint64_t v) {
+        h ^= v;
+        h *= 1099511628211ull;
+    };
+
+    const auto mt = std::filesystem::last_write_time(dir, ec);
+    if (!ec)
+        mix(static_cast<std::uint64_t>(mt.time_since_epoch().count()));
+
+    std::filesystem::directory_iterator it{
+        dir, std::filesystem::directory_options::skip_permission_denied, ec};
+    if (ec) return h;
+
+    for (const auto& entry : it) {
+        if (depth_left <= 0) break;
+        std::error_code sec;
+        const auto st = entry.symlink_status(sec);
+        if (sec || !std::filesystem::is_directory(st)) continue;
+        const auto name = entry.path().filename().string();
+        if (never_walk(name)) continue;
+        mix(dir_stamp(entry.path(), depth_left - 1));
+    }
+    return h;
+}
+
 }  // namespace
 
 std::vector<std::string> mask_paths(const Config& cfg, std::string_view workspace,
@@ -218,8 +267,81 @@ std::vector<std::string> mask_paths(const Config& cfg, std::string_view workspac
     //    workspace is bound READ-WRITE by both backends, so scope cannot save
     //    anything in here and the mask is the only wall.
     if (!workspace.empty()) {
-        sweep(std::filesystem::path{workspace},
-              static_cast<int>(cfg.mask_scan_depth), out);
+        // CACHED, because this is in the latency path of EVERY command.
+        //
+        // The header already warned that an unbounded walk here "would put a
+        // full directory scan in the latency path of every shell command" and
+        // bounded the depth in response. Bounding was not enough: measured on
+        // the agentty tree at the shipped depth=3, the sweep costs 3.7 ms and
+        // runs again for every single spawn -- re-deriving a byte-identical
+        // answer each time. Against a ~10 ms sandboxed `true`, that is most
+        // of the floor, and it grows with the repo rather than with the work.
+        //
+        // THE KEY IS THE TREE'S OWN SHAPE, not a clock.
+        //
+        // A time-to-live was the obvious first try and it is WRONG here: it
+        // means a credential that appears inside the TTL is readable by the
+        // next command. sandbox_live_check caught it immediately -- it plants
+        // `services/api/key.pem` and runs a command against it in well under
+        // a second, and the stale list let the body through. A mask that is
+        // merely eventually-correct is not a wall, and a 2-second hole is
+        // exactly long enough for the `write file` → `run tool` pair an agent
+        // does constantly.
+        //
+        // So key on the mtimes of every DIRECTORY the sweep descends into.
+        // Creating, deleting or renaming a file bumps its parent's mtime --
+        // that is the one thing POSIX guarantees here, and it is precisely
+        // the event that can change this list. Stat-ing the directories costs
+        // a fraction of walking their entries (one syscall per directory, no
+        // readdir, no per-file symlink_status), so the common case stays
+        // cheap while staying exact.
+        // jaal::guarded rather than a raw std::mutex: the concurrency banlist
+        // requires it (tests/lint/allowlist.txt -- my first version failed
+        // that check), and the type is the better tool anyway. The state is
+        // only reachable through with(), so "forgot the lock" is
+        // unrepresentable instead of a review item. Commands spawn from tool
+        // worker threads, so this really is shared.
+        struct Cache {
+            std::string              ws;
+            int                      depth = -1;
+            std::uint64_t            stamp = 0;
+            std::vector<std::string> paths;
+        };
+        // Function-local static: the first command can land from a worker
+        // during startup, and a file-scope global would race its own ctor.
+        static jaal::guarded<Cache> cache;
+
+        const int depth = static_cast<int>(cfg.mask_scan_depth);
+        // OUTSIDE the lock: stat-ing the tree is the slow part, and holding
+        // the lock across it would serialise every concurrent spawn behind
+        // one filesystem walk -- turning a latency fix into a latency bug.
+        const std::uint64_t stamp =
+            dir_stamp(std::filesystem::path{workspace}, depth);
+
+        // Captureless, as guarded<T> insists: everything it needs is passed
+        // as an argument. (A capture could name a second lock, and holding
+        // two is how deadlocks start -- the type enforces that rather than
+        // trusting the comment.)
+        //
+        // Returns a COPY rather than appending through a reference: with()
+        // forwards its arguments, so an out-parameter would bind to an
+        // rvalue. Copying ~16 short strings once per command is nothing
+        // against the walk this exists to avoid, and it keeps the critical
+        // section to a memcpy.
+        auto hits = cache.with(
+            [](Cache& c, std::string ws_, int depth_, std::uint64_t stamp_) {
+                if (c.ws != ws_ || c.depth != depth_ || c.stamp != stamp_) {
+                    c.paths.clear();
+                    sweep(std::filesystem::path{ws_}, depth_, c.paths);
+                    c.ws    = std::move(ws_);
+                    c.depth = depth_;
+                    c.stamp = stamp_;
+                }
+                return c.paths;
+            },
+            std::string{workspace}, depth, stamp);
+        out.insert(out.end(), std::make_move_iterator(hits.begin()),
+                   std::make_move_iterator(hits.end()));
     }
 
     // 3. The user's own denials, last, so an explicit deny cannot be undone
