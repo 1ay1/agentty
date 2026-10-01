@@ -119,6 +119,20 @@ maya::Panel::Config form_config(const agentty::form::Form& f, maya::Color accent
             line = f.note.empty() ? grammar : (f.note + "   ·   " + grammar);
         }
         cfg.note = std::move(line);
+
+        // maya REPLACES the note with its own "editing · ↵ done · ↑↓ next
+        // field" whenever a row is live, unless the caller supplies
+        // editing_note. Without this, any pane-specific footer silently
+        // vanished the moment you started typing -- which is exactly when the
+        // sandbox list editor needs to show its completion candidates, and why
+        // the suggestions looked like they were never rendering at all.
+        //
+        // Only when the pane ASKED to own the line (note_replaces_grammar).
+        // Panes that merely prepend an extra still get maya's editing hint,
+        // because that hint is the correct thing to say while editing and
+        // overriding it everywhere would lose "↵ done".
+        if (!f.note.empty() && f.note_replaces_grammar)
+            cfg.editing_note = f.note;
     }
     cfg.selected = f.cursor;
     cfg.accent   = accent;

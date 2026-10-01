@@ -443,17 +443,41 @@ Cmd sandbox_update(Model& m, msg::SandboxMsg sm) {
                 return Cmd::none();
             }
 
-            const auto applied = form::keys::apply(ed->pane.form, e.action);
-            if (applied.close) {
-                // Esc with suggestions open dismisses THEM, not the editor --
-                // otherwise the completion you opened by typing costs you the
-                // whole list to get rid of.
-                if (ed->pane.completing) {
+            // Esc, in one place, with a fixed order of what it cancels.
+            //
+            // Three things can be open at once (suggestions, a live field, the
+            // editor) and Esc has to peel exactly one per press, outermost
+            // last. Scattering that across apply()'s result and a follow-up
+            // check is what made it unreliable: a press could dismiss the
+            // suggestions AND be swallowed by the field, so the editor took
+            // three Escs from some states and two from others.
+            if (e.action.intent == form::keys::Intent::Close) {
+                if (ed->pane.form.editing() || ed->pane.form.choosing()) {
+                    // 1. the live field, AND any suggestions it opened.
+                    //
+                    // One press for both, because they are one layer from the
+                    // user's side: the completion list only exists while a
+                    // field is live, so charging a separate Esc for it just
+                    // makes the editor take three presses to leave and the
+                    // count vary with whether you had typed anything.
+                    (void)form::keys::apply(ed->pane.form, e.action);
                     ed->pane.completing = false;
                     return Cmd::none();
                 }
+                if (ed->pane.completing) {
+                    // 2. suggestions with no live field. Only reachable if a
+                    //    future path opens them while browsing; dismiss and
+                    //    stay, rather than leaving a stale list on screen.
+                    ed->pane.completing = false;
+                    return Cmd::none();
+                }
+                // 3. the editor itself.
                 return sandbox_update(m, msg::SandboxMsg{SandboxListClose{}});
             }
+
+            const auto applied = form::keys::apply(ed->pane.form, e.action);
+            if (applied.close)
+                return sandbox_update(m, msg::SandboxMsg{SandboxListClose{}});
 
             // Typing in the trailing blank row means "add", so the moment it
             // stops being blank the list needs ANOTHER blank row after it.
@@ -476,6 +500,20 @@ Cmd sandbox_update(Model& m, msg::SandboxMsg sm) {
                 const int cursor  = ed->pane.form.cursor;
                 auto focus        = ed->pane.form.focus;
 
+                // Remember where the CARET was in the row being typed into.
+                //
+                // build_sandbox_list() makes fresh Text fields with cursor 0,
+                // so without this every keystroke after the first inserted at
+                // the START of the entry: typing "abc" gave "cba", and the
+                // reported symptom was a character always landing in the wrong
+                // place. The row's VALUE survived the rebuild and its caret did
+                // not, which is the kind of half-preserved state that reads as
+                // the editor being broken.
+                std::size_t caret = 0;
+                if (const auto* row = ed->pane.form.focused())
+                    if (const auto* t = std::get_if<form::field::Text>(&row->value))
+                        caret = t->cursor;
+
                 auto rebuilt = pn::build_sandbox_list(row_id, title, help,
                                                       values, num);
                 // Keep the picker rather than reconstructing it: a fresh one
@@ -487,6 +525,10 @@ Cmd sandbox_update(Model& m, msg::SandboxMsg sm) {
                     cursor, 0,
                     std::max(0, static_cast<int>(rebuilt.form.fields.size()) - 1));
                 rebuilt.form.focus = focus;
+                rebuilt.form.edit_dirty = ed->pane.form.edit_dirty;
+                if (auto* row = rebuilt.form.focused())
+                    if (auto* t = std::get_if<form::field::Text>(&row->value))
+                        t->cursor = std::min(caret, t->value.size());
                 ed->pane = std::move(rebuilt);
             }
 

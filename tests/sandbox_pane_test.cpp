@@ -980,6 +980,98 @@ TEST_CASE("sandbox list: closing commits back into the pane") {
     CHECK(m3.d.persisted.sandbox.read_paths == want);
 }
 
+TEST_CASE("sandbox list: typing builds the entry in order") {
+    // Reported as "a always suffixed to list": typing "abc" came out reversed.
+    //
+    // Growing the list rebuilds the form (a new blank row has to appear after
+    // the one you just filled), and build_sandbox_list makes FRESH Text fields
+    // whose caret is 0. The value survived the rebuild and the caret did not,
+    // so every keystroke after the first inserted at the start.
+    sandbox_cfg::Config cfg;
+    cfg.configured = true;
+    cfg.backend = sandbox_cfg::LinuxBackend::Claybin;
+    cfg.read_paths.clear();
+    install(cfg);
+
+    Model m = opened();
+    auto [m1, _] = app::update(std::move(m),
+                               Msg{SandboxEditList{std::string{pn::kSbReadPaths}}});
+    m = std::move(m1);
+
+    // Put the cursor on the trailing blank row and type.
+    {
+        auto* ed = m.ui.panel.get<pn::SandboxList>();
+        REQUIRE(ed != nullptr);
+        ed->pane.form.cursor =
+            static_cast<int>(ed->pane.form.fields.size()) - 1;
+    }
+    // The real key sequence: translate() emits TypeToEdit for the first
+    // printable (it starts the session) and Insert for the rest. Sending
+    // TypeToEdit three times would test a sequence the router never produces --
+    // the later two would hit the !editing() guard and be dropped.
+    {
+        auto [next, __] = app::update(
+            std::move(m),
+            Msg{SandboxListKey{form::keys::Action{form::keys::Intent::TypeToEdit, U'a'}}});
+        m = std::move(next);
+    }
+    for (char32_t ch : {U'b', U'c'}) {
+        auto [next, __] = app::update(
+            std::move(m),
+            Msg{SandboxListKey{form::keys::Action{form::keys::Intent::Insert, ch}}});
+        m = std::move(next);
+    }
+
+    const auto* ed = m.ui.panel.get<pn::SandboxList>();
+    REQUIRE(ed != nullptr);
+    const auto values = pn::read_sandbox_list(ed->pane);
+    REQUIRE(values.size() == 1);
+    CHECK(values[0] == "abc");   // not "cba"
+}
+
+TEST_CASE("sandbox list: Esc leaves the editor even from a live row") {
+    // Reported as "esc doesn't work always". While a row is EDITING, apply()
+    // turns Esc into LeaveField, which never reports `close` -- so the press
+    // only ended the edit and the editor stayed open with nothing visibly
+    // different.
+    sandbox_cfg::Config cfg;
+    cfg.configured = true;
+    cfg.backend = sandbox_cfg::LinuxBackend::Claybin;
+    cfg.read_paths = {"/opt/sdk"};
+    install(cfg);
+
+    Model m = opened();
+    auto [m1, _] = app::update(std::move(m),
+                               Msg{SandboxEditList{std::string{pn::kSbReadPaths}}});
+    m = std::move(m1);
+
+    // Start editing the first entry.
+    auto [m2, __] = app::update(
+        std::move(m),
+        Msg{SandboxListKey{form::keys::Action{form::keys::Intent::TypeToEdit, U'x'}}});
+    m = std::move(m2);
+    {
+        const auto* ed = m.ui.panel.get<pn::SandboxList>();
+        REQUIRE(ed != nullptr);
+        REQUIRE(ed->pane.form.editing());   // the session really started
+    }
+
+    // Two Escs, always. The first ends the edit AND dismisses any suggestions
+    // it opened -- they are one layer from the user's side. The second leaves
+    // the editor. That the count does NOT vary with whether you had typed is
+    // the fix: "esc doesn't work always" was a press being swallowed twice in
+    // some states and once in others.
+    for (int i = 0; i < 2; ++i) {
+        auto [next, ___] = app::update(
+            std::move(m),
+            Msg{SandboxListKey{form::keys::Action{form::keys::Intent::Close, 0}}});
+        m = std::move(next);
+    }
+
+    CHECK(m.ui.panel.get<pn::SandboxList>() == nullptr);
+    CHECK(m.ui.panel.get<pn::Sandbox>() != nullptr);   // back on the pane
+}
+
 // ── "applies on restart" has to be a checked claim ─────────────────────
 //
 // The footer promised "saved · applies on restart" with NOTHING checking that
