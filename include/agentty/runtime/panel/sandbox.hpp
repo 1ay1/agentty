@@ -143,37 +143,6 @@ struct Preview {
 // while it runs, and a mode that silently weakens a boundary is worse than no
 // mode. It has to be loud, and it cannot be the default.
 
-// The pane. Named SandboxPane, not Sandbox, because panel/slot.hpp needs the
-// bare name for the SLOT that holds it -- same split as AppearancePane.
-struct SandboxPane {
-    form::Form form;
-
-    // Recomputed on every edit, so the walls track the rows.
-    Preview preview;
-
-    // Which backend is actually in use, for the header line. A pane that
-    // offers per-port network while running under bwrap would be lying, so
-    // the rows that need claybin are marked unavailable rather than hidden --
-    // hiding them would make the limitation invisible.
-    std::string backend;        // "claybin" | "bwrap" | "none"
-    bool claybin_available = false;
-
-    // A save has landed on disk but the LIVE boundary is still the one this
-    // process started with. Drives the "applies on restart" footer.
-    //
-    // Needed because this pane's save is the one place in agentty where
-    // saving does not take effect: the sandbox policy is sealed at startup
-    // (see tool/util/sandbox.hpp's set_config). Without saying so, a user
-    // who tightens the syscall profile and keeps working would believe in a
-    // wall that is not up until they relaunch -- which is the exact class of
-    // lie this pane exists to prevent, just pointed at the future instead of
-    // the present.
-    bool saved_pending_restart = false;
-};
-
-// (visual_parts for this pane lives in panel/visual_parts.hpp, alongside
-// every other panel's -- that header is where the gate's proofs are kept.)
-
 // What the host can do, and what is ACTUALLY enforcing right now.
 //
 // ── Why this is a struct and not three parameters ────────────────────
@@ -209,6 +178,48 @@ struct HostFacts {
     bool sandbox_active = false;
 };
 
+// The pane. Named SandboxPane, not Sandbox, because panel/slot.hpp needs the
+// bare name for the SLOT that holds it -- same split as AppearancePane.
+struct SandboxPane {
+    form::Form form;
+
+    // Recomputed on every edit, so the walls track the rows.
+    Preview preview;
+
+    // Which backend is actually in use, for the header line. A pane that
+    // offers per-port network while running under bwrap would be lying, so
+    // the rows that need claybin are marked unavailable rather than hidden --
+    // hiding them would make the limitation invisible.
+    std::string backend;        // "claybin" | "bwrap" | "none"
+    bool claybin_available = false;
+
+    // The host as measured, captured by the REDUCER at open and on every
+    // reproject.
+    //
+    // Stored rather than probed on demand because the view must stay pure --
+    // it cannot fork a uid_map probe mid-render. And it has to be here rather
+    // than reconstructed in the view from `backend`/`claybin_available`,
+    // because reconstructing it is exactly how the subtitle came to describe
+    // a boundary that was not up (§17): the view would be inferring reality
+    // from fields that only approximate it.
+    HostFacts facts;
+
+    // A save has landed on disk but the LIVE boundary is still the one this
+    // process started with. Drives the "applies on restart" footer.
+    //
+    // Needed because this pane's save is the one place in agentty where
+    // saving does not take effect: the sandbox policy is sealed at startup
+    // (see tool/util/sandbox.hpp's set_config). Without saying so, a user
+    // who tightens the syscall profile and keeps working would believe in a
+    // wall that is not up until they relaunch -- which is the exact class of
+    // lie this pane exists to prevent, just pointed at the future instead of
+    // the present.
+    bool saved_pending_restart = false;
+};
+
+// (visual_parts for this pane lives in panel/visual_parts.hpp, alongside
+// every other panel's -- that header is where the gate's proofs are kept.)
+
 // The three states the engine row can be in.
 //
 // A sum type rather than the two bools that caused the bug, for the reason
@@ -231,6 +242,32 @@ enum class EngineStatus : std::uint8_t {
 
 [[nodiscard]] EngineStatus engine_status(const sandbox_cfg::Config& cfg,
                                          const HostFacts& facts);
+
+// Will this config actually work on the next launch?
+//
+// ── Why this is its own function ───────────────────────────────────
+//
+// Because the pane could say "saved \xc2\xb7 applies on restart" and be wrong about
+// it. Every ingredient of the answer was already computed -- the compile
+// result, the unenforceable list, the host probe -- and nothing joined them
+// into the one claim the footer was making. A promise about the future with no
+// check behind it is the same shape as every other bug in this subsystem:
+// "sandbox: active" (§1), the handoff row that enforced nothing (§14), the
+// subtitle naming walls that were not up (§17). Here the lie just points
+// forward instead of at the present.
+//
+// Three things can make a restart NOT deliver what the rows describe:
+//   1. the policy does not compile at all (claybin refuses rather than
+//      degrading, so this is a hard no)
+//   2. the selected engine cannot start on this host
+//   3. it compiles and starts, but some capability silently comes out weaker
+//      than asked -- the `unenforceable` list
+//
+// Returns empty when the restart really will deliver the policy as described.
+// A non-empty string is what the footer must say INSTEAD of a bare promise.
+[[nodiscard]] std::string restart_outcome(const sandbox_cfg::Config& cfg,
+                                          const HostFacts& facts,
+                                          const Preview& preview);
 
 // One line describing what is ACTUALLY confining commands right now, derived
 // only from `facts` -- it cannot see the selection, so it cannot be talked

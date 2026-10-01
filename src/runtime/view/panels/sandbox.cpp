@@ -198,12 +198,37 @@ maya::Element sandbox_panel(const Model& m) {
     // Rendered FIRST in the note and marked as replacing the shared grammar,
     // because it outranks the wall report: the walls describe what WOULD be
     // enforced, and this says when.
+    // The one thing this pane must never leave unsaid: a save here does NOT
+    // change the running sandbox -- AND whether the next launch will actually
+    // deliver what the rows describe.
+    //
+    // The second half was missing. The footer promised "applies on restart"
+    // with nothing checking that claim, while the preview already knew three
+    // ways it could be false (will not compile, engine cannot start, a
+    // capability silently degrades). A promise about the future with no check
+    // behind it is the same bug as "sandbox: active" with no sandbox, just
+    // pointed forward -- so `restart_outcome` is consulted and its verdict
+    // REPLACES the bare promise rather than sitting next to it.
+    const auto cfg_now = pn::read_sandbox_form(o->pane.form, sb::config());
+    const auto outcome = pn::restart_outcome(cfg_now, o->pane.facts, o->pane.preview);
+
     if (o->pane.saved_pending_restart) {
-        form.note = "saved \xc2\xb7 applies on restart (the running sandbox is "
-                    "unchanged)\n" + form.note;
+        form.note = (outcome.empty()
+                        ? std::string{"saved \xc2\xb7 applies on restart, verified against "
+                                      "this host (the running sandbox is unchanged)"}
+                        : "saved \xc2\xb7 " + outcome)
+                  + "\n" + form.note;
     } else if (form.dirty) {
-        form.note = "^S saves for the next launch \xc2\xb7 the running sandbox "
-                    "cannot be changed\n" + form.note;
+        form.note = (outcome.empty()
+                        ? std::string{"^S saves for the next launch \xc2\xb7 the running "
+                                      "sandbox cannot be changed"}
+                        : "^S saves, but " + outcome)
+                  + "\n" + form.note;
+    } else if (!outcome.empty()) {
+        // Not dirty and not saved: the policy already on disk is one this host
+        // cannot fully deliver. Worth saying unprompted -- otherwise the only
+        // way to discover it is to edit something.
+        form.note = outcome + "\n" + form.note;
     }
 
     return maya::Panel{form_config(form, info,

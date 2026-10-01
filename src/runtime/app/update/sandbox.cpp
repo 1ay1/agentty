@@ -124,7 +124,7 @@ void reprice(pn::Sandbox& o) {
     // The status decides the TENSE of every annotation: walls for an engine
     // that is not running are a forecast and have to read as one.
     pn::annotate_sandbox_form(o.pane.form, o.pane.preview, cfg,
-                              pn::engine_status(cfg, host_facts_here()));
+                              pn::engine_status(cfg, o.pane.facts));
 }
 
 // Rebuild the rows from a config, keeping the user's place in the list --
@@ -132,7 +132,11 @@ void reprice(pn::Sandbox& o) {
 void reproject(pn::Sandbox& o, const sandbox_cfg::Config& cfg) {
     const int cursor = o.pane.form.cursor;
     auto focus = o.pane.form.focus;
-    o.pane.form = pn::build_sandbox_form(cfg, host_facts_here());
+    // Re-measure and STORE. The view needs these to answer "will this work on
+    // restart" and must not probe for itself -- a uid_map fork mid-render is
+    // not something a pure view may do.
+    o.pane.facts = host_facts_here();
+    o.pane.form = pn::build_sandbox_form(cfg, o.pane.facts);
     o.pane.form.cursor = std::clamp(cursor, 0,
         std::max(0, static_cast<int>(o.pane.form.fields.size()) - 1));
     o.pane.form.focus = focus;
@@ -147,6 +151,7 @@ Cmd sandbox_update(Model& m, msg::SandboxMsg sm) {
         [&](OpenSandbox&) -> Cmd {
             pn::Sandbox o;
             const auto facts = host_facts_here();
+            o.pane.facts = facts;
             o.pane.claybin_available = facts.claybin_available;
             // Kept for anything that wants the running engine as a string.
             // Note the FORM no longer derives its subtitle from the selection

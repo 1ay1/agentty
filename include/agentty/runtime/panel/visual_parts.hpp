@@ -278,7 +278,13 @@ static_assert(visual::parts_cover_all<Sandbox>);
 //                                the footer it drives is inside the form's
 //                                own frame
 inline auto visual_parts(const SandboxPane& p) {
+    // `facts` is NOT exempt, and that is load-bearing. The subtitle and the
+    // restart verdict are both derived from it (§17, §19), so a change to it
+    // changes what is on screen -- exempting it would let the pane keep
+    // rendering a stale "what is running" line, which is the precise bug class
+    // this pane exists to prevent.
     return std::make_tuple(visual::ref(p.form), visual::exempt, visual::exempt,
+                           visual::ref(p.facts),
                            visual::exempt, visual::exempt);
 }
 static_assert(visual::parts_cover_all<SandboxPane>);

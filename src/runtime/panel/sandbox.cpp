@@ -169,6 +169,45 @@ EngineStatus engine_status(const sandbox_cfg::Config& cfg, const HostFacts& fact
                                         : EngineStatus::AppliesOnRestart;
 }
 
+std::string restart_outcome(const sandbox_cfg::Config& cfg,
+                            const HostFacts& facts,
+                            const Preview& preview) {
+    // Ordered worst-first, because the footer shows ONE line and the user
+    // needs the thing that most invalidates the promise. A policy that will
+    // not compile makes the unenforceable list irrelevant; an engine that
+    // cannot start makes the compile result irrelevant.
+
+    // 1. It does not compile. claybin refuses rather than degrading, so there
+    //    is no "partly" here -- the next launch gets no policy from this.
+    if (!preview.compiled)
+        return "will NOT apply on restart \xc2\xb7 " + preview.error;
+
+    // 2. The engine cannot start here. Saving is still legitimate (the user
+    //    may be on a different machine tomorrow, and the config is portable)
+    //    but the promise has to name the fallback rather than imply the walls
+    //    below will be up.
+    if (engine_status(cfg, facts) == EngineStatus::CannotStart)
+        return "claybin cannot start on this host \xc2\xb7 restart falls back to "
+               "bwrap, which enforces only the mount walls";
+
+    // 3. It compiles and starts, but something comes out weaker than asked.
+    //    This is the quiet case and the reason the function exists: the rows
+    //    describe a boundary, the restart delivers most of it, and without
+    //    saying so the user believes in the part that silently degraded.
+    if (!preview.unenforceable.empty()) {
+        std::string out = "applies on restart, but this host cannot enforce: ";
+        for (std::size_t i = 0; i < preview.unenforceable.size(); ++i) {
+            if (i) out += ", ";
+            out += preview.unenforceable[i];
+        }
+        return out;
+    }
+
+    // Empty: the restart really will deliver the policy as described, and the
+    // footer may make its promise plainly.
+    return {};
+}
+
 std::string describe_running(const HostFacts& facts) {
     // Reads ONLY `facts`. The selected engine is deliberately not a parameter:
     // this function answers "what is confining commands right now", and the
