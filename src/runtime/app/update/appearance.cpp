@@ -23,6 +23,7 @@
 // .agentty/settings.json.
 
 #include "agentty/domain/ui_theme.hpp"
+#include "agentty/i18n/startup.hpp"   // resolve_language on Auto
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/runtime/app/update.hpp"
 #include "agentty/runtime/app/deps.hpp"
@@ -238,6 +239,36 @@ namespace {
 
     up::Prefs& p = m.d.ui();
     if (f.id == pn::kApTier)            { p.tier     = static_cast<up::ColorTier>(idx()); return true; }
+    else if (f.id == pn::kApLang) {
+        // The LANGUAGE row, and it is the one place here that reads an id
+        // rather than an index. The choice carries BCP-47 tags ("", "de",
+        // "pt-BR") so that inserting a language into the table later cannot
+        // silently change what an existing settings.json means -- an index
+        // would.
+        if (const auto* c = std::get_if<form::field::Choice>(&f.value)) {
+            const int i = c->normalized(c->index);
+            p.lang = (i >= 0 && i < static_cast<int>(c->ids.size()))
+                         ? c->ids[static_cast<std::size_t>(i)]
+                         : std::string{};
+        }
+        // Apply NOW, not on restart. t() is a pointer read, so switching is
+        // one atomic store and the next frame is translated -- the sandbox
+        // seal has no analogue here, because a language is not a boundary
+        // (docs/design/i18n.md).
+        //
+        // Empty means auto: re-resolve from the environment rather than
+        // leaving whatever was active, or picking Auto after German would
+        // stay German until restart and read as "the setting did nothing".
+        i18n::Lang want{};
+        if (p.lang.empty()) want = i18n::resolve_language({}, {});
+        else if (!i18n::parse_tag(p.lang, want)) want = i18n::Lang::en;
+        (void)i18n::set_active(want);   // refuses if no catalog; keeps current
+
+        // Returns true: every label on screen is now a different string, so
+        // the caller must rebuild. Same reason the colour rows return true,
+        // one layer up -- the Elements are stale, not merely restyled.
+        return true;
+    }
     else if (f.id == pn::kApPolarity)   { p.polarity = static_cast<up::Polarity>(idx());  return true; }
     else if (f.id == pn::kApSyntax)     { p.syntax   = on();                              return true; }
     else if (f.id == pn::kApDensity)    p.density     = static_cast<up::Density>(idx());

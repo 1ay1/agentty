@@ -58,7 +58,7 @@ TEST_CASE("appearance: every row the pane builds is a real, reachable setting") 
     const auto form = pn::build_appearance_form(m.d.ui(), true);
 
     static constexpr std::string_view kKnown[] = {
-        pn::kApTheme, pn::kApTier, pn::kApPolarity, pn::kApDensity,
+        pn::kApLang, pn::kApTheme, pn::kApTier, pn::kApPolarity, pn::kApDensity,
         pn::kApCompact, pn::kApMotion, pn::kApSyntax, pn::kApToolOutput,
         pn::kApThinking, pn::kApTimestamps, pn::kApProseWidth,
     };

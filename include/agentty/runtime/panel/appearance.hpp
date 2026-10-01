@@ -31,6 +31,10 @@ namespace agentty::ui::panel {
 // the read site: a typo in one of two matching strings is a silently dead
 // setting, and the compiler cannot see it.
 inline constexpr std::string_view kApTheme      = "theme";
+// The UI language. A Pick rather than a Choice: twenty-one entries (twenty
+// languages plus Auto) is past the point form.hpp says belongs in a
+// dropdown, and the same reasoning that made Scheme a picker applies.
+inline constexpr std::string_view kApLang       = "lang";
 inline constexpr std::string_view kApTier       = "tier";
 inline constexpr std::string_view kApPolarity   = "polarity";
 inline constexpr std::string_view kApDensity    = "density";

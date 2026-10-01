@@ -6,6 +6,9 @@
 // what they are called, and what each one says about itself.
 
 #include "agentty/runtime/panel/appearance.hpp"
+#include "agentty/i18n/i18n.hpp"   // t(), endonym(), completeness()
+
+#include <span>
 
 #include "agentty/domain/ui_theme.hpp"
 
@@ -56,6 +59,71 @@ form::Form build_appearance_form(const up::Prefs& p, bool tty) {
     // of your eyes, not of the repo — and saying so here stops the question
     // being asked of every individual row.
     b.subtitle("how agentty looks \xc2\xb7 saved for your user, not this project");
+
+    // ── Language ────────────────────────────────────────────────────
+    //
+    // FIRST, above Theme, because it changes every other label on this
+    // screen including Theme's own. A user who cannot read the pane cannot
+    // navigate to the row that fixes that, so it has to be the one they
+    // reach without reading.
+    b.header(std::string{i18n::t("lang.picker.title")});
+    {
+        // The endonym, not our English name for it: someone looking for
+        // their language is looking for the word THEY would use. A Japanese
+        // speaker scans for 日本語 and slides straight past "Japanese".
+        const auto cur = i18n::active();
+        // A dropdown CHOICE, not a full-screen picker.
+        //
+        // The theme row is a picker because browsing themes is the point --
+        // you arrow through them to compare, and a live preview of each is
+        // the feature. Language has no equivalent: you know which one you
+        // want before you open the row, and you pick it once.
+        //
+        // Twenty-one entries is more than a ←/→ cycle should carry, which is
+        // exactly what form.hpp's dropdown is for.
+        //
+        // ids are the TAGS, labels are the endonyms. Picking by id means the
+        // stored value is "de" rather than an index, so inserting a language
+        // into the table later cannot silently change what an existing
+        // settings.json means.
+        std::vector<std::string> ids{""};
+        std::vector<std::string> labels{std::string{i18n::t("lang.auto")}
+                                        + " \xc2\xb7 "
+                                        + std::string{i18n::endonym(cur)}};
+        for (int i = 0; i < i18n::kLangCount; ++i) {
+            const auto l = static_cast<i18n::Lang>(i);
+            ids.emplace_back(i18n::tag_of(l));
+
+            // The endonym plus, when a translation is partial, how partial.
+            //
+            // Shown because a half-translated UI otherwise reads as
+            // breakage: German rows beside English ones look like a bug
+            // until you know the translation is at 60%. Showing it HERE --
+            // in the list, before committing -- is what makes it a choice
+            // rather than a discovery. Suppressed at 100%, where a number
+            // that never changes is noise.
+            std::string label{i18n::endonym(l)};
+            if (const double done = i18n::completeness(l); done < 0.999) {
+                const i18n::Arg pct{
+                    "pct", std::to_string(static_cast<int>(done * 100.0 + 0.5))};
+                label += " \xc2\xb7 " + i18n::format("lang.incomplete",
+                                                     std::span{&pct, 1});
+            }
+            labels.push_back(std::move(label));
+        }
+        b.choice(std::string{kApLang},
+                 std::string{i18n::t("lang.picker.title")},
+                 std::move(labels), std::move(ids), p.lang,
+                 std::string{i18n::t("lang.picker.help")});
+
+        // Provenance, same slot the Theme row uses for "why is it this".
+        //
+        // Empty `lang` means auto, and auto is where a user is most likely
+        // to be surprised -- they did not choose this, the environment did.
+        // Naming the variable makes "why is agentty in German" answerable
+        // without a web search.
+        if (p.lang.empty()) b.origin("from your system locale");
+    }
 
     // ── Theme ───────────────────────────────────────────────────────
     b.header("Theme");

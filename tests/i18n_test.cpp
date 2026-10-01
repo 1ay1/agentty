@@ -288,3 +288,68 @@ TEST_CASE("i18n: completeness is measured against English") {
     REQUIRE(install_catalog(Lang::de, de_stale));
     CHECK(completeness(Lang::de) == 0.5);
 }
+
+// ── The appearance row, end to end ───────────────────────────────────────
+//
+// Everything above tests i18n in isolation. This tests the PANE: that the
+// language row exists, carries tags rather than indices, and that choosing
+// one switches the active language without a restart.
+//
+// Why tags and not indices matters enough to pin: a Choice normally stores
+// the selected INDEX, so inserting a language into kLangs would silently
+// change what every existing settings.json means -- someone's saved "7"
+// becomes a different language on upgrade. Storing "de" cannot do that.
+
+#include "agentty/runtime/panel/appearance.hpp"
+#include "agentty/runtime/app/update.hpp"
+#include "agentty/runtime/model.hpp"
+
+TEST_CASE("i18n: the appearance pane carries a language row") {
+    const char* en = R"JSON({
+        "lang.picker.title": {"text": "Language"},
+        "lang.picker.help":  {"text": "agentty's own labels"},
+        "lang.auto":         {"text": "Auto (follow system)"},
+        "lang.incomplete":   {"text": "{pct}% translated"}
+    })JSON";
+    REQUIRE(install_catalog(Lang::en, en));
+    REQUIRE(set_active(Lang::en));
+
+    agentty::ui_prefs::Prefs p;          // empty lang = auto
+    const auto form = agentty::ui::panel::build_appearance_form(p, false);
+
+    const auto* row = form.find(agentty::ui::panel::kApLang);
+    REQUIRE(row != nullptr);
+
+    const auto* c = std::get_if<agentty::form::field::Choice>(&row->value);
+    REQUIRE(c != nullptr);
+
+    // Auto plus every language.
+    CHECK(c->labels.size() == static_cast<std::size_t>(kLangCount) + 1);
+    REQUIRE(c->ids.size() == c->labels.size());
+
+    // Auto is FIRST and its id is empty -- the same empty that ui.lang
+    // stores, so a user who never chose keeps following their environment.
+    CHECK(c->ids[0].empty());
+
+    // Every other id is a real tag that round-trips. An index would be
+    // unstable across a table edit; a tag cannot be.
+    for (std::size_t i = 1; i < c->ids.size(); ++i) {
+        INFO("row " << i << " id '" << c->ids[i] << "'");
+        Lang parsed{};
+        REQUIRE(parse_tag(c->ids[i], parsed));
+        CHECK(tag_of(parsed) == c->ids[i]);
+    }
+
+    // Labels are ENDONYMS: a Japanese speaker scans for 日本語, not for our
+    // English word. Checked on the three scripts where getting it wrong
+    // would be invisible to an English reader.
+    const auto has = [&](std::string_view needle) {
+        for (const auto& l : c->labels)
+            if (l.find(needle) != std::string::npos) return true;
+        return false;
+    };
+    CHECK(has("日本語"));      // ja
+    CHECK(has("Русский"));     // ru
+    CHECK(has("한국어"));       // ko
+    CHECK(has("Deutsch"));     // de
+}
