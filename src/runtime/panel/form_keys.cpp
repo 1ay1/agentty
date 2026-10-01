@@ -222,6 +222,23 @@ Applied apply(Form& f, Action a) {
             // destroy value bytes the user couldn't see a caret in.
             if (!f.editing() && row && row->is_text_like()
                 && row->editable() && !row->locked) {
+                // Does the row ACCEPT this character?
+                //
+                // A Number row takes digits only, and typing a letter used to
+                // enter the edit session anyway: focus flipped to Editing,
+                // edit_dirty went true, and number_insert silently dropped the
+                // character. The row was then live and "changed" with nothing
+                // on screen to show it -- so the next Esc committed a no-op
+                // edit, arrows behaved like caret moves instead of row moves,
+                // and the pane read as having swallowed the keystroke. That is
+                // the "alpha char misbehaves everywhere".
+                //
+                // Checked BEFORE any state moves, so a rejected character is
+                // exactly a no-op rather than a half-entered session.
+                const bool numeric_row =
+                    std::holds_alternative<field::Number>(row->value);
+                if (numeric_row && (a.ch < U'0' || a.ch > U'9')) break;
+
                 f.focus = focus::Editing{};
                 f.edit_dirty = false;
                 // Unambiguously the first keystroke of the session, so a
@@ -234,6 +251,19 @@ Applied apply(Form& f, Action a) {
             break;
         case Intent::Insert:
             if (f.editing() && row && row->editable()) {
+                // A Number row takes digits only. Inserting a letter is a
+                // no-op there, and reporting `changed` for it armed
+                // commit-on-exit for an edit that never happened -- the same
+                // half-state that made a letter on a numeric row read as the
+                // pane swallowing the key.
+                //
+                // Checked by KIND rather than by comparing values: FieldValue
+                // is a variant of types that are not equality-comparable, and
+                // Number is the only kind that can refuse a character.
+                if (std::holds_alternative<field::Number>(row->value)
+                    && (a.ch < U'0' || a.ch > U'9'))
+                    break;
+
                 // Fresh until something in THIS session has changed the value.
                 // That makes Enter-then-type behave like type-to-edit above:
                 // the first digit replaces, the rest append.

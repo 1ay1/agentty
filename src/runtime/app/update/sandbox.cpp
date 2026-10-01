@@ -531,11 +531,12 @@ Cmd sandbox_update(Model& m, msg::SandboxMsg sm) {
             // form while you are typing in it.
             const bool last_row_used = [&] {
                 if (ed->pane.form.fields.empty()) return true;
+                // Every entry row is Text now, ports included -- a Number
+                // widget cannot render a caret, so a list you type into must
+                // not use one.
                 const auto& back = ed->pane.form.fields.back().value;
                 if (const auto* t = std::get_if<form::field::Text>(&back))
                     return !t->value.empty();
-                if (const auto* n = std::get_if<form::field::Number>(&back))
-                    return n->value > 0;
                 return false;
             }();
             if (last_row_used) {

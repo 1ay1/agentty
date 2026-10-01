@@ -190,6 +190,40 @@ TEST_CASE("form: dropdown commit resolves through the same list the view shows")
     CHECK(std::get<field::Choice>(f.find("m")->value).label() == "model-3");
 }
 
+TEST_CASE("form: a letter on a number row is a true no-op") {
+    // Reported as "typing an alpha char misbehaves everywhere".
+    //
+    // A Number row takes digits only, but type-to-edit entered the session
+    // ANYWAY: focus flipped to Editing, edit_dirty went true, and
+    // number_insert then dropped the character. The row was left live and
+    // "changed" with nothing on screen to show it -- so arrows started moving
+    // a caret instead of the row cursor, Esc committed an edit that never
+    // happened, and the pane read as having swallowed the key.
+    //
+    // A rejected character must leave EVERY axis untouched, which is what
+    // makes it a no-op rather than a half-entered session.
+    auto f = demo();
+    f.cursor = 2;                               // port, a Number row
+    const auto before = std::get<field::Number>(f.find("port")->value).value;
+
+    press(f, chr(U'x'));
+    CHECK_FALSE(f.editing());                   // no session started
+    CHECK_FALSE(f.dirty);                       // nothing marked changed
+    CHECK(std::get<field::Number>(f.find("port")->value).value == before);
+
+    // And a digit still works right after, so the guard did not wedge the row.
+    press(f, chr(U'7'));
+    CHECK(f.editing());
+    CHECK(std::get<field::Number>(f.find("port")->value).value == 7);
+
+    // Mid-session too: a letter among digits is ignored rather than ending or
+    // corrupting the edit.
+    press(f, chr(U'z'));
+    CHECK(std::get<field::Number>(f.find("port")->value).value == 7);
+    press(f, chr(U'9'));
+    CHECK(std::get<field::Number>(f.find("port")->value).value == 79);
+}
+
 TEST_CASE("form: the first digit typed REPLACES, it does not append") {
     // Reported as "input doesn't work on all fields sometimes", and this is
     // the mechanism.

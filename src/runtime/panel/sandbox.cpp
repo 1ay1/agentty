@@ -870,7 +870,18 @@ form::Field list_entry_text(std::string_view id, std::string label,
 
 form::Field list_entry_number(std::string_view id, std::string label,
                               std::string help) {
-    return number(id, std::move(label), std::move(help), 0, 0, 65535);
+    // A TEXT row, not a Number row, and the difference is the caret.
+    //
+    // maya::panel::Number renders a bare integer with no caret field at all --
+    // it structurally cannot show one. That is right for a settings row you
+    // nudge with arrows (Memory, CPU%), and wrong for a LIST entry you type
+    // into: there was no way to see where you were, or that the row was even
+    // live. "I don't see a caret in the port list" is exactly that.
+    //
+    // Digits are enforced on readback instead (read_sandbox_list parses and
+    // drops anything that is not a port), so the constraint survives without
+    // costing the caret.
+    return text(id, std::move(label), std::move(help), {});
 }
 
 void renumber_sandbox_list(SandboxListPane& p) {
@@ -914,23 +925,16 @@ SandboxListPane build_sandbox_list(std::string_view row_id, std::string title,
     // small betrayal.
     for (std::size_t i = 0; i < values.size(); ++i) {
         const auto id = "e" + std::to_string(i);
-        if (numeric) {
-            std::int64_t v = 0;
-            try { v = std::stoll(values[i]); } catch (...) { v = 0; }
-            auto f = number(id, std::to_string(i + 1) + ".", {}, v, 0, 65535);
-            p.form.fields.push_back(std::move(f));
-        } else {
-            auto f = text(id, std::to_string(i + 1) + ".", {}, values[i]);
-            // Caret at the END of the value, not at 0.
-            //
-            // A Text field defaults its cursor to 0, so moving onto an entry
-            // that already reads "/opt/sdk" and typing put the character
-            // BEFORE the path. Every text editor in the world puts the caret
-            // where the text stops, and "append to what is here" is the only
-            // thing editing an existing path usually means.
-            std::get<form::field::Text>(f.value).cursor = values[i].size();
-            p.form.fields.push_back(std::move(f));
-        }
+        auto f = text(id, std::to_string(i + 1) + ".", {}, values[i]);
+        // Caret at the END of the value, not at 0.
+        //
+        // A Text field defaults its cursor to 0, so moving onto an entry that
+        // already reads "/opt/sdk" and typing put the character BEFORE the
+        // path. Every text editor in the world puts the caret where the text
+        // stops, and "append to what is here" is the only thing editing an
+        // existing entry usually means.
+        std::get<form::field::Text>(f.value).cursor = values[i].size();
+        p.form.fields.push_back(std::move(f));
     }
 
     // A trailing blank row IS the add affordance.
@@ -952,16 +956,28 @@ SandboxListPane build_sandbox_list(std::string_view row_id, std::string title,
 std::vector<std::string> read_sandbox_list(const SandboxListPane& p) {
     std::vector<std::string> out;
     for (const auto& f : p.form.fields) {
-        if (const auto* t = std::get_if<form::field::Text>(&f.value)) {
-            auto v = t->value;
-            // Trim: a path with a stray space is a path that silently does not
-            // match, which is exactly the failure the comma format had.
-            while (!v.empty() && (v.front() == ' ' || v.front() == '\t')) v.erase(v.begin());
-            while (!v.empty() && (v.back() == ' ' || v.back() == '\t')) v.pop_back();
-            if (!v.empty()) out.push_back(std::move(v));
-        } else if (const auto* n = std::get_if<form::field::Number>(&f.value)) {
-            // 0 is the empty port, matching the blank-is-absent rule above.
-            if (n->value > 0) out.push_back(std::to_string(n->value));
+        const auto* t = std::get_if<form::field::Text>(&f.value);
+        if (!t) continue;
+        auto v = t->value;
+        // Trim: a path with a stray space is a path that silently does not
+        // match, which is exactly the failure the comma format had.
+        while (!v.empty() && (v.front() == ' ' || v.front() == '\t')) v.erase(v.begin());
+        while (!v.empty() && (v.back() == ' ' || v.back() == '\t')) v.pop_back();
+        if (v.empty()) continue;   // blank == absent, for both kinds
+
+        if (p.numeric) {
+            // Ports are typed into a Text row so they can show a caret, so the
+            // digits-and-range rule is enforced HERE instead of by the widget.
+            // Anything that is not a port in range is dropped rather than
+            // clamped: silently turning "8O80" into 8080 would be inventing a
+            // rule the user did not ask for.
+            if (v.find_first_not_of("0123456789") != std::string::npos) continue;
+            unsigned long n = 0;
+            try { n = std::stoul(v); } catch (...) { continue; }
+            if (n == 0 || n > 65535) continue;
+            out.push_back(std::to_string(n));   // normalised: drops "0443"
+        } else {
+            out.push_back(std::move(v));
         }
     }
     return out;

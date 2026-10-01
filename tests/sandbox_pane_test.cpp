@@ -900,22 +900,33 @@ TEST_CASE("sandbox list: entries are trimmed") {
     CHECK(pn::read_sandbox_list(ed) == want);
 }
 
-TEST_CASE("sandbox list: a port list is numeric and bounded") {
+TEST_CASE("sandbox list: a port list validates on readback") {
     auto ed = pn::build_sandbox_list(pn::kSbPorts, "Allowed ports", "h",
                                      {"443", "80"}, /*numeric=*/true);
     CHECK(ed.numeric);
-    // Number rows, so a path cannot be typed into a port list at all and the
-    // range clamp is the form layer's rather than a validator we could forget
-    // to call.
-    CHECK(std::holds_alternative<form::field::Number>(ed.form.fields[0].value));
+    // TEXT rows, even for ports. maya's Number control has no caret field at
+    // all, so a list you type into cannot use one -- "I don't see a caret in
+    // the port list" was exactly that. The digit rule moves to readback.
+    CHECK(std::holds_alternative<form::field::Text>(ed.form.fields[0].value));
 
     const std::vector<std::string> want{"443", "80"};
     CHECK(pn::read_sandbox_list(ed) == want);
 
-    // 0 is the empty port, matching the blank-is-absent rule for paths.
-    std::get<form::field::Number>(ed.form.fields[0].value).value = 0;
+    // Blank is absent, same rule as a path.
+    std::get<form::field::Text>(ed.form.fields[0].value).value.clear();
     const std::vector<std::string> after{"80"};
     CHECK(pn::read_sandbox_list(ed) == after);
+}
+
+TEST_CASE("sandbox list: a non-port is dropped, not guessed at") {
+    // Enforced on readback now that the widget cannot enforce it. Dropping
+    // beats clamping: silently turning "8O80" (letter O) into 8080 would be
+    // inventing a rule the user never asked for, on a security control.
+    auto ed = pn::build_sandbox_list(pn::kSbPorts, "t", "h",
+                                     {"443", "8O80", "99999", "0", "0443"},
+                                     true);
+    const std::vector<std::string> want{"443", "443"};   // 0443 normalises
+    CHECK(pn::read_sandbox_list(ed) == want);
 }
 
 TEST_CASE("sandbox list: opening one from the pane carries the current values") {
@@ -1228,7 +1239,7 @@ TEST_CASE("sandbox pane: adding a port switches Access to `ports`") {
         auto* ed = m.ui.panel.get<pn::SandboxList>();
         REQUIRE(ed != nullptr);
         REQUIRE(ed->pane.numeric);
-        std::get<form::field::Number>(ed->pane.form.fields.back().value).value = 8080;
+        std::get<form::field::Text>(ed->pane.form.fields.back().value).value = "8080";
     }
     auto [m2, __] = app::update(std::move(m), Msg{SandboxListClose{}});
 
@@ -1255,11 +1266,11 @@ TEST_CASE("sandbox pane: emptying the port list leaves `ports` mode") {
                                Msg{SandboxEditList{std::string{pn::kSbPorts}}});
     m = std::move(m1);
 
-    // Clear the one entry (0 is the empty port).
+    // Clear the one entry (blank is absent, same as a path).
     {
         auto* ed = m.ui.panel.get<pn::SandboxList>();
         REQUIRE(ed != nullptr);
-        std::get<form::field::Number>(ed->pane.form.fields[0].value).value = 0;
+        std::get<form::field::Text>(ed->pane.form.fields[0].value).value.clear();
     }
     auto [m2, __] = app::update(std::move(m), Msg{SandboxListClose{}});
 
