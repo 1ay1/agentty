@@ -6,7 +6,7 @@
 # release binary. Users who want to ride HEAD (and get Arch's ABI/security
 # updates for OpenSSL et al. via normal `pacman -Syu`) want this package.
 #
-# Network policy: everything is fetched by makepkg in source=() — the four
+# Network policy: everything is fetched by makepkg in source=() — the five
 # git submodules are wired to the local clones in prepare(), and the three
 # CMake-FetchContent deps (nlohmann_json / simdjson / mimalloc, pinned by
 # the build system to exact tags) are provided as checksummed tarballs via
@@ -48,10 +48,12 @@ source=("$_pkgname::git+https://github.com/1ay1/agentty.git"
         'git+https://github.com/1ay1/acp-cpp.git'
         'git+https://github.com/1ay1/mcp-cpp.git'
         'git+https://github.com/1ay1/rag-cpp.git'
+        'git+https://github.com/1ay1/claybin.git'
         "nlohmann_json-${_json_tag}.tar.gz::https://github.com/nlohmann/json/archive/${_json_tag}.tar.gz"
         "simdjson-${_simdjson_tag}.tar.gz::https://github.com/simdjson/simdjson/archive/${_simdjson_tag}.tar.gz"
         "mimalloc-${_mimalloc_tag}.tar.gz::https://github.com/microsoft/mimalloc/archive/${_mimalloc_tag}.tar.gz")
 sha256sums=('SKIP'
+            'SKIP'
             'SKIP'
             'SKIP'
             'SKIP'
@@ -77,6 +79,10 @@ prepare() {
     git config submodule.acp-cpp.url "$srcdir/acp-cpp"
     git config submodule.mcp-cpp.url "$srcdir/mcp-cpp"
     git config submodule.rag-cpp.url "$srcdir/rag-cpp"
+    # claybin is the in-process sandbox backend, and it is NOT optional:
+    # AgenttySubmodules.cmake raises FATAL_ERROR when third_party/claybin is
+    # empty, so leaving it unwired failed at CONFIGURE rather than at link.
+    git config submodule.claybin.url "$srcdir/claybin"
     git -c protocol.file.allow=always submodule update
 
     # maya carries jaal as its OWN submodule, and agentty links maya::app,
