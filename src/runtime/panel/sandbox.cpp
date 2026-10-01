@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <string>
+#include <unordered_set>   // directory dedup in path_source()
 
 // claybin is a required submodule. The guard that remains is PLATFORM only:
 // compile() is portable, so the wall preview works on any host, but the
@@ -436,11 +437,22 @@ form::Form build_sandbox_form(const sandbox_cfg::Config& cfg,
                  "443 https \xc2\xb7 80 http \xc2\xb7 22 git-ssh \xc2\xb7 53 dns. "
                  "forgetting 53 breaks everything.",
                  cfg.allow_ports.size(), "port"));
-    // A dependent row: meaningless unless Access is `ports`. Locked for a
-    // different reason than the claybin rows -- this one is about the policy
-    // being incoherent, not the backend being unable to enforce it.
+    // Deliberately NOT locked when Access is not `ports`.
+    //
+    // It used to be, on the reasoning that a port list means nothing under
+    // `full` or `none`. True, and it made the row unreachable: lock_row makes
+    // activate() return Nothing, so Enter did not open the editor and there
+    // was no way to fill in ports at all. The user had to know to set Access
+    // first, from a row that told them to do it but would not let them act.
+    //
+    // So the row stays live and the EDITOR fixes the mode on commit: adding
+    // ports when Access is not `ports` switches it, because adding a port is
+    // an unambiguous statement of intent. The help line says so rather than
+    // leaving it to be discovered.
     if (cfg.net_mode != sandbox_cfg::NetMode::Ports)
-        lock_row(form, kSbPorts, "set Access to `ports` first");
+        form.fields.back().help =
+            "adding a port here switches Access to `ports` \xc2\xb7 "
+            "443 https \xc2\xb7 80 http \xc2\xb7 22 git-ssh \xc2\xb7 53 dns";
 
     // ── Syscalls ─────────────────────────────────────────────────────────
     form.fields.push_back(header("Syscalls"));
@@ -776,15 +788,50 @@ Preview preview_sandbox(const sandbox_cfg::Config& cfg) {
     return out;
 }
 
-// Candidates are workspace files, same source the `@` picker uses -- so a path
-// that completes here is one that actually exists, which is the entire point.
+// Candidates are workspace files PLUS their directories.
 //
-// Directories are what these rows usually want ("also readable:
-// /opt/weird-sdk"), and the file list gives them for free: every directory is
-// a prefix of some file in it, and the fuzzy filter matches prefixes.
+// Files come from the same source the `@` picker uses, so a path that
+// completes is one that exists. Directories are derived from them rather than
+// walked separately: every parent prefix of a known file is a real directory,
+// which costs one pass over a list we already have and cannot go stale
+// independently of it.
+//
+// Directories matter MORE than files here. "Also readable" and "Masked" are
+// almost always pointed at a tree (`/opt/weird-sdk`, `node_modules`), and a
+// completer that only offered files made the common case the one you had to
+// type by hand.
+[[nodiscard]] ui::SnapshotSource<std::string> path_source() {
+    return {
+        .ready = [] { return agentty::files_ready(); },
+        .fetch = [] {
+            auto files = agentty::list_workspace_files();
+            std::vector<std::string> all;
+            all.reserve(files->size() * 2);
+            // Keyed by VALUE, not by view into `all`. The views would dangle
+            // the first time push_back reallocates, and a set holding
+            // freed-then-reused bytes silently drops real directories rather
+            // than crashing -- the worst kind of wrong.
+            std::unordered_set<std::string> seen_dirs;
+            for (const auto& f : *files) {
+                all.push_back(f);
+                // Every parent prefix, deduped. A trailing '/' marks it as a
+                // directory in the list, which is also the hint the user needs
+                // to tell `src` the folder from `src` the file.
+                for (std::size_t i = 0; i < f.size(); ++i) {
+                    if (f[i] != '/') continue;
+                    std::string dir = f.substr(0, i + 1);   // keeps the '/'
+                    if (seen_dirs.insert(dir).second)
+                        all.push_back(std::move(dir));
+                }
+            }
+            return util::Snapshot<std::vector<std::string>>{
+                std::make_shared<const std::vector<std::string>>(std::move(all))};
+        },
+    };
+}
+
 SandboxListPane::SandboxListPane()
-    : complete(agentty::mention::file_source(),
-               agentty::mention::file_filter()) {}
+    : complete(path_source(), agentty::mention::file_filter()) {}
 
 form::Field list_entry_text(std::string_view id, std::string label,
                             std::string help) {
@@ -800,12 +847,25 @@ void renumber_sandbox_list(SandboxListPane& p) {
     // The LAST row is the add affordance and keeps its "+"; everything above
     // it is a real entry and gets its position. Driven off field order rather
     // than off a stored index, so an append cannot leave the labels lying.
+    //
+    // Writes only what CHANGED. This runs on the keystroke that fills the
+    // trailing row, and unconditionally reassigning two std::strings per row
+    // meant every append allocated across the whole list -- which is felt as
+    // typing lag exactly when the list is long enough to need renumbering.
+    // The comparison is a few bytes against an already-hot string; the
+    // assignment it avoids is a heap write.
     for (std::size_t i = 0; i < p.form.fields.size(); ++i) {
         const bool is_add = (i + 1 == p.form.fields.size());
-        p.form.fields[i].label = is_add ? "+" : std::to_string(i + 1) + ".";
-        p.form.fields[i].help  = is_add
-            ? (p.numeric ? "type a port" : "type a path")
-            : std::string{};
+        auto& f = p.form.fields[i];
+        if (is_add) {
+            if (f.label != "+") f.label = "+";
+            const std::string_view want = p.numeric ? "type a port" : "type a path";
+            if (f.help != want) f.help = want;
+        } else {
+            auto want = std::to_string(i + 1) + ".";
+            if (f.label != want) f.label = std::move(want);
+            if (!f.help.empty()) f.help.clear();
+        }
     }
 }
 

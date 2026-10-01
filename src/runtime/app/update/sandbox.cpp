@@ -555,7 +555,12 @@ Cmd sandbox_update(Model& m, msg::SandboxMsg sm) {
             // a path you are about to type in full, and burying it under a
             // thousand candidates would make the common case the loud one.
             if (!ed->pane.numeric) {
-                std::string q;
+                // By VIEW, not by copy. This runs on every keystroke including
+                // pure navigation, and allocating a fresh std::string per key
+                // just to compare it against one the picker already holds is
+                // the kind of cost that shows up as typing lag long before it
+                // shows up in a profile.
+                std::string_view q;
                 if (const auto* row = ed->pane.form.focused())
                     if (const auto* t = std::get_if<form::field::Text>(&row->value))
                         q = t->value;
@@ -563,16 +568,15 @@ Cmd sandbox_update(Model& m, msg::SandboxMsg sm) {
                 if (ed->pane.completing && q != ed->pane.complete.query()) {
                     // Only when it actually CHANGED.
                     //
-                    // This runs on every keystroke, and the naive version
-                    // (clear_query() then type()) invalidated the memo twice
-                    // per key and reset the selection each time -- so the
-                    // O(N x query) filter re-ran on every arrow press too, and
-                    // the highlight jumped back to the top while you were
-                    // moving through it. Guarding on inequality means a
+                    // The naive version (clear_query() then type()) invalidated
+                    // the memo twice per key and reset the selection each time
+                    // -- so the O(N x query) filter re-ran on every arrow press
+                    // too, and the highlight jumped back to the top while you
+                    // were moving through it. Guarding on inequality means a
                     // navigation key costs nothing and the filter runs exactly
                     // once per actual edit.
                     ed->pane.complete.clear_query();
-                    ed->pane.complete.type(std::string_view{q});
+                    ed->pane.complete.type(q);
                 }
             }
             return Cmd::none();
@@ -610,6 +614,18 @@ Cmd sandbox_update(Model& m, msg::SandboxMsg sm) {
                 cfg.allow_ports.erase(
                     std::unique(cfg.allow_ports.begin(), cfg.allow_ports.end()),
                     cfg.allow_ports.end());
+                // Adding a port is an unambiguous statement of intent, so it
+                // sets the mode rather than sitting inert under `full` or
+                // `none`. The row's help says this will happen.
+                //
+                // And the inverse: emptying the list under `ports` would be a
+                // policy that denies everything, which is never what deleting
+                // the last port meant -- fall back to the default rather than
+                // leaving a trap.
+                if (!cfg.allow_ports.empty())
+                    cfg.net_mode = sandbox_cfg::NetMode::Ports;
+                else if (cfg.net_mode == sandbox_cfg::NetMode::Ports)
+                    cfg.net_mode = sandbox_cfg::NetMode::Full;
             } else if (row_id == pn::kSbReadPaths) {
                 cfg.read_paths = values;
             } else if (row_id == pn::kSbWritePaths) {

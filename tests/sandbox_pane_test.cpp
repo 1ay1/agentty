@@ -1191,6 +1191,84 @@ TEST_CASE("sandbox list: ^X cannot delete the add row") {
     CHECK(pn::read_sandbox_list(ed->pane) == want);
 }
 
+TEST_CASE("sandbox pane: the ports row opens even when Access is not `ports`") {
+    // It used to be LOCKED unless the mode was already `ports`, which made it
+    // unreachable: lock_row makes activate() return Nothing, so Enter did not
+    // open the editor and there was no way to fill in ports at all. The row
+    // told you to set Access first and would not let you act.
+    sandbox_cfg::Config cfg;
+    cfg.configured = true;
+    cfg.backend = sandbox_cfg::LinuxBackend::Claybin;
+    cfg.net_mode = sandbox_cfg::NetMode::Full;   // NOT ports
+    install(cfg);
+
+    auto form = pn::build_sandbox_form(cfg, facts_for(cfg));
+    const int p = row_of(form, pn::kSbPorts);
+    REQUIRE(p >= 0);
+    CHECK_FALSE(form.fields[static_cast<std::size_t>(p)].locked);
+}
+
+TEST_CASE("sandbox pane: adding a port switches Access to `ports`") {
+    // Adding a port is an unambiguous statement of intent, so it sets the mode
+    // rather than sitting inert under `full`. Otherwise the user fills in a
+    // port list that does nothing and nothing says why.
+    sandbox_cfg::Config cfg;
+    cfg.configured = true;
+    cfg.backend = sandbox_cfg::LinuxBackend::Claybin;
+    cfg.net_mode = sandbox_cfg::NetMode::Full;
+    cfg.allow_ports.clear();
+    install(cfg);
+
+    Model m = opened();
+    auto [m1, _] = app::update(std::move(m),
+                               Msg{SandboxEditList{std::string{pn::kSbPorts}}});
+    m = std::move(m1);
+
+    {
+        auto* ed = m.ui.panel.get<pn::SandboxList>();
+        REQUIRE(ed != nullptr);
+        REQUIRE(ed->pane.numeric);
+        std::get<form::field::Number>(ed->pane.form.fields.back().value).value = 8080;
+    }
+    auto [m2, __] = app::update(std::move(m), Msg{SandboxListClose{}});
+
+    const auto* o = m2.ui.panel.get<pn::Sandbox>();
+    REQUIRE(o != nullptr);
+    CHECK(o->pane.working.net_mode == sandbox_cfg::NetMode::Ports);
+    const std::vector<std::uint16_t> want{8080};
+    CHECK(o->pane.working.allow_ports == want);
+}
+
+TEST_CASE("sandbox pane: emptying the port list leaves `ports` mode") {
+    // The inverse, and it matters more: `ports` with an empty list is a policy
+    // that denies ALL network, which is never what deleting the last port
+    // meant. Falling back to the default beats leaving a trap.
+    sandbox_cfg::Config cfg;
+    cfg.configured = true;
+    cfg.backend = sandbox_cfg::LinuxBackend::Claybin;
+    cfg.net_mode = sandbox_cfg::NetMode::Ports;
+    cfg.allow_ports = {443};
+    install(cfg);
+
+    Model m = opened();
+    auto [m1, _] = app::update(std::move(m),
+                               Msg{SandboxEditList{std::string{pn::kSbPorts}}});
+    m = std::move(m1);
+
+    // Clear the one entry (0 is the empty port).
+    {
+        auto* ed = m.ui.panel.get<pn::SandboxList>();
+        REQUIRE(ed != nullptr);
+        std::get<form::field::Number>(ed->pane.form.fields[0].value).value = 0;
+    }
+    auto [m2, __] = app::update(std::move(m), Msg{SandboxListClose{}});
+
+    const auto* o = m2.ui.panel.get<pn::Sandbox>();
+    REQUIRE(o != nullptr);
+    CHECK(o->pane.working.allow_ports.empty());
+    CHECK(o->pane.working.net_mode != sandbox_cfg::NetMode::Ports);
+}
+
 // ── "applies on restart" has to be a checked claim ─────────────────────
 //
 // The footer promised "saved · applies on restart" with NOTHING checking that
