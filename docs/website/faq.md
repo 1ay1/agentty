@@ -40,7 +40,7 @@ Linux, macOS, and Windows — all built and tested daily. Prebuilt binaries ship
 
 ## How is it sandboxed?
 
-Every shell/build call runs in `bwrap` (Linux) or `sandbox-exec` (macOS). The workspace is read-write, system libs read-only, and `~/.ssh` / `/etc` / other projects are blocked. Windows and unrooted Android/Termux run unsandboxed (no user-namespace backend available there); agentty detects this and prints `sandbox: unavailable, running unsandboxed`.
+Every shell/build call runs in an OS-enforced sandbox — claybin (seccomp + landlock + cgroup2) on Linux, with Bubblewrap as a fallback, and `sandbox-exec` on macOS. The workspace is read-write, system libs read-only, and `~/.ssh` / `/etc` / other projects are blocked. Windows and unrooted Android/Termux run unsandboxed (no user-namespace backend available there); agentty detects this and prints `sandbox: unavailable, running unsandboxed`.
 
 ## Can I run it on a machine with no internet?
 

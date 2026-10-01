@@ -20,7 +20,7 @@ If you already like Claude Code's workflow but want it faster, dependency-free, 
 | **Dependencies** | None (no Node, Python, Electron, npm) | Node.js ≥ 18 |
 | **Models** | Claude, OpenAI, DeepSeek, Kimi, Gemini, Grok, Mistral, Groq, OpenRouter, Together, Cerebras, Fireworks, local Ollama, any OpenAI-compatible host | Claude only |
 | **Auth** | Any provider API key, local Ollama (no key), *or* subscription OAuth (Claude Pro/Max, ChatGPT, GitHub Copilot, Kimi) | Claude Pro/Max OAuth or API key |
-| **Shell sandbox** | On by default (`bwrap` / `sandbox-exec`) | Permission prompts, no OS sandbox |
+| **Shell sandbox** | On by default (seccomp + landlock + cgroup2) | Permission prompts, no OS sandbox |
 | **Editor integration** | Runs inside Zed over [ACP](/docs/acp) | Terminal + IDE extensions |
 | **Air-gapped hosts** | One-command [SSH air-gap](/docs/airgap) | — |
 | **Platforms** | Linux, macOS, Windows (x86_64 + aarch64), Termux/Android | macOS, Linux, Windows (WSL) |
@@ -41,7 +41,7 @@ agentty is model-agnostic — run it with an API key for **OpenAI, DeepSeek, Goo
 
 ### Sandboxed by default, not as an afterthought
 
-Every shell and build command agentty runs is wrapped in an OS-native sandbox — `bwrap` on Linux, `sandbox-exec` on macOS. Your workspace is read-write, system libraries are read-only, and `~/.ssh`, `/etc`, and other projects are blocked. It's the default, not an opt-in. See [Sandboxing](/docs/sandboxing).
+Every shell and build command agentty runs is wrapped in an OS-native sandbox — claybin (seccomp + landlock + cgroup2) on Linux, `sandbox-exec` on macOS. Your workspace is read-write, system libraries are read-only, and `~/.ssh`, `/etc`, and other projects are blocked. It's the default, not an opt-in. See [Sandboxing](/docs/sandboxing).
 
 ### Cost-aware by design
 

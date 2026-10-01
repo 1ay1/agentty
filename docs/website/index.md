@@ -26,7 +26,7 @@ Already convinced? Jump straight to [Installation](/docs/installation) or the [Q
 
 - **Native speed.** C++26, statically linked, `posix_spawn` everywhere. Spawns in microseconds, no GC pauses mid-stream.
 - **One static binary.** {{sizeMB}}. `curl | chmod +x | run`. No version drift between machines.
-- **Sandbox by default.** Every shell/build runs inside `bwrap` (Linux) / `sandbox-exec` (macOS). `~/.ssh`, `/etc`, other projects stay read-only.
+- **Sandbox by default.** Every shell/build runs inside an OS-enforced sandbox — seccomp + landlock + cgroup2 on Linux, `sandbox-exec` on macOS. `~/.ssh`, `/etc`, other projects stay read-only.
 - **One-command SSH air-gap.** Relay bytes over SOCKS5-over-SSH; TLS pins end-to-end on the real upstreams.
 - **Reads like a single function.** The reducer is one `std::visit` over a closed event sum; the permission matrix is a `constexpr` with `static_assert`s — change a policy cell and the build breaks.
 

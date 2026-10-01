@@ -120,7 +120,7 @@ Set the model per-subprocess in the `args`. In ACP mode `-m` is an *ephemeral* o
 - **Cancellation** — stop a turn from Zed and the in-flight stream tears down.
 - **Full session lifecycle** — agentty advertises and implements the complete ACP v1 session surface: `session/new`, `session/load`, `session/resume`, `session/list`, `session/close`, `session/delete`, plus `logout`. Zed can enumerate past sessions, reopen any of them, and prune them — all backed by the on-disk thread store.
 - **Session persistence + reload** — every session is written to agentty's on-disk thread store after each turn (the *same* format the TUI uses), so it survives a subprocess restart. Zed can `session/load` to resume a past conversation: agentty replays the full transcript (user + assistant messages and tool cards) as `session/update` notifications, then hands back control. Sessions started in Zed also show up in the standalone TUI's thread picker, and vice versa.
-- **Workspace sandbox** — file tools stay inside the session's `cwd` (the folder you opened in Zed); `bash` is wrapped in bwrap/sandbox-exec exactly like the standalone TUI.
+- **Workspace sandbox** — file tools stay inside the session's `cwd` (the folder you opened in Zed); `bash` runs in the same OS-enforced sandbox as the standalone TUI.
 
 :::tip
 The ACP agent is the *same* engine as the TUI — same provider, same tools, same wire-message shaping, same permission policy — just driven over JSON-RPC on stdio instead of a terminal. Any other ACP client (not just Zed) works the same way.
