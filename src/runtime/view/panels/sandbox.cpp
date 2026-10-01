@@ -209,8 +209,7 @@ maya::Element sandbox_panel(const Model& m) {
     // behind it is the same bug as "sandbox: active" with no sandbox, just
     // pointed forward -- so `restart_outcome` is consulted and its verdict
     // REPLACES the bare promise rather than sitting next to it.
-    const auto cfg_now = pn::read_sandbox_form(o->pane.form, sb::config());
-    const auto outcome = pn::restart_outcome(cfg_now, o->pane.facts, o->pane.preview);
+    const auto& outcome = o->pane.restart_note;
 
     if (o->pane.saved_pending_restart) {
         form.note = (outcome.empty()

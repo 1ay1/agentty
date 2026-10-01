@@ -761,6 +761,136 @@ TEST_CASE("sandbox pane: the posture row scores the walls") {
 #endif
 }
 
+// ── "applies on restart" has to be a checked claim ─────────────────────
+//
+// The footer promised "saved · applies on restart" with NOTHING checking that
+// it would. Every ingredient of the answer was already computed -- the compile
+// result, the unenforceable list, the host probe -- and none of them was
+// joined into the claim being made.
+//
+// Same bug as "sandbox: active" with no sandbox and as the subtitle naming
+// walls that were not up, only pointed at the future instead of the present.
+
+TEST_CASE("sandbox restart: a clean policy promises plainly") {
+    sandbox_cfg::Config cfg;
+    cfg.configured = true;
+    cfg.backend = sandbox_cfg::LinuxBackend::Claybin;
+
+    const auto facts = facts_for(cfg);
+    const auto preview = pn::preview_sandbox(cfg);
+
+    // Empty verdict == the restart really will deliver what the rows describe.
+    // The footer may then make its promise without qualification.
+    if (preview.compiled && preview.unenforceable.empty())
+        CHECK(pn::restart_outcome(cfg, facts, preview).empty());
+}
+
+TEST_CASE("sandbox restart: a policy that will not compile says so") {
+    // The hard no. claybin refuses rather than degrading, so there is no
+    // "partly" here -- the next launch gets nothing from this config, and a
+    // footer saying "applies on restart" would be flatly false.
+    sandbox_cfg::Config cfg;
+    cfg.configured = true;
+
+    pn::Preview broken;
+    broken.compiled = false;
+    broken.error = "fabricated: this host cannot build it";
+
+    const auto out = pn::restart_outcome(cfg, facts_for(cfg), broken);
+    REQUIRE(!out.empty());
+    CHECK(out.find("NOT apply") != std::string::npos);
+    // And it carries the REASON, not just the refusal -- otherwise the user
+    // has no way to act on it.
+    CHECK(out.find("fabricated") != std::string::npos);
+}
+
+TEST_CASE("sandbox restart: an engine that cannot start names the fallback") {
+    // Saving is still legitimate -- the config is portable and the user may be
+    // on a different machine tomorrow. But the promise must not imply the
+    // claybin walls will be up, and it has to say what WILL be enforced
+    // instead, because "claybin cannot start" alone reads as "no sandbox".
+    sandbox_cfg::Config cfg;
+    cfg.configured = true;
+    cfg.backend = sandbox_cfg::LinuxBackend::Claybin;
+
+    pn::HostFacts facts;
+    facts.claybin_available = false;        // the host refuses it
+    facts.sandbox_active = true;
+    facts.running = sandbox_cfg::LinuxBackend::Bwrap;
+
+    pn::Preview ok;
+    ok.compiled = true;
+
+    const auto out = pn::restart_outcome(cfg, facts, ok);
+    REQUIRE(!out.empty());
+    CHECK(out.find("cannot start") != std::string::npos);
+    CHECK(out.find("bwrap") != std::string::npos);
+}
+
+TEST_CASE("sandbox restart: a silently degraded capability is named") {
+    // The quiet case, and the reason the function exists. It compiles, the
+    // engine starts, and some wall still comes out weaker than asked. Without
+    // this the user believes in the part that degraded -- which is the whole
+    // failure mode this subsystem is built around.
+    sandbox_cfg::Config cfg;
+    cfg.configured = true;
+    cfg.backend = sandbox_cfg::LinuxBackend::Claybin;
+
+    pn::Preview degraded;
+    degraded.compiled = true;
+    degraded.unenforceable.push_back("network.isolation needs landlock abi 4");
+
+    const auto out = pn::restart_outcome(cfg, facts_for(cfg), degraded);
+    REQUIRE(!out.empty());
+    // It still applies -- so the verdict must not read as a refusal.
+    CHECK(out.find("applies on restart") != std::string::npos);
+    // But the gap is named.
+    CHECK(out.find("network.isolation") != std::string::npos);
+}
+
+TEST_CASE("sandbox restart: the worst problem wins the one line the footer has") {
+    // Ordering is not cosmetic. The footer shows ONE line, so when several
+    // things are wrong the user needs the one that most invalidates the
+    // promise: a policy that will not compile makes the unenforceable list
+    // irrelevant, not merely less important.
+    sandbox_cfg::Config cfg;
+    cfg.configured = true;
+    cfg.backend = sandbox_cfg::LinuxBackend::Claybin;
+
+    pn::Preview worst;
+    worst.compiled = false;
+    worst.error = "refused";
+    worst.unenforceable.push_back("resource.cpu");
+
+    pn::HostFacts facts;
+    facts.claybin_available = false;   // ALSO cannot start
+    facts.sandbox_active = true;
+
+    const auto out = pn::restart_outcome(cfg, facts, worst);
+    CHECK(out.find("NOT apply") != std::string::npos);
+    // Not the lesser problems.
+    CHECK(out.find("resource.cpu") == std::string::npos);
+}
+
+TEST_CASE("sandbox pane: the reducer keeps the restart verdict with the preview") {
+    // End to end through the pane: the verdict is computed in reprice(), with
+    // the preview that was built from the SAME config, so the two cannot
+    // disagree about the policy they are describing. The view only reads it --
+    // it cannot probe, and must not re-derive the config to find out.
+    Model m = opened();
+    const auto& p = pane(m).pane;
+
+    // Whatever the verdict is, it must be CONSISTENT with the preview beside
+    // it: a non-compiling policy cannot have an empty (all-clear) verdict.
+    if (!p.preview.compiled)
+        CHECK(!p.restart_note.empty());
+    // And a clean compile with nothing unenforceable, on a host running the
+    // selected engine, must not invent a problem.
+    if (p.preview.compiled && p.preview.unenforceable.empty() &&
+        pn::engine_status(sb::config(), p.facts) == pn::EngineStatus::InForce)
+        CHECK(p.restart_note.empty());
+}
+
 // ── The subtitle must describe REALITY, not the selection ────────────────
 //
 // Reported from a screenshot: selecting claybin while running under bwrap

@@ -283,7 +283,9 @@ inline auto visual_parts(const SandboxPane& p) {
     // changes what is on screen -- exempting it would let the pane keep
     // rendering a stale "what is running" line, which is the precise bug class
     // this pane exists to prevent.
-    return std::make_tuple(visual::ref(p.form), visual::exempt, visual::exempt,
+    return std::make_tuple(visual::ref(p.form), visual::exempt,
+                           visual::ref(p.restart_note),
+                           visual::exempt,
                            visual::ref(p.facts),
                            visual::exempt, visual::exempt);
 }

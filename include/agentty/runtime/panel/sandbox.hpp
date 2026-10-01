@@ -186,6 +186,14 @@ struct SandboxPane {
     // Recomputed on every edit, so the walls track the rows.
     Preview preview;
 
+    // Whether the NEXT LAUNCH will actually deliver what the rows describe,
+    // and if not, why. Empty means the promise is good.
+    //
+    // Computed by the reducer alongside the preview, for the same reason
+    // `facts` is stored: the view cannot probe, and it must not re-derive the
+    // config to find out. See restart_outcome().
+    std::string restart_note;
+
     // Which backend is actually in use, for the header line. A pane that
     // offers per-port network while running under bwrap would be lying, so
     // the rows that need claybin are marked unavailable rather than hidden --

@@ -125,6 +125,10 @@ void reprice(pn::Sandbox& o) {
     // that is not running are a forecast and have to read as one.
     pn::annotate_sandbox_form(o.pane.form, o.pane.preview, cfg,
                               pn::engine_status(cfg, o.pane.facts));
+    // And the answer to "will this actually work when I restart". Computed
+    // HERE, with the preview that was just built from the same cfg, so the
+    // verdict and the walls it is judging cannot disagree.
+    o.pane.restart_note = pn::restart_outcome(cfg, o.pane.facts, o.pane.preview);
 }
 
 // Rebuild the rows from a config, keeping the user's place in the list --
