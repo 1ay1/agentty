@@ -31,6 +31,7 @@
 #include "panels_prologue.hpp"
 #include "agentty/runtime/view/form_panel.hpp"
 #include "agentty/runtime/panel/sandbox.hpp"
+#include "agentty/tool/util/sandbox_broker.hpp"   // blocked_feed()
 
 #include <string>
 
@@ -70,6 +71,37 @@ namespace {
     return out;
 }
 
+// What the sandbox actually stopped, this session.
+//
+// The line that changes behaviour. A wall report says what WOULD be enforced;
+// this says what was. "cargo tried ptrace ATTACH pid=1" tells you what your
+// toolchain does, where "your build failed" tells you nothing and sends people
+// to turn the sandbox off.
+//
+// Newest FIRST here, reversing the feed's storage order, because the footer has
+// a line or two of room and the most recent denial is the one you are debugging.
+[[nodiscard]] std::string blocked_summary() {
+    const auto feed = tools::util::sandbox::broker::blocked_feed();
+    if (feed.empty()) return {};
+
+    std::string out = "blocked: ";
+    // At most three, oldest dropped. The whole feed can be 64 entries and the
+    // footer is not a log viewer -- a summary that wraps the pane has stopped
+    // summarising. The log has all of them (channel `tool`, site
+    // `sandbox.broker`), which is where you go when three is not enough.
+    std::size_t shown = 0;
+    for (auto it = feed.rbegin(); it != feed.rend() && shown < 3; ++it, ++shown) {
+        if (shown) out += "  \xc2\xb7  ";
+        out += it->syscall + " " + it->detail;
+        // The count only when it is >1: "× 1" is noise, "× 4096" is the
+        // difference between a stray call and a loop hammering a denial.
+        if (it->count > 1) out += " \xc3\x97 " + std::to_string(it->count);
+    }
+    if (feed.size() > shown)
+        out += "  (+" + std::to_string(feed.size() - shown) + " more in the log)";
+    return out;
+}
+
 }  // namespace
 
 maya::Element sandbox_panel(const Model& m) {
@@ -81,6 +113,11 @@ maya::Element sandbox_panel(const Model& m) {
     // model would give two owners for one string.
     auto form = o->pane.form;
     form.note = wall_summary(o->pane);
+
+    // Denials go ABOVE the wall report, because they outrank it: the walls
+    // describe what would be enforced, and this is what actually happened.
+    if (const auto blocked = blocked_summary(); !blocked.empty())
+        form.note = blocked + "\n" + form.note;
 
     // The one thing this pane must never leave unsaid: a save here does NOT
     // change the running sandbox.

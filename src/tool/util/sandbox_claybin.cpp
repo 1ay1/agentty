@@ -390,6 +390,14 @@ SpawnResult spawn_shell(const Posture& p, const std::string& shell_cmd, int stdo
             AGT_LOG(Tool, Info, "sandbox.broker", "{} {} {}",
                     ev.syscall, ev.detail, ev.allowed ? "allowed" : "DENIED");
 
+            // And into the feed the settings pane reads. record() ignores
+            // allows, so this is the denial path only -- the log is the trace,
+            // the feed is the security surface.
+            //
+            // Called from a tool WORKER thread; the feed takes a lock for
+            // exactly this reason.
+            broker::record(ev);
+
             if (!listener->respond(*req, decision)) {
                 // Responding failed, which usually means the guest died while
                 // we were deciding. Not an error worth tearing down for; the

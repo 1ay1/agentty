@@ -19,6 +19,11 @@
 #include <sys/syscall.h>
 #include <signal.h>
 
+#include <atomic>
+#include <string>
+#include <thread>
+#include <vector>
+
 namespace br = agentty::tools::util::sandbox::broker;
 
 namespace {
@@ -150,6 +155,125 @@ TEST_CASE("broker: an unhandled brokered syscall is denied") {
 TEST_CASE("broker: an unknown ptrace request is denied") {
     // Not because each unknown request is dangerous, but because a supervisor
     // that allows requests it has not reasoned about is not a policy. There are
-    // ~40 ptrace requests and the ones we have thought about are listed.
+    // ~40 ptrace requests and several (PTRACE_SETREGS, PTRACE_POKEUSER) rewrite
+    // a traced process's execution.
+    //
+    // Checked with a target INSIDE our own group, because that is where the
+    // first version of this policy was wrong: the target rule ran before the
+    // request rule, so an unrecognised request aimed at our own child was
+    // allowed. "It is one of ours" is not a reason to permit an operation
+    // nobody reasoned about.
     CHECK(ptrace_call(0xdead, kGuest) == br::Verdict::Deny);
+}
+
+TEST_CASE("broker feed: only denials are recorded") {
+    // The broker logs both outcomes -- the log is a trace -- but the FEED is a
+    // security surface. A feed listing every permitted syscall is an strace,
+    // and the one denial that matters would drown in it.
+    br::clear_blocked_feed();
+
+    br::Event allowed{"ptrace", "TRACEME pid=0", true, 1};
+    br::Event denied{"ptrace", "ATTACH pid=1", false, 1};
+    br::record(allowed);
+    br::record(denied);
+
+    const auto feed = br::blocked_feed();
+    REQUIRE(feed.size() == 1);
+    CHECK(feed[0].detail == "ATTACH pid=1");
+    CHECK(!feed[0].allowed);
+}
+
+TEST_CASE("broker feed: identical repeats coalesce into a count") {
+    // A loop hammering one denied call should be one readable line, not 4096.
+    // The count is also the information: a stray call and a loop are different
+    // problems and "× 4096" is what distinguishes them.
+    br::clear_blocked_feed();
+
+    br::Event ev{"ptrace", "ATTACH pid=1", false, 1};
+    for (int i = 0; i < 500; ++i) br::record(ev);
+
+    const auto feed = br::blocked_feed();
+    REQUIRE(feed.size() == 1);
+    CHECK(feed[0].count == 500);
+}
+
+TEST_CASE("broker feed: interleaved denials stay separate") {
+    // Coalescing is against the LAST event only, not the whole feed. A build
+    // alternating two denied calls should show both interleaved rather than two
+    // counters, because the ORDER is the information -- it says what the
+    // toolchain was doing.
+    br::clear_blocked_feed();
+
+    br::Event a{"ptrace", "ATTACH pid=1", false, 1};
+    br::Event b{"kill", "SIGKILL pid=1", false, 1};
+    br::record(a);
+    br::record(b);
+    br::record(a);
+
+    const auto feed = br::blocked_feed();
+    REQUIRE(feed.size() == 3);
+    CHECK(feed[0].syscall == "ptrace");
+    CHECK(feed[1].syscall == "kill");
+    CHECK(feed[2].syscall == "ptrace");
+}
+
+TEST_CASE("broker feed: the feed is bounded") {
+    // Unbounded growth would be a denial of service the supervisor inflicts on
+    // its own host: a guest need only hammer DISTINCT denied calls in a loop.
+    br::clear_blocked_feed();
+
+    for (int i = 0; i < 500; ++i) {
+        // Distinct details, so coalescing cannot hide the growth -- this is the
+        // adversarial shape, not the friendly one.
+        br::Event ev{"kill", "SIGKILL pid=" + std::to_string(1000 + i), false, 1};
+        br::record(ev);
+    }
+
+    const auto feed = br::blocked_feed();
+    CHECK(feed.size() <= 64);
+
+    // And the NEWEST survived. Dropping the oldest is deliberate: a guest
+    // trying to flush evidence of an early denial has to push 64 distinct
+    // denials through, every one of which is itself recorded -- so the attempt
+    // is louder than the thing it would hide.
+    REQUIRE(!feed.empty());
+    CHECK(feed.back().detail == "SIGKILL pid=1499");
+}
+
+TEST_CASE("broker feed: concurrent writers do not corrupt it") {
+    // The feed is written from tool WORKER threads and read from the reducer
+    // thread, which is the one genuinely cross-thread surface in the sandbox
+    // layer. Under TSan this case is the one that would catch an unlocked
+    // version; without it, a torn std::string would show up as garbage detail.
+    br::clear_blocked_feed();
+
+    std::vector<std::thread> writers;
+    for (int t = 0; t < 4; ++t) {
+        writers.emplace_back([t] {
+            for (int i = 0; i < 200; ++i) {
+                br::Event ev{"kill",
+                             "SIGKILL pid=" + std::to_string(t * 1000 + i),
+                             false, 1};
+                br::record(ev);
+            }
+        });
+    }
+    // A reader racing them, because a snapshot taken mid-write is exactly the
+    // shape that breaks if blocked_feed() handed back a reference.
+    std::atomic<bool> stop{false};
+    std::thread reader([&] {
+        while (!stop.load(std::memory_order_relaxed)) {
+            for (const auto& e : br::blocked_feed()) {
+                // Touch the heap members so a torn string is dereferenced.
+                CHECK(!e.syscall.empty());
+                CHECK(!e.detail.empty());
+            }
+        }
+    });
+
+    for (auto& w : writers) w.join();
+    stop.store(true, std::memory_order_relaxed);
+    reader.join();
+
+    CHECK(br::blocked_feed().size() <= 64);
 }

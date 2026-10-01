@@ -901,6 +901,48 @@ kill SIGTERM pid=4242 allowed
 denied" teaches what your toolchain does, and is the difference between adding
 one allowlist line and turning the sandbox off.
 
+### The blocked-activity feed
+
+The log is a trace; the **feed** is the security surface. `broker::record()`
+keeps denials only — a feed listing every permitted syscall is an strace, and
+the one denial that matters would drown in it — and the Sandbox pane renders the
+three most recent above the wall report:
+
+```
+blocked: ptrace ATTACH pid=1 × 3  ·  kill SIGKILL pid=1  (+2 more in the log)
+```
+
+Denials sit *above* the walls because they outrank them: the wall report says
+what **would** be enforced, the feed says what actually happened.
+
+This is the feature §9a deleted for having no producer. The broker is what made
+it real, because the broker is the only place that knows a denial happened *at
+the moment it happens*, with the arguments still in hand.
+
+Four properties, each load-bearing:
+
+- **Bounded at 64 distinct events.** Unbounded growth is a denial of service the
+  supervisor inflicts on its own host: a guest need only hammer distinct denied
+  calls in a loop. The number is chosen for the *reader* — a pane showing more
+  than a screenful has stopped communicating.
+- **Oldest dropped, newest kept.** A guest trying to flush evidence of an early
+  denial must push 64 *distinct* denials through, every one of which is itself
+  recorded. The attempt is louder than the thing it would hide.
+- **Identical consecutive events coalesce** into a saturating count. `× 4096`
+  distinguishes a loop from a stray call; a count that wrapped to 0 would read
+  as "this never happened", which is the worst lie an audit surface can tell.
+  Coalescing is against the *last* event only, so two alternating denials stay
+  interleaved — the order is information about what the toolchain was doing.
+- **Written on worker threads, read on the reducer thread.** The one genuinely
+  cross-thread surface in this subsystem. It uses `jaal::guarded<T>`, not a raw
+  mutex: access is only possible through `with()`, so "forgot the lock" is
+  unrepresentable rather than a review item. My first version used
+  `std::mutex` and the concurrency banlist rejected it — correctly, and the
+  replacement is better code, not a workaround.
+
+  Verified by removing the lock: **135 TSan warnings** without it, **zero**
+  with. The guard is load-bearing, not decoration.
+
 ### Verification
 
 Two layers, because neither is sufficient:

@@ -99,4 +99,53 @@ enum class Verdict : std::uint8_t {
 // without building a policy at all.
 [[nodiscard]] std::vector<std::uint32_t> brokered_syscalls();
 
+// ── The blocked-activity feed ─────────────────────────────────────
+//
+// What the sandbox actually stopped, most recent last. This is the surface that
+// changes behaviour: "your build failed" teaches nothing, while "cargo tried
+// ptrace(PTRACE_ATTACH, 1) and was denied" teaches what your toolchain does --
+// and is the difference between adding one allowlist line and turning the
+// sandbox off, which is what people actually do when a sandbox is opaque.
+//
+// It was designed before it could exist: the log already had the decisions, but
+// nothing could read them back, so an earlier version of this header declared a
+// BlockedEvent struct with no producer and I deleted it (see §9a -- an
+// unimplemented control reads as a shipped feature). The broker is what made it
+// real, because the broker is the only place that knows a denial happened AT
+// THE MOMENT it happens, with the arguments still in hand.
+//
+// ── Threading, which is the whole design constraint ────────────────────
+//
+// Written from tool WORKER threads (the broker decides inside
+// Cmd::task_isolated) and read from the REDUCER thread (the pane renders it).
+// So this is genuinely cross-thread, unlike almost everything else in the
+// sandbox layer, and it is a mutex rather than a lock-free ring on purpose:
+// contention is a handful of events per command, and a tricky data structure
+// here would be optimising the wrong thing while adding a class of bug this
+// subsystem has already paid for once.
+//
+// Bounded, and that is a security property rather than tidiness. A guest that
+// hammers a denied syscall in a loop would otherwise grow this without limit --
+// a denial-of-service the supervisor inflicts on its own host. Identical
+// consecutive events coalesce into a count, which also makes the feed readable:
+// "ptrace ATTACH pid=1 × 4096" is one line and the truth.
+
+// Record one decision. Safe to call from any thread.
+//
+// Only DENIALS are recorded, despite the broker logging both. An allow is not
+// activity the sandbox blocked, and a feed that shows every permitted syscall
+// is a strace, not a security surface -- the signal would drown.
+void record(const Event& ev);
+
+// The feed, newest last, as a snapshot.
+//
+// By value: the caller is on another thread, so handing back a reference would
+// be a race with the next denial. Copying a bounded vector of small structs per
+// pane frame is not worth a shared_ptr dance.
+[[nodiscard]] std::vector<Event> blocked_feed();
+
+// Forget everything recorded. For tests, and for a future "clear" affordance in
+// the pane.
+void clear_blocked_feed();
+
 }  // namespace agentty::tools::util::sandbox::broker

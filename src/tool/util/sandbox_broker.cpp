@@ -3,8 +3,12 @@
 
 #include "agentty/tool/util/sandbox_broker.hpp"
 
+#include <jaal/kernel/guarded.hpp>
+
+#include <cstdint>
 #include <string>
 #include <string_view>
+#include <utility>
 
 #if defined(__linux__)
 #include <sys/ptrace.h>
@@ -59,6 +63,81 @@ namespace {
 #endif  // __linux__
 
 }  // namespace
+
+namespace {
+
+// The blocked-activity feed's storage.
+//
+// `jaal::guarded<T>` rather than a raw std::mutex, and not merely because the
+// concurrency banlist says so (it does -- tests/lint/allowlist.txt, and my
+// first version failed that check). The type is better for the job: access is
+// only possible through `with()`, so "forgot the lock" is unrepresentable
+// rather than a review item. For a cross-thread security surface that is worth
+// more than the two lines it saves.
+//
+// Function-local static so initialisation order cannot bite: the first denial
+// can arrive from a worker thread during startup, and a file-scope global would
+// be a race with its own constructor.
+jaal::guarded<std::vector<Event>>& feed() {
+    static jaal::guarded<std::vector<Event>> f;
+    return f;
+}
+
+// How many distinct events to keep.
+//
+// Bounded because a guest hammering a denied syscall in a loop would otherwise
+// grow this without limit -- a denial of service the supervisor inflicts on its
+// own host. 64 is chosen for the READER, not for memory: a pane showing more
+// than a screenful of denials has stopped communicating, and the coalescing
+// below means 64 distinct events covers far more than 64 syscalls.
+constexpr std::size_t kMaxEvents = 64;
+
+}  // namespace
+
+void record(const Event& ev) {
+    // Allows are not blocked activity. The broker logs both -- the log is a
+    // trace -- but a feed that lists every permitted syscall is an strace, and
+    // the one denial that matters would drown in it.
+    if (ev.allowed) return;
+
+    feed().with([](std::vector<Event>& events, Event incoming) {
+        // Coalesce an identical repeat. Checked against the LAST event only,
+        // not the whole feed: a build that alternates two denied calls should
+        // show both interleaved rather than two counters, because the order is
+        // the information -- it tells you what the toolchain was doing.
+        if (!events.empty()) {
+            auto& last = events.back();
+            if (last.syscall == incoming.syscall &&
+                last.detail == incoming.detail) {
+                // Saturate rather than wrap. A count that rolls over to 0 would
+                // read as "this never happened", which is the worst possible
+                // lie for an audit surface to tell.
+                if (last.count < UINT32_MAX) ++last.count;
+                return;
+            }
+        }
+
+        incoming.count = 1;
+        events.push_back(std::move(incoming));
+
+        // Drop the OLDEST when full, keeping the newest. A guest trying to
+        // flush evidence of an early denial has to push 64 DISTINCT denials
+        // through, every one of which is itself recorded -- so the attempt is
+        // louder than the thing it would hide.
+        if (events.size() > kMaxEvents) events.erase(events.begin());
+    }, ev);
+}
+
+std::vector<Event> blocked_feed() {
+    // A copy, deliberately: the caller is on another thread, so handing back a
+    // reference would be a race with the next denial. `with()` makes that hard
+    // to get wrong -- the result must not point into the guarded value.
+    return feed().with([](std::vector<Event>& events) { return events; });
+}
+
+void clear_blocked_feed() {
+    feed().with([](std::vector<Event>& events) { events.clear(); });
+}
 
 std::vector<std::uint32_t> brokered_syscalls() {
 #if defined(__linux__) && defined(SYS_ptrace) && defined(SYS_kill)
