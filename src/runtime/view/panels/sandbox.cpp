@@ -283,8 +283,8 @@ maya::Element sandbox_list_panel(const Model& m) {
         }
         form.note_replaces_grammar = true;
     } else {
-        form.note = "type a path \xc2\xb7 clear a line to remove it \xc2\xb7 "
-                    "Esc saves and goes back";
+        form.note = "type a path \xc2\xb7 ^X clears a line (removes it) \xc2\xb7 "
+                    "esc saves and goes back";
     }
 
     return maya::Panel{form_config(form, info,

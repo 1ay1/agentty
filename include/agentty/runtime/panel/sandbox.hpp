@@ -278,6 +278,21 @@ inline auto visual_parts(const SandboxListPane& p) {
                                                 const std::vector<std::string>& values,
                                                 bool numeric);
 
+// One entry row. Shared with the reducer so GROWING the list and BUILDING it
+// cannot drift -- the grow path appends a row that has to look exactly like
+// the ones build_sandbox_list made, or the editor changes shape mid-edit.
+[[nodiscard]] form::Field list_entry_text(std::string_view id, std::string label,
+                                          std::string help);
+[[nodiscard]] form::Field list_entry_number(std::string_view id, std::string label,
+                                            std::string help);
+
+// Renumber the visible labels ("1.", "2.", …) after the row set changes.
+//
+// The numbers are pure decoration -- order comes from field order, not from
+// them -- but a list that reads 1, 2, 2 after an append looks broken, and the
+// label is the only thing that has to be fixed up when a row is appended.
+void renumber_sandbox_list(SandboxListPane& p);
+
 // Read the editor back into a list, dropping blanks.
 //
 // Blank-dropping is why "add" can insert an empty row and why deleting is just

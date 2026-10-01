@@ -1072,6 +1072,125 @@ TEST_CASE("sandbox list: Esc leaves the editor even from a live row") {
     CHECK(m.ui.panel.get<pn::Sandbox>() != nullptr);   // back on the pane
 }
 
+TEST_CASE("sandbox list: the caret starts at the END of an existing entry") {
+    // Reported as "the caret starts at the front". A Text field defaults its
+    // cursor to 0, so moving onto an entry that already read "/opt/sdk" and
+    // typing put the character BEFORE the path.
+    auto ed = pn::build_sandbox_list(pn::kSbReadPaths, "t", "h",
+                                     {"/opt/sdk"}, false);
+    const auto& t = std::get<form::field::Text>(ed.form.fields[0].value);
+    CHECK(t.cursor == t.value.size());
+}
+
+TEST_CASE("sandbox list: backspacing to empty keeps the row and the session") {
+    // Reported as "backspace doesn't work sometimes", and the "sometimes" was
+    // the tell: it failed exactly when a row went empty.
+    //
+    // The grow logic used to REBUILD the form whenever the entry count
+    // disagreed with the row count. Backspacing a row to empty made it absent
+    // from read_sandbox_list(), so the rebuild deleted the row being edited --
+    // focus moved, the edit session ended, and the next backspace had no field
+    // to act on.
+    sandbox_cfg::Config cfg;
+    cfg.configured = true;
+    cfg.backend = sandbox_cfg::LinuxBackend::Claybin;
+    cfg.read_paths = {"ab"};
+    install(cfg);
+
+    Model m = opened();
+    auto [m1, _] = app::update(std::move(m),
+                               Msg{SandboxEditList{std::string{pn::kSbReadPaths}}});
+    m = std::move(m1);
+
+    const std::size_t rows_before =
+        m.ui.panel.get<pn::SandboxList>()->pane.form.fields.size();
+
+    // Enter the field, then backspace the value away entirely.
+    auto [m2, __] = app::update(
+        std::move(m),
+        Msg{SandboxListKey{form::keys::Action{form::keys::Intent::TypeToEdit, U'c'}}});
+    m = std::move(m2);
+    for (int i = 0; i < 3; ++i) {
+        auto [next, ___] = app::update(
+            std::move(m),
+            Msg{SandboxListKey{form::keys::Action{form::keys::Intent::Backspace, 0}}});
+        m = std::move(next);
+    }
+
+    const auto* ed = m.ui.panel.get<pn::SandboxList>();
+    REQUIRE(ed != nullptr);
+    // The row survived every keystroke, so backspace always had a target.
+    CHECK(ed->pane.form.fields.size() == rows_before);
+    CHECK(ed->pane.form.editing());
+    // And it really is empty now -- the keystrokes landed.
+    CHECK(std::get<form::field::Text>(ed->pane.form.fields[0].value).value.empty());
+}
+
+TEST_CASE("sandbox list: ^X removes the focused entry") {
+    // "no way to remove the entry". Clearing a line works (blanks are dropped
+    // on commit) but is not discoverable, so ^X -- which the form layer already
+    // routes as ResetField and leaves to the pane -- deletes the row.
+    sandbox_cfg::Config cfg;
+    cfg.configured = true;
+    cfg.backend = sandbox_cfg::LinuxBackend::Claybin;
+    cfg.read_paths = {"/a", "/b", "/c"};
+    install(cfg);
+
+    Model m = opened();
+    auto [m1, _] = app::update(std::move(m),
+                               Msg{SandboxEditList{std::string{pn::kSbReadPaths}}});
+    m = std::move(m1);
+
+    // Remove the middle one.
+    m.ui.panel.get<pn::SandboxList>()->pane.form.cursor = 1;
+    auto [m2, __] = app::update(
+        std::move(m),
+        Msg{SandboxListKey{form::keys::Action{form::keys::Intent::ResetField, 0}}});
+    m = std::move(m2);
+
+    const auto* ed = m.ui.panel.get<pn::SandboxList>();
+    REQUIRE(ed != nullptr);
+    const std::vector<std::string> want{"/a", "/c"};
+    CHECK(pn::read_sandbox_list(ed->pane) == want);
+
+    // The labels renumber, so the list does not read 1, 2, 2.
+    CHECK(ed->pane.form.fields[0].label == "1.");
+    CHECK(ed->pane.form.fields[1].label == "2.");
+    // And the trailing add row is still there -- it is the affordance, not an
+    // entry, so it must never be what ^X deletes.
+    CHECK(ed->pane.form.fields.back().label == "+");
+}
+
+TEST_CASE("sandbox list: ^X cannot delete the add row") {
+    sandbox_cfg::Config cfg;
+    cfg.configured = true;
+    cfg.backend = sandbox_cfg::LinuxBackend::Claybin;
+    cfg.read_paths = {"/a"};
+    install(cfg);
+
+    Model m = opened();
+    auto [m1, _] = app::update(std::move(m),
+                               Msg{SandboxEditList{std::string{pn::kSbReadPaths}}});
+    m = std::move(m1);
+
+    // Park on the trailing "+" row and try to remove it.
+    {
+        auto* ed = m.ui.panel.get<pn::SandboxList>();
+        ed->pane.form.cursor =
+            static_cast<int>(ed->pane.form.fields.size()) - 1;
+    }
+    auto [m2, __] = app::update(
+        std::move(m),
+        Msg{SandboxListKey{form::keys::Action{form::keys::Intent::ResetField, 0}}});
+    m = std::move(m2);
+
+    const auto* ed = m.ui.panel.get<pn::SandboxList>();
+    REQUIRE(ed != nullptr);
+    CHECK(ed->pane.form.fields.back().label == "+");
+    const std::vector<std::string> want{"/a"};
+    CHECK(pn::read_sandbox_list(ed->pane) == want);
+}
+
 // ── "applies on restart" has to be a checked claim ─────────────────────
 //
 // The footer promised "saved · applies on restart" with NOTHING checking that

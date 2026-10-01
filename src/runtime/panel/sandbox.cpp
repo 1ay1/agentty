@@ -786,6 +786,29 @@ SandboxListPane::SandboxListPane()
     : complete(agentty::mention::file_source(),
                agentty::mention::file_filter()) {}
 
+form::Field list_entry_text(std::string_view id, std::string label,
+                            std::string help) {
+    return text(id, std::move(label), std::move(help), {});
+}
+
+form::Field list_entry_number(std::string_view id, std::string label,
+                              std::string help) {
+    return number(id, std::move(label), std::move(help), 0, 0, 65535);
+}
+
+void renumber_sandbox_list(SandboxListPane& p) {
+    // The LAST row is the add affordance and keeps its "+"; everything above
+    // it is a real entry and gets its position. Driven off field order rather
+    // than off a stored index, so an append cannot leave the labels lying.
+    for (std::size_t i = 0; i < p.form.fields.size(); ++i) {
+        const bool is_add = (i + 1 == p.form.fields.size());
+        p.form.fields[i].label = is_add ? "+" : std::to_string(i + 1) + ".";
+        p.form.fields[i].help  = is_add
+            ? (p.numeric ? "type a port" : "type a path")
+            : std::string{};
+    }
+}
+
 SandboxListPane build_sandbox_list(std::string_view row_id, std::string title,
                                    std::string help,
                                    const std::vector<std::string>& values,
@@ -804,11 +827,19 @@ SandboxListPane build_sandbox_list(std::string_view row_id, std::string title,
         if (numeric) {
             std::int64_t v = 0;
             try { v = std::stoll(values[i]); } catch (...) { v = 0; }
-            p.form.fields.push_back(
-                number(id, std::to_string(i + 1) + ".", {}, v, 0, 65535));
+            auto f = number(id, std::to_string(i + 1) + ".", {}, v, 0, 65535);
+            p.form.fields.push_back(std::move(f));
         } else {
-            p.form.fields.push_back(
-                text(id, std::to_string(i + 1) + ".", {}, values[i]));
+            auto f = text(id, std::to_string(i + 1) + ".", {}, values[i]);
+            // Caret at the END of the value, not at 0.
+            //
+            // A Text field defaults its cursor to 0, so moving onto an entry
+            // that already reads "/opt/sdk" and typing put the character
+            // BEFORE the path. Every text editor in the world puts the caret
+            // where the text stops, and "append to what is here" is the only
+            // thing editing an existing path usually means.
+            std::get<form::field::Text>(f.value).cursor = values[i].size();
+            p.form.fields.push_back(std::move(f));
         }
     }
 
@@ -820,10 +851,9 @@ SandboxListPane build_sandbox_list(std::string_view row_id, std::string title,
     // -- so "type into the empty row" adds, and "clear a row" removes, with no
     // new gesture to learn and no way to end up with a stray empty entry.
     const auto add_id = "e" + std::to_string(values.size());
-    if (numeric)
-        p.form.fields.push_back(number(add_id, "+", "type a port", 0, 0, 65535));
-    else
-        p.form.fields.push_back(text(add_id, "+", "type a path", {}));
+    p.form.fields.push_back(
+        numeric ? list_entry_number(add_id, "+", "type a port")
+                : list_entry_text(add_id, "+", "type a path"));
 
     p.form.title = p.title;
     return p;

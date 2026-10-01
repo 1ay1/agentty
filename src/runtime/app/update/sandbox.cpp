@@ -479,57 +479,72 @@ Cmd sandbox_update(Model& m, msg::SandboxMsg sm) {
             if (applied.close)
                 return sandbox_update(m, msg::SandboxMsg{SandboxListClose{}});
 
-            // Typing in the trailing blank row means "add", so the moment it
-            // stops being blank the list needs ANOTHER blank row after it.
-            // Doing this here rather than on commit is what makes adding three
-            // paths in a row feel like a list instead of like reopening a
-            // dialog three times.
-            auto values = pn::read_sandbox_list(ed->pane);
-            if (values.size() + 1 != ed->pane.form.fields.size()) {
-                // Copy the inputs OUT before rebuilding.
-                //
-                // `ed->pane = build(ed->pane.row_id, ...)` reads members of the
-                // object it is assigning to: the arguments are evaluated first,
-                // but they bind to strings that the assignment then destroys.
-                // Taking copies first makes the order irrelevant instead of
-                // load-bearing.
-                const auto row_id = ed->pane.row_id;
-                const auto title  = ed->pane.title;
-                const auto help   = ed->pane.help;
-                const bool num    = ed->pane.numeric;
-                const int cursor  = ed->pane.form.cursor;
-                auto focus        = ed->pane.form.focus;
+            // ^X removes the focused entry outright.
+            //
+            // Clearing a line to delete it works (blanks are dropped on
+            // commit) but it is not DISCOVERABLE -- "no way to remove the
+            // entry" was the report, from someone looking at a list with no
+            // delete affordance. The form layer already routes ^X as
+            // ResetField and leaves the meaning to the pane, so this costs no
+            // new key and no new modality.
+            //
+            // Removes the ROW, not just its text, because leaving an empty row
+            // behind would make the list grow a gap every time you deleted
+            // something. The trailing add row is never removed: it is the
+            // affordance, not an entry.
+            if (e.action.intent == form::keys::Intent::ResetField) {
+                const int i = ed->pane.form.cursor;
+                const int last = static_cast<int>(ed->pane.form.fields.size()) - 1;
+                if (i >= 0 && i < last) {
+                    ed->pane.form.fields.erase(
+                        ed->pane.form.fields.begin() + i);
+                    ed->pane.form.cursor = std::clamp(
+                        i, 0,
+                        std::max(0, static_cast<int>(ed->pane.form.fields.size()) - 1));
+                    ed->pane.form.focus = form::focus::Browsing{};
+                    ed->pane.completing = false;
+                    pn::renumber_sandbox_list(ed->pane);
+                }
+                return Cmd::none();
+            }
 
-                // Remember where the CARET was in the row being typed into.
-                //
-                // build_sandbox_list() makes fresh Text fields with cursor 0,
-                // so without this every keystroke after the first inserted at
-                // the START of the entry: typing "abc" gave "cba", and the
-                // reported symptom was a character always landing in the wrong
-                // place. The row's VALUE survived the rebuild and its caret did
-                // not, which is the kind of half-preserved state that reads as
-                // the editor being broken.
-                std::size_t caret = 0;
-                if (const auto* row = ed->pane.form.focused())
-                    if (const auto* t = std::get_if<form::field::Text>(&row->value))
-                        caret = t->cursor;
-
-                auto rebuilt = pn::build_sandbox_list(row_id, title, help,
-                                                      values, num);
-                // Keep the picker rather than reconstructing it: a fresh one
-                // drops the snapshot and the memo, so every added row would
-                // re-list and re-filter the whole workspace.
-                rebuilt.complete   = std::move(ed->pane.complete);
-                rebuilt.completing = ed->pane.completing;
-                rebuilt.form.cursor = std::clamp(
-                    cursor, 0,
-                    std::max(0, static_cast<int>(rebuilt.form.fields.size()) - 1));
-                rebuilt.form.focus = focus;
-                rebuilt.form.edit_dirty = ed->pane.form.edit_dirty;
-                if (auto* row = rebuilt.form.focused())
-                    if (auto* t = std::get_if<form::field::Text>(&row->value))
-                        t->cursor = std::min(caret, t->value.size());
-                ed->pane = std::move(rebuilt);
+            // Keep exactly ONE trailing blank row, and only ever ADD it.
+            //
+            // This used to rebuild the whole form whenever the entry count
+            // disagreed with the row count, which made three separate bugs:
+            //
+            //   * backspacing a row to empty made it "absent", so the rebuild
+            //     DELETED the row you were editing -- focus jumped, and the
+            //     next backspace had no field to act on. That is the
+            //     "backspace doesn't work sometimes".
+            //   * clearing a row to remove it therefore could not work: the
+            //     row came back (rebuilt from values that no longer had it) or
+            //     vanished mid-keystroke.
+            //   * every rebuild made fresh fields, so caret/edit state had to
+            //     be copied back by hand and anything missed read as the
+            //     editor resetting itself.
+            //
+            // Growing is the only safe edit while a field is live: appending a
+            // row cannot disturb the one you are in. REMOVAL happens on
+            // commit, where read_sandbox_list() drops blanks -- so clearing a
+            // line still removes the entry, it just does not reshuffle the
+            // form while you are typing in it.
+            const bool last_row_used = [&] {
+                if (ed->pane.form.fields.empty()) return true;
+                const auto& back = ed->pane.form.fields.back().value;
+                if (const auto* t = std::get_if<form::field::Text>(&back))
+                    return !t->value.empty();
+                if (const auto* n = std::get_if<form::field::Number>(&back))
+                    return n->value > 0;
+                return false;
+            }();
+            if (last_row_used) {
+                const auto id = "e" + std::to_string(ed->pane.form.fields.size());
+                ed->pane.form.fields.push_back(
+                    ed->pane.numeric
+                        ? pn::list_entry_number(id, "+", "type a port")
+                        : pn::list_entry_text(id, "+", "type a path"));
+                pn::renumber_sandbox_list(ed->pane);
             }
 
             // Keep the suggestion list in step with what is typed.
