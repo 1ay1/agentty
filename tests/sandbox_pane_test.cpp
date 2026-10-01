@@ -2476,13 +2476,32 @@ TEST_CASE("sandbox render: the shipped catalogs fit every width") {
         return std::max(worst, cur);
     };
 
+    // EVERY shipped catalog, not a representative sample. A language that
+    // is not in this list is a language with no layout gate, and the whole
+    // point of a gate is that it covers the thing nobody is watching.
+    //
+    // Each marker is a string from that catalog that MUST appear, which is
+    // what separates "the pane fit" from "the pane fell back to English and
+    // of course it fit".
     struct Cat { agentty::i18n::Lang lang; const char* tag; const char* marker; };
     const Cat cats[] = {
         {agentty::i18n::Lang::de,    "de",    "Auch lesbar"},
+        {agentty::i18n::Lang::es,    "es",    "Tambi\xc3\xa9n legible"},
+        {agentty::i18n::Lang::fr,    "fr",    "Aussi lisible"},
+        {agentty::i18n::Lang::pt_BR, "pt-BR", "Tamb\xc3\xa9m leg\xc3\xadvel"},
+        // Cyrillic: 2 bytes per char, ONE column. The opposite trap from
+        // CJK -- a byte count over-measures it by 2x where a codepoint
+        // count is exactly right.
+        {agentty::i18n::Lang::ru,    "ru",
+         "\xd0\xa1\xd0\xba\xd1\x80\xd1\x8b\xd1\x82\xd0\xbe"},
         // 额外可读 -- "also readable". Spelled as bytes so the file stays
         // greppable whatever an editor does to it.
         {agentty::i18n::Lang::zh_CN, "zh-CN",
          "\xe9\xa2\x9d\xe5\xa4\x96\xe5\x8f\xaf\xe8\xaf\xbb"},
+        // マスク済み -- katakana + kanji, proving the CJK path is not
+        // zh-specific.
+        {agentty::i18n::Lang::ja,    "ja",
+         "\xe3\x83\x9e\xe3\x82\xb9\xe3\x82\xaf\xe6\xb8\x88\xe3\x81\xbf"},
     };
 
     for (const auto& c : cats) {

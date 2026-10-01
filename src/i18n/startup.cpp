@@ -7,6 +7,11 @@
 #include "agentty/i18n/startup.hpp"
 
 #include "catalog_de.hpp"
+#include "catalog_es.hpp"
+#include "catalog_fr.hpp"
+#include "catalog_ja.hpp"
+#include "catalog_pt_BR.hpp"
+#include "catalog_ru.hpp"
 #include "catalog_zh_CN.hpp"
 
 #include <cstdlib>
@@ -158,6 +163,11 @@ bool init(std::string_view cli_lang, std::string_view saved) {
     // and recoverable, which a startup abort is not.
     (void)install_catalog(Lang::de, catalogs::kGerman);
     (void)install_catalog(Lang::zh_CN, catalogs::kChineseSimplified);
+    (void)install_catalog(Lang::es, catalogs::kSpanish);
+    (void)install_catalog(Lang::fr, catalogs::kFrench);
+    (void)install_catalog(Lang::ja, catalogs::kJapanese);
+    (void)install_catalog(Lang::pt_BR, catalogs::kPortugueseBR);
+    (void)install_catalog(Lang::ru, catalogs::kRussian);
 
     const Lang want = resolve_language(cli_lang, saved);
     if (want == Lang::en) return set_active(Lang::en);

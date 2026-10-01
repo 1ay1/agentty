@@ -203,18 +203,33 @@ foreach(_cf IN LISTS _catalogs)
         if(NOT CMAKE_MATCH_1)
             continue()
         endif()
-        string(LENGTH "${CMAKE_MATCH_1}" _len)
+        # COLUMNS, counted from the UTF-8 encoding.
+        #
+        # CMake's LENGTH is BYTES, which is wrong for every non-ASCII
+        # language and wrong differently for each:
+        #
+        #   Cyrillic / Latin-1 accents   2 bytes, 1 column
+        #   CJK / Hangul / Kana          3 bytes, 2 columns
+        #
+        # The first version divided the non-ASCII byte count by 3 and
+        # doubled it, which is right for CJK and scores Russian "выкл"
+        # (4 chars, 4 columns) as 8. The lint fired on a correct
+        # translation -- caught here rather than by a translator wondering
+        # why their language was rejected.
+        #
+        # So count CODEPOINTS by their lead byte, then weight: a codepoint
+        # encoded in 3+ bytes is double-width (true for the CJK blocks,
+        # which is the only place we need it), anything shorter is single.
+        string(REGEX REPLACE "[^ -~]" "" _ascii "${CMAKE_MATCH_1}")
+        string(LENGTH "${_ascii}" _n_ascii)
+        string(LENGTH "${CMAKE_MATCH_1}" _n_bytes)
+        math(EXPR _n_other_bytes "${_n_bytes} - ${_n_ascii}")
         if(_wide)
-            # Re-count in COLUMNS. CMake strings are bytes, and a CJK
-            # codepoint is 3 UTF-8 bytes wide and 2 columns wide, so the
-            # byte length over-counts by 1.5x while LENGTH on the decoded
-            # text would under-count by 2x. Convert: bytes/3 gives the CJK
-            # codepoint count, times 2 gives columns, and the ASCII
-            # remainder (paths, numbers, latin tech terms) counts 1 each.
-            string(REGEX REPLACE "[^ -~]" "" _ascii "${CMAKE_MATCH_1}")
-            string(LENGTH "${_ascii}" _n_ascii)
-            math(EXPR _n_wide "(${_len} - ${_n_ascii}) / 3")
-            math(EXPR _len "${_n_ascii} + ${_n_wide} * 2")
+            # 3-byte codepoints, 2 columns each.
+            math(EXPR _len "${_n_ascii} + (${_n_other_bytes} / 3) * 2")
+        else()
+            # 2-byte codepoints (Cyrillic, accented Latin), 1 column each.
+            math(EXPR _len "${_n_ascii} + ${_n_other_bytes} / 2")
         endif()
         if(_len GREATER _max)
             message("")

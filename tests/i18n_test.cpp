@@ -366,19 +366,38 @@ TEST_CASE("i18n: the appearance pane carries a language row") {
 // ("Custom" -> "Benutzerdefiniert"). Those are the numbers the layout has to
 // absorb, and they are why German is the second language rather than the
 // tenth -- it is the stress case for every other Latin-script language.
-TEST_CASE("i18n: the shipped German catalog fits the panes") {
-    REQUIRE(agentty::i18n::init("de", ""));
-    REQUIRE(active() == Lang::de);
+TEST_CASE("i18n: every shipped catalog is complete and sane") {
+    REQUIRE(agentty::i18n::init("en", ""));
 
-    // 100% against English. A partial catalog would fall back to English for
-    // the gaps and silently hide exactly the overflow this test looks for,
-    // so completeness is a PRECONDITION here, not an observation.
-    CHECK(completeness(Lang::de) > 0.999);
+    // Every language with a catalog_*.hpp. A language NOT here is one the
+    // picker will show at 0% -- which is honest, and is why an incomplete
+    // translation is allowed to exist. What is NOT allowed is a translation
+    // that claims to be shipped and silently has holes, because a half-
+    // German pane reads as breakage rather than as "60% done".
+    const Lang shipped[] = {Lang::de, Lang::zh_CN, Lang::es,
+                            Lang::fr, Lang::ja, Lang::pt_BR, Lang::ru};
+
+    for (const Lang l : shipped) {
+    INFO("language " << std::string{english_name(l)});
+    REQUIRE(set_active(l));
+    REQUIRE(active() == l);
+
+    // 100% against English. A partial catalog falls back to English for the
+    // gaps, which silently hides exactly the overflow the render gate looks
+    // for -- so completeness is a PRECONDITION of that gate, not a nice
+    // property.
+    CHECK(completeness(l) > 0.999);
+
+    // The endonym is in the language's OWN script. Checked because the
+    // failure is invisible to an English reader: writing "Japanese" where
+    // 日本語 belongs looks fine in review and is useless to the one person
+    // it is for.
+    CHECK(!endonym(l).empty());
 
     // No translation may be empty. An empty string renders as a blank row
     // that still responds to Enter -- worse than an untranslated one, which
     // at least says what it does.
-    for (const auto& id : ids_of(Lang::de)) {
+    for (const auto& id : ids_of(l)) {
         INFO("id " << id);
         CHECK(!t(id).empty());
     }
@@ -387,9 +406,23 @@ TEST_CASE("i18n: the shipped German catalog fits the panes") {
     // this checks English-vs-German, which is the other half and the one
     // that rots as new strings land.
     for (const auto& id : ids_of(Lang::en)) {
-        INFO("missing from de: " << id);
-        REQUIRE(set_active(Lang::de));
+        INFO("missing from " << std::string{tag_of(l)} << ": " << id);
         CHECK(t(id) != id);     // t() falls back to English, never the id
+    }
+
+    // Plural categories must match what the language can PRODUCE. A catalog
+    // declaring `few` for Japanese is a translator misreading the schema --
+    // the runtime would never read it -- and one omitting `many` for Russian
+    // cannot count to five. Both are worth failing on; the first is the one
+    // that would otherwise rot in silence.
+    for (const Plural p : {Plural::One, Plural::Few, Plural::Many,
+                           Plural::Other}) {
+        bool producible = false;
+        for (long long n = 0; n <= 200; ++n)
+            if (select(l, n) == p) { producible = true; break; }
+        INFO("category " << std::string{key_of(p)});
+        CHECK(producible == has_category(l, p));
+    }
     }
 
     REQUIRE(set_active(Lang::en));
