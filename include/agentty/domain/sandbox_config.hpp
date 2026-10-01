@@ -174,9 +174,43 @@ inline constexpr const char* kAlwaysMaskedNames[] = {
     ".env.local",
     ".env.production",
     ".envrc.local",
+    // The rest of the .env family. These are not exotic: a repo with
+    // .env.production almost always has .env.development beside it, and
+    // masking one while leaving the others is a wall with a door next to it.
+    ".env.development",
+    ".env.staging",
+    ".env.test",
+    ".env.dev",
+    ".env.prod",
     "id_rsa",
     "id_ed25519",
-    ".pem",  // suffix, handled as such by the matcher
+    // The other SSH key types. id_rsa and id_ed25519 are the common two, but
+    // the file name is chosen by ssh-keygen -t, and a sandbox that masks two
+    // of five key types is relying on the user's choice of algorithm.
+    "id_ecdsa",
+    "id_dsa",
+    // Package-manager and VCS tokens, WORKSPACE copies.
+    //
+    // The $HOME versions are in kAlwaysMasked above, which is where these
+    // usually live -- but a project-local .npmrc with an auth token is a
+    // normal thing in a monorepo, and a .git-credentials checked into a
+    // worktree is a real (bad, common) pattern. The sweep walks the workspace
+    // and would find them; only the NAME list was missing.
+    ".npmrc",
+    ".pypirc",
+    ".netrc",
+    ".git-credentials",
+    ".dockercfg",
+    ".pgpass",
+    // Cloud service-account keys. The filenames are conventional rather than
+    // mandated, but these two are what every GCP/AWS tutorial writes and what
+    // CI templates copy around.
+    "credentials.json",
+    "service-account.json",
+    // Terraform variable files routinely carry provider secrets, and the
+    // .tfvars suffix is the convention the tooling itself documents.
+    "*.tfvars",  // SUFFIX: matches prod.tfvars, not a file named ".tfvars"
+    "*.pem",     // SUFFIX: the original one, now spelled explicitly
 };
 
 // Which Linux engine applies the policy.

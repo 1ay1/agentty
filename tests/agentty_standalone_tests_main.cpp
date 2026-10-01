@@ -34,11 +34,19 @@ int main(int argc, char** argv) {
     // threads and settings; without this they mutate the developer's
     // real ~/.agentty. Mirrors tests/test_main.cpp; see the rationale
     // there and the tripwire in util/user_root.cpp.
+    //
+    // It also mirrors that file's CLEANUP, which it did not before and which
+    // cost 12 GB of /tmp and a failed build. test_main.cpp creates one sandbox
+    // per BINARY; this binary is re-exec'd per folded test, so ctest spawns it
+    // ~150 times a run and every one leaked a ~250 MB directory. The symptom
+    // arrives much later and looks unrelated: "No space left on device" while
+    // compiling something else entirely.
+    namespace fs = std::filesystem;
+    fs::path sandbox;
     {
-        namespace fs = std::filesystem;
         const auto stamp = std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
-        const auto sandbox = fs::temp_directory_path() /
+        sandbox = fs::temp_directory_path() /
             ("agentty_stests_home_" + std::to_string(stamp));
         std::error_code ec;
         fs::create_directories(sandbox, ec);
@@ -50,6 +58,43 @@ int main(int argc, char** argv) {
         ::setenv("AGENTTY_UNDER_TEST", "1", 1);
 #endif
     }
+    // Sweep sandboxes an EARLIER run abandoned (a crash or SIGKILL skips the
+    // cleanup at exit, and those runs are exactly the ones worth
+    // investigating) -- so only directories older than a day go, never a
+    // sibling ctest worker's live one. Same rule and same reasoning as
+    // test_main.cpp.
+    {
+        std::error_code ec;
+        const auto now = fs::file_time_type::clock::now();
+        for (fs::directory_iterator it(fs::temp_directory_path(), ec), end;
+             !ec && it != end; it.increment(ec)) {
+            const auto name = it->path().filename().string();
+            if (!name.starts_with("agentty_stests_home_")) continue;
+            std::error_code sec;
+            const auto mt = fs::last_write_time(it->path(), sec);
+            if (sec || now - mt < std::chrono::hours(24)) continue;
+            std::error_code rec;
+            fs::remove_all(it->path(), rec);
+        }
+    }
+    // Remove it on the way out, on EVERY path.
+    //
+    // RAII rather than code at the end of main, because the dispatch below is
+    // a wall of `return name##_main(...)` macros -- there is no single exit to
+    // put cleanup after, and a `return` added by the next person would skip it
+    // silently. A destructor cannot be forgotten.
+    //
+    // Best-effort: a leaked sandbox is a slow leak, and a failed remove is not
+    // worth failing a green test over.
+    struct SandboxCleanup {
+        fs::path dir;
+        ~SandboxCleanup() {
+            if (dir.empty()) return;
+            std::error_code ec;
+            fs::remove_all(dir, ec);
+        }
+    } cleanup{sandbox};
+
     // These tests drive the real app reducers, some of which fire a network
     // prewarm (a detached background TLS handshake). A standalone test never
     // calls join_prewarm(), so that thread would outlive main() and race

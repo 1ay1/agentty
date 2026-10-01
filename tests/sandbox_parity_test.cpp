@@ -30,6 +30,10 @@
 #endif
 
 #include <cstdlib>
+#include <algorithm>
+#include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <string_view>
 
@@ -336,6 +340,102 @@ TEST_CASE("sandbox: a SUCCEEDING command is never annotated") {
     auto r = ag::run_shell_command("echo hello", 64 * 1024,
                                    std::chrono::seconds{20});
     CHECK(r.output.find("[sandbox]") == std::string::npos);
+}
+
+TEST_CASE("sandbox masks: the credential name list covers what repos hold") {
+    // The sweep walks the workspace and masks any file whose BASENAME is a
+    // credential name. The walk was right; the list was thin -- it had five
+    // entries and missed .npmrc, .git-credentials, .netrc, the rest of the
+    // .env family, three of the five ssh key types, and the cloud
+    // service-account filenames every tutorial writes.
+    //
+    // Driven through mask_paths() against a real tree, so this tests the
+    // matcher AND the walk rather than just the array.
+    namespace fs = std::filesystem;
+    const auto root = fs::temp_directory_path() /
+        ("agentty_masktest_" + std::to_string(
+            std::chrono::steady_clock::now().time_since_epoch().count()));
+    fs::create_directories(root / "services" / "api");
+
+    auto touch = [](const fs::path& p) { std::ofstream{p} << "x"; };
+    for (const char* n : {".env", ".env.development", ".env.test",
+                          ".npmrc", ".netrc", ".git-credentials",
+                          "credentials.json", "service-account.json",
+                          "id_ecdsa", "id_dsa", ".pgpass"})
+        touch(root / "services" / "api" / n);
+    // Suffix rules, which only the walk can resolve.
+    touch(root / "services" / "api" / "server.pem");
+    touch(root / "services" / "api" / "prod.tfvars");
+    // And things that must NOT be masked: ordinary source that merely looks
+    // adjacent to a rule.
+    touch(root / "services" / "api" / "main.cpp");
+    touch(root / "services" / "api" / "env.example");
+
+    sandbox_cfg::Config cfg;
+    cfg.mask_scan_depth = 3;
+    const auto masked = sandbox_cfg::mask_paths(cfg, root.string(), {});
+
+    auto has = [&](std::string_view leaf) {
+        return std::any_of(masked.begin(), masked.end(), [&](const auto& m) {
+            return std::string_view{m}.ends_with(leaf);
+        });
+    };
+
+    CHECK(has(".env"));
+    CHECK(has(".env.development"));
+    CHECK(has(".npmrc"));
+    CHECK(has(".netrc"));
+    CHECK(has(".git-credentials"));
+    CHECK(has("credentials.json"));
+    CHECK(has("service-account.json"));
+    CHECK(has("id_ecdsa"));
+    CHECK(has(".pgpass"));
+    CHECK(has("server.pem"));      // suffix rule
+    CHECK(has("prod.tfvars"));     // suffix rule
+
+    // Ordinary files stay readable. A mask list that caught main.cpp would
+    // break every build while looking like it was working.
+    CHECK_FALSE(has("main.cpp"));
+    CHECK_FALSE(has("env.example"));
+
+    std::error_code ec;
+    fs::remove_all(root, ec);
+}
+
+TEST_CASE("sandbox masks: a suffix rule needs its marker to be a suffix") {
+    // `*.pem` matches prod.pem; a rule written `.pem` would match only a file
+    // literally named ".pem". The marker is explicit rather than inferred from
+    // shape BECAUSE inference is dangerous here: "starts with a dot, no second
+    // dot" silently promotes .env, .npmrc and .netrc to suffixes, so prod.env
+    // and scoped.npmrc start getting masked as a side effect of adding an
+    // unrelated entry. Widening a security rule by accident is as bad as
+    // narrowing one.
+    namespace fs = std::filesystem;
+    const auto root = fs::temp_directory_path() /
+        ("agentty_sfxtest_" + std::to_string(
+            std::chrono::steady_clock::now().time_since_epoch().count()));
+    fs::create_directories(root);
+
+    auto touch = [](const fs::path& p) { std::ofstream{p} << "x"; };
+    touch(root / "prod.env");       // NOT .env -- must stay readable
+    touch(root / "scoped.npmrc");   // NOT .npmrc -- must stay readable
+    touch(root / "key.pem");        // IS a *.pem -- must be masked
+
+    sandbox_cfg::Config cfg;
+    cfg.mask_scan_depth = 1;
+    const auto masked = sandbox_cfg::mask_paths(cfg, root.string(), {});
+    auto has = [&](std::string_view leaf) {
+        return std::any_of(masked.begin(), masked.end(), [&](const auto& m) {
+            return std::string_view{m}.ends_with(leaf);
+        });
+    };
+
+    CHECK(has("key.pem"));
+    CHECK_FALSE(has("prod.env"));
+    CHECK_FALSE(has("scoped.npmrc"));
+
+    std::error_code ec;
+    fs::remove_all(root, ec);
 }
 
 TEST_CASE("sandbox: both implementations know the same backends") {

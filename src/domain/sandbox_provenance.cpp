@@ -135,14 +135,29 @@ constexpr std::string_view kNeverWalk[] = {
 
 // Does this basename name a credential file?
 //
-// `.pem` is a SUFFIX rule rather than a name, and it is the reason the walk
-// had to exist at all: a suffix cannot be turned into a path without looking
-// at what is actually on disk.
+// Two kinds of rule, told apart by an explicit marker:
+//
+//   SUFFIX  `*.pem`, `*.tfvars` — matches any file ENDING in the extension.
+//           These are why the walk had to exist at all: a suffix cannot be
+//           turned into a path without looking at what is actually on disk.
+//   NAME    everything else matches the whole basename, exactly.
+//
+// The marker is explicit rather than inferred from shape. Inferring "starts
+// with a dot and has no second dot" looks tidy and is wrong: it silently
+// promotes `.env`, `.npmrc` and `.netrc` to suffixes, so `prod.env` and
+// `scoped.npmrc` start being masked too. Widening what a SECURITY rule covers
+// as a side effect of adding an unrelated entry is exactly the kind of
+// accident this list must not have -- a mask that appears from nowhere is as
+// confusing as one that goes missing, and nobody reviewing the list would see
+// it.
 [[nodiscard]] bool is_masked_name(std::string_view name) {
     for (const char* n : kAlwaysMaskedNames) {
-        const std::string_view rule{n};
-        if (rule == ".pem") {
-            if (name.size() > 4 && name.ends_with(".pem")) return true;
+        std::string_view rule{n};
+        if (rule.starts_with("*")) {
+            rule.remove_prefix(1);                 // "*.pem" -> ".pem"
+            // `>` not `>=`, so the rule never matches a file that IS the bare
+            // suffix: a file called ".pem" is not a key.
+            if (name.size() > rule.size() && name.ends_with(rule)) return true;
             continue;
         }
         if (name == rule) return true;

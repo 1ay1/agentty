@@ -67,7 +67,19 @@ cb::Posture base_posture() {
             p.masked.emplace_back(std::string{home} + m);
     }
     for (const char* n : agentty::sandbox_cfg::kAlwaysMaskedNames) {
-        if (n[0] != '.' || std::string_view{n} == ".pem") continue;
+        // Skip SUFFIX rules (`*.pem`, `*.tfvars`). A suffix is not a path and
+        // cannot be turned into one without knowing what is on disk -- the
+        // spawn path finds those by walking, which is the whole reason the
+        // walk exists. Keyed on the `*` marker rather than on a hardcoded
+        // ".pem", so adding a suffix to the list cannot silently plant a
+        // nonsense mask at `<workspace>/*.tfvars` here.
+        if (n[0] == '*') continue;
+        // Every NAME rule, not just dotfiles. The old `n[0] != '.'` filter was
+        // an artifact of a list that happened to be all dotfiles; it now
+        // silently drops `credentials.json` and `service-account.json`, so
+        // this harness would mirror a posture weaker than the one the spawn
+        // path builds -- and a live check that measures the wrong posture is
+        // the failure mode the comment above already warns about.
         p.masked.emplace_back(std::string{kWorkspace} + "/" + n);
     }
     return p;
