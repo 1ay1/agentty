@@ -190,7 +190,7 @@ partial boundary.
    comparison retired the old argument. agentty's bwrap path emits no
    `--seccomp`, no cgroup limits and no landlock, so bwrap is strictly weaker
    on syscall.filter, all three resource caps, filesystem.exec and brokering,
-   and wins nothing. See §18.
+   and wins nothing. See §20.
 
 ### Toolchain paths
 
@@ -1108,7 +1108,7 @@ change broke what.
   whatever the user adds. A secret in `config.local.yaml` is invisible to it.
 - **The bwrap/claybin asymmetry in §6** is inherent, not a bug list. bwrap
   cannot express seccomp or cgroups; the honesty rule is the mitigation.
-- **The handoff row enforced nothing** until §14. It is wired now (all four
+- **The handoff row enforced nothing** until §16. It is wired now (all four
   authoring tools, `ErrorKind::Denied`, a recorded feed), which leaves the
   shape table itself as the bound: a trusted path whose shape is not in
   `kRules` is not caught. That is the same trade as the mask name list.
@@ -1132,7 +1132,7 @@ change broke what.
 
 ---
 
-## 14. The trust-handoff gate, and why it is not a wall
+## 16. The trust-handoff gate, and why it is not a wall
 
 The `handoff` row shipped before its enforcement did. For a while the pane
 offered refuse/warn/allow, persistence round-tripped the value, and
@@ -1201,7 +1201,7 @@ path, this one means the call was well-formed and the answer is still no.
 
 ---
 
-## 15. Per-row honesty
+## 17. Per-row honesty
 
 The wall report was correct and **unread**. Twelve capabilities folded into one
 footer line is a paragraph, and a paragraph next to a form is what the eye
@@ -1247,7 +1247,7 @@ breaking it).
 
 ---
 
-## 16. Postures: 28 correct rows was still the wrong question
+## 18. Postures: 28 correct rows was still the wrong question
 
 Every row in the pane is real, enforced, and individually justified. The pane
 still failed at the thing a settings screen is for, because **nobody opens it
@@ -1322,7 +1322,7 @@ showing the old policy under a footer describing the new one.
   would make the presets hostile — you would lose work by exploring.
 - **The handoff policy, in `permissive`.** A loose sandbox is a choice; letting
   the agent author your git hooks as a side effect of that choice is not one
-  anybody made. Those are different questions (§14), so `permissive` still
+  anybody made. Those are different questions (§16), so `permissive` still
   refuses handoffs and still masks secrets — both cost nothing in
   compatibility, which is the whole reason `permissive` exists instead of
   people reaching for `--sandbox off`.
@@ -1339,7 +1339,7 @@ choice.
 
 ---
 
-## 17. The pane told the exact lie it was built to prevent
+## 19. The pane told the exact lie it was built to prevent
 
 Reported from a screenshot: moving the Backend row from `bwrap` to `claybin`
 repainted the header to
@@ -1422,7 +1422,7 @@ tense.
 
 ---
 
-## 18. claybin is the default now, and bwrap is not deleted
+## 20. claybin is the default now, and bwrap is not deleted
 
 The ask was "prove claybin is as secure as bwrap, then delete bwrap". The first
 half measured out stronger than the claim. The second half would have been a
@@ -1493,7 +1493,7 @@ rather than falling through.
 
 ---
 
-## 19. "applies on restart" was a promise with nothing behind it
+## 21. "applies on restart" was a promise with nothing behind it
 
 The footer said:
 
