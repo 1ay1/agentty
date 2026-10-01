@@ -126,7 +126,7 @@ form::Form build_appearance_form(const up::Prefs& p, bool tty) {
     }
 
     // ── Theme ───────────────────────────────────────────────────────
-    b.header("Theme");
+    b.header(std::string{i18n::t("appearance.theme")});
     {
         // A Pick, not a Choice: 57 schemes and growing, which is precisely
         // the case form.hpp says belongs in a searchable picker rather than
@@ -144,16 +144,16 @@ form::Form build_appearance_form(const up::Prefs& p, bool tty) {
         // The reason belongs in `origin`, which is the field for "where this
         // value came from / why it is what it is", and which every other row
         // already uses for exactly that.
-        b.pick(std::string{kApTheme}, "Scheme",
+        b.pick(std::string{kApTheme}, std::string{i18n::t("appearance.scheme")},
                p.theme.empty() ? "native" : p.theme,
-               "native keeps your terminal's own colors \xc2\xb7 Enter to browse");
+               std::string{i18n::t("appearance.help.scheme")});
         const std::string_view why = up::theme_override_reason(p, r);
         if (!why.empty())          b.origin(std::string{why});
         else if (p.theme.empty())  b.origin("your terminal");
     }
 
     // ── Color ───────────────────────────────────────────────────────
-    b.header("Color");
+    b.header(std::string{i18n::t("appearance.color")});
     {
         static constexpr std::array kTiers = {
             up::ColorTier::Auto, up::ColorTier::TrueColor,
@@ -203,7 +203,7 @@ form::Form build_appearance_form(const up::Prefs& p, bool tty) {
     }
 
     // ── Layout ──────────────────────────────────────────────────────
-    b.header("Layout");
+    b.header(std::string{i18n::t("appearance.layout")});
     {
         static constexpr std::array kDens = {
             up::Density::Compact, up::Density::Normal, up::Density::Roomy,
@@ -219,13 +219,13 @@ form::Form build_appearance_form(const up::Prefs& p, bool tty) {
     // A reading measure. 0 is a real value here — "no cap" — so it is a
     // Number rather than a Choice: the useful settings are a continuum
     // (72, 80, 100), not an enum anyone could name.
-    b.number(std::string{kApProseWidth}, "Prose width", p.prose_width, 0, 200,
-             "wrap assistant text at N columns \xc2\xb7 0 = the full width");
-    b.toggle(std::string{kApCompact}, "Compact turns", p.compact_turns,
-             "drop the blank line between turns");
+    b.number(std::string{kApProseWidth}, std::string{i18n::t("appearance.prose_width")}, p.prose_width, 0, 200,
+             std::string{i18n::t("appearance.help.prose_width")});
+    b.toggle(std::string{kApCompact}, std::string{i18n::t("appearance.compact")}, p.compact_turns,
+             std::string{i18n::t("appearance.help.compact")});
 
     // ── Motion ──────────────────────────────────────────────────────
-    b.header("Motion");
+    b.header(std::string{i18n::t("appearance.motion")});
     {
         static constexpr std::array kMot = {
             up::Motion::Full, up::Motion::Reduced, up::Motion::Off,
@@ -250,9 +250,9 @@ form::Form build_appearance_form(const up::Prefs& p, bool tty) {
     }
 
     // ── Content ─────────────────────────────────────────────────────
-    b.header("Content");
-    b.toggle(std::string{kApSyntax}, "Syntax highlighting", p.syntax,
-             "colour code fences by language");
+    b.header(std::string{i18n::t("appearance.content")});
+    b.toggle(std::string{kApSyntax}, std::string{i18n::t("appearance.syntax")}, p.syntax,
+             std::string{i18n::t("appearance.help.syntax")});
     {
         static constexpr std::array kTool = {
             up::ToolOutput::Collapsed, up::ToolOutput::Preview, up::ToolOutput::Full,

@@ -145,6 +145,69 @@ if(_model_facing)
     set(_fail 1)
 endif()
 
+# ── GATE 4: no translation blows its width budget ────────────────────────
+#
+# THE FAILURE THIS CATCHES, and it is not the one you expect. An over-long
+# label does NOT break the frame -- maya truncates in display columns, which
+# a render test confirmed by refusing to fail on a deliberately 71-column
+# label at width 60. The frame held; the LABEL was silently cut to "Auch
+# lesbar aber mit einem absichtli".
+#
+# So the render gate cannot see this class of bug at all, and a width budget
+# is the only thing that can. `width_hint` on each English entry is the
+# column count the layout was designed around; a translation materially past
+# it is one that will be cut on a narrow terminal.
+#
+# The allowance is generous (1.6x, rounded up) because German legitimately
+# runs 1.35-1.61x and we are not going to make translators write worse German
+# to fit an English-shaped box. What it catches is the 2.5x+ case -- a
+# translator rendering a label as a sentence -- which is a translation bug,
+# not a layout one.
+#
+# Counted in CODEPOINTS here rather than columns: CMake cannot measure
+# display width, and for the Latin-script languages this gate applies to the
+# two are the same. CJK is EXEMPT for exactly that reason -- a Chinese label
+# is half the codepoints and the same columns, so a codepoint budget would
+# fire on every correct translation. Their widths are checked by the render
+# test instead, which can measure properly.
+file(GLOB _catalogs "${ROOT}/src/i18n/catalog_*.hpp")
+foreach(_cf IN LISTS _catalogs)
+    get_filename_component(_cname "${_cf}" NAME_WE)
+    string(REPLACE "catalog_" "" _lang "${_cname}")
+    if(_lang MATCHES "^(zh|ja|ko)")
+        continue()
+    endif()
+    file(READ "${_cf}" _ctext)
+
+    foreach(_id IN LISTS _catalog_ids)
+        # The English budget for this id.
+        string(REGEX MATCH "\"${_id}\"[^}]*\"width_hint\"[ \t]*:[ \t]*([0-9]+)"
+               _hm "${_startup_text}")
+        if(NOT CMAKE_MATCH_1)
+            continue()
+        endif()
+        set(_budget "${CMAKE_MATCH_1}")
+        math(EXPR _max "(${_budget} * 16 + 9) / 10")
+
+        string(REGEX MATCH "\"${_id}\"[ \t]*:[ \t]*{[ \t]*\"text\"[ \t]*:[ \t]*\"([^\"]*)\""
+               _tm "${_ctext}")
+        if(NOT CMAKE_MATCH_1)
+            continue()
+        endif()
+        string(LENGTH "${CMAKE_MATCH_1}" _len)
+        if(_len GREATER _max)
+            message("")
+            message("i18n: ${_lang}/${_id} is ${_len} chars against a budget of "
+                    "${_budget} (max ${_max})")
+            message("    ${CMAKE_MATCH_1}")
+            message("  It will be TRUNCATED on a narrow terminal -- the frame")
+            message("  holds, the label is what gets cut. Shorten it, or raise")
+            message("  width_hint in src/i18n/startup.cpp if the English grew.")
+            set(_fail 1)
+        endif()
+    endforeach()
+endforeach()
+
 if(_fail)
     message(FATAL_ERROR "i18n lint failed")
 endif()

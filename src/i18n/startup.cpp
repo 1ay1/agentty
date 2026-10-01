@@ -6,6 +6,8 @@
 
 #include "agentty/i18n/startup.hpp"
 
+#include "catalog_de.hpp"
+
 #include <cstdlib>
 
 namespace agentty::i18n {
@@ -36,6 +38,21 @@ constexpr std::string_view kEnglish = R"JSON({
   "lang.auto":           { "text": "Auto (follow system)", "width_hint": 20 },
   "lang.incomplete":     { "text": "{pct}% translated",    "width_hint": 16 },
 
+  "appearance.theme":        { "text": "Theme",               "width_hint": 5 },
+  "appearance.scheme":       { "text": "Scheme",              "width_hint": 6 },
+  "appearance.color":        { "text": "Color",               "width_hint": 5 },
+  "appearance.layout":       { "text": "Layout",              "width_hint": 6 },
+  "appearance.prose_width":  { "text": "Prose width",         "width_hint": 11 },
+  "appearance.compact":      { "text": "Compact turns",       "width_hint": 13 },
+  "appearance.motion":       { "text": "Motion",              "width_hint": 6 },
+  "appearance.content":      { "text": "Content",             "width_hint": 7 },
+  "appearance.syntax":       { "text": "Syntax highlighting", "width_hint": 19 },
+
+  "appearance.help.scheme":      { "text": "native keeps your terminal's own colors · Enter to browse", "width_hint": 56 },
+  "appearance.help.prose_width": { "text": "wrap assistant text at N columns · 0 = the full width",    "width_hint": 53 },
+  "appearance.help.compact":     { "text": "drop the blank line between turns",   "width_hint": 33 },
+  "appearance.help.syntax":      { "text": "colour code fences by language",      "width_hint": 30 },
+
   "sandbox.read_paths":  { "text": "Also readable", "width_hint": 13 },
   "sandbox.write_paths": { "text": "Also writable", "width_hint": 13 },
   "sandbox.deny_paths":  { "text": "Masked",        "width_hint": 6 },
@@ -54,8 +71,15 @@ constexpr std::string_view kEnglish = R"JSON({
 
   "common.on":     { "text": "on",     "width_hint": 2 },
   "common.off":    { "text": "off",    "width_hint": 3 },
-  "common.custom": { "text": "Custom", "width_hint": 6 }
+  "common.custom": { "text": "Custom", "width_hint": 17 }
 })JSON";
+// common.custom's width_hint is 17, not the English string's 6, and that is
+// the general rule rather than an exception: a width_hint is the column
+// count the LAYOUT must absorb, not the length of the English. German needs
+// 17 for "Benutzerdefiniert", which has no shorter form that is still the
+// word. The lint caught it at 2.83x over budget -- and the English hint was
+// what was wrong, because a one-word English label is no evidence that every
+// language has one.
 
 // Read a locale from the environment, in POSIX precedence order.
 //
@@ -118,6 +142,20 @@ bool init(std::string_view cli_lang, std::string_view saved) {
     // against it -- so a missing en catalog would make every other language
     // report 0% and fall back to raw ids.
     if (!install_catalog(Lang::en, kEnglish)) return false;
+
+    // Every OTHER catalog, unconditionally.
+    //
+    // Loading all of them rather than just the active one costs a parse per
+    // language at startup (microseconds -- these are a few dozen short
+    // strings) and buys two things worth more than that: the picker can show
+    // real completeness percentages for languages you are not using, and
+    // switching language at runtime is a pointer store rather than a parse.
+    //
+    // Failures are IGNORED on purpose. A malformed translation must not stop
+    // agentty from starting; install_catalog leaves the slot empty,
+    // set_active refuses it, and the picker shows it at 0%. That is visible
+    // and recoverable, which a startup abort is not.
+    (void)install_catalog(Lang::de, catalogs::kGerman);
 
     const Lang want = resolve_language(cli_lang, saved);
     if (want == Lang::en) return set_active(Lang::en);

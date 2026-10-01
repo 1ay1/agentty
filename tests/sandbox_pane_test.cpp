@@ -28,6 +28,7 @@
 #include "agentty/runtime/panel/settings/items.hpp"
 #include "agentty/runtime/view/form_panel.hpp"   // form_config — the render checks
 #include "agentty/i18n/i18n.hpp"                   // the translated-pane check
+#include "agentty/i18n/startup.hpp"                // the shipped-catalog check
 #include "agentty/tool/util/sandbox.hpp"
 
 #include <cstdlib>
@@ -2420,6 +2421,73 @@ TEST_CASE("sandbox render: the pane paints the ACTIVE language") {
     // pane showing "sandbox.ports" is worse than one showing English.
     CHECK(de_out.find("Allowed ports") != std::string::npos);
     CHECK(de_out.find("sandbox.ports") == std::string::npos);
+
+    REQUIRE(agentty::i18n::set_active(agentty::i18n::Lang::en));
+}
+
+// ── The SHIPPED German catalog, in the real panes ────────────────────────
+//
+// The translated-pane test above uses a four-string fixture, which proves
+// the pane calls t() but says nothing about whether a real translation
+// FITS. This loads the shipped German catalog -- 100% complete, worst string
+// +32 columns over its English source -- and paints both panes at every
+// width agentty supports.
+//
+// This is the gate docs/design/i18n.md promised before any translation
+// landed: "it must fail on a deliberately over-long string, or it is
+// decoration". It measures display COLUMNS via string_width rather than
+// counting bytes, because German is Latin-1-heavy (ü, ö, ß) and a byte count
+// over-measures it exactly as badly as it under-measures Chinese.
+TEST_CASE("sandbox render: the shipped German catalog fits every width") {
+    REQUIRE(agentty::i18n::init("de", ""));
+    REQUIRE(agentty::i18n::completeness(agentty::i18n::Lang::de) > 0.999);
+
+    const auto widest_cols = [](const std::string& out) {
+        std::size_t start = 0, worst = 0;
+        while (start <= out.size()) {
+            const auto nl = out.find('\n', start);
+            const auto end = (nl == std::string::npos) ? out.size() : nl;
+            worst = std::max<std::size_t>(
+                worst, static_cast<std::size_t>(maya::string_width(
+                           std::string_view{out}.substr(start, end - start))));
+            if (nl == std::string::npos) break;
+            start = nl + 1;
+        }
+        return worst;
+    };
+
+    sandbox_cfg::Config cfg;
+    cfg.configured = true;
+    cfg.backend = sandbox_cfg::LinuxBackend::Claybin;
+    // The worst case the pane can carry: a long path AND an inline error on
+    // the same row, under the longest translation.
+    cfg.read_paths = {"/ein/ziemlich/langer/pfad/zu/einem/abhaengigkeitsbaum"};
+    cfg.net_mode = sandbox_cfg::NetMode::Ports;
+    cfg.allow_ports.clear();
+    install(cfg);
+
+    auto form = pn::build_sandbox_form(cfg, facts_for(cfg));
+    pn::annotate_sandbox_form(form, pn::preview_sandbox(cfg), cfg,
+                              pn::EngineStatus::InForce);
+
+    for (int width : {60, 80, 100, 120, 200}) {
+        const auto out = maya::render_to_string(
+            maya::Panel{agentty::ui::form_config(form, maya::Color::blue(),
+                                                 nullptr, 0, width)}.build(),
+            width);
+        const auto worst = widest_cols(out);
+        INFO("German sandbox pane at width " << width
+             << ": widest line " << worst << " columns");
+        CHECK(worst <= static_cast<std::size_t>(width));
+    }
+
+    // And the German really is on screen -- a pane that silently fell back
+    // to English would pass every width check above.
+    const auto out = maya::render_to_string(
+        maya::Panel{agentty::ui::form_config(form, maya::Color::blue(),
+                                             nullptr, 0, 120)}.build(), 120);
+    CHECK(out.find("Auch lesbar") != std::string::npos);
+    CHECK(out.find("Maskiert") != std::string::npos);
 
     REQUIRE(agentty::i18n::set_active(agentty::i18n::Lang::en));
 }

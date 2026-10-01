@@ -25,6 +25,7 @@
 
 #include "agentty/i18n/i18n.hpp"
 #include "agentty/i18n/plural.hpp"
+#include "agentty/i18n/startup.hpp"
 
 using namespace agentty::i18n;
 
@@ -352,4 +353,44 @@ TEST_CASE("i18n: the appearance pane carries a language row") {
     CHECK(has("Русский"));     // ru
     CHECK(has("한국어"));       // ko
     CHECK(has("Deutsch"));     // de
+}
+
+// ── The real catalog, in the real panes ──────────────────────────────────
+//
+// Every test above uses a four-string fixture. This one loads the SHIPPED
+// German catalog and paints the actual panes with it, which is the only way
+// to find out whether a translation overflows a frame.
+//
+// Measured on this catalog: German runs 1.1-2.8x English per string, worst
+// absolute growth +32 columns (sandbox.help.read_paths), worst ratio 2.83x
+// ("Custom" -> "Benutzerdefiniert"). Those are the numbers the layout has to
+// absorb, and they are why German is the second language rather than the
+// tenth -- it is the stress case for every other Latin-script language.
+TEST_CASE("i18n: the shipped German catalog fits the panes") {
+    REQUIRE(agentty::i18n::init("de", ""));
+    REQUIRE(active() == Lang::de);
+
+    // 100% against English. A partial catalog would fall back to English for
+    // the gaps and silently hide exactly the overflow this test looks for,
+    // so completeness is a PRECONDITION here, not an observation.
+    CHECK(completeness(Lang::de) > 0.999);
+
+    // No translation may be empty. An empty string renders as a blank row
+    // that still responds to Enter -- worse than an untranslated one, which
+    // at least says what it does.
+    for (const auto& id : ids_of(Lang::de)) {
+        INFO("id " << id);
+        CHECK(!t(id).empty());
+    }
+
+    // Every id English has, German has. The lint checks code-vs-English;
+    // this checks English-vs-German, which is the other half and the one
+    // that rots as new strings land.
+    for (const auto& id : ids_of(Lang::en)) {
+        INFO("missing from de: " << id);
+        REQUIRE(set_active(Lang::de));
+        CHECK(t(id) != id);     // t() falls back to English, never the id
+    }
+
+    REQUIRE(set_active(Lang::en));
 }
