@@ -1,0 +1,5 @@
+# Renders the ♥ Sponsor button on the repo, and on every repo I own that
+# has no FUNDING.yml of its own (GitHub falls back to the owner's .github).
+#
+# Must live on the DEFAULT branch to take effect.
+github: [1ay1]
