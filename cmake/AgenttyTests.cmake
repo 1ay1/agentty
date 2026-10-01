@@ -224,9 +224,18 @@ add_executable(sandbox_audit EXCLUDE_FROM_ALL
     ${CMAKE_SOURCE_DIR}/tests/sandbox_config_race_stubs.cpp
     ${CMAKE_SOURCE_DIR}/src/tool/util/sandbox_claybin.cpp
     ${CMAKE_SOURCE_DIR}/src/tool/util/sandbox_broker.cpp
-    ${CMAKE_SOURCE_DIR}/src/domain/sandbox_provenance.cpp)
+    ${CMAKE_SOURCE_DIR}/src/domain/sandbox_provenance.cpp
+    # logx: sandbox_claybin.cpp logs the broker's decisions, so the audit
+    # needs the real logger rather than a stub -- a stubbed one would compile
+    # and then not prove the audit trail exists.
+    ${CMAKE_SOURCE_DIR}/src/util/logx.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/dbglog.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/home_dir.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/user_root.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/teardown.cpp)
 target_include_directories(sandbox_audit PRIVATE ${CMAKE_SOURCE_DIR}/include)
-target_link_libraries(sandbox_audit PRIVATE claybin)
+target_link_libraries(sandbox_audit PRIVATE claybin nlohmann_json::nlohmann_json
+    Threads::Threads)
 if(TARGET maya::app)
     target_include_directories(sandbox_audit SYSTEM PRIVATE
         $<TARGET_PROPERTY:maya::app,INTERFACE_INCLUDE_DIRECTORIES>)
