@@ -63,17 +63,41 @@ int main(int argc, char** argv) {
         ::setenv("AGENTTY_UNDER_TEST", "1", 1);
 #endif
     }
-    // Sweep any sandbox an EARLIER run abandoned (a crash or a SIGKILL skips
-    // the cleanup below, and those are exactly the runs worth investigating
-    // — so this only removes directories older than a day, never a sibling
-    // ctest worker's live one).
+    // Sweep anything an EARLIER run abandoned (a crash or a SIGKILL skips the
+    // cleanup below, and those are exactly the runs worth investigating — so
+    // this only removes directories older than a day, never a sibling ctest
+    // worker's live one).
+    //
+    // Matches the whole `agentty_*` namespace, not just this binary's own
+    // sandbox. That breadth is the point: individual tests mint their own temp
+    // dirs (agentty_smarttune_, agentty_acctsw_, agentty_mcp_, … 47 distinct
+    // prefixes at last count) and most of them never clean up. Fixing each
+    // call site is whack-a-mole and the next test to be written will leak
+    // again; sweeping the namespace is one rule that covers all of them,
+    // including the ones nobody has written yet.
+    //
+    // Measured before this existed: 3537 stale directories, on top of the 4956
+    // the standalone binary leaked — enough to fill a 16 GB tmpfs and fail an
+    // unrelated build with "No space left on device".
     {
         std::error_code ec;
         const auto now = fs::file_time_type::clock::now();
         for (fs::directory_iterator it(fs::temp_directory_path(), ec), end;
              !ec && it != end; it.increment(ec)) {
             const auto name = it->path().filename().string();
-            if (!name.starts_with("agentty_tests_home_")) continue;
+            // Only directories, and only ours. A FILE named agentty-something
+            // is not the harness's to delete, and the prefix is specific
+            // enough that nothing else on a dev box collides.
+            //
+            // Both spellings. Tests use `agentty_` and `agentty-`
+            // interchangeably (agentty-subagent-test-, agentty-test-), and a
+            // sweep that knows only one silently leaves the other growing --
+            // which is exactly how 183 agentty-subagent dirs survived the
+            // first version of this.
+            if (!name.starts_with("agentty_") &&
+                !name.starts_with("agentty-")) continue;
+            std::error_code dec;
+            if (!fs::is_directory(it->path(), dec) || dec) continue;
             std::error_code sec;
             const auto mt = fs::last_write_time(it->path(), sec);
             if (sec || now - mt < std::chrono::hours(24)) continue;

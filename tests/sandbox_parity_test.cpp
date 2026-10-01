@@ -352,9 +352,10 @@ TEST_CASE("sandbox masks: the credential name list covers what repos hold") {
     // Driven through mask_paths() against a real tree, so this tests the
     // matcher AND the walk rather than just the array.
     namespace fs = std::filesystem;
-    const auto root = fs::temp_directory_path() /
-        ("agentty_masktest_" + std::to_string(
-            std::chrono::steady_clock::now().time_since_epoch().count()));
+    // Self-deleting: the whole reason this helper exists is that hand-rolled
+    // temp dirs are what leaked 3537 directories onto this box.
+    agtest::TempDir tmp{"masktest"};
+    const auto root = tmp.path();
     fs::create_directories(root / "services" / "api");
 
     auto touch = [](const fs::path& p) { std::ofstream{p} << "x"; };
@@ -397,9 +398,6 @@ TEST_CASE("sandbox masks: the credential name list covers what repos hold") {
     // break every build while looking like it was working.
     CHECK_FALSE(has("main.cpp"));
     CHECK_FALSE(has("env.example"));
-
-    std::error_code ec;
-    fs::remove_all(root, ec);
 }
 
 TEST_CASE("sandbox masks: a suffix rule needs its marker to be a suffix") {
@@ -411,10 +409,8 @@ TEST_CASE("sandbox masks: a suffix rule needs its marker to be a suffix") {
     // unrelated entry. Widening a security rule by accident is as bad as
     // narrowing one.
     namespace fs = std::filesystem;
-    const auto root = fs::temp_directory_path() /
-        ("agentty_sfxtest_" + std::to_string(
-            std::chrono::steady_clock::now().time_since_epoch().count()));
-    fs::create_directories(root);
+    agtest::TempDir tmp{"sfxtest"};
+    const auto root = tmp.path();
 
     auto touch = [](const fs::path& p) { std::ofstream{p} << "x"; };
     touch(root / "prod.env");       // NOT .env -- must stay readable
@@ -433,9 +429,6 @@ TEST_CASE("sandbox masks: a suffix rule needs its marker to be a suffix") {
     CHECK(has("key.pem"));
     CHECK_FALSE(has("prod.env"));
     CHECK_FALSE(has("scoped.npmrc"));
-
-    std::error_code ec;
-    fs::remove_all(root, ec);
 }
 
 TEST_CASE("sandbox: both implementations know the same backends") {

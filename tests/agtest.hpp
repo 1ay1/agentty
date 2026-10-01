@@ -106,4 +106,57 @@ private:
 } // namespace agtest
 using agtest::ScopedEnvSandbox;
 
+// A temp directory that deletes itself.
+//
+// Tests mint temp dirs constantly and almost none of them clean up: 47
+// distinct `agentty_*_` prefixes at last count, 3537 stale directories on this
+// box, enough to fill a 16 GB tmpfs and fail an unrelated build with "No space
+// left on device". The harness now sweeps the namespace on startup, but that
+// is a safety net with a 24-hour lag -- it keeps the box healthy, it does not
+// keep a single run clean.
+//
+// This is the fix at the source. `agtest::TempDir d{"mytest"}` gives a unique
+// directory under the shared prefix and removes it at scope exit, on every
+// path including an exception from a failing CHECK.
+//
+// Use it instead of hand-rolling temp_directory_path() / (prefix + stamp):
+//   - unique by construction (clock + a counter, so same-nanosecond calls in
+//     one binary cannot collide the way a bare timestamp can)
+//   - inside the `agentty_` namespace, so the sweep catches it even if the
+//     process is SIGKILLed before the destructor runs
+//   - impossible to forget, which the 47 prefixes prove is the actual problem
+#include <atomic>
+#include <chrono>
+#include <string>
+namespace agtest {
+class TempDir {
+public:
+    explicit TempDir(std::string_view label) {
+        static std::atomic<unsigned> seq{0};
+        const auto stamp = std::chrono::steady_clock::now()
+                               .time_since_epoch().count();
+        path_ = std::filesystem::temp_directory_path() /
+                ("agentty_" + std::string{label} + "_" +
+                 std::to_string(stamp) + "_" +
+                 std::to_string(seq.fetch_add(1)));
+        std::error_code ec;
+        std::filesystem::create_directories(path_, ec);
+    }
+    ~TempDir() {
+        std::error_code ec;
+        std::filesystem::remove_all(path_, ec);   // best effort
+    }
+    TempDir(const TempDir&) = delete;
+    TempDir& operator=(const TempDir&) = delete;
+
+    [[nodiscard]] const std::filesystem::path& path() const noexcept { return path_; }
+    [[nodiscard]] std::string string() const { return path_.string(); }
+    operator const std::filesystem::path&() const noexcept { return path_; }
+
+private:
+    std::filesystem::path path_;
+};
+} // namespace agtest
+using agtest::TempDir;
+
 #endif // AGENTTY_TESTS_AGTEST_HPP

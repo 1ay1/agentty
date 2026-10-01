@@ -62,14 +62,19 @@ int main(int argc, char** argv) {
     // cleanup at exit, and those runs are exactly the ones worth
     // investigating) -- so only directories older than a day go, never a
     // sibling ctest worker's live one. Same rule and same reasoning as
-    // test_main.cpp.
+    // test_main.cpp, including the breadth: the whole `agentty_*` namespace
+    // rather than this binary's own prefix, because individual tests mint
+    // their own temp dirs and most never clean up. One rule beats 47.
     {
         std::error_code ec;
         const auto now = fs::file_time_type::clock::now();
         for (fs::directory_iterator it(fs::temp_directory_path(), ec), end;
              !ec && it != end; it.increment(ec)) {
             const auto name = it->path().filename().string();
-            if (!name.starts_with("agentty_stests_home_")) continue;
+            if (!name.starts_with("agentty_") &&
+                !name.starts_with("agentty-")) continue;
+            std::error_code dec;
+            if (!fs::is_directory(it->path(), dec) || dec) continue;
             std::error_code sec;
             const auto mt = fs::last_write_time(it->path(), sec);
             if (sec || now - mt < std::chrono::hours(24)) continue;
