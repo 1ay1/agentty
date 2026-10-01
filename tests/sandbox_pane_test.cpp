@@ -1360,6 +1360,71 @@ TEST_CASE("sandbox pane: a toggle says what its CURRENT state does") {
     CHECK(help_off.find("off:") != std::string::npos);
 }
 
+TEST_CASE("sandbox list: backspace works on the FIRST press after opening") {
+    // Reported as "backspace on the selected row doesn't work first".
+    //
+    // Two bugs stacked. The router did not translate Backspace while browsing
+    // at all, so the key was lost before apply() ever saw it; and even once it
+    // arrived, apply() requires an edit session and the editor opens in
+    // Browsing. Typing a character auto-enters and Backspace did not, so the
+    // two ways of starting to edit the same row disagreed.
+    sandbox_cfg::Config cfg;
+    cfg.configured = true;
+    cfg.backend = sandbox_cfg::LinuxBackend::Claybin;
+    cfg.read_paths = {"abc"};
+    install(cfg);
+
+    Model m = opened();
+    auto [m1, _] = app::update(std::move(m),
+                               Msg{SandboxEditList{std::string{pn::kSbReadPaths}}});
+    m = std::move(m1);
+
+    // Exactly ONE press, straight after opening, with no edit started.
+    auto [m2, __] = app::update(
+        std::move(m),
+        Msg{SandboxListKey{form::keys::Action{form::keys::Intent::Backspace, 0}}});
+    m = std::move(m2);
+
+    const auto* ed = m.ui.panel.get<pn::SandboxList>();
+    REQUIRE(ed != nullptr);
+    const std::vector<std::string> want{"ab"};
+    CHECK(pn::read_sandbox_list(ed->pane) == want);
+    // And it left a live session, so the NEXT press continues rather than
+    // needing its own wake-up.
+    CHECK(ed->pane.form.editing());
+}
+
+TEST_CASE("sandbox list: backspace on an empty row is harmless") {
+    // The form layer's reason for not auto-entering on delete keys is that a
+    // stray Backspace must never destroy bytes the user cannot see a caret in.
+    // That still has to hold here: an empty row has nothing to delete, so the
+    // press must not start a session or disturb anything.
+    sandbox_cfg::Config cfg;
+    cfg.configured = true;
+    cfg.backend = sandbox_cfg::LinuxBackend::Claybin;
+    cfg.read_paths.clear();
+    install(cfg);
+
+    Model m = opened();
+    auto [m1, _] = app::update(std::move(m),
+                               Msg{SandboxEditList{std::string{pn::kSbReadPaths}}});
+    m = std::move(m1);
+
+    const std::size_t rows =
+        m.ui.panel.get<pn::SandboxList>()->pane.form.fields.size();
+
+    auto [m2, __] = app::update(
+        std::move(m),
+        Msg{SandboxListKey{form::keys::Action{form::keys::Intent::Backspace, 0}}});
+    m = std::move(m2);
+
+    const auto* ed = m.ui.panel.get<pn::SandboxList>();
+    REQUIRE(ed != nullptr);
+    CHECK_FALSE(ed->pane.form.editing());
+    CHECK(ed->pane.form.fields.size() == rows);
+    CHECK(pn::read_sandbox_list(ed->pane).empty());
+}
+
 // ── "applies on restart" has to be a checked claim ─────────────────────
 //
 // The footer promised "saved · applies on restart" with NOTHING checking that

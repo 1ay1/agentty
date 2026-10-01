@@ -508,6 +508,60 @@ Cmd sandbox_update(Model& m, msg::SandboxMsg sm) {
                 return Cmd::none();
             }
 
+            // Arrows move the SUGGESTIONS while they are open.
+            //
+            // Without this the highlight rendered by the footer could never
+            // move, so Tab only ever accepted the first match and the "\xe2\x96\xb8"
+            // marker was decoration -- a list you can see, cannot steer, and
+            // whose other entries exist only to taunt you.
+            //
+            // Up/Down rather than a second key, because the suggestions are a
+            // vertical list and that is what moving in one means. The row
+            // cursor is not needed while completing: you are inside a field,
+            // and leaving it is what Esc is for.
+            if (ed->pane.completing &&
+                (e.action.intent == form::keys::Intent::MovePrev ||
+                 e.action.intent == form::keys::Intent::MoveNext)) {
+                ed->pane.complete.move_wrapping(
+                    e.action.intent == form::keys::Intent::MoveNext ? +1 : -1);
+                return Cmd::none();
+            }
+
+            // Backspace on a browsing row ENTERS the edit session.
+            //
+            // Reported as "backspace on the selected row doesn't work first":
+            // the editor opens in Browsing, so the first press hit apply()'s
+            // editing guard and vanished. Typing a character auto-enters (the
+            // form layer's type-to-edit) and Backspace did not, so the two
+            // ways of starting to edit the same row disagreed.
+            //
+            // The form layer's reason for NOT auto-entering on delete keys is
+            // sound where it applies -- a stray Backspace must never destroy
+            // bytes the user cannot see a caret in -- but it does not apply
+            // here: every row in this pane IS an editable value, there is
+            // nothing else Backspace could mean, and the caret is on the
+            // focused row already. So it edits, and a row with nothing in it
+            // is simply left alone.
+            if (e.action.intent == form::keys::Intent::Backspace &&
+                !ed->pane.form.editing()) {
+                if (auto* row = ed->pane.form.focused())
+                    if (auto* t = std::get_if<form::field::Text>(&row->value);
+                        t && !t->value.empty()) {
+                        ed->pane.form.focus = form::focus::Editing{};
+                        ed->pane.form.edit_dirty = false;
+                        // Caret to the END first: a browsing row has whatever
+                        // cursor it was built with, and deleting from position
+                        // 0 would silently do nothing on a non-empty value.
+                        t->cursor = t->value.size();
+                        // Then DO the delete. apply() already ran above and
+                        // dropped this key on its editing guard, so entering
+                        // the session without acting would make the first
+                        // press merely arm the second -- the same "doesn't
+                        // work first" with one less step.
+                        (void)form::keys::apply(ed->pane.form, e.action);
+                    }
+            }
+
             // Keep exactly ONE trailing blank row, and only ever ADD it.
             //
             // This used to rebuild the whole form whenever the entry count

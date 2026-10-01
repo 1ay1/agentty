@@ -92,6 +92,26 @@ std::optional<Action> translate(bool editing, bool choosing, const KeyEvent& ev)
         case SpecialKey::End:      return Action{Intent::MoveLast};
         case SpecialKey::PageUp:   return Action{Intent::MovePageUp};
         case SpecialKey::PageDown: return Action{Intent::MovePageDown};
+        // Backspace while BROWSING is still a Backspace.
+        //
+        // It used to fall through to None and be silently lost, which is why
+        // the first press after opening a list did nothing: the pane opens in
+        // Browsing, so the key never reached apply() at all and the user had
+        // to press it twice without ever learning why.
+        //
+        // Translating it does NOT make it destructive -- apply() still
+        // requires an edit session before touching bytes (see its Backspace
+        // arm, and the note there about never destroying value the user
+        // cannot see a caret in). What this buys is that the keystroke
+        // ARRIVES, so a pane can give it a meaning and the default stays a
+        // no-op rather than a hole in the router.
+        case SpecialKey::Backspace: return Action{Intent::Backspace};
+        // Delete has the same hole Backspace did, for the same reason, and is
+        // closed the same way: translate it so apply() (or the pane) can give
+        // it a meaning, rather than losing it in the router and leaving the
+        // user to wonder why one delete key reaches the field and the other
+        // does not.
+        case SpecialKey::Delete:    return Action{Intent::DeleteForward};
         default: break;
     }
     if (ch && ch->ctrl) {

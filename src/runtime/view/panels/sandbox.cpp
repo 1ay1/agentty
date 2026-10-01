@@ -264,21 +264,32 @@ maya::Element sandbox_list_panel(const Model& m) {
         // visible_entries() gives pointers into the snapshot for the top N
         // matches, already clamped -- the same call every other picker's view
         // makes, so the window arithmetic has one owner.
+        //
+        // It WINDOWS around the selection rather than always showing the top,
+        // which matters now that arrows move the highlight: a fixed top-3 would
+        // let the selection walk off the end and leave the footer looking
+        // frozen while Tab accepted something invisible.
         const auto hits = o->pane.complete.visible_entries(3);
         if (hits.empty()) {
             form.note = "no match in the workspace \xc2\xb7 the path is still "
                         "accepted (it may be outside, or not exist yet)";
         } else {
             const auto total = o->pane.complete.filtered().size();
+            const auto win = o->pane.complete.visible(3);
             const auto sel = o->pane.complete.index();
-            std::string line = "Tab completes \xc2\xb7 ";
+            std::string line = "\xe2\x86\x91\xe2\x86\x93 pick \xc2\xb7 Tab completes \xc2\xb7 ";
             for (std::size_t i = 0; i < hits.size(); ++i) {
                 if (i) line += "   ";
-                if (static_cast<int>(i) == sel) line += "\xe2\x96\xb8 ";
+                // Compare against the window's absolute position, not the
+                // loop index: the two only agree while the window is at the
+                // top, which is exactly the case that used to be the only one.
+                if (win.first + i == static_cast<std::size_t>(sel))
+                    line += "\xe2\x96\xb8 ";
                 line += *hits[i];
             }
             if (total > hits.size())
-                line += "   (+" + std::to_string(total - hits.size()) + " more)";
+                line += "   (" + std::to_string(sel + 1) + "/" +
+                        std::to_string(total) + ")";
             form.note = std::move(line);
         }
         form.note_replaces_grammar = true;
