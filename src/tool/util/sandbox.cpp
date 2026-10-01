@@ -531,6 +531,12 @@ constexpr const char* kHomeToolSubdirs[] = {
     p.wall_clock_secs = cfg.wall_clock_secs;
     p.cpu_secs = cfg.cpu_secs;
     p.fake_hostname = cfg.fake_hostname;
+    // Brokering is on whenever the filter is, because the runner can always
+    // poll the listener -- it already owns a poll loop for the output pipe.
+    // Gated on the filter rather than being a separate row: brokering IS the
+    // syscall filter deciding at runtime instead of up front, so a user who
+    // turned the filter off has already said they do not want either.
+    p.broker = cfg.syscall_mode != sandbox_cfg::SyscallMode::Off;
     return p;
 }
 #endif
@@ -568,6 +574,11 @@ constexpr const char* kHomeToolSubdirs[] = {
             }
             if (r.pidfd >= 0) ::close(r.pidfd);  // the runner reaps by pid
             out.pid = r.pid;
+            // Hand the syscall supervisor to the runner, which polls it beside
+            // the output pipe. It must be polled for the child's whole life: a
+            // brokered syscall blocks in the kernel until someone answers.
+            out.supervisor_fd = r.supervisor_fd;
+            out.service = std::move(r.service_broker);
             return out;
         };
         return Subprocess::run(std::move(opts));

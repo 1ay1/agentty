@@ -103,6 +103,34 @@ struct SubprocessOptions {
     struct SpawnedChild {
         int pid{-1};
         std::string error;
+
+        // A syscall supervisor, when the sandbox brokers calls.
+        //
+        // This exists because seccomp user-notification makes the CHILD's
+        // progress depend on the PARENT answering: the kernel blocks a
+        // brokered syscall until someone responds on the listener, so a
+        // supervisor that is not being polled is a hang, not a weaker wall.
+        // The supervise loop below already owns the child's lifetime and
+        // already polls, so this is where the listener has to live -- a second
+        // loop elsewhere would race this one for the same child.
+        //
+        // Two fields rather than a callback taking the fd, so the runner can
+        // put the descriptor in its own pollfd set and only call `service`
+        // when it is actually readable. A callback that blocked on recv would
+        // stall stdout draining and the idle watchdog.
+        //
+        //   supervisor_fd  readable exactly when a guest thread is blocked on
+        //                  a brokered syscall. -1 when nothing is brokered,
+        //                  which is the common case and costs nothing.
+        //   service        answer ONE pending notification. Returns false when
+        //                  the listener is finished (guest gone, fd closed),
+        //                  after which the runner stops polling it.
+        //
+        // The runner never interprets either one: what a decision means is the
+        // sandbox's business, and keeping that knowledge out of the subprocess
+        // layer is what stops this from becoming a second policy engine.
+        int supervisor_fd{-1};
+        std::function<bool()> service;
     };
     // (command, pipe_write_fd) -> child. `command` is the resolved shell string
     // or argv, already chosen by the variant above.

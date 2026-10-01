@@ -15,11 +15,13 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cerrno>
 #include <filesystem>
 #include <string>
 #include <string_view>
 #include <system_error>
 #include <fcntl.h>
+#include <poll.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -91,9 +93,40 @@ int run(const cb::Posture& p, const std::string& cmd, std::string& out) {
         ::close(fds[0]);
         return -1;
     }
-    char buf[4096];
-    ssize_t n;
-    while ((n = ::read(fds[0], buf, sizeof buf)) > 0) out.append(buf, static_cast<size_t>(n));
+    // Drain the pipe AND service the supervisor, in one poll.
+    //
+    // Both, in the same loop, for the reason the production runner does it:
+    // a brokered syscall blocks the guest in the kernel until someone answers,
+    // so reading the pipe first and the listener later deadlocks -- the child
+    // waits for a decision, we wait for output it cannot produce until it has
+    // one. This harness has to mirror that or the brokering cases below would
+    // hang instead of failing, and a hang reads as "the test is broken".
+    std::string chunk;
+    bool eof = false;
+    while (!eof) {
+        struct pollfd pfds[2];
+        pfds[0] = {fds[0], POLLIN, 0};
+        const bool brokering = sp.supervisor_fd >= 0 && sp.service_broker;
+        if (brokering) pfds[1] = {sp.supervisor_fd, POLLIN, 0};
+
+        // A bounded wait rather than -1: a bug that stops answering should
+        // surface as a failed assertion, not as a harness that never returns.
+        if (::poll(pfds, brokering ? 2 : 1, 10'000) <= 0) break;
+
+        if (brokering && (pfds[1].revents & (POLLIN | POLLHUP | POLLERR))) {
+            if (!sp.service_broker()) {
+                sp.supervisor_fd = -1;
+                sp.service_broker = nullptr;
+            }
+        }
+        if (pfds[0].revents & (POLLIN | POLLHUP | POLLERR)) {
+            char buf[4096];
+            const ssize_t n = ::read(fds[0], buf, sizeof buf);
+            if (n > 0) out.append(buf, static_cast<std::size_t>(n));
+            else if (n == 0) eof = true;
+            else if (errno != EINTR && errno != EAGAIN) eof = true;
+        }
+    }
     ::close(fds[0]);
 
     int status = 0;
@@ -390,6 +423,77 @@ int main() {
         // precise ceiling is host-dependent and pinning it would be flaky.
         expect(out.find("forked 20000") == std::string::npos,
                "the fork loop hit a limit");
+    }
+
+    // ── 9. syscall brokering decides instead of denying flatly ──────────
+    // The feature with the worst failure mode in this whole subsystem: a
+    // brokered syscall blocks the guest IN THE KERNEL until the supervisor
+    // answers, so a broker that is not polled is a hang rather than a weaker
+    // wall. Every case here would time out rather than fail if that regressed,
+    // which is why they run with a real child and a real listener.
+    std::printf("brokering: a self-ptrace is allowed\n");
+    {
+        auto p = base_posture();
+        p.broker = true;
+        std::string out;
+        // PTRACE_TRACEME: the child volunteers to be traced by its own parent.
+        // Grants no authority over anything else, and `strace prog` needs it.
+        // A flat deny breaks every debugger; the broker allows it from scalars.
+        int rc = run(p,
+            "python3 -c 'import ctypes,os\n"
+            "libc=ctypes.CDLL(None,use_errno=True)\n"
+            "ctypes.set_errno(0)\n"
+            "r=libc.ptrace(0,0,0,0)\n"           // 0 == PTRACE_TRACEME
+            "print(\"traceme\", r, ctypes.get_errno())' 2>&1", out);
+        std::printf("  exit=%d, child said: %s", rc, out.c_str());
+        // The decision is what matters, not the return value: TRACEME can fail
+        // for unrelated reasons (already traced). EPERM (1) is the broker
+        // denying; anything else means it got through to the kernel.
+        expect(out.find("errno=1") == std::string::npos &&
+               out.find(" 1)") == std::string::npos,
+               "TRACEME was not denied by the broker");
+    }
+
+    std::printf("brokering: attaching to pid 1 is denied\n");
+    {
+        auto p = base_posture();
+        p.broker = true;
+        std::string out;
+        // PTRACE_ATTACH to pid 1 -- the sandbox's own init inside a pid
+        // namespace, and a container-escape primitive rather than a debugging
+        // step. The target is a SCALAR, which is exactly why this is decidable
+        // soundly: no guest memory is read, so there is no TOCTOU window.
+        int rc = run(p,
+            "python3 -c 'import ctypes,os\n"
+            "libc=ctypes.CDLL(None,use_errno=True)\n"
+            "ctypes.set_errno(0)\n"
+            "r=libc.ptrace(16,1,0,0)\n"          // 16 == PTRACE_ATTACH
+            "e=ctypes.get_errno()\n"
+            "print(\"attach\", r, e, os.strerror(e) if e else \"\")' 2>&1", out);
+        std::printf("  exit=%d, child said: %s", rc, out.c_str());
+        expect(out.find("attach -1") != std::string::npos,
+               "ATTACH to pid 1 failed");
+    }
+
+    std::printf("brokering: the child still finishes (no hang)\n");
+    {
+        // The regression that would hurt most. If the supervisor stops being
+        // polled -- or answers one notification and not the next -- the child
+        // blocks forever and the command dies on the hard deadline. A test that
+        // only checked decisions would pass while every real command took
+        // exactly the timeout.
+        auto p = base_posture();
+        p.broker = true;
+        std::string out;
+        int rc = run(p,
+            "python3 -c 'import ctypes\n"
+            "libc=ctypes.CDLL(None,use_errno=True)\n"
+            "for i in range(50): libc.ptrace(16,1,0,0)\n"
+            "print(\"survived 50 brokered calls\")' 2>&1", out);
+        std::printf("  exit=%d, child said: %s", rc, out.c_str());
+        expect(out.find("survived 50") != std::string::npos,
+               "50 brokered calls in a row did not hang");
+        expect(rc == 0, "the child exited cleanly");
     }
 
     std::printf("\n%s\n", failures ? "LIVE CHECK FAILURES" : "all live checks passed");

@@ -600,6 +600,15 @@ SubprocessResult run_posix(const std::vector<std::string>& argv_in,
     // The spawner gets the write end of the pipe we already made and is
     // responsible for putting it on the child's stdout and stderr. We keep the
     // read end and the deadline.
+    // The syscall supervisor, when the sandbox brokers calls. Both stay unset
+    // in the common case, and the poll loop below skips them at zero cost.
+    //
+    // Hoisted out of the `if` so the supervise loop can see them: the listener
+    // has to be polled for as long as the child runs, because a brokered
+    // syscall blocks in the kernel until someone answers it.
+    int supervisor_fd = -1;
+    std::function<bool()> service_supervisor;
+
     if (opts.spawner) {
         auto child = opts.spawner(opts, piped.write_end.fd);
         if (child.pid < 0) {
@@ -609,6 +618,8 @@ SubprocessResult run_posix(const std::vector<std::string>& argv_in,
             return r;
         }
         pid = child.pid;
+        supervisor_fd = child.supervisor_fd;
+        service_supervisor = std::move(child.service);
     } else
 #if AGENTTY_HAVE_POSIX_SPAWN
     {
@@ -794,9 +805,45 @@ SubprocessResult run_posix(const std::vector<std::string>& argv_in,
         if (wait_ms > 100) wait_ms = 100;
 
         if (!eof) {
-            struct pollfd pfd{read_fd, POLLIN, 0};
-            int pn = ::poll(&pfd, 1, static_cast<int>(wait_ms));
-            if (pn > 0 && (pfd.revents & (POLLIN | POLLHUP | POLLERR))) {
+            // Two descriptors when the sandbox brokers syscalls, one otherwise.
+            //
+            // The listener MUST be in the same poll as the pipe. A brokered
+            // syscall blocks the guest thread in the kernel until someone
+            // answers, so a listener that is only serviced between reads can
+            // deadlock: the child waits for a decision, we wait for output it
+            // cannot produce until it gets one, and the idle watchdog fires on
+            // a child that was never idle.
+            struct pollfd pfds[2];
+            pfds[0] = {read_fd, POLLIN, 0};
+            const bool brokering = supervisor_fd >= 0 && service_supervisor;
+            if (brokering) pfds[1] = {supervisor_fd, POLLIN, 0};
+            const int nfds = brokering ? 2 : 1;
+
+            int pn = ::poll(pfds, static_cast<nfds_t>(nfds),
+                            static_cast<int>(wait_ms));
+
+            // Service the supervisor FIRST. If both are ready, answering the
+            // blocked syscall is what lets the child produce the next bytes --
+            // draining first would just mean another poll round trip.
+            if (pn > 0 && brokering &&
+                (pfds[1].revents & (POLLIN | POLLHUP | POLLERR))) {
+                if (!service_supervisor()) {
+                    // The listener is finished: the guest is gone, or the fd
+                    // closed. Stop polling it rather than spinning on a dead
+                    // descriptor -- POLLHUP is level-triggered and would make
+                    // this loop busy-wait at 100% CPU for the rest of the
+                    // command.
+                    supervisor_fd = -1;
+                    service_supervisor = nullptr;
+                }
+                // A brokered syscall is forward progress by the child, even
+                // though it produced no output. Resetting the idle window here
+                // is what stops the watchdog killing a command that is
+                // legitimately waiting on us.
+                if (has_idle_window) idle_deadline = clock::now() + idle_window;
+            }
+
+            if (pn > 0 && (pfds[0].revents & (POLLIN | POLLHUP | POLLERR))) {
                 const auto bytes_before = total;
                 if (drain_pipe(read_fd, out, total, opts.max_bytes, truncated))
                     eof = true;
@@ -815,12 +862,38 @@ SubprocessResult run_posix(const std::vector<std::string>& argv_in,
             // Pipe is done; wait for the reap. pidfd wakes the instant the
             // child exits instead of a flat 20 ms sleep on every command.
             const long cap = std::min<long>(wait_ms, 20);
+
+            // The supervisor still has to be answered here, and missing this
+            // would be a real hang rather than a slow path.
+            //
+            // EOF on the pipe does NOT mean the child is finished: it closed
+            // stdout, or a grandchild holds it, or it is about to make one
+            // last brokered syscall before exiting. If that call blocks and we
+            // are only polling the exit fd, nobody ever answers -- the child
+            // waits on us, we wait on its exit, and the command hangs until
+            // the hard deadline kills it. The symptom would be "commands with
+            // brokering sometimes take exactly the timeout", which is
+            // miserable to diagnose.
+            const bool brokering = supervisor_fd >= 0 && service_supervisor;
 #if defined(__linux__) && defined(SYS_pidfd_open)
             if (exit_fd == -2)
                 exit_fd = static_cast<int>(::syscall(SYS_pidfd_open, cpid, 0));
-            if (exit_fd >= 0) {
-                struct pollfd xfd{exit_fd, POLLIN, 0};
-                (void)::poll(&xfd, 1, static_cast<int>(cap));
+            if (exit_fd >= 0 || brokering) {
+                struct pollfd xfds[2];
+                int n = 0;
+                if (exit_fd >= 0) xfds[n++] = {exit_fd, POLLIN, 0};
+                const int sup_at = brokering ? n : -1;
+                if (brokering) xfds[n++] = {supervisor_fd, POLLIN, 0};
+
+                (void)::poll(xfds, static_cast<nfds_t>(n), static_cast<int>(cap));
+
+                if (sup_at >= 0 &&
+                    (xfds[sup_at].revents & (POLLIN | POLLHUP | POLLERR))) {
+                    if (!service_supervisor()) {
+                        supervisor_fd = -1;
+                        service_supervisor = nullptr;
+                    }
+                }
             } else
 #endif
             {

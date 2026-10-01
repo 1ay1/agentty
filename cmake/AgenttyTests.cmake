@@ -59,7 +59,7 @@ set(_AGENTTY_CONSOLIDATED
     palette_nav_test panel_test panel_nav_test status_bar_cache_test
     appearance_rows_test
     issue37_terminal_respect_test
-    param_tag_repair_test sandbox_escape_test sandbox_pane_test scope_test table_render_test
+    param_tag_repair_test sandbox_escape_test sandbox_pane_test sandbox_broker_test scope_test table_render_test
     ssrf_guard_test render_key_coverage_test reasoning_render_test
     plugin_config_test skills_engine_test skill_effects_trust_test
     skill_screen_test
@@ -186,6 +186,7 @@ add_executable(sandbox_live_check EXCLUDE_FROM_ALL
     ${CMAKE_SOURCE_DIR}/tests/sandbox_config_race_stubs.cpp
     ${CMAKE_SOURCE_DIR}/src/tool/util/sandbox.cpp
     ${CMAKE_SOURCE_DIR}/src/tool/util/sandbox_claybin.cpp
+    ${CMAKE_SOURCE_DIR}/src/tool/util/sandbox_broker.cpp
     ${CMAKE_SOURCE_DIR}/src/domain/sandbox_provenance.cpp
     ${CMAKE_SOURCE_DIR}/src/tool/util/subprocess.cpp
     ${CMAKE_SOURCE_DIR}/src/tool/util/utf8.cpp
@@ -222,6 +223,7 @@ add_executable(sandbox_audit EXCLUDE_FROM_ALL
     ${CMAKE_SOURCE_DIR}/tests/sandbox_audit.cpp
     ${CMAKE_SOURCE_DIR}/tests/sandbox_config_race_stubs.cpp
     ${CMAKE_SOURCE_DIR}/src/tool/util/sandbox_claybin.cpp
+    ${CMAKE_SOURCE_DIR}/src/tool/util/sandbox_broker.cpp
     ${CMAKE_SOURCE_DIR}/src/domain/sandbox_provenance.cpp)
 target_include_directories(sandbox_audit PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(sandbox_audit PRIVATE claybin)
@@ -508,6 +510,7 @@ add_executable(sandbox_config_race_test EXCLUDE_FROM_ALL
     tests/sandbox_config_race_stubs.cpp
     src/tool/util/sandbox.cpp src/tool/util/subprocess.cpp
     src/tool/util/sandbox_claybin.cpp
+    src/tool/util/sandbox_broker.cpp
     src/domain/sandbox_provenance.cpp
     src/tool/util/utf8.cpp
     src/util/logx.cpp src/util/dbglog.cpp src/util/home_dir.cpp

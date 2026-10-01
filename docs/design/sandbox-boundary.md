@@ -613,12 +613,13 @@ a weaker sandbox while it runs, and it cannot be the default.
 
 ## 10. How this gets verified
 
-Five layers. Each catches something the others cannot.
+Six layers. Each catches something the others cannot.
 
 | layer | what it proves | runs |
 |---|---|---|
 | policy tests | the table says the right thing | always |
 | `sandbox_pane_test` | door → open → edit → save → discard; the seal holds; **every row reaches the config** | always |
+| `sandbox_broker_test` | the broker's decisions, driven directly (it is pure) | always |
 | `sandbox_config_race_test` | concurrent readers see one whole policy | TSan lane |
 | `sandbox_live_check` | **the child actually experiences it** | by hand |
 | `sandbox_audit` | **which walls we claim at all, and how strongly** | by hand |
@@ -779,78 +780,144 @@ before you add a domain.
 
 ---
 
-## 13. Syscall brokering: available, deliberately not wired
+## 13. Syscall brokering
 
-claybin implements `SECCOMP_RET_USER_NOTIF` properly — `broker::Listener`,
-`Request`/`Decision`, crun's ADDFD handoff, and an explicit refusal of the
-unsound shape. `SyscallPolicy::notify(nr)` marks a syscall for brokering and
-`Spawned::notify_fd` hands the listener to the caller. agentty uses none of it.
+This is what makes the sandbox a **capability system** rather than a filter. A
+filter answers "may you call `ptrace`"; a supervisor answers "may you ptrace
+**this pid**", at runtime, with the arguments in hand.
 
-That is a decision, and it is worth writing down because the feature is
-genuinely attractive and the reason to wait is not obvious.
+Before this, `ptrace` was a flat **kill** in the compiler profile — so `strace
+prog`, `gdb`, and any test suite that traces a helper it spawned died outright.
+That is safe and occasionally wrong, and "the sandbox killed my debugger" is how
+people end up turning the sandbox off.
 
-### What it would buy
+### The two hazards, which are structural
 
-Brokering turns a filter into a **capability system**. Today the syscall
-profile answers "may you call `connect()`"; a broker answers "may you reach
-`api.github.com:443`" — the supervisor resolves the name itself and injects a
-connected descriptor, so DNS rebinding cannot widen the grant after the check.
-There is no second lookup to poison.
+The kernel documentation is blunt about this: of
+`SECCOMP_USER_NOTIF_FLAG_CONTINUE`, *"it should be absolutely clear that this
+means the seccomp notifier cannot be used to implement a security policy."*
+Both hazards are properties of the mechanism, not bugs to be careful about.
 
-It is also the mechanism behind the blocked-activity feed (§9a): a notification
-is how you learn that `cargo` tried `ptrace(PTRACE_ATTACH)` rather than only
-that the build failed.
+**1. TOCTOU on pointer arguments.** A notification carries the syscall's
+*register* values. A pointer argument names memory in the guest, and the guest
+has other threads — it can rewrite that memory between the moment we read it and
+the moment the kernel acts. Reading a path out of the guest and then allowing
+the call is a vulnerability. Container runtimes and CRIU have shipped this bug.
 
-### Why it is not wired
+**2. CONTINUE is not a decision.** Telling the kernel to resume the syscall
+re-runs it with the guest's credentials and the guest's view of memory, *after*
+our check. Everything checked is stale.
 
-**It needs a supervisor loop for the lifetime of every command.** Not an argv
-and not a policy field — a poll loop that must answer every notification
-promptly, for as long as the child runs. agentty's spawn path builds a posture
-and hands off to a runner that owns the pipe and the deadline; there is nowhere
-in that shape for a second event loop, and adding one touches the tool runner
-rather than the sandbox.
+claybin's broker refuses to expose either: a `Decision` is `allow`, `deny`, or
+`inject_fd` (we did the work, the guest gets a descriptor). There is no
+`continue`, and `Request` has no `path` field. So the policy here decides from
+scalars only — and the moment a rule wants a path, that rule belongs in
+landlock, which the kernel enforces with no race at all.
 
-**A broker that stops answering is a hang, not a denial.** The kernel blocks the
-guest thread until someone responds. So the failure mode of a half-finished
-broker is "agentty wedged on a command with no output", which is strictly worse
-than the denial it replaces — and it would land on exactly the hosts where
-people already distrust the sandbox.
+### What is brokered, and why only two things
 
-**The sound shapes are narrow.** A notification carries register arguments.
-Reading a path or a sockaddr out of the guest and then approving the call is a
-TOCTOU bug: the guest has other threads and can rewrite that memory between the
-read and the kernel acting. Only two shapes are safe — scalar-only decisions,
-and supervisor-performs-and-injects-an-fd. Most of the interesting rules a
-person would *want* ask about a path, which is the shape that is unsound.
+| syscall | decided from | why broker rather than deny |
+|---|---|---|
+| `ptrace` | request + target pid (scalars) | a debugger attaching to its own child is normal; attaching to pid 1 is an escape |
+| `kill` | target pid + signal (scalars) | reaping your own workers is routine; signalling outside the group is not |
 
-So the honest position is: the mechanism is there, the hard part (the broker
-itself, with the TOCTOU trap closed) is done in claybin, and the remaining work
-is in agentty's runner rather than its sandbox.
+A syscall qualifies only if **all three** hold: a scalar carries the decision, a
+flat deny is sometimes wrong (so brokering buys compatibility), and a flat allow
+is sometimes wrong (so there is a decision to make). Nothing involving a path
+qualifies. `socket()` is scalar-decidable and claybin ships a helper, but the
+network namespace already gives a stronger race-free answer, and two mechanisms
+for one boundary is how they drift.
 
-### What is in place now
+### The rules
 
-`spawn_shell` **closes** `notify_fd` if it is ever non-negative, and logs a
-warning. Closing is correct rather than a placeholder: when the listener closes,
-the kernel fails the pending syscall instead of blocking it, so a policy that
-brokers without a supervisor gets denials rather than a wedge. A denial is
-recoverable and visible; a hang is neither.
+- **`PTRACE_TRACEME` is allowed.** The child volunteers to be traced by its own
+  parent; it grants no authority over anything else, and it is how `strace prog`
+  works from the inside.
+- **Target inside our own process group is allowed.** claybin calls `setsid()`,
+  so the child leads its own group and descendants inherit it — that is what
+  makes "inside my group" answerable from a register. Deliberately *not* "same
+  pid namespace": we cannot ask the kernel that from a scalar, and guessing
+  would be the almost-right check this whole file avoids.
+- **An unknown `ptrace` request is denied regardless of target.** There are ~40
+  requests and several (`PTRACE_SETREGS`, `PTRACE_POKEUSER`) rewrite a traced
+  process's execution. "It is one of ours" is not a reason to permit an
+  operation nobody reasoned about.
+- **`kill(-1)` is denied.** It means "every process I may signal". Bounded
+  inside a pid namespace — but §3a means we may not have one, so assuming is
+  unsafe.
+- **An unhandled brokered syscall is denied.** If the brokered list and the
+  decision function ever drift, they must drift in the safe direction.
 
-That also closes a latent fd leak — the field was simply never read.
+### Where the supervisor lives
 
-### If it gets built
+In the **subprocess runner's existing poll loop**, beside the output pipe — not
+in a thread of its own.
 
-1. The listener's lifetime belongs to the **command**, not the sandbox. It has
-   to be owned wherever the pipe and the deadline are owned.
-2. Every notification must be answered, including on the error paths. A
-   `continue` that skips one wedges the guest.
-3. Re-verify the notification is live immediately before responding — the guest
-   thread alive, the id not reused. claybin exposes this; skipping it is the
-   TOCTOU bug.
-4. Scalar-only or supervisor-performs. If a rule needs a path, it does not
-   belong in a broker; it belongs in landlock, which the kernel enforces
-   without a race.
-5. It needs its own live check. A broker that answers `allow` to everything
-   passes every policy-level test.
+That is forced, not chosen. A brokered syscall blocks the guest *in the kernel*
+until someone answers, so servicing the listener only between reads deadlocks:
+the child waits for a decision, we wait for output it cannot produce until it
+has one, and the idle watchdog fires on a child that was never idle. The runner
+already owns the child's lifetime and already polls; a second loop would race it
+for the same child.
+
+Two subtleties that are easy to miss and cost a hang each:
+
+- **The listener must still be polled after pipe EOF.** EOF does not mean the
+  child is finished — it may close stdout and then make one last brokered call.
+  Polling only the exit fd there means nobody answers, and the command dies on
+  the hard deadline. The symptom would be "brokered commands sometimes take
+  exactly the timeout", which is miserable to diagnose.
+- **A finished listener must stop being polled.** `POLLHUP` is level-triggered,
+  so a dead descriptor left in the set busy-waits at 100% CPU for the rest of
+  the command.
+
+A brokered syscall also **resets the idle window**: it is forward progress by
+the child even though it produced no output, and not resetting would let the
+watchdog kill a command that was legitimately waiting on us.
+
+### The mandatory recheck
+
+Immediately before responding, the supervisor calls `still_valid()`
+(`SECCOMP_IOCTL_NOTIF_ID_VALID`). A notification id can be **reused** once its
+thread is gone, so responding to a stale one would answer a *different* syscall
+than the one judged. `seccomp_unotify(2)` documents this as mandatory rather
+than advisory — the kernel offers no other way to close that race.
+
+A stale notification is dropped and the loop continues: the listener itself is
+fine, only that request is dead. Tearing down there would strand every later
+brokered call.
+
+### The audit trail is half the point
+
+Every decision is logged at `Info` on the `Tool` channel:
+
+```
+ptrace ATTACH pid=1 DENIED
+ptrace TRACEME pid=0 allowed
+kill SIGTERM pid=4242 allowed
+```
+
+"Your build failed" teaches nothing. "cargo tried `ptrace ATTACH pid=1` and was
+denied" teaches what your toolchain does, and is the difference between adding
+one allowlist line and turning the sandbox off.
+
+### Verification
+
+Two layers, because neither is sufficient:
+
+- **`sandbox_broker_test`** drives `decide()` directly — it is pure, so "attach
+  to pid 1" and "signal outside the group" are three lines each instead of
+  staging a real escape. It caught a real permissive bug in the first version:
+  an unknown ptrace request aimed at our own group was allowed, because the
+  target check ran before the request check.
+- **`sandbox_live_check` cases 9–11** run a real child against a real listener.
+  Measured: `TRACEME` → allowed, `ATTACH pid=1` → `EPERM`, and 50 brokered calls
+  in a row with no hang. Every one of those would *time out* rather than fail if
+  the supervisor regressed, which is exactly why they exist.
+
+Confirmed load-bearing by turning it off: with `broker = false` the child
+produces no output at all — killed by seccomp, because `ptrace` is a `kill` in
+the profile. With it on, `traceme 0 0`.
 
 ---
 

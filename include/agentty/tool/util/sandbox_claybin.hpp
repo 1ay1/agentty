@@ -14,6 +14,7 @@
 // the hard part.
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -64,6 +65,17 @@ struct Posture {
     // Not containment -- the guest cannot escalate either way. This is about
     // what leaks into build output and test fixtures.
     bool fake_hostname{false};
+
+    // ── syscall brokering ────────────────────────────────────────
+    // Decide ptrace and kill at runtime from their scalar arguments, instead
+    // of denying them flatly. See sandbox_broker.hpp.
+    //
+    // A FLAG rather than always-on, because brokering makes the child's
+    // progress depend on the parent answering: the kernel blocks a brokered
+    // syscall until someone responds, so a supervisor that is not being polled
+    // is a hang. spawn_shell only sets it when it can hand the listener to a
+    // runner that will poll it.
+    bool broker{false};
 };
 
 // One wall and how strongly it is enforced, straight from claybin's guarantee
@@ -96,6 +108,22 @@ struct SpawnResult {
     int pid{-1};
     int pidfd{-1};
     std::string start_error;
+
+    // The seccomp listener, when the policy brokers syscalls. -1 otherwise.
+    //
+    // The CALLER owns it and MUST poll it for as long as the child runs: a
+    // brokered syscall blocks the guest thread in the kernel until someone
+    // answers, so an unpolled listener is a hang rather than a weaker wall.
+    // `service_broker` below is how to answer one.
+    int supervisor_fd{-1};
+
+    // Answer ONE pending notification. Returns false when the listener is
+    // finished (guest gone, fd closed), after which the caller stops polling.
+    //
+    // A callback rather than exposing the Listener, so the tool layer never
+    // includes a claybin header: the decision policy, the TOCTOU recheck and
+    // the audit record all live behind this one call.
+    std::function<bool()> service_broker;
 };
 
 // Can this host actually build the sandbox? Forks and attempts the uid_map

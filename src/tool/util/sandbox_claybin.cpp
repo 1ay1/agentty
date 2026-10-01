@@ -21,7 +21,8 @@
 // read on `/`, which handed ~/.ssh and ~/.aws to any approved bash call while
 // still reporting "sandbox: active". One list, two backends.
 #include "agentty/tool/util/sandbox_claybin.hpp"
-#include "agentty/util/logx.hpp"   // AGT_LOG — the unwired-broker warning
+#include "agentty/tool/util/sandbox_broker.hpp"
+#include "agentty/util/logx.hpp"   // AGT_LOG — the broker audit trail
 
 // Linux-only, and that is claybin's own split rather than a build toggle:
 // its plan compiler is portable (and the pane's preview uses it on any host),
@@ -37,6 +38,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "claybin/broker/notify.hpp"
 #include "claybin/plan/compile.hpp"
 #include "claybin/plan/spawn.hpp"
 #include "claybin/policy/policy.hpp"
@@ -155,17 +157,44 @@ using namespace ::clay::literals;
     d = std::move(d).new_session();
     d = std::move(d).die_with_parent();
 
-    // ── the walls bwrap is given none of ────────────────────────────────
+    // ── the walls bwrap is given none of ────────────────────────────
     //
-    // Off is everything(), NOT "no profile": a default-constructed
-    // SyscallPolicy is kill-by-default with no rules, which compiles to a
-    // sandbox that kills the guest at execve. claybin refuses it outright.
-    // The settings pane's live preview caught that the first time it ran.
-    switch (p.syscall_mode) {
-        case 0: d = std::move(d).syscall_profile(SyscallPolicy::everything()); break;
-        case 2: d = std::move(d).syscall_profile(profiles::with_filesystem()); break;
-        default: d = std::move(d).syscall_profile(profiles::compiler_with_network()); break;
+    // The syscall filter, plus any brokered calls.
+    //
+    // Built as one SyscallPolicy and applied ONCE, because a draft does not
+    // expose its syscall policy for amendment -- `syscall_profile()` replaces
+    // wholesale. So the notify rules have to be layered on here, before the
+    // policy is handed over, rather than added afterwards.
+    SyscallPolicy sp = [&] {
+        switch (p.syscall_mode) {
+            // Off is everything(), NOT "no profile": a default-constructed
+            // SyscallPolicy is kill-by-default with no rules, which compiles to
+            // a sandbox that kills the guest at execve. claybin refuses it
+            // outright, and the settings pane's live preview caught that the
+            // first time it ran.
+            case 0: return SyscallPolicy::everything();
+            case 2: return profiles::with_filesystem();
+            default: return profiles::compiler_with_network();
+        }
+    }();
+
+    // Brokered syscalls: decided at runtime by a supervisor rather than by the
+    // filter. Layered on AFTER the profile, because the profile sets a flat
+    // action for these and brokering has to win.
+    //
+    // Only when the caller actually wired a supervisor. A policy that brokers
+    // with nobody listening HANGS the guest -- the kernel blocks the thread
+    // until someone answers -- so this is gated on `p.broker` rather than being
+    // unconditional. Getting that backwards turns a hardening feature into a
+    // deadlock on every ptrace.
+    //
+    // Also skipped under syscall_mode Off: everything() is "no filter", and
+    // adding notify rules to it would mean brokering on a sandbox the user
+    // asked not to filter at all.
+    if (p.broker && p.syscall_mode != 0) {
+        for (auto nr : broker::brokered_syscalls()) sp.notify(nr);
     }
+    d = std::move(d).syscall_profile(std::move(sp));
 
     // Resource caps. cgroup2 when the host delegates, rlimit as a backstop;
     // the report distinguishes the two rather than claiming both.
@@ -303,28 +332,72 @@ SpawnResult spawn_shell(const Posture& p, const std::string& shell_cmd, int stdo
 
     // The seccomp listener, when the policy brokers syscalls.
     //
-    // No agentty policy sets SysAction::notify today, so this is always -1 and
-    // the close is a no-op. It is here because the failure mode if that ever
-    // changes is bad and silent: claybin hands the listener to the CALLER, and
-    // a caller that ignores it leaks the descriptor AND hangs the guest
-    // forever on its first brokered syscall -- the kernel blocks the thread
-    // until someone answers the notification, and nobody is listening.
-    //
-    // So: close it, and say loudly that arriving here means the policy and the
-    // spawn path disagree. Closing is the right move rather than a mistake to
-    // be fixed later -- when the listener fd closes, the kernel fails the
-    // pending syscall instead of blocking, which turns "agentty wedged" into
-    // "that syscall was denied". A denial is recoverable; a hang is not.
-    //
-    // Wiring real brokering means running a poll loop for the lifetime of the
-    // command (see docs/design/sandbox-boundary.md §13), which is a different
-    // shape of work from building an argv and is deliberately not done yet.
+    // claybin hands the listener to the CALLER, and the caller must answer
+    // every notification: the kernel blocks the guest thread until someone
+    // responds, so an unpolled listener is a hang rather than a weaker wall.
+    // The subprocess runner polls `supervisor_fd` alongside the output pipe and
+    // calls `service_broker` when it is readable.
     if (spawned->notify_fd >= 0) {
-        AGT_LOG(Tool, Warn, "sandbox.broker",
-                "policy requested syscall brokering but no supervisor is "
-                "wired; closing the listener so brokered calls fail instead "
-                "of hanging");
-        ::close(spawned->notify_fd);
+        out.supervisor_fd = spawned->notify_fd;
+
+        // The listener lives in the closure, by shared_ptr, because
+        // SpawnResult is copyable and a Listener is not. It closes when the
+        // last copy of the callback dies, which is the right lifetime: the
+        // runner drops the callback when the command ends.
+        auto listener = std::make_shared<::clay::broker::Listener>(
+            ::clay::OwnedFd{spawned->notify_fd});
+        // The guest's own pid doubles as its process group: claybin calls
+        // setsid() (new_session), so the child leads its own group and every
+        // descendant inherits it. That is what makes "inside my own group" a
+        // decidable question from a scalar.
+        const std::uint32_t guest_pid = static_cast<std::uint32_t>(spawned->pid);
+
+        out.service_broker = [listener, guest_pid]() -> bool {
+            auto req = listener->next();
+            if (!req) return false;   // guest gone, or the fd closed
+
+            broker::Event ev;
+            const auto verdict =
+                broker::decide(req->nr, req->args, req->pid, guest_pid, &ev);
+
+            // THE CHECK EVERY IMPLEMENTATION GETS WRONG, done immediately
+            // before responding.
+            //
+            // A notification id can be reused once its thread is gone. If the
+            // guest thread died between `next()` and here, responding would
+            // answer a DIFFERENT syscall than the one we judged -- the kernel
+            // offers no other way to close that race, which is why
+            // seccomp_unotify(2) documents the ID_VALID ioctl as mandatory
+            // rather than advisory.
+            //
+            // Returning true (not false) on a dead notification: the listener
+            // itself is still fine, only this request is stale. Tearing down
+            // the supervisor here would strand every later brokered call.
+            if (!listener->still_valid(*req)) {
+                AGT_LOG(Tool, Debug, "sandbox.broker",
+                        "notification went stale before the response; dropped");
+                return true;
+            }
+
+            const auto decision = verdict == broker::Verdict::Allow
+                                      ? ::clay::broker::Decision::allow_it()
+                                      : ::clay::broker::Decision::deny_it(EPERM);
+
+            // Logged at every outcome, because this is the audit trail that
+            // makes the sandbox teachable. "your build failed" says nothing;
+            // "cargo tried ptrace ATTACH pid=1 and was denied" says what the
+            // toolchain does and what to allow if you disagree.
+            AGT_LOG(Tool, Info, "sandbox.broker", "{} {} {}",
+                    ev.syscall, ev.detail, ev.allowed ? "allowed" : "DENIED");
+
+            if (!listener->respond(*req, decision)) {
+                // Responding failed, which usually means the guest died while
+                // we were deciding. Not an error worth tearing down for; the
+                // next next() will report the listener finished.
+                AGT_LOG(Tool, Debug, "sandbox.broker", "respond failed");
+            }
+            return true;
+        };
     }
     return out;
 }
