@@ -19,6 +19,7 @@
 #include <string>
 
 #include <maya/core/anim_clock.hpp>
+#include <jaal/kernel/loop.hpp>   // loop_identity: the harness stands in for the loop
 
 int main(int argc, char** argv) {
     // (No rendering policy is terminal-derived any more — the streaming
@@ -112,6 +113,25 @@ int main(int argc, char** argv) {
     // Harmless for tests that don't read it. Formerly each such test froze it
     // in its own main(); with one shared binary we do it once here.
     maya::testing::freeze_anim_clock();
+
+    // Stand in for the kernel's loop thread, for the same reason the clock is
+    // frozen above: these tests drive view() directly instead of running a
+    // kernel, and view() legitimately touches loop-bound state (the render
+    // caches in agent_timeline.cpp, the frozen-build flag in
+    // tool_body_preview.cpp).
+    //
+    // Without this the render tests abort — which is the mechanism working,
+    // not a false positive: off the loop there is no token, and loop_bound
+    // aborts rather than silently handing back a second thread's empty copy.
+    // Arming the identity here says "this thread IS the loop for this
+    // process", which is true: doctest runs the cases on the main thread.
+    //
+    // It does NOT weaken the guarantee for the thing it protects. A WORKER
+    // inside a test still has no token and still aborts, because the identity
+    // is per-thread — that is exactly what loop_affinity_test asserts in a
+    // forked child.
+    const jaal::kernel::loop_identity loop_id;
+
     const int rc = doctest::Context(argc, argv).run();
     // Best-effort: a leaked sandbox is a slow leak, a failed remove is not
     // worth failing a green suite over.

@@ -481,6 +481,8 @@ namespace runner_ui {
 
 #else  // _WIN32 — non-interactive fallback via the shared subprocess runner
 
+#include <jaal/kernel/scope.hpp>   // structured concurrency for the heartbeat helper
+
 // Wrap the block body for the chosen Windows interpreter. cmd.exe is the
 // default shell of run_command_s (it wraps in `cmd.exe /S /C "..."`), so
 // a Cmd block passes through verbatim. A PowerShell block is handed to
@@ -509,7 +511,7 @@ namespace runner_ui {
 // The console-echo helper below is also deliberately NOT named `out`: the
 // Sink parameter owns that name, and shadowing it made `out.send(...)`
 // resolve to the echo lambda.
-static void run_block_body(jaal::Sink<Msg> out, std::stop_token,
+static void run_block_body(jaal::Sink<Msg> out, std::stop_token stop,
                            std::string cmd, cbp::BlockShell shell) {
     const std::string wrapped = wrap_for_windows_shell(shell, cmd);
 
@@ -533,36 +535,70 @@ static void run_block_body(jaal::Sink<Msg> out, std::stop_token,
 
     std::string label = cmd.substr(0, cmd.find_first_of(" \t\n"));
     if (label.size() > 24) label.resize(24);
-    std::atomic<bool> done_flag{false};
-    std::thread ticker;
-    if (con) {
-        ticker = std::thread([&done_flag, label] {
+
+    // The heartbeat runs in a jaal::scope, not a bare std::thread.
+    //
+    // The old shape was `std::thread ticker; ... ticker.join()` with the
+    // blocking run_command_s between them. Two problems, both invisible until
+    // they bite: if anything in that window threw, ~thread ran on a joinable
+    // thread and the process called std::terminate (no stack, no message);
+    // and the helper captured `done_flag` and `label` by reference, which is
+    // only safe because of that same join nobody was guaranteed to reach.
+    //
+    // scope() joins every helper on EVERY exit path — normal return, early
+    // return, exception — which is what makes the [&] capture of locals
+    // legitimate rather than lucky. There is also no detach() to reach for,
+    // so the helper cannot be made to outlive the frame it borrows from.
+    //
+    // The task's own stop_token is passed in as the parent, so Esc (or
+    // shutdown) cancels the heartbeat through the same path as everything
+    // else instead of needing its own flag. done_flag stays for the normal
+    // "the command finished" stop, which is not a cancellation.
+    struct Outcome {
+        tools::util::SubprocessResult r;
+        long                          secs = 0;
+    };
+
+    auto outcome = jaal::scope(stop, [&](jaal::nursery& n) {
+        std::atomic<bool> done_flag{false};
+
+        // The helper takes its own stop_token: jaal derives it from the
+        // scope's, which in turn derives from the task's, so Esc reaches the
+        // spinner without anybody wiring a second flag.
+        auto beat = n.spawn([&done_flag, &label, con](std::stop_token st) {
+            if (!con) return;
             static constexpr const char* kSpin[] =
                 {"⣷","⣯","⣟","⡿","⣾","⣽","⣻","⣷"};
             int spin = 0;
             const auto start = std::chrono::steady_clock::now();
-            while (!done_flag.load(std::memory_order_relaxed)) {
+            while (!done_flag.load(std::memory_order_relaxed)
+                   && !st.stop_requested()) {
                 const long secs = static_cast<long>(
                     std::chrono::duration_cast<std::chrono::seconds>(
                         std::chrono::steady_clock::now() - start).count());
-                std::string s = "\x1b]2;● " + std::to_string(secs)
-                              + "s — " + label + " — agentty\x07";
+                std::string s = "\x1b]2;\u25cf " + std::to_string(secs)
+                              + "s \u2014 " + label + " \u2014 agentty\x07";
                 s += "\r\x1b[2K\x1b[2m" + std::string(kSpin[spin++ % 8])
-                   + " running… " + std::to_string(secs) + "s\x1b[0m";
+                   + " running\u2026 " + std::to_string(secs) + "s\x1b[0m";
                 std::fputs(s.c_str(), stdout); std::fflush(stdout);
                 std::this_thread::sleep_for(std::chrono::milliseconds(250));
             }
         });
-    }
 
-    const auto start = std::chrono::steady_clock::now();
-    auto r = tools::util::run_command_s(wrapped);
-    const long secs = static_cast<long>(
-        std::chrono::duration_cast<std::chrono::seconds>(
-            std::chrono::steady_clock::now() - start).count());
+        const auto start = std::chrono::steady_clock::now();
+        Outcome o;
+        o.r = tools::util::run_command_s(wrapped);
+        o.secs = static_cast<long>(
+            std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::steady_clock::now() - start).count());
 
-    done_flag.store(true, std::memory_order_relaxed);
-    if (ticker.joinable()) ticker.join();
+        done_flag.store(true, std::memory_order_relaxed);
+        beat.join();          // explicit, so a throwing helper surfaces here
+        return o;
+    });
+
+    auto r          = std::move(outcome.r);
+    const long secs = outcome.secs;
 
     CodeBlockRunFinished fin;
     fin.command   = cmd;   // show the ORIGINAL body in the card

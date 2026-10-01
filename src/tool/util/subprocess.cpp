@@ -15,6 +15,11 @@
 #include <thread>
 #include <vector>
 
+// guarded<T> pairs the pipe buffer with its mutex; scope() joins the reader
+// helper on every exit path. See jaal/docs/concurrency.md.
+#include <jaal/kernel/guarded.hpp>
+#include <jaal/kernel/scope.hpp>
+
 #ifdef _WIN32
 #  ifndef WIN32_LEAN_AND_MEAN
 #    define WIN32_LEAN_AND_MEAN
@@ -258,42 +263,74 @@ SubprocessResult run_win32_cmdline(const std::string& cmdline,
     //     reader's ReadFile returns 0 → reader thread exits cleanly;
     //   • grandchild-keeps-pipe-alive edge case → after the terminate,
     //     we CloseHandle(rd) to force-unblock the reader.
-    std::mutex          buf_mu;
-    std::ostringstream  shared_buf;
-    std::size_t         shared_total = 0;
-    bool                shared_truncated = false;
-    std::atomic<bool>   reader_done{false};
+    // The pipe buffer the reader fills and the poll loop samples.
+    //
+    // This used to be four loose variables plus a `std::mutex buf_mu` that
+    // every reader had to remember to take. The grouping lived in the
+    // variable NAMES (`shared_*`) and in review discipline: nothing stopped
+    // a later edit from reading shared_total without the lock, and that bug
+    // would be a torn size_t on a timeout path nobody tests.
+    //
+    // jaal::guarded<T> makes the mutex and the data one thing. The state is
+    // unreachable except inside a with()/read() body, so "took the lock"
+    // stops being something to remember. The callable must also be
+    // CAPTURELESS — which is jaal's deadlock rule, since a capture could
+    // name a second lock — so everything a body needs is passed as an
+    // argument, and the compiler checks the result doesn't point back into
+    // the protected data.
+    struct PipeBuf {
+        std::ostringstream buf;
+        std::size_t        total     = 0;
+        bool               truncated = false;
+    };
+    jaal::guarded<PipeBuf> shared;
+    std::atomic<bool>      reader_done{false};
 
-    std::thread reader([&, rd_h]{
+    auto snapshot = [&] {
+        return shared.read([](const PipeBuf& s) { return s.buf.str(); });
+    };
+    auto total_snapshot = [&] {
+        return shared.read([](const PipeBuf& s) { return s.total; });
+    };
+
+    auto now_ms = [] { return std::chrono::steady_clock::now(); };
+
+    // Everything that depends on the reader lives inside a jaal::scope.
+    //
+    // Before, the reader was a bare `std::thread reader(...)` joined ~90
+    // lines later, with `opts.on_progress(...)` — a caller-supplied callback
+    // — invoked twice in between. If that callback threw, ~thread ran on a
+    // joinable thread and the process called std::terminate: no stack, no
+    // message, and on Windows not even a core. The reader also captured the
+    // buffer and `opts` by reference, which is only sound because of a join
+    // nothing guaranteed we would reach.
+    //
+    // scope() joins on every exit path, so the [&] captures are now
+    // warranted rather than hoped-for, and a throwing on_progress unwinds
+    // normally with the reader already stopped.
+    jaal::scope([&](jaal::nursery& n) {
+    auto reader = n.spawn([&, rd_h] {
         char tmp[4096];
         for (;;) {
-            DWORD n = 0;
-            if (!::ReadFile(rd_h, tmp, sizeof(tmp), &n, nullptr) || n == 0) break;
-            std::lock_guard lk(buf_mu);
-            if (shared_truncated) continue;
-            std::size_t room = (shared_total < (std::size_t)opts.max_bytes)
-                             ? (std::size_t)opts.max_bytes - shared_total : 0;
-            std::size_t w = n < room ? n : room;
-            shared_buf.write(tmp, (std::streamsize)w);
-            shared_total += w;
-            if (w < (std::size_t)n) shared_truncated = true;
+            DWORD n_read = 0;
+            if (!::ReadFile(rd_h, tmp, sizeof(tmp), &n_read, nullptr) || n_read == 0) break;
+            // Captureless body, and the bytes arrive as an OWNED string_view
+            // over a std::string rather than a raw char* — jaal rejects the
+            // pointer, correctly: a pointer argument is how a lock body
+            // reaches data whose lifetime the lock does not cover.
+            shared.with(
+                [](PipeBuf& s, std::string chunk, std::size_t cap) {
+                    if (s.truncated) return;
+                    const std::size_t room = (s.total < cap) ? cap - s.total : 0;
+                    const std::size_t w    = chunk.size() < room ? chunk.size() : room;
+                    s.buf.write(chunk.data(), (std::streamsize)w);
+                    s.total += w;
+                    if (w < chunk.size()) s.truncated = true;
+                },
+                std::string(tmp, (std::size_t)n_read), (std::size_t)opts.max_bytes);
         }
         reader_done.store(true, std::memory_order_release);
     });
-
-    auto snapshot = [&]{
-        std::lock_guard lk(buf_mu);
-        return shared_buf.str();
-    };
-
-    auto now_ms = []{
-        return std::chrono::steady_clock::now();
-    };
-
-    auto total_snapshot = [&]{
-        std::lock_guard lk(buf_mu);
-        return shared_total;
-    };
 
     // Idle deadline: same semantics as the POSIX path — we cap *silence*,
     // not total wall-clock from spawn.  A child that's actively writing
@@ -376,18 +413,21 @@ SubprocessResult run_win32_cmdline(const std::string& cmdline,
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
     ::CloseHandle(rd_h);   // safe: even if reader is mid-ReadFile, it returns false
-    reader.join();
+    reader.join();         // explicit: surfaces a reader exception here
 
     if (opts.on_progress) {
         opts.on_progress(clean_capture(snapshot()));
     }
+    });   // jaal::scope — the reader is joined by here on EVERY path above
+
     ::CloseHandle(pi.hProcess);
     ::CloseHandle(pi.hThread);
-    {
-        std::lock_guard lk(buf_mu);
-        r.truncated = shared_truncated;
-        r.output    = clean_capture(shared_buf.str());
-    }
+    // The reader has been joined, so this is single-threaded now — but go
+    // through the guard anyway rather than reaching around it. One accessor
+    // means a future edit that moves this line back inside the scope is
+    // still correct.
+    r.truncated = shared.read([](const PipeBuf& s) { return s.truncated; });
+    r.output    = clean_capture(snapshot());
     return r;
 }
 

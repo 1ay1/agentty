@@ -7,6 +7,8 @@
 #include <utility>
 #include <vector>
 
+#include <jaal/kernel/loop.hpp>   // loop_bound: the view caches are loop-only
+
 #include "agentty/runtime/view/helpers.hpp"
 #include "agentty/runtime/view/palette.hpp"
 #include <maya/core/render_context.hpp>   // available_height (tail-spinner gate)
@@ -84,7 +86,23 @@ private:
     std::list<std::string>                 lru_;
 };
 
-thread_local BodyConfigCache g_body_cache;
+// The three caches below are LOOP-ONLY, and now say so in their types.
+//
+// They used to be `thread_local`, which documents the intent and enforces
+// nothing: a worker that ever called into this file would silently get its
+// own empty cache and render from it. That is a wrong answer, which is worse
+// than a crash — a missing panel or a stale body, with no trace of why.
+//
+// loop_bound<T> makes the rule checkable. Reaching the value needs proof of
+// being on the kernel's loop thread, and the only way to get that proof is
+// to actually be there; off the loop the access aborts with a message naming
+// the rule instead of quietly handing back a second copy. view() runs on the
+// loop (the kernel arms its identity for its whole lifetime, which covers
+// the between-steps window where a host paints), so the on-loop path is
+// unchanged and still lock-free.
+//
+// See jaal/kernel/loop.hpp and jaal/docs/concurrency.md §1.2 P1.
+jaal::kernel::loop_bound<BodyConfigCache> g_body_cache;
 
 // ── Settled-panel ELEMENT cache ───────────────────────────────────────
 //
@@ -154,7 +172,8 @@ private:
     std::list<std::string>                 lru_;
 };
 
-thread_local PanelElementCache g_panel_cache;
+// Loop-only, same as g_body_cache above — see the note there.
+jaal::kernel::loop_bound<PanelElementCache> g_panel_cache;
 
 // ── Per-message panel render memo (fast primary key) ──
 //
@@ -247,7 +266,8 @@ private:
     std::list<std::string>                               lru_;
 };
 
-thread_local PanelRenderMemo g_panel_render_memo;
+// Loop-only, same as g_body_cache above — see the note there.
+jaal::kernel::loop_bound<PanelRenderMemo> g_panel_render_memo;
 
 } // namespace
 
@@ -427,12 +447,14 @@ maya::AgentTimeline::Config agent_timeline_config(std::span<const ToolUse> tool_
             body_key += std::to_string(static_cast<int>(tool_out));
             body_key.push_back('|');
             body_key += grep_sig;
-            if (auto hit = g_body_cache.get(body_key)) {
+            if (auto hit = g_body_cache.with(
+                    [&](BodyConfigCache& c) { return c.get(body_key); })) {
                 body_sp = hit;  // SHARE the cached (immutable) build
             } else {
                 body_sp = std::make_shared<const maya::ToolBodyPreview::Config>(
                     apply_tool_output(tool_body_preview_config(tc, &grep_hits)));
-                g_body_cache.put(body_key, body_sp);
+                g_body_cache.with(
+                    [&](BodyConfigCache& c) { c.put(body_key, body_sp); });
             }
         } else {
             body = apply_tool_output(tool_body_preview_config(tc, &grep_hits));
@@ -737,13 +759,21 @@ maya::Element agent_timeline_element(std::span<const ToolUse> tool_calls,
     key += std::to_string(
         static_cast<int>(agentty::ui_prefs::current().tool_output));
 
-    if (const std::shared_ptr<const maya::Element>* hit = g_panel_cache.get(key))
-        return maya::Element{*hit};   // shared handle: refcount bump, no tree copy
+    // The cache returns an OWNING handle, not a pointer into itself: an
+    // evicting LRU can drop the entry at the next put(), and a `const
+    // shared_ptr<...>*` into the map would dangle right there. Copying the
+    // shared_ptr out is one refcount bump and still no tree copy.
+    // loop_bound<T>::with refuses the pointer-returning shape outright.
+    if (auto hit = g_panel_cache.with([&](PanelElementCache& c) {
+            const std::shared_ptr<const maya::Element>* p = c.get(key);
+            return p ? *p : std::shared_ptr<const maya::Element>{};
+        }))
+        return maya::Element{hit};   // shared handle: refcount bump, no tree copy
 
     auto el = std::make_shared<const maya::Element>(
         maya::AgentTimeline{
             agent_timeline_config(tool_calls, spinner_frame, rail_color)}.build());
-    g_panel_cache.put(key, el);
+    g_panel_cache.with([&](PanelElementCache& c) { c.put(key, el); });
     return maya::Element{el};
 }
 
@@ -773,9 +803,12 @@ maya::Element agent_timeline_element_memoized(std::string_view msg_id,
     // whole point: it removes the O(tools) std::to_string key-build
     // that even a g_panel_cache hit pays, which is what still scaled
     // with run depth (O(run-length) key-builds per frame).
-    if (const std::shared_ptr<const maya::Element>* hit =
-            g_panel_render_memo.get(msg_id, render_key))
-        return maya::Element{*hit};   // shared handle: refcount bump
+    // Owning handle out, for the same reason as g_panel_cache above.
+    if (auto hit = g_panel_render_memo.with([&](PanelRenderMemo& c) {
+            const std::shared_ptr<const maya::Element>* p = c.get(msg_id, render_key);
+            return p ? *p : std::shared_ptr<const maya::Element>{};
+        }))
+        return maya::Element{hit};   // shared handle: refcount bump
 
     // Miss: build via the content-addressed path (which itself hits
     // g_panel_cache across sub-turns with identical batch bytes, e.g.
@@ -785,7 +818,8 @@ maya::Element agent_timeline_element_memoized(std::string_view msg_id,
     // control block — maya blits its cells cross-frame.
     auto el = std::make_shared<const maya::Element>(
         agent_timeline_element(tool_calls, spinner_frame, rail_color));
-    g_panel_render_memo.put(msg_id, render_key, el);
+    g_panel_render_memo.with(
+        [&](PanelRenderMemo& c) { c.put(msg_id, render_key, el); });
     return maya::Element{el};
 }
 

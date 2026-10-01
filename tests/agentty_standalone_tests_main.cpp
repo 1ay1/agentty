@@ -21,6 +21,8 @@
 #include <string>
 #include <string_view>
 
+#include <jaal/kernel/loop.hpp>   // loop_identity: the harness stands in for the loop
+
 // Declarations — arity per the original main().
 #define FOLD_NOARGS(name) extern int name##_main();
 #define FOLD_ARGS(name)   extern int name##_main(int, char**);
@@ -121,6 +123,16 @@ int main(int argc, char** argv) {
         return 2;
     }
     const std::string_view which{argv[1]};
+
+    // Stand in for the kernel's loop thread. Same reasoning as
+    // tests/test_main.cpp: these tests drive reducers and view() directly on
+    // the main thread rather than running a kernel, and view() touches
+    // loop-bound render state. Off the loop that is an abort by design, so
+    // the harness has to say "this thread is the loop" — which is true here.
+    //
+    // A worker spawned inside a test still has no token, so the guarantee is
+    // intact where it matters.
+    const jaal::kernel::loop_identity loop_id;
     // Build the sub-argv: keep argv[0] as the REAL executable path (a test may
     // re-exec itself — external_acp_backend_test spawns argv[0] as a fake ACP
     // agent), drop the dispatch name at argv[1], keep the rest as the test's

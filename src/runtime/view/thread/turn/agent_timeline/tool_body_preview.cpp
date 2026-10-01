@@ -10,6 +10,8 @@
 
 #include "agentty/runtime/view/thread/turn/agent_timeline/tool_body_preview.hpp"
 
+#include <jaal/kernel/loop.hpp>   // loop_bound: the render-phase flag is loop-only
+
 #include "agentty/runtime/view/palette.hpp"
 #include "agentty/runtime/view/thread/turn/agent_timeline/tool_helpers.hpp"
 #include "tool_body_common.hpp"
@@ -27,9 +29,20 @@ namespace agentty::ui {
 // still scopes it for clarity and so a future divergent-build path has a
 // hook.
 namespace {
-bool& frozen_build_flag() noexcept {
-    thread_local bool v = false;
-    return v;
+// The render-phase flag is LOOP-ONLY: FrozenBuildScope is taken and released
+// inside one view() build, and view() runs on the kernel's loop thread.
+//
+// It was a thread_local, which enforced nothing — a worker asking
+// building_frozen() would have read its own untouched `false` and silently
+// taken the wrong branch. loop_bound<bool> makes that an abort naming the
+// rule instead of a quietly wrong render. See jaal/kernel/loop.hpp.
+jaal::kernel::loop_bound<bool> g_frozen_build;
+
+bool frozen_build_get() noexcept {
+    return g_frozen_build.with([](const bool& v) { return v; });
+}
+void frozen_build_set(bool v) noexcept {
+    g_frozen_build.with([v](bool& slot) { slot = v; });
 }
 
 bool text_is_visible(std::string_view text) {
@@ -123,9 +136,9 @@ void generic_lifecycle_body(const ToolUse& tc,
 } // namespace
 
 FrozenBuildScope::FrozenBuildScope() noexcept
-    : prev_(frozen_build_flag()) { frozen_build_flag() = true; }
-FrozenBuildScope::~FrozenBuildScope() { frozen_build_flag() = prev_; }
-bool building_frozen() noexcept { return frozen_build_flag(); }
+    : prev_(frozen_build_get()) { frozen_build_set(true); }
+FrozenBuildScope::~FrozenBuildScope() { frozen_build_set(prev_); }
+bool building_frozen() noexcept { return frozen_build_get(); }
 
 GrepHits collect_grep_hits(std::span<const ToolUse> tool_calls) {
     GrepHits out;

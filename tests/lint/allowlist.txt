@@ -100,10 +100,21 @@ tool/progress.cpp: thread_local
 # condition_variable so a clean exit costs no fixed sleep.
 tool/subagent.cpp: mutex thread_local atomic condition_variable
 tool/commands.cpp: mutex
-# Windows: run_command_s spawns a reader std::thread + mutex-guarded buffer to
-# tee child output. jaal doesn't paper over the platform boundary here — this
-# runs inside a jaal task, and the thread is joined before the task returns.
-tool/util/subprocess.cpp: thread mutex atomic
+# Windows: run_command_s tees child output while polling for exit. It used to
+# be a bare reader std::thread plus `std::mutex buf_mu` guarding four loose
+# `shared_*` variables, joined ~90 lines later with a caller-supplied
+# on_progress callback invoked in between — so a throwing callback meant
+# ~thread on a joinable thread, i.e. std::terminate with no stack.
+#
+# Now jaal::scope() owns the reader (joined on EVERY exit path, so the [&]
+# captures are warranted rather than lucky) and jaal::guarded<PipeBuf> owns
+# the buffer with its mutex, so "took the lock" is not something to remember.
+# jaal caught a real violation during the conversion: the first version
+# passed `char*` into the lock body, which it rejects because a pointer
+# argument is how a body reaches data the lock does not cover.
+#
+# Only `atomic` is left, for the reader_done flag the poll loop samples.
+tool/util/subprocess.cpp: atomic
 # Unique temp names for atomic writes, and a parallel directory walk.
 tool/util/fs_helpers.cpp: mutex atomic
 tool/util/sandbox.cpp: atomic
@@ -172,16 +183,34 @@ runtime/app/cmd_factory.cpp: atomic
 # ACP dispatch fans a tool call out to std::async so a permission-request
 # round-trip can happen alongside; the shared_future is awaited before return.
 acp/server.cpp: async
-# The Windows code-block runner ticks a heartbeat title/line via a background
-# std::thread flagged by an atomic while a blocking subprocess call runs.
-# Inside a jaal task; joined before return.
-runtime/app/update/code_blocks.cpp: thread atomic
+# The Windows code-block runner ticks a heartbeat title/line while a blocking
+# subprocess call runs. The helper is a jaal::scope() nursery spawn now, not a
+# bare std::thread with an unguarded join (same std::terminate-on-throw bug as
+# subprocess.cpp above), and it takes its own stop_token so Esc stops the
+# spinner through the task's cancellation instead of a second ad-hoc flag.
+# `atomic` remains for the "command finished" flag, which is not a cancel.
+runtime/app/update/code_blocks.cpp: atomic
 
-# View-layer render caches. Every one is a bounded LRU on the UI thread,
-# documented at the definition; thread_local is how they say "one thread
-# owns this" without a lock.
-runtime/view/thread/turn/agent_timeline/agent_timeline.cpp: thread_local
-runtime/view/thread/turn/agent_timeline/tool_body_preview.cpp: thread_local
+# View-layer render caches: NO LONGER LISTED, and that is the interesting
+# part. They were four thread_locals (three LRU caches in agent_timeline.cpp,
+# the render-phase flag in tool_body_preview.cpp) whose grant read "every one
+# is a bounded LRU on the UI thread, documented at the definition;
+# thread_local is how they say 'one thread owns this' without a lock."
+#
+# That is exactly the claim jaal's loop_bound<T> exists to CHECK rather than
+# assert, and the failure mode it names is this one: a worker reaching a
+# render cache does not crash, it silently gets its own empty copy and paints
+# from it. A missing panel with no trace of why is worse than an abort.
+#
+# They are jaal::kernel::loop_bound<T> now. Reaching the value needs proof of
+# being on the kernel's loop thread, the kernel arms that identity for its
+# whole lifetime (so view(), which runs between steps, is covered), and off
+# the loop the access aborts naming the rule. The on-loop path is unchanged:
+# still no lock, still one thread.
+#
+# Dropping these two lines is the point of the exercise. An allowlist entry
+# removed because the primitive was replaced by a checked one is the only kind
+# of progress this file can record.
 
 # ── i18n: the catalog pointer IS the live-switch mechanism ───────────────
 # Not a shortcut around guarded<T>. guarded<T> would be the wrong tool here

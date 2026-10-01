@@ -680,6 +680,29 @@ target_include_directories(host_escape_test PRIVATE include)
 add_test(NAME host_escape_test COMMAND host_escape_test)
 set_tests_properties(host_escape_test PROPERTIES TIMEOUT 30)
 
+# ── Loop affinity: agentty's loop-only state really is loop-only ───────────
+#
+# jaal's own tests prove loop_bound<T> behaves. They say nothing about whether
+# THIS tree uses it, and that gap is where the guarantee used to die: jaal
+# shipped loop_bound, and the number of them in jaal + maya + agentty combined
+# was zero, because the only way to get a token was to forge one. This test
+# pins the consumer half — the forge is shut, agentty's render caches are
+# reachable on the loop, and a worker that reaches for one ABORTS instead of
+# painting from its own empty copy.
+#
+# raw/standalone, not consolidated: the last case asserts a SIGABRT in a
+# forked child, which doctest cannot host. Header-only link (jaal + the test)
+# so it stays a ~3 s compile.
+agentty_test(loop_affinity_test MODE raw)
+add_executable(loop_affinity_test EXCLUDE_FROM_ALL tests/loop_affinity_test.cpp)
+target_include_directories(loop_affinity_test PRIVATE include)
+# jaal directly, NOT maya: this test is about the runtime's loop-affinity
+# guarantee, so it should not need a terminal framework to link. maya does not
+# re-export jaal's include dir anyway.
+target_link_libraries(loop_affinity_test PRIVATE jaal::jaal)
+add_test(NAME loop_affinity_test COMMAND loop_affinity_test)
+set_tests_properties(loop_affinity_test PROPERTIES TIMEOUT 60 LABELS sanitizer)
+
 # Single-root layout + legacy ~/.config/agentty migration. Narrow link —
 # user_root.cpp + home_dir.cpp only — so the sandboxed $HOME manipulation
 # can't interact with any other subsystem's statics.
