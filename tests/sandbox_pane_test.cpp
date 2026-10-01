@@ -26,6 +26,7 @@
 #include "agentty/runtime/msg.hpp"
 #include "agentty/runtime/panel/sandbox.hpp"
 #include "agentty/runtime/panel/settings/items.hpp"
+#include "agentty/runtime/view/form_panel.hpp"   // form_config — the render checks
 #include "agentty/tool/util/sandbox.hpp"
 
 #include <cstdlib>
@@ -1655,6 +1656,137 @@ TEST_CASE("sandbox list: no key sequence leaves the editor inconsistent") {
                 CHECK(std::holds_alternative<form::field::Text>(f.value));
         }
     }
+}
+
+// ── What actually reaches the screen ──────────────────────────────
+//
+// Everything above tests the MODEL: the form, the reducer, the config it
+// produces. None of it proves a single pixel is painted correctly, and this
+// pane has already shipped two bugs that only existed at the render layer --
+// the subtitle describing the wrong engine, and a footer maya silently
+// replaced while a row was being edited.
+//
+// render_to_string paints the real Element tree at a real width, so these
+// assert on the bytes a user's terminal would receive.
+
+TEST_CASE("sandbox render: the pane paints its rows, values and footer") {
+    sandbox_cfg::Config cfg;
+    cfg.configured = true;
+    cfg.backend = sandbox_cfg::LinuxBackend::Claybin;
+    cfg.read_paths = {"/opt/sdk"};
+    install(cfg);
+
+    auto form = pn::build_sandbox_form(cfg, facts_for(cfg));
+    pn::annotate_sandbox_form(form, pn::preview_sandbox(cfg), cfg,
+                              pn::EngineStatus::InForce);
+    const auto out = maya::render_to_string(
+        maya::Panel{agentty::ui::form_config(form, maya::Color::blue())}.build(), 120);
+
+    // Framed like every other picker. A frameless overlay paints
+    // transparently over the thread and reads as "the key did nothing".
+    CHECK(out.find("\xe2\x95\xad") != std::string::npos);   // ╭
+    CHECK(out.find("Sandbox") != std::string::npos);
+
+    // Section headers and the rows under them.
+    //
+    // Upper-cased: maya renders a header as caps plus a rule to the edge,
+    // which is what stops one section running into the next in a long form.
+    // Asserting the source-case label would pass on a pane that never painted
+    // a header at all.
+    CHECK(out.find("ENGINE") != std::string::npos);
+    CHECK(out.find("FILESYSTEM") != std::string::npos);
+    CHECK(out.find("Preset") != std::string::npos);
+
+    // The VALUE column, not just the labels. A row whose value never paints
+    // is a row you cannot read.
+    CHECK(out.find("claybin") != std::string::npos);
+
+    // The list row renders its COUNT rather than a raw path list.
+    CHECK(out.find("1 path") != std::string::npos);
+}
+
+TEST_CASE("sandbox render: nothing paints past the frame at any width") {
+    // The pane is the widest form in agentty -- long help lines, an origin
+    // column, and inline errors. A row that overflows does not wrap, it
+    // collides with the border and corrupts the frame.
+    //
+    // 60 is the practical floor (form_config clamps min-width against the
+    // terminal), 80 is the classic default, 200 is an ultrawide.
+    sandbox_cfg::Config cfg;
+    cfg.configured = true;
+    cfg.backend = sandbox_cfg::LinuxBackend::Claybin;
+    // Worst case for width: a long path, and an error on the same row.
+    cfg.read_paths = {"/some/quite/long/path/to/a/vendored/dependency/tree"};
+    cfg.net_mode = sandbox_cfg::NetMode::Ports;
+    cfg.allow_ports.clear();            // triggers the inline error
+    install(cfg);
+
+    auto form = pn::build_sandbox_form(cfg, facts_for(cfg));
+    pn::annotate_sandbox_form(form, pn::preview_sandbox(cfg), cfg,
+                              pn::EngineStatus::InForce);
+
+    for (int width : {60, 80, 100, 120, 200}) {
+        const auto out = maya::render_to_string(
+            maya::Panel{agentty::ui::form_config(form, maya::Color::blue(),
+                                                 nullptr, 0, width)}.build(),
+            width);
+        // Every painted line must fit. render_to_string emits one line per
+        // row; a line longer than the terminal is the overflow bug.
+        std::size_t start = 0, worst = 0;
+        while (start <= out.size()) {
+            const auto nl = out.find('\n', start);
+            const auto end = (nl == std::string::npos) ? out.size() : nl;
+            // Count display columns, not bytes: the pane is full of UTF-8
+            // (·, ─, →) and a byte count would false-positive on every row.
+            std::size_t cols = 0;
+            for (std::size_t i = start; i < end; ++i)
+                if ((static_cast<unsigned char>(out[i]) & 0xC0) != 0x80) ++cols;
+            worst = std::max(worst, cols);
+            if (nl == std::string::npos) break;
+            start = nl + 1;
+        }
+        const std::string msg =
+            "width " + std::to_string(width) + ": widest line was " +
+            std::to_string(worst);
+        CHECK_MESSAGE(worst <= static_cast<std::size_t>(width), msg);
+    }
+}
+
+TEST_CASE("sandbox render: the subtitle names the RUNNING engine") {
+    // The screenshot bug, asserted on painted bytes rather than on the model.
+    // Selecting claybin under bwrap must not put "seccomp" on screen.
+    sandbox_cfg::Config cfg;
+    cfg.configured = true;
+    cfg.backend = sandbox_cfg::LinuxBackend::Claybin;
+
+    pn::HostFacts facts;
+    facts.claybin_available = true;
+    facts.landlock_abi = 10;
+    facts.sandbox_active = true;
+    facts.running = sandbox_cfg::LinuxBackend::Bwrap;   // but bwrap is live
+
+    const auto form = pn::build_sandbox_form(cfg, facts);
+    const auto out = maya::render_to_string(
+        maya::Panel{agentty::ui::form_config(form, maya::Color::blue())}.build(), 120);
+
+    CHECK(out.find("bwrap") != std::string::npos);
+    CHECK(out.find("seccomp") == std::string::npos);
+    CHECK(out.find("restart") != std::string::npos);
+}
+
+TEST_CASE("sandbox render: the list editor paints its entries and hint") {
+    auto ed = pn::build_sandbox_list(pn::kSbReadPaths, "Also readable",
+                                     "extra paths a command may read",
+                                     {"/opt/sdk", "/var/cache/x"}, false);
+    const auto out = maya::render_to_string(
+        maya::Panel{agentty::ui::form_config(ed.form, maya::Color::blue())}.build(), 100);
+
+    // Both entries, numbered, plus the trailing add row.
+    CHECK(out.find("/opt/sdk") != std::string::npos);
+    CHECK(out.find("/var/cache/x") != std::string::npos);
+    CHECK(out.find("1.") != std::string::npos);
+    CHECK(out.find("2.") != std::string::npos);
+    CHECK(out.find("+") != std::string::npos);
 }
 
 // ── "applies on restart" has to be a checked claim ─────────────────────
