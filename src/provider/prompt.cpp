@@ -11,6 +11,8 @@
 #include "agentty/tool/registry.hpp"
 #include "agentty/tool/skills.hpp"
 #include "agentty/tool/util/fs_helpers.hpp"   // util::workspace_root/project_root — AGENTS.md anchor + walk start
+#include "agentty/tool/util/sandbox.hpp"      // is_active/config_snapshot — the <environment> sandbox stanza
+#include "agentty/domain/sandbox_config.hpp"  // NetMode
 #include "agentty/util/dbglog.hpp"
 
 #include <cstdlib>
@@ -198,6 +200,76 @@ namespace {
         tools::util::project_root(),
         wire::resolve_global_agents_md(),
         &read_memory_cached);
+}
+
+// What the model needs to know about the sandbox, or "" when there is none.
+//
+// ── Why the model is told at all ───────────────────────────────────
+//
+// Because a model that does not know it is sandboxed MISDIAGNOSES every wall
+// it hits. The failure is well documented across agents: EPERM on a path
+// becomes "your corporate proxy is blocking this", a blocked connect becomes
+// "check your firewall / CrowdStrike", and the agent either sends the user on
+// a wild goose chase or retries the same denied call in a loop. Both waste a
+// turn and neither can succeed, because the boundary is a kernel decision and
+// no amount of retrying moves it.
+//
+// The fix every mature implementation lands on is the same: say the boundary
+// exists, say where it is, and say what to do instead. Then a denial is a
+// FACT the model can route around rather than a mystery to investigate.
+//
+// ── Why it is in <environment> ─────────────────────────────────────
+//
+// It is an environment fact, exactly like the OS and the shell: the same class
+// of thing as "you are on Windows, do not write `ls`". Putting it in its own
+// section would make it read as policy to be reasoned about; putting it here
+// makes it a constraint to be worked within.
+//
+// ── Why it says what is ALLOWED, not just what is blocked ───────────────
+//
+// A denial list invites probing the edges. Stating the workspace is writable
+// and the rest is read-only tells the model where to work on the FIRST try,
+// which is the whole point: fewer walls hit, not better explanations after.
+[[nodiscard]] std::string sandbox_stanza() {
+    namespace sb = tools::util::sandbox;
+    if (!sb::is_active()) return {};
+
+    const auto cfg = sb::config_snapshot();
+    std::string out = "  sandbox: ON \xe2\x80\x94 shell commands run inside an "
+                      "OS-level sandbox\n";
+
+    // The workspace is the one thing that is always writable, and saying so is
+    // what stops "I cannot write anywhere" panic after one EPERM elsewhere.
+    out += "    writable:  the workspace (cwd above) and /tmp\n";
+    out += "    readable:  system dirs and your toolchain; "
+           "credential files are masked\n";
+
+    switch (cfg->net_mode) {
+        case sandbox_cfg::NetMode::Full:
+            out += "    network:   allowed\n";
+            break;
+        case sandbox_cfg::NetMode::None:
+            // Worth being blunt: this one breaks the commands an agent reaches
+            // for most (git push, npm install, curl), and a model that does not
+            // know will burn a turn diagnosing DNS.
+            out += "    network:   BLOCKED \xe2\x80\x94 git push, npm/pip installs "
+                   "and curl will fail. Do not retry them or blame DNS.\n";
+            break;
+        case sandbox_cfg::NetMode::Ports:
+            out += "    network:   restricted to specific ports; an unlisted "
+                   "port fails to connect\n";
+            break;
+    }
+
+    // The instruction, not just the facts. Without this the model knows it is
+    // sandboxed and still retries, because nothing told it that retrying is
+    // the wrong move.
+    out += "    If a command fails with a permission or network error, that is "
+           "the sandbox, not a broken tool or a proxy.\n"
+           "    Do NOT retry it unchanged and do NOT tell the user to check "
+           "their firewall. Work inside the workspace, or say plainly which "
+           "wall you hit and what you would need.\n";
+    return out;
 }
 
 } // namespace
@@ -456,7 +528,8 @@ std::string default_system_prompt(bool lean) {
         << "  os: " << os_name << "\n"
         << "  shell: " << shell << "\n";
     if (!cwd.empty()) oss << "  cwd: " << cwd << "\n";
-    oss << "</environment>\n\n"
+    oss << sandbox_stanza()
+        << "</environment>\n\n"
         << "<shell-notes>\n"
         << shell_hint << "\n"
         << "</shell-notes>\n\n";

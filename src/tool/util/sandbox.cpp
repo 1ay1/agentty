@@ -936,12 +936,81 @@ std::string describe_state() {
 #endif
 }
 
+// Does this output look like the SANDBOX refused something?
+//
+// ── Why annotate at all ───────────────────────────────────────────
+//
+// A bare "Permission denied" is indistinguishable from a real bug, and a model
+// reading it concludes the wrong thing with total confidence: it blames a
+// corporate proxy, tells the user to check CrowdStrike, or retries the same
+// denied call. Every one of those wastes a turn and none can work, because the
+// boundary is a kernel decision.
+//
+// The system prompt says a sandbox exists (see provider/prompt.cpp), and that
+// helps -- but it is thousands of tokens away from the error by the time the
+// error arrives. Attaching the explanation to the OUTPUT puts it where the
+// model is actually looking, at the moment it has to decide what to do next.
+// That is the pattern mature sandbox runtimes converge on, and it is the half
+// that stops retry loops.
+//
+// ── Why pattern-matching is sound here ──────────────────────────────
+//
+// It cannot be exact: the kernel denies, libc stringifies, and the program
+// prints whatever it likes. A false POSITIVE costs one extra sentence on an
+// error the model was already handling; a false NEGATIVE just leaves today's
+// behaviour. Neither can corrupt anything, so matching broadly is the right
+// trade -- which is also why this never claims the sandbox DID deny, only that
+// it is the likely cause.
+[[nodiscard]] bool looks_like_denial(std::string_view out) {
+    static constexpr std::string_view kSigns[] = {
+        "Permission denied",
+        "Operation not permitted",
+        "Read-only file system",
+        "Network is unreachable",
+        "Could not resolve host",
+        "Temporary failure in name resolution",
+        "Connection refused",
+        "Bad system call",            // a seccomp kill, as the shell reports it
+    };
+    for (auto s : kSigns)
+        if (out.find(s) != std::string_view::npos) return true;
+    return false;
+}
+
+// The note appended to a denied command's output.
+//
+// Phrased for the MODEL and kept short: it names the cause, forbids the two
+// wrong moves (retry, blame the network), and says what to do instead. A note
+// that only explained would still leave the model free to retry.
+[[nodiscard]] std::string denial_note() {
+    const auto cfg = config_snapshot();
+    std::string n =
+        "\n\n[sandbox] This command ran inside an OS-level sandbox, so a "
+        "permission or network error above is most likely the sandbox "
+        "refusing it \xe2\x80\x94 not a broken tool, a proxy, or the user's firewall.";
+    if (cfg->net_mode == sandbox_cfg::NetMode::None)
+        n += " Network access is BLOCKED in this session.";
+    else if (cfg->net_mode == sandbox_cfg::NetMode::Ports)
+        n += " Only specific ports are reachable in this session.";
+    n += " The workspace is writable; most paths outside it are not. "
+         "Do not retry the same command unchanged \xe2\x80\x94 work inside the "
+         "workspace, or tell the user which wall you hit and what access you "
+         "would need.";
+    return n;
+}
+
 SubprocessResult run_shell_command(std::string_view cmd,
                                    std::size_t max_bytes,
                                    std::chrono::seconds timeout) {
     if (!is_active())
         return run_command_s(std::string{cmd}, max_bytes, timeout);
-    return run_wrapped(cmd, max_bytes, timeout);
+    auto r = run_wrapped(cmd, max_bytes, timeout);
+    // Only on FAILURE, and only when the output looks like a wall. A note on
+    // every command would be noise the model learns to skip, which is how an
+    // explanation stops working.
+    if (r.exit_code != 0 && looks_like_denial(r.output))
+        r.output += denial_note();
+    return r;
 }
 
 SubprocessResult run_argv(const std::vector<std::string>& argv,
@@ -949,7 +1018,13 @@ SubprocessResult run_argv(const std::vector<std::string>& argv,
                           std::chrono::seconds timeout) {
     if (!is_active())
         return run_argv_s(argv, max_bytes, timeout);
-    return run_wrapped_argv(argv, max_bytes, timeout);
+    auto r = run_wrapped_argv(argv, max_bytes, timeout);
+    // Same annotation as the shell path: this is what hooks and ACP terminals
+    // go through, and a hook that dies on a wall is just as easy to
+    // misdiagnose as a bash call.
+    if (r.exit_code != 0 && looks_like_denial(r.output))
+        r.output += denial_note();
+    return r;
 }
 
 std::vector<std::string> bwrap_argv_for_test([[maybe_unused]] std::string_view shell_cmd) {

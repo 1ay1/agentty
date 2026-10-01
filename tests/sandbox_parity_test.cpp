@@ -16,6 +16,7 @@
 
 #include "agentty/tool/util/sandbox.hpp"
 #include "agentty/domain/sandbox_config.hpp"   // Config's default backend
+#include "agentty/provider/prompt.hpp"          // default_system_prompt — the sandbox stanza
 #include "agentty/tool/mcp_tools_bridge.hpp"
 #include <mcp/tools/util/sandbox.hpp>
 
@@ -266,6 +267,75 @@ TEST_CASE("sandbox: asking for claybin on a host that refuses it yields bwrap, n
         CHECK((b == ag::Backend::Claybin || b == ag::Backend::Bwrap));
     }
 #endif
+}
+
+TEST_CASE("sandbox: the model is TOLD it is sandboxed") {
+    // A model that does not know it is sandboxed misdiagnoses every wall it
+    // hits: EPERM becomes "your proxy is blocking this", a blocked connect
+    // becomes "check your firewall", and it either sends the user chasing a
+    // phantom or retries a call the kernel will never allow.
+    //
+    // So the <environment> stanza says the boundary exists. This pins that it
+    // appears when sandboxed and -- just as importantly -- does NOT when the
+    // user turned sandboxing off, because a prompt claiming walls that are not
+    // there is the same lie in the other direction.
+    ag::reset_config_for_test();
+    ag::init(ag::Mode::Off);
+    {
+        const auto p = agentty::provider::default_system_prompt();
+        CHECK(p.find("sandbox: ON") == std::string::npos);
+    }
+
+    ag::reset_config_for_test();
+    ag::init(ag::Mode::Auto);
+    if (ag::is_active()) {
+        const auto p = agentty::provider::default_system_prompt();
+        CHECK(p.find("sandbox: ON") != std::string::npos);
+        // The three things that stop the misdiagnosis: where it can write,
+        // that a denial is the sandbox, and that retrying is wrong.
+        CHECK(p.find("writable") != std::string::npos);
+        CHECK(p.find("not a broken tool") != std::string::npos);
+        CHECK(p.find("Do NOT retry") != std::string::npos);
+    }
+}
+
+TEST_CASE("sandbox: a denial is explained where the model is looking") {
+    // The system prompt is thousands of tokens away by the time an error
+    // arrives. The annotation goes on the OUTPUT, which is what the model is
+    // actually reading when it decides whether to retry.
+    //
+    // Driven through the real runner so this covers the wiring, not just the
+    // string: a command that cannot read a host path under any policy.
+    ag::reset_config_for_test();
+    ag::init(ag::Mode::Auto);
+    if (!ag::is_active()) return;   // no backend here; nothing to annotate
+
+    auto r = ag::run_shell_command("cat /etc/shadow", 64 * 1024,
+                                   std::chrono::seconds{20});
+    if (r.exit_code != 0 &&
+        r.output.find("[sandbox]") != std::string::npos) {
+        // When the annotation fires it must carry the instruction, not just
+        // the diagnosis -- a note that only explains still leaves the model
+        // free to retry.
+        CHECK(r.output.find("Do not retry") != std::string::npos);
+        CHECK(r.output.find("firewall") != std::string::npos);
+    }
+    // Not asserted: that it ALWAYS fires. Whether /etc/shadow is readable is a
+    // property of the host's policy, and a test that demanded a denial would
+    // fail on a machine configured differently rather than finding a bug.
+}
+
+TEST_CASE("sandbox: a SUCCEEDING command is never annotated") {
+    // The note has to stay rare to stay read. Putting it on every command --
+    // or on every failure, denial or not -- is how an explanation becomes
+    // noise the model learns to skip.
+    ag::reset_config_for_test();
+    ag::init(ag::Mode::Auto);
+    if (!ag::is_active()) return;
+
+    auto r = ag::run_shell_command("echo hello", 64 * 1024,
+                                   std::chrono::seconds{20});
+    CHECK(r.output.find("[sandbox]") == std::string::npos);
 }
 
 TEST_CASE("sandbox: both implementations know the same backends") {
