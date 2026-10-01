@@ -779,7 +779,82 @@ before you add a domain.
 
 ---
 
-## 13. Implementation order
+## 13. Syscall brokering: available, deliberately not wired
+
+claybin implements `SECCOMP_RET_USER_NOTIF` properly — `broker::Listener`,
+`Request`/`Decision`, crun's ADDFD handoff, and an explicit refusal of the
+unsound shape. `SyscallPolicy::notify(nr)` marks a syscall for brokering and
+`Spawned::notify_fd` hands the listener to the caller. agentty uses none of it.
+
+That is a decision, and it is worth writing down because the feature is
+genuinely attractive and the reason to wait is not obvious.
+
+### What it would buy
+
+Brokering turns a filter into a **capability system**. Today the syscall
+profile answers "may you call `connect()`"; a broker answers "may you reach
+`api.github.com:443`" — the supervisor resolves the name itself and injects a
+connected descriptor, so DNS rebinding cannot widen the grant after the check.
+There is no second lookup to poison.
+
+It is also the mechanism behind the blocked-activity feed (§9a): a notification
+is how you learn that `cargo` tried `ptrace(PTRACE_ATTACH)` rather than only
+that the build failed.
+
+### Why it is not wired
+
+**It needs a supervisor loop for the lifetime of every command.** Not an argv
+and not a policy field — a poll loop that must answer every notification
+promptly, for as long as the child runs. agentty's spawn path builds a posture
+and hands off to a runner that owns the pipe and the deadline; there is nowhere
+in that shape for a second event loop, and adding one touches the tool runner
+rather than the sandbox.
+
+**A broker that stops answering is a hang, not a denial.** The kernel blocks the
+guest thread until someone responds. So the failure mode of a half-finished
+broker is "agentty wedged on a command with no output", which is strictly worse
+than the denial it replaces — and it would land on exactly the hosts where
+people already distrust the sandbox.
+
+**The sound shapes are narrow.** A notification carries register arguments.
+Reading a path or a sockaddr out of the guest and then approving the call is a
+TOCTOU bug: the guest has other threads and can rewrite that memory between the
+read and the kernel acting. Only two shapes are safe — scalar-only decisions,
+and supervisor-performs-and-injects-an-fd. Most of the interesting rules a
+person would *want* ask about a path, which is the shape that is unsound.
+
+So the honest position is: the mechanism is there, the hard part (the broker
+itself, with the TOCTOU trap closed) is done in claybin, and the remaining work
+is in agentty's runner rather than its sandbox.
+
+### What is in place now
+
+`spawn_shell` **closes** `notify_fd` if it is ever non-negative, and logs a
+warning. Closing is correct rather than a placeholder: when the listener closes,
+the kernel fails the pending syscall instead of blocking it, so a policy that
+brokers without a supervisor gets denials rather than a wedge. A denial is
+recoverable and visible; a hang is neither.
+
+That also closes a latent fd leak — the field was simply never read.
+
+### If it gets built
+
+1. The listener's lifetime belongs to the **command**, not the sandbox. It has
+   to be owned wherever the pipe and the deadline are owned.
+2. Every notification must be answered, including on the error paths. A
+   `continue` that skips one wedges the guest.
+3. Re-verify the notification is live immediately before responding — the guest
+   thread alive, the id not reused. claybin exposes this; skipping it is the
+   TOCTOU bug.
+4. Scalar-only or supervisor-performs. If a rule needs a path, it does not
+   belong in a broker; it belongs in landlock, which the kernel enforces
+   without a race.
+5. It needs its own live check. A broker that answers `allow` to everything
+   passes every policy-level test.
+
+---
+
+## 14. Implementation order
 
 Each step is independently shippable and independently verifiable. Do not
 batch them — the whole point of the live check is that it tells you which

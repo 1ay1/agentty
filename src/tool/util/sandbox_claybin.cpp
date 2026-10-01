@@ -21,6 +21,7 @@
 // read on `/`, which handed ~/.ssh and ~/.aws to any approved bash call while
 // still reporting "sandbox: active". One list, two backends.
 #include "agentty/tool/util/sandbox_claybin.hpp"
+#include "agentty/util/logx.hpp"   // AGT_LOG — the unwired-broker warning
 
 // Linux-only, and that is claybin's own split rather than a build toggle:
 // its plan compiler is portable (and the pane's preview uses it on any host),
@@ -299,6 +300,32 @@ SpawnResult spawn_shell(const Posture& p, const std::string& shell_cmd, int stdo
     out.started = true;
     out.pid = spawned->pid;
     out.pidfd = spawned->pidfd;
+
+    // The seccomp listener, when the policy brokers syscalls.
+    //
+    // No agentty policy sets SysAction::notify today, so this is always -1 and
+    // the close is a no-op. It is here because the failure mode if that ever
+    // changes is bad and silent: claybin hands the listener to the CALLER, and
+    // a caller that ignores it leaks the descriptor AND hangs the guest
+    // forever on its first brokered syscall -- the kernel blocks the thread
+    // until someone answers the notification, and nobody is listening.
+    //
+    // So: close it, and say loudly that arriving here means the policy and the
+    // spawn path disagree. Closing is the right move rather than a mistake to
+    // be fixed later -- when the listener fd closes, the kernel fails the
+    // pending syscall instead of blocking, which turns "agentty wedged" into
+    // "that syscall was denied". A denial is recoverable; a hang is not.
+    //
+    // Wiring real brokering means running a poll loop for the lifetime of the
+    // command (see docs/design/sandbox-boundary.md §13), which is a different
+    // shape of work from building an argv and is deliberately not done yet.
+    if (spawned->notify_fd >= 0) {
+        AGT_LOG(Tool, Warn, "sandbox.broker",
+                "policy requested syscall brokering but no supervisor is "
+                "wired; closing the listener so brokered calls fail instead "
+                "of hanging");
+        ::close(spawned->notify_fd);
+    }
     return out;
 }
 
