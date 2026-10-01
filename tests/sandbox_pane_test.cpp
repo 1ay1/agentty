@@ -1783,6 +1783,106 @@ TEST_CASE("sandbox render: nothing paints past the frame at any width") {
     }
 }
 
+// ── The same frame, under translation ────────────────────────────────
+//
+// Prerequisite for docs/design/i18n.md. The claim that twenty languages can
+// share one TUI layout rests on two things being true, and neither is
+// obvious enough to assume:
+//
+//   1. a CJK label is DOUBLE-WIDTH -- `系统调用过滤` is 6 codepoints and 12
+//      columns -- so anything that counts characters will under-measure it by
+//      half and declare an overflowing row fine.
+//   2. German runs long. Measured on real agentty labels: `Applies on
+//      restart` (18 cols) becomes `Wird beim Neustart angewendet` (29), which
+//      is 1.61x -- well past the +30-40% rule of thumb.
+//
+// So this paints the pane with the LONGEST translation we expect and the
+// WIDEST script we support, and measures in true display columns via
+// maya::string_width rather than by counting codepoints.
+//
+// Note the deliberate difference from the test above: that one counts
+// non-continuation bytes, which equals the column count only while every
+// glyph is single-width. It is right for the English pane and would be
+// WRONG here -- it would score 系统调用过滤 as 6 and pass a row that paints
+// 12 columns wide. Two measurements because they answer two questions.
+TEST_CASE("sandbox render: the frame survives translation") {
+    // Widest line, in display COLUMNS.
+    const auto widest_cols = [](const std::string& out) {
+        std::size_t start = 0, worst = 0;
+        while (start <= out.size()) {
+            const auto nl = out.find('\n', start);
+            const auto end = (nl == std::string::npos) ? out.size() : nl;
+            worst = std::max<std::size_t>(
+                worst, static_cast<std::size_t>(maya::string_width(
+                           std::string_view{out}.substr(start, end - start))));
+            if (nl == std::string::npos) break;
+            start = nl + 1;
+        }
+        return worst;
+    };
+
+    struct Sample { const char* lang; const char* path; };
+    const Sample samples[] = {
+        // A path is the longest free-form string a row can carry, and it is
+        // the one field a translation cannot shorten.
+        {"de", "/ein/ziemlich/langer/pfad/zu/einem/abhängigkeitsbaum"},
+        {"zh-CN", "/一个/相当/长的/路径/到/依赖/树"},
+        {"ja", "/かなり/長い/パス/依存関係/ツリー"},
+        {"ru", "/довольно/длинный/путь/к/дереву/зависимостей"},
+        {"ko", "/상당히/긴/경로/종속성/트리"},
+    };
+
+    for (const auto& s : samples) {
+        sandbox_cfg::Config cfg;
+        cfg.configured = true;
+        cfg.backend = sandbox_cfg::LinuxBackend::Claybin;
+        cfg.read_paths = {s.path};
+        cfg.net_mode = sandbox_cfg::NetMode::Ports;
+        cfg.allow_ports.clear();          // inline error on the same row
+        install(cfg);
+
+        auto form = pn::build_sandbox_form(cfg, facts_for(cfg));
+        pn::annotate_sandbox_form(form, pn::preview_sandbox(cfg), cfg,
+                                  pn::EngineStatus::InForce);
+
+        for (int width : {60, 80, 120, 200}) {
+            const auto out = maya::render_to_string(
+                maya::Panel{agentty::ui::form_config(form, maya::Color::blue(),
+                                                     nullptr, 0, width)}.build(),
+                width);
+            const auto worst = widest_cols(out);
+            INFO("lang " << std::string{s.lang} << " at width " << width
+                         << ": widest line was " << worst << " columns");
+            CHECK(worst <= static_cast<std::size_t>(width));
+        }
+    }
+}
+
+// The measurement the whole design rests on: maya scores every script we
+// ship in true display columns. If this regresses, every width decision in
+// the renderer is wrong for 7 of the 20 languages and nothing else will say
+// so -- the layout just quietly corrupts.
+TEST_CASE("i18n: maya measures every target script in display columns") {
+    struct W { const char* text; int want; const char* note; };
+    const W cases[] = {
+        {"hello",            5, "ascii"},
+        {"\xe4\xbd\xa0\xe5\xa5\xbd",                 4, "zh-CN, 2 chars x 2 cols"},
+        {"\xe3\x81\x93\xe3\x82\x93",                 4, "ja hiragana"},
+        {"\xed\x95\x9c\xea\xb5\xad",                 4, "ko hangul"},
+        {"\xd0\xbf\xd1\x80\xd0\xb8",                 3, "ru cyrillic, single-width"},
+        {"\xd0\xbf\xd1\x80\xd0\xb8\xd0\xb2",         4, "uk cyrillic"},
+        {"\xc3\xa9\xc3\xa8",                         2, "fr accented"},
+        {"\xc3\xb6\xc3\xa4\xc3\xbc",                 3, "de umlauts"},
+        {"\xc4\xb1\xc5\x9f",                         2, "tr dotless-i + s-cedilla"},
+        {"\xc5\x82\xc4\x85",                         2, "pl"},
+        {"\xc4\x8d\xc5\x99",                         2, "cs"},
+    };
+    for (const auto& c : cases) {
+        INFO(std::string{c.note});
+        CHECK(maya::string_width(c.text) == c.want);
+    }
+}
+
 TEST_CASE("sandbox render: the subtitle names the RUNNING engine") {
     // The screenshot bug, asserted on painted bytes rather than on the model.
     // Selecting claybin under bwrap must not put "seccomp" on screen.
