@@ -4,6 +4,8 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.18] - 2026-10-01
+
 ### Fixed
 - **Windows had no binary in 0.9.16 or 0.9.17, and the check that was supposed
   to catch it reported green.** Two independent bugs, and the second is why the
