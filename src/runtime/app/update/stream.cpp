@@ -573,13 +573,24 @@ Cmd finalize_turn(Model& m, StopReason stop_reason) {
         // converges, so a wire that goes quiet can never again be silent on
         // only some of them.
         //
+        // IT GOES IN `error`, NOT IN `text`. Writing agentty's own words
+        // into `text` puts them in the model's mouth: they render as
+        // assistant prose, in the model's voice, behind the model's name --
+        // and they PERSIST that way, so a later turn replays them to the
+        // model as something it said. Message::error exists for exactly this
+        // (see its declaration: "kept SEPARATE from text so the assistant's
+        // actual partial output and the failure reason render distinctly"),
+        // renders as a ⚠ banner, and is never sent back on the wire.
+        //
         // Mid-turn settles are NOT empty turns: StopReason::ToolUse means
         // the model is mid-flight and the text may legitimately be blank
         // (tool call with no preamble). Only a TERMINAL stop with nothing to
-        // show qualifies.
+        // show qualifies. An existing `error` is also left alone -- a real
+        // stream failure already said something better than this can.
         if (last.role == Role::Assistant
             && last.text.empty()
             && last.tool_calls.empty()
+            && !last.error
             && stop_reason != StopReason::ToolUse) {
             // Name the cause when the wire gave one. `refusal` is a real
             // stop_reason (docs.claude.com/en/api/handling-stop-reasons) that
@@ -587,25 +598,24 @@ Cmd finalize_turn(Model& m, StopReason stop_reason) {
             // which is why this turn looked identical to a clean end.
             switch (stop_reason) {
                 case StopReason::Refusal:
-                    last.text = "_The model declined to answer. "
-                                "Rephrasing, or asking in a new thread, "
-                                "usually works._";
+                    last.error = "the model declined to answer "
+                                 "\xc2\xb7 rephrasing usually works";
                     break;
                 case StopReason::MaxTokens:
-                    last.text = "_The reply hit the output token limit "
-                                "before any text arrived._";
+                    last.error = "hit the output token limit before "
+                                 "any text arrived";
                     break;
                 case StopReason::ContextExceeded:
-                    last.text = "_The context window filled up before the "
-                                "model could reply. Try /compact._";
+                    last.error = "the context window filled up before "
+                                 "the model could reply \xc2\xb7 try /compact";
                     break;
                 // EndTurn / StopSequence / Unspecified: the wire claims a
                 // normal finish but handed us nothing. Say exactly that and
                 // nothing more -- a guess at the cause is worse than none
                 // (the same reasoning as guard_truncated_tool_args above).
                 default:
-                    last.text = "_The model ended the turn without "
-                                "producing any output._";
+                    last.error = "the model ended the turn without "
+                                 "producing any output";
                     break;
             }
             AGT_LOG(Wire, Warn, "stream.empty_turn",

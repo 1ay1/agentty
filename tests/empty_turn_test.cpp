@@ -33,6 +33,9 @@
 
 #include "agtest.hpp"
 
+#include <maya/print.hpp>            // render_to_string
+#include <maya/widget/turn.hpp>
+
 #include "agentty/runtime/app/update.hpp"
 #include "agentty/runtime/model.hpp"
 #include "agentty/runtime/msg.hpp"
@@ -83,13 +86,20 @@ TEST_CASE("empty turn: a refusal says it was refused") {
     // The exact shape of the reported bug: terminal stop, no text, no tools.
     const auto msg = settle_with(StopReason::Refusal);
 
-    // The ONE hard guarantee — never an empty bubble again.
-    agtest::check(!msg.text.empty(),
+    // The ONE hard guarantee -- never an empty bubble again.
+    agtest::check(msg.error.has_value(),
                   "a refused turn renders something");
     // ...and it names the cause, because "declined" and "crashed" call for
     // completely different responses from the user.
-    agtest::check(has(msg.text, "declined"),
+    agtest::check(has(*msg.error, "declined"),
                   "the refusal is described as a decline");
+
+    // THE CHANNEL IS THE POINT. agentty's own words must never land in
+    // `text`: that is the model's voice. There they would render as
+    // assistant prose behind the model's name, persist to disk that way,
+    // and replay to the model next turn as something it said.
+    agtest::check(msg.text.empty(),
+                  "the notice is NOT put in the model's mouth");
 }
 
 TEST_CASE("empty turn: every terminal stop is covered") {
@@ -103,18 +113,22 @@ TEST_CASE("empty turn: every terminal stop is covered") {
                             StopReason::Unspecified}) {
         const auto msg = settle_with(stop);
         INFO("stop_reason: " << std::string{to_string(stop)});
-        agtest::check(!msg.text.empty(),
+        agtest::check(msg.error.has_value(),
                       "no terminal stop leaves a blank bubble");
+        agtest::check(msg.text.empty(),
+                      "no terminal stop forges assistant prose");
     }
 }
 
 TEST_CASE("empty turn: a tool call is NOT an empty turn") {
     // The false-positive that would be worse than the bug. A model calling a
-    // tool with no preamble is normal and extremely common — stamping
+    // tool with no preamble is normal and extremely common -- stamping
     // "produced no output" on it would put a lie in the transcript on a huge
     // fraction of healthy turns.
     const auto msg = settle_with(StopReason::ToolUse, /*streamed=*/{},
                                  /*with_tool_call=*/true);
+    agtest::check(!msg.error.has_value(),
+                  "a silent tool call gets no error banner");
     agtest::check(msg.text.empty(),
                   "a silent tool call keeps its empty text");
 }
@@ -126,6 +140,8 @@ TEST_CASE("empty turn: real text is never overwritten") {
     const auto msg = settle_with(StopReason::EndTurn, "a real answer");
     agtest::check(msg.text == "a real answer",
                   "a turn with content is left exactly alone");
+    agtest::check(!msg.error.has_value(),
+                  "a turn with content gets no error banner");
 }
 
 TEST_CASE("empty turn: refusal survives the wire round-trip") {
@@ -145,4 +161,29 @@ TEST_CASE("empty turn: refusal survives the wire round-trip") {
     agtest::check(parse_stop_reason("some_future_reason")
                       == StopReason::Unspecified,
                   "an unknown stop reason is Unspecified");
+}
+
+// ── What actually reaches the screen ────────────────────────────────
+//
+// Everything above proves the notice lands in the `error` FIELD. None of it
+// proves the user can tell it apart from the model talking -- which is the
+// entire point of using that field. So paint the real widget and look at the
+// bytes a terminal would receive.
+TEST_CASE("empty turn render: the notice is marked, not spoken") {
+    const auto msg = settle_with(StopReason::Refusal);
+    REQUIRE(msg.error.has_value());
+
+    maya::Turn::Config cfg;
+    cfg.glyph = "\xe2\x9c\xa6";          // ✦
+    cfg.label = "Opus 5";
+    cfg.meta  = "12:34";
+    cfg.error = *msg.error;
+    const auto out = maya::render_to_string(maya::Turn{cfg}.build(), 100);
+
+    // The ⚠ is what separates "agentty is telling you something" from "the
+    // model said this". Model prose never carries it.
+    agtest::check(out.find("\xe2\x9a\xa0") != std::string::npos,
+                  "the notice paints behind a warning glyph");
+    agtest::check(out.find("declined") != std::string::npos,
+                  "the reason reaches the screen");
 }
