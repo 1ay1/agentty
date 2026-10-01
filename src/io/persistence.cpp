@@ -93,6 +93,72 @@ bool write_json_atomic(const fs::path& target, const std::string& content) {
     return true;
 }
 
+// ── Cross-process exclusive lock over the settings file ──────────────────
+//
+// write_json_atomic gives CRASH safety (tmp -> fsync -> rename), which is a
+// different property from CONCURRENCY safety, and the two got conflated.
+// Atomicity means no reader ever sees a torn file; it says nothing about
+// LOST UPDATES. save_settings serialises the caller's whole in-memory record
+// and replaces the document, so with two agentty instances open:
+//
+//   A starts (theme=Harper)   B starts (theme=Harper)
+//   B: pick Sumi Phosphor, Enter -> file says Sumi Phosphor
+//   A: change ANY unrelated row -> A writes its STALE record
+//   -> theme is Harper again, and nothing failed
+//
+// Both writes were complete, valid and durable. One simply landed second and
+// won the entire file. Observed in the wild with five instances running: the
+// theme kept reverting and it looked nondeterministic because the winner is
+// whichever process saved last.
+//
+// A mutex cannot fix this -- the writers are separate PROCESSES. The lock has
+// to live in the filesystem. We take it on a SIDECAR (.settings.lock) rather
+// than on settings.json itself, because the atomic write renames a new inode
+// over the target: a lock held on the old inode would protect a file that is
+// no longer there.
+//
+// Advisory, and deliberately best-effort: if the lock cannot be taken we log
+// and proceed with the plain write. Losing an update is bad, but refusing to
+// save the user's settings because a lock file was unavailable is worse.
+class SettingsLock {
+public:
+    SettingsLock() {
+#ifndef _WIN32
+        const fs::path p = data_dir() / ".settings.lock";
+        fd_ = ::open(p.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+        if (fd_ < 0) return;
+        // Blocking, because the contending window is one small JSON write.
+        // F_SETLKW rather than flock(): it works on NFS, and it is per-process
+        // so a future threaded writer still serialises.
+        struct ::flock fl{};
+        fl.l_type   = F_WRLCK;
+        fl.l_whence = SEEK_SET;
+        while (::fcntl(fd_, F_SETLKW, &fl) == -1) {
+            if (errno == EINTR) continue;   // a signal, not a failure
+            ::close(fd_);
+            fd_ = -1;
+            return;
+        }
+        held_ = true;
+#endif
+    }
+
+    ~SettingsLock() {
+#ifndef _WIN32
+        if (fd_ >= 0) ::close(fd_);   // closing releases the F_SETLKW lock
+#endif
+    }
+
+    SettingsLock(const SettingsLock&) = delete;
+    SettingsLock& operator=(const SettingsLock&) = delete;
+
+    [[nodiscard]] bool held() const noexcept { return held_; }
+
+private:
+    int  fd_   = -1;
+    bool held_ = false;
+};
+
 fs::path data_dir() {
     // The single per-user root (~/.agentty or $AGENTTY_HOME) — see
     // util/user_root.hpp for the layout and the reason it is NOT under
@@ -2242,12 +2308,35 @@ void delete_thread(const ThreadId& id) {
     if (idx.erase(id.value) > 0) write_thread_index_locked(idx);
 }
 
+// The raw JSON this process last LOADED from disk.
+//
+// The baseline for the merge in save_settings: a key whose value still equals
+// this one was not touched by us, so a concurrent writer's version of it must
+// win rather than being overwritten with what we read at startup. Without a
+// baseline the only options are "clobber everything" (the bug) or "merge
+// nothing", and neither preserves a second instance's edits.
+//
+// Guarded by its own mutex: load_settings runs on the engine thread at
+// startup and save_settings can run from a reducer, so the two can overlap.
+json& loaded_baseline() {
+    static json baseline = json::object();
+    return baseline;
+}
+std::mutex& baseline_mu() {
+    static std::mutex mu;
+    return mu;
+}
+
 store::Settings load_settings() {
     store::Settings s;
     std::ifstream ifs(data_dir() / "settings.json");
     if (!ifs) return s;
     try {
         json j; ifs >> j;
+        {
+            std::lock_guard<std::mutex> lk(baseline_mu());
+            loaded_baseline() = j;
+        }
         s.model_id = ModelId{j.value("model_id", "")};
         s.profile = static_cast<Profile>(j.value("profile", 0));
         // Appearance. Read field by field with the struct's own defaults as
@@ -2555,6 +2644,18 @@ std::function<void()>& settings_write_observer() {
 }
 
 void save_settings(const store::Settings& s) {
+    // Held for the WHOLE read-modify-write, not just the write. Two instances
+    // each serialise their own full in-memory record, so without this the
+    // second writer silently reverts every field the first one changed --
+    // see SettingsLock for the five-instance theme-revert this fixes.
+    //
+    // Taken BEFORE the json is built so the document we emit cannot be
+    // composed from state that another process invalidates while we work.
+    SettingsLock lock;
+    if (!lock.held())
+        AGT_LOG(Persist, Warn, "settings.save",
+                "result=unlocked reason=lock_unavailable (concurrent writes may be lost)");
+
     json j;
     j["model_id"] = s.model_id;
     j["profile"] = static_cast<int>(s.profile);
@@ -2801,12 +2902,68 @@ void save_settings(const store::Settings& s) {
         }
         j["smart"] = std::move(sm);
     }
+
+    // ── Merge, rather than replace ──────────────────────────────────
+    //
+    // The lock above makes writes SEQUENTIAL; it cannot make this process's
+    // record FRESH. Our in-memory copy is from startup, so every key we did
+    // not change still holds a startup-era value -- and writing those back is
+    // precisely the lost update (the theme revert).
+    //
+    // So compare each top-level key against the baseline we loaded. If our
+    // value is unchanged from what WE read, we have no opinion on it: adopt
+    // whatever is on disk now, which may be another instance's newer edit.
+    // If it differs, this process changed it and our value wins.
+    //
+    // Top-level granularity is deliberate. A deep per-leaf merge would need
+    // to know which absences are meaningful, and absence IS meaningful here
+    // (save_settings omits defaults on purpose, and load reads `effort: ""`
+    // as auto). Key-level is coarse but has no such failure mode: `ui` moves
+    // as a unit, which is how the user edits it anyway.
+    {
+        std::error_code ec;
+        const fs::path path = data_dir() / "settings.json";
+        json disk = json::object();
+        if (fs::exists(path, ec)) {
+            std::ifstream ifs(path);
+            if (ifs) { try { ifs >> disk; } catch (...) { disk = json::object(); } }
+        }
+        if (disk.is_object()) {
+            json base;
+            {
+                std::lock_guard<std::mutex> lk(baseline_mu());
+                base = loaded_baseline();
+            }
+            for (auto it = disk.begin(); it != disk.end(); ++it) {
+                const auto& key = it.key();
+                const bool we_changed =
+                    !base.contains(key) || !j.contains(key)
+                        ? true                       // appeared/vanished for us
+                        : j[key] != base[key];
+                if (we_changed) continue;            // our edit wins
+                if (j.contains(key) && j[key] == it.value()) continue;  // agree
+                // Untouched by us and newer on disk: take theirs.
+                AGT_LOG(Persist, Info, "settings.save",
+                        "merge=adopt_disk key={}", key);
+                j[key] = it.value();
+            }
+        }
+    }
+
     // A failed settings write silently discards the user's provider keys,
     // model choice and preferences — they simply "don't stick" across
     // restarts, with nothing to explain why. The result was discarded here.
     if (!write_json_atomic(data_dir() / "settings.json", j.dump(2)))
         AGT_LOG(Persist, Error, "settings.save", "result=write_failed path={}",
                 (data_dir() / "settings.json").string());
+    else {
+        // The document we just wrote IS the new baseline. Without this a
+        // second save in the same session would diff against the startup
+        // snapshot, see its own earlier edit as "changed", and keep
+        // re-asserting it over newer values from other instances.
+        std::lock_guard<std::mutex> lk(baseline_mu());
+        loaded_baseline() = j;
+    }
 
     // Tell anyone caching settings that the file moved under them. See
     // on_settings_written() in persistence.hpp for why this is here and not

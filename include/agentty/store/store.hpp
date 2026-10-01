@@ -198,8 +198,13 @@ struct Settings {
     // (which is a per-provider recall MAP); this is an ordered cross-provider
     // history the user actually toggles between.
     std::vector<std::string> recent_models;
-    // Reasoning effort tier (output_config.effort wire value, e.g. "high";
-    // empty = off, the default). Reloaded into Model::effort at startup.
+    // Reasoning effort tier, in PERSISTED form (effort_to_wire_setting):
+    // a wire value like "high", or one of the two sentinels -- "none" for an
+    // explicit off, "auto" for the centred default. Empty means UNSET (never
+    // configured), which reads back as auto, NOT as off: the two were
+    // indistinguishable while both persisted as "", which is what pinned the
+    // dial to the bottom rung of the ladder. Reloaded into Model::effort at
+    // startup via effort_from_wire.
     std::string          effort;
     // Per-model reasoning-effort capability overrides (issue #20). Keyed by
     // model id; true = force the effort knob ON for a compat model the

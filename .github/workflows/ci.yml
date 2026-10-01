@@ -482,6 +482,22 @@ jobs:
             -DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded `
             -DCMAKE_POLICY_DEFAULT_CMP0141=NEW
           cmake --build build
+          # $LASTEXITCODE, explicitly, because pwsh does NOT fail a step when a
+          # NATIVE command fails mid-script -- the step's exit code is the LAST
+          # command's, and `sccache --show-stats` below always succeeds. So a
+          # broken MSVC build reported this gate GREEN: v0.9.16 and v0.9.17
+          # both shipped with no Windows binary while the required check passed
+          # (the release lane failed on C2385 that this lane had already hit,
+          # 350 objects in, and hid behind the stats call).
+          #
+          # `set -e` has no pwsh equivalent for native exit codes, and
+          # $ErrorActionPreference does not cover them either, so the check has
+          # to be written out.
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "::error::MSVC build failed (exit $LASTEXITCODE)"
+            sccache --show-stats
+            exit $LASTEXITCODE
+          }
           sccache --show-stats
 
   # MinGW / MSYS2 ucrt64 gate. This is the toolchain real Windows users build
