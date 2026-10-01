@@ -718,9 +718,6 @@ jobs:
   # run prepare(), and configure. That is the step that breaks when a new
   # submodule lands, and it costs ~1 minute instead of the ~25 a full compile
   # would. The real compile is already covered by build-test on the same code.
-  #
-  # Scoped to pushes that touch the packaging or the submodule set, so the
-  # common path pays nothing.
   aur-source-package:
     name: AUR agentty-git configures
     runs-on: ubuntu-latest
