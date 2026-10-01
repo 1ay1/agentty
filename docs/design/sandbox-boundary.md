@@ -613,7 +613,7 @@ a weaker sandbox while it runs, and it cannot be the default.
 
 ## 10. How this gets verified
 
-Four layers. Each catches something the others cannot.
+Five layers. Each catches something the others cannot.
 
 | layer | what it proves | runs |
 |---|---|---|
@@ -621,6 +621,70 @@ Four layers. Each catches something the others cannot.
 | `sandbox_pane_test` | door → open → edit → save → discard; the seal holds; **every row reaches the config** | always |
 | `sandbox_config_race_test` | concurrent readers see one whole policy | TSan lane |
 | `sandbox_live_check` | **the child actually experiences it** | by hand |
+| `sandbox_audit` | **which walls we claim at all, and how strongly** | by hand |
+
+### The audit
+
+```sh
+cmake --build build --target sandbox_audit && ./build/sandbox_audit
+```
+
+It asserts nothing. It prints the real posture — the one
+`build_claybin_posture()` produces, not a hand-written example — capability by
+capability, with the mechanism behind each. "Is our sandbox any good" stops
+being a matter of opinion: every `none` in the output is either a deliberate
+trade or a gap, and the tool is what tells you which.
+
+It prints two columns that matter: the **shipped default** (what a user who
+never opens the pane gets — the number that matters most, because it is what
+almost everyone runs) and the **ceiling** (everything the pane can ask for; a
+`none` there is a real gap rather than a default).
+
+Current state on a modern kernel, landlock abi 10, cgroup2 delegated:
+
+| capability | default | ceiling |
+|---|---|---|
+| `filesystem.read` / `write` | strong (mount-ns) | strong |
+| `filesystem.exec` | strong (landlock) | strong |
+| `network.isolation` | partial (policy-only) | strong (netns) |
+| `process.isolation` | strong (userns+pidns) | strong |
+| `syscall.filter` | strong (seccomp-bpf) | strong |
+| `resource.pids` | strong (cgroup2 pids.max) | strong |
+| `resource.memory` | none | strong (cgroup2) |
+| `resource.cpu` | none | strong (cgroup2) |
+| `privilege.drop` | strong | strong |
+| `device.isolation` | strong (dev allowlist) | strong |
+| `host.kernel_isolation` | none | none |
+
+The three `none`s are each a decision, not an oversight:
+
+- **`resource.memory` / `resource.cpu` default off.** The right ceiling is a
+  property of the machine and the build, and a wrong one turns a working
+  `cargo build` into an OOM kill that looks like agentty's fault. There is no
+  number that fits an 8-core laptop and a 64-core workstation, so a guess is
+  worse than nothing. One row each, off until set.
+- **`network.isolation` is partial by default** because the default is
+  `NetMode::Full` — sharing the host netns so `git push` and `npm install`
+  work. "policy-only" is the honest report for that: the policy records what
+  is allowed, the kernel is not enforcing a boundary. `None` or `Ports` both
+  reach `strong`.
+- **`host.kernel_isolation` is `none` and will stay that way** on this
+  backend. It means a microVM; claybin's `Isolation::microvm` has no
+  implementation, and a process-backed sandbox cannot claim kernel isolation.
+
+### The one default the audit changed
+
+`resource.pids` used to be `none` by default, which meant an approved command
+could fork without limit — a fork bomb was unbounded out of the box. Unlike
+memory and CPU, **there is a number that is safe everywhere**: no legitimate
+build needs 4096 concurrent processes (`make -j` on 64 cores peaks in the low
+hundreds), and the pathological case wants millions. So `max_procs` ships at
+4096.
+
+Verified in the child, not in the report: the live check forks in a loop up to
+20000 and gets `forked 4093`. A guarantee table saying "cgroup2 pids.max" and
+a fork actually failing are different claims, and this subsystem has already
+shipped the first without the second.
 
 The live check is the one that matters for this subsystem, and it is
 deliberately not a ctest: it needs working user+mount namespaces and makes a

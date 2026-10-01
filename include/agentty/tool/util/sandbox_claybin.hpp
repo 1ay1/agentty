@@ -72,6 +72,17 @@ struct Posture {
 struct Wall {
     std::string name;
     std::string strength;  // "strong" | "partial" | "none"
+    // WHICH mechanism got it there: "landlock abi 10", "cgroup2 memory.max",
+    // "seccomp-bpf", "mount-ns".
+    //
+    // Not decoration. "strong" alone is a claim; "strong via landlock abi 10"
+    // is a claim with its receipt attached, and the difference matters because
+    // the SAME capability can be strong by two different routes with different
+    // failure modes -- filesystem.read is mount-ns when namespaces work and
+    // landlock when they do not, and a user debugging a denial needs to know
+    // which. It was missing here while the settings pane already reported it,
+    // so the two surfaces disagreed about how much they knew.
+    std::string mechanism;
 };
 
 struct Report {

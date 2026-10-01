@@ -354,6 +354,44 @@ int main() {
         std::filesystem::remove_all(root / "node_modules", ec);
     }
 
+    // ── 8. the default pid cap actually bounds a fork bomb ──────────────
+    // sandbox_audit reported resource.pids as `none` on a default install,
+    // which means an approved command could fork without limit. max_procs now
+    // ships at 4096 -- the one resource wall with a number that is safe on
+    // every host (no build needs 4096 concurrent processes; a fork bomb wants
+    // millions).
+    //
+    // Checked in the CHILD rather than in the report, because "cgroup2
+    // pids.max" in a guarantee table and "the fork actually fails" are
+    // different claims and this subsystem has already shipped the first
+    // without the second.
+    std::printf("the default pid cap bounds a fork bomb:\n");
+    {
+        auto p = base_posture();
+        p.max_processes = agentty::sandbox_cfg::Config{}.max_procs;
+        std::string out;
+        // Fork until it fails, print how far it got. A bounded sandbox reports
+        // a number near the cap; an unbounded one runs until the HOST suffers,
+        // which is the outcome worth never shipping.
+        int rc = run(p,
+            "python3 -c 'import os,sys\n"
+            "n=0\n"
+            "try:\n"
+            "    for _ in range(20000):\n"
+            "        if os.fork()==0: os._exit(0)\n"
+            "        n+=1\n"
+            "except OSError:\n"
+            "    pass\n"
+            "print(\"forked\", n)' 2>&1", out);
+        std::printf("  exit=%d, child said: %s", rc, out.c_str());
+        // The cap is 4096 and the loop tries 20000, so a working cap stops it
+        // short. Asserting "did not reach 20000" rather than an exact number:
+        // the kernel counts threads the shell and python already hold, so the
+        // precise ceiling is host-dependent and pinning it would be flaky.
+        expect(out.find("forked 20000") == std::string::npos,
+               "the fork loop hit a limit");
+    }
+
     std::printf("\n%s\n", failures ? "LIVE CHECK FAILURES" : "all live checks passed");
     return failures ? 1 : 0;
 }

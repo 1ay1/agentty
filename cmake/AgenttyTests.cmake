@@ -205,6 +205,33 @@ endif()
 target_compile_definitions(sandbox_live_check PRIVATE
     AGENTTY_MCP=0 AGENTTY_VERSION="${PROJECT_VERSION}")
 
+# sandbox_audit: what does agentty ACTUALLY enforce on THIS host?
+#
+# Not a test -- it asserts nothing. It prints the real posture, capability by
+# capability, with the mechanism behind each one. The point is that "is our
+# sandbox any good" stops being a matter of opinion: every `none` in its output
+# is either a deliberate trade or a gap, and the tool is what tells you which.
+#
+# Separate from sandbox_live_check because it answers a different question.
+# The live check asks "does the wall we claim actually hold in the child"; this
+# asks "which walls do we claim at all, and how strongly". A capability can
+# pass the live check and still be `partial` here.
+#
+#     cmake --build build --target sandbox_audit && ./build/sandbox_audit
+add_executable(sandbox_audit EXCLUDE_FROM_ALL
+    ${CMAKE_SOURCE_DIR}/tests/sandbox_audit.cpp
+    ${CMAKE_SOURCE_DIR}/tests/sandbox_config_race_stubs.cpp
+    ${CMAKE_SOURCE_DIR}/src/tool/util/sandbox_claybin.cpp
+    ${CMAKE_SOURCE_DIR}/src/domain/sandbox_provenance.cpp)
+target_include_directories(sandbox_audit PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(sandbox_audit PRIVATE claybin)
+if(TARGET maya::app)
+    target_include_directories(sandbox_audit SYSTEM PRIVATE
+        $<TARGET_PROPERTY:maya::app,INTERFACE_INCLUDE_DIRECTORIES>)
+endif()
+target_compile_definitions(sandbox_audit PRIVATE
+    AGENTTY_MCP=0 AGENTTY_VERSION="${PROJECT_VERSION}")
+
 agentty_fold_test(fork_test                TIMEOUT 30)
 agentty_fold_test(palette_render_probe     TIMEOUT 30)
 agentty_fold_test(embed_render_probe       TIMEOUT 30)

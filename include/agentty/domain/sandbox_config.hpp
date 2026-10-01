@@ -240,14 +240,31 @@ struct Config {
     // JIT (node with some flags, any JVM) genuinely needs it.
     bool wx_protect = true;
 
-    // ── Resources ────────────────────────────────────────────────────────
+    // ── Resources ────────────────────────────────────────────────────
     // cgroup2 when the host delegates, rlimit as a backstop otherwise. The
     // guarantee report distinguishes the two rather than claiming both.
     //
-    // 0 = no cap, which is today's behaviour for all three.
+    // memory and cpu default to NO CAP, deliberately: the right ceiling is a
+    // property of the machine and the build, and a wrong one turns a working
+    // `cargo build` into an OOM kill that looks like agentty's fault. There is
+    // no number we can pick for someone else's 8-core laptop and 64-core
+    // workstation.
     std::uint64_t memory_mb   = 0;
-    std::uint32_t max_procs   = 0;
     std::uint32_t cpu_percent = 0;   // 100 = one core
+
+    // Processes is DIFFERENT, and ships with a real cap.
+    //
+    // The audit (tests/sandbox_audit.cpp) showed resource.pids as `none` on a
+    // default install, which means a fork bomb from an approved command was
+    // unbounded -- and unlike memory, there IS a number that is safe
+    // everywhere. No legitimate build needs 4096 concurrent processes; `make
+    // -j` on a 64-core box peaks in the low hundreds, and the pathological
+    // case is not "a big build" but `:(){ :|:& };:`, which wants millions.
+    //
+    // So this is the one resource wall that can be on by default without
+    // guessing about the host. The others stay off until the user picks a
+    // number, because for them a guess is worse than nothing.
+    std::uint32_t max_procs   = 4096;
     // Open descriptors (RLIMIT_NOFILE). A separate lever from max_procs: a
     // runaway that leaks fds exhausts the host's file table without ever
     // forking, so a pid cap does not bound it.

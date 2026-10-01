@@ -259,6 +259,10 @@ Report describe(const Posture& p) {
         w.strength = s == Enforcement::strong    ? "strong"
                      : s == Enforcement::partial ? "partial"
                                                  : "none";
+        // The receipt. claybin already knows this; not copying it out was the
+        // difference between "the sandbox is active" and "filesystem.read is
+        // strong via landlock abi 10", and only the second is checkable.
+        w.mechanism = compiled->guarantees.mechanism(id);
         r.walls.push_back(std::move(w));
     }
     return r;
