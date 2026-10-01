@@ -133,14 +133,24 @@ OLLAMA_PS = {
 
 # LiteLLM: /v1/model/info is a DECLARATION (the proxy's config), not a
 # measurement — it must never shrink a larger advertised window.
+#
+# The /v1/models row is deliberately BARE apart from the window: that is what
+# a stock LiteLLM emits, and it is why the proxy needs /v1/model/info probed
+# at all to say anything about capability.
 LITELLM_V1 = {
     "object": "list",
     "data": [{"id": "gpt-4o", "object": "model", "context_length": 128000}],
 }
+# model_info carries TWO independent facts, and for a long time this fixture
+# carried only one. A window-only LiteLLM cannot declare reasoning, so no test
+# standing on this fixture could have caught agentty ignoring
+# `supports_reasoning` — the fixture encoded the blind spot rather than
+# exposing it. Both facts now, so the probe is exercised on both axes.
 LITELLM_INFO = {
     "data": [
         {"model_name": "gpt-4o",
-         "model_info": {"max_input_tokens": 8192}},   # stale/conservative
+         "model_info": {"max_input_tokens": 8192,      # stale/conservative
+                        "supports_reasoning": True}},
     ]
 }
 

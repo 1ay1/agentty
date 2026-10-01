@@ -252,7 +252,7 @@ TEST_CASE("Observed: the PR-53 failure mode, as a type") {
     CHECK(row_claims.value != probe_saw.value);
 }
 
-// ── declared capability: the two spellings of "this model can reason" ────
+// ── declared capability: every spelling of "this model can reason" ──────
 //
 // The fact that decides whether agentty offers an effort ladder and sends
 // `reasoning_effort` at all. resolved_caps() resolves it as
@@ -334,6 +334,107 @@ TEST_CASE("Observed: LiteLLM declares reasoning as supports_reasoning") {
     // ABSENT — the window is not evidence about reasoning either way.
     CHECK(!oa::dialect::declared_reasoning()(json::parse(
               R"({"model_info":{"max_input_tokens":131072}})")));
+}
+
+// ── THE COMPLETENESS GATE ────────────────────────────────────────────────
+//
+// Everything above is an EXAMPLE test: one case per server somebody hit.
+// Mistral, then LM Studio, then llama.cpp, then LiteLLM — four fixes, four
+// bug reports, each added after a user noticed their reasoning model wasn't
+// thinking. Example tests pass forever while the table beneath them stays
+// incomplete, so that history is the same miss happening four times.
+//
+// The window ladder next door has a gate against exactly this
+// ("context: every gateway dialect that declares a window is recovered" in
+// gateway_context_window_test.cpp). Reasoning never got one, which is the
+// structural reason LiteLLM's `supports_reasoning` could sit two keys away
+// from a `max_input_tokens` we read correctly, on the same row, on a probe
+// we were already making — and still be invisible.
+//
+// This is that gate. The contract: ONE ROW PER SERVING STACK, using the
+// field that stack actually emits. Adding a gateway means adding its
+// spelling to declared_reasoning() AND its row here. There is no fallback
+// that can guess a spelling, so a stack missing from this list is a stack
+// whose reasoning models are classified by filename.
+//
+// Phrased as a table rather than loose CHECKs so a gap reads as a missing
+// LINE — the thing a reviewer can actually notice.
+TEST_CASE("dialect: every gateway that declares reasoning is recovered") {
+    struct Row {
+        const char* stack;   // the serving stack, named
+        const char* json;    // the shape it emits
+        bool        reasons; // what we must observe
+    };
+
+    static const Row rows[] = {
+        // Mistral /v1/models — a plain bool, the shape this reader was
+        // originally written for.
+        {"mistral", R"({"id":"magistral-small","reasoning":true})", true},
+
+        // LM Studio /api/v1/models — an OBJECT. Presence is the declaration;
+        // a model that cannot reason omits the key. The is_boolean()-only
+        // reader skipped this entirely (fixed in cf8854ba).
+        {"lm studio",
+         R"({"id":"qwen3-8b",
+             "reasoning":{"allowed_options":["off","on"],"default":"on"}})",
+         true},
+
+        // LiteLLM, flat on the row.
+        {"litellm (flat)", R"({"id":"gpt-oss","supports_reasoning":true})", true},
+
+        // LiteLLM, nested under model_info — what a proxy config's
+        // `model_info:` block passes through to /v1/models and /model/info.
+        // This is the shape a user had set correctly while agentty showed no
+        // thinking at all.
+        {"litellm (model_info)",
+         R"({"model_name":"gpt-oss",
+             "model_info":{"supports_reasoning":true,
+                           "max_input_tokens":131072}})",
+         true},
+
+        // Both polarities on every spelling: an explicit false is a real
+        // declaration ("this model cannot reason") and must be observed as
+        // false, not swallowed as absent. Dropping these would let a lens
+        // that returns a constant `true` pass the whole table.
+        {"mistral (false)", R"({"id":"x","reasoning":false})", false},
+        {"litellm (flat false)", R"({"id":"x","supports_reasoning":false})", false},
+        {"litellm (nested false)",
+         R"({"model_info":{"supports_reasoning":false}})", false},
+    };
+
+    for (const auto& r : rows) {
+        const auto got = oa::dialect::declared_reasoning()(json::parse(r.json));
+        // std::string, not the raw const char* — doctest streams a bare
+        // char pointer as an ADDRESS, so the one thing this message exists
+        // to say (which stack regressed) came out as 0x5648…
+        INFO("serving stack: " << std::string{r.stack});
+        REQUIRE(got.has_value());          // silence here = classified by filename
+        CHECK(*got == r.reasons);
+    }
+}
+
+TEST_CASE("dialect: a row that declares only a WINDOW says nothing about reasoning") {
+    // The precise confusion that hid the LiteLLM bug for as long as it did.
+    //
+    // We read these rows carefully — for context windows. A `model_info`
+    // block carrying `max_input_tokens` was a well-understood, well-tested
+    // shape, so the row LOOKED handled. It was, on one axis.
+    //
+    // Two independent facts live on one row. Knowing the window must never
+    // read as evidence about reasoning in either direction: not true (a
+    // gateway declaring limits says nothing about thinking) and not false
+    // (which would overwrite the id-inference rung and pin a DeepSeek-R1
+    // distill to no-reasoning for having declared its token limit).
+    for (const char* window_only : {
+             R"({"id":"x","max_input_tokens":131072})",
+             R"({"id":"x","model_info":{"max_input_tokens":131072}})",
+             R"({"id":"x","max_model_len":262144})",
+             R"({"id":"x","n_ctx":32768,"n_ctx_train":131072})",
+             R"({"id":"x","context_length":200000})",
+         }) {
+        INFO("window-only row: " << std::string{window_only});
+        CHECK(!oa::dialect::declared_reasoning()(json::parse(window_only)));
+    }
 }
 
 TEST_CASE("Observed: no reasoning key is ABSENT, not false") {
