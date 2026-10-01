@@ -72,6 +72,23 @@ const form::field::Number& num_at(const form::Form& f, int i) {
 
 Msg key(form::keys::Intent i) { return Msg{SandboxKey{form::keys::Action{i, 0}}}; }
 
+// Host facts for a capable machine, with the RUNNING engine stated explicitly.
+//
+// Defaults to "running what the config selects", because most cases are about
+// a row's content rather than about the selection/reality split. The cases
+// that ARE about that split pass `running` by hand -- and that asymmetry is
+// the point: claiming a wall is up is now something a test has to ask for.
+pn::HostFacts facts_for(const sandbox_cfg::Config& cfg,
+                        bool claybin_available = true,
+                        std::uint32_t landlock_abi = 10) {
+    pn::HostFacts f;
+    f.claybin_available = claybin_available;
+    f.landlock_abi = landlock_abi;
+    f.sandbox_active = true;
+    f.running = cfg.backend;
+    return f;
+}
+
 // Install a policy as if this were startup.
 //
 // set_config() is SEALED after its first call, which is the property most of
@@ -699,7 +716,7 @@ TEST_CASE("sandbox pane: a preset does not re-stamp a row edited after it") {
     hard.backend = sandbox_cfg::LinuxBackend::Claybin;
     install(hard);
 
-    auto form = pn::build_sandbox_form(hard, true, 10);
+    auto form = pn::build_sandbox_form(hard, facts_for(hard));
     // The row shows Hardened, as it should.
     const int p = row_of(form, pn::kSbPosture);
     REQUIRE(p >= 0);
@@ -726,9 +743,9 @@ TEST_CASE("sandbox pane: the posture row scores the walls") {
     cfg.backend = sandbox_cfg::LinuxBackend::Claybin;
     install(cfg);
 
-    auto form = pn::build_sandbox_form(cfg, true, 10);
+    auto form = pn::build_sandbox_form(cfg, facts_for(cfg));
     const auto preview = pn::preview_sandbox(cfg);
-    pn::annotate_sandbox_form(form, preview, cfg);
+    pn::annotate_sandbox_form(form, preview, cfg, pn::EngineStatus::InForce);
 
     const int p = row_of(form, pn::kSbPosture);
     REQUIRE(p >= 0);
@@ -740,6 +757,160 @@ TEST_CASE("sandbox pane: the posture row scores the walls") {
         // glance, where four safe-sounding names are not.
         CHECK(origin.find('/') != std::string::npos);
         CHECK(origin.find("strong") != std::string::npos);
+    }
+#endif
+}
+
+// ── The subtitle must describe REALITY, not the selection ────────────────
+//
+// Reported from a screenshot: selecting claybin while running under bwrap
+// instantly repainted the header to "claybin · landlock abi 10 · seccomp ·
+// cgroup2". None of those walls existed -- the policy is sealed at startup, so
+// the process was still bwrap and could not change.
+//
+// That is issue #21 re-entered through the front door, in the very pane built
+// to prevent it. The root cause was that the running engine was never a fact
+// the form could see: `SandboxPane::backend` held it and had no reader at all,
+// so the subtitle was derived from the SELECTED engine plus host capability.
+//
+// These cases pin the fix at every altitude it could regress.
+
+TEST_CASE("sandbox pane: selecting claybin under bwrap does not claim seccomp") {
+    // The exact screenshot. The selection says claybin; reality says bwrap.
+    sandbox_cfg::Config cfg;
+    cfg.configured = true;
+    cfg.backend = sandbox_cfg::LinuxBackend::Claybin;
+
+    pn::HostFacts facts;
+    facts.claybin_available = true;          // the host COULD run it
+    facts.landlock_abi = 10;
+    facts.sandbox_active = true;
+    facts.running = sandbox_cfg::LinuxBackend::Bwrap;   // but it is not running
+
+    const auto form = pn::build_sandbox_form(cfg, facts);
+
+    // The walls that do not exist must not be named in the present tense.
+    CHECK(form.subtitle.find("seccomp") == std::string::npos);
+    CHECK(form.subtitle.find("cgroup2") == std::string::npos);
+    CHECK(form.subtitle.find("landlock") == std::string::npos);
+    // What IS running has to be stated.
+    CHECK(form.subtitle.find("bwrap") != std::string::npos);
+    // And the pending selection, as a forecast rather than a fact.
+    CHECK(form.subtitle.find("restart") != std::string::npos);
+}
+
+TEST_CASE("sandbox pane: running claybin DOES claim its walls") {
+    // The honesty has to cut both ways: a pane that never credits claybin is
+    // just as useless as one that always does.
+    sandbox_cfg::Config cfg;
+    cfg.configured = true;
+    cfg.backend = sandbox_cfg::LinuxBackend::Claybin;
+
+    pn::HostFacts facts;
+    facts.claybin_available = true;
+    facts.landlock_abi = 10;
+    facts.sandbox_active = true;
+    facts.running = sandbox_cfg::LinuxBackend::Claybin;   // actually running
+
+    const auto form = pn::build_sandbox_form(cfg, facts);
+    CHECK(form.subtitle.find("claybin") != std::string::npos);
+    CHECK(form.subtitle.find("seccomp") != std::string::npos);
+    CHECK(form.subtitle.find("landlock abi 10") != std::string::npos);
+    // Nothing pending, so no disclaimer.
+    CHECK(form.subtitle.find("restart") == std::string::npos);
+}
+
+TEST_CASE("sandbox pane: an inactive sandbox never names an engine") {
+    // `running` is meaningless when nothing is enforcing (probe failed, or
+    // --sandbox off). Naming bwrap there would be the same lie in miniature.
+    sandbox_cfg::Config cfg;
+    cfg.configured = true;
+
+    pn::HostFacts facts;
+    facts.sandbox_active = false;
+    facts.running = sandbox_cfg::LinuxBackend::Bwrap;
+
+    const auto form = pn::build_sandbox_form(cfg, facts);
+    CHECK(form.subtitle.find("unconfined") != std::string::npos);
+    CHECK(form.subtitle.find("mount namespaces") == std::string::npos);
+}
+
+TEST_CASE("sandbox pane: describe_running ignores the config entirely") {
+    // The structural guarantee, checked directly: this function takes no
+    // config, so no future edit can make the running description depend on
+    // what the user selected. Same facts, wildly different configs, identical
+    // answer.
+    pn::HostFacts facts;
+    facts.claybin_available = true;
+    facts.landlock_abi = 10;
+    facts.sandbox_active = true;
+    facts.running = sandbox_cfg::LinuxBackend::Bwrap;
+
+    const auto baseline = pn::describe_running(facts);
+    CHECK(baseline.find("bwrap") != std::string::npos);
+
+    // Whatever the user picks, the running line cannot move.
+    for (auto p : {sandbox_cfg::Posture::Hardened, sandbox_cfg::Posture::Airgapped,
+                   sandbox_cfg::Posture::Permissive}) {
+        auto cfg = sandbox_cfg::apply_posture(sandbox_cfg::Config{}, p);
+        cfg.backend = sandbox_cfg::LinuxBackend::Claybin;
+        CHECK(pn::describe_running(facts) == baseline);
+        (void)cfg;
+    }
+}
+
+TEST_CASE("sandbox pane: engine_status separates wanted from running") {
+    sandbox_cfg::Config cfg;
+    cfg.configured = true;
+
+    pn::HostFacts facts;
+    facts.claybin_available = true;
+    facts.sandbox_active = true;
+
+    // bwrap selected, bwrap running.
+    cfg.backend = sandbox_cfg::LinuxBackend::Bwrap;
+    facts.running = sandbox_cfg::LinuxBackend::Bwrap;
+    CHECK(pn::engine_status(cfg, facts) == pn::EngineStatus::InForce);
+
+    // claybin selected, bwrap running -- the screenshot.
+    cfg.backend = sandbox_cfg::LinuxBackend::Claybin;
+    CHECK(pn::engine_status(cfg, facts) == pn::EngineStatus::AppliesOnRestart);
+
+    // claybin selected, host refuses it. Outranks the comparison: "applies on
+    // restart" would be a promise nothing can keep.
+    facts.claybin_available = false;
+    CHECK(pn::engine_status(cfg, facts) == pn::EngineStatus::CannotStart);
+}
+
+TEST_CASE("sandbox pane: forecast walls are marked per row, not just in the header") {
+    // §15 moved the wall report onto the rows precisely because the footer is
+    // what people skip. That makes each row a place the same lie could appear:
+    // "strong via seccomp-bpf" in the present tense, beside a row, on a process
+    // with no seccomp filter.
+    sandbox_cfg::Config cfg;
+    cfg.configured = true;
+    cfg.backend = sandbox_cfg::LinuxBackend::Claybin;
+
+    pn::HostFacts facts;
+    facts.claybin_available = true;
+    facts.landlock_abi = 10;
+    facts.sandbox_active = true;
+    facts.running = sandbox_cfg::LinuxBackend::Bwrap;
+
+    auto form = pn::build_sandbox_form(cfg, facts);
+    const auto preview = pn::preview_sandbox(cfg);
+    pn::annotate_sandbox_form(form, preview, cfg,
+                              pn::engine_status(cfg, facts));
+
+#if defined(__linux__)
+    if (preview.compiled) {
+        const int sys = row_of(form, pn::kSbSyscalls);
+        REQUIRE(sys >= 0);
+        const auto& origin = form.fields[static_cast<std::size_t>(sys)].origin;
+        REQUIRE(!origin.empty());
+        // It may still say what the wall WOULD be -- that is the forecast the
+        // pane exists to show -- but it must not read as present tense.
+        CHECK(origin.find("restart") != std::string::npos);
     }
 #endif
 }
@@ -757,9 +928,9 @@ TEST_CASE("sandbox pane: a row carries the wall that enforces it") {
     cfg.backend = sandbox_cfg::LinuxBackend::Claybin;
     install(cfg);
 
-    auto form = pn::build_sandbox_form(cfg, /*claybin_available=*/true, 10);
+    auto form = pn::build_sandbox_form(cfg, facts_for(cfg));
     const auto preview = pn::preview_sandbox(cfg);
-    pn::annotate_sandbox_form(form, preview, cfg);
+    pn::annotate_sandbox_form(form, preview, cfg, pn::EngineStatus::InForce);
 
 #if defined(__linux__)
     if (preview.compiled) {
@@ -794,8 +965,8 @@ TEST_CASE("sandbox pane: per-port network with no ports says it denies all") {
     cfg.allow_ports.clear();
     install(cfg);
 
-    auto form = pn::build_sandbox_form(cfg, true, 10);
-    pn::annotate_sandbox_form(form, pn::preview_sandbox(cfg), cfg);
+    auto form = pn::build_sandbox_form(cfg, facts_for(cfg));
+    pn::annotate_sandbox_form(form, pn::preview_sandbox(cfg), cfg, pn::EngineStatus::InForce);
 
     const int ports = row_of(form, pn::kSbPorts);
     REQUIRE(ports >= 0);
@@ -804,8 +975,8 @@ TEST_CASE("sandbox pane: per-port network with no ports says it denies all") {
     // And it goes away once the config is coherent -- an error that never
     // clears is a label, and users learn to read past labels.
     cfg.allow_ports = {443};
-    auto ok = pn::build_sandbox_form(cfg, true, 10);
-    pn::annotate_sandbox_form(ok, pn::preview_sandbox(cfg), cfg);
+    auto ok = pn::build_sandbox_form(cfg, facts_for(cfg));
+    pn::annotate_sandbox_form(ok, pn::preview_sandbox(cfg), cfg, pn::EngineStatus::InForce);
     const int ports2 = row_of(ok, pn::kSbPorts);
     REQUIRE(ports2 >= 0);
     CHECK(ok.fields[static_cast<std::size_t>(ports2)].error.empty());
@@ -821,8 +992,8 @@ TEST_CASE("sandbox pane: turning the syscall filter off says brokering goes too"
     cfg.syscall_mode = sandbox_cfg::SyscallMode::Off;
     install(cfg);
 
-    auto form = pn::build_sandbox_form(cfg, true, 10);
-    pn::annotate_sandbox_form(form, pn::preview_sandbox(cfg), cfg);
+    auto form = pn::build_sandbox_form(cfg, facts_for(cfg));
+    pn::annotate_sandbox_form(form, pn::preview_sandbox(cfg), cfg, pn::EngineStatus::InForce);
 
     const int sys = row_of(form, pn::kSbSyscalls);
     REQUIRE(sys >= 0);
@@ -841,8 +1012,8 @@ TEST_CASE("sandbox pane: loosening the handoff policy warns on the row") {
     cfg.handoff = sandbox_cfg::HandoffPolicy::Allow;
     install(cfg);
 
-    auto form = pn::build_sandbox_form(cfg, true, 10);
-    pn::annotate_sandbox_form(form, pn::preview_sandbox(cfg), cfg);
+    auto form = pn::build_sandbox_form(cfg, facts_for(cfg));
+    pn::annotate_sandbox_form(form, pn::preview_sandbox(cfg), cfg, pn::EngineStatus::InForce);
 
     const int h = row_of(form, pn::kSbHandoff);
     REQUIRE(h >= 0);
@@ -851,8 +1022,8 @@ TEST_CASE("sandbox pane: loosening the handoff policy warns on the row") {
     // Refuse is the default and must be silent: a warning on the SAFE setting
     // trains the user to ignore the warning on the unsafe one.
     cfg.handoff = sandbox_cfg::HandoffPolicy::Refuse;
-    auto safe = pn::build_sandbox_form(cfg, true, 10);
-    pn::annotate_sandbox_form(safe, pn::preview_sandbox(cfg), cfg);
+    auto safe = pn::build_sandbox_form(cfg, facts_for(cfg));
+    pn::annotate_sandbox_form(safe, pn::preview_sandbox(cfg), cfg, pn::EngineStatus::InForce);
     const int h2 = row_of(safe, pn::kSbHandoff);
     REQUIRE(h2 >= 0);
     CHECK(safe.fields[static_cast<std::size_t>(h2)].error.empty());
@@ -867,11 +1038,11 @@ TEST_CASE("sandbox pane: a policy that will not compile annotates no walls") {
     cfg.backend = sandbox_cfg::LinuxBackend::Claybin;
     install(cfg);
 
-    auto form = pn::build_sandbox_form(cfg, true, 10);
+    auto form = pn::build_sandbox_form(cfg, facts_for(cfg));
     pn::Preview broken;
     broken.compiled = false;
     broken.error = "fabricated: the host cannot build this";
-    pn::annotate_sandbox_form(form, broken, cfg);
+    pn::annotate_sandbox_form(form, broken, cfg, pn::EngineStatus::InForce);
 
     for (auto id : {pn::kSbFsScope, pn::kSbNetMode, pn::kSbSyscalls}) {
         const int i = row_of(form, id);

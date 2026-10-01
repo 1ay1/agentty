@@ -1334,3 +1334,86 @@ presets comparable at a glance, where four safe-sounding names are not.
 a failure: no process backend can satisfy it (§13), and leaving it in would cap
 every posture below 100% for a reason that has nothing to do with the user's
 choice.
+
+---
+
+## 17. The pane told the exact lie it was built to prevent
+
+Reported from a screenshot: moving the Backend row from `bwrap` to `claybin`
+repainted the header to
+
+> `claybin · landlock abi 10 · seccomp · cgroup2`
+
+**None of those walls existed.** The policy is sealed at startup (§2), so the
+process was still running bwrap and could not change. The pane had announced a
+boundary that was not up — issue #21 re-entered through the front door, in the
+very screen built to make that impossible.
+
+The giveaway was visible in the same screenshot: the footer still read
+`resource.memory: none` and `resource.cpu: none`. Those are cgroup2 walls. The
+header and the footer were describing two different sandboxes.
+
+### Root cause: the fact was never in scope
+
+`build_sandbox_form` took `claybin_available` and a landlock ABI, and nothing
+else. So the only facts available to the subtitle were **what the user
+selected** and **what the host is capable of** — and it was built from exactly
+those:
+
+```cpp
+const bool claybin_live = on_claybin && claybin_available;
+form.subtitle = claybin_live ? "claybin · landlock abi N · seccomp · cgroup2"
+                             : "bwrap · mount namespaces only";
+```
+
+Neither of those is *what is running*. That fact existed —
+`SandboxPane::backend`, computed on open from the real `detected_backend()`
+probe — and a grep of the whole view layer found **zero readers**. A field
+holding precisely the thing that would have prevented the bug, with nothing
+consuming it. The same shape as the handoff row in §14 and as `kSbMode` before
+it: declared, plausible, inert.
+
+### The fix is structural, not a string change
+
+Patching the subtitle would have left the next person one refactor away from
+the same bug. Two types now make it unrepresentable:
+
+- **`HostFacts`** carries `claybin_available`, `landlock_abi`, `sandbox_active`
+  and `running` together. There is no overload of `build_sandbox_form` that
+  omits the running engine, so a caller cannot forget it.
+- **`EngineStatus`** is a three-state sum — `InForce`, `AppliesOnRestart`,
+  `CannotStart` — replacing the two bools that encoded them badly. This is the
+  same argument `panel/form.hpp` makes about `FormFocus`: two bools for three
+  states leaves the invariant living in a comment, and this file had now
+  shipped that failure twice.
+
+`describe_running(facts)` takes **no config at all**. It structurally cannot be
+talked into describing the selection, and there is a test asserting its output
+is invariant across wildly different configs.
+
+When selection and reality disagree, the pane now states both rather than
+picking one:
+
+> `bwrap · mount namespaces only  ·  selected: claybin (applies on restart)`
+
+### The same lie had a second home
+
+§15 moved the wall report onto the rows because the footer is what people skip.
+That made every annotated row another place the present tense could lie —
+`strong via seccomp-bpf` beside a row, on a process with no seccomp filter. So
+`annotate_sandbox_form` takes the `EngineStatus` too, and every forecast
+annotation carries ` (on restart)`.
+
+That is the general lesson: **when a surface is duplicated for emphasis, a
+honesty bug duplicates with it.** Fixing the header alone would have left the
+rows lying.
+
+### Rule
+
+Anything on this pane written in the present tense must derive from
+`HostFacts`, never from `Config`. The config is what the user *wants*; only
+`HostFacts` knows what they *have*. Six tests pin it: the screenshot case, its
+inverse (running claybin must still get credit — a pane that never credits
+claybin is as useless as one that always does), the inactive-sandbox case, the
+`describe_running` invariance, the `engine_status` truth table, and the per-row
+tense.

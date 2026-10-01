@@ -93,6 +93,24 @@ namespace sb = agentty::tools::util::sandbox;
 #endif
 }
 
+// Everything the pane needs to know about reality, in one place.
+//
+// The `running` field is the one that was missing and caused the subtitle to
+// lie: it comes from `sb::detected_backend()`, the engine actually confining
+// commands in THIS process, which the seal makes immutable. It is not derived
+// from the config and must never be -- the config is what the user wants, this
+// is what they have.
+[[nodiscard]] pn::HostFacts host_facts_here() {
+    pn::HostFacts f;
+    f.claybin_available = claybin_here();
+    f.landlock_abi = landlock_abi_here();
+    f.sandbox_active = sb::is_active();
+    f.running = sb::detected_backend() == sb::Backend::Claybin
+                    ? sandbox_cfg::LinuxBackend::Claybin
+                    : sandbox_cfg::LinuxBackend::Bwrap;
+    return f;
+}
+
 // Recompute the walls from the form. Runs after every edit, so the report
 // and the rows cannot disagree.
 //
@@ -103,7 +121,10 @@ namespace sb = agentty::tools::util::sandbox;
 void reprice(pn::Sandbox& o) {
     const auto cfg = pn::read_sandbox_form(o.pane.form, sb::config());
     o.pane.preview = pn::preview_sandbox(cfg);
-    pn::annotate_sandbox_form(o.pane.form, o.pane.preview, cfg);
+    // The status decides the TENSE of every annotation: walls for an engine
+    // that is not running are a forecast and have to read as one.
+    pn::annotate_sandbox_form(o.pane.form, o.pane.preview, cfg,
+                              pn::engine_status(cfg, host_facts_here()));
 }
 
 // Rebuild the rows from a config, keeping the user's place in the list --
@@ -111,8 +132,7 @@ void reprice(pn::Sandbox& o) {
 void reproject(pn::Sandbox& o, const sandbox_cfg::Config& cfg) {
     const int cursor = o.pane.form.cursor;
     auto focus = o.pane.form.focus;
-    o.pane.form = pn::build_sandbox_form(cfg, o.pane.claybin_available,
-                                         landlock_abi_here());
+    o.pane.form = pn::build_sandbox_form(cfg, host_facts_here());
     o.pane.form.cursor = std::clamp(cursor, 0,
         std::max(0, static_cast<int>(o.pane.form.fields.size()) - 1));
     o.pane.form.focus = focus;
@@ -126,10 +146,16 @@ Cmd sandbox_update(Model& m, msg::SandboxMsg sm) {
 
         [&](OpenSandbox&) -> Cmd {
             pn::Sandbox o;
-            o.pane.claybin_available = claybin_here();
-            o.pane.backend = sb::is_active()
-                ? (sb::detected_backend() == sb::Backend::Claybin ? "claybin" : "bwrap")
-                : "none";
+            const auto facts = host_facts_here();
+            o.pane.claybin_available = facts.claybin_available;
+            // Kept for anything that wants the running engine as a string.
+            // Note the FORM no longer derives its subtitle from the selection
+            // -- it asks `facts` -- which is what stopped the header claiming
+            // seccomp on a bwrap process.
+            o.pane.backend = !facts.sandbox_active
+                ? "none"
+                : (facts.running == sandbox_cfg::LinuxBackend::Claybin ? "claybin"
+                                                                       : "bwrap");
 
             // Seeded from the SAVED policy (m.d.persisted), not the live one.
             //
@@ -146,8 +172,7 @@ Cmd sandbox_update(Model& m, msg::SandboxMsg sm) {
             const auto& seed = m.d.persisted.sandbox.configured
                                    ? m.d.persisted.sandbox
                                    : sb::config();
-            o.pane.form = pn::build_sandbox_form(seed, o.pane.claybin_available,
-                                                 landlock_abi_here());
+            o.pane.form = pn::build_sandbox_form(seed, facts);
 
             // Already-saved-this-session is worth carrying into the reopened
             // pane, so the "applies on restart" footer does not vanish just

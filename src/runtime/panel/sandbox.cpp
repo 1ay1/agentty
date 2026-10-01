@@ -159,8 +159,33 @@ void lock_row(form::Form& f, std::string_view id, std::string_view reason) {
 
 }  // namespace
 
-form::Form build_sandbox_form(const sandbox_cfg::Config& cfg, bool claybin_available,
-                              std::uint32_t landlock_abi) {
+EngineStatus engine_status(const sandbox_cfg::Config& cfg, const HostFacts& facts) {
+    const bool wants_claybin = cfg.backend == sandbox_cfg::LinuxBackend::Claybin;
+    // Host refusal outranks the comparison: if claybin cannot start here,
+    // "applies on restart" would be a promise nothing can keep.
+    if (wants_claybin && !facts.claybin_available) return EngineStatus::CannotStart;
+    if (!facts.sandbox_active) return EngineStatus::AppliesOnRestart;
+    return cfg.backend == facts.running ? EngineStatus::InForce
+                                        : EngineStatus::AppliesOnRestart;
+}
+
+std::string describe_running(const HostFacts& facts) {
+    // Reads ONLY `facts`. The selected engine is deliberately not a parameter:
+    // this function answers "what is confining commands right now", and the
+    // bug it exists to prevent was exactly that question being answered from
+    // the row the user had just moved.
+    if (!facts.sandbox_active)
+        return "no sandbox \xc2\xb7 commands run unconfined";
+    if (facts.running == sandbox_cfg::LinuxBackend::Claybin)
+        return "claybin \xc2\xb7 landlock abi " + std::to_string(facts.landlock_abi) +
+               " \xc2\xb7 seccomp \xc2\xb7 cgroup2";
+    return "bwrap \xc2\xb7 mount namespaces only";
+}
+
+form::Form build_sandbox_form(const sandbox_cfg::Config& cfg,
+                              const HostFacts& facts) {
+    const bool claybin_available = facts.claybin_available;
+    const std::uint32_t landlock_abi = facts.landlock_abi;
     form::Form form;
     form.title = "Sandbox";
 
@@ -195,6 +220,12 @@ form::Form build_sandbox_form(const sandbox_cfg::Config& cfg, bool claybin_avail
     // Every row below is enforceable only when claybin is BOTH selected and
     // usable. One predicate, used everywhere, so a row cannot disagree with
     // the engine row about what it does.
+    //
+    // NOTE this is about what a SAVE would enforce, not about what is running.
+    // Those are different questions and conflating them is what made the
+    // subtitle lie -- see HostFacts. A row locked here is one that would do
+    // nothing even after a restart; a row that is merely not-yet-in-force is
+    // handled by the status line, not by locking.
     const bool claybin_live = on_claybin && claybin_available;
     // The reason a row is locked, phrased for whichever of the two cases
     // applies -- "needs the claybin backend" is wrong and confusing when the
@@ -203,12 +234,33 @@ form::Form build_sandbox_form(const sandbox_cfg::Config& cfg, bool claybin_avail
         !on_claybin ? std::string{"bwrap cannot express this \xc2\xb7 switch Backend to claybin"}
                     : std::string{"claybin cannot start on this host"};
 
-    // The subtitle is the one-line answer to "what am I protected by right
-    // now", which is the question the pane exists for.
-    form.subtitle = claybin_live
-                        ? std::string{"claybin \xc2\xb7 landlock abi "} +
-                              std::to_string(landlock_abi) + " \xc2\xb7 seccomp \xc2\xb7 cgroup2"
-                        : std::string{"bwrap \xc2\xb7 mount namespaces only"};
+    // The subtitle is the one-line answer to "what am I protected by RIGHT
+    // NOW", which is the question the pane exists for -- and the question it
+    // got wrong.
+    //
+    // It is built from `facts` alone and never from the selected engine. The
+    // old version used `on_claybin && claybin_available`, so moving the row to
+    // claybin instantly repainted this to claim seccomp + landlock + cgroup2
+    // on a process still running bwrap, which cannot change mid-session
+    // because the policy is sealed at startup. That is the "sandbox: active
+    // while nothing is enforced" failure this entire pane was built after.
+    //
+    // When the selection and reality disagree, the disagreement is stated
+    // here rather than resolved in favour of either one: the user needs both
+    // facts, and which is which.
+    form.subtitle = describe_running(facts);
+    switch (engine_status(cfg, facts)) {
+        case EngineStatus::InForce:
+            break;   // selection matches reality; nothing to disclaim
+        case EngineStatus::AppliesOnRestart:
+            form.subtitle += "  \xc2\xb7  selected: ";
+            form.subtitle += sandbox_cfg::to_string(cfg.backend);
+            form.subtitle += " (applies on restart)";
+            break;
+        case EngineStatus::CannotStart:
+            form.subtitle += "  \xc2\xb7  claybin cannot start here";
+            break;
+    }
 
     // ── Posture ───────────────────────────────────────────────────
     //
@@ -605,7 +657,17 @@ Preview preview_sandbox(const sandbox_cfg::Config& cfg) {
 }
 
 void annotate_sandbox_form(form::Form& f, const Preview& preview,
-                          const sandbox_cfg::Config& cfg) {
+                          const sandbox_cfg::Config& cfg, EngineStatus status) {
+    // Walls described while the selected engine is not the running one are a
+    // FORECAST, and every annotation below has to say so.
+    //
+    // Without this the per-row honesty added in §15 becomes the same lie the
+    // subtitle told: "strong via seccomp-bpf" next to a row, in the present
+    // tense, on a process whose seccomp filter does not exist. The suffix is
+    // short because it goes on every annotated row -- and it goes on every row
+    // rather than once in the footer precisely because the footer is what
+    // people skip (§15).
+    const char* tense = status == EngineStatus::InForce ? "" : " (on restart)";
     // Which capability answers for which row. The mapping is the whole point of
     // the function and the only interesting thing in it: a row the user edits
     // is a POLICY axis, and the wall report is indexed by CAPABILITY, so
@@ -656,9 +718,9 @@ void annotate_sandbox_form(form::Form& f, const Preview& preview,
         // "strong via landlock abi 10", not "strong". The mechanism IS the
         // receipt -- a strength on its own is the same unfalsifiable claim as
         // "sandbox: active", which is the bug this pane was built after.
-        fld->origin = w->mechanism.empty()
+        fld->origin = (w->mechanism.empty()
             ? w->strength
-            : w->strength + " via " + w->mechanism;
+            : w->strength + " via " + w->mechanism) + tense;
     }
 
     // The posture row gets the SCORE instead of a mechanism: it is not one
@@ -682,7 +744,7 @@ void annotate_sandbox_form(form::Form& f, const Preview& preview,
             }
             if (total)
                 fld->origin = std::to_string(strong) + "/" +
-                              std::to_string(total) + " strong";
+                              std::to_string(total) + " strong" + tense;
         }
     }
 
@@ -756,7 +818,7 @@ Preview preview_sandbox(const sandbox_cfg::Config&) {
 }
 
 void annotate_sandbox_form(form::Form&, const Preview&,
-                           const sandbox_cfg::Config&) {
+                           const sandbox_cfg::Config&, EngineStatus) {
     // Nothing to annotate: there are no walls to report and every row is
     // already locked by build_sandbox_form on a host with no backend. A
     // per-row "none" next to a row that already says why would be the same

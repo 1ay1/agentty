@@ -174,11 +174,73 @@ struct SandboxPane {
 // (visual_parts for this pane lives in panel/visual_parts.hpp, alongside
 // every other panel's -- that header is where the gate's proofs are kept.)
 
+// What the host can do, and what is ACTUALLY enforcing right now.
+//
+// ── Why this is a struct and not three parameters ────────────────────
+//
+// Because conflating two of these shipped the worst bug this pane has had.
+// `build_sandbox_form` used to take `claybin_available` and nothing else, so
+// the only facts in scope were the SELECTED engine and whether the host COULD
+// run it. The subtitle was built from those two -- and therefore announced
+// "claybin \xc2\xb7 landlock abi 10 \xc2\xb7 seccomp \xc2\xb7 cgroup2" the instant you moved the
+// row, on a process that was still running bwrap and could not change.
+//
+// That is issue #21 exactly, re-entered through the front door: a pane built
+// to stop "sandbox: active" from meaning nothing, claiming walls that were not
+// up. The missing fact was never computed anywhere the view could see it --
+// `SandboxPane::backend` held it and had no reader at all.
+//
+// So the running engine is a NAMED FIELD next to the capability probe, and
+// every caller has to supply it. There is no overload that omits it.
+struct HostFacts {
+    // Can claybin start here? A real probe (it forks and attempts the uid_map
+    // write), not a guess.
+    bool claybin_available = false;
+    std::uint32_t landlock_abi = 0;
+
+    // What is enforcing RIGHT NOW. Sealed at startup and immutable for the
+    // life of the process -- which is the whole reason it has to be separate
+    // from the selection: the row can change, this cannot.
+    sandbox_cfg::LinuxBackend running = sandbox_cfg::LinuxBackend::Bwrap;
+
+    // False when there is no backend at all (probe failed, or --sandbox off).
+    // `running` is meaningless then, and the subtitle must say so rather than
+    // naming an engine that is not confining anything.
+    bool sandbox_active = false;
+};
+
+// The three states the engine row can be in.
+//
+// A sum type rather than the two bools that caused the bug, for the reason
+// panel/form.hpp gives about FormFocus: two bools encoding three states leaves
+// the invariant living only in a comment, and this file has now shipped that
+// failure twice (kSbMode, and the subtitle). Spelling the states out means the
+// view cannot accidentally describe a boundary that is not up.
+enum class EngineStatus : std::uint8_t {
+    // The selected engine IS the running one. Only in this state may anything
+    // on screen speak in the present tense.
+    InForce,
+    // The selection differs from what is running. A save takes effect at the
+    // next launch; the walls described below are a FORECAST.
+    AppliesOnRestart,
+    // claybin is selected and the host refused it. Saving is still legitimate
+    // (the user may be on a different machine tomorrow) but nothing here will
+    // be enforced by it.
+    CannotStart,
+};
+
+[[nodiscard]] EngineStatus engine_status(const sandbox_cfg::Config& cfg,
+                                         const HostFacts& facts);
+
+// One line describing what is ACTUALLY confining commands right now, derived
+// only from `facts` -- it cannot see the selection, so it cannot be talked
+// into describing a policy that is not running.
+[[nodiscard]] std::string describe_running(const HostFacts& facts);
+
 // Build the form from a config. Pure: no I/O, no probe -- the caller supplies
 // what the host can do, so this is testable without a kernel.
 [[nodiscard]] form::Form build_sandbox_form(const sandbox_cfg::Config& cfg,
-                                            bool claybin_available,
-                                            std::uint32_t landlock_abi);
+                                            const HostFacts& facts);
 
 // Read the form back into a config. The inverse of the above, and the only
 // place that knows the mapping -- so a renamed row breaks in one spot.
@@ -216,6 +278,6 @@ struct SandboxPane {
 // for "these ports" and silently got "nothing". A row that is self-defeating
 // should say so where it is typed.
 void annotate_sandbox_form(form::Form& f, const Preview& preview,
-                           const sandbox_cfg::Config& cfg);
+                           const sandbox_cfg::Config& cfg, EngineStatus status);
 
 }  // namespace agentty::ui::panel
