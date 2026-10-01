@@ -113,21 +113,23 @@ TEST_CASE("repeat succeeding tolerated below the limit") {
 
 TEST_CASE("repeat succeeding breaks at the limit") {
     // The gap this closes. The failure breaker only counted FAILING calls,
-    // and the step cap is gated on enforce_step_cap — true only for models
-    // the id heuristic recognises as weak. A locally-hosted model behind a
+    // and the step cap that used to back it up was gated on a model-id
+    // heuristic (and has since been removed entirely). A model behind a
     // private gateway (`igpu/laguna-xs-2.1`) is unrecognised by
     // construction, so an identical-call loop that SUCCEEDED every time had
     // no cap at all: measured at 80 repeats before the turn budget ran out,
     // which on a 22GB resident is minutes of GPU time going nowhere.
     //
-    // Applies to EVERY model, weak or not — the deployment where this costs
-    // most is exactly the one the heuristic cannot identify.
+    // Applies to EVERY model — and now that the step cap is gone, this IS
+    // the backstop for a loop that keeps succeeding. It keys on the call
+    // being IDENTICAL, which is evidence of being stuck rather than evidence
+    // of working hard.
     std::vector<Message> msgs;
     msgs.push_back(user());
     json a = {{"path", "log.txt"}};
     for (int i = 0; i < 6; ++i)
         msgs.push_back(asst_call("read", a, Term::Done));
-    auto brk = agent_loop_should_break(msgs, /*enforce_step_cap=*/false);
+    auto brk = agent_loop_should_break(msgs);
     check(brk.has_value(), "six identical successful calls break the loop");
     if (brk) check(brk->reason.find("read") != std::string::npos,
                    "the break names the offending tool");
@@ -141,7 +143,7 @@ TEST_CASE("succeeding repeats with different args never break") {
     for (int i = 0; i < 12; ++i)
         msgs.push_back(asst_call("read",
             json{{"path", "f" + std::to_string(i) + ".txt"}}, Term::Done));
-    check(!agent_loop_should_break(msgs, false).has_value(),
+    check(!agent_loop_should_break(msgs).has_value(),
           "distinct successful reads are a legitimate traversal");
 }
 
@@ -157,39 +159,47 @@ TEST_CASE("distinct failing calls no break") {
           "distinct failing args do NOT trip the repeat cap");
 }
 
-// ── 5. RUNAWAY: 25 healthy tool turns → break on step cap ────────────────────
-TEST_CASE("runaway step cap breaks") {
+// ── 5. NO STEP CAP: a long run of DISTINCT work is never cut off ─────────────
+//
+// There used to be a 25-turn cap here, gated on a model-id heuristic. Both are
+// gone: a raw count of tool turns is not evidence of anything. A real
+// search → read → edit → verify pass over a large codebase legitimately spends
+// dozens of distinct, productive steps, and stopping it at an arbitrary number
+// truncates working output with no finding to point at. The gate made it worse
+// by being inconsistent — the SAME transcript stopped on a local model and ran
+// fine on Claude.
+//
+// What still bounds a runaway is repetition, which is tested in 5c/5d below.
+// This case locks in that volume alone never trips anything.
+TEST_CASE("no step cap: distinct work runs as long as it needs") {
     std::vector<Message> msgs;
     msgs.push_back(user());
-    for (int i = 0; i < 25; ++i)
+    for (int i = 0; i < 200; ++i)
         msgs.push_back(asst_call("shell", json{{"command", "echo " + std::to_string(i)}},
                                  Term::Done));
-    auto brk = agent_loop_should_break(msgs);
-    check(brk.has_value(), "25 tool turns → runaway break");
-    check(brk && brk->reason.find("steps") != std::string::npos,
-          "runaway reason mentions step count");
+    check(!agent_loop_should_break(msgs).has_value(),
+          "200 distinct successful tool turns do NOT break");
 }
 
-// ── 5b. CAPABLE model (enforce_step_cap=false): 25 healthy turns do NOT break.
-//       Matches Claude Code (max_turns unlimited) / aider (no step cap). A
-//       long, legitimate run on Claude must never be cut off by the count.
-TEST_CASE("runaway step cap skipped for capable") {
+// ── 5b. ...and that holds regardless of WHICH model is driving.
+//       The old cap was enforced only when an id heuristic failed to
+//       recognise the model, so an unfamiliar local name got stopped where
+//       `claude-opus-4` did not, on byte-identical history. There is no flag
+//       left to pass, which is the point: one transcript, one answer.
+TEST_CASE("no step cap: the answer does not depend on the model id") {
     std::vector<Message> msgs;
     msgs.push_back(user());
-    for (int i = 0; i < 40; ++i)
-        msgs.push_back(asst_call("shell", json{{"command", "echo " + std::to_string(i)}},
+    for (int i = 0; i < 60; ++i)
+        msgs.push_back(asst_call("read", json{{"path", "f" + std::to_string(i) + ".cpp"}},
                                  Term::Done));
-    check(!agent_loop_should_break(msgs, /*enforce_step_cap=*/false).has_value(),
-          "40 healthy turns with step cap OFF (Claude) does NOT break");
-    // Same history WITH the cap on (weak model) still breaks — proves the only
-    // difference is the flag, not the history.
-    check(agent_loop_should_break(msgs, /*enforce_step_cap=*/true).has_value(),
-          "same history with step cap ON (weak model) breaks");
+    check(!agent_loop_should_break(msgs).has_value(),
+          "60 distinct reads never break, whoever is driving");
 }
 
-// ── 5c. REPEAT-FAILURE is UNIVERSAL: fires even when the step cap is OFF.
-//       aider/MindStudio apply the repeated-dead-call cap to every model;
-//       a capable model stuck re-trying an identical failing call still stops.
+// ── 5c. REPEAT-FAILURE is UNIVERSAL — and with the step cap gone it is one
+//       of only two things that can stop a run at all. aider/MindStudio apply
+//       the repeated-dead-call cap to every model; a capable model stuck
+//       re-trying an identical failing call still stops.
 TEST_CASE("repeat failure breaks even for capable") {
     std::vector<Message> msgs;
     msgs.push_back(user());
@@ -197,9 +207,9 @@ TEST_CASE("repeat failure breaks even for capable") {
     msgs.push_back(asst_call("read", a, Term::Failed));
     msgs.push_back(asst_call("read", a, Term::Failed));
     msgs.push_back(asst_call("read", a, Term::Failed));
-    auto brk = agent_loop_should_break(msgs, /*enforce_step_cap=*/false);
+    auto brk = agent_loop_should_break(msgs);
     check(brk.has_value(),
-          "3x identical failing call breaks even with step cap OFF (Claude)");
+          "3x identical failing call breaks on every model");
     check(brk && brk->reason.find("read") != std::string::npos,
           "repeat-failure reason names the tool");
 }

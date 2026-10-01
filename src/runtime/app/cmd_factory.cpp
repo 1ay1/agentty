@@ -1740,13 +1740,11 @@ SchedDecision schedule_parallel_batch(const std::vector<ToolUse>& batch) {
 // transcript over the current agent run (everything after the last real User
 // message that isn't a synthetic TOOL-RESULT carrier) and applies two caps.
 std::optional<LoopBreak> agent_loop_should_break(
-        const std::vector<Message>& messages,
-        bool enforce_step_cap) {
+        const std::vector<Message>& messages) {
     // Tunables. Generous enough that a legitimate multi-step task (search →
     // read → edit → verify …) never trips, tight enough that a stuck model
     // bails in seconds rather than spinning until the user hits Esc.
     constexpr int kRepeatLimit  = 3;   // same failing call N times → stop
-    constexpr int kMaxToolTurns = 25;  // tool-call turns w/o a text answer
     // Same SUCCEEDING call, byte-identical args, N times in one run → stop.
     //
     // Higher than kRepeatLimit because a repeat that WORKS is weaker
@@ -1755,13 +1753,15 @@ std::optional<LoopBreak> agent_loop_should_break(
     // called `read` on the same path six times with identical arguments and
     // still has not spoken is not going to converge on the seventh.
     //
-    // Without this the only backstop was kMaxToolTurns, which is gated on
-    // enforce_step_cap — true only for models the id heuristic recognises as
-    // weak. A locally-hosted model with an unfamiliar name
+    // This is now the ONLY backstop against a loop that keeps succeeding.
+    // It was added because the step cap it backed up was gated on a name
+    // heuristic: a locally-hosted model with an unfamiliar name
     // (`igpu/laguna-xs-2.1` behind a private gateway) is NOT recognised, so
-    // an identical-call loop ran with no limit at all: measured at 80
-    // successful repeats before the harness gave up, which on a 22GB local
-    // model is minutes of GPU time spent going nowhere.
+    // an identical-call loop ran with no limit at all — measured at 80
+    // successful repeats, which on a 22GB resident is minutes of GPU time
+    // going nowhere. That protection does not depend on the step cap and is
+    // unaffected by its removal: it keys on the call being IDENTICAL, which
+    // is evidence of being stuck rather than evidence of working hard.
     constexpr int kSuccessRepeatLimit = 6;
 
     // Find the start of the current run: the last User message. (Sub-turn
@@ -1842,17 +1842,29 @@ std::optional<LoopBreak> agent_loop_should_break(
                 "action."};
         }
     }
-    // RUNAWAY step cap. Only enforced for weak local models (caller passes
-    // enforce_step_cap). Capable models (Claude, hosted GPT) are NEVER step-
-    // capped — matches Claude Code (max_turns unlimited by default) and aider
-    // (no step cap). A long, legitimate search→read→edit→verify run must not be
-    // cut off at an arbitrary count.
-    if (enforce_step_cap && tool_turns >= kMaxToolTurns) {
-        return LoopBreak{
-            "Stopped after " + std::to_string(tool_turns) + " tool steps "
-            "without finishing. Summarise what you found and answer the user "
-            "directly, or ask them how to proceed."};
-    }
+    // ── No step cap ─────────────────────────────────────────────────────
+    //
+    // There used to be a third trigger here: 25 tool turns in one run with
+    // no text answer, gated behind an `enforce_step_cap` flag that was true
+    // for local/custom endpoints and weak-looking model ids.
+    //
+    // It is gone because a STEP COUNT IS NOT EVIDENCE. The other two caps
+    // key on repetition — the same call, byte-identical arguments, over and
+    // over — which actually distinguishes a stuck model from a busy one. A
+    // raw count cannot: a search → read → edit → verify run across a large
+    // codebase legitimately spends dozens of distinct, productive steps, and
+    // cutting it off at an arbitrary number truncates real work with no
+    // finding to point at. The gate made it worse by being inconsistent —
+    // the same transcript was fine on Claude and stopped on a local model.
+    //
+    // This matches what the other agents do: Claude Code's max_turns is
+    // unlimited by default, aider never step-caps.
+    //
+    // What still bounds a runaway: the repeat caps above (universal), the
+    // context window, and the user hitting Esc. A model cycling through
+    // genuinely DIFFERENT calls forever is not something a counter should
+    // guess at — it is the thing the user is watching.
+    (void)tool_turns;
     return std::nullopt;
 }
 
@@ -2027,8 +2039,9 @@ Cmd kick_pending_tools(Model& m) {
         if (has_results) {
             // ── Doom-loop circuit breaker ────────────────────────────────
             // Before spending another model completion, check whether this
-            // agent run has stopped converging. Two independent caps, each
-            // matching what production agent tools ship:
+            // agent run has stopped converging. Both caps key on REPETITION —
+            // the same call with byte-identical arguments — because that is
+            // what distinguishes a stuck model from a busy one:
             //
             //   • REPEAT-FAILURE cap — the same call failed 3× in a row. This
             //     is the UNIVERSAL pattern (aider's max_reflections=3,
@@ -2036,55 +2049,24 @@ Cmd kick_pending_tools(Model& m) {
             //     model, Claude included: a capable model genuinely stuck on a
             //     dead call (bad path, wrong tool) is helped by it too.
             //
-            //   • RUNAWAY step cap (25 tool turns) — NOT something production
-            //     tools impose on a capable model: Claude Code's max_turns is
-            //     UNLIMITED by default, aider never step-caps. So it is not
-            //     applied to a model we have positive evidence is capable.
+            //   • SUCCESS-REPEAT cap — the same call SUCCEEDED 6× in one run.
+            //     Also universal. This is what caught the 80-repeat loop on a
+            //     local model behind a private gateway.
             //
-            //     "Capable" means KNOWN capable, not "unrecognised". That
-            //     polarity used to be inverted: the cap was enforced only
-            //     for `is_weak_model(id)`, an id heuristic tuned for hosted
-            //     and Ollama naming (`:7b` tags, known family prefixes). A
-            //     llama.cpp server reports GGUF filenames and LM Studio
-            //     reports `publisher/model` keys, so the heuristic says
-            //     "not weak" for essentially every local model — and the
-            //     LESS agentty knew about a model, the LESS protection it
-            //     got. Measured: qwen3-30b-a3b, gpt-oss-20b,
-            //     GLM-4.6-Q4_K_M.gguf all classify not-weak, so an
-            //     unbounded loop on a local server ran with no step cap at
-            //     all. That is the "trips and loops forever in tool calls"
-            //     report, and the same shape was seen before with
-            //     `igpu/laguna-xs-2.1` behind a private gateway at 80 turns.
-            //
-            //     Now: skip the cap when the provider row is a KNOWN hosted
-            //     backend (Anthropic, OpenAI proper, the preset rows) —
-            //     those are the capable models the exemption was written
-            //     for. An unrecognised endpoint gets the cap, because 25
-            //     tool turns with no text answer is not a working agent
-            //     loop on any model, and a wrong cap costs one nudge
-            //     message while a missing one costs the user's afternoon.
+            // There is NO step cap. A count of tool turns was never evidence
+            // of anything — a real search → read → edit → verify run across a
+            // large codebase spends dozens of distinct, productive steps — and
+            // gating it on a model-id heuristic meant the identical transcript
+            // stopped on a local model and ran fine on Claude. The whole
+            // `weak_step_cap` selector that used to be computed here went with
+            // it. Claude Code and aider both ship with no step cap for the
+            // same reason.
             //
             // If a cap trips, DON'T re-stream: surface the nudge as the run's
             // final assistant turn and drop to Idle so the loop ends in seconds
             // instead of spinning until the user hits Esc. The nudge also lands
             // in history, so a follow-up shows the model why it stopped.
-            const bool weak_step_cap = [&] {
-                const auto sel = provider::active();
-                // Not the OpenAI-compat wire at all (Anthropic, ACP): the
-                // original exemption, unchanged.
-                if (sel.kind != provider::Kind::OpenAI) return false;
-                // A custom host has no registry row. We cannot vouch for it,
-                // so it gets the backstop.
-                if (sel.row == nullptr) return true;
-                // A preset row that talks to someone else's hosted service
-                // is a known-capable backend. A row for a LOCAL server is
-                // not — cap it unless the id heuristic recognises the model
-                // as one of the capable ones.
-                if (sel.row->is_local) return true;
-                return is_weak_model(m.d.model_id.value);
-            }();
-            if (auto brk = agent_loop_should_break(m.d.current.messages,
-                                                   /*enforce_step_cap=*/weak_step_cap)) {
+            if (auto brk = agent_loop_should_break(m.d.current.messages)) {
                 m.s.phase = phase::Idle{};
                 Message note;
                 note.role = Role::Assistant;

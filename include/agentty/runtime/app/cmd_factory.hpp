@@ -162,28 +162,32 @@ struct SchedDecision {
 //
 // Given the full message history of the CURRENT agent turn (the run since the
 // last real User message), returns a non-empty nudge string when the loop
-// should be force-stopped, or std::nullopt to keep going. Two triggers:
+// should be force-stopped, or std::nullopt to keep going. Two triggers, both
+// keyed on REPETITION — the same call with byte-identical arguments — because
+// that is what distinguishes a stuck model from a busy one:
 //   (1) REPEAT: the same (tool, args) call appears >= kRepeatLimit times and
 //       its results were failures — the model is stuck re-trying a dead call.
 //       ALWAYS enforced (every production tool does this: aider's
 //       max_reflections, MindStudio's "2–3 attempts then stop"). A capable
 //       model that genuinely loops on a dead call benefits from it too.
-//   (2) RUNAWAY: the run has made >= kMaxToolTurns assistant tool-call turns
-//       without ever producing a plain-text answer — unbounded spend. Gated
-//       behind `enforce_step_cap`. No production tool applies a hard
-//       successful-step cap to a CAPABLE model by default: Claude Code's
-//       max_turns is UNLIMITED by default, aider never step-caps. So the
-//       caller passes enforce_step_cap=true ONLY for weak local models
-//       (qwen2.5-coder/codellama) and false for Claude / capable hosted
-//       models, which run until they finish on their own.
+//   (2) SUCCESS-REPEAT: the same (tool, args) call SUCCEEDS >= 6 times in one
+//       run — a model re-reading the same path with identical arguments six
+//       times and still not speaking is not going to converge on the seventh.
+//       Also always enforced.
+//
+// There is deliberately NO step cap. A raw count of tool turns is not evidence
+// of anything: a legitimate search → read → edit → verify run across a large
+// codebase spends dozens of distinct, productive steps. Claude Code's
+// max_turns is unlimited by default and aider never step-caps, for the same
+// reason. The old one was additionally gated on a model-id heuristic, so the
+// identical transcript stopped on a local model and ran fine on Claude.
 // The returned text is surfaced to the model as the final assistant turn so
 // it can recover gracefully (and the user sees why the loop stopped).
 struct LoopBreak {
     std::string reason;     // user/model-facing explanation
 };
 [[nodiscard]] std::optional<LoopBreak> agent_loop_should_break(
-    const std::vector<Message>& messages,
-    bool enforce_step_cap = true);
+    const std::vector<Message>& messages);
 
 // Fetch the model catalog.
 //
