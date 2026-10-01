@@ -851,3 +851,26 @@ if(Python3_Interpreter_FOUND AND EXISTS ${_STUBCHK})
     set_tests_properties(local_stub_claims PROPERTIES
                          LABELS "static" TIMEOUT 120 RUN_SERIAL TRUE)
 endif()
+
+# packaging_submodule_parity: does the AUR source recipe know every submodule?
+#
+# packaging/arch/agentty-git/PKGBUILD maintains its submodule list BY HAND --
+# makepkg forbids network access in build(), so each one is fetched as its own
+# source=() entry and rewired to that local clone in prepare(). A hand-kept
+# list does not track .gitmodules, so adding a submodule silently breaks the
+# package: claybin landed, nothing updated the recipe, and because an empty
+# third_party/claybin is a CMake FATAL_ERROR the package stopped CONFIGURING.
+# No workflow referenced the file, so nothing noticed until someone tried it
+# by hand.
+#
+# CI builds the recipe for real (the `AUR agentty-git configures` job) and
+# that remains the authoritative check. This is the cheap half: a text
+# comparison that runs in the normal suite and names exactly what to add, so
+# the next submodule fails here in milliseconds rather than on the AUR.
+set(_PKGPARITY ${CMAKE_SOURCE_DIR}/tests/packaging_submodule_parity.py)
+if(Python3_Interpreter_FOUND AND EXISTS ${_PKGPARITY})
+    add_test(NAME packaging_submodule_parity
+             COMMAND ${Python3_EXECUTABLE} ${_PKGPARITY})
+    set_tests_properties(packaging_submodule_parity PROPERTIES
+                         LABELS "static" TIMEOUT 30)
+endif()

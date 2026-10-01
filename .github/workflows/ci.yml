@@ -705,3 +705,52 @@ jobs:
           ./fuzzbuild/fuzz/fuzz_fuzzy_match 5000
           ./fuzzbuild/fuzz/fuzz_apply_patch 20000
 
+  # ── AUR source package: does agentty-git still CONFIGURE? ────────────────
+  #
+  # packaging/arch/agentty-git/PKGBUILD wires each submodule to a local clone
+  # by hand, so it does not track .gitmodules. When claybin became a REQUIRED
+  # submodule, nothing added it there -- and AgenttySubmodules.cmake raises
+  # FATAL_ERROR on an empty third_party/claybin, so the package stopped
+  # configuring entirely. Nobody could install it, and no workflow referenced
+  # the file, so it stayed broken silently until someone tried by hand.
+  #
+  # This gate runs makepkg --nobuild: fetch the sources, wire the submodules,
+  # run prepare(), and configure. That is the step that breaks when a new
+  # submodule lands, and it costs ~1 minute instead of the ~25 a full compile
+  # would. The real compile is already covered by build-test on the same code.
+  #
+  # Scoped to pushes that touch the packaging or the submodule set, so the
+  # common path pays nothing.
+  aur-source-package:
+    name: AUR agentty-git configures
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - uses: actions/checkout@v5
+      - name: Deps
+        run: pacman -Sy --noconfirm --needed git cmake ninja openssl libnghttp2
+      - name: makepkg --nobuild (fetch + prepare + configure)
+        run: |
+          # makepkg refuses to run as root.
+          useradd -m build
+          cp packaging/arch/agentty-git/PKGBUILD /home/build/
+          chown -R build /home/build
+          # --nobuild stops after prepare(); --nodeps because the container
+          # already has what we need and we are not producing a package.
+          su build -c 'cd ~ && makepkg --nobuild --nodeps --noconfirm' 2>&1 | tail -40
+          # Prove every submodule the build system REQUIRES actually landed,
+          # rather than trusting that prepare() exited 0.
+          src=/home/build/src/agentty
+          for m in maya acp-cpp mcp-cpp rag-cpp claybin; do
+            if [ ! -f "$src/third_party/$m/CMakeLists.txt" ]; then
+              echo "::error::third_party/$m is empty in the agentty-git build -- wire it in packaging/arch/agentty-git/PKGBUILD"
+              exit 1
+            fi
+            echo "ok: third_party/$m"
+          done
+          # maya carries jaal as its own submodule; a non-recursive update
+          # builds nothing, so check the nested one too.
+          test -f "$src/third_party/maya/third_party/jaal/CMakeLists.txt" \
+            || { echo "::error::nested jaal submodule missing"; exit 1; }
+          echo "ok: third_party/maya/third_party/jaal"
+

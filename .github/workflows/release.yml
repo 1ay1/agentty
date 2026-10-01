@@ -1559,6 +1559,47 @@ jobs:
             done
             if printf '%s\n' "$pk" | grep -qE "^pkgver=${V}$"; then
               ok "AUR agentty-bin @ $V"
+              # ---- 4b. .SRCINFO must MATCH that PKGBUILD ----
+              #
+              # Version alone is not health. .SRCINFO is what the AUR web UI
+              # and every helper reads for metadata, and it is a SEPARATE
+              # file -- so it can carry the right pkgver and still describe a
+              # different package. It did, for releases: the long pkgdesc and
+              # both optdepends were in the PKGBUILD while the AUR served the
+              # short description and no optional deps.
+              #
+              # That breaks UPDATES, not just appearances: helpers like pikaur
+              # regenerate .SRCINFO in their local clone when building, so a
+              # published file that disagrees with what makepkg produces makes
+              # `git pull` conflict on every new release.
+              #
+              # So regenerate from the PUBLISHED PKGBUILD with the real
+              # makepkg and diff. This is the check that was missing; nothing
+              # compared content, which is why a user had to report it.
+              si=$(curl -fsSL "https://aur.archlinux.org/cgit/aur.git/plain/.SRCINFO?h=agentty-bin" 2>/dev/null || true)
+              if [ -z "$si" ]; then
+                echo "::warning::could not fetch AUR .SRCINFO — skipping the content check"
+              else
+                rm -rf /tmp/srcchk && mkdir -p /tmp/srcchk
+                printf '%s\n' "$pk" > /tmp/srcchk/PKGBUILD
+                printf '%s\n' "$si" > /tmp/srcchk/.SRCINFO.live
+                if docker run --rm -v /tmp/srcchk:/pkg -w /pkg archlinux:base-devel sh -c '
+                     set -eu
+                     useradd -m build
+                     chown -R build /pkg
+                     su build -c "makepkg --printsrcinfo" > /pkg/.SRCINFO.want
+                   ' 2>/dev/null; then
+                  if diff -u /tmp/srcchk/.SRCINFO.live /tmp/srcchk/.SRCINFO.want > /tmp/srcchk/diff; then
+                    ok "AUR .SRCINFO matches its PKGBUILD"
+                  else
+                    echo "--- published .SRCINFO vs makepkg output ---"
+                    cat /tmp/srcchk/diff
+                    bad "AUR .SRCINFO is out of sync with the PKGBUILD (breaks pikaur-style updates) — run the reconcile-manifests workflow"
+                  fi
+                else
+                  echo "::warning::could not run makepkg to validate .SRCINFO"
+                fi
+              fi
             elif [ -z "$pk" ] || printf '%s\n' "$pk" | grep -qi 'AUR is down\|maintenance'; then
               # cgit itself is unreachable/down for maintenance — an upstream
               # outage, not a drifted package. publish-aur already soft-skips
