@@ -182,3 +182,25 @@ runtime/app/update/code_blocks.cpp: thread atomic
 # owns this" without a lock.
 runtime/view/thread/turn/agent_timeline/agent_timeline.cpp: thread_local
 runtime/view/thread/turn/agent_timeline/tool_body_preview.cpp: thread_local
+
+# ── i18n: the catalog pointer IS the live-switch mechanism ───────────────
+# Not a shortcut around guarded<T>. guarded<T> would be the wrong tool here
+# and would make the feature measurably worse.
+#
+# t() returns a string_view INTO the active catalog and is called a few
+# hundred times per frame. guarded<T>::with() hands its state to a
+# captureless lambda under a lock, so it cannot return a view that outlives
+# the call -- the render path would have to copy every translated string,
+# against 19 ns and zero allocation today.
+#
+# What the atomic actually does is LATE BINDING, the same shape colours use
+# (docs/LATE_BINDING.md). A catalog is immutable once built, so there is no
+# mutable shared state to protect: switching language is one release store
+# of a shared_ptr and readers take an acquire load. The outgoing catalog
+# stays alive through the shared_ptr until its last reader drops it, which
+# is what makes a view handed out mid-frame safe even if the language
+# changes during that frame.
+#
+# No lock is taken, so this file cannot participate in an inversion. Read
+# and judged by hand, per the note at the top.
+i18n/i18n.cpp: atomic
