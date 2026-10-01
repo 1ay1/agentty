@@ -980,7 +980,20 @@ std::vector<std::string> read_sandbox_list(const SandboxListPane& p) {
             out.push_back(std::move(v));
         }
     }
-    return out;
+    // Deduplicate, keeping FIRST position.
+    //
+    // A duplicate is never meaningful here -- two identical binds are one
+    // bind, and two identical ports are one port -- but it is easy to create
+    // by accident (type a path, scroll, type it again) and silently keeping
+    // both makes the row's count disagree with what the policy does. Order is
+    // preserved rather than sorted, because the user typed it in an order and
+    // reshuffling their list on save is its own small betrayal.
+    std::vector<std::string> uniq;
+    uniq.reserve(out.size());
+    for (auto& v : out)
+        if (std::find(uniq.begin(), uniq.end(), v) == uniq.end())
+            uniq.push_back(std::move(v));
+    return uniq;
 }
 
 void annotate_sandbox_form(form::Form& f, const Preview& preview,
@@ -1143,6 +1156,53 @@ void annotate_sandbox_form(form::Form& f, const Preview& preview,
                 ? "the agent may author files your host later executes \xc2\xb7 "
                   "this is the shape of every escape in Pillar's 2026 series"
                 : "allowed and recorded \xc2\xb7 the write still happens";
+    }
+
+    // A path in BOTH a grant list and the mask list is a contradiction, and
+    // it is one the compiler cannot catch: both produce valid mounts, and
+    // which wins comes down to emission order. The user asked for two
+    // incompatible things and the policy silently picked one.
+    //
+    // Checked here rather than resolved, deliberately. Picking a winner would
+    // be inventing an intent -- "masked" and "writable" are equally plausible
+    // readings of the same two rows -- so the pane says what it sees and lets
+    // the user decide which row they meant.
+    {
+        auto clash = [&](const std::vector<std::string>& grants) {
+            for (const auto& g : grants)
+                for (const auto& d : cfg.deny_paths)
+                    if (g == d) return g;
+            return std::string{};
+        };
+        if (const auto bad = clash(cfg.write_paths); !bad.empty()) {
+            if (auto* fld = row_of(kSbDenyPaths))
+                fld->error = bad + " is also in Also writable \xc2\xb7 "
+                             "remove it from one list";
+        } else if (const auto bad2 = clash(cfg.read_paths); !bad2.empty()) {
+            if (auto* fld = row_of(kSbDenyPaths))
+                fld->error = bad2 + " is also in Also readable \xc2\xb7 "
+                             "remove it from one list";
+        }
+    }
+
+    // A relative path in any of the three lists.
+    //
+    // The sandbox resolves these against the CHILD's cwd, not the pane's, so
+    // "build" means something the user cannot predict and usually matches
+    // nothing at all. It compiles, it just quietly does not do what it reads
+    // like -- the same class as the per-port rows above.
+    for (const auto* entry : {&cfg.read_paths, &cfg.write_paths, &cfg.deny_paths}) {
+        std::string_view id = entry == &cfg.read_paths    ? kSbReadPaths
+                            : entry == &cfg.write_paths   ? kSbWritePaths
+                                                          : kSbDenyPaths;
+        auto* fld = row_of(id);
+        if (!fld || !fld->error.empty()) continue;
+        for (const auto& p : *entry) {
+            if (p.empty() || p.front() == '/' || p.front() == '~') continue;
+            fld->error = "`" + p + "` is relative \xc2\xb7 resolved against the "
+                         "command's working directory, so it may match nothing";
+            break;
+        }
     }
 
     // Secret masking off entirely. Depth 0 still covers the workspace root, so

@@ -925,7 +925,10 @@ TEST_CASE("sandbox list: a non-port is dropped, not guessed at") {
     auto ed = pn::build_sandbox_list(pn::kSbPorts, "t", "h",
                                      {"443", "8O80", "99999", "0", "0443"},
                                      true);
-    const std::vector<std::string> want{"443", "443"};   // 0443 normalises
+    // 8O80 (letter O), 99999 (out of range) and 0 are dropped. "0443"
+    // normalises to 443, which is then a DUPLICATE of the first entry and
+    // collapses -- so one port survives, not two.
+    const std::vector<std::string> want{"443"};
     CHECK(pn::read_sandbox_list(ed) == want);
 }
 
@@ -1423,6 +1426,74 @@ TEST_CASE("sandbox list: backspace on an empty row is harmless") {
     CHECK_FALSE(ed->pane.form.editing());
     CHECK(ed->pane.form.fields.size() == rows);
     CHECK(pn::read_sandbox_list(ed->pane).empty());
+}
+
+TEST_CASE("sandbox list: duplicates collapse, keeping the first position") {
+    // Two identical binds are one bind and two identical ports are one port,
+    // but a duplicate is easy to create by accident (type a path, scroll, type
+    // it again) and keeping both makes the row's count disagree with what the
+    // policy actually does.
+    auto ed = pn::build_sandbox_list(pn::kSbReadPaths, "t", "h",
+                                     {"/a", "/b", "/a", "/c", "/b"}, false);
+    const std::vector<std::string> want{"/a", "/b", "/c"};
+    CHECK(pn::read_sandbox_list(ed) == want);
+}
+
+TEST_CASE("sandbox pane: a path in two lists is flagged, not silently resolved") {
+    // The compiler cannot catch this: a grant and a mask are both valid
+    // mounts, so which wins comes down to emission order. The user asked for
+    // two incompatible things and the policy quietly picked one.
+    //
+    // The pane REPORTS rather than resolves, deliberately -- "masked" and
+    // "writable" are equally plausible readings of the same two rows, so
+    // picking a winner would be inventing an intent.
+    sandbox_cfg::Config cfg;
+    cfg.configured = true;
+    cfg.backend = sandbox_cfg::LinuxBackend::Claybin;
+    cfg.write_paths = {"/opt/shared"};
+    cfg.deny_paths  = {"/opt/shared"};
+    install(cfg);
+
+    auto form = pn::build_sandbox_form(cfg, facts_for(cfg));
+    pn::annotate_sandbox_form(form, pn::preview_sandbox(cfg), cfg,
+                              pn::EngineStatus::InForce);
+
+    const int d = row_of(form, pn::kSbDenyPaths);
+    REQUIRE(d >= 0);
+    const auto& err = form.fields[static_cast<std::size_t>(d)].error;
+    CHECK(!err.empty());
+    CHECK(err.find("/opt/shared") != std::string::npos);
+    CHECK(err.find("writable") != std::string::npos);
+}
+
+TEST_CASE("sandbox pane: a relative path is flagged") {
+    // It compiles and it quietly does not do what it reads like: the sandbox
+    // resolves it against the CHILD's working directory, not the pane's, so
+    // `build` usually matches nothing at all.
+    sandbox_cfg::Config cfg;
+    cfg.configured = true;
+    cfg.backend = sandbox_cfg::LinuxBackend::Claybin;
+    cfg.read_paths = {"build"};
+    install(cfg);
+
+    auto form = pn::build_sandbox_form(cfg, facts_for(cfg));
+    pn::annotate_sandbox_form(form, pn::preview_sandbox(cfg), cfg,
+                              pn::EngineStatus::InForce);
+
+    const int r = row_of(form, pn::kSbReadPaths);
+    REQUIRE(r >= 0);
+    CHECK(form.fields[static_cast<std::size_t>(r)].error.find("relative")
+          != std::string::npos);
+
+    // An absolute path is fine, and so is ~ -- the shell expands it before the
+    // sandbox ever sees it.
+    cfg.read_paths = {"/opt/sdk", "~/.cargo"};
+    auto ok = pn::build_sandbox_form(cfg, facts_for(cfg));
+    pn::annotate_sandbox_form(ok, pn::preview_sandbox(cfg), cfg,
+                              pn::EngineStatus::InForce);
+    const int r2 = row_of(ok, pn::kSbReadPaths);
+    REQUIRE(r2 >= 0);
+    CHECK(ok.fields[static_cast<std::size_t>(r2)].error.empty());
 }
 
 // ── "applies on restart" has to be a checked claim ─────────────────────
