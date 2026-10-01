@@ -4,6 +4,8 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.17] - 2026-10-01
+
 ### Changed
 - **Reasoning effort defaults to `auto`, so Smart Mode's classifier can actually
   move the dial.** Smart Mode reads your effort setting as the *midpoint* of a
