@@ -6,6 +6,8 @@
 #include <cstdlib>
 #include <cstdio>
 #include <mutex>
+#include <set>
+#include <string>
 #include <system_error>
 
 #ifndef _WIN32
@@ -137,6 +139,64 @@ void migrate_legacy_config(const fs::path& root) {
         fs::remove(legacy, ec);
 }
 
+// Resolve one overridable subdirectory.
+//
+// `$env` wins when set and non-empty; otherwise `leaf` under the root.
+// A RELATIVE override is resolved against the user root, never against
+// the process CWD: `AGENTTY_LOGS_DIR=logs2` has to mean one directory,
+// not a different one for every directory agentty is launched from.
+//
+// Failure to create the override is NOT silently papered over with the
+// default. A user who points logs at an unmounted drive and gets them in
+// ~/.agentty anyway has been given the wrong answer twice: the setting
+// did not take, and nothing said so. Warn once, then fall back — losing
+// diagnostics entirely is worse than writing them to the default place,
+// but only if the user is told which happened.
+fs::path resolve_subdir(const char* env, const char* leaf, bool owner_only) {
+    fs::path root = user_root();
+    if (root.empty()) return root;
+
+    fs::path p;
+    bool overridden = false;
+    if (const char* v = std::getenv(env); v && *v) {
+        fs::path given{v};
+        p = given.is_absolute() ? std::move(given) : root / given;
+        overridden = true;
+    } else {
+        p = root / leaf;
+    }
+
+    std::error_code ec;
+    fs::create_directories(p, ec);
+    if (overridden && !fs::is_directory(p, ec)) {
+        static std::mutex warn_mu;
+        static std::set<std::string> warned;
+        {
+            std::scoped_lock lk{warn_mu};
+            if (!warned.insert(env).second) return root / leaf;
+        }
+        // create_directories() leaves `ec` CLEAR when the path already
+        // exists as a non-directory -- it did not fail, it had nothing to
+        // do -- so reporting ec here printed "Undefined error: 0" for the
+        // single most likely mistake (pointing the override at a file).
+        // Name that case directly and keep the errno text for the rest.
+        std::error_code exists_ec;
+        const bool in_the_way = fs::exists(p, exists_ec);
+        std::fprintf(stderr,
+            "agentty: warning: $%s='%s' is not usable (%s) — falling back to %s\n",
+            env, p.string().c_str(),
+            in_the_way ? "exists but is not a directory"
+                       : (ec ? ec.message().c_str() : "cannot create"),
+            (root / leaf).string().c_str());
+        p = root / leaf;
+        fs::create_directories(p, ec);
+    }
+#ifndef _WIN32
+    if (owner_only) ::chmod(p.c_str(), S_IRWXU);
+#endif
+    return p;
+}
+
 }  // namespace
 
 fs::path user_root() {
@@ -205,21 +265,20 @@ fs::path user_credentials_dir() {
 }
 
 fs::path user_cache_dir() {
-    fs::path p = user_root();
-    if (p.empty()) return p;
-    p /= "cache";
-    std::error_code ec;
-    fs::create_directories(p, ec);
-    return p;
+    return resolve_subdir("AGENTTY_CACHE_DIR", "cache", /*owner_only=*/false);
 }
 
 fs::path user_logs_dir() {
-    fs::path p = user_root();
-    if (p.empty()) return p;
-    p /= "logs";
-    std::error_code ec;
-    fs::create_directories(p, ec);
-    return p;
+    return resolve_subdir("AGENTTY_LOGS_DIR", "logs", /*owner_only=*/false);
+}
+
+fs::path user_threads_dir() {
+    // Owner-only: conversation history is as sensitive as the credentials
+    // beside it. The default inherits 0700 from the root, but an override
+    // can point anywhere — including a path the user created 0755 — so
+    // this is the one place the bit has to be set explicitly rather than
+    // assumed.
+    return resolve_subdir("AGENTTY_THREADS_DIR", "threads", /*owner_only=*/true);
 }
 
 }  // namespace agentty::util

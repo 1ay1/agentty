@@ -67,8 +67,46 @@ namespace agentty::util {
 
 // Subdirectory accessors — each creates its dir on first use. Use these
 // instead of joining literals so the layout stays enforced in one place.
+//
+// ─────────────────────────────────────────────────────────────────────
+// Moving the BULK off the config disk
+// ─────────────────────────────────────────────────────────────────────
+// $AGENTTY_HOME moves the whole root, which is the right answer when you
+// want one agentty install somewhere else. It is the wrong answer to a
+// different question users actually ask (issue #58): "keep my config on
+// the system disk, put the data on a second drive."
+//
+// The numbers are why that question is reasonable. On a working install
+// the split is roughly settings 4 KB, credentials 8 KB — against threads
+// 4 MB, cache 5 MB and logs 38 MB. ~99% of the bytes are the three
+// categories below, and they are exactly the ones that grow without
+// bound.
+//
+// So each takes its own override:
+//
+//   $AGENTTY_THREADS_DIR   conversation history, the thread index
+//   $AGENTTY_CACHE_DIR     refetchable: models.dev, update stamps
+//   $AGENTTY_LOGS_DIR      diagnostics
+//
+// This is NOT a retreat to the XDG four-root layout the rationale above
+// rejects, and the difference is the default. XDG scatters by default,
+// so "where does a new file go" has four answers and files land by
+// coin-flip. Here the default is still ONE root, every accessor still
+// goes through this header, and an override is a deliberate per-install
+// choice that changes nothing for anyone who does not set it.
+//
+// Deliberately NOT overridable: credentials/ and settings.json. They are
+// small, they are the things a user is most likely to lose track of, and
+// a secret that moves because of an env var set in a shell profile is a
+// secret nobody can find later.
+//
+// Relative paths are resolved against the user root rather than the
+// process CWD — `AGENTTY_LOGS_DIR=logs2` means ~/.agentty/logs2, not
+// "wherever agentty happened to be launched from", which would scatter
+// logs across every directory you ever started it in.
 [[nodiscard]] std::filesystem::path user_credentials_dir();  // secrets, 0700
 [[nodiscard]] std::filesystem::path user_cache_dir();        // refetchable
 [[nodiscard]] std::filesystem::path user_logs_dir();         // diagnostics
+[[nodiscard]] std::filesystem::path user_threads_dir();      // conversation history
 
 }  // namespace agentty::util

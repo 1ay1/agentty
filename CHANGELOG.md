@@ -5,6 +5,29 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **`$AGENTTY_THREADS_DIR`, `$AGENTTY_CACHE_DIR`, `$AGENTTY_LOGS_DIR`** — move
+  the bulk of agentty's storage to another disk without moving your config
+  ([#58](https://github.com/1ay1/agentty/issues/58)). `$AGENTTY_HOME` already
+  moved the whole root, which is the wrong tool for "config on the system
+  disk, data on a second drive": on a working install the split is ~4 KB of
+  settings and 8 KB of credentials against 4 MB of threads, 5 MB of cache and
+  38 MB of logs, so ~99% of the bytes are the three categories that grow.
+
+  Settings and credentials stay put, deliberately and not configurably — a
+  secret that moves because of a variable in a shell profile is a secret
+  nobody can find later. This is not the XDG four-root layout the single-root
+  rationale rejects: the default is still one root, every path still resolves
+  through `util/user_root.hpp`, and an override changes nothing for anyone who
+  does not set one.
+
+  A relative value resolves against the root rather than the process CWD, so
+  one setting means one directory instead of a different one per launch
+  directory. An empty value counts as unset. A directory that cannot be
+  created warns once and falls back to the default rather than silently
+  dropping the data, and an overridden threads directory is forced to `0700`,
+  because conversation history is as sensitive as the credentials it used to
+  sit beside.
+
 - **The sandbox on macOS is now claybin, not `sandbox-exec`.** Same policy
   compiler as Linux, so the Sandbox settings pane finally means something on a
   Mac: extra readable paths, masks, per-port network and resource ceilings
@@ -26,6 +49,16 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
   run one engine gets the other, never nothing.
 
 ### Fixed
+- **`logx` spelled the log directory itself instead of asking for it.** It
+  resolves its path with hand-rolled `getenv` calls on purpose — it has to
+  stay linkable from the narrow sanitizer TUs and safe from a crash handler —
+  but that independence meant the layout was written out twice, and the copy
+  in `logx.cpp` was the one that would have silently ignored
+  `$AGENTTY_LOGS_DIR`. Logs are the single biggest thing agentty writes, so
+  the one category most worth relocating would have been the one that did not
+  move. Found while testing the overrides above, which is the only reason it
+  is not a shipped bug.
+
 - **Three things on macOS were guarded on `__linux__` when they were really
   guarded on "has a sandbox".** The Sandbox settings pane compiled its rows out
   entirely and predicted walls using the *Linux* compiler, so resource caps

@@ -185,10 +185,13 @@ fs::path data_dir() {
 }
 
 fs::path threads_dir() {
-    auto p = data_dir() / "threads";
-    std::error_code ec;
-    fs::create_directories(p, ec);
-    return p;
+    // Via user_threads_dir() rather than `data_dir() / "threads"` so the
+    // $AGENTTY_THREADS_DIR override applies here too. Conversation history
+    // is the second-largest thing agentty writes, and it was the one that
+    // would have silently stayed on the config disk if this had kept
+    // joining the leaf itself — which is exactly the drift the one-root
+    // header warns about.
+    return util::user_threads_dir();
 }
 
 // ---- Image blob store ------------------------------------------------

@@ -546,13 +546,23 @@ bool init() {
     if (spec && *spec) parse_filter(spec);
     // A filter without a file logs to <user-root>/logs/agentty.log
     // ($AGENTTY_HOME/logs or ~/.agentty/logs — the single-root layout,
-    // see util/user_root.hpp) so AGENTTY_LOG=debug alone just works.
+    // see util/user_root.hpp), or to $AGENTTY_LOGS_DIR when that is set,
+    // so AGENTTY_LOG=debug alone just works.
     // In a non-release build the same is true with NO env var at all.
     const bool want_file = (spec && *spec) || kDefault != Level::Off;
     if (file && *file) open_sink(file);
     // Deliberately hand-rolled env reads (no <filesystem>, no user_root
     // dependency): logx must stay linkable from the narrow sanitizer
     // test TUs and be crash-handler-safe.
+    //
+    // That independence is also a HAZARD, and this block is where it bit:
+    // the layout was spelled out here as `root + "/logs"` rather than
+    // asked for, so when $AGENTTY_LOGS_DIR was added to user_root.cpp the
+    // logs — the single biggest thing agentty writes — were the one
+    // category that silently ignored it. Duplicated layout knowledge
+    // drifts; the fix is to duplicate the OVERRIDE too, and to keep the
+    // two spellings adjacent in the comments so the next change to either
+    // is obvious.
     if (g_fd.load(std::memory_order_relaxed) < 0 && want_file) {
         std::string root;
         if (const char* ah = std::getenv("AGENTTY_HOME"); ah && *ah)
@@ -564,15 +574,34 @@ bool init() {
             if (const char* prof = std::getenv("USERPROFILE"); prof && *prof)
                 root = std::string{prof} + "\\.agentty";
 #endif
-        if (!root.empty()) {
+        // $AGENTTY_LOGS_DIR wins over the default leaf. Same rule as
+        // util::resolve_subdir(): absolute is taken as-is, relative is
+        // resolved against the ROOT and not the CWD, so one setting means
+        // one directory rather than one per launch directory.
+        const char* logs_env = std::getenv("AGENTTY_LOGS_DIR");
+        const bool have_env = logs_env && *logs_env;
 #if defined(_WIN32)
-            ::_mkdir(root.c_str());
-            const std::string dir = root + "\\logs";
+        const bool env_abs =
+            have_env && (logs_env[0] == '\\' || logs_env[0] == '/' ||
+                         (logs_env[0] != '\0' && logs_env[1] == ':'));
+#else
+        const bool env_abs = have_env && logs_env[0] == '/';
+#endif
+        // An absolute override needs no root, which is the case that keeps
+        // logging alive on a host with no usable HOME.
+        if (!root.empty() || env_abs) {
+#if defined(_WIN32)
+            if (!root.empty()) ::_mkdir(root.c_str());
+            const std::string dir = !have_env  ? root + "\\logs"
+                                    : env_abs  ? std::string{logs_env}
+                                               : root + "\\" + logs_env;
             ::_mkdir(dir.c_str());
             open_sink((dir + "\\agentty.log").c_str());
 #else
-            ::mkdir(root.c_str(), 0700);
-            const std::string dir = root + "/logs";
+            if (!root.empty()) ::mkdir(root.c_str(), 0700);
+            const std::string dir = !have_env  ? root + "/logs"
+                                    : env_abs  ? std::string{logs_env}
+                                               : root + "/" + logs_env;
             ::mkdir(dir.c_str(), 0755);
             open_sink((dir + "/agentty.log").c_str());
 #endif

@@ -129,6 +129,9 @@ common ones are `AGENTTY_DOCS_DIR` and `AGENTTY_EMBED_MODEL`.
 | Variable | Effect |
 |----------|--------|
 | `AGENTTY_HOME` | Root for all agentty state (credentials, threads, settings, logs). Default `~/.agentty`. Point it at a scratch dir to sandbox a session. |
+| `AGENTTY_THREADS_DIR` | Conversation history. Default `<root>/threads`. |
+| `AGENTTY_CACHE_DIR` | Refetchable data — the model catalog, update stamps. Default `<root>/cache`. Safe to delete at any time. |
+| `AGENTTY_LOGS_DIR` | Diagnostic logs. Default `<root>/logs`. Usually the largest directory. |
 | `AGENTTY_ENCRYPT_PASSPHRASE` / `AGENTTY_PASSPHRASE` | Passphrase for the encrypted credential store — for headless machines where no prompt is possible. |
 | `AGENTTY_USE_KEYSTORE` | Use the OS keychain for credentials instead of the file store. |
 | `AGENTTY_KDF` | Key-derivation parameters for the credential store. Change only if you know why. |
@@ -139,6 +142,38 @@ common ones are `AGENTTY_DOCS_DIR` and `AGENTTY_EMBED_MODEL`.
 | `AGENTTY_AIRGAP_SSH` | SSH target for airgap mode. See **[Airgap](/docs/airgap)**. |
 | `AGENTTY_NO_SSH_THROTTLE` | Skip render throttling over SSH. A fast LAN hop doesn't need it. |
 | `AGENTTY_NO_UPDATE_CHECK` | Disable the background update check (also implied by airgap mode). |
+
+### Keeping config local and bulk elsewhere
+
+`AGENTTY_HOME` moves *everything*. The three variables above move only the
+parts that grow, which is the usual reason to care — on a working install the
+split is roughly 4 KB of settings and 8 KB of credentials against 4 MB of
+threads, 5 MB of cache and 38 MB of logs.
+
+```sh
+export AGENTTY_THREADS_DIR=/mnt/data/agentty/threads
+export AGENTTY_CACHE_DIR=/mnt/data/agentty/cache
+export AGENTTY_LOGS_DIR=/mnt/data/agentty/logs
+```
+
+Settings and credentials stay in `~/.agentty`. That is deliberate and not
+configurable: they are small, and a secret that moves because of a variable in
+a shell profile is a secret nobody can find later.
+
+Details worth knowing:
+
+- A **relative** value is resolved against the root, not your current
+  directory — `AGENTTY_LOGS_DIR=logs2` always means `~/.agentty/logs2`.
+- An **empty** value counts as unset, so an exported-but-blank variable
+  relocates nothing.
+- If a directory **can't be created** (unmounted drive, a file in the way),
+  agentty prints one warning and falls back to the default rather than losing
+  the data silently.
+- An overridden threads directory is forced to `0700`, because conversation
+  history is as sensitive as the credentials it used to sit beside.
+
+Symlinking the subdirectories works too, and predates these variables:
+`ln -s /mnt/data/agentty-logs ~/.agentty/logs`.
 
 ## Interface
 

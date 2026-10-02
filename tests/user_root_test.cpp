@@ -132,10 +132,66 @@ int main() {
         return fail("AGENTTY_HOME override ignored");
     if (agentty::util::user_cache_dir() != override_root / "cache")
         return fail("cache dir ignores AGENTTY_HOME");
+
+    // ── 6: per-category overrides (issue #58) ─────────────────────────
+    // The ask is "config on the system disk, bulk on a second drive", so
+    // the thing to pin is the SPLIT: the three bulk dirs move and the two
+    // small ones do not.
+    const fs::path drive2 = g_sandbox / "drive2";
+    ::setenv("AGENTTY_CACHE_DIR", (drive2 / "c").c_str(), 1);
+    ::setenv("AGENTTY_LOGS_DIR", (drive2 / "l").c_str(), 1);
+    ::setenv("AGENTTY_THREADS_DIR", (drive2 / "t").c_str(), 1);
+    if (agentty::util::user_cache_dir() != drive2 / "c")
+        return fail("AGENTTY_CACHE_DIR ignored");
+    if (agentty::util::user_logs_dir() != drive2 / "l")
+        return fail("AGENTTY_LOGS_DIR ignored");
+    if (agentty::util::user_threads_dir() != drive2 / "t")
+        return fail("AGENTTY_THREADS_DIR ignored");
+    if (!fs::is_directory(drive2 / "t"))
+        return fail("override dir not created");
+    // The whole point of the split: secrets and settings stay put. An
+    // override that dragged credentials onto a removable drive would be
+    // the opposite of what was asked for.
+    if (agentty::util::user_credentials_dir() != override_root / "credentials")
+        return fail("credentials followed a bulk override");
+    if (agentty::util::user_root() != override_root)
+        return fail("root moved under a subdir override");
+#ifndef _WIN32
+    // Threads are conversation history; an override must not land them
+    // world-readable just because the user pre-made the directory 0755.
+    if (::stat((drive2 / "t").c_str(), &st) != 0 || (st.st_mode & 0777) != 0700)
+        return fail("overridden threads dir not 0700");
+#endif
+
+    // 7: a RELATIVE override resolves against the root, not the CWD.
+    // Otherwise one setting would mean a different directory for every
+    // directory agentty is launched from.
+    ::setenv("AGENTTY_LOGS_DIR", "logs2", 1);
+    if (agentty::util::user_logs_dir() != override_root / "logs2")
+        return fail("relative override not anchored at the root");
+
+    // 8: an UNUSABLE override falls back to the default rather than
+    // leaving the caller with no directory at all. (It also warns, which
+    // is what keeps the fallback from being a silent downgrade.)
+    const fs::path blocker = g_sandbox / "blocker";
+    write_file(blocker, "not a directory");
+    ::setenv("AGENTTY_CACHE_DIR", blocker.c_str(), 1);
+    if (agentty::util::user_cache_dir() != override_root / "cache")
+        return fail("unusable override did not fall back");
+
+    // 9: empty means UNSET, not "use the empty path". An exported-but-
+    // blank var is a common shell accident and must not relocate anything.
+    ::setenv("AGENTTY_LOGS_DIR", "", 1);
+    if (agentty::util::user_logs_dir() != override_root / "logs")
+        return fail("empty override not treated as unset");
+
+    ::unsetenv("AGENTTY_CACHE_DIR");
+    ::unsetenv("AGENTTY_LOGS_DIR");
+    ::unsetenv("AGENTTY_THREADS_DIR");
     ::unsetenv("AGENTTY_HOME");
 
     fs::remove_all(g_sandbox, ec);
     std::printf("PASS: single-root layout, legacy migration, idempotence, "
-                "fresh-wins, AGENTTY_HOME override\n");
+                "fresh-wins, AGENTTY_HOME override, per-category overrides\n");
     return 0;
 }

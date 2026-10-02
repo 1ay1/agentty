@@ -682,7 +682,9 @@ void print_usage() {
                                             "them. Settable in the Sandbox settings pane too.",
               kOptGutter),
         entry("      --log-file PATH", "Write the diagnostic log here instead of "
-                                       "~/.agentty/logs/agentty.log. What gets captured "
+                                       "~/.agentty/logs/agentty.log (or "
+                                       "$AGENTTY_LOGS_DIR, to move just the logs off "
+                                       "the config disk). What gets captured "
                                        "is AGENTTY_LOG (default: warnings and errors) \u2014 "
                                        "e.g. AGENTTY_LOG=debug, or AGENTTY_LOG=wire=trace "
                                        "for raw HTTP bytes.", kOptGutter),
