@@ -4,6 +4,8 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.19] - 2026-10-02
+
 ### Fixed
 - **The sandbox refused to run anything on hardened Linux hosts.** Commands
   like `gofmt` died with `failed to spawn command: claybin: spawn failed:
