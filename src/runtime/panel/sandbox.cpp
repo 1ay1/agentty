@@ -16,9 +16,16 @@
 #include <unordered_set>   // directory dedup in path_source()
 
 // claybin is a required submodule. The guard that remains is PLATFORM only:
-// compile() is portable, so the wall preview works on any host, but the
-// linux headers it needs for policy types are not.
-#if defined(__linux__)
+// compile() is portable, so the wall preview works on any host.
+//
+// POSIX rather than Linux now that macOS applies claybin policies too. The
+// rows this guard controls -- the syscall profile, per-port network, the
+// resource caps, the extra path grants -- are the SETTINGS, and they are only
+// meaningful under claybin whichever platform is underneath. Leaving it at
+// Linux meant that on a mac the pane silently dropped every one of them: the
+// policy still compiled and was still enforced, but the user had no row to
+// see or change it with.
+#if defined(__linux__) || defined(__APPLE__)
 #include "claybin/plan/compile.hpp"
 #include "claybin/policy/policy.hpp"
 #include "claybin/policy/profiles.hpp"
@@ -875,7 +882,7 @@ std::vector<std::string> read_sandbox_list(const SandboxListPane& p) {
     return uniq;
 }
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
 
 Preview preview_sandbox(const sandbox_cfg::Config& cfg) {
     using namespace ::clay;
@@ -1216,13 +1223,13 @@ void annotate_sandbox_form(form::Form& f, const Preview& preview,
 
 Preview preview_sandbox(const sandbox_cfg::Config&) {
     // Not a missing LIBRARY -- claybin is a required submodule and always
-    // linked. It is a missing KERNEL: compiling a plan needs the linux policy
-    // headers, and applying one needs namespaces, landlock, seccomp and
-    // cgroup2. agentty's sandbox on macOS is sandbox-exec and on Windows is
-    // nothing, neither of which this pane configures.
+    // linked. It is a missing KERNEL: applying a plan needs namespaces,
+    // landlock, seccomp and cgroup2 (Linux) or seatbelt (macOS). On Windows
+    // claybin compiles a policy and refuses to apply it, and agentty has no
+    // sandbox there for this pane to configure.
     Preview out;
     out.compiled = false;
-    out.error = "the configurable sandbox is Linux-only on this build";
+    out.error = "no sandbox backend on this platform";
     return out;
 }
 

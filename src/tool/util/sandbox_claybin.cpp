@@ -24,10 +24,17 @@
 #include "agentty/tool/util/sandbox_broker.hpp"
 #include "agentty/util/logx.hpp"   // AGT_LOG — the broker audit trail
 
-// Linux-only, and that is claybin's own split rather than a build toggle:
-// its plan compiler is portable (and the pane's preview uses it on any host),
-// but only Linux can APPLY a plan -- namespaces, landlock, seccomp, cgroup2.
-#if defined(__linux__)
+// POSIX, not Linux-only. claybin's plan compiler is portable, and as of the
+// macOS backend there are now two platforms that can APPLY a policy:
+//
+//   Linux  — namespaces, landlock, seccomp, cgroup2  (claybin/plan/spawn.hpp)
+//   macOS  — seatbelt + rlimits                      (claybin/macos/backend.hpp)
+//
+// `build_policy()` below is shared between them, which is the entire point of
+// claybin's design: one description of the boundary, compiled per platform,
+// with a guarantee report saying what each host could actually enforce. The
+// two spawn paths differ because the mechanisms differ; the POLICY does not.
+#if defined(__linux__) || defined(__APPLE__)
 
 #include <cerrno>
 #include <cstdlib>
@@ -38,11 +45,16 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#include "claybin/broker/notify.hpp"
 #include "claybin/plan/compile.hpp"
-#include "claybin/plan/spawn.hpp"
 #include "claybin/policy/policy.hpp"
 #include "claybin/policy/profiles.hpp"
+
+#if defined(__linux__)
+#include "claybin/broker/notify.hpp"
+#include "claybin/plan/spawn.hpp"
+#else
+#include "claybin/macos/backend.hpp"
+#endif
 
 namespace agentty::tools::util::sandbox::claybin_backend {
 
@@ -191,9 +203,17 @@ using namespace ::clay::literals;
     // Also skipped under syscall_mode Off: everything() is "no filter", and
     // adding notify rules to it would mean brokering on a sandbox the user
     // asked not to filter at all.
+    //
+    // Linux-only: brokering is built on seccomp user-notify, which macOS has
+    // no equivalent of. Compiled out rather than no-op'd at runtime, so a
+    // future reader does not have to work out whether `p.broker` means
+    // something different on darwin -- there, it means nothing at all, and the
+    // guarantee report says `syscall.filter: none` to match.
+#if defined(__linux__)
     if (p.broker && p.syscall_mode != 0) {
         for (auto nr : broker::brokered_syscalls()) sp.notify(nr);
     }
+#endif
     d = std::move(d).syscall_profile(std::move(sp));
 
     // Resource caps. cgroup2 when the host delegates, rlimit as a backstop;
@@ -226,6 +246,101 @@ using namespace ::clay::literals;
 }
 
 }  // namespace
+
+#if defined(__APPLE__)
+
+// ─────────────────────────── macOS ────────────────────────────────────
+//
+// Shorter than the Linux path because seatbelt is one mechanism rather than
+// four, and because there is no broker: macOS has no seccomp user-notify, so
+// there is nothing to supervise and `SpawnResult::service_broker` stays empty.
+
+bool available() {
+    // probe_host() forks and actually calls sandbox_init() on a throwaway
+    // profile rather than testing for the symbol. Same discipline as the Linux
+    // probe and for the same reason: a capability that reads as present but
+    // fails on use is worse than absence, because Auto then degrades silently
+    // instead of loudly.
+    //
+    // In-process probing is not an option here. A seatbelt profile is
+    // IRREVERSIBLE -- once entered, a process cannot leave it -- so a probe
+    // that applied one would confine agentty itself.
+    return ::clay::macos::probe_host().seatbelt;
+}
+
+Report describe(const Posture& p) {
+    Report r;
+    auto sealed = build_policy(p);
+    auto compiled = ::clay::macos::compile(sealed, ::clay::macos::probe_host());
+    if (!compiled) {
+        r.ok = false;
+        r.detail = std::string{compiled.error().mechanism};
+        return r;
+    }
+    r.ok = true;
+    for (int i = 0; i < static_cast<int>(CapId::count_); ++i) {
+        auto id = static_cast<CapId>(i);
+        auto s = compiled->guarantees.strength(id);
+        Wall w;
+        w.name = ::clay::cap_name(id);
+        w.strength = s == Enforcement::strong    ? "strong"
+                     : s == Enforcement::partial ? "partial"
+                     : s == Enforcement::advisory ? "advisory"
+                                                  : "none";
+        // The receipt, same as Linux: "filesystem.read strong via seatbelt" is
+        // checkable in a way that "sandbox: active" is not. The mechanism
+        // strings differ per platform precisely because they are the truth.
+        w.mechanism = compiled->guarantees.mechanism(id);
+        r.walls.push_back(std::move(w));
+    }
+    return r;
+}
+
+SpawnResult spawn_shell(const Posture& p, const std::string& shell_cmd, int stdout_fd,
+                        int stderr_fd) {
+    SpawnResult out;
+
+    auto sealed = build_policy(p);
+    ::clay::macos::Options opts;
+    opts.profile_name = "agentty";
+    auto compiled = ::clay::macos::compile(sealed, ::clay::macos::probe_host(), opts);
+    if (!compiled) {
+        out.start_error =
+            "claybin: compile failed: " + std::string{compiled.error().mechanism};
+        return out;
+    }
+
+    // /bin/sh -c, matching the bwrap and Linux-claybin paths: pipes, redirects
+    // and globs are part of what an approved bash call means.
+    const char* argv[] = {"/bin/sh", "-c", shell_cmd.c_str(), nullptr};
+    ::clay::macos::SpawnRequest req;
+    req.program = "/bin/sh";
+    req.argv = argv;
+    req.stdout_fd = stdout_fd;
+    req.stderr_fd = stderr_fd;
+    if (!p.cwd.empty())
+        req.workdir = p.cwd;
+    else if (!p.workspace.empty())
+        req.workdir = p.workspace;
+
+    auto spawned = ::clay::macos::spawn(*compiled, req);
+    if (!spawned) {
+        out.start_error = "claybin: spawn failed: " +
+                          std::string{spawned.error().mechanism} + " (errno " +
+                          std::to_string(spawned.error().sys_errno) + ")";
+        return out;
+    }
+
+    out.started = true;
+    out.pid = spawned->pid;
+    // No pidfd on darwin and no broker to service: macOS has no seccomp
+    // user-notify, so there is no supervisor fd. Left at their defaults rather
+    // than faked, so the runner's `supervisor_fd >= 0` test does the right
+    // thing without needing to know which platform it is on.
+    return out;
+}
+
+#else  // __linux__
 
 bool available() {
     // The same question the bwrap probe asks, and for the same reason: a
@@ -410,6 +525,8 @@ SpawnResult spawn_shell(const Posture& p, const std::string& shell_cmd, int stdo
     return out;
 }
 
+#endif  // __APPLE__ / __linux__
+
 }  // namespace agentty::tools::util::sandbox::claybin_backend
 
-#endif  // __linux__
+#endif  // __linux__ || __APPLE__

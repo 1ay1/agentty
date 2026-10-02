@@ -273,10 +273,12 @@ endif()
 # it; claybin is one setting away.
 #
 # It compiles everywhere (its plan compiler is portable and covered by tests
-# on any host); only the APPLY step is Linux-only, which claybin's own
-# CMakeLists already handles by adding src/linux/* conditionally. So there is
-# no platform guard here either -- guarding it would just reintroduce the
-# two-configurations problem on a different axis.
+# on any host). The APPLY step used to be Linux-only; it is now Linux AND
+# macOS -- namespaces/landlock/seccomp/cgroup2 there, seatbelt + rlimits here
+# -- which claybin's own CMakeLists handles by adding src/linux/* and
+# src/macos/spawn.cpp conditionally. Windows still compiles the policy and
+# refuses to apply it. So there is no platform guard here either; guarding it
+# would just reintroduce the two-configurations problem on a different axis.
 if(EXISTS "${AGENTTY_THIRD_PARTY_DIR}/claybin/CMakeLists.txt")
     # claybin's own suite is thorough and runs in its own CI; agentty needs
     # the library, not another 20 test binaries in its ctest run.

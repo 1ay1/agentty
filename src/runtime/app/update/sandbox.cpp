@@ -73,14 +73,17 @@ namespace sb = agentty::tools::util::sandbox;
 // make the limitation invisible, which is the failure mode this whole pane
 // exists to avoid.
 [[nodiscard]] bool claybin_here() {
-#if defined(__linux__)
-    // The real probe: forks and attempts the uid_map write, so it predicts
-    // spawn() instead of guessing from sysctls. Guessing is how issue #21
-    // happened -- "sandbox: active" while every command died on the denial.
+#if defined(__linux__) || defined(__APPLE__)
+    // The real probe on both platforms, and real in the same sense: on Linux
+    // it forks and attempts the uid_map write; on macOS it forks and actually
+    // calls sandbox_init(). Neither guesses from a feature flag, because
+    // guessing is how issue #21 happened -- "sandbox: active" while every
+    // command died on the denial.
     return sb::claybin_backend::available();
 #else
     // claybin compiles a plan on every platform but can only APPLY one on
-    // Linux, so elsewhere the answer is no regardless of the library.
+    // Linux and macOS, so elsewhere the answer is no regardless of the
+    // library being linked.
     return false;
 #endif
 }

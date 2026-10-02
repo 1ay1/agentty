@@ -68,7 +68,7 @@ The sandbox isn't one mechanism. It's several, each closing a different route ou
 **A detached terminal session.** Without this, a command can push fake keystrokes into your terminal (the `TIOCSTI` trick) and make your shell run them after agentty exits.
 
 :::note
-On macOS the mechanism is `sandbox-exec`, which gives you the filesystem and process walls but has no equivalent of the syscall filter or resource limits. Windows has no first-class equivalent yet, and agentty says so rather than pretending.
+On macOS the mechanism is **seatbelt**, and agentty drives it through claybin — the same policy compiler it uses on Linux, so the settings you pick in the Sandbox pane apply there too. You get the filesystem, exec and network walls at full strength, resource limits as POSIX rlimits (weaker than cgroups: per-process, not per-tree), and *no* syscall filter, because macOS has no seccomp equivalent available to an unprivileged process. agentty reports that gap per capability rather than hiding it. Apple's `sandbox-exec` remains as a fallback. Windows has no first-class equivalent yet, and agentty says so rather than pretending.
 :::
 
 ## Which backend, and why

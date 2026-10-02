@@ -13,6 +13,19 @@
 
 #include <doctest/doctest.h>
 
+// Linux-only, because the thing under test is. Brokering is built on seccomp
+// user-notify, and the cases below are written in terms of PTRACE_* request
+// numbers from <sys/ptrace.h> -- darwin's ptrace is a different interface with
+// PT_* constants and no PTRACE_TRACEME at all, so this TU does not compile
+// there.
+//
+// This guard was added when macOS became a real sandbox target: before that
+// the file was simply never built on a mac and the breakage was invisible.
+// Guarded rather than ported, because there is no macOS broker to test -- the
+// seatbelt backend reports `syscall.filter: none` precisely because the
+// mechanism does not exist on this platform.
+#if defined(__linux__)
+
 #include "agentty/tool/util/sandbox_broker.hpp"
 
 #include <sys/ptrace.h>
@@ -277,3 +290,5 @@ TEST_CASE("broker feed: concurrent writers do not corrupt it") {
 
     CHECK(br::blocked_feed().size() <= 64);
 }
+
+#endif  // __linux__

@@ -19,8 +19,10 @@
 #include "agentty/domain/sandbox_config.hpp"
 
 // claybin is a required submodule, so the only question left is PLATFORM: it
-// compiles a plan anywhere but can only apply one on Linux.
-#if defined(__linux__)
+// compiles a plan anywhere, and can APPLY one on Linux (namespaces, landlock,
+// seccomp, cgroup2) and on macOS (seatbelt, rlimits). Windows compiles the
+// policy and refuses to apply it, so the include stays out there.
+#if defined(__linux__) || defined(__APPLE__)
 #include <unistd.h>  // ::close, for the pidfd the runner does not use
 
 #include "agentty/tool/util/sandbox_claybin.hpp"
@@ -234,6 +236,13 @@ std::atomic<bool> g_cfg_sealed{false};
 // network. Read + exfiltrate, exactly what the sandbox exists to close, and
 // invisible because it still reported "sandbox: active". One list, so a future
 // backend extends it instead of paraphrasing it.
+//
+// Visible to BOTH platform arms, because the claybin backend consumes them on
+// Linux and on macOS alike. That is the point of the list: one boundary
+// definition, extended rather than paraphrased, however many backends read it.
+#endif  // __linux__ (reopened below)
+
+#if defined(__linux__) || defined(__APPLE__)
 
 // System roots: the toolchain and shared libraries. Read-only, and no /etc —
 // see kEtcReadable.
@@ -283,6 +292,10 @@ constexpr const char* kHomeToolSubdirs[] = {
     "/.bun/bin", "/.deno/bin",   // Bun / Deno
     "/.dotnet", "/.sdkman/candidates", // .NET / JVM
 };
+#endif  // __linux__ || __APPLE__
+
+// Back into the per-platform arm the shared read set interrupted.
+#if defined(__linux__)
 
 [[nodiscard]] std::vector<std::string> build_bwrap_argv(std::string_view shell_cmd) {
     std::string ws = workspace_root().string();
@@ -501,7 +514,19 @@ constexpr const char* kHomeToolSubdirs[] = {
 // boundary applies to both or neither. A previous backend restated the set by
 // hand and ended up granting read on `/` -- handing ~/.ssh and ~/.aws to any
 // approved bash call while still reporting "sandbox: active".
-#if defined(__linux__)
+//
+// POSIX-wide rather than Linux-only: the macOS claybin backend consumes the
+// very same Posture. That is the payoff for describing the boundary as data
+// instead of as argv -- the read set, the masks and the pane's extra grants
+// cross the platform line unchanged, and only the mechanisms that enforce
+// them differ.
+//
+// Hence the #endif immediately below, closing the Linux arm that opened far
+// above: this one function has to be visible to BOTH the Linux and the macOS
+// run_wrapped(), and the per-platform arm reopens right after it.
+#endif  // __linux__ (reopened below)
+
+#if defined(__linux__) || defined(__APPLE__)
 [[nodiscard]] claybin_backend::Posture build_claybin_posture() {
     claybin_backend::Posture p;
 
@@ -603,7 +628,10 @@ constexpr const char* kHomeToolSubdirs[] = {
     p.broker = cfg.syscall_mode != sandbox_cfg::SyscallMode::Off;
     return p;
 }
-#endif
+#endif  // __linux__ || __APPLE__
+
+// Back into the per-platform arm the posture builder interrupted.
+#if defined(__linux__)
 
 [[nodiscard]] SubprocessResult run_wrapped(std::string_view cmd,
                                            std::size_t max_bytes,
@@ -613,12 +641,17 @@ constexpr const char* kHomeToolSubdirs[] = {
     opts.timeout = timeout;
     opts.on_progress = [](std::string_view snap) { progress::emit(snap); };
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
     if (detected_backend() == Backend::Claybin) {
         // claybin is a library, so there is no argv prefix to build. It forks,
         // applies the plan, and execs itself -- but only the SPAWN; the
         // supervise loop (poll, progress, idle deadline, SIGTERM/SIGKILL, reap)
         // stays in Subprocess::run, shared with every other path.
+        //
+        // Identical on both platforms, which is the whole return on keeping
+        // the supervise loop out of the backend: Linux hands back a pidfd and
+        // a seccomp-notify fd, macOS hands back neither, and the runner needs
+        // no branch to tell them apart -- the sentinel values already say so.
         //
         // `command` still carries the shell string so the runner's logging and
         // error messages read the same for both backends.
@@ -683,7 +716,38 @@ constexpr const char* kHomeToolSubdirs[] = {
 #elif defined(__APPLE__)
 
 [[nodiscard]] Backend probe() {
-    return can_invoke("sandbox-exec") ? Backend::SandboxExec : Backend::None;
+    // claybin first, when asked for AND usable.
+    //
+    // Both engines here are seatbelt -- claybin calls sandbox_init() directly
+    // from a compiled policy, sandbox-exec is Apple's CLI wrapper around the
+    // same kernel mechanism -- so this is not a choice about strength. It is a
+    // choice about what survives the trip.
+    //
+    // build_profile() below concatenates a fixed profile string, so it can
+    // express exactly what it was written to express: the workspace, /tmp, the
+    // caches. The claybin path compiles the same Posture the Linux backend
+    // consumes, so the pane's read_paths, write_paths, masks and resource caps
+    // mean something on a mac instead of being Linux-only settings that
+    // silently do nothing here. It also produces the guarantee report, which
+    // is the part worth having: "filesystem.read strong via seatbelt" is
+    // checkable in a way that "sandbox: active" is not.
+    //
+    // The preference is shared with Linux rather than given a second knob. A
+    // user's answer to "which engine applies my policy" does not change when
+    // they move between a mac and a Linux box.
+    //
+    // Fallback direction matches Linux: asking for claybin on a host where it
+    // cannot build still yields sandbox-exec, never None. Nobody should lose
+    // their sandbox by opting into the newer backend.
+    if (g_linux_pref.load(std::memory_order_acquire) == LinuxPreference::Claybin &&
+        claybin_backend::available())
+        return Backend::Claybin;
+    if (can_invoke("sandbox-exec")) return Backend::SandboxExec;
+    // And the other direction, for symmetry with the Ubuntu 24.04 case: if
+    // sandbox-exec is somehow missing (SIP damage, a stripped image), claybin
+    // still talks to the kernel directly and does not need the binary.
+    if (claybin_backend::available()) return Backend::Claybin;
+    return Backend::None;
 }
 
 // Generate a minimal sandbox-exec profile. Allows reads broadly,
@@ -733,14 +797,44 @@ constexpr const char* kHomeToolSubdirs[] = {
                                            std::size_t max_bytes,
                                            std::chrono::seconds timeout) {
     SubprocessOptions opts;
+    opts.max_bytes = max_bytes;
+    opts.timeout = timeout;
+    opts.on_progress = [](std::string_view snap) { progress::emit(snap); };
+
+    if (detected_backend() == Backend::Claybin) {
+        // Byte-for-byte the Linux claybin branch minus the broker, which macOS
+        // has no equivalent of. claybin forks, enters the sandbox and execs;
+        // the supervise loop (poll, progress, idle deadline, TERM/KILL, reap)
+        // stays in Subprocess::run, shared with every other path on every
+        // platform.
+        opts.command = SubprocessOptions::Shell{std::string{cmd}};
+        std::string shell_cmd{cmd};
+        opts.spawner = [shell_cmd](const SubprocessOptions&,
+                                   int pipe_write_fd) -> SubprocessOptions::SpawnedChild {
+            SubprocessOptions::SpawnedChild out;
+            auto posture = build_claybin_posture();
+            // Both streams onto the one pipe the runner already made, which is
+            // what the sandbox-exec path gets from its file_actions.
+            auto r = claybin_backend::spawn_shell(posture, shell_cmd, pipe_write_fd,
+                                                  pipe_write_fd);
+            if (!r.started) {
+                out.error = r.start_error;
+                return out;
+            }
+            out.pid = r.pid;
+            // No supervisor fd and no broker: seccomp user-notify has no macOS
+            // counterpart, so these keep their sentinel defaults and the
+            // runner's `supervisor_fd >= 0` test skips the poll on its own.
+            return out;
+        };
+        return Subprocess::run(std::move(opts));
+    }
+
     auto profile = build_profile(workspace_root().string());
     opts.command = SubprocessOptions::Argv{{
         "sandbox-exec", "-p", std::move(profile),
         "/bin/sh", "-c", std::string{cmd}
     }};
-    opts.max_bytes = max_bytes;
-    opts.timeout = timeout;
-    opts.on_progress = [](std::string_view snap) { progress::emit(snap); };
     return Subprocess::run(std::move(opts));
 }
 

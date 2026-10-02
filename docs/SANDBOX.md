@@ -51,7 +51,8 @@ Settings persist as you edit and apply **on the next launch** — see
 |---|---|---|
 | `claybin` | Linux | **default** |
 | `bwrap` (bubblewrap) | Linux | fallback |
-| `sandbox-exec` | macOS | default |
+| `claybin` | macOS | **default** |
+| `sandbox-exec` | macOS | fallback |
 | — | Windows | none (documented gap) |
 
 ### Why claybin is the default
@@ -90,11 +91,61 @@ Asking for claybin on a host that cannot run it yields bwrap, never nothing.
 
 Override with `--sandbox-backend bwrap|claybin`, or the Backend row in the pane.
 
+### claybin on macOS
+
+Same engine, same policy, a different set of walls underneath. claybin's
+front end is one description of the boundary compiled per platform, so the
+read set, the masks and every extra grant in the pane mean the same thing on
+a mac as on Linux — they are the *same code path*, not a parallel one.
+
+What differs is what the OS will enforce:
+
+| capability | claybin on Linux | claybin on macOS | `sandbox-exec` |
+|---|---|---|---|
+| filesystem read/write | strong (landlock + mount ns) | **strong** (seatbelt) | strong, fixed profile |
+| filesystem exec | strong (landlock) | **strong** (seatbelt) | strong, fixed profile |
+| network isolation | strong (netns) | **strong** denying, partial allow-listing | none |
+| syscall filter | strong (seccomp) | **none** | none |
+| memory / cpu caps | strong (cgroup2) | partial (rlimits) | none |
+| pid caps | strong (cgroup2) | **advisory** (RLIMIT_NPROC is per-UID) | none |
+| ptrace + kill brokering | yes (seccomp-notify) | **none** | none |
+| per-path grants from the pane | yes | **yes** | no |
+| guarantee report | yes | **yes** | no |
+
+The two macOS engines use the *same kernel mechanism* — claybin calls
+`sandbox_init(3)` with a compiled profile, `sandbox-exec` is Apple's CLI
+wrapper around it — so this is not a choice about strength. It is a choice
+about what survives the trip. The `sandbox-exec` path concatenates one fixed
+profile string, so the pane's settings have nowhere to go; the claybin path
+compiles the policy you actually configured, and reports per capability which
+walls the kernel agreed to build.
+
+Two honest gaps, stated rather than papered over:
+
+- **No syscall filter.** macOS has no seccomp equivalent available to an
+  unprivileged process, so `Isolation::hardened_process` is *refused* rather
+  than quietly downgraded, and brokering does not exist here.
+- **rlimits are not cgroups.** An rlimit is per-process and inherited; a
+  cgroup counts a tree. Four children under a 1 GB cap can use 4 GB between
+  them. `RLIMIT_NPROC` is weaker still — it counts processes for the whole
+  UID, so another terminal window moves the limit, which is why it reports
+  `advisory` rather than `partial`.
+
+Asking for claybin on a mac where seatbelt is unavailable yields
+`sandbox-exec`, never nothing — the same fallback discipline as Linux, in both
+directions.
+
 ### Availability is a probe, not a `which`
 
-`available()` forks and attempts the real `uid_map` write. A binary on `$PATH`
-that cannot actually start a namespace is not an available backend, and treating
-it as one is precisely how `sandbox: active` came to mean nothing.
+On Linux, `available()` forks and attempts the real `uid_map` write. On macOS
+it forks and actually calls `sandbox_init()`. A binary on `$PATH` that cannot
+start a namespace — or a symbol that is present but refused — is not an
+available backend, and treating it as one is precisely how `sandbox: active`
+came to mean nothing.
+
+The macOS probe runs in a **child** for a reason beyond honesty: a seatbelt
+profile is irreversible. A process that enters one cannot leave it, so an
+in-process probe would confine agentty itself.
 
 ---
 
