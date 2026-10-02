@@ -39,6 +39,13 @@ Testing/
 scratch/
 AGENTTY_ASSISTANT_USAGE.md
 
+# Cross-built / downloaded release binaries left at the repo root. These are
+# ~20 MB each and are PRODUCED by the release workflow, never an input to it.
+# One was sitting untracked at release time and would have been swept into the
+# release commit by a stage_all.
+*.exe
+/agentty
+
 # Personal files that live in this workspace but are NOT part of the
 # project — must never be committed (a stage_all once swept resume/ into
 # a public commit; the ignore makes that structurally impossible).

@@ -4,6 +4,38 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **The sandbox refused to run anything on hardened Linux hosts.** Commands
+  like `gofmt` died with `failed to spawn command: claybin: spawn failed:
+  unshare (errno 1)` on any machine that denies unprivileged user namespaces —
+  Ubuntu 24.04's AppArmor profile, and locked-down corporate laptops generally.
+  That is the exact configuration claybin was added to support, where it is
+  supposed to fall back to landlock + seccomp and keep working.
+
+  Two bugs. `compile()` gated every namespace flag on a probed host capability
+  except IPC, which it OR'd in unconditionally — so the flag mask was never
+  empty and the `unshare` op still shipped even after userns, mount, pid and
+  uts had all been correctly dropped. And no namespace is unprivileged on its
+  own: without `CAP_SYS_ADMIN` the kernel only grants `CLONE_NEWNS`/`NEWPID`/
+  `NEWUTS`/`NEWIPC`/`NEWNET` when they are created *together with* a user
+  namespace, so that one leftover `CLONE_NEWIPC` was guaranteed `EPERM`.
+
+  The capability probe was also answering the wrong question.
+  `path_exists("/proc/self/ns/mnt")` reports that the kernel knows what a mount
+  namespace *is* — true on every Linux ever built, including the hosts that
+  refuse to create one. It now reports whether this process can actually
+  create one.
+
+  Such hosts now degrade as designed: no namespaces and no mount-based secret
+  masking, but landlock, seccomp, cgroup limits and privilege drop are all
+  still enforced. Permissive hosts are unaffected.
+
+- **agentty crashed on startup under Wine.** The stderr redirect that keeps
+  subsystem diagnostics out of the inline TUI calls `freopen()` on the
+  inherited stderr handle, which faults under Wine instead of returning an
+  error. It is now skipped there — a slightly noisier frame on a development
+  target beats a binary that will not start.
+
 ### Added
 - **`$AGENTTY_THREADS_DIR`, `$AGENTTY_CACHE_DIR`, `$AGENTTY_LOGS_DIR`** — move
   the bulk of agentty's storage to another disk without moving your config

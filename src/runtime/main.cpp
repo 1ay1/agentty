@@ -62,6 +62,19 @@
 #endif
 }
 
+#ifdef _WIN32
+// Are we running under Wine rather than real Windows?
+//
+// Detected the way Wine itself documents: ntdll exports wine_get_version() and
+// nothing on genuine Windows does. Cheap, no registry poke, no side effects.
+[[nodiscard]] inline bool running_under_wine() {
+    auto* ntdll = ::GetModuleHandleA("ntdll.dll");
+    return ntdll && ::GetProcAddress(ntdll, "wine_get_version");
+}
+#else
+[[nodiscard]] inline bool running_under_wine() { return false; }
+#endif
+
 #include <maya/maya.hpp>
 #include <maya/host/run.hpp>   // maya::run: the jaal host
 #include "agentty/runtime/app/host.hpp"   // agentty::app::Host
@@ -1905,18 +1918,25 @@ int main(int argc, char** argv) {
     // never touch the screen. Opt out with AGENTTY_NO_STDERR_REDIRECT=1
     // (e.g. when debugging startup). ACP / mcp-serve / run keep stderr as
     // their diagnostic channel and are handled above, before this point.
-    if (const char* off = std::getenv("AGENTTY_NO_STDERR_REDIRECT");
-        !(off && off[0] && off[0] != '0')) {
-        std::error_code lec;
-        std::filesystem::path logdir = util::user_logs_dir();   // ~/.agentty/logs
-        std::filesystem::create_directories(logdir, lec);
-        std::filesystem::path logpath = logdir / "stderr.log";
-        // Append so a crash's trailing output survives across sessions;
-        // truncation would lose the very lines you'd want post-mortem.
-        if (std::freopen(logpath.string().c_str(), "a", stderr)) {
-            std::setvbuf(stderr, nullptr, _IOLBF, 0);   // line-buffered
-            std::fprintf(stderr, "\n=== agentty session %ld ===\n",
-                         static_cast<long>(agentty_pid()));
+    //
+    // SKIPPED under Wine: freopen() on the inherited stderr handle crashes
+    // the process there, so the redirect costs us the whole binary to keep
+    // the frame clean. Wine is a development/CI target, not a user-facing
+    // one, and a slightly dirty frame beats not starting at all.
+    if (!running_under_wine()) {
+        if (const char* off = std::getenv("AGENTTY_NO_STDERR_REDIRECT");
+            !(off && off[0] && off[0] != '0')) {
+            std::error_code lec;
+            std::filesystem::path logdir = util::user_logs_dir();   // ~/.agentty/logs
+            std::filesystem::create_directories(logdir, lec);
+            std::filesystem::path logpath = logdir / "stderr.log";
+            // Append so a crash's trailing output survives across sessions;
+            // truncation would lose the very lines you'd want post-mortem.
+            if (std::freopen(logpath.string().c_str(), "a", stderr)) {
+                std::setvbuf(stderr, nullptr, _IOLBF, 0);   // line-buffered
+                std::fprintf(stderr, "\n=== agentty session %ld ===\n",
+                             static_cast<long>(agentty_pid()));
+            }
         }
     }
 
