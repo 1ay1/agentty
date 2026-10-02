@@ -18,7 +18,7 @@ Both are open-source terminal coding agents. Aider is Python-based with deep git
 | Cold start | ~3 ms | Python startup |
 | Providers | Claude, OpenAI, Groq, OpenRouter, Cerebras, Ollama | Many (via LiteLLM) |
 | Retrieval | Built-in hybrid BM25 + dense RAG | Repo map |
-| Sandbox | On by default (bwrap) | — |
+| Sandbox | On by default (claybin: landlock+seccomp on Linux, seatbelt on macOS) | — |
 | Editor | Runs in Zed over ACP | — |
 | License | MIT | Apache-2.0 |
 

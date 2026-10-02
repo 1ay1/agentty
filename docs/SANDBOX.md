@@ -102,8 +102,8 @@ What differs is what the OS will enforce:
 
 | capability | claybin on Linux | claybin on macOS | `sandbox-exec` |
 |---|---|---|---|
-| filesystem read/write | strong (landlock + mount ns) | **strong** (seatbelt) | strong, fixed profile |
-| filesystem exec | strong (landlock) | **strong** (seatbelt) | strong, fixed profile |
+| filesystem read/write | strong (landlock + mount ns) | **strong**† (seatbelt) | strong, fixed profile |
+| filesystem exec | strong (landlock) | **strong**† (seatbelt) | strong, fixed profile |
 | network isolation | strong (netns) | **strong** denying, partial allow-listing | none |
 | syscall filter | strong (seccomp) | **none** | none |
 | memory / cpu caps | strong (cgroup2) | partial (rlimits) | none |
@@ -111,6 +111,12 @@ What differs is what the OS will enforce:
 | ptrace + kill brokering | yes (seccomp-notify) | **none** | none |
 | per-path grants from the pane | yes | **yes** | no |
 | guarantee report | yes | **yes** | no |
+
+† `strong` for a same-path policy. agentty's own posture adds a `proc_fs`, a
+`dev_fs`, a `tmpfs` and a mask — none of which have an access-control reading
+that is *exactly* the tree reading — so its plan's fidelity is `approximate`
+and the filesystem rows report `partial`. See
+[Capabilities](#capabilities) for the measured output.
 
 The two macOS engines use the *same kernel mechanism* — claybin calls
 `sandbox_init(3)` with a compiled profile, `sandbox-exec` is Apple's CLI
@@ -213,7 +219,8 @@ Three properties make presets safe rather than a second source of truth:
 
 ## Capabilities
 
-What a policy compiles to, per capability. Run `sandbox_audit` for your host:
+What a policy compiles to, per capability. Run `sandbox_audit` for your host.
+On Linux with claybin, every wall exists:
 
 ```
 === everything the pane can ask for
@@ -230,6 +237,51 @@ What a policy compiles to, per capability. Run `sandbox_audit` for your host:
   device.isolation       strong  dev allowlist
   host.kernel_isolation  NONE    process-backend, kvm available
 ```
+
+The same policy on macOS, where several do not — and the report is the only
+reason you would know which. This is real `sandbox_audit` output on darwin 24,
+with every pane row turned up:
+
+```
+host: darwin=24 seatbelt=1
+      sbpl: paths=1 net=1 proc=1
+      rlimits=1
+      hypervisor=1  (a microvm backend COULD run here)
+
+=== everything the pane can ask for
+  filesystem.read        partial  seatbelt
+  filesystem.write       partial  seatbelt
+  filesystem.exec        partial  seatbelt
+  network.isolation      strong   seatbelt (deny network*)
+  process.isolation      partial  seatbelt (inherited profile, shared pid space)
+  syscall.filter         partial  seatbelt operations (no syscall filter on macOS)
+  resource.memory        partial  RLIMIT_AS (per-process)
+  resource.cpu           partial  RLIMIT_CPU (per-process)
+  resource.pids          advisory RLIMIT_NPROC (per-UID, not per-tree)
+  privilege.drop         partial  seatbelt profile survives exec (no user namespace)
+  device.isolation       partial  seatbelt /dev path filters
+  host.kernel_isolation  NONE     shared host kernel (use a vm for isolation)
+```
+
+Three rows in that table are worth reading closely, because each is a place
+the report refuses to round up:
+
+- **`network.isolation: strong`** — the one macOS row that matches Linux.
+  `(deny network*)` is a single rule the kernel enforces exactly, equivalent
+  to an empty netns in what the guest can reach. Note it is `strong` only
+  here, with the network turned *off*; an endpoint allow-list reads `partial`,
+  because seatbelt matches on the address and the name-to-address step happens
+  in userspace where DNS can answer differently next time.
+- **`resource.pids: advisory`**, not `partial`. That is not hedging:
+  `RLIMIT_NPROC` counts processes for the whole UID, so another terminal
+  window moves the limit. It is a number the guest tends to respect, not a
+  wall, and the vocabulary has a word for that.
+- **`filesystem.*: partial`** — not because seatbelt is weak, but because
+  agentty's posture includes a `proc_fs`, a `dev_fs`, a `tmpfs` and a mask.
+  Those have no access-control interpretation that is *exactly* the tree
+  interpretation (a tmpfs becomes "you may write here", losing "starts empty"
+  and "is size-capped"), so the plan's fidelity is `approximate` and the
+  ceiling drops with it. A same-path-only policy reports `strong`.
 
 `host.kernel_isolation` is `none` on **every** process backend, by definition —
 the sandboxed command shares your kernel. Only a microVM changes that, and

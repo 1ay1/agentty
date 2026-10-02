@@ -396,10 +396,13 @@ sees no behavior change.
   the symbol index, and project-scoped `remember` — routes through
   `project_root()`; everything that means "the security gate" (containment
   checks, sandbox bind-mounts, refuse-delete-root) uses `workspace_root()`.
-- **Sandbox.** `bash` and `diagnostics` run inside `bwrap` (Linux) or
-  `sandbox-exec` (macOS) by default. Workspace + system libs + network are
-  reachable; `~/.ssh`, `/etc`, and other projects are read-only. An approved
-  `bash` call still can't `cat ~/.ssh/id_rsa`. `--sandbox auto|on|off`.
+- **Sandbox.** `bash` and `diagnostics` run inside `claybin` by default on both
+  Linux (namespaces + landlock + seccomp + cgroup2) and macOS (seatbelt +
+  rlimits), with `bwrap` and `sandbox-exec` as the respective fallbacks.
+  Workspace + system libs + network are reachable; `~/.ssh`, `/etc`, and other
+  projects are read-only. An approved `bash` call still can't
+  `cat ~/.ssh/id_rsa`. `--sandbox auto|on|off`,
+  `--sandbox-backend claybin|bwrap`.
 - **TLS pinning.** Certificates are pinned on the real upstreams, end-to-end,
   including through the airgap SOCKS tunnel.
 - **Atomic writes.** Every persisted file is `write` + `fsync` + `rename` (or

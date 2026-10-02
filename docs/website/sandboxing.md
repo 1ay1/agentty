@@ -53,7 +53,7 @@ Everything stays visible and editable afterwards — a posture is a starting poi
 
 ## What the walls actually are
 
-The sandbox isn't one mechanism. It's several, each closing a different route out. On Linux:
+The sandbox isn't one mechanism. It's several, each closing a different route out. Taking Linux first, because it's the platform where every one of them exists:
 
 **A private view of the filesystem.** The command gets its own *mount namespace* — its own idea of what the filesystem looks like. Your project is there, system libraries are there read-only, and `~/.ssh` is an empty file. Not hidden by convention: it genuinely isn't in that view.
 
@@ -68,19 +68,22 @@ The sandbox isn't one mechanism. It's several, each closing a different route ou
 **A detached terminal session.** Without this, a command can push fake keystrokes into your terminal (the `TIOCSTI` trick) and make your shell run them after agentty exits.
 
 :::note
-On macOS the mechanism is **seatbelt**, and agentty drives it through claybin — the same policy compiler it uses on Linux, so the settings you pick in the Sandbox pane apply there too. You get the filesystem, exec and network walls at full strength, resource limits as POSIX rlimits (weaker than cgroups: per-process, not per-tree), and *no* syscall filter, because macOS has no seccomp equivalent available to an unprivileged process. agentty reports that gap per capability rather than hiding it. Apple's `sandbox-exec` remains as a fallback. Windows has no first-class equivalent yet, and agentty says so rather than pretending.
+All six are enforced on Linux. On **macOS**, agentty drives the same claybin policy through **seatbelt** — the kernel mechanism Chrome and every App Store app use. The filesystem, exec and network walls are full strength; `no_new_privs` has an equivalent in that a seatbelt profile cannot be dropped by `exec`; resource ceilings become POSIX rlimits, which are weaker than cgroups (they count *per process*, not per process tree). There is **no syscall filter** — macOS has no seccomp equivalent available to an unprivileged process — so agentty reports that capability as `none` instead of quietly implying it. Windows has no backend yet, and `--sandbox on` fails loudly there rather than pretending.
 :::
 
 ## Which backend, and why
 
-On Linux there are two implementations:
+Two implementations per platform, with claybin the default on both:
 
-| Backend | What it is |
-|---|---|
-| **claybin** (default) | Built into agentty. Does all of the above. |
-| **bwrap** (fallback) | Bubblewrap, a separate tool. Filesystem walls only. |
+| Platform | Default | Fallback |
+|---|---|---|
+| Linux | **claybin** — namespaces, landlock, seccomp, cgroup2 | **bwrap** (bubblewrap) — filesystem walls only |
+| macOS | **claybin** — seatbelt from your compiled policy | **sandbox-exec** — Apple's CLI, one fixed profile |
+| Windows | — | — |
 
-claybin is the default because the difference is measured, not argued:
+claybin is the default because the difference is measured, not argued.
+
+**On Linux**, against bwrap:
 
 | Capability | claybin | bwrap |
 |---|---|---|
@@ -94,10 +97,24 @@ There's no capability where bwrap wins. It stays because the two **fail on diffe
 - bwrap can't start where *user namespaces* are blocked. That's the kernel feature letting an ordinary program build an isolated view of the system without being root — and Ubuntu 24.04 disables it by default for untrusted programs.
 - claybin needs Landlock, so it can't do its full job on kernels older than 5.13.
 
-Asking for claybin where it can't run gives you bwrap. You never silently end up with nothing.
+**On macOS**, the comparison is a different shape: both engines are seatbelt, so this is not a contest about strength. claybin calls `sandbox_init` with a profile compiled from *your* policy; `sandbox-exec` is Apple's command-line wrapper around the same kernel mechanism, driven by one fixed profile string. So the question is what survives the trip:
+
+| Capability | claybin | sandbox-exec |
+|---|---|---|
+| file read/write/exec walls | yes | yes, but fixed |
+| network off, or per-port | **yes** | **no** |
+| your **Settings → Sandbox** choices apply | **yes** | **no** |
+| extra readable / masked paths | **yes** | **no** |
+| per-capability guarantee report | **yes** | **no** |
+| memory / CPU / process limits | **partial** (rlimits) | **no** |
+| syscall filter | no — platform has none | no |
+
+That last row is the honest one. macOS has no seccomp equivalent available to an ordinary program, so agentty reports the syscall filter as unavailable rather than implying it. The resource limits are rlimits, which count *per process* rather than per process tree — four children under a 1 GB cap can use 4 GB between them — so they report `partial`, and the process limit reports `advisory`, because it is counted per *user account*, not per sandbox.
+
+Asking for claybin where it can't run gives you the fallback. You never silently end up with nothing — and the fallback works in both directions, so a Mac missing `sandbox-exec` still gets claybin, which talks to the kernel directly.
 
 ```sh
-agentty --sandbox-backend claybin   # default on Linux
+agentty --sandbox-backend claybin   # default on Linux and macOS
 agentty --sandbox-backend bwrap     # force the fallback
 ```
 
@@ -190,7 +207,7 @@ agentty tells it twice: once in the system prompt — what's *allowed*, not just
 agentty --sandbox on
 ```
 
-If your machine blocks the feature agentty needs, `--sandbox auto` runs unsandboxed and prints why; `--sandbox on` refuses to start. To enable it on a host that blocks unprivileged user namespaces, allow them — an AppArmor profile for `/usr/bin/bwrap` containing `userns,`, or `sudo sysctl -w kernel.unprivileged_userns_clone=1`.
+If your machine blocks the feature agentty needs, `--sandbox auto` runs unsandboxed and prints why; `--sandbox on` refuses to start. On Linux, to enable it on a host that blocks unprivileged user namespaces, allow them — an AppArmor profile for `/usr/bin/bwrap` containing `userns,`, or `sudo sysctl -w kernel.unprivileged_userns_clone=1`. (claybin's default path doesn't need user namespaces at all, which is why it's tried first.) On macOS there's nothing to enable: seatbelt is always present.
 
 :::warn
 Running with `--workspace /` makes your entire filesystem the project folder, so there's nothing left to contain — agentty reports the sandbox as degraded. Keep the workspace scoped to the project you're working on.

@@ -24,7 +24,7 @@ agentty is pre-1.0; security fixes land on the latest release. Always update to 
 ## Security model at a glance
 
 - **Credentials** live at `~/.config/agentty/credentials.json`, mode `0600`, written atomically.
-- **Shell calls** are sandboxed by default (`bwrap` / `sandbox-exec`) — see [Sandboxing](/docs/sandboxing).
+- **Shell calls** are sandboxed by default on Linux and macOS (`claybin`, falling back to `bwrap` / `sandbox-exec`) — see [Sandboxing](/docs/sandboxing).
 - **Filesystem tools** are confined to the workspace — see [Workspace Boundary](/docs/workspace).
 - **TLS** is pinned end-to-end, including through the air-gap SOCKS tunnel.
 - **Air-gap mode** trusts the remote host with your tokens — review the [trust model](/docs/airgap) before using it.

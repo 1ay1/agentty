@@ -4,6 +4,38 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **The sandbox on macOS is now claybin, not `sandbox-exec`.** Same policy
+  compiler as Linux, so the Sandbox settings pane finally means something on a
+  Mac: extra readable paths, masks, per-port network and resource ceilings
+  used to be Linux-only rows that silently did nothing there.
+
+  Both engines are seatbelt underneath — claybin calls `sandbox_init(3)` with a
+  profile compiled from your policy, `sandbox-exec` is Apple's CLI wrapper
+  around the same mechanism driven by one fixed profile string — so this is not
+  a claim about strength. It is about what survives the trip, plus the
+  per-capability guarantee report, which `sandbox-exec` cannot produce at all.
+
+  Where the platform cannot do something, it says so rather than rounding up:
+  **no syscall filter** (macOS has no seccomp equivalent available to an
+  unprivileged process, so `Isolation::hardened_process` is *refused*, not
+  quietly downgraded), resource ceilings as rlimits (`partial` — they count
+  per process, not per tree), and the process cap as `advisory`, because
+  `RLIMIT_NPROC` counts a whole UID and another terminal window moves it.
+  `sandbox-exec` remains the fallback, in both directions: a host that cannot
+  run one engine gets the other, never nothing.
+
+### Fixed
+- **Three things on macOS were guarded on `__linux__` when they were really
+  guarded on "has a sandbox".** The Sandbox settings pane compiled its rows out
+  entirely and predicted walls using the *Linux* compiler, so resource caps
+  read `none` while seatbelt was in fact applying rlimits. `sandbox_audit`
+  printed Linux host facts — all reading `0`, which looks like a host with
+  nothing — above a table reporting seatbelt walls doing real work.
+  `sandbox_broker_test` did not *compile* on macOS at all (darwin's ptrace is
+  `PT_*`, not `PTRACE_*`); it had simply never been built there, so nobody
+  noticed.
+
 ## [0.9.18] - 2026-10-01
 
 ### Fixed

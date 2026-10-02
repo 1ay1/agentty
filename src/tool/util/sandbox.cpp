@@ -1187,7 +1187,7 @@ std::vector<std::string> bwrap_argv_for_test([[maybe_unused]] std::string_view s
 }
 
 claybin_backend::Posture claybin_posture_for_test() {
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
     return build_claybin_posture();
 #else
     return {};

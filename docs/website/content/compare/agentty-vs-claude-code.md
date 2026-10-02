@@ -18,7 +18,7 @@ Both are terminal-first coding agents. Claude Code is Anthropic's official CLI; 
 | Binary size | 16.7 MB, no runtime | Node + npm install |
 | Cold start | ~3 ms | Node startup |
 | Providers | Claude, OpenAI, Groq, OpenRouter, Cerebras, Ollama | Anthropic only |
-| Sandbox | On by default (bwrap) | — |
+| Sandbox | On by default (claybin: landlock+seccomp on Linux, seatbelt on macOS) | — |
 | SSH air-gap | One command | — |
 | Editor | Runs in Zed over ACP | — |
 | License | Open source (MIT) | Proprietary |

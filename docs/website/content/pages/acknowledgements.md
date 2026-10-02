@@ -12,7 +12,8 @@ agentty stands on the shoulders of excellent open source software. Thank you to 
 - [**OpenSSL**](https://www.openssl.org/) — TLS and cryptography for the HTTP/2 transport and OAuth (PKCE).
 - [**nghttp2**](https://nghttp2.org/) — The HTTP/2 implementation behind the streaming providers.
 - [**nlohmann/json**](https://github.com/nlohmann/json) — JSON parsing and serialization for the API and thread persistence.
-- [**Bubblewrap**](https://github.com/containers/bubblewrap) — The Linux sandbox (bwrap) that isolates shell and build calls.
+- [**claybin**](https://github.com/1ay1/claybin) — The sister sandbox library and authority compiler that isolates shell and build calls: landlock + seccomp + cgroup2 on Linux, seatbelt on macOS.
+- [**Bubblewrap**](https://github.com/containers/bubblewrap) — The Linux sandbox (bwrap) agentty falls back to where claybin cannot build, and the bar claybin was written against.
 - [**CMake**](https://cmake.org/) — The build system that produces the single static binary across platforms.
 
 ## Inspiration

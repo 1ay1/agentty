@@ -29,6 +29,9 @@
 #include "claybin/plan/compile.hpp"
 #include "claybin/policy/policy.hpp"
 #include "claybin/policy/profiles.hpp"
+#if defined(__APPLE__)
+#include "claybin/macos/backend.hpp"
+#endif
 #endif
 
 namespace agentty::ui::panel {
@@ -941,22 +944,42 @@ Preview preview_sandbox(const sandbox_cfg::Config& cfg) {
     d = std::move(d).new_session();
     d = std::move(d).die_with_parent();
 
+    // Compile with the backend that will actually RUN this policy. Calling
+    // the linux compiler on a mac was the subtler half of the same bug as the
+    // Linux-gated rows: the pane rendered, but every wall it predicted came
+    // from namespaces and cgroups the host does not have, so the resource
+    // caps read `none` while seatbelt was in fact applying rlimits. A preview
+    // of a different platform's sandbox is worse than no preview.
+    //
+    // `plan_ops` is a linux concept (claybin's plan is a byte arena of
+    // opcodes); the macOS backend hands the kernel a profile STRING, so there
+    // is no op count and the row stays 0 rather than reporting a fiction.
+#if defined(__APPLE__)
+    ::clay::macos::Options mopts;
+    mopts.profile_name = "agentty";
+    auto compiled = ::clay::macos::compile(std::move(d).seal(),
+                                           ::clay::macos::probe_host(), mopts);
+#else
     auto compiled = compile(std::move(d).seal(), probe_host());
+#endif
     if (!compiled) {
         out.compiled = false;
         out.error = std::string{compiled.error().mechanism};
         return out;
     }
     out.compiled = true;
+#if !defined(__APPLE__)
     out.plan_ops = compiled->plan.op_count();
+#endif
     for (int i = 0; i < static_cast<int>(CapId::count_); ++i) {
         auto id = static_cast<CapId>(i);
         Wall w;
         w.name = cap_name(id);
         auto s = compiled->guarantees.strength(id);
-        w.strength = s == Enforcement::strong    ? "strong"
-                     : s == Enforcement::partial ? "partial"
-                                                 : "none";
+        w.strength = s == Enforcement::strong     ? "strong"
+                     : s == Enforcement::partial  ? "partial"
+                     : s == Enforcement::advisory ? "advisory"
+                                                  : "none";
         w.mechanism = compiled->guarantees.mechanism(id);
         // A capability the policy never asked for is not a gap in it. The three
         // resource caps ship at 0 = "no cap" on purpose (sandbox_config.hpp:
@@ -969,17 +992,33 @@ Preview preview_sandbox(const sandbox_cfg::Config& cfg) {
         out.walls.push_back(std::move(w));
     }
 
-    // Under BWRAP the report above describes a wall claybin would build and
-    // bwrap will not. Saying "filesystem.write: strong via landlock abi 10"
-    // while the command actually runs under a bwrap bind is precisely the
-    // lie this pane exists to prevent -- a stronger lie than saying nothing,
-    // because it comes with a receipt.
+    // On the FALLBACK backend the report above describes a wall claybin would
+    // build and the fallback will not. Saying "filesystem.write: strong via
+    // landlock abi 10" while the command actually runs under a bwrap bind is
+    // precisely the lie this pane exists to prevent -- a stronger lie than
+    // saying nothing, because it comes with a receipt.
     //
     // So the compile still runs (it is how we know the policy is coherent at
     // all, and the error above is worth having either way), but the walls it
-    // predicts are replaced by what bwrap actually gives: mount namespaces,
-    // and nothing else.
+    // predicts are replaced by what the fallback actually gives.
     if (cfg.backend != sandbox_cfg::LinuxBackend::Claybin) {
+#if defined(__APPLE__)
+        // sandbox-exec is seatbelt too, so the filesystem walls are real --
+        // but they come from ONE FIXED PROFILE in sandbox.cpp, not from this
+        // policy. So the strength is honest and the mechanism says where it
+        // actually came from, which is the part the user needs in order to
+        // understand why their settings above changed nothing.
+        for (auto& w : out.walls) {
+            const bool via_profile = w.name.starts_with("filesystem");
+            if (via_profile) {
+                w.strength  = "partial";
+                w.mechanism = "sandbox-exec fixed profile";
+            } else {
+                w.strength  = "none";
+                w.mechanism = "sandbox-exec cannot express this";
+            }
+        }
+#else
         for (auto& w : out.walls) {
             // The three capabilities a bwrap bind genuinely delivers. Every
             // other CapId is seccomp, landlock or cgroup2, none of which
@@ -994,6 +1033,7 @@ Preview preview_sandbox(const sandbox_cfg::Config& cfg) {
                 w.mechanism = "bwrap cannot express this";
             }
         }
+#endif
         out.unenforceable.push_back(
             "most of this policy needs the claybin backend \xc2\xb7 "
             "switch Backend above");
