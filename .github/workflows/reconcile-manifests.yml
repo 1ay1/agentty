@@ -226,12 +226,20 @@ jobs:
           # all and ALWAYS hand-wrote the file, so reconcile would happily
           # re-publish the drifted .SRCINFO (short pkgdesc, no optdepends) even
           # after a release fixed it.
-          docker run --rm -v "$PWD:/pkg" -w /pkg archlinux:base-devel sh -c '
+          #
+          # Generates into a container-local dir and prints to stdout. Must NOT
+          # chown the bind mount: that gives the clone dir to the container's
+          # build uid (bind mounts share uids numerically), the runner loses
+          # write permission on the directory, and the mv below fails with
+          # "Permission denied" -- the bug that stranded agentty-bin at 0.9.17.
+          docker run --rm -v "$PWD:/pkg:ro" archlinux:base-devel sh -c '
             set -eu
             useradd -m build
-            chown -R build /pkg
-            su build -c "makepkg --printsrcinfo" > /pkg/.SRCINFO.gen
-          '
+            mkdir -p /tmp/gen
+            cp /pkg/PKGBUILD /tmp/gen/PKGBUILD
+            chown -R build /tmp/gen
+            su build -c "cd /tmp/gen && makepkg --printsrcinfo"
+          ' > .SRCINFO.gen
           mv .SRCINFO.gen .SRCINFO
           if ! grep -q '^pkgbase = agentty-bin$' .SRCINFO; then
             echo "::error::.SRCINFO generation produced nothing usable"; exit 1

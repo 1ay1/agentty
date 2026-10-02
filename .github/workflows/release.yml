@@ -1052,12 +1052,26 @@ jobs:
           # design -- if it cannot run we fail loudly instead of publishing a
           # file that silently disagrees with the PKGBUILD. makepkg refuses to
           # run as root, hence the unprivileged build user.
-          docker run --rm -v "$PWD:/pkg" -w /pkg archlinux:base-devel sh -c '
+          #
+          # The generator copies the PKGBUILD to a container-local dir and
+          # prints to STDOUT, which the host redirects. It does NOT chown the
+          # bind mount, and mounts it read-only so it cannot.
+          #
+          # That matters: the previous version ran `chown -R build /pkg` on the
+          # mount, and a bind mount shares UIDs numerically with the host. So
+          # it handed the clone directory to the container's build uid, the
+          # runner lost write permission on the DIRECTORY, and the next line
+          # died with "mv: cannot move '.SRCINFO.gen' to '.SRCINFO':
+          # Permission denied" -- which is what kept agentty-bin on the AUR
+          # pinned at 0.9.17 while every other channel shipped 0.9.18.
+          docker run --rm -v "$PWD:/pkg:ro" archlinux:base-devel sh -c '
             set -eu
             useradd -m build
-            chown -R build /pkg
-            su build -c "makepkg --printsrcinfo" > /pkg/.SRCINFO.gen
-          '
+            mkdir -p /tmp/gen
+            cp /pkg/PKGBUILD /tmp/gen/PKGBUILD
+            chown -R build /tmp/gen
+            su build -c "cd /tmp/gen && makepkg --printsrcinfo"
+          ' > .SRCINFO.gen
           mv .SRCINFO.gen .SRCINFO
           # Prove it round-trips: what we are about to commit must be exactly
           # what a user's makepkg regenerates, or the pikaur conflict is back.
@@ -1583,12 +1597,19 @@ jobs:
                 rm -rf /tmp/srcchk && mkdir -p /tmp/srcchk
                 printf '%s\n' "$pk" > /tmp/srcchk/PKGBUILD
                 printf '%s\n' "$si" > /tmp/srcchk/.SRCINFO.live
-                if docker run --rm -v /tmp/srcchk:/pkg -w /pkg archlinux:base-devel sh -c '
+                # Same shape as the publish step: generate in a
+                # container-local dir and print to stdout. Must not chown the
+                # bind mount -- that gives /tmp/srcchk to the container's build
+                # uid and the runner can then neither write .SRCINFO.want nor
+                # reliably read it back for the diff.
+                if docker run --rm -v /tmp/srcchk:/pkg:ro archlinux:base-devel sh -c '
                      set -eu
                      useradd -m build
-                     chown -R build /pkg
-                     su build -c "makepkg --printsrcinfo" > /pkg/.SRCINFO.want
-                   ' 2>/dev/null; then
+                     mkdir -p /tmp/gen
+                     cp /pkg/PKGBUILD /tmp/gen/PKGBUILD
+                     chown -R build /tmp/gen
+                     su build -c "cd /tmp/gen && makepkg --printsrcinfo"
+                   ' > /tmp/srcchk/.SRCINFO.want 2>/tmp/srcchk/gen.err; then
                   if diff -u /tmp/srcchk/.SRCINFO.live /tmp/srcchk/.SRCINFO.want > /tmp/srcchk/diff; then
                     ok "AUR .SRCINFO matches its PKGBUILD"
                   else
@@ -1598,6 +1619,7 @@ jobs:
                   fi
                 else
                   echo "::warning::could not run makepkg to validate .SRCINFO"
+                  sed -n '1,20p' /tmp/srcchk/gen.err 2>/dev/null || true
                 fi
               fi
             elif [ -z "$pk" ] || printf '%s\n' "$pk" | grep -qi 'AUR is down\|maintenance'; then
