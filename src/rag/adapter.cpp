@@ -150,6 +150,35 @@ constexpr ::agentty::dirs::Spec kFeedbackSpec{
     return out;
 }
 
+// Sweep superseded variants of an index we just rewrote.
+//
+// Called AFTER a successful save, which is the only moment the live filename
+// is known for certain -- sweeping on startup would have to guess, and
+// guessing is how you delete the index you are about to load.
+//
+// `include_untagged` is on: a legacy `rag_code.ragdb` (no embedder tag) can
+// be named by no current code path, so it is unreadable dead weight rather
+// than a file someone might still want. That is the 47 MB in #62.
+void sweep_variants(const ::agentty::dirs::Spec& spec,
+                    std::string_view stem,
+                    const fs::path& live_db) {
+    if (!spec.life.sweeps() || live_db.empty()) return;
+
+    const std::string live = live_db.filename().string();
+    const std::array<std::string, 1> keep{live};
+    static constexpr std::array<std::string_view, 1> kSidecars{".meta.json"};
+
+    ::agentty::dirs::SweepRequest req{
+        .spec = spec,
+        .stem = stem,
+        .suffix = ".ragdb",
+        .keep = keep,
+        .sidecar_suffixes = kSidecars,
+        .include_untagged = true,
+    };
+    (void)::agentty::dirs::sweep(req);
+}
+
 bool truthy_default_on(const char* var) {
     const char* v = std::getenv(var);
     if (!v || !v[0]) return true;                 // unset ⇒ ON
@@ -1241,6 +1270,7 @@ struct Retriever::Impl {
             {"dense", dense_ready()},
         };
         atomic_write(meta, j.dump());
+        sweep_variants(kDocsIndexSpec, "rag_docs.", db);
     }
 
     bool try_load_persisted(const fs::path& root) {
@@ -1438,6 +1468,7 @@ struct Retriever::Impl {
             {"dense", dense_ready()},
         };
         atomic_write(meta, j.dump());
+        sweep_variants(kCodeIndexSpec, "rag_code.", db);
     }
 
     void refresh_docs(const fs::path& root) {

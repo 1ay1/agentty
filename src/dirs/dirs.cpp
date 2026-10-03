@@ -6,12 +6,14 @@
 
 #include "agentty/dirs/dirs.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
 #include <set>
 #include <utility>
+#include <vector>
 
 #ifndef _WIN32
 #include <sys/stat.h>
@@ -255,6 +257,172 @@ std::expected<Resolved, Error> resolve(const Spec& spec) {
 
 std::expected<Resolved, Error> resolve_dry(const Spec& spec) {
     return resolve_impl(spec, /*create=*/false);
+}
+
+SweepStats sweep(const SweepRequest& req, bool dry_run) {
+    SweepStats st;
+
+    // The gate. A store that is not rebuildable is never swept, whatever
+    // keep_last says -- see Lifecycle::rebuildable for why that asymmetry
+    // is a field rather than a convention.
+    if (!req.spec.life.sweeps()) return st;
+    if (req.stem.empty() || req.suffix.empty()) return st;
+
+    // resolve_dry: a sweep must not CREATE the directory it is cleaning.
+    auto d = resolve_dry(req.spec);
+    if (!d) return st;
+
+    std::error_code ec;
+    if (!fs::is_directory(d->path, ec)) return st;
+
+    const auto now = fs::file_time_type::clock::now();
+
+    struct Candidate {
+        fs::path path;
+        fs::file_time_type mtime;
+        std::uintmax_t size = 0;
+    };
+    std::vector<Candidate> cands;
+    // Legacy untagged files are tracked SEPARATELY, not ranked with the
+    // tagged variants. Putting them in the same list let keep_last protect
+    // one -- and since a legacy file is often the newest thing in the
+    // directory, it won the slot and a live-adjacent variant got deleted
+    // instead. They are unreadable by any current code path, so there is
+    // nothing to rank: they always go.
+    std::vector<Candidate> legacy;
+
+    // The untagged legacy name: "rag_code." + ".ragdb" -> "rag_code.ragdb".
+    std::string untagged;
+    if (req.include_untagged) {
+        std::string s{req.stem};
+        if (!s.empty() && s.back() == '.') s.pop_back();
+        untagged = s + std::string{req.suffix};
+    }
+
+    fs::directory_iterator it{d->path, fs::directory_options::skip_permission_denied, ec};
+    if (ec) {
+        // Could not even open the directory. Report and delete nothing.
+        st.failed = 1;
+        return st;
+    }
+
+    for (const auto& entry : it) {
+        std::error_code eec;
+        if (!entry.is_regular_file(eec) || eec) {
+            if (eec) ++st.failed;
+            continue;
+        }
+        const std::string name = entry.path().filename().string();
+
+        bool is_variant = name.size() > req.stem.size() + req.suffix.size()
+                       && name.starts_with(req.stem) && name.ends_with(req.suffix);
+        const bool is_legacy = !untagged.empty() && name == untagged;
+        if (!is_variant && !is_legacy) continue;
+
+        ++st.examined;
+
+        // Live variants survive unconditionally.
+        bool live = false;
+        for (const auto& k : req.keep)
+            if (name == k) { live = true; break; }
+        if (live) { ++st.kept; continue; }
+
+        std::error_code tec;
+        auto mt = fs::last_write_time(entry.path(), tec);
+        std::error_code sec;
+        auto sz = fs::file_size(entry.path(), sec);
+        if (tec || sec) { ++st.failed; continue; }
+
+        // The grace window. Another process may be mid-save, and a
+        // concurrent one may legitimately be running a different config.
+        // The legacy untagged file is exempt: no current code path can even
+        // name it, so nothing is about to be writing it.
+        if (!is_legacy && req.spec.life.min_age.count() > 0
+            && now - mt < req.spec.life.min_age) {
+            ++st.too_new;
+            ++st.kept;
+            continue;
+        }
+
+        cands.push_back({entry.path(), mt, sz});
+        if (is_legacy) {
+            legacy.push_back(cands.back());
+            cands.pop_back();
+        }
+    }
+
+    // Anything unreadable means our view of the directory is incomplete, so
+    // we cannot say which variants are newest. Delete nothing. Same rule as
+    // blobs::gc: being wrong about what is present costs disk, never data.
+    if (st.failed > 0) {
+        st.kept += cands.size() + legacy.size();
+        AGT_LOG(Persist, Warn, "dirs",
+                "sweep of {} aborted: {} unreadable entr{}",
+                d->path.string(), st.failed, st.failed == 1 ? "y" : "ies");
+        return st;
+    }
+
+    // Newest first, then keep the N most recent. keep_last counts VARIANTS
+    // retained beyond the live ones, which is what makes an A/B between two
+    // embedders free: switch back and the previous index is still warm.
+    std::sort(cands.begin(), cands.end(),
+              [](const Candidate& a, const Candidate& b) { return a.mtime > b.mtime; });
+
+    const std::size_t keep_n = std::min<std::size_t>(req.spec.life.keep_last,
+                                                     cands.size());
+    st.kept += keep_n;
+
+    // Doomed = the tagged variants beyond keep_last, PLUS every legacy file.
+    std::vector<Candidate> doomed;
+    doomed.reserve(cands.size() - keep_n + legacy.size());
+    for (std::size_t i = keep_n; i < cands.size(); ++i) doomed.push_back(cands[i]);
+    for (const auto& l : legacy) doomed.push_back(l);
+
+    for (const auto& c : doomed) {
+        // Sidecars go with the principal: a .meta.json describing a file
+        // that is gone is a trap every loader then has to defend against.
+        std::uintmax_t freed = c.size;
+        std::vector<fs::path> victims{c.path};
+        for (std::string_view sfx : req.sidecar_suffixes) {
+            fs::path side{c.path.string() + std::string{sfx}};
+            std::error_code xec;
+            if (fs::is_regular_file(side, xec)) {
+                std::error_code zec;
+                freed += fs::file_size(side, zec);
+                victims.push_back(std::move(side));
+            }
+        }
+
+        if (dry_run) {
+            ++st.deleted;
+            st.bytes_freed += freed;
+            AGT_LOG(Persist, Debug, "dirs", "sweep (dry) would remove {}",
+                    c.path.filename().string());
+            continue;
+        }
+
+        bool all_gone = true;
+        for (const auto& v : victims) {
+            std::error_code rec;
+            fs::remove(v, rec);
+            if (rec) all_gone = false;
+        }
+        if (all_gone) {
+            ++st.deleted;
+            st.bytes_freed += freed;
+            AGT_LOG(Persist, Info, "dirs", "sweep removed {} ({} bytes)",
+                    c.path.filename().string(), freed);
+        } else {
+            ++st.failed;
+        }
+    }
+
+    if (st.deleted > 0)
+        AGT_LOG(Persist, Info, "dirs",
+                "sweep {}: examined {} kept {} deleted {} ({} bytes)",
+                dry_run ? "dry-run" : "done",
+                st.examined, st.kept, st.deleted, st.bytes_freed);
+    return st;
 }
 
 }  // namespace agentty::dirs

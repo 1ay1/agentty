@@ -219,4 +219,57 @@ struct Error {
 // stops at the first directory containing ANY of them.
 [[nodiscard]] std::span<const std::string_view> project_markers() noexcept;
 
+// ── Sweep: the lifecycle, enforced ───────────────────────────────────────
+//
+// Reclaims superseded VARIANTS of a file whose name carries an identity
+// tag. The motivating case is rag's `rag_code.<embedder>.ragdb`: the tag is
+// correct (it stops us serving vectors from an incompatible space) but it
+// makes the filename set unbounded, and nothing collected the losers — a
+// 47 MB orphan from a retired naming scheme was still on disk (#62).
+//
+// Modelled on blobs::gc deliberately, including dry_run and min_age, with
+// ONE axis deliberately different: Lifecycle::rebuildable. blobs::gc is
+// cautious because deleting a blob destroys conversation history that no
+// recomputation restores. A .ragdb costs one re-index. That asymmetry is
+// why `sweeps()` demands rebuildable AND keep_last — a store that is not
+// rebuildable is NEVER swept, no matter what keep_last says.
+struct SweepStats {
+    std::size_t examined = 0;
+    std::size_t kept     = 0;
+    std::size_t deleted  = 0;
+    std::size_t too_new  = 0;   // held back by min_age
+    std::size_t failed   = 0;   // >0 ⇒ something was unreadable; see below
+    std::uintmax_t bytes_freed = 0;
+};
+
+// What to sweep, within the directory a Spec resolves to.
+//
+// `stem` + `suffix` bracket the variant tag: stem="rag_code.",
+// suffix=".ragdb" matches `rag_code.<anything>.ragdb`. `keep` names the
+// variants that must survive regardless of age or count — the live ones.
+//
+// Sidecars are swept with their principal: deleting `x.ragdb` and leaving
+// `x.ragdb.meta.json` is how you get a meta that describes a file that is
+// not there, which every loader then has to defend against.
+struct SweepRequest {
+    Spec             spec;
+    std::string_view stem;
+    std::string_view suffix;
+    std::span<const std::string>  keep;      // live filenames, never deleted
+    std::span<const std::string_view> sidecar_suffixes;  // e.g. ".meta.json"
+
+    // Also delete an UNTAGGED `<stem-without-dot><suffix>` (e.g. a legacy
+    // `rag_code.ragdb` with no embedder tag). Off by default because "a
+    // name I do not recognise" is normally a reason to leave a file alone,
+    // not to delete it.
+    bool include_untagged = false;
+};
+
+// Sweep. A no-op returning {} unless spec.life.sweeps().
+//
+// SAFETY: if any directory entry cannot be examined, nothing is deleted and
+// `failed` is non-zero. Same rule as blobs::gc — being wrong about what is
+// present must cost disk, never data.
+[[nodiscard]] SweepStats sweep(const SweepRequest& req, bool dry_run = false);
+
 }  // namespace agentty::dirs

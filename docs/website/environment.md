@@ -187,6 +187,23 @@ The "project" is the nearest enclosing directory containing `.git`,
 `cd src/ && agentty` reuses the index at the repo root instead of building a
 second one beside it.
 
+#### Superseded indexes are reclaimed
+
+The filename carries an identity tag for the embedding backend that built it
+(`rag_code.e45ba1de.ragdb`), so changing backends can never serve vectors
+from an incompatible space. The cost is that the filename set grows every
+time you switch.
+
+After a successful index write, agentty deletes superseded variants — keeping
+the live one plus the most recent previous one, so A/B-ing two backends does
+not force a full rebuild each time you switch back. Untagged indexes from
+before the tag existed are removed outright: no current build can read them.
+
+Two deliberate limits. Variants newer than an hour are left alone, since
+another agentty process may be mid-write. And if any file in the directory
+cannot be examined, nothing is deleted at all — being wrong about what is
+present should cost disk, not data.
+
 Details worth knowing:
 
 - A **relative** value is resolved against the root, not your current

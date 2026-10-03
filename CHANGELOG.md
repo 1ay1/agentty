@@ -28,6 +28,26 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
   stale-index sweep ([#62](https://github.com/1ay1/agentty/issues/62)) and
   can be deleted by hand at any time.
 
+- **Superseded retrieval indexes are now reclaimed**
+  ([#62](https://github.com/1ay1/agentty/issues/62)). The index filename
+  carries an identity tag for the embedding backend that built it, which is
+  correct — it stops agentty serving vectors from an incompatible space — but
+  it made the filename set unbounded, and nothing ever collected the losers.
+  A 45 MB index from a retired naming scheme was still on disk in this repo,
+  unreadable by any current build.
+
+  After a successful index write, superseded variants are deleted: the live
+  index plus the most recent previous one are kept, so A/B-ing two embedding
+  backends doesn't force a full rebuild on every switch. Untagged legacy
+  indexes go outright.
+
+  Two limits worth knowing. Variants newer than an hour are left alone, since
+  another agentty process may be mid-write. And if any file in the directory
+  can't be examined, nothing is deleted at all — the rule the blob collector
+  already follows, because being wrong about what's present should cost disk,
+  never data. Retrieval *feedback* is never swept: it accumulates from real
+  usage and nothing regenerates it.
+
 ## [0.9.19] - 2026-10-02
 
 ### Fixed

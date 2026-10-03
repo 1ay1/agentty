@@ -21,6 +21,12 @@
 //  10. Root::Project hangs off <anchor>/.agentty
 //  11. resolve_dry() creates nothing
 //  12. Lifecycle::sweeps() is the structural gate for #62
+//  13. sweep: keep_last + live-variant protection + sidecars + the legacy
+//      untagged file, and a bounded blast radius
+//  14. a NON-rebuildable store is never swept, whatever keep_last says
+//  15. min_age holds back variants a concurrent process may still be writing
+#include <array>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -309,6 +315,150 @@ int main() {
             check(over->origin == Origin::Override, "rag spec: origin is Override");
         }
         ::unsetenv("AGENTTY_RAG_DIR");
+
+        fs::current_path(cwd_before);
+    }
+
+    // ── 13. sweep: the #62 lifecycle, enforced ───────────────────────────
+    {
+        const fs::path proj = g_sandbox / "sweepproj";
+        fs::create_directories(proj / ".git");
+        const fs::path cwd_before = fs::current_path();
+        fs::current_path(proj);
+        agentty::tools::util::set_workspace_root(proj);
+
+        const Spec swept{
+            .root = Root::Project, .leaf = "",
+            .life = {.rebuildable = true, .keep_last = 1},
+        };
+        auto dir = resolve(swept);
+        check(dir.has_value(), "sweep: dir resolved");
+        const fs::path d = dir->path;
+
+        // Four variants + a live one + sidecars + a legacy untagged file.
+        auto mk = [&](const std::string& n, int age_days) {
+            touch(d / n);
+            touch(d / (n + ".meta.json"));
+            auto t = fs::file_time_type::clock::now()
+                   - std::chrono::hours{24 * age_days};
+            std::error_code tec;
+            fs::last_write_time(d / n, t, tec);
+        };
+        mk("rag_code.live.ragdb", 0);
+        mk("rag_code.aaaa.ragdb", 1);   // newest stale → kept by keep_last=1
+        mk("rag_code.bbbb.ragdb", 5);
+        mk("rag_code.cccc.ragdb", 9);
+        touch(d / "rag_code.ragdb");               // legacy, untagged
+        touch(d / "rag_docs.other.ragdb");         // different stem, untouched
+        touch(d / "unrelated.txt");
+
+        const std::array<std::string, 1> keep{"rag_code.live.ragdb"};
+        static constexpr std::array<std::string_view, 1> side{".meta.json"};
+        const SweepRequest req{
+            .spec = swept, .stem = "rag_code.", .suffix = ".ragdb",
+            .keep = keep, .sidecar_suffixes = side, .include_untagged = true,
+        };
+
+        // DRY RUN first: reports, touches nothing. The property that makes
+        // this safe to develop against a real store.
+        auto dry = sweep(req, /*dry_run=*/true);
+        check(dry.deleted == 3, "sweep dry: would delete 3 (bbbb, cccc, legacy)");
+        check(fs::exists(d / "rag_code.cccc.ragdb"), "sweep dry: deleted nothing");
+        check(fs::exists(d / "rag_code.ragdb"), "sweep dry: legacy still there");
+
+        auto st = sweep(req);
+        check(st.deleted == 3, "sweep: deleted 3");
+        check(st.failed == 0, "sweep: no failures");
+
+        // The live one and the newest stale variant survive.
+        check(fs::exists(d / "rag_code.live.ragdb"), "sweep: live kept");
+        check(fs::exists(d / "rag_code.aaaa.ragdb"),
+              "sweep: newest stale kept (keep_last=1 keeps the A/B warm)");
+        check(!fs::exists(d / "rag_code.bbbb.ragdb"), "sweep: older deleted");
+        check(!fs::exists(d / "rag_code.cccc.ragdb"), "sweep: oldest deleted");
+
+        // Sidecars go with their principal.
+        check(!fs::exists(d / "rag_code.cccc.ragdb.meta.json"),
+              "sweep: sidecar deleted with its principal");
+        check(fs::exists(d / "rag_code.live.ragdb.meta.json"),
+              "sweep: live sidecar kept");
+
+        // The legacy untagged file: #62's actual 47 MB.
+        check(!fs::exists(d / "rag_code.ragdb"), "sweep: legacy untagged deleted");
+
+        // Blast radius: a different stem and an unrelated file are untouched.
+        check(fs::exists(d / "rag_docs.other.ragdb"), "sweep: other stem untouched");
+        check(fs::exists(d / "unrelated.txt"), "sweep: unrelated file untouched");
+
+        fs::current_path(cwd_before);
+    }
+
+    // ── 14. a non-rebuildable store is NEVER swept ───────────────────────
+    // The blobs::gc asymmetry, enforced. keep_last alone must do nothing:
+    // feedback data is accumulated from real usage and nothing regenerates
+    // it, so no sweep may ever collect it.
+    {
+        const fs::path proj = g_sandbox / "nosweep";
+        fs::create_directories(proj / ".git");
+        const fs::path cwd_before = fs::current_path();
+        fs::current_path(proj);
+        agentty::tools::util::set_workspace_root(proj);
+
+        const Spec precious{
+            .root = Root::Project, .leaf = "",
+            .life = {.rebuildable = false, .keep_last = 1},   // NOT rebuildable
+        };
+        auto dir = resolve(precious);
+        check(dir.has_value(), "no-sweep: resolved");
+        touch(dir->path / "rag_code.aaaa.ragdb");
+        touch(dir->path / "rag_code.bbbb.ragdb");
+
+        const SweepRequest req{
+            .spec = precious, .stem = "rag_code.", .suffix = ".ragdb",
+        };
+        auto st = sweep(req);
+        check(st.deleted == 0, "no-sweep: nothing deleted");
+        check(st.examined == 0, "no-sweep: did not even look");
+        check(fs::exists(dir->path / "rag_code.bbbb.ragdb"),
+              "no-sweep: non-rebuildable data survives keep_last");
+
+        fs::current_path(cwd_before);
+    }
+
+    // ── 15. min_age holds back a fresh variant ───────────────────────────
+    // Another process may be mid-save; a concurrent one may legitimately be
+    // running a different embedder.
+    {
+        const fs::path proj = g_sandbox / "graceproj";
+        fs::create_directories(proj / ".git");
+        const fs::path cwd_before = fs::current_path();
+        fs::current_path(proj);
+        agentty::tools::util::set_workspace_root(proj);
+
+        // keep_last must be >0 or sweeps() is false and this test would
+        // pass vacuously -- it would be measuring the gate, not the grace
+        // window. Two fresh variants with keep_last=1: without min_age the
+        // older would be deleted, so holding BOTH proves the window works.
+        const Spec graced{
+            .root = Root::Project, .leaf = "",
+            .life = {.rebuildable = true, .keep_last = 1,
+                     .min_age = std::chrono::seconds{3600}},
+        };
+        auto dir = resolve(graced);
+        check(dir.has_value(), "min_age: resolved");
+        touch(dir->path / "rag_code.fresh1.ragdb");   // mtime = now
+        touch(dir->path / "rag_code.fresh2.ragdb");   // mtime = now
+
+        const SweepRequest req{
+            .spec = graced, .stem = "rag_code.", .suffix = ".ragdb",
+        };
+        auto st = sweep(req);
+        check(st.examined == 2, "min_age: both variants examined");
+        check(st.too_new == 2, "min_age: both held back by the grace window");
+        check(st.deleted == 0, "min_age: nothing deleted");
+        check(fs::exists(dir->path / "rag_code.fresh1.ragdb")
+                  && fs::exists(dir->path / "rag_code.fresh2.ragdb"),
+              "min_age: fresh variants survive even beyond keep_last");
 
         fs::current_path(cwd_before);
     }
