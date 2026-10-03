@@ -141,4 +141,54 @@ TEST_CASE("shell cmd alias canonification") {
                    args["command"].get<std::string>() == "echo shared");
         }
     }
+
+    // ── Case 8: the alias list stays SHORT, and deliberately so ────────
+    //
+    // Every entry is a key whose value gets handed to a shell, so a wrong
+    // guess does not cost a failed call -- it executes the wrong string.
+    // `shell` and `run` were in the first version of this list and are out:
+    // `shell` as a key on a tool NAMED shell is ambiguous rather than a
+    // spelling of "the command", and `run` is a real agentty subcommand a
+    // model could send meaning something else (notably to process_start).
+    //
+    // Pinned as a test because the failure mode of re-adding them is silent
+    // and bad: the call succeeds, running a string nobody intended.
+    {
+        for (auto alias : kCommandAliases) {
+            expect("no ambiguous alias in the command family",
+                   alias != "shell" && alias != "run",
+                   "`" + std::string{alias} + "` is a key whose value we hand "
+                   "to a shell; it must be an unambiguous spelling of "
+                   "\"the command to run\"");
+        }
+
+        // And a call that sends ONLY an unaccepted key must still fail the
+        // guard loudly, rather than be silently promoted to a command.
+        json args = {{"shell", "rm -rf /"}};
+        (void)canonify_tool_args("shell", args);
+        expect("an unaccepted key is NOT promoted to command",
+               !args.contains("command"));
+        expect("and the guard still rejects the call",
+               missing_required_field("shell", args) == "command",
+               "a key we do not understand must fail loudly, not execute");
+    }
+
+    // ── Case 9: canonify is IDEMPOTENT ───────────────────────────────
+    //
+    // It now runs at the stream-parse sites AND again at the dispatch
+    // boundary (mcp_tools_bridge's def.execute), so args are canonified
+    // twice on the normal path. The second pass must be a no-op: the first
+    // one leaves `command` present, which is exactly the case
+    // canonify_alias_keys refuses to touch.
+    {
+        json args = {{"cmd", "echo once"}};
+        const bool first = canonify_tool_args("shell", args);
+        const bool second = canonify_tool_args("shell", args);
+        expect("first pass canonifies", first);
+        expect("second pass is a no-op", !second);
+        expect("value survives both passes",
+               args["command"].get<std::string>() == "echo once");
+        expect("original key is still there for a model re-reading its call",
+               args["cmd"].get<std::string>() == "echo once");
+    }
 }

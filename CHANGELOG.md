@@ -7,14 +7,17 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 ### Fixed
 - **shell tool: models that send `cmd` instead of `command` no longer fail.**
   Laguna S 2.1 (and models cross-trained on OpenAI-style specs) reliably emit
-  the shell tool's command parameter as `cmd`. The dispatcher's ArgReader
-  already accepted it, but the host-side required-field guard rejected the
-  call first with "missing the required field `command`" — a wasted failed
-  call every time. The guard is now alias-aware (matching the ArgReader
-  table: `cmd`, `shell_command`, `script`, `run`, `cmdline`) and parsed tool
-  args are canonified (`cmd` → `command`) at every stream-parse site, so the
-  permission card, the live output panel, and the shell-detour check all see
-  the canonical key.
+  the shell tool's command parameter as `cmd`, and the host-side
+  required-field guard rejected the call with "missing the required field
+  `command`" — a wasted failed call every time. The guard is now alias-aware
+  (`cmd`, `shell_command`, `script`, `cmdline`) and parsed tool args are
+  canonified to `command` at every stream-parse site *and* at the dispatch
+  boundary, so the permission card, the live output panel, the shell-detour
+  check and the executor all read the same key.
+
+  The alias list is deliberately short. Every entry is a key whose value gets
+  handed to a shell, so a wrong guess doesn't cost a failed call — it runs the
+  wrong string. A test pins that, and names the reasoning when it fails.
 
 ### Added
 - **`$AGENTTY_RAG_DIR`** — relocate retrieval indexes

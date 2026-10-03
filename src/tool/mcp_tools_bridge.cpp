@@ -13,6 +13,7 @@
 #include "agentty/io/http.hpp"
 #include "agentty/rag/rag_adapter.hpp"   // rag::feedback::note_file_opened (learning loop)
 #include "agentty/tool/registry.hpp"   // tools::progress::emit
+#include "agentty/runtime/app/update/stream_args.hpp"  // canonify_tool_args (`cmd`→`command`)
 #include "agentty/tool/spec.hpp"       // spec catalog — effects authority
 #include "agentty/tool/util/fs_helpers.hpp"   // agentty workspace_root()
 
@@ -464,7 +465,28 @@ std::vector<ToolDef> build_mcp_tool_defs() {
         }
 
         std::string tool_name = spec.name;
-        def.execute = [provider, tool_name](const nlohmann::json& args) -> ExecResult {
+        def.execute = [provider, tool_name](const nlohmann::json& args_in) -> ExecResult {
+            // Canonify alias keys HERE, at the dispatch boundary.
+            //
+            // PR #66 canonified at every stream-parse site, which fixes the
+            // reported bug (a `cmd`-shaped call failing the required-field
+            // guard) but leaves the property depending on where the args came
+            // from. Any path that does not pass through those parsers --
+            // a replayed thread, a tool call injected by the ACP client, a
+            // future transport -- reaches this lambda with `cmd` set and
+            // `command` absent, and mcp-cpp's ArgReader has NO alias table
+            // (it is str(key)/require_str(key), nothing more), so the
+            // executor reads an empty command and runs it.
+            //
+            // Doing it at the single point every path funnels through makes
+            // the invariant "the executor always sees `command`" hold by
+            // construction rather than by having remembered to call it at N
+            // call sites. The parse-site calls stay: the permission card, the
+            // live output panel and the shell-detour check all read
+            // tc.args["command"] BEFORE dispatch, so they need the canonical
+            // key too. This is the backstop, not a replacement.
+            nlohmann::json args = args_in;
+            (void)::agentty::app::detail::canonify_tool_args(tool_name, args);
             // Bridge mcp's thread-local progress sink to agentty's on THIS
             // worker thread: cmd_factory already installed an agentty
             // progress::Scope here, so the subprocess runners inside the

@@ -722,9 +722,18 @@ Cmd sandbox_update(Model& m, msg::SandboxMsg sm) {
             // ascend() restores the stashed parent, which is the sandbox pane
             // descend() put there. Not close(): that would leave None and drop
             // the whole overlay stack, so editing a path list would exit
-            // Settings entirely. ascend() is fallible (no stashed parent means
-            // this list was opened elsewhere), so honor the bool and bail.
-            if (!m.ui.panel.ascend()) return Cmd::none();
+            // Settings entirely.
+            //
+            // Via detail::ascend, NOT a bare m.ui.panel.ascend(). The raw call
+            // is [[nodiscard]] and its false branch means "no stashed parent",
+            // which slot.hpp documents as the caller's cue to CLOSE. Honouring
+            // the bool by returning early instead leaves this overlay on screen
+            // with nothing beneath it, so Esc becomes a no-op and the pane
+            // cannot be left at all -- a worse outcome than the warning that
+            // prompted the change (PR #64). detail::ascend owns both halves:
+            // close-on-no-parent, and the revalidation a restored snapshot
+            // needs because the model may have moved since the descent.
+            detail::ascend(m);
 
             auto* o = m.ui.panel.get<pn::Sandbox>();
             if (!o) return Cmd::none();

@@ -22,8 +22,15 @@
 
 namespace agentty::app::detail {
 
-// Keys models sometimes emit in place of our canonical field name. Mirrors
-// the ArgReader alias table — keep in sync.
+// Keys models sometimes emit in place of our canonical field name.
+//
+// These predate the command family below and were described as mirroring
+// mcp-cpp's ArgReader. They do not: ArgReader has no alias mechanism (see
+// the note on kCommandAliases). A few of these strings happen to appear in
+// mcp-cpp for unrelated reasons -- `file_path` in cap/scheduler.hpp's own
+// take() list -- which is what made the claim look plausible. Treat every
+// list here as agentty's own host-side tolerance, honoured by canonify and
+// by salvage_args, and by nothing downstream.
 inline constexpr std::string_view kPathAliases[]    = {"path", "file_path", "filepath", "filename"};
 inline constexpr std::string_view kOldStrAliases[]  = {"old_string", "old_str", "oldStr"};
 inline constexpr std::string_view kNewStrAliases[]  = {"new_string", "new_str", "newStr"};
@@ -31,16 +38,28 @@ inline constexpr std::string_view kContentAliases[] = {"content", "file_text", "
                                                         "file_content", "contents",
                                                         "body", "data"};
 // Keys models emit for the shell tool's `command` parameter. Laguna S 2.1
-// (and models cross-trained on OpenAI-style specs) reliably send `cmd`;
-// keep in sync with mcp-cpp's ArgReader alias table, which accepts these
-// at dispatch. The host-side truncation guard and every UI surface read
-// `tc.args["command"]` literally, so without canonification a `cmd`-shaped
-// call dies in the guard with "missing the required field `command`"
-// before the alias-aware dispatcher is ever consulted.
+// (and models cross-trained on OpenAI-style specs) reliably send `cmd`.
+//
+// NOT mirrored from mcp-cpp's ArgReader, despite what the comment above says
+// about the older lists. ArgReader is a plain keyed reader -- str(key),
+// require_str(key), raw(key) -- with no alias table at all; the only "cmd"
+// anywhere in mcp-cpp is cmd.exe detection in cap/process.hpp. So
+// canonification here is not a convenience that duplicates dispatch, it is
+// THE mechanism: relax the guard without canonifying and a `cmd`-shaped call
+// stops failing loudly and starts reaching a dispatcher that reads `command`,
+// finds nothing, and runs an empty string. Guard and canonify ship together
+// or not at all.
+//
+// Kept deliberately SHORT. Every entry is a key whose value we will hand to a
+// shell, so a wrong guess does not cost a failed call -- it executes the wrong
+// string. `shell` and `run` were dropped for that reason: `shell` as a key on
+// a tool NAMED shell is ambiguous rather than a spelling of "the command",
+// and `run` is a real agentty subcommand that a model could plausibly send
+// meaning something else (notably to process_start). Add an alias only with a
+// transcript showing a model actually emitting it.
 inline constexpr std::string_view kCommandAliases[] = {"command", "cmd",
-                                                       "shell_command", "shell",
-                                                       "script", "run",
-                                                       "cmdline"};
+                                                       "shell_command",
+                                                       "script", "cmdline"};
 inline constexpr std::string_view kDisplayDescription = "display_description";
 
 // Hard cap on the live content preview shown during streaming. The widget
