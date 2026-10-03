@@ -545,7 +545,44 @@ std::vector<ToolDef> build_mcp_tool_defs() {
                 }
             }
 
+            // SHELL-PATH DETECTION. The gate above needs a path argument, and
+            // `shell` has none -- it hands over an opaque string, which is how
+            // `cat > .vscode/tasks.json` walked past a policy that correctly
+            // knew the path was dangerous.
+            //
+            // Parsing the command was rejected (grammar arms race; see
+            // docs/design/shell-write-gate.md and the long note in
+            // handoff_gate.hpp). So instead: observe the FILESYSTEM. Snapshot
+            // the trusted-shape paths, run the call, compare. No quoting trick
+            // evades it because it never looks at the command.
+            //
+            // Detection, not prevention: by the time we can compare, the bytes
+            // are written. Refusing afterwards would be theatre -- the honest
+            // outcome is a loud, attributable event on the feed the Sandbox
+            // pane already renders. A read-only bind is the prevention half
+            // and needs a mount namespace, so it cannot be the only answer on
+            // the hardened hosts claybin exists to serve.
+            const bool watchable =
+                tool_name == "shell" || tool_name == "process_start" ||
+                tool_name == "test" || tool_name == "diagnostics";
+            tools::util::handoff::TrustedSnapshot before;
+            if (watchable)
+                before = tools::util::handoff::snapshot_trusted(
+                    tools::util::workspace_root().string());
+
             auto r = provider->execute(::mcp::cap::Request{tool_name, args});
+
+            if (watchable && !before.empty()) {
+                // Name the command, not the tool: "shell" tells a user nothing
+                // about what happened. This is the one place the opaque string
+                // earns its keep -- explaining after the fact, never deciding.
+                std::string who = tool_name;
+                if (auto c = args.find("command");
+                    c != args.end() && c->is_string())
+                    who = c->get_ref<const std::string&>();
+                (void)tools::util::handoff::review_trusted(before, who);
+            }
+
             return decode_result(tool_name, std::move(r));
         };
         defs.push_back(std::move(def));

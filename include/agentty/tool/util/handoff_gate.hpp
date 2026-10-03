@@ -45,8 +45,10 @@
 // and the cost of a false positive is one declined tool call with a message
 // saying exactly what to do instead.
 
+#include <cstdint>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "agentty/domain/sandbox_provenance.hpp"
 
@@ -88,5 +90,83 @@ struct Verdict {
 
 // Forget everything recorded. For tests.
 void clear_handoff_feed();
+
+// ── The shell hole, and why this half exists ─────────────────────────
+//
+// check() guards write/edit/apply_patch/move, which each hand over a PATH we
+// can inspect. `shell` hands over an opaque string, so the gate above never
+// ran for it -- and `cat > .vscode/tasks.json` walked straight past a policy
+// that correctly knew the path was dangerous. Measured: `write` to that path
+// is refused, the same bytes via shell are not.
+//
+// Three mechanisms were considered. The notes are in
+// docs/design/shell-write-gate.md; the short version:
+//
+//   PARSE the command -- rejected as the mechanism. Catching `>` means also
+//     catching `tee`, `dd of=`, `sh -c`, `python -c`, heredocs, a path in a
+//     variable, base64-then-decode. mcp-cpp's bash_validate.hpp already
+//     carries the scars: its first version matched `sed -i` and `cat > f` as
+//     READS. A sniffer is defence in depth, never the wall.
+//
+//   LANDLOCK a read-only carve -- real, measured, and unshippable here. Within
+//     one ruleset rights INHERIT and a deeper stricter rule does not subtract
+//     (so the obvious carve is ignored); across layers they INTERSECT, which
+//     does work -- but rules target DIRECTORIES only, and granting the
+//     ancestors on the way to the carve re-opens it. Carving .vscode
+//     therefore makes loose files in the workspace root read-only. A worse
+//     regression than the hole.
+//
+//   BIND a read-only mount over each trusted path -- the right wall, and the
+//     one agentty already uses to mask secrets for exactly this reason: a
+//     negative rule has no landlock spelling, so you make the path not be the
+//     file. Exact, cheap, grammar-proof. Needs a mount namespace, so it is
+//     absent on the hosts that deny unprivileged userns.
+//
+// Hence this: DETECTION, which holds everywhere including those hosts. It
+// cannot prevent the write, and it cannot be evaded by any quoting trick,
+// because it observes the filesystem rather than the command. Snapshot the
+// trusted-shape paths that exist, run the call, compare. Any change becomes a
+// handoff event on the same feed the UI already renders.
+//
+// Prevention is the stronger guarantee where a mount namespace exists;
+// detection is the one that is always true.
+
+// An opaque before-picture of the trusted paths under `root`.
+//
+// Cheap by construction: it stats only paths matching a trusted SHAPE, never
+// walks the tree. An empty snapshot (no trusted paths present, or the gate is
+// off) makes the matching review() a no-op.
+struct TrustedSnapshot {
+    struct Entry {
+        std::string            path;
+        sandbox_cfg::TrustKind kind{};
+        std::uintmax_t         size = 0;
+        std::int64_t           mtime_ns = 0;
+        bool                   existed = false;
+    };
+    std::vector<Entry> entries;
+
+    // Directories that were walked and could sprout a NEW trusted file.
+    // review() re-scans these, because `entries` only covers paths that
+    // already existed -- and a freshly created hook is the more dangerous
+    // case, not the lesser one.
+    std::vector<std::string> roots;
+
+    [[nodiscard]] bool empty() const noexcept {
+        return entries.empty() && roots.empty();
+    }
+};
+
+// Snapshot before a shell-ish call. Returns {} when the policy is Allow or the
+// sandbox is off -- there is nothing to report, so there is no reason to stat.
+[[nodiscard]] TrustedSnapshot snapshot_trusted(std::string_view root);
+
+// Compare after the call and record a handoff for every path that changed,
+// appeared or vanished. Returns the number recorded.
+//
+// Deliberately does NOT fail the call. By the time this runs the bytes are
+// already on disk, so refusing would be theatre; the honest outcome is a loud,
+// attributable event. `tool` names the caller for the message.
+std::size_t review_trusted(const TrustedSnapshot& before, std::string_view tool);
 
 }  // namespace agentty::tools::util::handoff

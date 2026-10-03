@@ -5,6 +5,33 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- **The trust-handoff gate had a hole: `shell` walked straight past it.**
+  Writing `.vscode/tasks.json` with the `write` tool is refused — VS Code can
+  execute that file when the folder opens. Doing it with
+  `cat > .vscode/tasks.json` was not, because the gate is keyed on tool name
+  and `shell` was never in the list. The policy knew the path was dangerous;
+  the shell tool just never asked.
+
+  Parsing the command was considered and rejected. Catching `>` means also
+  catching `tee`, `dd of=`, `sh -c`, `python -c`, heredocs, a path held in a
+  variable, base64-then-decode — an arms race against a grammar, and agentty
+  already carries the scars of one (an earlier shell analyser matched
+  `sed -i` and `cat > f` as *reads*).
+
+  So the gate now observes the filesystem instead of the command: it
+  snapshots host-trusted paths before a shell call and compares after.
+  Modified, created and deleted files are all reported, with the command that
+  did it, on the same feed the Sandbox pane already shows. No quoting trick
+  evades it, because it never looks at the command.
+
+  This is detection, not prevention — by the time the comparison runs, the
+  bytes are on disk. That is deliberate: a read-only bind mount is the
+  stronger wall, but it needs a mount namespace, so it would be silently
+  absent on exactly the hardened hosts that need it most. Detection works
+  everywhere. The prevention half is tracked separately; the research behind
+  both, including measurements showing why a Landlock carve does *not* work
+  here, is in `docs/design/shell-write-gate.md`.
+
 - **shell tool: models that send `cmd` instead of `command` no longer fail.**
   Laguna S 2.1 (and models cross-trained on OpenAI-style specs) reliably emit
   the shell tool's command parameter as `cmd`, and the host-side
