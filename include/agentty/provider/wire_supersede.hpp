@@ -48,28 +48,29 @@ inline constexpr std::string_view kSupersededReadPointer =
 
 // Did this tool result actually CARRY the file's bytes?
 //
-// `read` can succeed and still return no content: the fs-layer dedup answers a
-// repeat of an already-served range with "File unchanged since last read",
-// pointing at the earlier result. That is sound on its own -- but only while
-// the earlier result is still on the wire.
+// Most read results do, including a CACHE HIT: the fs layer replays the exact
+// text it served before under a `[cached — unchanged …]` tag, so that result
+// is a full copy and may supersede an older one like any other.
 //
-// The collapse below is the other half of that bargain, and the two used to
-// break it together: read #1 of a path was superseded the moment read #2
-// existed, and read #2 was answered with the unchanged-sentinel. Net effect,
-// measured: the bytes appeared in NO tool result on the wire. The model's own
-// words for it were "the two sentinels point at each other, and there is no
-// tool result anywhere containing the file's text" -- then it fell back to
-// `cat`, which is the read-loop users report.
+// What cannot supersede is a POINTER: a result whose body only says "look at
+// an earlier tool_result". The fs layer used to answer every repeat that way,
+// and this collapse plus that sentinel broke each other -- read #1 was
+// superseded the moment read #2 existed, and read #2 carried no bytes, so the
+// content appeared in NO tool result on the wire. Measured; the model's own
+// words were "the two sentinels point at each other, and there is no tool
+// result anywhere containing the file's text", after which it fell back to
+// `cat`. Claude Code has the same failure open as issues #53578 / #60684.
 //
-// So a sentinel-bearing result cannot supersede anything. It is a POINTER to
-// content, not a copy of it, and a pointer cannot replace the thing it points
-// at.
+// The fs layer now serves content instead of a pointer, so this guard should
+// never fire on a current build. It stays for two reasons: a thread SAVED by
+// an older build rehydrates with the old sentinel text, and the invariant --
+// a pointer cannot replace the thing it points at -- is worth enforcing
+// structurally rather than trusting the layer below not to regress.
 [[nodiscard]] inline bool read_result_has_body(const ToolUse& tc) {
     const std::string_view out = tc.output();
     if (out.empty()) return false;
-    // The fs layer's two no-content answers. Matched on a stable prefix of
-    // each rather than the whole string: both carry a trailing hint that has
-    // been reworded before and will be again.
+    // The legacy no-content answers, matched on a stable prefix of each.
+    // `[cached` is deliberately NOT here: that body holds the real text.
     static constexpr std::string_view kUnchanged =
         "File unchanged since last read";
     static constexpr std::string_view kSuperseded =
