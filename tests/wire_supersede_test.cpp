@@ -90,6 +90,50 @@ TEST_CASE("supersede: a sentinel-only read never collapses the real one") {
                   "the file's content must exist in SOME surviving result");
 }
 
+TEST_CASE("supersede: a cached read carries its own bytes and may supersede") {
+    // The fs layer no longer answers a repeat with a bare pointer -- it
+    // replays the text it served under a `[cached …]` tag. So a cache hit is
+    // a FULL COPY and must behave like any other read: it supersedes the older
+    // result, and the content survives.
+    //
+    // This is the property the old design could not hold. A pointer is only
+    // valid while its target is on the wire, and compaction, this very
+    // collapse, and subagent boundaries all invalidate it. Claude Code has the
+    // same failure open as #53578 (read loop) and #60684 (stale snapshot);
+    // KhazAkar's proposal -- serve the cached value, annotate it -- removes
+    // the class rather than adding another TTL heuristic on top of it.
+    auto msgs = thread_of({
+        read_call("c1", "/w/f.txt", "line 1\nline 2\nline 3\n"),
+        read_call("c2", "/w/f.txt",
+                  "[cached \xe2\x80\x94 unchanged since your last read of this file]\n"
+                  "line 1\nline 2\nline 3\n"),
+    });
+
+    const auto dead = wire::superseded_read_ids(msgs);
+    CHECK_MESSAGE(dead.contains("c1"),
+                  "a cached result holds the bytes, so the older copy is "
+                  "genuinely redundant and should fade");
+    CHECK_FALSE(dead.contains("c2"));
+    // THE invariant, and the whole point: the content is still reachable even
+    // though the first read was collapsed.
+    CHECK_MESSAGE(body_survives(msgs, "line 2"),
+                  "collapsing the older read must not strand the content when "
+                  "the newer one is a cache hit");
+}
+
+TEST_CASE("supersede: a legacy sentinel from an old thread file still protects") {
+    // A thread SAVED by a build that emitted the old contentless sentinel
+    // rehydrates with that text. The guard stays so those transcripts keep
+    // working: the sentinel carries no bytes, so it must not collapse the one
+    // result that does.
+    auto msgs = thread_of({
+        read_call("c1", "/w/f.txt", "line 1\nline 2\nline 3\n"),
+        read_call("c2", "/w/f.txt", unchanged_sentinel()),
+    });
+    CHECK_FALSE(wire::superseded_read_ids(msgs).contains("c1"));
+    CHECK(body_survives(msgs, "line 2"));
+}
+
 TEST_CASE("supersede: a real re-read still collapses the older one") {
     // The behaviour worth keeping: two reads that both carry bytes means the
     // older body is redundant, so it fades to a pointer. This is the whole
