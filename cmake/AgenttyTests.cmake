@@ -630,6 +630,18 @@ target_include_directories(logx_test PRIVATE include)
 add_test(NAME logx_test COMMAND logx_test)
 set_tests_properties(logx_test PROPERTIES TIMEOUT 30)
 
+# clipboard display-server discovery: guards the fix for image paste failing
+# inside tmux (a pane inherits the tmux SERVER's env, so WAYLAND_DISPLAY is
+# missing and the wl-paste backend used to be skipped). Standalone and
+# self-contained — it builds a FAKE runtime dir, so it passes on a headless
+# CI box with no compositor, and needs no agentty objects.
+agentty_test(clipboard_display_env_test MODE raw)
+add_executable(clipboard_display_env_test EXCLUDE_FROM_ALL
+    tests/clipboard_display_env_test.cpp)
+target_include_directories(clipboard_display_env_test PRIVATE include)
+add_test(NAME clipboard_display_env_test COMMAND clipboard_display_env_test)
+set_tests_properties(clipboard_display_env_test PROPERTIES TIMEOUT 30)
+
 # logx redaction/format: standalone for the SAME reason as logx_test above —
 # the sink latches on first use, so a test that needs logging ON must own its
 # process. These were briefly folded into the consolidated binary, where the
