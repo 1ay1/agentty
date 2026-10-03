@@ -46,6 +46,38 @@ inline constexpr std::string_view kSupersededReadPointer =
     return {};
 }
 
+// Did this tool result actually CARRY the file's bytes?
+//
+// `read` can succeed and still return no content: the fs-layer dedup answers a
+// repeat of an already-served range with "File unchanged since last read",
+// pointing at the earlier result. That is sound on its own -- but only while
+// the earlier result is still on the wire.
+//
+// The collapse below is the other half of that bargain, and the two used to
+// break it together: read #1 of a path was superseded the moment read #2
+// existed, and read #2 was answered with the unchanged-sentinel. Net effect,
+// measured: the bytes appeared in NO tool result on the wire. The model's own
+// words for it were "the two sentinels point at each other, and there is no
+// tool result anywhere containing the file's text" -- then it fell back to
+// `cat`, which is the read-loop users report.
+//
+// So a sentinel-bearing result cannot supersede anything. It is a POINTER to
+// content, not a copy of it, and a pointer cannot replace the thing it points
+// at.
+[[nodiscard]] inline bool read_result_has_body(const ToolUse& tc) {
+    const std::string_view out = tc.output();
+    if (out.empty()) return false;
+    // The fs layer's two no-content answers. Matched on a stable prefix of
+    // each rather than the whole string: both carry a trailing hint that has
+    // been reworded before and will be again.
+    static constexpr std::string_view kUnchanged =
+        "File unchanged since last read";
+    static constexpr std::string_view kSuperseded =
+        "earlier read of this file";
+    return out.find(kUnchanged) == std::string_view::npos
+        && out.find(kSuperseded) == std::string_view::npos;
+}
+
 // Identify earlier `read` results whose file was touched again LATER in the
 // thread (by another read/edit/write/remove/move of the same path). Returns
 // the set of ToolCallId strings to collapse. The MOST RECENT read of each
@@ -62,13 +94,24 @@ superseded_read_ids(const std::vector<Message>& msgs) {
         for (const auto& tc : m.tool_calls) {
             const std::string path = tool_target_path(tc);
             if (path.empty()) continue;
-            if (auto it = newest_read_of.find(path); it != newest_read_of.end()) {
-                superseded.insert(it->second);
-                newest_read_of.erase(it);
-            }
-            const bool ok_read = tc.name.value == "read"
+
+            const bool is_read = tc.name.value == "read";
+            const bool ok_read = is_read
                 && tc.is_terminal() && !tc.is_failed() && !tc.is_rejected();
-            if (ok_read) newest_read_of[path] = tc.id.value;
+            // A read that served only a sentinel is a pointer to an earlier
+            // result, so it must neither supersede that result nor become the
+            // live copy -- doing either is what stranded the bytes entirely.
+            // A WRITE/EDIT/REMOVE still supersedes: it changed the file, so
+            // the old body is genuinely stale whatever it contained.
+            const bool carries_body = !is_read || read_result_has_body(tc);
+
+            if (carries_body) {
+                if (auto it = newest_read_of.find(path); it != newest_read_of.end()) {
+                    superseded.insert(it->second);
+                    newest_read_of.erase(it);
+                }
+            }
+            if (ok_read && carries_body) newest_read_of[path] = tc.id.value;
         }
     }
     return superseded;

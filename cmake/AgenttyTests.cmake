@@ -41,7 +41,7 @@ set(_AGENTTY_CONSOLIDATED
     scheduler_path_test tool_result_budget_test tool_wedge_liveness_test
     transcript_bound_test turn_settle_test stream_clock_test midrun_seam_test midrun_wire_test
     codex_responses_test doom_loop_test visual_hash_coverage_test
-    wire_fragmentation_test provider_identity_test provider_conformance_test
+    wire_fragmentation_test wire_supersede_test provider_identity_test provider_conformance_test
     provider_matrix_test tool_call_identity_test attribution_discipline_test
     empty_tool_args_test responses_log_test reasoning_ssot_test
     copilot_item_id_test wire_audit_test
@@ -530,6 +530,13 @@ add_executable(persistence_race_test_narrow EXCLUDE_FROM_ALL
     src/util/logx.cpp src/util/dbglog.cpp src/util/home_dir.cpp
     src/util/user_root.cpp src/util/base64.cpp src/util/teardown.cpp)
 target_include_directories(persistence_race_test_narrow PRIVATE include)
+# jaal's headers: user_root.cpp uses jaal::guarded for its warn-once set (the
+# concurrency banlist forbids a raw std::mutex). Header-only here -- guarded<T>
+# is all inline -- so the include path is enough and nothing new is linked.
+# Kept as a bare include rather than linking maya::maya on purpose: this target
+# exists to keep the TSan lane at ~11 TUs instead of 375.
+target_include_directories(persistence_race_test_narrow PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/maya/third_party/jaal/include)
 target_link_libraries(persistence_race_test_narrow PRIVATE
     nlohmann_json::nlohmann_json simdjson::simdjson Threads::Threads)
 target_compile_definitions(persistence_race_test_narrow PRIVATE
