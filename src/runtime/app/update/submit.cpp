@@ -36,6 +36,15 @@ namespace pn = agentty::ui::panel;
 namespace agentty::app::detail {
 
 Cmd submit_message(Model& m) {
+    // Perf stamps: `AGENTTY_LOG=perf=debug` reveals where the first-turn
+    // keystroke-to-stream latency goes (git spawn, slash/skill disk scan,
+    // credential resolve, wire-tool build). Each stage logs its delta.
+    const auto t_submit0 = std::chrono::steady_clock::now();
+    auto perf_stamp = [&](const char* stage) {
+        const auto dt = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - t_submit0).count();
+        AGT_LOG(Perf, Debug, "submit.stage", "stage={} ms={:.2f}", stage, dt);
+    };
     // Composer is non-empty if it has typed text OR an attachment chip.
     // Even an "empty-looking" buffer with chips should submit — those
     // chips ARE the message (a single dropped @file or paste, with no
@@ -274,7 +283,9 @@ Cmd submit_message(Model& m) {
         auto sp  = user.text.find_first_of(" \t\n");
         auto tok = user.text.substr(1, sp == std::string::npos
                                            ? std::string::npos : sp - 1);
-        if (const auto* sk = tools::skills::find(tok)) {
+        const auto* sk = tools::skills::find(tok);
+        perf_stamp("skills_find");
+        if (sk) {
             std::string rest = sp == std::string::npos
                 ? std::string{}
                 : std::string{user.text.substr(sp + 1)};
@@ -536,7 +547,9 @@ Cmd submit_message(Model& m) {
                     hit ? hit->confidence : -1.0}});
             }, std::move(proactive_probe));
     } else {
+        perf_stamp("pre_launch_stream");
         launch = cmd::launch_stream(m);
+        perf_stamp("post_launch_stream");
     }
     // No commit_scrollback_overflow here. Submit is not a wholesale
     // model swap — it appends to the existing transcript, so maya's
