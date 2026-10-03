@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -163,6 +164,139 @@ const char* pick_clipboard_image_type(std::string_view types) {
     return pick_clipboard_image_type(types) == nullptr;
 }
 
+#if defined(__linux__)
+
+// ---------------------------------------------------------------------------
+// Display-server discovery that does NOT trust the environment
+// ---------------------------------------------------------------------------
+//
+// WAYLAND_DISPLAY / XDG_SESSION_TYPE are the obvious way to find the
+// compositor, and they are wrong often enough to be the single biggest
+// source of "image paste stopped working" reports. The reason is process
+// ancestry: agentty inherits the environment of whatever started it, and
+// long-lived process servers hand out a SNAPSHOT of the env they were
+// themselves started with.
+//
+// The canonical case is tmux. The tmux server is started once — often by
+// systemd, or from a TTY login, or by an older graphical session that has
+// since ended — and every pane created later inherits THAT env. So a pane
+// running under a perfectly healthy Wayland kitty can still see:
+//
+//     XDG_SESSION_TYPE=tty          (no WAYLAND_DISPLAY at all)
+//
+// while the same binary run outside tmux sees XDG_SESSION_TYPE=wayland and
+// WAYLAND_DISPLAY=wayland-1. tmux's `update-environment` refreshes the
+// SESSION environment on attach, but panes that already exist — and panes
+// whose server predates the current graphical session — keep the stale
+// copy. Nothing the user can configure in tmux fixes an already-running
+// pane, which is why this has to be solved here.
+//
+// Trusting that stale env made read_clipboard_image() skip the wl-paste
+// branch entirely and fall through to "clipboard has no image", even
+// though `wl-paste --list-types` would have answered `image/png`. The
+// failure then got misattributed to the terminal ("the outer terminal
+// didn't answer") because the local probe had silently opted out.
+//
+// So: ask the filesystem, not the environment. A Wayland compositor is
+// reachable iff its socket exists in XDG_RUNTIME_DIR, and that fact is
+// true regardless of which env snapshot we inherited. When we find a
+// socket the env var disagrees with, we FIX the env with setenv() so the
+// wl-paste/wl-copy children we spawn inherit a working value — they read
+// WAYLAND_DISPLAY themselves and would otherwise fail the same way.
+
+// Directory holding the user's runtime sockets. Falls back to the
+// well-known /run/user/<uid> when XDG_RUNTIME_DIR is missing (same stale
+// -env scenario; the path is predictable from the uid).
+//
+// When we have to derive it we also EXPORT it: wl-paste/wl-copy resolve a
+// relative WAYLAND_DISPLAY against XDG_RUNTIME_DIR themselves, so handing
+// the child a display name without the directory it lives in just moves
+// the failure one process down.
+std::string runtime_dir() {
+    if (const char* d = std::getenv("XDG_RUNTIME_DIR"); d && *d) return d;
+    std::string derived =
+        "/run/user/" + std::to_string(static_cast<unsigned>(::getuid()));
+    std::error_code ec;
+    if (std::filesystem::exists(derived, ec) && !ec)
+        ::setenv("XDG_RUNTIME_DIR", derived.c_str(), 1);
+    return derived;
+}
+
+// True if `name` resolves to an existing Wayland socket. An absolute
+// WAYLAND_DISPLAY is used verbatim (the protocol allows it); otherwise it
+// is relative to the runtime dir.
+bool wayland_socket_exists(const std::string& dir, std::string_view name) {
+    if (name.empty()) return false;
+    std::error_code ec;
+    std::filesystem::path p =
+        name.front() == '/' ? std::filesystem::path{name}
+                            : std::filesystem::path{dir} / name;
+    // exists() is enough: we only need to know the compositor is there.
+    // Checking for S_IFSOCK would be stricter but breaks compositors that
+    // expose the display through a bind-mounted path.
+    return std::filesystem::exists(p, ec) && !ec;
+}
+
+// Resolve a usable Wayland display, exporting it when the inherited env
+// was stale or absent. Returns true when a compositor socket is reachable.
+//
+// Not cached: the whole point is that the inherited snapshot can be wrong,
+// and a user can start a compositor (or agentty can outlive one) mid
+// -session. The cost is a couple of stat() calls per explicit paste, which
+// is noise next to the popen we're about to do.
+bool ensure_wayland_env() {
+    const std::string dir = runtime_dir();
+
+    // Believe the env only if the socket it names actually exists. A
+    // WAYLAND_DISPLAY left over from a dead session is worse than none:
+    // it makes wl-paste fail with a connect error rather than fall back.
+    if (const char* w = std::getenv("WAYLAND_DISPLAY"); w && *w) {
+        if (wayland_socket_exists(dir, w)) return true;
+    }
+
+    // Scan for a live compositor socket: wayland-0, wayland-1, ...
+    // Lowest number wins so a single-compositor box is deterministic.
+    std::error_code ec;
+    std::vector<std::string> found;
+    for (const auto& e : std::filesystem::directory_iterator{dir, ec}) {
+        if (ec) break;
+        const std::string n = e.path().filename().string();
+        if (!n.starts_with("wayland-")) continue;
+        if (n.ends_with(".lock")) continue;   // the lock, not the socket
+        found.push_back(n);
+    }
+    if (found.empty()) return false;
+    std::ranges::sort(found);
+
+    // Export it for the wl-paste/wl-copy children. Overwrite (1): if we
+    // got here with WAYLAND_DISPLAY set it was pointing at a dead socket.
+    ::setenv("WAYLAND_DISPLAY", found.front().c_str(), 1);
+    return true;
+}
+
+// Same idea for X11: an X server is reachable iff its socket is in
+// /tmp/.X11-unix. Only consulted as a fallback, so a bare DISPLAY that
+// happens to be set is still honoured first.
+bool ensure_x11_env() {
+    if (const char* d = std::getenv("DISPLAY"); d && *d) return true;
+
+    std::error_code ec;
+    std::vector<std::string> found;
+    for (const auto& e :
+         std::filesystem::directory_iterator{"/tmp/.X11-unix", ec}) {
+        if (ec) break;
+        const std::string n = e.path().filename().string();
+        if (n.size() > 1 && n.front() == 'X') found.push_back(n.substr(1));
+    }
+    if (found.empty()) return false;
+    std::ranges::sort(found);
+
+    ::setenv("DISPLAY", (":" + found.front()).c_str(), 1);
+    return true;
+}
+
+#endif // __linux__
+
 #endif // !_WIN32
 
 std::optional<ClipboardImage> wrap(CaptureResult r) {
@@ -256,13 +390,17 @@ std::optional<ClipboardImage> read_clipboard_image(std::string* error_out) {
     }
 
 #if defined(__linux__)
-    // Session-type detection. KDE / GNOME / sway / etc. on Wayland
-    // all set XDG_SESSION_TYPE; the WAYLAND_DISPLAY fallback catches
-    // edge cases where the env var got unset by a shell rc.
-    bool wayland = false;
-    if (const char* st = std::getenv("XDG_SESSION_TYPE"))
-        wayland = std::string_view{st} == "wayland";
-    if (const char* w = std::getenv("WAYLAND_DISPLAY"); w && *w) wayland = true;
+    // Session-type detection. Resolve the display server from its SOCKET
+    // rather than from XDG_SESSION_TYPE/WAYLAND_DISPLAY: inside a tmux
+    // pane those env vars are a snapshot of whatever started the tmux
+    // SERVER, so a healthy Wayland kitty frequently presents as
+    // XDG_SESSION_TYPE=tty with no WAYLAND_DISPLAY and we would skip the
+    // wl-paste branch that was about to succeed. See ensure_wayland_env.
+    //
+    // ensure_* also EXPORTS a corrected value, so the wl-paste child we
+    // spawn below connects to the compositor we just found.
+    const bool wayland = ensure_wayland_env();
+    const bool x11     = ensure_x11_env();
 
     bool has_wl_paste = tool_in_path("wl-paste");
     bool has_xclip    = tool_in_path("xclip");
@@ -271,9 +409,11 @@ std::optional<ClipboardImage> read_clipboard_image(std::string* error_out) {
         // No display server reachable usually means a headless / SSH /
         // airgap host. The image is on the user's laptop, not here —
         // nothing on this machine can read it. Point at the override.
-        const char* disp = std::getenv("DISPLAY");
-        const char* wl   = std::getenv("WAYLAND_DISPLAY");
-        const bool headless = (!disp || !*disp) && (!wl || !*wl);
+        //
+        // Judged by socket probes, not env vars: a stale-env tmux pane on
+        // a graphical box is NOT headless, and telling the user to set
+        // AGENTTY_CLIPBOARD_CMD there sends them down the wrong path.
+        const bool headless = !wayland && !x11;
         if (headless) {
             return fail(
                 "couldn't read the clipboard over this connection. agentty "
@@ -605,10 +745,10 @@ std::optional<std::string> read_clipboard_text(std::string* error_out) {
     };
 
 #if defined(__linux__)
-    bool wayland = false;
-    if (const char* st = std::getenv("XDG_SESSION_TYPE"))
-        wayland = std::string_view{st} == "wayland";
-    if (const char* w = std::getenv("WAYLAND_DISPLAY"); w && *w) wayland = true;
+    // Socket-probed, not env-sniffed — same stale-tmux-env reason as
+    // read_clipboard_image(). See ensure_wayland_env().
+    const bool wayland = ensure_wayland_env();
+    (void)ensure_x11_env();
 
     if (wayland && tool_in_path("wl-paste")) {
         auto r = popen_capture("wl-paste --no-newline 2>/dev/null", kCap);
@@ -716,10 +856,12 @@ bool write_clipboard_text(std::string_view text, std::string* error_out) {
     return fail("pbcopy failed (is it on PATH?)");
 
 #elif defined(__linux__)
-    bool wayland = false;
-    if (const char* st = std::getenv("XDG_SESSION_TYPE"))
-        wayland = std::string_view{st} == "wayland";
-    if (const char* w = std::getenv("WAYLAND_DISPLAY"); w && *w) wayland = true;
+    // Socket-probed, not env-sniffed — same stale-tmux-env reason as
+    // read_clipboard_image(). Without this a copy from a tmux pane
+    // silently failed to reach the system clipboard. See
+    // ensure_wayland_env().
+    const bool wayland = ensure_wayland_env();
+    (void)ensure_x11_env();
 
     if (wayland && tool_in_path("wl-copy")) {
         if (popen_write("wl-copy 2>/dev/null", text)) return true;
