@@ -844,6 +844,17 @@ add_test(NAME util_layering
                  -P ${CMAKE_SOURCE_DIR}/tests/lint/util_layering.cmake)
 set_tests_properties(util_layering PROPERTIES LABELS "static")
 
+# ── project dotdir ─────────────────────────────────────────────
+# The user root sorted itself into cache/ credentials/ logs/ threads/; the
+# project root drifted to thirteen flat entries across four lifecycles. Each
+# arrived legitimately one commit at a time, which is why a reviewer misses the
+# next one. This makes the top level a declared set so the category is a
+# decision rather than an accident. docs/design/dot-agentty.md.
+add_test(NAME project_dotdir
+         COMMAND ${CMAKE_COMMAND} -DROOT=${CMAKE_SOURCE_DIR}
+                 -P ${CMAKE_SOURCE_DIR}/tests/lint/project_dotdir.cmake)
+set_tests_properties(project_dotdir PROPERTIES LABELS "static")
+
 # ── i18n catalog ───────────────────────────────────────────────────────────
 # Three gates: every t() id exists in the English catalog, every catalog id is
 # used, and nothing in src/provider or src/tool translates (model-facing
