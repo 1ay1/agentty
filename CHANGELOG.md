@@ -67,6 +67,17 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
   The alias list is deliberately short. Every entry is a key whose value gets
   handed to a shell, so a wrong guess doesn't cost a failed call — it runs the
   wrong string. A test pins that, and names the reasoning when it fails.
+- **edit tool: top-level `old_text`/`new_text` no longer fail.** Same driver,
+  mirror direction (Laguna S 2.1, do_edit.md trace): the schema's `edits[]`
+  entries are keyed `old_text`/`new_text`, and the model leaks that spelling
+  into the top-level `old_string`/`new_string` slots. The guard's alias
+  tables didn't list the `_text` forms, so a well-formed call died with
+  "missing the required field `old_string`" — even though the dispatcher's
+  parser accepts both spellings at both levels and every edit surface
+  (preview sniffer, timeline, ACP diff card) already reads both. The guard's
+  old/new tables now include the `_text` forms; no canonification and no
+  dispatch change were needed. Like the shell list, the tables grew only
+  with transcript evidence: `old`/`search`/`find`/`from` stay out.
 
 ### Added
 - **`$AGENTTY_RAG_DIR`** — relocate retrieval indexes
