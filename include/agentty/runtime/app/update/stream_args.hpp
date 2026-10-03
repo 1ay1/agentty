@@ -129,9 +129,16 @@ sniff_any(const std::string& raw,
 // Canonify the alias keys the given built-in tool is known to receive into
 // their canonical names, in place. Currently covers the `command` family
 // (shell / diagnostics / test / process_start): Laguna S 2.1 and models
-// cross-trained on OpenAI-style specs emit `cmd` for shell, which the
-// dispatcher's ArgReader accepts but every host-side consumer reads
-// literally. Returns true when anything was renamed.
+// cross-trained on OpenAI-style specs emit `cmd` for shell.
+//
+// This rename is LOAD-BEARING, not a convenience. The dispatcher's ArgReader
+// has no alias table (see the note on kCommandAliases) -- it is str(key) /
+// require_str(key) -- so nothing downstream would find `cmd`. Relaxing the
+// required-field guard without canonifying would therefore trade a clear
+// "missing the required field" for an EMPTY command reaching the shell. Guard
+// and canonify ship together or not at all.
+//
+// Returns true when anything was renamed.
 [[nodiscard]] inline bool canonify_tool_args(std::string_view tool_name,
                                              nlohmann::json& args) {
     if (tool_name == "shell" || tool_name == "diagnostics"
