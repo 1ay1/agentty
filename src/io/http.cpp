@@ -2749,7 +2749,11 @@ Client::~Client() { join_prewarm(); }
 // Helper: grab a connection from the pool or dial fresh.
 static std::expected<std::unique_ptr<Connection>, HttpError>
 acquire_or_dial(Pool& pool, const Endpoint& ep, Timeouts tos, CancelTokenPtr cancel) {
-    if (auto c = pool.acquire(ep)) return c;
+    if (auto c = pool.acquire(ep)) {
+        AGT_LOG(Perf, Debug, "http.acquire", "pool=hit host={}", ep.host);
+        return c;
+    }
+    AGT_LOG(Perf, Debug, "http.acquire", "pool=miss host={} dial=fresh", ep.host);
     return dial_new(ep, tos, std::move(cancel));
 }
 

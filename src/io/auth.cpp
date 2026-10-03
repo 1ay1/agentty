@@ -254,7 +254,11 @@ CrossProcessFileLock::~CrossProcessFileLock() {
 void prewarm_anthropic() {
     static std::atomic<bool> started{false};
     bool expected = false;
-    if (!started.compare_exchange_strong(expected, true)) return;
+    if (!started.compare_exchange_strong(expected, true)) {
+        AGT_LOG(Perf, Debug, "prewarm.anthropic", "skip=already_started");
+        return;
+    }
+    AGT_LOG(Perf, Debug, "prewarm.anthropic", "fire=1");
     const auto& ov = http::agentty_api_host_override();
     http::default_client().prewarm("api.anthropic.com", 443,
                                    ov.active() ? ov.host : std::string{},

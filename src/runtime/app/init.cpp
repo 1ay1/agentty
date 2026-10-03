@@ -18,6 +18,8 @@
 #include "agentty/io/blob_gc.hpp"
 #include "agentty/util/modelsdev.hpp"
 #include "agentty/util/dbglog.hpp"
+#include "agentty/util/logx.hpp"
+#include "agentty/tool/mcp_tools_backends.hpp"   // rag_embed_status: warm retriever off-thread
 #include "agentty/tool/subagent.hpp"   // set_smart: push pins to the task router
 
 #include <cstdlib>
@@ -401,6 +403,22 @@ std::pair<Model, Cmd> init() {
     // isolated task leaks one thread instead.
     cmds.push_back(Cmd::task_isolated(
         [](jaal::Sink<Msg>, std::stop_token) { prewarm_workspace_files(); }));
+
+    // Warm the RAG retriever OFF the reducer thread. The first call to
+    // shared_retriever() runs its function-local static ctor, which
+    // apply_config()s and re-probes the embedder — a network dial with a
+    // multi-second timeout. That first call otherwise happens INSIDE
+    // submit_message() on the very first turn (the proactive gate evaluates
+    // tools::proactive_enabled() → shared_retriever() for every send, even a
+    // 2-char "hi"), so a slow/unreachable embed endpoint stalls the reducer
+    // ~1.2 s between Enter and the stream launch — the real first-Enter hang
+    // (measured: submit.stage pre_launch_stream ms=1202 next to a
+    // rag.embed:unavailable on the SAME thread). Forcing the static init
+    // here moves that probe to a background thread; by the first turn the
+    // retriever is warm (or has already cached its Unavailable verdict) and
+    // the gate is a cheap snapshot read.
+    cmds.push_back(Cmd::task_isolated(
+        [](jaal::Sink<Msg>, std::stop_token) { (void)tools::rag_embed_status(); }));
     cmds.push_back(Cmd::task_isolated(
         [](jaal::Sink<Msg>, std::stop_token) { prewarm_workspace_symbols(); }));
 
@@ -428,6 +446,32 @@ std::pair<Model, Cmd> init() {
     if (provider::active().kind == provider::Kind::Anthropic)
         cmds.push_back(Cmd::task_isolated(
             [](jaal::Sink<Msg>, std::stop_token) { auth::prewarm_anthropic(); }));
+
+    // Copilot's first turn is the "weirdly hangs for a second" case: the
+    // reducer thread blocks on fresh_token() (ghu_ -> proxy-token exchange,
+    // a cold TLS round-trip to api.github.com) and then auto_session()
+    // (another cold round-trip to /models/session) before the first token
+    // streams. Both cache their result, so priming them here — off the
+    // reducer thread, while the user is still typing — means the first real
+    // submit finds a warm proxy token + Auto session instead of paying two
+    // serial handshakes on the turn's critical path. Guarded to the copilot
+    // provider; fresh_token()/auto_session() single-flight internally.
+    if (provider::active().is_copilot())
+        cmds.push_back(Cmd::task_isolated(
+            [](jaal::Sink<Msg>, std::stop_token) {
+                const auto t0 = std::chrono::steady_clock::now();
+                auto ms = [&]{ return std::chrono::duration<double,std::milli>(
+                    std::chrono::steady_clock::now() - t0).count(); };
+                AGT_LOG(Perf, Debug, "prewarm.copilot", "fire=1");
+                if (!provider::copilot::signed_in()) {
+                    AGT_LOG(Perf, Debug, "prewarm.copilot", "skip=not_signed_in");
+                    return;
+                }
+                (void)provider::copilot::fresh_token();
+                AGT_LOG(Perf, Debug, "prewarm.copilot", "stage=token_done ms={:.1f}", ms());
+                (void)provider::copilot::auto_session();
+                AGT_LOG(Perf, Debug, "prewarm.copilot", "stage=session_done ms={:.1f}", ms());
+            }));
 
     // Reclaim blobs no thread references any more (deleted threads,
     // replaced outputs). Once a day at most, 24 h grace so a save in
