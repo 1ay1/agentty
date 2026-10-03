@@ -191,6 +191,22 @@ find_catalog(const std::vector<ProviderCatalog>& cats, std::string_view pid) {
         probe += pid; probe += '\n'; probe += folded;
         return probe;
     };
+    // Second dedup axis, keyed on the same seen set with a distinct
+    // separator (\x01 instead of \n) so one hash lookup covers both
+    // probes. Row-id folding catches spelling aliases (foo-3-5/foo-3.5);
+    // label folding catches DISTINCT ids whose canonical display label
+    // collides -- Copilot's /models can emit `claude-opus-4-5` plus a
+    // snapshot/preview sibling that normalize_id renders the same way,
+    // which is how "Opus" and "Kimi K2 (GitHub)" ended up listed twice
+    // in the picker (issue #68). The surviving row is deterministic:
+    // stable_sort downstream is key-stable.
+    auto label_seen_key = [&probe](std::string_view pid,
+                                   std::string_view label_fold) -> const std::string& {
+        probe.clear();
+        probe.reserve(pid.size() + 1 + label_fold.size());
+        probe += pid; probe += '\x01'; probe += label_fold;
+        return probe;
+    };
     auto already = [&](const ModelRef& r) {
         return seen.contains(seen_key(r.provider_id,
                                       capkey::norm_row_id(r.model_id)));
@@ -219,6 +235,11 @@ find_catalog(const std::vector<ProviderCatalog>& cats, std::string_view pid) {
         row.match_positions = name_positions(row.model_label);
         recent_rows.push_back(std::move(row));
         seen.insert(seen_key(r.provider_id, capkey::norm_row_id(r.model_id)));
+        // Also fence the label axis: a recent "Opus 4.5" must suppress
+        // the catalog's `claude-opus-4-5-20250929` snapshot sibling in
+        // Section 2 (same label, different folded id).
+        seen.insert(label_seen_key(r.provider_id,
+            capkey::norm_row_id(recent_rows.back().model_label)));
         ++emitted_recent;
         return true;
     };
@@ -383,7 +404,15 @@ find_catalog(const std::vector<ProviderCatalog>& cats, std::string_view pid) {
             row.tool_capable  = mi.supports_tools.value_or(true);
             // Register AFTER the query gate: a filtered-out twin must not
             // suppress its matching sibling.
+            // Label-axis dedup: a different id whose canonical label
+            // folds to one we've already emitted (within the same
+            // provider) is the Copilot-catalog duplicate pattern. Done
+            // after the fuzzy match so an eliminated row still can't
+            // block its visible-label sibling.
+            const std::string label_fold = capkey::norm_row_id(model_label);
+            if (seen.contains(label_seen_key(c.provider_id, label_fold))) continue;
             seen.insert(seen_key(c.provider_id, folded));
+            seen.insert(label_seen_key(c.provider_id, label_fold));
             scored.push_back({std::move(row), mscore, prov_ord, tier,
                               no_query ? capkey::norm_row_id(model_label)
                                        : std::string{}});

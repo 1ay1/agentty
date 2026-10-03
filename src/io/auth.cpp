@@ -1180,6 +1180,12 @@ int cmd_login() {
                           << "\n\nEnter this one-time code (expires in "
                           << (dc.expires_in / 60) << " minutes):\n  "
                           << dc.user_code
+                          << "\n\nNote: GitHub will label the app \"GitHub "
+                             "Copilot Plugin\" on the consent page. That is "
+                             "expected \xE2\x80\x94 agentty signs in as VS "
+                             "Code's Copilot client because the API's model "
+                             "allowlist is keyed to that identity (see "
+                             "docs/design/copilot-provider.md)."
                           << "\n\nWaiting for approval\xE2\x80\xA6\n" << std::flush;
                 open_browser(dc.verification_uri);
             },

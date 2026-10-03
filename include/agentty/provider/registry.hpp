@@ -460,7 +460,13 @@ inline constexpr std::array<ProviderDescriptor, 15> kProviders{{
      .wire = Wire::OpenAIChat, .lifetime = Lifetime::PerCall,
      .auth = AuthStyle::ApiKey,
      .auth_env = {"GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENAI_API_KEY"},
-     .key_prefixes = {"AIzaSy", ""},
+     // AIzaSy is the legacy Developer API key prefix; AQ. is the newer
+     // AI-Studio-issued key format (see Google AI Studio forum reports --
+     // ai.google.dev/t/my-account-only-generates-aq-keys/170801 and
+     // sibling threads). New AI Studio accounts now issue AQ. keys
+     // exclusively, so leaving them unrouted sent every one of them to
+     // the Anthropic store on paste. Both prefixes carry a Gemini key.
+     .key_prefixes = {"AIzaSy", "AQ."},
      .host = "generativelanguage.googleapis.com",
      .path = "/v1beta/openai/chat/completions",
      .models_path = "/v1beta/openai/models"},

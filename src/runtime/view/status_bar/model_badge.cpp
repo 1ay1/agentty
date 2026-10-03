@@ -2,6 +2,9 @@
 
 #include <maya/widget/model_badge.hpp>
 
+#include <string>
+
+#include "agentty/auth/vault.hpp"
 #include "agentty/domain/model_name.hpp"
 #include "agentty/provider/registry.hpp"
 #include "agentty/provider/selection.hpp"
@@ -75,8 +78,36 @@ maya::Element model_badge_config(const Model& m) {
     // inverse_text was the obvious slot and the wrong one — under native it
     // is Default, the same colour as ordinary text, so the chip painted
     // normal foreground on a bright band (agentty #45).
-    const std::string prov = provider::provider_display_name(provider::active());
+    const auto& active_sel = provider::active();
+    const std::string prov = provider::provider_display_name(active_sel);
     const Style prov_style = ui::chip_style(name.color).with_bold();
+
+    // First-run honesty. If the user escaped out of the login modal (or
+    // launched for the first time with no env-var credentials), the active
+    // selection falls back to the Anthropic default -- but there's nothing
+    // signed in behind it. Showing "Anthropic Opus 4.5" there was a lie
+    // the status bar told confidently every launch: the next Enter would
+    // 401 against a credential the user never provided.
+    //
+    // Vault::signed_in is the uniform predicate (api-key store, OAuth
+    // state, custom-host settings slot, keyless locals -- the vault
+    // descriptor answers for all of them with one call) and it's cached
+    // on the credentials-file (mtime,size) so it's cheap per frame.
+    const bool authed =
+        auth::vault::signed_in(std::string{active_sel.provider_id()});
+    if (!authed) {
+        // Dimmed provider chip + a muted "-- sign in" where the model name
+        // would be. No family hue (there IS no model), no update chip, no
+        // effort chip: all three claim a running configuration we don't
+        // have. The provider name stays so the user can see which store
+        // the next `login` paste would route to; it's rendered with the
+        // muted hue, same as every other "disabled, actionable" chip.
+        const Style unauth_prov =
+            ui::chip_style(muted).with_bold();
+        return h(text(" " + prov + " ", unauth_prov),
+                 text(" "),
+                 text("\xe2\x80\x94 sign in", fg_dim(muted))).build();
+    }
 
     // Reasoning-effort chip: when a tier is active AND the model can reason,
     // ride a compact "· ◇high" so the current effort is visible at a glance
