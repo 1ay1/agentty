@@ -31,6 +31,16 @@ namespace agentty::app::detail {
 // take() list -- which is what made the claim look plausible. Treat every
 // list here as agentty's own host-side tolerance, honoured by canonify and
 // by salvage_args, and by nothing downstream.
+//
+// WIDENING ONE OF THESE HAS TWO CONSUMERS, not one. The required-field guard
+// only READS the table (an alias satisfies the check and nothing is rewritten),
+// but salvage_args CANONIFIES through it -- `pick("old_string", kOldStrAliases)`
+// copies the first alias it finds onto the canonical key. That is safe today
+// for a reason worth writing down rather than rediscovering: salvage only runs
+// on a TRUNCATED stream, ended_inside_string() refuses the mid-string case
+// first, and every dispatcher reads both spellings anyway, so the rewrite is a
+// no-op in effect. Add an alias whose canonical twin is read literally
+// somewhere and that stops being true.
 inline constexpr std::string_view kPathAliases[]    = {"path", "file_path", "filepath", "filename"};
 // old_text/new_text are transcript-evidenced (Laguna S 2.1, agentty session
 // of 2026-10-03, do_edit.md trace): the edit tool's edits[] entries are keyed
