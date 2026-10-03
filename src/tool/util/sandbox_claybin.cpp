@@ -141,6 +141,25 @@ using namespace ::clay::literals;
         for (const auto& m : p.masked) {
             if (m.starts_with(p.workspace)) d = std::move(d).mask(m);
         }
+
+        // Then the handoff binds, for exactly the same ordering reason: a
+        // read-only bind of <workspace>/.vscode/tasks.json is covered by the
+        // workspace bind above, so it has to come after. Same bug shape as
+        // the masks, same fix.
+        //
+        // bind_try with ro=true: TRY because a path the repo does not have is
+        // not an error (most repos have no .vscode), and RO because the guest
+        // must still READ these -- git reads its own config on every
+        // invocation. A write gets EROFS, which is a truthful error rather
+        // than the confusing EACCES a permission denial would give.
+        //
+        // This is prevention; detection (handoff::snapshot_trusted) runs
+        // regardless, because this wall needs a mount namespace and is simply
+        // absent on a host that denies unprivileged userns.
+        for (const auto& ro : p.handoff_ro) {
+            if (ro.starts_with(p.workspace))
+                d = std::move(d).bind_try(ro, ro, /*ro=*/true);
+        }
     }
 
     // ── network ─────────────────────────────────────────────────────────

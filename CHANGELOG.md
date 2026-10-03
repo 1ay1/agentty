@@ -4,6 +4,26 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **The trust-handoff gate now PREVENTS, not just reports.** Host-trusted
+  paths that exist — `.vscode/tasks.json`, `.git/hooks/*`, `.git/config`,
+  `hooks.json` — are bound read-only inside the sandbox, so a shell write to
+  them fails with a read-only filesystem error instead of landing and being
+  reported afterwards. They stay fully readable: git reads its own config on
+  every invocation, so masking was never an option.
+
+  Detection still runs on every host, because this wall needs a mount
+  namespace and is simply absent where unprivileged user namespaces are
+  denied. Prevention where possible, detection always. Skipped entirely when
+  Trust handoff is set to Allow — if you've said those files are yours to
+  edit, quietly making them read-only would be the setting lying to you.
+
+### Changed
+- **`--sandbox off` now prints a banner, not a line.** It used to sit at the
+  same visual weight as `sandbox: active (claybin)` and scroll past before the
+  first prompt. Being wrong about which wall is up is a cosmetic bug; being
+  wrong about whether there is one at all is the whole machine.
+
 ### Fixed
 - **Session stats ballooned on flaky providers.** Reported against the
   "where the time went" fix: precise with one model on a paid provider,

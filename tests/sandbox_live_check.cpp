@@ -17,6 +17,7 @@
 #include <cstdlib>
 #include <cerrno>
 #include <filesystem>
+#include <fstream>   // the handoff-prevention case reads the HOST file back
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -622,16 +623,77 @@ int main() {
             std::error_code rec;
             std::filesystem::remove(victim, rec);
 
-            // INSIDE the workspace, a host-trusted path: the sandbox ALLOWS
-            // it, and must. There is no wall here to lean on, which is exactly
-            // why the handoff gate is a separate mechanism that observes the
-            // filesystem around the call.
+            // INSIDE the workspace: the sandbox ALLOWS it, and must. There is
+            // no wall here to lean on, which is exactly why the handoff gate
+            // is a separate mechanism.
+            //
+            // An ORDINARY file, not .vscode/tasks.json. This check used to use
+            // the trusted path and it was the right choice then -- the point
+            // was "confinement permits this, so confinement cannot be what
+            // stops a handoff". Now that prevention binds trusted paths
+            // read-only, that spelling would assert the gate does NOT work.
+            // The property being pinned is unchanged: a plain workspace write
+            // is permitted, so a wall is not what stops the dangerous one.
             auto in = sb::run_shell_command(
-                "echo '{}' > .vscode/tasks.json && echo wrote || echo denied",
+                "echo hello > ordinary-file.txt && echo wrote || echo denied",
                 4096, std::chrono::seconds{15});
             expect(in.output.find("wrote") != std::string::npos,
                    "a write INSIDE the workspace is allowed -- so confinement "
                    "cannot be what stops a trust handoff");
+        }
+
+        // ── handoff PREVENTION: a read-only bind over the trusted path ───
+        //
+        // Detection reports a write after the bytes land. This stops it. The
+        // mechanism is a read-only bind of the path over itself, which is the
+        // same trick used to mask secrets and for the same reason: landlock
+        // has no negative rule, so you make the path not be writable rather
+        // than denying it.
+        //
+        // Needs a mount namespace, so this whole block is conditional. On a
+        // host that denies unprivileged userns the wall is absent and
+        // detection is the only layer -- which is the honest outcome, not a
+        // silent downgrade.
+        {
+            std::printf("\nhandoff prevention (read-only bind):\n");
+            const std::string ws{kWorkspace};
+            std::filesystem::create_directories(ws + "/.vscode");
+            // Must EXIST before the posture is built: a bind of a missing path
+            // cannot be made, which is what detection covers.
+            {
+                std::ofstream f(ws + "/.vscode/tasks.json");
+                f << "{\"version\":\"2.0.0\"}\n";
+            }
+
+            // Re-init so the posture picks up the now-existing trusted path.
+            (void)sb::init(sb::Mode::Auto);
+
+            auto w = sb::run_shell_command(
+                "echo PWNED > .vscode/tasks.json && echo wrote || echo denied",
+                4096, std::chrono::seconds{15});
+
+            // The guest's own report is not evidence; read the HOST file.
+            std::string after;
+            {
+                std::ifstream f(ws + "/.vscode/tasks.json");
+                std::getline(f, after);
+            }
+            const bool clobbered = after.find("PWNED") != std::string::npos;
+
+            if (clobbered) {
+                std::printf("  guest said: %s\n", w.output.c_str());
+                expect(false,
+                       "a host-trusted path must be READ-ONLY inside the "
+                       "sandbox when mount namespaces exist");
+            } else {
+                expect(true, "a write to a host-trusted path is refused");
+                // And it must still be READABLE -- git reads its own config on
+                // every invocation, so masking would break ordinary work.
+                auto r = sb::run_shell_command(
+                    "cat .vscode/tasks.json", 4096, std::chrono::seconds{15});
+                expect(r.output.find("2.0.0") != std::string::npos,
+                       "...and is still readable, not masked");
+            }
         }
     }
 

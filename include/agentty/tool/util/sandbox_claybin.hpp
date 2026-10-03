@@ -33,6 +33,23 @@ struct Posture {
     // Absolute paths masked after every grant. Credentials, agent state, and
     // whatever the user added to deny_paths. See kAlwaysMasked.
     std::vector<std::string> masked;
+    // Host-trusted paths that EXIST and must be read-only: .vscode/tasks.json,
+    // .git/hooks/*, .git/config, hooks.json. The PREVENTION half of the trust
+    // handoff gate.
+    //
+    // Not masked and not denied -- bound over themselves read-only, so the
+    // guest reads the real contents and gets EROFS on write. Masking would
+    // break every legitimate reader (git needs its own config); a landlock
+    // deny cannot express "this path only" under a writable workspace at all
+    // (measured: within one ruleset rights INHERIT and a deeper stricter rule
+    // does not subtract -- docs/design/shell-write-gate.md). A read-only bind
+    // is exact, needs no grammar, and no quoting trick evades it because the
+    // wall is the filesystem.
+    //
+    // Needs a mount namespace, so this is ABSENT on a host that denies
+    // unprivileged userns -- which is why the detection half exists and runs
+    // everywhere regardless.
+    std::vector<std::string> handoff_ro;
     std::string workspace;                       // read-write, bound last
     std::string cwd;                             // where the shell starts
 

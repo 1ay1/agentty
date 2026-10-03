@@ -189,6 +189,10 @@ add_executable(sandbox_live_check EXCLUDE_FROM_ALL
     ${CMAKE_SOURCE_DIR}/src/tool/util/sandbox.cpp
     ${CMAKE_SOURCE_DIR}/src/tool/util/sandbox_claybin.cpp
     ${CMAKE_SOURCE_DIR}/src/tool/util/sandbox_broker.cpp
+    # The gate owns the ONE table of host-trusted paths, and sandbox.cpp now
+    # reads it to build the read-only binds (the prevention half). Linked here
+    # so the live check drives the real list rather than a copy that can drift.
+    ${CMAKE_SOURCE_DIR}/src/tool/util/handoff_gate.cpp
     ${CMAKE_SOURCE_DIR}/src/domain/sandbox_provenance.cpp
     ${CMAKE_SOURCE_DIR}/src/tool/util/subprocess.cpp
     ${CMAKE_SOURCE_DIR}/src/tool/util/utf8.cpp
@@ -221,6 +225,10 @@ add_executable(ws_bind_probe EXCLUDE_FROM_ALL
     ${CMAKE_SOURCE_DIR}/src/tool/util/sandbox.cpp
     ${CMAKE_SOURCE_DIR}/src/tool/util/sandbox_claybin.cpp
     ${CMAKE_SOURCE_DIR}/src/tool/util/sandbox_broker.cpp
+    # The gate owns the ONE table of host-trusted paths, and sandbox.cpp now
+    # reads it to build the read-only binds (the prevention half). Linked here
+    # so the live check drives the real list rather than a copy that can drift.
+    ${CMAKE_SOURCE_DIR}/src/tool/util/handoff_gate.cpp
     ${CMAKE_SOURCE_DIR}/src/domain/sandbox_provenance.cpp
     ${CMAKE_SOURCE_DIR}/src/tool/util/subprocess.cpp
     ${CMAKE_SOURCE_DIR}/src/tool/util/utf8.cpp
@@ -258,6 +266,10 @@ add_executable(sandbox_audit EXCLUDE_FROM_ALL
     ${CMAKE_SOURCE_DIR}/src/tool/util/sandbox.cpp
     ${CMAKE_SOURCE_DIR}/src/tool/util/sandbox_claybin.cpp
     ${CMAKE_SOURCE_DIR}/src/tool/util/sandbox_broker.cpp
+    # The gate owns the ONE table of host-trusted paths, and sandbox.cpp now
+    # reads it to build the read-only binds (the prevention half). Linked here
+    # so the live check drives the real list rather than a copy that can drift.
+    ${CMAKE_SOURCE_DIR}/src/tool/util/handoff_gate.cpp
     ${CMAKE_SOURCE_DIR}/src/domain/sandbox_provenance.cpp
     ${CMAKE_SOURCE_DIR}/src/tool/util/subprocess.cpp
     ${CMAKE_SOURCE_DIR}/src/tool/util/utf8.cpp
@@ -809,6 +821,16 @@ if(EXISTS ${_BANLIST})
     set_tests_properties(concurrency_banlist_src concurrency_banlist_include
                          PROPERTIES LABELS "static")
 endif()
+
+# ── util layering ─────────────────────────────────────────────────
+# Two `util` namespaces exist (tools::util = the tool boundary, util = app-wide
+# plumbing) and the ONE-WAY dependency is what keeps the collision tolerable.
+# sail3r flagged the pair as hard to tell apart; the headers now explain the
+# split, and this makes the rule a build error rather than a convention.
+add_test(NAME util_layering
+         COMMAND ${CMAKE_COMMAND} -DROOT=${CMAKE_SOURCE_DIR}
+                 -P ${CMAKE_SOURCE_DIR}/tests/lint/util_layering.cmake)
+set_tests_properties(util_layering PROPERTIES LABELS "static")
 
 # ── i18n catalog ───────────────────────────────────────────────────────────
 # Three gates: every t() id exists in the English catalog, every catalog id is

@@ -183,11 +183,7 @@ of which genuinely run on the next build. Walk cost measured at ~14 ms over
 
 ### Still open
 
-The `bind_ro` prevention half. It is the better wall where mount namespaces
-exist, and it needs a claybin change plus a decision about what to do when
-`git config` legitimately wants to write. Detection landing first is the right
-order: it is the layer that works on every host, so shipping it does not depend
-on that decision.
+Nothing on the prevention side. `bind_ro` shipped — see below.
 
 ## Audit: which tools actually reach the sandbox
 
@@ -260,4 +256,69 @@ Worth noting what was *not* broken — 12 other spellings all classify correctly
   on the real terminal so `sudo` prompts work. Confining it would break the
   feature's whole purpose. Worth revisiting only if it ever becomes
   model-triggerable.
+
+## Prevention, shipped
+
+The read-only bind landed. `Posture::handoff_ro` carries the host-trusted paths
+that EXIST, and `build_policy` binds each over itself with `bind_try(.., ro)`
+— after the workspace bind, for exactly the reason the secret masks are applied
+after it: a bind of `<workspace>/.vscode/tasks.json` is covered by the
+workspace bind, so an earlier one is silently overwritten. That bug already
+happened once with `.env` and is recorded in `build_policy`.
+
+The path list is **not** a second copy. It comes from
+`handoff::snapshot_trusted`, the same function detection uses, so the two
+halves cannot disagree about what counts as host-trusted. The masks above it
+learned that lesson the hard way (two lists, one of which drifted).
+
+Verified live, on the bypass that opened this document:
+
+```
+$ agentty run 'echo PWNED >> .vscode/tasks.json'
+  → refused: read-only file system. Host file unchanged.
+$ cat .vscode/tasks.json
+  → still readable — git needs its own config, so masking was never an option
+```
+
+Skipped when the policy is `Allow`: a user who turned the gate off has said
+those files are theirs to edit, and quietly making them read-only would be the
+configuration lying to them.
+
+One test had to change, and the change is worth noting rather than hiding. The
+"a write INSIDE the workspace is allowed" live check used
+`.vscode/tasks.json` as its example — correct when written, since the point was
+*confinement permits this, so confinement is not what stops a handoff*. With
+prevention in place that spelling asserts the gate does **not** work. It now
+writes an ordinary file; the property it pins is unchanged.
+
+## Why bubblewrap is still here
+
+The suggestion was to drop bwrap entirely — "ClayBin or bust", on the grounds
+that a fallback nobody exercises is a liability. The instinct is right about
+maintenance and wrong about this particular fallback, for a measured reason.
+
+The fallback runs in **both directions**, and each direction has a real host:
+
+- **bwrap fails, claybin works.** Ubuntu 24.04 ships an AppArmor profile that
+  denies the `uid_map` write to unconfined binaries, so bwrap dies with
+  "setting up uid map: permission denied". agentty used to report *no backend*
+  there. claybin needs no user namespace for landlock + seccomp, so it still
+  gets the filesystem boundary and the syscall filter.
+- **claybin cannot build, bwrap works.** Asking for claybin on such a host
+  yields bwrap rather than `None`, so opting into the newer backend cannot
+  silently cost you your sandbox.
+
+claybin is already the DEFAULT on Linux (`g_linux_pref` starts at `Claybin`),
+so this is not a case of the old engine holding the new one back — bwrap is the
+second choice already, reached only when claybin cannot run.
+
+And the sandbox audit in this document is the direct argument against removal:
+the git tools were unsandboxed on **both** backends, because the gap was in
+which *runner* the tools called, not which engine was behind it. Deleting an
+engine would not have found that, and would have removed the only thing
+covering the hosts where the other one cannot start.
+
+If bwrap is ever dropped it should be because telemetry shows nobody lands on
+it, not because it is untidy. Until then it is ~50 lines of argv construction
+carrying the hosts claybin cannot serve.
 

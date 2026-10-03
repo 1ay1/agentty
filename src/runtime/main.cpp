@@ -1404,8 +1404,43 @@ int main(int argc, char** argv) {
         }
         // Status line so the user knows what they got. Stdout is fine —
         // maya runs after this returns, no clobbering.
-        std::fprintf(stderr, "agentty: %s\n",
-                     tools::util::sandbox::describe_state().c_str());
+        //
+        // OFF gets a banner, not a line. Every other state here is
+        // informational ("which wall is up"); off is the one where the next
+        // thing that happens is a model running commands against the real
+        // filesystem with nothing between them. A single line reading
+        // "sandbox: off" sat at the same visual weight as "sandbox: active
+        // (claybin)" and scrolled past before the first prompt — sail3r asked
+        // for something you cannot miss, and the asymmetry is real: being
+        // wrong about ON is a cosmetic bug, being wrong about OFF is the whole
+        // machine.
+        //
+        // Shape, not colour. The original ask was a blinking yellow banner,
+        // and that is one raw SGR sequence — which theme_discipline_test
+        // forbids on purpose: colour belongs in maya, so it follows the user's
+        // theme instead of assuming a dark terminal. maya has no blink
+        // attribute either, and this prints BEFORE maya starts, so there is no
+        // token to reach for. Rather than carve an exception into the one lint
+        // standing between us and hardcoded colour everywhere, the banner earns
+        // its weight from six lines of asterisks and the word UNCONFINED. That
+        // survives NO_COLOR, a pipe, a log file and a light terminal, none of
+        // which blink would have.
+        if (mode == tools::util::sandbox::Mode::Off) {
+            std::fprintf(stderr,
+                "\n"
+                "*********************************************************\n"
+                "***                                                   ***\n"
+                "***             agentty: SANDBOX IS OFF               ***\n"
+                "***                                                   ***\n"
+                "***   Tool commands run UNCONFINED. They can read     ***\n"
+                "***   and write anything your user account can.       ***\n"
+                "***                                                   ***\n"
+                "*********************************************************\n"
+                "\n");
+        } else {
+            std::fprintf(stderr, "agentty: %s\n",
+                         tools::util::sandbox::describe_state().c_str());
+        }
 
         // And say it plainly when the saved policy is not the thing running.
         // The pane can save a syscall profile, port rules and cgroup caps,

@@ -26,6 +26,7 @@
 #include <unistd.h>  // ::close, for the pidfd the runner does not use
 
 #include "agentty/tool/util/sandbox_claybin.hpp"
+#include "agentty/tool/util/handoff_gate.hpp"   // snapshot_trusted: ONE path table
 #endif
 
 namespace agentty::tools::util::sandbox {
@@ -602,6 +603,31 @@ constexpr const char* kHomeToolSubdirs[] = {
     // terminal, while a masked one still opens and still accepts writes --
     // they just go nowhere. Captured stdout/stderr are untouched.
     p.masked.emplace_back("/dev/tty");
+
+    // ── trust-handoff prevention: bind host-trusted paths read-only ─────
+    //
+    // The PREVENTION half of the gate. Detection (handoff::review_trusted)
+    // reports a write after the bytes land and works on every host; this stops
+    // the write, and needs a mount namespace.
+    //
+    // Reuses handoff::snapshot_trusted so the two halves cannot disagree about
+    // WHICH paths are host-trusted -- the same reasoning the mask list above
+    // records for bwrap vs claybin, where two copies drifted and one of them
+    // did not exist. One table, two mechanisms.
+    //
+    // Only EXISTING paths: a bind of a path that is not there fails, and
+    // bind_try tolerating that is not the same as wanting it. A trusted path
+    // CREATED during the session is what detection is for.
+    //
+    // Skipped when the policy is Allow -- a user who turned the gate off has
+    // said these files are theirs to edit, and silently making them read-only
+    // would be the config lying to them.
+    if (cfg.handoff != sandbox_cfg::HandoffPolicy::Allow && !p.workspace.empty()) {
+        auto snap = handoff::snapshot_trusted(p.workspace);
+        p.handoff_ro.reserve(snap.entries.size());
+        for (auto& e : snap.entries)
+            if (e.existed) p.handoff_ro.push_back(std::move(e.path));
+    }
 
     // ── network ──────────────────────────────────────────────────────────
     p.net_mode = static_cast<int>(cfg.net_mode);

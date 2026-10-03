@@ -3,6 +3,29 @@
 // binary detection, and a predictable "which directories to skip during
 // traversal" list — centralised here so the rules are consistent across
 // grep / glob / list_dir / find_definition.
+//
+// ── WHICH `util` IS THIS? ──────────────────────────────────────────
+// There are two, and the split is deliberate even though the name collides:
+//
+//   agentty::tools::util   (include/agentty/tool/util/, src/tool/util/)
+//       The TOOL BOUNDARY. Everything here exists because a MODEL asked for
+//       something and we have to be careful about it: workspace clamping,
+//       path normalisation, subprocess spawning, the sandbox, the trust
+//       handoff gate, argument reading, partial-JSON salvage. The unifying
+//       property is UNTRUSTED INPUT — these are the walls and the parsers
+//       that stand between a model's request and the machine.
+//
+//   agentty::util          (include/agentty/util/, src/util/)
+//       APP-WIDE PLUMBING, with no notion of a tool call: logging (logx),
+//       home/root resolution, base64, teardown ordering, the self-updater,
+//       the models.dev cache. Callable from anywhere, including from
+//       tools::util itself (fs_helpers uses util::home_dir), which is why
+//       the dependency runs one way only: tools::util may use util, never
+//       the reverse.
+//
+// Rule of thumb when adding something: does it only make sense because a
+// model is on the other end of it? Then it belongs here. Otherwise it is
+// agentty::util.
 
 #include <expected>
 #include <filesystem>
