@@ -47,6 +47,7 @@
 
 #include <rag/rag.hpp>
 
+#include "agentty/dirs/dirs.hpp"
 #include "agentty/io/http.hpp"
 #include "agentty/mcp/client.hpp"
 #include "agentty/tool/skills.hpp"
@@ -57,6 +58,97 @@ namespace fs = std::filesystem;
 
 namespace agentty::rag {
 namespace {
+
+// ── Where the persisted indexes live ─────────────────────────────────────
+//
+// Root::Project, so storage follows the CODE and is anchored to the project
+// marker rather than the shell's cwd. The old `fs::current_path()` form gave
+// `cd src/ && agentty` a second 82 MB index (#61).
+//
+// $AGENTTY_RAG_DIR relocates all three. A relative value resolves against
+// <anchor>/.agentty, never the cwd, so it names one directory rather than a
+// different one per launch dir — the rule dirs inherits from user_root.
+//
+// rebuildable: a .ragdb is derived data. Deleting one costs a re-index, not
+// history, which is what lets #62's sweep be aggressive where blobs::gc has
+// to be careful. keep_last=1 keeps the previous embedder's index so A/B-ing
+// two backends doesn't force a full rebuild on every switch — the whole
+// point of putting the identity tag in the filename.
+//
+// The sweep itself is #62 and not wired yet; these declare the intent so the
+// policy lives next to the path instead of in whatever code gets written later.
+constexpr ::agentty::dirs::Spec kDocsIndexSpec{
+    .root = ::agentty::dirs::Root::Project,
+    .leaf = "",                       // the .agentty root itself
+    .env  = "AGENTTY_RAG_DIR",
+    .life = {.rebuildable = true, .keep_last = 1,
+             .min_age = std::chrono::seconds{3600}},   // 1h grace
+};
+
+constexpr ::agentty::dirs::Spec kCodeIndexSpec = kDocsIndexSpec;
+
+// Retrieval feedback: the learning loop's tallies. Same root and override as
+// the indexes (it is the same kind of derived, project-scoped data), but NOT
+// rebuildable — it is accumulated from real usage and nothing regenerates it,
+// so no sweep may ever collect it. That distinction is exactly what the
+// Lifecycle field exists to make explicit rather than implicit.
+constexpr ::agentty::dirs::Spec kFeedbackSpec{
+    .root = ::agentty::dirs::Root::Project,
+    .leaf = "",
+    .env  = "AGENTTY_RAG_DIR",
+    .life = {},                       // never swept
+};
+
+// Resolve the directory the indexes live in.
+//
+// When $AGENTTY_RAG_DIR is NOT set this is <anchor>/.agentty, and being
+// inside the project is itself what keeps two checkouts apart.
+//
+// An override removes that property: point two projects at one directory and
+// they land on the same rag_docs.<tag>.ragdb. The meta's `root` guard means
+// that is not CORRUPTION -- each project rejects the other's index and
+// rebuilds -- but it is a thrash that silently costs a full re-index on every
+// switch, which is worse than the disk it was meant to save.
+//
+// So an overridden location gets a per-project subdirectory. The basename
+// keeps it readable; the hash of the absolute anchor keeps it unique. Same
+// reasoning as the embedder tag: machine identity for correctness, a human
+// prefix so you can tell what you are looking at.
+[[nodiscard]] fs::path rag_store_dir(const ::agentty::dirs::Spec& spec) {
+    auto d = ::agentty::dirs::resolve(spec);
+    if (!d) return {};
+    if (!d->overridden()) return d->path;
+
+    const fs::path anchor = ::agentty::dirs::project_anchor();
+    if (anchor.empty()) return d->path;
+
+    const std::string key = anchor.string();
+    // FNV-1a, not std::hash: this value is baked into a PERSISTED directory
+    // name, and std::hash is only required to be consistent within a single
+    // execution of a program. A libstdc++/libc++ difference -- or a future
+    // change to either -- would silently orphan every existing index and
+    // rebuild it under a new name. A fixed algorithm is the only kind that
+    // can appear in a path.
+    std::uint64_t h = 1469598103934665603ull;
+    for (unsigned char c : key) {
+        h ^= c;
+        h *= 1099511628211ull;
+    }
+    char tag[17];
+    std::snprintf(tag, sizeof tag, "%016llx",
+                  static_cast<unsigned long long>(h));
+
+    std::string name = anchor.filename().string();
+    if (name.empty()) name = "project";
+    name += '-';
+    name.append(tag, 8);
+
+    std::error_code ec;
+    fs::path out = d->path / name;
+    fs::create_directories(out, ec);
+    if (ec) return d->path;   // fall back rather than refuse to persist
+    return out;
+}
 
 bool truthy_default_on(const char* var) {
     const char* v = std::getenv(var);
@@ -417,8 +509,8 @@ std::string compress_passage(std::string_view query, std::string_view text,
 //   The learning loop, made real. A single process-wide store backs BOTH the
 //   write side (feedback::note_surfaced / note_file_opened free functions) and
 //   the read side (Retriever::Impl::feedback_boost). It persists an append-only
-//   TSV of `use`/`win` events to <cwd>/.agentty/rag_feedback.tsv and folds the
-//   Beta-smoothed per-path win-rate back into ranking as a BOUNDED nudge.
+//   TSV of `use`/`win` events to <project>/.agentty/rag_feedback.tsv and folds
+//   the Beta-smoothed per-path win-rate back into ranking as a BOUNDED nudge.
 //
 //   Signal semantics (matches docs/website/retrieval.md):
 //     use — search_docs surfaced this path (denominator).
@@ -495,27 +587,30 @@ private:
 
     std::mutex mu_;
     bool loaded_ = false;
-    std::string loaded_for_;                   // cwd the TSV was loaded for
+    std::string loaded_for_;                   // anchor the TSV was loaded for
     std::unordered_map<std::string, Tally> counts_;
     std::unordered_set<std::string> recent_;   // surfaced this session
 
     fs::path tsv_path_() const {
-        std::error_code ec;
-        auto cwd = fs::current_path(ec);
-        if (ec) return {};
-        return cwd / ".agentty" / "rag_feedback.tsv";
+        auto dir = rag_store_dir(kFeedbackSpec);
+        if (dir.empty()) return {};
+        return dir / "rag_feedback.tsv";
     }
 
-    // Load (once per cwd) the persisted counts so nudges survive restarts.
+    // Load (once per PROJECT) the persisted counts so nudges survive restarts.
+    //
+    // Keyed on the resolved directory, not the cwd. Keying on cwd was correct
+    // only while the path was cwd-derived; now that storage is anchored to the
+    // project marker, `cd src/` resolves to the SAME file, and a cwd key would
+    // reload it on every chdir — discarding the in-memory `recent_` set and
+    // with it this session's win signal.
     void ensure_loaded_() {
-        std::error_code ec;
-        auto cwd = fs::current_path(ec);
-        std::string cwds = ec ? std::string{} : cwd.string();
-        if (loaded_ && loaded_for_ == cwds) return;
+        auto p = tsv_path_();
+        const std::string key = p.empty() ? std::string{} : p.parent_path().string();
+        if (loaded_ && loaded_for_ == key) return;
         counts_.clear();
         loaded_ = true;
-        loaded_for_ = cwds;
-        auto p = tsv_path_();
+        loaded_for_ = key;
         if (p.empty()) return;
         std::ifstream f(p);
         if (!f) return;
@@ -1103,11 +1198,22 @@ struct Retriever::Impl {
     //  2. Because it is in the FILENAME rather than only the manifest,
     //     switching backends SWITCHES between warm indexes instead of
     //     invalidating one — free A/B between a local model and an endpoint.
+    //
+    // WHERE it lives is dirs::Root::Project, not the cwd. The old
+    // `fs::current_path() / ".agentty"` meant `cd src/ && agentty` built a
+    // SECOND index (#61) because the path moved with the shell. The anchor
+    // walks up to the project marker instead, so one checkout has one index
+    // regardless of which subdirectory you launch from.
+    //
+    // Note this does NOT migrate an index written by an older build: the
+    // meta carries the corpus `root` and refuses a load when it differs, so
+    // a stale file at the old location would have been rejected anyway
+    // rather than silently reused. It is left on disk for #62's sweep to
+    // collect.
     fs::path ragdb_path() {
-        std::error_code ec;
-        auto cwd = fs::current_path(ec);
-        if (ec) return {};
-        return cwd / ".agentty"
+        auto dir = rag_store_dir(kDocsIndexSpec);
+        if (dir.empty()) return {};
+        return dir
              / ("rag_docs." + ::agentty::rag::embed::identity_tag(cfg.embed) + ".ragdb");
     }
 
@@ -1272,14 +1378,13 @@ struct Retriever::Impl {
         return h;
     }
 
-    // Same identity discipline as the docs index — see ragdb_path().
+    // Same identity discipline as the docs index — see ragdb_path(), which
+    // also explains why this is dirs-resolved rather than cwd-relative.
     fs::path code_ragdb_path() const {
-        std::error_code ec;
-        auto cwd = fs::current_path(ec);
-        return ec ? fs::path{}
-                  : cwd / ".agentty"
-                        / ("rag_code." + ::agentty::rag::embed::identity_tag(cfg.embed)
-                           + ".ragdb");
+        auto dir = rag_store_dir(kCodeIndexSpec);
+        if (dir.empty()) return {};
+        return dir
+             / ("rag_code." + ::agentty::rag::embed::identity_tag(cfg.embed) + ".ragdb");
     }
 
     fs::path code_meta_path() const {

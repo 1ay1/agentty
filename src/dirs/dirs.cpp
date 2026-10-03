@@ -126,7 +126,16 @@ void warn_once(std::string_view env, const fs::path& bad,
     auto root = root_for(spec.root);
     if (!root) return std::unexpected(root.error());
 
-    const fs::path dflt = *root / fs::path{spec.leaf};
+    // An EMPTY leaf means "the root itself" — a caller that owns its own
+    // filename (rag appends rag_docs.<tag>.ragdb) and wants the directory.
+    //
+    // Must not go through operator/: joining an empty path appends a
+    // trailing separator, so `root / ""` compares UNEQUAL to `root` even
+    // though it names the same directory. That inequality is invisible
+    // until something compares two resolved paths, which is exactly what a
+    // "did this move?" check does.
+    const fs::path dflt = spec.leaf.empty() ? *root
+                                            : *root / fs::path{spec.leaf};
 
     // $env wins when set and NON-EMPTY. An exported-but-blank variable is a
     // common shell accident and must relocate nothing.

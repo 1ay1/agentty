@@ -4,6 +4,30 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **`$AGENTTY_RAG_DIR`** — relocate retrieval indexes
+  ([#61](https://github.com/1ay1/agentty/issues/61)). These are the biggest
+  thing agentty writes per project (31 MB of code index + 7 MB of docs index
+  on this repo) and they live under `<project>/.agentty`, so none of
+  `$AGENTTY_THREADS_DIR` / `$AGENTTY_CACHE_DIR` / `$AGENTTY_LOGS_DIR` moved
+  them — those relocate the *user* root. With the override set, each project
+  gets its own readable subdirectory (`myrepo-04b42962/`) so two checkouts
+  pointed at one location don't fight over the same file.
+
+### Fixed
+- **Launching from a subdirectory built a second retrieval index.**
+  `cd src/ && agentty` wrote its own `src/.agentty/` — another ~38 MB —
+  because the index path was derived from the process cwd. It now resolves
+  against the nearest enclosing `.git`/`.agentty`/`.hg`/`.svn`, so one
+  checkout has one index regardless of where you start agentty.
+
+  Nothing migrates an index written by an older build. That is deliberate
+  rather than lazy: the index metadata records which corpus root it was built
+  for and refuses to load when it differs, so a file at the old location
+  would have been rejected and rebuilt anyway. Old files are left for the
+  stale-index sweep ([#62](https://github.com/1ay1/agentty/issues/62)) and
+  can be deleted by hand at any time.
+
 ## [0.9.19] - 2026-10-02
 
 ### Fixed

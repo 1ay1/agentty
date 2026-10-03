@@ -111,6 +111,13 @@ struct Spec {
 
     // The leaf under the resolved root. A subdirectory name ("threads",
     // "rag"); dirs only ever joins it on.
+    //
+    // EMPTY means "the root itself", for a caller that owns its own
+    // filenames and just wants the directory (rag appends
+    // rag_docs.<embedder-tag>.ragdb). Resolution special-cases it so the
+    // result has no trailing separator — `root / ""` names the same
+    // directory but compares UNEQUAL to `root`, which silently breaks any
+    // "did this path move?" comparison.
     std::string_view leaf;
 
     // Override variable. Empty ⇒ deliberately NOT overridable, which is a

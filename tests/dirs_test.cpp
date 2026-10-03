@@ -269,6 +269,50 @@ int main() {
               "lifecycle: rebuildable + keep_last sweeps");
     }
 
+    // ── 12. the RAG Spec shape: empty leaf + override ────────────────────
+    // rag's Specs use leaf="" (they want the .agentty root itself, then add
+    // their own filename) and share $AGENTTY_RAG_DIR. Pinned here because an
+    // empty leaf is an easy thing to break with a stray path join, and
+    // because this is the exact shape #61's fix ships.
+    {
+        const fs::path proj = g_sandbox / "ragproj";
+        const fs::path deep = proj / "src" / "rag";
+        fs::create_directories(deep);
+        fs::create_directories(proj / ".git");
+        const fs::path cwd_before = fs::current_path();
+
+        const Spec rag{.root = Root::Project, .leaf = "", .env = "AGENTTY_RAG_DIR"};
+
+        fs::current_path(proj);
+        agentty::tools::util::set_workspace_root(proj);
+        auto top = resolve(rag);
+
+        fs::current_path(deep);
+        agentty::tools::util::set_workspace_root(deep);
+        auto sub = resolve(rag);
+
+        check(top.has_value() && sub.has_value(), "rag spec: resolved from both");
+        if (top && sub) {
+            check(top->path == fs::weakly_canonical(proj) / ".agentty",
+                  "rag spec: empty leaf yields the .agentty root itself");
+            check(top->path == sub->path,
+                  "rag spec: ONE index dir from root and from src/rag (#61)");
+        }
+
+        // And the override relocates it, which is the #61 feature half.
+        const fs::path moved = g_sandbox / "ragmoved";
+        ::setenv("AGENTTY_RAG_DIR", moved.c_str(), 1);
+        auto over = resolve(rag);
+        check(over.has_value(), "rag spec: override resolved");
+        if (over) {
+            check(over->path == moved, "rag spec: $AGENTTY_RAG_DIR honoured");
+            check(over->origin == Origin::Override, "rag spec: origin is Override");
+        }
+        ::unsetenv("AGENTTY_RAG_DIR");
+
+        fs::current_path(cwd_before);
+    }
+
     // ── markers are non-empty and include the common case ────────────────
     {
         auto m = project_markers();
