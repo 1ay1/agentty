@@ -4,6 +4,18 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **shell tool: models that send `cmd` instead of `command` no longer fail.**
+  Laguna S 2.1 (and models cross-trained on OpenAI-style specs) reliably emit
+  the shell tool's command parameter as `cmd`. The dispatcher's ArgReader
+  already accepted it, but the host-side required-field guard rejected the
+  call first with "missing the required field `command`" — a wasted failed
+  call every time. The guard is now alias-aware (matching the ArgReader
+  table: `cmd`, `shell_command`, `script`, `run`, `cmdline`) and parsed tool
+  args are canonified (`cmd` → `command`) at every stream-parse site, so the
+  permission card, the live output panel, and the shell-detour check all see
+  the canonical key.
+
 ### Added
 - **`$AGENTTY_RAG_DIR`** — relocate retrieval indexes
   ([#61](https://github.com/1ay1/agentty/issues/61)). These are the biggest

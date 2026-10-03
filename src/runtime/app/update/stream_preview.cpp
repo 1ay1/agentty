@@ -276,13 +276,13 @@ void update_stream_preview(ToolUse& tc) {
                 try_set_partial("new_string", kNewStrAliases);
         }
     }
-    else if (n == "shell") { try_set("command"); pull_desc(); }
+    else if (n == "shell") { try_set("command", kCommandAliases); pull_desc(); }
     else if (n == "grep")  { try_set("pattern"); try_set("path", kPathAliases); pull_desc(); }
     else if (n == "glob")  { try_set("pattern"); pull_desc(); }
     else if (n == "find_definition") { try_set("symbol"); pull_desc(); }
     else if (n == "web_fetch")       { try_set("url");    pull_desc(); }
     else if (n == "web_search")      { try_set("query");  pull_desc(); }
-    else if (n == "diagnostics")     { try_set("command"); pull_desc(); }
+    else if (n == "diagnostics")     { try_set("command", kCommandAliases); pull_desc(); }
     else if (n == "git_status" || n == "git_diff"
           || n == "git_log"    || n == "git_commit") {
         if (n == "git_commit") try_set("message");
