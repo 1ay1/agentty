@@ -572,6 +572,67 @@ int main() {
             expect(r.output.find("int main") != std::string::npos,
                    "an ordinary workspace file is still readable");
         }
+
+        // ── why the handoff gate cannot be a sandbox wall ───────────────
+        //
+        // The obvious objection to the trust-handoff gate is "claybin already
+        // confines the process, so how can the agent write .vscode/tasks.json
+        // at all?" This is the answer, measured rather than argued.
+        //
+        // A sandbox wall answers "may this PROCESS touch this PATH". For a
+        // path inside the workspace the answer is legitimately YES -- it has
+        // to be, or no build could write an object file. tasks.json is not
+        // dangerous because of WHERE it is; it is dangerous because VS Code
+        // executes it LATER, on the host, outside any sandbox we installed.
+        //
+        // So confinement and handoff are different questions, and this pair of
+        // checks pins that: the wall holds where confinement applies, and does
+        // not apply where it doesn't. If the first ever starts failing, the
+        // gate has become redundant; if the second ever starts failing, the
+        // sandbox has broken ordinary work.
+        {
+            std::printf("\nconfinement vs. handoff (why the gate exists):\n");
+            const std::string ws{kWorkspace};
+            std::filesystem::create_directories(ws + "/.vscode");
+
+            // OUTSIDE the workspace: the sandbox must refuse. This is
+            // confinement, and it is claybin's job.
+            //
+            // NOT /tmp. The posture mounts a private tmpfs there (see
+            // build_policy: "so nothing leaks into the host /tmp"), so a write
+            // to /tmp SUCCEEDS inside the guest and never reaches the host --
+            // which looks like an escape to a naive probe and is in fact the
+            // containment working. I wrote that probe first and it reported
+            // ESCAPED while the host file did not exist.
+            //
+            // $HOME is the honest test: real, outside the workspace, and not
+            // virtualised by the posture.
+            const char* home = std::getenv("HOME");
+            const std::string victim =
+                std::string{home ? home : "/root"} + "/agentty_confinement_probe";
+            auto out = sb::run_shell_command(
+                "echo escaped > " + victim + " && echo wrote || echo denied",
+                4096, std::chrono::seconds{15});
+            // The guest's own report is not evidence -- a virtualised target
+            // would say "wrote" too. Ask the HOST filesystem.
+            std::error_code hec;
+            const bool on_host = std::filesystem::exists(victim, hec);
+            if (on_host) std::printf("  ESCAPED to %s\n", victim.c_str());
+            expect(!on_host, "a write OUTSIDE the workspace never reaches the host");
+            std::error_code rec;
+            std::filesystem::remove(victim, rec);
+
+            // INSIDE the workspace, a host-trusted path: the sandbox ALLOWS
+            // it, and must. There is no wall here to lean on, which is exactly
+            // why the handoff gate is a separate mechanism that observes the
+            // filesystem around the call.
+            auto in = sb::run_shell_command(
+                "echo '{}' > .vscode/tasks.json && echo wrote || echo denied",
+                4096, std::chrono::seconds{15});
+            expect(in.output.find("wrote") != std::string::npos,
+                   "a write INSIDE the workspace is allowed -- so confinement "
+                   "cannot be what stops a trust handoff");
+        }
     }
 
     std::printf("\n%s\n", failures ? "LIVE CHECK FAILURES" : "all live checks passed");
