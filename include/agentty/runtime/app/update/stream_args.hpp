@@ -30,6 +30,17 @@ inline constexpr std::string_view kNewStrAliases[]  = {"new_string", "new_str", 
 inline constexpr std::string_view kContentAliases[] = {"content", "file_text", "text",
                                                         "file_content", "contents",
                                                         "body", "data"};
+// Keys models emit for the shell tool's `command` parameter. Laguna S 2.1
+// (and models cross-trained on OpenAI-style specs) reliably send `cmd`;
+// keep in sync with mcp-cpp's ArgReader alias table, which accepts these
+// at dispatch. The host-side truncation guard and every UI surface read
+// `tc.args["command"]` literally, so without canonification a `cmd`-shaped
+// call dies in the guard with "missing the required field `command`"
+// before the alias-aware dispatcher is ever consulted.
+inline constexpr std::string_view kCommandAliases[] = {"command", "cmd",
+                                                       "shell_command", "shell",
+                                                       "script", "run",
+                                                       "cmdline"};
 inline constexpr std::string_view kDisplayDescription = "display_description";
 
 // Hard cap on the live content preview shown during streaming. The widget
@@ -52,6 +63,41 @@ sniff_any(const std::string& raw,
         if (v) return v;
     }
     return std::nullopt;
+}
+
+// Rename alias keys to their canonical name IN PLACE in a parsed args
+// object: for the first alias of `canon` present in the object (with
+// `canon` itself absent), copy the value under `canon`. The original
+// entry stays so a model re-reading its own call still finds what it sent.
+// Returns true when any rename happened (callers use it to mark_args_dirty).
+[[nodiscard]] inline bool canonify_alias_keys(nlohmann::json& args,
+                                              std::string_view canon,
+                                              std::span<const std::string_view> keys) {
+    if (!args.is_object()) return false;
+    bool changed = false;
+    for (auto k : keys) {
+        if (k == canon) continue;
+        auto it = args.find(std::string{k});
+        if (it == args.end() || !it->is_string()) continue;
+        if (args.contains(std::string{canon})) break;   // canonical wins
+        args[std::string{canon}] = *it;                 // copy: alias entry stays intact
+        changed = true;
+    }
+    return changed;
+}
+
+// Canonify the alias keys the given built-in tool is known to receive into
+// their canonical names, in place. Currently covers the `command` family
+// (shell / diagnostics / test / process_start): Laguna S 2.1 and models
+// cross-trained on OpenAI-style specs emit `cmd` for shell, which the
+// dispatcher's ArgReader accepts but every host-side consumer reads
+// literally. Returns true when anything was renamed.
+[[nodiscard]] inline bool canonify_tool_args(std::string_view tool_name,
+                                             nlohmann::json& args) {
+    if (tool_name == "shell" || tool_name == "diagnostics"
+        || tool_name == "test" || tool_name == "process_start")
+        return canonify_alias_keys(args, "command", kCommandAliases);
+    return false;
 }
 
 // Attempt to parse the streaming buffer via the partial-JSON closer. Returns
@@ -135,7 +181,7 @@ missing_required_field(std::string_view tool_name, const nlohmann::json& args) {
         case K::Bash:
         case K::Diagnostics:
         case K::ProcessStart:
-            if (!is_nonempty_string("command")) return "command";
+            if (!is_nonempty_string_any(kCommandAliases)) return "command";
             return {};
         case K::ProcessPoll:
         case K::ProcessStop:

@@ -25,6 +25,7 @@
 #include "agentty/tool/registry.hpp"   // tools::progress::emit
 #include "agentty/tool/tool.hpp"       // tool::DynamicDispatch, ToolUse, Message …
 #include "agentty/tool/util/partial_json.hpp"   // args salvage for truncated tool JSON
+#include "agentty/runtime/app/update/stream_args.hpp"  // canonify_tool_args (`cmd`→`command`)
 
 #include "agentty/provider/anthropic/provider.hpp"
 #include "agentty/provider/anthropic/transport.hpp"
@@ -1305,6 +1306,12 @@ provider::StreamResult run_one_completion(Thread& thread,
                                              partial);
                             }
                         }
+                        // `cmd` → `command` etc. for the subagent's dispatcher
+                        // too — it funnels through the same ArgReader, but the
+                        // permission card and output panel read the canonical
+                        // key. (Laguna S 2.1 `cmd` finding.)
+                        if (tc) (void)::agentty::app::detail::canonify_tool_args(
+                                   tc->name.value, tc->args);
                     }
                     tool_json.erase(e.id.value);
                     if (tc) {

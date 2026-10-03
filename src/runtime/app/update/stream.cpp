@@ -291,13 +291,13 @@ json salvage_args(const ToolUse& tc) {
     else if (n == "edit")  { pick("path", kPathAliases);
                              pick("old_string", kOldStrAliases);
                              pick("new_string", kNewStrAliases); }
-    else if (n == "shell") { pick("command"); }
+    else if (n == "shell") { pick("command", kCommandAliases); }
     else if (n == "grep")  { pick("pattern"); pick("path", kPathAliases); }
     else if (n == "glob")  { pick("pattern"); }
     else if (n == "find_definition") { pick("symbol"); }
     else if (n == "web_fetch")       { pick("url"); }
     else if (n == "web_search")      { pick("query"); }
-    else if (n == "diagnostics")     { pick("command"); }
+    else if (n == "diagnostics")     { pick("command", kCommandAliases); }
     else if (n == "git_commit")      { pick("message"); }
     pick("display_description", std::span{&kDisplayDescription, 1});
     return out;
@@ -682,6 +682,10 @@ Cmd finalize_turn(Model& m, StopReason stop_reason) {
             if (!tc.args_streaming.empty() && tc.is_pending()) {
                 try {
                     tc.args = json::parse(tc.args_streaming);
+                    // `cmd` → `command` etc. before the required-field guard:
+                    // the guard and every downstream consumer read the
+                    // canonical key literally (Finding: Laguna S 2.1 shell).
+                    (void)detail::canonify_tool_args(tc.name.value, tc.args);
                     tc.mark_args_dirty();
                 } catch (const std::exception& ex) {
                     auto salvaged = salvage_args(tc);
@@ -1512,6 +1516,9 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
                 if (!tc.args_streaming.empty()) {
                     try {
                         tc.args = json::parse(tc.args_streaming);
+                        // Alias canonification before the guard — see
+                        // canonify_tool_args (Laguna S 2.1 `cmd` finding).
+                        (void)detail::canonify_tool_args(tc.name.value, tc.args);
                         tc.mark_args_dirty();
                         std::string{}.swap(tc.args_streaming);
                     } catch (const std::exception& ex) {

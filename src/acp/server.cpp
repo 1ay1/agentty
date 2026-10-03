@@ -35,6 +35,7 @@
 #include "agentty/runtime/view/helpers.hpp"
 #include "agentty/tool/policy.hpp"
 #include "agentty/tool/registry.hpp"
+#include "agentty/runtime/app/update/stream_args.hpp"  // canonify_tool_args (`cmd`→`command`)
 #include "agentty/tool/skills.hpp"
 #include "agentty/tool/spec.hpp"
 #include "agentty/tool/tool.hpp"
@@ -1831,6 +1832,12 @@ StopReason AgentServer::stream_completion(Session& sess, bool& out_cancelled,
                             try {
                                 tc.args = cur_tool_json.empty()
                                     ? json::object() : json::parse(cur_tool_json);
+                                // `cmd` → `command` etc. so the ACP card
+                                // title/content (tool_title, command_content)
+                                // read the canonical key — the client only
+                                // sees tc.args, never the raw stream JSON.
+                                (void)::agentty::app::detail::canonify_tool_args(
+                                    tc.name.value, tc.args);
                             } catch (const std::exception& e) {
                                 util::dbglog("acp.tool_args.parse", e.what());
                                 tc.args = json::object();
