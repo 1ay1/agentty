@@ -15,6 +15,7 @@
 // All functions are safe to call outside a git repo — they return
 // false/nullopt and do nothing.
 
+#include <optional>
 #include <string>
 
 namespace agentty::workspace {
@@ -22,6 +23,14 @@ namespace agentty::workspace {
 // True iff the workspace root is inside a git repository. Cached after
 // the first call (repo-ness doesn't change mid-session).
 [[nodiscard]] bool in_git_repo();
+
+// Non-blocking variant for the UI/reducer thread. Returns the cached answer
+// only if repo discovery has ALREADY been forced (by prewarm_repo_info() or
+// an earlier blocking caller); returns nullopt when the cache is still cold,
+// so the caller can skip git work this turn instead of spawning `git` on the
+// hot path. The very first Enter after launch -- before the startup prewarm
+// lands -- takes this nullopt path, keeping the keystroke instant on Windows.
+[[nodiscard]] std::optional<bool> in_git_repo_if_ready();
 
 // Warm the cached repo discovery on a detached background thread at
 // launch. The first call to in_git_repo()/create_checkpoint() otherwise

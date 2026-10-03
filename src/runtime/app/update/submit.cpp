@@ -329,8 +329,17 @@ Cmd submit_message(Model& m) {
     // (cfg.checkpoint_above), and "Rewind to checkpoint" in the palette
     // restores the files + truncates the transcript back to this point.
     // Outside a git repo this is a no-op — no id, no divider, no worker.
+    //
+    // Non-blocking repo probe: in_git_repo_if_ready() returns the cached
+    // answer only once startup's prewarm_repo_info() has forced discovery. On
+    // the very first Enter after launch — before the prewarm lands — it
+    // returns nullopt, and we skip the checkpoint for THIS turn rather than
+    // spawn `git` on the reducer thread (an expensive, visible freeze on
+    // Windows). The checkpoint resumes from the next turn, once the cache is
+    // warm. Losing a checkpoint on the opening turn is a fair trade for a
+    // keystroke that never stutters.
     std::optional<std::string> checkpoint_to_create;
-    if (workspace::in_git_repo()) {
+    if (workspace::in_git_repo_if_ready().value_or(false)) {
         user.checkpoint_id  = CheckpointId{user.id.value};
         checkpoint_to_create = user.id.value;
     }

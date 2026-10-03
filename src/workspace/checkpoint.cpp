@@ -18,6 +18,7 @@
 #include <atomic>
 #include <filesystem>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -227,11 +228,19 @@ bool current_paths(std::vector<std::string>& out) {
 
 bool in_git_repo() { return repo().in_repo; }
 
-// Set once the process is tearing down. prewarm_repo_info() checks it before
-// forcing the static, so a prewarm that hasn't started yet becomes a no-op
-// rather than reaching for statics on their way out.
+// Set true once repo() has been forced at least once (by the startup
+// prewarm OR by any earlier blocking caller). The submit path reads this to
+// decide whether in_git_repo() would answer instantly (cache warm) or would
+// have to spawn `git` on the UI thread (cache cold). See
+// in_git_repo_if_ready().
 namespace {
+std::atomic<bool> g_repo_ready{false};
 std::atomic<bool> g_repo_prewarm_cancelled{false};
+}
+
+std::optional<bool> in_git_repo_if_ready() {
+    if (!g_repo_ready.load(std::memory_order_acquire)) return std::nullopt;
+    return repo().in_repo;   // cache already built: this is a pure field read
 }
 
 void cancel_repo_info_prewarm() noexcept {
@@ -262,6 +271,7 @@ void prewarm_repo_info() {
     // at EOF, e.g. `type NUL | agentty.exe` under MSYS2).
     if (g_repo_prewarm_cancelled.load(std::memory_order_relaxed)) return;
     (void)repo();
+    g_repo_ready.store(true, std::memory_order_release);
 }
 
 CheckpointDiff checkpoint_summary(const std::string& id) {
