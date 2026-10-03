@@ -24,6 +24,11 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
   first prompt. Being wrong about which wall is up is a cosmetic bug; being
   wrong about whether there is one at all is the whole machine.
 
+  Drawn with maya rather than hand-rolled escape codes, so the amber comes
+  from your theme's warning slot and stays legible on a light terminal. Falls
+  back to an unstyled box when stderr is not a terminal or `NO_COLOR` is set —
+  a log file gets the box drawing without the escape bytes.
+
 ### Fixed
 - **Session stats ballooned on flaky providers.** Reported against the
   "where the time went" fix: precise with one model on a paid provider,

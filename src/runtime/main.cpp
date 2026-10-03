@@ -86,6 +86,7 @@
 #include "agentty/domain/bundled_catalog.hpp"
 #include "agentty/domain/profile.hpp"
 #include "agentty/runtime/app/deps.hpp"
+#include "agentty/runtime/view/palette.hpp"   // ui::status_warn — themed banner
 #include "agentty/runtime/app/program.hpp"
 #include "agentty/auth/auth.hpp"
 #include "agentty/io/persistence.hpp"
@@ -1415,28 +1416,69 @@ int main(int argc, char** argv) {
         // wrong about ON is a cosmetic bug, being wrong about OFF is the whole
         // machine.
         //
-        // Shape, not colour. The original ask was a blinking yellow banner,
-        // and that is one raw SGR sequence — which theme_discipline_test
-        // forbids on purpose: colour belongs in maya, so it follows the user's
-        // theme instead of assuming a dark terminal. maya has no blink
-        // attribute either, and this prints BEFORE maya starts, so there is no
-        // token to reach for. Rather than carve an exception into the one lint
-        // standing between us and hardcoded colour everywhere, the banner earns
-        // its weight from six lines of asterisks and the word UNCONFINED. That
-        // survives NO_COLOR, a pipe, a log file and a light terminal, none of
-        // which blink would have.
+        // Built as a maya Element and rendered with maya::print, not as raw
+        // escape codes. That is what lets the colour be a THEME TOKEN
+        // (ui::status_warn → ThemeSlot::Warning) instead of a hardcoded
+        // yellow: it resolves through the user's active scheme, so it stays
+        // legible on a light terminal and obeys NO_COLOR, and
+        // theme_discipline_test stays satisfied rather than needing an
+        // exception carved into it.
+        //
+        // maya::print is the static-output half of maya (print.hpp) — it
+        // renders a tree and returns; no alt-screen, no event loop, no
+        // terminal state to restore. Safe here, before the TUI exists.
+        //
+        // On stderr via render_to_string so it cannot be mistaken for tool
+        // output on stdout, which `agentty run` callers parse.
         if (mode == tools::util::sandbox::Mode::Off) {
-            std::fprintf(stderr,
-                "\n"
-                "*********************************************************\n"
-                "***                                                   ***\n"
-                "***             agentty: SANDBOX IS OFF               ***\n"
-                "***                                                   ***\n"
-                "***   Tool commands run UNCONFINED. They can read     ***\n"
-                "***   and write anything your user account can.       ***\n"
-                "***                                                   ***\n"
-                "*********************************************************\n"
-                "\n");
+            using namespace maya::dsl;
+            using maya::BorderStyle;
+            using maya::BorderTextPos;
+            using maya::BorderTextAlign;
+            const auto warn = ui::status_warn;
+            auto banner =
+                vstack()
+                    .padding(1, 2)
+                    .border(BorderStyle::Double)
+                    .border_color(warn)
+                    .border_text(" \xe2\x9a\xa0  SANDBOX IS OFF ",
+                                 BorderTextPos::Top, BorderTextAlign::Center)(
+                        text("Tool commands run UNCONFINED \xe2\x80\x94 "
+                             "they can read and write anything",
+                             ui::fg_bold(warn)),
+                        text("your user account can: every file, the "
+                             "network, your credentials.",
+                             ui::fg_bold(warn)),
+                        text(""),
+                        text("Re-enable with  --sandbox auto  "
+                             "or via Ctrl+K \xe2\x86\x92 Settings \xe2\x86\x92 Sandbox.",
+                             ui::fg_dim(ui::muted)));
+            // render_to_string_ansi, not maya::print: print() writes to
+            // STDOUT, and `agentty run` callers parse stdout. A banner there
+            // would corrupt the one stream a script reads.
+            //
+            // Colour only when it is wanted: the ansi variant ALWAYS emits
+            // SGR, so NO_COLOR and a non-tty stderr have to be honoured here
+            // rather than by the renderer. The plain variant draws the same
+            // box with the same text, just unstyled -- which is the right
+            // thing in a log file or a CI capture, where escape bytes are
+            // noise and the box drawing still reads fine.
+            const char* no_color = std::getenv("NO_COLOR");
+            const bool paint = ::isatty(fileno(stderr)) != 0
+                            && !(no_color && no_color[0]);
+            auto painted = paint
+                ? maya::render_to_string_ansi(std::move(banner), 74)
+                : maya::render_to_string(std::move(banner), 74);
+            // Both variants pad every row to `width`, so the final row is
+            // blank. Cut from the last border glyph -- the box drawing is the
+            // real end of the banner, and trailing-whitespace trimming misses
+            // the styled case (it ends in ESC[0m).
+            if (const auto end = painted.rfind("\xe2\x95\x9d");   // ╝
+                end != std::string::npos) {
+                const auto nl = painted.find('\n', end);
+                if (nl != std::string::npos) painted.resize(nl);
+            }
+            std::fprintf(stderr, "\n%s\n", painted.c_str());
         } else {
             std::fprintf(stderr, "agentty: %s\n",
                          tools::util::sandbox::describe_state().c_str());
