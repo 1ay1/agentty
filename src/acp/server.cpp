@@ -2149,10 +2149,16 @@ bool AgentServer::run_tools(Session& sess, bool& out_cancelled) {
             upd.status    = a::Just(a::ToolCallStatus::Completed);
             upd.content   = a::Just(std::move(content));
             upd.rawOutput = a::Just<json>(json{{"text", result->text}});
-            const auto exec_since = tc.executing_since();
+            // tool_start, NOT tc.executing_since(). ACP never moves a tool
+            // into Running, so executing_since() has nothing recorded to read
+            // and ALWAYS returns its liveness fallback, card birth -- which
+            // here includes the session/request_permission round trip to the
+            // client. tool_start is stamped above at the std::async that is
+            // this path's actual dispatch, and the timeout branch already
+            // uses it. The two terminal paths now agree.
             set_status(tc, ToolUse::Done{{}, {}, result->text});
             if (auto* d = std::get_if<ToolUse::Done>(&tc.status))
-                d->executing_since = exec_since;
+                d->executing_since = tool_start;
         } else {
             std::string detail = result.error().render();
             a::List<a::ToolCallContent> content;
@@ -2167,10 +2173,10 @@ bool AgentServer::run_tools(Session& sess, bool& out_cancelled) {
             upd.status    = a::Just(a::ToolCallStatus::Failed);
             upd.content   = a::Just(std::move(content));
             upd.rawOutput = a::Just<json>(json{{"text", detail}, {"error", true}});
-            const auto exec_since = tc.executing_since();
+            // Same as the Done branch: tool_start is the dispatch stamp.
             set_status(tc, ToolUse::Failed{{}, {}, detail});
             if (auto* fp = std::get_if<ToolUse::Failed>(&tc.status))
-                fp->executing_since = exec_since;
+                fp->executing_since = tool_start;
         }
 
         send_update(sess.id, a::SU_ToolCallUpdate{std::move(upd)});

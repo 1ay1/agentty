@@ -1638,18 +1638,13 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
                 if (output.empty())
                     output = e.failed ? "External agent tool failed."
                                       : "Executed by external agent.";
-                const auto exec_since = tc->executing_since();
-                if (e.failed) {
-                    tc->status = ToolUse::Failed{tc->started_at(), now,
-                                                 std::move(output)};
-                    std::get<ToolUse::Failed>(tc->status).executing_since =
-                        exec_since;
-                } else {
-                    tc->status = ToolUse::Done{tc->started_at(), now,
-                                               std::move(output)};
-                    std::get<ToolUse::Done>(tc->status).executing_since =
-                        exec_since;
-                }
+                // An EXTERNAL agent ran this, so agentty never dispatched it
+                // and holds no execution window. settle_* records none rather
+                // than copying card birth in as one -- we genuinely do not
+                // know how long the remote side spent, and a guess dressed
+                // up as a measurement is worse than an honest blank.
+                if (e.failed) tc->settle_failed(now, std::move(output));
+                else          tc->settle_done(now, std::move(output));
             }
             resync_live_tool_viewer(m);
             return Cmd::none();
@@ -2823,10 +2818,15 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
                     cache.streaming->finish();
                 }
                 for (auto& tc : last.tool_calls) {
-                    if (!tc.is_terminal()) {
-                        tc.status = ToolUse::Failed{
-                            tc.started_at(), now, "cancelled"};
-                    }
+                    // settle_failed, not a bare Failed{}. This catches RUNNING
+                    // tools too -- Esc lands mid-execution -- and a bare
+                    // Failed{} drops their window, so a tool that really ran
+                    // 40 s before the cancel vanished from tool time. The
+                    // opposite failure of the laundering bug, same root:
+                    // the window has to be carried across the overwrite, and
+                    // carried only if it was ever recorded.
+                    if (!tc.is_terminal())
+                        tc.settle_failed(now, "cancelled");
                     std::string{}.swap(tc.args_streaming);
                 }
                 if (last.text.empty() && last.tool_calls.empty()) {

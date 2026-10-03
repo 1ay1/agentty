@@ -1298,14 +1298,11 @@ Cmd token_refreshed(Model& m, auth::TokenResult result) {
                 auto& last = m.d.current.messages.back();
                 last.error = text;
                 for (auto& tc : last.tool_calls) {
-                    if (!tc.is_terminal()) {
-                        const auto exec_since = tc.executing_since();
-                        tc.status = ToolUse::Failed{
-                            tc.started_at(), now,
-                            "auth refresh failed"};
-                        std::get<ToolUse::Failed>(tc.status).executing_since =
-                            exec_since;
-                    }
+                    // Typically still Pending/Approved -- the stream parked
+                    // before dispatch -- so this is a settle that MUST record
+                    // no window. See ToolUse::settle_failed.
+                    if (!tc.is_terminal())
+                        tc.settle_failed(now, "auth refresh failed");
                     std::string{}.swap(tc.args_streaming);
                 }
                 if (last.text.empty() && last.tool_calls.empty()) {

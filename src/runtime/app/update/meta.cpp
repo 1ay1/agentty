@@ -726,16 +726,19 @@ Cmd meta_update(Model& m, msg::MetaMsg mm) {
                                         now - exec_from).count();
                         auto quiet = std::chrono::duration_cast<std::chrono::seconds>(
                                         now - liveness).count();
-                        tc.status = ToolUse::Failed{started, now,
+                        // The MESSAGE may use exec_from, which falls back to
+                        // liveness for a stamp-less Running -- a display needs
+                        // some number. The STORED window must not: that is an
+                        // accounting fact, and settle_failed records only a
+                        // real dispatch stamp (see ToolUse::settle_failed).
+                        tc.settle_failed(now,
                             "tool ran " + std::to_string(secs) + "s ("
                             + std::to_string(quiet) + "s with no progress) "
                             "\xe2\x80\x94 worker likely hung on a blocking "
                             "syscall; failing it so the turn can recover. "
                             "The worker thread may continue in the "
                             "background; its result is discarded if it "
-                            "ever returns."};
-                        std::get<ToolUse::Failed>(tc.status).executing_since =
-                            exec_from;
+                            "ever returns.");
                         wedged = true;
                     }
                 }

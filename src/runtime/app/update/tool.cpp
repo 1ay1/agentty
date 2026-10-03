@@ -323,8 +323,6 @@ void apply_tool_output(Model& m, const ToolCallId& id,
         // permanently-Running spinner in scrollback.
         if (tc.is_terminal()) return;
         auto now = std::chrono::steady_clock::now();
-        auto started = tc.started_at();
-        auto exec_since = tc.executing_since();
         if (result) {
             // Drift reminder. Shell begets shell: after a shell inspection
             // the next one is shell 81% of the time (22% after a native
@@ -350,18 +348,15 @@ void apply_tool_output(Model& m, const ToolCallId& id,
             } else {
                 m.d.shell_detour_streak = 0;
             }
-            tc.status = ToolUse::Done{started, now,
-                clamp_output(std::move(*result)), std::move(images)};
-            std::get<ToolUse::Done>(tc.status).executing_since = exec_since;
+            tc.settle_done(now, clamp_output(std::move(*result)),
+                           std::move(images));
         } else {
             // Render typed error as "[kind] detail" so the category
             // is visible in tool-card / history without losing the
             // human-readable detail. The model needs only the
             // string back; the kind is preserved structurally for
             // the future, when the view branches on category.
-            tc.status = ToolUse::Failed{started, now,
-                clamp_output(result.error().render())};
-            std::get<ToolUse::Failed>(tc.status).executing_since = exec_since;
+            tc.settle_failed(now, clamp_output(result.error().render()));
         }
         release_streaming_buffers(tc);
     });
@@ -410,15 +405,16 @@ void mark_tool_rejected(Model& m, const ToolCallId& id,
                         std::string_view reason) {
     with_live_tool(m, id, [&](ToolUse& tc) {
         auto now = std::chrono::steady_clock::now();
-        auto exec_since = tc.executing_since();   // BEFORE the overwrite
         if (reason.empty()) {
             tc.status = ToolUse::Rejected{now};
         } else {
-            // A reason means a policy/failure rejection mid-run; preserve
-            // the exec window so the stats fold keeps the real duration.
-            tc.status = ToolUse::Failed{tc.started_at(), now,
-                clamp_output(std::string{reason})};
-            std::get<ToolUse::Failed>(tc.status).executing_since = exec_since;
+            // A reason means a policy/failure rejection. settle_failed keeps a
+            // real exec window if the tool had dispatched, and records NONE if
+            // it hadn't -- which for "User rejected this tool call" is always:
+            // the tool was sitting at the permission prompt. Copying with
+            // executing_since() here used to bake card birth in as a fake
+            // dispatch stamp and bill the whole prompt wait as tool time.
+            tc.settle_failed(now, clamp_output(std::string{reason}));
         }
         release_streaming_buffers(tc);
     });
@@ -523,11 +519,7 @@ Cmd tool_update(Model& m, msg::ToolMsg tm) {
                         "thread may continue in the background; its "
                         "result will be discarded if it ever returns.";
                 }
-                auto exec_since = tc.executing_since();   // BEFORE overwrite
-                tc.status = ToolUse::Failed{
-                    tc.started_at(), now, std::move(reason)};
-                std::get<ToolUse::Failed>(tc.status).executing_since =
-                    exec_since;
+                tc.settle_failed(now, std::move(reason));
                 flipped = true;
             });
             if (!flipped) return Cmd::none();

@@ -795,7 +795,41 @@ Cmd launch_stream(Model& m) {
     // transitioned us into an active phase by the time launch_stream
     // runs, so active_ctx is non-null here.
     auto cancel = std::make_shared<http::CancelToken>();
-    if (auto* a = active_ctx(m.s.phase)) a->cancel = cancel;
+    if (auto* a = active_ctx(m.s.phase)) {
+        a->cancel = cancel;
+
+        // Start the per-stream clock HERE, at the one point every stream
+        // launch passes through -- submit, retry, truncation retry, the
+        // post-tool continuation, proactive-context release, compaction.
+        //
+        // It used to be (re)started only by the StreamStarted event, and only
+        // two transport families emit that: Anthropic (on message_start) and
+        // the Responses codec. The OpenAI-chat transport -- every OpenRouter,
+        // Groq, Mistral, llama.cpp and LM Studio user -- and Ollama emit none.
+        // On those, `started` stayed at the value submit stamped for the
+        // whole turn, so finalize_turn's ttft = first_delta_at - started
+        // absorbed:
+        //   * every retry's backoff sleep (a flaky free tier retries a lot)
+        //   * every PRIOR sub-turn's generation and every tool's runtime,
+        //     because the post-tool continuation never reset the clock
+        //
+        // That is why the stats panel was right on a stable paid Anthropic
+        // session and ballooned on OpenRouter's free tier: the accounting was
+        // fine, the clock it read was not being started.
+        //
+        // first_delta_at / live_delta_bytes / the rate sampler are reset with
+        // it, matching what StreamStarted did, so ttft and generation time
+        // are both per-stream. StreamStarted still resets them too, which on
+        // Anthropic just moves the origin forward by the connect time -- the
+        // honest place for "provider started answering".
+        const auto now = std::chrono::steady_clock::now();
+        a->started                = now;
+        a->last_event_at          = now;
+        a->first_delta_at         = {};
+        a->live_delta_bytes       = 0;
+        a->rate_last_sample_at    = {};
+        a->rate_last_sample_bytes = 0;
+    }
 
     // Snapshot the per-turn retry counter so the worker can stamp it on
     // the wire as x-stainless-retry-count. Reflecting the real attempt

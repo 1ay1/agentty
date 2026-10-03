@@ -195,6 +195,128 @@ TEST_CASE("stats: pre-exec-window threads fall back to no tool time, not garbage
     CHECK(f.tools.total == 1);
 }
 
+// ── Settling a tool must not LAUNDER card-birth into the exec stamp ───
+//
+// The two accessors have opposite semantics, and the header says so:
+//   executing_since()  liveness -- falls back to started_at so the card's
+//                      elapsed timer always has a value
+//   exec_window_at()   accounting -- only a RECORDED dispatch counts
+//
+// Every settle site copies the stamp across the status overwrite. If it
+// copies with executing_since(), then a tool that NEVER dispatched -- still
+// Pending or Approved when it settles -- picks up the fallback, card birth,
+// and writes it into Failed::executing_since as though it were a real
+// dispatch. exec_window_at() then sees a non-zero stamp and bills the whole
+// card life: the permission wait, the queueing, all of it. That is the exact
+// 2h20m lie the exec window exists to prevent, re-entering through the
+// paths where the turn goes wrong -- rejection, cancel, watchdog, stream
+// death, provider retry. "Works if nothing goes wrong along the turns."
+//
+// This drives the settle rule on the real types rather than through the
+// reducer, because the bug is in which accessor is read, and that is fully
+// observable here.
+namespace {
+
+using Clock = std::chrono::steady_clock;
+
+[[nodiscard]] Clock::time_point at_ms(std::int64_t ms) {
+    return Clock::time_point{std::chrono::milliseconds{ms}};
+}
+
+// What every settle site now does: ToolUse::settle_failed. Driven through
+// the REAL helper rather than a re-implementation in the test, so if the
+// helper ever goes back to reading the liveness accessor these fail.
+Message settle_failed(agentty::ToolUse::Status before, Clock::time_point now) {
+    Message m = unrouted("m1");
+    agentty::ToolUse tc;
+    tc.id = agentty::ToolCallId{"call1"};
+    tc.name = agentty::ToolName{"shell"};
+    tc.status = std::move(before);
+    tc.settle_failed(now, "rejected");
+    m.tool_calls.push_back(std::move(tc));
+    return m;
+}
+
+// The pre-fix settle, kept ONLY as the negative control: capture with the
+// liveness accessor, overwrite, write it back -- what ~17 sites did by hand.
+Message settle_failed_the_old_way(agentty::ToolUse::Status before,
+                                  Clock::time_point now) {
+    Message m = unrouted("m1");
+    agentty::ToolUse tc;
+    tc.id = agentty::ToolCallId{"call1"};
+    tc.name = agentty::ToolName{"shell"};
+    tc.status = std::move(before);
+    const auto stamp = tc.executing_since();
+    tc.status = agentty::ToolUse::Failed{tc.started_at(), now, "rejected"};
+    std::get<agentty::ToolUse::Failed>(tc.status).executing_since = stamp;
+    m.tool_calls.push_back(std::move(tc));
+    return m;
+}
+
+}  // namespace
+
+TEST_CASE("stats: a tool rejected at the prompt bills no tool time") {
+    // Card born at t=1s, user stares at the permission prompt for 300 s,
+    // then rejects. It never ran. Tool time must be ZERO.
+    auto m = settle_failed(agentty::ToolUse::Pending{at_ms(1'000)}, at_ms(301'000));
+    const auto f = rebuild(thread_of({std::move(m)}));
+    CHECK_MESSAGE(f.tools.latency.count() == 0,
+                  "a never-dispatched tool has no execution window");
+    CHECK(f.tools.total == 1);   // still a CALL
+}
+
+TEST_CASE("stats: an approved-but-queued tool that is cancelled bills nothing") {
+    // Approved, then cancelled before dispatch -- the batch was still being
+    // kicked. Same rule, different pre-dispatch state.
+    auto m = settle_failed(agentty::ToolUse::Approved{at_ms(1'000)}, at_ms(90'000));
+    const auto f = rebuild(thread_of({std::move(m)}));
+    CHECK(f.tools.latency.count() == 0);
+}
+
+TEST_CASE("stats: the old settle laundered the approval wait") {
+    // The negative control, and the reason the tests above exist. Copying
+    // with executing_since() -- the liveness accessor -- turns card birth
+    // into a fake dispatch stamp, and the 300 s spent at the prompt comes
+    // back as tool time. If this ever stops reporting 300 s, the accessors'
+    // semantics changed and the tests above need re-reading.
+    auto m = settle_failed_the_old_way(agentty::ToolUse::Pending{at_ms(1'000)},
+                                       at_ms(301'000));
+    const auto f = rebuild(thread_of({std::move(m)}));
+    CHECK(f.tools.latency.count() == 1);
+    CHECK(f.tools.latency.sum() == 300'000);
+}
+
+TEST_CASE("stats: a tool that DID run keeps its window through a failed settle") {
+    // The other half: the fix must not lose a real window. Dispatched at
+    // t=301s after a 300 s wait, killed by the watchdog at t=303.5s. Tool
+    // time is the 2.5 s it actually ran.
+    agentty::ToolUse::Running run{};
+    run.started_at = at_ms(1'000);
+    run.executing_since = at_ms(301'000);
+
+    auto m = settle_failed(std::move(run), at_ms(303'500));
+    const auto f = rebuild(thread_of({std::move(m)}));
+    CHECK(f.tools.latency.count() == 1);
+    CHECK(f.tools.latency.sum() == 2'500);
+}
+
+TEST_CASE("stats: settling twice is idempotent on the window") {
+    // A tool can be settled, then hit by a later sweep (cancel after a
+    // watchdog kill). Failed carries the window, and exec_window_at() reads
+    // Failed, so the second settle must preserve -- not drop or reset -- it.
+    agentty::ToolUse tc;
+    tc.id = agentty::ToolCallId{"call1"};
+    tc.name = agentty::ToolName{"shell"};
+    agentty::ToolUse::Running run{};
+    run.started_at = at_ms(1'000);
+    run.executing_since = at_ms(301'000);
+    tc.status = std::move(run);
+    tc.settle_failed(at_ms(303'500), "wedged");
+    tc.settle_failed(at_ms(400'000), "cancelled");
+    REQUIRE(tc.exec_window_at().has_value());
+    CHECK(*tc.exec_window_at() == at_ms(301'000));
+}
+
 TEST_CASE("stats: routed and unrouted are separate buckets") {
     // THE property. A Smart-Mode-off turn has no role; counting it as
     // Strategic would overstate the flagship's share, and dropping it

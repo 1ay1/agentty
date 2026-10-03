@@ -5,6 +5,32 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- **Session stats ballooned on flaky providers.** Reported against the
+  "where the time went" fix: precise with one model on a paid provider,
+  wildly inflated on OpenRouter's free tier. Two separate bugs, both of
+  which only show up when a turn goes wrong — which on a free tier is
+  most turns.
+
+  *Time to first token swallowed the whole turn.* The per-stream clock was
+  only restarted by a `StreamStarted` event, and only Anthropic and the
+  Responses codec emit one. On the OpenAI-chat transport (OpenRouter, Groq,
+  Mistral, llama.cpp, LM Studio) and Ollama, the clock started once at
+  submit and never again, so "Waiting" absorbed every retry's backoff and
+  every earlier sub-turn and tool. It now restarts whenever a stream
+  launches — the one point every path shares, so no transport has to
+  remember to.
+
+  *A tool that never ran could be billed as running.* Settling a tool
+  copied its start time with the accessor meant for the live elapsed
+  timer, which falls back to the card's birth when a tool hasn't
+  dispatched. A tool rejected at the permission prompt, cancelled while
+  queued, or failed by a dropped connection therefore had its whole wait
+  recorded as execution time. Settling now goes through one helper that
+  records an execution window only if there was one. The ACP path had the
+  sharpest version of this: it never marks a tool as running at all, so
+  every ACP tool's window was the fallback. It now uses the dispatch time
+  it already had.
+
 - **The `git_*` tools ran outside the sandbox.** A repository can execute code
   on your behalf — `pre-commit` and `commit-msg` hooks, `post-checkout`, a
   `core.fsmonitor` or credential helper configured in `.git/config` — and all

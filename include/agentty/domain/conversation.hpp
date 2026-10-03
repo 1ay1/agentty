@@ -381,6 +381,47 @@ struct ToolUse {
         }, status);
     }
 
+    // ── Settle: the ONE way to move a tool into a terminal state ──────────
+    //
+    // Every terminal transition has to carry the execution window across the
+    // status overwrite, because Running is the only state that holds it and
+    // the overwrite destroys Running. That was being done by hand at ~17
+    // sites as "capture executing_since(), overwrite, write it back" -- and
+    // every one of them read the WRONG accessor.
+    //
+    // executing_since() is the LIVENESS read: for a tool that never
+    // dispatched it falls back to started_at, card birth, so the elapsed
+    // timer has something to show. Copied into Failed::executing_since that
+    // fallback stops being a display convenience and becomes a recorded
+    // fact: "this tool started executing at card birth". exec_window_at()
+    // then reports it as a real window, and the fold bills the entire card
+    // life -- permission wait, queueing, the user's lunch -- as tool time.
+    //
+    // It only bites on a tool that settles BEFORE dispatch, which is exactly
+    // the set of paths where a turn goes wrong: rejected at the prompt,
+    // cancelled while queued, watchdog-killed with args never finished,
+    // stream death, token refresh failure. On a turn where nothing goes wrong
+    // every tool dispatches first, the copied value is the real stamp, and
+    // the numbers are right -- which is why it looked fine on a stable paid
+    // provider and drifted on a flaky one.
+    //
+    // These helpers read exec_window_at(), so "never dispatched" stays
+    // "never dispatched" through the settle. Use them instead of assigning
+    // Failed{}/Done{} directly to a live tool.
+    void settle_failed(std::chrono::steady_clock::time_point now,
+                       std::string output) {
+        const auto window = exec_window_at();   // BEFORE the overwrite
+        status = Failed{started_at(), now, std::move(output)};
+        if (window) std::get<Failed>(status).executing_since = *window;
+    }
+    void settle_done(std::chrono::steady_clock::time_point now,
+                     std::string output,
+                     std::vector<ImageContent> images = {}) {
+        const auto window = exec_window_at();   // BEFORE the overwrite
+        status = Done{started_at(), now, std::move(output), std::move(images)};
+        if (window) std::get<Done>(status).executing_since = *window;
+    }
+
     // String tag for serialization / logging. Stable across versions; the
     // reverse direction lives in persistence.cpp.
     [[nodiscard]] std::string_view status_name() const noexcept {

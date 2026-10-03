@@ -48,8 +48,20 @@ arrives (`live_delta_bytes`) and divide by ~4 (the Claude tokenizer
 averages ~3.5–4 bytes per token) to get the live rate.
 
 `first_delta_at` is stamped on the first non-empty delta so the divisor
-excludes time-to-first-token (TTFT).  Both reset on every
-`StreamStarted` so each sub-turn after a tool exec measures cleanly.
+excludes time-to-first-token (TTFT).  Both reset when a stream is
+**launched** (`cmd::launch_stream`), so each sub-turn after a tool exec
+and each retry measures cleanly.  `StreamStarted` resets them again where
+a transport emits it, which moves the origin forward past connect time.
+
+The launch-time reset is the one that matters, and it is not redundant.
+Only Anthropic (`message_start`) and the Responses codec emit
+`StreamStarted`.  The OpenAI-chat transport — OpenRouter, Groq, Mistral,
+llama.cpp, LM Studio — and Ollama emit none, so when the reset lived only
+on `StreamStarted` their clock was started once by submit and never
+again.  The turn's ttft then absorbed every retry backoff, every prior
+sub-turn and every tool's runtime, which is why stats were precise on a
+stable Anthropic session and ballooned on OpenRouter's free tier.
+`tests/stream_clock_test.cpp` drives that path with no `StreamStarted`.
 
 ## Sparkline ring buffer
 
@@ -65,8 +77,9 @@ numeric rate, giving the user:
 
 `rate_history_pos` and `rate_history_full` track ring-buffer state;
 `rate_last_sample_at` and `rate_last_sample_bytes` are the previous
-sample point used to compute the next delta.  Reset on every
-`StreamStarted` so each sub-turn measures its own pace.
+sample point used to compute the next delta.  Reset at every stream
+launch (and again on `StreamStarted`, where emitted) so each sub-turn
+measures its own pace.
 
 ## Cancel handle
 
