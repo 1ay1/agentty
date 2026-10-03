@@ -38,57 +38,6 @@ namespace agentty::ui::panel {
 
 namespace {
 
-// Render a path list as one editable line. Comma-separated rather than a
-// sub-list pane: these are usually zero or one entries, and a whole overlay
-// for "sometimes two paths" is more UI than the problem deserves.
-[[nodiscard]] std::string join(const std::vector<std::string>& v) {
-    std::string out;
-    for (std::size_t i = 0; i < v.size(); ++i) {
-        if (i) out += ", ";
-        out += v[i];
-    }
-    return out;
-}
-
-[[nodiscard]] std::string join_ports(const std::vector<std::uint16_t>& v) {
-    std::string out;
-    for (std::size_t i = 0; i < v.size(); ++i) {
-        if (i) out += ", ";
-        out += std::to_string(v[i]);
-    }
-    return out;
-}
-
-[[nodiscard]] std::vector<std::string> split(std::string_view s) {
-    std::vector<std::string> out;
-    std::size_t start = 0;
-    while (start <= s.size()) {
-        std::size_t comma = s.find(',', start);
-        std::string_view piece =
-            s.substr(start, comma == std::string_view::npos ? s.size() - start : comma - start);
-        // trim
-        while (!piece.empty() && (piece.front() == ' ' || piece.front() == '\t'))
-            piece.remove_prefix(1);
-        while (!piece.empty() && (piece.back() == ' ' || piece.back() == '\t'))
-            piece.remove_suffix(1);
-        if (!piece.empty()) out.emplace_back(piece);
-        if (comma == std::string_view::npos) break;
-        start = comma + 1;
-    }
-    return out;
-}
-
-[[nodiscard]] std::vector<std::uint16_t> split_ports(std::string_view s) {
-    std::vector<std::uint16_t> out;
-    for (const auto& tok : split(s)) {
-        unsigned long v = std::strtoul(tok.c_str(), nullptr, 10);
-        if (v > 0 && v <= 65535) out.push_back(static_cast<std::uint16_t>(v));
-    }
-    std::sort(out.begin(), out.end());
-    out.erase(std::unique(out.begin(), out.end()), out.end());
-    return out;
-}
-
 form::Field header(std::string label) {
     form::Field f;
     f.label = std::move(label);
@@ -632,11 +581,6 @@ sandbox_cfg::Config read_sandbox_form(const form::Form& f,
         if (const auto* fld = f.find(id))
             if (const auto* t = std::get_if<form::field::Toggle>(&fld->value)) return t->on;
         return fallback;
-    };
-    auto text_of = [&](std::string_view id) -> std::string {
-        if (const auto* fld = f.find(id))
-            if (const auto* t = std::get_if<form::field::Text>(&fld->value)) return t->value;
-        return {};
     };
     auto num_of = [&](std::string_view id, std::int64_t fallback) -> std::int64_t {
         if (const auto* fld = f.find(id))
