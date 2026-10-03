@@ -291,6 +291,38 @@ void install_crash_handler() {
 }
 #endif
 
+void fputs_utf8(FILE* f, std::string_view s) {
+#if defined(_WIN32)
+    const int fd = fileno(f);
+    if (fd >= 0 && ::_isatty(fd)) {
+        const intptr_t raw = ::_get_osfhandle(fd);
+        if (raw != -1) {
+            HANDLE h = reinterpret_cast<HANDLE>(raw);
+            DWORD mode = 0;
+            if (::GetConsoleMode(h, &mode)) {
+                const int need = ::MultiByteToWideChar(
+                    CP_UTF8, 0, s.data(), static_cast<int>(s.size()),
+                    nullptr, 0);
+                if (need > 0) {
+                    std::wstring wide(static_cast<size_t>(need), L'\0');
+                    if (::MultiByteToWideChar(
+                            CP_UTF8, 0, s.data(), static_cast<int>(s.size()),
+                            wide.data(), need) == need) {
+                        DWORD written = 0;
+                        if (::WriteConsoleW(h, wide.data(),
+                                            static_cast<DWORD>(wide.size()),
+                                            &written, nullptr)) {
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    }
+#endif
+    std::fwrite(s.data(), 1, s.size(), f);
+}
+
 void print_version() {
     std::printf("agentty %s\n", AGENTTY_VERSION);
     // Where diagnostics land, and whether they are being captured right now.
@@ -1478,7 +1510,12 @@ int main(int argc, char** argv) {
                 const auto nl = painted.find('\n', end);
                 if (nl != std::string::npos) painted.resize(nl);
             }
-            std::fprintf(stderr, "\n%s\n", painted.c_str());
+            std::string framed;
+            framed.reserve(painted.size() + 2);
+            framed += '\n';
+            framed += painted;
+            framed += '\n';
+            fputs_utf8(stderr, framed);
         } else {
             std::fprintf(stderr, "agentty: %s\n",
                          tools::util::sandbox::describe_state().c_str());
