@@ -75,16 +75,21 @@ const RepoInfo& repo() {
         // resolution (shared with git tools + normalize_path).
         std::string ws = util::project_root().string();
         if (ws.empty()) ws = util::workspace_root().string();
-        auto top = util::run_argv_s(
-            {"git", "-C", ws, "rev-parse", "--show-toplevel"}, 8192,
-            std::chrono::seconds{10});
-        if (!top.started || top.exit_code != 0) return r;
-        auto gd = util::run_argv_s(
-            {"git", "-C", ws, "rev-parse", "--absolute-git-dir"}, 8192,
-            std::chrono::seconds{10});
-        if (!gd.started || gd.exit_code != 0) return r;
-        r.root    = chomp(top.output);
-        r.git_dir = chomp(gd.output);
+        // ONE spawn, not two. `git rev-parse` prints each requested value on
+        // its own line in option order, so a single invocation yields both
+        // the worktree top-level (line 1) and the absolute git dir (line 2).
+        // Process creation is the expensive part on Windows, and this probe
+        // sits on the first turn's critical path (submit_message ->
+        // in_git_repo) -- halving the spawns halves that cost.
+        auto res = util::run_argv_s(
+            {"git", "-C", ws, "rev-parse", "--show-toplevel",
+             "--absolute-git-dir"}, 8192, std::chrono::seconds{10});
+        if (!res.started || res.exit_code != 0) return r;
+        std::string out = res.output;
+        const auto nl = out.find('\n');
+        if (nl == std::string::npos) return r;   // need both lines
+        r.root    = chomp(out.substr(0, nl));
+        r.git_dir = chomp(out.substr(nl + 1));
         r.in_repo = !r.root.empty() && !r.git_dir.empty();
         return r;
     }();
