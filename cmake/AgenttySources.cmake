@@ -140,6 +140,9 @@ set(AGENTTY_TOOL_SOURCES
     src/tool/registry.cpp
     src/scope/scope.cpp
     src/scope/trust.cpp
+    # The write-side peer of scope. Lives in this group for the same reason
+    # scope does: it needs util::project_root() from tool/util/fs_helpers.
+    src/dirs/dirs.cpp
     src/tool/progress.cpp
     src/tool/util/utf8.cpp
     src/tool/util/fs_helpers.cpp

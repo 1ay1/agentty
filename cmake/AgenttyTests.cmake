@@ -717,6 +717,32 @@ target_include_directories(user_root_test PRIVATE include)
 add_test(NAME user_root_test COMMAND user_root_test)
 set_tests_properties(user_root_test PROPERTIES TIMEOUT 30)
 
+# The WRITE-side storage primitive (agentty::dirs), peer of scope. Same
+# narrow-link reasoning as user_root_test: this test chdir()s and mutates
+# $HOME, so it links only the TUs it exercises rather than dragging in a
+# subsystem whose statics could observe either.
+#
+# logx is included because dirs.cpp instruments its resolutions; fs_helpers
+# for project_root()/set_workspace_root(), which the anchor walk starts from.
+agentty_test(dirs_test MODE raw)
+add_executable(dirs_test EXCLUDE_FROM_ALL
+    tests/dirs_test.cpp
+    src/dirs/dirs.cpp
+    src/util/user_root.cpp
+    src/util/home_dir.cpp
+    src/util/logx.cpp
+    src/tool/util/fs_helpers.cpp)
+target_include_directories(dirs_test PRIVATE include)
+# Same transitive deps keystore_test needs for the same reason: logx pulls
+# nlohmann + maya, and fs_helpers.cpp includes mcp-cpp's util header to
+# mirror the workspace root into it.
+target_link_libraries(dirs_test PRIVATE maya::maya nlohmann_json::nlohmann_json)
+if(TARGET mcp::tools)
+    target_link_libraries(dirs_test PRIVATE mcp::tools)
+endif()
+add_test(NAME dirs_test COMMAND dirs_test)
+set_tests_properties(dirs_test PROPERTIES TIMEOUT 30)
+
 # ── CLI argument order ──────────────────────────────────────────────────────
 # A shell test because parse_args lives inside main.cpp and the contract worth
 # pinning is the BINARY's: `agentty run` must accept --agent, -w/-m and the
