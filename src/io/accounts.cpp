@@ -10,6 +10,10 @@
 #include <algorithm>
 #include <chrono>
 #include <fstream>
+
+#ifndef _WIN32
+#include <sys/stat.h>   // chmod — 0600 on the registry, like its siblings
+#endif
 #include <iterator>
 
 #include <nlohmann/json.hpp>
@@ -124,6 +128,27 @@ bool write_registry(const Registry& reg) {
         ofs.write(sealed->data(), static_cast<std::streamsize>(sealed->size()));
         if (!ofs) return false;
     }
+#ifndef _WIN32
+    // 0600, like every other file under credentials/.
+    //
+    // std::ofstream creates at 0666 & ~umask, so this landed 0644 while
+    // credentials.json, the provider-key vault and even the auth LOCK file are
+    // all explicitly 0600. Measured on a live install before fixing.
+    //
+    // The body is crypt::seal'd and machine-bound, so a readable copy is
+    // cryptographically useless and this is not a leak -- it is the
+    // defence-in-depth the siblings have and this did not. It also matters
+    // more than it looks: credentials/ is 0700 TODAY, so the mode is
+    // contained, but that containment is one `chmod 755` or one
+    // AGENTTY_HOME pointed at a pre-existing directory away from being the
+    // only thing standing between this file and another local account.
+    //
+    // chmod after write rather than open(O_CREAT, 0600): the payload is
+    // ciphertext, so the window between create and chmod exposes nothing,
+    // and this keeps the ofstream path that the comment above deliberately
+    // chose over the unexported private writer.
+    ::chmod(tmp.c_str(), S_IRUSR | S_IWUSR);
+#endif
     std::error_code ec;
     fs::rename(tmp, p, ec);
     if (ec) { fs::remove(tmp, ec); return false; }

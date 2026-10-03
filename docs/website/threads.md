@@ -47,4 +47,4 @@ Thread and credential writes are atomic: agentty writes to a temp file, calls `f
 
 ## Credentials
 
-Auth lives separately at `~/.config/agentty/credentials.json` (mode `0600`) — see [Authentication](/docs/authentication).
+Auth lives separately at `~/.agentty/credentials/credentials.json` (mode `0600`) — see [Authentication](/docs/authentication).

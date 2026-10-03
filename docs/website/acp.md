@@ -23,7 +23,7 @@ Add this to Zed's `settings.json` (`zed: open settings`):
 }
 ```
 
-Then open the agent panel (`cmd-?` / `ctrl-?`), pick **agentty** from the agent list, and prompt. Auth is whatever `agentty login` already set up — the ACP process reads the same `~/.config/agentty/credentials.json`, so there's nothing extra to configure.
+Then open the agent panel (`cmd-?` / `ctrl-?`), pick **agentty** from the agent list, and prompt. Auth is whatever `agentty login` already set up — the ACP process reads the same `~/.agentty/credentials/credentials.json`, so there's nothing extra to configure.
 
 ## Set up in a JetBrains IDE
 
@@ -215,7 +215,7 @@ That's it. Zed spawns `ssh` directly — a single process is the tunnel, the age
 - TLS still negotiates end-to-end with the real upstream (api.anthropic.com etc.). The laptop sees encrypted bytes only — it can't MITM.
 
 :::warn Trust model (read before --setup)
-`--setup` copies your laptop's `~/.config/agentty/credentials.json` to the remote (chmod 600). That file contains your OAuth refresh token (or API key). A compromised remote can exfiltrate it independent of the tunnel. **agentty airgap protects the network between laptop and remote, not the remote itself** — treat the remote as a credential-bearing peer, not a sandboxed proxy. See [SSH Air-gap](/docs/airgap).
+`--setup` copies your laptop's `~/.agentty/credentials/credentials.json` to the remote (chmod 600). That file contains your OAuth refresh token (or API key). A compromised remote can exfiltrate it independent of the tunnel. **agentty airgap protects the network between laptop and remote, not the remote itself** — treat the remote as a credential-bearing peer, not a sandboxed proxy. See [SSH Air-gap](/docs/airgap).
 :::
 
 ### Troubleshooting

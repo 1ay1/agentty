@@ -80,9 +80,78 @@ The Smart Mode *feature* toggles (which layers run) live in the `Ctrl+S` overlay
 
 ## On-disk paths
 
-Credentials live under XDG config; everything else lives under `~/.agentty`.
+Everything agentty stores for you lives under **one root**, `~/.agentty`.
+Override it with `$AGENTTY_HOME`.
 
-- `~/.config/agentty/credentials.json` — Claude OAuth token or API key, mode `0600` (honours `$XDG_CONFIG_HOME`). Plaintext JSON by default; optionally sealed with AES-256-GCM (`AGENTTY_ENCRYPT_PASSPHRASE`) and/or stored in the OS keystore (`AGENTTY_USE_KEYSTORE`). See [Authentication](/docs/authentication) for the hardening options.
+One root rather than the XDG split across config/data/state/cache, for two
+reasons. A four-root layout has four plausible answers to "where does this new
+file go", so files land by coin-flip — which is exactly what happened here
+before the consolidation (a cache file in `~/.config`, one log in `~/.config`
+and its sibling in `~/.agentty`). And `~/.config` is what people back up and
+sync as dotfiles; this directory holds OAuth refresh tokens and your full
+conversation history, which should not ride along by accident.
+
+```
+~/.agentty/
+  settings.json  mcp.json  hooks.json  skills/   ← config, hand-editable
+  threads/  memory.jsonl                         ← your data
+  credentials/                                   ← secrets (0700)
+  cache/                                         ← refetchable, safe to delete
+  logs/                                          ← diagnostics
+```
+
+### Relocating the parts that grow
+
+| Variable | Moves |
+|---|---|
+| `AGENTTY_HOME` | the whole root |
+| `AGENTTY_THREADS_DIR` | conversation history |
+| `AGENTTY_CACHE_DIR` | refetchable data |
+| `AGENTTY_LOGS_DIR` | diagnostic logs |
+| `AGENTTY_RAG_DIR` | retrieval indexes (these are **per project**) |
+
+These exist for the categories that **grow with use**. On a working install
+settings is 4 KB and credentials 20 KB, against hundreds of MB of threads and
+tens of MB of logs — so those four are what you would ever want on another
+disk.
+
+Settings and credentials are deliberately **not** relocatable: they are small,
+easy to lose track of, and a secret that moves because of a line in a shell
+profile is a secret nobody can find later.
+
+> **Why not `~/.cache/agentty` for the cache, like other programs?**
+>
+> A fair question, and the answer is that the cache is not independent of the
+> rest. It holds the model catalog that `settings.json` references by id and
+> the update stamp that gates the self-updater — so a cache cleared without
+> the settings beside it produces a config pointing at models agentty no
+> longer knows. Keeping them in one root means "back up `~/.agentty`" and
+> "move `~/.agentty`" are both complete operations, with no second directory
+> to remember.
+>
+> If you want it on another disk — which is the real reason to care —
+> `AGENTTY_CACHE_DIR=~/.cache/agentty` does exactly that, and nothing stops
+> you pointing it at the XDG location. The difference is that it is your
+> choice rather than the default, so nobody inherits a split layout they did
+> not ask for.
+
+Three rules every one of them follows:
+
+- an **empty** value counts as unset, so an exported-but-blank variable moves
+  nothing
+- a **relative** value resolves against the root, not your current directory —
+  `AGENTTY_LOGS_DIR=logs2` always means `~/.agentty/logs2`, never a different
+  directory per shell
+- if the directory **cannot be created** you get one warning naming the reason
+  and the default is used, rather than a silent fallback
+
+### The files
+
+- `~/.agentty/credentials/` — OAuth tokens, API keys and the saved-account
+  registry. Directory mode `0700`, files `0600`. Plaintext JSON by default;
+  optionally sealed with AES-256-GCM (`AGENTTY_ENCRYPT_PASSPHRASE`) and/or
+  stored in the OS keystore (`AGENTTY_USE_KEYSTORE`). See
+  [Authentication](/docs/authentication) for the hardening options.
 - `~/.agentty/settings.json` — persisted provider, model, per-provider models, reasoning effort, favourite models, permission profile, auto-compaction depth, and in-app-pasted provider keys.
 - `~/.agentty/threads/<id>.json` — one JSON file per thread (flat, keyed by thread id).
 - `~/.agentty/memory.jsonl` — user-scope `remember` facts (cross-workspace); `<project>/.agentty/memory.jsonl` holds project-scope facts. Which file a fact lands in is chosen by [memory scope](#memory-scope), below.

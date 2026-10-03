@@ -855,6 +855,17 @@ add_test(NAME project_dotdir
                  -P ${CMAKE_SOURCE_DIR}/tests/lint/project_dotdir.cmake)
 set_tests_properties(project_dotdir PROPERTIES LABELS "static")
 
+# ── secret file modes ───────────────────────────────────────────
+# credentials/ is the one directory where a 0600 audit should find no
+# exceptions. accounts.json was 0644 among seven 0600 siblings because
+# std::ofstream creates at 0666 & ~umask and nothing said otherwise. Contained
+# by the 0700 directory, and still worth a structural guard: that containment
+# is one chmod away from being the only thing left.
+add_test(NAME secret_modes
+         COMMAND ${CMAKE_COMMAND} -DROOT=${CMAKE_SOURCE_DIR}
+                 -P ${CMAKE_SOURCE_DIR}/tests/lint/secret_modes.cmake)
+set_tests_properties(secret_modes PROPERTIES LABELS "static")
+
 # ── i18n catalog ───────────────────────────────────────────────────────────
 # Three gates: every t() id exists in the English catalog, every catalog id is
 # used, and nothing in src/provider or src/tool translates (model-facing

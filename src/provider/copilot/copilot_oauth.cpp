@@ -29,6 +29,7 @@
 #include "agentty/auth/auth.hpp"
 #include "agentty/auth/cred_crypt.hpp"
 #include "agentty/util/base64.hpp"
+#include "agentty/util/user_root.hpp"   // user_cache_dir — the support cache
 #include "agentty/io/http.hpp"
 #include "agentty/util/dbglog.hpp"
 #include "agentty/util/logx.hpp"
@@ -400,7 +401,21 @@ void invalidate_cached_token() { g_force_refresh.store(true); }
 // ── Per-account model-support learning ─────────────────────────────────
 namespace {
 std::mutex& support_mu() { static std::mutex m; return m; }
-fs::path support_path() { return auth::config_dir() / "copilot_model_support.json"; }
+// cache/, NOT credentials/.
+//
+// This is refetchable learning state -- which models this account was told it
+// may use -- and it was landing in the secrets directory purely because this
+// file already had auth::config_dir() in scope. Two things wrong with that:
+// it is the one directory where a 0600 audit should find no exceptions (this
+// file sat at 0644 among seven 0600 siblings), and "delete your cache" should
+// never mean "go near your tokens".
+//
+// Nothing migrates the old copy: it is a cache, so a missing file costs one
+// relearn on the next request, and leaving the stale one behind in a 0700
+// directory harms nothing. The blob holds model ids, never a credential.
+fs::path support_path() {
+    return ::agentty::util::user_cache_dir() / "copilot_model_support.json";
+}
 
 struct SupportSets { std::set<std::string> unsupported, supported; };
 
