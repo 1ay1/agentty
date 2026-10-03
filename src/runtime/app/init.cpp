@@ -414,6 +414,21 @@ std::pair<Model, Cmd> init() {
     cmds.push_back(Cmd::task_isolated(
         [](jaal::Sink<Msg>, std::stop_token) { workspace::prewarm_repo_info(); }));
 
+    // Open the TCP + TLS + HTTP/2 connection to api.anthropic.com NOW, while
+    // the user is still reading the screen / typing their first message, so
+    // the first real request reuses a warm pooled connection instead of
+    // paying DNS + TCP + TLS handshake + h2 settings on the turn's critical
+    // path. On Windows that cold handshake is ~1 s — the single biggest
+    // chunk of first-Enter latency once the git/skill/tool prewarms above
+    // have moved their cost off the reducer thread. prewarm_anthropic()
+    // single-flights internally and the dial is a tracked background thread
+    // (join_prewarm at shutdown), so this is safe to fire unconditionally;
+    // gate it on Anthropic being the active provider so we don't dial a host
+    // the session will never talk to.
+    if (provider::active().kind == provider::Kind::Anthropic)
+        cmds.push_back(Cmd::task_isolated(
+            [](jaal::Sink<Msg>, std::stop_token) { auth::prewarm_anthropic(); }));
+
     // Reclaim blobs no thread references any more (deleted threads,
     // replaced outputs). Once a day at most, 24 h grace so a save in
     // flight in this or another instance never loses a payload. Its own
