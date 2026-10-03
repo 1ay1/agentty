@@ -722,8 +722,9 @@ Cmd sandbox_update(Model& m, msg::SandboxMsg sm) {
             // ascend() restores the stashed parent, which is the sandbox pane
             // descend() put there. Not close(): that would leave None and drop
             // the whole overlay stack, so editing a path list would exit
-            // Settings entirely.
-            m.ui.panel.ascend();
+            // Settings entirely. ascend() is fallible (no stashed parent means
+            // this list was opened elsewhere), so honor the bool and bail.
+            if (!m.ui.panel.ascend()) return Cmd::none();
 
             auto* o = m.ui.panel.get<pn::Sandbox>();
             if (!o) return Cmd::none();
