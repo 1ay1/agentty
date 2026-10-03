@@ -5,7 +5,7 @@
 
 #include <cstdlib>
 #include <cstdio>
-#include <mutex>
+#include <jaal/kernel/guarded.hpp>
 #include <set>
 #include <string>
 #include <system_error>
@@ -169,12 +169,18 @@ fs::path resolve_subdir(const char* env, const char* leaf, bool owner_only) {
     std::error_code ec;
     fs::create_directories(p, ec);
     if (overridden && !fs::is_directory(p, ec)) {
-        static std::mutex warn_mu;
-        static std::set<std::string> warned;
-        {
-            std::scoped_lock lk{warn_mu};
-            if (!warned.insert(env).second) return root / leaf;
-        }
+        // jaal::guarded rather than a raw mutex + set: access is only possible
+        // through with(), so "forgot the lock" is unrepresentable. The
+        // concurrency banlist enforces this, and agentty::dirs (the write-side
+        // peer of this resolver) uses the same shape for the same warn-once.
+        static jaal::guarded<std::set<std::string>> warned;
+        // Capture-less AND owned-value arguments, both jaal rules: either a
+        // capture or a pointer could reach a second lock while this one is
+        // held. So the variable name is copied in.
+        if (!warned.with([](auto& seen, std::string k) {
+                return seen.insert(std::move(k)).second;
+            }, std::string{env}))
+            return root / leaf;
         // create_directories() leaves `ec` CLEAR when the path already
         // exists as a non-directory -- it did not fail, it had nothing to
         // do -- so reporting ec here printed "Undefined error: 0" for the

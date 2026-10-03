@@ -6,11 +6,12 @@
 
 #include "agentty/dirs/dirs.hpp"
 
+#include <jaal/kernel/guarded.hpp>
+
 #include <algorithm>
 #include <array>
 #include <cstdio>
 #include <cstdlib>
-#include <mutex>
 #include <set>
 #include <utility>
 #include <vector>
@@ -63,14 +64,21 @@ constexpr std::array<std::string_view, 4> kMarkers{
 // Repeating it per call would be worse than silence: these resolvers are
 // called from render and retrieval paths, so a broken override would print
 // on every frame and bury the one line that mattered.
+//
+// jaal::guarded, not a raw mutex + set: access is only possible through
+// with(), so "forgot the lock" is unrepresentable rather than a review item.
+// Same reasoning as the handoff gate's feed(), and the concurrency banlist
+// enforces it.
 void warn_once(std::string_view env, const fs::path& bad,
                const fs::path& fallback, const std::error_code& ec) {
-    static std::mutex mu;
-    static std::set<std::string, std::less<>> warned;
-    {
-        std::scoped_lock lk{mu};
-        if (!warned.emplace(env).second) return;
-    }
+    static jaal::guarded<std::set<std::string, std::less<>>> warned;
+    // Capture-less AND owned-value arguments, both jaal rules: a capture or a
+    // pointer/view could reach a second lock while this one is held, and
+    // holding two is how deadlocks start. So the key is copied in.
+    if (!warned.with([](auto& seen, std::string k) {
+            return seen.emplace(std::move(k)).second;
+        }, std::string{env}))
+        return;
 
     // create_directories() leaves `ec` CLEAR when the path already exists
     // as a non-directory -- it did not fail, it had nothing to do -- so
