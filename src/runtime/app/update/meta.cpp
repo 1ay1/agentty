@@ -734,6 +734,8 @@ Cmd meta_update(Model& m, msg::MetaMsg mm) {
                             "The worker thread may continue in the "
                             "background; its result is discarded if it "
                             "ever returns."};
+                        std::get<ToolUse::Failed>(tc.status).executing_since =
+                            exec_from;
                         wedged = true;
                     }
                 }

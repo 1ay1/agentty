@@ -2083,6 +2083,8 @@ bool AgentServer::run_tools(Session& sess, bool& out_cancelled) {
             const char* why = tool_timed_out ? "timed out" : "cancelled";
             if (tool_timed_out) util::dbglog("acp.run_tools.timeout", tc.name.value);
             set_status(tc, ToolUse::Failed{{}, {}, why});
+            if (auto* fp = std::get_if<ToolUse::Failed>(&tc.status))
+                fp->executing_since = tool_start;
             a::ToolCallUpdate c;
             c.toolCallId = a::ToolCallId{tc.id.value};
             c.status     = a::Just(a::ToolCallStatus::Failed);
@@ -2140,7 +2142,10 @@ bool AgentServer::run_tools(Session& sess, bool& out_cancelled) {
             upd.status    = a::Just(a::ToolCallStatus::Completed);
             upd.content   = a::Just(std::move(content));
             upd.rawOutput = a::Just<json>(json{{"text", result->text}});
+            const auto exec_since = tc.executing_since();
             set_status(tc, ToolUse::Done{{}, {}, result->text});
+            if (auto* d = std::get_if<ToolUse::Done>(&tc.status))
+                d->executing_since = exec_since;
         } else {
             std::string detail = result.error().render();
             a::List<a::ToolCallContent> content;
@@ -2155,7 +2160,10 @@ bool AgentServer::run_tools(Session& sess, bool& out_cancelled) {
             upd.status    = a::Just(a::ToolCallStatus::Failed);
             upd.content   = a::Just(std::move(content));
             upd.rawOutput = a::Just<json>(json{{"text", detail}, {"error", true}});
+            const auto exec_since = tc.executing_since();
             set_status(tc, ToolUse::Failed{{}, {}, detail});
+            if (auto* fp = std::get_if<ToolUse::Failed>(&tc.status))
+                fp->executing_since = exec_since;
         }
 
         send_update(sess.id, a::SU_ToolCallUpdate{std::move(upd)});
@@ -2201,8 +2209,14 @@ AgentServer::run_bash_via_terminal(Session& sess, ToolUse& tc) {
         util::RankedLock tlk(*sess.thread_mtx);
         tc.status = std::move(st);
     };
+    // Execution starts HERE (the terminal create is the dispatch), not at
+    // the card's birth — mirror the local bash tool's convention so the
+    // stats panel's tool-time slice measures running, not queueing.
+    const auto exec_started = std::chrono::steady_clock::now();
     auto fail = [&](const std::string& detail) -> TerminalRun {
         set_status(ToolUse::Failed{{}, {}, detail});
+        if (auto* fp = std::get_if<ToolUse::Failed>(&tc.status))
+            fp->executing_since = exec_started;
         a::ToolCallUpdate f;
         f.toolCallId = a::ToolCallId{tc.id.value};
         f.status     = a::Just(a::ToolCallStatus::Failed);
@@ -2363,6 +2377,13 @@ AgentServer::run_bash_via_terminal(Session& sess, ToolUse& tc) {
 
     if (ok) set_status(ToolUse::Done{{}, {}, model_text});
     else    set_status(ToolUse::Failed{{}, {}, model_text});
+    // Execution began at the terminal create (the dispatch), not the card's
+    // birth — stamp the window onto the just-settled state so the stats
+    // fold measures running time, not queueing.
+    if (auto* d = std::get_if<ToolUse::Done>(&tc.status))
+        d->executing_since = exec_started;
+    else if (auto* fp = std::get_if<ToolUse::Failed>(&tc.status))
+        fp->executing_since = exec_started;
 
     return TerminalRun{ok, false, std::move(model_text)};
 }

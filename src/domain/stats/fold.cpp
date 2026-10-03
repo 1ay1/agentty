@@ -108,16 +108,27 @@ void Facts::fold(const Message& msg) {
             else return "pending";
         }, tc.status);
         tools.by_status.add(st);
-        // Only settled calls have a duration. A running call's elapsed time
-        // is a live number, and folding it would bake "how long had it been
-        // going when I opened the panel" into a sealed statistic.
-        const auto started  = tc.started_at();
+        // Duration = the EXECUTION window (dispatch → terminal), not the
+        // card's existence. started_at is stamped at StreamToolUseStart and
+        // deliberately covers arg-streaming, permission wait and dispatch
+        // queueing (issue #40); folding THAT would bill "how long the human
+        // took to approve" and "how long args streamed" to the tool's time,
+        // and a session parked at permission prompts would show hours in
+        // the tools slice of "where the time went".
+        //
+        // Done/Failed carry executing_since copied from Running at settle.
+        // exec_window_at() reads it WITHOUT falling back to started_at:
+        // a tool that never dispatched (Rejected, salvaged-as-"not run",
+        // args-parse failure, pre-#40 thread) has no window, and billing
+        // its card-birth stamp would re-create exactly the 2h20m lie this
+        // split is meant to remove. Zero means "no window", a statement,
+        // not a sample.
+        const auto began    = tc.exec_window_at();
         const auto finished = tc.finished_at();
-        if (started.time_since_epoch().count() != 0
-            && finished.time_since_epoch().count() != 0
-            && finished > started) {
+        if (began && finished.time_since_epoch().count() != 0
+            && finished > *began) {
             const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                finished - started).count();
+                finished - *began).count();
             tools.latency.add(static_cast<std::uint32_t>(ms < 0 ? 0 : ms));
         }
     }

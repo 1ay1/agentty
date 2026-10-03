@@ -1299,9 +1299,12 @@ Cmd token_refreshed(Model& m, auth::TokenResult result) {
                 last.error = text;
                 for (auto& tc : last.tool_calls) {
                     if (!tc.is_terminal()) {
+                        const auto exec_since = tc.executing_since();
                         tc.status = ToolUse::Failed{
                             tc.started_at(), now,
                             "auth refresh failed"};
+                        std::get<ToolUse::Failed>(tc.status).executing_since =
+                            exec_since;
                     }
                     std::string{}.swap(tc.args_streaming);
                 }

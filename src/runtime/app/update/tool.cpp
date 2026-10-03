@@ -324,6 +324,7 @@ void apply_tool_output(Model& m, const ToolCallId& id,
         if (tc.is_terminal()) return;
         auto now = std::chrono::steady_clock::now();
         auto started = tc.started_at();
+        auto exec_since = tc.executing_since();
         if (result) {
             // Drift reminder. Shell begets shell: after a shell inspection
             // the next one is shell 81% of the time (22% after a native
@@ -351,6 +352,7 @@ void apply_tool_output(Model& m, const ToolCallId& id,
             }
             tc.status = ToolUse::Done{started, now,
                 clamp_output(std::move(*result)), std::move(images)};
+            std::get<ToolUse::Done>(tc.status).executing_since = exec_since;
         } else {
             // Render typed error as "[kind] detail" so the category
             // is visible in tool-card / history without losing the
@@ -359,6 +361,7 @@ void apply_tool_output(Model& m, const ToolCallId& id,
             // the future, when the view branches on category.
             tc.status = ToolUse::Failed{started, now,
                 clamp_output(result.error().render())};
+            std::get<ToolUse::Failed>(tc.status).executing_since = exec_since;
         }
         release_streaming_buffers(tc);
     });
@@ -407,11 +410,15 @@ void mark_tool_rejected(Model& m, const ToolCallId& id,
                         std::string_view reason) {
     with_live_tool(m, id, [&](ToolUse& tc) {
         auto now = std::chrono::steady_clock::now();
+        auto exec_since = tc.executing_since();   // BEFORE the overwrite
         if (reason.empty()) {
             tc.status = ToolUse::Rejected{now};
         } else {
+            // A reason means a policy/failure rejection mid-run; preserve
+            // the exec window so the stats fold keeps the real duration.
             tc.status = ToolUse::Failed{tc.started_at(), now,
                 clamp_output(std::string{reason})};
+            std::get<ToolUse::Failed>(tc.status).executing_since = exec_since;
         }
         release_streaming_buffers(tc);
     });
@@ -516,8 +523,11 @@ Cmd tool_update(Model& m, msg::ToolMsg tm) {
                         "thread may continue in the background; its "
                         "result will be discarded if it ever returns.";
                 }
+                auto exec_since = tc.executing_since();   // BEFORE overwrite
                 tc.status = ToolUse::Failed{
                     tc.started_at(), now, std::move(reason)};
+                std::get<ToolUse::Failed>(tc.status).executing_since =
+                    exec_since;
                 flipped = true;
             });
             if (!flipped) return Cmd::none();

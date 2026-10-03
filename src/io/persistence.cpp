@@ -424,6 +424,23 @@ json message_to_json(const Message& m) {
             t["output"] = std::move(out);
         }
         t["status"] = std::string{tc.status_name()};
+        // The EXECUTION window, persisted as a duration in ms rather than a
+        // time_point: steady_clock offsets are meaningless across a restart,
+        // so serializing points would fold "time since boot" into every
+        // reloaded thread's stats (the 2h20m class of lie). Terminal only;
+        // the fold already refuses pending/running spans. exec_window_at()
+        // reads executing_since WITHOUT the card-birth fallback — a tool
+        // that never dispatched must serialize NO window, because on reload
+        // the fallback (started_at) cannot even be reconstructed, and
+        // deserialization would otherwise fill it with a fake epoch.
+        if (tc.is_terminal()) {
+            const auto began = tc.exec_window_at();
+            const auto done  = tc.finished_at();
+            if (began && done.time_since_epoch().count() != 0
+                && done > *began)
+                t["exec_ms"] = std::chrono::duration_cast<
+                    std::chrono::milliseconds>(done - *began).count();
+        }
         tcs.push_back(std::move(t));
     }
     j["tool_calls"] = std::move(tcs);
@@ -687,14 +704,38 @@ std::string DeserializeError::render() const {
 }
 
 static std::expected<ToolUse::Status, DeserializeError>
-parse_tool_status(std::string_view status_tag, std::string&& output) {
+parse_tool_status(std::string_view status_tag, std::string&& output,
+                  std::uint64_t exec_ms) {
     // Reconstruct the variant. Persisted threads only ever land in
     // terminal states (in-flight tools are never serialized), so the
     // intermediate states reset to a no-arg-time-stamp default.
-    if (status_tag == "done")
-        return ToolUse::Status{ToolUse::Done{{}, {}, std::move(output)}};
-    if (status_tag == "failed" || status_tag == "error")
-        return ToolUse::Status{ToolUse::Failed{{}, {}, std::move(output)}};
+    // exec_ms is the EXECUTION window (dispatch → terminal) saved next to
+    // the status tag; rehydrate it as a SYNTHETIC clock window — base=epoch
+    // +1ms, finish=base+exec_ms — so the stats fold keeps measuring the
+    // tool, not the restart. Zero/absent = older thread file: leave the
+    // window empty, and the fold's guard skips the sample rather than
+    // counting a fake span.
+    if (status_tag == "done" || status_tag == "failed"
+        || status_tag == "error") {
+        if (exec_ms == 0) {
+            if (status_tag == "done")
+                return ToolUse::Status{ToolUse::Done{{}, {}, std::move(output)}};
+            return ToolUse::Status{ToolUse::Failed{{}, {}, std::move(output)}};
+        }
+        const auto base = std::chrono::steady_clock::time_point{
+            std::chrono::milliseconds{1}};   // non-zero: the fold's guard
+                                             // reads 0 as "no window"
+        const auto finish = base + std::chrono::milliseconds{
+            static_cast<std::int64_t>(exec_ms)};   // diff == exec_ms exactly
+        if (status_tag == "done") {
+            ToolUse::Done d{base, finish, std::move(output)};
+            d.executing_since = base;
+            return ToolUse::Status{std::move(d)};
+        }
+        ToolUse::Failed fp{base, finish, std::move(output)};
+        fp.executing_since = base;
+        return ToolUse::Status{std::move(fp)};
+    }
     if (status_tag == "rejected") return ToolUse::Status{ToolUse::Rejected{{}}};
     // A persisted thread SHOULD only carry terminal tool states, but a
     // session killed mid-tool (crash, SIGKILL, power loss) leaves a
@@ -706,6 +747,20 @@ parse_tool_status(std::string_view status_tag, std::string&& output) {
     if (status_tag == "running" || status_tag == "approved"
         || status_tag == "pending") {
         std::string note = output.empty() ? "interrupted" : std::move(output);
+        if (exec_ms) {
+            // Defensive: the serializer only writes exec_ms under
+            // is_terminal(), so a non-terminal tag should never carry one —
+            // but if a future writer does, honour it rather than silently
+            // reporting the run as instantaneous.
+            const auto base = std::chrono::steady_clock::time_point{
+                std::chrono::milliseconds{1}};
+            auto st = ToolUse::Failed{base,
+                base + std::chrono::milliseconds{
+                    static_cast<std::int64_t>(exec_ms)},
+                std::move(note)};
+            st.executing_since = base;
+            return ToolUse::Status{std::move(st)};
+        }
         return ToolUse::Status{ToolUse::Failed{{}, {}, std::move(note)}};
     }
     return std::unexpected(DeserializeError{
@@ -829,7 +884,9 @@ std::expected<Message, DeserializeError> message_from_json(const json& j) {
                         ? std::string{legacy[idx]} : std::string{"pending"};
                 }
             }
-            auto status = parse_tool_status(status_tag, std::move(output));
+            auto status = parse_tool_status(status_tag, std::move(output),
+                                            t.value("exec_ms",
+                                                    static_cast<std::uint64_t>(0)));
             if (!status) return std::unexpected(std::move(status).error());
             tc.status = std::move(*status);
             m.tool_calls.push_back(std::move(tc));

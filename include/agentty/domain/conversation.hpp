@@ -181,6 +181,10 @@ struct ToolUse {
         }
     };
     struct Done {
+        // Field ORDER is pinned: ~70 aggregate-initialisation sites across
+        // tests and update code bind {started, finished, output[, images]}
+        // positionally. executing_since therefore goes LAST with a default
+        // — the old shape remains valid and binds it to "not recorded".
         std::chrono::steady_clock::time_point started_at{};
         std::chrono::steady_clock::time_point finished_at{};
         std::string output;
@@ -188,11 +192,19 @@ struct ToolUse {
         // image file). Raw bytes; the wire encodes them as image blocks inside
         // this call's tool_result, right after the text. Empty for text tools.
         std::vector<ImageContent> images;
+        // EXECUTION window start (dispatch), copied from
+        // Running::executing_since at settle. Zero = "not recorded" (older
+        // persisted threads, tests constructing Done directly); consumers
+        // fall back to started_at — correct whenever dispatch happened
+        // immediately, i.e. whenever there was no approval gap.
+        std::chrono::steady_clock::time_point executing_since{};
     };
     struct Failed {
         std::chrono::steady_clock::time_point started_at{};
         std::chrono::steady_clock::time_point finished_at{};
         std::string output;
+        // Same convention as Done: last, defaulted, zero = not recorded.
+        std::chrono::steady_clock::time_point executing_since{};
     };
     struct Rejected {
         std::chrono::steady_clock::time_point finished_at{};
@@ -322,6 +334,50 @@ struct ToolUse {
         return std::visit([](const auto& s) -> std::chrono::steady_clock::time_point {
             if constexpr (requires { s.finished_at; }) return s.finished_at;
             else return {};
+        }, status);
+    }
+
+    // When execution ACTUALLY began (dispatch), as distinct from
+    // started_at() (card birth). Done/Failed carry their own
+    // executing_since — copied from Running when the tool settles; older
+    // terminal states fall back to started_at, matching the pre-#40
+    // behaviour that is correct whenever there was no approval gap.
+    [[nodiscard]] std::chrono::steady_clock::time_point executing_since() const noexcept {
+        return std::visit([](const auto& s) -> std::chrono::steady_clock::time_point {
+            if constexpr (requires { s.executing_since; } && requires { s.started_at; }) {
+                return s.executing_since.time_since_epoch().count() != 0
+                     ? s.executing_since : s.started_at;
+            }
+            else if constexpr (requires { s.started_at; }) return s.started_at;
+            else return {};
+        }, status);
+    }
+
+    // EXECUTION-window read for the stats fold and the persistence
+    // serializer. The two use cases have OPPOSITE semantics:
+    //
+    //   executing_since()   → liveness display: "how long has this been
+    //                         RUNNING?" falls back to card birth for old
+    //                         states (no approval gap) so the elapsed
+    //                         timer keeps a value.
+    //   exec_window_at()    → accounting: only a RECORDED execution
+    //                         window is a fact. A tool that never
+    //                         dispatched (Rejected, salvaged-as-
+    //                         "not run", args-parse failure) has no
+    //                         executing_since and must report none —
+    //                         falling back to its card-birth stamp would
+    //                         bill approval wait / park time as tool
+    //                         time and re-create the 2h20m lie the
+    //                         executing_since fix removed.
+    [[nodiscard]] std::optional<std::chrono::steady_clock::time_point>
+    exec_window_at() const noexcept {
+        return std::visit([](const auto& s)
+            -> std::optional<std::chrono::steady_clock::time_point> {
+            if constexpr (requires { s.executing_since; }) {
+                return s.executing_since.time_since_epoch().count() != 0
+                     ? std::optional{s.executing_since} : std::nullopt;
+            }
+            return std::nullopt;
         }, status);
     }
 

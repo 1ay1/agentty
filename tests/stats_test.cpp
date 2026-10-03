@@ -23,6 +23,7 @@
 #include "agentty/domain/stats/tabs.hpp"
 #include "agentty/domain/stats/unit.hpp"
 
+#include <chrono>
 #include <string>
 #include <vector>
 
@@ -122,6 +123,76 @@ TEST_CASE("stats: a turn that never ran is not counted") {
     // It IS an assistant turn, and the Session tab says so.
     CHECK(f.session.assistant_turns == 1);
     CHECK(f.session.user_turns == 1);
+}
+
+// ── Tool time: the EXECUTION window, not the card's life ─────────────
+
+// A settled tool whose card was born at T0 and dispatched at T_exec.
+// Mirrors the real lifecycle: StreamToolUseStart → (optionally a long
+// permission wait) → Running{executing_since} → Done.
+[[nodiscard]] Message tool_exec_ms(std::uint64_t exec_ms) {
+    Message m = unrouted("m1");
+    const auto base = std::chrono::steady_clock::time_point{
+        std::chrono::milliseconds{1}};
+    agentty::ToolUse tc;
+    tc.id   = agentty::ToolCallId{"call1"};
+    tc.name = agentty::ToolName{"shell"};
+    // Card born "long before" execution; whatever that gap is, only the
+    // exec window may reach the stats.
+    const auto born = base - std::chrono::milliseconds{300'000};
+    agentty::ToolUse::Done done{born,
+                       base + std::chrono::milliseconds{
+                           static_cast<std::int64_t>(exec_ms)},
+                       "+ok"};
+    done.executing_since = base;   // dispatch stamp, AFTER output/images
+    tc.status = std::move(done);
+    m.tool_calls.push_back(std::move(tc));
+    return m;
+}
+
+TEST_CASE("stats: tools are billed for execution, not the approval wait") {
+    // The card existed 300 s before it dispatched (a human parked at a
+    // permission prompt). Folding started_at→finished_at reported that
+    // wait as tool time — the 2h20m class of lie on the Session tab's
+    // "where the time went" ring. Only the exec window counts.
+    const auto f = rebuild(thread_of({tool_exec_ms(1'500)}));
+    CHECK(f.tools.latency.count() == 1);
+    CHECK(f.tools.latency.sum()   == 1'500);
+    CHECK(f.tools.latency.max()   == 1'500);
+}
+
+TEST_CASE("stats: a tool that never dispatched contributes no tool time") {
+    // Rejected-without-run and interrupted (crash mid-turn) tools carry no
+    // exec window. Zero is a statement — "no executions happened" — not a
+    // sample to average in.
+    Message m = unrouted("m1");
+    agentty::ToolUse tc;
+    tc.id = agentty::ToolCallId{"call1"};
+    tc.name = agentty::ToolName{"shell"};
+    tc.status = agentty::ToolUse::Rejected{
+        std::chrono::steady_clock::time_point{std::chrono::milliseconds{5}}};
+    m.tool_calls.push_back(std::move(tc));
+
+    const auto f = rebuild(thread_of({std::move(m)}));
+    CHECK(f.tools.latency.count() == 0);
+    CHECK(f.tools.total == 1);  // still counted as a CALL
+}
+
+TEST_CASE("stats: pre-exec-window threads fall back to no tool time, not garbage") {
+    // A thread file from before the exec window existed rehydrates as
+    // Done{{},{},output} — no timestamps at all. The fold must skip it,
+    // not count a bogus span: the tool TIME row goes missing while the
+    // call COUNT stays whole.
+    Message m = unrouted("m1");
+    agentty::ToolUse tc;
+    tc.id = agentty::ToolCallId{"call1"};
+    tc.name = agentty::ToolName{"shell"};
+    tc.status = agentty::ToolUse::Done{{}, {}, std::string{"+ok"}};
+    m.tool_calls.push_back(std::move(tc));
+
+    const auto f = rebuild(thread_of({std::move(m)}));
+    CHECK(f.tools.latency.count() == 0);
+    CHECK(f.tools.total == 1);
 }
 
 TEST_CASE("stats: routed and unrouted are separate buckets") {
