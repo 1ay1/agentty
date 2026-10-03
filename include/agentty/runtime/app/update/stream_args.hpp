@@ -32,8 +32,19 @@ namespace agentty::app::detail {
 // list here as agentty's own host-side tolerance, honoured by canonify and
 // by salvage_args, and by nothing downstream.
 inline constexpr std::string_view kPathAliases[]    = {"path", "file_path", "filepath", "filename"};
-inline constexpr std::string_view kOldStrAliases[]  = {"old_string", "old_str", "oldStr"};
-inline constexpr std::string_view kNewStrAliases[]  = {"new_string", "new_str", "newStr"};
+// old_text/new_text are transcript-evidenced (Laguna S 2.1, agentty session
+// of 2026-10-03, do_edit.md trace): the edit tool's edits[] entries are keyed
+// old_text/new_text (see edit_schema), and the model leaks that spelling into
+// the TOP-LEVEL old_string/new_string slots. parse_edit_args accepts both
+// spellings at both levels (top level probes `old_string` then `old_text`;
+// edits[] probes the reverse), so dispatch was never the failure — the guard
+// was. `old`/`search`/`find`/`from` are deliberately NOT listed: no transcript
+// shows a model emitting them, and unlike the _text forms they are not the
+// schema's own vocabulary for this tool.
+inline constexpr std::string_view kOldStrAliases[]  = {"old_string", "old_text",
+                                                       "old_str", "oldStr"};
+inline constexpr std::string_view kNewStrAliases[]  = {"new_string", "new_text",
+                                                       "new_str", "newStr"};
 inline constexpr std::string_view kContentAliases[] = {"content", "file_text", "text",
                                                         "file_content", "contents",
                                                         "body", "data"};

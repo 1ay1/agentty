@@ -192,3 +192,109 @@ TEST_CASE("shell cmd alias canonification") {
                args["cmd"].get<std::string>() == "echo once");
     }
 }
+
+TEST_CASE("edit top-level old_text/new_text guard acceptance") {
+    // Regression for the second Laguna S 2.1 finding (do_edit.md trace).
+    // The edit tool's edits[] entries are keyed old_text/new_text — the
+    // schema's OWN vocabulary — and the model leaks that spelling into the
+    // top-level old_string/new_string slots. parse_edit_args accepts both
+    // spellings at both levels, so the call was well-formed and would have
+    // executed; the guard failed it with "missing the required field
+    // `old_string`" because kOldStrAliases/kNewStrAliases didn't list the
+    // _text forms. Unlike the shell fix, NO canonification is involved:
+    // every edit surface (guard, preview sniffer, edit_body, the ACP diff
+    // card) already reads both spellings, and widening the guard alone
+    // makes the whole path work.
+
+    // ── Case 1: the exact shape reconstructed from the wire trace ──────
+    // Streamed fragments: {"path": …, "old_text": …, "new_text": …,
+    // "display_description": …} (the logged tail starts at `, "new_text":`).
+    {
+        json args = {{"path", "~/.config/yazi/superuser.yazi/main.lua"},
+                     {"old_text", "local sudo = \"sudo\""},
+                     {"new_text", "local sudo = {\"sudo\", \"sudo-rs\", \"run0\", \"doas\"}"},
+                     {"display_description",
+                      "Add -S flag to sudo/sudo-rs and mark stdin-capable escalators"}};
+        auto missing = missing_required_field("edit", args);
+        expect("top-level old_text/new_text call passes the guard",
+               missing.empty(),
+               "missing_required_field returned `" + std::string{missing} + "`");
+    }
+
+    // ── Case 2: every spelling pair the guard now accepts ───────────────
+    {
+        struct Spelling { const char* oldk; const char* newk; };
+        const Spelling spellings[] = {{"old_string", "new_string"},
+                                      {"old_text",   "new_text"},
+                                      {"old_str",    "new_str"},
+                                      {"oldStr",     "newStr"}};
+        for (const auto& sp : spellings) {
+            json args = {{"path", "a.lua"},
+                         {sp.oldk, "x"},
+                         {sp.newk, "y"}};
+            auto missing = missing_required_field("edit", args);
+            expect(std::string{sp.oldk} + "/" + std::string{sp.newk}
+                       + " accepted by the edit guard",
+                   missing.empty(),
+                   "returned `" + std::string{missing} + "`");
+        }
+    }
+
+    // ── Case 3: mixed spellings accepted — each field checked against
+    //    its own table independently ─────────────────────────────────
+    {
+        json args = {{"path", "a.lua"},
+                     {"old_text", "x"},
+                     {"new_string", "y"}};
+        expect("mixed old_text + new_string accepted",
+               missing_required_field("edit", args).empty());
+        json args2 = {{"path", "a.lua"},
+                      {"old_string", "x"},
+                      {"new_text", "y"}};
+        expect("mixed old_string + new_text accepted",
+               missing_required_field("edit", args2).empty());
+    }
+
+    // ── Case 4: edits[] short-circuit behaviour is preserved ────────────
+    // A non-empty edits[] array satisfies the guard before the top-level
+    // old/new check ever runs.
+    {
+        json args = {{"path", "a.lua"},
+                     {"edits", json::array({
+                         json{{"old_text", "x"}, {"new_text", "y"}}})}};
+        expect("edits[] call passes", missing_required_field("edit", args).empty());
+        json empty_edits = {{"path", "a.lua"},
+                            {"edits", json::array()}};
+        auto missing = missing_required_field("edit", empty_edits);
+        expect("empty edits[] falls through to top-level check",
+               missing == "old_string",
+               "returned `" + std::string{missing} + "`");
+    }
+
+    // ── Case 5: non-evidenced synonyms stay out ─────────────────────────
+    // Policy (see the table comment in stream_args.hpp): add an alias only
+    // with a transcript showing a model actually emitting it. None of these
+    // has one, so they must keep failing — a wrong `old` guess on the edit
+    // path does not cost a failed call, it mutates the wrong text.
+    {
+        json args = {{"path", "a.lua"},
+                     {"old", "x"},
+                     {"new", "y"}};
+        expect("bare old/new NOT accepted (unevidenced)",
+               missing_required_field("edit", args) == "old_string");
+    }
+
+    // ── Case 6: genuinely missing still fails, unchanged ─────────────────
+    {
+        json args = {{"path", "a.lua"}, {"new_text", "y"}};
+        auto missing = missing_required_field("edit", args);
+        expect("missing old_string still reported",
+               missing == "old_string",
+               "returned `" + std::string{missing} + "`");
+        json args2 = {{"path", "a.lua"}, {"old_text", "x"}};
+        auto missing2 = missing_required_field("edit", args2);
+        expect("missing new_string still reported",
+               missing2 == "new_string",
+               "returned `" + std::string{missing2} + "`");
+    }
+}
