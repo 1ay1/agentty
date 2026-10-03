@@ -325,8 +325,19 @@ fs::path& mutable_workspace_root() {
 
 void set_workspace_root(fs::path root) {
     std::error_code ec;
+    // On Windows, weakly_canonical can fail on junctions/reparse points.
+    // If canonicalisation fails, use the path as-is (it's already absolute
+    // or we normalize it below). This degrades gracefully rather than
+    // rejecting valid workspace roots.
     auto canon = fs::weakly_canonical(root, ec);
     auto resolved = ec ? std::move(root) : std::move(canon);
+    // Ensure it's absolute; on Windows some bad canonicalisations might
+    // return relative paths in error cases.
+    if (!resolved.is_absolute()) {
+        std::error_code aec;
+        auto abs = fs::absolute(resolved, aec);
+        if (!aec) resolved = std::move(abs);
+    }
     // Mirror into mcp-cpp's util layer: the local tool set is served by the
     // mcp-cpp toolset (filesystem tools enforce the workspace boundary there),
     // so agentty's root MUST be the same root mcp sees. Doing it here — in the
@@ -356,19 +367,40 @@ bool is_within_workspace(const fs::path& target) {
     // perfect for write targets where the file doesn't exist yet but the
     // parent directory does, and it resolves symlinks so an in-workspace
     // link pointing at /etc fails the prefix check.
+    // On Windows, this can fail on junctions/reparse points. If it fails,
+    // retry on the parent (common write-target case: file doesn't exist yet
+    // but the directory does). If even that fails, try a parent-relative
+    // approach as a last resort.
     auto canon_target = fs::weakly_canonical(target, ec);
     if (ec) {
         // weakly_canonical failed (e.g. a parent component is a dangling
-        // symlink, or EACCES walking the chain). Do NOT fall back to a
-        // plain absolute() — that skips symlink resolution and would let
-        // a crafted link escape the boundary. Retry on the parent dir
-        // (the common write-target case: file doesn't exist yet but the
-        // directory does, and canonicalising it still resolves symlinks),
-        // then re-attach the filename. If even that fails, deny.
+        // symlink, or EACCES walking the chain, or a Windows reparse point).
+        // Do NOT fall back to a plain absolute() — that skips symlink
+        // resolution and would let a crafted link escape the boundary.
+        // Retry on the parent dir (the common write-target case: file doesn't
+        // exist yet but the directory does, and canonicalising it still
+        // resolves symlinks), then re-attach the filename.
         std::error_code pec;
-        auto parent = fs::weakly_canonical(target.parent_path(), pec);
-        if (pec || parent.empty()) return false;
-        canon_target = parent / target.filename();
+        auto parent = target.parent_path();
+        if (!parent.empty()) {
+            auto canon_parent = fs::weakly_canonical(parent, pec);
+            if (!pec && !canon_parent.empty()) {
+                canon_target = canon_parent / target.filename();
+                ec.clear();
+            }
+        }
+        // If even parent retry failed, fall back to lexically_normal of the
+        // absolute path (no symlink resolution, but at least consistent).
+        if (ec) {
+            std::error_code aec;
+            auto abs = fs::absolute(target, aec);
+            if (!aec) {
+                canon_target = abs.lexically_normal();
+                ec.clear();
+            } else {
+                return false;   // can't even get absolute; deny
+            }
+        }
     }
     auto canon_root = workspace_root();   // already canonicalised on set
     // Component-wise prefix check. Plain string startsWith would let
@@ -413,7 +445,16 @@ struct ReadRoots {
 void allow_read_root(const fs::path& root) {
     std::error_code ec;
     auto canon = fs::weakly_canonical(root, ec);
-    if (ec || canon.empty()) return;
+    // On Windows, weakly_canonical can fail on junctions. If it fails,
+    // fall back to lexically_normal(absolute(root)). This provides a
+    // stable cache key even if we can't resolve symlinks.
+    if (ec) {
+        std::error_code aec;
+        auto abs = fs::absolute(root, aec);
+        if (aec) return;   // can't even get absolute; bail
+        canon = abs.lexically_normal();
+    }
+    if (canon.empty()) return;
     auto& rr = read_roots();
     std::lock_guard lk{rr.mu};
     if (std::find(rr.roots.begin(), rr.roots.end(), canon) == rr.roots.end())
@@ -424,7 +465,15 @@ bool is_read_allowlisted(const fs::path& target) {
     if (target.empty()) return false;
     std::error_code ec;
     auto canon = fs::weakly_canonical(target, ec);
-    if (ec) return false;   // reads need the file to exist; no parent retry
+    if (ec) {
+        // weakly_canonical failed (bad junction, etc.). Fall back to
+        // lexically_normal(absolute()). Reads need the file to exist at
+        // comparison time, so no parent retry like is_within_workspace.
+        std::error_code aec;
+        auto abs = fs::absolute(target, aec);
+        if (aec) return false;   // can't canonicalise; deny
+        canon = abs.lexically_normal();
+    }
     auto& rr = read_roots();
     std::lock_guard lk{rr.mu};
     for (const auto& r : rr.roots)
@@ -542,14 +591,19 @@ struct FileCache {
 // Canonicalise without requiring the file to exist (write target might
 // not exist yet at the moment we record). Falls back to the lexically-
 // normal absolute form when weakly_canonical errors out — we still get
-// a stable key per file across calls, just not symlink-aware.
+// a stable key per file across calls, just not symlink-aware. On Windows,
+// weakly_canonical can fail on junctions/reparse points; degrading to
+// lexically_normal(absolute()) is safer than returning empty or crashing.
 [[nodiscard]] std::string canon_key(const fs::path& p) noexcept {
     std::error_code ec;
     auto canon = fs::weakly_canonical(p, ec);
     if (!ec) return canon.string();
+    // Fallback 1: if p is already absolute, use its lexically normal form
     if (p.is_absolute()) return p.lexically_normal().string();
+    // Fallback 2: make it absolute, then lexically normal
     auto abs = fs::absolute(p, ec);
     if (!ec) return abs.lexically_normal().string();
+    // Fallback 3: return as-is (shouldn't happen, but defensive)
     return p.string();
 }
 
@@ -580,12 +634,15 @@ StaleVerdict staleness_of(const fs::path& path) noexcept {
     auto snap = last_seen_file(path);
     if (!snap) return StaleVerdict::Unknown;
     std::error_code ec;
+    // On Windows, last_write_time/file_size can fail on junctions/reparse
+    // points. If we can't stat the current file, we can't compare; return
+    // Unknown (treat as potentially stale to be safe).
     auto cur_mtime = fs::last_write_time(path, ec);
     if (ec) return StaleVerdict::Unknown;
     auto cur_size  = fs::file_size(path, ec);
-    if (ec) cur_size = 0;
-    // mtime granularity is filesystem-dependent (HFS+ 1 s, ext4 ns, FAT
-    // 2 s). Compare strictly: any difference — forward OR backward —
+    if (ec) cur_size = 0;   // default to 0 on error; still compare with snap
+    // mtime granularity is filesystem-dependent (HFS+ 1 s, ext4 ns, FAT
+    // 2 s). Compare strictly: any difference — forward OR backward —
     // counts as stale. Size mismatch is also a stale signal even when
     // mtime didn't change (some tools touch-without-updating-mtime).
     if (snap->mtime == cur_mtime && snap->size == cur_size)

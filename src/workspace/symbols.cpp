@@ -167,22 +167,55 @@ std::vector<SymbolEntry> build_symbol_list(std::size_t cap) {
         for (auto it = fs::recursive_directory_iterator(
                  root, fs::directory_options::skip_permission_denied, ec);
              it != fs::recursive_directory_iterator() && src.size() < kFileCap;
-             it.increment(ec)) {
+             ) {
             if (prewarm_cancelled()) return {};   // bail early on shutdown
-            if (ec) { ec.clear(); continue; }
+            if (ec) {
+                ec.clear();
+                std::error_code step_ec;
+                it.increment(step_ec);
+                if (step_ec) break;
+                continue;
+            }
             const auto& entry = *it;
             auto fn = entry.path().filename().string();
-            const bool is_dir = entry.is_directory(ec);
+            std::error_code qec;
+            const bool is_dir = entry.is_directory(qec);
             if (is_dir && tools::util::should_skip_dir(fn)) {
-                it.disable_recursion_pending(); continue;
+                it.disable_recursion_pending();
+                std::error_code step_ec;
+                it.increment(step_ec);
+                if (step_ec) break;
+                continue;
             }
             if (is_dir && it.depth() > 0 && fn.starts_with(".")) {
-                it.disable_recursion_pending(); continue;
+                it.disable_recursion_pending();
+                std::error_code step_ec;
+                it.increment(step_ec);
+                if (step_ec) break;
+                continue;
             }
-            if (is_dir) continue;
-            if (!entry.is_regular_file(ec)) continue;
-            if (!is_source_ext(entry.path().extension().string())) continue;
+            if (is_dir) {
+                std::error_code step_ec;
+                it.increment(step_ec);
+                if (step_ec) break;
+                continue;
+            }
+            if (!entry.is_regular_file(qec)) {
+                std::error_code step_ec;
+                it.increment(step_ec);
+                if (step_ec) break;
+                continue;
+            }
+            if (!is_source_ext(entry.path().extension().string())) {
+                std::error_code step_ec;
+                it.increment(step_ec);
+                if (step_ec) break;
+                continue;
+            }
             src.push_back(entry.path());
+            std::error_code step_ec;
+            it.increment(step_ec);
+            if (step_ec) break;
         }
     }
     if (src.empty()) return out;

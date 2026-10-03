@@ -307,7 +307,7 @@ TrustedSnapshot snapshot_trusted(std::string_view root) {
         fs::directory_options::skip_permission_denied, ec};
     if (ec) return snap;
 
-    for (; it != fs::recursive_directory_iterator{}; ++it) {
+    for (; it != fs::recursive_directory_iterator{}; ) {
         if (++seen > kMaxEntries) { truncated = true; break; }
 
         const fs::directory_entry& e = *it;
@@ -318,6 +318,14 @@ TrustedSnapshot snapshot_trusted(std::string_view root) {
             const std::string name = e.path().filename().string();
             if (std::ranges::find(kSkipDirs, name) != std::ranges::end(kSkipDirs)) {
                 it.disable_recursion_pending();
+                std::error_code iec;
+                it.increment(iec);
+                if (iec) {
+                    AGT_LOG(General, Warn, "handoff",
+                            "trusted snapshot walk aborted under {}: {}",
+                            std::string{root}, iec.message());
+                    break;
+                }
                 continue;
             }
             // Prune unwatched git subtrees rather than filtering them after the
@@ -325,6 +333,14 @@ TrustedSnapshot snapshot_trusted(std::string_view root) {
             // walking it only to discard it is the cost without the benefit.
             if (git_noise(e.path())) {
                 it.disable_recursion_pending();
+                std::error_code iec;
+                it.increment(iec);
+                if (iec) {
+                    AGT_LOG(General, Warn, "handoff",
+                            "trusted snapshot walk aborted under {}: {}",
+                            std::string{root}, iec.message());
+                    break;
+                }
                 continue;
             }
             if (it.depth() >= kMaxDepth) it.disable_recursion_pending();
@@ -334,13 +350,41 @@ TrustedSnapshot snapshot_trusted(std::string_view root) {
             sandbox_cfg::TrustKind dk{};
             if (sandbox_cfg::is_host_trusted(e.path().string() + "/probe", &dk))
                 snap.roots.push_back(e.path().string());
+            std::error_code iec;
+            it.increment(iec);
+            if (iec) {
+                AGT_LOG(General, Warn, "handoff",
+                        "trusted snapshot walk aborted under {}: {}",
+                        std::string{root}, iec.message());
+                break;
+            }
             continue;   // directories are watched through the files inside them
         }
 
         const std::string p = e.path().string();
         sandbox_cfg::TrustKind kind{};
-        if (!sandbox_cfg::is_host_trusted(p, &kind)) continue;
-        if (git_noise(e.path())) continue;   // .git/objects and friends
+        if (!sandbox_cfg::is_host_trusted(p, &kind)) {
+            std::error_code iec;
+            it.increment(iec);
+            if (iec) {
+                AGT_LOG(General, Warn, "handoff",
+                        "trusted snapshot walk aborted under {}: {}",
+                        std::string{root}, iec.message());
+                break;
+            }
+            continue;
+        }
+        if (git_noise(e.path())) {
+            std::error_code iec;
+            it.increment(iec);
+            if (iec) {
+                AGT_LOG(General, Warn, "handoff",
+                        "trusted snapshot walk aborted under {}: {}",
+                        std::string{root}, iec.message());
+                break;
+            }
+            continue;
+        }   // .git/objects and friends
 
         TrustedSnapshot::Entry entry;
         entry.path = p;
@@ -351,6 +395,15 @@ TrustedSnapshot snapshot_trusted(std::string_view root) {
         if (sec) entry.size = 0;
         entry.mtime_ns = mtime_ns(e);
         snap.entries.push_back(std::move(entry));
+
+        std::error_code iec;
+        it.increment(iec);
+        if (iec) {
+            AGT_LOG(General, Warn, "handoff",
+                    "trusted snapshot walk aborted under {}: {}",
+                    std::string{root}, iec.message());
+            break;
+        }
     }
 
     if (truncated)
@@ -425,26 +478,37 @@ std::size_t review_trusted(const TrustedSnapshot& before, std::string_view tool)
         fs::directory_iterator dit{
             dir, fs::directory_options::skip_permission_denied, dec};
         if (dec) continue;
-        for (; dit != fs::directory_iterator{}; ++dit) {
+        for (; dit != fs::directory_iterator{}; ) {
             std::error_code fec;
-            if (!dit->is_regular_file(fec) || fec) continue;
-            const std::string p = dit->path().string();
-            if (std::ranges::binary_search(known, p)) continue;   // pre-existing
-            sandbox_cfg::TrustKind kind{};
-            if (!sandbox_cfg::is_host_trusted(p, &kind)) continue;
+            if (dit->is_regular_file(fec) && !fec) {
+                const std::string p = dit->path().string();
+                if (!std::ranges::binary_search(known, p)) {
+                    sandbox_cfg::TrustKind kind{};
+                    if (sandbox_cfg::is_host_trusted(p, &kind)) {
+                        sandbox_cfg::TrustHandoff h;
+                        h.kind = kind;
+                        h.write.path = p;
+                        h.write.command = std::string{tool};
+                        h.write.at_ms = now_ms();
+                        h.write.created = true;
+                        remember(h);
+                        ++recorded;
 
-            sandbox_cfg::TrustHandoff h;
-            h.kind = kind;
-            h.write.path = p;
-            h.write.command = std::string{tool};
-            h.write.at_ms = now_ms();
-            h.write.created = true;
-            remember(h);
-            ++recorded;
+                        AGT_LOG(General, Warn, "handoff",
+                                "created a host-trusted path outside the gate: {} ({})",
+                                p, sandbox_cfg::explain(kind));
+                    }
+                }
+            }
 
-            AGT_LOG(General, Warn, "handoff",
-                    "created a host-trusted path outside the gate: {} ({})",
-                    p, sandbox_cfg::explain(kind));
+            std::error_code iec;
+            dit.increment(iec);
+            if (iec) {
+                AGT_LOG(General, Warn, "handoff",
+                        "trusted review walk aborted under {}: {}",
+                        dir, iec.message());
+                break;
+            }
         }
     }
     return recorded;
