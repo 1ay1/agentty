@@ -74,10 +74,18 @@ void session_counts(const Facts& f, std::vector<Metric>& out) {
            static_cast<double>(f.session.compact_summaries));
 }
 
-// Where the wall-clock actually went. A session's total time is the least
-// actionable number on the panel — "1m05s" tells you nothing you can fix.
-// The SPLIT does: waiting on the provider, generating, and running tools
-// have three different causes and three different remedies.
+// Where the provider-facing time went: waiting for the first byte,
+// generating, and tools executing. A session's total time is the least
+// actionable number on the panel — "1m05s" tells you nothing you can
+// fix. The SPLIT does: the three phases have three different causes and
+// three different remedies.
+//
+// Measured as CONSECUTIVE machine time, not wall-clock: each turn
+// contributes ttft + generation, each settled tool contributes its own
+// execution window. Concurrent tools' windows overlap, so the three
+// slices can sum to MORE than the session's wall-clock — that is a
+// statement about where machine effort went, and the caption says so
+// rather than implying a wall-clock bill.
 void session_where_time_went(const Facts& f, std::vector<Metric>& out) {
     const double ttft  = static_cast<double>(f.stream.ttft.sum());
     const double gen   = static_cast<double>(f.stream.stream_ms.sum());
@@ -110,8 +118,14 @@ void session_time(const Facts& f, std::vector<Metric>& out) {
         kv(out, "Generating", Unit::Millis, static_cast<double>(f.stream.stream_ms.sum()));
     if (f.tools.latency.sum())
         kv(out, "Tools",      Unit::Millis, static_cast<double>(f.tools.latency.sum()));
+    // Per turn: the streaming phases (ttft + generation, the same terms
+    // wall_ms already sums) plus the tool time that turn round-tripped
+    // through. Concurrent windows overlap, so this is machine time and can
+    // exceed wall-clock on a parallel-heavy turn — a bigger number here is
+    // a busier session, not a lie about how long the user waited.
     kv(out, "Average turn",     Unit::Millis,
-       static_cast<double>(f.session.wall_ms)
+       (static_cast<double>(f.session.wall_ms)
+          + static_cast<double>(f.tools.latency.sum()))
          / static_cast<double>(f.session.measured_turns));
     if (f.session.measured_turns < f.session.assistant_turns)
         kv(out, "Measured turns", Unit::Count,

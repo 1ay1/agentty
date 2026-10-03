@@ -710,9 +710,9 @@ Cmd finalize_turn(Model& m, StopReason stop_reason) {
                         } else {
                             auto now = std::chrono::steady_clock::now();
                             tc.status = ToolUse::Failed{
-                                tc.started_at(), now,
-                                std::string{"tool args never closed: "}
-                                    + ex.what()};
+                            tc.started_at(), now,
+                            std::string{"tool args never closed: "}
+                                + ex.what()};
                         }
                     }
                 }
@@ -775,7 +775,8 @@ Cmd finalize_turn(Model& m, StopReason stop_reason) {
         for (auto& tc : m.d.current.messages.back().tool_calls) {
             if (tc.is_pending()) {
                 tc.status = ToolUse::Failed{
-                    tc.started_at(), now, std::string{kMaxTokensExplanation}};
+                    tc.started_at(), now,
+                    std::string{kMaxTokensExplanation}};
             } else if (auto* f = std::get_if<ToolUse::Failed>(&tc.status);
                        f && f->output.starts_with("Tool call arguments look incomplete")) {
                 // guard_truncated_tool_args already failed this one with
@@ -1630,12 +1631,18 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
                 if (output.empty())
                     output = e.failed ? "External agent tool failed."
                                       : "Executed by external agent.";
-                if (e.failed)
+                const auto exec_since = tc->executing_since();
+                if (e.failed) {
                     tc->status = ToolUse::Failed{tc->started_at(), now,
                                                  std::move(output)};
-                else
+                    std::get<ToolUse::Failed>(tc->status).executing_since =
+                        exec_since;
+                } else {
                     tc->status = ToolUse::Done{tc->started_at(), now,
                                                std::move(output)};
+                    std::get<ToolUse::Done>(tc->status).executing_since =
+                        exec_since;
+                }
             }
             resync_live_tool_viewer(m);
             return Cmd::none();
