@@ -138,6 +138,29 @@ struct ProviderDescriptor {
     // Stored as a fixed 3-slot array of string_views; unused slots are "".
     std::array<std::string_view, 3> auth_env;
 
+    // Key PREFIXES unique enough to identify this provider from a pasted key
+    // alone, most specific first. Unused slots are "".
+    //
+    // Why this lives on the row: `agentty login` and the first-run modal both
+    // accept "an API key" and then had nowhere to ask which provider it
+    // belonged to, so every pasted key was written to the Anthropic store
+    // (issue #68). The prompt says "or any provider" and the code meant
+    // "Anthropic" -- a key for Groq was accepted, saved, and then failed on
+    // the first turn with an auth error naming the wrong vendor.
+    //
+    // Detection HAS to be a registry fact rather than a switch somewhere in
+    // the auth layer: a new provider already declares its host, its env vars
+    // and its wire dialect here, and a prefix table living anywhere else is
+    // one more place to forget. This is the same reasoning auth_env above
+    // follows.
+    //
+    // ONLY unambiguous prefixes belong here. `sk-` is shared by Anthropic,
+    // OpenAI and DeepSeek, so it identifies nothing and is deliberately
+    // absent -- a guess that silently picks the wrong provider is worse than
+    // asking, because the user then debugs a credential they believe is
+    // correct. An empty match means "ask", which is the honest outcome.
+    std::array<std::string_view, 2> key_prefixes;
+
     // The FIXED host to open a warm TLS connection to before the first turn,
     // when it is NOT derivable from the runtime Endpoint. Two backends need
     // this: Anthropic (the transport hardcodes api.anthropic.com; no Endpoint
@@ -300,6 +323,10 @@ inline constexpr std::array<ProviderDescriptor, 15> kProviders{{
      // re-arm on an account switch.
      .wire = Wire::AnthropicMessages, .lifetime = Lifetime::LongLived,
      .auth = AuthStyle::OAuthOrKey,
+     // sk-ant- covers both the API key (sk-ant-api03-) and the OAuth token
+     // (sk-ant-oat01-). Unambiguous, unlike the bare sk- that OpenAI and
+     // DeepSeek also use -- which is why neither of those rows has a prefix.
+     .key_prefixes = {"sk-ant-", ""},
      .prewarm_host = "api.anthropic.com",
      .method_menu = true, .oauth_proactive_refresh = true,
      .default_model = "claude-opus-4-5",
@@ -371,6 +398,7 @@ inline constexpr std::array<ProviderDescriptor, 15> kProviders{{
      .wire = Wire::OpenAIChat, .lifetime = Lifetime::PerCall,
      .auth = AuthStyle::ApiKey,
      .auth_env = {"GROQ_API_KEY", "OPENAI_API_KEY", ""},
+     .key_prefixes = {"gsk_", ""},
      .host = "api.groq.com", .path = "/openai/v1/chat/completions",
      .models_path = "/openai/v1/models"},
 
@@ -379,6 +407,7 @@ inline constexpr std::array<ProviderDescriptor, 15> kProviders{{
      .wire = Wire::OpenAIChat, .lifetime = Lifetime::PerCall,
      .auth = AuthStyle::ApiKey,
      .auth_env = {"OPENROUTER_API_KEY", "OPENAI_API_KEY", ""},
+     .key_prefixes = {"sk-or-v1-", "sk-or-"},
      .host = "openrouter.ai", .path = "/api/v1/chat/completions",
      .models_path = "/api/v1/models",
      // OpenRouter shipped an OpenAI-compatible Responses endpoint; upstream
@@ -414,6 +443,7 @@ inline constexpr std::array<ProviderDescriptor, 15> kProviders{{
      .wire = Wire::OpenAIChat, .lifetime = Lifetime::PerCall,
      .auth = AuthStyle::ApiKey,
      .auth_env = {"XAI_API_KEY", "OPENAI_API_KEY", ""},
+     .key_prefixes = {"xai-", ""},
      .host = "api.x.ai", .path = "/v1/chat/completions",
      .models_path = "/v1/models"},
 
@@ -430,6 +460,7 @@ inline constexpr std::array<ProviderDescriptor, 15> kProviders{{
      .wire = Wire::OpenAIChat, .lifetime = Lifetime::PerCall,
      .auth = AuthStyle::ApiKey,
      .auth_env = {"GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENAI_API_KEY"},
+     .key_prefixes = {"AIzaSy", ""},
      .host = "generativelanguage.googleapis.com",
      .path = "/v1beta/openai/chat/completions",
      .models_path = "/v1beta/openai/models"},
@@ -468,6 +499,33 @@ inline constexpr std::array<ProviderDescriptor, 15> kProviders{{
     for (const auto& p : kProviders)
         if (p.id == id) return &p;
     return nullptr;
+}
+
+// Which provider does this API key belong to, judged by its prefix alone?
+// Empty when no row claims it — which is the common case and NOT a failure.
+//
+// Why empty is a real answer: a bare `sk-` key could be OpenAI, DeepSeek or a
+// custom endpoint, and silently picking one is how issue #68 happened in the
+// first place. Every pasted key was written to the Anthropic store because the
+// prompt said "or any provider" while the code had no way to ask. The user
+// then debugged a credential they believed was correct, against an error
+// naming a vendor they had not chosen.
+//
+// So the contract is: a confident answer, or none. A caller that gets none
+// must ASK rather than assume. Longest match wins, so `sk-or-v1-` beats
+// `sk-or-` and a future `sk-ant-oat02-` cannot be shadowed by `sk-ant-`.
+[[nodiscard]] inline std::string_view provider_for_api_key(
+        std::string_view key) noexcept {
+    std::string_view best;
+    std::size_t best_len = 0;
+    for (const auto& p : kProviders) {
+        for (std::string_view pre : p.key_prefixes) {
+            if (pre.empty() || key.size() < pre.size()) continue;
+            if (key.substr(0, pre.size()) != pre) continue;
+            if (pre.size() > best_len) { best_len = pre.size(); best = p.id; }
+        }
+    }
+    return best;
 }
 
 // ── Compile-time invariants ─────────────────────────────────────────────
@@ -528,6 +586,42 @@ namespace detail {
             if (kProviders[i].id == kProviders[j].id) return false;
     return true;
 }
+
+// No two providers may claim the same key prefix, and no prefix may be a
+// prefix OF another provider's prefix.
+//
+// The second half is the one that matters. provider_for_api_key() takes the
+// longest match, so `sk-or-v1-` beating `sk-or-` within OpenRouter is fine and
+// intended. But if a FUTURE row declared `sk-` while Anthropic declares
+// `sk-ant-`, every Anthropic key would still resolve correctly and every
+// unrecognised `sk-` key would silently resolve to that new provider -- which
+// is issue #68 again, wearing a different vendor's name. A prefix that can
+// swallow another row's keys must not compile.
+//
+// Checked at build time rather than tested, because the failure is silent at
+// runtime: the user gets a credential stored against the wrong provider and an
+// auth error that names someone they never chose.
+[[nodiscard]] constexpr bool key_prefixes_unambiguous() noexcept {
+    for (std::size_t i = 0; i < kProviders.size(); ++i) {
+        for (std::string_view a : kProviders[i].key_prefixes) {
+            if (a.empty()) continue;
+            for (std::size_t j = 0; j < kProviders.size(); ++j) {
+                if (i == j) continue;
+                for (std::string_view b : kProviders[j].key_prefixes) {
+                    if (b.empty()) continue;
+                    // Either being a prefix of the other is ambiguous ACROSS
+                    // rows; equality is the degenerate case of that.
+                    const auto n = a.size() < b.size() ? a.size() : b.size();
+                    if (a.substr(0, n) == b.substr(0, n)) return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+static_assert(key_prefixes_unambiguous(),
+              "two providers claim overlapping API-key prefixes: a pasted key "
+              "would resolve to the wrong vendor's store (issue #68)");
 
 // Auth capabilities must be internally consistent. These fields replaced a
 // chain of provider-name compares in login.cpp, so a row that contradicts

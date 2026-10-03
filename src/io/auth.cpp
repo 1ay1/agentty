@@ -7,6 +7,13 @@
 #include "agentty/provider/anthropic/oauth.hpp"
 #include "agentty/provider/chatgpt/codex_oauth.hpp"
 #include "agentty/provider/copilot/copilot_oauth.hpp"
+// Pasted-key routing: the registry owns the prefix table, credentials:: does
+// the per-provider store write, persistence sets the active provider. Same
+// three that io/account_switch.cpp in this objlib already reaches for, so no
+// new layering edge.
+#include "agentty/provider/registry.hpp"
+#include "agentty/provider/credentials.hpp"
+#include "agentty/io/persistence.hpp"
 #include "agentty/util/dbglog.hpp"
 #include "agentty/util/home_dir.hpp"
 #include "agentty/util/user_root.hpp"
@@ -1230,6 +1237,47 @@ int cmd_login() {
         while (!key.empty() && (key.back() == '\r' || key.back() == '\n'
                                 || key.back() == ' ')) key.pop_back();
         if (key.empty()) { std::cerr << "No key entered.\n"; return 1; }
+
+        // Route the key to the provider its PREFIX names, not to Anthropic.
+        //
+        // This prompt has always said "or any provider" and then stored every
+        // key in the Anthropic credential store (issue #68). A Groq or
+        // OpenRouter key was accepted, saved, reported as success, and then
+        // failed on the first turn with an auth error naming Anthropic -- so
+        // the user debugged a credential that was correct, against a vendor
+        // they had not chosen.
+        //
+        // provider_for_api_key is deliberately conservative: it answers only
+        // when a registry row claims the prefix unambiguously. A bare `sk-`
+        // could be OpenAI, DeepSeek or a custom endpoint, so it returns empty
+        // and we fall through to the Anthropic store -- which is the historical
+        // behaviour and the right default for a tool whose method menu leads
+        // with Claude. The difference is that it is now a FALLBACK for the
+        // genuinely ambiguous case rather than the answer for every case.
+        const std::string_view detected = provider::provider_for_api_key(key);
+        if (!detected.empty() && detected != "anthropic") {
+            const auto* row = provider::preset_for(detected);
+            const std::string_view label = row ? row->label : detected;
+            if (!provider::credentials::add_key(detected, key)) {
+                std::cerr << "Failed to save the " << label << " key.\n";
+                return 1;
+            }
+            // Make it the active provider too: a user who pasted a Groq key
+            // meant to use Groq, and leaving the selection elsewhere would be
+            // the same class of surprise in a quieter form.
+            auto s = persistence::load_settings();
+            s.provider = std::string{detected};
+            persistence::save_settings(s);
+            // "an OpenRouter key", "a Groq key" — the labels are a fixed set,
+            // so a vowel check is the whole of the grammar needed here.
+            const bool vowel = !label.empty()
+                && (label[0] == 'A' || label[0] == 'E' || label[0] == 'I'
+                    || label[0] == 'O' || label[0] == 'U');
+            std::cout << "Recognised a" << (vowel ? "n " : " ") << label
+                      << " key and saved it as your active provider.\n";
+            return 0;
+        }
+
         Credentials c{cred::ApiKey{std::move(key)}};
         if (!save_credentials(c)) {
             std::cerr << "Failed to save credentials.\n"; return 1;

@@ -1032,8 +1032,8 @@ Cmd login_submit(Model& m) {
     }
     if (auto* api = std::get_if<login::ApiKeyInput>(&m.ui.login)) {
         std::string key = std::move(api->key_input);
-        const std::string provider = api->provider;
-        const std::string provider_label = api->provider_label;
+        std::string provider = api->provider;
+        std::string provider_label = api->provider_label;
         // Trim trailing whitespace — paste handlers may include a stray
         // newline depending on terminal pasting behaviour.
         while (!key.empty() && (key.back() == '\r' || key.back() == '\n'
@@ -1042,6 +1042,29 @@ Cmd login_submit(Model& m) {
         if (key.empty()) {
             m.ui.login = login::Failed{"no key entered"};
             return Cmd::none();
+        }
+
+        // No provider chosen? Let the KEY name one.
+        //
+        // This modal is reached two ways. From the provider picker, where
+        // `provider` is already set and this does nothing. And on FIRST RUN,
+        // where nothing has been picked yet, `provider` is empty, and empty
+        // has always meant "Anthropic" — so a Groq key pasted into a prompt
+        // that offers "any provider" was stored as an Anthropic credential
+        // and failed on the first turn naming the wrong vendor (issue #68).
+        //
+        // Only an unambiguous prefix counts. A bare `sk-` stays empty and
+        // keeps the Anthropic default, which is the right guess for a tool
+        // whose method menu leads with Claude — the fix is that it is now a
+        // guess reserved for the ambiguous case, not the answer for all of
+        // them.
+        if (provider.empty()) {
+            if (const auto detected = provider::provider_for_api_key(key);
+                !detected.empty() && detected != "anthropic") {
+                provider = std::string{detected};
+                const auto* row = provider::preset_for(detected);
+                provider_label = row ? std::string{row->label} : provider;
+            }
         }
 
         // OpenAI-family key: persist under Settings.provider_keys[id], then
