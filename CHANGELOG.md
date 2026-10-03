@@ -5,6 +5,28 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- **The `git_*` tools ran outside the sandbox.** A repository can execute code
+  on your behalf — `pre-commit` and `commit-msg` hooks, `post-checkout`, a
+  `core.fsmonitor` or credential helper configured in `.git/config` — and all
+  of it arrives with `git clone`. Those spawns used an unsandboxed subprocess
+  runner, so a `pre-commit` hook invoked through `git_commit` could write
+  outside the workspace, while the identical write through the `shell` tool was
+  refused.
+
+  That asymmetry was backwards: a git hook is *more* dangerous than a command
+  the model typed, because you did not write it and may never read it. Every
+  git invocation now goes through the same sandbox the shell tool uses. Commit
+  messages containing quotes and `$vars` are unaffected — the wrapper preserves
+  exact argv semantics rather than going through `sh -c`.
+
+- **One symlink could step around the trust-handoff gate.** The gate matched
+  the path as written, and `is_host_trusted()` is a pure path-shape check, so
+  `ln -s .git/hooks innocuous` followed by a write to `innocuous/post-merge`
+  installed a real git hook that the gate never saw. Creating a symlink inside
+  your own workspace is ordinary work, so nothing else stopped it. The gate now
+  also checks the resolved path — only when the spelling looks innocent, so an
+  ordinary write still costs nothing.
+
 - **The trust-handoff gate had a hole: `shell` walked straight past it.**
   Writing `.vscode/tasks.json` with the `write` tool is refused — VS Code can
   execute that file when the folder opens. Doing it with

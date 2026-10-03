@@ -22,9 +22,14 @@
 #include <doctest/doctest.h>
 
 #include <atomic>
+#include <filesystem>
 #include <string>
 #include <thread>
 #include <vector>
+
+#ifndef _WIN32
+#include <unistd.h>   // getpid — unique symlink sandbox per run
+#endif
 
 #include "agentty/tool/util/handoff_gate.hpp"
 #include "agentty/tool/util/sandbox.hpp"   // Mode::Off, for the "off means off" case
@@ -257,4 +262,53 @@ TEST_CASE("handoff: clearing the feed empties it") {
     CHECK_FALSE(hg::handoff_feed().empty());
     hg::clear_handoff_feed();
     CHECK(hg::handoff_feed().empty());
+}
+
+TEST_CASE("handoff: a symlinked directory cannot hide a trusted shape") {
+    Fresh fresh;
+
+    // is_host_trusted() is a pure path-shape walk, so it only sees the spelling
+    // it was handed. That let ONE symlink step around the gate entirely:
+    //
+    //     ln -s .git/hooks innocuous
+    //     write innocuous/post-merge      <- installs a real git hook
+    //
+    // Measured before the fix: "innocuous/post-merge" read as PLAIN while
+    // ".git/hooks/post-merge" read as trusted, and the write reached the hook
+    // directory either way. Creating a symlink inside your own workspace is
+    // ordinary work, so nothing else stopped it.
+    //
+    // check() now also tries the RESOLVED path, but only when the spelling
+    // looks innocent -- the common case must stay string compares with no I/O.
+    namespace fs = std::filesystem;
+    const fs::path root = fs::temp_directory_path() /
+        ("agentty_handoff_symlink_" + std::to_string(::getpid()));
+    std::error_code ec;
+    fs::remove_all(root, ec);
+    fs::create_directories(root / ".git" / "hooks");
+    fs::create_directories(root / "src");
+
+    fs::create_directory_symlink(root / ".git" / "hooks", root / "innocuous", ec);
+    if (ec) return;   // no symlink support here; nothing to assert
+
+    // Direct spelling: caught before and after the fix.
+    CHECK(hg::check_with((root / ".git" / "hooks" / "post-merge").string(),
+                         "write", Policy::Refuse).is_handoff);
+
+    // THE REGRESSION: same destination, spelled through the symlink.
+    auto v = hg::check_with((root / "innocuous" / "post-merge").string(),
+                           "write", Policy::Refuse);
+    CHECK_MESSAGE(v.is_handoff,
+                  "a trusted path reached through a symlinked directory must "
+                  "still be gated -- otherwise one `ln -s` defeats the gate");
+    CHECK_FALSE(v.allowed);
+
+    // And resolution must not start gating ordinary files: a check that fires
+    // on everything is as useless as one that fires on nothing.
+    CHECK_FALSE(hg::check_with((root / "src" / "main.cpp").string(),
+                               "write", Policy::Refuse).is_handoff);
+    CHECK_FALSE(hg::check_with((root / "README.md").string(),
+                               "write", Policy::Refuse).is_handoff);
+
+    fs::remove_all(root, ec);
 }

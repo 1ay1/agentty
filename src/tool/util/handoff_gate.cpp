@@ -18,6 +18,8 @@
 
 namespace agentty::tools::util::handoff {
 
+namespace fs = std::filesystem;
+
 namespace {
 
 // Same storage shape and the same reasoning as the broker's blocked feed: see
@@ -72,7 +74,44 @@ Verdict check_with(std::string_view path, std::string_view tool,
     Verdict v;
 
     sandbox_cfg::TrustKind kind{};
-    if (!sandbox_cfg::is_host_trusted(path, &kind)) {
+    bool trusted = sandbox_cfg::is_host_trusted(path, &kind);
+
+    // If the SPELLING is innocent, try the RESOLVED path before believing it.
+    //
+    // is_host_trusted() is a pure shape walk, so it sees only what it was
+    // handed. A symlinked directory therefore hides a trusted shape entirely:
+    //
+    //     ln -s .git/hooks innocuous
+    //     write innocuous/post-merge      <- installs a real git hook
+    //
+    // Measured: "innocuous/post-merge" reads as PLAIN, and the same file via
+    // ".git/hooks/post-merge" reads as trusted. The write lands in the hook
+    // directory either way, so matching only the spelling is a gate the model
+    // can step around by creating one symlink -- which it is allowed to do,
+    // since a symlink inside the workspace is ordinary work.
+    //
+    // Resolution is the second check rather than a replacement for the first:
+    // weakly_canonical touches the filesystem, and the common case is an
+    // ordinary path that must stay a few string compares. Only a path that
+    // looks innocent pays for the resolve, and `trusted` short-circuits the
+    // one that already matched.
+    if (!trusted) {
+        std::error_code ec;
+        const fs::path resolved = fs::weakly_canonical(fs::path{path}, ec);
+        if (!ec && !resolved.empty() && resolved != fs::path{path}) {
+            sandbox_cfg::TrustKind rk{};
+            if (sandbox_cfg::is_host_trusted(resolved.string(), &rk)) {
+                trusted = true;
+                kind = rk;
+                AGT_LOG(Tool, Warn, "sandbox.handoff",
+                        "path resolves into a trusted location: {} -> {}",
+                        logx::body(std::string{path}),
+                        logx::body(resolved.string()));
+            }
+        }
+    }
+
+    if (!trusted) {
         // The common case, and it must stay cheap: this runs on every write the
         // agent makes. `is_host_trusted` is a table walk over path shapes with
         // no I/O, so an ordinary path costs a few string compares.
@@ -164,8 +203,6 @@ void clear_handoff_feed() {
 // ── Detection for the shell path ──────────────────────────────────
 
 namespace {
-
-namespace fs = std::filesystem;
 
 // Directories the snapshot will not descend into.
 //

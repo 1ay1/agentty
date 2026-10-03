@@ -188,3 +188,76 @@ exist, and it needs a claybin change plus a decision about what to do when
 `git config` legitimately wants to write. Detection landing first is the right
 order: it is the layer that works on every host, so shipping it does not depend
 on that decision.
+
+## Audit: which tools actually reach the sandbox
+
+After the above, I walked all 36 tools in the spec catalog against both layers.
+Two real gaps, both now fixed; recorded here because the *shape* of each is
+worth remembering.
+
+### Gap 1 (high) — the git tools were not sandboxed at all
+
+agentty installs a `HostSandbox` hook that mcp-cpp calls for subprocesses, and
+`run_shell_command` honours it. But there are two runner families in mcp-cpp:
+
+| runner | sandboxed |
+|---|---|
+| `util::sandbox::run_shell_command` / `run_argv` | yes |
+| `util::run_command_s` / `run_argv_s` | **no** |
+
+All 16 git spawn sites in `mcp-cpp/src/tools/git.cpp` used `run_argv_s`.
+Measured, with a `pre-commit` hook that writes to `$HOME`:
+
+```
+git_commit tool  → hook ran, $HOME/agentty_hook_escape created   ESCAPED
+shell tool       → identical write refused                        contained
+```
+
+The asymmetry is backwards. A git hook is *more* dangerous than an `echo`: the
+user did not type it, may never read it, and it arrives with `git clone`. Git
+also executes more than hooks — a `core.fsmonitor` or credential helper in
+`.git/config` is an arbitrary command.
+
+Fixed by routing every site through one `run_git_argv()` helper over
+`util::sandbox::run_argv`. The argv form matters: no `sh -c`, so commit messages
+containing quotes and `$vars` survive exactly. It falls through to the plain
+runner when no backend is active, so this is a no-op where the sandbox is off
+rather than a new failure mode. Verified: hook contained, commit still succeeds.
+
+### Gap 2 (medium) — the gate matched the path as SPELLED
+
+`is_host_trusted()` is a pure shape walk, so it sees only what it is handed:
+
+```sh
+ln -s .git/hooks innocuous
+write innocuous/post-merge      # installs a real git hook
+```
+
+Measured: `innocuous/post-merge` read as **plain**, `.git/hooks/post-merge`
+read as **trusted**, same destination. Creating a symlink inside your own
+workspace is ordinary work, so nothing else stopped it — one `ln -s` defeated
+the gate.
+
+`check()` now also tries the resolved path, but only when the spelling looks
+innocent: `weakly_canonical` touches the filesystem, and the common case must
+stay a few string compares with no I/O.
+
+Worth noting what was *not* broken — 12 other spellings all classify correctly
+(`./`, `../`, `//`, basename rules at any depth) with no false positives on
+`tasks.json.txt`, `mytasks.json` or `docs/vscode-notes.md`.
+
+### Checked and sound
+
+- **Hooks** (`src/tool/hooks.cpp`) — already use `run_shell_command`.
+- **MCP plugin servers** — not sandboxed, but gated by content-hash approval
+  against a store in `~/.agentty` the clone cannot reach. A project `mcp.json`
+  stays untrusted until a human vouches for *those exact bytes*; editing it
+  re-gates. That is the MCPoison lesson applied correctly.
+- **Subagents / skills** — reuse the same tool defs, so they inherit both
+  layers by construction rather than by remembering to.
+- **Run code block** (`code_blocks.cpp`) uses the unsandboxed runner, and that
+  is deliberate: it is `Ctrl+G` → `Enter`, explicitly user-initiated, and runs
+  on the real terminal so `sudo` prompts work. Confining it would break the
+  feature's whole purpose. Worth revisiting only if it ever becomes
+  model-triggerable.
+
