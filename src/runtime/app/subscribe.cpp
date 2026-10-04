@@ -1148,6 +1148,12 @@ Sub subscribe(const Model& m) {
         m.ui.composer.queue_peek_index().has_value(),
     };
 
+    // Changes-strip chords (A accept / X reject) are advertised on the strip
+    // but only reachable with an EMPTY composer — the gate below never fires
+    // while the user is typing, so plain letters stay safe everywhere else.
+    const bool strip_chords_armed =
+        composer_state.text_empty && !m.d.pending_changes.empty();
+
     // Which mode each form-backed pane is in. Three bools per pane — NOT the
     // pane's rows, which would be a per-frame deep copy on the input path.
     FormFocus rag_form, smart_form_snap, plugin_form_snap, appearance_form_snap;
@@ -1323,6 +1329,25 @@ Sub subscribe(const Model& m) {
                 }
             }
             if (auto msg = on_global(ev)) return msg;
+
+            // Changes-strip chords: A (accept all, non-destructive — tools
+            // already wrote these changes) and X (reject all, two-press guard
+            // via the reducer) from the main screen. Gated on the bare main
+            // screen (no overlay, not even ambient Todo), an empty composer
+            // AND an idle turn: a letter the user is TYPING must never jump
+            // the queue into the review flow, a modal must keep its own key
+            // surface, and mid-turn the changeset can still be growing.
+            if (strip_chords_armed && active_panel == OK::None && !turn_active) {
+                if (auto* ck = std::get_if<CharKey>(&ev.key);
+                    ck && !ev.mods.ctrl && !ev.mods.alt) {
+                    const char32_t c = ck->codepoint;
+                    if (c == U'a' || c == U'A')
+                        return Msg{AcceptAllChanges{}};
+                    if (c == U'x' || c == U'X')
+                        return Msg{RejectAllChanges{}};
+                }
+            }
+
             return on_composer(composer_state, ev);
         });
 

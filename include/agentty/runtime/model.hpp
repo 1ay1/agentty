@@ -341,6 +341,11 @@ struct Model {
         smart::RoleConfig      smart;
 
         std::vector<FileChange>          pending_changes;
+        // Two-press guard state for X/^X "reject all" when the review pane is
+        // CLOSED: the first bare X arms (toast asks for a second), the second
+        // executes, ANY other diff-review message disarms. Inside the pane the
+        // guard lives on the panel cell (confirm_reject_all) instead.
+        bool                             reject_all_armed = false;
         // Whether the persistent "N changes" review strip renders after edits.
         // Loaded from Settings at startup; toggled live via the palette. OFF by
         // default — edits still queue in pending_changes (Ctrl+R opens the

@@ -113,6 +113,10 @@ Cmd submit_message(Model& m) {
         m.s.status_until = std::chrono::steady_clock::now()
                          + std::chrono::seconds{3};
         m.d.pending_changes.clear();
+        // The changes are gone either way — an armed X two-press guard from
+        // the changes strip must not survive into the next turn and fire on
+        // some unrelated later keypress.
+        m.d.reject_all_armed = false;
     }
 
     // ── Slash-command expansion ──────────────────────────────────
