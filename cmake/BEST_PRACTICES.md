@@ -166,7 +166,9 @@ instantiate ONCE per batch is a big win:
 Modern C++ was PRESERVED — the only source changes were genuine improvements
 that unity surfaced as latent issues:
   * `scope/trust.cpp`: an anonymous-namespace `home_dir()` that duplicated an
-    identical one in `scope.cpp` — renamed `trust_home_dir()` (real dedup).
+    identical one in `scope.cpp` — renamed `trust_home_dir()` (real dedup;
+    later REMOVED entirely when the approvals store moved to
+    `util::user_root()`, which made the helper dead).
   * `provider/external_acp_backend.cpp`: bare `acp::` was ambiguous with
     agentty's own `agentty::acp` (the ACP server ns) — pinned via
     `namespace acp = ::acp;` (removes a real ambiguity).

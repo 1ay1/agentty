@@ -395,8 +395,8 @@ void scope_edits_are_isolated(const fs::path& dir) {
 
 // Project-config trust gate: a workspace-local mcp.json is untrusted until
 // approved by CONTENT HASH; editing it re-gates (the MCPoison fix). Runs in
-// its own HOME + cwd sandbox so the approvals store and the project file are
-// both isolated.
+// its own AGENTTY_HOME + cwd sandbox so the approvals store and the project
+// file are both isolated.
 void project_trust_gate(const fs::path& dir) {
     std::println("--- project_trust_gate ---");
     const fs::path home = dir / "trust_home";
@@ -404,11 +404,15 @@ void project_trust_gate(const fs::path& dir) {
     fs::create_directories(home);
     fs::create_directories(work / ".agentty");
 
-    // Redirect HOME (approvals store) + cwd (project config lookup). Make sure
-    // the env opt-in isn't set, so we're testing the content-hash path.
-    const std::string prev_home = std::getenv("HOME") ? std::getenv("HOME") : "";
-    const fs::path    prev_cwd  = fs::current_path();
-    ::setenv("HOME", home.string().c_str(), 1);
+    // Redirect the approvals root + cwd (project config lookup). The store
+    // resolves through util::user_root(): repoint AGENTTY_HOME at this test's
+    // home (the binary main set one for the whole process), so approvals land
+    // in the test's own sandbox, not the shared per-process one. Also clear
+    // the env opt-in so we're testing the content-hash path.
+    const std::string prev_agt_home = std::getenv("AGENTTY_HOME") ? std::getenv("AGENTTY_HOME") : "";
+    const bool        had_agt_home  = std::getenv("AGENTTY_HOME") != nullptr;
+    const fs::path    prev_cwd      = fs::current_path();
+    ::setenv("AGENTTY_HOME", (home / ".agentty").string().c_str(), 1);
     ::unsetenv("AGENTTY_MCP_ALLOW_PROJECT");
     fs::current_path(work);
 
@@ -439,7 +443,8 @@ void project_trust_gate(const fs::path& dir) {
 
     // Restore.
     fs::current_path(prev_cwd);
-    if (!prev_home.empty()) ::setenv("HOME", prev_home.c_str(), 1);
+    if (had_agt_home) ::setenv("AGENTTY_HOME", prev_agt_home.c_str(), 1);
+    else              ::unsetenv("AGENTTY_HOME");
     std::println("PASS\n");
 }
 
@@ -451,9 +456,10 @@ void per_server_trust(const fs::path& dir) {
     const fs::path work = dir / "ps_work";
     fs::create_directories(home);
     fs::create_directories(work / ".agentty");
-    const std::string prev_home = std::getenv("HOME") ? std::getenv("HOME") : "";
-    const fs::path    prev_cwd  = fs::current_path();
-    ::setenv("HOME", home.string().c_str(), 1);
+    const std::string prev_agt_home = std::getenv("AGENTTY_HOME") ? std::getenv("AGENTTY_HOME") : "";
+    const bool        had_agt_home  = std::getenv("AGENTTY_HOME") != nullptr;
+    const fs::path    prev_cwd      = fs::current_path();
+    ::setenv("AGENTTY_HOME", (home / ".agentty").string().c_str(), 1);
     ::unsetenv("AGENTTY_MCP_ALLOW_PROJECT");
     fs::current_path(work);
     const fs::path cfg = plug::config_path(true);
@@ -492,7 +498,8 @@ void per_server_trust(const fs::path& dir) {
     check(!plug::is_server_trusted(cfg, "delta"), "delta re-gated on args change");
 
     fs::current_path(prev_cwd);
-    if (!prev_home.empty()) ::setenv("HOME", prev_home.c_str(), 1);
+    if (had_agt_home) ::setenv("AGENTTY_HOME", prev_agt_home.c_str(), 1);
+    else              ::unsetenv("AGENTTY_HOME");
     std::println("PASS\n");
 }
 
