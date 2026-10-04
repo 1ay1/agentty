@@ -41,6 +41,8 @@ Trust     may I EXECUTE it      Trusted | Pending | Blocked
 - **`Dialect`** is a separate axis so the six-root ladder is the *product*
   `Locus × Dialect`, generated once, instead of four hand-written arrays.
   Within a locus the native `.agentty` dir shadows the interop conventions.
+  **Breadth is per-feature**, declared on the `Layout` (`dialects`), not a
+  global list — see "Dialect breadth" below.
 - **`Trust`** is bound to **content**, never inferred from `Locus` (see
   "Trust", below).
 
@@ -54,7 +56,7 @@ Source                     (a resolved origin — carries its own provenance)
   writable    (is this a valid WRITE target here?)
 
 Tagged<T>  { value: T, source: Source }   (every resolved item knows its origin)
-Layout     { leaf, explicit_env }         (what the FEATURE stores — passed in)
+Layout     { leaf, explicit_env, dialects } (what the FEATURE stores — passed in)
 Env        { home, project_root, … }      (the resolved edge — passed by value)
 ```
 
@@ -70,6 +72,35 @@ Two properties do the heavy lifting:
   hands scope a `Layout{leaf}` (`"memory.jsonl"`, `"skills"`, …); scope
   lays out roots and folds. Inverting that dependency is what keeps this a
   reusable primitive rather than a registry of everything downstream.
+
+## Dialect breadth — a property of the FEATURE
+
+Which dialects a feature reads answers a question only that feature can:
+**do the same bytes work in both tools?**
+
+| kind | example | dialects | why |
+|------|---------|----------|-----|
+| portable content | skills, agents, commands | `kPortable` (all three) | a `SKILL.md` is valid in another tool, so reading theirs is free compat |
+| our own format | memory, `mcp.json` | `kNativeOnly` (default) | nobody else writes that file there; extra roots are dead paths |
+
+This used to be one array inside `plan()`, shared by everyone, so the ladder
+always carried three dialects per locus and MCP filtered the extras back out
+downstream (`if (src.dialect != Agentty) continue;`). **Two decision sites for
+one decision**: `plan()` reported six sources where three were read, so
+anything built on it — a `config where` command, a doc, a test — described
+behaviour that did not exist. Adding a dialect *looked* like it widened MCP
+and silently did nothing, because the downstream filter still dropped it.
+
+Moving the choice onto `Layout` collapses that to one site, and flips the
+default to the safe end: a feature gets `.agentty` only and must opt **into**
+interop. Forgetting now fails closed — one fewer directory read, instead of a
+cloned repo's `.claude/` read by accident.
+
+A dialect earns a slot only when the same bytes work in both tools. That test
+is what rules `~/.ai/mcp/mcp.json` out: it swaps the *leaf shape*
+(`mcp/mcp.json`) and has no project-side counterpart, so forcing it in would
+turn `plan()` from a product back into a hand-written path list. Foreign
+config belongs behind an explicit import, not an implicit read.
 
 ## The fold — two monoids over one source list
 

@@ -328,12 +328,16 @@ void read_one_config(const fs::path& file, const scope::Source& src,
 read_config_servers() {
     std::unordered_map<std::string, ConfigServer> out;
     const scope::Env env = scope::current_env(mcp_layout());
-    // scope::plan yields sources in precedence order; MCP only uses the native
-    // .agentty dialect (mcp.json isn't an .agents/.claude convention), so we
-    // read the Agentty source for each locus. Higher precedence read first =
-    // first-writer-wins shadow in read_one_config.
+    // scope::plan yields sources in precedence order, and mcp_layout() asks
+    // for the native dialect ONLY (mcp.json isn't an .agents/.claude
+    // convention), so every source here is one we read. Higher precedence
+    // first = first-writer-wins shadow in read_one_config.
+    //
+    // This used to re-filter with `if (src.dialect != Agentty) continue;`
+    // because plan() emitted all three dialects for everyone. That made the
+    // ladder a lie: plan reported six sources where three were read. The
+    // breadth now lives on the Layout, so the plan IS the behaviour.
     for (const scope::Source& src : scope::plan(mcp_layout(), env)) {
-        if (src.dialect != scope::Dialect::Agentty) continue;
         // Explicit source's base is the file's parent; its leaf is the exact
         // env-named file. Project/User join the standard leaf onto the base.
         const fs::path file = (src.locus == scope::Locus::Explicit && env.explicit_config)

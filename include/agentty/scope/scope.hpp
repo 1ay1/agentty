@@ -101,6 +101,39 @@ enum class Dialect : std::uint8_t { Agentty, Agents, Claude };
     return ".agentty";
 }
 
+// ── Dialect BREADTH: a per-feature choice, not a global ───────────────────
+//
+// Which dialects a feature reads is a property OF THE FEATURE, because it
+// answers a question only the feature can: do the same bytes work in both
+// tools? A skill is markdown with frontmatter and Claude reads the same
+// file, so reading `.claude/skills/` is free compatibility. `mcp.json` is
+// not an `.agents`/`.claude` convention at all — those tools do not put that
+// file there, and its schema is ours.
+//
+// This used to be ONE array inside plan(), shared by every caller, so the
+// ladder always had three dialects per locus and MCP filtered the extras
+// back out downstream (`if (src.dialect != Dialect::Agentty) continue;`).
+// Two decision sites for one decision: plan() reported six sources where
+// three were ever read, so anything built on plan() — a `config where`
+// command, a doc, a test — described behaviour that did not exist. Adding a
+// dialect LOOKED like it widened MCP and silently did nothing, because the
+// downstream filter still dropped it.
+//
+// Moving the choice onto Layout collapses that to one site. It also flips
+// the default to the safe end: a feature now gets `.agentty` ONLY and must
+// opt INTO interop, where before it got all three and had to remember to
+// narrow. Forgetting now fails closed — it reads one fewer directory,
+// instead of reading a cloned repo's `.claude/` by accident.
+
+// Native only. The default: a format nobody else writes.
+inline constexpr Dialect kNativeOnly[] = {Dialect::Agentty};
+
+// Native plus the interop conventions, in shadow order (native wins).
+// For PORTABLE content — skills, agents, commands — where the same file is
+// valid in another tool and reading theirs is drop-in compatibility.
+inline constexpr Dialect kPortable[] = {
+    Dialect::Agentty, Dialect::Agents, Dialect::Claude};
+
 // ── Source: a resolved, tagged origin — the carrier of the fold ───────────
 // A value that knows its own provenance. Constructed ONLY by the resolver
 // (via plan()), so you cannot fabricate configuration with no source: the
@@ -169,6 +202,16 @@ struct Layout {
     // An optional Explicit-locus override: if this env var names an existing
     // file, it becomes the highest-precedence source. Empty ⇒ no escape hatch.
     std::string_view explicit_env = {};
+
+    // WHICH dialects this feature reads, in shadow order. Defaults to native
+    // only (kNativeOnly) — see the note above dir_name(): a dialect earns a
+    // slot here only when the SAME BYTES work in both tools. Portable content
+    // (skills, agents, commands) passes kPortable; everything whose format we
+    // own leaves this alone.
+    //
+    // plan() emits exactly these and nothing else, so the ladder a caller can
+    // print is the ladder it reads. No consumer filters afterward.
+    std::span<const Dialect> dialects = kNativeOnly;
 };
 
 // ── Trust: first-class, bound to CONTENT — never inferred from Locus ──────

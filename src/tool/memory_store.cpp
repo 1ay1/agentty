@@ -520,8 +520,11 @@ fs::path path_for(Scope s) {
         (s == Scope::User) ? scope::Locus::User : scope::Locus::Project;
 
     for (const scope::Source& src : scope::plan(layout, env)) {
-        if (src.locus != want || src.dialect != scope::Dialect::Agentty)
-            continue;
+        // Locus is still a filter here — path_for answers "the path for THIS
+        // scope", not "the winning path". The dialect check that used to sit
+        // beside it is gone: the Layout asks for native only, so every source
+        // plan() yields is already .agentty.
+        if (src.locus != want) continue;
         // Project scope must be writable to be a valid store target (a
         // project fact silently promoted to user scope would bleed across
         // workspaces). User scope only needs a resolved base.
