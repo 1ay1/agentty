@@ -284,33 +284,58 @@ decomposition is right:
 4. **`state/`.** Last, because `rag_feedback.tsv` and `routing_memory.tsv` are
    small and the flat layout does not actively hurt yet.
 
-## The variable budget: two anchors, and no more
+## The variable budget: one anchor, and an honest gap
 
-The storage model is sayable in one breath, and that is a requirement, not a
-boast:
+The storage model should be sayable in one breath, and that is a requirement,
+not a boast:
 
 | root | follows | anchor |
 |---|---|---|
 | `~/.agentty` | the HUMAN | `$AGENTTY_HOME` |
-| `<project>/.agentty` | the CODE | `$AGENTTY_RAG_DIR` |
+| `<project>/.agentty` | the CODE | **none yet** |
 
-Seven variables exist; only three carry the model. `$AGENTTY_MCP_CONFIG` is
-the third and it is not storage at all — it names one file to *read*, which
-is scope's Explicit locus, a different axis entirely.
+That second row is the remaining gap, and `agentty config env` prints it that
+way rather than papering over it. `$AGENTTY_RAG_DIR` relocates the retrieval
+indexes and the feedback TSV and *nothing else* — `memory.jsonl` stays at
+`<project>/.agentty` regardless — so calling it the project anchor would be a
+confident wrong answer. The user root has categories to hang an override off;
+the project root is flat, which is exactly why `RAG_DIR` had to be invented as
+a one-off instead of falling out of `(Root, Lifecycle)`.
 
-The other three (`$AGENTTY_THREADS_DIR`, `$AGENTTY_CACHE_DIR`,
-`$AGENTTY_LOGS_DIR`) each move ONE leaf that `$AGENTTY_HOME` already moves
-wholesale. They are narrower conveniences that predate the anchor. They stay
-— removing a released variable breaks a working setup with no error message
-— but `agentty config env` prints them *below* the anchors and labelled as
-narrower, so nobody reads seven flat names as seven decisions.
+Seven variables exist; `$AGENTTY_MCP_CONFIG` is not storage at all (it names
+one file to *read* — scope's Explicit locus, a different axis). The rest each
+move ONE leaf. `$AGENTTY_THREADS_DIR`, `$AGENTTY_CACHE_DIR` and
+`$AGENTTY_LOGS_DIR` predate `$AGENTTY_HOME` and each move a leaf it already
+moves; they stay because removing a released variable breaks a working setup
+with no error message.
 
 **Nothing new is added on that axis.** A new storage category is a leaf under
-an existing root, so the anchor already relocates it. The pressure to add one
-is constant and the rule from `user_root.hpp` is the answer: a category earns
-a variable only if it grows unboundedly AND you would plausibly put it on a
-different device from its siblings. Threads, cache and logs fail that test in
-hindsight; `cache/` under the project root will fail it too.
+an existing root. The pressure to add one is constant and the rule from
+`user_root.hpp` is the answer: a category earns a variable only if it grows
+unboundedly AND you would plausibly put it on a different device from its
+siblings.
+
+## The project root ignores itself
+
+`<project>/.agentty` holds derived state — 33 MB of retrieval index in this
+repo — directly inside a user's source tree. agentty's own `.gitignore` lists
+it, which protects agentty's repo and nobody else's: in any other checkout the
+first `git add -A` after a warm index stages tens of megabytes of binary, and
+the author finds out at review time.
+
+So `dirs::resolve` writes a `.gitignore` *inside* the directory when it
+creates it, containing `*`. The rule ships with the thing it protects, which
+makes it structural rather than folklore every user has to know. It is also
+the only file in there git can see.
+
+Two properties, both load-bearing:
+
+- **Never overwritten.** A user who deliberately tracks part of `.agentty` (a
+  shared `skills/` directory is a real use) edits the file, and agentty leaves
+  it alone forever after. A tool that rewrote it every launch would be a tool
+  that argues.
+- **Project root only.** `~/.agentty` is not inside a repository, so the same
+  file there would be noise.
 
 ## Seeing it: `agentty config`
 

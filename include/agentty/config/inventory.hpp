@@ -175,22 +175,30 @@ inline constexpr dirs::Spec kFeedbackSpec{
     .root = dirs::Root::Project, .leaf = "", .env = "AGENTTY_RAG_DIR",
     .life = {}};   // never swept
 
-// Is this spec's variable the ANCHOR for its root, or a narrower convenience?
+// Does this spec's variable move the WHOLE root, or just this leaf?
 //
-// Derived, never a field. $AGENTTY_HOME moves the whole user root, so any
-// User-root leaf variable is narrower than an anchor that already covers it.
-// The project root has no anchor of its own, so its variable IS the anchor.
+// Derived from the root, never a field, so a new category cannot
+// accidentally advertise itself as an anchor.
 //
-// Deriving it means the honest answer survives adding a category: a new
-// User-root spec is automatically reported as narrower, and nobody has to
-// remember to tag it.
-[[nodiscard]] constexpr bool is_anchor(const dirs::Spec& s) noexcept {
-    return s.root == dirs::Root::Project;
+// Today the honest answer is NO for every spec. $AGENTTY_HOME is the user
+// root's anchor, and no Spec declares it — it is resolved one level down, by
+// util::user_root(). The PROJECT root has no anchor at all: $AGENTTY_RAG_DIR
+// relocates the retrieval indexes and the feedback TSV, and nothing else —
+// `memory.jsonl` stays at <project>/.agentty regardless. Reporting it as a
+// root anchor would be exactly the kind of confident wrong answer this file
+// exists to prevent.
+//
+// That asymmetry is the remaining gap in the storage model, written up in
+// docs/design/dot-agentty.md: the user root has categories to hang an
+// override off, and the project root is flat, which is why RAG_DIR had to be
+// invented as a one-off instead of falling out of (Root, Lifecycle).
+[[nodiscard]] constexpr bool moves_whole_root(const dirs::Spec&) noexcept {
+    return false;
 }
 
-// The anchor for a root, as a user would type it.
+// The variable that moves this root wholesale, or empty when none does.
 [[nodiscard]] constexpr std::string_view anchor_env(dirs::Root r) noexcept {
-    return r == dirs::Root::User ? "AGENTTY_HOME" : "AGENTTY_RAG_DIR";
+    return r == dirs::Root::User ? "AGENTTY_HOME" : std::string_view{};
 }
 
 // ── Entry: one concern, both halves ──────────────────────────────────────
@@ -241,8 +249,8 @@ struct WriteRow {
     std::string      path;
     dirs::Origin     origin = dirs::Origin::Default;
     std::string_view env;        // this spec's own variable, if any
-    std::string_view anchor;     // the variable that moves its whole root
-    bool             env_is_anchor = false;
+    std::string_view anchor;     // the variable that moves its whole root, if any
+    bool             env_moves_root = false;
     bool             rebuildable = false;
     unsigned         keep_last = 0;
     std::string      error;      // non-empty when the spec would not resolve

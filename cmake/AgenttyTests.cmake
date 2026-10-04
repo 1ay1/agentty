@@ -764,7 +764,11 @@ add_executable(dirs_test EXCLUDE_FROM_ALL
     src/util/home_dir.cpp
     src/util/logx.cpp
     src/tool/util/fs_helpers.cpp)
-target_include_directories(dirs_test PRIVATE include)
+# jaal's headers: dirs.cpp and user_root.cpp both use jaal::guarded for their
+# warn-once sets. Without this the standalone target does not compile at all
+# (it is EXCLUDE_FROM_ALL, so a plain `ninja` never noticed).
+target_include_directories(dirs_test PRIVATE include
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/maya/third_party/jaal/include)
 # Same transitive deps keystore_test needs for the same reason: logx pulls
 # nlohmann + maya, and fs_helpers.cpp includes mcp-cpp's util header to
 # mirror the workspace root into it.

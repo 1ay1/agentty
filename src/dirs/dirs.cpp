@@ -12,6 +12,7 @@
 #include <array>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
 #include <set>
 #include <utility>
 #include <vector>
@@ -201,6 +202,35 @@ void warn_once(std::string_view env, const fs::path& bad,
     // is the one place the bit has to be set explicitly rather than assumed.
     if (spec.owner_only) ::chmod(chosen.c_str(), S_IRWXU);
 #endif
+
+    // Make the PROJECT root self-ignoring, once, when we create it.
+    //
+    // <project>/.agentty holds derived state -- a 33 MB retrieval index in
+    // this very repo -- next to a user's source tree. agentty's own
+    // .gitignore lists it, but that protects nobody else: in any OTHER
+    // checkout the first `git add -A` after a warm index stages tens of
+    // megabytes of binary, and the author finds out at review time.
+    //
+    // Shipping the rule INSIDE the directory makes it structural rather
+    // than something every user must know to write. The file ignores its own
+    // directory, so it is also the only thing in there git can see.
+    //
+    // Best-effort and never overwritten: a user who deliberately commits
+    // part of .agentty (a shared skills/ dir is a real use) edits this file,
+    // and a tool that rewrites it every launch would be a tool that argues.
+    if (spec.root == Root::Project && !out.root.empty()) {
+        std::error_code gec;
+        const fs::path ignore = out.root / ".gitignore";
+        if (!fs::exists(ignore, gec)) {
+            std::ofstream f(ignore);
+            if (f) f << "# agentty's project state. Derived data (retrieval"
+                        " indexes, caches)\n"
+                        "# lives here and should not be committed.\n"
+                        "# Delete a line to start tracking something; agentty"
+                        " won't rewrite this.\n"
+                        "*\n";
+        }
+    }
 
     AGT_LOG(Persist, Debug, "dirs", "resolved {} -> {} ({})",
             spec.leaf, out.path.string(),

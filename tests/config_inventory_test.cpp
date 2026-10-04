@@ -143,18 +143,34 @@ TEST_CASE("the read ladder is exactly what plan emits") {
           "a portable concern skips nothing");
 }
 
-TEST_CASE("anchors are derived, not tagged") {
-    // is_anchor() is a function of the Root, so adding a user-root category
-    // cannot accidentally advertise itself as a second anchor.
+TEST_CASE("anchors are derived, and honest") {
+    // The inventory must not claim a variable moves more than it does.
+    // $AGENTTY_RAG_DIR relocates the retrieval indexes and the feedback TSV
+    // and NOTHING else -- memory.jsonl stays at <project>/.agentty -- so the
+    // project root has no anchor, and saying otherwise would be exactly the
+    // confident wrong answer this file exists to prevent.
+    CHECK(cfg::anchor_env(agentty::dirs::Root::User) == "AGENTTY_HOME",
+          "the user root has an anchor");
+    CHECK(cfg::anchor_env(agentty::dirs::Root::Project).empty(),
+          "the project root does NOT (that gap is the point)");
+
     for (const cfg::Entry& e : cfg::inventory()) {
         if (!e.write) continue;
-        const bool anchor = cfg::is_anchor(*e.write);
-        CHECK(anchor == (e.write->root == agentty::dirs::Root::Project),
-              "only the project root's variable is an anchor");
-        if (!anchor)
-            CHECK(cfg::anchor_env(e.write->root) == "AGENTTY_HOME",
-                  "user-root leaves point at the one user anchor");
+        CHECK(!cfg::moves_whole_root(*e.write),
+              "no Spec's own variable relocates a whole root");
     }
+
+    // A concrete proof of the asymmetry: rag and memory share the project
+    // root, and only one of them follows $AGENTTY_RAG_DIR.
+    const cfg::Entry* rag = cfg::find("rag");
+    const cfg::Entry* mem = cfg::find("memory");
+    REQUIRE(rag != nullptr, "rag is in the inventory");
+    REQUIRE(mem != nullptr, "memory is in the inventory");
+    REQUIRE(rag->write != nullptr, "rag writes");
+    CHECK(rag->write->env == "AGENTTY_RAG_DIR", "rag follows the variable");
+    CHECK(mem->write == nullptr,
+          "memory has no write spec -- it resolves through scope, so the"
+          " variable cannot reach it");
 }
 
 TEST_CASE("only executable concerns report trust") {

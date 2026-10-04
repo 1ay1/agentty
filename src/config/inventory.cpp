@@ -139,9 +139,9 @@ Report describe(const Entry& e) {
 
     if (e.write) {
         WriteRow w;
-        w.env           = e.write->env;
-        w.anchor        = anchor_env(e.write->root);
-        w.env_is_anchor = is_anchor(*e.write);
+        w.env            = e.write->env;
+        w.anchor         = anchor_env(e.write->root);
+        w.env_moves_root = moves_whole_root(*e.write);
         w.rebuildable   = e.write->life.rebuildable;
         w.keep_last     = e.write->life.keep_last;
         // resolve_dry: report a location without creating it or warning.
@@ -215,14 +215,17 @@ void print_one(const Report& r) {
         } else {
             std::printf("  %s%s\n", r.write->path.c_str(),
                         origin_note(r.write->origin));
-            // Always lead with the ANCHOR, because that is the model: one
-            // variable per root. A leaf variable is mentioned second and
-            // marked as narrower, so nobody reads the two as equals.
-            std::printf("  $%s moves the whole root\n",
-                        std::string{r.write->anchor}.c_str());
-            if (!r.write->env.empty() && !r.write->env_is_anchor)
-                std::printf("  $%s moves just this one (narrower)\n",
-                            std::string{r.write->env}.c_str());
+            // Say exactly what each variable moves. The anchor (when the
+            // root has one) first, because that is the model; then this
+            // spec's own variable, marked as narrower so the two never read
+            // as equals.
+            if (!r.write->anchor.empty())
+                std::printf("  $%s moves the whole root\n",
+                            std::string{r.write->anchor}.c_str());
+            if (!r.write->env.empty() && !r.write->env_moves_root)
+                std::printf("  $%s moves just this%s\n",
+                            std::string{r.write->env}.c_str(),
+                            r.write->anchor.empty() ? "" : " (narrower)");
             // Lifecycle is on the Spec precisely so it cannot be forgotten;
             // printing it turns an internal discipline into something a user
             // can check.
@@ -238,20 +241,20 @@ void print_one(const Report& r) {
     std::printf("\n");
 }
 
-// The storage model on one screen. Two roots, one anchor each, and the leaf
-// variables demoted to what they are: narrower conveniences that predate the
-// anchors. Printing them in that shape is the point — seven flat names look
-// like seven decisions, and they are not.
+// The storage model on one screen. Two roots; the user root has an anchor,
+// the project root does not yet. Saying so plainly is the point -- seven flat
+// names look like seven decisions, and the one real gap (a project root with
+// no anchor, which is why RAG_DIR had to be a one-off) is worth naming rather
+// than papering over.
 void print_env() {
     std::printf("storage model\n\n");
     std::printf("  ~/.agentty           follows the HUMAN   $AGENTTY_HOME%s\n",
-                env_set("AGENTTY_HOME") ? "    (set)" : "");
-    std::printf("  <project>/.agentty   follows the CODE    $AGENTTY_RAG_DIR%s\n",
-                env_set("AGENTTY_RAG_DIR") ? " (set)" : "");
+                env_set("AGENTTY_HOME") ? "   (set)" : "");
+    std::printf("  <project>/.agentty   follows the CODE    — no anchor yet\n");
 
-    std::printf("\nnarrower — each moves ONE leaf $AGENTTY_HOME already covers\n");
+    std::printf("\nnarrower — each moves ONE leaf, not a root\n");
     for (const Entry& e : kEntries) {
-        if (!e.write || is_anchor(*e.write) || e.write->env.empty()) continue;
+        if (!e.write || e.write->env.empty()) continue;
         std::printf("  $%-22s %s%s\n", std::string{e.write->env}.c_str(),
                     std::string{e.name}.c_str(),
                     env_set(e.write->env) ? "   (set)" : "");
@@ -260,8 +263,10 @@ void print_env() {
     std::printf("\nnot storage — names one file to READ\n");
     std::printf("  $%-22s %s%s\n", "AGENTTY_MCP_CONFIG", "mcp",
                 env_set("AGENTTY_MCP_CONFIG") ? "   (set)" : "");
-    std::printf("\nnew categories get a leaf under an existing root, not a\n"
-                "new variable — the anchor already relocates them.\n");
+
+    std::printf("\nthreads/cache/logs predate $AGENTTY_HOME and each move one\n"
+                "leaf it already moves. nothing new goes on that axis — a new\n"
+                "category is a leaf under an existing root.\n");
 }
 
 void print_table() {

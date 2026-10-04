@@ -463,6 +463,58 @@ int main() {
         fs::current_path(cwd_before);
     }
 
+    // ── the project root ignores itself ───────────────────────────────
+    //
+    // <project>/.agentty holds derived state -- tens of MB of retrieval index
+    // -- next to a user's source. agentty's own .gitignore protects agentty's
+    // repo and nobody else's: in any other checkout, the first `git add -A`
+    // after a warm index stages the lot. Shipping the rule INSIDE the
+    // directory makes it structural instead of folklore.
+    {
+        const fs::path proj = g_sandbox / "ignoreproj";
+        fs::create_directories(proj / ".git");
+        const fs::path cwd_before = fs::current_path();
+        fs::current_path(proj);
+        agentty::tools::util::set_workspace_root(proj);
+
+        const Spec s{.root = Root::Project, .leaf = ""};
+        auto d = resolve(s);
+        check(d.has_value(), "ignore: project spec resolves");
+        if (d) {
+            const fs::path ig = d->root / ".gitignore";
+            check(fs::exists(ig), "ignore: .gitignore written on creation");
+            std::ifstream in(ig);
+            std::string body((std::istreambuf_iterator<char>(in)),
+                              std::istreambuf_iterator<char>());
+            check(body.find("\n*\n") != std::string::npos
+                      || body.rfind("*\n") != std::string::npos,
+                  "ignore: the rule ignores everything in here");
+
+            // NEVER clobbered. A user who wants to commit part of .agentty
+            // (a shared skills/ dir is a real use) edits this file, and a
+            // tool that rewrote it every launch would be a tool that argues.
+            {
+                std::ofstream out(ig, std::ios::trunc);
+                out << "# mine\n*.ragdb\n";
+            }
+            (void)resolve(s);
+            std::ifstream again(ig);
+            std::string after((std::istreambuf_iterator<char>(again)),
+                               std::istreambuf_iterator<char>());
+            check(after == "# mine\n*.ragdb\n",
+                  "ignore: a user-edited file is left alone");
+        }
+
+        // The USER root gets no such file -- ~/.agentty is not inside a
+        // repository, so the rule would be noise.
+        const Spec u{.root = Root::User, .leaf = "threads"};
+        if (auto ud = resolve(u))
+            check(!fs::exists(ud->root / ".gitignore"),
+                  "ignore: user root is left alone");
+
+        fs::current_path(cwd_before);
+    }
+
     // ── markers are non-empty and include the common case ────────────────
     {
         auto m = project_markers();
