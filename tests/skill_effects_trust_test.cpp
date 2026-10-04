@@ -27,6 +27,12 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#ifdef _WIN32
+#include <process.h>
+#define getpid _getpid
+#else
+#include <unistd.h>   // getpid
+#endif
 
 #include "agtest.hpp"
 
@@ -54,6 +60,22 @@ Skill effectful_skill() {
     s.origin = "github.com/example/agentty-sites";
     s.source = "user";
     return s;
+}
+
+void set_env(const char* name, const std::string& value) {
+#if defined(_WIN32)
+    _putenv_s(name, value.c_str());
+#else
+    ::setenv(name, value.c_str(), 1);
+#endif
+}
+
+void unset_env(const char* name) {
+#if defined(_WIN32)
+    _putenv_s(name, "");
+#else
+    ::unsetenv(name);
+#endif
 }
 
 } // namespace
@@ -206,4 +228,70 @@ TEST_CASE("approval_does_not_leak_between_different_skills") {
     store.approve(std::get<scope::Pending>(trust_of(a, store)).content_sha);
     CHECK(std::holds_alternative<scope::Trusted>(trust_of(a, store)));
     CHECK(std::holds_alternative<scope::Pending>(trust_of(b, store)));
+}
+
+TEST_CASE("approval_store_follows_AGENTTY_HOME") {
+    // The store must resolve through util::user_root(), not $HOME/".agentty":
+    // when AGENTTY_HOME relocates the root, trust approvals must land BESIDE
+    // the credentials/hooks/skills they gate — not stay behind in the real
+    // ~/.agentty, where every relocated run silently lost them (re-prompt,
+    // re-approve, nothing carried forward). Regression for the approvals_path
+    // bypass: it used to join $HOME + dir_name(Dialect::Agentty) directly.
+    namespace fs = std::filesystem;
+
+    const char* old_at_home = std::getenv("AGENTTY_HOME");
+    const char* old_home    = std::getenv("HOME");
+    const bool  had_at_home = old_at_home != nullptr;
+    const bool  had_home    = old_home    != nullptr;
+    const std::string keep_at_home = had_at_home ? old_at_home : "";
+    const std::string keep_home    = had_home    ? old_home    : "";
+
+    // PID-unique so parallel consolidated workers never share state.
+    const auto root = fs::temp_directory_path() /
+                      ("agentty_approvals_home_" + std::to_string(::getpid()));
+    fs::remove_all(root);
+
+    // Split the two roots so the bypass is distinguishable: AGENTTY_HOME
+    // relocates the store here, while HOME (which the OLD code joined) points
+    // at a DIFFERENT tree. Repointing HOME is also what keeps the old path
+    // from touching the developer's real ~/.agentty when this test runs.
+    const auto redirected = root / "relocated";
+    set_env("AGENTTY_HOME", redirected.string());
+    set_env("HOME", root.string());
+
+    const auto restore = [&] {
+        if (had_at_home) set_env("AGENTTY_HOME", keep_at_home);
+        else             unset_env("AGENTTY_HOME");
+        if (had_home)    set_env("HOME", keep_home);
+        else             unset_env("HOME");
+        fs::remove_all(root);
+    };
+
+    const auto leaf = "skills_approved.json";
+
+    // 1. An empty store reads as empty — no file, no crash.
+    const auto empty0 = scope::load_approvals(leaf);
+    CHECK(empty0.shas.empty(),
+          "empty store reads as empty under a relocated root");
+
+    // 2. Round-trip: save through the relocated root, then verify the file
+    //    landed under $AGENTTY_HOME (NOT $HOME/.agentty) and reads back.
+    const auto skill = effectful_skill();
+    const std::string sha =
+        std::get<scope::Pending>(trust_of(skill, scope::Approvals{})).content_sha;
+    scope::Approvals store;
+    store.approve(sha);
+    CHECK(scope::save_approvals(leaf, store),
+          "save_approvals succeeds against the relocated root");
+
+    CHECK(fs::exists(redirected / leaf),
+          "approvals file written under $AGENTTY_HOME");
+    CHECK(!fs::exists(root / ".agentty"),
+          "NO approvals file behind in the $HOME/.agentty layout");
+
+    const auto loaded = scope::load_approvals(leaf);
+    CHECK(loaded.approved(sha),
+          "relocated store reads back the approval");
+
+    restore();
 }

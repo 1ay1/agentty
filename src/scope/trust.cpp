@@ -5,12 +5,15 @@
 // tests link only scope.cpp. This TU is pulled by the full binary and the
 // dedicated trust test.
 //
-// The store lives under the USER .agentty dir, keyed by a content hash, so a
-// cloned repo can neither write an approval for itself nor keep one valid
-// after its command bytes change (the MCPoison / CVE-2025-54136 re-gate).
+// The store lives under the USER root (util::user_root(): ~/.agentty, or
+// $AGENTTY_HOME when overridden — see approvals_path below), keyed by a
+// content hash, so a cloned repo can neither write an approval for itself
+// nor keep one valid after its command bytes change (the MCPoison /
+// CVE-2025-54136 re-gate).
 
 #include "agentty/scope/scope.hpp"
 #include "agentty/util/home_dir.hpp"
+#include "agentty/util/user_root.hpp"
 
 #include "agentty/auth/auth.hpp"   // auth::sha256_hex
 
@@ -29,19 +32,28 @@ std::string content_hash(std::string_view bytes) noexcept {
 }
 
 namespace {
-// Renamed from home_dir() to keep internal linkage unique under a unity build
-// (scope.cpp defines an identical anonymous-namespace home_dir(); concatenated
-// into one TU they'd collide). Same behaviour, file-local name.
-[[nodiscard]] fs::path trust_home_dir() noexcept {
-    return util::home_dir_or_empty();
-}
-
-// The approvals file lives under the USER .agentty dir — never the project's,
-// so a cloned repo can't write an approval for itself. Empty if no HOME.
+// The approvals file lives under the USER root — util::user_root()
+// (~/.agentty, or $AGENTTY_HOME when overridden) — never the project's, so a
+// cloned repo can't write an approval for itself. Resolving through
+// user_root() rather than joining $HOME + dir_name(Dialect::Agentty) is what
+// makes trust FOLLOW the relocated store: with AGENTTY_HOME set, hooks, MCP
+// and skills approvals land beside the credentials they gate instead of
+// staying behind in the real ~/.agentty, where they were lost on every
+// relocated run (each scratch run re-prompted and re-approved into /tmp).
+// The default resolves identically: user_root() is $HOME/.agentty. Empty
+// (fail-closed) when there is neither a real home nor $AGENTTY_HOME.
 [[nodiscard]] fs::path approvals_path(std::string_view leaf) {
-    const fs::path h = trust_home_dir();
-    if (h.empty()) return {};
-    return h / dir_name(Dialect::Agentty) / leaf;
+    const char* override = std::getenv("AGENTTY_HOME");
+    // Fail closed with no home and no override: util::user_root() would
+    // otherwise fall back to $PWD/.agentty and drop approvals into whatever
+    // directory agentty was launched from — which could be a project, the
+    // exact repo-vouches-for-itself hazard this store exists to stop.
+    if (util::home_dir_or_empty().empty() && !(override && *override))
+        return {};
+    const fs::path root = util::user_root();
+    if (root.empty()) return {};
+    // No `dir_name` join: user_root() already IS the .agentty dir.
+    return root / leaf;
 }
 }  // namespace
 
