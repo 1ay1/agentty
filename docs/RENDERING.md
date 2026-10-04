@@ -43,7 +43,7 @@ debugging new burst/stutter complaints.
 │  ┃ ╰────────────────────────────────────────────────────╯       │         │ ─┘
 │                                                                          │
 │  ╭─────────────────────────────────────────────────────────────────╮     │ ─┐
-│  │ Changes (2 files)        Ctrl+R review  A accept  X reject      │     │  │ ChangesStrip
+│  │ Changes (2 files)   Ctrl+R review  Ctrl+A accept  Ctrl+X reject │     │  │ ChangesStrip
 │  │ 2 files changed  +12  -3                                        │     │  │ (only when
 │  │   ~ src/auth/login.ts        +5 -2                              │     │  │  pending)
 │  │   + src/auth/types.ts        +7 -1                              │     │  │
@@ -133,7 +133,7 @@ maya::AppLayout                               top-level chat-app frame
 │
 ├── maya::ChangesStrip                       pending-edits banner
 │       │
-│       ├── header row                       "Changes (2 files)  Ctrl+R review  A accept  X reject"
+│       ├── header row                       "Changes (2 files)  Ctrl+R review  Ctrl+A accept  Ctrl+X reject"
 │       └── maya::FileChanges                file list with +/− line counts
 │
 ├── maya::Composer                           bordered input box
@@ -417,12 +417,12 @@ prompts, hint keys); the widget owns the layout, the wordmark gradient
 ### `maya::ChangesStrip` — pending edits banner
 
 ```
-╭─────────────────────────────────────────────────────╮
-│ Changes (2 files)   Ctrl+R review  A accept  X reject│
-│ 2 files changed  +12  -3                             │
-│   ~ src/auth/login.ts        +5 -2                   │
-│   + src/auth/types.ts        +7 -1                   │
-╰─────────────────────────────────────────────────────╯
+╭──────────────────────────────────────────────────────────────╮
+│ Changes (2 files)  Ctrl+R review  Ctrl+A accept  Ctrl+X reject│
+│ 2 files changed  +12  -3                                     │
+│   ~ src/auth/login.ts        +5 -2                           │
+│   + src/auth/types.ts        +7 -1                           │
+╰──────────────────────────────────────────────────────────────╯
 ```
 
 When `cfg.changes` is empty, the widget renders to an empty Element so

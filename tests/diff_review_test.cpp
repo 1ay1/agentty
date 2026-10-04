@@ -150,8 +150,8 @@ int main() {
         m.ui.panel.descend(agentty::ui::panel::DiffReview{{0, 0}});
         // Two-press guard (commit 7498bf3f): from the OPEN pane the first
         // ^X arms (no write), the second executes. The palette's "Reject all"
-        // (pane closed) pre-confirms before dispatching, so it still executes
-        // on the first press — that explicit path is deliberate multi-step.
+        // sends RejectAllChanges{confirmed=true} and bypasses the guard —
+        // that explicit path is already deliberate multi-step.
         auto armed = apply_fx(detail::step(detail::diff_review_update, std::move(m), RejectAllChanges{}));
         check(g_writes.count("a.txt") == 0,
               "first reject-all press only arms, no write yet");
@@ -276,6 +276,27 @@ int main() {
         check(!done.first.d.reject_all_armed, "guard consumed after execution");
         check(!done.first.ui.panel.is<agentty::ui::panel::DiffReview>(),
               "reject-all from outside leaves no pane behind");
+    }
+
+    // ── a CONFIRMED reject-all (the palette row) skips the guard ────────
+    // The palette pick is already open → select → Enter, so a second press
+    // would be ceremony. The intent rides on the MESSAGE rather than the
+    // caller pre-writing the reducer's own guard state, which is why this
+    // executes on the first step from BOTH pane states.
+    {
+        install_stub_deps();
+        Model m = with_live_tool("t1");
+        detail::apply_tool_output(m, ToolCallId{"t1"},
+            std::expected<std::string, tools::ToolError>{"ok"},
+            make_change("x6.txt", before, after));
+        check(m.ui.panel.get<pn::DiffReview>() == nullptr, "pane closed");
+        auto s = apply_fx(detail::step(detail::diff_review_update, std::move(m),
+                                       RejectAllChanges{/*confirmed=*/true}));
+        check(g_writes.count("x6.txt") == 1 && g_writes["x6.txt"] == before,
+              "confirmed reject-all reverts on the FIRST press");
+        check(!s.first.d.reject_all_armed,
+              "confirmed reject-all leaves no armed guard behind");
+        check(s.first.d.pending_changes.empty(), "queue cleared");
     }
 
     // ── any review traffic other than the arming press disarms the guard ─

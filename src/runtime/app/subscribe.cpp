@@ -103,6 +103,31 @@ bool reveal_draining(const Model& m) noexcept {
         || !detail::live_tail_reveal_settled(m);
 }
 
+// Whether the changes-strip bulk chords (^A accept all / ^X reject all) are
+// LIVE on the main screen. ONE definition, read by both subscribe() (which
+// captures it into the key router) and subs_key() (which keys the memo on
+// it) — the same shape as animation_demand() just below, and for the same
+// reason: a predicate spelled out twice is a predicate that drifts, and a
+// router capture going stale is invisible until a key routes against last
+// frame's state.
+//
+// The three terms:
+//   * show_changes_strip — the chords are ADVERTISED by the strip's header
+//     hints and nowhere else. With the strip hidden (the default) there is
+//     no on-screen affordance, so a live ^X would be an unannounced way to
+//     revert every pending edit. Advertised and reachable stay the same bit.
+//   * pending_changes non-empty — nothing to accept or reject otherwise.
+//   * !m.s.active() — mid-turn the changeset is still growing, so a bulk
+//     decision would be taken against a set the agent hasn't finished
+//     writing.
+// The composer is deliberately NOT a term: the chords are Ctrl-held, so
+// they can't collide with typing (see the chord policy in on_diff_review).
+bool strip_chords_armed(const Model& m) noexcept {
+    return m.d.show_changes_strip
+        && !m.d.pending_changes.empty()
+        && !m.s.active();
+}
+
 bool animation_demand(const Model& m) noexcept {
     return m.s.active()
         // `models_loading` keeps the fused picker's "loading …" spinner
@@ -1148,11 +1173,9 @@ Sub subscribe(const Model& m) {
         m.ui.composer.queue_peek_index().has_value(),
     };
 
-    // Changes-strip chords (A accept / X reject) are advertised on the strip
-    // but only reachable with an EMPTY composer — the gate below never fires
-    // while the user is typing, so plain letters stay safe everywhere else.
-    const bool strip_chords_armed =
-        composer_state.text_empty && !m.d.pending_changes.empty();
+    // Changes-strip bulk chords. ONE predicate, shared with subs_key() so the
+    // captured copy below and the memo key can never disagree.
+    const bool chords_armed = strip_chords_armed(m);
 
     // Which mode each form-backed pane is in. Three bools per pane — NOT the
     // pane's rows, which would be a per-frame deep copy on the input path.
@@ -1330,21 +1353,34 @@ Sub subscribe(const Model& m) {
             }
             if (auto msg = on_global(ev)) return msg;
 
-            // Changes-strip chords: A (accept all, non-destructive — tools
-            // already wrote these changes) and X (reject all, two-press guard
-            // via the reducer) from the main screen. Gated on the bare main
-            // screen (no overlay, not even ambient Todo), an empty composer
-            // AND an idle turn: a letter the user is TYPING must never jump
-            // the queue into the review flow, a modal must keep its own key
-            // surface, and mid-turn the changeset can still be growing.
-            if (strip_chords_armed && active_panel == OK::None && !turn_active) {
-                if (auto* ck = std::get_if<CharKey>(&ev.key);
-                    ck && !ev.mods.ctrl && !ev.mods.alt) {
-                    const char32_t c = ck->codepoint;
-                    if (c == U'a' || c == U'A')
-                        return Msg{AcceptAllChanges{}};
-                    if (c == U'x' || c == U'X')
-                        return Msg{RejectAllChanges{}};
+            // Changes-strip bulk chords: ^A (accept all, non-destructive —
+            // the tools already wrote these bytes) and ^X (reject all, which
+            // reverts files on disk, so the reducer holds a two-press guard).
+            //
+            // CTRL-HELD, matching the in-pane policy in on_diff_review: bulk
+            // decisions are destructive enough that they must not sit on a
+            // bare letter, and the same action keeping the same chord inside
+            // and outside the pane is the whole point. A bare `x` here would
+            // also be a footgun the moment focus assumptions shift.
+            //
+            // Gated on the bare main screen (no overlay, not even an ambient
+            // Todo) so a modal always keeps its own key surface; the rest of
+            // the arming condition lives in strip_chords_armed().
+            if (chords_armed && active_panel == OK::None) {
+                if (auto* ck = std::get_if<CharKey>(&ev.key); ck && !ev.mods.alt) {
+                    char32_t c = ck->codepoint;
+                    // Legacy terminals deliver Ctrl+letter as the raw control
+                    // byte with no modifier reported — same normalisation the
+                    // global and in-pane routers do, so the chords work
+                    // without keyboard-protocol support.
+                    const bool raw_ctrl = (c >= 0x01 && c <= 0x1A);
+                    if (raw_ctrl) c = U'a' + (c - 1);
+                    if (ev.mods.ctrl || raw_ctrl) {
+                        if (c == U'a' || c == U'A')
+                            return Msg{AcceptAllChanges{}};
+                        if (c == U'x' || c == U'X')
+                            return Msg{RejectAllChanges{}};
+                    }
                 }
             }
 
@@ -1545,6 +1581,11 @@ SubsKey subs_key(const Model& m) noexcept {
     k.streaming        = m.s.active() && !m.s.is_awaiting_permission();
     k.turn_active      = m.s.active();
     k.animation_demand = animation_demand(m);
+
+    // The changes-strip chord gate the key router captures. Same function
+    // subscribe() calls — not a re-spelling of its terms, so the two cannot
+    // drift apart the way the form-pane focus snapshots once did.
+    k.strip_chords     = strip_chords_armed(m);
 
     // The composer predicates the router closes over (ComposerKeyState),
     // plus the has_history scan subscribe() performs — including the

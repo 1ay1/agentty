@@ -95,22 +95,11 @@ template <class T, class V>
         // ── Changes ──
         add(Command::ReviewChanges,    emit<OpenDiffReview>());
         add(Command::AcceptAll,        emit<AcceptAllChanges>());
-        // Reject-all from the palette is an explicit multi-step action (open
-        // palette → select row → Enter), so it executes on the first press:
-        // pre-confirm whichever two-press guard the reducer will consult, then
-        // ask for the revert through the same message the chords emit.
-        add(Command::RejectAll, [](Model& m) {
-            // Pre-confirm whichever guard the reducer will consult, so the
-            // explicit palette pick executes on this first press.
-            if (auto* c = m.ui.panel.get<pn::DiffReview>())
-                c->confirm_reject_all = true;
-            else
-                m.d.reject_all_armed = true;
-            auto [next, cmd] =
-                agentty::app::update(std::move(m), Msg{RejectAllChanges{}});
-            m = std::move(next);
-            return std::move(cmd);
-        });
+        // Reject-all from the palette is already an explicit multi-step
+        // action (open palette → select row → Enter), so it skips the chords'
+        // two-press guard and executes on this pick. The intent travels on
+        // the message; no pre-staging of reducer state here.
+        add(Command::RejectAll,        emit_val<RejectAllChanges>(/*confirmed=*/true));
         // ── Go ──
         add(Command::OpenThreads,      emit<OpenThreadList>());
         add(Command::OpenPlan,         emit<OpenTodoModal>());

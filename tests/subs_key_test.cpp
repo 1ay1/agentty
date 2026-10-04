@@ -113,3 +113,29 @@ TEST_CASE("subs_key: the sandbox pane's focus is part of the key") {
     CHECK_MESSAGE(!(browsing == app::subs_key(m)),
                   "sandbox editing mode changes key routing");
 }
+
+TEST_CASE("subs_key: the changes-strip chord gate is part of the key") {
+    // Regression: the ^A/^X changes-strip chords shipped with their arming
+    // predicate CAPTURED by the key router but absent from SubsKey. The memo
+    // therefore never invalidated when pending_changes went empty <->
+    // non-empty, so the chords were dead for the frame after the agent's
+    // edits landed, and stayed stale-live after the queue cleared -- the
+    // exact hazard the sandbox-focus case above documents, one subsystem over.
+    Model m;
+    m.d.show_changes_strip = true;
+    const auto idle = app::subs_key(m);
+
+    FileChange fc;
+    fc.path = "src/main.cpp";
+    m.d.pending_changes.push_back(fc);
+    CHECK_MESSAGE(!(idle == app::subs_key(m)),
+                  "queued changes arm the chords, so the router must rebuild");
+
+    // Hiding the strip retracts the only on-screen affordance for the
+    // chords, so it has to re-key too -- otherwise ^X stays live with
+    // nothing advertising it.
+    const auto armed = app::subs_key(m);
+    m.d.show_changes_strip = false;
+    CHECK_MESSAGE(!(armed == app::subs_key(m)),
+                  "hiding the strip disarms the chords, so the router must rebuild");
+}

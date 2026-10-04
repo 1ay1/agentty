@@ -55,6 +55,8 @@ Here's the part that isn't obvious. When you approve a server, agentty does **no
 ~/.agentty/mcp_approvals.json     ["a3f9…", "7c21…"]   (a list of approved hashes)
 ```
 
+(Like every per-user store, that path follows `$AGENTTY_HOME` when you set it — so a relocated root keeps its own approvals rather than reading the ones in your real home.)
+
 Two consequences fall out of that design, and they're the whole point:
 
 **1. A cloned repo can't approve itself.** The approvals live in *your* `~/.agentty`, which a repo can't write to. A repo can ship an `mcp.json`, but it can't ship the approval — that decision is always yours, made on your machine.
@@ -107,7 +109,7 @@ At no point does code from the repo run without a deliberate keypress from you, 
 | Approve in TUI | `Ctrl+K` → Plugins → Enter on the *trust & enable* row |
 | Approve in CLI | `agentty plugin approve <name> --project` |
 | Command edited after approval | Re-gated automatically (hash no longer matches) |
-| Approvals stored at | `~/.agentty/mcp_approvals.json` (a list of hashes) |
+| Approvals stored at | `~/.agentty/mcp_approvals.json` (a list of hashes; follows `$AGENTTY_HOME`) |
 
 ## A related case: project-defined agents
 

@@ -1032,7 +1032,13 @@ struct DiffReviewPrevFile {};
 struct AcceptHunk {};
 struct RejectHunk {};
 struct AcceptAllChanges {};
-struct RejectAllChanges {};
+// Revert every pending change on disk. `confirmed` carries the INTENT past
+// the reducer's two-press guard: a key chord sends it false (first press
+// arms, second executes), while an explicitly chosen palette row — already a
+// multi-step open → select → Enter — sends it true and executes at once.
+// Keeping that on the message means no caller has to pre-stage guard state
+// in the Model and then re-enter update().
+struct RejectAllChanges { bool confirmed = false; };
 
 // ── Meta / session-level ─────────────────────────────────────────────────
 // CompactContext, Tick, Quit, NoOp, ClearStatus, CycleProfile,

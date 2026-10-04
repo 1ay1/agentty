@@ -387,7 +387,7 @@ struct ChangesStrip::Config {
 };
 ```
 
-Header row (`Changes (N) … Ctrl+R review · A accept · X reject`) plus
+Header row (`Changes (N) … Ctrl+R review · Ctrl+A accept · Ctrl+X reject`) plus
 a `maya::FileChanges` body with the file list. When `changes` is
 empty, renders to an empty Element so the AppLayout slot collapses
 without a host-side `if`.

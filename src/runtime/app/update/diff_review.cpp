@@ -230,36 +230,42 @@ Cmd diff_review_update(Model& m, msg::DiffReviewMsg dm) {
                 + (hunks == 1 ? " hunk" : " hunks"));
             return cmd;
         },
-        [&](RejectAllChanges) -> Cmd {
+        [&](RejectAllChanges rm) -> Cmd {
             if (m.d.pending_changes.empty()) {
                 auto cmd = set_status_toast(m, "no pending changes to reject");
                 return cmd;
             }
-            // TWO-PRESS guard. Inside the pane (^X): the first press arms the
-            // cell flag, the second executes. From OUTSIDE the pane (bare X on
-            // the changes strip): the same protocol via m.d.reject_all_armed —
-            // a single bare keypress must never revert every touched file.
-            // A palette "Reject all" (explicit menu pick) is already a
-            // deliberate multi-step action — execute immediately. Mirrors the
-            // thread picker's two-press delete.
-            if (auto* c = m.ui.panel.get<pn::DiffReview>()) {
-                // Inside the pane: arm the cell flag on the first press.
-                if (!c->confirm_reject_all) {
-                    c->confirm_reject_all = true;
+            // TWO-PRESS guard for the key chords. Inside the pane (^X) the
+            // first press arms the cell flag and the second executes; from
+            // the changes strip (^X with the pane closed) the same protocol
+            // runs on m.d.reject_all_armed. Either way a single keypress must
+            // never revert every touched file. Mirrors the thread picker's
+            // two-press delete.
+            //
+            // `rm.confirmed` bypasses the guard: the palette's "Reject all"
+            // row is already open → select → Enter, so asking for a second
+            // press there would be ceremony. The intent rides on the MESSAGE
+            // rather than being pre-written into the Model by the caller — the
+            // reducer stays the only writer of its own guard state.
+            if (!rm.confirmed) {
+                if (auto* c = m.ui.panel.get<pn::DiffReview>()) {
+                    // Inside the pane: arm the cell flag on the first press.
+                    if (!c->confirm_reject_all) {
+                        c->confirm_reject_all = true;
+                        auto cmd = set_status_toast(m,
+                            "press ^X again to revert ALL changes — any other key cancels");
+                        return cmd;
+                    }
+                } else if (!m.d.reject_all_armed) {
+                    // Outside the pane: arm the domain flag on the first
+                    // press. The guard is consumed by any review resolution
+                    // (^X, ^A, ^R, new-turn submit), so it can never survive
+                    // into a later turn and fire on an unrelated key.
+                    m.d.reject_all_armed = true;
                     auto cmd = set_status_toast(m,
-                        "press ^X again to revert ALL changes — any other key cancels");
+                        "press ^X again to revert ALL changes");
                     return cmd;
                 }
-            } else if (!m.d.reject_all_armed) {
-                // Outside the pane (bare X on the changes strip / chord): arm
-                // the domain flag on the first press. The guard is consumed by
-                // any review resolution (X, A, ^R, new-turn submit) — the same
-                // two-press contract as the open-pane ^X, so a lone bare key
-                // never reverts every touched file.
-                m.d.reject_all_armed = true;
-                auto cmd = set_status_toast(m,
-                    "press X again to revert ALL changes");
-                return cmd;
             }
             // Reject ALL = revert every touched file to its original contents
             // on disk (the tools already wrote the new version, so this undoes

@@ -118,6 +118,14 @@ struct SubsKey {
     bool turn_active       = false;
     bool animation_demand  = false;
 
+    // strip_chords_armed() — whether ^A/^X are live on the main screen.
+    // The router CAPTURES this one, and it flips on changes the rest of this
+    // key does not see: pending_changes going empty <-> non-empty as a turn
+    // lands, or the strip being toggled in the palette. Without it here the
+    // memo never invalidates, so the chords are dead for a frame after the
+    // edits arrive and stale-live after the queue clears.
+    bool strip_chords      = false;
+
     // Composer-derived predicates the router branches on.
     bool text_empty        = true;
     bool has_queued        = false;
