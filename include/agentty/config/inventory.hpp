@@ -73,13 +73,19 @@
 // siblings. Threads/cache/logs failed that test in hindsight; `cache/`
 // under the project root will fail it too.
 //
-// ── What this deliberately does NOT do yet ───────────────────────────────
+// ── What this file reports about TRUST ───────────────────────────────────
 //
-// It does not report TRUST. scope has the right model (trust_of + content
-// hashes, the MCPoison fix) but MCP still hand-rolls its own gate in
-// bridge.cpp, so there are currently two answers and printing either one
-// would describe behaviour that does not exist. That is the exact sin this
-// file is built to prevent, so it abstains until the two are one.
+// It reports it, and that became honest only once MCP's hand-rolled gate was
+// folded into scope::trust_of. While there were TWO answers — scope's
+// content-hash model, and a `bool project_local` threaded through bridge.cpp
+// — printing either would have described behaviour that does not exist. That
+// is the exact sin this file is built to prevent, so it abstained until the
+// two became one.
+//
+// Trust is a property of a SOURCE, not of a concern, which is why it is a
+// column on the read ladder rather than a field up here: `executable`
+// decides whether a locus needs vouching, and the per-source answer is then
+// scope::trust_of's.
 
 #include "agentty/dirs/dirs.hpp"
 #include "agentty/scope/scope.hpp"
@@ -103,8 +109,23 @@ namespace agentty::config {
 
 // MCP servers. Native only: `mcp.json` is not an .agents/.claude convention
 // — those tools do not put that file there — and the schema is ours.
+//
+// EXECUTABLE: acting on this content spawns processes. A config that rode in
+// on a clone is therefore Pending until the human vouches for its exact
+// bytes (scope::trust_of + the content-hash approvals store — the MCPoison
+// re-gate). Nothing else in this inventory executes, which is why this is
+// the only row that carries the flag.
 inline constexpr scope::Layout kMcpLayout{
     .leaf = "mcp.json", .explicit_env = "AGENTTY_MCP_CONFIG"};
+
+// Does acting on this concern's content EXECUTE something?
+//
+// A function of the concern, not a field on the Layout: scope owns the
+// read algebra and must not grow a notion of what its callers do with the
+// bytes. Only MCP spawns.
+[[nodiscard]] constexpr bool executable(std::string_view name) noexcept {
+    return name == "mcp";
+}
 
 // Skills, agents, commands. Portable: the same markdown-with-frontmatter
 // file is valid in another tool, so reading theirs is free compatibility.
@@ -197,6 +218,12 @@ struct ReadRow {
     scope::Dialect dialect{};
     std::string    path;
     bool           exists = false;
+
+    // Empty unless the concern is executable AND the file is present.
+    // "trusted" / "needs approval" / "blocked: <why>" — computed by the same
+    // scope::trust_of the spawn gate calls, so the word printed here is the
+    // word the connect loop acted on.
+    std::string    trust;
 };
 
 // A dialect this feature does NOT read.

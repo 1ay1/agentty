@@ -356,12 +356,21 @@ resolve_union(const Layout& layout, const Env& env, Key&& key, Load&& load) {
 //   2. skills/agents/commands — union. The four hand-written root arrays
 //                 collapse into plan()+resolve_union; shadow semantics are
 //                 preserved by the first-key-wins rule.
-//   3. MCP      — LAST, and the only one that GAINS behaviour: switch to
-//                 resolve_union (merge project+user servers), route edits to
-//                 item.source.base (fixes the wrong-file bug), and replace the
-//                 AGENTTY_MCP_ALLOW_PROJECT env gate with trust_of()+Approvals
-//                 (fixes the MCPoison-class exposure). Land it only once (1)
-//                 and (2) have shaken out the algebra in production.
+//   3. MCP      — LAST, and the only one that GAINED behaviour (done).
+//                 resolve_union merges project+user servers, edits route to
+//                 item.source.base (fixes the wrong-file bug), and the
+//                 AGENTTY_MCP_ALLOW_PROJECT env gate is now only a
+//                 back-compat pre-check in front of trust_of()+Approvals
+//                 (fixes the MCPoison-class exposure).
+//
+//                 bridge.cpp's own resolve_config() — a SECOND ladder that
+//                 returned one winning file — is deleted. It had disagreed
+//                 with plan() in the worst direction: a project mcp.json
+//                 silently stopped every USER server from running while
+//                 every surface still listed them. The `bool project_local`
+//                 it threaded through four functions is gone too; that was
+//                 provenance rebuilt by hand when Source::locus already
+//                 carried it.
 //
 // Locus::Local ships as a VALUE now (the algebra is complete + future-proof)
 // but is wired into no resolver until a concrete second consumer appears —

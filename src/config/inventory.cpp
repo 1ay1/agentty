@@ -13,7 +13,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <system_error>
+#include <variant>
 
 namespace agentty::config {
 
@@ -69,6 +72,31 @@ constexpr scope::Dialect kAllDialects[] = {
     return v && v[0];
 }
 
+// The approvals leaf MCP vouches against. Same constant bridge.cpp uses;
+// named here so the report reads the same store the spawn gate reads.
+constexpr char kMcpApprovalsLeaf[] = "mcp_approvals.json";
+
+// What trust_of says about this source, as a word.
+//
+// Calls the SAME function the spawn gate calls, with the same content hash
+// and the same approvals store, so the word printed here is the word the
+// connect loop acted on. Anything less is a second opinion, which is what
+// this whole file exists to avoid.
+[[nodiscard]] std::string trust_word(const scope::Source& src,
+                                     const fs::path& file) {
+    std::ifstream in(file, std::ios::binary);
+    if (!in) return {};
+    const std::string bytes((std::istreambuf_iterator<char>(in)),
+                             std::istreambuf_iterator<char>());
+    const scope::Trust t = scope::trust_of(
+        src, scope::content_hash(bytes),
+        scope::load_approvals(kMcpApprovalsLeaf));
+    if (std::holds_alternative<scope::Trusted>(t)) return "trusted";
+    if (const auto* b = std::get_if<scope::Blocked>(&t))
+        return "blocked: " + b->reason;
+    return "needs approval";
+}
+
 }  // namespace
 
 std::span<const Entry> inventory() noexcept { return kEntries; }
@@ -97,6 +125,10 @@ Report describe(const Entry& e) {
             row.path = p.string();
             std::error_code ec;
             row.exists = fs::exists(p, ec);
+            // Only executable content needs vouching, and only a file that
+            // exists has bytes to bind an approval to.
+            if (row.exists && executable(e.name))
+                row.trust = trust_word(src, p);
             r.reads.push_back(std::move(row));
         }
         for (scope::Dialect d : kAllDialects) {
@@ -146,14 +178,21 @@ void print_one(const Report& r) {
                 std::string{r.what}.c_str());
 
     if (!r.reads.empty()) {
-        std::printf("\nread, in precedence order\n");
+        // Name the gate in the header when there is one. A reader who sees
+        // "needs approval" on a row deserves to know WHY this concern is the
+        // one that asks.
+        std::printf("\nread, in precedence order%s\n",
+                    executable(r.name) ? "  (executable — project configs are"
+                                         " vouched by content hash)" : "");
         int n = 0;
         for (const ReadRow& row : r.reads) {
-            std::printf("  %d  %-8s %-8s %s%s\n", ++n,
+            std::printf("  %d  %-8s %-8s %s%s%s%s\n", ++n,
                         std::string{scope::to_string(row.locus)}.c_str(),
                         std::string{scope::dir_name(row.dialect)}.c_str(),
                         row.path.c_str(),
-                        row.exists ? "" : "   (missing)");
+                        row.exists ? "" : "   (missing)",
+                        row.trust.empty() ? "" : "   ",
+                        row.trust.c_str());
         }
         if (!r.explicit_env.empty())
             std::printf("     $%s overrides all of the above\n",

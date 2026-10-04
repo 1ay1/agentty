@@ -152,38 +152,19 @@ std::chrono::milliseconds call_timeout() {
     return std::chrono::milliseconds{ms};
 }
 
-// Resolve the config path per the documented precedence. Empty if none.
-// `out_project_local` is set true when the config came from the WORKSPACE
-// (./.agentty/mcp.json) — which can ride in on a cloned repo — vs. an
-// explicitly-pointed ($AGENTTY_MCP_CONFIG) or user-global (~/.agentty)
-// config the user themselves placed. Project-local stdio servers spawn
-// arbitrary commands, so they're gated behind an opt-in (see mcp_tools).
-fs::path resolve_config(bool& out_project_local) {
-    out_project_local = false;
-    std::error_code ec;
-    if (const char* e = std::getenv("AGENTTY_MCP_CONFIG"); e && e[0]) {
-        fs::path p{e};
-        return fs::is_regular_file(p, ec) ? p : fs::path{};
-    }
-    if (auto local = fs::path{".agentty"} / "mcp.json"; fs::is_regular_file(local, ec)) {
-        out_project_local = true;
-        return local;
-    }
-    // User-level config under the single per-user root (~/.agentty or
-    // $AGENTTY_HOME — see util/user_root.hpp), resolved uniformly on
-    // every platform.
-    if (auto user = util::user_root() / "mcp.json";
-        fs::is_regular_file(user, ec)) {
-        return user;
-    }
-    return {};
-}
-
-// Convenience overload for callers that don't care about the trust source.
-fs::path resolve_config() {
-    bool ignore = false;
-    return resolve_config(ignore);
-}
+// NOTE: resolve_config() is GONE.
+//
+// It was a second ladder -- env ▷ project ▷ user, ONE winning file -- living
+// beside the scope::plan ladder read_config_servers() uses. Two answers to
+// one question, and they disagreed: plan() MERGES project+user, so the
+// Plugins pane, `agentty config mcp` and delegation all listed both, while
+// the connect path resolved a single file and silently dropped every user
+// server whenever a project mcp.json existed. You saw your server; it never
+// ran.
+//
+// Everything now folds read_config_servers(), which is scope::plan + the
+// union monoid. The scope header's own prologue named this function as the
+// thing it replaced; this is that migration finished.
 
 // The approvals store leaf under ~/.agentty (scope::load/save_approvals).
 inline constexpr char kMcpApprovalsLeaf[] = "mcp_approvals.json";
@@ -204,16 +185,36 @@ inline constexpr char kMcpApprovalsLeaf[] = "mcp_approvals.json";
               || e[0] == 'y' || e[0] == 'Y');
 }
 
-[[nodiscard]] bool project_config_trusted(const fs::path& cfg) noexcept {
+// Is the config at `cfg`, read from `src`, trusted to spawn?
+//
+// The LOCUS decision is scope::trust_of's, not ours. That function is the
+// one place that knows Explicit/User are trusted because a human placed
+// them while Project/Local rode in on a clone -- this used to be a `bool
+// project_local` threaded through four functions plus a convenience overload
+// that threw the answer away (`bool ignore`), which is provenance being
+// reconstructed badly when plan() already returned it.
+//
+// The env opt-in stays as a pre-check for back-compat, and only as that: it
+// is a blunt instrument (one variable trusts EVERY project config forever,
+// including the repo you cloned ten minutes ago) and the content-hash path
+// below is the one that actually re-gates on an edit.
+[[nodiscard]] bool source_trusted(const scope::Source& src,
+                                  const fs::path& cfg) noexcept {
     if (env_allows_project()) return true;
-    // Hash the file bytes and check the user-root approvals store.
     std::error_code ec;
     std::ifstream in(cfg, std::ios::binary);
-    if (!in) return false;
-    std::string bytes((std::istreambuf_iterator<char>(in)),
-                       std::istreambuf_iterator<char>());
-    const std::string h = scope::content_hash(bytes);
-    return scope::load_approvals(kMcpApprovalsLeaf).approved(h);
+    std::string bytes;
+    if (in) bytes.assign((std::istreambuf_iterator<char>(in)),
+                          std::istreambuf_iterator<char>());
+    // An empty hash would make trust_of answer Trusted (it reads "nothing to
+    // bind to"), so an unreadable project file must not reach it.
+    if (bytes.empty() && src.locus != scope::Locus::Explicit
+                      && src.locus != scope::Locus::User)
+        return false;
+    const scope::Trust t = scope::trust_of(
+        src, scope::content_hash(bytes),
+        scope::load_approvals(kMcpApprovalsLeaf));
+    return std::holds_alternative<scope::Trusted>(t);
 }
 
 // Parsed per-server config the model needs: command + the exclude set.
@@ -241,16 +242,24 @@ struct ConfigServer {
         bool advertise = false;  // default: proxy owns the schema
     };
     std::vector<PassthroughTool> passthrough;
+
+    // The entry's raw JSON, and the file it came from.
+    //
+    // Carried so the CONNECT path can use this merged map instead of
+    // re-reading one winning file. Before, read_config_servers() (via
+    // scope::plan) merged project+user while mcp_tools() independently
+    // resolved ONE file -- two ladders, and they disagreed: a project
+    // mcp.json silently disabled every user server, while the Plugins pane
+    // and `agentty config mcp` both still listed them. Keeping the spec here
+    // means there is one read of the config and one answer.
+    json       spec;
+    fs::path   file;     // the concrete mcp.json this entry was read from
 };
-// Read a boolean flag from a JSON object WITHOUT throwing on a malformed
-// value. A hand-edited non-bool (e.g. `"disabled": "true"`) would make
-// nlohmann's value(key, false) throw type_error and take down the config read
-// or the connect loop. Any non-bool reads as false (fail-open).
-[[nodiscard]] bool json_flag(const json& obj, const char* key) noexcept {
-    if (!obj.is_object()) return false;
-    auto it = obj.find(key);
-    return it != obj.end() && it->is_boolean() && it->get<bool>();
-}
+
+// NOTE: json_flag() is gone with the second ladder. It existed because the
+// connect loop re-parsed raw JSON and needed a throw-safe `disabled` read;
+// that loop now consumes ConfigServer, where read_one_config has already
+// done the type-checked parse once.
 
 // The scope Layout for MCP config. Declared ONCE in config/inventory.hpp and
 // consumed here, so `agentty config mcp` prints the same ladder this reads --
@@ -285,6 +294,8 @@ void read_one_config(const fs::path& file, const scope::Source& src,
         cs.url     = e.value("url", std::string{});   // HTTP/SSE servers have no command
         cs.type    = e.value("type", std::string{});
         cs.source  = src;
+        cs.spec    = e;      // the connect path spawns from this
+        cs.file    = file;   // and reports/approves against this file
         if (e.contains("args") && e["args"].is_array())
             for (const auto& a : e["args"])
                 if (a.is_string()) cs.args.push_back(a.get<std::string>());
@@ -997,7 +1008,7 @@ std::vector<tools::ToolDef> passthrough_tools() {
         // a vouch even though nothing spawns. User/explicit configs are
         // user-placed and trusted by construction.
         if (cs.source.locus == scope::Locus::Project
-            && !project_config_trusted(cs.source.base / "mcp.json"))
+            && !source_trusted(cs.source, cs.file))
             continue;
         const std::string url = cs.url;
         if (url.empty()) continue;
@@ -1070,37 +1081,15 @@ std::vector<tools::ToolDef> project_tools(PoolHandle pool) {
     // at PROJECTION time, rather than trusting only the policy baked at
     // connect. This makes enabling/disabling a tool a config edit + cache
     // invalidation — NO server re-spawn — so a toggle can't hang on a
-    // reload/re-connect race. Parsed once per projection (cheap; runs when
-    // the wire catalog rebuilds, not per turn on a warm cache).
+    // reload/re-connect race.
+    //
+    // Reads the MERGED map rather than re-parsing one winning file. The old
+    // form resolved a single config, so a user server's tool-exclude was
+    // silently ignored whenever a project mcp.json existed -- a toggle in the
+    // Plugins pane appeared to do nothing.
     std::unordered_map<std::string, std::unordered_set<std::string>> live_excl;
-    {
-        std::error_code ec;
-        const fs::path cfg = resolve_config();
-        if (!cfg.empty()) {
-            std::ifstream in(cfg);
-            json doc = json::parse(in, nullptr, /*throw=*/false);
-            const json* servers = nullptr;
-            if (doc.is_object()) {
-                if (doc.contains("mcpServers") && doc["mcpServers"].is_object())
-                    servers = &doc["mcpServers"];
-                else if (doc.contains("servers") && doc["servers"].is_object())
-                    servers = &doc["servers"];
-            }
-            if (servers) {
-                for (auto it = servers->begin(); it != servers->end(); ++it) {
-                    const json& e = it.value();
-                    if (!e.is_object() || !e.contains("tools")) continue;
-                    const json& tj = e["tools"];
-                    if (!tj.is_object() || !tj.contains("exclude")) continue;
-                    const json& ex = tj["exclude"];
-                    if (!ex.is_array()) continue;
-                    auto& set = live_excl[it.key()];
-                    for (const auto& v : ex)
-                        if (v.is_string()) set.insert(v.get<std::string>());
-                }
-            }
-        }
-    }
+    for (const auto& [sname, cs] : read_config_servers())
+        if (!cs.exclude.empty()) live_excl[sname] = cs.exclude;
 
     {
         std::lock_guard<std::mutex> lk(pool->mu);
@@ -1175,46 +1164,38 @@ std::vector<tools::ToolDef> project_tools(PoolHandle pool) {
 
 } // namespace
 
-bool mcp_config_present() { return !resolve_config().empty(); }
+bool mcp_config_present() { return !read_config_servers().empty(); }
 
 std::vector<ServerLaunch> configured_servers_for_delegation() {
-    bool project_local = false;
-    const fs::path path = resolve_config(project_local);
-    if (path.empty()) return {};
-    // Same trust gate as mcp_tools(): a workspace-local config only exposes
-    // its servers for delegation once the human has vouched for it (env opt-in
-    // or a content-hash approval of THIS file).
-    if (project_local && !project_config_trusted(path)) return {};
-
-    json document;
-    try { std::ifstream input(path); input >> document; }
-    catch (...) { return {}; }
-    const json* servers = nullptr;
-    if (document.contains("mcpServers") && document["mcpServers"].is_object())
-        servers = &document["mcpServers"];
-    else if (document.contains("servers") && document["servers"].is_object())
-        servers = &document["servers"];
-    if (!servers) return {};
-
+    // One ladder. This used to resolve ONE winning file, so a project
+    // mcp.json silently hid every user server from delegation while the
+    // Plugins pane (which reads the merged map) still listed them.
+    //
+    // Trust is now per SOURCE rather than per whole-config: a user server
+    // beside an unvouched project one stays available instead of being
+    // collateral damage.
     auto string_value = [](const json& value) {
         return value.is_string() ? value.get<std::string>() : value.dump();
     };
     std::vector<ServerLaunch> out;
-    for (auto it = servers->begin(); it != servers->end(); ++it) {
-        if (!it.value().is_object()
-            || json_flag(it.value(), "disabled")) continue;
-        const auto& spec = it.value();
+    for (const auto& [sname, cs] : read_config_servers()) {
+        if (cs.disabled) continue;
         // Passthrough entries are dispatch-only tool declarations, not
         // delegable MCP servers.
-        if (spec.value("type", std::string{}) == "passthrough") continue;
+        if (cs.type == "passthrough") continue;
+        // Same gate as mcp_tools(): a config that rode in on a clone only
+        // exposes its servers once the human has vouched for it.
+        if (cs.source.locus == scope::Locus::Project
+            && !source_trusted(cs.source, cs.file))
+            continue;
+        const json& spec = cs.spec;
         ServerLaunch launch;
-        launch.name = it.key();
-        launch.command = spec.value("command", std::string{});
-        launch.url = spec.value("url", std::string{});
-        const auto type = spec.value("type", std::string{});
-        if (!launch.url.empty() || type == "http" || type == "streamable-http")
+        launch.name = sname;
+        launch.command = cs.command;
+        launch.url = cs.url;
+        if (!launch.url.empty() || cs.type == "http" || cs.type == "streamable-http")
             launch.transport = ServerLaunch::Transport::Http;
-        else if (type == "sse")
+        else if (cs.type == "sse")
             launch.transport = ServerLaunch::Transport::Sse;
         if (auto args = spec.find("args"); args != spec.end() && args->is_array())
             for (const auto& value : *args) launch.args.push_back(string_value(value));
@@ -1236,42 +1217,39 @@ std::vector<tools::ToolDef> mcp_tools(PoolHandle& out_pool) {
     // Serialize the whole connect+swap — no two builds ever run at once.
     std::lock_guard<std::mutex> connect_lk(g_connect_mu());
     std::vector<tools::ToolDef> out;
-    bool project_local = false;
-    fs::path cfg = resolve_config(project_local);
-    if (cfg.empty()) return out;          // no config → zero work, zero tools
 
-    // ── Untrusted-workspace spawn gate (security) ────────────────────────
+    // ONE ladder. This used to resolve a single winning file while
+    // read_config_servers() (the Plugins pane, `agentty config mcp`,
+    // delegation) merged project+user via scope::plan. The two disagreed,
+    // and the disagreement was silent and bad: a project mcp.json DISABLED
+    // every user server, while every surface that lists servers still showed
+    // them. You saw your server, and it never ran.
+    const auto config = read_config_servers();
+    if (config.empty()) return out;       // no config → zero work, zero tools
+
+    // ── Untrusted-workspace spawn gate (security) ────────────────────
     // A project-local ./.agentty/mcp.json can ride in on a cloned repo, and
     // its stdio servers spawn ARBITRARY commands at registry-build time with
     // no per-tool permission prompt — bypassing the Exec gate every other
     // code path honors. So a workspace-local config's stdio servers connect
-    // only when the human has vouched for them. Trust is now PER-SERVER (see
-    // the connect loop below): each server is gated on its own spec hash, so
-    // approving one doesn't bless a later-added one, and editing one server's
-    // command re-gates only that server. $AGENTTY_MCP_CONFIG and
-    // ~/.agentty/mcp.json are user-placed and never gated. A whole-file
-    // approval or AGENTTY_MCP_ALLOW_PROJECT=1 still blanket-trusts everything
-    // (back-compat), short-circuited here to skip the per-server work.
-    const bool project_all_trusted =
-        !project_local || project_config_trusted(cfg);
-
-    json doc;
-    try {
-        std::ifstream f(cfg);
-        f >> doc;
-    } catch (const std::exception& e) {
-        // cfg.c_str() is wchar_t* on Windows — narrow it for %s.
-        std::fprintf(stderr, "mcp: failed to parse %s: %s\n",
-                     cfg.string().c_str(), e.what());
-        return out;
-    }
-
-    const json* servers = nullptr;
-    if (doc.contains("mcpServers") && doc["mcpServers"].is_object())
-        servers = &doc["mcpServers"];
-    else if (doc.contains("servers") && doc["servers"].is_object())
-        servers = &doc["servers"];
-    if (!servers) return out;
+    // only when the human has vouched for them.
+    //
+    // The locus decision belongs to scope::trust_of (see source_trusted):
+    // Explicit/User are trusted because a human placed them, Project/Local
+    // rode in on a clone. Trust is also per SOURCE now, not per whole-config
+    // — an unvouched project file no longer takes the user's own servers down
+    // with it. Within a project source it stays per SERVER (the spec-hash
+    // check in the loop below), so approving one server doesn't bless a
+    // later-added one and editing one command re-gates only that one.
+    std::unordered_map<std::string, bool> source_ok;   // memoize per file
+    auto whole_source_trusted = [&](const ConfigServer& cs) -> bool {
+        if (cs.source.locus != scope::Locus::Project) return true;
+        const std::string key = cs.file.string();
+        if (auto it = source_ok.find(key); it != source_ok.end()) return it->second;
+        const bool ok = source_trusted(cs.source, cs.file);
+        source_ok.emplace(key, ok);
+        return ok;
+    };
 
     auto pool = std::make_shared<ConnectionPool>();
     // tools/list_changed (+ resources/prompts) from any server bumps the
@@ -1304,15 +1282,13 @@ std::vector<tools::ToolDef> mcp_tools(PoolHandle& out_pool) {
     std::vector<Pending> pending;
     // Per-server trust set, loaded once. For a workspace-local config that
     // isn't blanket-trusted, a stdio server connects only if its own spec
-    // hash is in the user-root approvals store (see project_config_trusted /
+    // hash is in the user-root approvals store (see source_trusted /
     // plugin::server_spec_hash).
-    const scope::Approvals approvals =
-        project_all_trusted ? scope::Approvals{}
-                            : scope::load_approvals(kMcpApprovalsLeaf);
-    for (auto it = servers->begin(); it != servers->end(); ++it) {
-        const std::string sname = it.key();
-        const json spec = it.value();   // copy: detached worker outlives `doc`
-        if (json_flag(spec, "disabled")) continue;
+    const scope::Approvals approvals = scope::load_approvals(kMcpApprovalsLeaf);
+    for (const auto& [sname_key, cs] : config) {
+        const std::string sname = sname_key;
+        const json spec = cs.spec;   // copy: detached worker outlives `config`
+        if (cs.disabled) continue;
 
         // Untrusted-workspace spawn gate, PER SERVER. A stdio server (has a
         // command, no url) from a not-yet-trusted project config is skipped
@@ -1325,8 +1301,8 @@ std::vector<tools::ToolDef> mcp_tools(PoolHandle& out_pool) {
         // the connect loop handshake a non-MCP endpoint (headroom's
         // /v1/retrieve) and burn the full 15 s deadline — the Plugins pane
         // sat on "connecting…" and startup paid the wait for nothing.
-        if (spec.value("type", std::string{}) == "passthrough") continue;
-        if (!project_all_trusted) {
+        if (cs.type == "passthrough") continue;
+        if (!whole_source_trusted(cs)) {
             const std::string command = spec.value("command", std::string{});
             const std::string url     = spec.value("url", std::string{});
             if (!command.empty() && url.empty()) {
@@ -1547,14 +1523,20 @@ PluginModel plugin_model() {
 
     // Build one ServerState per configured server, unifying config + live.
     // Per-server trust (the RCE gate): a workspace-local config's stdio
-    // servers only connect once vouched for. Blanket trust (env or whole-file
-    // approval) short-circuits; otherwise each server is checked on its own
-    // spec hash, so one untrusted server doesn't taint the rest.
-    const bool project_all_trusted =
-        project_config_trusted(fs::path{".agentty"} / "mcp.json");
-    const scope::Approvals approvals =
-        project_all_trusted ? scope::Approvals{}
-                            : scope::load_approvals(kMcpApprovalsLeaf);
+    // servers only connect once vouched for. Trust is per SOURCE (each
+    // server knows the file it came from), then per SERVER within it — the
+    // same two-step the connect loop runs, so the pane never shows a server
+    // as available that mcp_tools() would skip.
+    std::unordered_map<std::string, bool> source_ok;
+    auto whole_source_trusted = [&](const ConfigServer& cs) -> bool {
+        if (cs.source.locus != scope::Locus::Project) return true;
+        const std::string key = cs.file.string();
+        if (auto it = source_ok.find(key); it != source_ok.end()) return it->second;
+        const bool ok = source_trusted(cs.source, cs.file);
+        source_ok.emplace(key, ok);
+        return ok;
+    };
+    const scope::Approvals approvals = scope::load_approvals(kMcpApprovalsLeaf);
     std::size_t enabled_mcp = 0;
     for (const auto& [name, cs] : cfg) {
         ServerState ss;
@@ -1587,7 +1569,7 @@ PluginModel plugin_model() {
             if (cs.url.empty()) {
                 ss.error = "passthrough needs a \"url\" in mcp.json";
             } else if (cs.source.locus == scope::Locus::Project
-                       && !project_all_trusted
+                       && !whole_source_trusted(cs)
                        && !approvals.approved(
                               tools::plugin::server_spec_hash(
                                   cs.command, cs.url, cs.args))) {
@@ -1615,7 +1597,7 @@ PluginModel plugin_model() {
                 ss.error = "no \"command\" or \"url\" in mcp.json";
             } else if (cs.source.locus == scope::Locus::Project
                        && !cs.command.empty() && cs.url.empty()
-                       && !project_all_trusted
+                       && !whole_source_trusted(cs)
                        && !approvals.approved(
                               tools::plugin::server_spec_hash(
                                   cs.command, cs.url, cs.args))) {

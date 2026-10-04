@@ -195,6 +195,41 @@ re-gates only that server. The connect loop skips each untrusted stdio
 server individually; a blanket grant (the env opt-in or a whole-file
 approval) still trusts everything and short-circuits the per-server work.
 
+## One ladder, not two (the MCP migration, finished)
+
+MCP was the last consumer and the only one that *gained* behaviour, so it
+landed last. It had been carrying a second resolver:
+
+| | ladder | shape |
+|---|---|---|
+| `read_config_servers` | `scope::plan` + union | MERGES project + user |
+| `resolve_config` (gone) | hand-rolled env ▷ project ▷ user | ONE winning file |
+
+Two answers to one question, and they disagreed in the worst direction. The
+Plugins pane, `agentty config mcp` and ACP delegation all read the merged
+map, so they listed every server. The **connect loop** read the single file —
+so the moment a repo had `./.agentty/mcp.json`, every server in
+`~/.agentty/mcp.json` silently stopped running while still being listed.
+You saw your server; it never ran.
+
+The fix is the union fold everywhere, plus trust moving from a whole-config
+verdict to a per-source one:
+
+- `bool project_local`, threaded through four functions plus a convenience
+  overload that discarded it (`bool ignore`), is gone. That bool was
+  provenance being reconstructed badly when `plan()` already returned it as
+  `Source::locus`.
+- The locus decision is `trust_of`'s alone. `$AGENTTY_MCP_ALLOW_PROJECT`
+  survives as a back-compat pre-check and nothing more — it is blunt (one
+  variable trusts every project config forever) where the content hash
+  re-gates on any edit.
+- An unvouched project config no longer takes the user's own servers down
+  with it. Trust is per source, then per server within it.
+
+That last point is what earned `agentty config mcp` its trust column: with
+one gate there is one answer to print, and it is computed by calling the
+same `trust_of` the spawn path calls.
+
 ## Where it lives
 
 - `include/agentty/scope/scope.hpp` — the types + the two inline fold

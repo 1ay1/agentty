@@ -157,6 +157,46 @@ TEST_CASE("anchors are derived, not tagged") {
     }
 }
 
+TEST_CASE("only executable concerns report trust") {
+    // The column exists because MCP's gate is now scope::trust_of's — the
+    // report calls the same function the spawn path calls. Nothing else in
+    // the inventory executes, so nothing else may claim a trust state;
+    // printing "trusted" next to a skills directory would be meaningless
+    // ceremony that erodes the word where it matters.
+    for (const cfg::Entry& e : cfg::inventory()) {
+        if (!e.read) continue;
+        const cfg::Report r = cfg::describe(e);
+        for (const auto& row : r.reads) {
+            if (cfg::executable(e.name)) {
+                // Present executable config always gets a verdict; a missing
+                // file has no bytes to bind an approval to.
+                CHECK(row.exists == !row.trust.empty(),
+                      "executable: a verdict exactly when the file exists");
+            } else {
+                CHECK(row.trust.empty(),
+                      "non-executable concerns claim no trust state");
+            }
+        }
+    }
+    CHECK(cfg::executable("mcp"), "mcp spawns processes");
+    CHECK(!cfg::executable("skills"), "skills are data");
+    CHECK(!cfg::executable("memory"), "memory is data");
+}
+
+TEST_CASE("user and explicit sources are trusted by placement") {
+    // scope::trust_of's rule, surfaced: a human put ~/.agentty/mcp.json
+    // there, so it needs no vouching. Only Project/Local rode in on a clone.
+    const cfg::Entry* mcp = cfg::find("mcp");
+    REQUIRE(mcp != nullptr, "mcp is in the inventory");
+    for (const auto& row : cfg::describe(*mcp).reads) {
+        if (!row.exists) continue;
+        if (row.locus == agentty::scope::Locus::User
+            || row.locus == agentty::scope::Locus::Explicit)
+            CHECK(row.trust == "trusted",
+                  "a human placed it, so it is trusted");
+    }
+}
+
 TEST_CASE("every concern has a name and a description") {
     // The table is the first thing a confused user sees; a blank cell there
     // is a worse bug than a missing feature.

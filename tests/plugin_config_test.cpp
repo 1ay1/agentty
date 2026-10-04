@@ -7,6 +7,8 @@
 #include "agtest.hpp"
 
 #include "agentty/tool/plugin.hpp"
+#include "agentty/mcp/client.hpp"   // plugin_model() — the merged-config probe
+#include "agentty/tool/util/fs_helpers.hpp"   // workspace_root clamp
 
 #include <nlohmann/json.hpp>
 
@@ -342,6 +344,81 @@ void concurrent_mutations_safe(const fs::path& dir) {
     std::println("PASS\n");
 }
 
+// A project mcp.json must NOT hide the user's own servers.
+//
+// There used to be TWO ladders. read_config_servers() merged project+user
+// via scope::plan, so the Plugins pane, `agentty config mcp` and delegation
+// all listed both. But the CONNECT path (mcp_tools) called its own
+// resolve_config(), which returned ONE winning file -- so the moment a repo
+// had ./.agentty/mcp.json, every server in ~/.agentty/mcp.json silently
+// stopped running while still being listed everywhere. You saw your server;
+// it never ran.
+//
+// plugin_model() is NOT the probe: it folded read_config_servers() all
+// along, so it never showed the bug. The broken path is the one that called
+// resolve_config() -- the connect loop and delegation. This asserts the two
+// now agree.
+void project_does_not_hide_user_servers(const fs::path& dir) {
+    std::println("--- project_does_not_hide_user_servers ---");
+    const fs::path home = dir / "merge_home";
+    const fs::path work = dir / "merge_work";
+    fs::create_directories(home / ".agentty");
+    fs::create_directories(work / ".agentty");
+
+    const std::string prev_home = std::getenv("AGENTTY_HOME")
+                                      ? std::getenv("AGENTTY_HOME") : "";
+    const bool     had_home = std::getenv("AGENTTY_HOME") != nullptr;
+    const fs::path prev_cwd = fs::current_path();
+    ::setenv("AGENTTY_HOME", (home / ".agentty").string().c_str(), 1);
+    // Blanket-trust the workspace so this measures the LADDER, not the gate
+    // (the gate has its own cases above).
+    ::setenv("AGENTTY_MCP_ALLOW_PROJECT", "1", 1);
+    fs::current_path(work);
+    // scope's Project locus anchors on util::project_root(), which is the
+    // WORKSPACE-ROOT clamp -- process-global state, not the live cwd. chdir
+    // alone leaves it wherever an earlier test pinned it, and then the
+    // project source resolves somewhere else entirely. (Same trap the rag
+    // adapter test hit.)
+    const auto old_ws = ::agentty::tools::util::workspace_root();
+    ::agentty::tools::util::set_workspace_root(work);
+
+    // An HTTP server in each scope -- http needs no binary to exist and is
+    // never spawn-gated, so the only thing under test is whether both are
+    // seen at all.
+    write_file(work / ".agentty" / "mcp.json",
+               R"({"mcpServers":{"projsrv":{"url":"http://127.0.0.1:9/p"}}})");
+    write_file(home / ".agentty" / "mcp.json",
+               R"({"mcpServers":{"usersrv":{"url":"http://127.0.0.1:9/u"}}})");
+
+    // plugin_model() already merged (it used read_config_servers all along);
+    // the path that was BROKEN is the one that called resolve_config() --
+    // delegation and the connect loop. Probe delegation: public, spawns
+    // nothing, and it is what ACP session/new hands downstream.
+    const auto launches = agentty::mcp::configured_servers_for_delegation();
+    bool saw_proj = false, saw_user = false;
+    for (const auto& l : launches) {
+        if (l.name == "projsrv") saw_proj = true;
+        if (l.name == "usersrv") saw_user = true;
+    }
+    check(saw_proj, "project server is delegable");
+    check(saw_user, "USER server survives a project mcp.json (the merge bug)");
+
+    // And the listing surface agrees with it -- that agreement IS the fix.
+    const auto model = agentty::mcp::plugin_model();
+    bool listed_user = false;
+    for (const auto& s : model.servers)
+        if (s.name == "usersrv") listed_user = true;
+    check(listed_user == saw_user,
+          "what the pane LISTS matches what delegation can RUN");
+
+    fs::current_path(prev_cwd);
+    ::agentty::tools::util::set_workspace_root(old_ws);
+    ::unsetenv("AGENTTY_MCP_ALLOW_PROJECT");
+    if (had_home) ::setenv("AGENTTY_HOME", prev_home.c_str(), 1);
+    else          ::unsetenv("AGENTTY_HOME");
+    std::println("PASS\n");
+}
+
 // A symlinked mcp.json must be written THROUGH (target updated), not replaced
 // by a regular file (which would orphan the user's dotfile symlink).
 void symlink_written_through(const fs::path& dir) {
@@ -560,6 +637,7 @@ TEST_CASE("plugin config") {
     non_object_entry_no_throw(sandbox);
     concurrent_mutations_safe(sandbox);
     symlink_written_through(sandbox);
+    project_does_not_hide_user_servers(sandbox);
 
     std::error_code ec;
     fs::remove_all(sandbox, ec);
