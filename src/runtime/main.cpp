@@ -111,6 +111,7 @@
 #include "agentty/provider/selection.hpp"
 #include "agentty/provider/credentials.hpp"
 #include "agentty/tool/skills.hpp"
+#include "agentty/config/inventory.hpp"   // config::cmd_config
 #include "agentty/tool/commands.hpp"
 #include "agentty/tool/hooks.hpp"
 #include "agentty/tool/plugin.hpp"
@@ -689,6 +690,9 @@ void print_usage() {
                                "(build info, logs, config \u2014 no secrets)", kCmdGutter),
         entry("  skills", "List discovered skills with spec-lint diagnostics "
                           "(exit 1 on warnings \u2014 CI-friendly validate)", kCmdGutter),
+        entry("  config [what]", "Show where config is read from and bytes are written. "
+                                "`config <concern>` for one ladder (including what is "
+                                "NOT read), `config env` for the storage model", kCmdGutter),
         entry("  hooks [list]", "Show configured lifecycle hooks + approval state", kCmdGutter),
         entry("  hooks approve", "Inspect + approve the active hooks file (hooks NEVER "
                                  "run unapproved; any change re-gates)", kCmdGutter),
@@ -822,6 +826,11 @@ Args parse_args(int argc, char** argv) {
          || a == "acp" || a == "skills" || a == "mcp-serve"
          || a == "diagnostics") {
             out.subcommand = std::move(a);
+        } else if (a == "config") {
+            // `agentty config [concern]` — the optional concern rides in
+            // plugin_argv, the same verbatim-tail channel `plugin` uses.
+            out.subcommand = std::move(a);
+            while (i + 1 < argc) out.plugin_argv.emplace_back(argv[++i]);
         } else if (a == "update") {
             // `agentty update [--check]` — --check rides in cli_run_agent
             // (reused scratch; update has no agent).
@@ -1296,6 +1305,7 @@ int main(int argc, char** argv) {
     if (args.subcommand == "logout") return auth::cmd_logout();
     if (args.subcommand == "status") return auth::cmd_status();
     if (args.subcommand == "skills") return tools::skills::cmd_skills();
+    if (args.subcommand == "config") return config::cmd_config(args.plugin_argv);
     if (args.subcommand == "skill")  return tools::skills::cli(args.plugin_argv);
     if (args.subcommand == "hooks")  return tools::hooks::cli(args.cli_run_agent);
     if (args.subcommand == "plugin") return tools::plugin::cli(args.plugin_argv);

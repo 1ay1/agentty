@@ -48,6 +48,7 @@
 #include <rag/rag.hpp>
 
 #include "agentty/dirs/dirs.hpp"
+#include "agentty/config/inventory.hpp"   // kRagSpec — the one declaration
 #include "agentty/io/http.hpp"
 #include "agentty/mcp/client.hpp"
 #include "agentty/tool/skills.hpp"
@@ -77,13 +78,11 @@ namespace {
 //
 // The sweep itself is #62 and not wired yet; these declare the intent so the
 // policy lives next to the path instead of in whatever code gets written later.
-constexpr ::agentty::dirs::Spec kDocsIndexSpec{
-    .root = ::agentty::dirs::Root::Project,
-    .leaf = "",                       // the .agentty root itself
-    .env  = "AGENTTY_RAG_DIR",
-    .life = {.rebuildable = true, .keep_last = 1,
-             .min_age = std::chrono::seconds{3600}},   // 1h grace
-};
+//
+// Declared ONCE in config/inventory.hpp (kRagSpec) and aliased here, so
+// `agentty config rag` reports the same root, override and lifecycle this
+// actually uses -- no second definition to drift from it.
+constexpr ::agentty::dirs::Spec kDocsIndexSpec = ::agentty::config::kRagSpec;
 
 constexpr ::agentty::dirs::Spec kCodeIndexSpec = kDocsIndexSpec;
 
@@ -92,12 +91,7 @@ constexpr ::agentty::dirs::Spec kCodeIndexSpec = kDocsIndexSpec;
 // rebuildable — it is accumulated from real usage and nothing regenerates it,
 // so no sweep may ever collect it. That distinction is exactly what the
 // Lifecycle field exists to make explicit rather than implicit.
-constexpr ::agentty::dirs::Spec kFeedbackSpec{
-    .root = ::agentty::dirs::Root::Project,
-    .leaf = "",
-    .env  = "AGENTTY_RAG_DIR",
-    .life = {},                       // never swept
-};
+constexpr ::agentty::dirs::Spec kFeedbackSpec = ::agentty::config::kFeedbackSpec;
 
 // Resolve the directory the indexes live in.
 //

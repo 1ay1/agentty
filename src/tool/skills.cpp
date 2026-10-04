@@ -6,6 +6,7 @@
 #include "agentty/util/home_dir.hpp"
 
 #include "agentty/scope/scope.hpp"
+#include "agentty/config/inventory.hpp"   // kSkillsLayout — the one declaration
 #include "agentty/tool/util/fs_helpers.hpp"
 #include "agentty/util/dbglog.hpp"
 
@@ -571,7 +572,7 @@ const std::vector<Skill>& all() {
     env.user_native_base = ::agentty::util::user_root();
     env.project_root     = fs::path{"."};
     env.project_writable = true;   // discovery reads all dialects; unused here
-    const scope::Layout layout{.leaf = "skills", .dialects = scope::kPortable};
+    const scope::Layout& layout = ::agentty::config::kSkillsLayout;
     const auto sources = scope::plan(layout, env);
 
     // PASS 1 — signature only. stat() per SKILL.md, no file read, no parse.

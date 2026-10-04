@@ -8,6 +8,7 @@
 #include "agentty/util/home_dir.hpp"
 
 #include "agentty/scope/scope.hpp"
+#include "agentty/config/inventory.hpp"   // kCommandsLayout — the one declaration
 
 #include <algorithm>
 #include <cctype>
@@ -209,7 +210,7 @@ const std::vector<Command>& all() {
     env.user_native_base = ::agentty::util::user_root();
     env.project_root     = fs::path{"."};
     env.project_writable = true;
-    const scope::Layout layout{.leaf = "commands", .dialects = scope::kPortable};
+    const scope::Layout& layout = ::agentty::config::kCommandsLayout;
     for (const scope::Source& src : scope::plan(layout, env)) {
         scan_root(src.base / layout.leaf,
                   std::string{scope::to_string(src.locus)}, fresh, sig);

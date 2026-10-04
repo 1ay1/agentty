@@ -19,6 +19,7 @@
 #include "agentty/util/home_dir.hpp"
 
 #include "agentty/scope/scope.hpp"
+#include "agentty/config/inventory.hpp"   // kAgentsLayout — the one declaration
 #include "agentty/tool/memory_store.hpp"
 #include "agentty/tool/skills.hpp"
 #include "agentty/tool/subagent.hpp"
@@ -736,7 +737,7 @@ void refresh_user_agents_locked(UserAgentStore& store) {
         env.user_native_base = ::agentty::util::user_root();
         env.project_root     = fs::path{"."};
         env.project_writable = true;
-        const scope::Layout layout{.leaf = "agents", .dialects = scope::kPortable};
+        const scope::Layout& layout = ::agentty::config::kAgentsLayout;
         for (const scope::Source& src : scope::plan(layout, env)) {
             const AgentOrigin org = src.locus == scope::Locus::User
                 ? AgentOrigin::User : AgentOrigin::Project;

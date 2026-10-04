@@ -140,6 +140,10 @@ set(AGENTTY_TOOL_SOURCES
     src/tool/registry.cpp
     src/scope/scope.cpp
     src/scope/trust.cpp
+    # The app-level inventory: the ONE declaration of every Layout/Spec, read
+    # by the features and printed by `agentty config`. Sits above both
+    # primitives and depends on both; neither knows it exists.
+    src/config/inventory.cpp
     # The write-side peer of scope. Lives in this group for the same reason
     # scope does: it needs util::project_root() from tool/util/fs_helpers.
     src/dirs/dirs.cpp

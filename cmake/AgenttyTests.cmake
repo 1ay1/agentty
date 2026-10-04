@@ -52,6 +52,7 @@ set(_AGENTTY_CONSOLIDATED
     openai_dialect_test host_probe_taxonomy_test openai_conformance_policy_test
     openai_request_body_test context_window_robustness_test
     command_palette_test compaction_threshold_test fsm_test model_caps_test
+    config_inventory_test
     dialect_test
     embed_backend_test form_test embed_form_test escape_guarantee_test
     theme_discipline_test

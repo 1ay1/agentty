@@ -284,6 +284,70 @@ decomposition is right:
 4. **`state/`.** Last, because `rag_feedback.tsv` and `routing_memory.tsv` are
    small and the flat layout does not actively hurt yet.
 
+## The variable budget: two anchors, and no more
+
+The storage model is sayable in one breath, and that is a requirement, not a
+boast:
+
+| root | follows | anchor |
+|---|---|---|
+| `~/.agentty` | the HUMAN | `$AGENTTY_HOME` |
+| `<project>/.agentty` | the CODE | `$AGENTTY_RAG_DIR` |
+
+Seven variables exist; only three carry the model. `$AGENTTY_MCP_CONFIG` is
+the third and it is not storage at all — it names one file to *read*, which
+is scope's Explicit locus, a different axis entirely.
+
+The other three (`$AGENTTY_THREADS_DIR`, `$AGENTTY_CACHE_DIR`,
+`$AGENTTY_LOGS_DIR`) each move ONE leaf that `$AGENTTY_HOME` already moves
+wholesale. They are narrower conveniences that predate the anchor. They stay
+— removing a released variable breaks a working setup with no error message
+— but `agentty config env` prints them *below* the anchors and labelled as
+narrower, so nobody reads seven flat names as seven decisions.
+
+**Nothing new is added on that axis.** A new storage category is a leaf under
+an existing root, so the anchor already relocates it. The pressure to add one
+is constant and the rule from `user_root.hpp` is the answer: a category earns
+a variable only if it grows unboundedly AND you would plausibly put it on a
+different device from its siblings. Threads, cache and logs fail that test in
+hindsight; `cache/` under the project root will fail it too.
+
+## Seeing it: `agentty config`
+
+Six read locations and two write roots are fine when you can see them. Six
+invisible ones are the problem — that is what #58 and #60 are really about,
+and both are the same person asking twice for *fewer things to track*.
+
+```
+agentty config          every concern, one line each
+agentty config mcp      the full ladder, including what is NOT read
+agentty config env      the storage model above
+```
+
+The design constraint is that it **cannot lie**. A tool describing the
+program is worthless if it can drift from it, so
+`include/agentty/config/inventory.hpp` *owns* every `Layout` and `Spec`, and
+the features consume them:
+
+```
+config::kMcpLayout  ──┬──>  bridge.cpp reads servers with it
+                      └──>  `agentty config mcp` prints it
+```
+
+One constant, two readers, no second copy to disagree. `config_inventory_test`
+enforces it mechanically: no file outside the inventory may brace-init either
+type, and the three user-root specs must resolve byte-identically to the
+accessors that shipped first.
+
+The registry lives above both primitives, never inside them — `scope` and
+`dirs` still know nothing about their callers, which is what keeps them
+reusable. The dependency points one way.
+
+The most useful half of the output is **"not read, and why"**. It is derived
+as the set difference between the full dialect product and the feature's own
+`dialects`, so it cannot disagree with what *is* read, and it answers #60
+before anyone files it.
+
 ## See also
 
 - `include/agentty/util/user_root.hpp` — the one-root argument, at length

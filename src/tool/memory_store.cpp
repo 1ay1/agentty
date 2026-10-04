@@ -15,6 +15,7 @@
 #include "agentty/tool/memory_store.hpp"
 
 #include "agentty/scope/scope.hpp"
+#include "agentty/config/inventory.hpp"   // kMemoryLayout — the one declaration
 #include "agentty/tool/util/fs_helpers.hpp"
 #include "agentty/tool/util/utf8.hpp"
 
@@ -509,7 +510,7 @@ fs::path path_for(Scope s) {
     // Project → <project-root>/.agentty/memory.jsonl (empty at "/" or when
     // unwritable). Memory only uses the native .agentty dialect, so we take
     // the Agentty source for the requested locus.
-    const scope::Layout layout{.leaf = "memory.jsonl"};
+    const scope::Layout& layout = ::agentty::config::kMemoryLayout;
     scope::Env env;
     env.home             = home_dir();       // richer than scope's own
     env.user_native_base = ::agentty::util::user_root();

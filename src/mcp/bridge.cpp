@@ -30,6 +30,7 @@
 #include "agentty/mcp/client.hpp"
 #include "agentty/mcp/http_server.hpp"
 #include "agentty/scope/scope.hpp"
+#include "agentty/config/inventory.hpp"   // kMcpLayout — the one declaration
 #include "agentty/io/http.hpp"
 #include "agentty/tool/plugin.hpp"
 #include "agentty/tool/util/fs_helpers.hpp"
@@ -251,11 +252,11 @@ struct ConfigServer {
     return it != obj.end() && it->is_boolean() && it->get<bool>();
 }
 
-// The scope Layout for MCP config: the mcp.json leaf, with $AGENTTY_MCP_CONFIG
-// as the Explicit-locus override. Built once; scope::plan derives the ordered
-// source list (Explicit ▷ Project×dialect ▷ User×dialect) from it.
-[[nodiscard]] scope::Layout mcp_layout() noexcept {
-    return scope::Layout{.leaf = "mcp.json", .explicit_env = "AGENTTY_MCP_CONFIG"};
+// The scope Layout for MCP config. Declared ONCE in config/inventory.hpp and
+// consumed here, so `agentty config mcp` prints the same ladder this reads --
+// there is no second definition to drift from it.
+[[nodiscard]] const scope::Layout& mcp_layout() noexcept {
+    return ::agentty::config::kMcpLayout;
 }
 
 // Parse one mcp.json file's server entries into `out`, tagging each with
