@@ -90,6 +90,7 @@
 #include "agentty/dirs/dirs.hpp"
 #include "agentty/scope/scope.hpp"
 
+#include <cstdint>
 #include <optional>
 #include <span>
 #include <string>
@@ -268,6 +269,19 @@ struct WriteRow {
     bool             rebuildable = false;
     unsigned         keep_last = 0;
     std::string      error;      // non-empty when the spec would not resolve
+
+    // Bytes on disk, measured. This is the column #58 was really asking for
+    // — "store all non-configuration data on a different path" is a decision
+    // nobody can make without knowing which categories are big. Settings are
+    // KB and threads are GB, and until now the only way to learn that was
+    // `du`.
+    //
+    // Counted ONLY for a leaf this spec owns. Two specs that share a
+    // directory (rag and feedback both resolve to <project>/.agentty) must
+    // not each report the whole tree, or the totals read as double.
+    std::uintmax_t   bytes = 0;
+    bool             measured = false;   // false when the dir does not exist
+    bool             shared_dir = false; // size belongs to a sibling spec
 };
 
 struct Report {

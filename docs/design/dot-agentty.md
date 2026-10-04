@@ -373,6 +373,35 @@ as the set difference between the full dialect product and the feature's own
 `dialects`, so it cannot disagree with what *is* read, and it answers #60
 before anyone files it.
 
+### The size column
+
+```
+  concern    what                   reads  on disk   writes
+  threads    conversation history   —      760.4 MB  ~/.agentty/threads
+  cache      refetchable caches     —      5.1 MB    ~/.agentty/cache
+  logs       diagnostics            —      48.7 MB   ~/.agentty/logs
+  rag        retrieval indexes      —      38.5 MB   <project>/.agentty
+  feedback   retrieval learning     —      (shared)  <project>/.agentty
+             total                         852.8 MB
+```
+
+This is what [#58](https://github.com/1ay1/agentty/issues/58) actually needed.
+"Store all non-configuration data on a different path" is a decision nobody
+can make without knowing which categories are big — the ratio argument in
+`user_root.hpp` (KB of settings against GB of threads) was true but
+*invisible*, so every user had to rediscover it with `du`.
+
+The one trap is specs that share a resolved directory: `rag` and `feedback`
+both land on `<project>/.agentty`. If each measured the tree the total would
+overstate by 2x, and a total that lies is worse than no total. The first row
+for a path owns the measurement; later ones print `(shared)`. A test pins it:
+every directory is measured by exactly one concern, and a deferring row
+reports zero bytes of its own.
+
+`agentty diagnostics` emits the same table, generated from the same
+inventory, so a bug report can never describe a layout the binary does not
+have — and "my disk is full" arrives already answered.
+
 ## See also
 
 - `include/agentty/util/user_root.hpp` — the one-root argument, at length

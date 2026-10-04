@@ -101,6 +101,41 @@ constexpr char kMcpApprovalsLeaf[] = "mcp_approvals.json";
     return "needs approval";
 }
 
+// Bytes under `dir`, recursively. Symlinks are NOT followed: a link into
+// someone else's tree would make agentty report their disk as ours, and a
+// cycle would hang the command.
+[[nodiscard]] std::uintmax_t dir_bytes(const fs::path& dir) {
+    std::error_code ec;
+    if (!fs::is_directory(dir, ec)) {
+        // A spec may name a FILE rather than a directory.
+        const auto sz = fs::file_size(dir, ec);
+        return ec ? 0 : sz;
+    }
+    std::uintmax_t total = 0;
+    fs::recursive_directory_iterator it{
+        dir, fs::directory_options::skip_permission_denied, ec};
+    if (ec) return 0;
+    for (const auto& e : it) {
+        std::error_code sec;
+        if (!e.is_regular_file(sec) || sec) continue;
+        const auto sz = e.file_size(sec);
+        if (!sec) total += sz;
+    }
+    return total;
+}
+
+// Three significant-ish figures, which is all anyone needs to answer "is
+// this the big one". Exact bytes would be noise.
+[[nodiscard]] std::string human_bytes(std::uintmax_t n) {
+    const char* unit[] = {"B", "KB", "MB", "GB", "TB"};
+    double v = static_cast<double>(n);
+    int u = 0;
+    while (v >= 1024.0 && u < 4) { v /= 1024.0; ++u; }
+    char buf[32];
+    std::snprintf(buf, sizeof buf, u == 0 ? "%.0f %s" : "%.1f %s", v, unit[u]);
+    return buf;
+}
+
 }  // namespace
 
 std::span<const Entry> inventory() noexcept { return kEntries; }
@@ -174,6 +209,29 @@ Report describe(const Entry& e) {
         if (auto got = dirs::resolve_dry(*e.write)) {
             w.path   = got->path.string();
             w.origin = got->origin;
+            std::error_code sec;
+            if (fs::exists(got->path, sec)) {
+                // Specs that share a resolved directory (rag and feedback
+                // both land on <project>/.agentty) must not each claim the
+                // whole tree, or the column sums to double the real disk.
+                // The FIRST row for a path owns the measurement; later ones
+                // say so rather than repeating a number that isn't theirs.
+                bool owned_by_earlier = false;
+                for (const Entry& other : kEntries) {
+                    if (&other == &e) break;   // only rows BEFORE this one
+                    if (!other.write) continue;
+                    if (auto o = dirs::resolve_dry(*other.write);
+                        o && o->path == got->path) {
+                        owned_by_earlier = true;
+                        break;
+                    }
+                }
+                w.shared_dir = owned_by_earlier;
+                if (!owned_by_earlier) {
+                    w.bytes    = dir_bytes(got->path);
+                    w.measured = true;
+                }
+            }
         } else {
             w.error = got.error().detail.empty() ? "unresolved"
                                                  : got.error().detail;
@@ -245,6 +303,12 @@ void print_one(const Report& r) {
         } else {
             std::printf("  %s%s\n", r.write->path.c_str(),
                         origin_note(r.write->origin));
+            if (r.write->measured)
+                std::printf("  %s on disk\n",
+                            human_bytes(r.write->bytes).c_str());
+            else if (r.write->shared_dir)
+                std::printf("  shares this directory with another concern"
+                            " (counted there)\n");
             // Say exactly what each variable moves. The anchor (when the
             // root has one) first, because that is the model; then this
             // spec's own variable, marked as narrower so the two never read
@@ -301,19 +365,44 @@ void print_env() {
 
 void print_table() {
     std::printf("where things live\n\n");
-    std::printf("  %-10s %-22s %-6s %s\n", "concern", "what", "reads", "writes");
+    // Columns are padded by hand rather than with printf's %-Ns because the
+    // placeholder is an em dash: three BYTES, one COLUMN. %-6s pads to a byte
+    // count and would short the cell by two, which is exactly how a table
+    // with non-ASCII cells goes ragged.
+    auto pad = [](std::string s, std::size_t cols) {
+        std::size_t width = 0;
+        for (unsigned char c : s) if ((c & 0xC0) != 0x80) ++width;
+        if (width < cols) s.append(cols - width, ' ');
+        return s;
+    };
+    std::printf("  %s%s%s%s%s\n",
+                pad("concern", 11).c_str(), pad("what", 23).c_str(),
+                pad("reads", 7).c_str(), pad("on disk", 10).c_str(), "writes");
+    std::uintmax_t total = 0;
     for (const Entry& e : kEntries) {
         const Report r = describe(e);
-        char reads[16] = "—";
-        if (e.read) std::snprintf(reads, sizeof reads, "%zu", r.reads.size());
-        std::printf("  %-10s %-22s %-6s %s\n",
-                    std::string{e.name}.c_str(),
-                    std::string{e.what}.c_str(),
-                    reads,
-                    r.write ? (r.write->error.empty() ? r.write->path.c_str()
-                                                      : "unresolved")
-                            : "—");
+        std::string reads = "—";
+        if (e.read) reads = std::to_string(r.reads.size());
+        // The size column is the one #58 needed: "move my non-config data"
+        // is unanswerable until you can see which categories are big.
+        std::string size = "—";
+        if (r.write && r.write->measured) {
+            size = human_bytes(r.write->bytes);
+            total += r.write->bytes;
+        } else if (r.write && r.write->shared_dir) {
+            size = "(shared)";
+        }
+        const std::string where =
+            r.write ? (r.write->error.empty() ? r.write->path : "unresolved")
+                    : "—";
+        std::printf("  %s%s%s%s%s\n",
+                    pad(std::string{e.name}, 11).c_str(),
+                    pad(std::string{e.what}, 23).c_str(),
+                    pad(reads, 7).c_str(), pad(size, 10).c_str(),
+                    where.c_str());
     }
+    std::printf("  %s%s%s%s\n", pad("", 11).c_str(), pad("total", 23).c_str(),
+                pad("", 7).c_str(), human_bytes(total).c_str());
     std::printf("\n`agentty config <concern>` for the full ladder,"
                 " `agentty config env` for the model.\n");
 }

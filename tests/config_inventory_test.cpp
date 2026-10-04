@@ -25,6 +25,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <regex>
 #include <string>
 #include <vector>
@@ -210,6 +211,47 @@ TEST_CASE("user and explicit sources are trusted by placement") {
             || row.locus == agentty::scope::Locus::Explicit)
             CHECK(row.trust == "trusted",
                   "a human placed it, so it is trusted");
+    }
+}
+
+TEST_CASE("sizes are measured once, never double-counted") {
+    // The size column is what #58 actually needed: "store all
+    // non-configuration data on a different path" is a decision nobody can
+    // make without seeing which categories are big. Settings are KB and
+    // threads can be GB, and until this existed the only way to find out was
+    // `du`.
+    //
+    // The trap is specs that SHARE a resolved directory -- rag and feedback
+    // both land on <project>/.agentty. If each measured the tree, the column
+    // would sum to double the real disk, and a total that overstates by 2x is
+    // worse than no total at all.
+    std::map<std::string, int> measured_per_path;
+    for (const cfg::Entry& e : cfg::inventory()) {
+        if (!e.write) continue;
+        const cfg::Report r = cfg::describe(e);
+        REQUIRE(r.write.has_value(), "a write spec yields a write row");
+        if (!r.write->error.empty()) continue;
+
+        // measured and shared_dir are mutually exclusive by construction:
+        // either this row owns the number or it defers to a sibling.
+        CHECK(!(r.write->measured && r.write->shared_dir),
+              "a row either owns its size or defers, never both");
+        if (r.write->measured) ++measured_per_path[r.write->path];
+        if (r.write->shared_dir)
+            CHECK(r.write->bytes == 0,
+                  "a deferring row reports no bytes of its own");
+    }
+    for (const auto& [path, n] : measured_per_path)
+        CHECK(n == 1, "each directory is measured by exactly one concern");
+}
+
+TEST_CASE("a concern that writes nothing claims no disk") {
+    // Read-only concerns (mcp, skills, memory...) resolve through scope, not
+    // dirs. Reporting a size for them would invent a number.
+    for (const cfg::Entry& e : cfg::inventory()) {
+        if (e.write) continue;
+        CHECK(!cfg::describe(e).write.has_value(),
+              "no write spec, no write row, no size");
     }
 }
 

@@ -533,6 +533,34 @@ int cmd_diagnostics() {
     }
     }
 
+    // Where bytes live, and how many. Generated from the SAME inventory
+    // `agentty config` prints, so a bug report can never describe a layout
+    // the binary does not have -- and "my disk is full" / "can I move this"
+    // arrives already answered instead of needing a round trip.
+    section("storage");
+    for (const auto& e : agentty::config::inventory()) {
+        const auto r = agentty::config::describe(e);
+        if (!r.write) continue;
+        out += std::string{e.name};
+        out += ": ";
+        if (!r.write->error.empty()) {
+            out += "unresolved (" + r.write->error + ")\n";
+            continue;
+        }
+        out += r.write->path;
+        if (r.write->measured) {
+            char buf[48];
+            std::snprintf(buf, sizeof buf, "  (%.1f MB)",
+                          static_cast<double>(r.write->bytes) / (1024.0 * 1024.0));
+            out += buf;
+        } else if (r.write->shared_dir) {
+            out += "  (shared)";
+        }
+        if (r.write->origin != agentty::dirs::Origin::Default)
+            out += "  [overridden]";
+        out += "\n";
+    }
+
     section("log");
     {
         const auto lf = agentty::logx::log_file();
