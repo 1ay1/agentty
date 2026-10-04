@@ -177,6 +177,16 @@ bool responses_endpoint_for(std::string_view provider_id,
     out.port = row->port;
     out.path = std::string{row->responses_path};
     out.use_tls = row->use_tls;
+    // Fill the WHOLE destination, not just the URL. These two were left to
+    // the caller, and the one caller happened to patch them in afterwards
+    // from its chat Endpoint — so the function was only correct by luck of
+    // having a single user, and a second caller would silently dial with no
+    // identity and no routing feedback. Attribution made that concrete:
+    // OpenRouter is a responses_path row, so a Responses turn that skipped
+    // these headers would be an UNCREDITED request on a host where being
+    // credited is the point.
+    out.provider_id   = std::string{row->id};
+    out.extra_headers = provider::attribution_headers(row);
     return true;
 }
 

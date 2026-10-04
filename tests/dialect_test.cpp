@@ -170,6 +170,29 @@ TEST_CASE("dialect: the Responses endpoint resolves from the row") {
 
     REQUIRE(openai::responses_endpoint_for("openrouter", ep));
     CHECK(ep.path == std::string{"/api/v1/responses"});
+    // The row resolves a COMPLETE destination, not just a URL. provider_id and
+    // extra_headers used to be left for the caller to patch in afterwards,
+    // which made the function correct only by luck of having one user.
+    //
+    // Attribution (issue #74) is why it matters: OpenRouter credits a request
+    // to an app page keyed on HTTP-Referer, and it carries a responses_path,
+    // so a reasoning model routed to this dialect must be credited the same
+    // as a chat model. If only chat carried the headers, attribution would
+    // silently depend on which model you picked.
+    CHECK(ep.provider_id == std::string{"openrouter"});
+    {
+        const auto hdr = [&](std::string_view n) -> std::string {
+            for (const auto& [k, v] : ep.extra_headers)
+                if (k == n) return v;
+            return {};
+        };
+        CHECK(hdr("http-referer") == std::string{"https://agentty.org"});
+        CHECK(hdr("x-title")      == std::string{"agentty"});
+    }
+
+    // A row that asks for no attribution gets none on this dialect either.
+    REQUIRE(openai::responses_endpoint_for("openai", ep));
+    CHECK(ep.extra_headers.empty());
 
     // Rows without the column must REFUSE rather than invent a URL — the
     // caller's contract is "false means stay on chat", and a fabricated

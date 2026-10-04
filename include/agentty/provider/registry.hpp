@@ -24,7 +24,12 @@
 #include <array>
 #include <cstdint>
 #include <span>
+#include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
+
+#include "agentty/util/identity.hpp"
 
 namespace agentty::provider {
 
@@ -224,6 +229,30 @@ struct ProviderDescriptor {
     // somewhere true to live, and `endpoints_consistent()` checks it.
     std::string_view responses_path;   // "" = no Responses endpoint here.
 
+    // ── App attribution (optional) ───────────────────────────────────
+    // Some aggregators ask a client to NAME ITSELF, and give the user
+    // something back for it. OpenRouter is the case that exists today: a
+    // request carrying `HTTP-Referer` (+ `X-Title`) is credited to an app
+    // page, shows up in the public rankings, and — the part users actually
+    // feel — satisfies the models that only serve a recognised agent
+    // harness. Issue #74.
+    //
+    // A COLUMN, not a branch in the transport, for the reason the endpoint
+    // block above exists: the identity would otherwise be a string literal
+    // sitting next to an `if (label == "openrouter")`, which is the same
+    // shape as the 14-arm if-chain that drifted from these rows. Here the
+    // fact is one line next to the host it belongs to, every transport that
+    // dials the row picks it up for free, and a row that wants no
+    // attribution simply leaves it empty.
+    //
+    // This is deliberately NOT a general "static headers" escape hatch:
+    // Endpoint::extra_headers already plays that role for per-request
+    // protocol junk (Copilot's editor block, Kimi's device ids). This column
+    // is narrower on purpose — it answers "who is calling", so it holds a
+    // URL and a display name and nothing else, and the values come from the
+    // ONE place agentty states its own identity (identity.hpp).
+    bool             attribution = false;
+
     // Ollama's NATIVE /api/chat protocol (NDJSON, structured tool_calls)
     // instead of its OpenAI-compat shim, which makes weak local models
     // leak tool calls as raw JSON in `content`.
@@ -412,7 +441,10 @@ inline constexpr std::array<ProviderDescriptor, 15> kProviders{{
      .models_path = "/api/v1/models",
      // OpenRouter shipped an OpenAI-compatible Responses endpoint; upstream
      // reasoning models behind it need the same routing as first-party.
-     .responses_path = "/api/v1/responses"},
+     .responses_path = "/api/v1/responses",
+     // Name ourselves: OpenRouter credits attributed requests to an app page
+     // and some models only serve a recognised harness. Issue #74.
+     .attribution = true},
 
     {.id = "together", .label = "Together",
      .blurb = "Open models on together.ai",
@@ -551,6 +583,11 @@ namespace detail {
 
 [[nodiscard]] constexpr bool endpoints_consistent() noexcept {
     for (const auto& p : kProviders) {
+        // Attribution names agentty to a HOST, so it only means something on a
+        // row we actually dial over HTTP. Checked BEFORE the http_dialled()
+        // bail below, because the rows that would get this wrong (the chatgpt
+        // / acp sentinels) are exactly the ones that bail.
+        if (p.attribution && !p.http_dialled()) return false;
         if (!p.http_dialled()) {
             // Not dialled over the compat transport ⇒ must not carry half
             // an endpoint (a stray path with no host is how rows rot).
@@ -718,6 +755,41 @@ static_assert(detail::auth_caps_consistent(),
 // provider show reasoning", which is what a provider-level row wants.
 [[nodiscard]] bool wire_streams_reasoning_text(
         std::string_view provider_id, std::string_view model = {}) noexcept;
+
+// The attribution headers for a provider row, or empty when the row doesn't
+// ask for them.
+//
+// ONE builder, so the chat path and the Responses path cannot disagree about
+// who agentty is. Both dialects dial the same host and both are credited to
+// the same app page, so a second spelling of these two headers is a bug
+// waiting for the day one of them is edited.
+//
+// Header names, from openrouter.ai/docs/app-attribution:
+//   HTTP-Referer  REQUIRED. The app URL, and the primary key for rankings.
+//                 Without it no app page exists and nothing else matters.
+//   X-Title       The display name. Does nothing on its own — it only
+//                 labels an app page that HTTP-Referer already created.
+//
+// On the name: the docs now call the title header `X-OpenRouter-Title` and
+// keep `X-Title` as a supported alias. We send `X-Title` deliberately — it
+// is what the overwhelming bulk of real traffic uses, it is still documented
+// as supported, and a shipped harness has already been bitten sending ONLY
+// the newer name (QwenLM/qwen-code#12072). Sending both would be the
+// belt-and-braces option, but two headers claiming one field is how you end
+// up with two app pages if a vendor ever disagrees with itself.
+//
+// Lowercase names: header names are case-insensitive per RFC 9110 and the
+// rest of agentty sends lowercase, so these match their neighbours on the
+// wire rather than the spelling used in vendor docs.
+[[nodiscard]] inline std::vector<std::pair<std::string, std::string>>
+attribution_headers(const ProviderDescriptor* row) {
+    std::vector<std::pair<std::string, std::string>> out;
+    if (!row || !row->attribution) return out;
+    out.reserve(2);
+    out.emplace_back("http-referer", std::string{util::identity::url});
+    out.emplace_back("x-title",      std::string{util::identity::name});
+    return out;
+}
 
 // The default provider's id — first row of the table.
 [[nodiscard]] inline std::string_view default_provider_id() noexcept {

@@ -1680,6 +1680,11 @@ Endpoint Endpoint::from_spec(std::string_view spec) {
                     std::string{row->models_path}, row->use_tls,
                     std::string{row->id}};
         ep.native_api = row->native_api;
+        // Name ourselves when the row asks for it (OpenRouter today). Same
+        // builder the Responses path uses, so both dialects are credited to
+        // one app page. Rides extra_headers, which build_request_headers
+        // already appends on both the chat and the models calls.
+        ep.extra_headers = provider::attribution_headers(row);
         return ep;
     }
 
@@ -2075,8 +2080,15 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
     if (dialect_for(req.endpoint.label, req.model) == Dialect::Responses) {
         openai::ResponsesEndpoint rep;
         if (responses_endpoint_for(req.endpoint.label, rep)) {
+            // responses_endpoint_for() already resolved both of these from the
+            // row. Re-assert them from the LIVE endpoint anyway: the native
+            // Copilot path rewrites host and headers at request time from its
+            // token exchange, so the runtime endpoint is a superset of what
+            // the static row knows. For a plain row (OpenRouter) the two are
+            // identical and this is a no-op.
             rep.provider_id   = req.endpoint.label;
-            rep.extra_headers = req.endpoint.extra_headers;
+            if (!req.endpoint.extra_headers.empty())
+                rep.extra_headers = req.endpoint.extra_headers;
             // openai::Request and provider::Request are distinct types (the
             // former carries chat-only fields like weak_model/native_api), so
             // project across explicitly rather than assuming layout overlap.

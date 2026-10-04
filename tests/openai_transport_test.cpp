@@ -988,6 +988,64 @@ TEST_CASE("legacy codex alias resolves to the openai row, not a copy") {
     CHECK(empty.path == openai.path);
 }
 
+TEST_CASE("attribution: openrouter names agentty on the chat dialect") {
+    // Issue #74. OpenRouter credits a request to an app page keyed on the URL
+    // we send, and some models only serve a recognised agent harness, so
+    // these two headers are the difference between "works" and "403" on
+    // part of the catalog.
+    const auto find = [](const auto& hs, std::string_view name)
+            -> std::optional<std::string> {
+        for (const auto& [k, v] : hs)
+            if (k == name) return v;
+        return std::nullopt;
+    };
+
+    // ── the chat dialect ──
+    auto orouter = oai::Endpoint::from_spec("openrouter");
+    auto referer = find(orouter.extra_headers, "http-referer");
+    auto title   = find(orouter.extra_headers, "x-title");
+    REQUIRE(referer.has_value());
+    REQUIRE(title.has_value());
+    // HTTP-Referer is the PRIMARY key for the app page, so it has to be the
+    // real public URL -- a placeholder here silently creates someone else's
+    // app page, or none at all.
+    CHECK(*referer == "https://agentty.org");
+    CHECK(*title == "agentty");
+
+    // ── every other row stays silent ──
+    // Attribution is opt-in per row. Sending agentty's URL to OpenAI, Groq or
+    // a user's own llama.cpp is noise at best and a fingerprint at worst.
+    for (const char* id : {"openai", "groq", "together", "cerebras",
+                           "deepseek", "mistral", "ollama", "llama.cpp"}) {
+        auto ep = oai::Endpoint::from_spec(id);
+        INFO("row: ", id);
+        CHECK(!find(ep.extra_headers, "http-referer").has_value());
+        CHECK(!find(ep.extra_headers, "x-title").has_value());
+    }
+
+    // A custom host spec matches no row, so it gets nothing either.
+    auto custom = oai::Endpoint::from_spec("https://gw.example.com/api");
+    CHECK(!find(custom.extra_headers, "http-referer").has_value());
+
+    // ── and they actually reach the WIRE ──
+    // The struct carrying them is not the point; the request is. This is the
+    // same builder the stream and the model-list call go through, so passing
+    // here means an attributed request really goes out attributed.
+    const auto wire = [](const agentty::http::Headers& hs, std::string_view nm)
+            -> std::optional<std::string> {
+        for (const auto& x : hs)
+            if (x.name == nm) return x.value;
+        return std::nullopt;
+    };
+    auto hs = oai::build_request_headers(
+        oai::AuthHeader{oai::BearerHeader{"sk-or-v1-test"}}, orouter);
+    CHECK(wire(hs, "http-referer") == std::optional<std::string>{"https://agentty.org"});
+    CHECK(wire(hs, "x-title")      == std::optional<std::string>{"agentty"});
+    // The auth header still wins its slot — extras are appended, not merged
+    // over the top of something load-bearing.
+    CHECK(wire(hs, "authorization") == std::optional<std::string>{"Bearer sk-or-v1-test"});
+}
+
 TEST_CASE("test_endpoint_presets") {
     auto groq = oai::Endpoint::from_spec("groq");
     CHECK(groq.host == "api.groq.com");

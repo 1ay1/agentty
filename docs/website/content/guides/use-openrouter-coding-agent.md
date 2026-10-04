@@ -29,5 +29,10 @@ Use Smart Mode to map a flagship model to strategic reasoning and a cheaper/fast
 - **One key, many models** — experiment without juggling provider accounts.
 - **Cost control** — route by price/latency per task.
 - **No lock-in** — swap to Claude Pro/Max, Groq, or local Ollama anytime.
+- **Agent-gated models work** — agentty identifies itself to OpenRouter on
+  every request, so models that only serve a recognised agent harness are
+  available to you, and your usage shows up against agentty in OpenRouter's
+  [app rankings](https://openrouter.ai/rankings). Nothing about your prompts
+  or code is sent — it is two headers naming the tool and its homepage.
 
 See the [providers docs](/docs/providers/) for configuration.

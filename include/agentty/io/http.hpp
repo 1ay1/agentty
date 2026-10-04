@@ -328,6 +328,11 @@ struct Timeouts {
 // Build-time version, baked from CMakeLists.txt's PROJECT_VERSION via
 // -DAGENTTY_VERSION. The fallback exists only for hand-invoked compiler
 // runs that bypass our CMake — keep the binary self-describing.
+//
+// This macro is the raw build input for the User-Agent strings. agentty's
+// identity as a remote service RECORDS it — product name and homepage URL —
+// lives in util/identity.hpp, which is what app attribution sends (see
+// ProviderDescriptor::attribution).
 #ifndef AGENTTY_VERSION
 #define AGENTTY_VERSION "0.0.0-dev"
 #endif
