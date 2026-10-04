@@ -20,6 +20,7 @@
 #include "agtest.hpp"
 
 #include "agentty/rag/rag_adapter.hpp"
+#include "agentty/tool/util/fs_helpers.hpp"   // workspace_root / set_workspace_root
 
 #include <chrono>
 #include <cstdlib>
@@ -90,8 +91,33 @@ TEST_CASE("rag adapter") {
     write_file(tmp / "src" / "auth_guard.cpp",
                "bool validate_bearer_token(const std::string& token) {\n"
                "  return token == \"valid\";\n}\n");
+    // Make the sandbox a PROJECT, not just a directory.
+    //
+    // Persisted indexes resolve through dirs::Root::Project, which walks up
+    // from the cwd to the nearest project marker (.git/.agentty/.hg/.svn) --
+    // that walk is what gives one checkout one index no matter which subdir
+    // you launch from (#61). A markerless temp dir has no marker to find, so
+    // the walk ran all the way up and anchored on whatever real repo the test
+    // binary happened to be launched from: the 33 MB rag_code.*.ragdb landed
+    // in agentty's OWN .agentty/ instead of here, find_index(tmp, ...) found
+    // nothing, and the next block threw on `fs::path{""} + ".meta.json"`.
+    //
+    // That is why this only failed in a FULL run: alone, ctest's cwd already
+    // sat inside the repo whose .agentty the index went to, so find_index
+    // happened to see a pre-existing one and the assertions passed by
+    // accident. The marker makes the sandbox self-contained either way.
+    fs::create_directories(tmp / ".git");
     auto old_cwd = fs::current_path();
     fs::current_path(tmp);
+    // chdir alone is NOT enough. project_anchor() starts its marker walk at
+    // util::project_root(), which is the WORKSPACE ROOT clamp, not the live
+    // cwd -- and the workspace root is process-global state that any earlier
+    // test in the binary may have pinned somewhere else (several call
+    // set_workspace_root and never restore it). So this sandbox has to claim
+    // the boundary explicitly, or the anchor resolves into whatever directory
+    // the last test left behind and the index lands there.
+    const auto old_ws = ::agentty::tools::util::workspace_root();
+    ::agentty::tools::util::set_workspace_root(tmp);
 
 #if defined(_WIN32)
     _putenv_s("AGENTTY_DOCS_DIR", docs.string().c_str());
@@ -316,6 +342,14 @@ TEST_CASE("rag adapter") {
                   "warm-opened index preserves ranking");
 
         auto code_db = find_index(tmp, "rag_code.");
+        // Never let a MISSING index degrade into a filesystem exception. The
+        // whole suite used to abort here with "cannot create directories:
+        // Invalid argument" whenever the index resolved outside `tmp`, which
+        // reported as a crash in an unrelated place instead of naming the
+        // real problem. A check() says which index is missing and keeps the
+        // remaining assertions running.
+        REQUIRE(!code_db.empty(),
+                "rag_code index exists under the sandbox anchor");
         auto code_before = fs::last_write_time(code_db, ec);
         auto code = warm.retrieve_code("rotate session nonce", 5);
         auto code_after = fs::last_write_time(code_db, ec);
@@ -330,7 +364,10 @@ TEST_CASE("rag adapter") {
     // written meta from a killed process is recovered from, never fatal.
     {
         std::error_code ec;
-        auto meta = fs::path{find_index(tmp, "rag_docs.").string() + ".meta.json"};
+        const auto docs_db = find_index(tmp, "rag_docs.");
+        REQUIRE(!docs_db.empty(),
+                "rag_docs index exists before the corrupt-meta probe");
+        auto meta = fs::path{docs_db.string() + ".meta.json"};
         // Truncated JSON object: exactly what an interrupted write could leave
         // if writes were not atomic.
         write_file(meta, "{\"version\": 3, \"root\": \"/tmp\", \"docs_fp\":");
@@ -405,6 +442,10 @@ TEST_CASE("rag adapter") {
     }
 
     fs::current_path(old_cwd);
+    // Hand the process-global workspace boundary back exactly as we found it:
+    // leaving a deleted temp dir pinned is what broke the NEXT test, and this
+    // test should not propagate the hazard it just worked around.
+    ::agentty::tools::util::set_workspace_root(old_ws);
     fs::remove_all(tmp);
 }
 
@@ -419,8 +460,21 @@ TEST_CASE("rag shutdown interrupts warm promptly") {
                ("agentty_rag_shutdown_" + std::to_string(nonce));
     fs::remove_all(tmp);
     fs::create_directories(tmp);
+    // Same project marker as the main sandbox above: without it this cwd has
+    // no anchor, so anything persisted here resolves into the enclosing real
+    // repo's .agentty/ instead.
+    fs::create_directories(tmp / ".git");
     auto old_cwd = fs::current_path();
     fs::current_path(tmp);
+    // chdir alone is NOT enough. project_anchor() starts its marker walk at
+    // util::project_root(), which is the WORKSPACE ROOT clamp, not the live
+    // cwd -- and the workspace root is process-global state that any earlier
+    // test in the binary may have pinned somewhere else (several call
+    // set_workspace_root and never restore it). So this sandbox has to claim
+    // the boundary explicitly, or the anchor resolves into whatever directory
+    // the last test left behind and the index lands there.
+    const auto old_ws = ::agentty::tools::util::workspace_root();
+    ::agentty::tools::util::set_workspace_root(tmp);
 
     // A large-ish corpus so a real warm has work to do (and thus a window in
     // which cancellation matters).
@@ -458,5 +512,9 @@ TEST_CASE("rag shutdown interrupts warm promptly") {
     }
 
     fs::current_path(old_cwd);
+    // Hand the process-global workspace boundary back exactly as we found it:
+    // leaving a deleted temp dir pinned is what broke the NEXT test, and this
+    // test should not propagate the hazard it just worked around.
+    ::agentty::tools::util::set_workspace_root(old_ws);
     fs::remove_all(tmp);
 }
