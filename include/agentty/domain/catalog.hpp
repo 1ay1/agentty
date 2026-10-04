@@ -703,13 +703,22 @@ struct ModelCapabilities {
                     // gpt-4o / gpt-4.1 / gpt-3.5 stay Unknown (generic compat).
                     int g = 0, r = 0;
                     bool ok = !tok.empty(), frac = false, any_frac = false;
+                    int gd = 0, rd = 0;   // digit counts, per part
                     for (char c : tok) {
-                        if (c == '.') { if (frac) { ok = false; break; } frac = true; continue; }
+                        if (c == '.') {
+                            if (frac || gd == 0) { ok = false; break; }
+                            frac = true;
+                            continue;
+                        }
                         if (c < '0' || c > '9') { ok = false; break; }
-                        if (frac) { r = r * 10 + (c - '0'); any_frac = true; }
-                        else        g = g * 10 + (c - '0');
+                        if (frac) { r = r * 10 + (c - '0'); ++rd; any_frac = true; }
+                        else      { g = g * 10 + (c - '0'); ++gd; }
                     }
-                    if (ok && g >= 5 && g <= 99) {
+                    // Bounded exactly like the Claude branch: a version part
+                    // is 1-2 digits. Without the digit-count cap a token like
+                    // `gpt-20250514` would parse as generation 20250514 and
+                    // pass `g <= 99` only by accident of the upper bound.
+                    if (ok && gd >= 1 && gd <= 2 && rd <= 2 && g >= 5 && g <= 99) {
                         caps.family = Family::Gpt;
                         caps.generation = g;
                         caps.generation_4_or_later = true;
@@ -718,24 +727,65 @@ struct ModelCapabilities {
                 }
                 else if (prev == "haiku" || prev == "sonnet" || prev == "opus"
                          || prev == "fable" || prev == "mythos") {
-                    // Generation token — parse as int (no allocations). Only
-                    // the NEW id schema puts the generation right after the
-                    // family (`claude-sonnet-4-5-...`). The LEGACY schema
-                    // (`claude-3-5-sonnet-20241022`) puts a date there
-                    // instead; an 8-digit date must NOT be read as
-                    // generation 20241022 (which would falsely look like a
-                    // 4-or-later model). Reject any token that isn't a
-                    // plausible 1- or 2-digit generation.
-                    int g = 0;
-                    bool ok = !tok.empty() && tok.size() <= 2;
+                    // Version token — parse as int (no allocations). TWO
+                    // spellings reach this branch and both are live:
+                    //
+                    //   DASHED  `claude-opus-4-7`   gen in this token, the
+                    //                               revision in the NEXT one.
+                    //   DOTTED  `claude-opus-4.7`   gen AND revision packed
+                    //                               into this one token.
+                    //
+                    // The dotted form is what GitHub Copilot's /models
+                    // returns (`claude-opus-4.7`, `claude-sonnet-5.5`,
+                    // `claude-fable-5.1`) and it used to be REJECTED here by
+                    // a `size() <= 2` length check — '4', '.', '7' is three
+                    // chars — so every dotted Copilot id decoded to
+                    // generation 0 / revision 0 while keeping its family.
+                    // That is the worst failure mode available: `is_opus()`
+                    // stayed true, so nothing looked unknown, but every gate
+                    // that reads the NUMBER silently answered "old model" —
+                    // effort `max`/`xhigh` withheld from Opus 4.7+, the
+                    // 1M-context rung skipped, and the label rendered as a
+                    // bare "Opus" so `claude-opus-4.7` and `claude-opus-4.8`
+                    // folded to ONE picker row (the duplicate-looking rows in
+                    // #68 are the same bug seen from the other side).
+                    //
+                    // Parse both shapes here, exactly like the `gpt` branch
+                    // already does. The date guard that motivated the length
+                    // check is preserved and made explicit: the LEGACY schema
+                    // (`claude-3-5-sonnet-20241022`) puts an 8-digit date
+                    // after the family, and reading that as generation
+                    // 20241022 would falsely pass every `>= 4` gate. A
+                    // generation is 1-2 digits and a revision is 1-2 digits;
+                    // anything longer is not a version.
+                    int g = 0, r = 0;
+                    bool ok = !tok.empty(), frac = false, any_frac = false;
+                    int gd = 0, rd = 0;   // digit counts, per part
                     for (char c : tok) {
+                        if (c == '.') {
+                            // One dot only, and it must separate two digit
+                            // runs — `4.`, `.7` and `4.7.1` are not versions.
+                            if (frac || gd == 0) { ok = false; break; }
+                            frac = true;
+                            continue;
+                        }
                         if (c < '0' || c > '9') { ok = false; break; }
-                        g = g * 10 + (c - '0');
+                        if (frac) { r = r * 10 + (c - '0'); ++rd; any_frac = true; }
+                        else      { g = g * 10 + (c - '0'); ++gd; }
                     }
-                    if (ok) {
+                    // Same plausibility window for both parts — this is what
+                    // keeps `20241022` (8 digits) out, dotted or not.
+                    if (ok && gd >= 1 && gd <= 2 && rd <= 2 && (!frac || any_frac)) {
                         caps.generation = g;
                         caps.generation_4_or_later = (g >= 4);
-                        expect_revision = true;  // next int token is the revision
+                        if (any_frac) {
+                            // Dotted: the revision came with the generation,
+                            // so the NEXT token is a variant word
+                            // (`-latest`, `-thinking`), never a revision.
+                            caps.revision = r;
+                        } else {
+                            expect_revision = true;  // dashed: revision is next
+                        }
                     }
                 }
                 prev = tok;

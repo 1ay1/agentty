@@ -1004,3 +1004,115 @@ TEST_CASE("provider rows know which backends are local") {
     REQUIRE(openai != nullptr);
     CHECK(!openai->is_local);
 }
+
+// ── Dotted version ids (GitHub Copilot's /models spelling) ──────────────
+//
+// Copilot returns `claude-opus-4.7`, not `claude-opus-4-7`. The family
+// token matched, so `is_opus()` was true and NOTHING looked broken — but
+// the version parse required a token of <= 2 chars ('4','.','7' is three),
+// so generation and revision both stayed 0. Every gate that reads the
+// NUMBER then silently answered "old model": effort max/xhigh withheld on
+// the whole Copilot Claude lane, and the display label collapsed to a bare
+// "Opus" so 4.7 and 4.8 rendered as two identical picker rows.
+//
+// Both spellings must decode identically.
+TEST_CASE("dotted and dashed version ids decode identically") {
+    using agentty::ModelCapabilities;
+    struct Pair { const char* dotted; const char* dashed; };
+    for (auto p : {Pair{"claude-opus-4.7",   "claude-opus-4-7"},
+                   Pair{"claude-opus-4.5",   "claude-opus-4-5"},
+                   Pair{"claude-sonnet-4.6", "claude-sonnet-4-6"},
+                   Pair{"claude-haiku-4.5",  "claude-haiku-4-5"},
+                   Pair{"claude-fable-5.1",  "claude-fable-5-1"}}) {
+        const auto a = ModelCapabilities::from_id(p.dotted);
+        const auto b = ModelCapabilities::from_id(p.dashed);
+        CHECK(a.family     == b.family);
+        CHECK(a.generation == b.generation);
+        CHECK(a.revision   == b.revision);
+        CHECK(a.generation_4_or_later == b.generation_4_or_later);
+        CHECK(a.supports_effort()       == b.supports_effort());
+        CHECK(a.supports_effort_max()   == b.supports_effort_max());
+        CHECK(a.supports_effort_xhigh() == b.supports_effort_xhigh());
+        CHECK(ModelCapabilities::tier_for(p.dotted)
+              == ModelCapabilities::tier_for(p.dashed));
+    }
+}
+
+TEST_CASE("copilot dotted claude ids reach the full effort ladder") {
+    using agentty::ModelCapabilities;
+    // The user-visible symptom: xhigh shipped with Opus 4.7, and a Copilot
+    // session could never select it because the id decoded as generation 0.
+    const auto o47 = ModelCapabilities::from_id("claude-opus-4.7");
+    CHECK(o47.is_opus());
+    CHECK(o47.generation == 4);
+    CHECK(o47.revision   == 7);
+    CHECK(o47.generation_4_or_later);
+    CHECK(o47.supports_effort());
+    CHECK(o47.supports_effort_max());
+    CHECK(o47.supports_effort_xhigh());
+
+    // A dotted revision must not be mistaken for the NEXT token's revision:
+    // `claude-haiku-4.5-latest` is 4.5, and `latest` is a variant word.
+    const auto h = ModelCapabilities::from_id("claude-haiku-4.5-latest");
+    CHECK(h.is_haiku());
+    CHECK(h.generation == 4);
+    CHECK(h.revision   == 5);
+
+    // Two-digit revisions stay in range.
+    const auto s = ModelCapabilities::from_id("claude-sonnet-5.10");
+    CHECK(s.generation == 5);
+    CHECK(s.revision   == 10);
+}
+
+TEST_CASE("version parse rejects dates and malformed versions") {
+    using agentty::ModelCapabilities;
+    // The guard the old <= 2 length check existed for. An 8-digit date must
+    // never read as a generation — 20241022 would pass every `>= 4` gate.
+    for (const char* id : {"claude-3-5-sonnet-20241022",
+                           "claude-3-opus-20240229"}) {
+        const auto c = ModelCapabilities::from_id(id);
+        CHECK(c.generation == 0);
+        CHECK(!c.generation_4_or_later);
+    }
+    // Malformed dotted forms are not versions: trailing dot, leading dot,
+    // and a second dot all leave the version unset rather than guessing.
+    for (const char* id : {"claude-opus-4.", "claude-opus-.7",
+                           "claude-opus-4.7.1"}) {
+        const auto c = ModelCapabilities::from_id(id);
+        CHECK(c.is_opus());          // family still decodes
+        CHECK(c.generation == 0);    // but no version is invented
+    }
+    // The gpt branch is bounded the same way, so a date-shaped token there
+    // cannot become a generation either.
+    CHECK(ModelCapabilities::from_id("gpt-20250514").generation == 0);
+    // And the pre-5 ids stay Unknown (generic OpenAI compat), as before.
+    CHECK(!ModelCapabilities::from_id("gpt-4o").is_gpt());
+    CHECK(!ModelCapabilities::from_id("gpt-4.1").is_gpt());
+}
+
+TEST_CASE("the [1m] suffix survives a dotted version") {
+    using agentty::ModelCapabilities;
+    const auto c = ModelCapabilities::from_id("claude-opus-4.5[1m]");
+    CHECK(c.is_opus());
+    CHECK(c.generation == 4);
+    CHECK(c.revision   == 5);
+    CHECK(c.extended_context_1m);
+    CHECK(c.context_window() == 1000000);
+}
+
+TEST_CASE("every live copilot claude id decodes a version") {
+    using agentty::ModelCapabilities;
+    // The real /models payload. Each of these is a Claude-family id whose
+    // version is dotted; a generation of 0 on any of them means the picker
+    // folds siblings into one row and the effort ladder is withheld.
+    for (const char* id : {"claude-opus-4.7", "claude-opus-4.8",
+                           "claude-opus-5",   "claude-opus-5.5",
+                           "claude-sonnet-4.6", "claude-sonnet-5",
+                           "claude-sonnet-5.5", "claude-haiku-4.5",
+                           "claude-fable-5",  "claude-fable-5.1"}) {
+        const auto c = ModelCapabilities::from_id(id);
+        CHECK(c.is_known_family());
+        CHECK(c.generation >= 4);
+        CHECK(c.generation_4_or_later);
+    }
+}
