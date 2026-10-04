@@ -112,6 +112,9 @@
 #include "agentty/provider/credentials.hpp"
 #include "agentty/tool/skills.hpp"
 #include "agentty/config/inventory.hpp"   // config::cmd_config
+#if defined(AGENTTY_MCP)
+#include "agentty/mcp/import.hpp"         // mcp::import_::cli
+#endif
 #include "agentty/tool/commands.hpp"
 #include "agentty/tool/hooks.hpp"
 #include "agentty/tool/plugin.hpp"
@@ -681,6 +684,10 @@ void print_usage() {
               kCmdGutter),
         entry("  mcp-serve", "Serve agentty's native tools over MCP (stdio). Point any "
                              "MCP client at `agentty mcp-serve`.", kCmdGutter),
+        entry("  mcp import", "Copy another tool's MCP servers into "
+                             "~/.agentty/mcp.json (`--from junie|claude|cursor|"
+                             "vscode`, `--dry-run`). No args lists what each "
+                             "tool offers.", kCmdGutter),
         entry("  mcp-login <srv>", "Authorize an OAuth-gated MCP server from mcp.json "
                                    "(2026-07-28 OAuth 2.1 + PKCE via your browser).",
               kCmdGutter),
@@ -845,6 +852,11 @@ Args parse_args(int argc, char** argv) {
             out.subcommand = std::move(a);
             if (i + 1 < argc && argv[i + 1][0] != '-')
                 out.cli_run_agent = argv[++i];
+        } else if (a == "mcp") {
+            // `agentty mcp import [...]` — verb + tail ride verbatim in
+            // plugin_argv, the same channel `plugin` and `config` use.
+            out.subcommand = std::move(a);
+            while (i + 1 < argc) out.plugin_argv.emplace_back(argv[++i]);
         } else if (a == "mcp-login" || a == "mcp-logout" || a == "mcp-status") {
             // `agentty mcp-login <server> [--metadata <url>] [--client-id <id>]`
             out.subcommand = std::move(a);
@@ -1306,6 +1318,17 @@ int main(int argc, char** argv) {
     if (args.subcommand == "status") return auth::cmd_status();
     if (args.subcommand == "skills") return tools::skills::cmd_skills();
     if (args.subcommand == "config") return config::cmd_config(args.plugin_argv);
+#if defined(AGENTTY_MCP)
+    if (args.subcommand == "mcp") {
+        if (args.plugin_argv.empty() || args.plugin_argv.front() != "import") {
+            std::fprintf(stderr, "usage: agentty mcp import [--from <tool>]"
+                                 " [--dry-run] [--force]\n");
+            return 1;
+        }
+        return mcp::import_::cli({args.plugin_argv.begin() + 1,
+                                  args.plugin_argv.end()});
+    }
+#endif
     if (args.subcommand == "skill")  return tools::skills::cli(args.plugin_argv);
     if (args.subcommand == "hooks")  return tools::hooks::cli(args.cli_run_agent);
     if (args.subcommand == "plugin") return tools::plugin::cli(args.plugin_argv);

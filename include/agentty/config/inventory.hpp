@@ -245,6 +245,20 @@ struct SkippedDialect {
     std::string    dir;          // ".claude", ".agents"
 };
 
+// A FOREIGN config that exists on this machine and is deliberately not read.
+//
+// Not a dialect: these vary in file name and nesting, not just directory, so
+// they cannot be a value on scope's Locus × Dialect product. And reading
+// executable config we do not own would let another tool's edit change what
+// we spawn, silently. Naming them here — with the one command that adopts
+// them — is what turns "agentty ignores my servers" from an issue someone
+// files into a line they already read. That is #60.
+struct ForeignSource {
+    std::string tool;       // "junie", "claude", …
+    std::string path;
+    std::string adopt_with; // the exact command to run
+};
+
 struct WriteRow {
     std::string      path;
     dirs::Origin     origin = dirs::Origin::Default;
@@ -261,6 +275,7 @@ struct Report {
     std::string_view            what;
     std::vector<ReadRow>        reads;
     std::vector<SkippedDialect> skipped;
+    std::vector<ForeignSource>  foreign;   // present, not read, adoptable
     std::string_view            explicit_env;
     std::optional<WriteRow>     write;
 };

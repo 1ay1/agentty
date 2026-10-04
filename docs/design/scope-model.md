@@ -230,6 +230,55 @@ That last point is what earned `agentty config mcp` its trust column: with
 one gate there is one answer to print, and it is computed by calling the
 same `trust_of` the spawn path calls.
 
+## Foreign config: import, never a read root
+
+The three tiers of foreignness, by **who owns which part**:
+
+| tier | example | their dir | their leaf | their schema | policy |
+|---|---|---|---|---|---|
+| native | `.agentty/mcp.json` | no | no | no | read + write |
+| dialect | `.claude/skills/` | yes | no | no | read, same product |
+| foreign | `~/.junie/mcp/mcp.json` | yes | yes | yes | **adapter** |
+
+A dialect is exactly `<base>/<their-dirname>/<our-leaf>` — one substitution,
+in one position. That is why it fits the product. A foreign config swaps the
+leaf shape too and often has no project-side counterpart, so forcing it in
+would turn `plan()` from a product back into a hand-written list of paths
+with tags on them — the exact thing the product was invented to kill.
+
+One rule decides every foreign source:
+
+> **Does acting on this content EXECUTE something?**
+> No → read it live; staleness is the only risk.
+> Yes → import it; show what you found, write it down, own it.
+
+`mcp.json` spawns processes. Live-reading a file we do not own, cannot
+validate, and whose edits we never observe would let another tool's config
+change what we execute — silently, because nothing tells us it changed.
+
+### Why import is what #60 actually asked for
+
+[#60](https://github.com/1ay1/agentty/issues/60) asked agentty to *read*
+`~/.ai/mcp/mcp.json`, "to have all my custom MCP servers in one place". The
+literal ask is a sixth read location; the stated wish is the opposite of it.
+If agentty read that file, the servers would live in **two** places with a
+precedence rule between them. After `agentty mcp import --from junie` there
+is one file, which is what was asked for.
+
+Two things fell out of checking rather than assuming:
+
+- **The path in the title does not exist.** JetBrains documents Junie's
+  user-scope config at `~/.junie/mcp/mcp.json` (project: `.junie/mcp/mcp.json`).
+  The reporter remembered the shape, not the directory.
+- **Which is exactly why `agentty config mcp` prints what it does NOT read**,
+  with the command that adopts it. That turns "agentty ignores my servers"
+  from an issue someone files into a line they already read.
+
+Import never replaces a name agentty already has (without `--force`):
+swapping a command under an approved name is the MCPoison shape arriving
+through the front door. A malformed foreign config refuses rather than
+importing half of itself.
+
 ## Where it lives
 
 - `include/agentty/scope/scope.hpp` — the types + the two inline fold

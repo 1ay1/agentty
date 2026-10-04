@@ -116,6 +116,9 @@ set(AGENTTY_ACP_SOURCES
 # confined to these TUs (linked as mcp::mcp). Only compiled when AGENTTY_MCP.
 set(AGENTTY_MCP_SOURCES
     src/mcp/bridge.cpp
+    # Adopting another tool's servers, rather than growing a sixth read root
+    # for each one. See include/agentty/mcp/import.hpp for the argument.
+    src/mcp/import.cpp
     src/mcp/http_server.cpp
     src/mcp/serve.cpp
     src/mcp/oauth.cpp

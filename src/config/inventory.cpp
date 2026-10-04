@@ -7,7 +7,11 @@
 
 #include "agentty/config/inventory.hpp"
 
+#include "agentty/util/home_dir.hpp"
 #include "agentty/util/logx.hpp"
+#if AGENTTY_MCP
+#include "agentty/mcp/import.hpp"   // foreign configs, named with their fix
+#endif
 
 #include <array>
 #include <cstdio>
@@ -135,6 +139,26 @@ Report describe(const Entry& e) {
             if (reads_dialect(*e.read, d)) continue;
             r.skipped.push_back({d, std::string{scope::dir_name(d)}});
         }
+#if AGENTTY_MCP
+        // Foreign configs that EXIST on this machine. Only listed when
+        // present: naming a path nobody has is noise, while naming one they
+        // do have is the answer to "why is agentty ignoring my servers".
+        if (executable(e.name)) {
+            const fs::path home = util::home_dir_or_empty();
+            std::error_code fec;
+            const fs::path proj = fs::current_path(fec);
+            for (auto t : mcp::import_::all_tools()) {
+                const auto loc = mcp::import_::locations_of(t, home, proj);
+                for (const fs::path& p : {loc.user, loc.project}) {
+                    if (p.empty() || !fs::is_regular_file(p, fec)) continue;
+                    r.foreign.push_back(
+                        {std::string{mcp::import_::name_of(t)}, p.string(),
+                         "agentty mcp import --from "
+                             + std::string{mcp::import_::name_of(t)}});
+                }
+            }
+        }
+#endif
     }
 
     if (e.write) {
@@ -201,11 +225,17 @@ void print_one(const Report& r) {
 
     // The valuable half. "Not read, and why" is where someone finds out their
     // .claude/mcp.json is ignored on purpose — before they file an issue.
-    if (!r.skipped.empty()) {
+    if (!r.skipped.empty() || !r.foreign.empty()) {
         std::printf("\nnot read\n");
         for (const SkippedDialect& s : r.skipped)
             std::printf("  %-8s not a portable format for %s\n",
                         s.dir.c_str(), std::string{r.name}.c_str());
+        // A foreign config gets the command that adopts it. Reading it live
+        // would put the user's servers in two places with a precedence rule;
+        // importing puts them in one, which is what they asked for.
+        for (const ForeignSource& f : r.foreign)
+            std::printf("  %-8s %s\n           → %s\n",
+                        f.tool.c_str(), f.path.c_str(), f.adopt_with.c_str());
     }
 
     if (r.write) {
