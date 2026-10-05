@@ -15,7 +15,14 @@
 #include "agentty/util/home_dir.hpp"
 #include "agentty/util/user_root.hpp"
 
-#include "agentty/auth/auth.hpp"   // auth::sha256_hex
+#include "agentty/auth/auth.hpp"   // auth::sha256_hex, CrossProcessFileLock
+
+#ifndef _WIN32
+#include <unistd.h>   // getpid
+#else
+#include <process.h>  // _getpid
+#define getpid _getpid
+#endif
 
 #include <cstdlib>
 #include <fstream>
@@ -79,13 +86,65 @@ bool save_approvals(std::string_view leaf, const Approvals& a) noexcept {
     if (p.empty()) return false;
     std::error_code ec;
     fs::create_directories(p.parent_path(), ec);
+
+    // Hold the file lock across the whole re-read + merge + write.
+    //
+    // Every caller here does load_approvals -> approve(x) -> save_approvals,
+    // which is a load->modify->store cycle on a file three independent
+    // subsystems share (skills, hooks, MCP plugins). Two agentty processes
+    // approving different things at once each wrote a list that had never
+    // seen the other's entry, so one approval silently vanished and the
+    // thing it vouched for went back to Pending. Measured before the fix:
+    // 4 concurrent approvals, 10 rounds, only 1 survived every time.
+    //
+    // Best-effort, like every other use of this lock: if it cannot be taken
+    // we still do the merge below, which is strictly better than the
+    // truncating write this replaced.
+    auth::CrossProcessFileLock guard{p};
+
     try {
+        // MERGE rather than replace. Approvals are a grow-only set of
+        // content hashes -- an entry means "a human vouched for these exact
+        // bytes" and nothing in the tree revokes one -- so union is the
+        // correct reconciliation, not last-writer-wins. That also makes the
+        // write idempotent under a lost lock.
+        std::vector<std::string> merged;
+        {
+            std::ifstream in(p);
+            if (in) {
+                nlohmann::json cur =
+                    nlohmann::json::parse(in, nullptr, /*throw=*/false);
+                if (cur.is_array())
+                    for (const auto& v : cur)
+                        if (v.is_string()) merged.push_back(v.get<std::string>());
+            }
+        }
+        for (const auto& s : a.shas)
+            if (std::find(merged.begin(), merged.end(), s) == merged.end())
+                merged.push_back(s);
+
         nlohmann::json doc = nlohmann::json::array();
-        for (const auto& s : a.shas) doc.push_back(s);
-        std::ofstream out(p, std::ios::trunc);
-        if (!out) return false;
-        out << doc.dump(2);
-        return static_cast<bool>(out);
+        for (const auto& s : merged) doc.push_back(s);
+
+        // Write through a unique temp + atomic rename so a reader never sees
+        // a half-written list, and a crash mid-write cannot truncate the
+        // store to nothing. The old form opened the real path with trunc,
+        // which meant the file was momentarily EMPTY on every save -- and an
+        // empty approvals file fails closed, so a concurrent reader could
+        // see every project config as untrusted.
+        const fs::path tmp = p.parent_path()
+                           / (p.filename().string() + "."
+                              + std::to_string(static_cast<long long>(getpid()))
+                              + ".tmp");
+        {
+            std::ofstream out(tmp, std::ios::trunc);
+            if (!out) return false;
+            out << doc.dump(2);
+            if (!out) { fs::remove(tmp, ec); return false; }
+        }
+        fs::rename(tmp, p, ec);
+        if (ec) { fs::remove(tmp, ec); return false; }
+        return true;
     } catch (...) { return false; }
 }
 

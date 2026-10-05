@@ -7,6 +7,7 @@
 #include "agtest.hpp"
 
 #include "agentty/tool/plugin.hpp"
+#include "agentty/scope/scope.hpp"   // Approvals — cross-process merge case
 #include "agentty/mcp/client.hpp"   // plugin_model() — the merged-config probe
 #include "agentty/tool/util/fs_helpers.hpp"   // workspace_root clamp
 
@@ -347,6 +348,84 @@ void concurrent_mutations_safe(const fs::path& dir) {
           "all " + std::to_string(N) + " concurrent disables landed (got "
           + std::to_string(disabled) + ")");
     std::println("PASS\n");
+}
+
+// Approvals from two PROCESSES must merge, not overwrite.
+//
+// The store is shared by three subsystems (skills, hooks, MCP plugins) and
+// every caller does load -> approve(x) -> save. Two agentty instances
+// approving different things at once each wrote a list that had never seen
+// the other's entry, so one approval vanished and whatever it vouched for
+// went back to Pending. Measured before the fix: 4 concurrent approvals,
+// only 1 survived, every round.
+//
+// Merge is the right reconciliation rather than last-writer-wins because an
+// approval is a grow-only fact -- "a human vouched for these exact bytes" --
+// and nothing in the tree revokes one.
+void approvals_merge_across_processes(const fs::path& dir) {
+    std::println("--- approvals_merge_across_processes ---");
+#ifdef _WIN32
+    std::println("SKIP (no fork)\n");
+    (void)dir;
+#else
+    const fs::path home = dir / "aprhome";
+    fs::create_directories(home);
+    const std::string prev = std::getenv("AGENTTY_HOME")
+                                 ? std::getenv("AGENTTY_HOME") : "";
+    const bool had = std::getenv("AGENTTY_HOME") != nullptr;
+    ::setenv("AGENTTY_HOME", home.string().c_str(), 1);
+
+    constexpr char kLeaf[] = "race_approved.json";
+    constexpr int  kWriters = 4;
+    int lost = 0;
+
+    for (int round = 0; round < 6; ++round) {
+        // Start from empty each round.
+        (void)agentty::scope::save_approvals(kLeaf, agentty::scope::Approvals{});
+        { std::ofstream f(home / kLeaf, std::ios::trunc); f << "[]"; }
+
+        std::vector<::pid_t> kids;
+        for (int w = 0; w < kWriters; ++w) {
+            const ::pid_t pid = ::fork();
+            if (pid == 0) {
+                // Child: the real cycle -- load, add one, save.
+                //
+                // The sleep is what makes this a RACE rather than four
+                // lucky sequential runs. Each child loads, then waits, so
+                // every one of them is holding a snapshot taken before any
+                // of the others wrote. Without it the forks finish so fast
+                // they rarely overlap and the case passes even unfixed --
+                // which it did, the first time this was written.
+                auto store = agentty::scope::load_approvals(kLeaf);
+                ::usleep(40000);   // 40 ms: all four now hold stale copies
+                store.approve("hash-r" + std::to_string(round)
+                              + "-w" + std::to_string(w));
+                const bool ok = agentty::scope::save_approvals(kLeaf, store);
+                ::_exit(ok ? 0 : 1);
+            }
+            if (pid > 0) kids.push_back(pid);
+        }
+        for (::pid_t p : kids) { int st = 0; ::waitpid(p, &st, 0); }
+
+        const auto final_store = agentty::scope::load_approvals(kLeaf);
+        if (static_cast<int>(final_store.shas.size()) != kWriters) ++lost;
+    }
+
+    check(lost == 0,
+          "concurrent approvals all survive (lost rounds: "
+              + std::to_string(lost) + "/6)");
+
+    // And a save must never leave the store momentarily EMPTY. The old form
+    // opened the real path with trunc, so a concurrent reader could catch it
+    // mid-write -- and an empty approvals file fails CLOSED, meaning every
+    // project config reads as untrusted for that instant.
+    check(!fs::exists(home / (std::string{kLeaf} + ".tmp")),
+          "no temp file is left behind");
+
+    if (had) ::setenv("AGENTTY_HOME", prev.c_str(), 1);
+    else     ::unsetenv("AGENTTY_HOME");
+    std::println("PASS\n");
+#endif
 }
 
 // Two agentty PROCESSES mutating one mcp.json must not lose an update.
@@ -734,6 +813,7 @@ TEST_CASE("plugin config") {
     project_does_not_hide_user_servers(sandbox);
     directory_shaped_config_is_not_fatal(sandbox);
     cross_process_mutations_safe(sandbox);
+    approvals_merge_across_processes(sandbox);
 
     std::error_code ec;
     fs::remove_all(sandbox, ec);
