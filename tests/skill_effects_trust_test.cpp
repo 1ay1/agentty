@@ -284,7 +284,7 @@ TEST_CASE("approval_store_follows_AGENTTY_HOME") {
     CHECK(scope::save_approvals(leaf, store),
           "save_approvals succeeds against the relocated root");
 
-    CHECK(fs::exists(redirected / leaf),
+    CHECK(fs::exists(redirected / "state" / leaf),
           "approvals file written under $AGENTTY_HOME");
     CHECK(!fs::exists(root / ".agentty"),
           "NO approvals file behind in the $HOME/.agentty layout");

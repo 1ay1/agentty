@@ -380,9 +380,12 @@ void approvals_merge_across_processes(const fs::path& dir) {
     int lost = 0;
 
     for (int round = 0; round < 6; ++round) {
-        // Start from empty each round.
+        // Start from empty each round. Write through save_approvals rather
+        // than touching a path by hand -- the store lives under state/, and
+        // seeding the old flat location would trip the legacy migration
+        // mid-race instead of testing the race.
         (void)agentty::scope::save_approvals(kLeaf, agentty::scope::Approvals{});
-        { std::ofstream f(home / kLeaf, std::ios::trunc); f << "[]"; }
+        { std::ofstream f(home / "state" / kLeaf, std::ios::trunc); f << "[]"; }
 
         std::vector<::pid_t> kids;
         for (int w = 0; w < kWriters; ++w) {
@@ -419,7 +422,7 @@ void approvals_merge_across_processes(const fs::path& dir) {
     // opened the real path with trunc, so a concurrent reader could catch it
     // mid-write -- and an empty approvals file fails CLOSED, meaning every
     // project config reads as untrusted for that instant.
-    check(!fs::exists(home / (std::string{kLeaf} + ".tmp")),
+    check(!fs::exists(home / "state" / (std::string{kLeaf} + ".tmp")),
           "no temp file is left behind");
 
     if (had) ::setenv("AGENTTY_HOME", prev.c_str(), 1);

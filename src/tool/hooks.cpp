@@ -133,10 +133,17 @@ struct HooksFile {
     return out;   // no file
 }
 
-[[nodiscard]] fs::path approvals_path() {
+// The pre-scope {path: hash} store, if one is still around. scope owns the
+// current location (user root / state/); this only has to find an old file
+// to migrate, so it looks in both.
+[[nodiscard]] fs::path legacy_approvals_path() {
     auto root = ::agentty::util::user_root();
     if (root.empty()) return {};
-    return root / fs::path{::agentty::config::kHooksApprovals};
+    const fs::path leaf{::agentty::config::kHooksApprovals};
+    std::error_code ec;
+    const fs::path in_state = root / "state" / leaf;
+    if (fs::is_regular_file(in_state, ec)) return in_state;
+    return root / leaf;
 }
 
 // Hooks trust now rides on the SHARED content-hash primitive
@@ -160,7 +167,7 @@ constexpr std::string_view kHooksApprovalsLeaf =
     scope::Approvals a = scope::load_approvals(kHooksApprovalsLeaf);
     if (!a.shas.empty()) return a;
     // Legacy {path: hash} object — migrate its values into the list.
-    const auto p = approvals_path();
+    const auto p = legacy_approvals_path();
     std::string raw = std::string{::agentty::util::bytes_or_empty(
         ::agentty::util::capped_read(p, kMaxHooksFileBytes))};
     if (raw.empty()) return a;

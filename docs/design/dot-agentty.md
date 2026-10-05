@@ -298,12 +298,25 @@ Each root has categories under it, and each category is a leaf the anchor
 already moves:
 
 ```
-~/.agentty           <project>/.agentty
-  credentials/         cache/     derived, sweepable (rag indexes)
-  threads/             state/     accumulated, never swept (feedback)
-  cache/               skills/    content
-  logs/                memory.jsonl
+~/.agentty                      <project>/.agentty
+  credentials/  secrets           cache/   derived, sweepable
+  threads/      history           state/   accumulated, never swept
+  cache/        refetchable       skills/  content
+  logs/         diagnostics       memory.jsonl
+  state/        approvals
+  skills/       content
+  settings.json  mcp.json  memory.jsonl
 ```
+
+`state/` means the same thing on both sides: machine-written, accumulated,
+never hand-edited, never swept. Approval stores live there rather than loose
+at the root, so the user root does not grow one `*_approved.json` per
+subsystem. Existing ones move on first read.
+
+The three files still at the user root — `settings.json`, `mcp.json`,
+`memory.jsonl` — stay there on purpose: people hand-edit them, the paths are
+documented, and moving them would break something a user typed for no gain
+beyond tidiness.
 
 The leaf variables (`$AGENTTY_THREADS_DIR`, `$AGENTTY_CACHE_DIR`,
 `$AGENTTY_LOGS_DIR`) shipped in 0.9.19 before the anchors existed, and each

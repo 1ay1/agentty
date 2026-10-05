@@ -59,8 +59,34 @@ namespace {
         return {};
     const fs::path root = util::user_root();
     if (root.empty()) return {};
-    // No `dir_name` join: user_root() already IS the .agentty dir.
-    return root / leaf;
+
+    // state/: machine-written, accumulated, never hand-edited -- the same
+    // category the project root uses for its feedback TSV. Keeps the user
+    // root from growing one loose *_approved.json per subsystem.
+    std::error_code ec;
+    const fs::path dir = root / "state";
+    fs::create_directories(dir, ec);
+    const fs::path dest = dir / leaf;
+
+    // Adopt an approval list from the old flat location. Losing one means a
+    // skill or hook the user already vouched for silently reverts to
+    // pending, so this moves rather than orphans.
+    //
+    // The lock matters as much as the move. save_approvals locks the path
+    // this RETURNS, so a rename done here would sit outside it: two
+    // processes could both see the legacy file, both rename, and the loser
+    // clobbers the winner's merged list. Lock the destination first, then
+    // re-check -- whoever gets the lock second finds dest already there and
+    // does nothing.
+    const fs::path legacy = root / leaf;
+    if (fs::is_regular_file(legacy, ec) && !fs::exists(dest, ec)) {
+        auth::CrossProcessFileLock guard{dest};
+        if (!fs::exists(dest, ec)) {
+            std::error_code rec;
+            fs::rename(legacy, dest, rec);
+        }
+    }
+    return dest;
 }
 }  // namespace
 
