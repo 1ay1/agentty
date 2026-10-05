@@ -44,14 +44,17 @@ static void write_file(const fs::path& p, const std::string& body) {
 // of silently reopening one built with incompatible geometry.
 static fs::path find_index(const fs::path& root, std::string_view stem) {
     std::error_code ec;
-    const auto dir = root / ".agentty";
-    if (!fs::is_directory(dir, ec)) return {};
-    for (const auto& e : fs::directory_iterator(dir, ec)) {
-        const auto name = e.path().filename().string();
-        if (name.rfind(std::string{stem}, 0) == 0
-            && name.size() > 6
-            && name.compare(name.size() - 6, 6, ".ragdb") == 0)
-            return e.path();
+    // Indexes live under .agentty/cache/ (derived data, sweepable). The old
+    // flat location is checked too so this still passes mid-migration.
+    for (const auto& dir : {root / ".agentty" / "cache", root / ".agentty"}) {
+        if (!fs::is_directory(dir, ec)) continue;
+        for (const auto& e : fs::directory_iterator(dir, ec)) {
+            const auto name = e.path().filename().string();
+            if (name.rfind(std::string{stem}, 0) == 0
+                && name.size() > 6
+                && name.compare(name.size() - 6, 6, ".ragdb") == 0)
+                return e.path();
+        }
     }
     return {};
 }

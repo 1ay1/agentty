@@ -111,6 +111,25 @@ constexpr ::agentty::dirs::Spec kFeedbackSpec = ::agentty::config::kFeedbackSpec
 [[nodiscard]] fs::path rag_store_dir(const ::agentty::dirs::Spec& spec) {
     auto d = ::agentty::dirs::resolve(spec);
     if (!d) return {};
+
+    // Indexes used to sit flat in <project>/.agentty; they live under cache/
+    // now. Move what is there on first use rather than orphaning it -- a
+    // re-index is cheap but not free, and a stale 38 MB nobody can name is
+    // exactly what #62 was about.
+    if (!d->overridden() && !d->root.empty()) {
+        std::error_code mec;
+        if (fs::is_directory(d->path, mec)) {
+            for (const auto& e : fs::directory_iterator(d->root, mec)) {
+                if (mec) break;
+                if (!e.is_regular_file(mec) || mec) continue;
+                const auto name = e.path().filename().string();
+                if (!name.starts_with("rag_")) continue;
+                std::error_code rec;
+                fs::rename(e.path(), d->path / name, rec);
+            }
+        }
+    }
+
     if (!d->overridden()) return d->path;
 
     const fs::path anchor = ::agentty::dirs::project_anchor();

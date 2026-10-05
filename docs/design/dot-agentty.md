@@ -284,36 +284,50 @@ decomposition is right:
 4. **`state/`.** Last, because `rag_feedback.tsv` and `routing_memory.tsv` are
    small and the flat layout does not actively hurt yet.
 
-## The variable budget: one anchor, and an honest gap
+## The variable budget: two roots, one anchor each
 
-The storage model should be sayable in one breath, and that is a requirement,
-not a boast:
+The storage model fits in one breath, which is a requirement rather than a
+boast:
 
 | root | follows | anchor |
 |---|---|---|
 | `~/.agentty` | the HUMAN | `$AGENTTY_HOME` |
-| `<project>/.agentty` | the CODE | **none yet** |
+| `<project>/.agentty` | the CODE | `$AGENTTY_PROJECT_DIR` |
 
-That second row is the remaining gap, and `agentty config env` prints it that
-way rather than papering over it. `$AGENTTY_RAG_DIR` relocates the retrieval
-indexes and the feedback TSV and *nothing else* — `memory.jsonl` stays at
-`<project>/.agentty` regardless — so calling it the project anchor would be a
-confident wrong answer. The user root has categories to hang an override off;
-the project root is flat, which is exactly why `RAG_DIR` had to be invented as
-a one-off instead of falling out of `(Root, Lifecycle)`.
+Each root has categories under it, and each category is a leaf the anchor
+already moves:
 
-Seven variables exist; `$AGENTTY_MCP_CONFIG` is not storage at all (it names
-one file to *read* — scope's Explicit locus, a different axis). The rest each
-move ONE leaf. `$AGENTTY_THREADS_DIR`, `$AGENTTY_CACHE_DIR` and
-`$AGENTTY_LOGS_DIR` predate `$AGENTTY_HOME` and each move a leaf it already
-moves; they stay because removing a released variable breaks a working setup
-with no error message.
+```
+~/.agentty           <project>/.agentty
+  credentials/         cache/     derived, sweepable (rag indexes)
+  threads/             state/     accumulated, never swept (feedback)
+  cache/               skills/    content
+  logs/                memory.jsonl
+```
 
-**Nothing new is added on that axis.** A new storage category is a leaf under
-an existing root. The pressure to add one is constant and the rule from
-`user_root.hpp` is the answer: a category earns a variable only if it grows
-unboundedly AND you would plausibly put it on a different device from its
-siblings.
+The leaf variables (`$AGENTTY_THREADS_DIR`, `$AGENTTY_CACHE_DIR`,
+`$AGENTTY_LOGS_DIR`, `$AGENTTY_RAG_DIR`) predate the anchors and each move
+one leaf their anchor already covers. They stay because removing a released
+variable breaks a working setup with no error message, but **nothing new goes
+on that axis** — a new category is a leaf under an existing root.
+
+`$AGENTTY_MCP_CONFIG` is not storage at all: it names one file to *read*,
+which is scope's Explicit locus.
+
+### Why cache/ and state/ are separate
+
+They sit side by side and have opposite retention. `cache/` is derived —
+delete it and you pay a re-index — so a sweep may reclaim it. `state/`
+accumulates from real usage and nothing regenerates it, so no sweep may ever
+touch it.
+
+They used to share the flat project root, which made "same directory,
+opposite retention" a fact only a comment protected. Separate leaves make it
+structural, and `Lifecycle` on the `Spec` means adding a category forces the
+retention decision at the declaration site.
+
+Indexes from the old flat layout are moved into `cache/` on first use rather
+than orphaned.
 
 ## The project root ignores itself
 

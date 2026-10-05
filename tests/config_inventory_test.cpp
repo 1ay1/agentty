@@ -147,15 +147,10 @@ TEST_CASE("the read ladder is exactly what plan emits") {
 }
 
 TEST_CASE("anchors are derived, and honest") {
-    // The inventory must not claim a variable moves more than it does.
-    // $AGENTTY_RAG_DIR relocates the retrieval indexes and the feedback TSV
-    // and NOTHING else -- memory.jsonl stays at <project>/.agentty -- so the
-    // project root has no anchor, and saying otherwise would be exactly the
-    // confident wrong answer this file exists to prevent.
-    CHECK(cfg::anchor_env(agentty::dirs::Root::User) == "AGENTTY_HOME",
-          "the user root has an anchor");
-    CHECK(cfg::anchor_env(agentty::dirs::Root::Project).empty(),
-          "the project root does NOT (that gap is the point)");
+    // Two roots, one anchor each. The anchor is a function of the Root, so a
+    // new category cannot accidentally advertise itself as one.
+    CHECK(cfg::anchor_env(agentty::dirs::Root::User) == "AGENTTY_HOME");
+    CHECK(cfg::anchor_env(agentty::dirs::Root::Project) == "AGENTTY_PROJECT_DIR");
 
     for (const cfg::Entry& e : cfg::inventory()) {
         if (!e.write) continue;
@@ -163,17 +158,18 @@ TEST_CASE("anchors are derived, and honest") {
               "no Spec's own variable relocates a whole root");
     }
 
-    // A concrete proof of the asymmetry: rag and memory share the project
-    // root, and only one of them follows $AGENTTY_RAG_DIR.
+    // rag and feedback share the project root but not a leaf: one is
+    // rebuildable and swept, the other accumulates and never is.
     const cfg::Entry* rag = cfg::find("rag");
-    const cfg::Entry* mem = cfg::find("memory");
+    const cfg::Entry* fb  = cfg::find("feedback");
     REQUIRE(rag != nullptr, "rag is in the inventory");
-    REQUIRE(mem != nullptr, "memory is in the inventory");
+    REQUIRE(fb  != nullptr, "feedback is in the inventory");
     REQUIRE(rag->write != nullptr, "rag writes");
-    CHECK(rag->write->env == "AGENTTY_RAG_DIR", "rag follows the variable");
-    CHECK(mem->write == nullptr,
-          "memory has no write spec -- it resolves through scope, so the"
-          " variable cannot reach it");
+    REQUIRE(fb->write  != nullptr, "feedback writes");
+    CHECK(rag->write->leaf != fb->write->leaf,
+          "separate leaves — opposite retention must not share a directory");
+    CHECK(rag->write->life.rebuildable);
+    CHECK(!fb->write->life.rebuildable);
 }
 
 TEST_CASE("only executable concerns report trust") {

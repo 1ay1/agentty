@@ -455,19 +455,8 @@ void save_support(const SupportSets& s) {
     const auto dest = support_path();
     fs::create_directories(dest.parent_path(), ec);
 
-    // Unique temp + atomic rename, like every other JSON store here.
-    //
-    // The previous form opened the real path with trunc, which makes the
-    // file momentarily EMPTY and then partial. Two readers can see that:
-    // another agentty process, and this one's own note_* callers on other
-    // threads. A torn read parses as nothing, load_support() returns empty
-    // sets, and the account "forgets" which models it may use -- so the next
-    // request re-probes a model the server already refused.
-    //
-    // Nothing is lost permanently either way (this is a relearnable cache,
-    // which is exactly why it lives in cache/ rather than credentials/), but
-    // a wrong answer that costs a round-trip is worth four lines to avoid.
-    // The pid in the name keeps two processes from sharing a temp.
+    // Temp + rename: a trunc write leaves the file empty then partial, and a
+    // reader that catches it mid-write just relearns the whole set.
     fs::path tmp = dest;
     tmp += "." + std::to_string(static_cast<long long>(::getpid())) + ".tmp";
     {

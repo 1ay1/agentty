@@ -381,18 +381,17 @@ void print_one(const Report& r) {
     std::printf("\n");
 }
 
-// The storage model on one screen. Two roots; the user root has an anchor,
-// the project root does not yet. Saying so plainly is the point -- seven flat
-// names look like seven decisions, and the one real gap (a project root with
-// no anchor, which is why RAG_DIR had to be a one-off) is worth naming rather
-// than papering over.
+// The storage model on one screen: two roots, one anchor each, and the leaf
+// variables shown as what they are -- narrower conveniences that predate the
+// anchors. Seven flat names look like seven decisions, and they are not.
 void print_env() {
     std::printf("storage model\n\n");
     std::printf("  ~/.agentty           follows the HUMAN   $AGENTTY_HOME%s\n",
-                env_set("AGENTTY_HOME") ? "   (set)" : "");
-    std::printf("  <project>/.agentty   follows the CODE    — no anchor yet\n");
+                env_set("AGENTTY_HOME") ? "         (set)" : "");
+    std::printf("  <project>/.agentty   follows the CODE    $AGENTTY_PROJECT_DIR%s\n",
+                env_set("AGENTTY_PROJECT_DIR") ? "  (set)" : "");
 
-    std::printf("\nnarrower — each moves ONE leaf, not a root\n");
+    std::printf("\nnarrower — each moves ONE leaf its anchor already moves\n");
     for (const Entry& e : kEntries) {
         if (!e.write || e.write->env.empty()) continue;
         std::printf("  $%-22s %s%s\n", std::string{e.write->env}.c_str(),
@@ -404,9 +403,8 @@ void print_env() {
     std::printf("  $%-22s %s%s\n", "AGENTTY_MCP_CONFIG", "mcp",
                 env_set("AGENTTY_MCP_CONFIG") ? "   (set)" : "");
 
-    std::printf("\nthreads/cache/logs predate $AGENTTY_HOME and each move one\n"
-                "leaf it already moves. nothing new goes on that axis — a new\n"
-                "category is a leaf under an existing root.\n");
+    std::printf("\nnothing new goes on the narrower axis — a new category is a\n"
+                "leaf under an existing root, which the anchor already moves.\n");
 }
 
 void print_table() {

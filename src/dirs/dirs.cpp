@@ -117,6 +117,21 @@ void warn_once(std::string_view env, const fs::path& bad,
             return p;
         }
         case Root::Project: {
+            // $AGENTTY_PROJECT_DIR moves this root wholesale, the way
+            // $AGENTTY_HOME moves the user one. Two roots, one anchor each.
+            if (const char* v = std::getenv("AGENTTY_PROJECT_DIR"); v && *v) {
+                fs::path given{v};
+                if (given.is_relative()) {
+                    // Relative resolves against the anchor, never the cwd:
+                    // one directory per checkout, not one per launch dir.
+                    fs::path a = project_anchor();
+                    if (a.empty())
+                        return std::unexpected(Error{Error::Kind::NoRoot,
+                                                     "no usable project anchor"});
+                    given = a / given;
+                }
+                return given;
+            }
             fs::path a = project_anchor();
             if (a.empty())
                 return std::unexpected(Error{Error::Kind::NoRoot,

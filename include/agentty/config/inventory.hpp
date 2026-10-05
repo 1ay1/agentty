@@ -155,51 +155,33 @@ inline constexpr dirs::Spec kCacheSpec{
 inline constexpr dirs::Spec kLogsSpec{
     .root = dirs::Root::User, .leaf = "logs", .env = "AGENTTY_LOGS_DIR"};
 
-// Retrieval indexes. Root::Project — this storage follows the CODE — and
-// rebuildable, which is what lets a future sweep be aggressive here where
-// blobs::gc has to be careful.
+// Retrieval indexes. Derived data, so it lives under cache/ and a sweep may
+// reclaim it; keep_last=1 spares the previous embedder's index so A/B-ing
+// two backends doesn't force a full rebuild.
 inline constexpr dirs::Spec kRagSpec{
-    .root = dirs::Root::Project, .leaf = "", .env = "AGENTTY_RAG_DIR",
+    .root = dirs::Root::Project, .leaf = "cache", .env = "AGENTTY_RAG_DIR",
     .life = {.rebuildable = true, .keep_last = 1,
              .min_age = std::chrono::seconds{3600}}};
 
-// Retrieval feedback: the learning loop's tallies. Same root and variable as
-// the indexes — it is the same kind of derived, project-scoped data — but
-// NOT rebuildable: it accumulates from real usage and nothing regenerates
-// it, so no sweep may ever collect it.
-//
-// Worth a row of its own precisely BECAUSE it shares a path with kRagSpec.
-// "Same directory, opposite retention" is the kind of fact that silently
-// becomes wrong, and `agentty config feedback` saying "kept indefinitely"
-// next to rag's "rebuildable" is what keeps a future sweep honest.
+// Retrieval feedback. Accumulated from real usage and nothing regenerates
+// it, so it sits in state/ and no sweep may ever collect it. Separate leaf
+// from the indexes precisely because the retention differs.
 inline constexpr dirs::Spec kFeedbackSpec{
-    .root = dirs::Root::Project, .leaf = "", .env = "AGENTTY_RAG_DIR",
+    .root = dirs::Root::Project, .leaf = "state",
     .life = {}};   // never swept
 
 // Does this spec's variable move the WHOLE root, or just this leaf?
 //
-// Derived from the root, never a field, so a new category cannot
-// accidentally advertise itself as an anchor.
-//
-// Today the honest answer is NO for every spec. $AGENTTY_HOME is the user
-// root's anchor, and no Spec declares it — it is resolved one level down, by
-// util::user_root(). The PROJECT root has no anchor at all: $AGENTTY_RAG_DIR
-// relocates the retrieval indexes and the feedback TSV, and nothing else —
-// `memory.jsonl` stays at <project>/.agentty regardless. Reporting it as a
-// root anchor would be exactly the kind of confident wrong answer this file
-// exists to prevent.
-//
-// That asymmetry is the remaining gap in the storage model, written up in
-// docs/design/dot-agentty.md: the user root has categories to hang an
-// override off, and the project root is flat, which is why RAG_DIR had to be
-// invented as a one-off instead of falling out of (Root, Lifecycle).
+// Derived from the root, so a new category can't advertise itself as an
+// anchor. No Spec declares an anchor: both roots resolve theirs one level
+// down, in dirs::root_for.
 [[nodiscard]] constexpr bool moves_whole_root(const dirs::Spec&) noexcept {
     return false;
 }
 
-// The variable that moves this root wholesale, or empty when none does.
+// The variable that moves this root wholesale.
 [[nodiscard]] constexpr std::string_view anchor_env(dirs::Root r) noexcept {
-    return r == dirs::Root::User ? "AGENTTY_HOME" : std::string_view{};
+    return r == dirs::Root::User ? "AGENTTY_HOME" : "AGENTTY_PROJECT_DIR";
 }
 
 // ── Entry: one concern, both halves ──────────────────────────────────────
