@@ -6,6 +6,8 @@
 #include <jaal/kernel/guarded.hpp>
 
 #include <algorithm>
+#include <ranges>
+#include <unordered_set>
 #include <chrono>
 #include <filesystem>
 #include <string>
@@ -302,6 +304,122 @@ TrustedSnapshot snapshot_trusted(std::string_view root) {
     // empty repo has no hooks to modify. Verified live before fixing.
     snap.roots.push_back(base.string());
 
+    // Record one trusted file. Shared by the priority pass below and the
+    // general walk, so the two cannot disagree about what an entry holds.
+    auto record = [&snap](const fs::path& p, sandbox_cfg::TrustKind kind) {
+        TrustedSnapshot::Entry entry;
+        entry.path    = p.string();
+        entry.kind    = kind;
+        entry.existed = true;
+        std::error_code sec;
+        entry.size    = fs::file_size(p, sec);
+        if (sec) entry.size = 0;
+        std::error_code tec;
+        const auto t = fs::last_write_time(p, tec);
+        entry.mtime_ns = tec ? 0
+            : std::chrono::duration_cast<std::chrono::nanoseconds>(
+                  t.time_since_epoch()).count();
+        snap.entries.push_back(std::move(entry));
+    };
+
+    // ── Priority pass: the trusted DIRECTORIES, before the cap can bite ──
+    //
+    // The general walk below is capped at kMaxEntries, and on a tree bigger
+    // than that it stops early. recursive_directory_iterator is unordered, so
+    // WHICH trusted paths made it inside the budget was arbitrary and could
+    // differ between runs on one repo -- `.git/hooks/post-commit`, the escape
+    // the whole gate was built for, had no better odds than a vendored
+    // Makefile 40k entries deep. A wall whose coverage is decided by walk
+    // order is not a wall (#78).
+    //
+    // So the ShapeMatch::Component rules get walked FIRST and uncapped. Those
+    // are whole directories the host later trusts -- .git, .vscode, .claude,
+    // .agentty, .cursor, .idea, .direnv -- and they are small: a few dozen
+    // files each, versus the tens of thousands a monorepo's source tree runs
+    // to. Walking them in full costs almost nothing and makes the high-risk
+    // set unconditional.
+    //
+    // Truncation still exists and can still drop a deep Basename match (a
+    // vendored Makefile). That is the right thing to lose: it is bounded
+    // work, and the directories that carry every exploit in the Pillar series
+    // are covered before the budget is spent.
+    //
+    // Named here rather than derived from the rule table because the table is
+    // match SHAPES, not locations, and only these have the "small, entirely
+    // trusted, worth guaranteeing" property. is_host_trusted() stays the one
+    // authority on whether a path counts -- this list only decides walk ORDER.
+    static constexpr std::string_view kPriorityDirs[] = {
+        ".git", ".vscode", ".claude", ".agentty", ".cursor", ".idea",
+        ".direnv",
+    };
+    {
+        std::error_code pec;
+        fs::recursive_directory_iterator pit{
+            base, fs::directory_options::skip_permission_denied, pec};
+        // Find the priority directories with a SHALLOW scan (they live at or
+        // near the workspace root in every real layout), then walk each fully.
+        std::vector<fs::path> targets;
+        if (!pec) {
+            std::size_t pseen = 0;
+            for (; pit != fs::recursive_directory_iterator{}; ) {
+                // Bounded discovery: deep enough to find .vscode in a
+                // sub-package, cheap enough not to be a second full walk.
+                if (pit.depth() >= 3) pit.disable_recursion_pending();
+                if (++pseen > kMaxEntries) break;
+                std::error_code dec;
+                if (pit->is_directory(dec) && !dec) {
+                    const std::string name = pit->path().filename().string();
+                    if (std::ranges::find(kPriorityDirs, name)
+                            != std::ranges::end(kPriorityDirs)) {
+                        targets.push_back(pit->path());
+                        pit.disable_recursion_pending();   // walked below
+                    }
+                }
+                std::error_code iec;
+                pit.increment(iec);
+                if (iec) break;
+            }
+        }
+        for (const auto& dir : targets) {
+            std::error_code dec;
+            fs::recursive_directory_iterator dit{
+                dir, fs::directory_options::skip_permission_denied, dec};
+            if (dec) continue;
+            for (; dit != fs::recursive_directory_iterator{}; ) {
+                const fs::path p = dit->path();
+                std::error_code fec;
+                const bool is_dir = dit->is_directory(fec);
+                if (is_dir && !fec) {
+                    // .git/objects and friends are thousands of files that
+                    // carry no trust; pruning them is what keeps this pass
+                    // cheap enough to be uncapped.
+                    if (git_noise(p)) dit.disable_recursion_pending();
+                    sandbox_cfg::TrustKind dk{};
+                    if (sandbox_cfg::is_host_trusted(p.string() + "/probe", &dk))
+                        snap.roots.push_back(p.string());
+                } else if (!git_noise(p)) {
+                    sandbox_cfg::TrustKind kind{};
+                    if (sandbox_cfg::is_host_trusted(p.string(), &kind))
+                        record(p, kind);
+                }
+                std::error_code iec;
+                dit.increment(iec);
+                if (iec) break;
+            }
+        }
+        if (!targets.empty())
+            AGT_LOG(General, Debug, "handoff",
+                    "priority pass covered {} trusted dir(s), {} entry(s)",
+                    targets.size(), snap.entries.size());
+    }
+    // Everything the priority pass already recorded; the general walk skips
+    // these rather than double-recording (review() would report one write
+    // twice).
+    const std::size_t priority_count = snap.entries.size();
+    std::unordered_set<std::string> already;
+    already.reserve(priority_count * 2);
+    for (const auto& e : snap.entries) already.insert(e.path);
+
     fs::recursive_directory_iterator it{
         base,
         fs::directory_options::skip_permission_denied, ec};
@@ -363,7 +481,7 @@ TrustedSnapshot snapshot_trusted(std::string_view root) {
 
         const std::string p = e.path().string();
         sandbox_cfg::TrustKind kind{};
-        if (!sandbox_cfg::is_host_trusted(p, &kind)) {
+        if (!sandbox_cfg::is_host_trusted(p, &kind) || already.contains(p)) {
             std::error_code iec;
             it.increment(iec);
             if (iec) {
@@ -409,8 +527,9 @@ TrustedSnapshot snapshot_trusted(std::string_view root) {
     if (truncated)
         AGT_LOG(General, Warn, "handoff",
                 "trusted snapshot truncated at {} entries under {} -- a write "
-                "below the cut would not be reported",
-                kMaxEntries, std::string{root});
+                "below the cut would not be reported (the {} high-risk "
+                "trusted dir entries were covered first)",
+                kMaxEntries, std::string{root}, priority_count);
 
     AGT_LOG(General, Debug, "handoff", "snapshot {} trusted path(s) under {}",
             snap.entries.size(), std::string{root});
