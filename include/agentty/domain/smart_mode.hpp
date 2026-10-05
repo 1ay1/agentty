@@ -642,6 +642,12 @@ namespace detail {
     // no cost heuristic outranks that.
     if (cfg.pinned_model) return parent;
 
+    // AGENTTY_SMART_NO_INTERNAL=1 is documented as "compaction/titles stay on
+    // the main model", so it has to stop the tier fallback too -- it used to
+    // gate only the slot below, which left the downgrade running and made the
+    // promise false (#70).
+    if (slot == &cfg.utility && tuning::no_internal()) return parent;
+
     // A Smart Mode slot the user set explicitly comes next.
     if (slot && cfg.internal_routing() && slot->set && !slot->model.empty()
         && (active_provider.empty() || slot->provider.empty()

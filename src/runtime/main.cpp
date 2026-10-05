@@ -1386,6 +1386,9 @@ int main(int argc, char** argv) {
         auto s = persistence::load_settings();
         s.model_id = ModelId{args.cli_model};
         persistence::save_settings(s);
+        // An explicit --model binds every role, not just the main turn. Set
+        // here so the TUI's init() sees it too -- it takes no argv (#70).
+        smart::tuning::model_pinned() = true;
     }
 
     // ── Filesystem sandbox boundary ─────────────────────────────────────
@@ -1813,7 +1816,7 @@ int main(int argc, char** argv) {
         // and read-only subagents still routed to whatever the catalog said
         // was cheaper -- a harness got billed for a model it never named
         // (#70).
-        sa_smart.pinned_model = !args.cli_model.empty();
+        sa_smart.pinned_model = smart::tuning::model_pinned();
         // The model CATALOG, for the same reason and with the same history.
         //
         // The TUI pushes this from init() and again on every catalog load

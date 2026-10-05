@@ -191,6 +191,9 @@ std::pair<Model, Cmd> init() {
     // preference survives the session untouched.
     if (auto ov = smart::tuning::enabled_override())
         m.d.smart.enabled = *ov;
+    // `agentty --model X` binds every role interactively too: without this,
+    // compaction routed away from the model the user named (#70).
+    m.d.smart.pinned_model = smart::tuning::model_pinned();
     // Env overrides for the numeric policy, resolved once here so the
     // classifier reads a plain int rather than calling getenv() per turn.
     settings::registry::apply_env(m.d.smart);

@@ -578,6 +578,22 @@ TEST_CASE("smart_mode: a pinned --model wins every role") {
         cfg.pinned_model = true;
         CHECK(sm::utility_model(parent, only, cfg) == parent);
     }
+
+    // AGENTTY_SMART_NO_INTERNAL is documented as "compaction/titles stay on
+    // the main model". It used to gate only the Smart Mode slot, leaving the
+    // tier fallback running -- so the promise was false and the reporter had
+    // set it expecting exactly this.
+    {
+        sm::RoleConfig cfg;
+        cfg.enabled = true;
+        setenv("AGENTTY_SMART_NO_INTERNAL", "1", 1);
+        CHECK_MESSAGE(sm::utility_model(parent, catalog, cfg) == parent,
+                      "NO_INTERNAL keeps utility turns on the main model");
+        unsetenv("AGENTTY_SMART_NO_INTERNAL");
+        CHECK_MESSAGE(sm::utility_model(parent, catalog, cfg)
+                          == "claude-haiku-4-5",
+                      "and unsetting it restores the downgrade");
+    }
 }
 
 TEST_CASE("smart_mode: the main turn follows its complexity") {

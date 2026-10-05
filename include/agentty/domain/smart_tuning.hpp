@@ -156,4 +156,18 @@ inline constexpr int kComplexDefault    = 3, kComplexMin    = 1, kComplexMax    
 [[nodiscard]] inline bool no_orchestrate() noexcept { return disabled("AGENTTY_SMART_NO_ORCHESTRATE"); }
 [[nodiscard]] inline bool no_subagents()   noexcept { return disabled("AGENTTY_SMART_NO_SUBAGENTS"); }
 
+// Did the command line name a model?
+//
+// `--model X` is a contract, not a hint: every role runs on it. Set once at
+// startup, read by whoever assembles a RoleConfig. It is process state
+// rather than an env var because it is not a user knob -- it mirrors an
+// argv fact, and a second spelling would be a second source of truth.
+//
+// The TUI reads this too: `agentty --model X` interactively had the same
+// gap, where compaction routed away from the model the user named (#70).
+inline bool& model_pinned() noexcept {
+    static bool pinned = false;
+    return pinned;
+}
+
 } // namespace agentty::smart::tuning
