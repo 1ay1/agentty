@@ -16,6 +16,7 @@
 #include <maya/widget/panel.hpp>
 
 #include <atomic>
+#include <cstdlib>
 #include <string>
 #include <thread>
 #include <vector>
@@ -38,8 +39,24 @@ Panel::Item header_row(const char* label) {
     return r;
 }
 
+// Render a panel at `width`.
+//
+// COLUMNS is set to the same width, because the panel derives its content
+// budgets from the terminal and those budgets have to be about the width it
+// is actually painted at. Rendering at 70 while the ambient terminal says
+// 200 is a state that cannot happen in the app — the overlay stretches to
+// the terminal — and it makes a windowed value look unwindowed.
 std::string render(Panel::Config c, int width = 60) {
-    return maya::render_to_string(Panel{std::move(c)}.build(), width);
+    std::string saved;
+    const bool had = std::getenv("COLUMNS") != nullptr;
+    if (had) saved = std::getenv("COLUMNS");
+    setenv("COLUMNS", std::to_string(width).c_str(), /*overwrite=*/1);
+
+    auto out = maya::render_to_string(Panel{std::move(c)}.build(), width);
+
+    if (had) setenv("COLUMNS", saved.c_str(), /*overwrite=*/1);
+    else     unsetenv("COLUMNS");
+    return out;
 }
 
 // Does the frame have a top and bottom border? A panel that fails to draw one

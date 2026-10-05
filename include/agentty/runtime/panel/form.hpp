@@ -259,6 +259,10 @@ using FormFocus = std::variant<focus::Browsing, focus::Editing, focus::Choosing>
 struct Form {
     std::string        title;
     std::string        subtitle;      // e.g. the effective config summary
+    // A failure the whole pane is in. Projected onto Panel::Config::error,
+    // which wraps it — unlike the subtitle, which truncates. A pane that
+    // put its error in `subtitle` lost the tail that said what to fix.
+    std::string        error;
     std::vector<Field> fields;
     int                cursor = 0;
     FormFocus          focus{focus::Browsing{}};
@@ -333,6 +337,9 @@ public:
     explicit Builder(std::string title) { form_.title = std::move(title); }
 
     Builder& subtitle(std::string s) { form_.subtitle = std::move(s); return *this; }
+    // A pane-wide failure. Wraps when rendered, so the part of the message
+    // that says what to do about it survives a narrow pane.
+    Builder& error(std::string s) { form_.error = std::move(s); return *this; }
     // The footer line under the rows: a validation summary, a save hint, or a
     // key affordance. Same field the panes already set directly — exposed on
     // the builder so a form that is built in one pass can say its piece

@@ -96,6 +96,7 @@ maya::Panel::Config form_config(const agentty::form::Form& f, maya::Color accent
     maya::Panel::Config cfg;
     cfg.title    = f.title;
     cfg.subtitle = f.subtitle;
+    cfg.error    = f.error;
     // ── Footer: ONE grammar for every form pane (SSOT) ───────────
     // The key line is derived from the form's MODE here, not spelled by
     // panes — three panes each wording their own footer is how "no
