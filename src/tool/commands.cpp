@@ -150,6 +150,13 @@ void scan_dir(const fs::path& dir, const std::string& prefix,
             sig += std::to_string(static_cast<long long>(
                        fmt.time_since_epoch().count())) + ";";
         std::string raw = read_capped(p, kMaxBodyBytes);
+        // NOTE: an oversized .md is skipped silently here, unlike skills
+        // (which keeps a reporting stub) and hooks (which names the file).
+        // Both of those have a CLI that exists to tell you what loaded;
+        // slash commands have none, so there is nowhere to put the
+        // warning. A command that does not appear in the palette is also
+        // self-evident in a way a missing skill or an inert hook is not.
+        // If `agentty commands` ever ships, this should match them.
         if (raw.empty()) continue;
 
         std::string name = prefix.empty() ? stem : prefix + ":" + stem;

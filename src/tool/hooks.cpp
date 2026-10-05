@@ -73,6 +73,10 @@ struct HooksFile {
     std::vector<HookEntry> pre_tool;
     std::vector<HookEntry> post_tool;
     bool                   ok = false;
+    // Set when a hooks file EXISTS but is past the size cap, so nothing
+    // could be loaded from it. Distinct from "no file": a user whose
+    // blocking hook is silently inert deserves to be told which it is.
+    std::string            too_big;   // the oversized path, else empty
 };
 
 [[nodiscard]] bool hooks_disabled() {
@@ -80,11 +84,25 @@ struct HooksFile {
     return off && off[0] && off[0] != '0';
 }
 
-[[nodiscard]] std::string read_all(const fs::path& p, std::size_t cap) {
+// Read a whole file, or empty when it is missing, unreadable, or past `cap`.
+//
+// `out_too_big` separates the last case from the others. Without it an
+// oversized hooks.json read exactly like no hooks file at all, and
+// `agentty hooks` printed "no hooks file" while the user's file sat right
+// there -- so a PreToolUse hook written to BLOCK something was silently
+// inert and nothing said so. Every other cap in this tree learned the same
+// lesson; this one gates command execution, so it matters most here.
+[[nodiscard]] std::string read_all(const fs::path& p, std::size_t cap,
+                                   bool* out_too_big = nullptr) {
+    if (out_too_big) *out_too_big = false;
     std::error_code ec;
     if (!fs::is_regular_file(p, ec) || ec) return {};
     auto sz = fs::file_size(p, ec);
-    if (ec || sz == 0 || sz > cap) return {};
+    if (ec || sz == 0) return {};
+    if (sz > cap) {
+        if (out_too_big) *out_too_big = true;
+        return {};
+    }
     std::ifstream f(p, std::ios::binary);
     if (!f) return {};
     std::string out(static_cast<std::size_t>(sz), '\0');
@@ -106,7 +124,9 @@ struct HooksFile {
     };
     for (const auto& c : candidates) {
         if (c.empty()) continue;
-        std::string raw = read_all(c, kMaxHooksFileBytes);
+        bool too_big = false;
+        std::string raw = read_all(c, kMaxHooksFileBytes, &too_big);
+        if (too_big && out.too_big.empty()) out.too_big = c.string();
         if (raw.empty()) continue;
         std::error_code ec;
         auto abs = fs::weakly_canonical(c, ec);
@@ -334,6 +354,15 @@ int cli(const std::string& verb) {
     HooksFile hf = load_hooks_file();
     if (verb == "list" || verb.empty()) {
         if (hf.path.empty()) {
+            // "No file" and "a file too big to load" are different answers,
+            // and printing the first for the second is how a blocking hook
+            // stays silently inert while the user believes it is armed.
+            if (!hf.too_big.empty()) {
+                std::printf("%s is over the %zu KB limit — NOT loaded,"
+                            " so no hooks are running\n",
+                            hf.too_big.c_str(), kMaxHooksFileBytes / 1024);
+                return 1;
+            }
             std::printf("no hooks file (.agentty/hooks.json or "
                         "~/.agentty/hooks.json)\n");
             return 0;
@@ -359,6 +388,12 @@ int cli(const std::string& verb) {
     }
     if (verb == "approve") {
         if (hf.path.empty()) {
+            if (!hf.too_big.empty()) {
+                std::fprintf(stderr, "agentty hooks approve: %s is over the "
+                                     "%zu KB limit — nothing to approve\n",
+                             hf.too_big.c_str(), kMaxHooksFileBytes / 1024);
+                return 1;
+            }
             std::fprintf(stderr, "agentty hooks approve: no hooks file found\n");
             return 1;
         }

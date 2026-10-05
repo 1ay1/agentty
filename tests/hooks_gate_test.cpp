@@ -147,6 +147,36 @@ void kill_switch(const fs::path& sandbox, const fs::path& home) {
     std::println("PASS\n");
 }
 
+// An oversized hooks.json must not read as "no hooks file".
+//
+// read_all returned empty for "past the cap" exactly as it did for
+// "missing", so `agentty hooks` printed "no hooks file" while the user's
+// file sat right there -- a PreToolUse hook written to BLOCK something was
+// silently inert and nothing said so. Of all the caps in this tree this is
+// the one that matters most: it gates command execution, and the failure is
+// a user believing a guard is armed when it is not.
+void oversized_file_is_reported(const fs::path& sandbox) {
+    std::println("--- oversized_file_is_reported ---");
+    const fs::path cfg = sandbox / ".agentty" / "hooks.json";
+    // A real, valid hook -- padded past the 64 KiB cap.
+    nlohmann::json j{
+        {"pre_tool", {{{"match", ""}, {"run", "exit 2"}}}},
+        {"pad", std::string(70u * 1024u, 'x')},
+    };
+    write_file(cfg, j.dump());
+    check(fs::file_size(cfg) > 64u * 1024u, "fixture is past the cap");
+
+    // The hook does NOT run -- that part was always true and stays true.
+    check(!hooks::pending_approval(),
+          "an unloadable file offers nothing to approve");
+
+    // `agentty hooks` must SAY the file was too big rather than claim there
+    // is none. Exit 1 so CI notices.
+    const int rc = hooks::cli("list");
+    check(rc == 1, "hooks list exits non-zero for an oversized file");
+    std::println("PASS\n");
+}
+
 } // namespace
 
 TEST_CASE("hooks_gate") {
@@ -171,6 +201,7 @@ TEST_CASE("hooks_gate") {
     approved_runs_and_blocks(sandbox, home);
     byte_change_regates(sandbox);
     kill_switch(sandbox, home);
+    oversized_file_is_reported(sandbox);
 
     std::error_code ec;
     fs::current_path(fs::temp_directory_path(), ec);
