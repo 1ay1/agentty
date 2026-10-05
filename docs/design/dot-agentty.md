@@ -402,6 +402,50 @@ reports zero bytes of its own.
 inventory, so a bug report can never describe a layout the binary does not
 have — and "my disk is full" arrives already answered.
 
+## Two agentty processes are the normal case
+
+A TUI in one terminal, `agentty plugin add` in another, a second pane, an
+ACP session beside an interactive one. Every shared file under either root
+has to assume a concurrent writer, and **an in-process mutex is not that
+assumption** — two instances have two mutexes.
+
+The distinction that keeps catching people:
+
+> **Atomic rename prevents a TORN file. It does not prevent a LOST update.**
+
+Both writes are complete, valid and durable; one simply lands second and the
+first edit is gone. `settings_multiproc_test` says this at length because it
+was reported from a real session — a theme pick that kept reverting with five
+instances open.
+
+So a load→modify→store cycle on a shared file takes `auth::CrossProcessFileLock`
+across the WHOLE cycle, not just the write. Measured, on this tree:
+
+| file | before | after |
+|---|---|---|
+| `mcp.json` (2 writers) | 20/20 rounds lost a server | 0/20 |
+| `mcp.json` (4 writers) | — | 0/15 |
+| `*_approved.json` (4 writers) | 1 of 4 approvals survived, every round | 0/10 |
+
+The lock is deliberately **best-effort**: where it cannot be taken (an odd
+filesystem), the write proceeds. That is never worse than not having it.
+
+Where a merge is possible, prefer it to last-writer-wins. Approvals are a
+grow-only set of content hashes — an entry means "a human vouched for these
+exact bytes" and nothing revokes one — so `save_approvals` unions with what is
+already on disk. That makes the write correct even if the lock was missed.
+
+Current state of every shared writer:
+
+| file | guard |
+|---|---|
+| `settings.json` | `F_SETLKW` range lock (works on NFS) |
+| `mcp.json` | mutex + `CrossProcessFileLock` |
+| `*_approved.json` | `CrossProcessFileLock` + merge + atomic rename |
+| `credentials/*.json` | `CrossProcessFileLock` (OAuth refresh) |
+| `rag_feedback.tsv` | append-only, lines under `PIPE_BUF` — atomic by POSIX |
+| `routing_memory.tsv` | inert; nothing writes it |
+
 ## See also
 
 - `include/agentty/util/user_root.hpp` — the one-root argument, at length
