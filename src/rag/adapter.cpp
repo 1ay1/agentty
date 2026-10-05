@@ -1377,7 +1377,22 @@ struct Retriever::Impl {
             if (!wanted.contains(ext)) continue;
             auto size = e.file_size(ec);
             if (ec || size > opts.max_file_bytes) { ec.clear(); continue; }
-            if (opts.max_files > 0 && out.size() >= opts.max_files) break;
+            if (opts.max_files > 0 && out.size() >= opts.max_files) {
+                // Say so. The ceiling is a real decision (an unbounded walk
+                // on a monorepo is a startup stall), but a corpus silently
+                // missing most of a repo makes retrieval look broken rather
+                // than bounded -- the user asks about a file that IS there
+                // and gets nothing, with no way to tell why.
+                //
+                // Logged rather than surfaced in the UI: unlike an oversized
+                // SKILL.md or an inert hook, nothing here is BROKEN, and the
+                // fix is "narrow the root or raise the cap" rather than
+                // "edit this file". A diagnostics line is the right weight.
+                AGT_LOG(Persist, Warn, "rag",
+                        "corpus hit the {} file ceiling under {} — indexing "
+                        "only part of it", opts.max_files, root.string());
+                break;
+            }
             auto mtime = e.last_write_time(ec).time_since_epoch().count();
             if (ec) { ec.clear(); continue; }
             auto rel = fs::relative(e.path(), root, ec).generic_string();
