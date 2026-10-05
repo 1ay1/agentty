@@ -202,10 +202,15 @@ inline constexpr char kMcpApprovalsLeaf[] = "mcp_approvals.json";
                                   const fs::path& cfg) noexcept {
     if (env_allows_project()) return true;
     std::error_code ec;
-    std::ifstream in(cfg, std::ios::binary);
     std::string bytes;
-    if (in) bytes.assign((std::istreambuf_iterator<char>(in)),
-                          std::istreambuf_iterator<char>());
+    // A directory opens successfully and throws on read, so check the KIND
+    // first. Leaving bytes empty here is also the safe answer: the guard
+    // below refuses to hand an empty hash to trust_of for a project source.
+    if (fs::is_regular_file(cfg, ec)) {
+        std::ifstream in(cfg, std::ios::binary);
+        if (in) bytes.assign((std::istreambuf_iterator<char>(in)),
+                              std::istreambuf_iterator<char>());
+    }
     // An empty hash would make trust_of answer Trusted (it reads "nothing to
     // bind to"), so an unreadable project file must not reach it.
     if (bytes.empty() && src.locus != scope::Locus::Explicit
@@ -275,6 +280,18 @@ struct ConfigServer {
 void read_one_config(const fs::path& file, const scope::Source& src,
                      std::unordered_map<std::string, ConfigServer>& out) {
     if (file.empty()) return;
+    // is_regular_file, not just a successful open. Opening a DIRECTORY
+    // succeeds on Linux -- the failure arrives later, as an exception out of
+    // the first read, and nlohmann's noexcept parse does not catch it. So
+    // `mkdir .agentty/mcp.json` aborted the whole agent with
+    // `basic_filebuf::underflow error reading the file: Is a directory`,
+    // which names neither agentty nor the path that did it.
+    //
+    // Config lives where users (and other tools, and scripts) can put
+    // anything, so "not the kind of thing I expected" has to be a no-op
+    // rather than a crash -- every other malformed case here already is.
+    std::error_code ec;
+    if (!fs::is_regular_file(file, ec)) return;
     std::ifstream in(file);
     if (!in) return;
     json doc = json::parse(in, nullptr, /*throw=*/false);

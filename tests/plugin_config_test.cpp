@@ -344,6 +344,39 @@ void concurrent_mutations_safe(const fs::path& dir) {
     std::println("PASS\n");
 }
 
+// A config path that is a DIRECTORY must not take the process down.
+//
+// `std::ifstream` opens a directory SUCCESSFULLY on Linux; the failure
+// arrives later as an exception out of the first read, and nlohmann's
+// noexcept parse does not catch it. So `mkdir .agentty/mcp.json` aborted
+// agentty with `basic_filebuf::underflow error reading the file: Is a
+// directory` -- a message naming neither agentty nor the path, from a
+// `run` that had nothing to do with config.
+//
+// Config lives where users, other tools and scripts can put anything, so
+// "not the kind of thing I expected" has to be a no-op. Every other
+// malformed case in this file already is; this was the one hole.
+void directory_shaped_config_is_not_fatal(const fs::path& dir) {
+    std::println("--- directory_shaped_config_is_not_fatal ---");
+    const fs::path cfg = dir / "dirshaped" / "mcp.json";
+    fs::create_directories(cfg);          // a DIRECTORY at the config path
+    check(fs::is_directory(cfg), "fixture really is a directory");
+
+    // Every reader must survive it. Before the fix each of these threw.
+    check(plug::list_servers(cfg).empty(), "list: no servers, no crash");
+    check(!plug::is_server_trusted(cfg, "anything"),
+          "trust probe: false, no crash");
+
+    // And no writer may clobber it. A directory in that position is exactly
+    // the kind of thing we must refuse rather than replace -- load() reports
+    // it as present-but-broken, which is what gates every mutation here.
+    check(plug::add_server(cfg, {"x", "/bin/true", {}}, false)
+              == plug::EditResult::ParseError,
+          "add refuses to overwrite a directory");
+    check(fs::is_directory(cfg), "the directory is still there, untouched");
+    std::println("PASS\n");
+}
+
 // A project mcp.json must NOT hide the user's own servers.
 //
 // There used to be TWO ladders. read_config_servers() merged project+user
@@ -638,6 +671,7 @@ TEST_CASE("plugin config") {
     concurrent_mutations_safe(sandbox);
     symlink_written_through(sandbox);
     project_does_not_hide_user_servers(sandbox);
+    directory_shaped_config_is_not_fatal(sandbox);
 
     std::error_code ec;
     fs::remove_all(sandbox, ec);

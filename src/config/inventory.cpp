@@ -88,6 +88,12 @@ constexpr char kMcpApprovalsLeaf[] = "mcp_approvals.json";
 // this whole file exists to avoid.
 [[nodiscard]] std::string trust_word(const scope::Source& src,
                                      const fs::path& file) {
+    // is_regular_file before opening: a DIRECTORY opens fine and then throws
+    // out of the first read, which an istreambuf_iterator slurp does not
+    // catch. Reporting trust must never be the thing that aborts the
+    // process.
+    std::error_code ec;
+    if (!fs::is_regular_file(file, ec)) return {};
     std::ifstream in(file, std::ios::binary);
     if (!in) return {};
     const std::string bytes((std::istreambuf_iterator<char>(in)),

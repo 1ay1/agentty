@@ -72,6 +72,21 @@ struct Loaded {
     Loaded out;
     std::error_code ec;
     if (!fs::exists(path, ec) || ec) return out;
+    // exists() is true for a DIRECTORY, and opening one succeeds on Linux --
+    // the failure surfaces later as an exception out of the first read,
+    // which nlohmann's noexcept parse does not catch. `mkdir mcp.json` used
+    // to abort the process with `basic_filebuf::underflow error reading the
+    // file: Is a directory`, naming neither agentty nor the path.
+    //
+    // Treat it as "present but broken" rather than absent: ok=false is what
+    // stops every writer here from clobbering a file it could not read, and
+    // a directory in that position is exactly something we must not
+    // overwrite.
+    if (!fs::is_regular_file(path, ec)) {
+        out.existed = true;
+        out.ok = false;
+        return out;
+    }
     out.existed = true;
     std::ifstream f(path, std::ios::binary);
     if (!f) { out.ok = false; return out; }
@@ -140,6 +155,10 @@ constexpr char kMcpApprovalsLeaf[] = "mcp_approvals.json";
 // The current project mcp.json's content hash, or empty if there's no file.
 [[nodiscard]] std::string project_config_hash() {
     const fs::path cfg = config_path(/*project=*/true);
+    // Same reason as load(): exists-and-opens is not the same as readable,
+    // and a directory here would throw out of the slurp below.
+    std::error_code ec;
+    if (!fs::is_regular_file(cfg, ec)) return {};
     std::ifstream in(cfg, std::ios::binary);
     if (!in) return {};
     std::string bytes((std::istreambuf_iterator<char>(in)),
