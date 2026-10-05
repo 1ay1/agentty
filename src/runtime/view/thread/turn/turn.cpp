@@ -221,14 +221,29 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m,
         // animation quality (fast scramble/ghost SLIDE, never a paste) comes
         // from the rate_tau low-pass — which is INDEPENDENT of the speed band.
         // So we lift the CEILING well above the answer path (reasoning is
-        // bulk, skimmable content the user reads faster than prose) to drain a
-        // big block quickly, keep the floor brisk so short reasoning types
-        // promptly, and hold a tight-ish lag so the cursor tracks the wire and
-        // never hoards a backlog to dump at the reasoning→answer settle. The
-        // earlier 95 cps ceiling was the bottleneck that made it feel slow.
+        // bulk, skimmable content the user reads faster than prose) and keep
+        // the floor brisk so short reasoning types promptly.
+        //
+        // The LAG matches the answer path (0.40), and that is a fix: it was
+        // 0.28, justified as "hold a tight-ish lag so the cursor tracks the
+        // wire and never hoards a backlog to dump at the reasoning->answer
+        // settle". That is the same argument the answer path above tried at
+        // 0.15 and retired, with a profile: a tight lag leaves no buffer, so
+        // the cursor drains each fat delta and then sits IDLE at the edge
+        // until the next one (57% of frames frozen at 90/0.15, <1% at
+        // 45/0.40). Reasoning arrives in BIGGER, sparser bursts than prose,
+        // so a short buffer bites harder there, not less — which is the
+        // reported "slow and bursty" reasoning: a sprint, then a stall.
+        //
+        // The dump it was guarding against cannot happen any more: the
+        // reasoning->answer seam drains through request_finalize(160) and the
+        // tool boundary through snap_reveal_to_edge(150), both bounded
+        // VISIBLE glides rather than a paste (docs/STREAMING_REVEAL.md, and
+        // the answer path's own comment says so). A larger steady-state
+        // backlog is drained smoothly at both.
         if (reasoning_view) {
             cache.streaming->set_reveal_pacing(/*floor_cps=*/60.0,
-                                               /*lead_secs=*/0.28);
+                                               /*lead_secs=*/0.40);
             cache.streaming->set_reveal_adaptive(true, /*min*/45.0,
                                                  /*max*/280.0);
         }

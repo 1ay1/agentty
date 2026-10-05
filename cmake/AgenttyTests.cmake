@@ -811,6 +811,27 @@ agentty_add_ctest(reveal_stream_gate_snap COMMAND
     --cps 45 --drain 0.40 --adaptive --snap-at 40 --snap-glide 150
     --assert-max-delta 40 --assert-finalize-max 40 --assert-finalize-ms 3600)
 
+# The REASONING profile, on a reasoning-SHAPED stream.
+#
+# The fixture above is answer prose: frequent small deltas. Reasoning is the
+# opposite shape -- a provider thinks silently for 1-3 s and then emits a
+# ~300-character summary chunk -- and the two tune differently. Reasoning's
+# lead window was 0.28 s, a value justified by "never hoard a backlog to dump
+# at the reasoning->answer settle"; the answer path had already tried a tight
+# lag (0.15), profiled it, and retired it because a short buffer leaves the
+# cursor idle AT the edge between bursts -- a sprint, then a stall, which is
+# what "slow and bursty" means.
+#
+# Measured on this fixture: drain 0.28 left the cursor idle-at-edge on 6.2% of
+# live frames with a max per-frame jump of 16; drain 0.40 gives 2.9% and 12,
+# with 52% more animating frames. The gate pins the delta ceiling so a future
+# retune of the reasoning lane cannot quietly reintroduce the chunking.
+set(_RSG_REASONING ${CMAKE_SOURCE_DIR}/tests/fixtures/reasoning_burst_shape.jsonl)
+agentty_add_ctest(reveal_stream_gate_reasoning COMMAND
+    agentty_standalone_tests anthropic_md_stream det ${_RSG_REASONING}
+    --cps 60 --drain 0.40 --adaptive
+    --assert-max-delta 24 --assert-finalize-max 40 --assert-finalize-ms 3600)
+
 # ── Concurrency ban-list ───────────────────────────────────────────
 # Raw threads, locks, atomics and thread_locals only where a human signed
 # off that they ARE the implementation of a safe type. Everything else goes
