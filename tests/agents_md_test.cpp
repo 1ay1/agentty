@@ -119,7 +119,15 @@ static void test_truncates_at_cap() {
     // +1 to skip the single '\n' the helper inserts between intro and content.
     const auto content_start = intro_pos + intro.size() + 1;
     const auto body = r.substr(content_start, close_pos - content_start);
-    CHECK(body.size() <= 64u * 1024u);
+    // The cap, plus the short marker the truncation appends.
+    CHECK(body.size() <= 64u * 1024u + 128u);
+
+    // And it SAYS it was cut. AGENTS.md is instructions and the reader is
+    // the model, so a silent cut means a rule written near the bottom --
+    // "never delete files without asking" is exactly where people put that
+    // -- never arrives, while the author watches the top of their file take
+    // effect and reasonably assumes the whole thing did.
+    CHECK(body.find("NOT read") != std::string::npos);
     fs::remove_all(ws);
 }
 

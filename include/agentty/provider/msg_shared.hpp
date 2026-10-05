@@ -193,6 +193,19 @@ wire_tool_result_images(const ToolUse& tc, unsigned max_side = util::kMaxWireIma
 // Truncated to `cap` bytes so one rogue multi-MB CLAUDE.md can't poison the
 // system prompt on every turn. Trailing whitespace is trimmed so a wrapper tag
 // never gets a blank line jammed against it.
+//
+// A truncated file SAYS SO, in the returned text. This matters more here than
+// anywhere else the codebase caps a read: AGENTS.md is INSTRUCTIONS, and the
+// reader is the model. Cutting silently at 64 KiB meant a rule written near
+// the bottom -- "never delete files without asking" is exactly the kind of
+// thing people put at the end -- simply did not reach the model, while the
+// author watched the top of their file take effect and reasonably concluded
+// the whole thing had.
+//
+// The marker is addressed to the model rather than logged, because the model
+// is who needs it: it is the one being asked to follow instructions it has
+// only part of, and it can say so when the missing part matters. A log line
+// would be read by nobody at the moment it counts.
 [[nodiscard]] inline std::string read_capped_file(
     const std::filesystem::path& p, std::size_t cap = 64u * 1024u) {
     std::error_code ec;
@@ -201,10 +214,14 @@ wire_tool_result_images(const ToolUse& tc, unsigned max_side = util::kMaxWireIma
     if (!f) return {};
     std::string s((std::istreambuf_iterator<char>(f)),
                    std::istreambuf_iterator<char>());
-    if (s.size() > cap) s.resize(cap);
+    const bool truncated = s.size() > cap;
+    if (truncated) s.resize(cap);
     while (!s.empty() && (s.back() == '\n' || s.back() == '\r'
                           || s.back() == ' ' || s.back() == '\t'))
         s.pop_back();
+    if (truncated)
+        s += "\n\n[truncated at " + std::to_string(cap / 1024)
+           + " KB — the rest of this file was NOT read]";
     return s;
 }
 
