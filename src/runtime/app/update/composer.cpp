@@ -460,6 +460,12 @@ Cmd smart_paste_from_clipboard(Model& m) {
         // TEXT-only reply can explain itself instead of silently inserting
         // prose where the user expected a screenshot.
         m.ui.clipboard_wanted_image = true;
+        // Sample the terminal's REFUSAL counter too. If it moves while we
+        // wait, kitty answered with EPERM — the protocol is there, the read
+        // permission is not — and the advice is one specific config line,
+        // not "your terminal doesn't support images".
+        m.ui.clipboard_refused_mark =
+            maya::clipboard_read_refused().load(std::memory_order_relaxed);
         // How long to wait before declaring "the terminal never answered".
         //
         // 1.2 s is right for a LOCAL terminal answering a text read: the
@@ -906,9 +912,28 @@ Cmd composer_update(Model& m, msg::ComposerMsg cm) {
             // ANY paste (bracketed, OSC 52 reply, OSC 5522 image reply)
             // satisfies an in-flight escape-based clipboard query — cancel
             // the pending no-reply diagnosis.
-            m.ui.clipboard_query_done = m.ui.clipboard_query_seq;
+            //
+            // EXCEPT: when we asked for an IMAGE and got TEXT. In tmux the
+            // OSC 52 (text) and OSC 5522 (image) requests go out together,
+            // and tmux answers the OSC 52 from its own paste buffer while
+            // the 5522 is still in flight to kitty. The text reply is
+            // instant; the image reply crosses two pty hops. If the text
+            // closes the window, the image arrives with nothing listening
+            // for it. So when wanted_image is true and this is NOT image
+            // bytes, keep the window open — the image may still be coming.
             const bool wanted_image = m.ui.clipboard_wanted_image;
-            m.ui.clipboard_wanted_image = false;
+            const bool is_image = !e.text.empty()
+                               && detect_image_media_type(e.text) != nullptr;
+            if (is_image || !wanted_image) {
+                m.ui.clipboard_query_done = m.ui.clipboard_query_seq;
+                m.ui.clipboard_wanted_image = false;
+            }
+            // Stash the text so the image-timeout path can fall back to it
+            // if no image ever arrives.
+            if (wanted_image && !is_image && !e.text.empty()) {
+                m.ui.clipboard_text_fallback = std::move(e.text);
+                return Cmd::none();
+            }
             // Empty bracketed paste → Windows Terminal signature for
             // "user hit Ctrl+V but the clipboard has no text content".
             // The terminal swallows Ctrl+V to run its own paste action;
@@ -1105,6 +1130,53 @@ Cmd composer_update(Model& m, msg::ComposerMsg cm) {
             // This query is dead. Clear the image-intent latch so it cannot
             // leak into an unrelated later paste and mislabel it.
             m.ui.clipboard_wanted_image = false;
+
+            // The terminal REFUSED the read — it answered, with EPERM.
+            //
+            // Checked first, and ahead of the text fallback, because it is
+            // the one case where we know exactly what is wrong and exactly
+            // which line fixes it. Every message below this is a guess from
+            // circumstantial evidence; this one is the terminal telling us.
+            const bool refused =
+                maya::clipboard_read_refused().load(std::memory_order_relaxed)
+                    != m.ui.clipboard_refused_mark;
+            if (refused) {
+                std::string txt = std::move(m.ui.clipboard_text_fallback);
+                m.ui.clipboard_text_fallback.clear();
+                m.ui.clipboard_query_done = m.ui.clipboard_query_seq;
+                auto toast = set_status_toast(
+                    m,
+                    "clipboard: your terminal refused the image read \xe2\x80\x94 "
+                    "in kitty.conf add `clipboard_control write-clipboard "
+                    "write-primary read-clipboard read-primary` and restart "
+                    "kitty (it is write-only by default)",
+                    std::chrono::seconds{12});
+                if (txt.empty()) return toast;
+                return Cmd::batch(
+                    composer_update(m, ComposerPaste{std::move(txt)}),
+                    std::move(toast));
+            }
+
+            // If a TEXT reply arrived while we waited for an image (the tmux
+            // race: tmux answered OSC 52 from its buffer while OSC 5522 was
+            // still in flight to kitty), use it now rather than diagnosing
+            // "no answer" — the terminal DID answer, just not with the kind
+            // we wanted, and showing the user an error while their text is
+            // stashed is worse than showing the text.
+            if (!m.ui.clipboard_text_fallback.empty()) {
+                std::string txt = std::move(m.ui.clipboard_text_fallback);
+                m.ui.clipboard_text_fallback.clear();
+                m.ui.clipboard_query_done = m.ui.clipboard_query_seq;
+                auto toast = set_status_toast(
+                    m,
+                    "pasted text \xe2\x80\x94 for images over SSH, kitty needs "
+                    "clipboard_control read-clipboard in kitty.conf (restart "
+                    "kitty after adding it)",
+                    std::chrono::seconds{8});
+                return Cmd::batch(
+                    composer_update(m, ComposerPaste{std::move(txt)}),
+                    std::move(toast));
+            }
             // Name the user's EXACT situation and the shortest path out —
             // an unanswered query must never dead-end in silence.
             const bool in_mosh = [] {
@@ -1224,12 +1296,14 @@ Cmd composer_update(Model& m, msg::ComposerMsg cm) {
                           "\",*:clipboard\"` if it does, or set AGENTTY_CLIPBOARD_CMD";
                 } else {
                     msg = "clipboard: no reply through tmux \xe2\x80\x94 passthrough and "
-                          "clipboard are on, so the outer terminal didn't answer "
-                          "(images need a kitty outer terminal)";
+                          "clipboard are on, so the outer terminal refused the "
+                          "read (in kitty: add read-clipboard to clipboard_control "
+                          "in kitty.conf and restart kitty)";
                 }
             } else if (in_ssh) {
                 msg = "clipboard: your terminal didn't answer \xe2\x80\x94 images "
-                      "over SSH need kitty (OSC 5522); else set "
+                      "over SSH need kitty with clipboard_control read-clipboard "
+                      "in kitty.conf (restart kitty after adding it); else set "
                       "AGENTTY_CLIPBOARD_CMD='ssh <laptop> wl-paste -t image/png'";
             } else {
                 msg = "clipboard: terminal didn't answer the read query "

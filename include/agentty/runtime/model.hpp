@@ -408,6 +408,11 @@ struct Model {
         // timeout compares against it to tell a silent terminal from one
         // whose (large, image) reply is still streaming in.
         std::uint64_t       clipboard_rx_mark    = 0;
+        // maya::clipboard_read_refused() sampled when the query was armed.
+        // Movement means the terminal answered with EPERM/ENOSYS rather than
+        // staying silent — a different fault with a different fix, which the
+        // user cannot distinguish from the symptom alone.
+        std::uint64_t       clipboard_refused_mark = 0;
         // True when the in-flight query was raised by an IMAGE-paste intent
         // (Ctrl+V / Alt+V on a clipboard we could not read locally), as
         // opposed to an ordinary text paste. Set alongside the seq bump.
@@ -420,6 +425,11 @@ struct Model {
         // without this flag there is no moment at which anything can explain
         // what happened — the failure is invisible.
         bool                clipboard_wanted_image = false;
+        // Text stashed by the ComposerPaste arm when wanted_image is true and
+        // the paste was text (the tmux race: OSC 52 text reply arrives before
+        // the OSC 5522 image reply). The timeout path uses it as a fallback
+        // instead of diagnosing "no answer" while the text is sitting here.
+        std::string         clipboard_text_fallback;
         // (Smart-Mode slot-assign state used to be parked HERE as three
         // fields — slot, advanced, from — because the hand-off destroyed the
         // SmartMode overlay. It now rides ON the assign-mode Models panel

@@ -214,6 +214,29 @@ std::string runtime_dir() {
     return "/run/user/" + std::to_string(static_cast<unsigned>(::getuid()));
 }
 
+// True when this process is on the far side of an ssh/mosh hop, so the
+// clipboard the LOCAL tools can reach is not the one the user copied into.
+//
+// This matters on macOS specifically. On Linux a remote host usually has no
+// display at all, so wl-paste/xclip fail and the code falls through to the
+// terminal query by accident. A Mac always has a working pasteboard, so
+// pbpaste SUCCEEDS over ssh — it just answers about the wrong machine. The
+// read then returns that host's stale text and never asks the terminal,
+// which is the one path that can actually reach the laptop's clipboard.
+//
+// Env sniff, not a syscall: the question is "did someone ssh in", and
+// sshd/mosh-server answer it by exporting these. AGENTTY_LOCAL_CLIPBOARD=1
+// forces the local tools back on, for the case this sniff gets wrong (a
+// remote session that really does own the display the user copied from — a
+// VNC/XRDP desktop, say).
+bool session_is_remote() {
+    if (const char* f = std::getenv("AGENTTY_LOCAL_CLIPBOARD"); f && *f == '1')
+        return false;
+    for (const char* k : {"SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"})
+        if (const char* v = std::getenv(k); v && *v) return true;
+    return false;
+}
+
 // Single-quote a value for safe inclusion in a shell command. Every
 // embedded quote is closed, escaped, and reopened ('\''). Paths from the
 // filesystem can contain anything; this keeps a hostile runtime dir name
@@ -613,6 +636,18 @@ std::optional<ClipboardImage> read_clipboard_image(std::string* error_out) {
     return fail("clipboard has no image");
 
 #elif defined(__APPLE__)
+    // SKIPPED over ssh — and this is the whole macOS image-paste bug.
+    //
+    // On Linux a remote host usually has no display, so wl-paste/xclip fail
+    // and the read falls through to the terminal query BY ACCIDENT. A Mac
+    // always has a working pasteboard, so pngpaste/osascript SUCCEED over
+    // ssh; they just answer about the wrong machine. "clipboard has no
+    // image" from the far end then hid the fact that the user's laptop had
+    // a screenshot on it, and the terminal — the only path that can reach
+    // that clipboard — was never asked.
+    if (session_is_remote())
+        return fail("ssh session \xe2\x80\x94 the pasteboard on this host is "
+                    "not the one you copied into");
     if (tool_in_path("pngpaste")) {
         if (auto img = wrap(popen_capture("pngpaste - 2>/dev/null", kCap)))
             return img;
@@ -904,6 +939,19 @@ std::optional<std::string> read_clipboard_text(std::string* error_out) {
     return fail("clipboard has no text");
 
 #elif defined(__APPLE__)
+    // SKIPPED over ssh, and this is the half that actually broke image paste.
+    //
+    // smart_paste_from_clipboard tries image, then TEXT, then the terminal.
+    // pbpaste succeeds over ssh against the wrong machine, so any stale text
+    // on the remote host satisfied the text step and the function returned
+    // before ever asking the terminal — the user pressed Ctrl+V on a fresh
+    // screenshot and got whatever they last copied on the server.
+    //
+    // Refusing here is what lets the fallback chain reach OSC 5522, which
+    // carries the real image back from kitty over the pty.
+    if (session_is_remote())
+        return fail("ssh session \xe2\x80\x94 the pasteboard on this host is "
+                    "not the one you copied into");
     auto r = popen_capture("pbpaste 2>/dev/null", kCap);
     if (r.status == 0 && !r.bytes.empty()) return std::move(r.bytes);
     return fail("clipboard has no text");
