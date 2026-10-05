@@ -764,6 +764,18 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m,
     //        widget, fx on), so nothing visible is lost — the animation
     //        simply doesn't outlive the prose it animates.
     {
+        // NOTE on lane scope. This block reasons about tool CARDS
+        // interleaved into the body being revealed, which is an ANSWER-body
+        // concern: the reasoning "#r" slot has no cards inside it (a tool
+        // call belongs to the answer, below the reasoning block). Most of
+        // what follows is therefore inert for reasoning -- but the cursor
+        // SNAPS were not, and they ran for both lanes (#79).
+        //
+        // The guards are on the snap/finish sites below rather than on
+        // has_cards, deliberately: has_cards also appears NEGATED (see
+        // text_gone_quiet), so forcing it false for reasoning would make a
+        // drain path newly REACHABLE on that lane instead of unreachable.
+        // Removing a wrong effect must not add a new one.
         const bool has_cards = !msg.tool_calls.empty();
 
         // ── Pre-emptive end-of-text drain (kills the burst at its ROOT) ──
@@ -1179,7 +1191,20 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m,
                 // reveal_in_progress() reading with different semantics.
                 const bool was_deferring = cache.defer_tool_panel;
                 const bool has_backlog = backlog_worth_smoothing;
-                if (has_backlog) {
+                if (reasoning_view) {
+                    // The reasoning lane has no card to stay consistent
+                    // with, so there is nothing here to protect and the snap
+                    // is pure damage: it jumped the reasoning cursor to the
+                    // live edge at every tool boundary, bursting the block
+                    // once per tool call and worst on the last paragraph,
+                    // where the final call lands (#79). Leave the reveal
+                    // alone and let it keep gliding.
+                    //
+                    // Scrollback safety, which is why the snap exists, is an
+                    // ANSWER-body concern: it is the growing tool CARD that
+                    // can push a half-revealed row off the top. The reasoning
+                    // block sits above the cards and is not what grows.
+                } else if (has_backlog) {
                     // Bounded glide, then defer the finish to the exit path.
                     cache.streaming->snap_reveal_to_edge(/*glide_ms=*/150);
                     cache.defer_tool_panel    = true;
