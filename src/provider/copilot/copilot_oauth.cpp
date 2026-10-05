@@ -24,6 +24,13 @@
 #include <set>
 #include <thread>
 
+#ifndef _WIN32
+#include <unistd.h>   // getpid — unique temp name per process
+#else
+#include <process.h>  // _getpid
+#define getpid _getpid
+#endif
+
 #include <nlohmann/json.hpp>
 
 #include "agentty/auth/auth.hpp"
@@ -442,10 +449,35 @@ void save_support(const SupportSets& s) {
     for (auto& id : s.unsupported) j["unsupported"].push_back(id);
     j["supported"] = json::array();
     for (auto& id : s.supported) j["supported"].push_back(id);
+    const std::string payload = j.dump();
+
     std::error_code ec;
-    fs::create_directories(support_path().parent_path(), ec);
-    std::ofstream ofs(support_path(), std::ios::trunc);
-    if (ofs) ofs << j.dump();
+    const auto dest = support_path();
+    fs::create_directories(dest.parent_path(), ec);
+
+    // Unique temp + atomic rename, like every other JSON store here.
+    //
+    // The previous form opened the real path with trunc, which makes the
+    // file momentarily EMPTY and then partial. Two readers can see that:
+    // another agentty process, and this one's own note_* callers on other
+    // threads. A torn read parses as nothing, load_support() returns empty
+    // sets, and the account "forgets" which models it may use -- so the next
+    // request re-probes a model the server already refused.
+    //
+    // Nothing is lost permanently either way (this is a relearnable cache,
+    // which is exactly why it lives in cache/ rather than credentials/), but
+    // a wrong answer that costs a round-trip is worth four lines to avoid.
+    // The pid in the name keeps two processes from sharing a temp.
+    fs::path tmp = dest;
+    tmp += "." + std::to_string(static_cast<long long>(::getpid())) + ".tmp";
+    {
+        std::ofstream ofs(tmp, std::ios::binary | std::ios::trunc);
+        if (!ofs) return;
+        ofs.write(payload.data(), static_cast<std::streamsize>(payload.size()));
+        if (!ofs) { fs::remove(tmp, ec); return; }
+    }
+    fs::rename(tmp, dest, ec);
+    if (ec) fs::remove(tmp, ec);
 }
 } // namespace
 
