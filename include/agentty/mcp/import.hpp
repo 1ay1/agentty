@@ -109,6 +109,10 @@ struct Scan {
     std::vector<fs::path> looked_in;   // every path probed, present or not
     std::vector<Found>    servers;
     std::string           error;       // malformed config: refuse, don't guess
+    // Entries that were present but not importable: no command or url, or a
+    // name agentty cannot manage. Counted so the scan can SAY so -- "3 of 5
+    // imported" with no explanation is how someone concludes it is broken.
+    int                   skipped = 0;
 };
 
 // Read a tool's configs. Pure-ish: touches only the filesystem, writes

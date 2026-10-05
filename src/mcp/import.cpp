@@ -33,6 +33,32 @@ namespace {
     return nullptr;
 }
 
+// Is this a name agentty can actually work with?
+//
+// Import is a TRUST BOUNDARY: the bytes come from a file another tool wrote,
+// which means they can contain anything. A name is not just a label -- it is
+// the key a user types to disable a server, the prefix on every tool it
+// exposes, and a cell in three different tables.
+//
+// Observed from a hostile fixture: an EMPTY name renders as a blank row
+// nobody can address, and a name containing a NEWLINE splits `plugin list`
+// across two lines so the table stops parsing by eye. Neither is a security
+// hole -- canonical_mcp_name() sanitises the tool names downstream -- but
+// both produce an entry the user cannot manage, which is its own kind of
+// broken.
+//
+// Refuse at the boundary rather than carrying junk inward. Deliberately NOT
+// a character allow-list: names legitimately carry dots, dashes and
+// non-ASCII, and guessing which are "safe" would reject real servers to
+// prevent a cosmetic problem.
+[[nodiscard]] bool usable_name(std::string_view n) noexcept {
+    if (n.empty()) return false;
+    if (n.size() > 128) return false;         // a label, not a payload
+    for (unsigned char c : n)
+        if (c < 0x20 || c == 0x7f) return false;   // control bytes
+    return true;
+}
+
 // Decode just enough of one foreign entry to display and validate it.
 //
 // The ENTRY ITSELF is kept whole. `mcp.json` is one schema across tools, so
@@ -43,6 +69,7 @@ namespace {
 [[nodiscard]] bool translate(const std::string& name, const json& e,
                              const fs::path& from, Found& out) {
     if (!e.is_object()) return false;
+    if (!usable_name(name)) return false;
     out.name  = name;
     out.from  = from;
     out.entry = e;   // verbatim
@@ -74,7 +101,7 @@ void scan_claude_nested(const json& doc, const fs::path& project,
 }
 
 void scan_file(const fs::path& file, const fs::path& project,
-               std::vector<Found>& out, std::string& error) {
+               std::vector<Found>& out, std::string& error, int& skipped) {
     std::error_code ec;
     if (!fs::is_regular_file(file, ec)) return;
     std::ifstream in(file);
@@ -91,6 +118,8 @@ void scan_file(const fs::path& file, const fs::path& project,
             Found f;
             if (translate(it.key(), it.value(), file, f))
                 out.push_back(std::move(f));
+            else
+                ++skipped;   // no transport, or a name we cannot manage
         }
     }
     scan_claude_nested(doc, project, file, out);
@@ -170,7 +199,7 @@ Scan scan(Tool t, const fs::path& home, const fs::path& project) {
     for (const fs::path& p : {loc.user, loc.project}) {
         if (p.empty()) continue;
         s.looked_in.push_back(p);
-        scan_file(p, project, s.servers, s.error);
+        scan_file(p, project, s.servers, s.error, s.skipped);
     }
     for (Found& f : s.servers) f.conflicts = existing.contains(f.name);
     AGT_LOG(Persist, Debug, "mcp", "import.scan {}: {} server(s) in {} path(s)",
@@ -222,6 +251,11 @@ void print_scan(const Scan& s) {
         std::printf("    %-20s %s%s\n", f.name.c_str(),
                     f.command.empty() ? f.url.c_str() : f.command.c_str(),
                     f.conflicts ? "   (agentty already has this name)" : "");
+    // Never drop an entry silently. "3 of 5 imported" with no explanation is
+    // how someone concludes the import is broken.
+    if (s.skipped > 0)
+        std::printf("    %d entry(s) skipped: no command or url, or a name"
+                    " agentty cannot manage\n", s.skipped);
 }
 
 }  // namespace

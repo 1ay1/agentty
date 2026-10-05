@@ -222,6 +222,47 @@ TEST_CASE("the ADOPTED file keeps every key, and never clobbers") {
     else     ::unsetenv("AGENTTY_HOME");
 }
 
+TEST_CASE("names agentty cannot manage are refused, and counted") {
+    // Import is a trust boundary: the bytes come from a file another tool
+    // wrote, so a name can be anything. It is not just a label -- it is the
+    // key you type to disable a server, the prefix on every tool it exposes,
+    // and a cell in three tables.
+    //
+    // Two shapes break that, found by feeding a hostile fixture in: an EMPTY
+    // name renders as a blank row nobody can address, and a name containing
+    // a NEWLINE splits `plugin list` across two lines so the table stops
+    // parsing by eye. Neither is a security hole (canonical_mcp_name()
+    // sanitises tool names downstream), but both produce an entry the user
+    // cannot manage.
+    const auto dir = sandbox("names");
+    // Note the ESCAPED \n: a literal newline would be invalid JSON, and the
+    // point is a name that parses fine and then breaks everything after it.
+    write_file(dir / ".junie" / "mcp" / "mcp.json",
+               "{\"mcpServers\":{"
+               "  \"good\":      {\"command\":\"/bin/true\"},"
+               "  \"\":          {\"command\":\"/bin/x\"},"
+               "  \"two\\nlines\": {\"command\":\"/bin/y\"},"
+               "  \"../../odd\": {\"command\":\"/bin/z\"}"
+               "}}");
+
+    const imp::Scan s = imp::scan(imp::Tool::Junie, dir, dir / "nowhere");
+    CHECK(by_name(s, "good") != nullptr, "an ordinary name is kept");
+    CHECK(by_name(s, "") == nullptr, "an empty name is refused");
+    for (const auto& f : s.servers)
+        CHECK(f.name.find('\n') == std::string::npos,
+              "no control bytes survive into a name");
+
+    // `../../odd` is just an odd STRING -- it is a JSON key, never joined
+    // onto a path. Rejecting it would turn a cosmetic worry into refusing
+    // real servers, so it is kept deliberately.
+    CHECK(by_name(s, "../../odd") != nullptr,
+          "a path-looking name is still just a name");
+
+    // And the refusals are REPORTED. "2 of 4 imported" with no explanation
+    // is how someone concludes the import is broken.
+    CHECK(s.skipped == 2, "both unusable entries are counted");
+}
+
 TEST_CASE("scanning writes nothing") {
     // Discovery is not a mutation. `agentty mcp import` with no --from is a
     // report, and a report that creates files is a trap.
