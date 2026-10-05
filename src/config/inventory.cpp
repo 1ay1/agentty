@@ -78,7 +78,7 @@ constexpr scope::Dialect kAllDialects[] = {
 
 // The approvals leaf MCP vouches against. Same constant bridge.cpp uses;
 // named here so the report reads the same store the spawn gate reads.
-constexpr char kMcpApprovalsLeaf[] = "mcp_approvals.json";
+constexpr std::string_view kMcpApprovalsLeaf = kMcpApprovals;
 
 // What trust_of says about this source, as a word.
 //

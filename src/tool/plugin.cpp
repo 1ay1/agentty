@@ -6,6 +6,7 @@
 #include "agentty/util/user_root.hpp"
 
 #include "agentty/scope/scope.hpp"
+#include "agentty/config/inventory.hpp"   // kMcpApprovals — the one name
 #include "agentty/auth/auth.hpp"        // CrossProcessFileLock
 
 #include <nlohmann/json.hpp>
@@ -177,7 +178,8 @@ fs::path config_path(bool project) {
 namespace {
 // Must match the bridge's kMcpApprovalsLeaf + hashing exactly — both sides
 // read/write the SAME user-root store keyed by the SAME content hash.
-constexpr char kMcpApprovalsLeaf[] = "mcp_approvals.json";
+constexpr std::string_view kMcpApprovalsLeaf =
+    ::agentty::config::kMcpApprovals;
 
 // The current project mcp.json's content hash, or empty if there's no file.
 [[nodiscard]] std::string project_config_hash() {

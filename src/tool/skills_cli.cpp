@@ -38,10 +38,18 @@
 #include "agentty/tool/skills.hpp"
 
 #include "agentty/scope/scope.hpp"
+#include "agentty/config/inventory.hpp"   // kSkillsApprovals — the one name
 #include "agentty/util/home_dir.hpp"
 #include "agentty/util/user_root.hpp"
 
 #include <nlohmann/json.hpp>
+
+// The inventory and the skills header must name the same store. Both exist
+// because skills.hpp is consumed by callers that must not pull the
+// inventory in; this keeps them from drifting.
+static_assert(agentty::tools::skills::kApprovalsLeaf
+                  == agentty::config::kSkillsApprovals,
+              "skills approvals leaf must match the inventory");
 
 #include <algorithm>
 #include <cstdio>

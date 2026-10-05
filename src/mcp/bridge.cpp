@@ -167,7 +167,8 @@ std::chrono::milliseconds call_timeout() {
 // thing it replaced; this is that migration finished.
 
 // The approvals store leaf under ~/.agentty (scope::load/save_approvals).
-inline constexpr char kMcpApprovalsLeaf[] = "mcp_approvals.json";
+inline constexpr std::string_view kMcpApprovalsLeaf =
+    ::agentty::config::kMcpApprovals;
 
 // May a WORKSPACE-LOCAL config spawn its (stdio) servers this session?
 // A project mcp.json rides in on a clone and can spawn arbitrary commands

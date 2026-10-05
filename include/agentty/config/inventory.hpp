@@ -188,6 +188,18 @@ inline constexpr dirs::Spec kFeedbackSpec{
     return r == dirs::Root::User ? "AGENTTY_HOME" : "AGENTTY_PROJECT_DIR";
 }
 
+// ── Approval stores ────────────────────────────────────────────────
+//
+// Content hashes a human has vouched for. Always under the USER root, so a
+// cloned repo can never vouch for itself.
+//
+// Declared here because each name was previously spelled in several files --
+// "mcp_approvals.json" appeared in four -- and a store the readers and the
+// writer disagree about silently trusts nothing.
+inline constexpr std::string_view kSkillsApprovals = "skills_approved.json";
+inline constexpr std::string_view kHooksApprovals  = "hooks_approved.json";
+inline constexpr std::string_view kMcpApprovals    = "mcp_approvals.json";
+
 // ── Entry: one concern, both halves ──────────────────────────────────────
 //
 // Pointers rather than values so this stays an aggregate pointing AT the

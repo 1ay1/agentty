@@ -338,6 +338,8 @@ struct Finding {
 // The approvals store leaf, under the USER root — a cloned repo cannot
 // write here, so it cannot pre-approve its own skills.
 inline constexpr std::string_view kApprovalsLeaf = "skills_approved.json";
+// NOTE: config::kSkillsApprovals is the same name, declared in the inventory.
+// A static_assert in skills_cli.cpp keeps the two from drifting.
 
 // Load / persist the skill approvals store (kApprovalsLeaf under the user
 // root). Separate from hooks' and MCP's stores on purpose: approving a

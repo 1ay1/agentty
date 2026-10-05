@@ -16,6 +16,7 @@
 
 #include "agentty/tool/hooks.hpp"
 #include "agentty/util/user_root.hpp"
+#include "agentty/config/inventory.hpp"   // kHooksApprovals — the one name
 #include "agentty/util/capped_read.hpp"   // the one capped-read primitive
 
 #include "agentty/auth/auth.hpp"            // auth::sha256_hex (file-content hash)
@@ -135,7 +136,7 @@ struct HooksFile {
 [[nodiscard]] fs::path approvals_path() {
     auto root = ::agentty::util::user_root();
     if (root.empty()) return {};
-    return root / "hooks_approved.json";
+    return root / fs::path{::agentty::config::kHooksApprovals};
 }
 
 // Hooks trust now rides on the SHARED content-hash primitive
@@ -150,7 +151,8 @@ struct HooksFile {
 // is a flat hash LIST; the pre-scope format was a {abs_path: hash} OBJECT.
 // load_hook_approvals() reads either — an object is migrated in place by
 // taking its hash VALUES — so nobody loses an approval across the upgrade.
-constexpr char kHooksApprovalsLeaf[] = "hooks_approved.json";
+constexpr std::string_view kHooksApprovalsLeaf =
+    ::agentty::config::kHooksApprovals;
 
 [[nodiscard]] scope::Approvals load_hook_approvals() {
     // Fast path: the scope loader handles the new array form (and returns
