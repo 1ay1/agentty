@@ -228,6 +228,15 @@ namespace detail {
 // set changes; replaces the previous set wholesale.
 void install_probe_hosts(std::set<std::string> hosts);
 
+// Does this endpoint really speak Ollama's native /api/* protocol?
+//
+// 11434 is Ollama's PORT, not proof of its protocol -- llama.cpp can be told
+// to serve there, and then /api/chat 404s every turn while
+// /v1/chat/completions works fine (#73). One GET of /api/tags, cached per
+// host:port. Unreachable counts as native, so a busy daemon is not
+// downgraded.
+[[nodiscard]] bool endpoint_speaks_native(const Endpoint& ep);
+
 // ── Custom-host dialect probe ───────────────────────────────────
 // One call answers "what is actually running at this endpoint?" before a
 // custom host is committed. Tries, in order:

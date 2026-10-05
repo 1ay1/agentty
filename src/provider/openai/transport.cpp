@@ -20,6 +20,8 @@
 // StreamToolUseEnd when the index is superseded or the stream ends.
 
 #include "agentty/provider/openai/transport.hpp"
+
+#include <jaal/kernel/guarded.hpp>
 // The observation tables: every way this spec-less wire spells a field lives
 // there, not here. See lens.hpp for why a Lens and not an acp::Codec.
 #include "agentty/provider/openai/dialect.hpp"
@@ -1634,7 +1636,45 @@ void feed_ndjson(StreamCtx& ctx, const char* data, size_t len) {
 
 } // namespace
 
-// ── Endpoint presets ────────────────────────────────────────────────────────
+// Does this endpoint really speak Ollama's native /api/* protocol? See the
+// header. Unreachable counts as native so a busy daemon is not downgraded.
+bool endpoint_speaks_native(const Endpoint& ep) {
+    if (!ep.native_api) return false;
+
+    static jaal::guarded<std::map<std::string, bool, std::less<>>> cache;
+    const std::string key = ep.host + ":" + std::to_string(ep.port);
+    if (auto hit = cache.with(
+            [](auto& m, std::string k) -> std::optional<bool> {
+                auto it = m.find(k);
+                return it == m.end() ? std::nullopt : std::optional{it->second};
+            }, key))
+        return *hit;
+
+    http::Request probe;
+    probe.method    = http::HttpMethod::Get;
+    probe.host      = ep.host;
+    probe.port      = ep.port;
+    probe.path      = "/api/tags";
+    probe.plaintext = !ep.use_tls;
+    http::Timeouts tos;
+    tos.connect = std::chrono::milliseconds(2'000);
+    tos.total   = std::chrono::milliseconds(3'000);
+
+    auto resp = http::default_client().send(probe, tos);
+    const bool native = !resp || resp->status == 200;
+    if (!native)
+        AGT_LOG(Wire, Info, "openai",
+                "{}:{} has no /api/tags — treating it as OpenAI-compatible",
+                ep.host, ep.port);
+
+    cache.with([](auto& m, std::pair<std::string, bool> kv) {
+        m.insert_or_assign(std::move(kv.first), kv.second);
+        return 0;
+    }, std::pair{key, native});
+    return native;
+}
+
+// ── Endpoint presets ─────────────────────────────────────────────────────────
 Endpoint Endpoint::from_spec(std::string_view spec) {
     auto eq = [](std::string_view a, const char* b) {
         return a == std::string_view{b};
@@ -3494,19 +3534,32 @@ std::vector<ModelInfo> list_models(const AuthHeader& auth, const Endpoint& endpo
     // process (Endpoint::from_spec output is rebuilt per selection, so the
     // correction also has to happen at request time — see run_stream_sync's
     // matching fallback note).
+    //
+    // The retry covers Ollama too. 11434 is Ollama's port but llama.cpp can
+    // be told to use it, and then /api/tags 404s while /v1/models answers
+    // fine — an empty model picker against a server the user can curl (#73).
+    // Falling back here means picking "Ollama" for an OpenAI-compatible
+    // server on that port lists models instead of looking broken.
+    bool fell_back_to_v1 = false;
     if (resp && resp->status == 404
-        && !endpoint.models_path.starts_with("/v1/")
-        && !endpoint.native_api) {
+        && !endpoint.models_path.starts_with("/v1/")) {
         http::Request retry = hreq;
         retry.path = "/v1/models";
         auto second = http::default_client().send(retry, tos);
-        if (second && second->status == 200) resp = std::move(second);
+        if (second && second->status == 200) {
+            resp = std::move(second);
+            // The body is now OpenAI-shaped whatever the preset said, so the
+            // parse below must follow the RESPONSE rather than the registry
+            // row. Reading a {"data":[...]} list as Ollama's {"models":[...]}
+            // yields an empty picker that looks exactly like the 404 did.
+            fell_back_to_v1 = true;
+        }
     }
     if (!resp || resp->status != 200) return result;
 
     try {
         auto j = json::parse(resp->body);
-        if (endpoint.native_api) {
+        if (endpoint.native_api && !fell_back_to_v1) {
             // Ollama /api/tags: {"models":[{"name":"qwen2.5-coder:7b",...}]}
             // Collect model names first, then probe /api/show for each to
             // determine tool support (Zed-style capability check).

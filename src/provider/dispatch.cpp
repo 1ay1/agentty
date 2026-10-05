@@ -88,11 +88,20 @@ StreamResult dispatch_stream(const ProviderRouter& router, const Selection& sel,
     //    its native /api/chat NDJSON dialect; every other OpenAI-compatible
     //    endpoint (openai/groq/openrouter/together/cerebras/llama.cpp/custom)
     //    goes through the shared OpenAI transport.
-    if (sel.openai_endpoint.native_api) {
+    // 11434 is Ollama's PORT, not proof of its protocol: llama.cpp can be
+    // told to serve there, and then /api/chat 404s every turn (#73). Ask the
+    // host once; if it has no /api/tags, treat it as OpenAI-compatible.
+    if (openai::endpoint_speaks_native(sel.openai_endpoint)) {
         ollama::OllamaProvider p{sel.openai_endpoint};
         return p.stream(std::move(req), std::move(sink));
     }
-    openai::OpenAIProvider p{sel.openai_endpoint};
+    openai::Endpoint ep = sel.openai_endpoint;
+    if (ep.native_api) {
+        ep.native_api  = false;
+        ep.path        = "/v1/chat/completions";
+        ep.models_path = "/v1/models";
+    }
+    openai::OpenAIProvider p{ep};
     return p.stream(std::move(req), std::move(sink));
 }
 
