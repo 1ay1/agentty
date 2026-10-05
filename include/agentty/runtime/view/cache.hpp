@@ -110,15 +110,6 @@ struct MessageMdCache {
     // -1 = nothing applied yet (a fresh widget configures unconditionally).
     int                                       applied_motion = -1;
 
-    // Set once the reasoning->answer seam glide has been armed for this
-    // slot. The trigger is a state TRANSITION (reasoning settles when the
-    // answer's first byte lands), not a byte arrival, so it cannot live
-    // under the sizes-changed gate -- reasoning's source stops growing at
-    // exactly that moment, which is why the seam was previously unbounded.
-    // Latched so the deadline is stamped once; re-arming each frame would
-    // keep pushing it back and the cursor would never land.
-    bool                                      seam_glide_armed = false;
-
     // ── Reveal bookkeeping ──
     //
     // There is no host-side typewriter cursor: cached_markdown_for feeds

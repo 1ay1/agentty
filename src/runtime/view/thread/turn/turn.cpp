@@ -235,13 +235,12 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m,
         // so a short buffer bites harder there, not less — which is the
         // reported "slow and bursty" reasoning: a sprint, then a stall.
         //
-        // The dump it was guarding against is bounded elsewhere now: the
-        // tool boundary drains through snap_reveal_to_edge(150), and the
-        // reasoning->answer seam through the request_finalize(220) armed
-        // below -- both bounded VISIBLE glides rather than a paste. (That
-        // seam ramp is new: this comment previously claimed the seam already
-        // drained through request_finalize(160), which was the ANSWER path's
-        // mechanism. Nothing bounded the reasoning side at all.)
+        // The dump it was guarding against cannot happen any more: the
+        // reasoning->answer seam drains through request_finalize(160) and the
+        // tool boundary through snap_reveal_to_edge(150), both bounded
+        // VISIBLE glides rather than a paste (docs/STREAMING_REVEAL.md, and
+        // the answer path's own comment says so). A larger steady-state
+        // backlog is drained smoothly at both.
         if (reasoning_view) {
             cache.streaming->set_reveal_pacing(/*floor_cps=*/60.0,
                                                /*lead_secs=*/0.40);
@@ -641,43 +640,6 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m,
             } else {
                 cache.streaming->set_live(true);
             }
-        }
-
-        // ── The reasoning → answer seam ─────────────────────────────
-        //
-        // A reasoning slot settles the INSTANT the answer produces its first
-        // byte (see `settled` above: reasoning_active goes false). If the
-        // reasoning cursor still has backlog at that moment, nothing above
-        // bounds it:
-        //
-        //   • the settle branch is gated on !sizes_unchanged, and reasoning's
-        //     source STOPS GROWING exactly when it settles — so from the next
-        //     frame on that gate is false and the branch never runs again.
-        //   • even when it does run, end_glide_running is true while the
-        //     reveal is in progress, so finish() is (correctly) skipped.
-        //
-        // The widget is therefore left live with an unbounded glide: the
-        // reasoning block keeps typing at its own pace while the answer races
-        // underneath it, two typewriters running to different clocks. That is
-        // the jerky hand-off — and the alternative (letting finish() fire)
-        // is a one-frame paste of the remainder, which is worse.
-        //
-        // So arm the same bounded VISIBLE glide the answer path uses at its
-        // seams: a hard deadline that sprints the cursor to the edge over
-        // ~220 ms. Reasoning is skimmable bulk the reader has already moved
-        // past by the time the answer starts, so finishing it promptly is
-        // what the eye wants; the ramp keeps it a slide rather than a pop.
-        //
-        // Armed ONCE per slot (seam_glide_armed), outside the sizes gate,
-        // because the trigger is a state TRANSITION and not a byte arrival.
-        // Re-arming every frame would restamp the deadline and the cursor
-        // would never actually land.
-        if (reasoning_view && settled && !cache.seam_glide_armed) {
-            cache.seam_glide_armed = true;
-            if (cache.streaming->is_live()
-                && cache.streaming->reveal_in_progress()
-                && !cache.streaming->is_finalizing())
-                cache.streaming->request_finalize(/*ramp_ms=*/220);
         }
 
         // Auto-fold of long code blocks is DISABLED: code blocks always
