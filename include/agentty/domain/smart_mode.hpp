@@ -574,6 +574,23 @@ namespace detail {
                                   resolved_caps(parent_wire))};
     if (!cfg.enabled) return pass;
 
+    // 0. A PINNED model wins before anything else, including an explicit
+    //    slot. The user named it on the command line; that is a contract, not
+    //    a hint (#70).
+    //
+    //    This check was added to role_model() and MISSED here, which left the
+    //    bug half fixed in the paths that matter most: resolve_role is what
+    //    the MAIN TURN goes through (cmd_factory's resolve_turn_routing) and
+    //    what Layer 3b uses for subagent roles. main_turn_role() can score a
+    //    simple turn as Implementation or Utility, so `--model opus` plus
+    //    Smart Mode still answered a trivial turn on sonnet or haiku -- the
+    //    original report ("still making requests to a different model than
+    //    the selected one") with Smart Mode left on.
+    //
+    //    Returns `pass`, which already carries the parent model at its
+    //    clamped effort, so a pinned run keeps the user's effort too.
+    if (cfg.pinned_model) return pass;
+
     // 1. Explicit user override for this slot wins outright — but only under
     //    the provider it was pinned on. A model id is endpoint-scoped, so
     //    replaying an Anthropic pin against Groq dispatches an id that

@@ -568,6 +568,54 @@ TEST_CASE("smart_mode: a pinned --model wins every role") {
         CHECK(sm::utility_model(parent, catalog, cfg) == "claude-haiku-4-5");
     }
 
+    // resolve_role() must honour the pin too, and this is the arm the
+    // original fix MISSED -- it was added to role_model() only.
+    //
+    // That left the bug alive in the two paths that matter most, because
+    // resolve_role is what the MAIN TURN goes through (cmd_factory's
+    // resolve_turn_routing) and what Layer 3b uses for subagent roles. And
+    // the main turn does not always ask for Strategic: main_turn_role()
+    // scores the turn, so a trivial prompt resolves as Implementation or
+    // Utility -- which, with Smart Mode on, answered on sonnet/haiku while
+    // the user had pinned opus. Exactly the reported symptom, surviving the
+    // fix that was supposed to end it.
+    //
+    // Every role, pinned, with Smart Mode ON and slots configured against
+    // it: the answer is the parent, always.
+    {
+        sm::RoleConfig cfg;
+        cfg.enabled = true;
+        cfg.pinned_model = true;
+        cfg.implementation.set = true;
+        cfg.implementation.model = "claude-sonnet-4-5";
+        cfg.implementation.provider = "anthropic";
+        cfg.utility.set = true;
+        cfg.utility.model = "claude-haiku-4-5";
+        cfg.utility.provider = "anthropic";
+
+        for (const auto role : {sm::ModelRole::Strategic,
+                                sm::ModelRole::Implementation,
+                                sm::ModelRole::Utility}) {
+            const auto p = sm::resolve_role(role, parent, Effort::None,
+                                            catalog, cfg, "anthropic");
+            CHECK_MESSAGE(p.model == parent,
+                          "resolve_role honours --model for every role");
+            CHECK_MESSAGE(!p.cross_provider(),
+                          "a pinned role never retargets the provider");
+        }
+
+        // Unpinned, the same config routes as Smart Mode intends -- proving
+        // the assertions above are about the PIN and not about a resolver
+        // that stopped routing altogether.
+        cfg.pinned_model = false;
+        CHECK(sm::resolve_role(sm::ModelRole::Implementation, parent,
+                               Effort::None, catalog, cfg, "anthropic").model
+              == "claude-sonnet-4-5");
+        CHECK(sm::resolve_role(sm::ModelRole::Utility, parent,
+                              Effort::None, catalog, cfg, "anthropic").model
+              == "claude-haiku-4-5");
+    }
+
     // A single-model account is unaffected either way -- the router never
     // routes UP, so there is nothing to pin against.
     {
