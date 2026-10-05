@@ -80,6 +80,7 @@ set(_AGENTTY_CONSOLIDATED
     panel_overflow_probe
     panel_draw_budget_test
     panel_width_probe
+    reveal_bucket_test
     stats_golden_test
     stats_render_probe
     context_window_test
