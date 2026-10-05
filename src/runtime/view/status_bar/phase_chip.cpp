@@ -49,6 +49,24 @@ std::string_view running_tool_name(const Model& m) {
     return {};
 }
 
+// True while the model is REASONING and has not started its answer: the
+// last assistant message has reasoning text but no prose yet.
+//
+// The reasoning block carries its own live header -- animated sigil,
+// spinner, ticking token meter, elapsed clock -- directly above the
+// composer. While that is on screen the phase chip is a SECOND activity
+// indicator for the same work, two spinners breathing on their own clocks
+// a couple of rows apart.
+bool in_reasoning_phase(const Model& m) {
+    if (m.d.current.messages.empty()) return false;
+    const auto& last = m.d.current.messages.back();
+    if (last.role != Role::Assistant) return false;
+    if (!last.text.empty() || !last.streaming_text.empty()
+        || !last.pending_stream.empty() || !last.tool_calls.empty())
+        return false;
+    return !last.reasoning_display_text().empty();
+}
+
 } // namespace
 
 maya::PhaseChip::Config phase_chip_config(const Model& m) {
@@ -128,7 +146,7 @@ maya::PhaseChip::Config phase_chip_config(const Model& m) {
         breathing = true;
         elapsed   = phase_elapsed;
     }
-    // ── 6. Streaming — model is composing ────────────────────────────────
+    // ── 6. Streaming — model is composing ──────────────────────────────────
     else if (is_streaming) {
         glyph     = spinner;
         // LOCAL providers process the prompt in complete silence before the
@@ -147,6 +165,23 @@ maya::PhaseChip::Config phase_chip_config(const Model& m) {
         color     = ui::status_info;
         breathing = true;
         elapsed   = phase_elapsed;
+
+        // While REASONING, defer to the reasoning block.
+        //
+        // That block sits directly above the composer with its own live
+        // header: animated sigil, spinner, ticking token meter, elapsed
+        // clock. Running this chip's spinner at the same time puts two
+        // activity indicators for ONE piece of work a couple of rows apart,
+        // each breathing on its own clock. The one attached to the content
+        // is the better of the two -- it says what is happening AND how far
+        // along it is -- so the chip steps back to a static glyph.
+        //
+        // The verb and elapsed stay: a glance at the chrome should still
+        // answer "is a turn in flight". Only the competing MOTION goes.
+        if (in_reasoning_phase(m)) {
+            glyph     = std::string{phase_glyph(m.s.phase)};
+            breathing = false;
+        }
     }
     // ── 7. OAuth refresh in flight (idle, but submissions are gated) ──
     else if (m.s.oauth_refresh_in_flight) {
