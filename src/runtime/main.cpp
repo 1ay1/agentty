@@ -1730,10 +1730,15 @@ int main(int argc, char** argv) {
     // reference capture made that a use-after-free); short-lived
     // OpenAI-compat / Ollama transports are built per call inside dispatch
     // from the active endpoint.
-    std::function<provider::StreamResult(provider::Request,
-                                         provider::EventSink)> stream_fn =
-        [anthropic_provider, chatgpt_provider, copilot_provider, kimi_provider]
-        (provider::Request req, provider::EventSink sink) {
+    // The router, assembled per call from the long-lived providers.
+    //
+    // Factored out because there are now TWO seams over it: `stream_fn`
+    // routes to whatever provider is active, and `stream_to_fn` routes to a
+    // NAMED one (a Smart Mode role pinned on another endpoint). Both must
+    // offer the identical set of transports, so they build from one place
+    // rather than each spelling out the four arms.
+    auto build_router =
+        [anthropic_provider, chatgpt_provider, copilot_provider, kimi_provider] {
             provider::ProviderRouter router;
             router.set(provider::LongLived::Anthropic,
                        [anthropic_provider](provider::Request r,
@@ -1760,8 +1765,42 @@ int main(int argc, char** argv) {
                 return provider::stream_external_acp(agent_id, std::move(r),
                                                      std::move(s));
             };
-            return provider::dispatch_stream(router, std::move(req),
+            return router;
+        };
+
+    std::function<provider::StreamResult(provider::Request,
+                                         provider::EventSink)> stream_fn =
+        [build_router](provider::Request req, provider::EventSink sink) {
+            return provider::dispatch_stream(build_router(), std::move(req),
                                              std::move(sink));
+        };
+
+    // Dispatch to a NAMED provider — a Smart Mode role whose slot was pinned
+    // on an endpoint other than the active one.
+    //
+    // The auth is resolved HERE, from the target provider, which is the whole
+    // point: a `req.auth` arriving from the caller is the PARENT provider's
+    // credential and would 401 against anyone else. credentials::resolve()
+    // already answers for an arbitrary provider id, and returns empty for the
+    // oauth_native and local rows whose transports own their own tokens — so
+    // an empty answer is left alone rather than treated as a failure.
+    std::function<provider::StreamResult(const std::string&, provider::Request,
+                                         provider::EventSink)> stream_to_fn =
+        [build_router](const std::string& provider_id, provider::Request req,
+                       provider::EventSink sink) {
+            const auto sel = provider::parse_selection(provider_id);
+            auto cred = provider::credentials::resolve(provider_id);
+            const bool have = !auth::bearer_token(cred).empty()
+                || std::holds_alternative<auth::BearerHeader>(cred);
+            if (have)
+                req.auth = sel.kind == provider::Kind::Anthropic
+                             ? auth::fresh_auth_header(cred)
+                             : std::move(cred);
+            AGT_LOG(Smart, Debug, "route.cross_provider",
+                    "provider={} model={} auth={}", provider_id, req.model,
+                    have ? "resolved" : "transport-owned");
+            return provider::dispatch_stream(build_router(), sel,
+                                             std::move(req), std::move(sink));
         };
     app::install_deps(app::Deps{
         .stream        = stream_fn,
@@ -1902,6 +1941,7 @@ int main(int argc, char** argv) {
             .installed = true,
             .candidates = std::move(sa_candidates),
             .stream = stream_fn,
+            .stream_to = stream_to_fn,
             .smart = std::move(sa_smart)});
     }
 

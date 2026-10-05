@@ -974,18 +974,25 @@ provider::StreamResult run_one_completion(Thread& thread,
     provider::Request req;
     // Model routing: read-only roles (explorer/reviewer) do grunt work —
     // read/grep/map/summarise — a small model handles as well as a flagship
-    // for a fraction of the cost, so route them to the cheapest capable model
-    // the ACTIVE provider offers. Write-capable roles (coder/general) keep the
-    // parent model — their edits must match the parent's quality. The router
-    // never routes up and never crosses providers, so a single-model or
-    // Opus-only provider sees no change (returns cfg.model unchanged).
-    // Model routing: read-only roles (explorer/reviewer) do grunt work —
-    // route them to the cheapest capable model the ACTIVE provider offers.
-    // Write-capable roles (coder/tester/general) keep the parent model.
+    // for a fraction of the cost, so route them to a cheaper model the ACTIVE
+    // provider offers. Write-capable roles (coder/tester/general) keep the
+    // parent model, because their edits must match the parent's quality. The
+    // router never routes UP, so a single-model or Opus-only provider sees no
+    // change.
+    //
+    // It can now route ACROSS providers, but only for a slot the user pinned
+    // on another endpoint and only with cross_provider_roles on — see
+    // RoleConfig. Off (the default) it behaves exactly as it always did.
+    //
     // Layer 3b: when Smart Mode subagent routing is on, resolve each worker's
     // model by its ROLE (explorer→Utility, reviewer→Strategic, coder/tester/
     // general→Implementation) through the shared resolver instead — honouring
     // the user's pinned slots. Off ⇒ exactly the existing tier auto-router.
+    //
+    // The provider this delegation dispatches to, when it is NOT the active
+    // one. Empty is the normal case. Set by whichever branch resolves the
+    // role below, then validated once after both.
+    std::string route_provider;
     if (cfg.smart.subagent_routing()) {
         // resolve_subagent_role hard-clamps effort to the parent's (Effort::None
         // here, so effort stays off — a worker never thinks harder than the
@@ -1001,6 +1008,7 @@ provider::StreamResult run_one_completion(Thread& thread,
         // effort off — which is the case today since parent_effort is None).
         req.effort = std::string(effort_wire_for(
             role_prof.effort, resolved_caps(role_prof.model)));
+        route_provider = role_prof.provider;
     } else {
         // Read-only roles are routed DOWN from the parent, but only to the
         // Mid tier, not the cheapest thing on the provider.
@@ -1013,14 +1021,36 @@ provider::StreamResult run_one_completion(Thread& thread,
         // confidently. Zed does not downgrade at all; Mid is the middle
         // position.
         //
-        // Through role_model, so a pinned --model is honoured here too. This
-        // branch used to call cheapest_capable_model directly, which meant
-        // turning Smart Mode OFF did not stop routing -- it fell through to
-        // this router instead (#70).
-        req.model = type.read_only
-                      ? smart::role_model(cfg.model, cfg.candidates, cfg.smart,
-                                          ModelCapabilities::Tier::Mid)
-                      : cfg.model;
+        // Through role_target, so a pinned --model is honoured here too.
+        // This branch used to call cheapest_capable_model directly, which
+        // meant turning Smart Mode OFF did not stop routing -- it fell
+        // through to this router instead (#70).
+        if (type.read_only) {
+            auto t = smart::role_target(cfg.model, cfg.candidates, cfg.smart,
+                                        ModelCapabilities::Tier::Mid,
+                                        &cfg.smart.utility, cfg.provider);
+            req.model      = std::move(t.model);
+            route_provider = std::move(t.provider);
+        } else {
+            req.model = cfg.model;
+        }
+    }
+
+    // ONE place decides whether a cross-provider target is reachable.
+    //
+    // Both branches above can name a foreign provider, and a resolver that
+    // says "run on Groq" is only correct if something here can actually
+    // dispatch there -- otherwise it is a model id sent to an endpoint that
+    // never heard of it, which is a 404 on every delegation. Checking it
+    // once, after both branches, is why the two cannot disagree.
+    if (!route_provider.empty() && !cfg.stream_to) {
+        AGT_LOG(Smart, Debug, "route.cross_provider_unavailable",
+                "provider={} model={} falling back to active",
+                route_provider, req.model);
+        req.model = agentty::cheapest_capable_model(
+            agentty::wire_model_id(cfg.model), cfg.candidates,
+            ModelCapabilities::Tier::Mid);
+        route_provider.clear();
     }
     // A subagent NEVER needs the 1M/2M extended-context window: it does a
     // bounded burst (8k output, tool results capped to 8 KiB, up to 24 turns)
@@ -1076,14 +1106,15 @@ provider::StreamResult run_one_completion(Thread& thread,
     // Layer 3b or the tier auto-router chose it.
     AGT_LOG(Smart, Debug, "route.subagent",
             "agent={} role_routing={} pinned={} read_only={} candidates={} "
-            "parent_model={} model={}",
+            "parent_model={} model={} route_provider={}",
             type.name,
             cfg.smart.subagent_routing() ? 1 : 0,
             cfg.smart.pinned_model ? 1 : 0,
             type.read_only ? 1 : 0,
             cfg.candidates.size(),
             cfg.model,
-            req.model);
+            req.model,
+            route_provider.empty() ? "active" : route_provider);
     // Resolve auth LIVE from the ACTIVE provider through the central
     // credential layer — the same discipline as launch_stream's
     // auth_snapshot(). cfg.auth is a snapshot taken at the last
@@ -1091,9 +1122,14 @@ provider::StreamResult run_one_completion(Thread& thread,
     // in-picker account switch between then and this subagent's launch
     // would ship a stale (or the WRONG provider's) credential — the exact
     // 401 class fixed on the main turn path. cfg.auth remains the fallback
-    // for oauth_native/local providers whose transports own their tokens
+    // for oauth_native/local providers whose transports own their own tokens
     // (resolve returns empty there).
-    {
+    //
+    // SKIPPED when route_provider is set: this resolves the ACTIVE
+    // provider's credential, which is the wrong one for a delegation going
+    // somewhere else. stream_to resolves the target's own auth — one
+    // credential lookup per request, done by whoever knows the destination.
+    if (route_provider.empty()) {
         const auto sel = provider::active();
         const std::string pid =
             sel.kind == provider::Kind::OpenAI
@@ -1363,7 +1399,12 @@ provider::StreamResult run_one_completion(Thread& thread,
     }
     if (cancellation::requested()
         || (run_reg && run_reg->cancelled())) cancel->cancel();
-    if (cfg.stream) {
+    if (!route_provider.empty() && cfg.stream_to) {
+        // A role pinned on another endpoint. stream_to resolves that
+        // provider's own credential before dispatching — see the auth block
+        // above for why this path skips the active-provider lookup.
+        result = cfg.stream_to(route_provider, std::move(req), sink);
+    } else if (cfg.stream) {
         result = cfg.stream(std::move(req), sink);
     } else {
         provider::anthropic::AnthropicProvider p;

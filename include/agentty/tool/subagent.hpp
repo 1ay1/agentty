@@ -48,6 +48,24 @@ struct Config {
     std::function<provider::StreamResult(provider::Request,
                                          provider::EventSink)> stream;
 
+    // The same dispatch, but to a NAMED provider instead of the active one.
+    //
+    // `stream` above closes over provider::active() at call time, which is
+    // right for a subagent that runs where the parent runs — and makes a
+    // cross-provider role inexpressible. A Smart Mode slot pinned on another
+    // endpoint had to be dropped for exactly that reason (docs/design/
+    // smart-mode.md §9 called this "per-role auth threading").
+    //
+    // Separate seam rather than a defaulted argument on `stream`, because
+    // the two have different failure modes: dispatching to the active
+    // provider cannot fail to find one, and dispatching to a named provider
+    // can (signed out, removed, misspelled). A caller that does not install
+    // this gets the old behaviour — the role falls back to the active
+    // provider's own cheapest capable model, never a 404.
+    std::function<provider::StreamResult(const std::string& provider_id,
+                                         provider::Request,
+                                         provider::EventSink)> stream_to;
+
     // Smart Mode config, mirrored from the Model so the subagent runner can
     // resolve a worker's model by its ROLE (Layer 3b) when
     // smart.subagent_routing() is on. Off/unconfigured ⇒ the existing

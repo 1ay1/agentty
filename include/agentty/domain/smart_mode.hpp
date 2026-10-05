@@ -101,6 +101,20 @@ role_from_wire_name(std::string_view s) noexcept {
 struct RoleProfile {
     std::string             model;
     Effort effort = Effort::None;
+    // The provider that can serve `model`, when it is NOT the caller's own.
+    //
+    // Empty is the common case and means "dispatch where you already are".
+    // Non-empty only happens for a slot the user pinned on another endpoint:
+    // a model id is endpoint-scoped, so replaying it against the active
+    // provider is a 404 — the resolver used to drop such a pin for exactly
+    // that reason. Naming the provider instead lets a caller that CAN reach
+    // it (the subagent runner, via Config::stream_to) honour the pin, while
+    // one that cannot still falls back.
+    std::string             provider;
+
+    [[nodiscard]] bool cross_provider() const noexcept {
+        return !provider.empty();
+    }
 };
 
 // Per-role user overrides, persisted in settings. An empty `model` means "not
@@ -143,9 +157,28 @@ struct RoleConfig {
     // subagents billed to a different model (#70). Nothing in the docs said
     // --model was a hint.
     //
-    // Only the CLI sets this. The TUI never passes --model, so interactive
-    // cost routing is unchanged.
+    // Set wherever --model is parsed, and mirrored to both the CLI and TUI
+    // config sites through tuning::model_pinned() (257d566) -- the first
+    // version set it only on the headless path, so `agentty --model X`
+    // interactively had the same bug it was meant to fix.
     bool pinned_model = false;
+
+    // Let a role run on a provider OTHER than the active one.
+    //
+    // OFF by default, and the default is the interesting part. A slot pinned
+    // on another endpoint is dispatchable -- credentials::resolve() answers
+    // for any provider and dispatch_stream() takes an explicit Selection --
+    // so the old "auth doesn't transfer" reason (docs/design/smart-mode.md
+    // §9) has expired. What has NOT expired is the cost: prompt caching is
+    // per-provider, so a role that hops endpoints re-sends its prefix
+    // uncached every turn. For a short read-only subagent that is a fair
+    // trade; for a chatty role it can cost more than the cheaper model
+    // saves.
+    //
+    // So it is a choice the user makes, not one inferred for them -- and
+    // with it off, a foreign pin behaves exactly as it did before: ignored
+    // in favour of this provider's own catalog, never dispatched as a 404.
+    bool cross_provider_roles = false;
 
     // ONE decision, three slots. There used to be seven more toggles here.
     //
@@ -557,14 +590,25 @@ namespace detail {
         const bool provider_matches =
             active_provider.empty() || ov.provider.empty()
             || ov.provider == active_provider;
-        if (provider_matches) {
-            const std::string wire = wire_model_id(std::string_view{ov.model});
+        const std::string wire = wire_model_id(std::string_view{ov.model});
+        if (provider_matches)
             return RoleProfile{wire,
-                               clamp_effort(ov.effort,
-                                            resolved_caps(wire))};
-        }
-        // Foreign pin: fall through to the zero-config auto-fill below, which
-        // ranks over THIS provider's catalog. The pin is not cleared — switch
+                               clamp_effort(ov.effort, resolved_caps(wire)),
+                               {}};
+        // Foreign pin: NAME the provider it belongs to and let the caller
+        // decide. One that can dispatch there (the subagent runner, via
+        // Config::stream_to) honours the pin; one that cannot checks
+        // cross_provider() and falls back to the auto-fill below, which is
+        // what every caller used to get unconditionally.
+        //
+        // The effort is the pin's own, clamped against the pinned model --
+        // not the parent's. Effort is a property of the model that will run.
+        if (cfg.cross_provider_roles)
+            return RoleProfile{wire,
+                               clamp_effort(ov.effort, resolved_caps(wire)),
+                               ov.provider};
+        // Cross-provider routing is off: behave exactly as before and rank
+        // over THIS provider's catalog. The pin is not cleared -- switch
         // back and it applies again.
     }
 
@@ -629,7 +673,15 @@ namespace detail {
 // grep hits matter is not mechanical work).
 //
 // Returns a WIRE model id.
-[[nodiscard]] inline std::string role_model(
+// Resolve a role to a (model, provider) target.
+//
+// The long form of role_model() below, for callers that can dispatch to a
+// provider other than their own. Everything else keeps calling role_model()
+// and gets the model alone.
+//
+// Effort is not set here: the internal roles this serves (compaction, titles,
+// read-only exploration) all run with effort off.
+[[nodiscard]] inline RoleProfile role_target(
         std::string_view parent_model,
         const std::vector<ModelInfo>& candidates,
         const RoleConfig& cfg,
@@ -640,23 +692,55 @@ namespace detail {
 
     // A pinned model wins outright. The user named it on the command line;
     // no cost heuristic outranks that.
-    if (cfg.pinned_model) return parent;
+    if (cfg.pinned_model) return {parent, Effort::None, {}};
 
     // AGENTTY_SMART_NO_INTERNAL=1 is documented as "compaction/titles stay on
     // the main model", so it has to stop the tier fallback too -- it used to
     // gate only the slot below, which left the downgrade running and made the
     // promise false (#70).
-    if (slot == &cfg.utility && tuning::no_internal()) return parent;
+    if (slot == &cfg.utility && tuning::no_internal())
+        return {parent, Effort::None, {}};
 
     // A Smart Mode slot the user set explicitly comes next.
-    if (slot && cfg.internal_routing() && slot->set && !slot->model.empty()
-        && (active_provider.empty() || slot->provider.empty()
-            || slot->provider == active_provider))
-        return wire_model_id(std::string_view{slot->model});
+    if (slot && cfg.internal_routing() && slot->set && !slot->model.empty()) {
+        const bool same_provider = active_provider.empty()
+                                || slot->provider.empty()
+                                || slot->provider == active_provider;
+        if (same_provider)
+            return {wire_model_id(std::string_view{slot->model}),
+                    Effort::None, {}};
+        // Pinned on ANOTHER provider: name it, so a caller that can reach
+        // that endpoint honours the pin. Gated on the same opt-in as
+        // resolve_role -- ONE switch decides this for every role, rather
+        // than two resolvers disagreeing about whether hopping is allowed.
+        if (cfg.cross_provider_roles)
+            return {wire_model_id(std::string_view{slot->model}),
+                    Effort::None, slot->provider};
+        // Off: fall through and rank over this provider's own catalog.
+    }
 
     // Otherwise route down to the cheapest model that clears the floor.
     // Never routes UP, so a single-model account sees no change.
-    return cheapest_capable_model(parent, candidates, floor);
+    return {cheapest_capable_model(parent, candidates, floor),
+            Effort::None, {}};
+}
+
+[[nodiscard]] inline std::string role_model(
+        std::string_view parent_model,
+        const std::vector<ModelInfo>& candidates,
+        const RoleConfig& cfg,
+        ModelCapabilities::Tier floor,
+        const SlotOverride* slot = nullptr,
+        std::string_view active_provider = {}) {
+    auto t = role_target(parent_model, candidates, cfg, floor, slot,
+                         active_provider);
+    // A cross-provider target is not dispatchable by a caller that only has
+    // one endpoint, so it degrades to the old answer: fall back as if the
+    // slot were unset. Same behaviour this function has always had.
+    if (t.cross_provider())
+        return cheapest_capable_model(wire_model_id(parent_model), candidates,
+                                      floor);
+    return std::move(t.model);
 }
 
 // Utility turns: compaction summaries, thread titles, HyDE expansion. Text
