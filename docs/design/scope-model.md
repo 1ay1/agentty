@@ -279,6 +279,25 @@ swapping a command under an approved name is the MCPoison shape arriving
 through the front door. A malformed foreign config refuses rather than
 importing half of itself.
 
+### Import does not translate — it copies
+
+The entry is adopted **verbatim**, and that is the whole trick. `mcp.json` is
+ONE schema shared across tools, so a foreign entry may carry `env`,
+`headers`, `timeoutMs`, `connectTimeoutMs` or `tools.exclude` — every one of
+which agentty's own connect path already reads.
+
+The first version of this rebuilt the entry from a `ServerSpec`, which models
+only what `plugin add` can set (command/args/url/type). That looked principled
+and was a data-loss bug: a server with an API key in its env block imported
+*looking complete*, then failed at spawn with an auth error naming nothing.
+**A lossy import is worse than a refused one** — the failure is silent and
+arrives later, detached from its cause.
+
+Copying whole also means a field added to the format next year survives
+without a code change, which an allow-list of known keys can never do. The
+decoded `command`/`url` on `Found` exist only to display the server and to
+reject an entry with no transport at all.
+
 ## Where it lives
 
 - `include/agentty/scope/scope.hpp` — the types + the two inline fold

@@ -31,6 +31,8 @@
 #include <string>
 #include <vector>
 
+#include <nlohmann/json_fwd.hpp>
+
 namespace agentty::tools::plugin {
 
 struct ServerSpec {
@@ -58,6 +60,28 @@ enum class EditResult : std::uint8_t {
 // overwrites an existing entry of the same name.
 [[nodiscard]] EditResult add_server(const std::filesystem::path& path,
                                     const ServerSpec& spec, bool force);
+
+// Add a RAW server entry, verbatim, preserving every key it carries.
+//
+// add_server() builds its entry from a ServerSpec, which models only the
+// fields agentty's own `plugin add` flow can set (command/args/url/type).
+// That is right for a CLI where a human types the arguments, and WRONG for
+// adoption: `mcp.json` is one schema shared across tools, so an entry we
+// copy from another client may legitimately carry `env`, `headers`,
+// `timeoutMs`, `connectTimeoutMs` or `tools.exclude` -- all of which
+// agentty's own connect path reads. Re-deriving a spec and rebuilding an
+// entry from it silently drops them.
+//
+// Dropping `env` is the worst of those. A server configured with an API key
+// in its env block imports looking complete, then fails at spawn with an
+// auth error that names nothing. A lossy import is worse than a refused one.
+//
+// So import does not translate. It validates (the caller checks there is a
+// command or a url) and copies. Same no-clobber contract as add_server.
+[[nodiscard]] EditResult add_server_raw(const std::filesystem::path& path,
+                                        const std::string& name,
+                                        const nlohmann::json& entry,
+                                        bool force);
 
 // Edit an EXISTING entry in place, preserving every key the spec doesn't
 // own (env blocks, headers, timeoutMs, tools.exclude — anything the user

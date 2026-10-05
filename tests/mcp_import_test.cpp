@@ -102,19 +102,124 @@ TEST_CASE("translation keeps both transports, and skips what is neither") {
     const auto* stdio = by_name(s, "stdio-one");
     REQUIRE(stdio != nullptr, "stdio server found");
     CHECK(stdio->command == "npx");
-    CHECK(stdio->args.size() == 2);
-    CHECK(stdio->args[1] == "@jetbrains/mcp-proxy");
+    CHECK(stdio->entry["args"].size() == 2);
+    CHECK(stdio->entry["args"][1] == "@jetbrains/mcp-proxy");
 
     const auto* remote = by_name(s, "remote-one");
     REQUIRE(remote != nullptr, "remote server found");
     CHECK(remote->url == "https://api.example.com/mcp/");
-    CHECK(remote->type == "http");
+    CHECK(remote->entry["type"] == "http");
 
     // A server with neither a command nor a url cannot be connected to.
     // Importing it would produce an entry that fails later with no
     // explanation; skipping it is the honest outcome.
     CHECK(by_name(s, "neither") == nullptr,
           "an entry with no transport is not imported");
+}
+
+TEST_CASE("import is lossless — every key survives") {
+    // THE failure mode this design exists to avoid. `mcp.json` is ONE schema
+    // shared across tools, and agentty's own connect path reads `env`,
+    // `headers`, `timeoutMs`, `connectTimeoutMs` and `tools.exclude`. An
+    // import that rebuilt the entry from the handful of fields it bothered to
+    // name would drop the API key that made the server work — and the server
+    // would import looking complete, then fail at spawn with an auth error
+    // that names nothing.
+    //
+    // So import copies the entry verbatim. This pins that.
+    const auto dir = sandbox("lossless");
+    write_file(dir / ".junie" / "mcp" / "mcp.json", R"({"mcpServers":{
+        "rich": {
+            "command": "/opt/server",
+            "args": ["--port", "8080"],
+            "env": {"API_KEY": "secret-value", "REGION": "eu"},
+            "timeoutMs": 45000,
+            "connectTimeoutMs": 9000,
+            "tools": {"exclude": ["dangerous_tool"]},
+            "someFutureKey": {"nested": true}
+        }
+    }})");
+
+    const imp::Scan s = imp::scan(imp::Tool::Junie, dir, dir / "nowhere");
+    const auto* rich = by_name(s, "rich");
+    REQUIRE(rich != nullptr, "found it");
+
+    // Everything agentty itself reads at connect time.
+    CHECK(rich->entry["env"]["API_KEY"] == "secret-value",
+          "the env block survives — this is the one that silently breaks");
+    CHECK(rich->entry["env"]["REGION"] == "eu");
+    CHECK(rich->entry["timeoutMs"] == 45000);
+    CHECK(rich->entry["connectTimeoutMs"] == 9000);
+    CHECK(rich->entry["tools"]["exclude"][0] == "dangerous_tool");
+
+    // And a key NEITHER tool models today. Copying verbatim means a field
+    // added to the format next year arrives intact without a code change,
+    // which an allow-list of known fields could never do.
+    CHECK(rich->entry["someFutureKey"]["nested"] == true,
+          "an unrecognised key is carried, not dropped");
+}
+
+TEST_CASE("the ADOPTED file keeps every key, and never clobbers") {
+    // The round trip, not just the scan: what actually lands in
+    // ~/.agentty/mcp.json. adopt() writes through user_root(), so point that
+    // at a sandbox.
+    const auto dir = sandbox("adopt");
+    const fs::path home = dir / "home";
+    fs::create_directories(home);
+
+    const std::string prev = std::getenv("AGENTTY_HOME")
+                                 ? std::getenv("AGENTTY_HOME") : "";
+    const bool had = std::getenv("AGENTTY_HOME") != nullptr;
+    ::setenv("AGENTTY_HOME", home.string().c_str(), 1);
+
+    imp::Found f;
+    f.name    = "rich";
+    f.command = "/opt/server";
+    f.entry   = json::parse(R"({
+        "command": "/opt/server",
+        "env": {"API_KEY": "secret-value"},
+        "timeoutMs": 45000
+    })");
+
+    const imp::Outcome o = imp::adopt({f}, {});
+    CHECK(o.imported == 1, "one server adopted");
+
+    json doc;
+    {
+        std::ifstream in(o.into);
+        REQUIRE(in.good(), "the file was written");
+        in >> doc;
+    }
+    const auto& got = doc["mcpServers"]["rich"];
+    CHECK(got["command"] == "/opt/server");
+    CHECK(got["env"]["API_KEY"] == "secret-value",
+          "the env block is ON DISK, not just in the scan");
+    CHECK(got["timeoutMs"] == 45000);
+
+    // Re-adopting the same name without --force must not overwrite. Swapping
+    // a command under an existing name is the MCPoison shape; arriving via
+    // import does not make it safe.
+    imp::Found evil = f;
+    evil.entry["command"] = "/evil";
+    evil.conflicts = true;
+    const imp::Outcome o2 = imp::adopt({evil}, {});
+    CHECK(o2.imported == 0 && o2.skipped == 1, "conflict skipped");
+    {
+        std::ifstream in(o.into);
+        json after;
+        in >> after;
+        CHECK(after["mcpServers"]["rich"]["command"] == "/opt/server",
+              "the original entry is untouched");
+    }
+
+    // --force replaces it wholesale, which is the documented escape hatch.
+    imp::Options force;
+    force.force = true;
+    const imp::Outcome o3 = imp::adopt({evil}, force);
+    CHECK(o3.imported == 1, "--force replaces");
+
+    if (had) ::setenv("AGENTTY_HOME", prev.c_str(), 1);
+    else     ::unsetenv("AGENTTY_HOME");
 }
 
 TEST_CASE("scanning writes nothing") {

@@ -256,6 +256,25 @@ EditResult add_server(const fs::path& path, const ServerSpec& spec,
     return store(path, l.doc) ? EditResult::Ok : EditResult::IoError;
 }
 
+EditResult add_server_raw(const fs::path& path, const std::string& name,
+                          const json& entry, bool force) {
+    std::lock_guard<std::mutex> lk(mutation_mutex());
+    Loaded l = load(path);
+    if (!l.ok) return EditResult::ParseError;
+    if (!entry.is_object()) return EditResult::ParseError;
+    const char* key = servers_key(l.doc);
+    if (!l.doc.contains(key) || !l.doc[key].is_object())
+        l.doc[key] = json::object();
+    auto& servers = l.doc[key];
+    if (servers.contains(name) && !force)
+        return EditResult::AlreadyExists;
+    // Verbatim. Every key the source carried -- env, headers, timeoutMs,
+    // tools.exclude -- survives, because the schema is the same one agentty
+    // reads. Rebuilding the entry from a ServerSpec is what loses them.
+    servers[name] = entry;
+    return store(path, l.doc) ? EditResult::Ok : EditResult::IoError;
+}
+
 EditResult update_server(const fs::path& path, const ServerSpec& spec) {
     std::lock_guard<std::mutex> lk(mutation_mutex());
     Loaded l = load(path);

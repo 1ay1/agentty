@@ -33,27 +33,23 @@ namespace {
     return nullptr;
 }
 
-// Translate one foreign entry into our shape.
+// Decode just enough of one foreign entry to display and validate it.
 //
-// The fields we understand are the ones every tool agrees on, because they
-// come from the MCP spec itself: a stdio server is command+args, a remote one
-// is a url. Anything else (env blocks, headers, timeouts) is deliberately NOT
-// carried: a half-translated secret is worse than an obvious gap, and the
-// import prints what it took so the user can tell.
+// The ENTRY ITSELF is kept whole. `mcp.json` is one schema across tools, so
+// an env block, custom headers, a timeoutMs or a tools.exclude are all things
+// agentty's own connect path reads -- rebuilding the entry from the handful
+// of fields we bother to name is how an import silently drops the API key
+// that made the server work. A lossy import is worse than a refused one.
 [[nodiscard]] bool translate(const std::string& name, const json& e,
                              const fs::path& from, Found& out) {
     if (!e.is_object()) return false;
-    out.name = name;
-    out.from = from;
+    out.name  = name;
+    out.from  = from;
+    out.entry = e;   // verbatim
     if (auto it = e.find("command"); it != e.end() && it->is_string())
         out.command = it->get<std::string>();
     if (auto it = e.find("url"); it != e.end() && it->is_string())
         out.url = it->get<std::string>();
-    if (auto it = e.find("type"); it != e.end() && it->is_string())
-        out.type = it->get<std::string>();
-    if (auto it = e.find("args"); it != e.end() && it->is_array())
-        for (const auto& a : *it)
-            if (a.is_string()) out.args.push_back(a.get<std::string>());
     // A server with neither is not a server. Skipping beats importing a
     // broken entry that then fails to connect with no explanation.
     return !out.command.empty() || !out.url.empty();
@@ -197,13 +193,9 @@ Outcome adopt(const std::vector<Found>& servers, const Options& opts) {
     for (const Found& f : servers) {
         if (f.conflicts && !opts.force) { ++o.skipped; continue; }
         if (opts.dry_run) { ++o.imported; continue; }
-        tools::plugin::ServerSpec spec;
-        spec.name    = f.name;
-        spec.command = f.command;
-        spec.args    = f.args;
-        spec.url     = f.url;
-        spec.type    = f.type;
-        const auto r = tools::plugin::add_server(o.into, spec, opts.force);
+        // Verbatim, not re-derived from a ServerSpec: see Found::entry.
+        const auto r = tools::plugin::add_server_raw(o.into, f.name, f.entry,
+                                                     opts.force);
         if (r == tools::plugin::EditResult::Ok) ++o.imported;
         else                                    ++o.failed;
     }

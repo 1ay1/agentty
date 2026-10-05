@@ -49,6 +49,8 @@
 #include <string>
 #include <vector>
 
+#include <nlohmann/json.hpp>
+
 namespace agentty::mcp::import_ {
 
 namespace fs = std::filesystem;
@@ -81,13 +83,18 @@ struct Locations {
 [[nodiscard]] Locations locations_of(Tool, const fs::path& home,
                                      const fs::path& project);
 
-// One server found in a foreign config, already translated to our shape.
+// One server found in a foreign config.
+//
+// `command`/`url` are decoded only so the scan can SHOW you what it found and
+// reject an entry with no transport. The import itself copies `entry`
+// verbatim -- `mcp.json` is one schema across tools, so an env block, custom
+// headers or a timeout all survive. Translating field-by-field is how an
+// import silently loses the API key that made the server work.
 struct Found {
     std::string name;
-    std::string command;
-    std::vector<std::string> args;
-    std::string url;
-    std::string type;        // "" | "http" | "sse"
+    std::string command;     // for display + validation
+    std::string url;         // for display + validation
+    nlohmann::json entry;    // the WHOLE source object, copied as-is
     fs::path    from;        // the file it was read from
     // Set when agentty already has a server of this name. Import never
     // silently replaces one: a name collision is the user's call, and
