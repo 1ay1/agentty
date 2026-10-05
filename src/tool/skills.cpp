@@ -7,6 +7,7 @@
 
 #include "agentty/scope/scope.hpp"
 #include "agentty/config/inventory.hpp"   // kSkillsLayout — the one declaration
+#include "agentty/util/capped_read.hpp"   // the one capped-read primitive
 #include "agentty/tool/util/fs_helpers.hpp"
 #include "agentty/util/dbglog.hpp"
 
@@ -102,19 +103,11 @@ std::atomic<std::size_t>& cap_resolutions() noexcept {
     return s;
 }
 
-// Read a file with a hard byte cap. Empty on missing / unreadable / oversize.
-[[nodiscard]] std::string read_capped(const fs::path& p, std::size_t cap) {
-    std::error_code ec;
-    if (!fs::is_regular_file(p, ec) || ec) return {};
-    auto sz = fs::file_size(p, ec);
-    if (ec || sz == 0 || sz > cap) return {};
-    std::ifstream f(p, std::ios::binary);
-    if (!f) return {};
-    std::string out(static_cast<std::size_t>(sz), '\0');
-    f.read(out.data(), static_cast<std::streamsize>(sz));
-    out.resize(static_cast<std::size_t>(f.gcount()));
-    return out;
-}
+// NOTE: the local read_capped() is gone. The same helper lived here, in
+// commands.cpp and in hooks.cpp, and every copy returned "" for both
+// "missing" and "too big" -- which is how an oversized SKILL.md used to
+// vanish with `0 warning(s)`. util::capped_read returns a VARIANT, so the
+// two cannot be conflated by a caller who forgets to care.
 
 // Parse `key: value` from a YAML frontmatter line. LENIENT by design
 // (spec guidance): only the FIRST colon splits, so a description like
@@ -448,31 +441,32 @@ void scan_root(const fs::path& root, const std::string& source,
             sig += std::to_string(static_cast<long long>(
                        fmt.time_since_epoch().count())) +
                    ";";
-        std::string raw = read_capped(md, kMaxBodyBytes);
-        if (raw.empty()) {
-            // read_capped returns empty for "too big" the same way it does
-            // for "unreadable", so an oversized SKILL.md used to vanish with
-            // `0 warning(s)` -- the author's skill simply never loaded and
-            // nothing said why. A file on disk that the catalog ignores is
-            // exactly the shape the shadow log exists to prevent.
-            //
-            // Only speak up when the file is PRESENT and over the cap:
-            // genuinely unreadable (permissions, a race with a delete) is
-            // already covered by the directory walk, and a warning for every
-            // transient miss would be noise.
-            std::error_code zec;
-            const auto sz = fs::file_size(md, zec);
-            if (!zec && sz > kMaxBodyBytes) {
+        // Visit, don't peek: the compiler refuses a lambda set that omits
+        // TooBig, which is the whole reason this is a variant.
+        const auto got = ::agentty::util::capped_read(md, kMaxBodyBytes);
+        std::string raw;
+        bool skip = false;
+        std::visit([&](const auto& v) {
+            using V = std::decay_t<decltype(v)>;
+            if constexpr (std::is_same_v<V, ::agentty::util::Content>) {
+                raw = v.text;
+            } else if constexpr (std::is_same_v<V, ::agentty::util::TooBig>) {
+                // Keep a stub so discovery can REPORT it. A file on disk
+                // the catalog ignores is exactly what the shadow log exists
+                // to prevent; the size cap deserves the same treatment.
                 Skill over;
                 over.name   = slug;
                 over.slug   = slug;
                 over.source = source;
                 over.dir    = md.parent_path();
-                over.oversized_bytes = sz;
+                over.oversized_bytes = v.size;
                 out.push_back(std::move(over));
+                skip = true;
+            } else {
+                skip = true;   // Absent / Unreadable
             }
-            continue;
-        }
+        }, got);
+        if (skip || raw.empty()) continue;
         Skill s = parse_skill(raw, slug, source);
         if (s.name.empty()) continue;
         // Shadow: earlier roots (project before user, native before

@@ -9,6 +9,7 @@
 
 #include "agentty/scope/scope.hpp"
 #include "agentty/config/inventory.hpp"   // kCommandsLayout — the one declaration
+#include "agentty/util/capped_read.hpp"   // the one capped-read primitive
 
 #include <algorithm>
 #include <cctype>
@@ -42,18 +43,8 @@ constexpr int         kMaxDepth     = 3;   // namespace nesting (a:b:c)
     return std::string{v.substr(b, e - b)};
 }
 
-[[nodiscard]] std::string read_capped(const fs::path& p, std::size_t cap) {
-    std::error_code ec;
-    if (!fs::is_regular_file(p, ec) || ec) return {};
-    auto sz = fs::file_size(p, ec);
-    if (ec || sz == 0 || sz > cap) return {};
-    std::ifstream f(p, std::ios::binary);
-    if (!f) return {};
-    std::string out(static_cast<std::size_t>(sz), '\0');
-    f.read(out.data(), static_cast<std::streamsize>(sz));
-    out.resize(static_cast<std::size_t>(f.gcount()));
-    return out;
-}
+// NOTE: the local read_capped() is gone — see util/capped_read.hpp for why
+// three copies of it all shipped the same bug.
 
 [[nodiscard]] bool parse_kv(const std::string& line,
                             std::string& key, std::string& val) {
@@ -149,14 +140,13 @@ void scan_dir(const fs::path& dir, const std::string& prefix,
         if (!sec)
             sig += std::to_string(static_cast<long long>(
                        fmt.time_since_epoch().count())) + ";";
-        std::string raw = read_capped(p, kMaxBodyBytes);
-        // NOTE: an oversized .md is skipped silently here, unlike skills
-        // (which keeps a reporting stub) and hooks (which names the file).
-        // Both of those have a CLI that exists to tell you what loaded;
-        // slash commands have none, so there is nowhere to put the
-        // warning. A command that does not appear in the palette is also
-        // self-evident in a way a missing skill or an inert hook is not.
-        // If `agentty commands` ever ships, this should match them.
+        // Commands have no `agentty commands` CLI to report into, so an
+        // oversized file is skipped -- but the TooBig case is now named
+        // rather than hidden inside an empty string, so if that CLI ever
+        // ships the branch to fill in is already here.
+        const auto got = ::agentty::util::capped_read(p, kMaxBodyBytes);
+        if (!::agentty::util::has_content(got)) continue;
+        const std::string& raw = ::agentty::util::bytes_or_empty(got);
         if (raw.empty()) continue;
 
         std::string name = prefix.empty() ? stem : prefix + ":" + stem;

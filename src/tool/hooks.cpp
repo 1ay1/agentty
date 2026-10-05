@@ -16,6 +16,7 @@
 
 #include "agentty/tool/hooks.hpp"
 #include "agentty/util/user_root.hpp"
+#include "agentty/util/capped_read.hpp"   // the one capped-read primitive
 
 #include "agentty/auth/auth.hpp"            // auth::sha256_hex (file-content hash)
 #include "agentty/scope/scope.hpp"          // scope::Approvals (shared trust store)
@@ -84,32 +85,10 @@ struct HooksFile {
     return off && off[0] && off[0] != '0';
 }
 
-// Read a whole file, or empty when it is missing, unreadable, or past `cap`.
-//
-// `out_too_big` separates the last case from the others. Without it an
-// oversized hooks.json read exactly like no hooks file at all, and
-// `agentty hooks` printed "no hooks file" while the user's file sat right
-// there -- so a PreToolUse hook written to BLOCK something was silently
-// inert and nothing said so. Every other cap in this tree learned the same
-// lesson; this one gates command execution, so it matters most here.
-[[nodiscard]] std::string read_all(const fs::path& p, std::size_t cap,
-                                   bool* out_too_big = nullptr) {
-    if (out_too_big) *out_too_big = false;
-    std::error_code ec;
-    if (!fs::is_regular_file(p, ec) || ec) return {};
-    auto sz = fs::file_size(p, ec);
-    if (ec || sz == 0) return {};
-    if (sz > cap) {
-        if (out_too_big) *out_too_big = true;
-        return {};
-    }
-    std::ifstream f(p, std::ios::binary);
-    if (!f) return {};
-    std::string out(static_cast<std::size_t>(sz), '\0');
-    f.read(out.data(), static_cast<std::streamsize>(sz));
-    out.resize(static_cast<std::size_t>(f.gcount()));
-    return out;
-}
+// NOTE: the local read_all() is gone — see util/capped_read.hpp. It, and the
+// two other copies in skills.cpp and commands.cpp, all shipped the same bug:
+// "" meant missing AND too big, so `agentty hooks` printed "no hooks file"
+// with the user's file right there and a blocking hook silently inert.
 
 // Locate + parse the active hooks file. NOT cached across calls on
 // purpose: hooks fire once per tool call (seconds apart), a stat+parse is
@@ -124,9 +103,10 @@ struct HooksFile {
     };
     for (const auto& c : candidates) {
         if (c.empty()) continue;
-        bool too_big = false;
-        std::string raw = read_all(c, kMaxHooksFileBytes, &too_big);
-        if (too_big && out.too_big.empty()) out.too_big = c.string();
+        const auto got = ::agentty::util::capped_read(c, kMaxHooksFileBytes);
+        if (::agentty::util::oversize_bytes(got) > 0 && out.too_big.empty())
+            out.too_big = c.string();
+        const std::string& raw = ::agentty::util::bytes_or_empty(got);
         if (raw.empty()) continue;
         std::error_code ec;
         auto abs = fs::weakly_canonical(c, ec);
@@ -179,7 +159,8 @@ constexpr char kHooksApprovalsLeaf[] = "hooks_approved.json";
     if (!a.shas.empty()) return a;
     // Legacy {path: hash} object — migrate its values into the list.
     const auto p = approvals_path();
-    std::string raw = read_all(p, kMaxHooksFileBytes);
+    std::string raw = std::string{::agentty::util::bytes_or_empty(
+        ::agentty::util::capped_read(p, kMaxHooksFileBytes))};
     if (raw.empty()) return a;
     json j = json::parse(raw, nullptr, /*throw=*/false);
     if (j.is_object())
@@ -413,7 +394,9 @@ int cli(const std::string& verb) {
                     "but still able to act inside your workspace).\n"
                     "Approve this exact file content? [y/N] ",
                     hf.path.c_str(),
-                    read_all(hf.path, kMaxHooksFileBytes).c_str());
+                    std::string{::agentty::util::bytes_or_empty(
+                        ::agentty::util::capped_read(
+                            hf.path, kMaxHooksFileBytes))}.c_str());
         std::fflush(stdout);
         std::string line;
         std::getline(std::cin, line);
