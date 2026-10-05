@@ -82,6 +82,7 @@ set(_AGENTTY_CONSOLIDATED
     panel_width_probe
     reveal_bucket_test
     ui_motion_frame_test
+    reasoning_ticker_height_test
     stats_golden_test
     stats_render_probe
     context_window_test
