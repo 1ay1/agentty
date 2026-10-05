@@ -170,7 +170,51 @@ void warn_once(std::string_view env, const fs::path& bad,
     out.path = chosen;
     out.origin = overridden ? Origin::Override : Origin::Default;
 
-    if (!create) return out;
+    if (!create) {
+        // PREDICT what the creating path would do, without doing it.
+        //
+        // This early return used to skip every viability check below, so a
+        // dry resolve happily reported `$AGENTTY_HOME/threads` even when
+        // $AGENTTY_HOME named a FILE -- a path that can never exist. The
+        // writer warns "will not persist this session" and falls back; the
+        // observer stated the broken path as fact.
+        //
+        // That gap is the whole reason `agentty config` exists to be
+        // trustworthy: a tool that describes the program is worthless if it
+        // can disagree with it. So mirror the decisions, cheaply -- an
+        // existence probe instead of a mkdir.
+        // A path is creatable when it is already a directory, OR when the
+        // nearest EXISTING ancestor is a directory. Checking only `chosen`
+        // itself is not enough: `$AGENTTY_HOME=/tmp/afile` makes
+        // `/tmp/afile/threads` merely absent, which reads as "fine, we'll
+        // make it" while mkdir would fail on the file in its path.
+        auto creatable = [](fs::path p) {
+            std::error_code ec;
+            if (fs::is_directory(p, ec)) return true;
+            if (fs::exists(p, ec))      return false;   // exists, not a dir
+            for (fs::path up = p.parent_path(); !up.empty();
+                 up = up.parent_path()) {
+                if (fs::is_directory(up, ec)) return true;
+                if (fs::exists(up, ec))       return false;  // a FILE in the way
+                if (up == up.parent_path())   break;
+            }
+            return false;
+        };
+        if (!creatable(chosen)) {
+            if (!overridden)
+                return std::unexpected(Error{Error::Kind::Unusable,
+                                             "cannot create " + chosen.string()});
+            // Same fallback the writer takes, reported the same way, so the
+            // Origin a caller prints matches the one it would really get.
+            out.path   = dflt;
+            out.origin = Origin::OverrideFellBack;
+            if (!creatable(dflt))
+                return std::unexpected(
+                    Error{Error::Kind::Unusable,
+                          "neither override nor default usable: " + dflt.string()});
+        }
+        return out;
+    }
 
     std::error_code ec;
     fs::create_directories(chosen, ec);

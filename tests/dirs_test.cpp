@@ -463,6 +463,52 @@ int main() {
         fs::current_path(cwd_before);
     }
 
+    // ── resolve_dry agrees with resolve ─────────────────────────────────
+    //
+    // The observer must predict the writer. `agentty config` resolves dry so
+    // that asking where the logs go does not MAKE a logs directory -- but a
+    // dry resolve that skips the viability checks reports a path the writer
+    // would reject, which is worse than creating the directory: the user is
+    // told a location that can never exist.
+    //
+    // The case that caught it: $AGENTTY_HOME naming a FILE. `<file>/threads`
+    // is merely ABSENT, which reads as "fine, we'll create it" unless you
+    // walk up to the nearest existing ancestor and find a file in the way.
+    {
+        const fs::path base = g_sandbox / "dry";
+        fs::create_directories(base);
+        const fs::path afile = base / "a-file";
+        { std::ofstream f(afile); f << "x"; }
+
+        const Spec s{.root = Root::User, .leaf = "threads",
+                     .env = "AGENTTY_TEST_DRY"};
+
+        // Override points at a FILE -> the writer warns and falls back, so
+        // the dry answer must be the fallback, flagged as such.
+        ::setenv("AGENTTY_TEST_DRY", afile.string().c_str(), 1);
+        auto dry = resolve_dry(s);
+        auto wet = resolve(s);
+        check(dry.has_value() && wet.has_value(), "dry: both resolve");
+        if (dry && wet) {
+            check(dry->path == wet->path,
+                  "dry: the path matches what the writer chose");
+            check(dry->origin == wet->origin,
+                  "dry: the origin matches too (fell-back, not override)");
+            check(dry->origin == Origin::OverrideFellBack,
+                  "dry: a file-valued override is reported as fallen back");
+        }
+        ::unsetenv("AGENTTY_TEST_DRY");
+
+        // And a dry resolve still creates NOTHING -- that is the whole
+        // reason it exists.
+        const fs::path probe = base / "never-made";
+        const Spec q{.root = Root::User, .leaf = "", .env = "AGENTTY_TEST_DRY2"};
+        ::setenv("AGENTTY_TEST_DRY2", probe.string().c_str(), 1);
+        (void)resolve_dry(q);
+        check(!fs::exists(probe), "dry: resolves without creating");
+        ::unsetenv("AGENTTY_TEST_DRY2");
+    }
+
     // ── the project root ignores itself ───────────────────────────────
     //
     // <project>/.agentty holds derived state -- tens of MB of retrieval index
