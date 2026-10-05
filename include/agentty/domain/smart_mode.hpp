@@ -133,6 +133,20 @@ struct SlotOverride {
 struct RoleConfig {
     bool enabled = false;   // Smart Mode master switch (off by default)
 
+    // The user named a model on the command line, so every role uses it.
+    //
+    // Smart Mode answers "should agentty optimise cost for me" — a
+    // preference. This answers "is --model binding" — a contract. They were
+    // the same switch, which is why turning Smart Mode OFF did not stop
+    // routing: it fell through to the tier auto-router instead, and a
+    // harness passing `--model X` still got compaction and read-only
+    // subagents billed to a different model (#70). Nothing in the docs said
+    // --model was a hint.
+    //
+    // Only the CLI sets this. The TUI never passes --model, so interactive
+    // cost routing is unchanged.
+    bool pinned_model = false;
+
     // ONE decision, three slots. There used to be seven more toggles here.
     //
     // Three of them (internal routing, orchestration, subagent routing) are
@@ -602,26 +616,53 @@ namespace detail {
     return p;
 }
 
-// Convenience for the INTERNAL utility calls (compaction summary, commit
-// messages, HyDE query expansion, fork/thread retrieval). These already
-// default to the cheapest capable model even with Smart Mode OFF — so this
-// preserves that default and ONLY overrides it when the user has explicitly
-// pinned a Utility slot in Smart Mode. That way turning Smart Mode on can
-// steer these onto a specific cheap model, but turning it OFF never regresses
-// them back up to the flagship. Returns a WIRE model id.
+// ── The one question every router asks ──────────────────────────────────
+//
+// "Which model may this role run on?" Three sites used to answer it
+// independently — compaction, read-only subagents, and the utility turns —
+// each consulting routing policy in its own way. Three decision sites for
+// one decision, which is how `--model X` ended up binding for the main turn
+// and advisory everywhere else (#70).
+//
+// `floor` is the capability the role actually needs: Cheap for summarisation
+// (text in, text out), Mid for read-only exploration (deciding which of 40
+// grep hits matter is not mechanical work).
+//
+// Returns a WIRE model id.
+[[nodiscard]] inline std::string role_model(
+        std::string_view parent_model,
+        const std::vector<ModelInfo>& candidates,
+        const RoleConfig& cfg,
+        ModelCapabilities::Tier floor,
+        const SlotOverride* slot = nullptr,
+        std::string_view active_provider = {}) {
+    const std::string parent = wire_model_id(parent_model);
+
+    // A pinned model wins outright. The user named it on the command line;
+    // no cost heuristic outranks that.
+    if (cfg.pinned_model) return parent;
+
+    // A Smart Mode slot the user set explicitly comes next.
+    if (slot && cfg.internal_routing() && slot->set && !slot->model.empty()
+        && (active_provider.empty() || slot->provider.empty()
+            || slot->provider == active_provider))
+        return wire_model_id(std::string_view{slot->model});
+
+    // Otherwise route down to the cheapest model that clears the floor.
+    // Never routes UP, so a single-model account sees no change.
+    return cheapest_capable_model(parent, candidates, floor);
+}
+
+// Utility turns: compaction summaries, thread titles, HyDE expansion. Text
+// in, text out, so the Cheap tier is enough.
 [[nodiscard]] inline std::string utility_model(
         std::string_view parent_model,
         const std::vector<ModelInfo>& candidates,
         const RoleConfig& cfg,
         std::string_view active_provider = {}) {
-    if (cfg.internal_routing()) {
-        if (const auto& ov = cfg.utility; ov.set && !ov.model.empty()
-            && (active_provider.empty() || ov.provider.empty()
-                || ov.provider == active_provider))
-            return wire_model_id(std::string_view{ov.model});
-    }
-    return cheapest_capable_model(wire_model_id(parent_model), candidates,
-                                  ModelCapabilities::Tier::Cheap);
+    return role_model(parent_model, candidates, cfg,
+                      ModelCapabilities::Tier::Cheap, &cfg.utility,
+                      active_provider);
 }
 
 // ── The Smart Mode overlay's rows, as a TYPE ────────────────────────────

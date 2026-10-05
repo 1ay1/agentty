@@ -1808,6 +1808,12 @@ int main(int argc, char** argv) {
         if (auto ov = smart::tuning::enabled_override())
             sa_smart.enabled = *ov;
         settings::registry::apply_env(sa_smart);
+        // An explicit --model is a contract, not a hint: every role runs on
+        // it. Without this, `--model X` bound the main turn while compaction
+        // and read-only subagents still routed to whatever the catalog said
+        // was cheaper -- a harness got billed for a model it never named
+        // (#70).
+        sa_smart.pinned_model = !args.cli_model.empty();
         // The model CATALOG, for the same reason and with the same history.
         //
         // The TUI pushes this from init() and again on every catalog load

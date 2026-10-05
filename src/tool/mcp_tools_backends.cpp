@@ -1007,26 +1007,19 @@ provider::StreamResult run_one_completion(Thread& thread,
         //
         // The floor used to be Cheap, which on Anthropic means every
         // explorer ran on Haiku while the parent was Opus — tier 1 doing the
-        // investigation for tier 3. That is the single biggest reason a
-        // `task` came back with a thin or confused report: exploring a
-        // codebase is not mechanical. It is deciding which of 40 grep hits
-        // matter, and a weaker model spends its turns reading the wrong
-        // files and then summarises them confidently. The user cannot see
-        // why, because the routing is silent and the report looks plausible.
+        // investigation for tier 3. Exploring a codebase is not mechanical:
+        // it is deciding which of 40 grep hits matter, and a weaker model
+        // spends its turns reading the wrong files and then summarises them
+        // confidently. Zed does not downgrade at all; Mid is the middle
+        // position.
         //
-        // Zed does not downgrade at all — `Thread::new_subagent` copies the
-        // parent's model verbatim. Mid is the middle position: still cheaper
-        // than a flagship parent (Sonnet vs Opus), still a real saving on a
-        // fan-out, but competent at the judgement the role actually needs.
-        //
-        // The router never routes UP and never crosses providers, so a
-        // single-model account, or one whose cheapest capable model is
-        // already the parent, sees no change. Smart Mode (above) still wins
-        // outright when the user has pinned slots explicitly.
+        // Through role_model, so a pinned --model is honoured here too. This
+        // branch used to call cheapest_capable_model directly, which meant
+        // turning Smart Mode OFF did not stop routing -- it fell through to
+        // this router instead (#70).
         req.model = type.read_only
-                      ? agentty::cheapest_capable_model(
-                            cfg.model, cfg.candidates,
-                            ModelCapabilities::Tier::Mid)
+                      ? smart::role_model(cfg.model, cfg.candidates, cfg.smart,
+                                          ModelCapabilities::Tier::Mid)
                       : cfg.model;
     }
     // A subagent NEVER needs the 1M/2M extended-context window: it does a
@@ -1082,10 +1075,13 @@ provider::StreamResult run_one_completion(Thread& thread,
     // naming the role, the model the router actually chose, and whether
     // Layer 3b or the tier auto-router chose it.
     AGT_LOG(Smart, Debug, "route.subagent",
-            "agent={} role_routing={} read_only={} parent_model={} model={}",
+            "agent={} role_routing={} pinned={} read_only={} candidates={} "
+            "parent_model={} model={}",
             type.name,
             cfg.smart.subagent_routing() ? 1 : 0,
+            cfg.smart.pinned_model ? 1 : 0,
             type.read_only ? 1 : 0,
+            cfg.candidates.size(),
             cfg.model,
             req.model);
     // Resolve auth LIVE from the ACTIVE provider through the central

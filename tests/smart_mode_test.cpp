@@ -513,6 +513,73 @@ TEST_CASE("smart_mode") {
 // never the model. A 577-turn trace: role=strategic 501, role=none 76,
 // Implementation and Utility never, ZERO `task` calls (the only other way to
 // reach them) — while 142 of those turns (25%) were scored trivial/simple.
+TEST_CASE("smart_mode: a pinned --model wins every role") {
+    // #70: `agentty run --model X` bound the main turn and nothing else.
+    // Compaction and read-only subagents still asked the tier router, so a
+    // harness got billed for a model it never named -- and the reporter's
+    // spend limit was what caught it, not any output agentty produced.
+    //
+    // Smart Mode answers "optimise cost for me" (a preference). The pin
+    // answers "is --model binding" (a contract). They were one switch, which
+    // is why turning Smart Mode OFF did not stop routing: it fell through to
+    // the tier router instead.
+    std::vector<agentty::ModelInfo> catalog;
+    catalog.push_back({.id = agentty::ModelId{"claude-opus-4-5"}});
+    catalog.push_back({.id = agentty::ModelId{"claude-haiku-4-5"}});
+
+    const std::string parent = "claude-opus-4-5";
+
+    // Unpinned: a Cheap-floor role routes DOWN. This is the default and
+    // stays the default -- the TUI never passes --model.
+    {
+        sm::RoleConfig cfg;
+        cfg.enabled = false;
+        CHECK(sm::utility_model(parent, catalog, cfg) == "claude-haiku-4-5");
+    }
+
+    // Pinned: every role runs on what the user named.
+    {
+        sm::RoleConfig cfg;
+        cfg.enabled = false;
+        cfg.pinned_model = true;
+        CHECK_MESSAGE(sm::utility_model(parent, catalog, cfg) == parent,
+                      "compaction honours the pin");
+        CHECK_MESSAGE(sm::role_model(parent, catalog, cfg,
+                                     agentty::ModelCapabilities::Tier::Mid) == parent,
+                      "read-only subagents honour the pin");
+        CHECK_MESSAGE(sm::role_model(parent, catalog, cfg,
+                                     agentty::ModelCapabilities::Tier::Cheap) == parent,
+                      "the cheapest floor honours it too");
+    }
+
+    // The pin outranks an explicitly pinned Smart Mode slot: the command
+    // line is more specific than a saved preference.
+    {
+        sm::RoleConfig cfg;
+        cfg.enabled = true;
+        cfg.pinned_model = true;
+        cfg.utility.set = true;
+        cfg.utility.model = "claude-haiku-4-5";
+        CHECK(sm::utility_model(parent, catalog, cfg) == parent);
+
+        // ...and without the pin, that slot still wins. The pin ADDS a rule,
+        // it does not replace Smart Mode.
+        cfg.pinned_model = false;
+        CHECK(sm::utility_model(parent, catalog, cfg) == "claude-haiku-4-5");
+    }
+
+    // A single-model account is unaffected either way -- the router never
+    // routes UP, so there is nothing to pin against.
+    {
+        std::vector<agentty::ModelInfo> only;
+        only.push_back({.id = agentty::ModelId{"claude-opus-4-5"}});
+        sm::RoleConfig cfg;
+        CHECK(sm::utility_model(parent, only, cfg) == parent);
+        cfg.pinned_model = true;
+        CHECK(sm::utility_model(parent, only, cfg) == parent);
+    }
+}
+
 TEST_CASE("smart_mode: the main turn follows its complexity") {
     using sm::Complexity;
     using sm::ModelRole;
