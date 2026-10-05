@@ -381,30 +381,33 @@ void print_one(const Report& r) {
     std::printf("\n");
 }
 
-// The storage model on one screen: two roots, one anchor each, and the leaf
-// variables shown as what they are -- narrower conveniences that predate the
-// anchors. Seven flat names look like seven decisions, and they are not.
+// The storage model on one screen. Two roots, one anchor each; everything
+// else is a leaf an anchor already moves.
 void print_env() {
     std::printf("storage model\n\n");
     std::printf("  ~/.agentty           follows the HUMAN   $AGENTTY_HOME%s\n",
                 env_set("AGENTTY_HOME") ? "         (set)" : "");
     std::printf("  <project>/.agentty   follows the CODE    $AGENTTY_PROJECT_DIR%s\n",
                 env_set("AGENTTY_PROJECT_DIR") ? "  (set)" : "");
+    std::printf("\nthat is the whole model. every category is a leaf under one\n"
+                "of those two, so the anchor moves it.\n");
 
-    std::printf("\nnarrower — each moves ONE leaf its anchor already moves\n");
+    // The leftovers. Shipped in 0.9.19 before the anchors existed, kept
+    // because removing a released variable breaks a setup with no error.
+    bool any = false;
     for (const Entry& e : kEntries) {
         if (!e.write || e.write->env.empty()) continue;
+        if (!any) {
+            std::printf("\nalso accepted, from before the anchors — each moves one leaf\n");
+            any = true;
+        }
         std::printf("  $%-22s %s%s\n", std::string{e.write->env}.c_str(),
                     std::string{e.name}.c_str(),
                     env_set(e.write->env) ? "   (set)" : "");
     }
 
-    std::printf("\nnot storage — names one file to READ\n");
-    std::printf("  $%-22s %s%s\n", "AGENTTY_MCP_CONFIG", "mcp",
+    std::printf("\n$AGENTTY_MCP_CONFIG is not storage — it names one file to read.%s\n",
                 env_set("AGENTTY_MCP_CONFIG") ? "   (set)" : "");
-
-    std::printf("\nnothing new goes on the narrower axis — a new category is a\n"
-                "leaf under an existing root, which the anchor already moves.\n");
 }
 
 void print_table() {

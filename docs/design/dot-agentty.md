@@ -64,7 +64,7 @@ $AGENTTY_HOME         the whole root
 $AGENTTY_THREADS_DIR  conversation history
 $AGENTTY_CACHE_DIR    refetchable
 $AGENTTY_LOGS_DIR     diagnostics
-$AGENTTY_RAG_DIR      retrieval indexes — PROJECT-scoped, the odd one out
+$AGENTTY_PROJECT_DIR  the whole <project>/.agentty root
 $AGENTTY_DOCS_DIR     which corpus to index (not where state goes)
 ```
 
@@ -306,10 +306,13 @@ already moves:
 ```
 
 The leaf variables (`$AGENTTY_THREADS_DIR`, `$AGENTTY_CACHE_DIR`,
-`$AGENTTY_LOGS_DIR`, `$AGENTTY_RAG_DIR`) predate the anchors and each move
-one leaf their anchor already covers. They stay because removing a released
+`$AGENTTY_LOGS_DIR`) shipped in 0.9.19 before the anchors existed, and each
+moves one leaf its anchor now covers. They stay because removing a released
 variable breaks a working setup with no error message, but **nothing new goes
 on that axis** — a new category is a leaf under an existing root.
+
+`$AGENTTY_RAG_DIR` is gone. It existed only because the project root had no
+anchor, and it never shipped in a release.
 
 `$AGENTTY_MCP_CONFIG` is not storage at all: it names one file to *read*,
 which is scope's Explicit locus.

@@ -158,8 +158,12 @@ inline constexpr dirs::Spec kLogsSpec{
 // Retrieval indexes. Derived data, so it lives under cache/ and a sweep may
 // reclaim it; keep_last=1 spares the previous embedder's index so A/B-ing
 // two backends doesn't force a full rebuild.
+//
+// No variable of its own: $AGENTTY_PROJECT_DIR moves the root this sits in.
+// It briefly had $AGENTTY_RAG_DIR, invented because the project root had no
+// anchor — that reason is gone, and the variable never shipped in a release.
 inline constexpr dirs::Spec kRagSpec{
-    .root = dirs::Root::Project, .leaf = "cache", .env = "AGENTTY_RAG_DIR",
+    .root = dirs::Root::Project, .leaf = "cache",
     .life = {.rebuildable = true, .keep_last = 1,
              .min_age = std::chrono::seconds{3600}}};
 

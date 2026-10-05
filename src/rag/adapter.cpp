@@ -113,54 +113,20 @@ constexpr ::agentty::dirs::Spec kFeedbackSpec = ::agentty::config::kFeedbackSpec
     if (!d) return {};
 
     // Indexes used to sit flat in <project>/.agentty; they live under cache/
-    // now. Move what is there on first use rather than orphaning it -- a
-    // re-index is cheap but not free, and a stale 38 MB nobody can name is
-    // exactly what #62 was about.
-    if (!d->overridden() && !d->root.empty()) {
-        std::error_code mec;
-        if (fs::is_directory(d->path, mec)) {
-            for (const auto& e : fs::directory_iterator(d->root, mec)) {
-                if (mec) break;
-                if (!e.is_regular_file(mec) || mec) continue;
-                const auto name = e.path().filename().string();
-                if (!name.starts_with("rag_")) continue;
-                std::error_code rec;
-                fs::rename(e.path(), d->path / name, rec);
-            }
+    // now. Move what is there rather than orphaning a 38 MB index nobody can
+    // name, which is what #62 was about.
+    std::error_code mec;
+    if (!d->root.empty() && fs::is_directory(d->path, mec)) {
+        for (const auto& e : fs::directory_iterator(d->root, mec)) {
+            if (mec) break;
+            if (!e.is_regular_file(mec) || mec) continue;
+            const auto name = e.path().filename().string();
+            if (!name.starts_with("rag_")) continue;
+            std::error_code rec;
+            fs::rename(e.path(), d->path / name, rec);
         }
     }
-
-    if (!d->overridden()) return d->path;
-
-    const fs::path anchor = ::agentty::dirs::project_anchor();
-    if (anchor.empty()) return d->path;
-
-    const std::string key = anchor.string();
-    // FNV-1a, not std::hash: this value is baked into a PERSISTED directory
-    // name, and std::hash is only required to be consistent within a single
-    // execution of a program. A libstdc++/libc++ difference -- or a future
-    // change to either -- would silently orphan every existing index and
-    // rebuild it under a new name. A fixed algorithm is the only kind that
-    // can appear in a path.
-    std::uint64_t h = 1469598103934665603ull;
-    for (unsigned char c : key) {
-        h ^= c;
-        h *= 1099511628211ull;
-    }
-    char tag[17];
-    std::snprintf(tag, sizeof tag, "%016llx",
-                  static_cast<unsigned long long>(h));
-
-    std::string name = anchor.filename().string();
-    if (name.empty()) name = "project";
-    name += '-';
-    name.append(tag, 8);
-
-    std::error_code ec;
-    fs::path out = d->path / name;
-    fs::create_directories(out, ec);
-    if (ec) return d->path;   // fall back rather than refuse to persist
-    return out;
+    return d->path;
 }
 
 // Sweep superseded variants of an index we just rewrote.

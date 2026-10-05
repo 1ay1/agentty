@@ -131,14 +131,19 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
   with transcript evidence: `old`/`search`/`find`/`from` stay out.
 
 ### Added
-- **`$AGENTTY_RAG_DIR`** — relocate retrieval indexes
-  ([#61](https://github.com/1ay1/agentty/issues/61)). These are the biggest
-  thing agentty writes per project (31 MB of code index + 7 MB of docs index
-  on this repo) and they live under `<project>/.agentty`, so none of
-  `$AGENTTY_THREADS_DIR` / `$AGENTTY_CACHE_DIR` / `$AGENTTY_LOGS_DIR` moved
-  them — those relocate the *user* root. With the override set, each project
-  gets its own readable subdirectory (`myrepo-04b42962/`) so two checkouts
-  pointed at one location don't fight over the same file.
+- **`$AGENTTY_PROJECT_DIR`** — relocate `<project>/.agentty` wholesale, the
+  way `$AGENTTY_HOME` relocates the user root
+  ([#61](https://github.com/1ay1/agentty/issues/61),
+  [#63](https://github.com/1ay1/agentty/issues/63)). Two roots, one anchor
+  each; every category is a leaf underneath one of them, so the anchor moves
+  it. Retrieval indexes now live in `cache/` (derived, swept) and feedback in
+  `state/` (accumulated, never swept) — they used to share the flat project
+  root, which made "same directory, opposite retention" a fact only a comment
+  protected. Existing indexes move into `cache/` on first use rather than
+  being orphaned. `agentty config env` prints the whole model.
+
+  This replaces `$AGENTTY_RAG_DIR`, which existed only because the project
+  root had no anchor and never shipped in a release.
 
 ### Fixed
 - **Launching from a subdirectory built a second retrieval index.**
