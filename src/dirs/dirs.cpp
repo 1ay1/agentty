@@ -106,6 +106,24 @@ void warn_once(std::string_view env, const fs::path& bad,
             env, why, bad.string(), fallback.string());
 }
 
+// 8 hex chars identifying a path, for keeping two projects apart under one
+// override directory.
+//
+// FNV-1a rather than std::hash: this lands in a PERSISTED directory name,
+// and std::hash is only required to be stable within one run of one program.
+// A libstdc++/libc++ difference would silently orphan every index.
+[[nodiscard]] std::string path_tag(const fs::path& p) {
+    std::uint64_t h = 1469598103934665603ull;
+    for (unsigned char c : p.string()) {
+        h ^= c;
+        h *= 1099511628211ull;
+    }
+    char buf[17];
+    std::snprintf(buf, sizeof buf, "%016llx",
+                  static_cast<unsigned long long>(h));
+    return std::string{buf, 8};
+}
+
 // Resolve the root a Spec hangs off, without touching `leaf`.
 [[nodiscard]] std::expected<fs::path, Error> root_for(Root r) {
     switch (r) {
@@ -117,25 +135,26 @@ void warn_once(std::string_view env, const fs::path& bad,
             return p;
         }
         case Root::Project: {
-            // $AGENTTY_PROJECT_DIR moves this root wholesale, the way
-            // $AGENTTY_HOME moves the user one. Two roots, one anchor each.
-            if (const char* v = std::getenv("AGENTTY_PROJECT_DIR"); v && *v) {
-                fs::path given{v};
-                if (given.is_relative()) {
-                    // Relative resolves against the anchor, never the cwd:
-                    // one directory per checkout, not one per launch dir.
-                    fs::path a = project_anchor();
-                    if (a.empty())
-                        return std::unexpected(Error{Error::Kind::NoRoot,
-                                                     "no usable project anchor"});
-                    given = a / given;
-                }
-                return given;
-            }
             fs::path a = project_anchor();
             if (a.empty())
                 return std::unexpected(Error{Error::Kind::NoRoot,
                                              "no usable project anchor"});
+
+            // $AGENTTY_PROJECT_DIR moves this root wholesale, the way
+            // $AGENTTY_HOME moves the user one.
+            if (const char* v = std::getenv("AGENTTY_PROJECT_DIR"); v && *v) {
+                fs::path given{v};
+                // Relative resolves against the anchor, never the cwd: one
+                // directory per checkout, not one per launch dir.
+                if (given.is_relative()) given = a / given;
+                // One override, many projects -- so give each its own
+                // subdirectory. Without this two checkouts land on the same
+                // filenames, and the index meta's root guard turns that into
+                // a full re-index on every switch (#61). Basename to stay
+                // readable, hash to disambiguate.
+                return given / (a.filename().string() + "-" + path_tag(a));
+            }
+
             if (!dir_is_writable(a))
                 return std::unexpected(Error{Error::Kind::NotWritable,
                                              "project anchor is not writable: "

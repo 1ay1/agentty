@@ -1,91 +1,18 @@
 #pragma once
-// agentty::config — the inventory: every place agentty reads config from or
-// writes bytes to, declared once, in one list.
+// agentty::config — every place agentty reads config from or writes bytes to,
+// declared once.
 //
-// ── The model, in four lines ─────────────────────────────────────────────
+// The model: two roots, one anchor each.
 //
-//     TWO ROOTS.          ~/.agentty          follows the HUMAN
-//                         <project>/.agentty  follows the CODE
+//     ~/.agentty           follows the HUMAN   $AGENTTY_HOME
+//     <project>/.agentty   follows the CODE    $AGENTTY_PROJECT_DIR
 //
-//     ONE ANCHOR EACH.    $AGENTTY_HOME       moves the user root
-//                         $AGENTTY_RAG_DIR    moves the project root's bulk
+// Everything else is a leaf under one of those, so the anchor moves it.
 //
-// Everything agentty stores is a leaf under one of those two roots. That is
-// the whole storage model, and the goal is to keep it sayable in one breath.
-//
-// ── Why this file exists ─────────────────────────────────────────────────
-//
-// agentty has two storage primitives and they are both good:
-//
-//     scope  (scope/scope.hpp)   where do I READ config from   — precedence
-//     dirs   (dirs/dirs.hpp)     where do I WRITE bytes to      — lifecycle
-//
-// What it did not have is a way for a USER to see either one. Six read
-// locations per portable feature, two write roots, seven environment
-// variables — and no command that answers "where does my MCP config come
-// from" or "why is agentty ignoring the file I just edited".
-//
-// That gap is what issues #58 and #60 are really about. Both are the same
-// person asking the same thing twice: FEWER THINGS TO TRACK. Six locations
-// are fine when you can see them; six invisible ones are the problem.
-//
-// ── The one rule that makes this trustworthy ─────────────────────────────
-//
-// A tool that describes the program is worthless if it can drift from the
-// program. A WRONG explanation is worse than none, because now you believe
-// it.
-//
-// So this file does not DESCRIBE anything. It OWNS the declarations, and the
-// features consume them:
-//
-//     config::kMcpLayout  ──┬──>  bridge.cpp reads servers with it
-//                           └──>  `agentty config mcp` prints it
-//
-// One constant, two readers. There is no second copy to disagree with the
-// first, so the printed ladder cannot be a lie about the real one.
-//
-// Same lesson as the dialect fix: that bug was two decision sites for one
-// decision — plan() said six sources, a filter downstream read three. The
-// fix was not to document the filter, it was to delete the second site.
-//
-// ── On environment variables: the model needs THREE ──────────────────────
-//
-// Seven exist. Only three carry the model:
-//
-//     $AGENTTY_HOME        the user root            — anchor
-//     $AGENTTY_RAG_DIR     the project root's bulk  — anchor
-//     $AGENTTY_MCP_CONFIG  "read exactly this file" — a different axis
-//                                                     (scope's Explicit locus)
-//
-// The other three — $AGENTTY_THREADS_DIR, $AGENTTY_CACHE_DIR,
-// $AGENTTY_LOGS_DIR — each move ONE leaf of the user root that
-// $AGENTTY_HOME already moves wholesale. They are narrower conveniences,
-// not part of the model, and `agentty config env` says so rather than
-// presenting seven equals.
-//
-// They stay because they shipped in 0.9.19 and removing a released variable
-// breaks a working setup with no error message. But NOTHING NEW gets added
-// on that axis: a new storage category is a leaf under an existing root, so
-// the anchor already relocates it. The counter-pressure is real and worth
-// naming — every category looks like it deserves its own variable, and
-// user_root.hpp's rule is the answer: a category gets one only if it grows
-// unboundedly AND you would plausibly put it on a different device from its
-// siblings. Threads/cache/logs failed that test in hindsight; `cache/`
-// under the project root will fail it too.
-//
-// ── What this file reports about TRUST ───────────────────────────────────
-//
-// It reports it, and that became honest only once MCP's hand-rolled gate was
-// folded into scope::trust_of. While there were TWO answers — scope's
-// content-hash model, and a `bool project_local` threaded through bridge.cpp
-// — printing either would have described behaviour that does not exist. That
-// is the exact sin this file is built to prevent, so it abstained until the
-// two became one.
-//
-// Trust is a property of a SOURCE, not of a concern, which is why it is a
-// column on the read ladder rather than a field up here: `executable`
-// decides whether a locus needs vouching, and the per-source answer is then
-// scope::trust_of's.
+// Each constant below is THE definition for its feature. The feature reads
+// it and `agentty config` prints it, so the printed answer cannot drift from
+// the real one. config_inventory_test fails the build if any other file
+// declares its own Layout or Spec.
 
 #include "agentty/dirs/dirs.hpp"
 #include "agentty/scope/scope.hpp"
@@ -99,37 +26,17 @@
 
 namespace agentty::config {
 
-// ── Read-side declarations ───────────────────────────────────────────────
+// ── Read: what each feature looks for, and where ─────────────────────────
 //
-// Each constant is THE definition for its feature. The feature reads it;
-// this file prints it. Nothing constructs a second one.
-//
-// Dialect breadth is the per-feature choice on Layout::dialects: kPortable
-// where the same bytes are valid in another tool, kNativeOnly (the default)
-// for a format we own.
+// Layout::dialects is the per-feature choice: kPortable where the same bytes
+// are valid in another tool, kNativeOnly (the default) for a format we own.
 
-// MCP servers. Native only: `mcp.json` is not an .agents/.claude convention
-// — those tools do not put that file there — and the schema is ours.
-//
-// EXECUTABLE: acting on this content spawns processes. A config that rode in
-// on a clone is therefore Pending until the human vouches for its exact
-// bytes (scope::trust_of + the content-hash approvals store — the MCPoison
-// re-gate). Nothing else in this inventory executes, which is why this is
-// the only row that carries the flag.
+// mcp.json is not an .agents/.claude convention and the schema is ours.
 inline constexpr scope::Layout kMcpLayout{
     .leaf = "mcp.json", .explicit_env = "AGENTTY_MCP_CONFIG"};
 
-// Does acting on this concern's content EXECUTE something?
-//
-// A function of the concern, not a field on the Layout: scope owns the
-// read algebra and must not grow a notion of what its callers do with the
-// bytes. Only MCP spawns.
-[[nodiscard]] constexpr bool executable(std::string_view name) noexcept {
-    return name == "mcp";
-}
-
-// Skills, agents, commands. Portable: the same markdown-with-frontmatter
-// file is valid in another tool, so reading theirs is free compatibility.
+// Markdown with frontmatter — valid in other tools, so reading theirs is
+// free compatibility.
 inline constexpr scope::Layout kSkillsLayout{
     .leaf = "skills", .dialects = scope::kPortable};
 inline constexpr scope::Layout kAgentsLayout{
@@ -137,15 +44,17 @@ inline constexpr scope::Layout kAgentsLayout{
 inline constexpr scope::Layout kCommandsLayout{
     .leaf = "commands", .dialects = scope::kPortable};
 
-// Learned memory. Our own JSONL; nobody else writes it.
 inline constexpr scope::Layout kMemoryLayout{.leaf = "memory.jsonl"};
 
-// ── Write-side declarations ──────────────────────────────────────────────
-//
-// Three leaves under the user root, one under the project root. Each mirrors
-// what util::resolve_subdir() has always done — same variable, same leaf,
-// same owner-only bit — and config_inventory_test asserts each resolves to
-// the byte-identical path its existing accessor returns.
+// Does acting on this content spawn a process? Only MCP does, and that is
+// what makes a cloned repo's config Pending until a human vouches for its
+// exact bytes. A function rather than a Layout field: scope owns the read
+// algebra and must not learn what callers do with the bytes.
+[[nodiscard]] constexpr bool executable(std::string_view name) noexcept {
+    return name == "mcp";
+}
+
+// ── Write: where bytes land, and for how long ────────────────────────────
 
 inline constexpr dirs::Spec kThreadsSpec{
     .root = dirs::Root::User, .leaf = "threads",
@@ -155,56 +64,41 @@ inline constexpr dirs::Spec kCacheSpec{
 inline constexpr dirs::Spec kLogsSpec{
     .root = dirs::Root::User, .leaf = "logs", .env = "AGENTTY_LOGS_DIR"};
 
-// Retrieval indexes. Derived data, so it lives under cache/ and a sweep may
-// reclaim it; keep_last=1 spares the previous embedder's index so A/B-ing
-// two backends doesn't force a full rebuild.
-//
-// No variable of its own: $AGENTTY_PROJECT_DIR moves the root this sits in.
-// It briefly had $AGENTTY_RAG_DIR, invented because the project root had no
-// anchor — that reason is gone, and the variable never shipped in a release.
+// Derived: a sweep may reclaim it. keep_last=1 spares the previous
+// embedder's index so switching backends doesn't force a full rebuild.
 inline constexpr dirs::Spec kRagSpec{
     .root = dirs::Root::Project, .leaf = "cache",
     .life = {.rebuildable = true, .keep_last = 1,
              .min_age = std::chrono::seconds{3600}}};
 
-// Retrieval feedback. Accumulated from real usage and nothing regenerates
-// it, so it sits in state/ and no sweep may ever collect it. Separate leaf
-// from the indexes precisely because the retention differs.
+// Accumulated from use, nothing regenerates it, so never swept. A separate
+// leaf from the indexes because the retention differs.
 inline constexpr dirs::Spec kFeedbackSpec{
     .root = dirs::Root::Project, .leaf = "state",
-    .life = {}};   // never swept
+    .life = {}};
 
-// Does this spec's variable move the WHOLE root, or just this leaf?
-//
-// Derived from the root, so a new category can't advertise itself as an
-// anchor. No Spec declares an anchor: both roots resolve theirs one level
-// down, in dirs::root_for.
+// Both roots resolve their anchor in dirs::root_for, so no Spec declares
+// one — which keeps a new category from advertising itself as an anchor.
 [[nodiscard]] constexpr bool moves_whole_root(const dirs::Spec&) noexcept {
     return false;
 }
-
-// The variable that moves this root wholesale.
 [[nodiscard]] constexpr std::string_view anchor_env(dirs::Root r) noexcept {
     return r == dirs::Root::User ? "AGENTTY_HOME" : "AGENTTY_PROJECT_DIR";
 }
 
-// ── Approval stores ────────────────────────────────────────────────
+// ── Approval stores ──────────────────────────────────────────────────────
 //
-// Content hashes a human has vouched for. Always under the USER root, so a
-// cloned repo can never vouch for itself.
-//
-// Declared here because each name was previously spelled in several files --
-// "mcp_approvals.json" appeared in four -- and a store the readers and the
-// writer disagree about silently trusts nothing.
+// Content hashes a human vouched for. Under the user root in state/, so a
+// cloned repo can never vouch for itself. Named here because
+// "mcp_approvals.json" used to be spelled in four files, and a store whose
+// readers and writer disagree silently trusts nothing.
 inline constexpr std::string_view kSkillsApprovals = "skills_approved.json";
 inline constexpr std::string_view kHooksApprovals  = "hooks_approved.json";
 inline constexpr std::string_view kMcpApprovals    = "mcp_approvals.json";
 
-// ── Entry: one concern, both halves ──────────────────────────────────────
+// ── One concern, both halves ─────────────────────────────────────────────
 //
-// Pointers rather than values so this stays an aggregate pointing AT the
-// constants above — not copies of them. A copy would be a second
-// definition, which is the whole thing this file exists to avoid.
+// Pointers, not values: a copy would be a second definition.
 struct Entry {
     std::string_view     name;    // what you type: `agentty config mcp`
     std::string_view     what;    // one line, for the table
@@ -217,74 +111,54 @@ struct Entry {
 
 // ── The resolved view ────────────────────────────────────────────────────
 //
-// Computed by folding the SAME functions the resolvers fold: scope::plan for
-// the read ladder, dirs::resolve_dry for the write path. Nothing here
-// re-derives a location.
+// Folded from the same functions the resolvers fold — scope::plan for the
+// ladder, dirs::resolve_dry for the write path. Nothing here re-derives a
+// location.
+
 struct ReadRow {
     scope::Locus   locus{};
     scope::Dialect dialect{};
     std::string    path;
     bool           exists = false;
-
-    // Empty unless the concern is executable AND the file is present.
-    // "trusted" / "needs approval" / "blocked: <why>" — computed by the same
-    // scope::trust_of the spawn gate calls, so the word printed here is the
-    // word the connect loop acted on.
+    // Set only for an executable concern with a present file. Computed by
+    // the same trust_of the spawn gate calls.
     std::string    trust;
 };
 
-// A dialect this feature does NOT read.
-//
-// Derived, not hardcoded: the set difference between the full dialect
-// product and the layout's declared `dialects`. So the "not read" lines come
-// from the same field that decides what IS read, and the two cannot
-// disagree. Widening a feature removes its line here for free.
+// A dialect this feature does not read. Derived as the set difference
+// against the layout's own `dialects`, so it cannot disagree with what IS
+// read.
 struct SkippedDialect {
     scope::Dialect dialect{};
     std::string    dir;          // ".claude", ".agents"
 };
 
-// A FOREIGN config that exists on this machine and is deliberately not read.
-//
-// Not a dialect: these vary in file name and nesting, not just directory, so
-// they cannot be a value on scope's Locus × Dialect product. And reading
-// executable config we do not own would let another tool's edit change what
-// we spawn, silently. Naming them here — with the one command that adopts
-// them — is what turns "agentty ignores my servers" from an issue someone
-// files into a line they already read. That is #60.
+// Another tool's config, found on this machine and deliberately not read:
+// these vary in file name and nesting, so they are not a dialect, and
+// reading executable config we don't own would let someone else's edit
+// change what we spawn. Printed with the command that adopts it.
 struct ForeignSource {
     std::string tool;       // "junie", "claude", …
     std::string path;
-    std::string adopt_with; // the exact command to run
+    std::string adopt_with;
 };
 
 struct WriteRow {
     std::string      path;
     dirs::Origin     origin = dirs::Origin::Default;
     std::string_view env;        // this spec's own variable, if any
-    std::string_view anchor;     // the variable that moves its whole root, if any
+    std::string_view anchor;     // the variable that moves its whole root
     bool             env_moves_root = false;
     bool             rebuildable = false;
     unsigned         keep_last = 0;
     std::string      error;      // non-empty when the spec would not resolve
 
-    // Bytes on disk, measured. This is the column #58 was really asking for
-    // — "store all non-configuration data on a different path" is a decision
-    // nobody can make without knowing which categories are big. Settings are
-    // KB and threads are GB, and until now the only way to learn that was
-    // `du`.
-    //
-    // Counted ONLY for a leaf this spec owns. Two specs that share a
-    // directory (rag and feedback both resolve to <project>/.agentty) must
-    // not each report the whole tree, or the totals read as double.
+    // Measured. Counted only for a leaf this spec owns, so two specs sharing
+    // a directory don't double the total.
     std::uintmax_t   bytes = 0;
     bool             measured = false;   // false when the dir does not exist
-    bool             shared_dir = false; // size belongs to a sibling spec
-    // Some of the tree could not be read (permissions), so `bytes`
-    // UNDERSTATES. Saying so matters more than the number: a silent 0 B
-    // beside 2 MB of unreadable files is the same confident lie the rest of
-    // this file exists to prevent.
-    bool             partial = false;
+    bool             shared_dir = false; // counted by a sibling spec
+    bool             partial = false;    // some of it was unreadable
 };
 
 struct Report {
@@ -292,20 +166,16 @@ struct Report {
     std::string_view            what;
     std::vector<ReadRow>        reads;
     std::vector<SkippedDialect> skipped;
-    std::vector<ForeignSource>  foreign;   // present, not read, adoptable
+    std::vector<ForeignSource>  foreign;
     std::string_view            explicit_env;
     std::optional<WriteRow>     write;
 };
 
 [[nodiscard]] Report describe(const Entry&);
 
-// CLI: `agentty config [concern|env]`.
-//
 //   agentty config          every concern, one line each
-//   agentty config mcp      the full ladder, including what is NOT read
-//   agentty config env      the three variables that carry the model
-//
-// Returns 0 on success, 1 on an unknown name.
+//   agentty config mcp      one ladder, including what is NOT read
+//   agentty config env      the model
 int cmd_config(std::span<const std::string> argv);
 
 }  // namespace agentty::config

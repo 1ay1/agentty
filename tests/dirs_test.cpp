@@ -561,6 +561,51 @@ int main() {
         fs::current_path(cwd_before);
     }
 
+    // ── one override location, many projects ────────────────────────────
+    //
+    // #61's worry: point two checkouts at one directory and they land on
+    // the same filenames. Nothing corrupts -- the index meta records its
+    // corpus root and refuses a foreign one -- but each switch then costs a
+    // full re-index, which is worse than the disk it saved.
+    {
+        const fs::path p1 = g_sandbox / "shareda";
+        const fs::path p2 = g_sandbox / "sharedb";
+        const fs::path shared = g_sandbox / "onedir";
+        fs::create_directories(p1 / ".git");
+        fs::create_directories(p2 / ".git");
+        const fs::path cwd_before = fs::current_path();
+
+        const Spec s{.root = Root::Project, .leaf = "cache"};
+        ::setenv("AGENTTY_PROJECT_DIR", shared.string().c_str(), 1);
+
+        fs::current_path(p1);
+        agentty::tools::util::set_workspace_root(p1);
+        auto a = resolve(s);
+
+        fs::current_path(p2);
+        agentty::tools::util::set_workspace_root(p2);
+        auto b = resolve(s);
+
+        ::unsetenv("AGENTTY_PROJECT_DIR");
+        check(a.has_value() && b.has_value(), "shared: both resolve");
+        if (a && b) {
+            check(a->path != b->path,
+                  "two projects under one override get separate directories");
+            check(a->path.string().find("shareda-") != std::string::npos,
+                  "the basename stays readable");
+        }
+
+        // And the DEFAULT keeps no hash -- each project already has its own
+        // .agentty, so there is nothing to disambiguate.
+        fs::current_path(p1);
+        agentty::tools::util::set_workspace_root(p1);
+        if (auto d = resolve(s))
+            check(d->path == p1 / ".agentty" / "cache",
+                  "the default path is plain");
+
+        fs::current_path(cwd_before);
+    }
+
     // ── markers are non-empty and include the common case ────────────────
     {
         auto m = project_markers();
