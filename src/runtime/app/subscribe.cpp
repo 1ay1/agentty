@@ -8,6 +8,7 @@
 #include <maya/terminal/ansi.hpp>
 
 #include "agentty/runtime/login.hpp"
+#include "agentty/domain/ui_live.hpp"   // thinking pref: gates the reasoning reveal
 #include "agentty/runtime/panel/common.hpp"
 #include "agentty/runtime/panel/top.hpp"
 #include "agentty/runtime/panel/nav.hpp"
@@ -88,7 +89,16 @@ bool reveal_needs_frames(const Model& m) noexcept {
         // this term is the "Thinking gets stuck" bug: the fast bucket
         // never engages, armed RAF frames get gated away, and the
         // reasoning typewriter freezes until a keypress.
-        || (m.d.show_reasoning
+        //
+        // The gate is the SAME one reasoning_slot() renders on — Appearance's
+        // Thinking pref. It used to read m.d.show_reasoning, which nothing
+        // can toggle (^R is diff review; ModelsToggleShowReasoning is
+        // unreachable), so a stale `false` in settings.json produced exactly
+        // the freeze this comment describes: the block painted and then sat
+        // there unanimated. Whatever decides to SHOW reasoning has to be
+        // what decides to animate it, or one of the two is always wrong.
+        || (agentty::ui_prefs::current().thinking
+                != agentty::ui_prefs::Thinking::Hidden
             && !back.reasoning_display_text().empty());
 }
 

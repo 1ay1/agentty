@@ -16,6 +16,7 @@
 #include <cstdlib>   // setenv — the reveal tests pin the effect explicitly
 
 #include "agentty/runtime/model.hpp"
+#include "agentty/domain/ui_live.hpp"   // the Thinking pref gates the block
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/runtime/view/thread/thread.hpp"
 #include "agentty/runtime/view/changes_strip.hpp"
@@ -97,7 +98,7 @@ TEST_CASE("reasoning: unified accessor precedence") {
 
 TEST_CASE("reasoning: settled turn shows the full reasoning, not a fold") {
     Model m;
-    m.d.show_reasoning = true;   // the global ^R switch is on
+    // Thinking::Collapsed (the default) SHOWS the block; only Hidden suppresses it.
     Message a = assistant("Here is the FINAL_ANSWER_MARKER.");
     // Reasoning arrived (any provider) and the answer is present => SETTLED:
     // render the FULL streamed reasoning (no fold), under a "Reasoned" header.
@@ -122,7 +123,6 @@ TEST_CASE("reasoning: settled turn shows the full reasoning, not a fold") {
 
 TEST_CASE("reasoning: no block when the turn never reasoned") {
     Model m;
-    m.d.show_reasoning = true;
     m.d.current.messages.push_back(assistant("PLAIN_ANSWER no reasoning here."));
     m.s.phase = phase::Idle{};
     const std::string out = render_text(m);
@@ -131,18 +131,36 @@ TEST_CASE("reasoning: no block when the turn never reasoned") {
     check(has(out, "PLAIN_ANSWER"), "the plain answer still renders");
 }
 
-TEST_CASE("reasoning: the ^R switch hides the block even when text exists") {
+// Appearance's Thinking row is the ONE switch over the reasoning block.
+//
+// This used to set m.d.show_reasoning = false and call it "the global switch
+// (the default)". That flag had no control behind it: ^R opens diff review,
+// and nothing dispatched ModelsToggleShowReasoning, so the value was frozen
+// at whatever settings.json held. The test passed and the feature was
+// unreachable — it pinned a gate the user could not operate, which is how a
+// stale `true` ended up showing reasoning to people who had chosen Hidden.
+TEST_CASE("reasoning: the Appearance switch hides the block even when text exists") {
     Model m;
-    m.d.show_reasoning = false;   // global switch OFF (the default)
+    // publish(), not just the Model field: render_text() builds the configs
+    // directly and never calls view(), which is what normally republishes
+    // the prefs each frame. Restored at the end so the slot does not leak
+    // into another test in the same binary.
+    const auto saved = agentty::ui_prefs::current();
+    auto prefs = saved;
+    prefs.thinking = agentty::ui_prefs::Thinking::Hidden;
+    agentty::ui_prefs::publish(prefs);
+    m.d.persisted.ui.thinking = agentty::ui_prefs::Thinking::Hidden;
     Message a = assistant("Here is the ANSWER_STILL_SHOWN.");
     a.thinking = "lots of hidden reasoning the user chose not to see";
     m.d.current.messages.push_back(std::move(a));
     m.s.phase = phase::Idle{};
     const std::string out = render_text(m);
+    agentty::ui_prefs::publish(saved);
+
     check(!has(out, "Reasoned"),
-          "reasoning block is suppressed when show_reasoning is off");
+          "reasoning block is suppressed when Thinking is Hidden");
     check(!has(out, "hidden reasoning"),
-          "reasoning text never reaches the screen when the switch is off");
+          "reasoning text never reaches the screen when Thinking is Hidden");
     check(has(out, "ANSWER_STILL_SHOWN"),
           "the answer renders normally regardless of the reasoning switch");
 }
@@ -163,7 +181,6 @@ TEST_CASE("reasoning: body reveals incrementally, not all at once") {
         full += "word" + std::to_string(i) + " ";
 
     Model m;
-    m.d.show_reasoning = true;
     m.s.phase = phase::Streaming{phase::Active{}};
 
     Message a;
@@ -215,7 +232,6 @@ TEST_CASE("reasoning: reveal glides, not cut short when the answer follows") {
     for (int i = 0; i < 80; ++i) full += "tok" + std::to_string(i) + " ";
 
     Model m;
-    m.d.show_reasoning = true;
     m.s.phase = phase::Streaming{phase::Active{}};
     Message a; a.role = Role::Assistant; a.id = MessageId{"glide1"};
     m.d.current.messages.push_back(a);

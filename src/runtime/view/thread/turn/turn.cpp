@@ -1556,15 +1556,22 @@ void append_assistant_tool_panel(maya::Turn::Config& cfg,
 //     (~N tokens)"; the complete reasoning remains below it, dim, above the
 //     answer. Baked at freeze; never changes, never needs a keystroke.
 std::optional<maya::Element> reasoning_slot(const Message& msg, const Model& m) {
-    // Global display switch (^R in the model picker). Off => no reasoning block
-    // at all, for every provider. This is also what makes the Anthropic
-    // transport request visible thinking, so "off" is a clean, cheap default.
-    if (!m.d.show_reasoning) return std::nullopt;
-    // The Appearance pref is the OTHER half of the same question, and it is
-    // the durable one: ^R is a per-session peek, this is what you chose. Two
-    // switches over one block need a rule, and the rule is that either can
-    // hide it — hiding is the conservative outcome, and a user who set
-    // "never shown" should not have it reappear because a chord toggled.
+    // ONE switch decides whether a reasoning block renders: Appearance's
+    // "Thinking" row.
+    //
+    // There used to be two, and the first was dead. `m.d.show_reasoning` was
+    // documented here as "^R in the model picker" -- but ^R is diff review,
+    // and nothing dispatches ModelsToggleShowReasoning (its reducer arm and
+    // Msg variant are still there, unreachable). So the flag sat frozen at
+    // whatever settings.json last held, and that stale value silently
+    // decided whether anyone could see thinking: `true` meant Appearance's
+    // Hidden was the only way to turn it off, `false` meant the Appearance
+    // row did nothing at all. Neither matched what the user had chosen,
+    // because they had never been offered the choice.
+    //
+    // docs/COPILOT_RESPONSES.md already caught the same flag contradicting
+    // the effort strip on the REQUEST side and removed it from there. This is
+    // the display half of that cleanup.
     if (agentty::ui_prefs::current().thinking == agentty::ui_prefs::Thinking::Hidden)
         return std::nullopt;
     if (msg.reasoning_display_text().empty()) return std::nullopt;

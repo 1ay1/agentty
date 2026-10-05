@@ -474,7 +474,7 @@ struct ModelsToggleFavorite {};
 // surface — there is no second picker.
 struct ModelsCycleEffort { int delta; };
 // Step the highlighted model's CONTEXT WINDOW override through a ladder of
-// common sizes (^W in the model picker), wrapping back to "auto".
+// common sizes, wrapping back to "auto".
 //
 // A cycle rather than a text prompt on purpose: the picker is a list with a
 // live filter, so a numeric entry mode would have to steal the keyboard from
@@ -483,13 +483,6 @@ struct ModelsCycleEffort { int delta; };
 // reversible without a separate clear action.
 struct ModelsCycleContext { int delta = +1; };
 struct ModelsToggleReasoning {};
-// Toggle whether the model's reasoning/thinking is SHOWN (^R). Flips the
-// persisted Settings.show_reasoning / Model.show_reasoning: renders the
-// reasoning block in the transcript for every provider AND asks Anthropic
-// for visible thinking (interleaved-thinking beta). Distinct from
-// ModelsToggleReasoning above, which flips a single model's effort
-// CAPABILITY override.
-struct ModelsToggleShowReasoning {};
 // ^/ — scope the browse/filter list to ONLY the provider of the currently
 // highlighted row (so you can drill into "just this provider's models").
 // Pressing it again when already scoped clears the scope (back to all
@@ -1215,7 +1208,6 @@ using ModelsMsg = std::variant<
     OpenModels, CloseModels, ModelsMove, ModelsJump,
     ModelsSelect, ModelsToggleFavorite,
     ModelsCycleEffort, ModelsCycleContext, ModelsToggleReasoning,
-    ModelsToggleShowReasoning,
     ModelsScopeProvider,
     ModelsFilterInput, ModelsFilterBackspace,
     ModelsLoaded, FusedCatalogLoaded, SwitchToPreviousModel, FusedRefreshOthers,

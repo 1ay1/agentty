@@ -1213,32 +1213,6 @@ Cmd models_update(Model& m, msg::ModelsMsg pm) {
             }
             return Cmd::none();
         },
-        [&](ModelsToggleShowReasoning&) -> Cmd {
-            // Flip whether the model's reasoning/thinking is SHOWN. Global (all
-            // providers): renders the transcript reasoning block AND makes the
-            // Anthropic transport request VISIBLE thinking. Persisted so it
-            // survives restarts. Mirrors the ToggleChangesStrip pattern.
-            m.d.show_reasoning = !m.d.show_reasoning;
-            m.d.persisted.show_reasoning = m.d.show_reasoning;
-            auto save = save_record(m);
-            // Anthropic caveat: visible thinking is only REQUESTED when an
-            // effort tier is active (the transport gates thinking mode on
-            // req.effort). With effort off, ^R would silently show nothing —
-            // tell the user what to flip instead of leaving a dead toggle.
-            const auto caps = resolved_caps(m.d.model_id.value);
-            const bool claude_no_effort =
-                caps.family != ModelCapabilities::Family::Unknown
-                && caps.family != ModelCapabilities::Family::Gpt
-                && !caps.reasoning_compat
-                && m.d.effort == Effort::None;
-            auto toast = set_status_toast(m, !m.d.show_reasoning
-                ? "reasoning: hidden (existing blocks fold away too)"
-                : claude_no_effort
-                    ? "reasoning: shown — needs an effort tier on this model "
-                      "(\xe2\x86\x90/\xe2\x86\x92 in the picker)"
-                    : "reasoning: shown (live thinking + \xe2\x9c\xa6 summary)");
-            return Cmd::batch(std::move(save), std::move(toast));
-        },
         [&](ModelsScopeProvider&) -> Cmd {
             // ^/ — restrict the list to ONLY the highlighted row's provider,
             // or clear the scope if it is already active. The selected row's
