@@ -9,6 +9,7 @@
 #include <string>
 #include <utility>
 
+#include "agentty/domain/catalog.hpp"   // ModelCapabilities: does the MODEL reason
 #include "agentty/provider/registry.hpp"
 #include "agentty/util/logx.hpp"
 
@@ -195,11 +196,41 @@ bool streams_reasoning_text(std::string_view provider_id,
             break;
     }
 
-    // On chat, first-party OpenAI drops reasoning entirely — api.openai.com
-    // does not transmit it on /chat/completions at any effort.
+    // ── Chat: who drops reasoning, and why it is not a provider fact ──
+    //
+    // Two hosts return no reasoning on /chat/completions. Both refusals were
+    // MEASURED, and both were measured on the host's OWN models:
+    //
+    //   openai   api.openai.com transmits none at any effort, for anything
+    //            it serves (its reasoning models are Responses-only anyway).
+    //   copilot  claude-* and gpt-4.x return none there.
+    //
+    // The openai one really is host-wide: every model on that row is a
+    // first-party OpenAI model, so "the host drops it" and "these models
+    // drop it" are the same statement.
+    //
+    // Copilot's is not. That row is a GATEWAY -- it serves Anthropic,
+    // Google, xAI, DeepSeek and Qwen models alongside OpenAI's, and a
+    // measurement taken on claude-* says nothing about deepseek-r1, which
+    // populates reasoning_content exactly like it does on DeepSeek's own
+    // endpoint. Refusing per PROVIDER told the UI "no thinking here" for
+    // every model on a mixed host, so a reasoning model's visible thinking
+    // was dropped on the floor while the transport was parsing it fine.
+    //
+    // So: ask the MODEL whether it reasons, and keep the refusal only for
+    // the families it was actually taken on. supports_effort() is the same
+    // capability the picker's ✦ mark and the effort ladder already read, so
+    // there is no new list to drift -- a model that cannot reason cannot
+    // stream reasoning either, whoever is serving it.
     if (provider_id == "openai") return false;
-    // Copilot on chat likewise: claude-* and gpt-4.x return none there.
-    if (provider_id == "copilot") return false;
+    if (provider_id == "copilot") {
+        if (model.empty()) return true;   // provider-level "anything?" → yes
+        const auto caps = ModelCapabilities::from_id(model);
+        if (!caps.supports_effort()) return false;   // not a reasoning model
+        // Measured silent on this path despite being reasoning-capable.
+        if (caps.is_opus() || caps.is_sonnet() || caps.is_haiku()) return false;
+        return true;
+    }
 
     // Every other OpenAI-COMPAT host on this dialect (DeepSeek, Mistral,
     // OpenRouter's chat path, vLLM, Ollama) populates reasoning_content,
