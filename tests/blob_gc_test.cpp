@@ -24,6 +24,8 @@
 #include <fstream>
 #include <string>
 
+#include <unistd.h>   // geteuid — root reads anything, so skip there
+
 namespace fs = std::filesystem;
 using namespace agentty;
 
@@ -184,6 +186,47 @@ TEST_CASE("blob gc: a torn log line aborts the sweep") {
     CHECK_FALSE(st.ran);
     CHECK(st.deleted == 0u);
     CHECK(blob_exists(dir, orphan));
+}
+
+TEST_CASE("blob gc: an unlistable threads dir deletes nothing") {
+    // The nastiest version of "unknown references cannot be assumed
+    // absent", because it does not look like a failure at all.
+    //
+    // `directory_iterator(dir, ec)` yields NOTHING when it cannot open the
+    // directory, and a range-for cannot tell that from an empty directory.
+    // So an unreadable threads dir scanned 0 threads, found 0 references,
+    // left `unreadable` at 0 -- and the sweep, seeing no references at all,
+    // deleted EVERY blob. The safety rule below already said what to do
+    // with an unreadable input; nothing had told it this was one.
+    //
+    // Root can read anything, so this would pass vacuously there.
+    if (::geteuid() == 0) return;
+
+    const auto dir = make_dir("unlistable");
+    const auto blob = put_in(dir, std::string(256, 'u'));
+    write_file(dir / "t.json", nlohmann::json{
+        {"id", "t"},
+        {"messages", nlohmann::json::array({
+            nlohmann::json{{"images", nlohmann::json::array({
+                nlohmann::json{{"blob", blob}}})}}})}
+    }.dump());
+
+    // The blobs/ subdir stays readable -- only the thread listing fails, so
+    // the GC can still SEE the payloads it would wrongly delete.
+    std::error_code ec;
+    const auto before = fs::status(dir, ec).permissions();
+    fs::permissions(dir, fs::perms::owner_exec, ec);   // traverse, not list
+
+    const auto st = blobs::collect_in(dir);
+
+    fs::permissions(dir, before, ec);                  // restore for cleanup
+
+    CHECK_MESSAGE(!st.ran, "a sweep that could not read its input did not run");
+    CHECK_MESSAGE(st.unreadable > 0u,
+                  "an unlistable dir counts as unreadable, not as empty");
+    CHECK_MESSAGE(st.deleted == 0u, "nothing is deleted on unknown references");
+    CHECK_MESSAGE(blob_exists(dir, blob),
+                  "the referenced payload survives");
 }
 
 TEST_CASE("blob gc: dry_run reports without deleting") {

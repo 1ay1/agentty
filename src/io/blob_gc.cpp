@@ -110,26 +110,50 @@ GcStats collect_in(const fs::path& threads_dir, bool dry_run,
 
     // ── MARK ──────────────────────────────────────────────────────────
     std::unordered_set<std::string> referenced;
-    for (const auto& e : fs::directory_iterator(threads_dir, ec)) {
-        if (cancelled()) return st;          // ran == false: nothing deleted
-        if (!e.is_regular_file(ec)) continue;
-        const auto p   = e.path();
-        const auto ext = p.extension();
-        if (ext != ".json" && ext != ".jsonl") continue;
-
-        // index.json is our own picker cache and acp_sessions.json belongs
-        // to the ACP server; neither is a thread and neither holds blob
-        // references. Metadata sidecars (<id>.meta.json) DO get scanned:
-        // they carry compaction summaries, which go through put_or_inline
-        // and can therefore hold a blob reference.
-        const auto name = p.filename().string();
-        if (name == "index.json" || name.starts_with("acp_sessions")) continue;
-
-        ++st.scanned_threads;
-        if (!refs_from_file(p, referenced)) {
+    {
+        // Open the walk EXPLICITLY so a failure is a fact, not an absence.
+        //
+        // `directory_iterator(dir, ec)` yields nothing when it cannot open
+        // the directory -- which is indistinguishable from "no threads" to
+        // a range-for. That is the difference between "nothing references
+        // these blobs" and "I could not find out", and here the second
+        // silently becomes the first: `referenced` stays empty, `unreadable`
+        // stays 0, and SWEEP then deletes EVERY blob as unreferenced.
+        //
+        // Count it as unreadable instead. The safety rule below already
+        // says what to do with that -- report and delete nothing -- it was
+        // just never told.
+        std::error_code oec;
+        fs::directory_iterator walk{threads_dir, oec};
+        if (oec) {
             ++st.unreadable;
-            AGT_LOG(Persist, Warn, "blob_gc",
-                    "cannot read {} — aborting sweep", p.string());
+            AGT_LOG(Persist, Error, "blob_gc",
+                    "cannot list {} ({}) — deleted nothing",
+                    threads_dir.string(), oec.message());
+            return st;   // ran == false
+        }
+        for (const auto& e : walk) {
+            if (cancelled()) return st;      // ran == false: nothing deleted
+            if (!e.is_regular_file(ec)) continue;
+            const auto p   = e.path();
+            const auto ext = p.extension();
+            if (ext != ".json" && ext != ".jsonl") continue;
+
+            // index.json is our own picker cache and acp_sessions.json
+            // belongs to the ACP server; neither is a thread and neither
+            // holds blob references. Metadata sidecars (<id>.meta.json) DO
+            // get scanned: they carry compaction summaries, which go through
+            // put_or_inline and can therefore hold a blob reference.
+            const auto name = p.filename().string();
+            if (name == "index.json" || name.starts_with("acp_sessions"))
+                continue;
+
+            ++st.scanned_threads;
+            if (!refs_from_file(p, referenced)) {
+                ++st.unreadable;
+                AGT_LOG(Persist, Warn, "blob_gc",
+                        "cannot read {} — aborting sweep", p.string());
+            }
         }
     }
 
