@@ -1302,17 +1302,30 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m,
         // (tool-boundary snap, in-progress-line reveal) jumps it by
         // hundreds in one call. dclip is the honest burst signal.
         const std::size_t clip = cache.streaming->debug_reveal_byte_clip();
-        static std::size_t prev_clip = 0;
+        // Per-SLOT previous clip, not one static shared by every caller.
+        //
+        // cached_markdown_for runs once per streaming widget per frame -- the
+        // reasoning "#r" lane, the answer lane, one per sub-turn -- and a
+        // single `static prev_clip` was differenced across all of them. So
+        // dclip was reasoning-clip minus answer-clip: noise, often negative,
+        // occasionally a huge positive that looked exactly like the paste it
+        // was supposed to detect. The one instrument for diagnosing bursts
+        // was unusable on the lane most complained about, and it reported
+        // nothing to say which lane a line belonged to.
+        static std::unordered_map<std::string, std::size_t> prev_clips;
+        const std::size_t now_clip =
+            (clip == static_cast<std::size_t>(-1)) ? source.size() : clip;
+        auto& prev = prev_clips[slot_id.value];
         const long long dclip =
-            static_cast<long long>(clip == static_cast<std::size_t>(-1)
-                                       ? source.size() : clip)
-          - static_cast<long long>(prev_clip);
-        prev_clip = (clip == static_cast<std::size_t>(-1)) ? source.size() : clip;
+            static_cast<long long>(now_clip) - static_cast<long long>(prev);
+        prev = now_clip;
         AGT_LOG_HOT(Perf, Trace, "stream.frame",
-                "src={} clip={} dclip={:+} live={} finalizing={} "
-                "settled={} fastpath={} build_us={}",
+                "lane={} slot={} src={} clip={} dclip={:+} live={} "
+                "finalizing={} settled={} fastpath={} build_us={}",
+                reasoning_view ? "reasoning" : "answer",
+                slot_id.value,
                 source.size(),
-                clip == static_cast<std::size_t>(-1) ? source.size() : clip,
+                now_clip,
                 dclip,
                 cache.streaming->is_live() ? 1 : 0,
                 cache.streaming->is_finalizing() ? 1 : 0,
