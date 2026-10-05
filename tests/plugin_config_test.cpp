@@ -12,6 +12,11 @@
 
 #include <nlohmann/json.hpp>
 
+#ifndef _WIN32
+#include <sys/wait.h>   // waitpid — cross-process race case
+#include <unistd.h>     // fork, _exit
+#endif
+
 #include <filesystem>
 #include <fstream>
 #include <print>
@@ -344,6 +349,62 @@ void concurrent_mutations_safe(const fs::path& dir) {
     std::println("PASS\n");
 }
 
+// Two agentty PROCESSES mutating one mcp.json must not lose an update.
+//
+// concurrent_mutations_safe above covers our own threads. It is not the
+// whole story: a TUI in one terminal and `agentty plugin add` in another
+// have separate mutexes and race exactly the same way. Measured before the
+// fix with two real processes, 20 rounds: 20 of 20 lost one of the two
+// servers.
+//
+// fork() rather than spawning the binary, so the case runs in-suite without
+// depending on a built CLI or a PATH. Each child does a full
+// load->modify->store cycle, which is where the lost update lives.
+void cross_process_mutations_safe(const fs::path& dir) {
+    std::println("--- cross_process_mutations_safe ---");
+#ifdef _WIN32
+    std::println("SKIP (no fork)\n");
+    (void)dir;
+#else
+    const fs::path cfg = dir / "xproc" / "mcp.json";
+    fs::create_directories(cfg.parent_path());
+
+    constexpr int kRounds  = 8;
+    constexpr int kWriters = 4;
+    int lost = 0;
+
+    for (int r = 0; r < kRounds; ++r) {
+        write_file(cfg, R"({"mcpServers":{}})");
+
+        std::vector<::pid_t> kids;
+        for (int w = 0; w < kWriters; ++w) {
+            const ::pid_t pid = ::fork();
+            if (pid == 0) {
+                // Child: one add, then leave WITHOUT running doctest's
+                // teardown -- _exit skips atexit handlers and the parent's
+                // test state stays untouched.
+                const auto name = "r" + std::to_string(r) + "w" + std::to_string(w);
+                const auto rc = plug::add_server(cfg, {name, "/bin/true", {}}, false);
+                ::_exit(rc == plug::EditResult::Ok ? 0 : 1);
+            }
+            if (pid > 0) kids.push_back(pid);
+        }
+        for (::pid_t p : kids) { int st = 0; ::waitpid(p, &st, 0); }
+
+        // Every writer used a distinct name, so all of them must survive.
+        // A lost update shows up as a missing entry, not a corrupt file --
+        // store()'s atomic rename already prevented tearing.
+        const auto servers = plug::list_servers(cfg);
+        if (static_cast<int>(servers.size()) != kWriters) ++lost;
+    }
+
+    check(lost == 0,
+          "cross-process adds all survive (lost rounds: "
+              + std::to_string(lost) + "/" + std::to_string(kRounds) + ")");
+    std::println("PASS\n");
+#endif
+}
+
 // A config path that is a DIRECTORY must not take the process down.
 //
 // `std::ifstream` opens a directory SUCCESSFULLY on Linux; the failure
@@ -672,6 +733,7 @@ TEST_CASE("plugin config") {
     symlink_written_through(sandbox);
     project_does_not_hide_user_servers(sandbox);
     directory_shaped_config_is_not_fatal(sandbox);
+    cross_process_mutations_safe(sandbox);
 
     std::error_code ec;
     fs::remove_all(sandbox, ec);

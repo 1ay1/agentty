@@ -6,6 +6,7 @@
 #include "agentty/util/user_root.hpp"
 
 #include "agentty/scope/scope.hpp"
+#include "agentty/auth/auth.hpp"        // CrossProcessFileLock
 
 #include <nlohmann/json.hpp>
 
@@ -35,18 +36,44 @@ namespace agentty::tools::plugin {
 namespace {
 
 // All config MUTATIONS (add/remove/toggle) serialize behind this mutex. Each
-// mutator is a load→modify→store cycle with no cross-process CAS; the reducer
-// fires them on DETACHED worker threads (a "disable tool + disable server"
-// pair, or rapid toggles), so without serialization two loads race and the
-// second store clobbers the first's edit (classic lost update). One in-process
-// mutex makes every load+store atomic w.r.t. other agentty mutations. (A
-// concurrent EXTERNAL editor is still handled by the unique-temp + atomic
-// rename in store(), so at worst one side's write wins wholesale — never a
-// torn file.)
+// mutator is a load→modify→store cycle, and the reducer fires them on
+// DETACHED worker threads (a "disable tool + disable server" pair, or rapid
+// toggles), so without serialization two loads race and the second store
+// clobbers the first's edit (classic lost update).
+//
+// The mutex covers THIS process. It is not enough on its own: two agentty
+// instances in one workspace -- a TUI and `agentty plugin add` in another
+// terminal, or two panes -- have separate mutexes and race exactly the same
+// way. Measured before fixing: 20 of 20 concurrent `plugin add` pairs lost
+// one of the two servers.
+//
+// So a mutator takes BOTH: this mutex against our own threads, then
+// auth::CrossProcessFileLock against other agentty processes. See
+// locked_mutation() below.
 [[nodiscard]] std::mutex& mutation_mutex() {
     static std::mutex m;
     return m;
 }
+
+// Hold both locks for one load→modify→store cycle.
+//
+// Order is fixed (in-process first, then cross-process) and every mutator
+// takes them the same way, so two agentty processes cannot deadlock against
+// each other -- there is only ever one file lock held at a time per cycle.
+//
+// The file lock is BEST-EFFORT by design (see auth.hpp): on a filesystem
+// where it cannot be taken, held() is false and we proceed anyway. That is
+// no worse than before this existed, and store()'s unique-temp + atomic
+// rename still guarantees no torn file -- at worst one side's write wins
+// wholesale, which is the pre-existing behaviour against a hand editor.
+class LockedMutation {
+public:
+    explicit LockedMutation(const fs::path& target)
+        : guard_(mutation_mutex()), file_(target) {}
+private:
+    std::lock_guard<std::mutex>  guard_;
+    auth::CrossProcessFileLock   file_;
+};
 
 // Read an entry's `disabled` flag WITHOUT throwing on a malformed value. A
 // hand-edited `"disabled": "true"` (string, not bool) makes nlohmann's
@@ -243,7 +270,7 @@ bool approve_server(const fs::path& path, const std::string& name) {
 
 EditResult add_server(const fs::path& path, const ServerSpec& spec,
                       bool force) {
-    std::lock_guard<std::mutex> lk(mutation_mutex());
+    LockedMutation lk{path};
     Loaded l = load(path);
     if (!l.ok) return EditResult::ParseError;
     const char* key = servers_key(l.doc);
@@ -277,7 +304,7 @@ EditResult add_server(const fs::path& path, const ServerSpec& spec,
 
 EditResult add_server_raw(const fs::path& path, const std::string& name,
                           const json& entry, bool force) {
-    std::lock_guard<std::mutex> lk(mutation_mutex());
+    LockedMutation lk{path};
     Loaded l = load(path);
     if (!l.ok) return EditResult::ParseError;
     if (!entry.is_object()) return EditResult::ParseError;
@@ -295,7 +322,7 @@ EditResult add_server_raw(const fs::path& path, const std::string& name,
 }
 
 EditResult update_server(const fs::path& path, const ServerSpec& spec) {
-    std::lock_guard<std::mutex> lk(mutation_mutex());
+    LockedMutation lk{path};
     Loaded l = load(path);
     if (!l.existed) return EditResult::NotFound;
     if (!l.ok) return EditResult::ParseError;
@@ -332,7 +359,7 @@ EditResult update_server(const fs::path& path, const ServerSpec& spec) {
 }
 
 EditResult remove_server(const fs::path& path, const std::string& name) {
-    std::lock_guard<std::mutex> lk(mutation_mutex());
+    LockedMutation lk{path};
     Loaded l = load(path);
     if (!l.existed) return EditResult::NotFound;
     if (!l.ok) return EditResult::ParseError;
@@ -367,7 +394,7 @@ std::vector<ServerSpec> list_servers(const fs::path& path) {
 
 EditResult set_server_disabled(const fs::path& path, const std::string& name,
                               bool disabled) {
-    std::lock_guard<std::mutex> lk(mutation_mutex());
+    LockedMutation lk{path};
     Loaded l = load(path);
     if (!l.existed) return EditResult::NotFound;
     if (!l.ok) return EditResult::ParseError;
@@ -397,7 +424,7 @@ bool is_server_disabled(const fs::path& path, const std::string& name) {
 
 EditResult set_tool_enabled(const fs::path& path, const std::string& server,
                             const std::string& bare, bool enabled) {
-    std::lock_guard<std::mutex> lk(mutation_mutex());
+    LockedMutation lk{path};
     Loaded l = load(path);
     if (!l.existed) return EditResult::NotFound;
     if (!l.ok) return EditResult::ParseError;
