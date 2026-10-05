@@ -282,6 +282,11 @@ struct WriteRow {
     std::uintmax_t   bytes = 0;
     bool             measured = false;   // false when the dir does not exist
     bool             shared_dir = false; // size belongs to a sibling spec
+    // Some of the tree could not be read (permissions), so `bytes`
+    // UNDERSTATES. Saying so matters more than the number: a silent 0 B
+    // beside 2 MB of unreadable files is the same confident lie the rest of
+    // this file exists to prevent.
+    bool             partial = false;
 };
 
 struct Report {

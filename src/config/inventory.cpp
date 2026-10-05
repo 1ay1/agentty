@@ -110,7 +110,13 @@ constexpr char kMcpApprovalsLeaf[] = "mcp_approvals.json";
 // Bytes under `dir`, recursively. Symlinks are NOT followed: a link into
 // someone else's tree would make agentty report their disk as ours, and a
 // cycle would hang the command.
-[[nodiscard]] std::uintmax_t dir_bytes(const fs::path& dir) {
+//
+// `out_partial` is set when some of the tree could not be examined. The
+// count then UNDERSTATES, and saying so matters more than the number does:
+// a silent 0 B next to 2 MB of unreadable files is the same class of
+// confident lie this whole file exists to prevent.
+[[nodiscard]] std::uintmax_t dir_bytes(const fs::path& dir, bool& out_partial) {
+    out_partial = false;
     std::error_code ec;
     if (!fs::is_directory(dir, ec)) {
         // A spec may name a FILE rather than a directory.
@@ -120,12 +126,42 @@ constexpr char kMcpApprovalsLeaf[] = "mcp_approvals.json";
     std::uintmax_t total = 0;
     fs::recursive_directory_iterator it{
         dir, fs::directory_options::skip_permission_denied, ec};
-    if (ec) return 0;
-    for (const auto& e : it) {
+    if (ec) { out_partial = true; return 0; }
+    // Advance MANUALLY with the error_code increment. A range-for calls the
+    // throwing operator++, and descending into a chmod-000 subdirectory
+    // throws there -- skip_permission_denied governs the initial open, not
+    // every step. That threw away the whole running total and reported 0 B
+    // for a 1.9 MB tree.
+    const fs::recursive_directory_iterator end{};
+    while (it != end) {
         std::error_code sec;
-        if (!e.is_regular_file(sec) || sec) continue;
-        const auto sz = e.file_size(sec);
-        if (!sec) total += sz;
+        if (it->is_regular_file(sec) && !sec) {
+            const auto sz = it->file_size(sec);
+            if (!sec) total += sz;
+            else      out_partial = true;
+        } else if (sec) {
+            out_partial = true;
+        } else if (it->is_directory(sec) && !sec) {
+            // skip_permission_denied makes an unreadable directory vanish
+            // SILENTLY -- no error_code, nothing to notice, and everything
+            // inside it simply never appears. A chmod-000 subdir holding
+            // 2 MB reported as 0 B with no hint anything was missed.
+            //
+            // So probe it directly. Opening it is the only way to learn
+            // that the recursion is about to pretend it is empty.
+            std::error_code oec;
+            fs::directory_iterator probe{it->path(), oec};
+            if (oec) out_partial = true;
+        }
+        std::error_code iec;
+        it.increment(iec);
+        if (iec) {
+            // Cannot descend here. Keep what we counted, note that the
+            // answer is short, and stop -- resuming past an unreadable
+            // branch is not something the iterator offers.
+            out_partial = true;
+            break;
+        }
     }
     return total;
 }
@@ -234,7 +270,9 @@ Report describe(const Entry& e) {
                 }
                 w.shared_dir = owned_by_earlier;
                 if (!owned_by_earlier) {
-                    w.bytes    = dir_bytes(got->path);
+                    bool partial = false;
+                    w.bytes    = dir_bytes(got->path, partial);
+                    w.partial  = partial;
                     w.measured = true;
                 }
             }
@@ -310,8 +348,10 @@ void print_one(const Report& r) {
             std::printf("  %s%s\n", r.write->path.c_str(),
                         origin_note(r.write->origin));
             if (r.write->measured)
-                std::printf("  %s on disk\n",
-                            human_bytes(r.write->bytes).c_str());
+                std::printf("  %s on disk%s\n",
+                            human_bytes(r.write->bytes).c_str(),
+                            r.write->partial
+                                ? "  (at least — part of it is unreadable)" : "");
             else if (r.write->shared_dir)
                 std::printf("  shares this directory with another concern"
                             " (counted there)\n");
@@ -394,6 +434,7 @@ void print_table() {
         std::string size = "—";
         if (r.write && r.write->measured) {
             size = human_bytes(r.write->bytes);
+            if (r.write->partial) size += "+";   // undercounts; see detail view
             total += r.write->bytes;
         } else if (r.write && r.write->shared_dir) {
             size = "(shared)";

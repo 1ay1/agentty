@@ -30,6 +30,8 @@
 #include <string>
 #include <vector>
 
+#include <unistd.h>   // geteuid — root can read anything, so skip there
+
 namespace fs = std::filesystem;
 namespace cfg = agentty::config;
 
@@ -253,6 +255,82 @@ TEST_CASE("a concern that writes nothing claims no disk") {
         CHECK(!cfg::describe(e).write.has_value(),
               "no write spec, no write row, no size");
     }
+}
+
+TEST_CASE("an unreadable subtree is flagged, not silently dropped") {
+    // skip_permission_denied makes a chmod-000 directory vanish SILENTLY --
+    // no error_code, nothing inside it ever appears. A 2 MB subdir reported
+    // as "0 B" with no hint anything was missed, which is the same confident
+    // lie the rest of this file exists to prevent. Partial is fine; silent
+    // is not.
+    //
+    // Root can read anything, so this would pass vacuously there.
+    if (::geteuid() == 0) return;
+
+    const fs::path base = fs::temp_directory_path()
+                        / "agentty_cfg_partial";
+    fs::remove_all(base);
+    const fs::path home = base / "home";
+    const fs::path locked = home / "threads" / "locked";
+    fs::create_directories(locked);
+    { std::ofstream f(locked / "big.bin"); f << std::string(200000, 'x'); }
+
+    const std::string prev = std::getenv("AGENTTY_HOME")
+                                 ? std::getenv("AGENTTY_HOME") : "";
+    const bool had = std::getenv("AGENTTY_HOME") != nullptr;
+    ::setenv("AGENTTY_HOME", home.string().c_str(), 1);
+
+    const cfg::Entry* threads = cfg::find("threads");
+    REQUIRE(threads != nullptr, "threads is in the inventory");
+
+    // Readable: the bytes are counted and nothing is flagged.
+    {
+        const cfg::Report r = cfg::describe(*threads);
+        REQUIRE(r.write.has_value(), "write row");
+        CHECK(r.write->bytes >= 200000, "the file is counted");
+        CHECK(!r.write->partial, "nothing was unreadable");
+    }
+
+    // Unreadable: the count drops to 0, and that MUST be announced.
+    fs::permissions(locked, fs::perms::none);
+    {
+        const cfg::Report r = cfg::describe(*threads);
+        REQUIRE(r.write.has_value(), "write row");
+        CHECK(r.write->partial,
+              "an unreadable subtree is reported as partial");
+    }
+    fs::permissions(locked, fs::perms::owner_all);
+
+    if (had) ::setenv("AGENTTY_HOME", prev.c_str(), 1);
+    else     ::unsetenv("AGENTTY_HOME");
+    fs::remove_all(base);
+}
+
+TEST_CASE("a symlink loop in a measured tree terminates") {
+    // Sizes must never follow symlinks: a link into someone else's tree
+    // would report their disk as ours, and a cycle would hang the command.
+    const fs::path base = fs::temp_directory_path() / "agentty_cfg_loop";
+    fs::remove_all(base);
+    const fs::path home = base / "home";
+    fs::create_directories(home / "threads");
+    { std::ofstream f(home / "threads" / "a.txt"); f << "hello"; }
+    std::error_code ec;
+    fs::create_directory_symlink("..", home / "threads" / "self", ec);
+
+    const std::string prev = std::getenv("AGENTTY_HOME")
+                                 ? std::getenv("AGENTTY_HOME") : "";
+    const bool had = std::getenv("AGENTTY_HOME") != nullptr;
+    ::setenv("AGENTTY_HOME", home.string().c_str(), 1);
+
+    const cfg::Entry* threads = cfg::find("threads");
+    REQUIRE(threads != nullptr, "threads is in the inventory");
+    const cfg::Report r = cfg::describe(*threads);   // must return at all
+    REQUIRE(r.write.has_value(), "write row");
+    CHECK(r.write->bytes == 5, "counts the file once, does not follow the loop");
+
+    if (had) ::setenv("AGENTTY_HOME", prev.c_str(), 1);
+    else     ::unsetenv("AGENTTY_HOME");
+    fs::remove_all(base);
 }
 
 TEST_CASE("every concern has a name and a description") {
