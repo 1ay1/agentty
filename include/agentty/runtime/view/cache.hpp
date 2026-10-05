@@ -89,6 +89,27 @@ struct MessageMdCache {
     std::size_t                               last_settled_size =
         static_cast<std::size_t>(-1);
 
+    // The motion level this widget's reveal-fx policy was configured with.
+    //
+    // Per-WIDGET, because the question "must I re-apply the policy" is
+    // per-widget. It used to be a compare-and-reset latch local to
+    // cached_markdown_for(), which runs SEVERAL times per frame -- once per
+    // streaming widget (the reasoning "#r" lane, the answer lane, and one per
+    // sub-turn in a multi-message turn). The first caller consumed the change
+    // and every later widget that frame read "unchanged", so toggling motion
+    // mid-stream applied to the reasoning block and left the answer
+    // animating.
+    //
+    // A process-global "changed this frame" flag fixes that and introduces
+    // worse problems: it is sticky across anything that does not publish
+    // every frame, so it leaks between tests and between a panel frame and a
+    // thread frame. Storing the applied value HERE needs no frame semantics
+    // at all -- a widget re-applies exactly when what it has differs from
+    // what is in force, which is the actual condition.
+    //
+    // -1 = nothing applied yet (a fresh widget configures unconditionally).
+    int                                       applied_motion = -1;
+
     // ── Reveal bookkeeping ──
     //
     // There is no host-side typewriter cursor: cached_markdown_for feeds

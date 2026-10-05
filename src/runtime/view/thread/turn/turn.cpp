@@ -301,20 +301,43 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m,
         // ... EXCEPT when the pref itself changed, which is the one case a
         // live setting must beat that rule: a user who turns motion off
         // mid-stream is telling us to stop NOW, not on the next message.
-        // `last_motion` is function-local and render-thread-only, so the
-        // re-apply costs one comparison per frame and fires on the frame
-        // the pref moves.
-        static agentty::ui_prefs::Motion last_motion =
-            agentty::ui_prefs::current().motion;
-        const auto motion_now = agentty::ui_prefs::current().motion;
-        const bool motion_changed = motion_now != last_motion;
-        last_motion = motion_now;
+        //
+        // Compared against what THIS widget was configured with
+        // (cache.applied_motion), not a latch shared by every caller. This
+        // function runs several times per frame -- the reasoning "#r" lane,
+        // the answer lane, one per sub-turn -- so a compare-and-reset latch
+        // is consumed by whichever widget it reaches first and every later
+        // widget that frame reads "unchanged". Toggling motion mid-stream
+        // then applied to the reasoning block and left the answer animating:
+        // the same "only the first widget gets the policy" failure the
+        // paragraph above exists to prevent.
+        //
+        // Per-widget also needs no frame semantics, which a global
+        // changed-this-frame flag does: that flag is sticky for anything
+        // which does not publish every frame, so it leaks across tests and
+        // across a panel-only frame. "What I have differs from what is in
+        // force" is the real condition and carries no such hazard.
+        const int motion_now = static_cast<int>(agentty::ui_prefs::current().motion);
+        // >= 0 guard: -1 means "this widget's policy was never set by us".
+        // `fresh_widget` already covers the widget WE just created, so the
+        // only other way to reach here unstamped is a widget seeded from
+        // outside (a test building a slot directly to measure a settled
+        // height). Treating unstamped as stale would overwrite a deliberate
+        // setup, so a change means a KNOWN level that differs -- not an
+        // absent one.
+        const bool motion_changed =
+            cache.applied_motion >= 0 && cache.applied_motion != motion_now;
 
         if (fresh_widget || motion_changed) {
             cache.streaming->set_reveal_fx(
                 want_fx && env_on("AGENTTY_REVEAL_TYPEWRITER", fx_default));
             cache.streaming->set_reveal_decorate(
                 want_deco && env_on("AGENTTY_REVEAL_DECORATE", fx_default));
+            // Stamp what we just configured, so the next frame re-applies
+            // only on a real move. Unconditional inside the branch: a fresh
+            // widget has applied_motion = -1 and must record its level too,
+            // or it would re-apply on every frame for the life of the turn.
+            cache.applied_motion = motion_now;
         }
     }
 
