@@ -824,7 +824,27 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m,
             && cache.streaming->reveal_in_progress()
             && cache.last_grow_tick_ms != 0
             && since_grow_ms >= kTextQuietMs;
-        if (text_gone_quiet || msg.text_block_closed)
+        // ANSWER LANE ONLY, both terms.
+        //
+        // The drain's job, as the paragraph above says, is the text->tool
+        // seam: get the prose out before the card paints. Both signals are
+        // about the ANSWER body -- text_block_closed is the answer's
+        // end-of-text wire event, and since_grow_ms tracks the answer's
+        // bytes -- so neither says anything about whether the reasoning
+        // channel is done.
+        //
+        // Unguarded, a reasoning->tool-call turn (the common shape: think,
+        // then act) closed the answer's text block while the reasoning
+        // reveal was still mid-glide, and armed a 160 ms HARD ramp on it.
+        // One ~300-character paragraph finishing in 160 ms is ~1900 cps: the
+        // first reasoning box bursting even when it is a single paragraph,
+        // with no tool card and no ticker involved. Sibling of #79 -- same
+        // cause, a different answer-body mechanism reaching the other lane.
+        //
+        // The reasoning lane needs no equivalent: it has no card to get out
+        // of the way of, and its own end-of-channel is already handled where
+        // `settled` is computed.
+        if (!reasoning_view && (text_gone_quiet || msg.text_block_closed))
             cache.streaming->request_finalize(/*ramp_ms=*/160);
 
         // Gate on is_live(): finish() assigns live_=false through the
