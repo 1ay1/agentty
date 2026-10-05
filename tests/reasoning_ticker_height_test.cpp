@@ -74,30 +74,11 @@ int ticker_rows(const std::string& src) {
 
 }  // namespace
 
-// ── The trade this records ──────────────────────────────────────────────
-//
-// The ticker window keeps the last N line-NODES, and a node wraps to a
-// VARIABLE number of ROWS, so the block's height dips whenever a shorter
-// paragraph becomes the newest. Measured at width 50 with tail=3:
-//
-//     p1=8  p2=13  p3=12  p4=9      <- two shrinks
-//
-// A shrink mid-stream pulls the composer up under the cursor, so this was
-// briefly fixed by padding to a running row max. That removed the shrink
-// and replaced it with something users liked less: permanent blank rows
-// under the newest line for the rest of the block, which read as the widget
-// being broken. Reverted on that feedback -- a transient dip beats dead
-// space.
-//
-// So the height is NOT monotonic, deliberately. What this pins instead is
-// that the window still BOUNDS the block (its whole purpose: a long chain
-// of thought must not shove the composer down the screen) and that no dip
-// is extreme. If someone implements a row-exact window later -- selecting
-// the tail by rows rather than nodes, which needs line-node splitting and
-// so is a real change -- the monotonic assertion can come back with it.
-TEST_CASE("reasoning ticker: the window bounds the block without dead rows") {
+TEST_CASE("reasoning ticker: height never shrinks as paragraphs arrive") {
     maya::testing::freeze_anim_clock(0);
 
+    // Three long paragraphs (each wraps to several rows) then a SHORT one —
+    // the exact shape that collapsed the block.
     const std::vector<std::string> paras = {
         "This is a long first paragraph that will certainly wrap across "
         "several terminal rows because it keeps going and going with plenty "
@@ -124,13 +105,14 @@ TEST_CASE("reasoning ticker: the window bounds the block without dead rows") {
         trace += " p" + std::to_string(i + 1) + "=" + std::to_string(heights[i]);
     INFO("ticker heights:", trace);
 
-    // Bounded: the whole point of the window. Without it the block would
-    // track the full text and grow without limit.
-    for (const int h : heights) CHECK(h < 40);
+    for (std::size_t i = 1; i < heights.size(); ++i)
+        CHECK(heights[i] >= heights[i - 1]);
 
-    // And the content never vanishes entirely -- a dip must not collapse
-    // the block to chrome.
-    for (const int h : heights) CHECK(h >= 3);
+    // And the window still DOES bound the block — the point of the ticker is
+    // that a long chain-of-thought stays a glance. Without a cap this would
+    // grow without limit, so assert it stays modest rather than tracking the
+    // full text.
+    CHECK(heights.back() < 40);
 }
 
 TEST_CASE("reasoning ticker: settling releases the reserved rows") {
