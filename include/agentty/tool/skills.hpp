@@ -97,6 +97,12 @@ struct Skill {
     std::string origin;
     bool        user_only = false; // `disable-model-invocation`: hidden from the
                                    // model-facing catalog, loadable explicitly
+    // Non-zero when SKILL.md is PRESENT but larger than kMaxBodyBytes, so
+    // nothing could be loaded from it. The entry exists purely to be
+    // reported: an oversized skill used to vanish with `0 warning(s)` and
+    // the author had no way to tell it from a path typo. Such a skill is
+    // never usable -- it carries no name, description or body.
+    std::uintmax_t oversized_bytes = 0;
     std::filesystem::path dir; // absolute skill directory (tier-3 base path)
     // Spec-derived name: the path below the discovery root with segments
     // joined by '-' — for a root-level skill this IS the leaf directory

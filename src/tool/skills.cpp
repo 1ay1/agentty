@@ -449,7 +449,30 @@ void scan_root(const fs::path& root, const std::string& source,
                        fmt.time_since_epoch().count())) +
                    ";";
         std::string raw = read_capped(md, kMaxBodyBytes);
-        if (raw.empty()) continue;
+        if (raw.empty()) {
+            // read_capped returns empty for "too big" the same way it does
+            // for "unreadable", so an oversized SKILL.md used to vanish with
+            // `0 warning(s)` -- the author's skill simply never loaded and
+            // nothing said why. A file on disk that the catalog ignores is
+            // exactly the shape the shadow log exists to prevent.
+            //
+            // Only speak up when the file is PRESENT and over the cap:
+            // genuinely unreadable (permissions, a race with a delete) is
+            // already covered by the directory walk, and a warning for every
+            // transient miss would be noise.
+            std::error_code zec;
+            const auto sz = fs::file_size(md, zec);
+            if (!zec && sz > kMaxBodyBytes) {
+                Skill over;
+                over.name   = slug;
+                over.slug   = slug;
+                over.source = source;
+                over.dir    = md.parent_path();
+                over.oversized_bytes = sz;
+                out.push_back(std::move(over));
+            }
+            continue;
+        }
         Skill s = parse_skill(raw, slug, source);
         if (s.name.empty()) continue;
         // Shadow: earlier roots (project before user, native before
@@ -687,6 +710,11 @@ std::string catalog_block() {
     const auto approvals = load_approvals();
     auto eligible_for_model = [&](const Skill& s) {
         if (s.user_only) return false;
+        // An oversized SKILL.md produced a reporting stub with no body to
+        // load. Offering it to the model would be offering a skill that
+        // cannot be activated -- the same wasted turn user_only avoids.
+        // `agentty skills` is where it shows up, as a warning.
+        if (s.oversized_bytes > 0) return false;
         return std::holds_alternative<scope::Trusted>(trust_of(s, approvals));
     };
 
@@ -894,6 +922,18 @@ scope::Trust trust_of(const Skill& s, const scope::Approvals& approvals) noexcep
 
 std::vector<std::string> lint(const Skill& s) {
     std::vector<std::string> out;
+    // Too big to load at all. Report ONLY this: every other rule reads a
+    // field that was never parsed, so running them would bury the one fact
+    // that matters under a pile of "description is missing".
+    if (s.oversized_bytes > 0) {
+        out.push_back("SKILL.md is "
+                      + std::to_string(s.oversized_bytes / 1024)
+                      + " KB — over the "
+                      + std::to_string(kMaxBodyBytes / 1024)
+                      + " KB limit, so this skill is NOT loaded"
+                        " (move detail into references/)");
+        return out;
+    }
     // name: 1-64 chars, lowercase alnum + hyphens, no edge/double hyphens.
     if (s.name.empty()) out.push_back("name is empty");
     if (s.name.size() > 64) out.push_back("name exceeds 64 characters");

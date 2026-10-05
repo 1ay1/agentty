@@ -534,3 +534,74 @@ TEST_CASE("skills catalog cap: AGENTTY_MAX_SKILLS override") {
     fs::current_path(base, ec);
     fs::remove_all(base, ec);
 }
+
+// A SKILL.md too large to load must SAY so.
+//
+// read_capped returns empty for "over the cap" exactly as it does for
+// "unreadable", so an oversized skill used to vanish from discovery with
+// `0 warning(s)` -- the author's file sat on disk and nothing distinguished
+// it from a path typo. Same shape as the shadow log: a file the catalog
+// ignores is worse than one it rejects loudly.
+TEST_CASE("skills: an oversized SKILL.md is reported, not dropped") {
+    agtest::ScopedEnvSandbox _env_guard;
+    std::error_code ec;
+    fs::path base = fs::temp_directory_path(ec) / "agentty_skills_big_test";
+    fs::remove_all(base, ec);
+    fs::path home = base / "home";
+    fs::path work = base / "work";
+    fs::create_directories(home / ".agentty/skills", ec);
+    fs::create_directories(work / ".agentty/skills", ec);
+#if defined(_WIN32)
+    _putenv_s("HOME", home.string().c_str());
+    _putenv_s("AGENTTY_HOME", "");
+#else
+    setenv("HOME", home.string().c_str(), 1);
+    unsetenv("AGENTTY_HOME");
+#endif
+    fs::current_path(work, ec);
+
+    // One good skill beside one that is past the cap.
+    write_file_at(work / ".agentty/skills/fine/SKILL.md",
+                  "---\nname: fine\ndescription: loads normally\n---\nbody\n");
+    {
+        std::string big = "---\nname: toobig\ndescription: x\n---\n";
+        big.append(skills::kMaxBodyBytes + 1024, 'x');
+        write_file_at(work / ".agentty/skills/toobig/SKILL.md", big);
+    }
+
+    const auto& all = skills::all();
+    const skills::Skill* fine = nullptr;
+    const skills::Skill* big  = nullptr;
+    for (const auto& s : all) {
+        if (s.name == "fine")   fine = &s;
+        if (s.name == "toobig") big  = &s;
+    }
+
+    REQUIRE(fine != nullptr);
+    CHECK(fine->oversized_bytes == 0, "a normal skill is not flagged");
+
+    REQUIRE_MESSAGE(big != nullptr,
+        "an oversized SKILL.md must still appear in discovery -- silently "
+        "dropping it is how an author loses a skill with no way to tell");
+    CHECK(big->oversized_bytes > skills::kMaxBodyBytes,
+          "the measured size is carried for the warning");
+
+    // It must LINT, and say the one useful thing rather than a pile of
+    // "description is missing" from fields that were never parsed.
+    const auto warns = skills::lint(*big);
+    REQUIRE(!warns.empty(), "it produces a warning");
+    CHECK(warns.size() == 1, "exactly one warning -- the relevant one");
+    CHECK(warns.front().find("NOT loaded") != std::string::npos,
+          "the warning says the skill is not loaded");
+
+    // And it must NOT reach the model: there is no body to activate, so
+    // offering it would buy a wasted turn.
+    const std::string catalog = skills::catalog_block();
+    CHECK(catalog.find("toobig") == std::string::npos,
+          "an unloadable skill is never offered to the model");
+    CHECK(catalog.find("fine") != std::string::npos,
+          "the good skill beside it is unaffected");
+
+    fs::current_path(base, ec);
+    fs::remove_all(base, ec);
+}
