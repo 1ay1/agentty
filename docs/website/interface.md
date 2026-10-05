@@ -32,6 +32,51 @@ Every conversation is a saved thread. [[Ctrl+J]] opens the thread list *at the c
 
 When a thread fills the context window, **Fork thread** ([[Ctrl+K]] → palette) branches it into a fresh thread that opens with a **⑃ Forked** card and carries near-zero context — the parent transcript is read on demand. See [Forking a Thread](/docs/fork).
 
+## Reading the model picker
+
+[[Ctrl+/]] opens one list across every provider you're signed into. A row looks like this:
+
+```
+▎ anthropic   Claude Sonnet 4.6      200k  ★ ✦
+  openai      gpt-5-mini             400k    ✦
+  ollama      qwen3:4b · chat only   auto
+```
+
+Left to right: the active-row bar, the provider badge, the model name, then a right-aligned reference column.
+
+The **provider badge** on the left is coloured by the model's *capability tier* — agentty's estimate of what it can be trusted with. The list is ordered strongest-first, so the colour makes that ordering legible instead of leaving it unexplained:
+
+| Badge | Tier | What it means |
+|---|---|---|
+| Magenta | Flagship | The provider's top model — long multi-step work, hard reasoning |
+| Blue | Mid | The workhorse: reliable tool use, good for most turns |
+| Cyan | Cheap | Small and fast — fine for text, summaries, titles |
+| Grey | Weak | Tool use is unreliable here; expect it to fumble multi-step work |
+
+The tier is inferred from the model id, because the vendor's own naming *is* the ranking (Haiku < Sonnet < Opus, `gpt-5-mini` < `gpt-5`); local models rank by parameter count. The **active** model's badge wears the brand accent instead of its tier colour — that row's job is to say "you are here".
+
+Colour is never the only signal. The `▎` edge bar in column zero marks the active row, position carries the same ranking the hue does, and everything disqualifying is spelled out in words: a model that can't call tools gets **`· chat only`** appended to its *name*, not a glyph in the dim reference column, because a warning painted as reference data reads as decoration.
+
+The right-hand column is reference data, dimmed on purpose: the context window, then two fixed slots — **★** favourite ([[Ctrl+F]]) and **✦** reasoning-capable. The slots are fixed so a row without a favourite leaves a hole instead of sliding its ✦ left, which is what made the list look jittery while scrolling.
+
+`auto` in the context column means no catalog or probe could tell agentty the model's window, so it falls back to a default. It's rare — the window resolves automatically from what the gateway advertises, what it answers to a probe, and models.dev, which between them cover almost every provider agentty ships. What's left is a private gateway serving an id no catalog has heard of; set [`AGENTTY_MAX_CONTEXT_TOKENS`](/docs/environment) for that.
+
+## Reading the provider picker
+
+[[Ctrl+P]] lists backends rather than models, so its trailing chip is an auth status — it answers "can I use this row right now?":
+
+| Chip | Meaning |
+|---|---|
+| ✓ green | Signed in. On the active row it reads `✓ signed in · accounts`, and [[Enter]] drills into the accounts for that provider rather than switching |
+| ✓ grey | Signed in, but not the provider you're on — [[Enter]] switches to it |
+| ● blue | Usable with no login: a local server, an external ACP agent, or a key agentty found in your environment (`● key from OPENAI_API_KEY`) |
+| ⚠ amber | Needs action — `⚠ sign in`, or the name of the env var to set |
+| ✗ amber | [[Ctrl+D]] is armed; press again to sign out or remove |
+
+A key you **pasted** says `key saved` and [[Ctrl+D]] removes it. A key from the environment says `key from VAR` and [[Ctrl+D]] leaves it alone, because agentty can't unset a variable in your shell — the chip has to say which kind you have, or the remove key looks broken.
+
+The footer is contextual rather than a fixed legend: type something endpoint-shaped and it tells you what [[Enter]] will connect to; type something that matches no provider and it points at the `host:port` path, at the moment the list looks empty.
+
 ## The status bar
 
 A single row at the bottom edge shows the active profile, provider, and model, plus the current phase. When something needs your attention — a transient retry, an error — it swaps in a banner-style notification (`▎⚠ <text>` for errors, `▎ <text>` for info) and reverts to the keybindings strip when the toast expires. Switch provider with [[Ctrl+P]] and model with [[Ctrl+/]] without leaving the thread.

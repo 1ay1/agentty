@@ -285,9 +285,13 @@ Element models_panel(const Model& m) {
             // LiteLLM, LM Studio, a bare OpenAI-compat server) leaves every
             // row window-less, and a blank column reads as "this column does
             // not apply to me" — so the user never learns the number is a
-            // guess, never finds ^W, and concludes the 200k they see in the
-            // status bar is a hard cap. Saying "auto" names the state and
-            // points at the footer's ^W, which cycles to 1M/2M.
+            // guess and concludes the 200k they see in the status bar is a
+            // hard cap. "auto" names the state instead.
+            //
+            // It does NOT point at a key: ^W was considered and deliberately
+            // not bound (see subscribe.cpp), because the window now resolves
+            // from the catalog, a probe, or models.dev for almost every
+            // provider. The remaining case is AGENTTY_MAX_CONTEXT_TOKENS.
             ctx = "auto";
         }
         // Widest realistic context label is 5 columns ("200k", "1M+").

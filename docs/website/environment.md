@@ -77,16 +77,22 @@ a catalog window and the serving endpoint's, the **serving** one wins: it is
 the one that will reject an over-long prompt.
 
 But a gateway is not obliged to say anything — OpenAI's own `/v1/models`
-schema is just `{id, object, created, owned_by}` — so when yours is silent or
-wrong, set it yourself:
+schema is just `{id, object, created, owned_by}` — so when every layer comes
+up empty the picker shows `auto` and the turn runs on the conservative
+default. For that case:
 
-> In the model picker (**^/**), highlight a model and press **^W** to step
-> its window through `auto → 32k → 64k → 128k → 200k → 272k → 400k → 1M → 2M`
-> and back to `auto`. The choice is saved per **provider + model**, so the same
-> model id behind two gateways can carry two different windows.
+> | Variable | Effect |
+> |---|---|
+> | `AGENTTY_MAX_CONTEXT_TOKENS` | The window to assume when nothing else knows one. Spelled to mirror Claude Code's `CLAUDE_CODE_MAX_CONTEXT_TOKENS`, so it is guessable if you have hit this before. |
 
-An override always wins, including over a gateway that advertises a smaller
-window than it actually serves.
+It is consulted **last**, after the catalog, the probe and the model id, so it
+only speaks when nothing better did — it is global, and a session that reaches
+several models should not apply one number to all of them.
+
+In practice almost nothing needs it: between the `/v1/models` listing, the
+endpoint probes and models.dev, discovery covers nearly every provider agentty
+ships. What is left is the genuinely unknowable case — a private gateway
+serving an id no catalog has published.
 
 ## Retrieval (RAG)
 
