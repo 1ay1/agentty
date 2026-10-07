@@ -127,8 +127,17 @@ maya::Element model_badge_config(const Model& m) {
         if (effort_capable(caps))
             effort_chip = h(text("  "),
                             text("\xe2\x9c\xa6 ", fg_of(ui::role_brand)),
+                            // NOT fg_dim(muted). muted is already the
+                            // palette's grey (bright_black), and dimming it
+                            // again lands the tier a hair off the
+                            // background on a dark theme -- on Phosphor that
+                            // is #506258 dimmed against #0d1611, which is
+                            // the "I can't see the reasoning mode" report.
+                            // The sigil keeps the accent and carries the
+                            // eye; the tier only has to be READABLE once
+                            // the eye arrives, so plain muted is the floor.
                             text(std::string{effort_label(m.d.effort)},
-                                 fg_dim(muted))).build();
+                                 fg_of(muted))).build();
     }
 
     if (model.empty() || name.name.empty()) {
