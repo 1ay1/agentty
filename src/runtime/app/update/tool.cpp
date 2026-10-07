@@ -659,15 +659,37 @@ Cmd tool_update(Model& m, msg::ToolMsg tm) {
             // re-prompt. Mirrors Zed's per-session allow-list with live
             // sibling propagation.
             m.d.session_grants.insert(name.value);
+            // And WHAT was approved, not just its name. A standing grant on a
+            // bare name covers whatever that name resolves to later, which
+            // for an MCP tool is the server's choice -- so the grant carries
+            // the fingerprint of the definition the user saw, and
+            // execute_approved refuses if it changes.
+            const auto granted_hash = m.d.pending_permission->def_hash;
+            if (granted_hash != 0) m.d.grant_def_hash[name.value] = granted_hash;
             // Persist the grant (Zed's always_allow rules): reload-proof.
             // Onto the record, so the next whole-record save carries it
             // instead of writing a copy that predates it.
+            //
+            // Stored as "name@<hex>" so the definition survives a restart
+            // too. A bare name (an older build's entry, or a hand-edited
+            // settings.json) still loads and means "any definition".
             Cmd grant_save = Cmd::none();
             {
                 auto& allow = m.d.persisted.always_allow_tools;
-                if (std::find(allow.begin(), allow.end(), name.value)
-                        == allow.end()) {
-                    allow.push_back(name.value);
+                std::string entry = name.value;
+                if (granted_hash != 0)
+                    entry += "@" + std::format("{:016x}", granted_hash);
+                const auto same_tool = [&](const std::string& e) {
+                    const auto at = e.rfind('@');
+                    return (at == std::string::npos ? e : e.substr(0, at))
+                           == name.value;
+                };
+                auto it = std::find_if(allow.begin(), allow.end(), same_tool);
+                if (it == allow.end()) {
+                    allow.push_back(std::move(entry));
+                    grant_save = save_record(m);
+                } else if (*it != entry) {
+                    *it = std::move(entry);   // re-granted for a new definition
                     grant_save = save_record(m);
                 }
             }

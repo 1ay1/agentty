@@ -2020,9 +2020,18 @@ Cmd kick_pending_tools(Model& m) {
             // is the same instant as the launch, so the window is nil, but
             // recording it keeps every dispatch going through one check
             // instead of two shapes of call.
+            //
+            // A STANDING grant is different: it was given earlier, possibly
+            // in a previous session, so the hash that matters is the one it
+            // was given for -- not whatever the name resolves to now. That is
+            // the whole point of recording it.
             if (tc.approved_def_hash == 0) {
-                if (const auto* allowed = tools::find(tc.name.value))
+                if (auto g = m.d.grant_def_hash.find(tc.name.value);
+                    g != m.d.grant_def_hash.end()) {
+                    tc.approved_def_hash = g->second;
+                } else if (const auto* allowed = tools::find(tc.name.value)) {
                     tc.approved_def_hash = allowed->definition_hash();
+                }
             }
             {
                 // Effect/path-compatibility gate: the planner decided this

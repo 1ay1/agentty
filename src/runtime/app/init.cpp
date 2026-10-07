@@ -235,8 +235,31 @@ std::pair<Model, Cmd> init() {
     // Rehydrate persisted "always allow" tool grants (Zed's always_allow
     // rules). PermissionApproveAlways appends to this list; loading it here
     // means a grant given last week still suppresses the prompt today.
-    for (const auto& g : settings.always_allow_tools)
-        m.d.session_grants.insert(g);
+    //
+    // Entries are "name@<hex>" -- the definition the user approved, so a
+    // grant does not silently transfer to a tool that has since been
+    // redefined under the same name. A bare "name" (written by an older
+    // build, or hand-edited) loads as hash 0, which means unchecked: the
+    // behaviour it already had.
+    for (const auto& g : settings.always_allow_tools) {
+        const auto at = g.rfind('@');
+        std::string name = (at == std::string::npos) ? g : g.substr(0, at);
+        if (name.empty()) continue;
+        std::uint64_t hash = 0;
+        if (at != std::string::npos) {
+            const std::string hex = g.substr(at + 1);
+            // Only a full 16-hex-digit suffix is a hash. Anything else is
+            // part of a tool name that happens to contain '@'.
+            if (hex.size() == 16
+                && hex.find_first_not_of("0123456789abcdefABCDEF") == std::string::npos) {
+                hash = std::stoull(hex, nullptr, 16);
+            } else {
+                name = g;   // not a hash suffix after all
+            }
+        }
+        m.d.session_grants.insert(name);
+        if (hash != 0) m.d.grant_def_hash[name] = hash;
+    }
     for (auto& mi : m.d.available_models)
         for (const auto& fav : settings.favorite_models)
             if (mi.id == fav) mi.favorite = true;

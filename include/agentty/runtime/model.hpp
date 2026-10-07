@@ -363,11 +363,23 @@ struct Model {
 
         // Session-scoped "always allow" grants, keyed by tool name
         // (e.g. "shell", "write"). Set by PermissionApproveAlways;
-        // consulted in kick_pending_tools BEFORE prompting. NOT
-        // persisted — a grant lives for the lifetime of the process
-        // run, mirroring Zed's per-session allow-list. Cleared on
+        // consulted in kick_pending_tools BEFORE prompting. Cleared on
         // profile change so tightening the profile re-arms prompts.
+        // Seeded at startup from persisted always_allow_tools.
         std::set<std::string>            session_grants;
+
+        // The DEFINITION each grant was given for, by tool name.
+        //
+        // A grant on a bare name is a standing permission for whatever that
+        // name resolves to later, and for an MCP tool the server owns the
+        // name. So the grant carries the fingerprint of what was approved,
+        // and a call riding that grant is dispatched against that hash --
+        // execute_approved refuses if the tool has since been redefined.
+        //
+        // Missing entry (or 0) = unchecked: a grant persisted by an older
+        // build has no hash, and refusing those would break every saved
+        // grant on upgrade.
+        std::map<std::string, std::uint64_t> grant_def_hash;
 
         // Is ANY provider catalog still being fetched?
         //

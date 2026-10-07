@@ -177,6 +177,7 @@ Cmd meta_update(Model& m, msg::MetaMsg mm) {
             // user-facing way to revoke a stale always-allow.
             const bool had_grants = !m.d.session_grants.empty();
             m.d.session_grants.clear();
+            m.d.grant_def_hash.clear();   // the hashes belong to those grants
             m.d.persisted.always_allow_tools.clear();
             // One save, not two: persist_settings writes the whole record,
             // so clearing the grants on it above is enough. Saving them
