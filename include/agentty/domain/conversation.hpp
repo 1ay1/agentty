@@ -577,12 +577,21 @@ struct Message {
     std::vector<ThinkingBlock> thinking_blocks;
     std::string thinking;
     std::string thinking_signature;
-    // Wall-clock reasoning duration for the "Reasoned · ~N tokens · 3.2s"
-    // header meter. `reasoning_started_ms` is a transient steady-clock stamp
-    // set on the first thinking delta (0 = not started, NOT persisted);
-    // `reasoning_ms` is the finalized duration in milliseconds, sealed when
-    // the first answer/tool output arrives or the stream ends, and IS
-    // persisted so a reloaded thread still shows how long the turn thought.
+    // Wall-clock reasoning time for the "Reasoned · ~N tokens · 3.2s" header
+    // meter, kept as a small state machine rather than one latched number:
+    //
+    //   reasoning_started_ms  the OPEN phase's steady-clock stamp, 0 = no
+    //                         phase open. Not persisted (steady clock).
+    //   reasoning_ms          time ACCUMULATED over closed phases, and the
+    //                         persisted one, so a reloaded thread still
+    //                         shows how long the turn thought.
+    //
+    // Two fields because a turn can think more than once: interleaved
+    // thinking and multi-item Responses streams reason again after a tool
+    // call, so the phase re-opens and the total adds up. A single "sealed
+    // once" duration made the SECOND thinking phase invisible to the view,
+    // which then had to guess at it from whether the typewriter happened to
+    // be mid-glide.
     std::int64_t reasoning_started_ms = 0;
     std::int64_t reasoning_ms = 0;
     // ── Codex/Responses reasoning replay (Assistant turns only) ─────────
@@ -639,6 +648,18 @@ struct Message {
     }
     [[nodiscard]] bool has_reasoning() const noexcept {
         return !reasoning_display_text().empty();
+    }
+    /// Is a thinking phase OPEN on the wire right now? Stamped by the first
+    /// thinking delta, cleared when an answer byte or a tool call seals it.
+    /// This is the honest answer to "is it still thinking" — it survives a
+    /// quiet gap in the stream, which an animation flag does not.
+    [[nodiscard]] bool thinking_open() const noexcept {
+        return reasoning_started_ms != 0;
+    }
+    /// Total thinking time so far: closed phases plus the open one.
+    [[nodiscard]] std::int64_t thinking_elapsed_ms(std::int64_t now_ms) const noexcept {
+        if (!thinking_open()) return reasoning_ms;
+        return reasoning_ms + std::max<std::int64_t>(0, now_ms - reasoning_started_ms);
     }
     // Smoothing buffer. Anthropic's SSE batches deltas at the server's
     // tokenizer rate — a single content_block_delta can carry 50+ chars,

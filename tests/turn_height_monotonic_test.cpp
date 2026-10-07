@@ -16,6 +16,9 @@
 // animation frames in between — and watch the painted height.
 //
 // A failure prints the step where the height dropped and by how much.
+// Two probes for when it does: TRACE_ROWS=1 logs every height change with
+// its step name, DUMP_STEP=<prefix> prints the whole painted frame at the
+// matching steps. Both found real bugs here.
 
 #include "agtest.hpp"
 
@@ -27,6 +30,8 @@
 #include <maya/style/theme.hpp>
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -83,12 +88,37 @@ struct Watch {
     int   drops = 0;
     int   worst = 0;
     std::string worst_step;
+    // A dip that lasts: rows below the running peak for more than a frame or
+    // two. maya's inline renderer bridges a TRANSIENT 1-2 row seam dip (the
+    // activity-indicator → first-revealed-char handoff) with a running-max
+    // hold, so that class is invisible in the app. Nothing bridges a bigger
+    // or a longer one, and those are the shrinks the user sees.
+    int   peak = 0;
+    int   below_peak_frames = 0;
+    int   worst_run = 0;
+    std::string worst_run_step;
 
     void frame(const std::string& step) {
         const int rows = view_rows(m);
+        if (const char* want = std::getenv("DUMP_STEP");
+            want && step.rfind(want, 0) == 0)
+            std::fprintf(stderr, "=== %s (%d rows) ===\n%s\n",
+                         step.c_str(), rows, view_text(m).c_str());
+        if (std::getenv("TRACE_ROWS") && rows != prev)
+            std::fprintf(stderr, "  %-28s %3d -> %3d\n", step.c_str(), prev, rows);
         if (rows < prev) {
             ++drops;
             if (prev - rows > worst) { worst = prev - rows; worst_step = step; }
+        }
+        if (rows < peak) {
+            ++below_peak_frames;
+            if (below_peak_frames > worst_run) {
+                worst_run = below_peak_frames;
+                worst_run_step = step;
+            }
+        } else {
+            below_peak_frames = 0;
+            peak = rows;
         }
         prev = rows;
     }
@@ -179,13 +209,16 @@ static void sweep_one_turn(A::ui_prefs::Thinking thinking, const std::string& la
     w.tick("tool-end");
 
     // Running, as the executor would leave it, so the progress snapshots
-    // below go through the real reducer.
+    // below go through the real reducer. The PHASE moves too: a tool is
+    // executing, which is not phase::Streaming — and the view reads the
+    // phase to decide what the reasoning block is.
     {
         auto& calls = m.d.current.messages.back().tool_calls;
         REQUIRE(!calls.empty());
         const auto now = std::chrono::steady_clock::now();
         calls.back().status = A::ToolUse::Running{now, {}, {}, now, kExecSeq};
     }
+    m.s.phase = A::phase::ExecutingTool{A::phase::Active{}};
     w.tick("tool-running");
 
     // Output the way a build actually arrives: many lines, alternating long
@@ -224,6 +257,32 @@ static void sweep_one_turn(A::ui_prefs::Thinking thinking, const std::string& la
     }
     for (int f = 0; f < 4; ++f) w.tick("tool-done");
 
+    // The result goes back to the model and the next request opens.
+    m.s.phase = A::phase::Streaming{A::phase::Active{}};
+    for (int f = 0; f < 4; ++f) w.tick("sub-turn-2-open");
+
+    // ── 2b. More reasoning, AFTER the tool result ──────────────────────
+    // Interleaved thinking and multi-item Responses streams deliver more
+    // reasoning once a sub-turn has acted, and that is the normal shape of
+    // an agentic turn. The quiet frames between bursts are the point: the
+    // reveal goes idle there, and anything that keys the block's shape off
+    // "is the typewriter animating" changes shape in the gap.
+    for (std::size_t i = 0; i < 4; ++i) {
+        m = apply(std::move(m), A::StreamThinkingDelta{
+            i == 0 ? "\n\nThe build came back green, so the next thing to "
+                     "check is whether the window still holds its height "
+                     "when reasoning resumes after a tool call."
+                   : (i == 1 ? "\n\nShort."
+                   : (i == 2 ? "\n\nThat is the case the single-phase sweep "
+                               "never rendered, because it never let the "
+                               "reveal go idle and then fed it more bytes."
+                             : "\n\nChecking now."))});
+        w.tick("reasoning2-" + std::to_string(i));
+        // The stall: no new bytes for a while, frames still painting.
+        for (int f = 0; f < 25; ++f)
+            w.tick("reasoning2-" + std::to_string(i) + "-quiet");
+    }
+
     // ── 3. The answer ──────────────────────────────────────────────────
     const char* prose[] = {
         "The build is green.",
@@ -252,9 +311,14 @@ static void sweep_one_turn(A::ui_prefs::Thinking thinking, const std::string& la
 
     maya::testing::unfreeze_anim_clock();
 
-    INFO(label, ": height drops: ", w.drops, ", worst ", w.worst,
-         " rows at step '", w.worst_step, "'");
-    CHECK(w.drops == 0);
+    INFO(label, ": ", w.drops, " dips, worst -", w.worst,
+         " rows at '", w.worst_step, "'; longest below-peak run ",
+         w.worst_run, " frames at '", w.worst_run_step, "'");
+    // The contract: no dip deeper than the 2-row seam handoff maya's hold
+    // bridges, and none that LASTS — a real shrink (the window releasing
+    // mid-turn was 13 to 32 rows, and it stayed) fails both ways.
+    CHECK(w.worst <= 2);
+    CHECK(w.worst_run <= 2);
 
     // Not vacuous: the turn really did render, and all three lanes are in
     // the frame. A view that drew nothing would sail through the check above.

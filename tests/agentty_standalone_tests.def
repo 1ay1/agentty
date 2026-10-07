@@ -36,6 +36,7 @@ FOLD_NOARGS(scrollback_oracle_test)
 FOLD_NOARGS(mcp_bridge_test)
 FOLD_NOARGS(mcp_http_test)
 FOLD_NOARGS(md_shape_sweep)
+FOLD_ARGS(reasoning_stall_sweep)
 FOLD_NOARGS(reveal_headroom_test)
 
 FOLD_ARGS(theme_preview_cost_probe)

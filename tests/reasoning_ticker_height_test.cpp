@@ -286,7 +286,13 @@ TEST_CASE("reasoning: with no window at all, the block only grows") {
     CHECK(prev > kCap * 2);
 }
 
-TEST_CASE("reasoning ticker: settling releases the window") {
+TEST_CASE("reasoning: the window is the host's call, not the live flag") {
+    // The cap used to be gated on set_live(), so a block settling released
+    // the window and unfolded the whole chain-of-thought. That tied two
+    // unrelated questions together: "is the model thinking right now" (the
+    // header) and "how much reasoning does the reader want" (the window).
+    // agentty answers the second with the Thinking pref, so Collapsed keeps
+    // the tail after settling and Shown passes no cap at all.
     maya::testing::freeze_anim_clock(0);
 
     std::string src;
@@ -294,17 +300,27 @@ TEST_CASE("reasoning ticker: settling releases the window") {
 
     const int live_rows = ticker_rows(src);
 
+    // Same cap, settled: still a glance, same height.
     maya::ReasoningStream rs{ticker_cfg()};
     rs.set_content(src);
     rs.set_live(false);
     rs.finish();
     const std::string settled = maya::render_to_string(rs.build(), kWidth);
 
+    // No cap (Thinking::Shown): the whole thing.
+    maya::ReasoningStream::Config full_cfg;   // live_tail_rows stays 0
+    maya::ReasoningStream full{full_cfg};
+    full.set_content(src);
+    full.set_live(false);
+    full.finish();
+    const std::string all = maya::render_to_string(full.build(), kWidth);
+
     maya::testing::unfreeze_anim_clock();
 
-    INFO("live rows:", live_rows, " settled rows:", rows_of(settled));
-    // Settled shows everything, so it is taller than the window and the
-    // oldest paragraph is back. Growth, not shrink — still monotonic.
-    CHECK(rows_of(settled) > live_rows);
-    CHECK(settled.find("This is a long first paragraph") != std::string::npos);
+    INFO("live:", live_rows, " settled:", rows_of(settled),
+         " uncapped:", rows_of(all));
+    CHECK(rows_of(settled) == live_rows);
+    CHECK(settled.find("This is a long first paragraph") == std::string::npos);
+    CHECK(rows_of(all) > live_rows);
+    CHECK(all.find("This is a long first paragraph") != std::string::npos);
 }

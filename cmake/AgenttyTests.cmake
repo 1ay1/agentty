@@ -412,6 +412,8 @@ agentty_fold_test(reveal_scrollback_test   TIMEOUT 180 UNIX_LIBS util)
 agentty_fold_test(scrollback_oracle_test   TIMEOUT 600 UNIX_LIBS util)
 agentty_fold_test(external_acp_backend_test TIMEOUT 60)
 agentty_fold_test(md_shape_sweep           TIMEOUT 120)
+agentty_fold_test(reasoning_stall_sweep    TIMEOUT 120
+                  FIXTURE tests/fixtures/reasoning_burst_shape.jsonl)
 agentty_fold_test(reveal_headroom_test     TIMEOUT 60)
 agentty_fold_test(md_cache_probe           TIMEOUT 120 LABELS perf)
 if(AGENTTY_MCP)

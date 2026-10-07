@@ -1325,14 +1325,17 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
                 // Cap is on the COMBINED visible + buffered size so
                 // smoothing can't push past the per-message budget.
                 auto& msg = m.d.current.messages.back();
-                // Seal the reasoning timer: the first answer byte marks the
-                // end of the thinking phase.
-                if (msg.reasoning_started_ms != 0 && msg.reasoning_ms == 0) {
+                // Seal the thinking phase: the first answer byte ends it.
+                // Accumulate and CLOSE, so reasoning that resumes later
+                // (interleaved thinking) opens a fresh phase and adds to the
+                // same total.
+                if (msg.reasoning_started_ms != 0) {
                     const std::int64_t now_ms =
                         std::chrono::duration_cast<std::chrono::milliseconds>(
                             now.time_since_epoch()).count();
-                    msg.reasoning_ms =
-                        std::max<std::int64_t>(0, now_ms - msg.reasoning_started_ms);
+                    msg.reasoning_ms += std::max<std::int64_t>(
+                        0, now_ms - msg.reasoning_started_ms);
+                    msg.reasoning_started_ms = 0;
                 }
                 const std::size_t in_flight =
                     msg.streaming_text.size() + msg.pending_stream.size();
@@ -1404,13 +1407,16 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
                 && m.d.current.messages.back().role == Role::Assistant) {
                 auto& amsg = m.d.current.messages.back();
                 // A tool call ends the thinking phase too (reasoning→tool
-                // turns) — seal before the tool's own timer starts.
-                if (amsg.reasoning_started_ms != 0 && amsg.reasoning_ms == 0) {
+                // turns) — seal before the tool's own timer starts. Same
+                // accumulate-and-close as the answer path: a turn that
+                // reasons again after the tool opens a new phase.
+                if (amsg.reasoning_started_ms != 0) {
                     const std::int64_t now_ms =
                         std::chrono::duration_cast<std::chrono::milliseconds>(
                             now.time_since_epoch()).count();
-                    amsg.reasoning_ms =
-                        std::max<std::int64_t>(0, now_ms - amsg.reasoning_started_ms);
+                    amsg.reasoning_ms += std::max<std::int64_t>(
+                        0, now_ms - amsg.reasoning_started_ms);
+                    amsg.reasoning_started_ms = 0;
                 }
                 ToolUse tc;
                 tc.id   = e.id;
@@ -1719,8 +1725,10 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
                 if (!e.text.empty()) {
                     open_block().text += e.text;
                     msg.thinking      += e.text;
-                    // Start the reasoning timer on the first thinking text
-                    // (steady clock; finalized when the answer/tool arrives).
+                    // Open a thinking phase on the first thinking text of
+                    // this phase (steady clock; sealed by the answer or a
+                    // tool call). Re-opens after a seal, which is what makes
+                    // interleaved thinking visible as thinking.
                     if (msg.reasoning_started_ms == 0)
                         msg.reasoning_started_ms =
                             std::chrono::duration_cast<std::chrono::milliseconds>(

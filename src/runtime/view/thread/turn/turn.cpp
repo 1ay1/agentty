@@ -1753,30 +1753,23 @@ std::optional<maya::Element> reasoning_slot(const Message& msg, const Model& m) 
         return std::nullopt;
     if (msg.reasoning_display_text().empty()) return std::nullopt;
 
-    // "Actively reasoning" = this message is the LIVE tail AND it hasn't
-    // produced any output yet (no answer prose, no tool calls, text block not
-    // closed) AND the stream is running. Intermediate sub-turns that already
-    // reasoned and then ACTED (tool calls) are done thinking — they must read
-    // "Reasoned", not stay stuck on "Thinking". A message that isn't the last
-    // one has, by definition, been followed by more, so it too is settled.
+    // Two questions, not one, and they used to share a boolean.
+    //
+    //   in_flight    — is this turn still working on this message?
+    //   thinking_now — is the model thinking right now, as opposed to
+    //                  running a tool or answering? That is what the HEADER
+    //                  says and what the elapsed meter ticks on.
+    //
+    // m.s.active() rather than is_streaming() because a tool executing is
+    // the same turn in flight, and msg.thinking_open() rather than a peek at
+    // whether the reveal is mid-glide because the wire's own thinking phase
+    // survives a quiet gap — an animation flag does not, and keying the
+    // header off one made it flip to "Reasoned" at every pause.
     const auto& msgs = m.d.current.messages;
     const bool is_live_tail =
         !msgs.empty() && msgs.back().id == msg.id;
-    const bool produced_output =
-        !msg.text.empty() || !msg.streaming_text.empty()
-        || !msg.tool_calls.empty() || msg.text_block_closed;
-    // Interleaved thinking (Anthropic beta) and multi-item Responses streams
-    // legitimately deliver MORE reasoning after the first answer/tool output.
-    // If the header flipped to "Reasoned" purely on produced_output, those
-    // late bytes would snap into a settled block. Stay live while the #r
-    // reveal is still gliding — const peek, no touch/reorder.
-    const auto* rslot = m.ui.view_cache.peek(
-        m.d.current.id, MessageId{msg.id.value + "#r"});
-    const bool reveal_animating =
-        rslot && rslot->streaming && rslot->streaming->is_animating();
-    const bool active =
-        is_live_tail && m.s.is_streaming()
-        && (!produced_output || reveal_animating);
+    const bool in_flight    = is_live_tail && m.s.active();
+    const bool thinking_now = in_flight && msg.thinking_open();
 
     // The reasoning body streams through the CENTRAL streaming-markdown path
     // (own "#r" cache slot, cross-frame-persistent) so it reveals smoothly
@@ -1794,6 +1787,10 @@ std::optional<maya::Element> reasoning_slot(const Message& msg, const Model& m) 
     // the eye. Whole body, smooth reveal, full rail, dim — distinct aside.
     maya::ReasoningStream::Config rcfg;
     rcfg.boxed    = true;    // real ┃ rail (like a Turn), not a per-line prefix
+    rcfg.meter_below = true; // the "· 158 tokens · 6.2s" line reads as a footer
+                             // for what you just watched, and it is the row
+                             // that keeps changing — keep it at the live edge
+                             // rather than scrolling it away mid-tick
     rcfg.dim_body = true;    // recede the body by color so the answer wins
     // Colors MUST come from the named-ANSI palette, not the widget's hardcoded
     // truecolor defaults (0x8a gray body / indigo rail). agentty's rule is
@@ -1828,32 +1825,33 @@ std::optional<maya::Element> reasoning_slot(const Message& msg, const Model& m) 
     rcfg.accent      = ui::role_brand;          // ┃ rail + sigil
     rcfg.header_word = ui::text_secondary;      // visible header/meter
     rcfg.body_fg     = ui::text_secondary;      // always-visible dim
-    // Thinking::Collapsed — "a line you can open". While the model is live
-    // this becomes a thought TICKER: a fixed 8-row window on the newest
-    // rows, so a long chain-of-thought stays a glance rather than a wall
-    // that shoves the composer down the screen. The cap is in ROWS, so the
-    // block grows to 8 and then holds — it cannot shrink mid-stream, which
-    // is what a node-count window did every time a short paragraph became
-    // the newest one. Settled reasoning still renders in full: the cost of
-    // a long block is that it moves things WHILE it grows, and a settled
-    // block doesn't move.
+    // Thinking::Collapsed — a glance, and that is the whole pref: the last
+    // 8 ROWS of the reasoning, whether it is still arriving or long done.
+    // Thinking::Shown is the one that renders all of it.
+    //
+    // The cap does NOT depend on the turn's state, and that is deliberate.
+    // Deriving it from "is this live" meant the block changed shape on
+    // events that say nothing about how much reasoning the reader wants:
+    // the window released when a tool started (phase left Streaming), when
+    // the typewriter went idle at a pause, and when a later sub-turn made
+    // this message no longer the tail — unfolding a whole chain-of-thought
+    // mid-turn (measured: +32 rows in one frame, in a QUIET frame) and
+    // snapping back when the next burst landed. One cap, one shape.
+    //
+    // ROWS, so the block grows to 8 and then holds — it cannot shrink.
     if (agentty::ui_prefs::current().thinking
             == agentty::ui_prefs::Thinking::Collapsed)
         rcfg.live_tail_rows = 8;
     maya::ReasoningStream rs{rcfg};
-    rs.set_live(active);
+    rs.set_live(thinking_now);
     rs.set_char_hint(msg.reasoning_display_text().size());
-    // Reasoning duration for the "· 3.2s" header meter. Once sealed (answer/
-    // tool arrived) show the final reasoning_ms; while still thinking, tick a
-    // live elapsed off the steady-clock start stamp.
-    std::int64_t elapsed = msg.reasoning_ms;
-    if (elapsed == 0 && active && msg.reasoning_started_ms > 0) {
-        const std::int64_t now_ms =
-            std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now().time_since_epoch()).count();
-        elapsed = std::max<std::int64_t>(0, now_ms - msg.reasoning_started_ms);
-    }
-    rs.set_elapsed_ms(elapsed);
+    // Reasoning duration for the "· 3.2s" header meter: closed phases plus
+    // the open one, so a turn that thinks, acts, and thinks again shows the
+    // total rather than restarting or freezing at the first phase.
+    const std::int64_t now_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+    rs.set_elapsed_ms(msg.thinking_elapsed_ms(now_ms));
     return rs.build_with_body(std::move(body));
 }
 
