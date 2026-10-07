@@ -213,6 +213,49 @@ TEST_CASE("reasoning ticker: one long paragraph is cut mid-wrap") {
     CHECK(rows_of(frame) >= kCap);
 }
 
+TEST_CASE("reasoning ticker: a delta ending on a paragraph break wastes no rows") {
+    // How reasoning actually arrives: every burst ends with "\n\n". The
+    // trailing gap under the newest line used to eat two of the window's
+    // rows — cropping the oldest row to pay for a row with nothing in it —
+    // and during a pause in the stream it sat there as dead space. The
+    // answer lane never had this (StreamingMarkdown drops its trailing
+    // empties); the reasoning window has to match it.
+    maya::testing::freeze_anim_clock(0);
+
+    std::string src;
+    for (const auto& p : paragraphs()) { src += p; src += "\n\n"; }
+
+    const std::string mid   = ticker_frame(src + "and then the wire stopped");
+    const std::string brk   = ticker_frame(src + "and then the wire stopped.\n\n");
+
+    maya::testing::unfreeze_anim_clock();
+
+    const auto trailing_blanks = [](const std::string& frame) {
+        std::vector<std::string> lines;
+        std::string cur;
+        for (const char c : frame) {
+            if (c == '\n') { lines.push_back(cur); cur.clear(); }
+            else cur.push_back(c);
+        }
+        if (!cur.empty()) lines.push_back(cur);
+        while (!lines.empty() && lines.back().empty()) lines.pop_back();
+        int n = 0;
+        for (auto it = lines.rbegin(); it != lines.rend(); ++it) {
+            if (it->find_first_not_of(" \t\u2502\u2503") == std::string::npos) ++n;
+            else break;
+        }
+        return n;
+    };
+
+    INFO("mid-sentence frame:\n", mid, "\nparagraph-break frame:\n", brk);
+    CHECK(trailing_blanks(mid) == 0);
+    CHECK(trailing_blanks(brk) == 0);
+    // Same height either way: the break costs nothing.
+    CHECK(rows_of(brk) == rows_of(mid));
+    // ...and the newest line is still the last thing in the block.
+    CHECK(brk.find("the wire stopped.") != std::string::npos);
+}
+
 TEST_CASE("reasoning: with no window at all, the block only grows") {
     // Thinking::Shown — the whole block, no cap. Monotonic for the other
     // reason: nothing is ever dropped, so the only question is whether the
