@@ -165,7 +165,10 @@ workspace/checkpoint.cpp: mutex atomic
 # ── Providers: transports and their shared state ─────────────────────────
 provider/prompt.cpp: mutex
 provider/selection.cpp: mutex
-provider/external_acp_backend.cpp: thread mutex
+# external_acp_backend: the prompt getter moved to a jaal::scope nursery, so
+# the raw worker and its hand-written JoinGuard are gone. The mutex guards the
+# connection map.
+provider/external_acp_backend.cpp: mutex
 provider/acp_provider_adapter.cpp: mutex
 provider/acp_agents.cpp: mutex
 provider/dialect.cpp: mutex

@@ -8,7 +8,7 @@
 #include <algorithm>
 #include <future>
 #include <optional>
-#include <thread>
+#include <jaal/kernel/scope.hpp>
 #include <utility>
 #include <variant>
 
@@ -434,54 +434,65 @@ TurnResult ExternalAcpBackend::prompt(const Request&              req,
     std::future<void> done_f = done.get_future();
     acp::PromptResult result{};
     std::exception_ptr result_err;
-    std::thread getter([&]{
-        try { result = fut.get(); }
-        catch (...) { result_err = std::current_exception(); }
-        done.set_value();
-    });
-
-    // RAII join: whatever happens below — a throw from session_cancel, an
-    // exception on the poll path, or a normal return — the getter thread is
-    // ALWAYS joined before it destructs. An un-joined std::thread dtor calls
-    // std::terminate(); this guard makes that impossible. Declared AFTER
-    // `getter` so it destroys (joins) FIRST, before `done`/`result` unwind.
-    struct JoinGuard {
-        std::thread& t;
-        ~JoinGuard() { if (t.joinable()) t.join(); }
-    } join_guard{getter};
-
     bool sent_cancel = false;
-    std::optional<std::chrono::steady_clock::time_point> cancel_deadline;
-    for (;;) {
-        if (!sent_cancel && cancel && cancel->is_cancelled()) {
-            acp::CancelParams cp;
-            cp.sessionId = *sid;
-            // Fire session/cancel; the agent settles the in-flight future with
-            // StopReason::Cancelled, waking the getter. If the transport is
-            // already torn down this can throw — swallow it: we've recorded the
-            // cancel intent, and the getter will wake on the future erroring
-            // out (on_transport_closed fails all in-flight requests) regardless.
-            try {
-                conn_->session_cancel(cp);
-            } catch (...) { /* transport gone; getter wakes via future error */ }
-            sent_cancel = true;
-            // A COOPERATIVE agent settles the future within a beat. A BUGGY one
-            // might never settle it — in which case getter's fut.get() (and thus
-            // join_guard's join) would block forever. Arm a grace deadline; if
-            // it lapses, we force the escape hatch below.
-            cancel_deadline = std::chrono::steady_clock::now() + 2s;
+
+    // jaal::scope owns the getter. It joins EVERY helper before returning —
+    // normal exit, early exit, or a throw out of the poll loop — which is
+    // what makes the [&] captures of result / result_err / done above safe by
+    // construction. scope.hpp calls this out as the one place in jaal where a
+    // helper may capture by reference, precisely because the join is
+    // guaranteed.
+    //
+    // What this replaces: a raw worker plus a hand-written JoinGuard whose
+    // correctness rested on being DECLARED AFTER the thread so it would
+    // destroy (and join) FIRST, before `done`/`result` unwound. That is a
+    // real invariant enforced only by the order of two adjacent declarations
+    // and a comment asking the next reader not to move them — and getting it
+    // wrong means an un-joined thread destructor calling std::terminate.
+    // With a nursery the ordering is not expressible, so it cannot be got
+    // wrong.
+    jaal::scope([&](jaal::nursery& n) {
+        auto getter = n.spawn([&] {
+            try { result = fut.get(); }
+            catch (...) { result_err = std::current_exception(); }
+            done.set_value();
+        });
+        (void)getter;
+
+        std::optional<std::chrono::steady_clock::time_point> cancel_deadline;
+        for (;;) {
+            if (!sent_cancel && cancel && cancel->is_cancelled()) {
+                acp::CancelParams cp;
+                cp.sessionId = *sid;
+                // Fire session/cancel; the agent settles the in-flight future
+                // with StopReason::Cancelled, waking the getter. If the
+                // transport is already torn down this can throw — swallow it:
+                // we've recorded the cancel intent, and the getter will wake
+                // on the future erroring out (on_transport_closed fails all
+                // in-flight requests) regardless.
+                try {
+                    conn_->session_cancel(cp);
+                } catch (...) { /* transport gone; getter wakes via future error */ }
+                sent_cancel = true;
+                // A COOPERATIVE agent settles the future within a beat. A
+                // BUGGY one might never settle it — in which case the
+                // getter's fut.get(), and so the nursery's join, would block
+                // forever. Arm a grace deadline; if it lapses, force the
+                // escape hatch below.
+                cancel_deadline = std::chrono::steady_clock::now() + 2s;
+            }
+            // Escape hatch: the agent didn't settle the cancelled future in
+            // time. Fail every in-flight request at the engine (idempotent) —
+            // this errors the future the getter is blocked on, so it wakes and
+            // the join stays bounded no matter how the agent (mis)behaves.
+            if (cancel_deadline && std::chrono::steady_clock::now() >= *cancel_deadline) {
+                conn_->engine().on_transport_closed("cancel timed out");
+                cancel_deadline.reset();
+            }
+            if (done_f.wait_for(20ms) == std::future_status::ready) break;
         }
-        // Escape hatch: the agent didn't settle the cancelled future in time.
-        // Fail every in-flight request at the engine (idempotent) — this errors
-        // the future the getter is blocked on, so it wakes and the join is
-        // bounded no matter how the agent (mis)behaves.
-        if (cancel_deadline && std::chrono::steady_clock::now() >= *cancel_deadline) {
-            conn_->engine().on_transport_closed("cancel timed out");
-            cancel_deadline.reset();
-        }
-        if (done_f.wait_for(20ms) == std::future_status::ready) break;
-    }
-    // getter is joined by join_guard on scope exit (and again here is a no-op).
+    });
+    // Past this line the getter has finished: scope joined it.
 
     if (sent_cancel) return TurnResult::cancelled();
 
