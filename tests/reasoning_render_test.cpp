@@ -13,6 +13,9 @@
 
 #include "agtest.hpp"
 
+#include <functional>
+#include <maya/widget/reasoning.hpp>
+
 #include <cstdlib>   // setenv — the reveal tests pin the effect explicitly
 
 #include "agentty/runtime/model.hpp"
@@ -119,6 +122,98 @@ TEST_CASE("reasoning: settled turn shows the full reasoning, not a fold") {
           "settled reasoning keeps its first line");
     check(has(out, "SECOND_LINE_MARKER"),
           "settled reasoning keeps ALL lines — it does not fold to a summary");
+}
+
+TEST_CASE("reasoning: the meter footer lines up with the body text") {
+    // The footer used to be a filled CHIP, and the band carried its own
+    // one-column pad, so "✦ Reasoned" started one column RIGHT of the prose
+    // it was summarizing. Same box, same padding, two different left edges.
+    // Pin the columns equal: the footer is a label for the body, and a label
+    // that does not share the body's margin reads as a stray indented line.
+    Model m;
+    Message a = assistant("answer");
+    a.thinking = "BODYMARKER reasoning line that the footer sits under.";
+    m.d.current.messages.push_back(std::move(a));
+    m.s.phase = phase::Idle{};
+
+    const std::string out = render_text(m);
+
+    auto indent_of = [&out](std::string_view needle) -> int {
+        const std::size_t at = out.find(needle);
+        if (at == std::string::npos) return -1;
+        const std::size_t bol = out.rfind('\n', at) + 1; // npos+1 == 0 == start
+        int col = 0;
+        for (std::size_t i = bol; i < out.size() && out[i] != '\n'; ++i) {
+            if (out[i] != ' ') break;
+            ++col;
+        }
+        return col;
+    };
+
+    const int body   = indent_of("BODYMARKER");
+    const int footer = indent_of("Reasoned");
+    check(body >= 0, "body line rendered");
+    check(footer >= 0, "footer line rendered");
+    check(body == footer,
+          "footer indent must equal the body indent (no chip pad shift)");
+}
+
+// The swept meter, checked at the widget rather than through render_text():
+// the sweep is carried entirely by per-character fg colors, and the text dump
+// has no colors in it. Walks the built block for its meter row and counts
+// distinct ink.
+TEST_CASE("reasoning: the live meter carries a per-character sweep") {
+    auto meter_runs = [](bool sweep) {
+        maya::ReasoningStream::Config cfg;
+        cfg.boxed        = true;
+        cfg.meter_below  = true;
+        cfg.meter_sweep  = sweep;
+        cfg.meter_rate   = true;
+        maya::ReasoningStream rs{cfg};
+        rs.set_live(true);
+        rs.set_char_hint(600);
+        rs.set_elapsed_ms(6200);
+        rs.set_content("some reasoning");
+
+        // The block is a bordered box whose rows are body / blank / meter.
+        // The meter is the one TextElement holding the live word.
+        maya::Element e = rs.build();
+        std::vector<maya::StyledRun> found;
+        std::function<void(const maya::Element&)> walk =
+            [&](const maya::Element& el) {
+                if (const auto* t = maya::as_text(el)) {
+                    if (t->content.find("Thinking") != std::string::npos)
+                        found = t->runs;
+                    return;
+                }
+                if (const auto* b = maya::as_box(el))
+                    for (const auto& c : b->children) walk(c);
+                if (const auto* l = maya::as_list(el))
+                    for (const auto& c : l->items) walk(c);
+            };
+        walk(e);
+        return found;
+    };
+
+    const auto plain = meter_runs(false);
+    const auto swept = meter_runs(true);
+    check(!plain.empty(), "the meter row was found and is styled");
+    check(swept.size() > plain.size(),
+          "sweep explodes the meter into per-character runs");
+
+    // The crest is a gradient, not a two-tone flip. Only >= 2 is pinned: on
+    // an RGB theme the blend is smooth (many inks), but under theme::native
+    // the stops have no channels and lerp_color SNAPS by design, so the band
+    // is two-tone there. Both are correct; the count is not.
+    std::vector<maya::Color> inks;
+    for (const auto& r : swept) {
+        if (!r.style.fg) continue;
+        bool seen = false;
+        for (const auto& c : inks) seen = seen || (c == *r.style.fg);
+        if (!seen) inks.push_back(*r.style.fg);
+    }
+    check(inks.size() >= 2,
+          "the band varies ink across the row, it is not one flat color");
 }
 
 TEST_CASE("reasoning: no block when the turn never reasoned") {

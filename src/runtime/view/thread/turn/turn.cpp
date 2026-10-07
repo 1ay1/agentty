@@ -1791,10 +1791,19 @@ std::optional<maya::Element> reasoning_slot(const Message& msg, const Model& m) 
                              // for what you just watched, and it is the row
                              // that keeps changing — keep it at the live edge
                              // rather than scrolling it away mid-tick
-    rcfg.meter_chip  = true; // and it is a LABEL for the block, so it gets a
-                             // band like the provider chip does, not another
-                             // dim line that reads as more reasoning
-    rcfg.meter_chip_style = ui::chip_style(ui::role_brand);
+    rcfg.meter_chip  = false; // NOT a chip. The band's own one-column pad
+                              // pushed the ✦ a column right of the body text,
+                              // so the footer never lined up with the prose it
+                              // was summarizing. Flush text + motion says
+                              // "label" without the inset.
+    rcfg.meter_sweep = true;  // a highlight band rides left→right while live
+    rcfg.meter_sweep_fg = ui::fg;  // crest is BRIGHTNESS, not a second hue:
+                                   // a hue sweep over the muted meta fights
+                                   // the magenta rail, and under theme::native
+                                   // the blend snaps, so a hue crest would
+                                   // strobe gray→magenta. Dim→fg just reads as
+                                   // light passing over the row, in any theme.
+    rcfg.meter_rate  = true;  // "· 26 tok/s" — how fast it is actually thinking
     rcfg.dim_body = true;    // recede the body by color so the answer wins
     // Colors MUST come from the named-ANSI palette, not the widget's hardcoded
     // truecolor defaults (0x8a gray body / indigo rail). agentty's rule is
