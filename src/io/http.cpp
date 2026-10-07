@@ -39,7 +39,10 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <stop_token>
 #include <thread>
+
+#include <jaal/kernel/pool.hpp>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -2720,17 +2723,25 @@ struct Client::Impl {
     Config cfg;
     Pool   pool;
 
-    // Outstanding prewarm() dials. Tracked (not detached) so join_prewarm()
-    // can cancel + join them before CRT/OpenSSL teardown, closing the
-    // exit-race UAF that manifests as heap corruption on a fast exit. Each
-    // thread carries a `done` flag it sets right before returning, so
-    // join_prewarm() can wait with a deadline (std::thread has no timed join)
-    // and detach a dial genuinely wedged in a blocking getaddrinfo() instead
-    // of hanging teardown.
+    // Outstanding prewarm() dials. OWNED (not detached) so join_prewarm()
+    // can cancel and wait for them before CRT/OpenSSL teardown, closing the
+    // exit-race UAF that manifests as heap corruption on a fast exit. The
+    // waiting is jaal::kernel::pool's: it is bounded, so a dial genuinely
+    // wedged in a blocking getaddrinfo() is abandoned at the deadline rather
+    // than hanging teardown.
     std::mutex                              prewarm_mu;
-    std::vector<std::thread>                prewarm_threads;
+    // The dials' cancel tokens. The THREADS are the pool's business; these
+    // are the app's own cancellation, which dial_new() polls inside its
+    // connect loop, so they stay.
     std::vector<CancelTokenPtr>             prewarm_cancels;
-    std::vector<std::shared_ptr<std::atomic<bool>>> prewarm_done;
+    // Prewarm dials run here. Replaces a vector<thread> + a per-dial `done`
+    // atomic + a 10 ms poll loop in join_prewarm(): the pool already does
+    // "ask to stop, wait for a bounded grace on a condition variable, then
+    // abandon", without the polling, and its abandonment is safe because a
+    // worker co-owns the pool's state. One worker is not a cap on dials —
+    // each is posted isolated, since a dial can wedge in a blocking
+    // getaddrinfo() and must not occupy a shared worker.
+    jaal::kernel::pool                      prewarm_pool{/*max_workers=*/1};
 };
 
 Client::Client() : Client(Config{}) {}
@@ -3066,23 +3077,26 @@ void Client::prewarm(std::string host, uint16_t port,
         e && *e == '1')
         return;
     // A prewarm dial races process exit: on a fast teardown (immediate
-    // pipe-stdin EOF) main() can return while this thread is mid-SSL_connect,
+    // pipe-stdin EOF) main() can return while this dial is mid-SSL_connect,
     // and the CRT/OpenSSL static state gets freed under it — heap corruption.
-    // So the thread is TRACKED, not detached, with a cancel token; a shutdown
-    // join_prewarm() trips the token (which shuts the dialing socket to wake
-    // poll()) and joins before teardown. Swallows errors — opportunistic.
+    // So the work is OWNED by a pool, not detached, and carries a cancel
+    // token; a shutdown join_prewarm() trips the token (which shuts the
+    // dialing socket to wake poll()) and the pool waits before teardown.
+    // Swallows errors — opportunistic.
+    //
+    // No `done` flag any more: it existed so join_prewarm()'s poll loop could
+    // tell a settled dial from a wedged one, and the pool answers that from
+    // its own accounting without polling.
     auto cancel = std::make_shared<CancelToken>();
-    auto done   = std::make_shared<std::atomic<bool>>(false);
-    std::thread th([this, cancel, done,
-                    host = std::move(host), port,
-                    dial_host = std::move(dial_host), dial_port]() mutable {
-        // Set the done flag no matter how this thread exits (normal return,
-        // cancelled, or dial error) so join_prewarm()'s bounded wait can tell
-        // a settled dial from one still wedged in a blocking syscall.
-        struct DoneGuard {
-            std::shared_ptr<std::atomic<bool>> f;
-            ~DoneGuard() { f->store(true, std::memory_order_release); }
-        } done_guard{done};
+    {
+        std::lock_guard<std::mutex> lk(impl_->prewarm_mu);
+        impl_->prewarm_cancels.push_back(cancel);
+    }
+    impl_->prewarm_pool.post_isolated(
+        [this, cancel,
+         host = std::move(host), port,
+         dial_host = std::move(dial_host), dial_port](
+            std::stop_token st) mutable {
 #if !defined(_WIN32)
         // Block every signal so SIGWINCH / SIGINT / SIGTERM route to the
         // main thread's handlers instead of being delivered here mid
@@ -3093,74 +3107,56 @@ void Client::prewarm(std::string host, uint16_t port,
         sigfillset(&all);
         pthread_sigmask(SIG_BLOCK, &all, nullptr);
 #endif
-        if (cancel->is_cancelled()) return;
+        // Bridge the pool's stop to the app's cancel token, so a shutdown
+        // reaches the dial's poll loops even if join_prewarm() was never
+        // called — which is exactly the standalone-binary case documented at
+        // the top of this file.
+        const std::stop_callback cancel_on_stop(st, [cancel] {
+            cancel->cancel();
+        });
+        if (cancel->is_cancelled() || st.stop_requested()) return;
         Endpoint ep{ std::move(host), port,
                      std::move(dial_host), dial_port };
         // Short, bounded connect budget. A prewarm is pure latency-hiding —
         // it must never wedge the process at exit. With the default 10 s
         // connect timeout a dial stuck in TCP/TLS would keep join_prewarm()
         // blocked for up to 10 s on a fast pipe-EOF exit; cap it hard so the
-        // shutdown join returns promptly (and the dial's poll loops re-check
+        // shutdown wait returns promptly (and the dial's poll loops re-check
         // the cancel token every 200 ms within that window).
         Timeouts warm_tos{};
         warm_tos.connect = std::chrono::milliseconds{4'000};
         auto r = dial_new(ep, warm_tos, cancel);
         if (r && !cancel->is_cancelled()) impl_->pool.release(std::move(*r));
     });
-    std::lock_guard<std::mutex> lk(impl_->prewarm_mu);
-    impl_->prewarm_cancels.push_back(std::move(cancel));
-    impl_->prewarm_done.push_back(std::move(done));
-    impl_->prewarm_threads.push_back(std::move(th));
 }
 
 void Client::join_prewarm() noexcept {
-    std::vector<std::thread>                        threads;
-    std::vector<CancelTokenPtr>                     cancels;
-    std::vector<std::shared_ptr<std::atomic<bool>>> dones;
+    std::vector<CancelTokenPtr> cancels;
     {
         std::lock_guard<std::mutex> lk(impl_->prewarm_mu);
-        threads.swap(impl_->prewarm_threads);
         cancels.swap(impl_->prewarm_cancels);
-        dones.swap(impl_->prewarm_done);
     }
-    // Trip every token first so the dials abort at their next poll slice.
+    // Trip every token first so the dials abort at their next poll slice,
+    // THEN wait. Cancel-before-wait means a dial between slices spends the
+    // grace finishing rather than discovering the cancel at the end of it.
     for (auto& c : cancels)
         if (c) c->cancel();
 
-    // Bounded wait, then join. A cancelled dial's poll loops re-check the
-    // token every 200 ms and the connect budget is capped at 4 s, so it
-    // normally sets its `done` flag within a fraction of a second. We wait up
-    // to a bounded budget for that flag, then join (fast, the thread has
-    // finished). The one dial that can miss the window is one wedged inside a
-    // blocking getaddrinfo() (a hostile/offline resolver can stall for
-    // seconds) — for that we DETACH rather than let it block process
-    // teardown. Detach is safe here *because default_client() is a
-    // deliberately-leaked singleton*: its pool / OpenSSL statics are never
-    // destroyed, so a still-running dial can't race a destructor, and the OS
-    // reclaims the thread at process exit.
-    const auto deadline =
-        std::chrono::steady_clock::now() + std::chrono::milliseconds{2'000};
-    for (std::size_t i = 0; i < threads.size(); ++i) {
-        auto& t = threads[i];
-        if (!t.joinable()) continue;
-        const bool have_flag = i < dones.size() && dones[i];
-        bool settled = false;
-        while (std::chrono::steady_clock::now() < deadline) {
-            if (have_flag && dones[i]->load(std::memory_order_acquire)) {
-                settled = true;
-                break;
-            }
-            if (!have_flag) break;   // no flag to observe — fall through to join
-            std::this_thread::sleep_for(std::chrono::milliseconds{10});
-        }
-        if (settled || !have_flag) {
-            try { t.join(); } catch (...) {}
-        } else {
-            // Genuinely wedged (blocking resolve). Leak the thread rather than
-            // hang or race teardown; see the safety note above.
-            try { t.detach(); } catch (...) {}
-        }
-    }
+    // One call replaces a hand-rolled bounded wait: the pool requests stop on
+    // every dial, waits out its grace on a condition variable, and abandons
+    // whatever is still stuck. That last case is the dial wedged inside a
+    // blocking getaddrinfo() — a hostile/offline resolver can stall for
+    // seconds — and abandoning it is safe for the same reason the old detach
+    // was: default_client() is a deliberately-leaked singleton, so its pool /
+    // OpenSSL statics are never destroyed and a still-running dial cannot
+    // race a destructor. The OS reclaims the thread at process exit.
+    //
+    // What the old version did instead: a per-dial `done` atomic, and a loop
+    // that slept 10 ms at a time until a 2 s deadline before deciding whether
+    // to join or detach. That is a condition variable spelled as a poll — up
+    // to 200 wakeups per dial on a slow exit, and a shutdown that could not
+    // notice a dial finishing sooner than its next 10 ms tick.
+    (void)impl_->prewarm_pool.shutdown();
 }
 
 Client& default_client() {
