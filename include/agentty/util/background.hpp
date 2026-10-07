@@ -254,19 +254,21 @@ class WorkerGroup {
     /// Idempotent — the pool's shutdown is, and stop() is reached from both
     /// an explicit teardown path and the destructor.
     ///
-    /// The grace is long ON PURPOSE. Everywhere else in agentty a bounded
-    /// shutdown is the right answer, because the alternative is a process
-    /// that will not exit. Here the alternative is a worker writing into a
-    /// freed engine, so waiting is the lesser harm. A job that hangs forever
-    /// hangs this — which is why `post` belongs to work that carries its own
-    /// timeout, as the HTTP transport's does.
+    /// NO DEADLINE, and that is the contract rather than an oversight. A
+    /// group with a grace would be a barrier that sometimes isn't: it would
+    /// return while a job was still running, having told the caller it was
+    /// safe to destroy what that job writes into. Bounded-and-abandon is the
+    /// right default everywhere a worker only touches what it co-owns, which
+    /// is why jaal's pool defaults to it — it is the wrong answer HERE, where
+    /// the whole reason this type exists is that the jobs touch a
+    /// collaborator the caller is about to free.
+    ///
+    /// So a job that hangs forever hangs this. That turns silent corruption
+    /// at exit into a visibly stuck shutdown with a thread to look at, which
+    /// is the trade this type is for. Post work that carries its own timeout
+    /// — as the MCP transport's does.
     void stop() noexcept {
-        const std::size_t stuck =
-            pool_.shutdown(std::chrono::minutes(5));
-        if (stuck > 0)
-            dbglog(std::string{where_},
-                   "gave up waiting for " + std::to_string(stuck)
-                       + " worker(s) — a job ignored its own timeout");
+        (void)pool_.shutdown(jaal::kernel::pool::no_deadline);
     }
 
   private:
