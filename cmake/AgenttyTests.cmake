@@ -88,6 +88,7 @@ set(_AGENTTY_CONSOLIDATED
     reveal_bucket_test
     ui_motion_frame_test
     reasoning_ticker_height_test
+    turn_height_monotonic_test
     stats_golden_test
     stats_render_probe
     context_window_test

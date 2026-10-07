@@ -1819,15 +1819,17 @@ std::optional<maya::Element> reasoning_slot(const Message& msg, const Model& m) 
     rcfg.header_word = ui::text_secondary;      // visible header/meter
     rcfg.body_fg     = ui::text_secondary;      // always-visible dim
     // Thinking::Collapsed — "a line you can open". While the model is live
-    // this becomes a thought TICKER: the newest few lines only, so a long
-    // chain-of-thought stays a glance rather than a wall that shoves the
-    // composer down the screen. Settled reasoning still renders in full,
-    // which is the widget's own rule and the right one — the cost of a long
-    // block is that it moves things WHILE it grows, and a settled block
-    // doesn't move.
+    // this becomes a thought TICKER: a fixed 8-row window on the newest
+    // rows, so a long chain-of-thought stays a glance rather than a wall
+    // that shoves the composer down the screen. The cap is in ROWS, so the
+    // block grows to 8 and then holds — it cannot shrink mid-stream, which
+    // is what a node-count window did every time a short paragraph became
+    // the newest one. Settled reasoning still renders in full: the cost of
+    // a long block is that it moves things WHILE it grows, and a settled
+    // block doesn't move.
     if (agentty::ui_prefs::current().thinking
             == agentty::ui_prefs::Thinking::Collapsed)
-        rcfg.live_tail_lines = 3;
+        rcfg.live_tail_rows = 8;
     maya::ReasoningStream rs{rcfg};
     rs.set_live(active);
     rs.set_char_hint(msg.reasoning_display_text().size());

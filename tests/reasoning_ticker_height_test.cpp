@@ -1,21 +1,25 @@
-// reasoning_ticker_height_test — the live reasoning block stays bounded.
+// reasoning_ticker_height_test — the live reasoning block never shrinks.
 //
 // agentty renders live reasoning as a "thought ticker" when Appearance ▸
 // Thinking is Collapsed (the default): ReasoningStream::Config::
-// live_tail_lines = 3, so a long chain-of-thought stays a glance instead
-// of shoving the composer down.
+// live_tail_rows = 8, so a long chain-of-thought stays a glance instead of
+// shoving the composer down.
 //
-// The window is 3 line-NODES and a node wraps to a variable number of
-// ROWS, so the height dips when a shorter paragraph becomes the newest
-// node. maya padded up to a running row max to stop that and dropped it
-// again in 25b1759 — the pad left permanent blank rows under the newest
-// line, which reads worse than a transient dip. So the height is
-// non-monotonic on purpose; a row-exact window is the real fix and it
-// needs node splitting.
+// The window is counted in ROWS, and that is the whole point. A window of
+// line-NODES cannot hold a height: a node wraps to a variable number of
+// rows, so the block dipped whenever a shorter paragraph became the newest
+// node (8 → 13 → 12 → 9 at width 50). Every dip is a shrink mid-stream,
+// which yanks the composer up under the user's cursor and, once rows have
+// passed the viewport top, rewrites immutable scrollback.
 //
-// What the ticker still promises, and what this pins: the window BOUNDS
-// the block, so thinking for a long time does not grow the height with
-// it, and a settled block carries no reserved blank rows.
+// Padding up to a running row max was tried and is worse to look at:
+// permanent blank rows under the newest line. The row window needs neither
+// — the engine lays the body out at its natural height and the viewport
+// scrolls to the bottom, so the height is exactly min(content, cap): it
+// grows to the cap, then holds, with every row carrying real text.
+//
+// What this pins: monotonic height across a byte-by-byte stream, the cap
+// itself, no dead rows, and the settled block releasing the window.
 
 #include "agtest.hpp"
 
@@ -30,6 +34,7 @@
 namespace {
 
 constexpr int kWidth = 50;
+constexpr int kCap   = 8;     // agentty's Collapsed default (turn.cpp)
 
 int rows_of(const std::string& s) {
     int n = 1;
@@ -37,12 +42,16 @@ int rows_of(const std::string& s) {
     return n;
 }
 
-// Render a live ticker over `src` with the reveal allowed to catch up, and
-// return its height in rows.
-int ticker_rows(const std::string& src) {
+maya::ReasoningStream::Config ticker_cfg() {
     maya::ReasoningStream::Config cfg;
-    cfg.live_tail_lines = 3;          // agentty's Collapsed default
-    maya::ReasoningStream rs{cfg};
+    cfg.live_tail_rows = kCap;
+    return cfg;
+}
+
+// Render a live ticker over `src` with the reveal allowed to catch up, and
+// return the frame.
+std::string ticker_frame(const std::string& src) {
+    maya::ReasoningStream rs{ticker_cfg()};
     rs.set_live(true);
     rs.set_content(src);
     // The body is a reveal widget: let the typewriter reach the edge so the
@@ -52,103 +61,207 @@ int ticker_rows(const std::string& src) {
         out = maya::render_to_string(rs.build(), kWidth);
         maya::testing::advance_anim_clock_ms(33);
     }
-    return rows_of(out);
+    return out;
 }
 
-}  // namespace
+int ticker_rows(const std::string& src) { return rows_of(ticker_frame(src)); }
 
-TEST_CASE("reasoning ticker: the window bounds the block as paragraphs arrive") {
-    maya::testing::freeze_anim_clock(0);
-
-    // Long paragraphs (each wraps to several rows) with a SHORT one in the
-    // middle and at the end — the shapes that move the height around.
-    const std::vector<std::string> paras = {
+// A chain of thought with the shapes that moved the height around: long
+// paragraphs that wrap, short ones between them, a list, and a short final
+// line (the common worst case — "the last para makes the block short").
+const std::vector<std::string>& paragraphs() {
+    static const std::vector<std::string> p = {
         "This is a long first paragraph that will certainly wrap across "
         "several terminal rows because it keeps going and going with plenty "
         "of words in it.",
         "Here is a second long paragraph, also comfortably long enough to "
         "wrap onto multiple rows when rendered at a narrow width like this.",
-        "A third long paragraph that likewise wraps over several rows so the "
-        "ticker window is tall while these three are the newest nodes.",
         "Short one.",
-        "A fifth long paragraph, again several rows wide, so the window is "
-        "full of tall nodes once more and the text keeps accumulating.",
-        "A sixth long paragraph of roughly the same size, which is what a "
-        "real chain of thought looks like after thinking for a while.",
+        "A fourth long paragraph that likewise wraps over several rows, so "
+        "the window is full of tall nodes while these are the newest.",
+        "- a list item\n- another list item",
+        "A sixth paragraph of roughly the same size as the others, which is "
+        "what a real chain of thought looks like after a while of thinking.",
         "Short final.",
     };
+    return p;
+}
+
+}  // namespace
+
+TEST_CASE("reasoning ticker: height never shrinks as paragraphs arrive") {
+    maya::testing::freeze_anim_clock(0);
 
     std::string src;
     std::vector<int> heights;
-    for (const auto& p : paras) {
+    for (const auto& p : paragraphs()) {
         src += p;
         src += "\n\n";
         heights.push_back(ticker_rows(src));
     }
+
+    maya::testing::unfreeze_anim_clock();
 
     std::string trace;
     for (std::size_t i = 0; i < heights.size(); ++i)
         trace += " p" + std::to_string(i + 1) + "=" + std::to_string(heights[i]);
     INFO("ticker heights:", trace);
 
-    // Bounded: seven paragraphs in, the block is no taller than it was when
-    // three were. The window is the whole point — thinking longer must not
-    // push the composer further down.
-    const int tallest = *std::max_element(heights.begin(), heights.end());
-    CHECK(tallest < 20);
-    CHECK(heights.back() <= tallest);
+    for (std::size_t i = 1; i < heights.size(); ++i)
+        CHECK(heights[i] >= heights[i - 1]);
 
-    // And it really is a window, not the full text: the same content settled
-    // (no window) is much taller.
-    maya::ReasoningStream::Config full_cfg;
-    full_cfg.live_tail_lines = 3;
-    maya::ReasoningStream full{full_cfg};
-    full.set_content(src);
-    full.set_live(false);
-    full.finish();
-    const int settled_rows = rows_of(maya::render_to_string(full.build(), kWidth));
-    maya::testing::unfreeze_anim_clock();
-    INFO("settled rows:", settled_rows);
-    CHECK(settled_rows > tallest);
+    // And it settles ON the cap rather than drifting above it. The chrome
+    // (header + the block's own padding) rides along, so allow for it, but
+    // the body itself must be exactly the window.
+    CHECK(heights.back() <= kCap + 4);
 }
 
-TEST_CASE("reasoning ticker: settling releases the reserved rows") {
+TEST_CASE("reasoning ticker: height never shrinks byte by byte") {
+    // The stricter version of the same invariant: every intermediate
+    // prefix, not just paragraph boundaries. This is the shape a provider
+    // actually delivers.
     maya::testing::freeze_anim_clock(0);
 
-    const std::string src =
-        "A long paragraph that wraps across several rows when it renders at "
-        "this narrow width, giving the live window something tall.\n\n"
-        "Short.";
+    std::string all;
+    for (const auto& p : paragraphs()) { all += p; all += "\n\n"; }
 
-    maya::ReasoningStream::Config cfg;
-    cfg.live_tail_lines = 3;
-    maya::ReasoningStream rs{cfg};
+    int prev = 0;
+    int shrinks = 0;
+    int worst_at = 0;
+    maya::ReasoningStream rs{ticker_cfg()};
     rs.set_live(true);
-    rs.set_content(src);
-    for (int f = 0; f < 400; ++f) {
-        (void)maya::render_to_string(rs.build(), kWidth);
+    for (std::size_t n = 1; n <= all.size(); n += 7) {
+        const std::string src = all.substr(0, n);
+        rs.set_content(src);
+        const int rows = rows_of(maya::render_to_string(rs.build(), kWidth));
         maya::testing::advance_anim_clock_ms(33);
+        if (rows < prev) { ++shrinks; if (!worst_at) worst_at = static_cast<int>(n); }
+        prev = rows;
     }
 
-    // Settle: the full body renders with no window at all, so the pad must
-    // not survive as blank rows under it.
+    maya::testing::unfreeze_anim_clock();
+
+    INFO("shrinks:", shrinks, " first at byte ", worst_at, " of ", all.size());
+    CHECK(shrinks == 0);
+}
+
+TEST_CASE("reasoning ticker: the window spends its rows on text") {
+    maya::testing::freeze_anim_clock(0);
+
+    std::string src;
+    for (const auto& p : paragraphs()) { src += p; src += "\n\n"; }
+    const std::string frame = ticker_frame(src);
+
+    maya::testing::unfreeze_anim_clock();
+
+    std::vector<std::string> lines;
+    std::string cur;
+    for (const char c : frame) {
+        if (c == '\n') { lines.push_back(cur); cur.clear(); }
+        else cur.push_back(c);
+    }
+    if (!cur.empty()) lines.push_back(cur);
+
+    const auto blank = [](const std::string& l) {
+        return l.find_first_not_of(" \t\u2502\u2503") == std::string::npos;
+    };
+
+    // The window is cut at row granularity, so it never reserves rows it
+    // cannot fill: no stack of blank rows anywhere (that was the padding
+    // fix's failure mode), and at most the chrome's own couple of rows
+    // below the last line of text.
+    int run = 0, worst_run = 0, trailing = 0;
+    for (const auto& l : lines) {
+        if (blank(l)) { ++run; ++trailing; worst_run = std::max(worst_run, run); }
+        else { run = 0; trailing = 0; }
+    }
+    INFO("frame:\n", frame);
+    CHECK(worst_run <= 2);
+    CHECK(trailing <= 2);
+
+    // The newest text is what survives the window — the ticker is anchored
+    // at the bottom, where the reveal caret is.
+    CHECK(frame.find("Short final.") != std::string::npos);
+    // ...and the oldest text has scrolled out of it.
+    CHECK(frame.find("This is a long first paragraph") == std::string::npos);
+}
+
+TEST_CASE("reasoning ticker: one long paragraph is cut mid-wrap") {
+    // The cut has to land INSIDE a node, not just between nodes: a single
+    // paragraph longer than the window is the case a node-counted window
+    // could not window at all (one node = all or nothing).
+    maya::testing::freeze_anim_clock(0);
+
+    const std::string one =
+        "The first thing to establish is what the window actually promises, "
+        "because the promise is what makes it safe to put above a composer. "
+        "It promises a height: once the body is taller than the cap, the "
+        "block is exactly the cap and stays there, no matter which words "
+        "happen to be newest or how they wrap. The second thing is what it "
+        "shows, which is simply the newest rows, so the reveal caret is "
+        "always on screen at the bottom edge where the text is arriving.\n\n";
+
+    const std::string frame = ticker_frame(one);
+    maya::testing::unfreeze_anim_clock();
+
+    INFO("frame:\n", frame);
+    // The tail is on screen, the head has scrolled out, and the height is
+    // the cap plus the block's own chrome.
+    CHECK(frame.find("arriving") != std::string::npos);
+    CHECK(frame.find("The first thing to establish") == std::string::npos);
+    CHECK(rows_of(frame) <= kCap + 4);
+    CHECK(rows_of(frame) >= kCap);
+}
+
+TEST_CASE("reasoning: with no window at all, the block only grows") {
+    // Thinking::Shown — the whole block, no cap. Monotonic for the other
+    // reason: nothing is ever dropped, so the only question is whether the
+    // markdown underneath re-flows shorter mid-stream. It must not.
+    maya::testing::freeze_anim_clock(0);
+
+    std::string all;
+    for (const auto& p : paragraphs()) { all += p; all += "\n\n"; }
+
+    maya::ReasoningStream::Config cfg;   // live_tail_rows stays 0
+    maya::ReasoningStream rs{cfg};
+    rs.set_live(true);
+
+    int prev = 0, shrinks = 0, worst_at = 0;
+    for (std::size_t n = 1; n <= all.size(); n += 7) {
+        rs.set_content(all.substr(0, n));
+        const int rows = rows_of(maya::render_to_string(rs.build(), kWidth));
+        maya::testing::advance_anim_clock_ms(33);
+        if (rows < prev) { ++shrinks; if (!worst_at) worst_at = static_cast<int>(n); }
+        prev = rows;
+    }
+
+    maya::testing::unfreeze_anim_clock();
+
+    INFO("shrinks:", shrinks, " first at byte ", worst_at, " of ", all.size());
+    CHECK(shrinks == 0);
+    // ...and it really is the whole block, not a window.
+    CHECK(prev > kCap * 2);
+}
+
+TEST_CASE("reasoning ticker: settling releases the window") {
+    maya::testing::freeze_anim_clock(0);
+
+    std::string src;
+    for (const auto& p : paragraphs()) { src += p; src += "\n\n"; }
+
+    const int live_rows = ticker_rows(src);
+
+    maya::ReasoningStream rs{ticker_cfg()};
+    rs.set_content(src);
     rs.set_live(false);
     rs.finish();
     const std::string settled = maya::render_to_string(rs.build(), kWidth);
 
     maya::testing::unfreeze_anim_clock();
 
-    // Both paragraphs are present once settled (no window), and the block
-    // does not carry a tail of empty reserved rows.
-    CHECK(settled.find("Short.") != std::string::npos);
-    const std::size_t trailing_blanks = [&] {
-        std::size_t n = 0;
-        for (std::size_t i = settled.size(); i-- > 0;) {
-            if (settled[i] == '\n') { ++n; continue; }
-            if (settled[i] == ' ')  continue;
-            break;
-        }
-        return n;
-    }();
-    CHECK(trailing_blanks <= 2);
+    INFO("live rows:", live_rows, " settled rows:", rows_of(settled));
+    // Settled shows everything, so it is taller than the window and the
+    // oldest paragraph is back. Growth, not shrink — still monotonic.
+    CHECK(rows_of(settled) > live_rows);
+    CHECK(settled.find("This is a long first paragraph") != std::string::npos);
 }
