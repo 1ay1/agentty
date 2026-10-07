@@ -181,3 +181,104 @@ TEST_CASE("edit through a symlink writes the target and keeps the link") {
     fs::remove(link, ec);
     fs::remove(target, ec);
 }
+
+// ── the `line:` hint ────────────────────────────────────────────────────
+//
+// `line:` is documented as a DISAMBIGUATOR, and as a hard filter it would do
+// harm: line numbers go stale constantly (an earlier edit grew the file), and
+// refusing a correct edit over a stale number is worse than ignoring it.
+//
+// But it used to be discarded entirely whenever the DP produced exactly one
+// candidate -- precisely the case with no other evidence. A lone fuzzy match
+// 900 lines from where the caller said to look was applied silently.
+//
+// The rule: the hint binds only where we are ALREADY guessing.
+//
+//   exact match, any distance     -> apply (returns before the hint is read)
+//   fuzzy, near the hint          -> apply
+//   fuzzy, no hint given          -> apply (nothing was claimed)
+//   fuzzy, far from a given hint  -> refuse, and name the line it found
+
+namespace {
+
+// A file with a distinctive line far from the top, plus filler.
+std::string spread_file(const char* needle_line, int at_line) {
+    std::string s;
+    for (int i = 1; i < at_line; ++i)
+        s += "    int filler_" + std::to_string(i) + " = 0;\n";
+    s += needle_line;
+    s += "\n";
+    for (int i = 0; i < 40; ++i) s += "    int tail = 1;\n";
+    return s;
+}
+
+agentty::tools::ExecResult edit_at(const fs::path& p, std::string old_text,
+                                   std::string new_text, int line) {
+    json one{{"old_text", std::move(old_text)}, {"new_text", std::move(new_text)}};
+    if (line > 0) one["line"] = line;
+    return agentty::tool::DynamicDispatch::execute(
+        "edit", json{{"path", p.string()}, {"edits", json::array({one})}});
+}
+
+} // namespace
+
+TEST_CASE("line hint: an EXACT match is applied however stale the hint") {
+    // The common case this must never break: the region moved, the caller's
+    // remembered line number is wrong, but the text is exact.
+    const auto p = scratch("hint_exact");
+    put(p, spread_file("    const int target = 7;", 600));
+
+    auto r = edit_at(p, "    const int target = 7;",
+                        "    const int target = 8;", /*line=*/5);
+    REQUIRE_MESSAGE(r.has_value(),
+                    "an exact match must not be refused over a stale line");
+    CHECK(get(p).find("target = 8;") != std::string::npos);
+    fs::remove(p);
+}
+
+TEST_CASE("line hint: a FUZZY match far from the hint is refused, with the line") {
+    // Only an approximate candidate, and it sits ~600 lines from where the
+    // caller said. Weak on both axes at once -- the shape of a silently
+    // wrong edit.
+    const auto p = scratch("hint_far");
+    put(p, spread_file("    const int target = 7;   // trailing note", 600));
+    const auto before = get(p);
+
+    auto r = edit_at(p, "    const int target = 7;   // trailing note!",
+                        "    const int target = 8;", /*line=*/5);
+
+    REQUIRE_FALSE(r.has_value());
+    const auto& detail = r.error().detail;
+    const bool names_the_line = detail.find("600") != std::string::npos
+                             || detail.find("601") != std::string::npos;
+    CHECK_MESSAGE(names_the_line,
+                  "the refusal has to name where it DID find it -- 'no match' "
+                  "would send the caller on a blind retry");
+    CHECK_MESSAGE(get(p) == before, "and nothing is written");
+    fs::remove(p);
+}
+
+TEST_CASE("line hint: a FUZZY match near the hint still applies") {
+    const auto p = scratch("hint_near");
+    put(p, spread_file("    const int target = 7;   // trailing note", 600));
+
+    auto r = edit_at(p, "    const int target = 7;   // trailing note!",
+                        "    const int target = 8;", /*line=*/595);
+    REQUIRE_MESSAGE(r.has_value(),
+                    "within tolerance the hint corroborates rather than blocks");
+    CHECK(get(p).find("target = 8;") != std::string::npos);
+    fs::remove(p);
+}
+
+TEST_CASE("line hint: with NO hint a lone fuzzy match still applies") {
+    // Nothing was claimed, so there is nothing to contradict. Unchanged
+    // behaviour -- the fix must not make hint-less edits stricter.
+    const auto p = scratch("hint_none");
+    put(p, spread_file("    const int target = 7;   // trailing note", 600));
+
+    auto r = edit_at(p, "    const int target = 7;   // trailing note!",
+                        "    const int target = 8;", /*line=*/0);
+    REQUIRE(r.has_value());
+    CHECK(get(p).find("target = 8;") != std::string::npos);
+    fs::remove(p);
+}
