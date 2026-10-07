@@ -43,6 +43,7 @@
 #include "agentty/store/store.hpp"
 
 #include "agentty/mcp/client.hpp"   // mcp_resources / mcp_read_resource seams
+#include "agentty/util/background.hpp"
 #include "agentty/util/dbglog.hpp"
 #include "agentty/util/logx.hpp"
 
@@ -412,17 +413,22 @@ void rag_apply_settings(const store::RagConfig& s) {
     // that will be forgotten; making the function itself async is a property
     // that cannot be.
     //
-    // Detached rather than queued: applying settings is idempotent and
-    // last-writer-wins, so a superseded apply doing redundant work is
-    // harmless, and the retriever's own mutex serialises them.
-    try {
-        std::thread([s] {
-            try {
-                auto& r = shared_retriever();
-                r.apply_config(rag_config_from_settings(s, r.snapshot_config()));
-            } catch (...) { /* best-effort */ }
-        }).detach();
-    } catch (...) { /* thread creation failed: skip the apply, never block */ }
+    // Off the caller's thread rather than queued on a shared worker: applying
+    // settings is idempotent and last-writer-wins, so a superseded apply doing
+    // redundant work is harmless, the retriever's own mutex serialises them,
+    // and the embedder re-probe is a network dial that may never return —
+    // which must not occupy a pooled worker.
+    //
+    // Through the owned background pool rather than a raw detached worker:
+    // the body is exception-isolated, gets a stop_token, and is WAITED FOR
+    // inside the shutdown grace instead of still running while the CRT tears
+    // down the statics it is touching (shared_retriever() is one of them).
+    // Fully qualified: inside agentty::tools, a bare `util::` resolves to
+    // agentty::tools::util.
+    ::agentty::util::run_isolated_detached("rag.apply_settings", [s] {
+        auto& r = shared_retriever();
+        r.apply_config(rag_config_from_settings(s, r.snapshot_config()));
+    });
 }
 
 RagEmbedStatus rag_embed_status() {

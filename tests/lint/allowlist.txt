@@ -84,7 +84,12 @@ airgap/airgap.cpp: const_cast
 # thread_local is the sink the cmd runner captures — UI-thread only, and
 # documented there.
 tool/registry.cpp: mutex atomic
-tool/mcp_tools_backends.cpp: thread mutex atomic detach
+# rag_apply_settings' detached worker moved to util/background.hpp (jaal's
+# pool), so `detach` is gone from this file. The `thread` that remains is a
+# std::jthread cancel bridge, which is OWNED and joins on destruction — the
+# dangerous spelling was the detached one. mutex/atomic guard the retriever
+# + status caches.
+tool/mcp_tools_backends.cpp: thread mutex atomic
 tool/plugin.cpp: mutex atomic
 tool/skills.cpp: mutex atomic
 tool/memory_store.cpp: mutex

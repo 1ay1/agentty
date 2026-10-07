@@ -165,6 +165,25 @@ private:
     }
 
     void dispatch(std::string frame) {
+        // NOT on util::run_isolated_detached / jaal's pool, and the reason is
+        // the wait below rather than the spawn here.
+        //
+        // The pool's shutdown is BOUNDED: it asks jobs to stop, waits out the
+        // grace, then abandons whatever is still running. That is safe for
+        // the pool's own state because a worker co-owns it through a
+        // shared_ptr. These workers capture raw `this`, so an abandoned one
+        // would keep calling into a transport its owner has already
+        // destroyed. stop() therefore waits UNBOUNDED on purpose.
+        //
+        // Migrating means first moving the state these workers touch
+        // (engine_, feed, alive_) behind a shared core the worker co-owns,
+        // exactly the trick jaal::kernel::pool uses internally. Then
+        // post_isolated's stopping flag replaces the alive_/inflight_
+        // coupling below for free: it counts a job under the pool's own lock
+        // BEFORE the thread exists, which is the same check->increment
+        // atomicity this hand-rolls. Until the core is shared, the bounded
+        // wait would trade a hang for a use-after-free.
+        //
         // Check alive_ and claim an inflight slot as ONE atomic step (see
         // stop() — this closes the check→increment gap a concurrent stop()
         // could otherwise slice through and tear the object down under us).
