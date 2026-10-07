@@ -183,7 +183,7 @@ struct HostFacts {
     // What is enforcing RIGHT NOW. Sealed at startup and immutable for the
     // life of the process -- which is the whole reason it has to be separate
     // from the selection: the row can change, this cannot.
-    sandbox_cfg::LinuxBackend running = sandbox_cfg::LinuxBackend::Bwrap;
+    sandbox_cfg::LinuxBackend running = sandbox_cfg::LinuxBackend::Claybin;
 
     // False when there is no backend at all (probe failed, or --sandbox off).
     // `running` is meaningless then, and the subtitle must say so rather than
@@ -330,7 +330,7 @@ struct SandboxPane {
     // offers per-port network while running under bwrap would be lying, so
     // the rows that need claybin are marked unavailable rather than hidden --
     // hiding them would make the limitation invisible.
-    std::string backend;        // "claybin" | "bwrap" | "none"
+    std::string backend;        // "claybin" | "none"
     bool claybin_available = false;
 
     // The host as measured, captured by the REDUCER at open and on every

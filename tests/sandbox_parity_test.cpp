@@ -48,7 +48,6 @@ namespace {
 std::string name_of(ag::Backend b) {
     switch (b) {
         case ag::Backend::None:        return "none";
-        case ag::Backend::Bwrap:       return "bwrap";
         case ag::Backend::SandboxExec: return "sandbox-exec";
     }
     return "?";
@@ -56,7 +55,6 @@ std::string name_of(ag::Backend b) {
 std::string name_of(mc::Backend b) {
     switch (b) {
         case mc::Backend::None:        return "none";
-        case mc::Backend::Bwrap:       return "bwrap";
         case mc::Backend::SandboxExec: return "sandbox-exec";
     }
     return "?";
@@ -260,7 +258,6 @@ TEST_CASE("sandbox: asking for claybin on a host that refuses it yields bwrap, n
     // because the probe is a real fork+uid_map attempt and faking it would
     // test the fake.
     ag::reset_config_for_test();
-    ag::prefer_linux_backend(ag::LinuxPreference::Claybin);
     ag::init(ag::Mode::Auto);
 
 #if defined(__linux__)
@@ -268,7 +265,7 @@ TEST_CASE("sandbox: asking for claybin on a host that refuses it yields bwrap, n
         const auto b = ag::detected_backend();
         // Exactly one of the two Linux engines. Never None while active, and
         // never SandboxExec on Linux.
-        CHECK((b == ag::Backend::Claybin || b == ag::Backend::Bwrap));
+        CHECK(b == ag::Backend::Claybin);
     }
 #endif
 }
@@ -435,7 +432,6 @@ TEST_CASE("sandbox: both implementations know the same backends") {
     // A backend added to one side only is the bug. This is a compile-time
     // check in practice — a backend missing from either enum won't build in
     // name_of — but assert the mapping too, so a silent renumbering is caught.
-    CHECK(name_of(ag::Backend::Bwrap)       == name_of(mc::Backend::Bwrap));
     CHECK(name_of(ag::Backend::SandboxExec) == name_of(mc::Backend::SandboxExec));
     CHECK(name_of(ag::Backend::None)        == name_of(mc::Backend::None));
 }

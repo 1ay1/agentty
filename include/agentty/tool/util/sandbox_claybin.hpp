@@ -161,10 +161,20 @@ struct SpawnResult {
 // anything.
 [[nodiscard]] Report describe(const Posture& p);
 
-// Fork, apply the sandbox, exec `/bin/sh -c shell_cmd`. stdout_fd/stderr_fd are
-// the CALLER's descriptors (typically both ends of one pipe); they survive the
-// sandbox's close sweep and land on 1 and 2 in the guest. Returns as soon as
-// the child is running -- the caller waits.
+// Fork, apply the sandbox, exec `argv`. stdout_fd/stderr_fd are the CALLER's
+// descriptors (typically both ends of one pipe); they survive the sandbox's
+// close sweep and land on 1 and 2 in the guest. Returns as soon as the child
+// is running -- the caller waits.
+//
+// The argv reaches the child exactly as given, which is the point: a commit
+// message with quotes or a `$` in it must not be re-parsed on the way in.
+[[nodiscard]] SpawnResult spawn_argv(const Posture& p,
+                                     const std::vector<std::string>& argv,
+                                     int stdout_fd, int stderr_fd);
+
+// The same, with a shell in front: `/bin/sh -c shell_cmd`. Pipes, redirects
+// and globs are part of what a shell tool is for. Implemented as a call to
+// spawn_argv, so there is one spawn path rather than two.
 [[nodiscard]] SpawnResult spawn_shell(const Posture& p, const std::string& shell_cmd,
                                       int stdout_fd, int stderr_fd);
 

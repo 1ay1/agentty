@@ -215,31 +215,27 @@ inline constexpr const char* kAlwaysMaskedNames[] = {
 
 // Which Linux engine applies the policy.
 //
-// A RUNTIME choice, not a build one: both backends are always compiled in
-// (claybin is a required submodule). It lives in the saved config because it
-// decides what the rest of the config can even mean -- bwrap confines with
-// mount namespaces and nothing else, so the syscall profile, per-port
-// network, W^X and the cgroup caps have no bwrap spelling at all.
+// The Linux engine. One value, kept as an enum rather than dropped outright
+// so the saved config stays self-describing and a second engine (a Windows
+// one, say) has somewhere to land.
+//
+// bwrap was the other value. It went because the argument for keeping it did
+// not survive the code: it said claybin needs landlock, so an old kernel
+// would be left with nothing -- but claybin's floor is `landlock || seccomp`,
+// and seccomp predates (3.5) the unprivileged user namespaces bwrap requires
+// (3.8). Every host that could run bwrap has claybin.
 enum class LinuxBackend : std::uint8_t {
-    // bubblewrap, via the binary the user already has. The FALLBACK: kept
-    // because the two engines fail on different hosts, not because it is
-    // weaker-but-safer. A kernel older than landlock (RHEL < 5.13) cannot
-    // build claybin's walls at all, and removing bwrap there would leave the
-    // user with no sandbox rather than a lesser one.
-    Bwrap,
-    // The in-process library, and the DEFAULT. Adds a seccomp filter,
-    // landlock and cgroup2 limits -- i.e. everything the pane's other rows
-    // describe. Strictly stronger than bwrap on every measured capability;
-    // see tool/util/sandbox.hpp's LinuxPreference for the table.
+    // The in-process library: namespaces where available, plus a seccomp
+    // filter, landlock and cgroup2 limits -- i.e. everything the pane's
+    // other rows describe, which is why the policy vocabulary is its.
     Claybin,
 };
 
 [[nodiscard]] constexpr const char* to_string(LinuxBackend b) noexcept {
     switch (b) {
-        case LinuxBackend::Bwrap:   return "bwrap";
         case LinuxBackend::Claybin: return "claybin";
     }
-    return "bwrap";
+    return "claybin";
 }
 
 // A named posture: the whole policy as one decision.

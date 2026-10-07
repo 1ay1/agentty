@@ -432,9 +432,14 @@ Report describe(const Posture& p) {
     return r;
 }
 
-SpawnResult spawn_shell(const Posture& p, const std::string& shell_cmd, int stdout_fd,
-                        int stderr_fd) {
+SpawnResult spawn_argv(const Posture& p, const std::vector<std::string>& argv_in,
+                       int stdout_fd, int stderr_fd) {
     SpawnResult out;
+
+    if (argv_in.empty()) {
+        out.start_error = "claybin: empty argv";
+        return out;
+    }
 
     auto sealed = build_policy(p);
     auto compiled = compile(sealed, probe_host());
@@ -443,10 +448,15 @@ SpawnResult spawn_shell(const Posture& p, const std::string& shell_cmd, int stdo
         return out;
     }
 
-    // /bin/sh -c, matching the bwrap path: pipes, redirects and globs are part
-    // of what a shell tool is for.
-    const char* argv[] = {"/bin/sh", "-c", shell_cmd.c_str(), nullptr};
-    Command cmd{"/bin/sh", argv, nullptr};
+    // The caller's argv reaches the child exactly as given. No `sh -c`
+    // here: a commit message with quotes or a `$` in it must not be
+    // re-parsed on the way in, which is the whole reason the argv form
+    // exists beside the shell one.
+    std::vector<const char*> argv;
+    argv.reserve(argv_in.size() + 1);
+    for (const auto& a : argv_in) argv.push_back(a.c_str());
+    argv.push_back(nullptr);
+    Command cmd{argv_in.front().c_str(), argv.data(), nullptr};
     // stdin from /dev/null explicitly rather than inherited -- a guest that can
     // read the user's terminal can prompt them, and nothing a tool runs should.
     cmd.stdin_fd = Command::kDevNull;
@@ -562,6 +572,15 @@ SpawnResult spawn_shell(const Posture& p, const std::string& shell_cmd, int stdo
         };
     }
     return out;
+}
+
+// The shell form is the argv form with a shell in front of it. Pipes,
+// redirects and globs are part of what a shell tool is for, so this is a
+// genuine convenience rather than a second implementation -- there is one
+// spawn path and it is above.
+SpawnResult spawn_shell(const Posture& p, const std::string& shell_cmd, int stdout_fd,
+                        int stderr_fd) {
+    return spawn_argv(p, {"/bin/sh", "-c", shell_cmd}, stdout_fd, stderr_fd);
 }
 
 #endif  // __APPLE__ / __linux__

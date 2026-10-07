@@ -1470,24 +1470,19 @@ int main(int argc, char** argv) {
         // A flag the user typed this run beats a setting they saved once.
         tools::util::sandbox::set_config(persistence::load_settings().sandbox);
 
-        // Backend choice, before init() -- init is what probes, so setting the
-        // preference afterwards would leave the cached backend disagreeing
-        // with what was asked for.
-        //
-        // No build guard: claybin is a required submodule, so both backends
-        // are always present and this is purely a runtime choice. It used to
-        // have an #else arm that refused --sandbox-backend=claybin on a build
-        // without it, which was honest but should never have been reachable.
+        // --sandbox-backend is retained but no longer selects anything:
+        // claybin is the only Linux engine. Kept rather than rejected so a
+        // script or alias carrying `--sandbox-backend=bwrap` keeps working;
+        // it says what it did instead of silently ignoring the flag.
         if (!args.cli_sandbox_backend.empty()) {
-            if (args.cli_sandbox_backend == "claybin") {
-                tools::util::sandbox::prefer_linux_backend(
-                    tools::util::sandbox::LinuxPreference::Claybin);
-            } else if (args.cli_sandbox_backend == "bwrap") {
-                tools::util::sandbox::prefer_linux_backend(
-                    tools::util::sandbox::LinuxPreference::Bwrap);
-            } else {
+            if (args.cli_sandbox_backend == "bwrap") {
                 std::fprintf(stderr,
-                    "agentty: --sandbox-backend must be bwrap or claybin (got '%s')\n",
+                    "agentty: bwrap has been removed; using claybin, which is "
+                    "stronger on every measured capability (seccomp, landlock, "
+                    "cgroup2) and available wherever bwrap was.\n");
+            } else if (args.cli_sandbox_backend != "claybin") {
+                std::fprintf(stderr,
+                    "agentty: --sandbox-backend only accepts 'claybin' (got '%s')\n",
                     args.cli_sandbox_backend.c_str());
                 return 2;
             }

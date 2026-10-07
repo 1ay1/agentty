@@ -75,11 +75,6 @@ std::atomic<Backend> g_backend{Backend::None};
 // --seccomp, no cgroup limits and no landlock, so against claybin it is
 // strictly weaker on syscall.filter (none vs strong), all three resource caps
 // (none vs strong), filesystem.exec (binds vs landlock) and brokering (none vs
-// seccomp-notify). There is no capability where bwrap wins. Defaulting to the
-// weaker engine was costing every user walls they could have had, and "the
-// upgrade changes your boundary" is defensible when every change is upward and
-// the pane states exactly which engine is in force (see HostFacts).
-std::atomic<LinuxPreference> g_linux_pref{LinuxPreference::Claybin};
 
 // The user's saved sandbox policy. Written ONCE, at startup, then frozen.
 //
@@ -148,59 +143,21 @@ std::atomic<bool> g_cfg_sealed{false};
 // it can't build it for the shell either, and we report no backend so Auto
 // degrades to unsandboxed and On surfaces a clear, actionable error instead of
 // letting every command fail.
-[[nodiscard]] bool bwrap_can_sandbox() {
-    if (!can_invoke("bwrap")) return false;
-    const std::vector<std::string> argv = {
-        "bwrap",
-        "--unshare-user", "--unshare-pid",
-        "--ro-bind", "/usr", "/usr",
-        "--ro-bind-try", "/bin", "/bin",
-        "--ro-bind-try", "/lib", "/lib",
-        "--ro-bind-try", "/lib64", "/lib64",
-        "--proc", "/proc",
-        "--dev", "/dev",
-        "--die-with-parent",
-        "--", "/bin/true",
-    };
-    auto r = run_argv_s(argv, /*max_bytes=*/4096, std::chrono::seconds{5});
-    return r.started && !r.timed_out && r.exit_code == 0;
-}
 
 [[nodiscard]] Backend probe() {
-    // claybin when asked for AND usable. its available() is a faithful
-    // predictor of spawn() -- probe_host() forks and attempts the uid_map
-    // write rather than reading sysctls -- so "usable" means it will work,
-    // not that the kernel advertises the feature.
+    // One Linux engine. available() is a faithful predictor of spawn() --
+    // probe_host() forks and attempts the uid_map write rather than reading
+    // sysctls -- so "usable" means it will work, not that the kernel
+    // advertises the feature.
     //
-    // note the fallback direction: asking for claybin on a host where it cannot
-    // build still yields bwrap, not None. a user who opts into the newer
-    // backend should not silently lose their sandbox because of it.
+    // Its floor is landlock OR seccomp, neither of which needs a user
+    // namespace. That is what makes one engine enough: the Ubuntu 24.04 case
+    // that motivated a second backend (an AppArmor profile denying the
+    // uid_map write, which killed bwrap outright) still gets the filesystem
+    // boundary and the syscall filter here. The wall report says per
+    // capability what a given host did not reach, so a reduced posture is
+    // visible rather than silent.
 #if defined(__linux__)
-    if (g_linux_pref.load(std::memory_order_acquire) == LinuxPreference::Claybin &&
-        claybin_backend::available())
-        return Backend::Claybin;
-#endif
-    if (bwrap_can_sandbox()) return Backend::Bwrap;
-
-#if defined(__linux__)
-    // bwrap cannot build a sandbox here -- but claybin may still be able to.
-    //
-    // This is the Ubuntu 24.04 case, and it is why the fallback runs in BOTH
-    // directions. That host ships an AppArmor profile denying the uid_map
-    // write to unconfined binaries, so bwrap dies with "setting up uid map:
-    // permission denied" and agentty used to report no backend at all: the
-    // default is bwrap, bwrap failed, and nothing looked further.
-    //
-    // claybin does not need a user namespace to enforce landlock and seccomp,
-    // so it still gets the filesystem boundary and the syscall filter -- the
-    // walls that keep an approved command out of ~/.ssh. Taking that instead
-    // of nothing is strictly better, and the wall report says per capability
-    // what was lost (network and pid isolation), so it is not a silent
-    // substitution.
-    //
-    // Only as a LAST resort, after bwrap has actually been tried: when both
-    // work, the default stays bwrap, because a decade of hardening beats a
-    // better feature list and nobody's boundary should change on upgrade.
     if (claybin_backend::available()) return Backend::Claybin;
 #endif
     return Backend::None;
@@ -297,215 +254,6 @@ constexpr const char* kHomeToolSubdirs[] = {
 
 // Back into the per-platform arm the shared read set interrupted.
 #if defined(__linux__)
-
-[[nodiscard]] std::vector<std::string> build_bwrap_argv(std::string_view shell_cmd) {
-    std::string ws = workspace_root().string();
-    std::vector<std::string> argv = {"bwrap"};
-
-    // ONE snapshot of the policy, for the whole argv. Same reason
-    // build_claybin_posture() takes one: this runs on a tool worker thread,
-    // and re-reading a global per field could mix two policies into one
-    // sandbox. (The policy is sealed at startup so it cannot actually change
-    // now -- holding the snapshot is what keeps that true if the seal is ever
-    // relaxed, instead of silently degrading here.)
-    const auto snap = config_snapshot();
-    const auto& cfg = *snap;
-
-    auto push = [&](const char* a) { argv.emplace_back(a); };
-    auto push_pair = [&](const char* k, std::string v) {
-        argv.emplace_back(k);
-        argv.emplace_back(std::move(v));
-    };
-    auto push_bind = [&](const char* k, const char* p) {
-        argv.emplace_back(k);
-        argv.emplace_back(p);
-        argv.emplace_back(p);
-    };
-
-    // System dirs first: read-only, from the SHARED read set above so the two
-    // backends cannot drift. `--ro-bind-try` skips silently if the path doesn't
-    // exist on this distro (e.g. /lib64 on Alpine); /usr and /bin are required
-    // rather than tried, because a host without them cannot run a shell at all.
-    push_bind("--ro-bind",     "/usr");
-    push_bind("--ro-bind",     "/bin");
-    for (const char* root : kSystemReadRoots) {
-        if (std::string_view{root} == "/usr" || std::string_view{root} == "/bin")
-            continue;   // already bound as required above
-        push_bind("--ro-bind-try", root);
-    }
-
-    // /etc: bind ONLY the files a shell + toolchain + name resolution actually
-    // need, not the whole tree. See kEtcReadable for why.
-    for (const char* f : kEtcReadable) push_bind("--ro-bind-try", f);
-
-    // User-local toolchains. Bound READ-ONLY (execute yes, mutate no) via
-    // --ro-bind-try so a missing dir is skipped.
-    if (const char* home = std::getenv("HOME"); home && *home) {
-        const std::string h = home;
-        for (const char* sub : kHomeToolSubdirs) {
-            std::string p = h + sub;
-            argv.emplace_back("--ro-bind-try");
-            argv.emplace_back(p);
-            argv.emplace_back(std::move(p));
-        }
-    }
-
-    // Pseudo-fs
-    push_pair("--proc", "/proc");
-    push_pair("--dev",  "/dev");
-
-    // ── /dev/tty: the hole --dev leaves open ─────────────────────────
-    //
-    // bwrap's --dev builds a fresh devtmpfs, and the /dev/tty it creates is
-    // NOT isolated: it is the character device that resolves to the calling
-    // process's CONTROLLING terminal, which is agentty's own terminal. A
-    // child that opens it writes straight to the screen.
-    //
-    // Everything else we capture goes through a pipe and gets scrubbed by
-    // clean_capture() (strip_terminal_controls + to_valid_utf8), precisely
-    // so a child painting CSI bytes cannot corrupt the UI. /dev/tty bypasses
-    // that entirely — it is not our pipe, so nothing we do to stdout matters.
-    //
-    // Measured, under a real controlling terminal:
-    //
-    //     printf 'INJECTED\033[2J' > /dev/tty   →  TTY-WRITE-OK, screen cleared
-    //
-    // \033[2J\033[3J is erase-display + erase-scrollback. A `bash` call that
-    // emits it wipes the transcript, and agentty then renders the welcome
-    // logo into the blank screen — the reported "output disappears when I ask
-    // the model to stress-test the sandbox" bug. Stress tests are just the
-    // likeliest way to emit raw escapes; a hostile repo's build script is the
-    // same primitive aimed deliberately, and it can forge agentty's own
-    // prompts.
-    //
-    // Mask it with /dev/null: open() and write() still SUCCEED, so nothing
-    // that probes for a tty breaks — the bytes just go nowhere. (A --tmpfs
-    // over it would make opens fail, which changes program behaviour rather
-    // than only its reach.)
-    //
-    // ORDER IS LOAD-BEARING: bwrap applies arguments in sequence, so this
-    // must come AFTER --dev or the devtmpfs mount replaces it.
-    argv.emplace_back("--dev-bind");
-    argv.emplace_back("/dev/null");
-    argv.emplace_back("/dev/tty");
-
-    // Fresh /tmp inside the sandbox. MUST come before the workspace
-    // bind: when workspace lives under /tmp (common in test setups),
-    // bwrap applies args in order and a later --tmpfs would wipe the
-    // workspace overlay. Bind workspace LAST so it always wins.
-    push_pair("--tmpfs", "/tmp");
-
-    // Workspace: read-write. Bound LAST so it overlays any earlier
-    // --tmpfs / --ro-bind that touches the same prefix.
-    //
-    // NOTE: with --workspace / the rw bind covers the entire host
-    // filesystem, which defeats the point of the sandbox. We still
-    // wrap (process/pid/session hardening + fresh /tmp/proc/dev keep
-    // some value) but describe_state() reports the degraded posture so
-    // the user isn't told they're "active (bwrap)" when they're not.
-    argv.emplace_back("--bind");
-    argv.emplace_back(ws);
-    argv.emplace_back(ws);
-
-    // ── Credential masks, AFTER every bind that could cover them ─────────
-    //
-    // The path LIST comes from sandbox_cfg::mask_paths(), shared with the
-    // claybin posture. Only the mechanism differs per backend -- bwrap says it
-    // with mount arguments, claybin with MountKind::mask. A list computed
-    // twice is how `.env` leaked under bwrap while reading back empty under
-    // claybin, so there is exactly one now.
-    //
-    // $HOME credentials happened to be safe under bwrap anyway, because the
-    // only $HOME paths bound above are kHomeToolSubdirs and an unbound path
-    // simply is not in the mount namespace. Safe by WHITELIST, not by masking
-    // -- which is why ~/.ssh looked fine and hid the real hole. The workspace
-    // is bound read-write on both backends, so scope cannot save anything
-    // inside it and the mask is the only wall.
-    //
-    // ORDER IS THE WHOLE TRICK, and getting it wrong is this subsystem's
-    // recurring bug (three times now). bwrap applies arguments in sequence and
-    // a later mount covers an earlier one, so a mask emitted before the
-    // workspace bind is silently undone by it. claybin had exactly this bug:
-    // masks applied, workspace bound over them, `<workspace>/.env` readable
-    // again -- and every policy-level test passed, because the mask really was
-    // in the policy. It just lost to a later mount.
-    //
-    // Mechanism: make the path not BE the file, the same way claybin's
-    // MountKind::mask does. An empty read-only file over a file, an empty
-    // tmpfs over a directory. The guest sees an empty ~/.aws rather than a
-    // denied one, which is also the better failure mode -- a tool reading it
-    // gets no credentials instead of an EACCES it may report as a bug.
-    //
-    // We must stat to choose, because `--ro-bind /dev/null <dir>` fails and
-    // `--tmpfs <file>` fails. A path that does not exist needs no mask at all,
-    // and emitting one would make bwrap fail on a host where the file is
-    // simply absent.
-    auto push_mask = [&](const std::string& target) {
-        std::error_code ec;
-        const auto st = std::filesystem::symlink_status(target, ec);
-        if (ec) return;                       // absent: nothing to hide
-        if (std::filesystem::is_directory(st)) {
-            argv.emplace_back("--tmpfs");
-            argv.emplace_back(target);
-        } else {
-            // Covers regular files, symlinks and sockets. A symlink is masked
-            // rather than followed: following it would mask wherever it points
-            // and leave the link itself readable.
-            argv.emplace_back("--ro-bind");
-            argv.emplace_back("/dev/null");
-            argv.emplace_back(target);
-        }
-    };
-
-    if (const char* home = std::getenv("HOME"); home && *home) {
-        for (const auto& m : sandbox_cfg::mask_paths(cfg, ws, home)) push_mask(m);
-    } else {
-        for (const auto& m : sandbox_cfg::mask_paths(cfg, ws, {})) push_mask(m);
-    }
-
-    // Network: keep it. Removing this breaks git push / package
-    // installs / curl — flows users explicitly want to work.
-    push("--share-net");
-
-    // Process / namespace / privilege hardening. Each --unshare severs a
-    // kernel namespace so a command inside the sandbox can't observe or touch
-    // the host's view of it:
-    //   --unshare-user   own user namespace (uid/gid map) — the root of the
-    //                    whole sandbox; requested explicitly so the posture
-    //                    matches bwrap_can_sandbox()'s probe.
-    //   --unshare-pid    clean PID namespace (kills stay contained; the host
-    //                    process table is invisible).
-    //   --unshare-ipc    own SysV/POSIX IPC namespace (no shared shm with host
-    //                    processes).
-    //   --unshare-uts    own hostname/domainname (can't rewrite the host's).
-    //   --unshare-cgroup-try  own cgroup view where the kernel allows it.
-    //   --new-session    detach the controlling tty so the child can't inject
-    //                    into agentty's terminal via TIOCSTI.
-    //   --die-with-parent  no detached zombies if agentty exits.
-    // bwrap already runs the payload with no ambient capabilities and
-    // no_new_privs SET inside the userns, so a setuid binary can't escalate.
-    // Network is deliberately KEPT (--share-net) so git/npm/curl work; that is
-    // the accepted residual (see the sandboxing doc's threat model).
-    push("--unshare-user");
-    push("--unshare-pid");
-    push("--unshare-ipc");
-    push("--unshare-uts");
-    push("--unshare-cgroup-try");
-    push("--new-session");
-    push("--die-with-parent");
-
-    // Pass through the workspace-relative cwd so the shell starts where
-    // the user expects. Default cwd would be / inside the sandbox.
-    argv.emplace_back("--chdir");
-    argv.emplace_back(ws);
-
-    // The actual shell command
-    argv.emplace_back("--");
-    argv.emplace_back("/bin/sh");
-    argv.emplace_back("-c");
-    argv.emplace_back(std::string{shell_cmd});
-    return argv;
-}
 
 
 // The read set, handed to claybin as DATA rather than restated in its backend.
@@ -687,8 +435,7 @@ constexpr const char* kHomeToolSubdirs[] = {
                                    int pipe_write_fd) -> SubprocessOptions::SpawnedChild {
             SubprocessOptions::SpawnedChild out;
             auto posture = build_claybin_posture();
-            // Both streams onto the one pipe the runner already made, which is
-            // what the bwrap path gets from its file_actions.
+            // Both streams onto the one pipe the runner already made.
             auto r = claybin_backend::spawn_shell(posture, shell_cmd, pipe_write_fd,
                                                   pipe_write_fd);
             if (!r.started) {
@@ -712,13 +459,21 @@ constexpr const char* kHomeToolSubdirs[] = {
     }
 #endif
 
-    opts.command = SubprocessOptions::Argv{build_bwrap_argv(cmd)};
-    return Subprocess::run(std::move(opts));
+    // No backend: run_wrapped is only reached when the sandbox is active,
+    // and on Linux "active" means claybin. Reaching here would mean the
+    // probe said yes and the spawn path disagreed, so refuse rather than
+    // run the command unconfined -- a command that was approved on the
+    // understanding it would be boxed must not quietly escape the box.
+    SubprocessResult unconfined;
+    unconfined.started     = false;
+    unconfined.start_error = "sandbox is active but no backend could wrap "
+                             "this command; refusing to run it unconfined";
+    return unconfined;
 }
 
-// argv-form: wrap with the same bwrap prefix as the shell form, then
-// append the user's argv after the `--` separator. No `sh -c`
-// indirection — the args reach the child process exactly as given.
+// argv-form: same wrap as the shell form, with the user's argv reaching the
+// child exactly as given -- no `sh -c` indirection to re-parse quotes or
+// `$vars`.
 [[nodiscard]] SubprocessResult run_wrapped_argv(const std::vector<std::string>& user_argv,
                                                 std::size_t max_bytes,
                                                 std::chrono::seconds timeout) {
@@ -727,20 +482,39 @@ constexpr const char* kHomeToolSubdirs[] = {
         r.started = false; r.start_error = "empty argv";
         return r;
     }
-    // Build prefix with no shell command, then splice the user's argv.
-    auto wrapped = build_bwrap_argv("");
-    // Pop the trailing 4 elements added by build_bwrap_argv ("--",
-    // "/bin/sh", "-c", ""), then append user argv directly.
-    wrapped.resize(wrapped.size() - 4);
-    wrapped.emplace_back("--");
-    for (const auto& a : user_argv) wrapped.push_back(a);
 
     SubprocessOptions opts;
-    opts.command = SubprocessOptions::Argv{std::move(wrapped)};
-    opts.max_bytes = max_bytes;
-    opts.timeout = timeout;
+    opts.max_bytes   = max_bytes;
+    opts.timeout     = timeout;
     opts.on_progress = [](std::string_view snap) { progress::emit(snap); };
-    return Subprocess::run(std::move(opts));
+
+#if defined(__linux__)
+    if (detected_backend() == Backend::Claybin) {
+        opts.command = SubprocessOptions::Argv{user_argv};
+        std::vector<std::string> argv = user_argv;
+        opts.spawner = [argv](const SubprocessOptions&,
+                              int pipe_write_fd) -> SubprocessOptions::SpawnedChild {
+            SubprocessOptions::SpawnedChild out;
+            auto posture = build_claybin_posture();
+            auto r = claybin_backend::spawn_argv(posture, argv, pipe_write_fd,
+                                                 pipe_write_fd);
+            if (!r.started) { out.error = r.start_error; return out; }
+            if (r.pidfd >= 0) ::close(r.pidfd);
+            out.pid           = r.pid;
+            out.supervisor_fd = r.supervisor_fd;
+            out.service       = std::move(r.service_broker);
+            out.kill_tree     = std::move(r.kill_tree);
+            return out;
+        };
+        return Subprocess::run(std::move(opts));
+    }
+#endif
+
+    SubprocessResult unconfined;
+    unconfined.started     = false;
+    unconfined.start_error = "sandbox is active but no backend could wrap "
+                             "this command; refusing to run it unconfined";
+    return unconfined;
 }
 
 #elif defined(__APPLE__)
@@ -766,12 +540,10 @@ constexpr const char* kHomeToolSubdirs[] = {
     // user's answer to "which engine applies my policy" does not change when
     // they move between a mac and a Linux box.
     //
-    // Fallback direction matches Linux: asking for claybin on a host where it
-    // cannot build still yields sandbox-exec, never None. Nobody should lose
-    // their sandbox by opting into the newer backend.
-    if (g_linux_pref.load(std::memory_order_acquire) == LinuxPreference::Claybin &&
-        claybin_backend::available())
-        return Backend::Claybin;
+    // claybin first where it can build, sandbox-exec otherwise. Both are
+    // real boundaries here; the order just prefers the one whose policy
+    // vocabulary the pane actually speaks.
+    if (claybin_backend::available()) return Backend::Claybin;
     if (can_invoke("sandbox-exec")) return Backend::SandboxExec;
     // And the other direction, for symmetry with the Ubuntu 24.04 case: if
     // sandbox-exec is somehow missing (SIP damage, a stripped image), claybin
@@ -924,16 +696,6 @@ bool init(Mode requested) {
 Mode    requested_mode()   noexcept { return g_mode.load(std::memory_order_acquire); }
 Backend detected_backend() noexcept { return g_backend.load(std::memory_order_acquire); }
 
-LinuxPreference requested_linux_backend() noexcept {
-    return g_linux_pref.load(std::memory_order_acquire);
-}
-
-void prefer_linux_backend(LinuxPreference p) noexcept {
-    // Must be called BEFORE init(), which is what probes. Setting it afterwards
-    // would leave g_backend disagreeing with the preference, and every bash
-    // call reads g_backend.
-    g_linux_pref.store(p, std::memory_order_release);
-}
 
 void set_config(const sandbox_cfg::Config& cfg) {
     // SEALED AFTER THE FIRST CALL. A later call is ignored, and says so.
@@ -992,14 +754,6 @@ void set_config(const sandbox_cfg::Config& cfg) {
     // The policy carries the ENGINE, so sealing it seals the backend too.
     //
     // Only when the user has actually chosen: an unconfigured config holds
-    // the struct default (bwrap), and letting that overwrite the preference
-    // would make a bare set_config() silently undo --sandbox-backend.
-    // main.cpp calls this BEFORE parsing the flag, so the flag still wins.
-    if (cfg.configured) {
-        prefer_linux_backend(cfg.backend == sandbox_cfg::LinuxBackend::Claybin
-                                 ? LinuxPreference::Claybin
-                                 : LinuxPreference::Bwrap);
-    }
 }
 
 bool config_sealed() noexcept {
@@ -1073,7 +827,6 @@ std::string describe_state() {
     if (m == Mode::Off) return "sandbox: off";
     const char* tag = nullptr;
     switch (b) {
-        case Backend::Bwrap:       tag = "bwrap";        break;
         case Backend::Claybin:     tag = "claybin";      break;
         case Backend::SandboxExec: tag = "sandbox-exec"; break;
         case Backend::None:        tag = nullptr;        break;
@@ -1092,12 +845,8 @@ std::string describe_state() {
     if (m == Mode::On)
         return "sandbox: requested but no backend "
 #if defined(__linux__)
-               + std::string{can_invoke("bwrap")
-                   ? "(bubblewrap present but unprivileged user namespaces are "
-                     "blocked \xe2\x80\x94 e.g. Ubuntu 24.04 AppArmor userns "
-                     "restriction or kernel.unprivileged_userns_clone=0; "
-                     "allow userns or run with --sandbox off)"
-                   : "(install bubblewrap)"};
+               "(the kernel offers neither landlock nor seccomp \xe2\x80\x94 "
+               "nothing left to build a boundary from; run with --sandbox off)";
 #elif defined(__APPLE__)
                "(sandbox-exec missing \xe2\x80\x94 system integrity issue)";
 #else
@@ -1106,10 +855,7 @@ std::string describe_state() {
     // Mode::Auto + no backend → falling through unsandboxed
     return "sandbox: unavailable, running unsandboxed "
 #if defined(__linux__)
-           + std::string{can_invoke("bwrap")
-               ? "(bubblewrap present but user namespaces are blocked \xe2\x80\x94 "
-                 "allow unprivileged userns to enable containment)"
-               : "(install bubblewrap to enable)"};
+           "(the kernel offers neither landlock nor seccomp)";
 #elif defined(__APPLE__)
            "(sandbox-exec missing)";
 #else
@@ -1206,14 +952,6 @@ SubprocessResult run_argv(const std::vector<std::string>& argv,
     if (r.exit_code != 0 && looks_like_denial(r.output))
         r.output += denial_note();
     return r;
-}
-
-std::vector<std::string> bwrap_argv_for_test([[maybe_unused]] std::string_view shell_cmd) {
-#if defined(__linux__)
-    return build_bwrap_argv(shell_cmd);
-#else
-    return {};
-#endif
 }
 
 claybin_backend::Posture claybin_posture_for_test() {

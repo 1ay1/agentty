@@ -2512,10 +2512,13 @@ store::Settings load_settings() {
             // settings.json is a supported input, and an out-of-range value
             // here would pick a backend that does not exist.
             {
-                const int raw = b.value("backend", static_cast<int>(c.backend));
-                c.backend = raw == static_cast<int>(sandbox_cfg::LinuxBackend::Claybin)
-                                ? sandbox_cfg::LinuxBackend::Claybin
-                                : sandbox_cfg::LinuxBackend::Bwrap;
+                // One backend now. A file written when bwrap existed carries
+                // its old ordinal; read it as claybin rather than refusing to
+                // load, and the next save writes the current value. Read-old,
+                // write-new, never write-old -- the same shape as the
+                // entitlements migration above.
+                (void)b.value("backend", 0);
+                c.backend = sandbox_cfg::LinuxBackend::Claybin;
             }
             c.fs_scope     = static_cast<sandbox_cfg::FsScope>(
                                  b.value("fs_scope", static_cast<int>(c.fs_scope)));

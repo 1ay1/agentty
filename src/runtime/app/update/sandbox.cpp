@@ -109,9 +109,7 @@ namespace sb = agentty::tools::util::sandbox;
     f.landlock_abi = landlock_abi_here();
     f.sandbox_active = sb::is_active();
     f.mode_off = sb::requested_mode() == sb::Mode::Off;
-    f.running = sb::detected_backend() == sb::Backend::Claybin
-                    ? sandbox_cfg::LinuxBackend::Claybin
-                    : sandbox_cfg::LinuxBackend::Bwrap;
+    f.running = sandbox_cfg::LinuxBackend::Claybin;
     return f;
 }
 
@@ -171,10 +169,7 @@ Cmd sandbox_update(Model& m, msg::SandboxMsg sm) {
             // Note the FORM no longer derives its subtitle from the selection
             // -- it asks `facts` -- which is what stopped the header claiming
             // seccomp on a bwrap process.
-            o.pane.backend = !facts.sandbox_active
-                ? "none"
-                : (facts.running == sandbox_cfg::LinuxBackend::Claybin ? "claybin"
-                                                                       : "bwrap");
+            o.pane.backend = facts.sandbox_active ? "claybin" : "none";
 
             // Seeded from the SAVED policy (m.d.persisted), not the live one.
             //

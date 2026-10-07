@@ -14,9 +14,9 @@
 // an approved bash call is constrained to the workspace + system libs
 // + network. Backends:
 //
-//   Linux   — bwrap (bubblewrap). Common: `apt install bubblewrap`,
-//             `dnf install bubblewrap`, `pacman -S bubblewrap`. Used
-//             by Flatpak; well-maintained; doesn't need root.
+//   Linux   — claybin (vendored library, no binary to install): user
+//             namespaces where available, plus landlock, seccomp-bpf and
+//             cgroup2. Needs no root and no package.
 //   macOS   — sandbox-exec (built in since 10.5). Apple deprecated
 //             the public docs but the binary still works on 14+ and
 //             takes a Scheme-style profile.
@@ -55,54 +55,32 @@ enum class Mode : std::uint8_t {
 
 enum class Backend : std::uint8_t {
     None,         // no backend detected / sandbox disabled
-    Bwrap,        // Linux bubblewrap, exec'd as a binary
     Claybin,      // Linux, in-process via the claybin library
     SandboxExec,  // macOS sandbox-exec
 };
 
-// Which Linux engine applies the policy. Both are always compiled in --
-// claybin is a required submodule, not a build flag -- so this is purely a
-// runtime choice, settable with --sandbox-backend or in the Sandbox pane.
+// There is ONE Linux engine, and it is claybin.
 //
-// claybin is the DEFAULT, because it is strictly stronger and the difference
-// is measured rather than argued. agentty's bwrap path emits no --seccomp, no
-// cgroup limits and no landlock, so per capability:
+// bwrap used to be a second, selectable backend. It was removed, and the
+// argument for keeping it turned out not to survive the code it described.
+// That argument was: the two engines fail on DIFFERENT hosts, so dropping
+// bwrap trades a weaker sandbox for no sandbox on kernels without landlock
+// (old RHEL). But claybin's availability floor is `landlock_abi > 0 ||
+// seccomp` -- either one is enough -- and seccomp-bpf landed in Linux 3.5
+// while the unprivileged user namespaces bwrap REQUIRES landed in 3.8. So
+// every host that could run bwrap has seccomp, and therefore has claybin.
+// The host the argument was defending does not exist.
 //
-//     syscall.filter      claybin strong (seccomp-bpf)  vs bwrap NONE
-//     resource.mem/cpu/pids  strong (cgroup2)           vs bwrap NONE
-//     filesystem.exec     strong (landlock)             vs bwrap partial
-//     ptrace/kill broker  yes (seccomp-notify)          vs bwrap NONE
+// What claybin gives that the bwrap path never did, measured rather than
+// argued (tests/sandbox_audit.cpp):
 //
-// There is no capability where bwrap wins. See tests/sandbox_audit.cpp for
-// the report this table comes from.
+//     syscall.filter         seccomp-bpf        vs bwrap NONE
+//     resource.mem/cpu/pids  cgroup2            vs bwrap NONE
+//     filesystem.exec        landlock           vs bwrap partial
+//     ptrace/kill broker     seccomp-notify     vs bwrap NONE
 //
-// bwrap REMAINS, as the fallback, and deleting it would be a security
-// regression rather than a simplification: the two engines fail on different
-// hosts. bwrap dies where unprivileged user namespaces are denied (Ubuntu
-// 24.04's AppArmor profile), which is why claybin was added -- but claybin's
-// walls are landlock + seccomp + cgroup2, and a RHEL kernel older than 5.13
-// has no landlock at all. On that host, removing bwrap does not leave the user
-// with claybin; it leaves them with Backend::None. Trading a weaker sandbox
-// for no sandbox is the issue #21 failure wearing a different hat.
-//
-// Asking for claybin on a host where it cannot build still yields bwrap, not
-// None: opting into the newer backend must not cost you your sandbox.
-enum class LinuxPreference : std::uint8_t {
-    Bwrap,    // fallback, and what --sandbox-backend=bwrap selects
-    Claybin,  // default
-};
-
-// Which Linux backend the user ASKED for. Distinct from
-// detected_backend(), which is what the probe could actually deliver: asking
-// for claybin on a host without user namespaces still yields bwrap, and the
-// difference between "asked" and "got" is exactly what the Sandbox pane
-// needs to explain a locked row.
-[[nodiscard]] LinuxPreference requested_linux_backend() noexcept;
-
-// Choose the Linux backend. MUST be called before init(), which is what
-// probes -- setting it later would leave the cached backend disagreeing with
-// the preference.
-void prefer_linux_backend(LinuxPreference p) noexcept;
+// There was no capability where bwrap won, which is why it was the fallback
+// rather than the default, and why nothing is lost by its going.
 
 // Install the user's saved sandbox policy. Call ONCE, at startup, before
 // init(): the policy decides what the probe should be checking, so a config
@@ -114,12 +92,11 @@ void prefer_linux_backend(LinuxPreference p) noexcept;
 // is a deliberate trade rather than an implementation limit.
 //
 // A boundary that can move mid-session only ever moves usefully in the
-// WEAKENING direction. The weakening is invisible (switching claybin -> bwrap
-// silently drops the seccomp filter, the cgroup caps, and the
-// non-configurable secret masks) and it cannot be undone, because
-// re-tightening does not un-read a key that already left. It also makes the
-// sandbox unauditable: two commands in one session get two different walls,
-// with nothing recording which got which.
+// WEAKENING direction. The weakening is invisible (loosening a policy
+// silently drops a seccomp rule, a cgroup cap, or a secret mask) and it
+// cannot be undone, because re-tightening does not un-read a key that
+// already left. It also makes the sandbox unauditable: two commands in one
+// session get two different walls, with nothing recording which got which.
 //
 // So the pane writes to disk for the NEXT launch, and restart is the apply
 // step. Every other setting in agentty stays live.
@@ -144,8 +121,8 @@ void set_config(const sandbox_cfg::Config& cfg);
 // threat this actually addresses, and the alternative (a fresh process per
 // case) would make the sealing behaviour itself untestable.
 //
-// Named for_test like bwrap_argv_for_test above, so a grep for `_for_test`
-// finds every seam that exists only for the suite.
+// Named for_test like claybin_posture_for_test below, so a grep for
+// `_for_test` finds every seam that exists only for the suite.
 void reset_config_for_test() noexcept;
 
 // The policy in force. Read by the settings pane to seed its form, and by
@@ -166,16 +143,16 @@ void reset_config_for_test() noexcept;
 // building a posture would otherwise mix two policies into one sandbox.
 //
 // Never null; before anyone calls set_config it is the default config, which
-// is exactly the posture the bwrap path has always built.
+// is the posture claybin builds when nobody has tightened anything.
 [[nodiscard]] std::shared_ptr<const sandbox_cfg::Config> config_snapshot() noexcept;
 
 // Whether the ACTIVE backend can actually enforce the saved policy.
 //
 // Only claybin can. The policy's vocabulary -- a syscall profile, per-port
 // network rules, W^X, cgroup2 caps, deny-under-grant path masks -- is
-// claybin's; bwrap as we invoke it has no spelling for most of it, and the
-// parts it could express are fixed at the argv we build. So under bwrap the
-// pane is configuring something inert.
+// claybin's; macOS sandbox-exec has no spelling for most of it, and Windows
+// has no backend at all. So off Linux the pane is configuring something
+// inert.
 //
 // That has to be SAID rather than silently tolerated: a security control the
 // user believes they set and that is not running is worse than one they know
@@ -201,9 +178,9 @@ void reset_config_for_test() noexcept;
 
 // Single-line describe of current state for the startup banner / status
 // command. Examples:
-//   "sandbox: active (bwrap)"
+//   "sandbox: active (claybin)"
 //   "sandbox: off"
-//   "sandbox: requested but no backend (install bubblewrap)"
+//   "sandbox: requested but no backend (kernel has neither landlock nor seccomp)"
 [[nodiscard]] std::string describe_state();
 
 // Run a shell command, wrapping it in the active sandbox when one
@@ -217,10 +194,9 @@ void reset_config_for_test() noexcept;
 
 // argv-form variant for callers that already build a typed argv (e.g.
 // `diagnostics` invoking `cmake --build build`). Same wrap policy as
-// the shell variant: bwrap / sandbox-exec prepended when active, no-op
-// otherwise. Wraps without going through `sh -c`, preserving exact
-// argv semantics that matter for things like commit messages with
-// quotes / `$vars`.
+// the shell variant: the sandbox applied when active, no-op otherwise.
+// Wraps without going through `sh -c`, preserving exact argv semantics
+// that matter for things like commit messages with quotes / `$vars`.
 [[nodiscard]] SubprocessResult run_argv(
     const std::vector<std::string>& argv,
     std::size_t max_bytes,
@@ -234,13 +210,6 @@ void reset_config_for_test() noexcept;
 // unchanged. On non-Apple builds this is a trivial passthrough of the same
 // rules (kept cross-platform so the test compiles everywhere).
 [[nodiscard]] std::string sbpl_escape(std::string_view path);
-
-// Testing hook: the bwrap argv this build would wrap `shell_cmd` in, WITHOUT
-// running it (so tests can assert the hardening flags + read-only toolchain
-// binds + workspace RW bind are present on any host, even one without bwrap or
-// user namespaces). Empty on non-Linux builds. Exposed for the unit test only;
-// production code calls run_shell_command / run_argv.
-[[nodiscard]] std::vector<std::string> bwrap_argv_for_test(std::string_view shell_cmd);
 
 // Testing hook: the REAL claybin posture this process would build from the
 // sealed config snapshot right now, including the non-configurable masks and

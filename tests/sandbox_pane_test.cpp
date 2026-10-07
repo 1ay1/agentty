@@ -231,7 +231,6 @@ TEST_CASE("sandbox config: the policy is sealed after the first install") {
     weaker.configured   = true;
     weaker.memory_mb    = 0;      // no cap
     weaker.syscall_mode = sandbox_cfg::SyscallMode::Off;
-    weaker.backend      = sandbox_cfg::LinuxBackend::Bwrap;
     sb::set_config(weaker);
     CHECK(sb::config().memory_mb == 111);
     CHECK(sb::config().syscall_mode == sandbox_cfg::SyscallMode::Compiler);
@@ -241,7 +240,6 @@ TEST_CASE("sandbox config: the policy is sealed after the first install") {
     // (measured: the same workspace .env reads back empty under claybin and
     // in full under bwrap), so the backend has to be sealed with the rest of
     // the policy rather than alongside it.
-    CHECK(sb::requested_linux_backend() == sb::LinuxPreference::Claybin);
 
     // Tightening is refused too. Not because tightening is dangerous, but
     // because "the policy can change, but only in ways we judge safe" is a
@@ -252,182 +250,6 @@ TEST_CASE("sandbox config: the policy is sealed after the first install") {
     tighter.syscall_mode = sandbox_cfg::SyscallMode::Strict;
     sb::set_config(tighter);
     CHECK(sb::config().memory_mb == 111);
-}
-
-TEST_CASE("sandbox pane: the backend row is first and always offers both") {
-    // claybin is a required submodule now, not a build flag, so the choice is
-    // always a real runtime choice. It used to be possible to ship a binary
-    // where "claybin" was not an option at all.
-    sandbox_cfg::Config cfg;
-    cfg.configured = true;
-    install(cfg);
-
-    const Model m = opened();
-    const auto& f = pane(m).pane.form;
-
-    const int b = row_of(f, pn::kSbBackend);
-    REQUIRE(b >= 0);
-    const auto& ch = choice_at(f, b);
-    REQUIRE(ch.count() == 2);
-    CHECK(ch.labels[0] == "bwrap");
-    CHECK(ch.labels[1] == "claybin");
-
-    // FIRST real row: it decides what every row below can mean, so tuning ten
-    // rows before discovering eight are inert is the thing to prevent.
-    for (int i = 0; i < b; ++i)
-        CHECK(f.fields[static_cast<std::size_t>(i)].is_header());
-}
-
-TEST_CASE("sandbox pane: bwrap locks the rows it cannot enforce") {
-    // The shipped bug this pins: the pane rendered the syscall profile, W^X
-    // and all four resource caps as live rows under bwrap, where agentty
-    // passes no seccomp filter and no cgroup at all. A control that looks set
-    // and enforces nothing is the one failure mode a sandbox must not have.
-    sandbox_cfg::Config cfg;
-    cfg.configured = true;
-    cfg.backend    = sandbox_cfg::LinuxBackend::Bwrap;
-    install(cfg);
-
-    const Model m = opened();
-    const auto& f = pane(m).pane.form;
-
-    // Every claybin-only row must be locked, and must SAY why -- a lock with
-    // no reason reads as a bug in the pane.
-    for (const auto id : {pn::kSbNetMode, pn::kSbSyscalls, pn::kSbWxProtect,
-                          pn::kSbMemoryMb, pn::kSbMaxProcs, pn::kSbCpuPercent,
-                          pn::kSbTmpMb, pn::kSbScopeIpc}) {
-        const int i = row_of(f, id);
-        REQUIRE_MESSAGE(i >= 0, id);
-        const auto& fld = f.fields[static_cast<std::size_t>(i)];
-        CHECK_MESSAGE(fld.locked, id);
-        CHECK_MESSAGE(!fld.help.empty(), id);
-    }
-
-    // And the rows bwrap CAN honour stay live. Gating these would be a lie in
-    // the other direction: scope/read/write are binds, and a mask is a bind
-    // of an empty file.
-    for (const auto id : {pn::kSbFsScope, pn::kSbReadPaths, pn::kSbWritePaths,
-                          pn::kSbDenyPaths, pn::kSbCloseFds}) {
-        const int i = row_of(f, id);
-        REQUIRE_MESSAGE(i >= 0, id);
-        CHECK_MESSAGE(!f.fields[static_cast<std::size_t>(i)].locked, id);
-    }
-}
-
-TEST_CASE("sandbox pane: switching the backend row relocks live") {
-    // The locks are computed when the form is BUILT, so changing the engine
-    // has to reproject rather than just re-price. Without that you could
-    // switch to claybin and the syscall row would still say "bwrap cannot
-    // express this" until the pane was reopened.
-    sandbox_cfg::Config cfg;
-    cfg.configured = true;
-    cfg.backend    = sandbox_cfg::LinuxBackend::Bwrap;
-    install(cfg);
-
-    Model m = opened();
-    const int b = row_of(pane(m).pane.form, pn::kSbBackend);
-    REQUIRE(b >= 0);
-    const int sys_before = row_of(pane(m).pane.form, pn::kSbSyscalls);
-    REQUIRE(sys_before >= 0);
-    REQUIRE(pane(m).pane.form.fields[static_cast<std::size_t>(sys_before)].locked);
-
-    // Move onto the backend row and cycle it to claybin.
-    m.ui.panel.get<pn::Sandbox>()->pane.form.cursor = b;
-    auto [m2, _] = app::update(std::move(m), key(form::keys::Intent::AdjustUp));
-
-    const auto& f = pane(m2).pane.form;
-    const int nb = row_of(f, pn::kSbBackend);
-    REQUIRE(nb >= 0);
-    REQUIRE(choice_at(f, nb).id() == "claybin");
-
-    // On a host that can actually run claybin the row unlocks; on one that
-    // cannot it stays locked but for the OTHER reason. Both are correct, and
-    // which applies is a property of the machine -- so assert the thing that
-    // holds either way: the reason tracks the selection.
-    const int sys = row_of(f, pn::kSbSyscalls);
-    REQUIRE(sys >= 0);
-    const auto& help = f.fields[static_cast<std::size_t>(sys)].help;
-    CHECK(help.find("switch Backend to claybin") == std::string::npos);
-}
-
-TEST_CASE("sandbox pane: a locked row keeps its value through a round trip") {
-    // Switching to bwrap must not ZERO the claybin-only settings. They are
-    // still the user's choices; they are merely not in force. Losing them on
-    // a backend flip would make the pane destructive to look at.
-    sandbox_cfg::Config cfg;
-    cfg.configured = true;
-    cfg.backend    = sandbox_cfg::LinuxBackend::Bwrap;
-    cfg.memory_mb  = 4096;
-    cfg.syscall_mode = sandbox_cfg::SyscallMode::Strict;
-    install(cfg);
-
-    const Model m = opened();
-    const auto back = pn::read_sandbox_form(pane(m).pane.form, sb::config());
-
-    CHECK(back.memory_mb == 4096);
-    CHECK(back.syscall_mode == sandbox_cfg::SyscallMode::Strict);
-    CHECK(back.backend == sandbox_cfg::LinuxBackend::Bwrap);
-}
-
-TEST_CASE("sandbox pane: saving the backend switches the live engine") {
-    // The row has to MOVE the engine, not just record a preference. A Backend
-    // row that saves and switches nothing is the same class of bug as a pane
-    // that saves a policy nothing enforces.
-    sandbox_cfg::Config cfg;
-    cfg.configured = true;
-    cfg.backend    = sandbox_cfg::LinuxBackend::Claybin;
-    install(cfg);
-    CHECK(sb::requested_linux_backend() == sb::LinuxPreference::Claybin);
-
-    cfg.backend = sandbox_cfg::LinuxBackend::Bwrap;
-    install(cfg);
-    CHECK(sb::requested_linux_backend() == sb::LinuxPreference::Bwrap);
-
-    // An UNCONFIGURED config must not move it: main.cpp calls set_config()
-    // before the CLI flag, so letting a default config publish its default
-    // backend would silently undo --sandbox-backend.
-    sb::prefer_linux_backend(sb::LinuxPreference::Claybin);
-    install(sandbox_cfg::Config{});   // configured == false
-    CHECK(sb::requested_linux_backend() == sb::LinuxPreference::Claybin);
-}
-
-TEST_CASE("sandbox config: the backend survives a save/load round trip") {
-    // The pane can only mean anything if the choice OUTLIVES the session.
-    // Driven through the real save_settings/load_settings pair rather than a
-    // JSON helper, because that pair is what the reducer actually calls --
-    // testing a private serializer would prove the wrong thing.
-    //
-    // AGENTTY_HOME is repointed at a temp dir so this never writes the
-    // developer's own settings.json, and RESTORED afterwards: it is
-    // process-wide state and other cases in this binary resolve paths
-    // through it, so leaking it would make an unrelated test fail depending
-    // on run order. (Learned the hard way -- a stray AGENTTY_HOME is exactly
-    // the kind of cross-test coupling that presents as a flaky suite.)
-    const char* prev = std::getenv("AGENTTY_HOME");
-    const std::string saved = prev ? prev : "";
-    const bool had = prev != nullptr;
-
-    const auto tmp = std::filesystem::temp_directory_path() /
-                     "agentty-sbtest-roundtrip";
-    std::filesystem::remove_all(tmp);
-    std::filesystem::create_directories(tmp);
-    ::setenv("AGENTTY_HOME", tmp.string().c_str(), 1);
-
-    auto s = persistence::load_settings();
-    s.sandbox.configured = true;
-    s.sandbox.backend    = sandbox_cfg::LinuxBackend::Claybin;
-    s.sandbox.memory_mb  = 2048;
-    persistence::save_settings(s);
-
-    const auto back = persistence::load_settings();
-
-    if (had) ::setenv("AGENTTY_HOME", saved.c_str(), 1);
-    else     ::unsetenv("AGENTTY_HOME");
-    std::filesystem::remove_all(tmp);
-
-    CHECK(back.sandbox.backend == sandbox_cfg::LinuxBackend::Claybin);
-    CHECK(back.sandbox.memory_mb == 2048);
-    CHECK(back.sandbox.configured);
 }
 
 TEST_CASE("sandbox pane: every row round-trips into the config") {
@@ -2025,8 +1847,11 @@ TEST_CASE("i18n: maya measures every target script in display columns") {
 }
 
 TEST_CASE("sandbox render: the subtitle names the RUNNING engine") {
-    // The screenshot bug, asserted on painted bytes rather than on the model.
-    // Selecting claybin under bwrap must not put "seccomp" on screen.
+    // Asserted on painted bytes rather than on the model: the subtitle has
+    // to describe what is actually in force. (This began as a screenshot
+    // bug where the pane claimed seccomp while a weaker engine ran. With one
+    // engine the mismatch is gone, but the pane must still name the engine
+    // rather than infer it from the config.)
     sandbox_cfg::Config cfg;
     cfg.configured = true;
     cfg.backend = sandbox_cfg::LinuxBackend::Claybin;
@@ -2035,15 +1860,13 @@ TEST_CASE("sandbox render: the subtitle names the RUNNING engine") {
     facts.claybin_available = true;
     facts.landlock_abi = 10;
     facts.sandbox_active = true;
-    facts.running = sandbox_cfg::LinuxBackend::Bwrap;   // but bwrap is live
+    facts.running = sandbox_cfg::LinuxBackend::Claybin;
 
     const auto form = pn::build_sandbox_form(cfg, facts);
     const auto out = maya::render_to_string(
         maya::Panel{agentty::ui::form_config(form, maya::Color::blue())}.build(), 120);
 
-    CHECK(out.find("bwrap") != std::string::npos);
-    CHECK(out.find("seccomp") == std::string::npos);
-    CHECK(out.find("restart") != std::string::npos);
+    CHECK(out.find("claybin") != std::string::npos);
 }
 
 TEST_CASE("sandbox render: the list editor paints its entries and hint") {
@@ -2102,29 +1925,6 @@ TEST_CASE("sandbox restart: a policy that will not compile says so") {
     // And it carries the REASON, not just the refusal -- otherwise the user
     // has no way to act on it.
     CHECK(out.find("fabricated") != std::string::npos);
-}
-
-TEST_CASE("sandbox restart: an engine that cannot start names the fallback") {
-    // Saving is still legitimate -- the config is portable and the user may be
-    // on a different machine tomorrow. But the promise must not imply the
-    // claybin walls will be up, and it has to say what WILL be enforced
-    // instead, because "claybin cannot start" alone reads as "no sandbox".
-    sandbox_cfg::Config cfg;
-    cfg.configured = true;
-    cfg.backend = sandbox_cfg::LinuxBackend::Claybin;
-
-    pn::HostFacts facts;
-    facts.claybin_available = false;        // the host refuses it
-    facts.sandbox_active = true;
-    facts.running = sandbox_cfg::LinuxBackend::Bwrap;
-
-    pn::Preview ok;
-    ok.compiled = true;
-
-    const auto out = pn::restart_outcome(cfg, facts, ok);
-    REQUIRE(!out.empty());
-    CHECK(out.find("cannot start") != std::string::npos);
-    CHECK(out.find("bwrap") != std::string::npos);
 }
 
 TEST_CASE("sandbox restart: a silently degraded capability is named") {
@@ -2205,30 +2005,6 @@ TEST_CASE("sandbox pane: the reducer keeps the restart verdict with the preview"
 //
 // These cases pin the fix at every altitude it could regress.
 
-TEST_CASE("sandbox pane: selecting claybin under bwrap does not claim seccomp") {
-    // The exact screenshot. The selection says claybin; reality says bwrap.
-    sandbox_cfg::Config cfg;
-    cfg.configured = true;
-    cfg.backend = sandbox_cfg::LinuxBackend::Claybin;
-
-    pn::HostFacts facts;
-    facts.claybin_available = true;          // the host COULD run it
-    facts.landlock_abi = 10;
-    facts.sandbox_active = true;
-    facts.running = sandbox_cfg::LinuxBackend::Bwrap;   // but it is not running
-
-    const auto form = pn::build_sandbox_form(cfg, facts);
-
-    // The walls that do not exist must not be named in the present tense.
-    CHECK(form.subtitle.find("seccomp") == std::string::npos);
-    CHECK(form.subtitle.find("cgroup2") == std::string::npos);
-    CHECK(form.subtitle.find("landlock") == std::string::npos);
-    // What IS running has to be stated.
-    CHECK(form.subtitle.find("bwrap") != std::string::npos);
-    // And the pending selection, as a forecast rather than a fact.
-    CHECK(form.subtitle.find("restart") != std::string::npos);
-}
-
 TEST_CASE("sandbox pane: running claybin DOES claim its walls") {
     // The honesty has to cut both ways: a pane that never credits claybin is
     // just as useless as one that always does.
@@ -2258,7 +2034,7 @@ TEST_CASE("sandbox pane: an inactive sandbox never names an engine") {
 
     pn::HostFacts facts;
     facts.sandbox_active = false;
-    facts.running = sandbox_cfg::LinuxBackend::Bwrap;
+    facts.running = sandbox_cfg::LinuxBackend::Claybin;
 
     const auto form = pn::build_sandbox_form(cfg, facts);
     CHECK(form.subtitle.find("unconfined") != std::string::npos);
@@ -2274,10 +2050,10 @@ TEST_CASE("sandbox pane: describe_running ignores the config entirely") {
     facts.claybin_available = true;
     facts.landlock_abi = 10;
     facts.sandbox_active = true;
-    facts.running = sandbox_cfg::LinuxBackend::Bwrap;
+    facts.running = sandbox_cfg::LinuxBackend::Claybin;
 
     const auto baseline = pn::describe_running(facts);
-    CHECK(baseline.find("bwrap") != std::string::npos);
+    CHECK(baseline.find("claybin") != std::string::npos);
 
     // Whatever the user picks, the running line cannot move.
     for (auto p : {sandbox_cfg::Posture::Hardened, sandbox_cfg::Posture::Airgapped,
@@ -2289,25 +2065,28 @@ TEST_CASE("sandbox pane: describe_running ignores the config entirely") {
     }
 }
 
-TEST_CASE("sandbox pane: engine_status separates wanted from running") {
+TEST_CASE("sandbox pane: engine_status separates configured from in force") {
+    // With one engine, "wanted != running" is unreachable -- but the other
+    // two states are not, and they are the ones that matter: a policy saved
+    // while the sandbox is off applies on the next run, and a host that
+    // cannot start the engine must say so rather than promise a restart.
     sandbox_cfg::Config cfg;
     cfg.configured = true;
+    cfg.backend = sandbox_cfg::LinuxBackend::Claybin;
 
     pn::HostFacts facts;
     facts.claybin_available = true;
-    facts.sandbox_active = true;
+    facts.running = sandbox_cfg::LinuxBackend::Claybin;
 
-    // bwrap selected, bwrap running.
-    cfg.backend = sandbox_cfg::LinuxBackend::Bwrap;
-    facts.running = sandbox_cfg::LinuxBackend::Bwrap;
+    facts.sandbox_active = true;
     CHECK(pn::engine_status(cfg, facts) == pn::EngineStatus::InForce);
 
-    // claybin selected, bwrap running -- the screenshot.
-    cfg.backend = sandbox_cfg::LinuxBackend::Claybin;
+    // Saved now, applies next run.
+    facts.sandbox_active = false;
     CHECK(pn::engine_status(cfg, facts) == pn::EngineStatus::AppliesOnRestart);
 
-    // claybin selected, host refuses it. Outranks the comparison: "applies on
-    // restart" would be a promise nothing can keep.
+    // Host refuses it. Outranks everything: "applies on restart" would be a
+    // promise nothing can keep.
     facts.claybin_available = false;
     CHECK(pn::engine_status(cfg, facts) == pn::EngineStatus::CannotStart);
 }
@@ -2324,8 +2103,10 @@ TEST_CASE("sandbox pane: forecast walls are marked per row, not just in the head
     pn::HostFacts facts;
     facts.claybin_available = true;
     facts.landlock_abi = 10;
-    facts.sandbox_active = true;
-    facts.running = sandbox_cfg::LinuxBackend::Bwrap;
+    // Not yet active: the policy is a FORECAST, which is the state the
+    // per-row marking exists for.
+    facts.sandbox_active = false;
+    facts.running = sandbox_cfg::LinuxBackend::Claybin;
 
     auto form = pn::build_sandbox_form(cfg, facts);
     const auto preview = pn::preview_sandbox(cfg);
