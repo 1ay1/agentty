@@ -954,6 +954,23 @@ SubprocessResult run_argv(const std::vector<std::string>& argv,
     return r;
 }
 
+claybin_backend::SpawnResult spawn_in_sandbox(
+        const std::vector<std::string>& argv, std::string_view cwd, int out_fd) {
+#if defined(__linux__)
+    if (detected_backend() == Backend::Claybin) {
+        auto posture = build_claybin_posture();
+        if (!cwd.empty()) posture.cwd = std::string{cwd};
+        return claybin_backend::spawn_argv(posture, argv, out_fd, out_fd);
+    }
+#else
+    (void)argv; (void)cwd; (void)out_fd;
+#endif
+    claybin_backend::SpawnResult r;
+    r.started = false;
+    r.start_error = "no claybin backend active";
+    return r;
+}
+
 claybin_backend::Posture claybin_posture_for_test() {
 #if defined(__linux__) || defined(__APPLE__)
     return build_claybin_posture();

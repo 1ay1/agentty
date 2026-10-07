@@ -177,6 +177,19 @@ util/logx.cpp: mutex atomic
 # startup and read from workers (auth_snapshot), which is the one thing a
 # plain global could get wrong.
 runtime/app/deps.cpp: mutex
+# The exec capability's session drain. A process that outlives the call which
+# started it has to have its pipe read by SOMEONE, or it fills at 64 KiB and
+# the child blocks -- and polls are seconds apart by nature, so draining only
+# inside poll() would stall exactly the chatty servers process_start exists
+# for. This thread IS the implementation of mcp-cpp's Session capability,
+# which is what lets that library own no concurrency at all.
+#
+# `thread` only: the shared state went to jaal::guarded<Shared>, the first use
+# of it in agentty. So the lock cannot be forgotten, nothing escapes it, and
+# a second lock cannot be named inside it -- Level A for the state, Level B
+# for the thread. When tool execution becomes a keyed Sub::stream the thread
+# goes too, and this line with it.
+tool/util/exec.cpp: thread
 # next_tool_exec_seq(): a static atomic counter minted per dispatch, echoed by
 # the worker so the reducer can drop stale results from a superseded turn.
 runtime/app/cmd_factory.cpp: atomic

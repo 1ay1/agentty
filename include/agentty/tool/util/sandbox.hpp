@@ -211,6 +211,23 @@ void reset_config_for_test() noexcept;
 // rules (kept cross-platform so the test compiles everywhere).
 [[nodiscard]] std::string sbpl_escape(std::string_view path);
 
+// Spawn `argv` inside the active sandbox, with both streams on `out_fd`.
+//
+// The posture is built HERE rather than handed out, because building it is
+// the sandbox's job and a caller that assembles its own would be a second
+// policy. exec.cpp used to reach for claybin_posture_for_test() to do this,
+// which worked and was a lie: a `_for_test` seam in the production path.
+//
+// `cwd` is applied as a real directory change by the sandbox, not as a
+// `cd ... &&` prefix on a shell string -- the prefix is re-parsed by the
+// shell and denied by the boundary, which is how a background session died
+// with "cd: Operation not permitted" while the identical foreground command
+// worked.
+//
+// Returns started=false with a reason when no claybin backend is active.
+[[nodiscard]] claybin_backend::SpawnResult spawn_in_sandbox(
+    const std::vector<std::string>& argv, std::string_view cwd, int out_fd);
+
 // Testing hook: the REAL claybin posture this process would build from the
 // sealed config snapshot right now, including the non-configurable masks and
 // workspace sweep in sandbox.cpp. Empty/default on non-Linux builds.

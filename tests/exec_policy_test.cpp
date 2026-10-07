@@ -27,6 +27,12 @@
 
 #include "agentty/tool/util/exec.hpp"
 #include "agentty/tool/util/sandbox.hpp"
+#include "agentty/tool/tool.hpp"
+
+#include <nlohmann/json.hpp>
+#include <csignal>
+#include <cstdio>
+#include <unistd.h>
 
 #include <chrono>
 #include <string>
@@ -34,6 +40,7 @@
 
 using namespace std::chrono_literals;
 namespace mt = mcp::tools;
+using json = nlohmann::json;
 
 namespace {
 
@@ -186,4 +193,54 @@ TEST_CASE("exec: the sandboxed path spawns, is watched, and still obeys the cloc
 
     CHECK(timed_out_on(runaway, mt::TimedOut::budget::wall));
     CHECK_MESSAGE(elapsed < 15s, "reaped at its ceiling, not left spinning");
+}
+
+// ── a session: started here, polled later ───────────────────────────────
+//
+// process_start/poll/stop used to own a thread per session and spawn
+// through a different code path from every other tool — which after the
+// bwrap removal meant a background process was confined by nothing while a
+// foreground one was confined by claybin. Now it goes through the same
+// capability, so there is one boundary and one place that knows how to
+// watch a child.
+//
+// Driven through the real registry rather than the capability directly:
+// what matters is that the three tools still compose, since the lifetime
+// spans three separate calls.
+TEST_CASE("process session: start, poll, stop through the registry") {
+    auto start = agentty::tool::DynamicDispatch::execute(
+        "process_start",
+        json{{"command", "for i in 1 2 3; do echo tick$i; sleep 0.15; done; echo done"}});
+    if (!start) MESSAGE("process_start failed: " << start.error().detail);
+    REQUIRE(start.has_value());
+
+    const auto at = start->text.find("proc-");
+    REQUIRE(at != std::string::npos);
+    std::string id = start->text.substr(at);
+    id = id.substr(0, id.find_first_of(" )\n"));
+
+    // Poll until it ends or we run out of patience. The session keeps
+    // producing for ~450ms, so a few polls should see output and then the end.
+    std::string seen = start->text;
+    bool ended = false;
+    for (int i = 0; i < 40 && !ended; ++i) {
+        auto p = agentty::tool::DynamicDispatch::execute(
+            "process_poll", json{{"id", id}, {"wait_ms", 100}});
+        REQUIRE(p.has_value());
+        seen += p->text;
+        if (p->text.find("exited") != std::string::npos
+            || p->text.find("not running") != std::string::npos) ended = true;
+    }
+
+    CHECK_MESSAGE(seen.find("tick1") != std::string::npos,
+                  "output produced between polls must survive to the next one "
+                  "-- the host drains continuously so a full pipe never "
+                  "stalls the child");
+    CHECK_MESSAGE(seen.find("done") != std::string::npos,
+                  "and the tail written just before exit is not lost");
+
+    // Stopping an already-finished session is not an error.
+    auto stop = agentty::tool::DynamicDispatch::execute(
+        "process_stop", json{{"id", id}});
+    CHECK(stop.has_value());
 }

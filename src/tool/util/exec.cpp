@@ -9,11 +9,14 @@
 #include "agentty/tool/util/exec.hpp"
 
 #include <algorithm>
+#include <thread>
 #include <cstdlib>
 #include <cstring>
+#include <cstdio>
 #include <string>
 #include <vector>
 
+#include <jaal/kernel/guarded.hpp>
 #include <jaal/platform/posix/process.hpp>
 #include <jaal/platform/posix/poll_reactor.hpp>
 
@@ -52,7 +55,7 @@ struct started {
 /// that line the two paths are the same object with the same conformance
 /// suite behind it.
 [[nodiscard]] std::expected<started, std::string>
-start(const std::vector<std::string>& argv,
+start_child(const std::vector<std::string>& argv,
       const std::string& cwd,
       const std::vector<std::pair<std::string, std::string>>& env) {
     namespace sb = agentty::tools::util::sandbox;
@@ -63,9 +66,9 @@ start(const std::vector<std::string>& argv,
         if (::pipe2(fds, O_CLOEXEC) != 0)
             return std::unexpected(std::string{"pipe: "} + std::strerror(errno));
 
-        auto posture = sb::claybin_posture_for_test();   // the sealed policy
         // One pipe for both streams: the interleaving a terminal would show.
-        auto r = sb::claybin_backend::spawn_argv(posture, argv, fds[1], fds[1]);
+        // cwd goes to the sandbox as a real chdir, not as a shell prefix.
+        auto r = sb::spawn_in_sandbox(argv, cwd, fds[1]);
         ::close(fds[1]);
         if (!r.started) {
             ::close(fds[0]);
@@ -135,6 +138,142 @@ std::optional<std::chrono::seconds> env_wall_override() {
     return std::chrono::seconds{v};
 }
 
+/// A started program, polled for later.
+///
+/// The drain runs on its own thread, and that is deliberate rather than
+/// reluctant: a pipe nobody reads fills at 64 KiB and then BLOCKS the child.
+/// Polls are seconds apart by nature -- a caller checks a dev server when it
+/// wants to, not on a schedule -- so draining only inside poll() would stall
+/// exactly the chatty servers this tool exists for. The thread lives here,
+/// in the host, which is the layer allowed to have one.
+class JaalSession final : public mt::Session {
+  public:
+    JaalSession(pf::posix_process p, std::size_t cap)
+        : proc_(std::move(p)), cap_(cap) {
+        drain_ = std::thread([this] { pump(); });
+    }
+    ~JaalSession() override {
+        stop();
+        st_.with([](Shared& s) { s.done = true; });
+        if (drain_.joinable()) drain_.join();
+    }
+
+    [[nodiscard]] Update poll(std::chrono::milliseconds wait) override {
+        // Wait for something to report rather than returning empty
+        // immediately: a caller that polls in a loop should not spin, and one
+        // that asks for 5s of news should get 5s of news.
+        const auto deadline = clock_t_::now() + wait;
+        while (st_.read([](const Shared& s) { return s.pending.empty() && s.alive; })
+               && clock_t_::now() < deadline)
+            std::this_thread::sleep_for(std::chrono::milliseconds{20});
+
+        // One exclusive section that both drains and decides. Returning a
+        // struct by value is the only way out -- nothing can hand back a
+        // reference into the guarded state.
+        return st_.with([](Shared& s) {
+            Update u;
+            u.output    = std::exchange(s.pending, {});
+            u.truncated = std::exchange(s.truncated, false);
+            u.running   = s.alive;
+            if (!s.alive && !s.reported) {
+                s.reported = true;
+                u.outcome  = s.outcome;
+            }
+            return u;
+        });
+    }
+
+    void stop() override {
+        if (!st_.read([](const Shared& s) { return s.alive; })) return;
+        (void)proc_.stop(pf::stop_mode::graceful, pf::stop_scope::tree);
+        stop_at_ = clock_t_::now() + std::chrono::seconds{2};
+        st_.with([](Shared& s) { s.stopping = true; });
+    }
+
+  private:
+    void pump() {
+        auto reactor = pf::poll_reactor::create();
+        if (!reactor) return;
+        auto exit_reg = reactor->watch(proc_.exit_handle().get(),
+                                       pf::interest::read, kExitToken);
+        std::optional<pf::poll_reactor::registration> out_reg;
+        if (auto h = proc_.stdout_handle())
+            if (auto r = reactor->watch(h->get(), pf::interest::read, kOutToken))
+                out_reg = std::move(*r);
+
+        bool exited = false;
+        while (!st_.read([](const Shared& s) { return s.done; })) {
+            auto res = reactor->wait(std::chrono::milliseconds{100});
+            if (!res) break;
+            for (std::uint8_t i = 0; i < res->count; ++i) {
+                const auto& r = res->ready[i];
+                if (r.token == kOutToken && (r.readable || r.hangup)) {
+                    std::string chunk;
+                    bool        lost = false;
+                    if (auto h = proc_.stdout_handle())
+                        drain_into(h->get(), chunk, cap_, lost);
+                    if (!chunk.empty() || lost)
+                        st_.with([](Shared& s, std::string c, bool l,
+                                    std::size_t cap) {
+                            if (s.pending.size() < cap) s.pending += c;
+                            else                        s.truncated = true;
+                            if (l) s.truncated = true;
+                        }, std::move(chunk), lost, cap_);
+                } else if (r.token == kExitToken && (r.readable || r.hangup)) {
+                    exited = true;
+                }
+            }
+            if (st_.read([](const Shared& s) { return s.stopping; }) && !exited
+                && clock_t_::now() >= stop_at_) {
+                (void)proc_.stop(pf::stop_mode::forceful, pf::stop_scope::tree);
+            }
+            if (exited) break;
+        }
+
+        // Whatever was written before the end is still in the pipe.
+        std::string tail;
+        bool        lost = false;
+        if (auto h = proc_.stdout_handle())
+            drain_into(h->get(), tail, cap_, lost);
+
+        mt::ExecOutcome oc = mt::Signalled{0};
+        if (auto s = proc_.reap())
+            oc = (s->how == pf::exit_status::kind::exited)
+                     ? mt::ExecOutcome{mt::Exited{s->code}}
+                     : mt::ExecOutcome{mt::Signalled{s->code}};
+
+        st_.with([](Shared& s, std::string t, bool l, mt::ExecOutcome o) {
+            if (!t.empty()) s.pending += t;
+            if (l) s.truncated = true;
+            s.outcome = o;
+            s.alive   = false;
+        }, std::move(tail), lost, oc);
+    }
+
+    /// Everything two threads touch, in one place, reachable only while the
+    /// lock is held. guarded<T> makes the unsafe forms unwriteable rather
+    /// than merely wrong: there is no get(), nothing escapes (results must
+    /// be Sendable), and no second lock can be NAMED inside with() because
+    /// the function is captureless. agentty had 44 raw std::mutex and zero
+    /// of these; this is the first, and a drain thread feeding a poller is
+    /// exactly the shape it is for.
+    struct Shared {
+        std::string     pending;
+        bool            truncated = false;
+        bool            reported  = false;
+        bool            alive     = true;
+        bool            done      = false;   // the pump should wind up
+        bool            stopping  = false;
+        mt::ExecOutcome outcome   = mt::Exited{0};
+    };
+
+    pf::posix_process    proc_;
+    std::size_t          cap_;
+    jaal::guarded<Shared> st_;
+    std::thread          drain_;
+    clock_t_::time_point stop_at_{};
+};
+
 class JaalExec final : public mt::Exec {
   public:
     explicit JaalExec(ExecDefaults d) : d_(d) {}
@@ -157,7 +296,7 @@ class JaalExec final : public mt::Exec {
         argv.push_back(req.program.exe);
         for (const auto& a : req.program.args) argv.push_back(a);
 
-        auto st = start(argv, req.cwd.value_or(std::string{}), req.env);
+        auto st = start_child(argv, req.cwd.value_or(std::string{}), req.env);
         if (!st) {
             out.outcome = mt::StartFailed{st.error()};
             return out;
@@ -293,6 +432,25 @@ class JaalExec final : public mt::Exec {
             out.outcome = mt::Signalled{0};   // gone, and nothing to tell us how
         }
         return out;
+    }
+
+    [[nodiscard]] std::expected<std::shared_ptr<mt::Session>, std::string>
+    start(const mt::ExecRequest& req) override {
+        std::vector<std::string> argv;
+        argv.reserve(req.program.args.size() + 1);
+        argv.push_back(req.program.exe);
+        for (const auto& a : req.program.args) argv.push_back(a);
+
+        auto st = start_child(argv, req.cwd.value_or(std::string{}), req.env);
+        if (!st) return std::unexpected(st.error());
+        // The broker is not serviced for a session. A posture that delegates
+        // syscalls would hang its guest on the first brokered call, so a
+        // session is started OUTSIDE that posture rather than inside one it
+        // cannot answer -- see start_child, which only brokers for run().
+        return std::static_pointer_cast<mt::Session>(
+            std::make_shared<JaalSession>(std::move(st->proc),
+                                          req.max_output_bytes.value_or(
+                                              d_.max_output_bytes)));
     }
 
     [[nodiscard]] bool stops_whole_tree() const noexcept override {
