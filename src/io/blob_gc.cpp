@@ -9,14 +9,16 @@
 
 #include <nlohmann/json.hpp>
 
+#include <jaal/kernel/delay.hpp>
+#include <jaal/kernel/pool.hpp>
+
 #include <atomic>
 #include <chrono>
-#include <condition_variable>
 #include <fstream>
 #include <mutex>
+#include <stop_token>
 #include <string>
 #include <string_view>
-#include <thread>
 #include <unordered_set>
 
 namespace agentty::blobs {
@@ -236,63 +238,71 @@ std::optional<GcStats> collect_if_due() {
 }
 
 namespace {
-// One owned thread, not a detached one: main() must be able to wait for it
-// before static destruction. The delay means a process that exits at once
-// never starts the walk at all.
-struct Bg {
-    std::mutex              mu;
-    std::condition_variable cv;
-    std::thread             th;
-    bool                    stop = false;
-};
-Bg& bg() { static Bg b; return b; }
+// This subsystem's OWN pool, because join_background_gc() is a public promise
+// that ITS sweep is done — and you cannot join one job out of a shared pool.
+// That is the policy line: fire-and-forget with no join goes to
+// util::run_background / run_isolated_detached; work with a named join owns a
+// pool. A pool nobody posts to never spawns a thread, so this costs nothing
+// until the sweep is scheduled.
+//
+// What this replaced: a mutex + condition variable + raw worker thread + stop
+// flag, whose shutdown joined if it could and DETACHED if the walk was still
+// running. The detach is the part that mattered — it let a sweep keep
+// walking while the CRT destroyed the statics under it. pool::shutdown asks
+// the job to stop, waits inside a bounded grace, and only then abandons; see
+// its comment, which documents this exact failure from agentty's own symbol
+// scan.
+jaal::kernel::pool& gc_pool() {
+    // One worker: there is only ever one sweep.
+    static jaal::kernel::pool p{/*max_workers=*/1};
+    return p;
+}
 constexpr auto kStartDelay = std::chrono::seconds(20);
+std::atomic<bool> g_scheduled{false};
 }  // namespace
 
 void start_background_gc() {
-    auto& b = bg();
-    // Same reasoning as modelsdev: register the join where the thread is
-    // created, so main() never has to know this subsystem is threaded.
-    // bg() is a process-lifetime function-local static, so the callback
-    // cannot outlive its target and needs no cancel().
+    // Register the join where the work is created, so main() never has to know
+    // this subsystem is threaded. gc_pool() is a process-lifetime
+    // function-local static, so the callback cannot outlive its target and
+    // needs no cancel().
     static std::once_flag registered;
     std::call_once(registered, [] {
         util::teardown::on_shutdown("blobs.gc", [] { join_background_gc(); });
     });
 
-    std::lock_guard lk(b.mu);
-    if (b.th.joinable() || b.stop) return;
-    try {
-        b.th = std::thread([&b] {
-            {
-                std::unique_lock lk2(b.mu);
-                if (b.cv.wait_for(lk2, kStartDelay, [&] { return b.stop; })) return;
-            }
-            try { (void)collect_if_due(); }
-            catch (const std::exception& e) {
-                AGT_LOG(Persist, Warn, "blob_gc", "{}", e.what());
-            } catch (...) {}
+    // Once per process. Previously expressed as "is the thread joinable",
+    // which the pool no longer exposes — and did not need to be a lock.
+    if (g_scheduled.exchange(true, std::memory_order_relaxed)) return;
+
+    // Isolated, not queued: the walk is unbounded in principle (a large blob
+    // store on a slow disk), and it must not occupy a shared worker.
+    gc_pool().post_isolated([](std::stop_token st) {
+        // The delay means a process that exits at once never starts the walk
+        // at all. delay_for returns true if we were asked to stop first — one
+        // cancellation channel, the token, rather than a second stop flag that
+        // someone has to remember to notify.
+        if (jaal::kernel::delay_for(st, kStartDelay)) return;
+        // Bridge the token to the walk's own cancel flag, so a sweep already
+        // in progress stops at its next check instead of running to
+        // completion after shutdown has been requested.
+        const std::stop_callback cancel_on_stop(st, [] {
+            g_cancel.store(true, std::memory_order_relaxed);
         });
-    } catch (const std::system_error&) {
-        // No thread available: skip today, retry next start.
-    }
+        try {
+            (void)collect_if_due();
+        } catch (const std::exception& e) {
+            AGT_LOG(Persist, Warn, "blob_gc", "{}", e.what());
+        } catch (...) {}
+    });
 }
 
 void join_background_gc() noexcept {
-    auto& b = bg();
-    std::thread th;
-    {
-        std::lock_guard lk(b.mu);
-        b.stop = true;
-        th = std::move(b.th);
-    }
+    // Cancel first, then wait: setting the flag before the stop request means
+    // a walk between checks sees it on this side of the grace rather than
+    // burning the grace and being abandoned.
     g_cancel.store(true, std::memory_order_relaxed);
-    b.cv.notify_all();
-    if (th.joinable() && th.get_id() != std::this_thread::get_id()) {
-        try { th.join(); } catch (...) {}
-    } else if (th.joinable()) {
-        th.detach();
-    }
+    (void)gc_pool().shutdown();   // requests stop, waits within the grace
 }
 
 } // namespace agentty::blobs

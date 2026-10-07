@@ -2,14 +2,17 @@
 
 #include "agentty/util/modelsdev.hpp"
 
+#include <atomic>
 #include <chrono>
-#include <condition_variable>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
 #include <sstream>
+#include <stop_token>
 #include <string_view>
-#include <thread>
+
+#include <jaal/kernel/delay.hpp>
+#include <jaal/kernel/pool.hpp>
 
 #include <nlohmann/json.hpp>
 
@@ -262,75 +265,66 @@ int refresh() {
     return n;
 }
 
-// ── Background owned thread (same pattern as blob_gc.cpp) ─────────────
+// ── Background refresh (same pattern as blob_gc.cpp) ────────────────
 namespace {
-struct Bg {
-    std::mutex              mu;
-    std::condition_variable cv;
-    std::thread             th;
-    bool                    stop = false;
-    bool                    no_net = false;
-};
-Bg& bg() { static Bg b; return b; }
+// This subsystem's OWN pool: join_background_refresh() promises ITS fetch is
+// done, and a shared pool cannot be joined one job at a time. See blob_gc.cpp
+// for the same reasoning — these two stay deliberately identical.
+//
+// Replaces a mutex + condition variable + raw worker + stop flag whose
+// shutdown detached the worker whenever the fetch was still in flight, which
+// is precisely a network call left running against statics the CRT is
+// destroying. pool::shutdown asks it to stop, waits inside a bounded grace,
+// then abandons safely.
+jaal::kernel::pool& refresh_pool() {
+    static jaal::kernel::pool p{/*max_workers=*/1};   // one refresh, ever
+    return p;
+}
 constexpr auto kStartDelay = std::chrono::seconds(5);
+std::atomic<bool> g_scheduled{false};
 }  // namespace
 
 void start_background_refresh(bool no_net) {
-    auto& b = bg();
-    // Register the join with the teardown registry the moment a thread is
-    // about to exist, rather than relying on main() to know this subsystem
-    // is threaded. main()'s hand-written teardown list is the thing that
-    // misses one: settings_cache shipped with a join nobody called, and its
-    // worker sat joinable in a function-local static until ~std::thread
-    // terminated the process at exit.
+    // Register the join the moment background work is about to exist, rather
+    // than relying on main() to know this subsystem is threaded. main()'s
+    // hand-written teardown list is the thing that misses one: settings_cache
+    // shipped with a join nobody called, and its worker sat joinable in a
+    // function-local static until the destructor terminated the process at
+    // exit.
     //
-    // bg() is a function-local static that lives to process exit, so the
-    // callback can never outlive its target and needs no cancel(). Doing
-    // this inside the once-flag keeps it to one registration no matter how
-    // many times start_background_refresh is called.
+    // refresh_pool() is a function-local static that lives to process exit, so
+    // the callback can never outlive its target and needs no cancel(). Inside
+    // the once-flag, so repeated starts register once.
     static std::once_flag registered;
     std::call_once(registered, [] {
         util::teardown::on_shutdown("modelsdev.refresh",
                                     [] { join_background_refresh(); });
     });
 
-    std::lock_guard lk(b.mu);
-    if (b.th.joinable() || b.stop) return;
-    b.no_net = no_net;
-    try {
-        b.th = std::thread([&b] {
-            {
-                std::unique_lock lk2(b.mu);
-                if (b.cv.wait_for(lk2, kStartDelay, [&] { return b.stop; })) return;
+    if (g_scheduled.exchange(true, std::memory_order_relaxed)) return;
+
+    // Isolated: refresh() is a network fetch, so it may never return and must
+    // not occupy a shared worker.
+    refresh_pool().post_isolated([no_net](std::stop_token st) {
+        // A process that exits at once never dials at all. One cancellation
+        // channel — the token — instead of a second stop flag to notify.
+        if (jaal::kernel::delay_for(st, kStartDelay)) return;
+        try {
+            load_cached();
+            // Re-check: the cache load is the cheap half, and shutdown may
+            // have been requested while it ran. No point starting a dial we
+            // are about to abandon.
+            if (!no_net && !st.stop_requested()) {
+                try { (void)refresh(); } catch (...) {}
             }
-            try {
-                load_cached();
-                if (!b.no_net) {
-                    try { (void)refresh(); } catch (...) {}
-                }
-            } catch (const std::exception& e) {
-                util::dbglog("modelsdev.refresh", e.what());
-            } catch (...) {}
-        });
-    } catch (const std::system_error&) {
-        // No thread available: skip, retry next start.
-    }
+        } catch (const std::exception& e) {
+            util::dbglog("modelsdev.refresh", e.what());
+        } catch (...) {}
+    });
 }
 
 void join_background_refresh() noexcept {
-    auto& b = bg();
-    std::thread th;
-    {
-        std::lock_guard lk(b.mu);
-        b.stop = true;
-        th = std::move(b.th);
-    }
-    b.cv.notify_all();
-    if (th.joinable() && th.get_id() != std::this_thread::get_id()) {
-        try { th.join(); } catch (...) {}
-    } else if (th.joinable()) {
-        th.detach();
-    }
+    (void)refresh_pool().shutdown();   // requests stop, waits within the grace
 }
 
 } // namespace agentty::modelsdev

@@ -52,8 +52,15 @@
 # re-entrancy guard so the worker's own write doesn't invalidate the cache
 # it just filled.
 runtime/app/settings_cache.cpp: thread mutex thread_local
-io/blob_gc.cpp: thread mutex atomic detach
-util/modelsdev.cpp: thread mutex detach
+# blob_gc: the sweep moved to its own jaal::kernel::pool, so the thread, the
+# mutex, the condition variable and the detach are all gone. What is left is
+# two atomics: the walk's cancel flag (read deep inside the walk) and the
+# once-per-process scheduled flag.
+io/blob_gc.cpp: atomic
+# modelsdev: the refresh moved to its own jaal::kernel::pool, same as
+# blob_gc, so the thread, the mutex, the condition variable and the detach
+# are gone. One atomic left: the once-per-process scheduled flag.
+util/modelsdev.cpp: atomic
 
 # ── HTTP: the turn's cancel token, and the transport ─────────────────────
 # A streaming turn is a Cmd::task holding an http::CancelToken, tripped from

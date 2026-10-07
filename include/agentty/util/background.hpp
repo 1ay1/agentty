@@ -67,12 +67,25 @@ concept WorkerBody =
 
 // Format a source_location into a compact "file:line function" breadcrumb so a
 // worker panic reports WHERE it was spawned, auto-captured, never mislabeled.
-inline std::string spawn_site(const std::source_location& loc) {
+//
+// Called ONLY from the failure path. Building this eagerly cost a string
+// allocation (two, with the concatenation) on every spawn to produce a label
+// that is discarded unread in the overwhelmingly common case where the body
+// returns normally. The spawn now carries the string_view and the
+// source_location — both trivially copyable, both free — and pays for the
+// formatting only when there is actually something to report.
+inline std::string spawn_site(std::string_view where,
+                              const std::source_location& loc) {
     std::string f = loc.file_name();
     // Keep just the basename — full build paths are noise in a log line.
     if (auto slash = f.find_last_of("/\\"); slash != std::string::npos)
         f.erase(0, slash + 1);
-    return f + ":" + std::to_string(loc.line()) + " " + loc.function_name();
+    std::string out;
+    out.reserve(where.size() + f.size() + 32);
+    out.append(where).append(" @ ").append(f).append(":")
+       .append(std::to_string(loc.line())).append(" ")
+       .append(loc.function_name());
+    return out;
 }
 
 // The one background pool, created on first use and registered for shutdown
@@ -109,16 +122,64 @@ inline jaal::kernel::pool& background_pool() {
     return *p;
 }
 
+namespace detail {
+
+// The one wrapper both spawns share: run the body, and let nothing out.
+//
+// `where` is a std::string_view and is NOT copied — same contract as
+// jaal::error::what. Every call site passes a string literal, so the
+// pointee outlives the job for free; a caller handing this a temporary
+// std::string would dangle, which is why the parameter is documented rather
+// than quietly made a std::string.
+template <class Body>
+auto guarded_body(std::string_view where, std::source_location loc, Body body) {
+    return [where, loc, body = std::move(body)](
+               std::stop_token st) mutable noexcept {
+        try {
+            if constexpr (std::invocable<Body, std::stop_token>)
+                body(std::move(st));
+            else
+                body();
+        } catch (const std::exception& e) {
+            dbglog(spawn_site(where, loc), e.what());
+        } catch (...) {
+            dbglog(spawn_site(where, loc),
+                   "non-std exception (isolated \xe2\x80\x94 process survives)");
+        }
+    };
+}
+
+}  // namespace detail
+
+// Fire-and-forget on a WARM worker. For bounded work that will finish:
+// a filesystem walk, a parse, a cache refresh that cannot block forever.
+//
+// Prefer this over run_isolated_detached when the body is guaranteed to
+// return. It reuses a pooled thread, so a burst costs a queue push and a
+// notify rather than a thread spawn each — which is the difference that
+// matters for anything that can fire more than once in a session.
+//
+// The cost of being wrong: a body that blocks forever here OCCUPIES one of
+// the pool's workers permanently. If it might wedge, it is isolated work.
+template <WorkerBody Body>
+void run_background(std::string_view where, Body body,
+                    std::source_location loc = std::source_location::current()) {
+    background_pool().post(
+        detail::guarded_body(where, loc, std::move(body)));
+}
+
 // Fire-and-forget, but SAFELY: `body` runs on a thread of its own, cannot
 // take the process down by throwing, is asked to stop at shutdown, and is
 // waited for inside the shutdown grace before being abandoned.
 //
-// Isolated (a dedicated thread) rather than queued, because every caller here
-// is a job that MAY NEVER RETURN — an orphaned connect waiter, a tool reaper
-// blocked on a future, an ACP turn. Those must not occupy a shared worker.
+// Isolated (a dedicated thread) rather than queued, because the callers here
+// are jobs that MAY NEVER RETURN — an orphaned connect waiter, a tool reaper
+// blocked on a future, an ACP turn, a network dial. Those must not occupy a
+// shared worker. If the body is bounded, use run_background above.
 //
 // `body` may take a std::stop_token to honour cancellation; a nullary body
-// still works and simply ignores it.
+// still works and simply ignores it. Use jaal::kernel::delay_for to wait on
+// that token rather than sleeping through a shutdown.
 //
 // Ownership note: the caller must ensure any state `body` captures by
 // reference outlives the work. Prefer capturing by value / shared_ptr,
@@ -126,21 +187,8 @@ inline jaal::kernel::pool& background_pool() {
 template <WorkerBody Body>
 void run_isolated_detached(std::string_view where, Body body,
                            std::source_location loc = std::source_location::current()) {
-    std::string tag = std::string(where) + " @ " + spawn_site(loc);
     background_pool().post_isolated(
-        [tag = std::move(tag), body = std::move(body)](
-            std::stop_token st) mutable noexcept {
-            try {
-                if constexpr (std::invocable<Body, std::stop_token>)
-                    body(std::move(st));
-                else
-                    body();
-            } catch (const std::exception& e) {
-                dbglog(tag, e.what());
-            } catch (...) {
-                dbglog(tag, "non-std exception (isolated — process survives)");
-            }
-        });
+        detail::guarded_body(where, loc, std::move(body)));
 }
 
 } // namespace agentty::util
