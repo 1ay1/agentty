@@ -1628,6 +1628,10 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
                         missing_required_field(tc2.name.value, tc2.args).empty();
                     if (read_only && !needs_perm && args_complete) {
                         const auto now2 = std::chrono::steady_clock::now();
+                        // Auto-allowed, so the decision and the launch are the
+                        // same instant -- but record the definition anyway so
+                        // every dispatch verifies the same way.
+                        tc2.approved_def_hash = def->definition_hash();
                         // No permission gate on this path, so card birth and
                         // execution coincide — but record both anyway rather
                         // than leaving the liveness clock to fall back. A

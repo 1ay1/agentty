@@ -1484,7 +1484,8 @@ std::uint64_t next_tool_exec_seq() noexcept {
 }
 
 Cmd run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args,
-                  http::CancelTokenPtr cancel, std::uint64_t exec_seq) {
+                  http::CancelTokenPtr cancel, std::uint64_t exec_seq,
+                  std::uint64_t approved_def_hash) {
     // task_isolated, NOT task: a tool that wedges (e.g. read on a hung NFS
     // mount, bash on a process that won't unblock) must not consume a slot
     // in the shared BG worker pool. With Cmd::task the pool's max workers
@@ -1497,7 +1498,8 @@ Cmd run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args,
     return Cmd::task_isolated(
         [](jaal::Sink<Msg> sink, std::stop_token stop,
            ToolCallId id, ToolName name, nlohmann::json args,
-           http::CancelTokenPtr cancel, std::uint64_t exec_seq) {
+           http::CancelTokenPtr cancel, std::uint64_t exec_seq,
+           std::uint64_t approved_def_hash) {
             // Every result this worker sends carries its exec_seq, so the
             // reducer can drop it if the call it was started for is gone.
             auto out = [exec_seq](ToolExecOutput o) {
@@ -1575,7 +1577,8 @@ Cmd run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args,
                     return;
                 }
                 const auto t_start = std::chrono::steady_clock::now();
-                auto result = tool::DynamicDispatch::execute(name.value, args);
+                auto result = tool::DynamicDispatch::execute_approved(
+                    name.value, args, approved_def_hash);
                 const auto t_ms = std::chrono::duration_cast<
                     std::chrono::milliseconds>(
                         std::chrono::steady_clock::now() - t_start).count();
@@ -1648,7 +1651,7 @@ Cmd run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args,
             }
         },
         std::move(id), std::move(tool_name), std::move(args),
-        std::move(cancel), exec_seq);
+        std::move(cancel), exec_seq, approved_def_hash);
 }
 
 namespace {
@@ -1977,10 +1980,15 @@ Cmd kick_pending_tools(Model& m) {
             if (m.d.session_grants.contains(tc.name.value)
                 || !tool::DynamicDispatch::needs_permission(tc.name.value, m.d.profile))
                 continue;
+            // Fingerprint the definition the user is about to be SHOWN, so
+            // the approval is tied to that definition and not just to the
+            // name. Verified again at launch (execute_approved).
+            const auto* shown = tools::find(tc.name.value);
             m.d.pending_permission = PendingPermission{
                 tc.id, tc.name,
                 "Tool " + tc.name.value + " needs permission under "
-                    + std::string{ui::profile_label(m.d.profile)} + " profile"};
+                    + std::string{ui::profile_label(m.d.profile)} + " profile",
+                shown ? shown->definition_hash() : 0};
             if (auto ctx = take_active_ctx(std::move(m.s.phase)); ctx)
                 m.s.phase = phase::AwaitingPermission{std::move(*ctx)};
             else
@@ -2006,6 +2014,15 @@ Cmd kick_pending_tools(Model& m) {
                 // another sibling). Keep it Pending and do not dispatch it.
                 any_pending = true;
                 continue;
+            }
+            // Auto-allowed by the policy or by a standing grant. Record what
+            // was allowed at the moment of the decision; for this branch that
+            // is the same instant as the launch, so the window is nil, but
+            // recording it keeps every dispatch going through one check
+            // instead of two shapes of call.
+            if (tc.approved_def_hash == 0) {
+                if (const auto* allowed = tools::find(tc.name.value))
+                    tc.approved_def_hash = allowed->definition_hash();
             }
             {
                 // Effect/path-compatibility gate: the planner decided this
@@ -2036,7 +2053,8 @@ Cmd kick_pending_tools(Model& m) {
                     ? active_ctx(m.s.phase)->cancel
                     : http::CancelTokenPtr{};
                 cmds.push_back(run_tool(tc.id, tc.name, tc.args,
-                                        std::move(cancel), seq));
+                                        std::move(cancel), seq,
+                                        tc.approved_def_hash));
 
                 // Tool wall-clock watchdog removed at user request.
                 // Tools now run for as long as their worker takes;

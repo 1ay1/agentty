@@ -210,6 +210,36 @@ struct DynamicDispatch {
                == tools::policy::Decision::Prompt;
     }
 
+    // Execute a call that consent was given for, verifying the tool is still
+    // the one consented to.
+    //
+    // Consent is recorded against a NAME, and for an MCP tool the server owns
+    // that name. Between the decision and this call the catalog can be
+    // rebuilt -- a tools/list_changed notification, an mcp reload, a toggle --
+    // and the name can come back pointing at a different tool. The gate and
+    // the execute were two independent lookups of the same string, so nothing
+    // noticed. Re-checking the fingerprint here makes the approval refer to a
+    // definition rather than to a string.
+    //
+    // `approved_hash == 0` means nothing was recorded (a path with no gate, or
+    // a thread from before this existed), and the check is skipped rather
+    // than failing closed -- refusing those would break resumed threads for a
+    // risk that only exists where a grant was actually given.
+    [[nodiscard]] static ExecResult execute_approved(
+        std::string_view name, const nlohmann::json& args,
+        std::uint64_t approved_hash) noexcept {
+        const auto* td = tools::find(name);
+        if (!td) return std::unexpected(ToolError::not_found(tools::unknown_tool_error(name)));
+        if (approved_hash != 0 && td->definition_hash() != approved_hash) {
+            return std::unexpected(ToolError::denied(
+                "tool '" + std::string{name} + "' was redefined after it was "
+                "approved, so the approval no longer applies. This is what a "
+                "compromised or updated MCP server looks like. Re-request the "
+                "call to be shown the new definition."));
+        }
+        return execute_with(td, name, args);
+    }
+
     [[nodiscard]] static ExecResult execute(std::string_view name,
                                             const nlohmann::json& args) noexcept {
         const auto* td = tools::find(name);

@@ -141,6 +141,47 @@ struct ToolDef {
     EffectSet effects;
 
     std::function<ExecResult(const nlohmann::json& args)> execute;
+
+    // A stable fingerprint of everything a consent decision depends on:
+    // which tool this is, what it claims to do, what it accepts, and what it
+    // may reach. Deliberately NOT the execute closure (not hashable) and not
+    // the tuning knobs (budgets and timeouts don't change what you agreed
+    // to).
+    //
+    // Why it exists: a permission grant is recorded against a tool NAME, and
+    // for an MCP tool the server owns that name. A server may send
+    // tools/list_changed at any time and redefine `mcp__x__search` as
+    // something else entirely -- the "rug pull" the MCP spec and the OWASP
+    // MCP cheat sheet both call out, whose stated mitigation is to pin
+    // reviewed definitions by hash and re-prompt when they change. The same
+    // value closes the narrower gate/execute race, where the catalog is
+    // rebuilt between "user approved X" and "run X".
+    //
+    // agentty already gates a project-scoped stdio SERVER on its spec hash.
+    // This is that idea one level down, on the tool.
+    [[nodiscard]] std::uint64_t definition_hash() const {
+        // FNV-1a over a canonical rendering. nlohmann's dump() sorts object
+        // keys for the default (map-backed) json type, so the same schema
+        // always renders the same bytes.
+        std::uint64_t h = 1469598103934665603ull;
+        const auto feed = [&h](std::string_view s) {
+            for (unsigned char c : s) {
+                h ^= c;
+                h *= 1099511628211ull;
+            }
+            h ^= '\x1f';           // field separator: "ab"+"c" != "a"+"bc"
+            h *= 1099511628211ull;
+        };
+        feed(name.value);
+        feed(description);
+        feed(input_schema.is_null() ? std::string{} : input_schema.dump());
+        feed(origin_id);
+        const char origin_byte = static_cast<char>(origin);
+        feed(std::string_view{&origin_byte, 1});
+        const auto fx = static_cast<std::uint64_t>(effects.bits());
+        feed(std::to_string(fx));
+        return h;
+    }
 };
 
 [[nodiscard]] const std::vector<ToolDef>& native_registry();

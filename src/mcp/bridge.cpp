@@ -499,8 +499,12 @@ tools::EffectSet effects_for(const ::mcp::Tool& t, bool trust_annotations) {
     const bool destructive = a.destructiveHint.has_value() && *a.destructiveHint;
     if (read_only && !destructive) {
         // Read-only remote tool: it observes the world but does not mutate it.
-        // Model it as ReadFs|Net (the two non-exclusive, permission-free
-        // effects) so the permission policy treats it like `read`/`grep`.
+        // ReadFs|Net, which still PROMPTS under Ask and Minimal because Net is
+        // in the set -- the call's arguments leave this process either way.
+        // (An earlier comment here called these "the two permission-free
+        // effects" and said the policy treats them like read/grep. It does
+        // not: policy.hpp prompts for Net under Ask. The code was always the
+        // conservative thing; only the comment was wrong.)
         return tools::EffectSet{Effect::ReadFs, Effect::Net};
     }
     return full;
@@ -910,8 +914,15 @@ tools::ToolDef make_search_tools_tool(PoolHandle pool) {
     };
     def.origin = tools::ToolOrigin::Mcp;
     def.origin_id = "catalog";
-    def.effects = tools::EffectSet{};
-    def.scheduling_effects = tools::EffectSet{};
+    // Not Pure. Pure means "no IO at all", which is the one class the policy
+    // allows even under Minimal -- and this walks the registry, which can
+    // trigger a blocking list_tools RPC to every connected server
+    // (cap/registry.hpp rebuild_ -> provider->list()). ReadFs|Net is what a
+    // read-only MCP tool carries, and this reads the same servers' catalogs,
+    // so it carries the same thing. Effects describe what a tool CAN reach,
+    // not how harmless its intent is.
+    def.effects = tools::EffectSet{tools::Effect::ReadFs, tools::Effect::Net};
+    def.scheduling_effects = def.effects;
     def.max_output_chars = 12'000;
     def.always_expose = true;
     def.execute = [pool](const json& args) -> tools::ExecResult {

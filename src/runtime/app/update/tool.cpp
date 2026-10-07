@@ -621,7 +621,7 @@ Cmd tool_update(Model& m, msg::ToolMsg tm) {
             // tail — a frozen turn is by definition past every pending
             // permission. with_live_tool's frozen-prefix gate is the
             // structural guarantee of that invariant.
-            with_live_tool(m, id, [&](ToolUse& tc) {
+            with_live_tool(m, id, [&, shown = m.d.pending_permission->def_hash](ToolUse& tc) {
                 // Mark approval as type state: Pending → Approved.
                 // kick_pending_tools then treats Approved as
                 // "permission already granted" and routes through
@@ -630,6 +630,10 @@ Cmd tool_update(Model& m, msg::ToolMsg tm) {
                 // freshly approved Write/Bash waits for it instead
                 // of racing.
                 tc.status = ToolUse::Approved{tc.started_at()};
+                // What the user actually saw. If the catalog is rebuilt
+                // between here and the launch, execute_approved refuses
+                // rather than running a different tool under this name.
+                tc.approved_def_hash = shown;
             });
             m.d.pending_permission.reset();
             return cmd::kick_pending_tools(m);
@@ -671,8 +675,9 @@ Cmd tool_update(Model& m, msg::ToolMsg tm) {
                          "Shift+Tab profile cycle resets)";
             m.s.status_until = std::chrono::steady_clock::now()
                              + std::chrono::seconds{4};
-            with_live_tool(m, id, [&](ToolUse& tc) {
+            with_live_tool(m, id, [&, shown = m.d.pending_permission->def_hash](ToolUse& tc) {
                 tc.status = ToolUse::Approved{tc.started_at()};
+                tc.approved_def_hash = shown;   // see PermissionApprove
             });
             m.d.pending_permission.reset();
             return Cmd::batch(std::move(grant_save),

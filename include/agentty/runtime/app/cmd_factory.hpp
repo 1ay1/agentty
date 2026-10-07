@@ -117,7 +117,11 @@ void soft_trim_to_ceiling(std::vector<Message>& v, int ceiling);
                                       ToolName tool_name,
                                       nlohmann::json args,
                                       http::CancelTokenPtr cancel = {},
-                                      std::uint64_t exec_seq = 0);
+                                      std::uint64_t exec_seq = 0,
+                                      // Fingerprint of the definition consent
+                                      // was given for; re-checked immediately
+                                      // before execute. 0 skips the check.
+                                      std::uint64_t approved_def_hash = 0);
 
 // Inspect the latest assistant turn and either fire off pending tool calls,
 // request permission, or kick the follow-up stream once tool results are in.

@@ -272,6 +272,12 @@ struct ToolUse {
     // Streaming-time scratch only — not persisted; default-init on
     // load is correct.
     bool           stream_mid_string_truncated = false;
+    // The tool definition that consent was given for -- either by the user at
+    // the prompt, or by the policy when it auto-allowed. Checked immediately
+    // before execute, so a catalog rebuilt in between (tools/list_changed, an
+    // mcp reload) cannot swap a different tool under an approved name.
+    // 0 means nothing was recorded and the check is skipped.
+    std::uint64_t  approved_def_hash = 0;
     Status         status   = Pending{};
 
     // ── State predicates ─────────────────────────────────────────────────
@@ -1064,6 +1070,11 @@ struct PendingPermission {
     ToolCallId  id;
     ToolName    tool_name;
     std::string reason;
+    // The definition the user is being SHOWN, fingerprinted. Verified again
+    // at launch, because an MCP server can redefine a tool name while the
+    // prompt is on screen and the grant is recorded against the name.
+    // 0 means "not recorded", which skips the check.
+    std::uint64_t def_hash = 0;
 };
 
 } // namespace agentty
