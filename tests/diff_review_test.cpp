@@ -221,8 +221,15 @@ int main() {
             make_change("d.txt", before, after));
         m.ui.panel.descend(agentty::ui::panel::DiffReview{{0, 0}});
         auto s = apply_fx(detail::step(detail::diff_review_update, std::move(m), AcceptHunk{}));
-        check(g_writes.count("d.txt") == 1,
-              "last-hunk accept persisted without an extra keystroke");
+        // ACCEPTING writes nothing — the tool already put that content on
+        // disk, so persist() skips the file ("nothing to revert; disk is
+        // correct"). Same contract the accept-all case above asserts. This
+        // used to demand a write, which made "did it commit?" unanswerable
+        // for an all-accepted review and left the test permanently red.
+        // Re-writing identical bytes would also clobber anything the user
+        // changed since the tool ran.
+        check(g_writes.count("d.txt") == 0,
+              "accepting the last hunk needs no write — disk already matches");
         check(s.first.d.pending_changes.empty(), "queue cleared on auto-close");
         check(!s.first.ui.panel.is<agentty::ui::panel::DiffReview>(),
               "pane closed itself after the last hunk was decided");

@@ -78,12 +78,21 @@ static void diff_review_checks() {
     check(has(out, "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"), "diff: has a rule");
     check(!has_mojibake(out), "diff: no mojibake");
 
-    // All-reviewed state: mark every hunk accepted → the apply affordance.
+    // Every hunk decided. There is deliberately NO "all reviewed" banner:
+    // the pane closes itself when the last pending hunk is decided, so Esc
+    // never has to mean two opposed things (apply-at-end vs keep-the-rest
+    // mid-review). See the comment in view/diff_review.cpp.
+    //
+    // This probe used to assert the banner, which the auto-close work
+    // removed on purpose -- the check outlived the affordance and sat red.
+    // Pin the ABSENCE instead, so the contradiction can't creep back in.
     for (auto& fc : m.d.pending_changes)
         for (auto& hk : fc.hunks) hk.status = Hunk::Status::Accepted;
     std::string done = maya::render_to_string(ui::diff_review(m), 84);
-    check(has(done, "all reviewed"), "diff: all-reviewed banner appears");
-    check(has(done, "\xe2\x96\x88"), "diff: progress bar fills (█) when done");
+    check(!has(done, "all reviewed"),
+          "diff: no all-reviewed banner — the pane auto-closes instead");
+    check(has(done, "reviewed"), "diff: progress counter still reads N/N");
+    check(has(done, "\xe2\x96\x88"), "diff: progress bar fills (\xe2\x96\x88) when done");
 }
 
 int main() {

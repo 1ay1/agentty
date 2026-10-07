@@ -36,8 +36,13 @@ if(NOT IS_DIRECTORY "${_dotdir}")
 endif()
 
 # CONFIG -- hand-authored, committed, the team's.
+# .gitignore is seeded by dirs.cpp on first use and hand-edited after (it
+# says so in its own header), and it carries the team's ignore rules -- so
+# it is config, and it belongs in git like any other .gitignore. It was
+# missing from this list entirely, which meant the lint failed for anyone
+# who had ever run agentty in a project.
 set(_config
-    settings.json mcp.json hooks.json
+    settings.json mcp.json hooks.json .gitignore
     skills agents commands knowledge)
 
 # LOCAL CONFIG -- hand-authored, gitignored, yours.
