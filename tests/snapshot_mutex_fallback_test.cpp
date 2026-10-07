@@ -77,9 +77,22 @@ int main() {
         hot.store(std::vector<std::string>{"seed"});
         std::atomic<bool> stop{false};
         std::atomic<long> reads{0};
+        // Readers announce themselves. Without this the assertion below is a
+        // bet on the scheduler: the writer can finish all 5000 stores and set
+        // `stop` before a reader is ever run, leaving reads==0 and failing a
+        // test that found nothing wrong. It passed alone and failed under
+        // ctest -j12, which is the signature every time.
+        std::atomic<int> ready{0};
+        constexpr int kReaders = 4;
         std::vector<std::thread> readers;
-        for (int i = 0; i < 4; ++i) {
+        for (int i = 0; i < kReaders; ++i) {
             readers.emplace_back([&] {
+                // One load BEFORE announcing, so "ready" means this thread has
+                // actually exercised the slot, not merely started.
+                if (auto h = hot.load())
+                    reads.fetch_add(static_cast<long>(h->size()),
+                                    std::memory_order_relaxed);
+                ready.fetch_add(1, std::memory_order_release);
                 while (!stop.load(std::memory_order_relaxed)) {
                     auto h = hot.load();
                     if (h) reads.fetch_add(static_cast<long>(h->size()),
@@ -87,11 +100,17 @@ int main() {
                 }
             });
         }
+        // Every reader has read once, so the storm below genuinely overlaps
+        // live readers rather than racing their startup.
+        while (ready.load(std::memory_order_acquire) < kReaders)
+            std::this_thread::yield();
+
         for (int i = 0; i < 5000; ++i)
             hot.store(std::vector<std::string>(static_cast<std::size_t>(i % 8) + 1, "v"));
         stop.store(true);
         for (auto& t : readers) t.join();
-        check(reads.load() > 0, "concurrent readers saw published generations");
+        check(reads.load() >= kReaders,
+              "concurrent readers saw published generations");
         check(hot.has_value(), "the slot survives a write storm");
     }
 

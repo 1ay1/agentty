@@ -42,6 +42,7 @@
 // The OWNED, join-on-destruction thread this header used to export is gone:
 // it had no callers, and jaal::scope covers that shape properly.
 
+#include <chrono>
 #include <concepts>
 #include <exception>
 #include <source_location>
@@ -190,5 +191,89 @@ void run_isolated_detached(std::string_view where, Body body,
     background_pool().post_isolated(
         detail::guarded_body(where, loc, std::move(body)));
 }
+
+// ── WorkerGroup ─ background work tied to ONE object's lifetime ────────
+//
+// The third shape, and the one the table above was missing. Not "finishes
+// before this frame returns" (jaal::scope) and not "outlives the frame, nobody
+// waits" (run_isolated_detached), but: a long-lived OBJECT owns workers that
+// touch its collaborators, and its stop() is a HARD BARRIER — when stop()
+// returns, no job is running, so the caller may safely destroy things the jobs
+// were using.
+//
+// WHY THIS IS NOT run_isolated_detached
+//
+// jaal's pool shutdown is deliberately BOUNDED: it asks, waits out a grace,
+// then abandons. Abandoning is safe for anything the worker CO-OWNS — that is
+// why the pool keeps its own state in a shared core. It is not safe for
+// something a THIRD party owns and is about to free.
+//
+// agentty's MCP HTTP transport is exactly that case: its POST workers feed
+// responses into an mcp::RpcEngine owned by the ClientProvider base class,
+// and the provider destroys that engine right after stop() returns. Making
+// the worker co-own the transport does not help, because the dangling thing
+// is the ENGINE, which the transport cannot co-own. So "wait as long as it
+// takes" is a real requirement and not timidity.
+//
+// Each such site used to hand-roll it: a mutex, a condition variable, an
+// inflight counter, and an alive flag that had to flip under the SAME lock as
+// the counter so a stop() could not slip between "alive check passed" and
+// "counter incremented". That coupling is subtle, it was commented at length,
+// and it is the kind of thing that should exist once. The pool already does
+// the hard half: post_isolated counts a job under its own lock BEFORE the
+// thread exists, which is precisely that check-then-increment atomicity.
+//
+// So this adds exactly one thing to the pool — a barrier grace instead of a
+// teardown grace — and takes the lifetime bookkeeping off the call site.
+class WorkerGroup {
+  public:
+    /// `where` labels the group in logs. Static storage, same contract as the
+    /// spawn functions above.
+    explicit WorkerGroup(std::string_view where) : where_(where) {}
+
+    WorkerGroup(const WorkerGroup&)            = delete;
+    WorkerGroup& operator=(const WorkerGroup&) = delete;
+
+    /// Joins on destruction, so an object that forgets to call stop() is
+    /// still safe — it just blocks later than it meant to.
+    ~WorkerGroup() { stop(); }
+
+    /// Run `body` on a thread of its own. Dropped if the group is already
+    /// stopped, which is the admission half of the old alive_/inflight_
+    /// coupling and is handled inside the pool under its own lock.
+    ///
+    /// Isolated rather than queued because these jobs block on network IO by
+    /// nature; a queued one would occupy a shared worker for its duration.
+    template <WorkerBody Body>
+    void post(Body body,
+              std::source_location loc = std::source_location::current()) {
+        pool_.post_isolated(detail::guarded_body(where_, loc, std::move(body)));
+    }
+
+    /// Barrier: when this returns, no job posted to this group is running.
+    /// Idempotent — the pool's shutdown is, and stop() is reached from both
+    /// an explicit teardown path and the destructor.
+    ///
+    /// The grace is long ON PURPOSE. Everywhere else in agentty a bounded
+    /// shutdown is the right answer, because the alternative is a process
+    /// that will not exit. Here the alternative is a worker writing into a
+    /// freed engine, so waiting is the lesser harm. A job that hangs forever
+    /// hangs this — which is why `post` belongs to work that carries its own
+    /// timeout, as the HTTP transport's does.
+    void stop() noexcept {
+        const std::size_t stuck =
+            pool_.shutdown(std::chrono::minutes(5));
+        if (stuck > 0)
+            dbglog(std::string{where_},
+                   "gave up waiting for " + std::to_string(stuck)
+                       + " worker(s) — a job ignored its own timeout");
+    }
+
+  private:
+    std::string_view   where_;
+    // One worker: these groups serialize their own calls (the MCP provider
+    // holds a call mutex), so a second would never be used.
+    jaal::kernel::pool pool_{/*max_workers=*/1};
+};
 
 } // namespace agentty::util

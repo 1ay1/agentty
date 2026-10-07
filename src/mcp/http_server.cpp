@@ -38,14 +38,14 @@
 
 #include <atomic>
 #include <chrono>
-#include <condition_variable>
 #include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <string_view>
-#include <thread>
 #include <vector>
+
+#include "agentty/util/background.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -130,26 +130,23 @@ public:
     [[nodiscard]] bool alive() const noexcept { return alive_.load(std::memory_order_acquire); }
 
     void stop() {
-        // alive_ flips under worker_mu_ so it forms a single atomic unit with
-        // the inflight_ accounting: dispatch() checks alive_ AND increments
-        // inflight_ under the same lock, so stop() can never slip between
-        // "alive check passed" and "inflight_ incremented" — that gap let
-        // stop() see inflight_==0, return, and free this object while the
-        // dispatcher went on to lock the (destroyed) mutex.
-        {
-            std::lock_guard<std::mutex> lk(worker_mu_);
-            alive_.store(false, std::memory_order_release);
-        }
+        // Admission is the WorkerGroup's job now: workers_.stop() refuses
+        // further posts under the pool's own lock, which is the same
+        // check-then-admit atomicity the alive_/inflight_ pair hand-rolled
+        // (and the reason alive_ used to have to flip under worker_mu_).
+        // alive_ is left as the plain liveness flag the provider reads.
+        alive_.store(false, std::memory_order_release);
         {
             std::lock_guard<std::mutex> lk(mu_);
             if (cancel_) cancel_->cancel();
         }
-        // Wait for any in-flight POST worker to finish before returning, so
-        // the caller can safely drop the engine afterwards (no detached thread
-        // touches engine_ post-stop). ClientProvider serializes calls behind
-        // call_mu_, so at most one worker is ever in flight.
-        std::unique_lock<std::mutex> lk(worker_mu_);
-        worker_done_.wait(lk, [this] { return inflight_ == 0; });
+        // Hard barrier: when this returns no POST worker is running, so the
+        // caller may safely drop the engine our workers feed. That guarantee
+        // is WHY this is a WorkerGroup and not run_isolated_detached — the
+        // engine belongs to the ClientProvider base and is destroyed right
+        // after we return, and a bounded grace would let an abandoned worker
+        // write into it.
+        workers_.stop();
     }
 
     // The Transport sink the engine writes through.
@@ -165,57 +162,25 @@ private:
     }
 
     void dispatch(std::string frame) {
-        // NOT on util::run_isolated_detached / jaal's pool, and the reason is
-        // the wait below rather than the spawn here.
+        if (!alive_.load(std::memory_order_acquire)) return;   // stopped
+        // POST off this thread: the caller IS the engine's request_raw, which
+        // blocks on the response promise the moment it returns. POSTing inline
+        // would mean nobody is left to feed the response.
         //
-        // The pool's shutdown is BOUNDED: it asks jobs to stop, waits out the
-        // grace, then abandons whatever is still running. That is safe for
-        // the pool's own state because a worker co-owns it through a
-        // shared_ptr. These workers capture raw `this`, so an abandoned one
-        // would keep calling into a transport its owner has already
-        // destroyed. stop() therefore waits UNBOUNDED on purpose.
-        //
-        // Migrating means first moving the state these workers touch
-        // (engine_, feed, alive_) behind a shared core the worker co-owns,
-        // exactly the trick jaal::kernel::pool uses internally. Then
-        // post_isolated's stopping flag replaces the alive_/inflight_
-        // coupling below for free: it counts a job under the pool's own lock
-        // BEFORE the thread exists, which is the same check->increment
-        // atomicity this hand-rolls. Until the core is shared, the bounded
-        // wait would trade a hang for a use-after-free.
-        //
-        // Check alive_ and claim an inflight slot as ONE atomic step (see
-        // stop() — this closes the check→increment gap a concurrent stop()
-        // could otherwise slice through and tear the object down under us).
-        {
-            std::lock_guard<std::mutex> lk(worker_mu_);
-            if (!alive_.load(std::memory_order_acquire)) return;   // stopped
-            ++inflight_;
-        }
-        // POST on a worker thread: the calling thread is the engine's
-        // request_raw, which immediately blocks on the response promise. If we
-        // POSTed inline we'd never feed the response (the same thread is stuck).
-        try {
-            std::thread([this, frame]() mutable {
-                try {
-                    post_and_feed(frame);
-                } catch (const std::exception& error) {
-                    fail_request(frame, error.what());
-                } catch (...) {
-                    fail_request(frame, "unknown transport exception");
-                }
-                std::lock_guard<std::mutex> lk(worker_mu_);
-                if (--inflight_ == 0) worker_done_.notify_all();
-            }).detach();
-        } catch (const std::exception& error) {
-            fail_request(frame, error.what());
-            std::lock_guard<std::mutex> lk(worker_mu_);
-            if (--inflight_ == 0) worker_done_.notify_all();
-        } catch (...) {
-            fail_request(frame, "could not start HTTP transport worker");
-            std::lock_guard<std::mutex> lk(worker_mu_);
-            if (--inflight_ == 0) worker_done_.notify_all();
-        }
+        // The worker's accounting, admission and the shutdown barrier all
+        // belong to the group (util/background.hpp). What used to be here —
+        // a mutex, a condition variable, an inflight counter and three
+        // separate decrement-and-notify paths for the error cases — is the
+        // bookkeeping that is now written once instead of per call site.
+        workers_.post([this, frame]() mutable {
+            try {
+                post_and_feed(frame);
+            } catch (const std::exception& error) {
+                fail_request(frame, error.what());
+            } catch (...) {
+                fail_request(frame, "unknown transport exception");
+            }
+        });
     }
 
     void fail_request(const std::string& frame, std::string_view reason) noexcept {
@@ -477,10 +442,10 @@ private:
     bool                      http_status_401_ = false;
     std::string               resource_metadata_url_;
     http::CancelTokenPtr      cancel_;
-    // In-flight POST worker accounting so stop() can join before teardown.
-    std::mutex                worker_mu_;
-    std::condition_variable   worker_done_;
-    int                       inflight_ = 0;
+    // POST workers. The group owns their accounting, their admission after
+    // stop(), and the shutdown barrier — see util/background.hpp for why this
+    // one waits rather than abandoning.
+    util::WorkerGroup         workers_{"mcp.http_transport.worker"};
 };
 
 // ── HttpServerProvider ─────────────────────────────────────────────────────

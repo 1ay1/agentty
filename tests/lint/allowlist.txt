@@ -184,7 +184,11 @@ provider/openai/transport.cpp: mutex
 
 # ── MCP and RAG: their own servers and index workers ─────────────────────
 mcp/bridge.cpp: mutex atomic async
-mcp/http_server.cpp: thread mutex atomic detach
+# http_server: the POST workers moved to util::WorkerGroup, so the thread,
+# the condition variable, the inflight counter and the detach are gone. The
+# mutex guards the session id / protocol version / cancel token; the atomic
+# is the liveness flag the provider reads.
+mcp/http_server.cpp: mutex atomic
 mcp/oauth.cpp: mutex atomic
 rag/adapter.cpp: thread mutex atomic
 
