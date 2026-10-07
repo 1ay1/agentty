@@ -453,7 +453,20 @@ SpawnResult spawn_shell(const Posture& p, const std::string& shell_cmd, int stdo
     cmd.stdout_fd = stdout_fd;
     cmd.stderr_fd = stderr_fd;
 
-    auto spawned = spawn(compiled->plan, cmd);
+    // Hold the compiled posture for as long as the guest runs. It OWNS the
+    // cgroup: letting it die closes the handle and rmdirs the group, which
+    // would both drop the limits and lose the only reliable way to kill the
+    // tree. shared_ptr because the kill hook below outlives this function.
+    using Compiled = std::remove_reference_t<decltype(*compiled)>;
+    auto held = std::make_shared<Compiled>(std::move(*compiled));
+
+    // spawn_in, NOT spawn. spawn() forwards an EMPTY group, and spawn_in only
+    // ever looks at the group it is handed -- never at the compiled posture --
+    // so the plain call left the guest in no cgroup at all. describe() was
+    // meanwhile reporting `resource.memory strong via cgroup2` off the same
+    // compile, so the pane advertised a wall that was never erected. One call,
+    // two things fixed: the limits now bind, and the group exists to kill.
+    auto spawned = spawn_in(held->plan, cmd, held->cgroup);
     if (!spawned) {
         out.start_error = "claybin: spawn failed: " + std::string{spawned.error().mechanism} +
                           " (errno " + std::to_string(spawned.error().sys_errno) + ")";
@@ -463,6 +476,13 @@ SpawnResult spawn_shell(const Posture& p, const std::string& shell_cmd, int stdo
     out.started = true;
     out.pid = spawned->pid;
     out.pidfd = spawned->pidfd;
+
+    // Killing the tree, when the kernel gives us the means (cgroup.kill,
+    // 5.14+). Left empty otherwise so the runner keeps its process-group
+    // fallback rather than believing a kill that did nothing.
+    if (held->cgroup.valid() && held->cgroup.kill_supported()) {
+        out.kill_tree = [held]() -> bool { return held->cgroup.kill().has_value(); };
+    }
 
     // The seccomp listener, when the policy brokers syscalls.
     //

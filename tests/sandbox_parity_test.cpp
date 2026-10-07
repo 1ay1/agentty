@@ -484,3 +484,55 @@ TEST_CASE("sandbox: the two implementations select the SAME backend") {
     // what the startup banner reports.
     CHECK(ag::is_active() == mc::is_active());
 }
+
+#if defined(__linux__)
+// ── the cgroup has to actually hold the guest ───────────────────────────
+//
+// describe() reports `resource.memory strong via cgroup2` whenever compile()
+// managed to create a group. But the spawn used clay::spawn(), and that
+// forwards an EMPTY group to spawn_in() -- which only ever looks at the group
+// it is handed, never at the compiled posture. So on a host that DOES
+// delegate, the group was created, reported, and then nothing was ever put in
+// it: the pane advertised a wall that was never erected.
+//
+// It is also the difference between being able to kill a runaway and not.
+// Signalling the process group misses any descendant that called setsid();
+// cgroup.kill cannot be escaped that way.
+//
+// Only checkable where the host delegates a subtree. A plain desktop systemd
+// session does NOT: the scope is root-owned and cgroup.subtree_control is
+// unwritable, so claybin's probe says undelegable, compile() creates no
+// group, and the process-group fallback is the honest outcome. Containers and
+// delegated user slices are where this test does its work.
+//
+// Measured by asking the guest where it lives, because that is the only
+// answer the reporting path cannot fake.
+TEST_CASE("sandbox: a claybin guest runs inside its own cgroup") {
+    if (clay::cgroup::probe().availability != clay::cgroup::Availability::delegated)
+        return;   // nothing to attach to on this host; see above
+    if (!ag::init(ag::Mode::On) || !ag::is_active()) return;
+    if (ag::detected_backend() != ag::Backend::Claybin) return;
+
+    std::ifstream self("/proc/self/cgroup");
+    std::string ours((std::istreambuf_iterator<char>(self)),
+                     std::istreambuf_iterator<char>());
+    if (ours.empty()) return;   // cgroup v1 or no cgroupfs
+
+    auto r = ag::run_shell_command("cat /proc/self/cgroup", 4096,
+                                   std::chrono::seconds{10});
+    if (!r.started || r.output.empty()) return;   // spawn blocked on this host
+
+    const auto trim = [](std::string s) {
+        while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
+        return s;
+    };
+    const std::string mine  = trim(ours);
+    const std::string guest = trim(r.output);
+    if (guest.find("0::") != 0) return;   // not a cgroup2 answer
+
+    CHECK_MESSAGE(guest != mine,
+                  "the guest must not share agentty's own cgroup -- if it "
+                  "does, spawn never attached it and both the limits and "
+                  "cgroup.kill are fiction");
+}
+#endif

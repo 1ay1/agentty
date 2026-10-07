@@ -676,6 +676,10 @@ SubprocessResult run_posix(const std::vector<std::string>& argv_in,
     // syscall blocks in the kernel until someone answers it.
     int supervisor_fd = -1;
     std::function<bool()> service_supervisor;
+    // Set only by a spawner that can stop the tree better than killpg can
+    // (claybin's cgroup). Hoisted for the same reason as the two above: the
+    // poll loop needs it long after this block.
+    std::function<bool()> kill_tree_fn;
 
     if (opts.spawner) {
         auto child = opts.spawner(opts, piped.write_end.fd);
@@ -688,6 +692,7 @@ SubprocessResult run_posix(const std::vector<std::string>& argv_in,
         pid = child.pid;
         supervisor_fd = child.supervisor_fd;
         service_supervisor = std::move(child.service);
+        kill_tree_fn = std::move(child.kill_tree);
     } else
 #if AGENTTY_HAVE_POSIX_SPAWN
     {
@@ -841,6 +846,19 @@ SubprocessResult run_posix(const std::vector<std::string>& argv_in,
     // last bytes drain on a heavily-buffered pipe; pipe can EOF before
     // waitpid completes if the child is being reparented).
     auto signal_group = [&](int sig) {
+        // SIGTERM is a REQUEST, so it goes to the process group: the point is
+        // to let the child shut down cooperatively, and a cgroup kill offers
+        // no cooperative mode (it is SIGKILL by definition).
+        //
+        // SIGKILL is where the group falls short. A descendant that called
+        // setsid() is no longer in the group and survives it, which is how a
+        // runaway outlives the tool that started it. When the spawner handed
+        // us a tree killer -- claybin's cgroup.kill -- use that instead: one
+        // atomic kernel operation over the whole subtree, nothing to race and
+        // nowhere to escape to. It reports failure rather than throwing, so
+        // the group path below stays the fallback on an old kernel or a host
+        // that could not delegate a cgroup.
+        if (sig == SIGKILL && kill_tree_fn && kill_tree_fn()) return;
         // The child leads its own group (see spawn). Fall back to the
         // leader alone only if the group is already gone.
         if (::kill(-cpid, sig) != 0 && errno == ESRCH)

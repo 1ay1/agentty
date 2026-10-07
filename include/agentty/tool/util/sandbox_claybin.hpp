@@ -141,6 +141,16 @@ struct SpawnResult {
     // includes a claybin header: the decision policy, the TOCTOU recheck and
     // the audit record all live behind this one call.
     std::function<bool()> service_broker;
+
+    // SIGKILL the guest and every descendant, atomically, when the posture got
+    // a cgroup. Empty when it did not (no cgroup2, no delegation, or a kernel
+    // below 5.14 with no cgroup.kill), and the caller then falls back to
+    // signalling the process group.
+    //
+    // The group is not enough on its own: claybin puts the guest in a new
+    // session, but nothing stops a descendant calling setsid() again and
+    // stepping out of it. The cgroup has no such exit.
+    std::function<bool()> kill_tree;
 };
 
 // Can this host actually build the sandbox? Forks and attempts the uid_map

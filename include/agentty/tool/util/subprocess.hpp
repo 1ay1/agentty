@@ -150,6 +150,21 @@ struct SubprocessOptions {
         // layer is what stops this from becoming a second policy engine.
         int supervisor_fd{-1};
         std::function<bool()> service;
+
+        // Stop the whole process tree, if the spawner has a better way than
+        // signalling the process group.
+        //
+        // killpg is what the runner falls back to, and it has a hole: a
+        // descendant that calls setsid() leaves the group and survives. So
+        // does anything the shell re-parented. A sandbox that put the guest
+        // in its own cgroup can close that hole exactly -- cgroup.kill is a
+        // single atomic kernel operation over the whole subtree, with no PID
+        // list to race and nowhere to escape to.
+        //
+        // Returns false if it could not do it, and the runner then uses the
+        // process group as before. Empty means "nothing better available",
+        // which is the normal case for an unsandboxed spawn.
+        std::function<bool()> kill_tree;
     };
     // (command, pipe_write_fd) -> child. `command` is the resolved shell string
     // or argv, already chosen by the variant above.

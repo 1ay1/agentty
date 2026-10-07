@@ -702,6 +702,10 @@ constexpr const char* kHomeToolSubdirs[] = {
             // brokered syscall blocks in the kernel until someone answers.
             out.supervisor_fd = r.supervisor_fd;
             out.service = std::move(r.service_broker);
+            // Empty unless the posture actually got a cgroup with
+            // cgroup.kill. The runner falls back to the process group then,
+            // which is weaker (setsid escapes it) but is all there is.
+            out.kill_tree = std::move(r.kill_tree);
             return out;
         };
         return Subprocess::run(std::move(opts));
