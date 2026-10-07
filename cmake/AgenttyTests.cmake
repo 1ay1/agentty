@@ -128,6 +128,9 @@ agentty_fold_test(wire_encode_bench        TIMEOUT 600 LABELS perf
 agentty_fold_test(symbol_read_corpus       TIMEOUT 600 LABELS perf
                   FIXTURE tests/fixtures/symbol_read_corpus.tsv)
 agentty_fold_test(cross_process_lock_test  TIMEOUT 30)
+# persistence::SharedFile really reaches jaal's lock, on the sidecar, and
+# excludes a second PROCESS. Forks, so it needs its own process.
+agentty_fold_test(shared_file_test        TIMEOUT 30)
 # Drives skills::catalog_block()/activation_payload() with a COLD all() cache
 # and its own HOME — in the shared binary another case has already warmed the
 # mtime cache, so the interesting case (unapproved skill hidden) can't be set

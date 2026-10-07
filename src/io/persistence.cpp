@@ -33,6 +33,7 @@
 
 #include "agentty/tool/util/utf8.hpp"
 #include "agentty/auth/keys.hpp"
+#include "agentty/io/shared_file.hpp"
 #include "agentty/util/base64.hpp"
 #include "agentty/util/dbglog.hpp"
 #include "agentty/util/home_dir.hpp"
@@ -112,52 +113,35 @@ bool write_json_atomic(const fs::path& target, const std::string& content) {
 // whichever process saved last.
 //
 // A mutex cannot fix this -- the writers are separate PROCESSES. The lock has
-// to live in the filesystem. We take it on a SIDECAR (.settings.lock) rather
-// than on settings.json itself, because the atomic write renames a new inode
-// over the target: a lock held on the old inode would protect a file that is
-// no longer there.
+// to live in the filesystem, and that primitive is jaal's
+// (jaal::platform::native_file_lock) rather than a third hand-rolled copy of
+// it here. persistence::SharedFile pairs it with a process-wide mutex,
+// because the two races are different and each lock closes only one of them:
+// see include/agentty/io/shared_file.hpp.
+//
+// Note the correction this replaces: the old comment here claimed F_SETLKW
+// was chosen partly because "it is per-process so a future threaded writer
+// still serialises". That is backwards. Per-process means two THREADS of one
+// process both acquire and neither waits -- jaal's conformance suite pins it
+// as check 13 -- so the mutex is not redundant with the file lock, it is the
+// other half of the fix.
+//
+// The lock sits on a SIDECAR (settings.json.lock) rather than on settings.json
+// itself, because the atomic write renames a new inode over the target: a lock
+// held on the old inode would protect a file that is no longer there.
 //
 // Advisory, and deliberately best-effort: if the lock cannot be taken we log
 // and proceed with the plain write. Losing an update is bad, but refusing to
 // save the user's settings because a lock file was unavailable is worse.
-class SettingsLock {
-public:
-    SettingsLock() {
-#ifndef _WIN32
-        const fs::path p = data_dir() / ".settings.lock";
-        fd_ = ::open(p.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0600);
-        if (fd_ < 0) return;
-        // Blocking, because the contending window is one small JSON write.
-        // F_SETLKW rather than flock(): it works on NFS, and it is per-process
-        // so a future threaded writer still serialises.
-        struct ::flock fl{};
-        fl.l_type   = F_WRLCK;
-        fl.l_whence = SEEK_SET;
-        while (::fcntl(fd_, F_SETLKW, &fl) == -1) {
-            if (errno == EINTR) continue;   // a signal, not a failure
-            ::close(fd_);
-            fd_ = -1;
-            return;
-        }
-        held_ = true;
-#endif
-    }
+std::mutex& settings_mu() {
+    static std::mutex m;
+    return m;
+}
 
-    ~SettingsLock() {
-#ifndef _WIN32
-        if (fd_ >= 0) ::close(fd_);   // closing releases the F_SETLKW lock
-#endif
-    }
-
-    SettingsLock(const SettingsLock&) = delete;
-    SettingsLock& operator=(const SettingsLock&) = delete;
-
-    [[nodiscard]] bool held() const noexcept { return held_; }
-
-private:
-    int  fd_   = -1;
-    bool held_ = false;
-};
+fs::path data_dir();
+// One name for the file, so the lock sidecar and the writes can never drift
+// onto different paths.
+fs::path settings_path() { return data_dir() / "settings.json"; }
 
 fs::path data_dir() {
     // The single per-user root (~/.agentty or $AGENTTY_HOME) — see
@@ -1250,19 +1234,40 @@ namespace {
 
 fs::path thread_index_path() { return threads_dir() / "index.json"; }
 
-// index.json is read-modify-written from TWO threads: the AsyncWriter
-// worker (reindex_thread, after each save) and the UI/reducer thread
-// (delete_thread, load_all_threads). Without a lock the two interleave
-// as a classic lost update — both read the same map, both write their
-// own stale copy, and whichever lands second silently drops the other's
-// entry. write_json_atomic's rename means the file never CORRUPTS, so
-// the damage shows up as a ghost row in the picker (a deleted thread
-// that reappears) or a stale title, and it persists until the next cold
-// rebuild. One process-wide mutex held across the whole read-modify-
-// write closes it. Contention is nil: these are startup + per-save.
+// index.json is read-modify-written from two THREADS of this process (the
+// AsyncWriter worker via reindex_thread, and the UI/reducer thread via
+// delete_thread / load_all_threads) and from every other RUNNING AGENTTY.
+// Both are the same lost update: everyone reads the same map, everyone
+// writes their own stale copy, and whichever lands last drops the others'
+// entries.
+//
+// WHAT THAT ACTUALLY COSTS, measured rather than assumed: this file is a
+// CACHE, not the record. load_all_threads() enumerates the threads
+// directory and only trusts an index entry whose recorded mtime still
+// matches the file's; a lost entry is a cache miss, so the thread is
+// re-parsed and the index self-heals. So the damage is a slower load and a
+// briefly stale title in the picker — NOT a thread that disappears. The
+// fix is still worth having (it is cheap, and the guarantee this comment
+// used to assert was not actually in force) but it is a performance and
+// freshness fix, and claiming otherwise would send the next reader hunting
+// a data-loss bug that is not here.
+//
+// A mutex alone closes only the in-process half — it is invisible to the
+// other process, and two agentty windows is the normal way to use this
+// program. A file lock alone closes only the cross-process half: POSIX
+// record locks belong to the process, so our own two threads both walk
+// through it (jaal's file_lock conformance check 13). persistence::SharedFile
+// takes both; see include/agentty/io/shared_file.hpp for why neither is
+// sufficient. Contention is nil: these are startup + per-save.
 std::mutex& thread_index_mu() {
     static std::mutex m;
     return m;
+}
+
+// The critical section for index.json. Every read_thread_index_locked /
+// write_thread_index_locked pair must sit inside ONE of these.
+[[nodiscard]] persistence::SharedFile lock_thread_index() {
+    return persistence::SharedFile{thread_index_mu(), thread_index_path()};
 }
 
 struct IndexEntry {
@@ -1327,7 +1332,7 @@ long long file_size_bytes(const fs::path& p) {
     return static_cast<long long>(s);
 }
 
-// Raw index read. PRECONDITION: caller holds thread_index_mu(). The
+// Raw index read. PRECONDITION: caller holds lock_thread_index(). The
 // read and the matching write must sit inside ONE critical section or
 // the lost-update race described above reopens.
 std::unordered_map<std::string, IndexEntry> read_thread_index_locked() {
@@ -1373,7 +1378,7 @@ std::unordered_map<std::string, IndexEntry> read_thread_index_locked() {
     return out;
 }
 
-// Raw index write. PRECONDITION: caller holds thread_index_mu().
+// Raw index write. PRECONDITION: caller holds lock_thread_index().
 void write_thread_index_locked(const std::unordered_map<std::string, IndexEntry>& idx) {
     json threads = json::object();
     for (const auto& [id, e] : idx) {
@@ -1422,7 +1427,7 @@ void reindex_thread(const Thread& t) {
     // whole update is atomic with respect to delete_thread().
     const long long mt = file_mtime_secs(file);
     const long long sz = file_size_bytes(file);
-    std::lock_guard<std::mutex> lk(thread_index_mu());
+    const auto guard = lock_thread_index();
     auto idx = read_thread_index_locked();
     IndexEntry ie;
     ie.title      = t.title;
@@ -1450,8 +1455,9 @@ std::vector<Thread> load_all_threads() {
 
     // Held across the whole walk: the read at the top and the refresh at
     // the bottom are one read-modify-write, and a save landing in the
-    // middle must not have its entry clobbered by our `fresh` snapshot.
-    std::lock_guard<std::mutex> lk(thread_index_mu());
+    // middle — from this process OR another instance — must not have its
+    // entry clobbered by our `fresh` snapshot.
+    const auto guard = lock_thread_index();
     auto index = read_thread_index_locked();
     std::unordered_map<std::string, IndexEntry> fresh;
     fresh.reserve(index.size() + 8);
@@ -2361,9 +2367,10 @@ void delete_thread(const ThreadId& id) {
     // path — an orphaned blob costs disk, a wrongly-deleted one costs data.
     // Drop the metadata index entry too so the picker list doesn't show
     // a ghost row until the next full walk prunes it. Under the index
-    // lock: a concurrent reindex_thread() on the AsyncWriter worker
-    // would otherwise resurrect this id from its stale in-memory copy.
-    std::lock_guard<std::mutex> lk(thread_index_mu());
+    // lock: a concurrent reindex_thread() on the AsyncWriter worker, or
+    // in another agentty instance, would otherwise resurrect this id
+    // from its stale copy.
+    const auto guard = lock_thread_index();
     auto idx = read_thread_index_locked();
     if (idx.erase(id.value) > 0) write_thread_index_locked(idx);
 }
@@ -2389,7 +2396,7 @@ std::mutex& baseline_mu() {
 
 store::Settings load_settings() {
     store::Settings s;
-    std::ifstream ifs(data_dir() / "settings.json");
+    std::ifstream ifs(settings_path());
     if (!ifs) return s;
     try {
         json j; ifs >> j;
@@ -2710,12 +2717,12 @@ void save_settings(const store::Settings& s) {
     // Held for the WHOLE read-modify-write, not just the write. Two instances
     // each serialise their own full in-memory record, so without this the
     // second writer silently reverts every field the first one changed --
-    // see SettingsLock for the five-instance theme-revert this fixes.
+    // see settings_mu() for the five-instance theme-revert this fixes.
     //
     // Taken BEFORE the json is built so the document we emit cannot be
     // composed from state that another process invalidates while we work.
-    SettingsLock lock;
-    if (!lock.held())
+    const persistence::SharedFile lock{settings_mu(), settings_path()};
+    if (!lock.cross_process())
         AGT_LOG(Persist, Warn, "settings.save",
                 "result=unlocked reason=lock_unavailable (concurrent writes may be lost)");
 

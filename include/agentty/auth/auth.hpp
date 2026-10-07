@@ -260,8 +260,22 @@ void set_pending_refresh(std::string refresh_token);
 [[nodiscard]] std::optional<std::string>
 oauth_proactive_refresh_token(std::int64_t window_ms = 5 * 60 * 1000);
 
-// ── Cross-process advisory file lock (thundering-herd guard) ─────────────
+// ── Cross-process advisory file lock (thundering-herd guard) ─────────
 // RAII exclusive lock on `<path>.lock` (POSIX flock / Windows LockFileEx).
+//
+// WHY THIS IS NOT persistence::SharedFile / jaal::platform::native_file_lock.
+// Deliberate, not drift. jaal's POSIX backend uses fcntl record locks, which
+// are owned by the PROCESS: two threads of one agentty both acquire and
+// neither waits. This lock uses flock, which is owned by the OPEN FILE
+// DESCRIPTION — each CrossProcessFileLock opens its own descriptor, so two
+// threads of one process DO contend here. The refresh path depends on that:
+// refresh_access_token_locked() is reached from several callers and only some
+// of them hold the process-local refresh mutex, so losing the in-process
+// exclusion would re-open the rotating-refresh-token loop this lock exists to
+// close. Moving it to jaal means also moving the mutex pairing to every
+// caller; until then, flock's stronger guarantee is the safe choice and this
+// comment is the reason.
+//
 // Blocking on construction; released on destruction. Best-effort: if the
 // lock file can't be created/locked, held() is false and the caller should
 // proceed unlocked (no worse than no lock). Used to serialize OAuth token

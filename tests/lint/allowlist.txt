@@ -70,6 +70,10 @@ io/tls.cpp: mutex const_cast
 # The AsyncWriter owns a background worker thread that batches JSONL appends;
 # see persistence.cpp AsyncWriter. Joined at shutdown via the teardown registry.
 io/persistence.cpp: mutex thread
+# The cross-process critical section. The mutex IS the point: it closes the
+# in-process half of the race that the file lock cannot (jaal's file_lock
+# conformance check 13). See include/agentty/io/shared_file.hpp.
+io/shared_file.cpp: mutex
 io/auth.cpp: mutex atomic const_cast
 io/keystore.cpp: const_cast
 io/cred_crypt.cpp: const_cast

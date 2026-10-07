@@ -32,6 +32,7 @@ set(AGENTTY_IO_SOURCES
     src/io/cred_crypt.cpp
     src/io/keystore.cpp
     src/io/persistence.cpp
+    src/io/shared_file.cpp
     src/io/blob_store.cpp
     src/io/thread_log.cpp
     src/io/blob_gc.cpp
