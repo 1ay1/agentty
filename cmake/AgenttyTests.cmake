@@ -38,6 +38,7 @@ set(_AGENTTY_CONSOLIDATED
     tool_definition_pin_test
     shell_env_floor_test
     edit_idempotent_guard_test
+    exec_policy_test
     subprocess_group_kill_test
     plugins_in_model_test tool_stream_snapshot_test tool_timeline_adapter_test
     anthropic_sse_golden_test codex_login_flow_test mcp_reload_race_test
