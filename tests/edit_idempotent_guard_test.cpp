@@ -135,3 +135,49 @@ TEST_CASE("edit guard: the no-op message does not tell the model to move on") {
                   "never instruct the model to proceed on a guess");
     fs::remove(p);
 }
+
+// ── editing through a symlink ───────────────────────────────────────────
+//
+// The publish step is rename(), which replaces the NAME it is given. For a
+// symlink that is the link itself, so an edit through one did three wrong
+// things at once, silently:
+//
+//   * the symlink became a regular file (the link is destroyed),
+//   * the real target kept its old contents (the edit went nowhere), and
+//   * the tool reported success, with a diff of the change.
+//
+// Measured, not reasoned: I made a link, edited through it, and found the
+// link gone and the target untouched. Dotfiles repos and symlinked generated
+// files (compile_commands.json) hit this on the first edit.
+
+TEST_CASE("edit through a symlink writes the target and keeps the link") {
+    const auto dir = agentty::tools::util::workspace_root() / "build" / "test-scratch";
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    const auto target = dir / "symlink_target.txt";
+    const auto link   = dir / "symlink_alias.txt";
+
+    fs::remove(link, ec);
+    fs::remove(target, ec);
+    put(target, "alpha\nbeta\n");
+    fs::create_symlink(target.filename(), link, ec);
+    if (ec) return;   // no symlink support on this host (Windows w/o privilege)
+    REQUIRE(fs::is_symlink(link, ec));
+
+    auto r = agentty::tool::DynamicDispatch::execute(
+        "edit", json{{"path", link.string()},
+                     {"edits", json::array({json{{"old_text", "beta"},
+                                                 {"new_text", "BETA"}}})}});
+    REQUIRE(r.has_value());
+
+    CHECK_MESSAGE(fs::is_symlink(link, ec),
+                  "the link must survive the edit -- replacing it with a "
+                  "regular file silently breaks whatever pointed at it");
+    CHECK_MESSAGE(get(target).find("BETA") != std::string::npos,
+                  "and the edit has to land in the TARGET, not in a new inode "
+                  "nobody is looking at");
+    CHECK(get(target).find("beta") == std::string::npos);
+
+    fs::remove(link, ec);
+    fs::remove(target, ec);
+}
