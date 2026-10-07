@@ -211,3 +211,212 @@ TEST_CASE("supersede: a failed read is left alone") {
                            read_call("c2", "/w/missing.txt", "now it exists\n")});
     CHECK_FALSE(wire::superseded_read_ids(msgs).contains("c1"));
 }
+
+// ── paging a big file ────────────────────────────────────────────────────
+//
+// THE SECOND BUG, found by mining 40 recent threads: 121 of 3323 reads came
+// back as a pointer, and the big-file audits were the ones that broke. The
+// collapse keyed on path alone, so window #2 erased window #1 even though it
+// never held those lines. Four subagents reading one 1990-line file all
+// reported "my reads returned superseded, audit incomplete".
+
+// A windowed read, with the footer `read` actually prints.
+ToolUse window_read(const char* id, const char* path, int lo, int hi,
+                    int total, std::string body) {
+    ToolUse tc;
+    tc.id   = ToolCallId{id};
+    tc.name = ToolName{"read"};
+    tc.args = {{"path", path}, {"start_line", lo}, {"end_line", hi}};
+    body += "\n[showing lines " + std::to_string(lo) + "-" + std::to_string(hi)
+          + " of " + std::to_string(total) + "]";
+    tc.status = ToolUse::Done{{}, {}, std::move(body)};
+    return tc;
+}
+
+TEST_CASE("supersede: two different windows of one file both survive") {
+    auto msgs = thread_of({
+        window_read("c1", "/w/big.cpp", 100, 200, 1990, "the first slice\n"),
+        window_read("c2", "/w/big.cpp", 900, 1000, 1990, "the second slice\n"),
+    });
+
+    const auto dead = wire::superseded_read_ids(msgs);
+    CHECK_MESSAGE(dead.empty(),
+                  "a read of lines 900-1000 does not carry lines 100-200, so "
+                  "it cannot stand in for them");
+    CHECK(body_survives(msgs, "the first slice"));
+    CHECK(body_survives(msgs, "the second slice"));
+}
+
+TEST_CASE("supersede: overlapping windows that don't contain each other both survive") {
+    auto msgs = thread_of({
+        window_read("c1", "/w/big.cpp", 100, 300, 1990, "slice A\n"),
+        window_read("c2", "/w/big.cpp", 200, 400, 1990, "slice B\n"),
+    });
+    CHECK(wire::superseded_read_ids(msgs).empty());
+    CHECK(body_survives(msgs, "slice A"));
+}
+
+TEST_CASE("supersede: a containing window collapses the one inside it") {
+    // The token win still lands where it's actually sound.
+    auto msgs = thread_of({
+        window_read("c1", "/w/big.cpp", 150, 160, 1990, "inner\n"),
+        window_read("c2", "/w/big.cpp", 100, 200, 1990, "inner plus more\n"),
+    });
+
+    const auto dead = wire::superseded_read_ids(msgs);
+    CHECK(dead.contains("c1"));
+    CHECK_FALSE(dead.contains("c2"));
+    CHECK(body_survives(msgs, "inner plus more"));
+}
+
+TEST_CASE("supersede: a whole-file read collapses every window before it") {
+    // No footer means `read` withheld nothing, so this result holds the lot.
+    auto msgs = thread_of({
+        window_read("c1", "/w/f.txt", 1, 10, 400, "head\n"),
+        window_read("c2", "/w/f.txt", 300, 310, 400, "tail\n"),
+        read_call("c3", "/w/f.txt", "the entire file\n"),
+    });
+
+    const auto dead = wire::superseded_read_ids(msgs);
+    CHECK(dead.contains("c1"));
+    CHECK(dead.contains("c2"));
+    CHECK_FALSE(dead.contains("c3"));
+}
+
+TEST_CASE("supersede: a window does NOT collapse an earlier whole-file read") {
+    auto msgs = thread_of({
+        read_call("c1", "/w/f.txt", "the entire file\n"),
+        window_read("c2", "/w/f.txt", 300, 310, 400, "one slice\n"),
+    });
+    CHECK(wire::superseded_read_ids(msgs).empty());
+    CHECK(body_survives(msgs, "the entire file"));
+}
+
+TEST_CASE("supersede: an outline neither collapses nor is collapsed") {
+    // An outline is a symbol index, not content. It can't stand in for a line
+    // range, and a line range doesn't contain it either.
+    ToolUse outline;
+    outline.id   = ToolCallId{"c2"};
+    outline.name = ToolName{"read"};
+    outline.args = {{"path", "/w/big.cpp"}};
+    outline.status = ToolUse::Done{{}, {},
+        "This file is large, so here is its shape.\n\n# Outline of /w/big.cpp\n\n"
+        "L10: void f()\nL80: void g()\n"};
+
+    auto msgs = thread_of({
+        window_read("c1", "/w/big.cpp", 100, 200, 1990, "a slice\n"),
+        std::move(outline),
+        window_read("c3", "/w/big.cpp", 100, 200, 1990, "the same slice\n"),
+    });
+
+    const auto dead = wire::superseded_read_ids(msgs);
+    CHECK_MESSAGE(!dead.contains("c2"),
+                  "a window read must not collapse an outline");
+    CHECK_MESSAGE(dead.contains("c1"),
+                  "the identical later window still collapses the earlier one "
+                  "across the outline");
+}
+
+TEST_CASE("supersede: a past-the-end read carries nothing and collapses nothing") {
+    ToolUse past;
+    past.id   = ToolCallId{"c2"};
+    past.name = ToolName{"read"};
+    past.args = {{"path", "/w/f.txt"}, {"offset", 9000}};
+    past.status = ToolUse::Done{{}, {},
+        "[offset 9000 is past the end of the file, which has 400 lines "
+        "\xe2\x80\x94 nothing to show. Re-read with an offset \xe2\x89\xa4 400.]"};
+
+    auto msgs = thread_of({
+        read_call("c1", "/w/f.txt", "the entire file\n"),
+        std::move(past),
+    });
+    CHECK(wire::superseded_read_ids(msgs).empty());
+    CHECK(body_survives(msgs, "the entire file"));
+}
+
+TEST_CASE("supersede: an edit collapses every live window of the file") {
+    // Range doesn't enter into it: the file changed, so every earlier body is
+    // stale whatever slice it held.
+    auto msgs = thread_of({
+        window_read("c1", "/w/f.txt", 1, 10, 400, "head\n"),
+        window_read("c2", "/w/f.txt", 300, 310, 400, "tail\n"),
+        edit_call("c3", "/w/f.txt"),
+    });
+
+    const auto dead = wire::superseded_read_ids(msgs);
+    CHECK(dead.contains("c1"));
+    CHECK(dead.contains("c2"));
+}
+
+TEST_CASE("supersede: an edit collapses a read spelled with a different path") {
+    // The compare is on strings, so the two spellings have to normalise to
+    // one. Otherwise the wire serves pre-edit bytes as if they were current.
+    auto msgs = thread_of({
+        read_call("c1", "/w/sub/../f.txt", "before the edit\n"),
+        edit_call("c2", "/w/f.txt"),
+    });
+    CHECK(wire::superseded_read_ids(msgs).contains("c1"));
+}
+
+TEST_CASE("supersede: an unparsable footer falls back to the args") {
+    // A thread written by an older build, or a reworded footer. The args still
+    // say which slice was asked for.
+    ToolUse odd;
+    odd.id   = ToolCallId{"c1"};
+    odd.name = ToolName{"read"};
+    odd.args = {{"path", "/w/f.txt"}, {"start_line", 150}, {"end_line", 160}};
+    odd.status = ToolUse::Done{{}, {}, "inner\n[showing lines ??? of 400]"};
+
+    auto msgs = thread_of({
+        std::move(odd),
+        window_read("c2", "/w/f.txt", 100, 200, 400, "inner plus more\n"),
+    });
+    CHECK_MESSAGE(wire::superseded_read_ids(msgs).contains("c1"),
+                  "args-derived span 150-160 sits inside 100-200");
+}
+
+TEST_CASE("supersede: a file that QUOTES the sentinel still counts as a body") {
+    // This repo's own wire_supersede.hpp and this test file both contain the
+    // pointer text. A substring search called such a read bodyless, which
+    // dropped it from the edit-invalidation path entirely -- so a later edit
+    // left pre-edit bytes on the wire looking current.
+    ToolUse quoting;
+    quoting.id   = ToolCallId{"c1"};
+    quoting.name = ToolName{"read"};
+    quoting.args = {{"path", "/w/wire_supersede.hpp"}};
+    quoting.status = ToolUse::Done{{}, {},
+        std::string{"constexpr auto kPointer =\n  \""}
+        + std::string{wire::kSupersededReadPointer} + "\";\n"};
+
+    CHECK(wire::read_result_has_body(quoting));
+
+    auto msgs = thread_of({std::move(quoting), edit_call("c2", "/w/wire_supersede.hpp")});
+    CHECK_MESSAGE(wire::superseded_read_ids(msgs).contains("c1"),
+                  "the edit must still invalidate it");
+}
+
+TEST_CASE("supersede: the pointer itself is not a body") {
+    ToolUse pointer;
+    pointer.id   = ToolCallId{"c1"};
+    pointer.name = ToolName{"read"};
+    pointer.args = {{"path", "/w/f.txt"}};
+    pointer.status = ToolUse::Done{{}, {}, std::string{wire::kSupersededReadPointer}};
+    CHECK_FALSE(wire::read_result_has_body(pointer));
+}
+
+TEST_CASE("supersede: a tail read has no absolute span, so it is left alone") {
+    // offset:-50 means "the last 50 lines" — which lines that is depends on a
+    // length the args don't carry.
+    ToolUse tail;
+    tail.id   = ToolCallId{"c1"};
+    tail.name = ToolName{"read"};
+    tail.args = {{"path", "/w/log.txt"}, {"offset", -50}};
+    tail.status = ToolUse::Done{{}, {}, "the last fifty\n[showing lines ? of ?]"};
+
+    auto msgs = thread_of({
+        std::move(tail),
+        window_read("c2", "/w/log.txt", 1, 2000, 9000, "the head\n"),
+    });
+    CHECK(wire::superseded_read_ids(msgs).empty());
+    CHECK(body_survives(msgs, "the last fifty"));
+}
