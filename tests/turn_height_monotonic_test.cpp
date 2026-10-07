@@ -188,24 +188,41 @@ static void sweep_one_turn(A::ui_prefs::Thinking thinking, const std::string& la
     }
     w.tick("tool-running");
 
-    // Output in fragments, including a long line that wraps and a short one
-    // after it — the shape that dips a line-counted tail window. The wire
-    // sends a SNAPSHOT each time, not a delta.
-    const char* out[] = {
-        "[1/12] Building CXX object CMakeFiles/agentty.dir/src/main.cpp.o\n",
-        "[2/12] Building CXX object CMakeFiles/agentty.dir/src/runtime/view/thread/turn/turn.cpp.o\n",
-        "ok\n",
-        "[3/12] Linking CXX executable agentty\n",
-        "done\n",
-    };
+    // Output the way a build actually arrives: many lines, alternating long
+    // (wraps at this width) and short. A LINE-counted window over text that
+    // WRAPS dips exactly like the node window did, so the window has to
+    // slide for the check to mean anything. The wire sends a SNAPSHOT each
+    // time, not a delta.
+    std::vector<std::string> out;
+    for (int i = 1; i <= 24; ++i) {
+        if (i % 3 == 0) {
+            out.push_back("ok\n");
+        } else if (i % 3 == 1) {
+            out.push_back("[" + std::to_string(i) +
+                          "/24] Building CXX object CMakeFiles/agentty.dir/src/"
+                          "runtime/view/thread/turn/agent_timeline/tool_args.cpp.o\n");
+        } else {
+            out.push_back("[" + std::to_string(i) + "/24] Building main.cpp.o\n");
+        }
+    }
     std::string snapshot;
-    for (std::size_t i = 0; i < std::size(out); ++i) {
+    for (std::size_t i = 0; i < out.size(); ++i) {
         snapshot += out[i];
         m = apply_tool(std::move(m), A::ToolExecProgress{
             A::ToolCallId{"call-1"}, snapshot, kExecSeq});
         w.tick("tool-output" + std::to_string(i));
         w.tick("tool-output" + std::to_string(i) + "-anim");
     }
+
+    // The tool FINISHES. The card stops rendering live progress and starts
+    // rendering its result, and those are two different renderers with two
+    // different row policies — the handover must not lose rows.
+    {
+        A::ToolExecOutput done{A::ToolCallId{"call-1"}, snapshot};
+        done.exec_seq = kExecSeq;
+        m = apply_tool(std::move(m), std::move(done));
+    }
+    for (int f = 0; f < 4; ++f) w.tick("tool-done");
 
     // ── 3. The answer ──────────────────────────────────────────────────
     const char* prose[] = {
