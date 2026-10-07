@@ -11,6 +11,31 @@ maya::Permission::Config inline_permission_config(const PendingPermission& pp,
         desc = pp.reason;
     } else if (tc.name == "shell" || tc.name == "diagnostics") {
         desc = tc.args.value("command", "");
+        // `command` is not the whole of what runs. `cd` moves it, and `env`
+        // can hand the child LD_PRELOAD / BASH_ENV / GIT_SSH_COMMAND -- so a
+        // card showing a harmless-looking `ls -la` could be approving
+        // arbitrary code from a path the user never saw. Consent has to show
+        // everything that decides what executes, which is the whole point of
+        // the card.
+        if (const auto cd = pick_arg(tc.args, {"cd", "cwd", "directory"}); !cd.empty())
+            desc += "  \xc2\xb7 in " + cd;
+        if (auto it = tc.args.find("env");
+            it != tc.args.end() && it->is_object() && !it->empty()) {
+            desc += "  \xc2\xb7 env ";
+            bool first = true;
+            for (auto e = it->begin(); e != it->end(); ++e) {
+                if (!first) desc += " ";
+                first = false;
+                desc += e.key() + "=";
+                // The VALUE is the payload (a path to a .so, a command for
+                // git to run), so it has to be visible -- but bounded, or a
+                // long value pushes the command itself off the card.
+                std::string v = e.value().is_string()
+                    ? e.value().get<std::string>() : e.value().dump();
+                if (v.size() > 48) { v.resize(47); v += "\xe2\x80\xa6"; }
+                desc += v;
+            }
+        }
     } else if (tc.name == "read" || tc.name == "edit"
             || tc.name == "write" || tc.name == "list_dir") {
         // Alias-aware: write's canonical key is `file_path`, and models
