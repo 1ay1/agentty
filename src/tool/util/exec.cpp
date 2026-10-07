@@ -17,6 +17,8 @@
 #include <jaal/platform/posix/process.hpp>
 #include <jaal/platform/posix/poll_reactor.hpp>
 
+#include <mcp/tools/util/utf8.hpp>
+
 #include "agentty/tool/util/sandbox.hpp"
 #include "agentty/tool/util/sandbox_claybin.hpp"
 
@@ -262,6 +264,12 @@ class JaalExec final : public mt::Exec {
         // suite pins that rule; honouring it is one more drain.
         if (auto h = proc.stdout_handle())
             drain_into(h->get(), out.output, cap, out.truncated);
+
+        // ExecResult says "UTF-8 valid", so make it so. A child writes
+        // whatever it likes, and a cap can cut a multi-byte codepoint in
+        // half; handing that to a JSON encoder is a failure two layers
+        // further on with nothing pointing back here.
+        out.output = ::mcp::tools::util::to_valid_utf8(std::move(out.output));
 
         // ── outcome ─────────────────────────────────────────────────────
         if (why) {
