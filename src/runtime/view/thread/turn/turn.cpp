@@ -1791,6 +1791,10 @@ std::optional<maya::Element> reasoning_slot(const Message& msg, const Model& m) 
                              // for what you just watched, and it is the row
                              // that keeps changing — keep it at the live edge
                              // rather than scrolling it away mid-tick
+    rcfg.meter_chip  = true; // and it is a LABEL for the block, so it gets a
+                             // band like the provider chip does, not another
+                             // dim line that reads as more reasoning
+    rcfg.meter_chip_style = ui::chip_style(ui::role_brand);
     rcfg.dim_body = true;    // recede the body by color so the answer wins
     // Colors MUST come from the named-ANSI palette, not the widget's hardcoded
     // truecolor defaults (0x8a gray body / indigo rail). agentty's rule is
