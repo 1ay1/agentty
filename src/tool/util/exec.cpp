@@ -10,12 +10,17 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <vector>
 
 #include <jaal/platform/posix/process.hpp>
 #include <jaal/platform/posix/poll_reactor.hpp>
 
+#include "agentty/tool/util/sandbox.hpp"
+#include "agentty/tool/util/sandbox_claybin.hpp"
+
+#include <fcntl.h>
 #include <unistd.h>
 
 namespace agentty::tools::util {
@@ -28,6 +33,67 @@ using clock_t_ = std::chrono::steady_clock;
 
 constexpr std::uint64_t kExitToken = 1;
 constexpr std::uint64_t kOutToken  = 2;
+constexpr std::uint64_t kBrokerToken = 3;
+
+/// How the child was started, and what has to be serviced while it runs.
+struct started {
+    pf::posix_process    proc;
+    int                  supervisor_fd = -1;
+    std::function<bool()> service_broker;
+};
+
+/// Start `argv`, inside the sandbox when one is active.
+///
+/// Two ways in, one way to watch. claybin clones with namespace flags,
+/// installs a seccomp filter and enters a cgroup -- none of it expressible
+/// as "fork then exec" -- so it spawns, and jaal adopts the result. After
+/// that line the two paths are the same object with the same conformance
+/// suite behind it.
+[[nodiscard]] std::expected<started, std::string>
+start(const std::vector<std::string>& argv,
+      const std::string& cwd,
+      const std::vector<std::pair<std::string, std::string>>& env) {
+    namespace sb = agentty::tools::util::sandbox;
+
+#if defined(__linux__)
+    if (sb::is_active() && sb::detected_backend() == sb::Backend::Claybin) {
+        int fds[2];
+        if (::pipe2(fds, O_CLOEXEC) != 0)
+            return std::unexpected(std::string{"pipe: "} + std::strerror(errno));
+
+        auto posture = sb::claybin_posture_for_test();   // the sealed policy
+        // One pipe for both streams: the interleaving a terminal would show.
+        auto r = sb::claybin_backend::spawn_argv(posture, argv, fds[1], fds[1]);
+        ::close(fds[1]);
+        if (!r.started) {
+            ::close(fds[0]);
+            return std::unexpected(r.start_error);
+        }
+
+        pf::posix_process::adopted_child c;
+        c.pid       = r.pid;
+        c.pidfd     = r.pidfd;     // claybin already opened one
+        c.stdout_fd = fds[0];
+        c.merged    = true;
+        auto adopted = pf::posix_process::adopt(c);
+        if (!adopted)
+            return std::unexpected(std::string{adopted.error().what});
+
+        return started{std::move(*adopted), r.supervisor_fd,
+                       std::move(r.service_broker)};
+    }
+#endif
+
+    pf::process_spec spec;
+    spec.argv         = argv;
+    spec.cwd          = cwd;
+    spec.env          = env;
+    spec.merge_stderr = true;
+    spec.new_session  = true;
+    auto p = pf::posix_process::spawn(spec);
+    if (!p) return std::unexpected(std::string{p.error().what});
+    return started{std::move(*p), -1, nullptr};
+}
 
 /// Read everything currently available. Never blocks: the handles are
 /// non-blocking and we only get here because the reactor said ready.
@@ -84,21 +150,17 @@ class JaalExec final : public mt::Exec {
         const std::size_t cap = req.max_output_bytes.value_or(d_.max_output_bytes);
 
         // ── spawn ───────────────────────────────────────────────────────
-        pf::process_spec spec;
-        spec.argv.reserve(req.program.args.size() + 1);
-        spec.argv.push_back(req.program.exe);
-        for (const auto& a : req.program.args) spec.argv.push_back(a);
-        if (req.cwd) spec.cwd = *req.cwd;
-        spec.env          = req.env;
-        spec.merge_stderr = true;   // one stream: the interleaving a terminal shows
-        spec.new_session  = true;   // its own group, so stop() can reach the tree
+        std::vector<std::string> argv;
+        argv.reserve(req.program.args.size() + 1);
+        argv.push_back(req.program.exe);
+        for (const auto& a : req.program.args) argv.push_back(a);
 
-        auto spawned = pf::posix_process::spawn(spec);
-        if (!spawned) {
-            out.outcome = mt::StartFailed{std::string{spawned.error().what}};
+        auto st = start(argv, req.cwd.value_or(std::string{}), req.env);
+        if (!st) {
+            out.outcome = mt::StartFailed{st.error()};
             return out;
         }
-        auto proc = std::move(*spawned);
+        auto& proc = st->proc;
 
         auto reactor = pf::poll_reactor::create();
         if (!reactor) {
@@ -112,6 +174,17 @@ class JaalExec final : public mt::Exec {
         if (auto h = proc.stdout_handle()) {
             if (auto r = reactor->watch(h->get(), pf::interest::read, kOutToken))
                 out_reg = std::move(*r);
+        }
+        // The seccomp broker, when the policy delegates syscalls. It MUST be
+        // serviced: the kernel blocks the guest thread until someone answers,
+        // so an unpolled listener is a hang, not a weaker wall. Watching it
+        // here rather than on its own thread is the point of having a
+        // reactor -- one wait covers output, exit and brokered calls.
+        std::optional<pf::poll_reactor::registration> broker_reg;
+        if (st->supervisor_fd >= 0 && st->service_broker) {
+            if (auto r = reactor->watch(st->supervisor_fd, pf::interest::read,
+                                        kBrokerToken))
+                broker_reg = std::move(*r);
         }
 
         // ── the two clocks ──────────────────────────────────────────────
@@ -149,6 +222,12 @@ class JaalExec final : public mt::Exec {
                             saw_output = true;
                 } else if (r.token == kExitToken && (r.readable || r.hangup)) {
                     exited = true;
+                } else if (r.token == kBrokerToken && r.readable) {
+                    // Answer the brokered syscall. Returns false when the
+                    // listener is done; stop watching then rather than
+                    // spinning on a dead fd.
+                    if (st->service_broker && !st->service_broker())
+                        broker_reg.reset();
                 }
             }
             // Output resets the idle clock and ONLY the idle clock. That
@@ -211,7 +290,7 @@ class JaalExec final : public mt::Exec {
 
 }  // namespace
 
-std::shared_ptr<mt::Exec> make_unsandboxed_exec(ExecDefaults defaults) {
+std::shared_ptr<mt::Exec> make_exec(ExecDefaults defaults) {
     return std::make_shared<JaalExec>(defaults);
 }
 

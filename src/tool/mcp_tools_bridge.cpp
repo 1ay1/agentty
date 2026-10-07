@@ -418,7 +418,7 @@ std::vector<ToolDef> build_mcp_tool_defs() {
     // like the HttpClient above: mcp-cpp states what it wants and we do it,
     // over jaal's process + reactor. One implementation, in one place, with
     // the idle-vs-wall policy that the two old poll loops disagreed about.
-    ka.exec = util::make_unsandboxed_exec();
+    ka.exec = util::make_exec();
 
     mt::HostServices svc;
     svc.http = ka.http;

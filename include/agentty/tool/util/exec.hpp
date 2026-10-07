@@ -67,28 +67,19 @@ struct ExecDefaults {
 
 /// Build the exec capability agentty hands to mcp-cpp.
 ///
-/// UNSANDBOXED, AND THE NAME SAYS SO ON PURPOSE.
+/// Sandboxed when a sandbox is active. Two ways in, one way to watch:
+/// claybin clones with namespace flags, installs a seccomp filter and enters
+/// a cgroup -- none of which is expressible as "fork then exec this argv" --
+/// so it spawns, and jaal adopts the pid and pidfd it hands back. Everything
+/// after that line is identical whichever way the child started, including
+/// the conformance suite that pins the exit semantics.
 ///
-/// This spawns through jaal directly, so a command runs with the privileges
-/// of this process. The existing tool path does NOT: `shell`, `git` and
-/// `diagnostics` go through util::sandbox, which on Linux is claybin
-/// (namespaces, seccomp, landlock, cgroup) or bwrap. Pointing those at this
-/// function would silently remove confinement while every test still
-/// passed, which is the worst shape a regression can take -- so the hazard
-/// lives in the name rather than in a comment someone skims.
-///
-/// WHAT CLOSES THE GAP. bwrap is expressible as an argv wrap
-/// (build_bwrap_argv), so it would already work. claybin is not: it spawns
-/// programmatically and hands back a pid AND A PIDFD. That pidfd is exactly
-/// what jaal's posix_process watches, so the fix is adoption rather than
-/// re-implementation --
-///
-///     posix_process::adopt(pid, pidfd, stdout_fd, ...)
-///
-/// -- letting the sandbox do the spawning and jaal own the waiting,
-/// deadlines and teardown. One observability path, two ways in. When that
-/// exists this becomes `make_exec` and the tools can move.
+/// The seccomp broker, when the policy delegates syscalls, is serviced in
+/// the SAME reactor wait as output and exit. The kernel blocks the guest
+/// until someone answers a brokered call, so an unpolled listener is a hang
+/// rather than a weaker wall -- and a wait that already covers three kinds
+/// of readiness is the reason not to grow a thread for it.
 [[nodiscard]] std::shared_ptr<::mcp::tools::Exec>
-make_unsandboxed_exec(ExecDefaults defaults = {});
+make_exec(ExecDefaults defaults = {});
 
 }  // namespace agentty::tools::util

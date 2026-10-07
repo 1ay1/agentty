@@ -26,6 +26,7 @@
 #include "agtest.hpp"
 
 #include "agentty/tool/util/exec.hpp"
+#include "agentty/tool/util/sandbox.hpp"
 
 #include <chrono>
 #include <string>
@@ -40,7 +41,7 @@ namespace {
 // in mcp-cpp's vocabulary and implemented over jaal behind the seam, so a
 // caller -- including this test -- never sees the platform layer.
 std::shared_ptr<mt::Exec> exec() {
-    static auto e = agentty::tools::util::make_unsandboxed_exec();
+    static auto e = agentty::tools::util::make_exec();
     return e;
 }
 
@@ -142,4 +143,47 @@ TEST_CASE("exec: a clean command reports no timeout at all") {
     CHECK_FALSE(std::holds_alternative<mt::TimedOut>(r.outcome));
     CHECK_FALSE(r.truncated);
     CHECK(r.output == "ok");
+}
+
+// ── the sandboxed path ──────────────────────────────────────────────────
+//
+// The checks above exercise the direct spawn. This one exercises the other
+// way in: claybin clones with namespace flags, installs a seccomp filter and
+// enters a cgroup, then jaal ADOPTS the pid and pidfd it hands back. After
+// that line both paths are the same object, so what needs proving is that
+// the hand-off works at all -- and that the policy still applies on top of
+// it, since a sandbox you cannot observe the exit of would have been reason
+// to keep a second loop.
+//
+// Skips where no sandbox can be built, because a check that silently passes
+// on an unconfined host is worse than no check.
+TEST_CASE("exec: the sandboxed path spawns, is watched, and still obeys the clocks") {
+    namespace sb = agentty::tools::util::sandbox;
+    if (!sb::init(sb::Mode::On) || !sb::is_active()) return;
+
+    auto e = agentty::tools::util::make_exec();
+
+    // 1. it runs at all -- the adopt() hand-off works.
+    auto ran = e->run({.program = {"/bin/sh", {"-c", "echo inside"}},
+                       .budgets = {.idle = 10s, .wall = 30s}});
+    CHECK_MESSAGE(ran.ok(), "a sandboxed command still runs and is reaped");
+    CHECK(ran.output.find("inside") != std::string::npos);
+
+    // 2. the exit is observable -- this is the bit adopt() exists for. A
+    //    pidfd we could not watch would show up as a wall-clock timeout
+    //    instead of a clean exit, so ok() above already proves it; assert it
+    //    directly too, because that inference is not obvious.
+    CHECK(std::holds_alternative<mt::Exited>(ran.outcome));
+
+    // 3. the wall clock still reaps a runaway INSIDE the sandbox. The idle
+    //    clock cannot (output keeps resetting it), and a sandboxed child is
+    //    exactly where an unreaped runaway would be hardest to notice.
+    const auto t0 = std::chrono::steady_clock::now();
+    auto runaway = e->run({.program = {"/bin/sh", {"-c", "while :; do echo s; done"}},
+                           .budgets = {.idle = 30s, .wall = 2s},
+                           .max_output_bytes = 32u * 1024u});
+    const auto elapsed = std::chrono::steady_clock::now() - t0;
+
+    CHECK(timed_out_on(runaway, mt::TimedOut::budget::wall));
+    CHECK_MESSAGE(elapsed < 15s, "reaped at its ceiling, not left spinning");
 }
