@@ -35,6 +35,7 @@
 #include <maya/widget/turn.hpp>
 
 #include "agentty/runtime/view/palette.hpp"
+#include "agentty/runtime/view/helpers.hpp"   // ui::reasoning_shown
 #include "agentty/runtime/view/thread/activity_indicator.hpp"
 #include "agentty/runtime/view/thread/seam.hpp"
 #include "agentty/runtime/view/thread/turn/permission.hpp"
@@ -170,7 +171,13 @@ void build_live_tail(const Model& m, int& running_turn,
             // every frame for the whole duration of the active run.
             const bool is_last_run     = (run_end >= total);
             const bool reserve_slot   = m.s.active() && is_last_run;
-            const bool show_indicator = reserve_slot && tail_is_empty_placeholder;
+            // ...and nothing else is already saying "still working". A live
+            // reasoning block has its own spinner, its own meter and text
+            // arriving in it; the hex tape under that is a second animation
+            // for the same fact, and it costs the rows it occupies plus the
+            // handoff when real content lands.
+            const bool show_indicator = reserve_slot && tail_is_empty_placeholder
+                                        && !reasoning_shown(tail);
             if (show_indicator) {
                 using namespace maya::dsl;
                 maya::ActivityIndicator::Config ind;

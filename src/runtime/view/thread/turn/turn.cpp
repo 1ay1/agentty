@@ -1748,10 +1748,10 @@ std::optional<maya::Element> reasoning_slot(const Message& msg, const Model& m) 
     //
     // docs/COPILOT_RESPONSES.md already caught the same flag contradicting
     // the effort strip on the REQUEST side and removed it from there. This is
-    // the display half of that cleanup.
-    if (agentty::ui_prefs::current().thinking == agentty::ui_prefs::Thinking::Hidden)
-        return std::nullopt;
-    if (msg.reasoning_display_text().empty()) return std::nullopt;
+    // the display half of that cleanup. The rule itself lives in
+    // ui::reasoning_shown now, because the reveal subscription and the
+    // activity indicator have to answer it the same way.
+    if (!reasoning_shown(msg)) return std::nullopt;
 
     // Two questions, not one, and they used to share a boolean.
     //

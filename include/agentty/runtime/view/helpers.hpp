@@ -10,9 +10,23 @@
 #include <maya/dsl.hpp>
 #include <maya/terminal/ansi.hpp>
 
+#include "agentty/domain/ui_live.hpp"   // thinking pref
 #include "agentty/runtime/model.hpp"
 
 namespace agentty::ui {
+
+// Does the thread SHOW a reasoning block for this message?
+//
+// Three consumers have to agree on this and they are in three different
+// layers: the view that renders the block, the subscription that asks for
+// animation frames, and the activity indicator that must not duplicate it.
+// When they disagreed we got a block that painted and never animated, and
+// a hex-tape "still working" row stacked under a reasoning block that was
+// already saying the same thing.
+[[nodiscard]] inline bool reasoning_shown(const Message& msg) noexcept {
+    return ui_prefs::current().thinking != ui_prefs::Thinking::Hidden
+        && !msg.reasoning_display_text().empty();
+}
 
 // Enum reflection — delegates to agentty::to_string().
 [[nodiscard]] inline std::string_view profile_label(Profile p) noexcept { return to_string(p); }

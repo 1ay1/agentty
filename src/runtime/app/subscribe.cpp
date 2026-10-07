@@ -9,6 +9,7 @@
 
 #include "agentty/runtime/login.hpp"
 #include "agentty/domain/ui_live.hpp"   // thinking pref: gates the reasoning reveal
+#include "agentty/runtime/view/helpers.hpp"  // ui::reasoning_shown
 #include "agentty/runtime/panel/common.hpp"
 #include "agentty/runtime/panel/top.hpp"
 #include "agentty/runtime/panel/nav.hpp"
@@ -90,16 +91,11 @@ bool reveal_needs_frames(const Model& m) noexcept {
         // never engages, armed RAF frames get gated away, and the
         // reasoning typewriter freezes until a keypress.
         //
-        // The gate is the SAME one reasoning_slot() renders on — Appearance's
-        // Thinking pref. It used to read m.d.show_reasoning, which nothing
-        // can toggle (^R is diff review; ModelsToggleShowReasoning is
-        // unreachable), so a stale `false` in settings.json produced exactly
-        // the freeze this comment describes: the block painted and then sat
-        // there unanimated. Whatever decides to SHOW reasoning has to be
-        // what decides to animate it, or one of the two is always wrong.
-        || (agentty::ui_prefs::current().thinking
-                != agentty::ui_prefs::Thinking::Hidden
-            && !back.reasoning_display_text().empty());
+        // ui::reasoning_shown is the SAME predicate the view renders on and
+        // the activity indicator defers to. Whatever decides to SHOW
+        // reasoning has to be what decides to animate it, or one of the two
+        // is always wrong.
+        || ::agentty::ui::reasoning_shown(back);
 }
 
 bool reveal_draining(const Model& m) noexcept {
