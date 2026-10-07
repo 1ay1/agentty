@@ -658,57 +658,15 @@ void wire_mcp_runtime(std::string_view sandbox_mode) {
     // library and claybin is OUR submodule), which is exactly why the hook
     // exists.
     if (mode != mu::sandbox::Mode::Off) {
+        // Tell mcp-cpp it is confined, and by what. It used to be handed a
+        // RUN FUNCTION here -- agentty's own subprocess runner, installed as
+        // mcp-cpp's sandbox -- which is how the two runners came to disagree
+        // about the wall clock. Tools reach the host through
+        // HostServices::exec now, so all that is left to say is "yes, and
+        // this is its name".
         mu::sandbox::HostSandbox hs;
-        hs.label = util::sandbox::describe_state();
-        hs.run = [](const std::vector<std::string>& argv,
-                    std::size_t max_bytes,
-                    std::chrono::seconds timeout,
-                    std::string_view cwd,
-                    const std::vector<std::pair<std::string, std::string>>& env)
-                    -> std::optional<::mcp::tools::util::SubprocessResult> {
-            // Decline when we have nothing better to offer, so mcp falls back
-            // to its own backend rather than running the command unconfined.
-            if (!util::sandbox::is_active()) return std::nullopt;
-
-            // agentty's runner takes neither cwd nor env, so a request for
-            // either has to be expressed IN the command. Both are prefixed as
-            // shell builtins: `cd` before the command, `VAR=val` exports
-            // ahead of it. Single-quote wrapping is the only escaping a
-            // POSIX shell needs — inside '' every byte but ' is literal.
-            auto shq = [](std::string_view s) {
-                std::string q = "'";
-                for (char c : s) { if (c == '\'') q += "'\\''"; else q += c; }
-                q += "'";
-                return q;
-            };
-            std::string cmd;
-            if (!cwd.empty()) cmd += "cd " + shq(cwd) + " && ";
-            for (const auto& [k, v] : env) {
-                // Only well-formed names; a bogus key would otherwise become
-                // a command to run.
-                if (k.empty()) continue;
-                bool ok = !(k[0] >= '0' && k[0] <= '9');
-                for (char c : k)
-                    if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '_')) ok = false;
-                if (!ok) continue;
-                cmd += k + "=" + shq(v) + " ";
-            }
-            for (std::size_t i = 0; i < argv.size(); ++i) {
-                if (i) cmd += " ";
-                cmd += shq(argv[i]);
-            }
-
-            auto r = util::sandbox::run_shell_command(cmd, max_bytes, timeout);
-
-            ::mcp::tools::util::SubprocessResult out;
-            out.output      = std::move(r.output);
-            out.exit_code   = r.exit_code;
-            out.timed_out   = r.timed_out;
-            out.truncated   = r.truncated;
-            out.started     = r.started;
-            out.start_error = std::move(r.start_error);
-            return out;
-        };
+        hs.active = true;
+        hs.label  = "claybin";
         mu::sandbox::set_host_sandbox(std::move(hs));
     } else {
         // Explicitly CLEAR it, rather than just not installing. This function
