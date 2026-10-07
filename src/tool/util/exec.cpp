@@ -211,7 +211,7 @@ class JaalExec final : public mt::Exec {
 
 }  // namespace
 
-std::shared_ptr<mt::Exec> make_exec(ExecDefaults defaults) {
+std::shared_ptr<mt::Exec> make_unsandboxed_exec(ExecDefaults defaults) {
     return std::make_shared<JaalExec>(defaults);
 }
 

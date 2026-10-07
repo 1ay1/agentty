@@ -40,7 +40,7 @@ namespace {
 // in mcp-cpp's vocabulary and implemented over jaal behind the seam, so a
 // caller -- including this test -- never sees the platform layer.
 std::shared_ptr<mt::Exec> exec() {
-    static auto e = agentty::tools::util::make_exec();
+    static auto e = agentty::tools::util::make_unsandboxed_exec();
     return e;
 }
 

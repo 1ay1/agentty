@@ -7,6 +7,7 @@
 // FileChange) back into agentty's ToolOutput.
 
 #include "agentty/tool/mcp_tools_bridge.hpp"
+#include "agentty/tool/util/exec.hpp"   // the host's one way to run a program
 #include "agentty/tool/mcp_tools_backends.hpp"
 
 #include "agentty/diff/diff.hpp"
@@ -404,6 +405,7 @@ ExecResult decode_result(const std::string& tool_name, ::mcp::cap::Result r) {
 struct ProviderKeepAlive {
     std::shared_ptr<::mcp::cap::CapabilityProvider> provider;
     std::shared_ptr<mt::HttpClient>                 http;
+    std::shared_ptr<mt::Exec>                       exec;
 };
 ProviderKeepAlive& keep_alive() { static ProviderKeepAlive k; return k; }
 
@@ -412,9 +414,15 @@ ProviderKeepAlive& keep_alive() { static ProviderKeepAlive k; return k; }
 std::vector<ToolDef> build_mcp_tool_defs() {
     auto& ka = keep_alive();
     ka.http = std::make_shared<AgenttyHttpClient>();
+    // Running another program is a capability the HOST supplies, exactly
+    // like the HttpClient above: mcp-cpp states what it wants and we do it,
+    // over jaal's process + reactor. One implementation, in one place, with
+    // the idle-vs-wall policy that the two old poll loops disagreed about.
+    ka.exec = util::make_unsandboxed_exec();
 
     mt::HostServices svc;
     svc.http = ka.http;
+    svc.exec = ka.exec;
     // Inject the host-coupled backends (memory/skill/retriever/subagent).
     // todo stays null — its shell renders identical text with no host state.
     install_host_backends(svc);

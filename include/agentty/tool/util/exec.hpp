@@ -49,6 +49,11 @@ namespace agentty::tools::util {
 /// raise it everywhere, and a limit everyone disables is not a limit. The
 /// wall default is derived from the idle one rather than fixed, so a caller
 /// that asks for a long silence implicitly asks for a long run.
+///
+/// `$AGENTTY_TOOL_HARD_TIMEOUT_SECS` overrides the wall default for the
+/// process (0 disables the wall clock entirely). A ceiling nobody can raise
+/// is its own kind of broken: the one session where a legitimate job needs
+/// forty minutes should not need a rebuild.
 struct ExecDefaults {
     std::chrono::seconds idle{120};
     /// wall = idle × this, floored at `wall_floor`.
@@ -62,11 +67,28 @@ struct ExecDefaults {
 
 /// Build the exec capability agentty hands to mcp-cpp.
 ///
-/// `$AGENTTY_TOOL_HARD_TIMEOUT_SECS` overrides the wall default for the
-/// process (0 disables the wall clock entirely). A ceiling nobody can raise
-/// is its own kind of broken: the one session where a legitimate job needs
-/// forty minutes should not need a rebuild.
+/// UNSANDBOXED, AND THE NAME SAYS SO ON PURPOSE.
+///
+/// This spawns through jaal directly, so a command runs with the privileges
+/// of this process. The existing tool path does NOT: `shell`, `git` and
+/// `diagnostics` go through util::sandbox, which on Linux is claybin
+/// (namespaces, seccomp, landlock, cgroup) or bwrap. Pointing those at this
+/// function would silently remove confinement while every test still
+/// passed, which is the worst shape a regression can take -- so the hazard
+/// lives in the name rather than in a comment someone skims.
+///
+/// WHAT CLOSES THE GAP. bwrap is expressible as an argv wrap
+/// (build_bwrap_argv), so it would already work. claybin is not: it spawns
+/// programmatically and hands back a pid AND A PIDFD. That pidfd is exactly
+/// what jaal's posix_process watches, so the fix is adoption rather than
+/// re-implementation --
+///
+///     posix_process::adopt(pid, pidfd, stdout_fd, ...)
+///
+/// -- letting the sandbox do the spawning and jaal own the waiting,
+/// deadlines and teardown. One observability path, two ways in. When that
+/// exists this becomes `make_exec` and the tools can move.
 [[nodiscard]] std::shared_ptr<::mcp::tools::Exec>
-make_exec(ExecDefaults defaults = {});
+make_unsandboxed_exec(ExecDefaults defaults = {});
 
 }  // namespace agentty::tools::util
