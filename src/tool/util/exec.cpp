@@ -199,6 +199,7 @@ class JaalExec final : public mt::Exec {
         std::optional<clock_t_::time_point> kill_at;
         std::optional<mt::ExecOutcome>      why;       // why we stopped it
         bool                       exited = false;
+        bool                       stopped_early = false;
 
         for (;;) {
             const auto now = clock_t_::now();
@@ -237,6 +238,14 @@ class JaalExec final : public mt::Exec {
             // line running forever and the wall clock below is what ends it.
             if (saw_output) idle_at = clock_t_::now() + idle;
 
+            // The caller had enough. Only it can know that -- "enough" is a
+            // property of what it asked for, not of the process.
+            if (saw_output && req.stop_when && req.stop_when(out.output)) {
+                stopped_early = true;
+                (void)proc.stop(pf::stop_mode::forceful, pf::stop_scope::tree);
+                break;
+            }
+
             if (exited) break;
 
             const auto t = clock_t_::now();
@@ -272,7 +281,9 @@ class JaalExec final : public mt::Exec {
         out.output = ::mcp::tools::util::to_valid_utf8(std::move(out.output));
 
         // ── outcome ─────────────────────────────────────────────────────
-        if (why) {
+        if (stopped_early) {
+            out.outcome = mt::StoppedEarly{};
+        } else if (why) {
             out.outcome = *why;            // a budget ended it; say which
         } else if (auto st = proc.reap()) {
             out.outcome = (st->how == pf::exit_status::kind::exited)
