@@ -1610,7 +1610,23 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
                         !m.d.session_grants.contains(tc2.name.value)
                         && tool::DynamicDispatch::needs_permission(
                                tc2.name.value, m.d.profile);
-                    if (read_only && !needs_perm) {
+                    // A salvaged arg set can be missing a schema-required
+                    // field: the wire cut outside a string, so try_parse_partial
+                    // closed the object happily and `path` never arrived.
+                    // finalize_turn owns that case (repair, then retry, then an
+                    // honest failure) and it only ever sees a tool that is
+                    // still Pending -- so dispatching here skipped the whole
+                    // mechanism for exactly the read-only tools this path
+                    // handles. 44 of 3323 reads across 40 recent threads died
+                    // as "[invalid args] path required", which reads to the
+                    // model as its own mistake and burns the turn.
+                    //
+                    // Same predicate guard_truncated_tool_args checks, named
+                    // once and read by both, because a gate spelled out in two
+                    // places is a gate that drifts.
+                    const bool args_complete =
+                        missing_required_field(tc2.name.value, tc2.args).empty();
+                    if (read_only && !needs_perm && args_complete) {
                         const auto now2 = std::chrono::steady_clock::now();
                         // No permission gate on this path, so card birth and
                         // execution coincide — but record both anyway rather

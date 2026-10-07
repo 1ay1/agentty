@@ -282,14 +282,28 @@ missing_required_field(std::string_view tool_name, const nlohmann::json& args) {
             // skill requires the `name` of the skill to load.
             if (!is_nonempty_string("name")) return "name";
             return {};
-        // `path` is nice-to-have but not strictly required for these
-        // (list_dir/glob default to cwd; read without path is already a tool
-        // error — surfacing it from the tool itself preserves the typed
-        // ToolError chain instead of converting to a stream-level salvage
-        // failure here).
         case K::Read:
-        case K::ListDir:
+            // `read` without a path can only ever fail, so treating it as a
+            // truncation is strictly better than letting it dispatch.
+            //
+            // This case used to sit in the no-required group below, arguing
+            // that the tool's own "[invalid args] path required" preserves the
+            // typed ToolError chain. Mining 40 recent threads refuted it: 44
+            // of 3323 reads died exactly that way, 33 with args `{}`. The
+            // typed error is real but useless here -- it skips the
+            // transparent retry, burns the turn, and tells the model it forgot
+            // an argument when the truth is the wire cut mid-arguments.
+            if (!is_nonempty_string_any(kPathAliases)) return "path";
+            return {};
         case K::Glob:
+            // Same reasoning: the pattern IS the query, and glob without one
+            // has nothing to match. (`path` genuinely defaults to cwd.)
+            if (!is_nonempty_string("pattern")) return "pattern";
+            return {};
+        // `path` is nice-to-have but not strictly required for these:
+        // list_dir defaults to cwd, and the git tools validate per-action
+        // with richer messages than this guard could produce.
+        case K::ListDir:
         case K::GitDiff:
         case K::GitLog:
         case K::GitStatus:
