@@ -347,10 +347,27 @@ SubprocessResult run_win32_cmdline(const std::string& cmdline,
     auto idle_deadline = has_idle_window
         ? now_ms() + idle_window
         : std::chrono::steady_clock::time_point::max();
+    // The same absolute ceiling the POSIX path keeps: output rolls the idle
+    // window forward forever, so without this a chatty runaway is never
+    // reaped. 20x idle, floored at 10 min.
+    const auto hard_window = [&]() -> std::chrono::milliseconds {
+        if (opts.hard_timeout.count() > 0)
+            return std::chrono::milliseconds(opts.hard_timeout.count() * 1000);
+        if (!has_idle_window) return std::chrono::milliseconds::zero();
+        return std::max<std::chrono::milliseconds>(
+            idle_window * 20,
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::minutes{10}));
+    }();
+    const bool has_hard_window = hard_window.count() > 0;
+    const auto hard_deadline = has_hard_window
+        ? now_ms() + hard_window
+        : std::chrono::steady_clock::time_point::max();
     auto last_emit = now_ms();
     std::size_t last_total_seen = 0;
 
     bool timed_out = false;
+    bool hard_capped = false;
     bool cancelled = false;
     for (;;) {
         auto now = now_ms();
@@ -375,6 +392,16 @@ SubprocessResult run_win32_cmdline(const std::string& cmdline,
             timed_out = true;
             break;
         }
+        if (has_hard_window && now >= hard_deadline) {
+            timed_out   = true;
+            hard_capped = true;
+            break;
+        }
+        if (has_hard_window) {
+            const auto to_hard = std::chrono::duration_cast<std::chrono::milliseconds>(
+                hard_deadline - now);
+            if (to_hard < remaining_deadline) remaining_deadline = to_hard;
+        }
         auto to_emit = kEmitGap - std::chrono::duration_cast<std::chrono::milliseconds>(
             now - last_emit);
         if (to_emit.count() < 0) to_emit = std::chrono::milliseconds{0};
@@ -398,6 +425,7 @@ SubprocessResult run_win32_cmdline(const std::string& cmdline,
         ::TerminateProcess(pi.hProcess, 1);
         ::WaitForSingleObject(pi.hProcess, 2000);
         r.timed_out = timed_out;
+        r.hard_capped = hard_capped;
     } else {
         ::GetExitCodeProcess(pi.hProcess, &exit_code);
         r.exit_code = (int)exit_code;
@@ -760,6 +788,33 @@ SubprocessResult run_posix(const std::vector<std::string>& argv_in,
     auto idle_deadline = has_idle_window
         ? start + idle_window
         : clock::time_point::max();
+    // Absolute ceiling from spawn, never reset by output. The idle window
+    // above cannot catch a child that stays chatty forever -- every byte
+    // rolls it forward, and past the output cap those bytes are read and
+    // discarded, so nothing bounds it at all. Derived at 20x the idle
+    // budget with a 10-minute floor, which no realistic build or test run
+    // comes near; `hard_timeout` overrides when a caller knows better.
+    //
+    // $AGENTTY_TOOL_HARD_TIMEOUT_SECS overrides the derived value for the
+    // whole process, and 0 switches the ceiling off entirely. A ceiling that
+    // cannot be raised is its own kind of broken: the one session where a
+    // legitimate job needs 40 minutes should not need a rebuild. Read live,
+    // never cached, same as the other AGENTTY_* knobs.
+    const auto hard_window = [&]() -> std::chrono::seconds {
+        if (const char* e = std::getenv("AGENTTY_TOOL_HARD_TIMEOUT_SECS"); e && e[0]) {
+            char* end = nullptr;
+            const long v = std::strtol(e, &end, 10);
+            if (end != e && v >= 0) return std::chrono::seconds{v};
+        }
+        if (opts.hard_timeout.count() > 0) return opts.hard_timeout;
+        if (!has_idle_window)              return std::chrono::seconds::zero();
+        const auto scaled = idle_window * 20;
+        return std::max<std::chrono::seconds>(scaled, std::chrono::minutes{10});
+    }();
+    const bool has_hard_window = hard_window > std::chrono::seconds::zero();
+    const auto hard_deadline = has_hard_window
+        ? start + hard_window
+        : clock::time_point::max();
     constexpr auto kKillGrace = std::chrono::milliseconds{2000};
 
     auto last_emit  = start;
@@ -767,6 +822,7 @@ SubprocessResult run_posix(const std::vector<std::string>& argv_in,
     bool sent_term  = false;
     bool sent_kill  = false;
     bool timed_out  = false;
+    bool hard_capped = false;
     bool eof        = false;
     int  wait_status = 0;
 
@@ -820,6 +876,16 @@ SubprocessResult run_posix(const std::vector<std::string>& argv_in,
             timed_out = true;
             kill_at   = now + kKillGrace;
         }
+        // Same escalation for the wall-clock ceiling. Reported as a timeout
+        // too -- from the caller's side "it ran too long" is one outcome,
+        // and legacy_format explains which budget it was.
+        if (!sent_term && has_hard_window && now >= hard_deadline) {
+            signal_group(SIGTERM);
+            sent_term  = true;
+            timed_out  = true;
+            hard_capped = true;
+            kill_at    = now + kKillGrace;
+        }
         if (sent_term && !sent_kill && now >= kill_at) {
             signal_group(SIGKILL);
             sent_kill = true;
@@ -838,6 +904,8 @@ SubprocessResult run_posix(const std::vector<std::string>& argv_in,
         auto next = last_emit + kEmitGap;
         if (!sent_term && has_idle_window && idle_deadline < next)
             next = idle_deadline;
+        if (!sent_term && has_hard_window && hard_deadline < next)
+            next = hard_deadline;
         if (sent_term && !sent_kill && kill_at < next) next = kill_at;
         auto wait_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                            next - now).count();
@@ -979,6 +1047,7 @@ SubprocessResult run_posix(const std::vector<std::string>& argv_in,
     if      (WIFEXITED  (wait_status)) r.exit_code = WEXITSTATUS(wait_status);
     else if (WIFSIGNALED(wait_status)) r.exit_code = 128 + WTERMSIG(wait_status);
     r.timed_out = timed_out;
+    r.hard_capped = hard_capped;
     r.truncated = truncated;
     r.output    = clean_capture(out.str());
     return r;
@@ -1073,8 +1142,22 @@ std::string legacy_format(const SubprocessResult& r, std::chrono::seconds timeou
     if (!r.started) return "[" + r.start_error + "]";
     std::string o = r.output;
     if (r.truncated) o += "\n[output truncated]";
-    if (r.timed_out) o += "\n[timed out after " + std::to_string(timeout.count()) + "s]";
-    else if (r.exit_code != 0) o += "\n[exit code " + std::to_string(r.exit_code) + "]";
+    if (r.hard_capped) {
+        // It was still producing output when we stopped it, so the useful
+        // next step is more time or a background session -- not the hunt for
+        // a hang that "timed out" would send the model on.
+        o += "\n[stopped at the wall-clock ceiling while still producing "
+             "output. It was not stuck. Re-run with a larger `timeout`, or "
+             "start it with `process_start` and poll it, which is the right "
+             "shape for anything long-running.]";
+    } else if (r.timed_out) {
+        o += "\n[no output for " + std::to_string(timeout.count())
+           + "s, so it was stopped. The clock measures SILENCE, not total "
+             "runtime -- a long build that keeps printing is never cut off. "
+             "If it is legitimately quiet for a while, raise `timeout`.]";
+    } else if (r.exit_code != 0) {
+        o += "\n[exit code " + std::to_string(r.exit_code) + "]";
+    }
     return o;
 }
 

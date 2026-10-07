@@ -182,6 +182,22 @@ struct DynamicDispatch {
             result->text = detail::apply_output_budget(
                 std::move(result->text), td->max_output_chars,
                 td->output_truncation);
+        } else if (!result && td->max_output_chars > 0) {
+            // Errors used to skip the budget on the reasoning that typed
+            // ToolError details are short by design. They are when WE write
+            // them -- but an MCP server's error payload crosses this boundary
+            // verbatim (bridge.cpp wraps r.text in ToolError::subprocess),
+            // and so does a subprocess's stderr. Untrusted text is untrusted
+            // whichever side of the expected<> it arrives on.
+            //
+            // Generous and HeadTail: a truncated error still has to be
+            // diagnosable, and the useful part of a failure is usually the
+            // first lines plus the last.
+            constexpr int kMinErrorBudget = 4'000;
+            const int budget = std::max(td->max_output_chars, kMinErrorBudget);
+            result.error().detail = detail::apply_output_budget(
+                std::move(result.error().detail), budget,
+                tools::OutputTruncation::HeadTail);
         }
         return result;
     }
@@ -225,6 +241,22 @@ struct DynamicDispatch {
             result->text = detail::apply_output_budget(
                 std::move(result->text), td->max_output_chars,
                 td->output_truncation);
+        } else if (!result && td->max_output_chars > 0) {
+            // Errors used to skip the budget on the reasoning that typed
+            // ToolError details are short by design. They are when WE write
+            // them -- but an MCP server's error payload crosses this boundary
+            // verbatim (bridge.cpp wraps r.text in ToolError::subprocess),
+            // and so does a subprocess's stderr. Untrusted text is untrusted
+            // whichever side of the expected<> it arrives on.
+            //
+            // Generous and HeadTail: a truncated error still has to be
+            // diagnosable, and the useful part of a failure is usually the
+            // first lines plus the last.
+            constexpr int kMinErrorBudget = 4'000;
+            const int budget = std::max(td->max_output_chars, kMinErrorBudget);
+            result.error().detail = detail::apply_output_budget(
+                std::move(result.error().detail), budget,
+                tools::OutputTruncation::HeadTail);
         }
         return result;
     }

@@ -65,7 +65,26 @@ struct SubprocessOptions {
         return nullptr;
     }
 
+    // `timeout` is an IDLE watchdog: it fires only after this many seconds
+    // of SILENCE, so a chatty build/test that keeps printing progress is
+    // never killed mid-flight. That is the right default for a coding agent
+    // -- a 20-minute test run should finish.
+    //
+    // But silence is not the only way to hang. A runaway that stays chatty
+    // forever (`yes`, `tail -f`, a progress loop) rolls the idle deadline
+    // forward on every byte and is never reaped, and once the output cap is
+    // hit the reader discards everything it reads, so it isn't even bounded
+    // by memory. `hard_timeout` is an absolute ceiling from spawn that never
+    // resets. 0 derives a generous one (20x idle, floored at 10 min) so a
+    // caller that only set `timeout` still gets a backstop without any
+    // realistic build or test suite coming near it.
+    //
+    // This mirrors mcp-cpp's runner field for field. agentty installs ITS
+    // runner as mcp-cpp's host sandbox whenever the sandbox is on, so the
+    // ceiling written over there was being bypassed in the default config --
+    // the two have to agree or the protection only exists on paper.
     std::chrono::seconds timeout{120};
+    std::chrono::seconds hard_timeout{0};
     // Unsigned because a negative cap makes no sense and every compare
     // site was already a `size_t` on the RHS; the old `int` caused
     // mixed-sign promotions and the occasional sign-compare warning.
@@ -141,6 +160,12 @@ struct SubprocessResult {
     std::string output;                // captured stdout+stderr, UTF-8 valid
     int  exit_code   = 0;
     bool timed_out   = false;
+    // True when it was the WALL-CLOCK ceiling that stopped it, not silence.
+    // The two want opposite advice: an idle timeout means "it hung, look at
+    // why", a hard cap means "it was still working, give it longer or run it
+    // in the background". Saying "timed out" for both sends the model
+    // debugging a command that was fine.
+    bool hard_capped = false;
     bool truncated   = false;
     bool started     = true;           // false iff spawn itself failed
     std::string start_error;           // populated when started==false

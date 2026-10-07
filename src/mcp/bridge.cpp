@@ -856,6 +856,43 @@ std::optional<std::string> resolve_tool_route(
     return match;
 }
 
+// ── "is this tool actually enabled?" ──────────────────────────────────
+//
+// Two sources, both of which projection already consults: the per-server
+// policy baked at connect (tools.include / tools.exclude) and the LIVE config
+// exclude that the Plugins pane toggle writes.
+//
+// This used to be spelled inline inside project_tools only, which meant
+// mcp_call and mcp_search_tools -- both of which go straight to the registry
+// -- ignored it completely. A tool the user switched off stayed advertised by
+// search and stayed callable by mcp_call; the toggle only removed it from the
+// inline catalog. A deny that merely hides something is not a deny, so the
+// check lives here and every path reads the same function.
+[[nodiscard]] std::unordered_map<std::string, std::unordered_set<std::string>>
+live_exclude_map() {
+    std::unordered_map<std::string, std::unordered_set<std::string>> m;
+    for (const auto& [sname, cs] : read_config_servers())
+        if (!cs.exclude.empty()) m[sname] = cs.exclude;
+    return m;
+}
+
+// Caller must hold pool->mu (it reads pool->policies).
+[[nodiscard]] bool tool_enabled(
+    const PoolHandle& pool, std::string_view exposed,
+    const std::unordered_map<std::string, std::unordered_set<std::string>>& live_excl) {
+    const auto origin = mcp_origin_id(exposed);
+    const auto bare   = mcp_bare_name(exposed);
+    const ServerPolicy fallback;
+    const auto it = pool->policies.find(origin);
+    const auto& policy = it == pool->policies.end() ? fallback : it->second;
+    if (!policy.include.empty() && !policy.include.contains(bare)) return false;
+    if (policy.exclude.contains(bare)) return false;
+    if (auto le = live_excl.find(origin);
+        le != live_excl.end() && le->second.contains(bare))
+        return false;
+    return true;
+}
+
 tools::ToolDef make_search_tools_tool(PoolHandle pool) {
     tools::ToolDef def;
     def.name = ToolName{"mcp_search_tools"};
@@ -886,7 +923,15 @@ tools::ToolDef make_search_tools_tool(PoolHandle pool) {
         std::ranges::transform(needle, needle.begin(),
             [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
         std::vector<std::pair<int, ::mcp::Tool>> ranked;
-        for (auto tool : pool->registry.tools()) {
+        const auto live_excl = live_exclude_map();
+        std::vector<::mcp::Tool> visible;
+        {
+            std::lock_guard<std::mutex> lk(pool->mu);
+            for (auto& t : pool->registry.tools())
+                if (tool_enabled(pool, t.name, live_excl))
+                    visible.push_back(std::move(t));
+        }
+        for (auto tool : visible) {
             std::string text = tool.name + " " + tool.description.value_or("");
             std::ranges::transform(text, text.begin(),
                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
@@ -955,6 +1000,17 @@ tools::ToolDef make_call_tool(PoolHandle pool) {
         if (!route)
             return std::unexpected(tools::ToolError::not_found(
                 "MCP tool is missing or ambiguous: " + name));
+        // The user's toggle binds here too, not just in the inline catalog --
+        // otherwise mcp_call is a documented way around it.
+        {
+            const auto live_excl = live_exclude_map();
+            std::lock_guard<std::mutex> lk(pool->mu);
+            if (!tool_enabled(pool, *route, live_excl))
+                return std::unexpected(tools::ToolError::denied(
+                    "MCP tool '" + name + "' is disabled. Enable it in the "
+                    "Plugins pane, or remove it from tools.exclude in "
+                    "mcp.json."));
+        }
         auto result = pool->registry.dispatch(::mcp::cap::Request{
             *route, call_args, tools::progress::current(),
             tools::cancellation::current()});
@@ -1105,26 +1161,18 @@ std::vector<tools::ToolDef> project_tools(PoolHandle pool) {
     // form resolved a single config, so a user server's tool-exclude was
     // silently ignored whenever a project mcp.json existed -- a toggle in the
     // Plugins pane appeared to do nothing.
-    std::unordered_map<std::string, std::unordered_set<std::string>> live_excl;
-    for (const auto& [sname, cs] : read_config_servers())
-        if (!cs.exclude.empty()) live_excl[sname] = cs.exclude;
+    std::unordered_map<std::string, std::unordered_set<std::string>> live_excl =
+        live_exclude_map();
 
     {
         std::lock_guard<std::mutex> lk(pool->mu);
         for (auto& t : pool->registry.tools()) {
             const auto origin = mcp_origin_id(t.name);
-            const auto bare = mcp_bare_name(t.name);
+            if (!tool_enabled(pool, t.name, live_excl)) continue;
             const auto policy_it = pool->policies.find(origin);
             const ServerPolicy fallback;
             const auto& policy = policy_it == pool->policies.end()
                 ? fallback : policy_it->second;
-            if ((!policy.include.empty() && !policy.include.contains(bare))
-                || policy.exclude.contains(bare))
-                continue;
-            // Live per-config exclude (the toggle path).
-            if (auto le = live_excl.find(origin);
-                le != live_excl.end() && le->second.contains(bare))
-                continue;
             out.push_back(make_tool(pool, t, policy));
         }
         any_resources = !pool->registry.resources().empty() ||
