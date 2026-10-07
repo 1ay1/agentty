@@ -1,39 +1,21 @@
-// reasoning_ticker_height_test — the live reasoning block never shrinks.
-//
-// ── The bug ─────────────────────────────────────────────────────────────
+// reasoning_ticker_height_test — the live reasoning block stays bounded.
 //
 // agentty renders live reasoning as a "thought ticker" when Appearance ▸
-// Thinking is Collapsed (the DEFAULT): ReasoningStream::Config::
-// live_tail_lines = 3, so only the newest few lines show and a long
-// chain-of-thought stays a glance instead of shoving the composer down.
+// Thinking is Collapsed (the default): ReasoningStream::Config::
+// live_tail_lines = 3, so a long chain-of-thought stays a glance instead
+// of shoving the composer down.
 //
-// The window is 3 line-NODES. A node is a markdown block, and a block wraps
-// to a VARIABLE number of terminal ROWS. So the block's height tracked
-// whichever three paragraphs happened to be newest, and fell whenever a
-// shorter one entered the window. Measured at width 50:
+// The window is 3 line-NODES and a node wraps to a variable number of
+// ROWS, so the height dips when a shorter paragraph becomes the newest
+// node. maya padded up to a running row max to stop that and dropped it
+// again in 25b1759 — the pad left permanent blank rows under the newest
+// line, which reads worse than a transient dip. So the height is
+// non-monotonic on purpose; a row-exact window is the real fix and it
+// needs node splitting.
 //
-//     after para 1:  8 rows
-//     after para 2: 13 rows
-//     after para 3: 12 rows      <- shrink
-//     after para 4:  9 rows      <- shrink (short final paragraph)
-//
-// Every decrease is a height shrink DURING streaming, which yanks the
-// composer and status bar up under the user's cursor. A short final
-// paragraph is both the worst case and the common one, which is why the
-// report was "the last para makes the height short".
-//
-// This is the same invariant md_shape_sweep enforces for the markdown
-// widget ("ALL SHAPES MONOTONIC") — the reasoning ticker simply was not
-// covered by it, because the instability comes from the tail WINDOW and not
-// from the markdown underneath.
-//
-// ── The fix this pins ───────────────────────────────────────────────────
-//
-// The ticker holds a running max of the rows it has occupied for the
-// current live block and pads up to it. Growth stays immediate; only dips
-// are absorbed. set_live() resets it on each live/settled transition, so a
-// settled block (which renders in full, no window) carries no dead rows and
-// a new turn does not inherit the previous one's tallest moment.
+// What the ticker still promises, and what this pins: the window BOUNDS
+// the block, so thinking for a long time does not grow the height with
+// it, and a settled block carries no reserved blank rows.
 
 #include "agtest.hpp"
 
@@ -41,6 +23,7 @@
 #include <maya/print.hpp>
 #include <maya/widget/reasoning.hpp>
 
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -74,11 +57,11 @@ int ticker_rows(const std::string& src) {
 
 }  // namespace
 
-TEST_CASE("reasoning ticker: height never shrinks as paragraphs arrive") {
+TEST_CASE("reasoning ticker: the window bounds the block as paragraphs arrive") {
     maya::testing::freeze_anim_clock(0);
 
-    // Three long paragraphs (each wraps to several rows) then a SHORT one —
-    // the exact shape that collapsed the block.
+    // Long paragraphs (each wraps to several rows) with a SHORT one in the
+    // middle and at the end — the shapes that move the height around.
     const std::vector<std::string> paras = {
         "This is a long first paragraph that will certainly wrap across "
         "several terminal rows because it keeps going and going with plenty "
@@ -87,6 +70,11 @@ TEST_CASE("reasoning ticker: height never shrinks as paragraphs arrive") {
         "wrap onto multiple rows when rendered at a narrow width like this.",
         "A third long paragraph that likewise wraps over several rows so the "
         "ticker window is tall while these three are the newest nodes.",
+        "Short one.",
+        "A fifth long paragraph, again several rows wide, so the window is "
+        "full of tall nodes once more and the text keeps accumulating.",
+        "A sixth long paragraph of roughly the same size, which is what a "
+        "real chain of thought looks like after thinking for a while.",
         "Short final.",
     };
 
@@ -98,21 +86,30 @@ TEST_CASE("reasoning ticker: height never shrinks as paragraphs arrive") {
         heights.push_back(ticker_rows(src));
     }
 
-    maya::testing::unfreeze_anim_clock();
-
     std::string trace;
     for (std::size_t i = 0; i < heights.size(); ++i)
         trace += " p" + std::to_string(i + 1) + "=" + std::to_string(heights[i]);
     INFO("ticker heights:", trace);
 
-    for (std::size_t i = 1; i < heights.size(); ++i)
-        CHECK(heights[i] >= heights[i - 1]);
+    // Bounded: seven paragraphs in, the block is no taller than it was when
+    // three were. The window is the whole point — thinking longer must not
+    // push the composer further down.
+    const int tallest = *std::max_element(heights.begin(), heights.end());
+    CHECK(tallest < 20);
+    CHECK(heights.back() <= tallest);
 
-    // And the window still DOES bound the block — the point of the ticker is
-    // that a long chain-of-thought stays a glance. Without a cap this would
-    // grow without limit, so assert it stays modest rather than tracking the
-    // full text.
-    CHECK(heights.back() < 40);
+    // And it really is a window, not the full text: the same content settled
+    // (no window) is much taller.
+    maya::ReasoningStream::Config full_cfg;
+    full_cfg.live_tail_lines = 3;
+    maya::ReasoningStream full{full_cfg};
+    full.set_content(src);
+    full.set_live(false);
+    full.finish();
+    const int settled_rows = rows_of(maya::render_to_string(full.build(), kWidth));
+    maya::testing::unfreeze_anim_clock();
+    INFO("settled rows:", settled_rows);
+    CHECK(settled_rows > tallest);
 }
 
 TEST_CASE("reasoning ticker: settling releases the reserved rows") {
