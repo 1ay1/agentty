@@ -110,18 +110,24 @@ maya::Element model_badge_config(const Model& m) {
     }
 
     // Reasoning-effort chip: when a tier is active AND the model can reason,
-    // ride a compact "· ◇high" so the current effort is visible at a glance
+    // ride a compact "· ✦ xhigh" so the current effort is visible at a glance
     // without opening the picker — the same tier you set there (←/→). Uses
     // resolved_caps so it never shows on a model that can't take effort (or
     // where a stale pick would be dropped at send time). An empty Element
     // when absent, so it composes without a presence flag.
+    //
+    // The sigil is ✦, the same one the reasoning block wears in the thread,
+    // so one glyph means "reasoning" everywhere instead of a ◇ that appears
+    // nowhere else. It carries the accent and the tier stays muted: the
+    // chip then reads as a footnote on the model rather than a third peer
+    // in the row, and the two are no longer glued into one "◇xhigh" word.
     Element effort_chip = text("");
     if (m.d.effort != Effort::None && !model.empty()) {
         const auto caps = resolved_caps(model);
         if (effort_capable(caps))
-            effort_chip = h(text(" \xc2\xb7 ", fg_dim(muted)),
-                            text("\xe2\x97\x87" +
-                                 std::string{effort_label(m.d.effort)},
+            effort_chip = h(text("  "),
+                            text("\xe2\x9c\xa6 ", fg_of(ui::role_brand)),
+                            text(std::string{effort_label(m.d.effort)},
                                  fg_dim(muted))).build();
     }
 
