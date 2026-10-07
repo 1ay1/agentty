@@ -1354,7 +1354,10 @@ std::vector<tools::ToolDef> mcp_tools(PoolHandle& out_pool) {
 
     struct Pending {
         std::string name;
-        std::shared_future<std::shared_ptr<::mcp::cap::CapabilityProvider>> fut;
+        // A plain future, not a shared_future. It was shared only so the
+        // orphan-waiter below could keep a timed-out connect alive; the pool
+        // owns the job now, so nothing else needs a handle on it.
+        std::future<std::shared_ptr<::mcp::cap::CapabilityProvider>> fut;
     };
     std::vector<Pending> pending;
     // Per-server trust set, loaded once. For a workspace-local config that
@@ -1416,7 +1419,14 @@ std::vector<tools::ToolDef> mcp_tools(PoolHandle& out_pool) {
         // A server entry with a "url" (or type:"http"/"sse") is a remote
         // Streamable HTTP server; anything with a "command" is a spawned
         // stdio server. URL wins when both are present.
-        pending.push_back(Pending{sname, std::async(std::launch::async,
+        // submit_isolated, not the standard async helper: a connect is a
+        // network dial that can wedge, and that helper's future JOINS in its
+        // destructor — so dropping a timed-out connect below would have
+        // blocked startup at the line that dropped it. The pool's future does
+        // not, and the job stays owned (waited for at teardown) rather than
+        // detached.
+        pending.push_back(Pending{sname,
+            ::agentty::util::background_pool().submit_isolated(
             [sname, spec]() -> std::shared_ptr<::mcp::cap::CapabilityProvider> {
                 const std::string url  = spec.value("url", std::string{});
                 const std::string type = spec.value("type", std::string{});
@@ -1440,7 +1450,7 @@ std::vector<tools::ToolDef> mcp_tools(PoolHandle& out_pool) {
                     return p;
                 }
                 return make_provider(sname, spec);
-            }).share()});
+            })});
     }
 
     const auto deadline = std::chrono::steady_clock::now()
@@ -1458,13 +1468,10 @@ std::vector<tools::ToolDef> mcp_tools(PoolHandle& out_pool) {
             // plugin that silently failed to connect just meant its tools
             // "weren't there", with no way to tell that from a config typo.
             AGT_LOG(Mcp, Warn, "mcp.connect", "server={} result=timeout", pend.name);
-            // Detach so the still-handshaking worker can finish and clean up
-            // without blocking startup; its result is dropped. Terminate-proof
-            // wrapper: any throw out of a bare detached lambda is process
-            // death — the isolated runner logs and swallows instead.
-            agentty::util::run_isolated_detached(
-                "mcp.orphan_connect_waiter",
-                [f = pend.fut]() mutable { f.wait(); });
+            // Just drop it. The still-handshaking job keeps running on the
+            // pool and is waited for at teardown; its result is discarded.
+            // This used to need a detached waiter whose only job was to
+            // absorb a blocking future destructor somewhere other than here.
             continue;
         }
         auto p = pend.fut.get();
