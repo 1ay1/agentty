@@ -242,9 +242,19 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m,
         // seam ramp is new: this comment previously claimed the seam already
         // drained through request_finalize(160), which was the ANSWER path's
         // mechanism. Nothing bounded the reasoning side at all.)
+        //
+        // 0.55, not 0.40, and the half-step is the point. On the reasoning
+        // fixture (reveal_stream_gate_reasoning), measured over the lag
+        // window: 0.40 leaves the cursor idle AT the edge on 2.9% of live
+        // frames, 0.55 on 1.6%, 0.70 on 0.9% -- and the end-of-reasoning
+        // drain stretches 1.9s / 2.5s / 3.0s in step. Stalls are what the
+        // user sees mid-stream and the drain is what they see at the seam,
+        // so this sits at the knee rather than at either end. Bigger lag
+        // also means a smoother glide (max 11 -> 9 bytes revealed per
+        // frame), because the rate is backlog/lag.
         if (reasoning_view) {
             cache.streaming->set_reveal_pacing(/*floor_cps=*/60.0,
-                                               /*lead_secs=*/0.40);
+                                               /*lead_secs=*/0.55);
             cache.streaming->set_reveal_adaptive(true, /*min*/45.0,
                                                  /*max*/280.0);
         }

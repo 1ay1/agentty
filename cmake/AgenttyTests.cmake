@@ -830,15 +830,21 @@ agentty_add_ctest(reveal_stream_gate_snap COMMAND
 # cursor idle AT the edge between bursts -- a sprint, then a stall, which is
 # what "slow and bursty" means.
 #
-# Measured on this fixture: drain 0.28 left the cursor idle-at-edge on 6.2% of
-# live frames with a max per-frame jump of 16; drain 0.40 gives 2.9% and 12,
-# with 52% more animating frames. The gate pins the delta ceiling so a future
-# retune of the reasoning lane cannot quietly reintroduce the chunking.
+# Measured on this fixture, sweeping the lag window with production's own
+# adaptive bounds: 0.28 left the cursor idle-at-edge on 7.0% of live frames
+# (max per-frame jump 14), 0.40 on 2.9% (11), 0.55 on 1.6% (9), 0.70 on 0.9%
+# (8) -- while the end-of-reasoning drain stretched 1.9s / 2.5s / 3.0s. The
+# lane runs 0.55, the knee. The gate pins the delta ceiling so a future
+# retune cannot quietly reintroduce the chunking.
+#
+# The adaptive WINDOW is passed explicitly because it is part of the profile:
+# without it the harness used maya's defaults (20..220) and this "reasoning
+# profile" was measuring the answer lane's window.
 set(_RSG_REASONING ${CMAKE_SOURCE_DIR}/tests/fixtures/reasoning_burst_shape.jsonl)
 agentty_add_ctest(reveal_stream_gate_reasoning COMMAND
     agentty_standalone_tests anthropic_md_stream det ${_RSG_REASONING}
-    --cps 60 --drain 0.40 --adaptive
-    --assert-max-delta 24 --assert-finalize-max 40 --assert-finalize-ms 3600)
+    --cps 60 --drain 0.55 --adaptive --adaptive-min 45 --adaptive-max 280
+    --assert-max-delta 16 --assert-finalize-max 24 --assert-finalize-ms 3600)
 
 # ── Concurrency ban-list ───────────────────────────────────────────
 # Raw threads, locks, atomics and thread_locals only where a human signed
