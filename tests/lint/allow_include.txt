@@ -3,13 +3,13 @@
 #
 # Paths are relative to include/.
 
-# ── Types whose whole job is to be the safe wrapper ──────────────────────
-# isolated_thread: an OWNED worker whose body cannot call std::terminate.
-# It predates the jaal migration and survives it for one reason — the ACP
-# server (`agentty acp`) is a separate process mode with no jaal loop, so
-# there is no task machinery to hand work to. In the TUI path nothing uses
-# it; that work is Cmd::task.
-agentty/util/isolated_thread.hpp: thread detach
+# ── Types whose whole job is to be the safe wrapper ──────────────────
+# NOTE: util/background.hpp (was isolated_thread.hpp) is deliberately NOT
+# here any more. It used to need `thread detach` because it hand-rolled a
+# detached worker, exempted on the grounds that the ACP process mode has no
+# jaal loop and therefore no task machinery. That premise was wrong:
+# jaal::kernel::pool is standalone and needs no loop, so background.hpp now
+# posts to it and spawns no thread of its own.
 # ranked_lock: lock-ordering enforcement. The mutex IS the subject, and the
 # thread_local is the per-thread rank stack it checks against.
 agentty/util/ranked_lock.hpp: mutex thread_local

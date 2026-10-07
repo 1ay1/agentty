@@ -41,7 +41,7 @@
 #include "agentty/tool/tool.hpp"
 #include "agentty/tool/util/sandbox.hpp"
 #include "agentty/util/dbglog.hpp"
-#include "agentty/util/isolated_thread.hpp"
+#include "agentty/util/background.hpp"
 
 #ifndef AGENTTY_VERSION
 #define AGENTTY_VERSION "0.0.0-dev"

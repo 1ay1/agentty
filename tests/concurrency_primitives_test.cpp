@@ -6,11 +6,15 @@
 //      debug build. We fork a child that deliberately takes the locks out of
 //      order and assert the child dies by SIGABRT.
 //
-//   2. util::isolated_thread / run_isolated_detached — the terminate-proof
-//      worker. A body that throws must NOT propagate to std::terminate; the
-//      thread swallows it (routing to dbglog) and the process survives. We
-//      run a throwing body on an owned isolated_thread and assert we reach the
-//      line after join() alive.
+//   2. util::run_isolated_detached — background work that is OWNED. Three
+//      guarantees, and only the first one used to hold:
+//        a. a body that throws does NOT reach std::terminate,
+//        b. the work is WAITED FOR at shutdown, not detached and forgotten,
+//        c. the body is handed a stop_token and asked to stop.
+//      (b) and (c) arrived with jaal::kernel::pool. The old hand-rolled
+//      version was a plain std::thread(...).detach() whose comment claimed a
+//      "self-joining reaper" that did not exist, so there was nothing to
+//      join and nothing to cancel. The test below would have failed it.
 //
 // The abort path is exercised in a forked child (like cred_crypt_test) so the
 // deliberate std::abort() doesn't take down the whole ctest process.
@@ -33,7 +37,7 @@
 #  include <unistd.h>
 #endif
 
-#include "agentty/util/isolated_thread.hpp"
+#include "agentty/util/background.hpp"
 #include "agentty/util/ranked_lock.hpp"
 
 namespace {
@@ -101,44 +105,50 @@ void test_lock_order_legal() {
     CHECK(reached, "legal nesting (10 then 20) does not abort");
 }
 
-// ── 2. Terminate-proof isolated worker ─────────────────────────────────────
-// A worker body that throws must be swallowed; the process must survive and
-// the thread must join cleanly.
-void test_isolated_thread_swallows_throw() {
-    std::atomic<bool> body_ran{false};
-    {
-        agentty::util::isolated_thread t("test.throwing_worker",
-            [&] {
-                body_ran = true;
-                throw std::runtime_error("boom — must not reach std::terminate");
-            });
-        // Destructor joins. If the throw escaped, we'd std::terminate here and
-        // never reach the CHECK below.
-    }
-    CHECK(body_ran.load(), "isolated worker body executed");
-    CHECK(true, "throwing worker did NOT terminate the process (survived join)");
-}
+// ── 2. Background work that is OWNED ───────────────────────────────────────
+// One test, one shutdown: the pool's shutdown is terminal (later posts are
+// dropped), so isolation and cancellation are asserted against the same
+// drain rather than in two passes.
+//
+// The spin-and-hope the old version ended with ("even if some haven't run,
+// the point is none terminated") is exactly what a detached thread forces on
+// a test. Here shutdown() JOINS, so the counter is an assertion and not a
+// race: if the work were still detached, these counts would be unreliable
+// and `stuck` would be meaningless.
+void test_background_work_is_owned() {
+    std::atomic<int>  ran{0};
+    std::atomic<bool> saw_stop{false};
 
-// The fire-and-forget variant must also isolate a throw. We give it a moment
-// to run and assert the process is still alive afterward.
-void test_run_isolated_detached_survives_throw() {
-    std::atomic<int> counter{0};
+    // (a) throwing bodies must be isolated, every one of them.
     for (int i = 0; i < 8; ++i) {
-        agentty::util::run_isolated_detached("test.detached_worker",
-            [&counter] {
-                counter.fetch_add(1);
-                throw std::logic_error("detached boom");
+        agentty::util::run_isolated_detached("test.throwing_worker",
+            [&ran] {
+                ran.fetch_add(1);
+                throw std::logic_error("boom — must not reach std::terminate");
             });
     }
-    // Spin briefly for the detached workers to run; even if some haven't, the
-    // point is that NONE terminated the process.
-    for (int spin = 0; spin < 100 && counter.load() < 8; ++spin)
+
+    // (c) a body that asks for the stop_token must actually be stopped.
+    agentty::util::run_isolated_detached("test.cancellable_worker",
+        [&saw_stop](std::stop_token st) {
+            while (!st.stop_requested()) {
 #if AGENTTY_HAS_FORK
-        usleep(1000);
-#else
-        ;
+                usleep(500);
 #endif
-    CHECK(true, "8 throwing detached workers did not terminate the process");
+            }
+            saw_stop = true;
+        });
+
+    // (b) shutdown REQUESTS STOP and WAITS. Returns how many were still
+    // stuck at the grace deadline.
+    const std::size_t stuck = agentty::util::background_pool().shutdown();
+
+    CHECK(ran.load() == 8,
+          "every throwing body ran and was waited for (not detached)");
+    CHECK(saw_stop.load(),
+          "a background body is handed a stop_token and is asked to stop");
+    CHECK(stuck == 0, "shutdown drained every job within the grace");
+    CHECK(true, "8 throwing workers did not terminate the process");
 }
 
 } // namespace
@@ -146,8 +156,7 @@ void test_run_isolated_detached_survives_throw() {
 int main() {
     test_lock_order_legal();
     test_lock_order_tripwire();
-    test_isolated_thread_swallows_throw();
-    test_run_isolated_detached_survives_throw();
+    test_background_work_is_owned();
 
     if (failures == 0) {
         std::fprintf(stderr, "\nALL concurrency-primitive checks passed.\n");

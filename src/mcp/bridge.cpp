@@ -38,7 +38,7 @@
 #include "agentty/util/dbglog.hpp"
 #include "agentty/util/home_dir.hpp"
 #include "agentty/util/user_root.hpp"
-#include "agentty/util/isolated_thread.hpp"
+#include "agentty/util/background.hpp"
 
 #include <mcp/cap/cap.hpp>
 

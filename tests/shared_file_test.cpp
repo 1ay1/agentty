@@ -25,6 +25,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <mutex>
+#include <optional>
 #include <string>
 
 #if !defined(_WIN32)
@@ -98,18 +99,27 @@ int main() {
     // how long it waited; it must have been blocked for a real fraction of
     // the parent's hold, or the exclusion is not crossing the process
     // boundary and the race is still open.
+    //
+    // ORDER MATTERS: the parent takes the lock BEFORE forking. Forking first
+    // and acquiring after is a race the test loses under parallel load — the
+    // child got in first and reported "waited 0 ms", which looks exactly
+    // like a broken lock. (It failed that way under ctest -j12 while passing
+    // standalone, which is the signature of a racy test, not a racy lock.)
+    //
+    // fcntl locks are NOT inherited across fork, so the child genuinely
+    // contends rather than sharing our hold. The child uses its own mutex
+    // because our copy of test_mu() is inherited LOCKED.
     {
         constexpr auto kHold = std::chrono::milliseconds{400};
         int pipefd[2] = {-1, -1};
         if (::pipe(pipefd) != 0) {
             CHECK(false, "pipe for the child's verdict");
         } else {
-            const auto t0  = std::chrono::steady_clock::now();
+            auto guard = std::make_optional<SharedFile>(test_mu(), target);
             const pid_t pid = ::fork();
             if (pid == 0) {
                 ::close(pipefd[0]);
-                // Contend for the same file. Blocks until the parent's
-                // SharedFile goes out of scope.
+                const auto t0 = std::chrono::steady_clock::now();
                 std::mutex child_mu;
                 { const SharedFile g{child_mu, target}; (void)g; }
                 const auto waited =
@@ -121,11 +131,8 @@ int main() {
                 ::_exit(0);
             }
             ::close(pipefd[1]);
-            {
-                const SharedFile guard{test_mu(), target};
-                (void)guard;
-                ::usleep(static_cast<unsigned>(kHold.count()) * 1000u);
-            }  // release here
+            ::usleep(static_cast<unsigned>(kHold.count()) * 1000u);
+            guard.reset();  // release here
 
             long long child_waited = -1;
             (void)!::read(pipefd[0], &child_waited, sizeof(child_waited));

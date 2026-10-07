@@ -482,8 +482,13 @@ agentty_test(stats_refresh_bench     MODE standalone NO_TEST)
 # pulling maya's un-instrumented renderer. Registered raw + marked sanitizer.
 agentty_test(concurrency_primitives_test MODE raw LABELS sanitizer)
 add_executable(concurrency_primitives_test EXCLUDE_FROM_ALL
-    tests/concurrency_primitives_test.cpp src/util/dbglog.cpp src/util/logx.cpp)
+    tests/concurrency_primitives_test.cpp src/util/dbglog.cpp src/util/logx.cpp
+    src/util/teardown.cpp)
 target_include_directories(concurrency_primitives_test PRIVATE include)
+# util/background.hpp posts to jaal::kernel::pool rather than spawning its
+# own thread, so this raw target needs jaal on the include path like any
+# other consumer.
+target_link_libraries(concurrency_primitives_test PRIVATE jaal::jaal)
 add_test(NAME concurrency_primitives_test COMMAND concurrency_primitives_test)
 set_tests_properties(concurrency_primitives_test PROPERTIES TIMEOUT 30 LABELS sanitizer)
 
