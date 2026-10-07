@@ -153,6 +153,10 @@ set(AGENTTY_TOOL_SOURCES
     src/tool/progress.cpp
     src/tool/util/utf8.cpp
     src/tool/util/fs_helpers.cpp
+    # The ONE place agentty runs another program: mcp-cpp's Exec capability,
+    # implemented over jaal's process + reactor. Replaces the two poll loops
+    # (this tree's subprocess.cpp and mcp-cpp's) that drifted apart.
+    src/tool/util/exec.cpp
     src/tool/util/subprocess.cpp
     src/tool/util/sandbox.cpp
     src/tool/util/sandbox_claybin.cpp
