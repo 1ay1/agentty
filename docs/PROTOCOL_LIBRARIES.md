@@ -277,7 +277,7 @@ coro.hpp 2 lines apart; core, codec, rpc, stdio drifted copies). Under R7
 they become:
 
 ```
-jsonrpc-cpp   (new library, header-only, C++20, no deps but nlohmann_json)
+agentty/include/jsonrpc/   (header-only, C++20, no deps but nlohmann_json)
   core.hpp        Maybe / List / Sum / Newtype / Unit, match()
   codec.hpp       Codec<T>, the codec algebra, to_json / from_json
   error.hpp       RpcError, errc
@@ -287,9 +287,9 @@ jsonrpc-cpp   (new library, header-only, C++20, no deps but nlohmann_json)
   router.hpp      Router<Ctx>: typed method table, pure dispatch
   coro.hpp        Task<T>, awaitables resumed by the caller (§4.9)
 
-mcp-cpp  depends on jsonrpc-cpp.  Owns: MCP types, methods, capabilities,
+mcp-cpp  includes <jsonrpc/...>.  Owns: MCP types, methods, capabilities,
          the Client/Server protocol state machines, builtin tool logic.
-acp-cpp  depends on jsonrpc-cpp.  Owns: ACP types, methods, session updates,
+acp-cpp  includes <jsonrpc/...>.  Owns: ACP types, methods, session updates,
          the Agent/Client protocol state machines.
 ```
 
@@ -302,11 +302,23 @@ Rules for the core:
   `acp::`) via `using` aliases where the vocabulary is shared, so callers
   are unaffected by where a type lives.
 - It obeys every rule in §2. It is a library too.
-- Lives as its own repo (`1ay1/jsonrpc-cpp`), added as a submodule of
-  agentty and consumed by mcp-cpp and acp-cpp through the parent build
-  (`add_subdirectory` guarded by `if(NOT TARGET jsonrpc::jsonrpc)`, so the
-  parent supplies one copy and each library can still fetch it when built on
-  its own for its own tests).
+- **It lives in agentty, at `include/jsonrpc/`**, its own top-level header
+  directory and namespace (`jsonrpc::`), not under `include/agentty/`. No
+  separate repo, no submodule.
+- **It is self-contained.** A `jsonrpc/` header includes only the standard
+  library, `<nlohmann/json.hpp>` and other `jsonrpc/` headers. Never
+  `agentty/`, `maya/`, `jaal/`, `mcp/`, `acp/`. That is what lets the
+  libraries use it without depending on agentty: `jsonrpc/` is a leaf that
+  happens to be stored in agentty's tree.
+- **It is the only thing from agentty the libraries may include.**
+  mcp-cpp and acp-cpp may `#include <jsonrpc/...>` and nothing else from
+  agentty. The parent build exports it as the INTERFACE target
+  `jsonrpc::jsonrpc` (include dir `${agentty}/include`, restricted by lint to
+  `jsonrpc/`), defined before the libraries are added, and they link it.
+- **The libraries are no longer standalone builds.** They are built as part
+  of agentty. Their own unit tests are registered by agentty's test build
+  (still single-threaded, still without `-pthread`), not by a separate
+  top-level CMake project.
 
 ## 6. What agentty provides
 
@@ -345,11 +357,16 @@ Lints in agentty's `static` ctest label, so one `ctest -L static` proves it:
   whose code (comments and namespace names normalised away) matches another
   library's above a small threshold, or if either redefines a name the core
   exports (`RpcEngine`, `Codec`, `RpcError`, `Newtype` ...).
+- **`jsonrpc_leaf`** (new) — `include/jsonrpc/` includes only the standard
+  library, nlohmann and itself; mcp-cpp and acp-cpp include nothing from
+  agentty except `<jsonrpc/...>`; nothing in agentty's own `src/` needs
+  `jsonrpc/` except the integration modules of §6.
 - **`layering` / `layering_maya` / `layering_jaal`** — unchanged: agentty
   never names jaal; maya never names agentty; jaal never names either.
-- Each library's own CI builds its tests **single-threaded** (no
-  `-pthread`, no `Threads::Threads` link). A library that needs a thread to
-  pass its own tests fails to link.
+- agentty's test build compiles each library's unit tests (and
+  `include/jsonrpc/`'s) **single-threaded**: no `-pthread`, no
+  `Threads::Threads` link. A library that needs a thread to pass its own
+  tests fails to link.
 
 A lint is only added together with the change that makes it pass, and its
 allowlist (if any) can only shrink.
@@ -360,8 +377,8 @@ Each step leaves the tree compiling, agentty's binary working end to end,
 and the `static` label green. Each library gets its own commits; agentty
 bumps the submodule pointer after each.
 
-1. **jsonrpc-cpp core.** Extract the shared headers from mcp-cpp/acp-cpp into
-   the new repo, rewritten to §4.3/§4.5 (Engine as a state machine, no
+1. **jsonrpc core.** Extract the shared headers from mcp-cpp/acp-cpp into
+   `agentty/include/jsonrpc/`, rewritten to §4.3/§4.5 (Engine as a state machine, no
    futures, no transport, no runtime). Unit-test it single-threaded:
    request/response, ids of every JSON type, batches, deadlines via
    `expire(now)`, malformed frames, notifications, responses to unknown ids.
@@ -420,5 +437,5 @@ And for agentty code that drives a library:
   write, completions, inbound requests, cancellations.
 - **Splitter** — a caller-supplied function that runs `fn(i)` over `[0, n)`,
   possibly in parallel. The only form of parallelism a library may accept.
-- **Core** — jsonrpc-cpp, the one shared implementation of JSON-RPC 2.0 and
+- **Core** — `include/jsonrpc/` in agentty, the one shared implementation of JSON-RPC 2.0 and
   the codec vocabulary.
