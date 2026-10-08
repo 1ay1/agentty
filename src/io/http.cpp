@@ -36,7 +36,6 @@
 #include <cstring>
 #include <deque>
 #include <limits>
-#include <mutex>
 #include <optional>
 #include <string>
 #include <stop_token>
@@ -2636,60 +2635,67 @@ constexpr std::size_t kMaxPoolEntriesPerEndpoint = 16;
     return true;
 }
 
+} // namespace
+} // namespace agentty::http
+
+// A Connection solely owns its socket, SSL and nghttp2 session (the dtor
+// frees all three); pend_buf_ points into that same session. Only a
+// connection whose run() succeeded is pooled, and run() clears the session's
+// user_data on success, so a pooled one points at nothing outside itself.
+MAYA_SENDABLE(agentty::http::Connection);
+
+namespace agentty::http {
+namespace {
+
+using PoolMap = std::unordered_map<Endpoint, std::vector<PooledConn>, EndpointHash>;
+
 class Pool {
 public:
     std::unique_ptr<Connection> acquire(const Endpoint& ep) {
-        std::lock_guard<std::mutex> lk(mu_);
-        auto it = map_.find(ep);
-        if (it == map_.end()) return nullptr;
-        auto& stack = it->second;
-        const auto now = clock_t_::now();
-        while (!stack.empty()) {
-            auto p = std::move(stack.back());
-            stack.pop_back();
-            // Three-stage liveness check: idle TTL → nghttp2 protocol state →
-            // socket-level FIN/RST. Each stage is cheap and catches a class
-            // of stale connections the previous one misses.
-            // Four-stage liveness check: total lifetime → idle TTL →
-            // nghttp2 protocol state → socket-level FIN/RST. Each stage
-            // is cheap and catches a class of stale connections the
-            // previous one misses; lifetime in particular catches the
-            // proxy-drain case that no client-side check can detect.
-            if (now - p.created_at  > kMaxLifetime) continue;
-            if (now - p.released_at > idle_ttl())   continue;
-            if (!p.conn->is_alive())                continue;
-            if (!socket_is_alive(p.conn->fd()))     continue;
-            p.conn->set_pooled(true);   // reused socket — see was_pooled()
-            p.conn->set_idle_ms(
-                std::chrono::duration_cast<std::chrono::milliseconds>(
-                    now - p.released_at).count());
-            return std::move(p.conn);
-        }
-        return nullptr;
+        return map_.with([](PoolMap& map, Endpoint e) -> std::unique_ptr<Connection> {
+            auto it = map.find(e);
+            if (it == map.end()) return nullptr;
+            auto& stack = it->second;
+            const auto now = clock_t_::now();
+            while (!stack.empty()) {
+                auto p = std::move(stack.back());
+                stack.pop_back();
+                // Four-stage liveness check: total lifetime → idle TTL →
+                // nghttp2 protocol state → socket-level FIN/RST. Each stage
+                // is cheap and catches a class of stale connections the
+                // previous one misses; lifetime in particular catches the
+                // proxy-drain case that no client-side check can detect.
+                if (now - p.created_at  > kMaxLifetime) continue;
+                if (now - p.released_at > idle_ttl())   continue;
+                if (!p.conn->is_alive())                continue;
+                if (!socket_is_alive(p.conn->fd()))     continue;
+                p.conn->set_pooled(true);   // reused socket — see was_pooled()
+                p.conn->set_idle_ms(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        now - p.released_at).count());
+                return std::move(p.conn);
+            }
+            return nullptr;
+        }, ep);
     }
 
     void release(std::unique_ptr<Connection> c) {
         if (!c || !c->is_alive()) return;
         c->set_pooled(false);   // back in the pool — next acquirer re-marks
-        std::lock_guard<std::mutex> lk(mu_);
-        auto& stack = map_[c->endpoint()];
-        if (stack.size() >= kMaxPoolEntriesPerEndpoint) {
-            // Drop the oldest (front) — its idle clock is most advanced and
-            // it's the most likely candidate for the peer to have closed by
-            // the time we'd next reach for it. Keeping the freshest 16 also
-            // matches stdio LRU intuition for a small fixed-size pool.
-            stack.erase(stack.begin());
-        }
-        // We don't track the original dial time on Connection; release
-        // time stands in for "how old is this entry in the pool." Good
-        // enough — the lifetime cap is about pool tenure, not socket age.
-        const auto now = clock_t_::now();
-        stack.push_back({std::move(c), now, now});
+        map_.with([](PoolMap& map, std::unique_ptr<Connection> conn) {
+            auto& stack = map[conn->endpoint()];
+            // Full: drop the oldest (front), the likeliest to have been
+            // closed by the peer by the time we'd reach for it.
+            if (stack.size() >= kMaxPoolEntriesPerEndpoint) stack.erase(stack.begin());
+            // Release time stands in for dial time; the lifetime cap is
+            // about pool tenure, not socket age.
+            const auto now = clock_t_::now();
+            stack.push_back({std::move(conn), now, now});
+        }, std::move(c));
     }
 
 private:
-    std::mutex mu_;
-    std::unordered_map<Endpoint, std::vector<PooledConn>, EndpointHash> map_;
+    maya::guarded<PoolMap> map_;
 };
 
 } // namespace
@@ -2729,11 +2735,6 @@ struct Client::Impl {
     // waiting is maya::pool's: it is bounded, so a dial genuinely
     // wedged in a blocking getaddrinfo() is abandoned at the deadline rather
     // than hanging teardown.
-    std::mutex                              prewarm_mu;
-    // The dials' cancel tokens. The THREADS are the pool's business; these
-    // are the app's own cancellation, which dial_new() polls inside its
-    // connect loop, so they stay.
-    std::vector<CancelTokenPtr>             prewarm_cancels;
     // Prewarm dials run here. Replaces a vector<thread> + a per-dial `done`
     // atomic + a 10 ms poll loop in join_prewarm(): the pool already does
     // "ask to stop, wait for a bounded grace on a condition variable, then
@@ -3088,10 +3089,6 @@ void Client::prewarm(std::string host, uint16_t port,
     // tell a settled dial from a wedged one, and the pool answers that from
     // its own accounting without polling.
     auto cancel = std::make_shared<CancelToken>();
-    {
-        std::lock_guard<std::mutex> lk(impl_->prewarm_mu);
-        impl_->prewarm_cancels.push_back(cancel);
-    }
     impl_->prewarm_pool.post_isolated(
         [this, cancel,
          host = std::move(host), port,
@@ -3131,17 +3128,9 @@ void Client::prewarm(std::string host, uint16_t port,
 }
 
 void Client::join_prewarm() noexcept {
-    std::vector<CancelTokenPtr> cancels;
-    {
-        std::lock_guard<std::mutex> lk(impl_->prewarm_mu);
-        cancels.swap(impl_->prewarm_cancels);
-    }
-    // Trip every token first so the dials abort at their next poll slice,
-    // THEN wait. Cancel-before-wait means a dial between slices spends the
-    // grace finishing rather than discovering the cancel at the end of it.
-    for (auto& c : cancels)
-        if (c) c->cancel();
-
+    // shutdown() requests stop on every dial before it waits, and each dial
+    // turns that into its cancel token (the stop_callback above), so the
+    // dials abort at their next poll slice.
     // One call replaces a hand-rolled bounded wait: the pool requests stop on
     // every dial, waits out its grace on a condition variable, and abandons
     // whatever is still stuck. That last case is the dial wedged inside a

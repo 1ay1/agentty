@@ -68,12 +68,10 @@ util/modelsdev.cpp: atomic
 # request from a later step" — its stop_token is the runtime's, and fires
 # when work stops being subscribed — so this atomic is the app's own. The
 # reasoning is written out on the Sendable opt-in in runtime/cmd.hpp.
-# http: the prewarm dials moved to a maya::pool member, so the
-# thread, the per-dial done atomic and the detach are gone — along with the
-# 10ms poll loop that stood in for a timed join. mutex guards the cancel-token
-# list and the connection pool; thread_local is the turn's cancel token;
-# const_cast is the OpenSSL C API.
-io/http.cpp: mutex thread_local const_cast
+# http: prewarm dials run on a maya::pool, the connection pool is
+# maya::guarded. thread_local is the turn's cancel token; const_cast is the
+# OpenSSL C API.
+io/http.cpp: thread_local const_cast
 io/tls.cpp: mutex const_cast
 
 # ── Persistence and credentials ──────────────────────────────────────────
