@@ -6,15 +6,15 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
-#include <map>
-#include <mutex>
-#include <set>
 #include <atomic>
-#include <shared_mutex>
+#include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <vector>
+
+#include <maya/runtime.hpp>
 
 #include "agentty/domain/id.hpp"
 #include "agentty/domain/capkey.hpp"   // canonical capability-key discipline
@@ -1046,17 +1046,15 @@ private:
 // which only receives a model id — can consult the scoped fact without the
 // domain layer depending on provider state.
 namespace caps_scope_detail {
-inline std::mutex& mu() { static std::mutex m; return m; }
-inline std::string& val() { static std::string s; return s; }
+inline maya::guarded<std::string>& val() { static maya::guarded<std::string> s; return s; }
 } // namespace caps_scope_detail
 
 inline void set_caps_provider_scope(std::string provider_id) {
-    std::lock_guard lk(caps_scope_detail::mu());
-    caps_scope_detail::val() = std::move(provider_id);
+    caps_scope_detail::val().with([](std::string& v, std::string p) { v = std::move(p); },
+                                  std::move(provider_id));
 }
 [[nodiscard]] inline std::string caps_provider_scope() {
-    std::lock_guard lk(caps_scope_detail::mu());
-    return caps_scope_detail::val();
+    return caps_scope_detail::val().read([](const std::string& v) { return v; });
 }
 // "provider/model" when a scope is set; "" when not (callers then use bare).
 // The one-arg form uses the ACTIVE provider scope; pass `scope` explicitly
@@ -1118,31 +1116,78 @@ inline void bump_caps_epoch() noexcept {
     return capkey::norm_model(key);
 }
 
+// The shape every registry below shares: a map of facts, the keys poisoned
+// by disagreeing sources, and a lock-free "anything recorded?" flag. The
+// flag lets the per-frame render path skip the lock entirely in the common
+// case (no facts), since background turns take the write side.
+template <class V>
+struct Facts {
+    std::map<std::string, V> map;
+    std::set<std::string>    poisoned;
+};
+template <class V>
+struct Registry {
+    maya::guarded<Facts<V>> facts;
+    std::atomic<bool>       any{false};
+
+    // Record a fact for an exact key.
+    void set(std::string key, V v) {
+        facts.with([](Facts<V>& f, std::string k, V val) { f.map[std::move(k)] = val; },
+                   std::move(key), v);
+        any.store(true, std::memory_order_relaxed);
+    }
+    // Agree-or-poison merge for a key shared across sources.
+    void merge(std::string key, V v) {
+        const bool recorded = facts.with([](Facts<V>& f, std::string k, V val) {
+            if (f.poisoned.count(k)) return false;
+            if (auto it = f.map.find(k); it != f.map.end()) {
+                if (it->second != val) { f.map.erase(it); f.poisoned.insert(k); }
+                return false;
+            }
+            f.map[std::move(k)] = val;
+            return true;
+        }, std::move(key), v);
+        if (recorded) any.store(true, std::memory_order_relaxed);
+    }
+    // Scoped-first, bare-tail fallback.
+    [[nodiscard]] std::optional<V> find(std::string scoped, std::string bare) const {
+        if (!any.load(std::memory_order_relaxed)) return std::nullopt;
+        return facts.read([](const Facts<V>& f, std::string sk, std::string bk)
+                              -> std::optional<V> {
+            if (!sk.empty())
+                if (auto it = f.map.find(sk); it != f.map.end()) return it->second;
+            if (auto it = f.map.find(bk); it != f.map.end()) return it->second;
+            return std::nullopt;
+        }, std::move(scoped), std::move(bare));
+    }
+    // Replace everything (settings hydrate).
+    void replace(std::map<std::string, V> all) {
+        const bool non_empty = !all.empty();
+        facts.with([](Facts<V>& f, std::map<std::string, V> m) {
+            f.map = std::move(m);
+            f.poisoned.clear();
+        }, std::move(all));
+        any.store(non_empty, std::memory_order_relaxed);
+    }
+    [[nodiscard]] std::map<std::string, V> snapshot() const {
+        return facts.read([](const Facts<V>& f) { return f.map; });
+    }
+};
+
 namespace catalog_reasoning_detail {
-inline std::shared_mutex& mu() { static std::shared_mutex m; return m; }
-inline std::map<std::string, bool>& map_() {
-    static std::map<std::string, bool> m; return m;
-}
+inline Registry<bool>& reg() { static Registry<bool> r; return r; }
 // Keys whose recorded reasoning fact CONFLICTED across sources (one source
-// said reasons, another said not). Cross-provider aggregators disagree about
-// the SAME bare id (e.g. one lists `mistral-large-2402` as reasoning, another
-// as not) — and a flat bare namespace would otherwise be last-writer-wins,
-// silently lighting a reasoning chip on an instruct model. A poisoned key is
-// treated as "no info" so resolution falls through to the scoped fact or
-// id-inference instead of trusting a coin-flip. Provider-agnostic: no model
-// ids are hardcoded; the data corrects itself by disagreeing.
-inline std::set<std::string>& poisoned_() {
-    static std::set<std::string> s; return s;
-}
-inline std::atomic<bool>& any() { static std::atomic<bool> a{false}; return a; }
+// said reasons, another said not) are poisoned. Cross-provider aggregators
+// disagree about the SAME bare id (e.g. one lists `mistral-large-2402` as
+// reasoning, another as not) — and a flat bare namespace would otherwise be
+// last-writer-wins, silently lighting a reasoning chip on an instruct model.
+// A poisoned key is treated as "no info" so resolution falls through to the
+// scoped fact or id-inference instead of trusting a coin-flip.
 } // namespace catalog_reasoning_detail
 
 inline void set_catalog_reasoning(std::string model_id, bool reasons) {
     bump_caps_epoch();
-    model_id = norm_caps_key(model_id);
-    std::unique_lock lk(catalog_reasoning_detail::mu());
-    catalog_reasoning_detail::map_()[std::move(model_id)] = reasons;
-    catalog_reasoning_detail::any().store(true, std::memory_order_relaxed);
+    catalog_reasoning_detail::reg().set(norm_caps_key(model_id), reasons);
 }
 
 // Merge a fact that may share a key with a DIFFERENT source (the bare-tail
@@ -1151,37 +1196,19 @@ inline void set_catalog_reasoning(std::string model_id, bool reasons) {
 // info". Scoped keys never collide across providers, so they use the plain
 // setter above; only the ambiguous bare tail goes through here.
 inline void merge_catalog_reasoning(const std::string& raw_id, bool reasons) {
-    const std::string model_id = norm_caps_key(raw_id);
-    std::unique_lock lk(catalog_reasoning_detail::mu());
-    auto& m = catalog_reasoning_detail::map_();
-    auto& poisoned = catalog_reasoning_detail::poisoned_();
-    if (poisoned.count(model_id)) return;          // already ambiguous
-    if (auto it = m.find(model_id); it != m.end()) {
-        if (it->second != reasons) {               // sources disagree → poison
-            m.erase(it);
-            poisoned.insert(model_id);
-        }
-        return;
-    }
-    m[model_id] = reasons;
-    catalog_reasoning_detail::any().store(true, std::memory_order_relaxed);
+    catalog_reasoning_detail::reg().merge(norm_caps_key(raw_id), reasons);
 }
 // Tri-state: 1 (catalog says reasons), 0 (catalog says not), -1 (no info).
 // Scoped-first ("provider/model"), bare fallback — see scoped_caps_key.
 [[nodiscard]] inline int catalog_reasoning_for(std::string_view model_id,
                                                std::string_view scope = {}) {
-    if (!catalog_reasoning_detail::any().load(std::memory_order_relaxed))
+    if (!catalog_reasoning_detail::reg().any.load(std::memory_order_relaxed))
         return -1;
-    std::shared_lock lk(catalog_reasoning_detail::mu());
-    auto& m = catalog_reasoning_detail::map_();
     auto scoped = scope.empty() ? scoped_caps_key(model_id)
                                 : scoped_caps_key(model_id, scope);
-    if (!scoped.empty())
-        if (auto it = m.find(scoped); it != m.end())
-            return it->second ? 1 : 0;
-    auto it = m.find(capkey::norm_tail(model_id));
-    if (it == m.end()) return -1;
-    return it->second ? 1 : 0;
+    const auto v = catalog_reasoning_detail::reg().find(
+        std::move(scoped), std::string{capkey::norm_tail(model_id)});
+    return v ? (*v ? 1 : 0) : -1;
 }
 
 // DECLARED effort-value sets: a metadata source (models.dev snapshot, or a
@@ -1191,22 +1218,12 @@ inline void merge_catalog_reasoning(const std::string& raw_id, bool reasons) {
 // overrides, but ABOVE from_id derivation. Same keying and lock discipline
 // as the reasoning declarations above.
 namespace catalog_effort_detail {
-inline std::shared_mutex& mu() { static std::shared_mutex m; return m; }
-inline std::map<std::string, std::uint8_t>& map_() {
-    static std::map<std::string, std::uint8_t> m; return m;
-}
-inline std::set<std::string>& poisoned_() {
-    static std::set<std::string> s; return s;
-}
-inline std::atomic<bool>& any() { static std::atomic<bool> a{false}; return a; }
+inline Registry<std::uint8_t>& reg() { static Registry<std::uint8_t> r; return r; }
 } // namespace catalog_effort_detail
 
 inline void set_catalog_effort_set(std::string model_id, std::uint8_t set) {
     bump_caps_epoch();
-    model_id = norm_caps_key(model_id);
-    std::unique_lock lk(catalog_effort_detail::mu());
-    catalog_effort_detail::map_()[std::move(model_id)] = set;
-    catalog_effort_detail::any().store(true, std::memory_order_relaxed);
+    catalog_effort_detail::reg().set(norm_caps_key(model_id), set);
 }
 
 // Bare-tail merge for the effort-set registry — same cross-provider collision
@@ -1214,17 +1231,7 @@ inline void set_catalog_effort_set(std::string model_id, std::uint8_t set) {
 // "no declaration" so resolution falls back to the scoped fact / id-inference.
 inline void merge_catalog_effort_set(const std::string& raw_id,
                                      std::uint8_t set) {
-    const std::string model_id = norm_caps_key(raw_id);
-    std::unique_lock lk(catalog_effort_detail::mu());
-    auto& m = catalog_effort_detail::map_();
-    auto& poisoned = catalog_effort_detail::poisoned_();
-    if (poisoned.count(model_id)) return;
-    if (auto it = m.find(model_id); it != m.end()) {
-        if (it->second != set) { m.erase(it); poisoned.insert(model_id); }
-        return;
-    }
-    m[model_id] = set;
-    catalog_effort_detail::any().store(true, std::memory_order_relaxed);
+    catalog_effort_detail::reg().merge(norm_caps_key(raw_id), set);
 }
 // ── models.dev context-window declarations ──────────────────────────────
 //
@@ -1252,23 +1259,13 @@ inline void merge_catalog_effort_set(const std::string& raw_id,
 // overflow. Static metadata is the best guess available when nothing was
 // advertised — which, for the custom-host case, is most of the time.
 namespace catalog_context_detail {
-inline std::shared_mutex& mu() { static std::shared_mutex m; return m; }
-inline std::map<std::string, int>& map_() {
-    static std::map<std::string, int> m; return m;
-}
-inline std::set<std::string>& poisoned_() {
-    static std::set<std::string> s; return s;
-}
-inline std::atomic<bool>& any() { static std::atomic<bool> a{false}; return a; }
+inline Registry<int>& reg() { static Registry<int> r; return r; }
 } // namespace catalog_context_detail
 
 inline void set_catalog_context_window(std::string model_id, int tokens) {
     if (tokens <= 0) return;
     bump_caps_epoch();
-    model_id = norm_caps_key(model_id);
-    std::unique_lock lk(catalog_context_detail::mu());
-    catalog_context_detail::map_()[std::move(model_id)] = tokens;
-    catalog_context_detail::any().store(true, std::memory_order_relaxed);
+    catalog_context_detail::reg().set(norm_caps_key(model_id), tokens);
 }
 
 // Bare-tail merge — same agree-or-poison semantics as the siblings.
@@ -1282,21 +1279,9 @@ inline void set_catalog_context_window(std::string model_id, int tokens) {
 // copy it here.
 inline void merge_catalog_context_window(const std::string& raw_id, int tokens) {
     if (tokens <= 0) return;
-    const std::string key = std::string{capkey::norm_tail(raw_id)};
+    std::string key{capkey::norm_tail(raw_id)};
     if (key.empty()) return;
-    std::unique_lock lk(catalog_context_detail::mu());
-    auto& m = catalog_context_detail::map_();
-    auto& poisoned = catalog_context_detail::poisoned_();
-    if (poisoned.count(key)) return;                   // already ambiguous
-    if (auto it = m.find(key); it != m.end()) {
-        if (it->second != tokens) {                    // sources disagree
-            m.erase(it);
-            poisoned.insert(key);
-        }
-        return;
-    }
-    m[key] = tokens;
-    catalog_context_detail::any().store(true, std::memory_order_relaxed);
+    catalog_context_detail::reg().merge(std::move(key), tokens);
 }
 
 // ── Endpoint-keyed declarations (custom-host / localhost seam) ──────────
@@ -1324,9 +1309,10 @@ struct Entry {
     int tokens = 0;
     int port   = 0;   // 0 when the declaring api URL used the scheme default
 };
-inline std::map<std::string, std::map<std::string, Entry>>& map_() {
-    static std::map<std::string, std::map<std::string, Entry>> m; return m;
-}
+// host → (model → entry)
+using Hosts = std::map<std::string, std::map<std::string, Entry>>;
+inline maya::guarded<Hosts>& hosts() { static maya::guarded<Hosts> h; return h; }
+inline std::atomic<bool>& any() { static std::atomic<bool> a{false}; return a; }
 } // namespace catalog_endpoint_detail
 
 // Parse the ORIGIN out of an api URL / endpoint spec: canonical host
@@ -1396,10 +1382,11 @@ inline void merge_endpoint_context_window(std::string_view api_url,
     const std::string model_id = norm_caps_key(raw_id);
     if (model_id.empty()) return;
     bump_caps_epoch();
-    std::unique_lock lk(catalog_context_detail::mu());
-    auto& hm = catalog_endpoint_detail::map_()[host];
-    hm[model_id] = catalog_endpoint_detail::Entry{tokens, port};
-    catalog_context_detail::any().store(true, std::memory_order_relaxed);
+    catalog_endpoint_detail::hosts().with(
+        [](catalog_endpoint_detail::Hosts& hs, std::string h, std::string m,
+           catalog_endpoint_detail::Entry e) { hs[h][m] = e; },
+        host, model_id, catalog_endpoint_detail::Entry{tokens, port});
+    catalog_endpoint_detail::any().store(true, std::memory_order_relaxed);
 }
 
 // 0 = no declaration; else the window a models.dev entry serving this
@@ -1417,15 +1404,20 @@ inline void merge_endpoint_context_window(std::string_view api_url,
 // `host` is the CANONICAL origin host (context_endpoint_origin form).
 [[nodiscard]] inline int endpoint_context_window_for(
     std::string_view model_id, std::string_view host, std::uint16_t port) {
-    if (!catalog_context_detail::any().load(std::memory_order_relaxed))
+    if (!catalog_endpoint_detail::any().load(std::memory_order_relaxed))
         return 0;
-    std::shared_lock lk(catalog_context_detail::mu());
-    auto hm = catalog_endpoint_detail::map_().find(std::string(host));
-    if (hm == catalog_endpoint_detail::map_().end()) return 0;
     const std::string mid = norm_caps_key(model_id);
     if (mid.empty()) return 0;
+    // Copy out this host's entries; the scan runs unlocked.
+    const auto entries = catalog_endpoint_detail::hosts().read(
+        [](const catalog_endpoint_detail::Hosts& hs, std::string h) {
+            auto it = hs.find(h);
+            return it == hs.end() ? std::map<std::string, catalog_endpoint_detail::Entry>{}
+                                  : it->second;
+        }, std::string(host));
+    if (entries.empty()) return 0;
     int host_tier = 0, adopted = 0; bool ambiguous = false;
-    for (const auto& [mid_key, e] : hm->second) {
+    for (const auto& [mid_key, e] : entries) {
         if (mid_key != mid) continue;
         if (e.port == port) return e.tokens;              // (1) exact origin
         if (e.port == 0)   { host_tier = e.tokens; continue; }  // (2)
@@ -1444,35 +1436,26 @@ inline void merge_endpoint_context_window(std::string_view api_url,
 // 0 = no declaration. Scoped-first, bare fallback.
 [[nodiscard]] inline int catalog_context_window_for(std::string_view model_id,
                                                     std::string_view scope = {}) {
-    if (!catalog_context_detail::any().load(std::memory_order_relaxed))
+    if (!catalog_context_detail::reg().any.load(std::memory_order_relaxed))
         return 0;
-    std::shared_lock lk(catalog_context_detail::mu());
-    auto& m = catalog_context_detail::map_();
     auto scoped = scope.empty() ? scoped_caps_key(model_id)
                                 : scoped_caps_key(model_id, scope);
-    if (!scoped.empty())
-        if (auto it = m.find(scoped); it != m.end())
-            return it->second;
-    auto it = m.find(std::string{capkey::norm_tail(model_id)});
-    return it == m.end() ? 0 : it->second;
+    return catalog_context_detail::reg()
+        .find(std::move(scoped), std::string{capkey::norm_tail(model_id)})
+        .value_or(0);
 }
 
 // -1 = no declaration; else the bitmask of declared ON levels.
 // Scoped-first ("provider/model"), bare fallback — see scoped_caps_key.
 [[nodiscard]] inline int catalog_effort_set_for(std::string_view model_id,
                                                 std::string_view scope = {}) {
-    if (!catalog_effort_detail::any().load(std::memory_order_relaxed))
+    if (!catalog_effort_detail::reg().any.load(std::memory_order_relaxed))
         return -1;
-    std::shared_lock lk(catalog_effort_detail::mu());
-    auto& m = catalog_effort_detail::map_();
     auto scoped = scope.empty() ? scoped_caps_key(model_id)
                                 : scoped_caps_key(model_id, scope);
-    if (!scoped.empty())
-        if (auto it = m.find(scoped); it != m.end())
-            return static_cast<int>(it->second);
-    auto it = m.find(capkey::norm_tail(model_id));
-    if (it == m.end()) return -1;
-    return static_cast<int>(it->second);
+    const auto v = catalog_effort_detail::reg().find(
+        std::move(scoped), std::string{capkey::norm_tail(model_id)});
+    return v ? static_cast<int>(*v) : -1;
 }
 
 // ── Per-model reasoning-effort override registry ─────────────────────────
@@ -1485,48 +1468,34 @@ inline void merge_endpoint_context_window(std::string_view api_url,
 // Claude/GPT stay family-gated — an override only opens/closes the COMPAT
 // lane (low|medium|high); it never fabricates the max/xhigh ladder.
 namespace reasoning_override_detail {
-inline std::shared_mutex&                    reasoning_override_mu() {
-    static std::shared_mutex m; return m;
-}
-inline std::map<std::string, bool>&         reasoning_override_map() {
-    static std::map<std::string, bool> m; return m;
-}
-// Lock-free "is the map non-empty?" flag. The override map is empty for the
-// vast majority of users (nobody set a ^E override), yet reasoning_override_for
-// is called on the PER-FRAME UI render path (model_badge, the picker). Reading
-// this atomic first lets the common case return without touching the mutex at
-// all — which matters because the mutex is also taken by BACKGROUND threads
-// (launch_stream, subagent) via resolved_caps, and blocking the render thread
-// on that contention was a source of intermittent input lag.
-inline std::atomic<bool>&                    reasoning_override_any() {
-    static std::atomic<bool> any{false}; return any;
+// The override map is empty for the vast majority of users (nobody set a ^E
+// override), yet reasoning_override_for is called on the PER-FRAME UI render
+// path. The registry's `any` flag lets that common case return without
+// taking the lock, which background threads (launch_stream, subagent) also
+// take via resolved_caps.
+inline Registry<bool>& reg() { static Registry<bool> r; return r; }
+// After an erase, `any` follows the map.
+inline void erase(std::string key) {
+    const bool left = reg().facts.with([](Facts<bool>& f, std::string k) {
+        f.map.erase(k);
+        return !f.map.empty();
+    }, std::move(key));
+    reg().any.store(left, std::memory_order_relaxed);
 }
 } // namespace reasoning_override_detail
 
 // Set/clear a single model's override (true = force effort on, false = off).
 inline void set_reasoning_override(std::string model_id, bool on) {
     bump_caps_epoch();
-    model_id = norm_caps_key(model_id);
-    std::unique_lock lk(reasoning_override_detail::reasoning_override_mu());
-    reasoning_override_detail::reasoning_override_map()[std::move(model_id)] = on;
-    reasoning_override_detail::reasoning_override_any().store(
-        !reasoning_override_detail::reasoning_override_map().empty(),
-        std::memory_order_relaxed);
+    reasoning_override_detail::reg().set(norm_caps_key(model_id), on);
 }
 inline void clear_reasoning_override(const std::string& model_id) {
     bump_caps_epoch();
-    std::unique_lock lk(reasoning_override_detail::reasoning_override_mu());
-    reasoning_override_detail::reasoning_override_map().erase(model_id);
-    reasoning_override_detail::reasoning_override_any().store(
-        !reasoning_override_detail::reasoning_override_map().empty(),
-        std::memory_order_relaxed);
+    reasoning_override_detail::erase(model_id);
 }
 inline void clear_reasoning_overrides() {
     bump_caps_epoch();
-    std::unique_lock lk(reasoning_override_detail::reasoning_override_mu());
-    reasoning_override_detail::reasoning_override_map().clear();
-    reasoning_override_detail::reasoning_override_any().store(false,
-        std::memory_order_relaxed);
+    reasoning_override_detail::reg().replace({});
 }
 inline void set_reasoning_overrides(std::map<std::string, bool> all) {
     bump_caps_epoch();
@@ -1535,24 +1504,16 @@ inline void set_reasoning_overrides(std::map<std::string, bool> all) {
     // today's lookups. Raw installation would silently orphan those facts.
     std::map<std::string, bool> normed;
     for (auto& [k, v] : all) normed[norm_caps_key(k)] = v;
-    std::unique_lock lk(reasoning_override_detail::reasoning_override_mu());
-    reasoning_override_detail::reasoning_override_any().store(!normed.empty(),
-        std::memory_order_relaxed);
-    reasoning_override_detail::reasoning_override_map() = std::move(normed);
+    reasoning_override_detail::reg().replace(std::move(normed));
 }
 // Tri-state lookup: 1 (force on), 0 (force off), -1 (no override for this id).
 // Lock-free when no overrides exist (the common case). Otherwise a SHARED lock
 // — concurrent per-frame readers never block each other; only the rare write
 // (init / ^E toggle) is exclusive.
 [[nodiscard]] inline int reasoning_override_for(std::string_view model_id) {
-    if (!reasoning_override_detail::reasoning_override_any().load(
-            std::memory_order_relaxed))
-        return -1;
-    std::shared_lock lk(reasoning_override_detail::reasoning_override_mu());
-    auto& m = reasoning_override_detail::reasoning_override_map();
-    auto it = m.find(capkey::norm_tail(model_id));
-    if (it == m.end()) return -1;
-    return it->second ? 1 : 0;
+    const auto v = reasoning_override_detail::reg().find(
+        std::string{}, std::string{capkey::norm_tail(model_id)});
+    return v ? (*v ? 1 : 0) : -1;
 }
 
 // AGENTTY_FORCE_EFFORT env override, read once. Returns 1 (force on),
@@ -1582,20 +1543,13 @@ inline void set_reasoning_overrides(std::map<std::string, bool> all) {
 // without a release, for providers no database has ever heard of. Same lock
 // discipline as the other registries (render-path readers).
 namespace learned_effort_detail {
-inline std::shared_mutex& mu() { static std::shared_mutex m; return m; }
 // model id → effort_set bitmask (0 = rejects the parameter entirely).
-inline std::map<std::string, std::uint8_t>& map_() {
-    static std::map<std::string, std::uint8_t> m; return m;
-}
-inline std::atomic<bool>& any() { static std::atomic<bool> a{false}; return a; }
+inline Registry<std::uint8_t>& reg() { static Registry<std::uint8_t> r; return r; }
 } // namespace learned_effort_detail
 
 inline void set_learned_effort_set(std::string model_id, std::uint8_t set) {
     bump_caps_epoch();
-    model_id = norm_caps_key(model_id);
-    std::unique_lock lk(learned_effort_detail::mu());
-    learned_effort_detail::map_()[std::move(model_id)] = set;
-    learned_effort_detail::any().store(true, std::memory_order_relaxed);
+    learned_effort_detail::reg().set(norm_caps_key(model_id), set);
 }
 inline void set_learned_effort_sets(std::map<std::string, std::uint8_t> all) {
     bump_caps_epoch();
@@ -1603,15 +1557,11 @@ inline void set_learned_effort_sets(std::map<std::string, std::uint8_t> all) {
     // set_reasoning_overrides above.
     std::map<std::string, std::uint8_t> normed;
     for (auto& [k, v] : all) normed[norm_caps_key(k)] = v;
-    std::unique_lock lk(learned_effort_detail::mu());
-    learned_effort_detail::any().store(!normed.empty(),
-                                       std::memory_order_relaxed);
-    learned_effort_detail::map_() = std::move(normed);
+    learned_effort_detail::reg().replace(std::move(normed));
 }
 [[nodiscard]] inline std::map<std::string, std::uint8_t>
 learned_effort_sets_snapshot() {
-    std::shared_lock lk(learned_effort_detail::mu());
-    return learned_effort_detail::map_();
+    return learned_effort_detail::reg().snapshot();
 }
 // -1 = nothing learned for this id; else the bitmask (may be 0 = param off).
 // Scoped-first lookup: a fact learned while Groq was active is keyed
@@ -1619,18 +1569,13 @@ learned_effort_sets_snapshot() {
 // entry (legacy, or explicitly unscoped) still matches everywhere.
 [[nodiscard]] inline int learned_effort_set_for(std::string_view model_id,
                                                 std::string_view scope = {}) {
-    if (!learned_effort_detail::any().load(std::memory_order_relaxed))
+    if (!learned_effort_detail::reg().any.load(std::memory_order_relaxed))
         return -1;
-    std::shared_lock lk(learned_effort_detail::mu());
-    auto& m = learned_effort_detail::map_();
     auto scoped = scope.empty() ? scoped_caps_key(model_id)
                                 : scoped_caps_key(model_id, scope);
-    if (!scoped.empty())
-        if (auto it = m.find(scoped); it != m.end())
-            return static_cast<int>(it->second);
-    auto it = m.find(capkey::norm_tail(model_id));
-    if (it == m.end()) return -1;
-    return static_cast<int>(it->second);
+    const auto v = learned_effort_detail::reg().find(
+        std::move(scoped), std::string{capkey::norm_tail(model_id)});
+    return v ? static_cast<int>(*v) : -1;
 }
 
 // Decode a model id AND fold in the runtime reasoning-effort override (per
