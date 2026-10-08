@@ -89,8 +89,8 @@ struct ConnectionPool {
     // Threading: a pool is BUILT by one mcp_tools() call and only then
     // published (current_pool). `policies` and `connect_errors` are written
     // during the build and never after, so readers of a published pool need
-    // no lock for them. The registry guards itself (mcp::cap::Registry
-    // locks its provider list), and `generation` is an atomic counter.
+    // no lock for them. The registry too is filled during the build and only
+    // read after, and `generation` is an atomic counter.
     ::mcp::cap::Registry registry{true};
     std::atomic<unsigned long> generation{0};   // bumps on any *_list_changed
     std::unordered_map<std::string, ServerPolicy> policies;
@@ -1355,10 +1355,10 @@ std::vector<tools::ToolDef> build_pool(PoolHandle& out_pool) {
     // tools/list_changed (+ resources/prompts) from any server bumps the
     // pool generation. Callers compare mcp_generation() to know the snapshot
     // moved; the dispatch path keeps working regardless (it routes by name).
-    pool->registry.set_on_list_changed([wp = std::weak_ptr<ConnectionPool>(pool)] {
+    auto bump_on_change = [wp = std::weak_ptr<ConnectionPool>(pool)] {
         if (auto p = wp.lock())
             p->generation.fetch_add(1, std::memory_order_relaxed);
-    });
+    };
 
     // ── Connect every server IN PARALLEL with a global deadline ──────────
     // Each provider's constructor blocks on a handshake (up to the SDK's
@@ -1506,6 +1506,7 @@ std::vector<tools::ToolDef> build_pool(PoolHandle& out_pool) {
                     "server={} result=ok tools={} resources={} prompts={}",
                     pend.name, p->list().size(), p->resources().size(),
                     p->prompts().size());
+            p->set_on_list_changed(bump_on_change);
             pool->registry.add(std::move(p));
         } else {
             // make_provider returned nullptr — spawn/handshake failed. The
