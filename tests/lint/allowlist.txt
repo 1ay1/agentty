@@ -178,12 +178,10 @@ mcp/bridge.cpp: atomic
 # maya::guarded. The atomic is the liveness flag the provider reads.
 mcp/http_server.cpp: atomic
 mcp/oauth.cpp: atomic
-# rag/adapter: the warm worker is a util::WorkerGroup and the feedback store
-# is maya::guarded. The one mutex left is Retriever::Impl::mu, held across
-# whole index rebuilds and the stateful rag::Engine calls inside them; the
-# status readout try_locks it so a frame never waits on a rebuild, which
-# guarded<T> has no form for. atomic is the warming gate and the stop flag.
-rag/adapter.cpp: mutex atomic
+# rag/adapter: the warm worker is a util::WorkerGroup; the index and the
+# feedback store are maya::guarded (the status row uses try_read so a frame
+# never waits on a rebuild). atomic is the warming gate and the stop flag.
+rag/adapter.cpp: atomic
 
 # ── Process-wide plumbing ────────────────────────────────────────────────
 util/logx.cpp: atomic

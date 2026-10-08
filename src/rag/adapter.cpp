@@ -38,7 +38,6 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
-#include <mutex>
 #include <stop_token>
 #include <string>
 #include <string_view>
@@ -771,10 +770,19 @@ struct Unavailable { std::string reason; };
 using DenseState = std::variant<dense::Unprobed, dense::Ready, dense::Unavailable>;
 
 // ─────────────────────────────────────────────────────────────────────────
-struct Retriever::Impl {
+// Everything a retrieval reads or rebuilds. Lives in Impl::index, a
+// maya::guarded: every method below runs inside index.with(), so the lock is
+// implied by the receiver. Held across whole rebuilds on purpose; the UI's
+// status row uses try_read so a frame never waits on one.
+struct Index {
+    // The warm worker's cancel flag, owned by Impl (outside the lock, so
+    // shutdown can trip it while a rebuild holds the index). refresh_docs()
+    // and reindex() poll it at every loop boundary so a multi-second embed
+    // pass unwinds promptly. Declared first: the ctor below needs it set.
+    const std::atomic<bool>* warm_stop = nullptr;
+
     Config cfg = Config::from_env();
 
-    std::mutex mu;
     ::rag::Engine engine;
     bool   embedder_ready = false;
     // The dense-embedder state machine. Was `ollama_probed` + `ollama_ready`:
@@ -802,21 +810,10 @@ struct Retriever::Impl {
     std::uint64_t warm_skills_gen = 0;
     std::uint64_t warm_memory_gen = 0;
 
-    std::atomic<bool> warming{false};
-
-    // Cooperative-cancellation flag for the warm worker. Set by the worker's
-    // std::stop_token (tripped when the jthread is re-seated or destroyed) AND
-    // by Retriever::shutdown() at process teardown. refresh_docs()/reindex()
-    // poll warm_cancelled() at every loop boundary so a multi-second embed
-    // pass unwinds PROMPTLY instead of blocking warmer.join() — which used to
-    // run at STATIC destruction (after main returns) and stall ^C for 4–10 s.
-    std::atomic<bool> warm_stop{false};
     [[nodiscard]] bool warm_cancelled() const noexcept {
-        return warm_stop.load(std::memory_order_relaxed);
+        return warm_stop && warm_stop->load(std::memory_order_relaxed);
     }
 
-    // Optional LLM seam for HyDE / multi-query (agentty's provider).
-    Retriever::Generator generator;
 
     // Separate engine for search_code (cwd source tree), with its own
     // edit-drift fingerprint. Kept apart from the docs engine so a docs
@@ -827,31 +824,10 @@ struct Retriever::Impl {
     std::string code_root;
     std::unordered_map<std::string, std::uint64_t> code_files;
 
-    // LAST data member ON PURPOSE: members destroy in reverse order, so the
-    // group's destructor (a barrier) runs FIRST in ~Impl and the warm worker
-    // can never see a half-destroyed Impl. Keep it last.
-    //
-    // A WorkerGroup and not a jthread because warm_async() and shutdown()
-    // reach the handle from different threads under different locking rules
-    // (shutdown cannot take mu, the worker holds it). The group's post and
-    // stop both go through the pool's own lock, so that race is gone, and a
-    // post after stop is dropped instead of starting a warm during teardown.
-    util::WorkerGroup warmer{"rag.warm"};
-
-    Impl() : engine(make_engine_config()) {
+    explicit Index(const std::atomic<bool>* stop) : warm_stop(stop), engine(make_engine_config()) {
         probe_embedder();
         attach_embedder();
         apply_pipeline(engine);
-        install_default_generator();
-    }
-
-    ~Impl() {
-        // Explicit, though the member would do it anyway: stop() requests
-        // stop through the token, which trips warm_stop, so a warm in flight
-        // bails at its next batch. The old jthread code called join() here
-        // WITHOUT a stop request first, which waited out the whole embed
-        // pass on destruction.
-        warmer.stop();
     }
 
     // Install a ZERO-COST local generator for HyDE / multi-query: a tiny model
@@ -864,7 +840,7 @@ struct Retriever::Impl {
     // embed through a corporate endpoint while a local Ollama (if any) does
     // query expansion. It dials the embed endpoint only when that endpoint is
     // itself an Ollama, otherwise the historical localhost default.
-    void install_default_generator() {
+    [[nodiscard]] static Retriever::Generator default_generator(const Config& cfg) {
         namespace eb = ::agentty::rag::embed;
         const bool embed_is_ollama =
             cfg.embed.backend == eb::Backend::Ollama
@@ -872,7 +848,7 @@ struct Retriever::Impl {
         std::string   host  = embed_is_ollama ? cfg.embed.host : std::string{"127.0.0.1"};
         std::uint16_t port  = embed_is_ollama ? cfg.embed.port : std::uint16_t{11434};
         std::string   model = cfg.gen_model;
-        generator = [host, port, model](const std::string& prompt, int n)
+        return [host, port, model](const std::string& prompt, int n)
                         -> std::vector<std::string> {
             std::vector<std::string> outs;
             const int want = n > 0 ? n : 1;
@@ -995,26 +971,24 @@ struct Retriever::Impl {
     // mode this subsystem had).
     void probe_embedder() {
         if (!std::holds_alternative<dense::Unprobed>(dense)) return;
-        probe_embedder_unlocked();
+        apply_probe(run_probe(effective_embed()));
     }
 
-    // The probe itself, with no "already probed?" guard and no expectation
-    // that `mu` is held. apply_config() calls this with the lock RELEASED,
-    // because a probe dials a network endpoint (or memory-maps a model file)
-    // and holding the retriever's mutex across that stalls every reader,
-    // including the UI thread's status row.
-    //
-    // `cfg.embed` is read into a local before the call and the result written
-    // back after, so the unlocked window touches no shared state.
-    void probe_embedder_unlocked() {
+    // The probe in two halves. run_probe dials a network endpoint (or
+    // memory-maps a model file) and touches no index state, so apply_config
+    // and reprobe run it with the index UNLOCKED: holding the lock across a
+    // multi-second timeout stalls every reader. apply_probe writes the
+    // result, under the lock.
+    static ::agentty::rag::embed::ProbeResult
+    run_probe(const ::agentty::rag::embed::EmbedConfig& ec) {
         namespace eb = ::agentty::rag::embed;
-        const auto ec = effective_embed();
-        if (ec.backend == eb::Backend::Disabled) {
-            dense = dense::Unavailable{"embeddings disabled"};
-            ::agentty::util::dbglog("rag.embed", "disabled; using BM25");
-            return;
-        }
-        auto r = eb::probe(ec);
+        if (ec.backend == eb::Backend::Disabled)
+            return eb::ProbeErr{"embeddings disabled"};
+        return eb::probe(ec);
+    }
+
+    void apply_probe(const ::agentty::rag::embed::ProbeResult& r) {
+        namespace eb = ::agentty::rag::embed;
         if (const auto* ok = std::get_if<eb::ProbeOk>(&r)) {
             // The MEASURED dimension is authoritative — pin it so every
             // subsequent spec (and the identity hash) carries it.
@@ -1563,295 +1537,348 @@ struct Retriever::Impl {
     }
 };
 
+
+struct Retriever::Impl {
+    // Outside the lock: warm_async's one-at-a-time gate, and the cancel flag
+    // shutdown trips while a rebuild holds the index.
+    std::atomic<bool> warming{false};
+    std::atomic<bool> warm_stop{false};
+
+    maya::guarded<Index> index{&warm_stop};
+
+    // Optional LLM seam for HyDE / multi-query. Outside the index: it is a
+    // closure that may dial out, so retrieve() takes a snapshot of it and
+    // never calls user code it can't see through the lock's own rules.
+    maya::published<const Retriever::Generator> generator;
+
+    Impl() {
+        generator.publish(std::make_shared<const Retriever::Generator>(
+            Index::default_generator(index.read([](const Index& ix) { return ix.cfg; }))));
+    }
+
+    // LAST data member ON PURPOSE: members destroy in reverse order, so the
+    // group's destructor (a barrier) runs FIRST in ~Impl and the warm worker
+    // can never see a half-destroyed Impl. Keep it last. A WorkerGroup
+    // because warm_async() and shutdown() reach it from different threads.
+    util::WorkerGroup warmer{"rag.warm"};
+
+    ~Impl() {
+        // stop() requests stop through the token, which trips warm_stop, so
+        // a warm in flight bails at its next batch.
+        warmer.stop();
+    }
+};
+
 Retriever::Retriever() : impl_(std::make_unique<Impl>()) {}
 Retriever::~Retriever() = default;
 
 void Retriever::set_generator(Generator g) {
-    std::lock_guard<std::mutex> lock(impl_->mu);
-    impl_->generator = std::move(g);
+    impl_->generator.publish(std::make_shared<const Generator>(std::move(g)));
 }
+
+// A shared handle on the current HyDE generator, handed into the index lock.
+// The generator is a user closure: the default one dials a local Ollama and
+// touches no agentty lock; a set_generator() one is the caller's, and was
+// always called under the index lock, so this keeps that contract as is.
+struct GeneratorRef { std::shared_ptr<const Retriever::Generator> fn; };
+} // namespace agentty::rag
+MAYA_SENDABLE(agentty::rag::GeneratorRef);
+namespace agentty::rag {
+
+namespace {
+// The body of retrieve(), run with the index locked.
+Retrieval retrieve_locked(Index& ix, const std::string& query, int kk, bool skip_docs,
+                          const GeneratorRef& gref) {
+    const Retriever::Generator* generator = gref.fn.get();
+    Retrieval out;
+    auto root = skip_docs ? fs::path{}
+                          : resolve_docs_root(ix.cfg.docs_root);
+
+    if (skip_docs) {
+        ix.ensure_warm_index();
+    } else {
+        if (ix.engine.corpus().chunk_count() == 0)
+            (void)ix.try_load_persisted(root);
+        ix.refresh_docs(root);
+    }
+
+    auto& active_engine = skip_docs ? ix.warm_engine : ix.engine;
+    const bool any = active_engine.corpus().chunk_count() > 0;
+    if (!any) {
+        out.error = "no knowledge configured. Set AGENTTY_DOCS_DIR to a "
+                    "folder of docs, put files under ./docs, install skills, "
+                    "or store memories to give search_docs something to find.";
+        return out;
+    }
+
+    // ── RETRIEVE ──────────────────────────────────────────────────
+    // 1. Base hybrid retrieval through the full pipeline (PRF → convex
+    //    fusion → filter → feature-rerank → MMR → parent-stitch → top-k).
+    //    Optionally trace each stage for the mode header.
+    std::vector<std::string> trace;
+    std::vector<std::string>* tracep = ix.cfg.trace ? &trace : nullptr;
+    const std::size_t want = static_cast<std::size_t>(kk);
+
+    std::vector<::rag::SearchResult> hits;
+    std::string retriever_mode = active_engine.corpus().has_embedder()
+                               ? "hybrid+ctx" : "bm25+ctx";
+
+    // 2. LLM-assisted retrieval (HyDE / multi-query) when a Generator is
+    //    wired AND enabled — closes the query↔document asymmetry gap and
+    //    lifts recall. Degrades gracefully to plain search when absent.
+    //    SKIPPED on the warm/proactive path (skip_docs): that path is
+    //    latency-budgeted (pre-turn hedge) and must not wait on generation.
+    bool used_llm = false;
+    if (!skip_docs && generator && *generator && (ix.cfg.hyde || ix.cfg.expand)) {
+        ::rag::query::Generator gen =
+            [&](std::string_view prompt) -> ::rag::Result<std::vector<std::string>> {
+                try {
+                    int n = ix.cfg.expand ? 3 : 1;
+                    auto outs = (*generator)(std::string(prompt), n);
+                    return outs;
+                } catch (...) {
+                    return std::vector<std::string>{};
+                }
+            };
+        ::rag::Result<std::vector<::rag::Hit>> lh =
+            std::unexpected(::rag::Error{});
+        if (ix.cfg.expand)
+            lh = ::rag::query::multi_query_search(active_engine.corpus(), query, want, gen, 3);
+        else
+            lh = ::rag::query::hyde_search(active_engine.corpus(), query, want, gen);
+        if (lh && !lh->empty()) {
+            for (const auto& h : *lh) hits.push_back(active_engine.corpus().resolve(h));
+            used_llm = true;
+            retriever_mode += ix.cfg.expand ? "+multiquery" : "+hyde";
+        }
+    }
+
+    if (!used_llm) {
+        auto res = active_engine.search(query, want, {}, tracep);
+        if (!res) { out.error = "retrieval failed"; return out; }
+        hits = std::move(*res);
+    }
+
+    // 3. Optional GraphRAG expansion. Fuse by reciprocal rank because graph
+    // and base scores have different scales; appending after an already-k
+    // base list made graph hits either dominate incorrectly or get trimmed
+    // without ever surfacing.
+    if (ix.cfg.graph) {
+        try {
+            auto g = active_engine.graph_local(query, want);
+            if (g && !g->empty()) {
+                std::unordered_map<std::string, std::size_t> positions;
+                auto key_of = [](const ::rag::SearchResult& r) {
+                    return r.uri + "\n" + std::to_string(r.start_line);
+                };
+                for (std::size_t i = 0; i < hits.size(); ++i) {
+                    hits[i].score.value = 1.0f / static_cast<float>(60 + i + 1);
+                    positions.emplace(key_of(hits[i]), i);
+                }
+                for (std::size_t i = 0; i < g->size(); ++i) {
+                    const float add = 1.0f / static_cast<float>(60 + i + 1);
+                    auto key = key_of((*g)[i]);
+                    if (auto it = positions.find(key); it != positions.end()) {
+                        hits[it->second].score.value += add;
+                    } else {
+                        (*g)[i].score.value = add;
+                        positions.emplace(std::move(key), hits.size());
+                        hits.push_back(std::move((*g)[i]));
+                    }
+                }
+                std::stable_sort(hits.begin(), hits.end(),
+                    [](const auto& a, const auto& b) {
+                        return a.score.value > b.score.value;
+                    });
+                retriever_mode += "+graph";
+            }
+        } catch (...) { /* graph optional */ }
+    }
+
+    // 4. CRAG corrective grading: a model-free retrieval evaluator that
+    //    drops passages graded irrelevant and yields a real confidence in
+    //    [0,1]. This turns retrieval from "always inject whatever came
+    //    back" into a self-checking step.
+    double crag_conf = -1.0;
+    if (ix.cfg.corrective && !hits.empty()) {
+        try {
+            std::vector<::rag::Hit> raw;
+            raw.reserve(hits.size());
+            for (const auto& h : hits) raw.push_back(::rag::Hit{h.chunk, h.score});
+            ::rag::crag::CragConfig cc;
+            cc.strips = want;
+            cc.drop_irrelevant = false;
+            auto corr = ::rag::crag::correct(active_engine.corpus(), query, raw, cc);
+            crag_conf = static_cast<double>(corr.confidence);
+            if (!corr.kept.empty()) {
+                // Re-resolve only the kept chunks, preserving CRAG's order.
+                std::vector<::rag::SearchResult> kept;
+                for (const auto& h : corr.kept)
+                    kept.push_back(active_engine.corpus().resolve(h));
+                if (!kept.empty()) { hits = std::move(kept); retriever_mode += "+crag"; }
+            }
+        } catch (...) { /* grading optional */ }
+    }
+
+    if (hits.empty()) {
+        out.error = "no relevant passages (retrieval graded low-confidence)";
+        return out;
+    }
+    if (hits.size() > want) hits.resize(want);
+
+    // 5. Learning-loop read side: nudge each hit by its historical
+    //    Beta-smoothed win-rate (bounded ±15%), then re-sort so a passage
+    //    that has repeatedly proven useful in THIS workspace edges ahead of
+    //    a near-tied one that hasn't. Neutral (×1.0) for unseen paths, so
+    //    this can only refine — never invent — ranking. Off with
+    //    AGENTTY_RAG_LEARN=0.
+    bool learned = false;
+    if (ix.cfg.learn) {
+        auto& fb = FeedbackStore::instance();
+        for (auto& h : hits) {
+            auto [src, path] = split_uri(h.uri);
+            (void)src;
+            float b = fb.boost(path);
+            if (b != 1.0f) {
+                h.score.value *= b;
+                learned = true;
+            }
+        }
+        if (learned)
+            std::stable_sort(hits.begin(), hits.end(),
+                             [](const ::rag::SearchResult& a,
+                                const ::rag::SearchResult& b) {
+                                 return a.score.value > b.score.value;
+                             });
+    }
+
+    double top = 0.0;
+    std::vector<std::string> surfaced;
+    surfaced.reserve(hits.size());
+
+    // Relevance floor: drop the low-confidence tail before spending any
+    // tokens on it. The top hit always survives; a later hit survives only
+    // if it scores within floor_frac of the top. This is where the token
+    // saving comes from — the model ignores 0.1-confidence passages, so we
+    // don't pay to inject them.
+    {
+        double hi = 0.0;
+        for (const auto& r : hits) hi = std::max(hi, static_cast<double>(r.score.value));
+        const double floor = hi * relevance_floor_frac();
+        if (hi > 0.0 && floor > 0.0) {
+            std::size_t keep = 1; // always keep the best
+            while (keep < hits.size()
+                   && static_cast<double>(hits[keep].score.value) >= floor)
+                ++keep;
+            if (keep < hits.size()) hits.resize(keep);
+        }
+    }
+
+    // Score-proportional (water-filling) budget: confident passages get
+    // room to be complete; kept tail passages get a tight excerpt — instead
+    // of the old flat total/n split that spent equal tokens on signal and
+    // noise. The TOTAL is first scaled down by CRAG confidence so a
+    // barely-passing retrieval injects a cheap block, not the full ~3k tok.
+    const std::size_t total_budget =
+        confidence_scaled_budget(retrieval_output_budget(), crag_conf);
+    std::vector<double> pre_scores;
+    pre_scores.reserve(hits.size());
+    for (const auto& r : hits) {
+        double s = std::clamp(static_cast<double>(r.score.value), 0.0, 1.0);
+        pre_scores.push_back(s);
+    }
+    const std::vector<std::size_t> allowances =
+        allocate_budget(pre_scores, total_budget);
+    std::size_t remaining_budget = total_budget;
+    std::size_t idx = 0;
+    for (const auto& r : hits) {
+        auto [src, path] = split_uri(r.uri);
+        Passage p;
+        p.source     = src;
+        p.path       = path;
+        p.line_start = static_cast<int>(r.start_line);
+        p.line_end   = static_cast<int>(r.end_line);
+        double s = static_cast<double>(r.score.value);
+        if (s < 0.0) s = 0.0;
+        if (s > 1.0) s = 1.0;
+        p.score      = s;
+        std::string raw = r.context.empty() ? r.text : (r.context + "\n" + r.text);
+        std::size_t want_bytes = idx < allowances.size() ? allowances[idx] : 768;
+        const std::size_t allowance = std::min(want_bytes, remaining_budget);
+        ++idx;
+        if (allowance < 256) break;
+        p.text = compress_passage(query, raw, allowance);
+        remaining_budget -= std::min(remaining_budget, p.text.size());
+        top = std::max(top, p.score);
+        surfaced.push_back(path);
+        out.passages.push_back(std::move(p));
+    }
+    // Learning-loop write side (denominator): record what we surfaced so a
+    // later `read` of one of these can be scored as a win.
+    if (ix.cfg.learn && !surfaced.empty())
+        FeedbackStore::instance().note_surfaced(surfaced);
+    // Prefer CRAG's calibrated confidence when available; else top score.
+    out.confidence = crag_conf >= 0.0 ? crag_conf : top;
+
+    // ── The retrieval funnel: show the engine's actual working ──────
+    // `mode` is what the tool card renders. We build a compact one-line
+    // headline (retriever + fusion + confidence) followed by an OPTIONAL
+    // multi-line "funnel" that walks the candidate set through every stage
+    // it actually passed through, with the counts rag-cpp itself recorded.
+    // The funnel is the UX centrepiece: a user (and the model) can SEE that
+    // 47 candidates were retrieved, reranked to 30, deduped to 24, and
+    // autocut to 8 — instead of trusting an opaque black box.
+    std::string headline = retriever_mode;
+    headline += ix.cfg.fusion == "rrf"
+                  ? ", rrf-fusion"
+                  : (ix.cfg.adaptive_fusion ? ", convex-fusion(adaptive)"
+                                                : ", convex-fusion");
+    if (learned) headline += ", learned-boost";
+    if (!root.empty() && !skip_docs)
+        headline += ", docs=" + root.filename().string();
+    char buf[48];
+    std::snprintf(buf, sizeof buf, ", confidence %.2f", out.confidence);
+    headline += buf;
+
+    std::string m = headline;
+    if (ix.cfg.trace && !trace.empty()) {
+        // rag-cpp emits two kinds of trace line: diagnostic lines that
+        // carry counts ("hybrid: 47 candidates", "dedup 30 -> 24") and bare
+        // stage markers ("→ dedup") that just echo the stage name. Keep the
+        // former — they show the funnel narrowing — and drop the latter,
+        // which are noise once the diagnostics are present.
+        std::vector<std::string> steps;
+        steps.reserve(trace.size());
+        for (const auto& t : trace) {
+            if (t.empty()) continue;
+            // Bare "→ stagename" markers begin with the arrow; skip them.
+            if (t.rfind("→ ", 0) == 0 || t.rfind("-> ", 0) == 0) continue;
+            steps.push_back(t);
+        }
+        if (!steps.empty()) {
+            // Render as an indented funnel the card shows verbatim. Each
+            // rung is one stage; the arrow prefix reads top-to-bottom as
+            // the query flowing down the pipeline.
+            m += "\n  funnel:";
+            for (const auto& s : steps)
+                m += "\n    ↳ " + s;
+            m += "\n    ↳ top-" + std::to_string(out.passages.size());
+        }
+    }
+    out.mode = std::move(m);
+    return out;
+}
+} // namespace
 
 Retrieval Retriever::retrieve(const std::string& query, int k, bool skip_docs) {
     Retrieval out;
     if (query.empty()) { out.error = "empty query"; return out; }
     const int kk = k > 0 ? k : 6;
     try {
-        std::lock_guard<std::mutex> lock(impl_->mu);
-        auto root = skip_docs ? fs::path{}
-                              : resolve_docs_root(impl_->cfg.docs_root);
-
-        if (skip_docs) {
-            impl_->ensure_warm_index();
-        } else {
-            if (impl_->engine.corpus().chunk_count() == 0)
-                (void)impl_->try_load_persisted(root);
-            impl_->refresh_docs(root);
-        }
-
-        auto& active_engine = skip_docs ? impl_->warm_engine : impl_->engine;
-        const bool any = active_engine.corpus().chunk_count() > 0;
-        if (!any) {
-            out.error = "no knowledge configured. Set AGENTTY_DOCS_DIR to a "
-                        "folder of docs, put files under ./docs, install skills, "
-                        "or store memories to give search_docs something to find.";
-            return out;
-        }
-
-        // ── RETRIEVE ──────────────────────────────────────────────────
-        // 1. Base hybrid retrieval through the full pipeline (PRF → convex
-        //    fusion → filter → feature-rerank → MMR → parent-stitch → top-k).
-        //    Optionally trace each stage for the mode header.
-        std::vector<std::string> trace;
-        std::vector<std::string>* tracep = impl_->cfg.trace ? &trace : nullptr;
-        const std::size_t want = static_cast<std::size_t>(kk);
-
-        std::vector<::rag::SearchResult> hits;
-        std::string retriever_mode = active_engine.corpus().has_embedder()
-                                   ? "hybrid+ctx" : "bm25+ctx";
-
-        // 2. LLM-assisted retrieval (HyDE / multi-query) when a Generator is
-        //    wired AND enabled — closes the query↔document asymmetry gap and
-        //    lifts recall. Degrades gracefully to plain search when absent.
-        //    SKIPPED on the warm/proactive path (skip_docs): that path is
-        //    latency-budgeted (pre-turn hedge) and must not wait on generation.
-        bool used_llm = false;
-        if (!skip_docs && impl_->generator && (impl_->cfg.hyde || impl_->cfg.expand)) {
-            ::rag::query::Generator gen =
-                [&](std::string_view prompt) -> ::rag::Result<std::vector<std::string>> {
-                    try {
-                        int n = impl_->cfg.expand ? 3 : 1;
-                        auto outs = impl_->generator(std::string(prompt), n);
-                        return outs;
-                    } catch (...) {
-                        return std::vector<std::string>{};
-                    }
-                };
-            ::rag::Result<std::vector<::rag::Hit>> lh =
-                std::unexpected(::rag::Error{});
-            if (impl_->cfg.expand)
-                lh = ::rag::query::multi_query_search(active_engine.corpus(), query, want, gen, 3);
-            else
-                lh = ::rag::query::hyde_search(active_engine.corpus(), query, want, gen);
-            if (lh && !lh->empty()) {
-                for (const auto& h : *lh) hits.push_back(active_engine.corpus().resolve(h));
-                used_llm = true;
-                retriever_mode += impl_->cfg.expand ? "+multiquery" : "+hyde";
-            }
-        }
-
-        if (!used_llm) {
-            auto res = active_engine.search(query, want, {}, tracep);
-            if (!res) { out.error = "retrieval failed"; return out; }
-            hits = std::move(*res);
-        }
-
-        // 3. Optional GraphRAG expansion. Fuse by reciprocal rank because graph
-        // and base scores have different scales; appending after an already-k
-        // base list made graph hits either dominate incorrectly or get trimmed
-        // without ever surfacing.
-        if (impl_->cfg.graph) {
-            try {
-                auto g = active_engine.graph_local(query, want);
-                if (g && !g->empty()) {
-                    std::unordered_map<std::string, std::size_t> positions;
-                    auto key_of = [](const ::rag::SearchResult& r) {
-                        return r.uri + "\n" + std::to_string(r.start_line);
-                    };
-                    for (std::size_t i = 0; i < hits.size(); ++i) {
-                        hits[i].score.value = 1.0f / static_cast<float>(60 + i + 1);
-                        positions.emplace(key_of(hits[i]), i);
-                    }
-                    for (std::size_t i = 0; i < g->size(); ++i) {
-                        const float add = 1.0f / static_cast<float>(60 + i + 1);
-                        auto key = key_of((*g)[i]);
-                        if (auto it = positions.find(key); it != positions.end()) {
-                            hits[it->second].score.value += add;
-                        } else {
-                            (*g)[i].score.value = add;
-                            positions.emplace(std::move(key), hits.size());
-                            hits.push_back(std::move((*g)[i]));
-                        }
-                    }
-                    std::stable_sort(hits.begin(), hits.end(),
-                        [](const auto& a, const auto& b) {
-                            return a.score.value > b.score.value;
-                        });
-                    retriever_mode += "+graph";
-                }
-            } catch (...) { /* graph optional */ }
-        }
-
-        // 4. CRAG corrective grading: a model-free retrieval evaluator that
-        //    drops passages graded irrelevant and yields a real confidence in
-        //    [0,1]. This turns retrieval from "always inject whatever came
-        //    back" into a self-checking step.
-        double crag_conf = -1.0;
-        if (impl_->cfg.corrective && !hits.empty()) {
-            try {
-                std::vector<::rag::Hit> raw;
-                raw.reserve(hits.size());
-                for (const auto& h : hits) raw.push_back(::rag::Hit{h.chunk, h.score});
-                ::rag::crag::CragConfig cc;
-                cc.strips = want;
-                cc.drop_irrelevant = false;
-                auto corr = ::rag::crag::correct(active_engine.corpus(), query, raw, cc);
-                crag_conf = static_cast<double>(corr.confidence);
-                if (!corr.kept.empty()) {
-                    // Re-resolve only the kept chunks, preserving CRAG's order.
-                    std::vector<::rag::SearchResult> kept;
-                    for (const auto& h : corr.kept)
-                        kept.push_back(active_engine.corpus().resolve(h));
-                    if (!kept.empty()) { hits = std::move(kept); retriever_mode += "+crag"; }
-                }
-            } catch (...) { /* grading optional */ }
-        }
-
-        if (hits.empty()) {
-            out.error = "no relevant passages (retrieval graded low-confidence)";
-            return out;
-        }
-        if (hits.size() > want) hits.resize(want);
-
-        // 5. Learning-loop read side: nudge each hit by its historical
-        //    Beta-smoothed win-rate (bounded ±15%), then re-sort so a passage
-        //    that has repeatedly proven useful in THIS workspace edges ahead of
-        //    a near-tied one that hasn't. Neutral (×1.0) for unseen paths, so
-        //    this can only refine — never invent — ranking. Off with
-        //    AGENTTY_RAG_LEARN=0.
-        bool learned = false;
-        if (impl_->cfg.learn) {
-            auto& fb = FeedbackStore::instance();
-            for (auto& h : hits) {
-                auto [src, path] = split_uri(h.uri);
-                (void)src;
-                float b = fb.boost(path);
-                if (b != 1.0f) {
-                    h.score.value *= b;
-                    learned = true;
-                }
-            }
-            if (learned)
-                std::stable_sort(hits.begin(), hits.end(),
-                                 [](const ::rag::SearchResult& a,
-                                    const ::rag::SearchResult& b) {
-                                     return a.score.value > b.score.value;
-                                 });
-        }
-
-        double top = 0.0;
-        std::vector<std::string> surfaced;
-        surfaced.reserve(hits.size());
-
-        // Relevance floor: drop the low-confidence tail before spending any
-        // tokens on it. The top hit always survives; a later hit survives only
-        // if it scores within floor_frac of the top. This is where the token
-        // saving comes from — the model ignores 0.1-confidence passages, so we
-        // don't pay to inject them.
-        {
-            double hi = 0.0;
-            for (const auto& r : hits) hi = std::max(hi, static_cast<double>(r.score.value));
-            const double floor = hi * relevance_floor_frac();
-            if (hi > 0.0 && floor > 0.0) {
-                std::size_t keep = 1; // always keep the best
-                while (keep < hits.size()
-                       && static_cast<double>(hits[keep].score.value) >= floor)
-                    ++keep;
-                if (keep < hits.size()) hits.resize(keep);
-            }
-        }
-
-        // Score-proportional (water-filling) budget: confident passages get
-        // room to be complete; kept tail passages get a tight excerpt — instead
-        // of the old flat total/n split that spent equal tokens on signal and
-        // noise. The TOTAL is first scaled down by CRAG confidence so a
-        // barely-passing retrieval injects a cheap block, not the full ~3k tok.
-        const std::size_t total_budget =
-            confidence_scaled_budget(retrieval_output_budget(), crag_conf);
-        std::vector<double> pre_scores;
-        pre_scores.reserve(hits.size());
-        for (const auto& r : hits) {
-            double s = std::clamp(static_cast<double>(r.score.value), 0.0, 1.0);
-            pre_scores.push_back(s);
-        }
-        const std::vector<std::size_t> allowances =
-            allocate_budget(pre_scores, total_budget);
-        std::size_t remaining_budget = total_budget;
-        std::size_t idx = 0;
-        for (const auto& r : hits) {
-            auto [src, path] = split_uri(r.uri);
-            Passage p;
-            p.source     = src;
-            p.path       = path;
-            p.line_start = static_cast<int>(r.start_line);
-            p.line_end   = static_cast<int>(r.end_line);
-            double s = static_cast<double>(r.score.value);
-            if (s < 0.0) s = 0.0;
-            if (s > 1.0) s = 1.0;
-            p.score      = s;
-            std::string raw = r.context.empty() ? r.text : (r.context + "\n" + r.text);
-            std::size_t want_bytes = idx < allowances.size() ? allowances[idx] : 768;
-            const std::size_t allowance = std::min(want_bytes, remaining_budget);
-            ++idx;
-            if (allowance < 256) break;
-            p.text = compress_passage(query, raw, allowance);
-            remaining_budget -= std::min(remaining_budget, p.text.size());
-            top = std::max(top, p.score);
-            surfaced.push_back(path);
-            out.passages.push_back(std::move(p));
-        }
-        // Learning-loop write side (denominator): record what we surfaced so a
-        // later `read` of one of these can be scored as a win.
-        if (impl_->cfg.learn && !surfaced.empty())
-            FeedbackStore::instance().note_surfaced(surfaced);
-        // Prefer CRAG's calibrated confidence when available; else top score.
-        out.confidence = crag_conf >= 0.0 ? crag_conf : top;
-
-        // ── The retrieval funnel: show the engine's actual working ──────
-        // `mode` is what the tool card renders. We build a compact one-line
-        // headline (retriever + fusion + confidence) followed by an OPTIONAL
-        // multi-line "funnel" that walks the candidate set through every stage
-        // it actually passed through, with the counts rag-cpp itself recorded.
-        // The funnel is the UX centrepiece: a user (and the model) can SEE that
-        // 47 candidates were retrieved, reranked to 30, deduped to 24, and
-        // autocut to 8 — instead of trusting an opaque black box.
-        std::string headline = retriever_mode;
-        headline += impl_->cfg.fusion == "rrf"
-                      ? ", rrf-fusion"
-                      : (impl_->cfg.adaptive_fusion ? ", convex-fusion(adaptive)"
-                                                    : ", convex-fusion");
-        if (learned) headline += ", learned-boost";
-        if (!root.empty() && !skip_docs)
-            headline += ", docs=" + root.filename().string();
-        char buf[48];
-        std::snprintf(buf, sizeof buf, ", confidence %.2f", out.confidence);
-        headline += buf;
-
-        std::string m = headline;
-        if (impl_->cfg.trace && !trace.empty()) {
-            // rag-cpp emits two kinds of trace line: diagnostic lines that
-            // carry counts ("hybrid: 47 candidates", "dedup 30 -> 24") and bare
-            // stage markers ("→ dedup") that just echo the stage name. Keep the
-            // former — they show the funnel narrowing — and drop the latter,
-            // which are noise once the diagnostics are present.
-            std::vector<std::string> steps;
-            steps.reserve(trace.size());
-            for (const auto& t : trace) {
-                if (t.empty()) continue;
-                // Bare "→ stagename" markers begin with the arrow; skip them.
-                if (t.rfind("→ ", 0) == 0 || t.rfind("-> ", 0) == 0) continue;
-                steps.push_back(t);
-            }
-            if (!steps.empty()) {
-                // Render as an indented funnel the card shows verbatim. Each
-                // rung is one stage; the arrow prefix reads top-to-bottom as
-                // the query flowing down the pipeline.
-                m += "\n  funnel:";
-                for (const auto& s : steps)
-                    m += "\n    ↳ " + s;
-                m += "\n    ↳ top-" + std::to_string(out.passages.size());
-            }
-        }
-        out.mode = std::move(m);
+        out = impl_->index.with(
+            [](Index& ix, std::string query, int kk, bool skip_docs, GeneratorRef g) {
+                return retrieve_locked(ix, query, kk, skip_docs, g);
+            }, query, kk, skip_docs, GeneratorRef{impl_->generator.current()});
     } catch (const std::exception& e) {
         out.error = std::string("retrieval error: ") + e.what();
     } catch (...) {
@@ -1870,190 +1897,201 @@ Retrieval Retriever::retrieve(const std::string& query, int k, bool skip_docs) {
     return out;
 }
 
+namespace {
+// The body of retrieve_code(), run with the index locked.
+Retrieval retrieve_code_locked(Index& ix, const std::string& query, int kk) {
+    Retrieval out;
+    std::error_code ec;
+    auto root = fs::current_path(ec);
+    if (ec) { out.error = "search_code: cannot resolve cwd"; return out; }
+
+    ::rag::loaders::DirOptions opts;
+    opts.include_ext = {
+        ".c",".cc",".cpp",".cxx",".h",".hh",".hpp",".hxx",".inl",
+        ".py",".js",".jsx",".ts",".tsx",".mjs",".go",".rs",".java",
+        ".kt",".swift",".rb",".php",".cs",".scala",".sh",".bash",
+        ".zig",".lua",".sql",".proto",".cmake",".md"};
+    opts.exclude_dirs = {
+        ".git",".hg",".svn","node_modules","build","dist","out",
+        "target","venv",".venv","__pycache__",".cache","_deps",
+        "CMakeFiles",".agentty","vendor","third_party"};
+    opts.max_file_bytes = 256 * 1024;
+    opts.max_files = 4000;
+
+    auto manifest = ix.file_manifest(root, opts);
+    if (!ix.code_initialized)
+        (void)ix.try_load_code_index(root, manifest);
+    const bool cold = !ix.code_initialized
+                   || ix.code_root != root.string();
+
+    std::size_t changed = 0;
+    if (!cold) {
+        for (const auto& [path, stamp] : manifest) {
+            auto it = ix.code_files.find(path);
+            if (it == ix.code_files.end() || it->second != stamp) ++changed;
+        }
+        for (const auto& [path, _] : ix.code_files)
+            if (!manifest.contains(path)) ++changed;
+    }
+    const bool rebuild = cold
+        || changed > std::max<std::size_t>(64, ix.code_files.size() / 3);
+
+    if (rebuild) {
+        ix.code_engine = ::rag::Engine(
+            ix.make_engine_config(/*source_code=*/true));
+        ix.attach_code_embedder();
+        auto files = ::rag::loaders::load_directory(root, opts);
+        if (files) {
+            for (auto& d : *files) {
+                std::string rel = d.meta.count("rel") ? d.meta["rel"] : d.uri;
+                rel = fs::path{rel}.generic_string();
+                d.meta["rel"] = rel;
+                (void)ix.code_engine.add("code://" + rel,
+                                             std::move(d.text), d.meta, d.title);
+            }
+        }
+        auto built = ix.code_engine.build();
+        if (!built) { out.error = "search_code: index build failed"; return out; }
+        ix.apply_pipeline(ix.code_engine);
+    } else if (changed > 0) {
+        auto remove_uri = [&](const std::string& rel) {
+            // O(1) URI→id lookup, not a full-corpus linear scan.
+            auto& corpus = ix.code_engine.corpus();
+            if (auto id = corpus.find_by_uri("code://" + rel))
+                (void)corpus.remove_document(*id);
+        };
+
+        for (const auto& [path, old_stamp] : ix.code_files) {
+            auto it = manifest.find(path);
+            if (it == manifest.end() || it->second != old_stamp)
+                remove_uri(path);
+        }
+        for (const auto& [path, stamp] : manifest) {
+            auto old = ix.code_files.find(path);
+            if (old != ix.code_files.end() && old->second == stamp) continue;
+            auto loaded = ::rag::loaders::load_file(root / fs::path{path});
+            if (!loaded) continue;
+            loaded->meta["rel"] = path;
+            // upsert = dedup-safe replace (see docs path).
+            (void)ix.code_engine.corpus().upsert_document("code://" + path,
+                std::move(loaded->text), loaded->meta, loaded->title);
+        }
+        auto built = ix.code_engine.build();
+        if (!built) { out.error = "search_code: incremental update failed"; return out; }
+        ix.apply_pipeline(ix.code_engine);
+    }
+    ix.code_root = root.string();
+    ix.code_files = std::move(manifest);
+    ix.code_initialized = true;
+    if (rebuild || changed > 0) ix.persist_code_index();
+
+    if (ix.code_engine.corpus().chunk_count() == 0) {
+        out.error = "search_code: no source files found under " + root.string();
+        return out;
+    }
+
+    std::vector<std::string> code_trace;
+    std::vector<std::string>* code_tracep = ix.cfg.trace ? &code_trace : nullptr;
+    auto res = ix.code_engine.search(query, static_cast<std::size_t>(kk),
+                                         {}, code_tracep);
+    if (!res) { out.error = "search_code failed"; return out; }
+    double top = 0.0;
+    // Relevance floor + score-proportional budget (same rationale as the
+    // docs path): don't pay tokens for the low-confidence tail, and give
+    // the confident head room to be complete.
+    std::vector<::rag::SearchResult> ranked(res->begin(), res->end());
+    {
+        double hi = 0.0;
+        for (const auto& r : ranked) hi = std::max(hi, static_cast<double>(r.score.value));
+        const double floor = hi * relevance_floor_frac();
+        if (hi > 0.0 && floor > 0.0 && !ranked.empty()) {
+            std::size_t keep = 1;
+            while (keep < ranked.size()
+                   && static_cast<double>(ranked[keep].score.value) >= floor)
+                ++keep;
+            if (keep < ranked.size()) ranked.resize(keep);
+        }
+    }
+    const std::size_t total_budget = confidence_scaled_budget(
+        retrieval_output_budget(),
+        ranked.empty() ? -1.0
+                       : std::clamp(static_cast<double>(ranked.front().score.value),
+                                    0.0, 1.0));
+    std::vector<double> pre_scores;
+    pre_scores.reserve(ranked.size());
+    for (const auto& r : ranked)
+        pre_scores.push_back(std::clamp(static_cast<double>(r.score.value), 0.0, 1.0));
+    const std::vector<std::size_t> allowances =
+        allocate_budget(pre_scores, total_budget);
+    std::size_t remaining_budget = total_budget;
+    std::size_t idx = 0;
+    for (const auto& r : ranked) {
+        auto [src, path] = split_uri(r.uri);
+        (void)src;
+        Passage p;
+        p.source     = "code";
+        p.path       = path;
+        p.line_start = static_cast<int>(r.start_line);
+        p.line_end   = static_cast<int>(r.end_line);
+        p.score      = static_cast<double>(r.score.value);
+        std::size_t want_bytes = idx < allowances.size() ? allowances[idx] : 768;
+        const std::size_t allowance = std::min(want_bytes, remaining_budget);
+        ++idx;
+        if (allowance < 256) break;
+        // ── Disk verification: RAG proposes, live disk disposes. ────────
+        // The index can lag an unindexed edit; re-read the cited line range
+        // from the CURRENT file on disk and serve that (the truth). Only
+        // fall back to the indexed chunk text when the disk read fails
+        // (file moved/deleted since the walk). Keeps search_code results
+        // correct-on-bytes, not just approximately-ranked.
+        std::string verified = read_disk_lines(
+            (root / fs::path{path}).string(), p.line_start, p.line_end);
+        const std::string& source_text = !verified.empty() ? verified : r.text;
+        p.text = compress_passage(query, source_text, allowance);
+        remaining_budget -= std::min(remaining_budget, p.text.size());
+        top = std::max(top, p.score);
+        out.passages.push_back(std::move(p));
+    }
+    out.confidence = top;
+    std::string cm = std::string(ix.code_embedder_ready ? "code:hybrid" : "code:bm25")
+                   + (ix.cfg.fusion == "rrf" ? ", rrf-fusion"
+                      : (ix.cfg.adaptive_fusion ? ", convex-fusion(adaptive)"
+                                                    : ", convex-fusion"))
+                   + ", " + std::to_string(ix.code_engine.corpus().chunk_count())
+                   + " chunks from " + root.filename().string();
+    {
+        char cbuf[48];
+        std::snprintf(cbuf, sizeof cbuf, ", confidence %.2f", out.confidence);
+        cm += cbuf;
+    }
+    if (ix.cfg.trace && !code_trace.empty()) {
+        std::vector<std::string> steps;
+        steps.reserve(code_trace.size());
+        for (const auto& t : code_trace) {
+            if (t.empty()) continue;
+            if (t.rfind("→ ", 0) == 0 || t.rfind("-> ", 0) == 0) continue;
+            steps.push_back(t);
+        }
+        if (!steps.empty()) {
+            cm += "\n  funnel:";
+            for (const auto& s : steps) cm += "\n    ↳ " + s;
+            cm += "\n    ↳ top-" + std::to_string(out.passages.size());
+        }
+    }
+    out.mode = std::move(cm);
+    return out;
+}
+} // namespace
+
 Retrieval Retriever::retrieve_code(const std::string& query, int k) {
     Retrieval out;
     if (query.empty()) { out.error = "empty query"; return out; }
     const int kk = k > 0 ? k : 6;
     try {
-        std::lock_guard<std::mutex> lock(impl_->mu);
-        std::error_code ec;
-        auto root = fs::current_path(ec);
-        if (ec) { out.error = "search_code: cannot resolve cwd"; return out; }
-
-        ::rag::loaders::DirOptions opts;
-        opts.include_ext = {
-            ".c",".cc",".cpp",".cxx",".h",".hh",".hpp",".hxx",".inl",
-            ".py",".js",".jsx",".ts",".tsx",".mjs",".go",".rs",".java",
-            ".kt",".swift",".rb",".php",".cs",".scala",".sh",".bash",
-            ".zig",".lua",".sql",".proto",".cmake",".md"};
-        opts.exclude_dirs = {
-            ".git",".hg",".svn","node_modules","build","dist","out",
-            "target","venv",".venv","__pycache__",".cache","_deps",
-            "CMakeFiles",".agentty","vendor","third_party"};
-        opts.max_file_bytes = 256 * 1024;
-        opts.max_files = 4000;
-
-        auto manifest = impl_->file_manifest(root, opts);
-        if (!impl_->code_initialized)
-            (void)impl_->try_load_code_index(root, manifest);
-        const bool cold = !impl_->code_initialized
-                       || impl_->code_root != root.string();
-
-        std::size_t changed = 0;
-        if (!cold) {
-            for (const auto& [path, stamp] : manifest) {
-                auto it = impl_->code_files.find(path);
-                if (it == impl_->code_files.end() || it->second != stamp) ++changed;
-            }
-            for (const auto& [path, _] : impl_->code_files)
-                if (!manifest.contains(path)) ++changed;
-        }
-        const bool rebuild = cold
-            || changed > std::max<std::size_t>(64, impl_->code_files.size() / 3);
-
-        if (rebuild) {
-            impl_->code_engine = ::rag::Engine(
-                impl_->make_engine_config(/*source_code=*/true));
-            impl_->attach_code_embedder();
-            auto files = ::rag::loaders::load_directory(root, opts);
-            if (files) {
-                for (auto& d : *files) {
-                    std::string rel = d.meta.count("rel") ? d.meta["rel"] : d.uri;
-                    rel = fs::path{rel}.generic_string();
-                    d.meta["rel"] = rel;
-                    (void)impl_->code_engine.add("code://" + rel,
-                                                 std::move(d.text), d.meta, d.title);
-                }
-            }
-            auto built = impl_->code_engine.build();
-            if (!built) { out.error = "search_code: index build failed"; return out; }
-            impl_->apply_pipeline(impl_->code_engine);
-        } else if (changed > 0) {
-            auto remove_uri = [&](const std::string& rel) {
-                // O(1) URI→id lookup, not a full-corpus linear scan.
-                auto& corpus = impl_->code_engine.corpus();
-                if (auto id = corpus.find_by_uri("code://" + rel))
-                    (void)corpus.remove_document(*id);
-            };
-
-            for (const auto& [path, old_stamp] : impl_->code_files) {
-                auto it = manifest.find(path);
-                if (it == manifest.end() || it->second != old_stamp)
-                    remove_uri(path);
-            }
-            for (const auto& [path, stamp] : manifest) {
-                auto old = impl_->code_files.find(path);
-                if (old != impl_->code_files.end() && old->second == stamp) continue;
-                auto loaded = ::rag::loaders::load_file(root / fs::path{path});
-                if (!loaded) continue;
-                loaded->meta["rel"] = path;
-                // upsert = dedup-safe replace (see docs path).
-                (void)impl_->code_engine.corpus().upsert_document("code://" + path,
-                    std::move(loaded->text), loaded->meta, loaded->title);
-            }
-            auto built = impl_->code_engine.build();
-            if (!built) { out.error = "search_code: incremental update failed"; return out; }
-            impl_->apply_pipeline(impl_->code_engine);
-        }
-        impl_->code_root = root.string();
-        impl_->code_files = std::move(manifest);
-        impl_->code_initialized = true;
-        if (rebuild || changed > 0) impl_->persist_code_index();
-
-        if (impl_->code_engine.corpus().chunk_count() == 0) {
-            out.error = "search_code: no source files found under " + root.string();
-            return out;
-        }
-
-        std::vector<std::string> code_trace;
-        std::vector<std::string>* code_tracep = impl_->cfg.trace ? &code_trace : nullptr;
-        auto res = impl_->code_engine.search(query, static_cast<std::size_t>(kk),
-                                             {}, code_tracep);
-        if (!res) { out.error = "search_code failed"; return out; }
-        double top = 0.0;
-        // Relevance floor + score-proportional budget (same rationale as the
-        // docs path): don't pay tokens for the low-confidence tail, and give
-        // the confident head room to be complete.
-        std::vector<::rag::SearchResult> ranked(res->begin(), res->end());
-        {
-            double hi = 0.0;
-            for (const auto& r : ranked) hi = std::max(hi, static_cast<double>(r.score.value));
-            const double floor = hi * relevance_floor_frac();
-            if (hi > 0.0 && floor > 0.0 && !ranked.empty()) {
-                std::size_t keep = 1;
-                while (keep < ranked.size()
-                       && static_cast<double>(ranked[keep].score.value) >= floor)
-                    ++keep;
-                if (keep < ranked.size()) ranked.resize(keep);
-            }
-        }
-        const std::size_t total_budget = confidence_scaled_budget(
-            retrieval_output_budget(),
-            ranked.empty() ? -1.0
-                           : std::clamp(static_cast<double>(ranked.front().score.value),
-                                        0.0, 1.0));
-        std::vector<double> pre_scores;
-        pre_scores.reserve(ranked.size());
-        for (const auto& r : ranked)
-            pre_scores.push_back(std::clamp(static_cast<double>(r.score.value), 0.0, 1.0));
-        const std::vector<std::size_t> allowances =
-            allocate_budget(pre_scores, total_budget);
-        std::size_t remaining_budget = total_budget;
-        std::size_t idx = 0;
-        for (const auto& r : ranked) {
-            auto [src, path] = split_uri(r.uri);
-            (void)src;
-            Passage p;
-            p.source     = "code";
-            p.path       = path;
-            p.line_start = static_cast<int>(r.start_line);
-            p.line_end   = static_cast<int>(r.end_line);
-            p.score      = static_cast<double>(r.score.value);
-            std::size_t want_bytes = idx < allowances.size() ? allowances[idx] : 768;
-            const std::size_t allowance = std::min(want_bytes, remaining_budget);
-            ++idx;
-            if (allowance < 256) break;
-            // ── Disk verification: RAG proposes, live disk disposes. ────────
-            // The index can lag an unindexed edit; re-read the cited line range
-            // from the CURRENT file on disk and serve that (the truth). Only
-            // fall back to the indexed chunk text when the disk read fails
-            // (file moved/deleted since the walk). Keeps search_code results
-            // correct-on-bytes, not just approximately-ranked.
-            std::string verified = read_disk_lines(
-                (root / fs::path{path}).string(), p.line_start, p.line_end);
-            const std::string& source_text = !verified.empty() ? verified : r.text;
-            p.text = compress_passage(query, source_text, allowance);
-            remaining_budget -= std::min(remaining_budget, p.text.size());
-            top = std::max(top, p.score);
-            out.passages.push_back(std::move(p));
-        }
-        out.confidence = top;
-        std::string cm = std::string(impl_->code_embedder_ready ? "code:hybrid" : "code:bm25")
-                       + (impl_->cfg.fusion == "rrf" ? ", rrf-fusion"
-                          : (impl_->cfg.adaptive_fusion ? ", convex-fusion(adaptive)"
-                                                        : ", convex-fusion"))
-                       + ", " + std::to_string(impl_->code_engine.corpus().chunk_count())
-                       + " chunks from " + root.filename().string();
-        {
-            char cbuf[48];
-            std::snprintf(cbuf, sizeof cbuf, ", confidence %.2f", out.confidence);
-            cm += cbuf;
-        }
-        if (impl_->cfg.trace && !code_trace.empty()) {
-            std::vector<std::string> steps;
-            steps.reserve(code_trace.size());
-            for (const auto& t : code_trace) {
-                if (t.empty()) continue;
-                if (t.rfind("→ ", 0) == 0 || t.rfind("-> ", 0) == 0) continue;
-                steps.push_back(t);
-            }
-            if (!steps.empty()) {
-                cm += "\n  funnel:";
-                for (const auto& s : steps) cm += "\n    ↳ " + s;
-                cm += "\n    ↳ top-" + std::to_string(out.passages.size());
-            }
-        }
-        out.mode = std::move(cm);
+        out = impl_->index.with(
+            [](Index& ix, std::string query, int kk) {
+                return retrieve_code_locked(ix, query, kk);
+            }, query, kk);
     } catch (const std::exception& e) {
         out.error = std::string("search_code failed: ") + e.what();
     } catch (...) {
@@ -2063,23 +2101,25 @@ Retrieval Retriever::retrieve_code(const std::string& query, int k) {
 }
 
 bool Retriever::warm() const {
-    std::lock_guard<std::mutex> lock(impl_->mu);
-    auto root = resolve_docs_root(impl_->cfg.docs_root);
-    if (root.empty()) return true;
-    if (impl_->engine.corpus().chunk_count() == 0)
-        (void)impl_->try_load_persisted(root);
-    return !impl_->needs_reindex(root, /*skip_docs=*/false);
+    return impl_->index.with([](Index& ix) {
+        auto root = resolve_docs_root(ix.cfg.docs_root);
+        if (root.empty()) return true;
+        if (ix.engine.corpus().chunk_count() == 0)
+            (void)ix.try_load_persisted(root);
+        return !ix.needs_reindex(root, /*skip_docs=*/false);
+    });
 }
 
 bool Retriever::code_warm() const {
-    std::lock_guard<std::mutex> lock(impl_->mu);
-    if (impl_->code_initialized) return true;
-    // A persisted code index from a prior session counts as warm: loading it
-    // is Engine::open() + a manifest stat-walk, not an embed-everything
-    // build. Its absence means an opportunistic query would pay the full
-    // cold build — refuse; only an explicit search_code call should do that.
-    std::error_code ec;
-    return fs::exists(impl_->code_ragdb_path(), ec) && !ec;
+    return impl_->index.read([](const Index& ix) {
+        if (ix.code_initialized) return true;
+        // A persisted code index from a prior session counts as warm: loading
+        // it is Engine::open() + a manifest stat-walk, not an embed-everything
+        // build. Its absence means an opportunistic query would pay the full
+        // cold build — refuse; only an explicit search_code call should.
+        std::error_code ec;
+        return fs::exists(ix.code_ragdb_path(), ec) && !ec;
+    });
 }
 
 void Retriever::warm_async() {
@@ -2104,18 +2144,19 @@ void Retriever::warm_async() {
             Impl* s;
             ~ClearWarming() { s->warming.store(false); }
         } clear{state};
-        std::lock_guard<std::mutex> lock(state->mu);
-        auto root = resolve_docs_root(state->cfg.docs_root);
-        if (state->engine.corpus().chunk_count() == 0)
-            (void)state->try_load_persisted(root);
-        state->refresh_docs(root);
+        state->index.with([](Index& ix) {
+            auto root = resolve_docs_root(ix.cfg.docs_root);
+            if (ix.engine.corpus().chunk_count() == 0)
+                (void)ix.try_load_persisted(root);
+            ix.refresh_docs(root);
+        });
     });
 }
 
 // Stop any in-flight warm promptly and reclaim the worker. Called early in
-// process teardown so ^C is instant. Deliberately does NOT take state->mu: the
-// warm worker holds mu for its whole run, so locking here would DEADLOCK — we
-// only touch the atomics + the jthread handle, both safe to poke concurrently.
+// process teardown so ^C is instant. Deliberately does NOT touch the index: the
+// warm worker holds it for its whole run, so waiting on it here would stall
+// teardown. Only the flag and the worker group, both safe from any thread.
 void Retriever::shutdown() {
     // 1. Trip the cooperative flag so refresh_docs()/reindex() bail at their
     //    next loop boundary (and before the expensive engine.build()).
@@ -2139,129 +2180,137 @@ void Retriever::shutdown() {
 // a change to it forces a re-probe + cold rebuild.
 void Retriever::apply_config(const Config& cfg) {
     try {
-        std::unique_lock<std::mutex> lock(impl_->mu);
-        const Config& old = impl_->cfg;
-        // A different embedder means a different VECTOR SPACE: every persisted
-        // vector is incomparable, so this is always a cold rebuild (and the
-        // .ragdb path changes with the identity, so the old index survives on
-        // disk for when the user switches back).
-        const bool embedder_changed =
-            ::agentty::rag::embed::identity(old.embed)
-                != ::agentty::rag::embed::identity(cfg.embed);
-        const bool corpus_changed =
-               old.skills        != cfg.skills
-            || old.memory        != cfg.memory
-            || old.mcp_resources != cfg.mcp_resources
-            || old.contextual    != cfg.contextual
-            || old.dedup         != cfg.dedup
-            || old.mmr           != cfg.mmr
-            || old.stitch        != cfg.stitch
-            || old.autocut       != cfg.autocut
-            || old.fusion        != cfg.fusion
-            || old.adaptive_fusion != cfg.adaptive_fusion
-            || old.dense_weight  != cfg.dense_weight
-            || old.bm25_weight   != cfg.bm25_weight
-            || old.persist       != cfg.persist
-            || embedder_changed;
-        // Preserve only what the picker genuinely never touches.
-        Config next = cfg;
-        next.docs_root  = old.docs_root;
-        impl_->cfg = std::move(next);
-        if (embedder_changed) {
-            // Re-probe: the new backend may be unreachable, and its dimension
-            // must be measured rather than inherited from the previous one.
-            //
-            // The probe DIALS A NETWORK ENDPOINT (or memory-maps a model), so
-            // it runs with the lock RELEASED. Holding `mu` across a
-            // multi-second timeout is what made every reader — including the
-            // UI's status row — stall behind it. Readers see the old state
-            // until the new one lands, which is the honest answer while a
-            // probe is in flight.
-            impl_->dense = dense::Unprobed{};
-            lock.unlock();
-            impl_->probe_embedder_unlocked();
-            lock.lock();
-            impl_->install_default_generator();
-        }
-        if (corpus_changed) {
-            // Cold-start every engine; the pipeline is rebuilt from the new
-            // toggles on the next reindex/refresh. Rebuilding the docs engine
-            // in place (make_engine_config reads cfg) keeps ownership simple.
-            impl_->engine = ::rag::Engine(impl_->make_engine_config());
-            impl_->embedder_ready = false;
-            impl_->docs_initialized = false;
-            impl_->indexed_root.clear();
-            impl_->indexed_fp = 0;
-            impl_->docs_files.clear();
-            impl_->persist_checked_for.clear();
-            impl_->warm_initialized = false;
-            impl_->warm_engine = ::rag::Engine(impl_->make_engine_config());
-            impl_->code_initialized = false;
-            impl_->code_root.clear();
-            impl_->code_files.clear();
-            impl_->attach_embedder();
-        } else {
-            // Ranking-only change: re-apply the pipeline in place so e.g. an
-            // MMR/autocut toggle that DID land in corpus_changed is covered,
-            // and cheap re-labels (fusion label) refresh without a rebuild.
-            impl_->apply_pipeline(impl_->engine);
-        }
+        // Step 1, locked: install the new config, and report whether the
+        // embedder changed (its probe must then run unlocked) and whether the
+        // corpus shape changed.
+        struct Change { bool embedder = false; bool corpus = false;
+                        ::agentty::rag::embed::EmbedConfig embed; };
+        const Change ch = impl_->index.with([](Index& ix, Config cfg) {
+            const Config& old = ix.cfg;
+            Change c;
+            // A different embedder means a different VECTOR SPACE: every
+            // persisted vector is incomparable, so this is always a cold
+            // rebuild (and the .ragdb path changes with the identity, so the
+            // old index survives on disk for when the user switches back).
+            c.embedder = ::agentty::rag::embed::identity(old.embed)
+                      != ::agentty::rag::embed::identity(cfg.embed);
+            c.corpus =
+                   old.skills        != cfg.skills
+                || old.memory        != cfg.memory
+                || old.mcp_resources != cfg.mcp_resources
+                || old.contextual    != cfg.contextual
+                || old.dedup         != cfg.dedup
+                || old.mmr           != cfg.mmr
+                || old.stitch        != cfg.stitch
+                || old.autocut       != cfg.autocut
+                || old.fusion        != cfg.fusion
+                || old.adaptive_fusion != cfg.adaptive_fusion
+                || old.dense_weight  != cfg.dense_weight
+                || old.bm25_weight   != cfg.bm25_weight
+                || old.persist       != cfg.persist
+                || c.embedder;
+            // Preserve only what the picker genuinely never touches.
+            cfg.docs_root = old.docs_root;
+            ix.cfg = std::move(cfg);
+            if (c.embedder) ix.dense = dense::Unprobed{};
+            c.embed = ix.effective_embed();
+            return c;
+        }, cfg);
+
+        // Step 2, UNLOCKED: the probe dials a network endpoint (or maps a
+        // model). Holding the index across a multi-second timeout is what
+        // made every reader, the UI's status row included, stall behind it.
+        // Readers see Unprobed until the result lands.
+        std::optional<::agentty::rag::embed::ProbeResult> probed;
+        if (ch.embedder) probed = Index::run_probe(ch.embed);
+
+        // Step 3, locked: land the probe, then reset or re-pipeline.
+        impl_->index.with([](Index& ix, Change c,
+                             std::optional<::agentty::rag::embed::ProbeResult> pr) {
+            if (pr) ix.apply_probe(*pr);
+            if (c.corpus) {
+                // Cold-start every engine; the pipeline is rebuilt from the
+                // new toggles on the next reindex/refresh.
+                ix.engine = ::rag::Engine(ix.make_engine_config());
+                ix.embedder_ready = false;
+                ix.docs_initialized = false;
+                ix.indexed_root.clear();
+                ix.indexed_fp = 0;
+                ix.docs_files.clear();
+                ix.persist_checked_for.clear();
+                ix.warm_initialized = false;
+                ix.warm_engine = ::rag::Engine(ix.make_engine_config());
+                ix.code_initialized = false;
+                ix.code_root.clear();
+                ix.code_files.clear();
+                ix.attach_embedder();
+            } else {
+                // Ranking-only change: re-apply the pipeline in place so cheap
+                // re-labels (fusion label) refresh without a rebuild.
+                ix.apply_pipeline(ix.engine);
+            }
+        }, ch, std::move(probed));
+        // The default generator dials the embed host when that is an
+        // Ollama, so a new embedder means a new default generator.
+        if (ch.embedder)
+            impl_->generator.publish(std::make_shared<const Generator>(
+                Index::default_generator(snapshot_config())));
     } catch (...) { /* best-effort; keep the old config live on failure */ }
 }
 
 Config Retriever::snapshot_config() const {
-    std::lock_guard<std::mutex> lock(impl_->mu);
-    return impl_->cfg;
+    return impl_->index.read([](const Index& ix) { return ix.cfg; });
 }
 
 Retriever::EmbedStatus Retriever::embed_status() const {
     EmbedStatus out;
 
     // NEVER blocks. This is called from the UI thread to render a status row,
-    // and `mu` is held for the whole of apply_config() — which re-probes the
-    // embedder (a network dial) and cold-rebuilds three engines. A plain
-    // lock_guard here meant the UI froze, animations included, for as long as
-    // a rebuild took.
+    // and the index is held across whole rebuilds. A blocking read here meant
+    // the UI froze, animations included, for as long as a rebuild took.
     //
     // A status readout is advisory by nature: if the retriever is busy being
     // reconfigured, "reconfiguring" IS the true answer, and it costs nothing
     // to say so. The next frame picks up the real state.
-    std::unique_lock<std::mutex> lock(impl_->mu, std::try_to_lock);
-    if (!lock.owns_lock()) {
+    auto now = impl_->index.try_read([](const Index& ix) {
+        EmbedStatus st_out;
+        st_out.describe = ::agentty::rag::embed::describe(ix.cfg.embed);
+        std::visit([&st_out](const auto& st) {
+            using T = std::decay_t<decltype(st)>;
+            if constexpr (std::is_same_v<T, dense::Ready>) {
+                st_out.state      = EmbedStatus::State::Ready;
+                st_out.dim        = st.dim;
+                st_out.latency_ms = st.latency_ms;
+            } else if constexpr (std::is_same_v<T, dense::Unavailable>) {
+                st_out.state  = EmbedStatus::State::Unavailable;
+                st_out.reason = st.reason;
+            } else {
+                st_out.state = EmbedStatus::State::Unprobed;
+            }
+        }, ix.dense);
+        return st_out;
+    });
+    if (!now) {
         out.state    = EmbedStatus::State::Unprobed;
         out.describe = "reconfiguring\xe2\x80\xa6";
         return out;
     }
-
-    out.describe = ::agentty::rag::embed::describe(impl_->cfg.embed);
-    std::visit([&](const auto& st) {
-        using T = std::decay_t<decltype(st)>;
-        if constexpr (std::is_same_v<T, dense::Ready>) {
-            out.state      = EmbedStatus::State::Ready;
-            out.dim        = st.dim;
-            out.latency_ms = st.latency_ms;
-        } else if constexpr (std::is_same_v<T, dense::Unavailable>) {
-            out.state  = EmbedStatus::State::Unavailable;
-            out.reason = st.reason;
-        } else {
-            out.state = EmbedStatus::State::Unprobed;
-        }
-    }, impl_->dense);
-    return out;
+    return *now;
 }
 
 Retriever::EmbedStatus Retriever::reprobe_embedder() {
     // Same discipline as apply_config: the probe itself runs UNLOCKED, because
     // it dials a network endpoint. Only the state write and the re-attach take
     // the lock, and both are cheap.
-    {
-        std::unique_lock<std::mutex> lock(impl_->mu);
-        impl_->dense = dense::Unprobed{};
-        lock.unlock();
-        impl_->probe_embedder_unlocked();
-        lock.lock();
-        impl_->attach_embedder();
-    }
+    const auto ec = impl_->index.with([](Index& ix) {
+        ix.dense = dense::Unprobed{};
+        return ix.effective_embed();
+    });
+    auto r = Index::run_probe(ec);
+    impl_->index.with([](Index& ix, ::agentty::rag::embed::ProbeResult pr) {
+        ix.apply_probe(pr);
+        ix.attach_embedder();
+    }, std::move(r));
     return embed_status();
 }
 
