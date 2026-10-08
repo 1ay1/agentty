@@ -174,7 +174,7 @@ they only asked.
   granularity = one model completion; `StopReason::ToolUse` drives the loop.
 - **External ACP subprocess (opt-in).** For a backend that already ships an
   ACP adapter, spawn it (`codex-acp`, `claude-agent-acp`, any ACP agent) and
-  drive it with acp-cpp's client side (`acp/agent.hpp`). Its `session/update`
+  drive it over an `rpc::Peer` with acp-cpp's method types. Its `session/update`
   stream *is already* `SessionUpdate` — near-zero translation. Here the
   subprocess owns the tool loop; agentty is the ACP **client**, servicing
   `fs/read_text_file`, `fs/write_text_file`, `terminal/create` callbacks

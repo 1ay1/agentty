@@ -1,4 +1,4 @@
-// protocol_runtime.cpp — mcp::Runtime / acp::Runtime on maya → jaal.
+// protocol_runtime.cpp — mcp::Runtime on maya → jaal.
 //
 // Each background job is a one-worker maya::pool running the body as an
 // isolated task. That gives every job what the libraries need, from jaal:
@@ -22,7 +22,6 @@
 
 #include <maya/runtime.hpp>
 #include <mcp/runtime.hpp>
-#include <acp/runtime.hpp>
 #if AGENTTY_HAS_RAGCPP
 #include <rag/util/parallel.hpp>
 #endif
@@ -120,7 +119,6 @@ class RagExecutor final : public ::rag::util::Executor {
 
 void install_protocol_runtimes() {
     ::mcp::set_runtime(std::make_shared<MayaRuntime<::mcp::Runtime>>());
-    ::acp::set_runtime(std::make_shared<MayaRuntime<::acp::Runtime>>());
 #if AGENTTY_HAS_RAGCPP
     ::rag::util::set_executor(std::make_shared<RagExecutor>());
 #endif

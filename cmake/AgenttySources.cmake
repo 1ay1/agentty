@@ -107,6 +107,7 @@ set(AGENTTY_PROVIDER_SOURCES
 # The wire protocol/engine/transport live in the acp-cpp submodule (linked
 # as acp::acp); server.cpp is the agentty-specific glue (turn loop + tools).
 set(AGENTTY_ACP_SOURCES
+    src/rpc/peer.cpp
     src/acp/server.cpp
     src/provider/external_acp_backend.cpp
     src/provider/acp_provider_adapter.cpp

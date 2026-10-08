@@ -34,7 +34,7 @@ using json = nlohmann::json;
 // subprocess is long-lived, its ACP session reused across requests.
 struct LiveAgent {
     std::unique_ptr<ExternalAcpBackend> backend;
-    SpawnedAcpAgent                     agent;   // owns the subprocess + transport
+    SpawnedAcpAgent                     agent;   // owns the subprocess and peer; dies first
 };
 
 // Copy-on-write: readers look up without a lock, a spawn publishes a new map.
@@ -124,7 +124,7 @@ std::shared_ptr<LiveAgent> acquire(const std::string& agent_id, std::string& err
 
     std::string spawn_err;
     live->agent = spawn_acp_agent(spec->argv(), make_init(),
-                                  live->backend->make_handlers(), spawn_err);
+                                  live->backend->make_dispatch(), spawn_err);
     if (!live->agent.ok()) {
         err = "failed to launch ACP agent '" + agent_id + "': " + spawn_err;
         return nullptr;
@@ -295,14 +295,12 @@ StreamResult stream_external_acp(const std::string& agent_id, Request req, Event
 void release_acp_agents() noexcept {
     auto drained = g_cache().take();
     if (!drained) return;
-    // Each LiveAgent dtor runs ExternalAcpBackend's hardened teardown watchdog
-    // (bounded even for a wedged agent).
+    // Each agent's teardown is bounded even for a wedged agent.
     for (const auto& [id, live] : *drained) {
         if (!live) continue;
-        // Order: backend (holds non-owning conn_) → connection → process.
+        // The peer first: its dispatch points at the backend.
+        live->agent.reset();
         live->backend.reset();
-        live->agent.connection.reset();
-        live->agent.process.reset();
     }
 }
 

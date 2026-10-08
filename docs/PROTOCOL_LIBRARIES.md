@@ -401,12 +401,13 @@ bumps the submodule pointer after each.
    futures, no transport, no runtime). Unit-test it single-threaded:
    request/response, ids of every JSON type, batches, deadlines via
    `expire(now)`, malformed frames, notifications, responses to unknown ids.
-2. **acp-cpp on the core.** Smaller of the two; proves the shape. Delete its
-   `runtime.hpp`, `rpc.hpp`, `stdio.hpp`, `coro.hpp`, and its copies of
-   core/codec. Its Agent/Client become protocol state machines over the core
-   Engine. agentty's `acp/server.cpp` and `external_acp_backend.cpp` gain the
-   reader task and owner. Verify: `external_acp_backend_test`, the ACP
-   JSON-RPC drive (tool turn, load, list, delete) and the 3-session storm.
+2. **acp-cpp on the core.** *(done)* Its runtime, rpc engine, stdio
+   transport, coroutines and connection classes are gone; every method is a
+   type in `protocol.hpp`. agentty drives both sides through `rpc::Peer`
+   (`src/rpc/peer.cpp`): a reader, a writer and a deadline task on maya,
+   the engine under one `maya::guarded`. Verified with
+   `external_acp_backend_test` (in-memory, real subprocess, wedged agent)
+   and an `agentty acp` stdio drive.
 3. **mcp-cpp on the core.** Same for the protocol side; then
    `cap::ClientProvider`, `cap::registry`, `Guarded`, `scheduler`,
    `stdio_server` lose their locks and jobs (single-owner, agentty drives).

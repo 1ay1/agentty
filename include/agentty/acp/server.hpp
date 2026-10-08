@@ -2,19 +2,16 @@
 // agentty::acp::AgentServer — the ACP agent that lets agentty run as a
 // subprocess Zed (or any ACP client) drives over stdio.
 //
-// Built on the acp-cpp library (acp-cpp/ submodule): acp-cpp owns the wire
-// algebra, JSON-RPC engine, codecs, and stdio transport. This class is the
-// agentty-specific glue: it implements the AgentHandlers surface, drives a
-// headless turn loop against the same provider + tools + permission policy
-// the TUI uses, and translates each step into acp-cpp SessionUpdate values.
+// acp-cpp declares the methods and types; an rpc::Peer runs the connection.
+// This class answers the client's methods through a jsonrpc::Router, drives
+// a headless turn loop against the same provider + tools + permission policy
+// the TUI uses, and turns each step into session/update notifications.
 //
-// session/prompt is registered as an ASYNC handler (on_session_prompt_async):
-// a prompt drives a whole turn that streams session/update notifications and
-// calls BACK to the client (session/request_permission) before it can
-// resolve. Those callbacks need the engine's reader thread free to deliver
-// their responses, so the handler hands an acp::RpcEngine::Responder to a
-// worker thread and returns immediately; the worker resolves it when the turn
-// settles. (See acp-cpp's deferred-response support.)
+// session/prompt is deferred: a turn streams updates and calls back to the
+// client (session/request_permission, terminal/*) before it can answer, and
+// those replies arrive on the reader. So the reader hands the turn to a
+// worker with a Peer::Deferred and moves on; the worker answers when the
+// turn settles.
 //
 // Lifecycle (ACP v1 agent surface; every optional method is advertised via
 // the matching capability in `initialize`):
@@ -32,7 +29,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include <acp/acp.hpp>
+#include <acp/protocol.hpp>
 
 #include <maya/runtime.hpp>
 
@@ -41,6 +38,7 @@
 #include "agentty/domain/profile.hpp"
 #include "agentty/io/http.hpp"
 #include "agentty/provider/provider.hpp"
+#include "agentty/rpc/peer.hpp"
 
 namespace agentty::acp {
 
@@ -82,20 +80,21 @@ public:
     // test double). `auth` is the resolved wire credential; may be empty (then
     // prompts report authentication-required). `model_id` is the default model
     // for new sessions.
-    AgentServer(::acp::FdTransport& transport,
+    AgentServer(rpc::Channel      channel,
                 StreamFn          stream,
                 auth::AuthHeader  auth,
                 std::string       model_id,
                 Profile           profile = Profile::Ask);
+    ~AgentServer();
 
-    // Install handlers, start the transport's read pump, and block until the
-    // client disconnects (EOF on stdin). Returns a process exit code.
+    // Start reading and block until the client disconnects (EOF on stdin).
+    // Returns a process exit code.
     int serve();
 
 private:
-    using Responder = ::acp::RpcEngine::Responder<::acp::PromptResult>;
+    using Responder = rpc::Peer::Deferred<::acp::to_agent::SessionPrompt>;
 
-    // ── AgentHandlers method handlers (typed via acp-cpp) ─────────────────
+    // ── method handlers ─────────────────────────────────────────────────
     ::acp::InitializeResult     on_initialize(const ::acp::InitializeParams&);
     ::acp::NewSessionResult     on_new_session(const ::acp::NewSessionParams&);
     ::acp::ListSessionsResult   on_list_sessions(const ::acp::ListSessionsParams&);
@@ -112,9 +111,12 @@ private:
     // has this JSON-RPC id (falls back to a no-op for an unknown id).
     void                        on_cancel_request(const ::acp::RpcId& id);
 
-    // Build the AgentHandlers bundle (captures this). Called in the init list
-    // to construct conn_; safe because member storage exists at that point.
-    ::acp::AgentHandlers make_handlers();
+    // The method table, built once in the constructor.
+    using Router = ::jsonrpc::Router<AgentServer>;
+    static Router make_router();
+    rpc::Dispatch make_dispatch();
+    std::optional<std::string> on_call(const ::acp::Call& c);
+    void on_notification(const ::acp::Notification& n);
 
     // ── The headless turn loop ───────────────────────────────────────────
     void run_turn(std::string session_id, std::string req_id_dump, Responder resp);
@@ -195,8 +197,8 @@ private:
     void                  replay_history(const std::string& session_id,
                                          const Thread& thread);
 
-    ::acp::FdTransport&       transport_;
-    ::acp::ClientConnection   conn_;
+    Router                    router_;
+    std::unique_ptr<rpc::Peer> peer_;
     StreamFn                  stream_;
     auth::AuthHeader          auth_;
     std::string               model_id_;

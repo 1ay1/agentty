@@ -49,10 +49,12 @@ source=("$_pkgname::git+https://github.com/1ay1/agentty.git"
         'git+https://github.com/1ay1/mcp-cpp.git'
         'git+https://github.com/1ay1/rag-cpp.git'
         'git+https://github.com/1ay1/claybin.git'
+        'git+https://github.com/1ay1/jsonrpc-cpp.git'
         "nlohmann_json-${_json_tag}.tar.gz::https://github.com/nlohmann/json/archive/${_json_tag}.tar.gz"
         "simdjson-${_simdjson_tag}.tar.gz::https://github.com/simdjson/simdjson/archive/${_simdjson_tag}.tar.gz"
         "mimalloc-${_mimalloc_tag}.tar.gz::https://github.com/microsoft/mimalloc/archive/${_mimalloc_tag}.tar.gz")
 sha256sums=('SKIP'
+            'SKIP'
             'SKIP'
             'SKIP'
             'SKIP'
@@ -83,6 +85,7 @@ prepare() {
     # AgenttySubmodules.cmake raises FATAL_ERROR when third_party/claybin is
     # empty, so leaving it unwired failed at CONFIGURE rather than at link.
     git config submodule.claybin.url "$srcdir/claybin"
+    git config submodule.jsonrpc-cpp.url "$srcdir/jsonrpc-cpp"
     git -c protocol.file.allow=always submodule update
 
     # maya carries jaal as its OWN submodule, and agentty links maya::app,

@@ -2,8 +2,8 @@
 //
 // Headless analogue of the TUI turn loop (src/runtime/app/cmd_factory.cpp).
 // Reuses the SAME provider, tools, wire shaping, and permission policy, driven
-// synchronously on a worker thread and translated into acp-cpp SessionUpdate
-// notifications via the acp-cpp ClientConnection.
+// synchronously on a worker thread and sent to the client as session/update
+// notifications over an rpc::Peer.
 
 #include "agentty/acp/server.hpp"
 
@@ -15,7 +15,6 @@
 #include <cstring>
 #include <exception>
 #include <fstream>
-#include <future>
 #include <stop_token>
 
 #include <maya/runtime.hpp>
@@ -56,6 +55,14 @@ namespace {
 
 using nlohmann::json;
 namespace a = ::acp;
+
+// A call to the client that throws its RpcError, for the try/catch paths.
+template <jsonrpc::IsMethod M>
+typename M::result call(rpc::Peer& peer, const typename M::params& p) {
+    auto r = peer.call<M>(p);
+    if (!r) throw r.error();
+    return std::move(*r);
+}
 
 // Construct a text ContentBlock.
 a::ContentBlock text_block(std::string s) {
@@ -866,85 +873,94 @@ std::optional<a::ConfigOption> model_config_option(const std::string& current) {
 
 } // namespace
 
-AgentServer::AgentServer(a::FdTransport& transport,
+AgentServer::AgentServer(rpc::Channel      channel,
                          StreamFn          stream,
                          auth::AuthHeader  auth,
                          std::string       model_id,
                          Profile           profile)
-    : transport_(transport),
-      conn_(transport.sink(), make_handlers()),
+    : router_(make_router()),
       stream_(std::move(stream)),
       auth_(std::move(auth)),
       model_id_(std::move(model_id)),
-      profile_(profile) {}
+      profile_(profile) {
+    peer_ = std::make_unique<rpc::Peer>(std::move(channel), make_dispatch(), "acp");
+    // A dead client must not wedge a worker forever: our calls to it
+    // (permission, terminal/*) fail with Timeout after this. 5 min is
+    // generous for a human reading a permission dialog.
+    peer_->set_default_timeout(std::chrono::minutes(5));
+}
 
-a::AgentHandlers AgentServer::make_handlers() {
-    a::AgentHandlers h;
-    h.on_initialize  = [this](const a::InitializeParams& p)  { return on_initialize(p); };
-    h.on_session_new = [this](const a::NewSessionParams& p)  { return on_new_session(p); };
-    h.on_session_cancel = [this](const a::CancelParams& p)   { on_cancel(p); };
-    h.on_cancel_request = [this](const a::RpcId& id)         { on_cancel_request(id); };
-    h.on_session_prompt_async =
-        [this](const a::PromptParams& p, Responder r) { on_prompt(p, std::move(r)); };
+AgentServer::~AgentServer() { if (peer_) peer_->stop(); }
 
-    h.on_session_load = [this](const a::LoadSessionParams& p) -> a::Unit {
-        on_load_session(p); return a::Unit{};
-    };
-    h.on_session_resume = [this](const a::ResumeSessionParams& p) { return on_resume_session(p); };
-    h.on_session_list   = [this](const a::ListSessionsParams& p)  { return on_list_sessions(p); };
-    h.on_session_close  = [this](const a::CloseSessionParams& p) -> a::Unit {
-        on_close_session(p); return a::Unit{};
-    };
-    h.on_session_delete = [this](const a::DeleteSessionParams& p) -> a::Unit {
-        on_delete_session(p); return a::Unit{};
-    };
-    h.on_session_set_mode = [this](const a::SetModeParams& p) -> a::Unit {
-        on_set_mode(p); return a::Unit{};
-    };
-    h.on_session_set_config_option =
-        [this](const a::SetConfigOptionParams& p) { return on_set_config_option(p); };
-
-    h.on_authenticate = [this](const a::AuthenticateParams&) -> a::Unit {
-        if (auth::is_empty(auth_))
-            throw a::RpcError(a::errc::AuthRequired,
+AgentServer::Router AgentServer::make_router() {
+    namespace m = a::to_agent;
+    Router r;
+    r.on<m::Initialize>([](AgentServer& s, const a::InitializeParams& p) { return s.on_initialize(p); });
+    r.on<m::SessionNew>([](AgentServer& s, const a::NewSessionParams& p) { return s.on_new_session(p); });
+    r.on<m::SessionCancel>([](AgentServer& s, const a::CancelParams& p) { s.on_cancel(p); });
+    r.on<a::CancelRequest>([](AgentServer& s, const a::CancelRequestParams& p) { s.on_cancel_request(p.id); });
+    // session/prompt is answered in on_call, before the router.
+    r.defer<m::SessionPrompt>();
+    r.on<m::SessionLoad>([](AgentServer& s, const a::LoadSessionParams& p) {
+        s.on_load_session(p); return a::Unit{};
+    });
+    r.on<m::SessionResume>([](AgentServer& s, const a::ResumeSessionParams& p) { return s.on_resume_session(p); });
+    r.on<m::SessionList>([](AgentServer& s, const a::ListSessionsParams& p) { return s.on_list_sessions(p); });
+    r.on<m::SessionClose>([](AgentServer& s, const a::CloseSessionParams& p) {
+        s.on_close_session(p); return a::Unit{};
+    });
+    r.on<m::SessionDelete>([](AgentServer& s, const a::DeleteSessionParams& p) {
+        s.on_delete_session(p); return a::Unit{};
+    });
+    r.on<m::SessionSetMode>([](AgentServer& s, const a::SetModeParams& p) {
+        s.on_set_mode(p); return a::Unit{};
+    });
+    r.on<m::SessionSetConfig>([](AgentServer& s, const a::SetConfigOptionParams& p) {
+        return s.on_set_config_option(p);
+    });
+    r.on<m::Authenticate>([](AgentServer& s, const a::AuthenticateParams&) {
+        if (auth::is_empty(s.auth_))
+            throw a::RpcError(a::AuthRequired,
                 "agentty has no credentials — run `agentty login` first");
         return a::Unit{};
-    };
-    h.on_logout = [this]() -> a::Unit { on_logout(); return a::Unit{}; };
-    return h;
+    });
+    r.on<m::Logout>([](AgentServer& s, const a::Unit&) { s.on_logout(); return a::Unit{}; });
+    return r;
+}
+
+rpc::Dispatch AgentServer::make_dispatch() {
+    rpc::Dispatch d;
+    d.on_call         = [this](const a::Call& c) { return on_call(c); };
+    d.on_notification = [this](const a::Notification& n) { on_notification(n); };
+    // Every frame lands on the `acp` channel of the structured log, captured
+    // by default in a non-release build or via AGENTTY_LOG=acp=trace.
+    if (logx::enabled(logx::Channel::Acp, logx::Level::Trace))
+        d.trace = [](bool inbound, std::string_view line) {
+            AGT_LOG(Acp, Trace, "acp.frame", "dir={} raw={}", inbound ? "in" : "out", line);
+        };
+    return d;
+}
+
+std::optional<std::string> AgentServer::on_call(const a::Call& c) {
+    if (c.method == a::to_agent::SessionPrompt::name) {
+        Responder resp(*peer_, c.id);
+        try {
+            on_prompt(jsonrpc::from_json<a::PromptParams>(c.params), std::move(resp));
+        } catch (const std::exception& e) {
+            return a::reply(c.id, std::unexpected(a::RpcError(a::errc::InvalidParams, e.what())));
+        }
+        return std::nullopt;
+    }
+    return router_.handle(*this, c);
+}
+
+void AgentServer::on_notification(const a::Notification& n) {
+    router_.handle(*this, n);
 }
 
 int AgentServer::serve() {
-    // ── observability ──────────────────────────────────────────────────────
-    // Every JSON-RPC frame lands on the `acp` channel of the ONE structured
-    // log — captured by default in a non-release build, or via
-    // AGENTTY_LOG=acp=trace in a release one. This used to be its own
-    // AGENTTY_ACP_TRACE env var writing to stderr; that was one of eight
-    // logging knobs, and a frame dump that cannot be correlated with the
-    // wire/auth/tool events of the same turn is much less useful than one
-    // that can.
-    if (logx::enabled(logx::Channel::Acp, logx::Level::Trace)) {
-        conn_.set_wire_trace([](a::WireDir dir, std::string_view line) {
-            AGT_LOG(Acp, Trace, "acp.frame", "dir={} raw={}",
-                    dir == a::WireDir::Inbound ? "in" : "out", line);
-        });
-    }
-    // Surface transport-level faults (peer EOF, reader exception) — silent
-    // failure here is the worst Zed-integration UX. errc::ConnectionLost is
-    // expected at session end; everything else is worth seeing.
-    conn_.set_error_callback([](int code, std::string_view msg) {
-        if (code == a::errc::ConnectionLost) return;  // normal end-of-session
-        std::cerr << "[acp] transport error (" << code << "): " << msg << '\n';
-    });
-    // Default deadline on outbound requests we issue to the client
-    // (request_permission, read_text_file, write_text_file, terminal_*).
-    // A dead client no longer wedges a worker thread forever — the future
-    // fails with errc::Timeout and ask_permission falls through to Deny.
-    // 5 min is generous for a human reading a permission dialog.
-    conn_.set_default_timeout(std::chrono::minutes(5));
-
-    transport_.start(conn_.engine());
-    transport_.join();   // blocks until EOF on stdin
+    peer_->start();
+    peer_->wait_closed();   // EOF on stdin
     return 0;
 }
 
@@ -958,7 +974,7 @@ void AgentServer::send_update(const std::string& session_id, a::SessionUpdate up
     a::SessionUpdateMsg msg;
     msg.sessionId = a::SessionId{session_id};
     msg.update    = std::move(update);
-    conn_.session_update(msg);
+    peer_->notify<a::to_client::SessionUpdate>(msg);
 }
 
 void AgentServer::emit_session_config(const std::string& session_id,
@@ -1017,11 +1033,9 @@ void AgentServer::replay_history(const std::string& session_id, const Thread& th
     const std::string scwd =
         with_session(session_id, [](Session& s) { return s.cwd; }).value_or(std::string{});
 
-    // Coalesce the whole replay fan-out into ONE writev + one flush: replay
-    // emits many session/update notifications back-to-back, and flushing each
-    // separately is pure syscall overhead. The batch guard buffers every frame
-    // written on this (reader) thread until it goes out of scope.
-    auto _batch = transport_.batch();
+    // Send the whole replay as one write: replay emits many session/update
+    // notifications back-to-back on the reader thread.
+    rpc::Peer::Batch batch(*peer_);
 
     // Replay is a synchronous fan-out to the wire on the reader thread (one
     // blocking write per message + per tool call), so an arbitrarily large
@@ -1488,7 +1502,7 @@ void AgentServer::on_prompt(const a::PromptParams& p, Responder resp) {
             return;
         }
         if (auth::is_empty(auth_) && !keyless_local) {
-            resp.error(a::errc::AuthRequired,
+            resp.error(a::AuthRequired,
                 "agentty has no credentials — run `agentty login` first");
             return;
         }
@@ -1514,7 +1528,7 @@ void AgentServer::on_prompt(const a::PromptParams& p, Responder resp) {
             s.cancel = std::make_shared<http::CancelToken>();
             ss.reqid_to_session[std::move(rid)] = id;
             return first_message ? s.thread.title : std::string{};
-        }, sid, std::move(um), resp.id().dump());
+        }, sid, std::move(um), jsonrpc::to_json(resp.id()).dump());
     if (!title) {   // closed between the check above and here
         resp.error(a::errc::InvalidParams, "unknown sessionId: " + sid);
         return;
@@ -1527,7 +1541,7 @@ void AgentServer::on_prompt(const a::PromptParams& p, Responder resp) {
 
     // Capture the request id before `resp` is moved into the worker; run_turn
     // uses it to drop the reqid→session mapping when the turn settles.
-    std::string req_id_dump = resp.id().dump();
+    std::string req_id_dump = jsonrpc::to_json(resp.id()).dump();
 
     // Run the whole turn off the reader thread; the engine stays free to
     // deliver our outbound permission responses. The Responder resolves the
@@ -2239,7 +2253,7 @@ AgentServer::run_bash_via_terminal(const TurnCtx& ctx, ToolUse& tc) {
 
     std::string terminal_id;
     try {
-        terminal_id = conn_.terminal_create(cp).get().terminalId;
+        terminal_id = call<a::to_client::TerminalCreate>(*peer_, cp).terminalId;
     } catch (const std::exception& e) {
         // Client couldn't create the terminal after advertising the cap: fall
         // back to internal execution rather than failing the tool.
@@ -2256,7 +2270,7 @@ AgentServer::run_bash_via_terminal(const TurnCtx& ctx, ToolUse& tc) {
             if (!armed) return;
             try {
                 a::TerminalRef r; r.sessionId = a::SessionId{sid}; r.terminalId = tid;
-                self->conn_.terminal_release(r).get();
+                (void)call<a::to_client::TerminalRelease>(*self->peer_, r);
             } catch (...) { /* client gone; nothing to clean up */ }
         }
     } releaser{this, ctx.id, terminal_id};
@@ -2274,46 +2288,36 @@ AgentServer::run_bash_via_terminal(const TurnCtx& ctx, ToolUse& tc) {
         send_update(ctx.id, a::SU_ToolCallUpdate{std::move(u)});
     }
 
-    // 3) Wait for the process to exit, honouring cancellation. terminal/kill
-    //    stops a running process; the reader thread services the responses.
+    // 3) Wait for the process to exit. A session cancel cuts the wait short,
+    //    then terminal/kill stops the process.
     a::TerminalExitStatus exit{};
     {
-        auto exit_fut = conn_.terminal_wait_for_exit(ref);
-        for (;;) {
-            if (exit_fut.wait_for(std::chrono::milliseconds(50)) == std::future_status::ready) {
-                try { exit = exit_fut.get(); }
-                catch (const std::exception& e) { return fail(std::string{"terminal wait failed: "} + e.what()); }
-                break;
-            }
-            if (is_cancelled()) {
-                try { a::TerminalKillParams k; k.sessionId = ref.sessionId; k.terminalId = ref.terminalId;
-                      conn_.terminal_kill(k).get(); }
-                catch (const std::exception& e) { util::dbglog("acp.terminal_kill", e.what()); }
-                catch (...) { util::dbglog("acp.terminal_kill", "non-std exception"); }
-                set_status(ToolUse::Failed{{}, {}, "cancelled"});
-                a::ToolCallUpdate c;
-                c.toolCallId = a::ToolCallId{tc.id.value};
-                c.status     = a::Just(a::ToolCallStatus::Failed);
-                // Replace the live terminal block with static text.
-                //
-                // The Releaser below frees this terminal the moment we
-                // return, and Zed drops a released terminal's widget — its
-                // ToolCallContent::Terminal arm resolves the id against a
-                // live map and ERRORS when it misses (acp_thread.rs
-                // from_acp). So a cancel that left the terminal block in
-                // place gave the user a card that renders as empty or
-                // broken, with no trace of what was cancelled.
-                //
-                // Every other exit from this function already leaves durable
-                // text (`fail` sends a text block, the success path attaches
-                // the fenced scrollback). Cancel was the one that didn't.
-                a::List<a::ToolCallContent> cc;
-                cc.push_back(a::ToolCallContent{
-                    a::TCC_Content{text_block("(cancelled)"), json::object()}});
-                c.content = a::Just(std::move(cc));
-                send_update(ctx.id, a::SU_ToolCallUpdate{std::move(c)});
-                return TerminalRun{false, true, {}};
-            }
+        rpc::CallOptions o;
+        o.timeout = std::chrono::milliseconds{0};   // a build can run for an hour; cancel is the way out
+        if (ctx.cancel) o.cancel = ctx.cancel->token();
+        auto waited = peer_->call<a::to_client::TerminalWaitForExit>(ref, std::move(o));
+        if (waited) {
+            exit = std::move(*waited);
+        } else if (!is_cancelled()) {
+            return fail(std::string{"terminal wait failed: "} + waited.error().what());
+        } else {
+            try { a::TerminalKillParams k; k.sessionId = ref.sessionId; k.terminalId = ref.terminalId;
+                  (void)call<a::to_client::TerminalKill>(*peer_, k); }
+            catch (const std::exception& e) { util::dbglog("acp.terminal_kill", e.what()); }
+            catch (...) { util::dbglog("acp.terminal_kill", "non-std exception"); }
+            set_status(ToolUse::Failed{{}, {}, "cancelled"});
+            a::ToolCallUpdate c;
+            c.toolCallId = a::ToolCallId{tc.id.value};
+            c.status     = a::Just(a::ToolCallStatus::Failed);
+            // Replace the live terminal block with static text: the releaser
+            // frees the terminal as we return, and Zed renders a released
+            // terminal's block as empty or broken.
+            a::List<a::ToolCallContent> cc;
+            cc.push_back(a::ToolCallContent{
+                a::TCC_Content{text_block("(cancelled)"), json::object()}});
+            c.content = a::Just(std::move(cc));
+            send_update(ctx.id, a::SU_ToolCallUpdate{std::move(c)});
+            return TerminalRun{false, true, {}};
         }
     }
 
@@ -2322,7 +2326,7 @@ AgentServer::run_bash_via_terminal(const TurnCtx& ctx, ToolUse& tc) {
     bool truncated = false;
     try {
         a::TerminalOutputParams op; op.sessionId = ref.sessionId; op.terminalId = ref.terminalId;
-        auto out = conn_.terminal_output(op).get();
+        auto out = call<a::to_client::TerminalOutput>(*peer_, op);
         output    = std::move(out.output);
         truncated = out.truncated;
     } catch (const std::exception& e) {
@@ -2402,7 +2406,7 @@ AgentServer::ask_permission(const std::string& session_id, const ToolUse& tc) {
     };
 
     try {
-        auto outcome = conn_.request_permission(req).get();   // blocks worker, not reader
+        auto outcome = call<a::to_client::RequestPermission>(*peer_, req);   // blocks worker, not reader
         return a::match(outcome.outcome,
             [](const a::PO_Cancelled&) { return PermissionOutcome::Deny; },
             [](const a::PO_Selected& s) {

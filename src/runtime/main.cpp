@@ -2101,21 +2101,17 @@ int main(int argc, char** argv) {
             return 2;
         }
 
-        // Fast fd transport: raw read(2)/writev(2) on stdin(0)/stdout(1).
-        // Bypasses std::iostream sync + per-message flush that std::cin/cout
-        // would impose. Ensure any buffered C++ stream output is flushed first
-        // so it can't interleave with the raw fd writes.
+        // Raw read(2)/write(2) on stdin(0)/stdout(1). Flush any buffered C++
+        // stream output first so it can't interleave with the raw writes.
         std::cout.flush();
 #if defined(_WIN32)
         // On Windows fds 0/1 default to TEXT mode, which would translate every
         // '\n' the JSON-RPC framing emits into "\r\n" and mangle the wire.
-        // Force BINARY so FdTransport's read(2)/write(2) see exact bytes.
         _setmode(_fileno(stdin),  _O_BINARY);
         _setmode(_fileno(stdout), _O_BINARY);
 #endif
-        ::acp::FdTransport transport = ::acp::FdTransport::process();
         agentty::acp::AgentServer server(
-            transport,
+            agentty::rpc::fd_channel(0, 1),
             stream_fn,
             provider_auth,
             std::move(model_id),
