@@ -29,9 +29,10 @@ namespace agentty::app {
 // Cadence (33 ms ≈ 30 fps on DEC-2026 sync terminals for a smooth
 // spinner; 100 ms ≈ 10 fps elsewhere to cut progressive-paint
 // flicker; clamped to ≥ 80 ms over SSH where the wire, not local
-// paint, is the bottleneck). Computed once — the inputs (terminal
-// sync support, SSH env) are immutable for the session.
-[[nodiscard]] std::chrono::milliseconds streaming_tick_period() noexcept;
+// paint, is the bottleneck). A pure function of the launch environment
+// init() captured, so subscribe() and visual_hash() agree by reading it.
+[[nodiscard]] std::chrono::milliseconds
+streaming_tick_period(const Model::Env& env) noexcept;
 
 // ── Animation demand — the SINGLE definition of "something is moving" ──
 //

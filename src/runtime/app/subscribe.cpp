@@ -42,20 +42,16 @@ namespace {
 } // namespace
 
 // The single definition of the streaming Tick cadence. See the
-// declaration in subscribe.hpp for the full rationale. Computed once
-// per session — the inputs are immutable — and shared verbatim by both
-// subscribe() (the timer interval) and Program::visual_hash() (the
-// phase-locked animation bucket).
-std::chrono::milliseconds streaming_tick_period() noexcept {
-    static const std::chrono::milliseconds period = [] {
-        auto base = maya::ansi::env_supports_synchronized_output()
-            ? std::chrono::milliseconds(33)
-            : std::chrono::milliseconds(100);
-        if (detail::running_over_ssh())
-            return std::max(base, std::chrono::milliseconds(80));
-        return base;
-    }();
-    return period;
+// declaration in subscribe.hpp for the full rationale. A function of the
+// launch environment, which init() captured into Model::env — so it reads the
+// Model, not the process, and subscribe() and visual_hash() agree because
+// they read the same field.
+std::chrono::milliseconds streaming_tick_period(const Model::Env& env) noexcept {
+    const auto base = env.synchronized_output
+        ? std::chrono::milliseconds(33)
+        : std::chrono::milliseconds(100);
+    if (env.remote) return std::max(base, std::chrono::milliseconds(80));
+    return base;
 }
 
 // True when the last message still carries in-flight wire bytes
@@ -1522,7 +1518,7 @@ Sub subscribe(const Model& m) {
     // the visual hash (app/program.hpp) lets the wake reach view(). The
     // per-term rationale lives on animation_demand's definition above.
     if (animation_demand(m)) {
-        auto tick = Sub::every(streaming_tick_period(), Tick{});
+        auto tick = Sub::every(streaming_tick_period(m.env), Tick{});
         return Sub::batch(std::move(key_sub), std::move(paste_sub),
                                std::move(focus_sub), std::move(tick),
                                std::move(login_sub));

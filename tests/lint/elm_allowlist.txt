@@ -9,16 +9,15 @@
 # Format: `path: name name ...` with names from elm_purity.cmake
 #   clock env fileio subprocess net global auth static thread
 update/code_blocks.cpp: clock subprocess
-update/composer.cpp: auth clock env fileio
+update/composer.cpp: auth clock fileio
 update/fork.cpp: clock fileio global
-update/frozen.cpp: env
 update/login.cpp: auth clock
-update/meta.cpp: clock env global
+update/meta.cpp: clock global
 update/models.cpp: auth global
 update/plugin_edit.cpp: global
 update/providers.cpp: auth
 update/settings_list.cpp: fileio global
-update/stream.cpp: auth clock env
+update/stream.cpp: auth clock
 update/submit.cpp: auth clock global
 update/thread_list.cpp: clock global
 update/tool.cpp: clock

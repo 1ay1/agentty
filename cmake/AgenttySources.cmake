@@ -182,6 +182,7 @@ set(AGENTTY_RUNTIME_NOMAIN_SOURCES
     src/runtime/app/deps.cpp
     src/runtime/app/settings_cache.cpp
     src/runtime/app/init.cpp
+    src/runtime/app/env.cpp
     src/runtime/app/cmd_factory.cpp
     src/runtime/app/wire_audit.cpp
     src/runtime/app/update.cpp

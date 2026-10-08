@@ -373,7 +373,7 @@ Cmd meta_update(Model& m, msg::MetaMsg mm) {
             if (!m.s.update_in_flight
                 && m.s.update_pending_restart.empty()
                 && m.s.update_latest.empty()
-                && !std::getenv("AGENTTY_NO_UPDATE_CHECK")) {
+                && !m.env.no_update_check) {
                 if (m.s.last_update_poll.time_since_epoch().count() == 0)
                     m.s.last_update_poll = now;   // startup check just ran
                 else if (now - m.s.last_update_poll >= kUpdatePollInterval) {
@@ -938,22 +938,22 @@ Cmd meta_update(Model& m, msg::MetaMsg mm) {
                 // happens TO you, and by the time you're told, the only step
                 // left is the restart.
                 //
-                // Gated on self_update_possible(), which already refuses the
-                // cases where replacing the binary is not ours to do:
-                // package-manager installs under /usr, nix, Windows. There
-                // the chip stays exactly as before — a signal to go run
-                // pacman/apt/brew — and nothing is touched.
+                // Gated on m.env.self_update_ok, answered once at launch by
+                // self_update_possible(), which refuses the cases where
+                // replacing the binary is not ours to do: package-manager
+                // installs under /usr, nix, Windows. There the chip stays
+                // exactly as before — a signal to go run pacman/apt/brew —
+                // and nothing is touched.
                 //
                 // AGENTTY_NO_AUTO_UPDATE=1 keeps the old behaviour (notify
                 // only, install on request). Replacing someone's binary
                 // without asking needs an off switch that does not also
                 // turn off the notice — AGENTTY_NO_UPDATE_CHECK is the
                 // bigger hammer that disables checking entirely.
-                std::string why;
                 if (!m.s.update_in_flight
                     && m.s.update_pending_restart.empty()
-                    && !std::getenv("AGENTTY_NO_AUTO_UPDATE")
-                    && update::self_update_possible(why)) {
+                    && !m.env.no_auto_update
+                    && m.env.self_update_ok) {
                     m.s.update_in_flight = true;
                     std::string v = m.s.update_latest;
                     // Quiet: the download is incidental to whatever the user

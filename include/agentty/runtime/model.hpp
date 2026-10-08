@@ -695,6 +695,57 @@ struct Model {
     StreamState s;
     UI          ui;
 
+    // The process's launch environment, read ONCE by init() and never again.
+    //
+    // Elm has no getenv: a reducer that reads the environment is a function
+    // of state the Model doesn't hold, so replay and a test that sets one var
+    // and expects one behaviour both lie. These facts can't change while we
+    // run (env vars are fixed at exec), so capturing them is not a snapshot
+    // that goes stale — it is the whole truth, stated where update can see
+    // it. They were six getenv calls and two function-local statics spread
+    // across update/; the predicates below are their single definition.
+    struct Env {
+        // A remote session (SSH / mosh / Eternal Terminal, or forced). Frames
+        // land >=80 ms apart, so streaming and reveal cadence throttle down.
+        bool remote               = false;
+        // A plain SSH session specifically (mosh/ET excluded): the composer's
+        // clipboard paths differ, because OSC 52 rides the SSH pty.
+        bool ssh                  = false;
+        // AGENTTY_NO_REVEAL_GLIDE: force the immediate end-of-turn finish.
+        bool no_reveal_glide      = false;
+        // The terminal supports synchronized output (DECSET 2026).
+        bool synchronized_output  = false;
+        // AGENTTY_FROZEN_COLLAPSE: stub off-screen bodies instead of
+        // re-rendering them.
+        bool frozen_collapse      = false;
+        // AGENTTY_NO_UPDATE_CHECK / AGENTTY_NO_AUTO_UPDATE.
+        bool no_update_check      = false;
+        bool no_auto_update       = false;
+        // Can this binary replace itself? Answered once at launch: resolving
+        // our own path and probing its directory for write access (it creates
+        // and deletes a file there). The reducer used to call that inline
+        // every time an auto-update was considered — a filesystem WRITE from
+        // inside update, invisible to a name-based lint because it sat in a
+        // util/ helper. Neither answer can change while we run.
+        bool        self_update_ok     = false;
+        std::string self_update_reason;   // why not, when !self_update_ok
+
+        // The end-of-turn reveal glide (the design contract: end-of-turn is
+        // a visible catch-up, never a paste) needs a DENSE frame cadence to
+        // hold the live height steady mid-ramp, so it requires both signals
+        // streaming_tick_period() derives its cadence from:
+        //   - not remote: remote frames land >=80 ms apart, with wire jitter
+        //     on top;
+        //   - synchronized output: without it the tick is 100 ms, so a 200 ms
+        //     ramp is ~2 frames, the same sparse-frame height-drift geometry
+        //     (the stranded-duplicate bug) as SSH.
+        // Everywhere sparse, the immediate finish is used.
+        // AGENTTY_NO_REVEAL_GLIDE=1 forces the immediate finish everywhere.
+        [[nodiscard]] bool reveal_end_glide() const noexcept {
+            return !no_reveal_glide && !remote && synchronized_output;
+        }
+    } env;
+
     // Is a LOADING SPINNER currently on screen?
     //
     // THE gate for the picker's catalog-fetch animation — and the reason it

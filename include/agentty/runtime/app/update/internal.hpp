@@ -291,25 +291,12 @@ void restyle_sealed_turns(Model& m);
 // sizes so the per-frame settled fast-path engages. Defined in stream.cpp.
 void settle_message_md(Model& m, const Message& msg);
 
-// True when agentty is driven over a REMOTE session (env-sniffed once):
-// direct SSH (SSH_CONNECTION/SSH_TTY/SSH_CLIENT), mosh (MOSH_*), or
-// Eternal Terminal (ET_VERSION). AGENTTY_FORCE_REMOTE=1 forces true (a
-// session the sniff can't see); AGENTTY_NO_SSH_THROTTLE=1 forces false (a
-// fast LAN hop). Shared by the subscription cadence throttle AND the
-// end-of-turn reveal policy below. Defined in stream.cpp.
-bool running_over_ssh();
-
-// End-of-turn reveal policy: on an interactive (non-SSH) terminal the
-// steady-state reveal backlog (≈wire_cps × drain_secs — a line or more)
-// glides out through the widget's finalize ramp instead of being pasted
-// in one frame by an immediate finish(). The deferred settle-freeze in
-// meta.cpp (gated on live_tail_reveal_settled) then settles + freezes
-// once the widget flips live_ off on its own — the freeze snapshot is
-// still byte-identical to the last live frame. Over SSH/fps=0 the sparse
-// frames can't hold the live height steady mid-glide (height drift →
-// stranded duplicate turn in scrollback), so there the immediate finish
-// stays. Defined in stream.cpp.
-bool reveal_end_glide_enabled();
+// Remote-session detection and the end-of-turn reveal-glide policy are
+// LAUNCH FACTS, captured once by init() into Model::env
+// (runtime/app/env.cpp): read m.env.remote and m.env.reveal_end_glide().
+// They were free functions here, getenv calls behind function-local
+// statics, which made every reducer that asked a function of the process
+// rather than of the Model.
 
 // live_tail_reveal_settled: true iff EVERY Assistant message in the live
 // tail [frozen_through..end) has fully drained its reveal animation — the

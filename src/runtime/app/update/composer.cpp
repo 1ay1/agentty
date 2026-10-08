@@ -476,8 +476,7 @@ Cmd smart_paste_from_clipboard(Model& m) {
         // the timer fires — so the paste that matters most is exactly the
         // one that always failed. Give a remote session room, and let the
         // progress check below extend it further while bytes keep landing.
-        const bool remote = std::getenv("SSH_CONNECTION") != nullptr
-                         || std::getenv("SSH_TTY") != nullptr;
+        const bool remote = m.env.ssh;
         const auto deadline = std::chrono::milliseconds{remote ? 6000 : 1200};
         // Snapshot the byte counter so the timeout arm can tell whether the
         // terminal answered at all.
@@ -1265,8 +1264,7 @@ Cmd composer_update(Model& m, msg::ComposerMsg cm) {
             // the moment a stale verdict is worth one ~8 ms round-trip to
             // re-check. Only re-probes when the attached client changed.
             if (in_tmux) (void)maya::tmux::refresh_if_client_changed();
-            const bool in_ssh  = std::getenv("SSH_CONNECTION") != nullptr
-                              || std::getenv("SSH_TTY") != nullptr;
+            const bool in_ssh  = m.env.ssh;
             std::string msg;
             if (in_mosh) {
                 msg = "clipboard: mosh doesn't relay terminal clipboard "

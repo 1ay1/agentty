@@ -456,7 +456,7 @@ struct AgenttyApp {
         // ≥ 80 ms SSH). Sharing the one function eliminates the old
         // hand-maintained duplicate heuristic here — which silently
         // omitted the SSH floor and could beat against the real tick.
-        const std::int64_t kFineAnimMs = streaming_tick_period().count();
+        const std::int64_t kFineAnimMs = streaming_tick_period(m.env).count();
 
         // Streaming-text render bucket. While an assistant message is
         // actively streaming, the live edge runs maya's reveal_fx

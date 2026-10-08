@@ -79,61 +79,10 @@ constexpr int kMaxTruncationRetries = 2;
 // drained.
 }  // namespace (close anon for the cross-TU helpers below)
 
-bool running_over_ssh() {
-    static const bool remote = [] {
-        // Explicit FORCE-ON: a session the env sniff can't see (a bespoke
-        // remote wrapper, a serial console, a laggy container attach) can
-        // opt into the remote cadence. Takes precedence over everything.
-        if (const char* on = std::getenv("AGENTTY_FORCE_REMOTE");
-            on && on[0] && on[0] != '0')
-            return true;
-        // Escape hatch: a fast LAN SSH hop doesn't need throttling.
-        if (const char* off = std::getenv("AGENTTY_NO_SSH_THROTTLE");
-            off && off[0] && off[0] != '0')
-            return false;
-        // Direct SSH: sshd exports these into the remote shell.
-        if (std::getenv("SSH_CONNECTION") != nullptr
-            || std::getenv("SSH_TTY") != nullptr
-            || std::getenv("SSH_CLIENT") != nullptr)
-            return true;
-        // mosh: the SSH_* vars are NOT propagated through the mosh-server
-        // (it re-execs), but MOSH_* are — and mosh is ALWAYS remote +
-        // latency-adaptive itself, so throttling our byte rate helps it.
-        if (std::getenv("MOSH_CONNECTION") != nullptr
-            || std::getenv("MOSH_KEY") != nullptr
-            || std::getenv("MOSH_SERVER_PID") != nullptr)
-            return true;
-        // Eternal Terminal: exports ET_VERSION into the remote shell.
-        if (std::getenv("ET_VERSION") != nullptr)
-            return true;
-        return false;
-    }();
-    return remote;
-}
-
-bool reveal_end_glide_enabled() {
-    // Interactive terminals get the bounded end-of-turn glide (the design
-    // contract: end-of-turn is a visible catch-up, never a paste). The
-    // glide needs the DENSE frame cadence to hold the live height steady
-    // mid-ramp, so require BOTH of the signals streaming_tick_period()
-    // derives its cadence from:
-    //   • not SSH — remote frames land ≥80 ms apart (throttled) and the
-    //     wire round-trip adds jitter on top;
-    //   • synchronized-output support — without it the streaming tick is
-    //     100 ms, so a 200 ms ramp is ~2 frames: the same sparse-frame
-    //     height-drift geometry (stranded-duplicate bug) as SSH.
-    // Everywhere sparse, the immediate-finish path stays.
-    // AGENTTY_NO_REVEAL_GLIDE=1 forces the old immediate finish
-    // everywhere — the escape hatch if a terminal misbehaves.
-    static const bool enabled = [] {
-        if (const char* off = std::getenv("AGENTTY_NO_REVEAL_GLIDE");
-            off && off[0] && off[0] != '0')
-            return false;
-        return !running_over_ssh()
-            && maya::ansi::env_supports_synchronized_output();
-    }();
-    return enabled;
-}
+// running_over_ssh() and reveal_end_glide_enabled() lived here as getenv
+// calls behind function-local statics. Both are launch facts now, read once
+// by init() into Model::env (runtime/app/env.cpp): m.env.remote and
+// m.env.reveal_end_glide().
 
 void settle_message_md(Model& m, const Message& msg) {
     auto& cache = m.ui.view_cache.message_md(m.d.current.id, msg.id);
@@ -649,7 +598,7 @@ Cmd finalize_turn(Model& m, StopReason stop_reason) {
         // only thing lost is the ~200 ms post-stream typewriter glide —
         // exactly the trade agent_session makes.
         if (last.role == Role::Assistant && !last.text.empty()) {
-            if (reveal_end_glide_enabled()) {
+            if (m.env.reveal_end_glide()) {
                 // #5: bounded GLIDE, not a paste. At message_stop the reveal
                 // cursor still holds a steady-state backlog (≈wire_cps ×
                 // drain_secs — with the 0.40 s retune, a line or more).
@@ -1054,7 +1003,7 @@ Cmd finalize_turn(Model& m, StopReason stop_reason) {
             // the pending_settle_freeze gate below waits for
             // live_tail_reveal_settled before freezing, and meta.cpp's
             // Tick runs settle_message_md once the widget settles itself.
-            if (reveal_end_glide_enabled()) {
+            if (m.env.reveal_end_glide()) {
                 const auto* c = m.ui.view_cache.peek(m.d.current.id, mm.id);
                 if (c && c->streaming && c->streaming->is_animating())
                     continue;

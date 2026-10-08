@@ -200,13 +200,8 @@ using ui::gap_rows;
 //
 // Opt IN with AGENTTY_FROZEN_COLLAPSE=1 (or t/y) only if your workflow
 // restarts agentty in the SAME terminal, where the body IS still in the
-// native scrollback and the stub's pointer is truthful.
-bool frozen_collapse_enabled() {
-    const char* v = std::getenv("AGENTTY_FROZEN_COLLAPSE");
-    if (!v || !*v) return false;   // default OFF — render every body full
-    return v[0] == '1' || v[0] == 't' || v[0] == 'T'
-        || v[0] == 'y' || v[0] == 'Y';
-}
+// native scrollback and the stub's pointer is truthful. Read once by init()
+// into m.env.frozen_collapse.
 
 // Compact placeholder for an OFF-SCREEN body collapsed out of the in-app
 // re-render window (see collapse_oversized_offscreen_entries). One dim ⋯ row,
@@ -563,7 +558,7 @@ void drop_leading_separators(Model& m) {
 // resets the block's recorded height and the next paint re-records the
 // stub's true (tiny) height. The trailing entry stays full.
 void collapse_oversized_offscreen_entries(Model& m) {
-    if (!frozen_collapse_enabled())      return;
+    if (!m.env.frozen_collapse)          return;
     if (m.ui.frozen.size() < 2)          return;  // only the current result
     const std::size_t budget = frozen_row_budget();
     if (m.ui.frozen.row_total() <= budget) return;  // already fits

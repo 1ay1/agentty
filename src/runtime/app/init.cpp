@@ -1,5 +1,6 @@
 #include "agentty/runtime/app/program.hpp"
 #include "agentty/runtime/app/cmd_factory.hpp"
+#include "agentty/runtime/app/env.hpp"
 #include "agentty/mcp/client.hpp"   // mcp_config_present()
 #include "agentty/runtime/login.hpp"
 #include "agentty/runtime/view/helpers.hpp"
@@ -41,6 +42,9 @@ std::vector<ModelInfo> seed_models() {
 
 std::pair<Model, Cmd> init() {
     Model m;
+    // The launch environment, captured once. Every reducer reads m.env;
+    // none calls getenv (enforced by the elm_purity lint).
+    m.env = read_launch_env();
     // Seed the composer idle-blink clock at launch so the 15 s
     // blink-stop countdown starts now, not on the first keystroke. A
     // freshly-opened, never-touched agentty is exactly the idle-CPU case
@@ -388,7 +392,7 @@ std::pair<Model, Cmd> init() {
     // launches; when a newer release exists, the status bar grows an
     // unobtrusive "⬆ vX.Y.Z" chip and the palette gains "Update agentty".
     // AGENTTY_NO_UPDATE_CHECK=1 (or airgap mode) disables it entirely.
-    if (!std::getenv("AGENTTY_NO_UPDATE_CHECK"))
+    if (!m.env.no_update_check)
         cmds.push_back(cmd::check_for_update());
 
     // models.dev capability snapshot: parse the cached copy on a BACKGROUND
@@ -407,7 +411,7 @@ std::pair<Model, Cmd> init() {
     // releases; the learned-from-rejection registry still outranks it.
     // Same opt-outs as the release check (airgap installs must not dial
     // out).
-    const bool no_net = std::getenv("AGENTTY_NO_UPDATE_CHECK") != nullptr;
+    const bool no_net = m.env.no_update_check;
     agentty::modelsdev::start_background_refresh(no_net);
 
     // Prewarm the composer's `@` (files) and `#` (symbols) indices so that by
