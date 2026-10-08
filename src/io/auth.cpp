@@ -18,6 +18,7 @@
 #include "agentty/util/home_dir.hpp"
 #include "agentty/util/user_root.hpp"
 
+#include <maya/runtime.hpp>
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
@@ -28,7 +29,6 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
-#include <mutex>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -438,28 +438,32 @@ std::optional<Credentials> load_credentials() {
 // save_credentials always (re)writes the encrypted file even when the keystore
 // is enabled. Mirrors provider::copilot::signed_in().
 bool anthropic_signed_in() {
-    static std::mutex mu;
-    std::scoped_lock lk(mu);
-    static bool cached = false;
-    static fs::file_time_type cached_mtime{};
-    static std::uintmax_t cached_size = static_cast<std::uintmax_t>(-1);
+    struct Cache {
+        bool           ok = false;
+        std::int64_t   mtime = 0;   // file_time_type ticks: a Sendable key
+        std::uintmax_t size = static_cast<std::uintmax_t>(-1);
+    };
+    static maya::guarded<Cache> cache;
 
     std::error_code ec;
     const fs::path p = credentials_path();
-    const auto mtime = fs::last_write_time(p, ec);
+    const std::int64_t mtime = fs::last_write_time(p, ec).time_since_epoch().count();
     const auto size  = ec ? 0 : fs::file_size(p, ec);
     if (ec) {   // missing / unreadable → signed out; remember cheaply
-        cached = false;
-        cached_mtime = {};
-        cached_size = static_cast<std::uintmax_t>(-1);
+        cache.with([](Cache& c) { c = Cache{}; });
         return false;
     }
-    if (mtime != cached_mtime || size != cached_size) {
-        cached = load_credentials().has_value();
-        cached_mtime = mtime;
-        cached_size  = size;
-    }
-    return cached;
+    if (auto hit = cache.read(
+            [](const Cache& c, std::int64_t m, std::uintmax_t s) -> std::optional<bool> {
+                if (c.mtime != m || c.size != s) return std::nullopt;
+                return c.ok;
+            },
+            mtime, size))
+        return *hit;
+    // Changed: unseal + parse outside the lock, then publish.
+    const bool ok = load_credentials().has_value();
+    cache.with([](Cache& c, Cache v) { c = v; }, Cache{ok, mtime, size});
+    return ok;
 }
 
 bool save_credentials(const Credentials& c) {
@@ -1005,6 +1009,10 @@ Credentials resolve(const std::string& cli_api_key) {
 // Synchronous fresh credential (worker-thread safe)
 // ---------------------------------------------------------------------------
 
+namespace {
+AuthHeader fresh_auth_header_locked(const AuthHeader& fallback);
+}
+
 AuthHeader fresh_auth_header(const AuthHeader& fallback) {
     using namespace agentty::util;
 
@@ -1016,11 +1024,16 @@ AuthHeader fresh_auth_header(const AuthHeader& fallback) {
         return fallback;
 
     // Serialize refreshes: several subagent worker threads can land here at
-    // once when a captured OAuth token expires. The first to win the lock
-    // refreshes + persists; the rest re-read the freshly-saved token below.
-    static std::mutex g_refresh_mu;
-    std::scoped_lock lock(g_refresh_mu);
+    // once when a captured OAuth token expires. The first in refreshes +
+    // persists; the rest re-read the freshly-saved token.
+    static maya::guarded<bool> one_at_a_time;
+    return one_at_a_time.with(
+        [](bool&, AuthHeader fb) { return fresh_auth_header_locked(fb); },
+        fallback);
+}
 
+namespace {
+AuthHeader fresh_auth_header_locked(const AuthHeader& fallback) {
     auto loaded = load_credentials();
     if (!loaded) return fallback;
 
@@ -1060,6 +1073,7 @@ AuthHeader fresh_auth_header(const AuthHeader& fallback) {
     }};
     return make_auth_header(refreshed);
 }
+}  // namespace
 
 // ---------------------------------------------------------------------------
 // Browser launch

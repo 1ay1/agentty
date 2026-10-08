@@ -1,6 +1,7 @@
 #include "agentty/tool/util/fs_helpers.hpp"
 #include "agentty/util/home_dir.hpp"
 
+#include <maya/runtime.hpp>
 #include <mcp/tools/util/fs_helpers.hpp>   // mirror the workspace root into mcp-cpp
 
 #include <algorithm>
@@ -9,7 +10,6 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
-#include <mutex>
 #include <sstream>
 #include <string>
 #include <system_error>
@@ -417,15 +417,10 @@ bool is_within_workspace(const fs::path& target) {
 namespace {
 
 // Canonicalised roots the READ gate also accepts (skill directories
-// under ~/.agentty/skills etc.). Guarded by its own mutex — reads come
-// from tool threads, registration from the skills scanner.
-struct ReadRoots {
-    std::mutex mu;
-    std::vector<fs::path> roots;
-};
-
-[[nodiscard]] ReadRoots& read_roots() {
-    static ReadRoots r;
+// under ~/.agentty/skills etc.). Reads come from tool threads, registration
+// from the skills scanner. Stored as strings so they cross into guarded<T>.
+[[nodiscard]] maya::guarded<std::vector<std::string>>& read_roots() {
+    static maya::guarded<std::vector<std::string>> r;
     return r;
 }
 
@@ -455,10 +450,12 @@ void allow_read_root(const fs::path& root) {
         canon = abs.lexically_normal();
     }
     if (canon.empty()) return;
-    auto& rr = read_roots();
-    std::lock_guard lk{rr.mu};
-    if (std::find(rr.roots.begin(), rr.roots.end(), canon) == rr.roots.end())
-        rr.roots.push_back(std::move(canon));
+    read_roots().with(
+        [](std::vector<std::string>& roots, std::string c) {
+            if (std::find(roots.begin(), roots.end(), c) == roots.end())
+                roots.push_back(std::move(c));
+        },
+        canon.string());
 }
 
 bool is_read_allowlisted(const fs::path& target) {
@@ -474,11 +471,14 @@ bool is_read_allowlisted(const fs::path& target) {
         if (aec) return false;   // can't canonicalise; deny
         canon = abs.lexically_normal();
     }
-    auto& rr = read_roots();
-    std::lock_guard lk{rr.mu};
-    for (const auto& r : rr.roots)
-        if (under_root(canon, r)) return true;
-    return false;
+    return read_roots().read(
+        [](const std::vector<std::string>& roots, std::string target) {
+            const fs::path t{target};
+            for (const auto& r : roots)
+                if (under_root(t, fs::path{r})) return true;
+            return false;
+        },
+        canon.string());
 }
 
 std::expected<NormalizedPath, ToolError>
@@ -578,13 +578,16 @@ bool is_binary_file(const fs::path& p) {
 // ── File snapshot cache ────────────────────────────────────────────────────
 namespace {
 
-struct FileCache {
-    std::mutex mu;
-    std::unordered_map<std::string, FileSnapshot> by_path;
+// The snapshot each tool last saw, by canonical path. FileSnapshot holds a
+// file_time_type, which jaal can't see inside, so the cache keeps the ticks
+// and rebuilds the snapshot on the way out.
+struct SeenFile {
+    std::int64_t   mtime = 0;
+    std::uintmax_t size = 0;
+    std::uint64_t  content_hash = 0;
 };
-
-[[nodiscard]] FileCache& file_cache() {
-    static FileCache c;
+[[nodiscard]] maya::guarded<std::unordered_map<std::string, SeenFile>>& file_cache() {
+    static maya::guarded<std::unordered_map<std::string, SeenFile>> c;
     return c;
 }
 
@@ -615,19 +618,24 @@ void record_file_seen(const fs::path& path,
                       std::uint64_t content_hash) noexcept {
     auto key = canon_key(path);
     if (key.empty()) return;
-    auto& c = file_cache();
-    std::lock_guard lk{c.mu};
-    c.by_path[std::move(key)] = FileSnapshot{mtime, size, content_hash};
+    file_cache().with(
+        [](auto& m, std::string k, SeenFile v) { m[std::move(k)] = v; },
+        std::move(key), SeenFile{mtime.time_since_epoch().count(), size, content_hash});
 }
 
 std::optional<FileSnapshot> last_seen_file(const fs::path& path) noexcept {
     auto key = canon_key(path);
     if (key.empty()) return std::nullopt;
-    auto& c = file_cache();
-    std::lock_guard lk{c.mu};
-    auto it = c.by_path.find(key);
-    if (it == c.by_path.end()) return std::nullopt;
-    return it->second;
+    auto seen = file_cache().read(
+        [](const auto& m, std::string k) -> std::optional<SeenFile> {
+            auto it = m.find(k);
+            if (it == m.end()) return std::nullopt;
+            return it->second;
+        },
+        std::move(key));
+    if (!seen) return std::nullopt;
+    return FileSnapshot{fs::file_time_type{fs::file_time_type::duration{seen->mtime}},
+                        seen->size, seen->content_hash};
 }
 
 StaleVerdict staleness_of(const fs::path& path) noexcept {

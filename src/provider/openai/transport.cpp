@@ -3011,13 +3011,9 @@ struct WindowProbe {
 // than read out, because this layer takes no dependency on the settings
 // store (the whole transport is constructed from an Endpoint and an auth
 // header, which is what makes it testable without a filesystem).
-std::set<std::string>& probe_opt_in() {
-    static std::set<std::string> s;
+maya::guarded<std::set<std::string>>& probe_opt_in() {
+    static maya::guarded<std::set<std::string>> s;
     return s;
-}
-std::shared_mutex& probe_opt_in_mu() {
-    static std::shared_mutex m;
-    return m;
 }
 
 // Is this endpoint a server we should probe unconditionally?
@@ -3050,10 +3046,12 @@ std::shared_mutex& probe_opt_in_mu() {
     // This exists because the alternative is telling someone their setup is
     // unsupported — the probe is the only way to learn a runtime window, so
     // refusing to run it makes the window permanently wrong.
-    {
-        std::shared_lock lk(probe_opt_in_mu());
-        if (probe_opt_in().count(h) > 0) return true;
-    }
+    if (probe_opt_in().read(
+            [](const std::set<std::string>& s, std::string host) {
+                return s.count(host) > 0;
+            },
+            h))
+        return true;
     if (const char* v = std::getenv("AGENTTY_PROBE_HOSTS")) {
         std::string_view list{v};
         while (!list.empty()) {
@@ -3428,8 +3426,9 @@ std::shared_mutex& probe_opt_in_mu() {
 }  // namespace detail
 
 void install_probe_hosts(std::set<std::string> hosts) {
-    std::unique_lock lk(detail::probe_opt_in_mu());
-    detail::probe_opt_in() = std::move(hosts);
+    detail::probe_opt_in().with(
+        [](std::set<std::string>& s, std::set<std::string> v) { s = std::move(v); },
+        std::move(hosts));
 }
 
 // Public forwarder — see the header for why the 0 is a contract.

@@ -86,7 +86,7 @@ io/persistence.cpp: mutex
 # in-process half of the race that the file lock cannot (jaal's file_lock
 # conformance check 13). See include/agentty/io/shared_file.hpp.
 io/shared_file.cpp: mutex
-io/auth.cpp: mutex atomic const_cast
+io/auth.cpp: atomic const_cast
 io/keystore.cpp: const_cast
 io/cred_crypt.cpp: const_cast
 airgap/airgap.cpp: const_cast
@@ -139,7 +139,7 @@ tool/subagent.cpp: mutex thread_local
 # Only `atomic` is left, for the reader_done flag the poll loop samples.
 tool/util/subprocess.cpp: atomic
 # Unique temp names for atomic writes, and a parallel directory walk.
-tool/util/fs_helpers.cpp: mutex atomic
+tool/util/fs_helpers.cpp: atomic
 tool/util/sandbox.cpp: atomic
 
 # ── Workspace scans ──────────────────────────────────────────────────
@@ -179,7 +179,6 @@ provider/kimi/provider.cpp: mutex
 provider/openai/responses_site.cpp: thread_local
 # probe_opt_in cache: a process-wide shared_mutex behind a small set that maps
 # thread ids to opt-in tokens for the /responses probe.
-provider/openai/transport.cpp: mutex
 
 # ── MCP and RAG: their own servers and index workers ─────────────────────
 # bridge: the MCP connects moved to pool.submit_isolated, whose future does
