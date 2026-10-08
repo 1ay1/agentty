@@ -82,4 +82,9 @@ struct ExecDefaults {
 [[nodiscard]] std::shared_ptr<::mcp::tools::Exec>
 make_exec(ExecDefaults defaults = {});
 
+/// Build the executor agentty hands to mcp-cpp for its parallel scans
+/// (grep, structural search, repo map, extract/aggregate). Each call is a
+/// maya::scope: every share is joined before parallel_for returns.
+[[nodiscard]] std::shared_ptr<::mcp::tools::Executor> make_executor();
+
 }  // namespace agentty::tools::util

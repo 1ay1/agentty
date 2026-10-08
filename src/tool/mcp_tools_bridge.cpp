@@ -406,6 +406,7 @@ struct ProviderKeepAlive {
     std::shared_ptr<::mcp::cap::CapabilityProvider> provider;
     std::shared_ptr<mt::HttpClient>                 http;
     std::shared_ptr<mt::Exec>                       exec;
+    std::shared_ptr<mt::Executor>                   executor;
 };
 ProviderKeepAlive& keep_alive() { static ProviderKeepAlive k; return k; }
 
@@ -419,10 +420,14 @@ std::vector<ToolDef> build_mcp_tool_defs() {
     // over jaal's process + reactor. One implementation, in one place, with
     // the idle-vs-wall policy that the two old poll loops disagreed about.
     ka.exec = util::make_exec();
+    // Parallel scans too: mcp-cpp owns no threads, so its grep / structural
+    // search / repo map fan out on agentty's executor (maya::scope).
+    ka.executor = util::make_executor();
 
     mt::HostServices svc;
     svc.http = ka.http;
     svc.exec = ka.exec;
+    svc.executor = ka.executor;
     // Inject the host-coupled backends (memory/skill/retriever/subagent).
     // todo stays null — its shell renders identical text with no host state.
     install_host_backends(svc);
