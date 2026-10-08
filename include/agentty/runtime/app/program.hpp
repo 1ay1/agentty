@@ -40,7 +40,7 @@ struct AgenttyApp {
     // as an argument"), so a reducer never reads std::chrono itself and a
     // recorded run replays to the same model. The seam below copies it into
     // Model::now, which is how it reaches the helpers.
-    using Clock = jaal::platform::steady_clock;
+    using Clock = maya::platform::steady_clock;
 
     // jaal's init is `Cmd init(Model&)` — it fills the model IN PLACE and
     // returns only the first Cmd (core/program.hpp, `has_init`).

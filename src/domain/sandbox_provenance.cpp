@@ -20,7 +20,7 @@
 #include <filesystem>
 #include <span>
 
-#include <jaal/kernel/guarded.hpp>   // guarded<T> — the mask-sweep cache
+#include <maya/runtime.hpp>
 
 // The matcher lives in claybin, which is a required submodule -- so this is a
 // plain include, not a guarded one.
@@ -295,7 +295,7 @@ std::vector<std::string> mask_paths(const Config& cfg, std::string_view workspac
         // a fraction of walking their entries (one syscall per directory, no
         // readdir, no per-file symlink_status), so the common case stays
         // cheap while staying exact.
-        // jaal::guarded rather than a raw std::mutex: the concurrency banlist
+        // maya::guarded rather than a raw std::mutex: the concurrency banlist
         // requires it (tests/lint/allowlist.txt -- my first version failed
         // that check), and the type is the better tool anyway. The state is
         // only reachable through with(), so "forgot the lock" is
@@ -309,7 +309,7 @@ std::vector<std::string> mask_paths(const Config& cfg, std::string_view workspac
         };
         // Function-local static: the first command can land from a worker
         // during startup, and a file-scope global would race its own ctor.
-        static jaal::guarded<Cache> cache;
+        static maya::guarded<Cache> cache;
 
         const int depth = static_cast<int>(cfg.mask_scan_depth);
         // OUTSIDE the lock: stat-ing the tree is the slow part, and holding

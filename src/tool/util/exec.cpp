@@ -16,10 +16,8 @@
 #include <string>
 #include <vector>
 
-#include <jaal/kernel/guarded.hpp>
+#include <maya/runtime.hpp>
 #include "agentty/util/background.hpp"   // util::WorkerGroup
-#include <jaal/platform/posix/process.hpp>
-#include <jaal/platform/posix/poll_reactor.hpp>
 
 #include <mcp/tools/util/utf8.hpp>
 
@@ -32,7 +30,7 @@
 namespace agentty::tools::util {
 namespace {
 
-namespace pf = jaal::platform;
+namespace pf = maya::platform;
 namespace mt = ::mcp::tools;
 
 using clock_t_ = std::chrono::steady_clock;
@@ -268,7 +266,7 @@ class JaalSession final : public mt::Session {
 
     pf::posix_process    proc_;
     std::size_t          cap_;
-    jaal::guarded<Shared> st_;
+    maya::guarded<Shared> st_;
     clock_t_::time_point stop_at_{};
     // Last member: destroyed (joined) first, before anything the pump uses.
     ::agentty::util::WorkerGroup drain_{"exec.session.drain"};

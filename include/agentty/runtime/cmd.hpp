@@ -21,7 +21,7 @@
 //                 does. Added as the Deps seam is dismantled (step 7 in
 //                 docs/design/jaal-rewrite.md).
 
-#include <jaal/jaal.hpp>
+#include <maya/runtime.hpp>
 #include <maya/host/effects.hpp>
 #include <maya/host/sources.hpp>   // maya::on_key / on_paste / on_resize
 
@@ -53,9 +53,9 @@
 // free of jaal: the same rule maya follows (host/interop.hpp), and the same
 // reason — a value type shouldn't know which runtime is carrying it.
 template <class Tag>
-inline constexpr bool jaal::sendable_opt_in<agentty::Id<Tag>> = true;
+MAYA_SENDABLE_T(agentty::Id<Tag>);
 template <class Tag>
-inline constexpr bool jaal::frozen_opt_in<agentty::Id<Tag>> = true;
+MAYA_FROZEN_T(agentty::Id<Tag>);
 
 // ImageContent owns its bytes (LazyBytes) and a shared base64 cell, and
 // LazyBytes owns a content-addressed Source plus the bytes it resolves to.
@@ -71,11 +71,9 @@ inline constexpr bool jaal::frozen_opt_in<agentty::Id<Tag>> = true;
 // change, and here the memoised bytes and the memoised base64 both can,
 // behind const accessors. That is D8's distinction exactly — safe to MOVE to
 // one other thread, not safe to SHARE between two — so these say Sendable
-// only, and jaal::shared<ImageContent> stays correctly impossible.
-template <>
-inline constexpr bool jaal::sendable_opt_in<agentty::LazyBytes> = true;
-template <>
-inline constexpr bool jaal::sendable_opt_in<agentty::ImageContent> = true;
+// only, and maya::shared<ImageContent> stays correctly impossible.
+MAYA_SENDABLE(agentty::LazyBytes);
+MAYA_SENDABLE(agentty::ImageContent);
 
 // nlohmann::json owns its whole tree by value (a variant over string, array,
 // object, number, bool, null — every branch an owning container). jaal can't
@@ -85,8 +83,7 @@ inline constexpr bool jaal::sendable_opt_in<agentty::ImageContent> = true;
 //
 // Sendable, not Frozen: a json is freely mutable through a non-const
 // reference, and nothing here pretends otherwise.
-template <>
-inline constexpr bool jaal::sendable_opt_in<nlohmann::json> = true;
+MAYA_SENDABLE(nlohmann::json);
 
 // http::CancelToken is a shared mutable object, and Sendable refuses
 // shared_ptr by default for exactly that reason. This is the case the rule
@@ -109,8 +106,7 @@ inline constexpr bool jaal::sendable_opt_in<nlohmann::json> = true;
 // so the token stays the app's own.
 //
 // Opting in the pointer, not the token: the shared_ptr is what crosses.
-template <>
-inline constexpr bool jaal::sendable_opt_in<agentty::http::CancelTokenPtr> = true;
+MAYA_SENDABLE(agentty::http::CancelTokenPtr);
 
 // provider::Selection carries `const ProviderPreset* row`, and Sendable
 // refuses raw pointers — "may point at memory another thread frees" — which
@@ -127,8 +123,7 @@ inline constexpr bool jaal::sendable_opt_in<agentty::http::CancelTokenPtr> = tru
 //
 // Not Frozen — nothing needs it to be, and the endpoint strings are mutable
 // through a non-const Selection.
-template <>
-inline constexpr bool jaal::sendable_opt_in<agentty::provider::Selection> = true;
+MAYA_SENDABLE(agentty::provider::Selection);
 
 // ── the message tree, as jaal routes it ───────────────────────────────
 // Msg is a variant of 23 DOMAIN variants, not 231 leaves — agentty grouped
@@ -148,7 +143,7 @@ inline constexpr bool jaal::sendable_opt_in<agentty::provider::Selection> = true
 // every domain and switch off the exhaustiveness check underneath. Naming
 // each one keeps the check on for every leaf we HAVEN'T grouped.
 #define AGENTTY_MSG_GROUP(T) \
-    template <> inline constexpr bool jaal::handled_as_group<::agentty::msg::T> = true;
+    template <> inline constexpr bool maya::handled_as_group<::agentty::msg::T> = true;
 
 AGENTTY_MSG_GROUP(ComposerMsg)
 AGENTTY_MSG_GROUP(StreamMsg)
@@ -182,7 +177,7 @@ namespace agentty {
 ///
 /// Add to this row when you add an effect; the host that can't run it stops
 /// compiling, with `require_host_for` naming the effect and the program.
-using Cmd = jaal::Cmd<Msg,
+using Cmd = maya::Cmd<Msg,
     // ── maya's terminal effects ──────────────────────────────────
     maya::commit_scrollback,   // hand inline rows to the terminal's scrollback
     maya::write_clipboard,     // OSC 52 write
@@ -225,7 +220,7 @@ using Cmd = jaal::Cmd<Msg,
 // Options::mouse, so it stays out. That isn't cosmetic — the row is the
 // difference between "this program needs a mouse" and "this program would
 // run on a host that has none".
-using Sub = jaal::Sub<Msg,
+using Sub = maya::Sub<Msg,
     maya::on_key,      // the composer and every panel's keymap
     maya::on_paste,    // bracketed paste, and the OSC 52 clipboard reply
     maya::on_focus,    // ?1004; gates the hardware caret when unfocused

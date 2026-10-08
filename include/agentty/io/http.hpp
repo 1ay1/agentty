@@ -57,7 +57,7 @@ public:
         return src_.stop_requested();
     }
     /// The same signal as a std::stop_token: register a stop_callback on it,
-    /// or hand it to jaal::kernel::delay_for, instead of polling.
+    /// or hand it to maya::delay_for, instead of polling.
     [[nodiscard]] std::stop_token token() const noexcept {
         return src_.get_token();
     }

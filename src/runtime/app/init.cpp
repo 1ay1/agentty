@@ -375,7 +375,7 @@ std::pair<Model, Cmd> init() {
         // turn finds the snapshot already built. (When MCP config IS present,
         // load_plugins_async above already touches registry() and warms it.)
         cmds.push_back(Cmd::task_isolated(
-            [](jaal::Sink<Msg>, std::stop_token) { (void)tools::registry(); }));
+            [](maya::Sink<Msg>, std::stop_token) { (void)tools::registry(); }));
 
     // OpenAI-family backends (Ollama, llama.cpp, groq, …) have no fixed
     // built-in model list — seed_models() only knows Claude ids. A saved
@@ -457,7 +457,7 @@ std::pair<Model, Cmd> init() {
     // a shared-pool slot forever and starve every later tool call. A wedged
     // isolated task leaks one thread instead.
     cmds.push_back(Cmd::task_isolated(
-        [](jaal::Sink<Msg>, std::stop_token) { prewarm_workspace_files(); }));
+        [](maya::Sink<Msg>, std::stop_token) { prewarm_workspace_files(); }));
 
     // Warm the RAG retriever OFF the reducer thread. The first call to
     // shared_retriever() runs its function-local static ctor, which
@@ -473,9 +473,9 @@ std::pair<Model, Cmd> init() {
     // retriever is warm (or has already cached its Unavailable verdict) and
     // the gate is a cheap snapshot read.
     cmds.push_back(Cmd::task_isolated(
-        [](jaal::Sink<Msg>, std::stop_token) { (void)tools::rag_embed_status(); }));
+        [](maya::Sink<Msg>, std::stop_token) { (void)tools::rag_embed_status(); }));
     cmds.push_back(Cmd::task_isolated(
-        [](jaal::Sink<Msg>, std::stop_token) { prewarm_workspace_symbols(); }));
+        [](maya::Sink<Msg>, std::stop_token) { prewarm_workspace_symbols(); }));
 
     // Warm the checkpoint module's repo discovery too. submit_message()
     // calls workspace::in_git_repo() SYNCHRONOUSLY on the first turn, and
@@ -485,7 +485,7 @@ std::pair<Model, Cmd> init() {
     // Priming it here (isolated: it too is subprocess-spawning work) moves
     // that cost off the reducer thread while the user is still typing.
     cmds.push_back(Cmd::task_isolated(
-        [](jaal::Sink<Msg>, std::stop_token) { workspace::prewarm_repo_info(); }));
+        [](maya::Sink<Msg>, std::stop_token) { workspace::prewarm_repo_info(); }));
 
     // Open the TCP + TLS + HTTP/2 connection to api.anthropic.com NOW, while
     // the user is still reading the screen / typing their first message, so
@@ -500,7 +500,7 @@ std::pair<Model, Cmd> init() {
     // the session will never talk to.
     if (m.d.selection.kind == provider::Kind::Anthropic)
         cmds.push_back(Cmd::task_isolated(
-            [](jaal::Sink<Msg>, std::stop_token) { auth::prewarm_anthropic(); }));
+            [](maya::Sink<Msg>, std::stop_token) { auth::prewarm_anthropic(); }));
 
     // Copilot's first turn is the "weirdly hangs for a second" case: the
     // reducer thread blocks on fresh_token() (ghu_ -> proxy-token exchange,
@@ -513,7 +513,7 @@ std::pair<Model, Cmd> init() {
     // provider; fresh_token()/auto_session() single-flight internally.
     if (m.d.selection.is_copilot())
         cmds.push_back(Cmd::task_isolated(
-            [](jaal::Sink<Msg>, std::stop_token) {
+            [](maya::Sink<Msg>, std::stop_token) {
                 const auto t0 = std::chrono::steady_clock::now();
                 auto ms = [&]{ return std::chrono::duration<double,std::milli>(
                     std::chrono::steady_clock::now() - t0).count(); };

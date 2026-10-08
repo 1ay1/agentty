@@ -74,7 +74,7 @@ TEST_CASE("effects: Quit saves BEFORE it quits") {
         using U = std::remove_cvref_t<decltype(e)>;
         if constexpr (std::same_as<U, SaveSettings> || std::same_as<U, SaveThread>)
             seen_save = true;
-        else if constexpr (std::same_as<U, jaal::payload_t<jaal::fx::quit, Msg>>)
+        else if constexpr (std::same_as<U, maya::payload_t<maya::fx::quit, Msg>>)
             save_came_first = seen_save;
     });
     CHECK_MESSAGE(seen_save, "Quit must persist the session");

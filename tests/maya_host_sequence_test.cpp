@@ -8,7 +8,7 @@
 //   • the alternative is a distinct variant arm.
 //
 // Post-jaal shape: the effect is maya::EmitHostSequence (a payload struct in
-// maya/host/effects.hpp), and a program's Cmd is jaal::Cmd<Msg, effects...>
+// maya/host/effects.hpp), and a program's Cmd is maya::Cmd<Msg, effects...>
 // naming the effects it uses — not maya::Cmd<Msg>, which no longer exists.
 // `inner` is still a plain std::variant, so the assertions are unchanged.
 #include <doctest/doctest.h>
@@ -26,7 +26,7 @@ struct ParentMsg { int v = 0; };
 
 // The row: just the two effects this test drives.
 template <class Msg>
-using Cmd = jaal::Cmd<Msg, maya::emit_host_sequence, maya::set_title>;
+using Cmd = maya::Cmd<Msg, maya::emit_host_sequence, maya::set_title>;
 
 using CCmd = Cmd<ChildMsg>;
 using PCmd = Cmd<ParentMsg>;

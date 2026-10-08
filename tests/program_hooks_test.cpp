@@ -36,18 +36,18 @@ static_assert(requires(P::Model& m) {
               "saved setting and thread is dropped at startup.");
 
 // ── the rest of the contract ─────────────────────────────────────────────
-static_assert(jaal::Program<P>,
-              "AgenttyApp must satisfy jaal::Program.");
+static_assert(maya::RuntimeProgram<P>,
+              "AgenttyApp must satisfy maya::RuntimeProgram.");
 static_assert(maya::Program<P>,
-              "AgenttyApp must satisfy maya::Program (jaal::Program + view()).");
-static_assert(jaal::Subscribing<P>,
+              "AgenttyApp must satisfy maya::Program (RuntimeProgram + view()).");
+static_assert(maya::Subscribing<P>,
               "AgenttyApp::subscribe must be `Sub subscribe(const Model&)`; "
               "otherwise the app runs with NO event sources — no keys, no "
               "timers — and simply sits there.");
-static_assert(jaal::HasVisualHash<P>,
+static_assert(maya::HasVisualHash<P>,
               "AgenttyApp::visual_hash must be `std::uint64_t (const Model&)`; "
               "without it the host re-runs view() every wakeup.");
-static_assert(jaal::HasNeedsWarmup<P>,
+static_assert(maya::HasNeedsWarmup<P>,
               "AgenttyApp::needs_warmup must be `bool (const Model&)`.");
 
 // The host that actually runs it must be able to carry out every effect in
@@ -58,7 +58,7 @@ static_assert(jaal::HasNeedsWarmup<P>,
 // terminal ones, and app::Host is the wrapper that handles both. Asserting
 // maya's host here would be asserting something agentty never runs on.
 TEST_CASE("program: agentty's Cmd row is runnable by its host") {
-    jaal::require_host_for<agentty::app::Host<P>, P>();
+    maya::require_host_for<agentty::app::Host<P>, P>();
     CHECK(true);   // reaching here means the static checks above all passed
 }
 
@@ -80,19 +80,19 @@ TEST_CASE("program: agentty's Cmd row is runnable by its host") {
 // property that fix provides, because nothing else would notice losing it.
 using H = agentty::app::Host<P>;
 
-static_assert(requires(H& h, jaal::host_context<H>& cx) { h.attach(cx); },
+static_assert(requires(H& h, maya::host_context<H>& cx) { h.attach(cx); },
               "Host::attach must accept host_context<Host>. jaal detects it "
               "with a requires-test, so a signature it can't call means the "
               "terminal's input is never registered — the app runs but takes "
               "no keys, silently.");
 
-static_assert(requires(H& h, jaal::host_context<H>& cx, jaal::readiness r) {
+static_assert(requires(H& h, maya::host_context<H>& cx, maya::readiness r) {
                   h.on_ready(cx, r);
               },
               "Host::on_ready must accept host_context<Host>, or input that "
               "IS registered is never read.");
 
-static_assert(requires(H& h, jaal::host_context<H>& cx, jaal::sig s) {
+static_assert(requires(H& h, maya::host_context<H>& cx, maya::sig s) {
                   h.on_signal(cx, s);
               },
               "Host::on_signal must accept host_context<Host>, or SIGWINCH "

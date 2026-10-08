@@ -415,7 +415,7 @@ namespace runner_ui {
 
 #else  // _WIN32 — non-interactive fallback via the shared subprocess runner
 
-#include <jaal/kernel/scope.hpp>   // structured concurrency for the heartbeat helper
+#include <maya/runtime.hpp>
 
 // Wrap the block body for the chosen Windows interpreter. cmd.exe is the
 // default shell of run_command_s (it wraps in `cmd.exe /S /C "..."`), so
@@ -445,7 +445,7 @@ namespace runner_ui {
 // The console-echo helper below is also deliberately NOT named `out`: the
 // Sink parameter owns that name, and shadowing it made `out.send(...)`
 // resolve to the echo lambda.
-static void run_block_body(jaal::Sink<Msg> out, std::stop_token stop,
+static void run_block_body(maya::Sink<Msg> out, std::stop_token stop,
                            std::string cmd, cbp::BlockShell shell) {
     const std::string wrapped = wrap_for_windows_shell(shell, cmd);
 
@@ -470,7 +470,7 @@ static void run_block_body(jaal::Sink<Msg> out, std::stop_token stop,
     std::string label = cmd.substr(0, cmd.find_first_of(" \t\n"));
     if (label.size() > 24) label.resize(24);
 
-    // The heartbeat runs in a jaal::scope, not a bare std::thread.
+    // The heartbeat runs in a maya::scope, not a bare std::thread.
     //
     // The old shape was `std::thread ticker; ... ticker.join()` with the
     // blocking run_command_s between them. Two problems, both invisible until
@@ -493,7 +493,7 @@ static void run_block_body(jaal::Sink<Msg> out, std::stop_token stop,
         long                          secs = 0;
     };
 
-    auto outcome = jaal::scope(stop, [&](jaal::nursery& n) {
+    auto outcome = maya::scope(stop, [&](maya::nursery& n) {
         std::atomic<bool> done_flag{false};
 
         // The helper takes its own stop_token: jaal derives it from the

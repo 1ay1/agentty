@@ -1,7 +1,7 @@
 #include "agentty/tool/subagent.hpp"
 #include "agentty/util/teardown.hpp"
 
-#include <jaal/kernel/stop_group.hpp>
+#include <maya/runtime.hpp>
 
 #include <algorithm>
 #include <mutex>
@@ -81,7 +81,7 @@ DeadlineScope::DeadlineScope(RunDeadline d) noexcept : prev_{g_deadline} {
 DeadlineScope::~DeadlineScope() { g_deadline = prev_; }
 
 // ── Running-run registry ─────────────────────────────────────────
-// See the header for why this exists. It is a jaal::kernel::stop_group:
+// See the header for why this exists. It is a maya::stop_group:
 // that is the registry this file used to hand-roll (a mutex, a condition
 // variable, a vector of {cancelled, done} pairs and a wait that rescanned
 // every entry on each wakeup), written once in jaal.
@@ -94,13 +94,13 @@ DeadlineScope::~DeadlineScope() { g_deadline = prev_; }
 //     stop_callback instead of a thread polling a flag every 20 ms.
 
 struct RunRegistration::State {
-    std::optional<jaal::kernel::stop_group::member> member;
+    std::optional<maya::stop_group::member> member;
 };
 
 namespace {
 
-jaal::kernel::stop_group& runs() {
-    static jaal::kernel::stop_group g;
+maya::stop_group& runs() {
+    static maya::stop_group g;
     return g;
 }
 

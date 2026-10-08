@@ -27,7 +27,7 @@ SharedFile::SharedFile(std::mutex& local, const std::filesystem::path& target)
     : local_(local) {
     // Mutex first, file lock second, always this order. There is only ever
     // one SharedFile held at a time, so this is the whole lock-order story.
-    auto got = jaal::platform::native_file_lock::acquire(target.string());
+    auto got = maya::platform::native_file_lock::acquire(target.string());
     if (got) {
         cross_.emplace(std::move(*got));
         return;

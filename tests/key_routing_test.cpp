@@ -65,7 +65,7 @@ std::optional<Msg> route(const Model& m, const maya::KeyEvent& ev) {
     sub.for_each([&](const auto& leaf) {
         if (out) return;                       // first match wins
         using L = std::remove_cvref_t<decltype(leaf)>;
-        if constexpr (std::same_as<L, jaal::payload_t<maya::on_key, Msg>>)
+        if constexpr (std::same_as<L, maya::payload_t<maya::on_key, Msg>>)
             out = maya::on_key::route(leaf, ev);
     });
     return out;

@@ -7,7 +7,7 @@
 #include <utility>
 #include <vector>
 
-#include <jaal/kernel/loop.hpp>   // loop_bound: the view caches are loop-only
+#include <maya/runtime.hpp>
 
 #include "agentty/runtime/view/helpers.hpp"
 #include "agentty/runtime/view/palette.hpp"
@@ -102,7 +102,7 @@ private:
 // unchanged and still lock-free.
 //
 // See jaal/kernel/loop.hpp and jaal/docs/concurrency.md §1.2 P1.
-jaal::kernel::loop_bound<BodyConfigCache> g_body_cache;
+maya::loop_bound<BodyConfigCache> g_body_cache;
 
 // ── Settled-panel ELEMENT cache ───────────────────────────────────────
 //
@@ -173,7 +173,7 @@ private:
 };
 
 // Loop-only, same as g_body_cache above — see the note there.
-jaal::kernel::loop_bound<PanelElementCache> g_panel_cache;
+maya::loop_bound<PanelElementCache> g_panel_cache;
 
 // ── Per-message panel render memo (fast primary key) ──
 //
@@ -267,7 +267,7 @@ private:
 };
 
 // Loop-only, same as g_body_cache above — see the note there.
-jaal::kernel::loop_bound<PanelRenderMemo> g_panel_render_memo;
+maya::loop_bound<PanelRenderMemo> g_panel_render_memo;
 
 } // namespace
 

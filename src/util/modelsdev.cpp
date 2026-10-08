@@ -11,8 +11,7 @@
 #include <stop_token>
 #include <string_view>
 
-#include <jaal/kernel/delay.hpp>
-#include <jaal/kernel/pool.hpp>
+#include <maya/runtime.hpp>
 
 #include <nlohmann/json.hpp>
 
@@ -276,8 +275,8 @@ namespace {
 // is precisely a network call left running against statics the CRT is
 // destroying. pool::shutdown asks it to stop, waits inside a bounded grace,
 // then abandons safely.
-jaal::kernel::pool& refresh_pool() {
-    static jaal::kernel::pool p{/*max_workers=*/1};   // one refresh, ever
+maya::pool& refresh_pool() {
+    static maya::pool p{/*max_workers=*/1};   // one refresh, ever
     return p;
 }
 constexpr auto kStartDelay = std::chrono::seconds(5);
@@ -308,7 +307,7 @@ void start_background_refresh(bool no_net) {
     refresh_pool().post_isolated([no_net](std::stop_token st) {
         // A process that exits at once never dials at all. One cancellation
         // channel — the token — instead of a second stop flag to notify.
-        if (jaal::kernel::delay_for(st, kStartDelay)) return;
+        if (maya::delay_for(st, kStartDelay)) return;
         try {
             load_cached();
             // Re-check: the cache load is the cheap half, and shutdown may

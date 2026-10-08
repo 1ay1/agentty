@@ -5,7 +5,7 @@
 
 #include <cstdlib>
 #include <cstdio>
-#include <jaal/kernel/guarded.hpp>
+#include <maya/runtime.hpp>
 #include <set>
 #include <string>
 #include <system_error>
@@ -169,11 +169,11 @@ fs::path resolve_subdir(const char* env, const char* leaf, bool owner_only) {
     std::error_code ec;
     fs::create_directories(p, ec);
     if (overridden && !fs::is_directory(p, ec)) {
-        // jaal::guarded rather than a raw mutex + set: access is only possible
+        // maya::guarded rather than a raw mutex + set: access is only possible
         // through with(), so "forgot the lock" is unrepresentable. The
         // concurrency banlist enforces this, and agentty::dirs (the write-side
         // peer of this resolver) uses the same shape for the same warn-once.
-        static jaal::guarded<std::set<std::string>> warned;
+        static maya::guarded<std::set<std::string>> warned;
         // Capture-less AND owned-value arguments, both jaal rules: either a
         // capture or a pointer could reach a second lock while this one is
         // held. So the variable name is copied in.

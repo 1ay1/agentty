@@ -124,7 +124,7 @@ std::string diagnose(bool in_ssh) {
 
 Cmd diagnose_clipboard(bool in_ssh) {
     return Cmd::task(
-        [](jaal::Sink<Msg> out, std::stop_token, bool in_ssh) {
+        [](maya::Sink<Msg> out, std::stop_token, bool in_ssh) {
             std::string message;
             try {
                 message = diagnose(in_ssh);

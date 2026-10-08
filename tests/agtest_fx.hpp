@@ -22,7 +22,7 @@
 //
 // Only the store effects are handled. Terminal effects (clipboard, scrollback)
 // are the host's and mean nothing here; tasks and timers are the kernel's, and
-// a test that wants those should drive jaal::headless instead.
+// a test that wants those should drive maya::headless instead.
 #ifndef AGENTTY_TESTS_AGTEST_FX_HPP
 #define AGENTTY_TESTS_AGTEST_FX_HPP
 

@@ -8,7 +8,7 @@
 # here any more. It used to need `thread detach` because it hand-rolled a
 # detached worker, exempted on the grounds that the ACP process mode has no
 # jaal loop and therefore no task machinery. That premise was wrong:
-# jaal::kernel::pool is standalone and needs no loop, so background.hpp now
+# maya::pool is standalone and needs no loop, so background.hpp now
 # posts to it and spawns no thread of its own.
 # ranked_lock: lock-ordering enforcement. The mutex IS the subject, and the
 # thread_local is the per-thread rank stack it checks against.

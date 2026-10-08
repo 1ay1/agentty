@@ -9,8 +9,7 @@
 
 #include <nlohmann/json.hpp>
 
-#include <jaal/kernel/delay.hpp>
-#include <jaal/kernel/pool.hpp>
+#include <maya/runtime.hpp>
 
 #include <atomic>
 #include <chrono>
@@ -252,9 +251,9 @@ namespace {
 // the job to stop, waits inside a bounded grace, and only then abandons; see
 // its comment, which documents this exact failure from agentty's own symbol
 // scan.
-jaal::kernel::pool& gc_pool() {
+maya::pool& gc_pool() {
     // One worker: there is only ever one sweep.
-    static jaal::kernel::pool p{/*max_workers=*/1};
+    static maya::pool p{/*max_workers=*/1};
     return p;
 }
 constexpr auto kStartDelay = std::chrono::seconds(20);
@@ -282,7 +281,7 @@ void start_background_gc() {
         // at all. delay_for returns true if we were asked to stop first — one
         // cancellation channel, the token, rather than a second stop flag that
         // someone has to remember to notify.
-        if (jaal::kernel::delay_for(st, kStartDelay)) return;
+        if (maya::delay_for(st, kStartDelay)) return;
         // Bridge the token to the walk's own cancel flag, so a sweep already
         // in progress stops at its next check instead of running to
         // completion after shutdown has been requested.

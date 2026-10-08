@@ -21,7 +21,7 @@
 
 #include "agentty/provider/openai/transport.hpp"
 
-#include <jaal/kernel/guarded.hpp>
+#include <maya/runtime.hpp>
 // The observation tables: every way this spec-less wire spells a field lives
 // there, not here. See lens.hpp for why a Lens and not an acp::Codec.
 #include "agentty/provider/openai/dialect.hpp"
@@ -1641,7 +1641,7 @@ void feed_ndjson(StreamCtx& ctx, const char* data, size_t len) {
 bool endpoint_speaks_native(const Endpoint& ep) {
     if (!ep.native_api) return false;
 
-    static jaal::guarded<std::map<std::string, bool, std::less<>>> cache;
+    static maya::guarded<std::map<std::string, bool, std::less<>>> cache;
     const std::string key = ep.host + ":" + std::to_string(ep.port);
     if (auto hit = cache.with(
             [](auto& m, std::string k) -> std::optional<bool> {

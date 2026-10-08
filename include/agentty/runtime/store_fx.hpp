@@ -29,7 +29,7 @@
 #include <string>
 #include <vector>
 
-#include <jaal/jaal.hpp>
+#include <maya/runtime.hpp>
 
 #include "agentty/domain/catalog.hpp"        // ModelInfo
 #include "agentty/domain/conversation.hpp"   // Thread
@@ -48,15 +48,15 @@ namespace agentty {
 /// would be a dangling reference the moment the next message lands. The
 /// copy is what makes "describe now, run later" safe.
 struct SaveThread { Thread thread; };
-using save_thread = jaal::pure_fx<SaveThread, "save_thread">;
+using save_thread = maya::pure_fx<SaveThread, "save_thread">;
 
 /// Remove a thread from the store.
 struct DeleteThread { ThreadId id; };
-using delete_thread = jaal::pure_fx<DeleteThread, "delete_thread">;
+using delete_thread = maya::pure_fx<DeleteThread, "delete_thread">;
 
 /// Write a file to disk. The diff-review pane's accept/reject path.
 struct WriteFile { std::string path; std::string contents; };
-using write_file = jaal::pure_fx<WriteFile, "write_file">;
+using write_file = maya::pure_fx<WriteFile, "write_file">;
 
 /// Persist the settings record.
 ///
@@ -65,7 +65,7 @@ using write_file = jaal::pure_fx<WriteFile, "write_file">;
 /// keystroke affordable. `m.d.persisted` is the record — see save_record in
 /// runtime/app/update/internal.hpp for why there is exactly one write path.
 struct SaveSettings { store::Settings settings; };
-using save_settings = jaal::pure_fx<SaveSettings, "save_settings">;
+using save_settings = maya::pure_fx<SaveSettings, "save_settings">;
 
 /// Publish the subagent router's view of the Model to the registry the
 /// worker threads read (tool/subagent.cpp).
@@ -82,7 +82,7 @@ struct PublishSubagent {
     smart::RoleConfig       smart;
     std::vector<ModelInfo>  candidates;
 };
-using publish_subagent = jaal::pure_fx<PublishSubagent, "publish_subagent">;
+using publish_subagent = maya::pure_fx<PublishSubagent, "publish_subagent">;
 
 /// Publish the Model's active provider to the process-global copy that code
 /// off the loop reads (provider::active(): the stream worker, ACP, main).
@@ -92,7 +92,7 @@ using publish_subagent = jaal::pure_fx<PublishSubagent, "publish_subagent">;
 /// not knowing its own provider. Now only the dispatch seam returns this,
 /// and only when the selection changed.
 struct PublishSelection { provider::Selection selection; };
-using publish_selection = jaal::pure_fx<PublishSelection, "publish_selection">;
+using publish_selection = maya::pure_fx<PublishSelection, "publish_selection">;
 
 /// Re-install the live auth header the stream and subagents use.
 ///
@@ -104,7 +104,7 @@ struct InstallAuth {
     std::string provider;
     bool        clear = false;
 };
-using install_auth = jaal::pure_fx<InstallAuth, "install_auth">;
+using install_auth = maya::pure_fx<InstallAuth, "install_auth">;
 
 /// Persist Anthropic credentials from a login and file them as an account.
 /// `as_new_account` picks a fresh label rather than reusing the current one.
@@ -113,12 +113,12 @@ struct SaveCredentials {
     auth::Credentials creds;
     bool              as_new_account = false;
 };
-using save_credentials = jaal::pure_fx<SaveCredentials, "save_credentials">;
+using save_credentials = maya::pure_fx<SaveCredentials, "save_credentials">;
 
 /// Read the credential stores, env and accounts registry into an AuthView
 /// and answer AuthViewLoaded. Batched after any effect that changes them.
 struct LoadAuthView {};
-using load_auth_view = jaal::pure_fx<LoadAuthView, "load_auth_view">;
+using load_auth_view = maya::pure_fx<LoadAuthView, "load_auth_view">;
 
 /// The accounts registry, as effects. Each runs on the host, then the reducer
 /// batches a LoadAuthView so the Model sees the result.
@@ -137,6 +137,6 @@ struct AccountOp {
     std::string label;   // Activate / Remove / Register
     std::string key;     // AddKey
 };
-using account_op = jaal::pure_fx<AccountOp, "account_op">;
+using account_op = maya::pure_fx<AccountOp, "account_op">;
 
 }  // namespace agentty

@@ -488,7 +488,7 @@ target_include_directories(concurrency_primitives_test PRIVATE include)
 # util/background.hpp posts to jaal::kernel::pool rather than spawning its
 # own thread, so this raw target needs jaal on the include path like any
 # other consumer.
-target_link_libraries(concurrency_primitives_test PRIVATE jaal::jaal)
+target_link_libraries(concurrency_primitives_test PRIVATE maya::app)
 add_test(NAME concurrency_primitives_test COMMAND concurrency_primitives_test)
 set_tests_properties(concurrency_primitives_test PROPERTIES TIMEOUT 30 LABELS sanitizer)
 
@@ -563,13 +563,12 @@ add_executable(persistence_race_test_narrow EXCLUDE_FROM_ALL
     src/util/logx.cpp src/util/dbglog.cpp src/util/home_dir.cpp
     src/util/user_root.cpp src/util/base64.cpp src/util/teardown.cpp)
 target_include_directories(persistence_race_test_narrow PRIVATE include)
-# jaal's headers: user_root.cpp uses jaal::guarded for its warn-once set (the
-# concurrency banlist forbids a raw std::mutex). Header-only here -- guarded<T>
-# is all inline -- so the include path is enough and nothing new is linked.
-# Kept as a bare include rather than linking maya::maya on purpose: this target
+# The runtime's headers: user_root.cpp uses maya::guarded for its warn-once set
+# (the concurrency banlist forbids a raw std::mutex). Header-only here, so the
+# usage requirements of maya::app are enough and nothing is linked: this target
 # exists to keep the TSan lane at ~11 TUs instead of 375.
 target_include_directories(persistence_race_test_narrow PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/maya/third_party/jaal/include)
+    $<TARGET_PROPERTY:maya::app,INTERFACE_INCLUDE_DIRECTORIES>)
 target_link_libraries(persistence_race_test_narrow PRIVATE
     nlohmann_json::nlohmann_json simdjson::simdjson Threads::Threads)
 target_compile_definitions(persistence_race_test_narrow PRIVATE
@@ -755,7 +754,7 @@ target_include_directories(loop_affinity_test PRIVATE include)
 # jaal directly, NOT maya: this test is about the runtime's loop-affinity
 # guarantee, so it should not need a terminal framework to link. maya does not
 # re-export jaal's include dir anyway.
-target_link_libraries(loop_affinity_test PRIVATE jaal::jaal)
+target_link_libraries(loop_affinity_test PRIVATE maya::app)
 add_test(NAME loop_affinity_test COMMAND loop_affinity_test)
 set_tests_properties(loop_affinity_test PROPERTIES TIMEOUT 60 LABELS sanitizer)
 
@@ -784,11 +783,11 @@ add_executable(dirs_test EXCLUDE_FROM_ALL
     src/util/home_dir.cpp
     src/util/logx.cpp
     src/tool/util/fs_helpers.cpp)
-# jaal's headers: dirs.cpp and user_root.cpp both use jaal::guarded for their
-# warn-once sets. Without this the standalone target does not compile at all
-# (it is EXCLUDE_FROM_ALL, so a plain `ninja` never noticed).
+# The runtime's headers: dirs.cpp and user_root.cpp both use maya::guarded for
+# their warn-once sets. Without this the standalone target does not compile at
+# all (it is EXCLUDE_FROM_ALL, so a plain `ninja` never noticed).
 target_include_directories(dirs_test PRIVATE include
-    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/maya/third_party/jaal/include)
+    $<TARGET_PROPERTY:maya::app,INTERFACE_INCLUDE_DIRECTORIES>)
 # Same transitive deps keystore_test needs for the same reason: logx pulls
 # nlohmann + maya, and fs_helpers.cpp includes mcp-cpp's util header to
 # mirror the workspace root into it.
@@ -891,6 +890,14 @@ endif()
 # process-global writes from a reducer. tests/lint/elm_allowlist.txt is the
 # remaining debt; the strict check rejects anything new, the tight check
 # rejects an exemption that is no longer needed, so the list only shrinks.
+# ── Layering: agentty → maya → jaal ────────────────────────────────
+# agentty reaches the runtime only through maya (<maya/runtime.hpp>), never
+# jaal directly. docs/LAYERING.md.
+add_test(NAME layering
+         COMMAND ${CMAKE_COMMAND} -DROOT=${CMAKE_SOURCE_DIR}
+                 -P ${CMAKE_SOURCE_DIR}/tests/lint/layering.cmake)
+set_tests_properties(layering PROPERTIES LABELS static)
+
 add_test(NAME elm_purity
          COMMAND ${CMAKE_COMMAND}
                  -DROOT=${CMAKE_SOURCE_DIR}/src/runtime/app

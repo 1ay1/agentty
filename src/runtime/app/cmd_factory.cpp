@@ -1096,7 +1096,7 @@ Cmd launch_stream(Model& m) {
     };
 
     return Cmd::task(
-        [](jaal::Sink<Msg> out, std::stop_token, TurnInputs in) mutable {
+        [](maya::Sink<Msg> out, std::stop_token, TurnInputs in) mutable {
         auto& thread                  = in.thread;
         const auto compacting         = in.compacting;
         const auto compaction_style   = in.compaction_style;
@@ -1509,7 +1509,7 @@ Cmd run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args,
     // accumulated. Per-call detached thread costs ~100-300 µs of
     // construction; tools run seconds apart so it's noise.
     return Cmd::task_isolated(
-        [](jaal::Sink<Msg> sink, std::stop_token stop,
+        [](maya::Sink<Msg> sink, std::stop_token stop,
            ToolCallId id, ToolName name, nlohmann::json args,
            http::CancelTokenPtr cancel, std::uint64_t exec_seq,
            std::uint64_t approved_def_hash,
@@ -2251,7 +2251,7 @@ Cmd kick_pending_tools(Model& m) {
 // ── Self-update ────────────────────────────────────────────────
 
 Cmd check_for_update() {
-    return Cmd::task([](jaal::Sink<Msg> out, std::stop_token) {
+    return Cmd::task([](maya::Sink<Msg> out, std::stop_token) {
         // 24h-cached; the fast path is one small file read. Errors are
         // swallowed — an update NOTICE must never surface as a failure.
         try {
@@ -2271,7 +2271,7 @@ Cmd check_for_update() {
 }
 
 Cmd perform_self_update(std::string version) {
-    return Cmd::task([](jaal::Sink<Msg> out, std::stop_token,
+    return Cmd::task([](maya::Sink<Msg> out, std::stop_token,
                         std::string version) {
         try {
             // Throttle: the HTTP layer calls back per chunk, which is
@@ -2320,7 +2320,7 @@ Cmd fetch_models(provider::Selection sel, auth::AuthHeader auth,
     // or a global it owns. A capture is a lifetime you have to reason about
     // on another thread; an argument is a copy the runtime made for you.
     return Cmd::task(
-        [](jaal::Sink<Msg> out, std::stop_token,
+        [](maya::Sink<Msg> out, std::stop_token,
            provider::Selection sel, auth::AuthHeader auth,
            std::string for_provider) {
             try {
@@ -2387,7 +2387,7 @@ Cmd probe_model_window(const Model& m, std::string model_id) {
         || !provider::openai::detail::is_local_endpoint(sel.openai_endpoint))
         return Cmd::none();
     return Cmd::task(
-        [](jaal::Sink<Msg> out, std::stop_token,
+        [](maya::Sink<Msg> out, std::stop_token,
            std::string model_id, provider::openai::Endpoint endpoint,
            auth::AuthHeader auth, std::string for_provider) {
             int w = 0;
@@ -2415,7 +2415,7 @@ Cmd fetch_models_for(std::string spec) {
     // against a provider signed out mid-fetch). list_models_for falls back to
     // the bundled seed on empty auth / unreachable host, so this is fast and
     // non-empty for hosted providers even before a live fetch succeeds.
-    return Cmd::task([](jaal::Sink<Msg> out, std::stop_token, std::string spec) {
+    return Cmd::task([](maya::Sink<Msg> out, std::stop_token, std::string spec) {
         try {
             auto sel = provider::parse_selection(spec);
             // Resolve credentials for THIS spec — not auth_snapshot(), which
@@ -2439,7 +2439,7 @@ Cmd open_browser_async(std::string url) {
     // task_isolated rather than task: posix_spawn / ShellExecute can
     // wedge on a hung WindowServer or a bizarre default-opener.
     // Isolated thread keeps a wedge from starving the shared BG pool.
-    return Cmd::task_isolated([](jaal::Sink<Msg>, std::stop_token,
+    return Cmd::task_isolated([](maya::Sink<Msg>, std::stop_token,
                                  std::string url) {
         // No send — the reducer doesn't care whether the browser
         // launched. The user can always paste auth_url manually from
@@ -2449,7 +2449,7 @@ Cmd open_browser_async(std::string url) {
 }
 
 Cmd mint_oauth_login() {
-    return Cmd::task([](jaal::Sink<Msg> out, std::stop_token) {
+    return Cmd::task([](maya::Sink<Msg> out, std::stop_token) {
         LoginOAuthMinted r;
         // random_urlsafe throws if the CSPRNG is unavailable. Fail closed
         // into the modal's Failed state rather than mint a weak secret.
@@ -2469,7 +2469,7 @@ Cmd oauth_exchange(auth::OAuthCode    code,
                         auth::PkceVerifier verifier,
                         auth::OAuthState   state) {
     return Cmd::task(
-        [](jaal::Sink<Msg> out, std::stop_token,
+        [](maya::Sink<Msg> out, std::stop_token,
            auth::OAuthCode code, auth::PkceVerifier verifier,
            auth::OAuthState state) {
             try {
@@ -2494,7 +2494,7 @@ Cmd load_threads_async() {
     // `nlohmann::json::parse` per file). Isolating it keeps the shared
     // worker pool free for stream / tool tasks the user fires in the
     // meantime.
-    return Cmd::task_isolated([](jaal::Sink<Msg> out, std::stop_token) {
+    return Cmd::task_isolated([](maya::Sink<Msg> out, std::stop_token) {
         try {
             auto threads = deps().load_threads();
             out.send(Msg{ThreadsLoaded{std::move(threads)}});
@@ -2517,7 +2517,7 @@ Cmd load_plugins_async(bool reconnect) {
     // m.ui.plugins — the view reads THAT, never the global pool. This is the
     // Cmd→Msg discipline that makes the panel a pure function of the Model.
     return Cmd::task_isolated(
-        [](jaal::Sink<Msg> out, std::stop_token, bool reconnect) {
+        [](maya::Sink<Msg> out, std::stop_token, bool reconnect) {
             if (reconnect) {
                 // Force the connect. On a COLD start nothing has accessed the
                 // registry yet, so the pool is unbuilt — touching registry()
@@ -2537,7 +2537,7 @@ Cmd apply_rag_settings(store::RagConfig cfg) {
     // return, and must not occupy a shared worker. The stop_token is the
     // kernel's, so app shutdown reaches it with no registration on our side.
     return Cmd::task_isolated(
-        [](jaal::Sink<Msg>, std::stop_token st, store::RagConfig cfg) {
+        [](maya::Sink<Msg>, std::stop_token st, store::RagConfig cfg) {
             if (st.stop_requested()) return;
             try {
                 tools::rag_apply_settings_now(cfg);
@@ -2558,7 +2558,7 @@ Cmd edit_plugin(std::filesystem::path path, PluginEdited reply,
     // std::string owns its bytes, and has no entry for filesystem::path. The
     // worker rebuilds the path, which is the same value either way.
     return Cmd::task(
-        [](jaal::Sink<Msg> out, std::stop_token, std::string path_str,
+        [](maya::Sink<Msg> out, std::stop_token, std::string path_str,
            PluginEdited r, tools::plugin::ServerSpec spec) {
             const std::filesystem::path path{path_str};
             namespace pl = tools::plugin;
@@ -2607,7 +2607,7 @@ Cmd edit_plugin(std::filesystem::path path, PluginEdited reply,
 
 Cmd write_fork_transcript(Thread parent, fork_panel::Choice choice) {
     return Cmd::task(
-        [](jaal::Sink<Msg> out, std::stop_token, Thread t,
+        [](maya::Sink<Msg> out, std::stop_token, Thread t,
            fork_panel::Choice choice) {
             ForkTranscriptWritten r{.parent_id = t.id.value, .choice = choice};
             try {
@@ -2637,7 +2637,7 @@ Cmd prewarm_provider(const Model& m) {
     // microseconds. The dial's lifetime is the client's, joined by its own
     // join_prewarm() at teardown.
     return Cmd::task(
-        [](jaal::Sink<Msg>, std::stop_token st, provider::PrewarmTarget t) {
+        [](maya::Sink<Msg>, std::stop_token st, provider::PrewarmTarget t) {
             if (st.stop_requested()) return;
             http::default_client().prewarm(t.host, t.port, t.override_host,
                                            t.override_port);
@@ -2652,7 +2652,7 @@ Cmd load_thread_async(ThreadId id) {
     // the load_threads_async policy and keeps the per-thread parse
     // off the same pool that tools/stream contend for.
     return Cmd::task_isolated(
-        [](jaal::Sink<Msg> out, std::stop_token, ThreadId id) {
+        [](maya::Sink<Msg> out, std::stop_token, ThreadId id) {
             try {
                 auto loaded = deps().load_thread(id);
                 if (loaded) {
@@ -2680,7 +2680,7 @@ Cmd probe_host_async(std::string spec, std::uint64_t attempt_id) {
     // (configured path → /v1/models → Ollama /api/tags) and report the
     // DETECTED dialect. Bounded by probe_host's own 3s/6s timeouts, so the
     // modal's "probing…" state resolves quickly either way.
-    return Cmd::task([](jaal::Sink<Msg> out, std::stop_token,
+    return Cmd::task([](maya::Sink<Msg> out, std::stop_token,
                         std::string spec, std::uint64_t attempt_id) {
         HostProbed r;
         r.attempt_id = attempt_id;
@@ -2780,7 +2780,7 @@ Sub device_login_sub(std::string provider, std::string provider_label,
     // for as long as the user takes.
     return Sub::stream(
         "login/device/" + provider + "/" + std::to_string(attempt_id),
-        [](jaal::Sink<Msg> out, std::stop_token stop, std::string provider,
+        [](maya::Sink<Msg> out, std::stop_token stop, std::string provider,
            std::string provider_label, std::uint64_t attempt_id) {
         const auto cancelled = [&stop] { return stop.stop_requested(); };
         auto emit_code = [&](std::string bare_url, std::string browser_url,
@@ -2856,7 +2856,7 @@ Sub codex_login_sub(std::uint64_t attempt_id) {
     // OAuth mode blocks while the user signs in.
     return Sub::stream(
         "login/codex/" + std::to_string(attempt_id),
-        [](jaal::Sink<Msg> out, std::stop_token stop, std::uint64_t attempt_id) {
+        [](maya::Sink<Msg> out, std::stop_token stop, std::uint64_t attempt_id) {
         const auto cancelled = [&stop] { return stop.stop_requested(); };
         try {
             auto r = provider::chatgpt::codex_login(
@@ -2922,7 +2922,7 @@ TokenRefreshed run_refresh(const std::string& refresh_token) {
 }  // namespace
 
 Cmd refresh_oauth_if_due() {
-    return Cmd::task([](jaal::Sink<Msg> out, std::stop_token) {
+    return Cmd::task([](maya::Sink<Msg> out, std::stop_token) {
         std::optional<std::string> tok;
         try { tok = auth::oauth_proactive_refresh_token(); } catch (...) {}
         if (!tok) {
@@ -2934,7 +2934,7 @@ Cmd refresh_oauth_if_due() {
 }
 
 Cmd refresh_oauth_for_401() {
-    return Cmd::task([](jaal::Sink<Msg> out, std::stop_token) {
+    return Cmd::task([](maya::Sink<Msg> out, std::stop_token) {
         std::string rt;
         try {
             if (auto loaded = auth::load_credentials())
@@ -2954,7 +2954,7 @@ Cmd refresh_oauth_for_401() {
 
 Cmd refresh_oauth(std::string refresh_token) {
     return Cmd::task(
-        [](jaal::Sink<Msg> out, std::stop_token, std::string refresh_token) {
+        [](maya::Sink<Msg> out, std::stop_token, std::string refresh_token) {
             out.send(Msg{run_refresh(refresh_token)});
         }, std::move(refresh_token));
 }

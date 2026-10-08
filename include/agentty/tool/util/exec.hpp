@@ -2,7 +2,7 @@
 // agentty::tools::util — the ONE place agentty runs another program.
 //
 // mcp-cpp asks (mcp::tools::Exec); jaal supplies the primitive
-// (jaal::platform::posix_process, whose exit is a handle a reactor watches).
+// (maya::platform::posix_process, whose exit is a handle a reactor watches).
 // This is the piece in between: the policy.
 //
 // WHY THIS FILE EXISTS AT ALL

@@ -144,7 +144,7 @@ ImagePasteResult sniff_image_paste(std::string_view text) {
 
 Cmd sniff_image_path(std::string text) {
     return Cmd::task(
-        [](jaal::Sink<Msg> out, std::stop_token, std::string text) {
+        [](maya::Sink<Msg> out, std::stop_token, std::string text) {
             ImagePathSniffed r;
             try {
                 auto img = sniff_image_paste(text);

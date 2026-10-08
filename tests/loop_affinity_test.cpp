@@ -27,8 +27,7 @@
 // Standalone, not consolidated: case 3 asserts an ABORT, so it has to run in
 // a child process and doctest can't host that.
 
-#include <jaal/jaal.hpp>
-#include <jaal/kernel/loop.hpp>
+#include <maya/runtime.hpp>
 
 #include <cstdio>
 #include <cstdlib>
@@ -45,7 +44,7 @@
 #  define HAVE_FORK 0
 #endif
 
-namespace k = jaal::kernel;
+namespace k = maya;
 
 // ── 1. The hole, pinned shut ─────────────────────────────────────────────
 //
@@ -74,9 +73,9 @@ template <class T> concept has_current = requires { T::current(); };
 static_assert(!has_current<k::loop_token>);
 
 // Loop-bound state must not be able to travel to a worker as a task argument.
-static_assert(!jaal::Sendable<k::loop_bound<int>>,
+static_assert(!maya::Sendable<k::loop_bound<int>>,
               "loop_bound is pinned to one thread; it must not be Sendable");
-static_assert(!jaal::Sendable<k::loop_token>,
+static_assert(!maya::Sendable<k::loop_token>,
               "a token is proof about ONE thread; it must not travel");
 
 // ── 2. A stand-in for agentty's view caches ──────────────────────────────
@@ -94,7 +93,7 @@ struct Done {};
 struct App {
     using Model = int;
     using Msg   = std::variant<Paint, Done>;
-    using Cmd   = jaal::Cmd<Msg>;
+    using Cmd   = maya::Cmd<Msg>;
 
     static Cmd init(Model& m) { m = 0; return Cmd::send(Msg{Paint{}}); }
 
@@ -132,7 +131,7 @@ static int on_loop_cases() {
     // inside step(). That matters here: a host calls view() between steps,
     // and view() is the code with the caches worth protecting.
     {
-        jaal::headless<App> h;
+        maya::headless<App> h;
         h.run_until_idle();
         if (h.model() != 2) {
             std::printf("FAIL: app ended at model=%d\n", h.model());

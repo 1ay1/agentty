@@ -4,8 +4,8 @@
 //
 // THE POLICY, AND WHY IT IS AGENTTY'S AND NOT JAAL'S
 //
-// jaal owns the primitive: jaal::guarded<T> for threads, and
-// jaal::platform::native_file_lock for processes. Neither knows WHICH of
+// jaal owns the primitive: maya::guarded<T> for threads, and
+// maya::platform::native_file_lock for processes. Neither knows WHICH of
 // agentty's files are shared, what to do when a lock cannot be taken, or
 // that both locks are needed at once. Those are policy, they differ per
 // file, and they live here.
@@ -48,7 +48,7 @@
 #include <mutex>
 #include <optional>
 
-#include <jaal/platform/select.hpp>  // native_file_lock — jaal owns the OS choice
+#include <maya/runtime.hpp>
 
 namespace agentty::persistence {
 
@@ -69,7 +69,7 @@ class SharedFile {
 
   private:
     std::unique_lock<std::mutex>                     local_;
-    std::optional<jaal::platform::native_file_lock>  cross_;
+    std::optional<maya::platform::native_file_lock>  cross_;
 };
 
 }  // namespace agentty::persistence

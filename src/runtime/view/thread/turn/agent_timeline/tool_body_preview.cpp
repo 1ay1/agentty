@@ -10,7 +10,7 @@
 
 #include "agentty/runtime/view/thread/turn/agent_timeline/tool_body_preview.hpp"
 
-#include <jaal/kernel/loop.hpp>   // loop_bound: the render-phase flag is loop-only
+#include <maya/runtime.hpp>
 
 #include "agentty/runtime/view/palette.hpp"
 #include "agentty/runtime/view/thread/turn/agent_timeline/tool_helpers.hpp"
@@ -36,7 +36,7 @@ namespace {
 // building_frozen() would have read its own untouched `false` and silently
 // taken the wrong branch. loop_bound<bool> makes that an abort naming the
 // rule instead of a quietly wrong render. See jaal/kernel/loop.hpp.
-jaal::kernel::loop_bound<bool> g_frozen_build;
+maya::loop_bound<bool> g_frozen_build;
 
 bool frozen_build_get() noexcept {
     return g_frozen_build.with([](const bool& v) { return v; });

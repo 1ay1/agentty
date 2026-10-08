@@ -52,12 +52,12 @@
 # re-entrancy guard so the worker's own write doesn't invalidate the cache
 # it just filled.
 runtime/app/settings_cache.cpp: mutex thread_local
-# blob_gc: the sweep moved to its own jaal::kernel::pool, so the thread, the
+# blob_gc: the sweep moved to its own maya::pool, so the thread, the
 # mutex, the condition variable and the detach are all gone. What is left is
 # two atomics: the walk's cancel flag (read deep inside the walk) and the
 # once-per-process scheduled flag.
 io/blob_gc.cpp: atomic
-# modelsdev: the refresh moved to its own jaal::kernel::pool, same as
+# modelsdev: the refresh moved to its own maya::pool, same as
 # blob_gc, so the thread, the mutex, the condition variable and the detach
 # are gone. One atomic left: the once-per-process scheduled flag.
 util/modelsdev.cpp: atomic
@@ -68,7 +68,7 @@ util/modelsdev.cpp: atomic
 # request from a later step" — its stop_token is the runtime's, and fires
 # when work stops being subscribed — so this atomic is the app's own. The
 # reasoning is written out on the Sendable opt-in in runtime/cmd.hpp.
-# http: the prewarm dials moved to a jaal::kernel::pool member, so the
+# http: the prewarm dials moved to a maya::pool member, so the
 # thread, the per-dial done atomic and the detach are gone — along with the
 # 10ms poll loop that stood in for a timed join. mutex guards the cancel-token
 # list and the connection pool; thread_local is the turn's cancel token;
@@ -118,7 +118,7 @@ tool/progress.cpp: thread_local
 # This used to be hand-rolled here (a cancel flag + done latch per run, a
 # condition variable, a rescan on every wakeup) on the grounds that the wait
 # "cannot be expressed as a jaal task — the threads are ones jaal disowned".
-# True of a task, and exactly the gap jaal::kernel::stop_group now fills:
+# True of a task, and exactly the gap maya::stop_group now fills:
 # cancel + wait for work on threads you don't own, with admission closing
 # at shutdown (which the old snapshot-then-wait missed). What is left here:
 # mutex for the installed Config; thread_local for the per-chain nesting depth
@@ -131,8 +131,8 @@ tool/commands.cpp: mutex
 # on_progress callback invoked in between — so a throwing callback meant
 # ~thread on a joinable thread, i.e. std::terminate with no stack.
 #
-# Now jaal::scope() owns the reader (joined on EVERY exit path, so the [&]
-# captures are warranted rather than lucky) and jaal::guarded<PipeBuf> owns
+# Now maya::scope() owns the reader (joined on EVERY exit path, so the [&]
+# captures are warranted rather than lucky) and maya::guarded<PipeBuf> owns
 # the buffer with its mutex, so "took the lock" is not something to remember.
 # jaal caught a real violation during the conversion: the first version
 # passed `char*` into the lock body, which it rejects because a pointer
@@ -145,7 +145,7 @@ tool/util/fs_helpers.cpp: mutex atomic
 tool/util/sandbox.cpp: atomic
 
 # ── Workspace scans ──────────────────────────────────────────────────
-# The symbol index fans a directory walk across helpers in a jaal::scope; the
+# The symbol index fans a directory walk across helpers in a maya::scope; the
 # atomic is the shared work cursor they pull file indexes from.
 workspace/symbols.cpp: atomic
 workspace/files.cpp: mutex atomic
@@ -167,7 +167,7 @@ workspace/checkpoint.cpp: mutex atomic
 # ── Providers: transports and their shared state ─────────────────────────
 provider/prompt.cpp: mutex
 provider/selection.cpp: mutex
-# external_acp_backend: the prompt getter moved to a jaal::scope nursery, so
+# external_acp_backend: the prompt getter moved to a maya::scope nursery, so
 # the raw worker and its hand-written JoinGuard are gone. The mutex guards the
 # connection map.
 provider/external_acp_backend.cpp: mutex
@@ -220,7 +220,7 @@ runtime/app/cmd_factory.cpp: atomic
 # and waits on a stop_token (delay_for) instead of the standard async helper
 # plus a 50 ms poll, so it uses none of the banned primitives.
 # The Windows code-block runner ticks a heartbeat title/line while a blocking
-# subprocess call runs. The helper is a jaal::scope() nursery spawn now, not a
+# subprocess call runs. The helper is a maya::scope() nursery spawn now, not a
 # bare std::thread with an unguarded join (same std::terminate-on-throw bug as
 # subprocess.cpp above), and it takes its own stop_token so Esc stops the
 # spinner through the task's cancellation instead of a second ad-hoc flag.
@@ -238,7 +238,7 @@ runtime/app/cmd_code_block_run.cpp: atomic
 # render cache does not crash, it silently gets its own empty copy and paints
 # from it. A missing panel with no trace of why is worse than an abort.
 #
-# They are jaal::kernel::loop_bound<T> now. Reaching the value needs proof of
+# They are maya::loop_bound<T> now. Reaching the value needs proof of
 # being on the kernel's loop thread, the kernel arms that identity for its
 # whole lifetime (so view(), which runs between steps, is covered), and off
 # the loop the access aborts naming the rule. The on-loop path is unchanged:

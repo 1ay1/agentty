@@ -227,7 +227,7 @@ Cmd meta_update(Model& m, msg::MetaMsg mm) {
             // Isolated worker: git checkout-index on a large snapshot can
             // block for seconds; never on the shared BG pool.
             auto cmd = Cmd::task_isolated(
-                [](jaal::Sink<Msg> out, std::stop_token, CheckpointId id) {
+                [](maya::Sink<Msg> out, std::stop_token, CheckpointId id) {
                     CheckpointRestored done;
                     done.id = id;
                     std::string err;
@@ -819,7 +819,7 @@ Cmd meta_update(Model& m, msg::MetaMsg mm) {
                     // re-stamps it when the summary request actually goes out.
                     m.s.last_wire_at = {};
                     auto compact_cmd = Cmd::task(
-                        [](jaal::Sink<Msg> out, std::stop_token) {
+                        [](maya::Sink<Msg> out, std::stop_token) {
                             out.send(Msg{CompactContext{}});
                         });
                     return compact_cmd;

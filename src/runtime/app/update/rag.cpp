@@ -350,7 +350,7 @@ Cmd rag_settings_update(Model& m, msg::RagMsg rm) {
             // off the shared BG pool means a wedged endpoint cannot starve
             // other background work.
             return Cmd::task_isolated(
-                        [](jaal::Sink<Msg> out, std::stop_token,
+                        [](maya::Sink<Msg> out, std::stop_token,
                            store::RagConfig probe_cfg, std::string key,
                            std::uint64_t gen) {
                             const auto r = tools::rag_probe_embedder(probe_cfg, key);

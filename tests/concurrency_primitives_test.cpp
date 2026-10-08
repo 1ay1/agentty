@@ -11,7 +11,7 @@
 //        a. a body that throws does NOT reach std::terminate,
 //        b. the work is WAITED FOR at shutdown, not detached and forgotten,
 //        c. the body is handed a stop_token and asked to stop.
-//      (b) and (c) arrived with jaal::kernel::pool. The old hand-rolled
+//      (b) and (c) arrived with maya::pool. The old hand-rolled
 //      version was a plain std::thread(...).detach() whose comment claimed a
 //      "self-joining reaper" that did not exist, so there was nothing to
 //      join and nothing to cancel. The test below would have failed it.

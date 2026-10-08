@@ -1,4 +1,4 @@
-// The turn state machine, under jaal::sim.
+// The turn state machine, under maya::sim.
 //
 // agentty's phase is a variant — Idle, Streaming, AwaitingPermission,
 // ExecutingTool — and the reducers move between them from a dozen places:
@@ -18,7 +18,7 @@
 // them safe to assert against a random interleaving.
 #include "agtest.hpp"
 
-#include <jaal/host/sim.hpp>
+#include <maya/runtime.hpp>
 #include <maya/device/events.hpp>
 
 #include "agentty/runtime/app/program.hpp"
@@ -36,7 +36,7 @@ using P = app::AgenttyApp;
 // them even though it never produces one (it drives with messages).
 using Ev = std::variant<maya::KeyEvent, maya::MouseEvent, maya::PasteEvent,
                         maya::FocusEvent, maya::ResizeEvent>;
-using Sim = jaal::sim<P, Ev>;
+using Sim = maya::sim<P, Ev>;
 
 namespace {
 
@@ -124,9 +124,9 @@ TEST_CASE("sim: the turn machine holds under a scripted interleaving") {
     install();
     JoinsBackgroundThreads joiner;   // see its comment
 
-    jaal::sim_options opt;
+    maya::sim_options opt;
     opt.max_steps = 2'000;
-    jaal::sim<P, Ev> s(0xA9E77C0Dull, opt);
+    maya::sim<P, Ev> s(0xA9E77C0Dull, opt);
     arm_invariants(s);
 
     // A plausible session: type, submit, a tool asks, the user answers,
@@ -152,12 +152,12 @@ TEST_CASE("sim: the turn machine holds across 200 seeds") {
     install();
     JoinsBackgroundThreads joiner;   // see its comment
 
-    jaal::sim_options opt;
+    maya::sim_options opt;
     opt.max_steps = 2'000;
     // A late result is the interesting case, so let latency vary widely.
     opt.task_latency_max = std::chrono::milliseconds{40};
 
-    auto out = jaal::explore<P, Ev>(1, 200, opt, [](Sim& s) {
+    auto out = maya::explore<P, Ev>(1, 200, opt, [](Sim& s) {
         arm_invariants(s);
         s.at(std::chrono::milliseconds{0},  Msg{msg::ComposerMsg{ComposerCharInput{U'x'}}});
         s.at(std::chrono::milliseconds{1},  Msg{msg::ComposerMsg{ComposerSubmit{}}});
@@ -178,12 +178,12 @@ TEST_CASE("sim: a lost or crashing task leaves the machine consistent") {
     install();
     JoinsBackgroundThreads joiner;   // see its comment
 
-    jaal::sim_options opt;
+    maya::sim_options opt;
     opt.max_steps  = 2'000;
     opt.task_crash = 0.15;   // the body throws
     opt.task_lose  = 0.15;   // the body never finishes
 
-    auto out = jaal::explore<P, Ev>(1, 100, opt, [](Sim& s) {
+    auto out = maya::explore<P, Ev>(1, 100, opt, [](Sim& s) {
         arm_invariants(s);
         s.at(std::chrono::milliseconds{0}, Msg{msg::ComposerMsg{ComposerCharInput{U'q'}}});
         s.at(std::chrono::milliseconds{1}, Msg{msg::ComposerMsg{ComposerSubmit{}}});

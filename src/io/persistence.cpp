@@ -115,7 +115,7 @@ bool write_json_atomic(const fs::path& target, const std::string& content) {
 //
 // A mutex cannot fix this -- the writers are separate PROCESSES. The lock has
 // to live in the filesystem, and that primitive is jaal's
-// (jaal::platform::native_file_lock) rather than a third hand-rolled copy of
+// (maya::platform::native_file_lock) rather than a third hand-rolled copy of
 // it here. persistence::SharedFile pairs it with a process-wide mutex,
 // because the two races are different and each lock closes only one of them:
 // see include/agentty/io/shared_file.hpp.

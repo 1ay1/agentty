@@ -42,7 +42,7 @@
 #include <stop_token>
 #include <thread>
 
-#include <jaal/kernel/pool.hpp>
+#include <maya/runtime.hpp>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -2726,7 +2726,7 @@ struct Client::Impl {
     // Outstanding prewarm() dials. OWNED (not detached) so join_prewarm()
     // can cancel and wait for them before CRT/OpenSSL teardown, closing the
     // exit-race UAF that manifests as heap corruption on a fast exit. The
-    // waiting is jaal::kernel::pool's: it is bounded, so a dial genuinely
+    // waiting is maya::pool's: it is bounded, so a dial genuinely
     // wedged in a blocking getaddrinfo() is abandoned at the deadline rather
     // than hanging teardown.
     std::mutex                              prewarm_mu;
@@ -2741,7 +2741,7 @@ struct Client::Impl {
     // worker co-owns the pool's state. One worker is not a cap on dials —
     // each is posted isolated, since a dial can wedge in a blocking
     // getaddrinfo() and must not occupy a shared worker.
-    jaal::kernel::pool                      prewarm_pool{/*max_workers=*/1};
+    maya::pool                      prewarm_pool{/*max_workers=*/1};
 };
 
 Client::Client() : Client(Config{}) {}

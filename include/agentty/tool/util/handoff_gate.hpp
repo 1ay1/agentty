@@ -84,7 +84,7 @@ struct Verdict {
 // Every handoff the gate has seen this session, newest last, bounded.
 //
 // Same shape and the same reasoning as the broker's blocked feed: written from
-// tool worker threads, read from the reducer thread, so it is `jaal::guarded`
+// tool worker threads, read from the reducer thread, so it is `maya::guarded`
 // internally and handed back by value.
 [[nodiscard]] std::vector<sandbox_cfg::TrustHandoff> handoff_feed();
 

@@ -3,7 +3,7 @@
 
 #include "agentty/tool/util/handoff_gate.hpp"
 
-#include <jaal/kernel/guarded.hpp>
+#include <maya/runtime.hpp>
 
 #include <algorithm>
 #include <ranges>
@@ -25,12 +25,12 @@ namespace fs = std::filesystem;
 namespace {
 
 // Same storage shape and the same reasoning as the broker's blocked feed: see
-// sandbox_broker.cpp. `jaal::guarded` because access is only possible through
+// sandbox_broker.cpp. `maya::guarded` because access is only possible through
 // `with()`, so "forgot the lock" is unrepresentable rather than a review item;
 // function-local static because the first handoff can arrive from a tool worker
 // during startup and a file-scope global would race its own constructor.
-jaal::guarded<std::vector<sandbox_cfg::TrustHandoff>>& feed() {
-    static jaal::guarded<std::vector<sandbox_cfg::TrustHandoff>> f;
+maya::guarded<std::vector<sandbox_cfg::TrustHandoff>>& feed() {
+    static maya::guarded<std::vector<sandbox_cfg::TrustHandoff>> f;
     return f;
 }
 

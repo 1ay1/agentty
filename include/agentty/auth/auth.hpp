@@ -263,7 +263,7 @@ oauth_proactive_refresh_token(std::int64_t window_ms = 5 * 60 * 1000);
 // ── Cross-process advisory file lock (thundering-herd guard) ─────────
 // RAII exclusive lock on `<path>.lock` (POSIX flock / Windows LockFileEx).
 //
-// WHY THIS IS NOT persistence::SharedFile / jaal::platform::native_file_lock.
+// WHY THIS IS NOT persistence::SharedFile / maya::platform::native_file_lock.
 // Deliberate, not drift. jaal's POSIX backend uses fcntl record locks, which
 // are owned by the PROCESS: two threads of one agentty both acquire and
 // neither waits. This lock uses flock, which is owned by the OPEN FILE

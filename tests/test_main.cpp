@@ -19,7 +19,7 @@
 #include <string>
 
 #include <maya/core/anim_clock.hpp>
-#include <jaal/kernel/loop.hpp>   // loop_identity: the harness stands in for the loop
+#include <maya/runtime.hpp>
 
 int main(int argc, char** argv) {
     // (No rendering policy is terminal-derived any more — the streaming
@@ -130,7 +130,7 @@ int main(int argc, char** argv) {
     // inside a test still has no token and still aborts, because the identity
     // is per-thread — that is exactly what loop_affinity_test asserts in a
     // forked child.
-    const jaal::kernel::loop_identity loop_id;
+    const maya::loop_identity loop_id;
 
     const int rc = doctest::Context(argc, argv).run();
     // Best-effort: a leaked sandbox is a slow leak, a failed remove is not

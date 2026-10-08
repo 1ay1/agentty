@@ -6,7 +6,7 @@
 
 #include "agentty/dirs/dirs.hpp"
 
-#include <jaal/kernel/guarded.hpp>
+#include <maya/runtime.hpp>
 
 #include <algorithm>
 #include <array>
@@ -66,13 +66,13 @@ constexpr std::array<std::string_view, 4> kMarkers{
 // called from render and retrieval paths, so a broken override would print
 // on every frame and bury the one line that mattered.
 //
-// jaal::guarded, not a raw mutex + set: access is only possible through
+// maya::guarded, not a raw mutex + set: access is only possible through
 // with(), so "forgot the lock" is unrepresentable rather than a review item.
 // Same reasoning as the handoff gate's feed(), and the concurrency banlist
 // enforces it.
 void warn_once(std::string_view env, const fs::path& bad,
                const fs::path& fallback, const std::error_code& ec) {
-    static jaal::guarded<std::set<std::string, std::less<>>> warned;
+    static maya::guarded<std::set<std::string, std::less<>>> warned;
     // Capture-less AND owned-value arguments, both jaal rules: a capture or a
     // pointer/view could reach a second lock while this one is held, and
     // holding two is how deadlocks start. So the key is copied in.

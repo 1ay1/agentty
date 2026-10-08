@@ -3,7 +3,7 @@
 //
 // THE PRIMITIVE IS JAAL'S. THE POLICY IS HERE.
 //
-// jaal::kernel::pool is the capability: a job gets its own thread when it may
+// maya::pool is the capability: a job gets its own thread when it may
 // never return, every body is wrapped so an exception cannot reach
 // std::terminate, every job gets a std::stop_token, and shutdown is BOUNDED —
 // isolated jobs are counted before their thread exists, waited for inside the
@@ -31,7 +31,7 @@
 //
 // ── Choosing a shape ────────────────────────────────────────────────────
 //
-//   work that must finish before this frame returns   jaal::scope (a nursery;
+//   work that must finish before this frame returns   maya::scope (a nursery;
 //                                                     [&] captures are safe,
 //                                                     every helper joined)
 //   work that outlives the frame, result goes to the  Cmd::task / task_isolated
@@ -40,7 +40,7 @@
 //                                                     below
 //
 // The OWNED, join-on-destruction thread this header used to export is gone:
-// it had no callers, and jaal::scope covers that shape properly.
+// it had no callers, and maya::scope covers that shape properly.
 
 #include <chrono>
 #include <concepts>
@@ -51,7 +51,7 @@
 #include <string_view>
 #include <utility>
 
-#include <jaal/kernel/pool.hpp>
+#include <maya/runtime.hpp>
 
 #include "agentty/util/dbglog.hpp"
 #include "agentty/util/teardown.hpp"
@@ -100,9 +100,9 @@ inline std::string spawn_site(std::string_view where,
 // its own try/catch so the report names the spawn site; anything that gets
 // past that is reported here without one, which is still better than the
 // process dying.
-inline jaal::kernel::pool& background_pool() {
-    static jaal::kernel::pool* const p = [] {
-        static jaal::kernel::pool inst{
+inline maya::pool& background_pool() {
+    static maya::pool* const p = [] {
+        static maya::pool inst{
             /*max_workers=*/0u,
             [](std::exception_ptr) {
                 dbglog("util.background_pool",
@@ -179,7 +179,7 @@ void run_background(std::string_view where, Body body,
 // shared worker. If the body is bounded, use run_background above.
 //
 // `body` may take a std::stop_token to honour cancellation; a nullary body
-// still works and simply ignores it. Use jaal::kernel::delay_for to wait on
+// still works and simply ignores it. Use maya::delay_for to wait on
 // that token rather than sleeping through a shutdown.
 //
 // Ownership note: the caller must ensure any state `body` captures by
@@ -195,7 +195,7 @@ void run_isolated_detached(std::string_view where, Body body,
 // ── WorkerGroup ─ background work tied to ONE object's lifetime ────────
 //
 // The third shape, and the one the table above was missing. Not "finishes
-// before this frame returns" (jaal::scope) and not "outlives the frame, nobody
+// before this frame returns" (maya::scope) and not "outlives the frame, nobody
 // waits" (run_isolated_detached), but: a long-lived OBJECT owns workers that
 // touch its collaborators, and its stop() is a HARD BARRIER — when stop()
 // returns, no job is running, so the caller may safely destroy things the jobs
@@ -268,14 +268,14 @@ class WorkerGroup {
     /// is the trade this type is for. Post work that carries its own timeout
     /// — as the MCP transport's does.
     void stop() noexcept {
-        (void)pool_.shutdown(jaal::kernel::pool::no_deadline);
+        (void)pool_.shutdown(maya::pool::no_deadline);
     }
 
   private:
     std::string_view   where_;
     // One worker: these groups serialize their own calls (the MCP provider
     // holds a call mutex), so a second would never be used.
-    jaal::kernel::pool pool_{/*max_workers=*/1};
+    maya::pool pool_{/*max_workers=*/1};
 };
 
 } // namespace agentty::util

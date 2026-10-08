@@ -18,7 +18,7 @@
 #include <future>
 #include <stop_token>
 
-#include <jaal/kernel/delay.hpp>
+#include <maya/runtime.hpp>
 #include <iostream>
 #include <mutex>
 #include <optional>
@@ -2079,7 +2079,7 @@ bool AgentServer::run_tools(Session& sess, bool& out_cancelled) {
         // deadline we fail the tool and move on.
         constexpr auto kToolDeadline = std::chrono::minutes(10);
         const auto tool_start = std::chrono::steady_clock::now();
-        const bool woke = jaal::kernel::delay_for(wake.get_token(), kToolDeadline);
+        const bool woke = maya::delay_for(wake.get_token(), kToolDeadline);
         on_cancel.reset();
 
         // Finished beats cancelled: a tool that completed in the same instant

@@ -524,7 +524,7 @@ Cmd composer_update(Model& m, msg::ComposerMsg cm) {
                 if (!m.ui.git_refresh_inflight) {
                     m.ui.git_refresh_inflight = true;
                     git_cmd = Cmd::task_isolated(
-                        [](jaal::Sink<Msg> out, std::stop_token) {
+                        [](maya::Sink<Msg> out, std::stop_token) {
                             refresh_git_signals();
                             out.send(Msg{GitSignalsRefreshed{}});
                         });

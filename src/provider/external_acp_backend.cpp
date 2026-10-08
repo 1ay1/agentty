@@ -8,7 +8,7 @@
 #include <algorithm>
 #include <future>
 #include <optional>
-#include <jaal/kernel/scope.hpp>
+#include <maya/runtime.hpp>
 #include <utility>
 #include <variant>
 
@@ -436,7 +436,7 @@ TurnResult ExternalAcpBackend::prompt(const Request&              req,
     std::exception_ptr result_err;
     bool sent_cancel = false;
 
-    // jaal::scope owns the getter. It joins EVERY helper before returning —
+    // maya::scope owns the getter. It joins EVERY helper before returning —
     // normal exit, early exit, or a throw out of the poll loop — which is
     // what makes the [&] captures of result / result_err / done above safe by
     // construction. scope.hpp calls this out as the one place in jaal where a
@@ -451,7 +451,7 @@ TurnResult ExternalAcpBackend::prompt(const Request&              req,
     // wrong means an un-joined thread destructor calling std::terminate.
     // With a nursery the ordering is not expressible, so it cannot be got
     // wrong.
-    jaal::scope([&](jaal::nursery& n) {
+    maya::scope([&](maya::nursery& n) {
         auto getter = n.spawn([&] {
             try { result = fut.get(); }
             catch (...) { result_err = std::current_exception(); }

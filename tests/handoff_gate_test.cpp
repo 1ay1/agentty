@@ -219,7 +219,7 @@ TEST_CASE("handoff: concurrent writers do not corrupt the feed") {
 
     // The feed is written from tool worker threads and read from the reducer
     // thread, so it is the one genuinely cross-thread surface here. Same
-    // reasoning as the broker's feed: `jaal::guarded` makes "forgot the lock"
+    // reasoning as the broker's feed: `maya::guarded` makes "forgot the lock"
     // unrepresentable, and this test is what proves the guard is load-bearing
     // rather than decorative -- run under TSan it reports nothing, and reports
     // plenty if the guard is removed.

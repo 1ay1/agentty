@@ -3,7 +3,7 @@
 
 #include "agentty/tool/util/sandbox_broker.hpp"
 
-#include <jaal/kernel/guarded.hpp>
+#include <maya/runtime.hpp>
 
 #include <cstdint>
 #include <string>
@@ -192,7 +192,7 @@ namespace {
 
 // The blocked-activity feed's storage.
 //
-// `jaal::guarded<T>` rather than a raw std::mutex, and not merely because the
+// `maya::guarded<T>` rather than a raw std::mutex, and not merely because the
 // concurrency banlist says so (it does -- tests/lint/allowlist.txt, and my
 // first version failed that check). The type is better for the job: access is
 // only possible through `with()`, so "forgot the lock" is unrepresentable
@@ -202,8 +202,8 @@ namespace {
 // Function-local static so initialisation order cannot bite: the first denial
 // can arrive from a worker thread during startup, and a file-scope global would
 // be a race with its own constructor.
-jaal::guarded<std::vector<Event>>& feed() {
-    static jaal::guarded<std::vector<Event>> f;
+maya::guarded<std::vector<Event>>& feed() {
+    static maya::guarded<std::vector<Event>> f;
     return f;
 }
 

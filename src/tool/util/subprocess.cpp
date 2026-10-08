@@ -17,8 +17,7 @@
 
 // guarded<T> pairs the pipe buffer with its mutex; scope() joins the reader
 // helper on every exit path. See jaal/docs/concurrency.md.
-#include <jaal/kernel/guarded.hpp>
-#include <jaal/kernel/scope.hpp>
+#include <maya/runtime.hpp>
 
 #ifdef _WIN32
 #  ifndef WIN32_LEAN_AND_MEAN
@@ -271,7 +270,7 @@ SubprocessResult run_win32_cmdline(const std::string& cmdline,
     // a later edit from reading shared_total without the lock, and that bug
     // would be a torn size_t on a timeout path nobody tests.
     //
-    // jaal::guarded<T> makes the mutex and the data one thing. The state is
+    // maya::guarded<T> makes the mutex and the data one thing. The state is
     // unreachable except inside a with()/read() body, so "took the lock"
     // stops being something to remember. The callable must also be
     // CAPTURELESS — which is jaal's deadlock rule, since a capture could
@@ -283,7 +282,7 @@ SubprocessResult run_win32_cmdline(const std::string& cmdline,
         std::size_t        total     = 0;
         bool               truncated = false;
     };
-    jaal::guarded<PipeBuf> shared;
+    maya::guarded<PipeBuf> shared;
     std::atomic<bool>      reader_done{false};
 
     auto snapshot = [&] {
@@ -295,7 +294,7 @@ SubprocessResult run_win32_cmdline(const std::string& cmdline,
 
     auto now_ms = [] { return std::chrono::steady_clock::now(); };
 
-    // Everything that depends on the reader lives inside a jaal::scope.
+    // Everything that depends on the reader lives inside a maya::scope.
     //
     // Before, the reader was a bare `std::thread reader(...)` joined ~90
     // lines later, with `opts.on_progress(...)` — a caller-supplied callback
@@ -308,7 +307,7 @@ SubprocessResult run_win32_cmdline(const std::string& cmdline,
     // scope() joins on every exit path, so the [&] captures are now
     // warranted rather than hoped-for, and a throwing on_progress unwinds
     // normally with the reader already stopped.
-    jaal::scope([&](jaal::nursery& n) {
+    maya::scope([&](maya::nursery& n) {
     auto reader = n.spawn([&, rd_h] {
         char tmp[4096];
         for (;;) {
@@ -446,7 +445,7 @@ SubprocessResult run_win32_cmdline(const std::string& cmdline,
     if (opts.on_progress) {
         opts.on_progress(clean_capture(snapshot()));
     }
-    });   // jaal::scope — the reader is joined by here on EVERY path above
+    });   // maya::scope — the reader is joined by here on EVERY path above
 
     ::CloseHandle(pi.hProcess);
     ::CloseHandle(pi.hThread);

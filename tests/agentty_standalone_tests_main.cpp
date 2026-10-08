@@ -21,7 +21,7 @@
 #include <string>
 #include <string_view>
 
-#include <jaal/kernel/loop.hpp>   // loop_identity: the harness stands in for the loop
+#include <maya/runtime.hpp>
 
 // Declarations — arity per the original main().
 #define FOLD_NOARGS(name) extern int name##_main();
@@ -132,7 +132,7 @@ int main(int argc, char** argv) {
     //
     // A worker spawned inside a test still has no token, so the guarantee is
     // intact where it matters.
-    const jaal::kernel::loop_identity loop_id;
+    const maya::loop_identity loop_id;
     // Build the sub-argv: keep argv[0] as the REAL executable path (a test may
     // re-exec itself — external_acp_backend_test spawns argv[0] as a fake ACP
     // agent), drop the dispatch name at argv[1], keep the rest as the test's
