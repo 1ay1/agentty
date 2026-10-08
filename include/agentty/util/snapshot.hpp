@@ -64,36 +64,11 @@
 // so "which one do I need" is answered at the declaration rather than
 // discovered under a sanitizer.
 
-#include <atomic>
 #include <cstddef>
 #include <memory>
-#include <mutex>
 #include <utility>
-#include <version>
 
-// std::atomic<std::shared_ptr<T>> is C++20 (P0718R2), and libstdc++ has had
-// it since GCC 12 — but libc++ still has not shipped it, so on Termux/Android
-// (and any other libc++ target) the declaration falls through to the PRIMARY
-// atomic template, which static_asserts on trivially-copyable and fails with
-// a wall of instantiation notes.
-//
-// Gate on the feature-test macro rather than the compiler: the question is
-// "does this standard library have the specialisation", and __cpp_lib_atomic_
-// shared_ptr is exactly that question. When it is missing we keep the SAME
-// public API backed by a mutex — measurably slower under contention, but this
-// slot is written by one background job and read a handful of times per
-// frame, so the cost is a couple of uncontended lock/unlock pairs.
-// AGENTTY_FORCE_SNAPSHOT_MUTEX=1 forces the fallback on a library that has
-// the specialisation, so the path libc++ users actually run is exercised in
-// CI on the machines we develop on. Without it, the fallback would only ever
-// be compiled by the people least able to report a bug in it.
-#if defined(AGENTTY_FORCE_SNAPSHOT_MUTEX) && AGENTTY_FORCE_SNAPSHOT_MUTEX
-#  define AGENTTY_HAS_ATOMIC_SHARED_PTR 0
-#elif defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
-#  define AGENTTY_HAS_ATOMIC_SHARED_PTR 1
-#else
-#  define AGENTTY_HAS_ATOMIC_SHARED_PTR 0
-#endif
+#include <maya/runtime.hpp>   // maya::published: the slot behind AtomicSnapshot
 
 namespace agentty::util {
 
@@ -166,17 +141,10 @@ template <class T>
 // `ptr_`). Getting it wrong is silent: the pointee really is immutable, so
 // the code looks obviously fine and races only on the handle.
 //
-// std::atomic<std::shared_ptr<T>> does the refcount manipulation atomically,
-// so load() hands back a handle that is already safely owned. Lock-free on
-// platforms that support it, a tiny internal lock where they don't — either
-// way the caller cannot get it wrong, because there is no exposed `ptr_` to
-// race on.
-//
-// On a standard library without that specialisation (libc++ as of 2026 —
-// Termux, Android) the same guarantee is provided by a mutex around the
-// handle. The PUBLIC SURFACE IS IDENTICAL either way, which is the point:
-// the portability problem is solved once, here, instead of at each of the
-// three cache sites deciding for themselves.
+// It is a thin face over maya::published<const T>: published owns the
+// atomic<shared_ptr> (or, on a standard library without that
+// specialisation, the small mutex), so the portability problem is solved
+// once, in jaal. This adds the Snapshot reading surface on top.
 template <class T>
 class AtomicSnapshot {
 public:
@@ -185,57 +153,23 @@ public:
     // Take a private handle. Safe to call concurrently with store(): the
     // returned Snapshot owns its buffer for as long as the caller holds it.
     [[nodiscard]] Snapshot<T> load() const noexcept {
-#if AGENTTY_HAS_ATOMIC_SHARED_PTR
-        return Snapshot<T>{cell_.load(std::memory_order_acquire)};
-#else
-        std::lock_guard lk(mu_);
-        return Snapshot<T>{cell_};
-#endif
+        return Snapshot<T>{cell_.current()};
     }
 
     // Republish. Readers already holding a handle keep seeing their own
     // generation; new loads see this one.
-    void store(Snapshot<T> s) noexcept {
-#if AGENTTY_HAS_ATOMIC_SHARED_PTR
-        cell_.store(s.share(), std::memory_order_release);
-#else
-        std::lock_guard lk(mu_);
-        cell_ = s.share();
-#endif
-    }
+    void store(Snapshot<T> s) noexcept { cell_.publish(s.share()); }
 
     void store(T value) { store(make_snapshot(std::move(value))); }
 
     // Has anything been published yet? Distinct from an empty payload — the
     // "indexing…" vs "workspace empty" distinction the pickers render.
-    [[nodiscard]] bool has_value() const noexcept {
-#if AGENTTY_HAS_ATOMIC_SHARED_PTR
-        return static_cast<bool>(cell_.load(std::memory_order_acquire));
-#else
-        std::lock_guard lk(mu_);
-        return static_cast<bool>(cell_);
-#endif
-    }
+    [[nodiscard]] bool has_value() const noexcept { return static_cast<bool>(cell_.current()); }
 
-    void reset() noexcept {
-#if AGENTTY_HAS_ATOMIC_SHARED_PTR
-        cell_.store(std::shared_ptr<const T>{}, std::memory_order_release);
-#else
-        std::lock_guard lk(mu_);
-        cell_.reset();
-#endif
-    }
+    void reset() noexcept { (void)cell_.take(); }
 
 private:
-#if AGENTTY_HAS_ATOMIC_SHARED_PTR
-    std::atomic<std::shared_ptr<const T>> cell_;
-#else
-    // `mutable` because load()/has_value() are logically const reads that
-    // must still take the lock — copying a shared_ptr WRITES its refcount,
-    // which is the race the mutex exists to prevent.
-    mutable std::mutex              mu_;
-    std::shared_ptr<const T>        cell_;
-#endif
+    maya::published<const T> cell_;
 };
 
 } // namespace agentty::util

@@ -139,25 +139,19 @@ agentty_fold_test(skill_catalog_trust_test TIMEOUT 30)
 # Own HOME + cold skills cache, same reason as skill_catalog_trust_test.
 agentty_fold_test(skills_panel_test        TIMEOUT 30)
 agentty_fold_test(catalog_cost_probe       TIMEOUT 60)
-# Compiles AtomicSnapshot's mutex fallback (the libc++/Termux path) on a
-# toolchain that HAS the atomic specialisation, so it can't rot unnoticed.
-# A BARE binary: snapshot.hpp is header-only, and this test must link NO
-# agentty objects. AGENTTY_FORCE_SNAPSHOT_MUTEX changes AtomicSnapshot's
-# layout, so a TU compiled with it linked against objects compiled without it
-# is an ODR violation — same class, two definitions, linker picks one and the
-# program hangs in static init. Found the hard way; hence MODE raw.
-# snapshot.hpp's mutex fallback (the libc++/Termux path) as a BARE binary.
-#
-# It must link NO agentty objects: AGENTTY_FORCE_SNAPSHOT_MUTEX changes
-# AtomicSnapshot's layout, so a TU compiled with it linked against objects
-# compiled without it is an ODR violation — same class, two definitions. The
-# linker picks one and the program hangs in static init. Found the hard way.
+# Compiles AtomicSnapshot over published<T>'s mutex fallback (the
+# libc++/Termux path) on a toolchain that HAS the atomic specialisation, so
+# it can't rot unnoticed. A BARE binary that links NO agentty objects:
+# JAAL_FORCE_PUBLISHED_MUTEX changes the slot's layout, so mixing it with
+# objects built without it is an ODR violation (the program hangs in static
+# init). Header-only use of jaal, so its include dirs and nothing linked.
 add_executable(snapshot_mutex_fallback_test EXCLUDE_FROM_ALL
     ${CMAKE_SOURCE_DIR}/tests/snapshot_mutex_fallback_test.cpp)
 target_include_directories(snapshot_mutex_fallback_test PRIVATE
-    ${CMAKE_SOURCE_DIR}/include)
+    ${CMAKE_SOURCE_DIR}/include
+    $<TARGET_PROPERTY:maya::app,INTERFACE_INCLUDE_DIRECTORIES>)
 target_compile_definitions(snapshot_mutex_fallback_test PRIVATE
-    AGENTTY_FORCE_SNAPSHOT_MUTEX=1)
+    JAAL_FORCE_PUBLISHED_MUTEX=1)
 find_package(Threads REQUIRED)
 target_link_libraries(snapshot_mutex_fallback_test PRIVATE Threads::Threads)
 add_test(NAME snapshot_mutex_fallback_test

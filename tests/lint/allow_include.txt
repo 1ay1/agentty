@@ -13,8 +13,6 @@
 # ranked_lock: lock-ordering enforcement. The mutex IS the subject, and the
 # thread_local is the per-thread rank stack it checks against.
 agentty/util/ranked_lock.hpp: mutex thread_local
-# snapshot: publish-once, read-many across threads.
-agentty/util/snapshot.hpp: mutex atomic
 agentty/util/logx.hpp: atomic
 
 # ── The turn's cancel token ──────────────────────────────────────────────
