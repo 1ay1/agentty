@@ -104,6 +104,8 @@ void save_settings(const store::Settings& s);
 void on_settings_written(std::function<void()> observer);
 
 [[nodiscard]] ThreadId new_id();
+// 64 random bits as 16 hex digits; backs new_id() and new_message_id().
+[[nodiscard]] std::string random_hex_id();
 [[nodiscard]] std::string title_from_first_message(std::string_view text);
 
 // Atomic + durable write of `content` to `target`: writes to <target>.tmp,

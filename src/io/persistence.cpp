@@ -6,6 +6,7 @@
 #include "agentty/util/logx.hpp"
 #include "agentty/util/background.hpp"   // util::WorkerGroup
 
+#include "agentty/util/sendable.hpp"   // maya::guarded + the json opt-in
 #include <atomic>
 #include <condition_variable>
 #include <cstdio>
@@ -2389,15 +2390,11 @@ void delete_thread(const ThreadId& id) {
 // baseline the only options are "clobber everything" (the bug) or "merge
 // nothing", and neither preserves a second instance's edits.
 //
-// Guarded by its own mutex: load_settings runs on the engine thread at
-// startup and save_settings can run from a reducer, so the two can overlap.
-json& loaded_baseline() {
-    static json baseline = json::object();
+// A guarded value: load_settings runs on the engine thread at startup and
+// save_settings can run from a reducer, so the two can overlap.
+maya::guarded<json>& loaded_baseline() {
+    static maya::guarded<json> baseline{json::object()};
     return baseline;
-}
-std::mutex& baseline_mu() {
-    static std::mutex mu;
-    return mu;
 }
 
 store::Settings load_settings() {
@@ -2406,10 +2403,7 @@ store::Settings load_settings() {
     if (!ifs) return s;
     try {
         json j; ifs >> j;
-        {
-            std::lock_guard<std::mutex> lk(baseline_mu());
-            loaded_baseline() = j;
-        }
+        loaded_baseline().with([](json& b, json v) { b = std::move(v); }, j);
         s.model_id = ModelId{j.value("model_id", "")};
         s.profile = static_cast<Profile>(j.value("profile", 0));
         // Appearance. Read field by field with the struct's own defaults as
@@ -3005,11 +2999,7 @@ void save_settings(const store::Settings& s) {
             if (ifs) { try { ifs >> disk; } catch (...) { disk = json::object(); } }
         }
         if (disk.is_object()) {
-            json base;
-            {
-                std::lock_guard<std::mutex> lk(baseline_mu());
-                base = loaded_baseline();
-            }
+            const json base = loaded_baseline().read([](const json& b) { return b; });
             for (auto it = disk.begin(); it != disk.end(); ++it) {
                 const auto& key = it.key();
                 const bool we_changed =
@@ -3037,8 +3027,7 @@ void save_settings(const store::Settings& s) {
         // second save in the same session would diff against the startup
         // snapshot, see its own earlier edit as "changed", and keep
         // re-asserting it over newer values from other instances.
-        std::lock_guard<std::mutex> lk(baseline_mu());
-        loaded_baseline() = j;
+        loaded_baseline().with([](json& b, json v) { b = std::move(v); }, j);
     }
 
     // Tell anyone caching settings that the file moved under them. See
@@ -3051,14 +3040,22 @@ void on_settings_written(std::function<void()> observer) {
     settings_write_observer() = std::move(observer);
 }
 
-ThreadId new_id() {
-    static std::mt19937_64 rng{std::random_device{}()};
-    static std::mutex      mu;
-    std::lock_guard<std::mutex> lk(mu);
-    std::uniform_int_distribution<uint64_t> dist;
+// 64 random bits as 16 hex digits. Zero-padded so every id is fixed width:
+// variable width was unambiguous given the ":" separator in cache keys but
+// brittle (a 0x1 roll produced "1", a substring of most other ids). One
+// generator, guarded, shared by thread and message ids.
+std::string random_hex_id() {
+    static maya::guarded<std::mt19937_64> rng{std::random_device{}()};
+    const std::uint64_t v = rng.with([](std::mt19937_64& g) {
+        return std::uniform_int_distribution<std::uint64_t>{}(g);
+    });
     std::ostringstream oss;
-    oss << std::hex << std::setw(16) << std::setfill('0') << dist(rng);
-    return ThreadId{oss.str()};
+    oss << std::hex << std::setw(16) << std::setfill('0') << v;
+    return oss.str();
+}
+
+ThreadId new_id() {
+    return ThreadId{random_hex_id()};
 }
 
 std::string title_from_first_message(std::string_view text) {
@@ -3093,17 +3090,7 @@ namespace agentty {
 // IDs colliding within a session is ~2⁻³² even at a million messages,
 // well below any realistic load.
 MessageId new_message_id() {
-    static std::mt19937_64 rng{std::random_device{}()};
-    static std::mutex      mu;
-    std::lock_guard<std::mutex> lk(mu);
-    std::uniform_int_distribution<uint64_t> dist;
-    // Zero-pad to 16 hex digits so every id is fixed width. Variable
-    // width was technically unambiguous given the ":" separator in cache
-    // keys but brittle: a 0x1 roll produced "1", which is a substring of
-    // most other ids. Fixed width also makes persisted ids look uniform.
-    std::ostringstream oss;
-    oss << std::hex << std::setw(16) << std::setfill('0') << dist(rng);
-    return MessageId{oss.str()};
+    return MessageId{persistence::random_hex_id()};
 }
 
 } // namespace agentty
