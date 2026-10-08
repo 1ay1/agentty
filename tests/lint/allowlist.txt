@@ -51,7 +51,7 @@
 # round-trip out of the input path (see its header). thread_local: a
 # re-entrancy guard so the worker's own write doesn't invalidate the cache
 # it just filled.
-runtime/app/settings_cache.cpp: thread mutex thread_local
+runtime/app/settings_cache.cpp: mutex thread_local
 # blob_gc: the sweep moved to its own jaal::kernel::pool, so the thread, the
 # mutex, the condition variable and the detach are all gone. What is left is
 # two atomics: the walk's cancel flag (read deep inside the walk) and the
@@ -81,7 +81,7 @@ io/tls.cpp: mutex const_cast
 # CLI paths with no loop at all.
 # The AsyncWriter owns a background worker thread that batches JSONL appends;
 # see persistence.cpp AsyncWriter. Joined at shutdown via the teardown registry.
-io/persistence.cpp: mutex thread
+io/persistence.cpp: mutex
 # The cross-process critical section. The mutex IS the point: it closes the
 # in-process half of the race that the file lock cannot (jaal's file_lock
 # conformance check 13). See include/agentty/io/shared_file.hpp.
@@ -145,11 +145,9 @@ tool/util/fs_helpers.cpp: mutex atomic
 tool/util/sandbox.cpp: atomic
 
 # ── Workspace scans ──────────────────────────────────────────────────
-# The symbol index fans a directory walk across hardware_concurrency()
-# workers and joins them before returning — a data-parallel scan inside one
-# call, not a lifetime the loop has to track. It already runs on a jaal
-# task; this is that task using its own thread.
-workspace/symbols.cpp: thread atomic
+# The symbol index fans a directory walk across helpers in a jaal::scope; the
+# atomic is the shared work cursor they pull file indexes from.
+workspace/symbols.cpp: atomic
 workspace/files.cpp: mutex atomic
 # checkpoint.cpp's atomic is a teardown cancel flag, and it is the one place
 # here where the raw primitive is load-bearing rather than incidental.
@@ -215,19 +213,6 @@ util/logx.cpp: mutex atomic
 # startup and read from workers (auth_snapshot), which is the one thing a
 # plain global could get wrong.
 runtime/app/deps.cpp: mutex
-# The exec capability's session drain. A process that outlives the call which
-# started it has to have its pipe read by SOMEONE, or it fills at 64 KiB and
-# the child blocks -- and polls are seconds apart by nature, so draining only
-# inside poll() would stall exactly the chatty servers process_start exists
-# for. This thread IS the implementation of mcp-cpp's Session capability,
-# which is what lets that library own no concurrency at all.
-#
-# `thread` only: the shared state went to jaal::guarded<Shared>, the first use
-# of it in agentty. So the lock cannot be forgotten, nothing escapes it, and
-# a second lock cannot be named inside it -- Level A for the state, Level B
-# for the thread. When tool execution becomes a keyed Sub::stream the thread
-# goes too, and this line with it.
-tool/util/exec.cpp: thread
 # next_tool_exec_seq(): a static atomic counter minted per dispatch, echoed by
 # the worker so the reducer can drop stale results from a superseded turn.
 runtime/app/cmd_factory.cpp: atomic

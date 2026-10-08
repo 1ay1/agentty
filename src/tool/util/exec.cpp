@@ -17,6 +17,7 @@
 #include <vector>
 
 #include <jaal/kernel/guarded.hpp>
+#include "agentty/util/background.hpp"   // util::WorkerGroup
 #include <jaal/platform/posix/process.hpp>
 #include <jaal/platform/posix/poll_reactor.hpp>
 
@@ -140,22 +141,21 @@ std::optional<std::chrono::seconds> env_wall_override() {
 
 /// A started program, polled for later.
 ///
-/// The drain runs on its own thread, and that is deliberate rather than
+/// The drain runs on its own worker, and that is deliberate rather than
 /// reluctant: a pipe nobody reads fills at 64 KiB and then BLOCKS the child.
 /// Polls are seconds apart by nature -- a caller checks a dev server when it
 /// wants to, not on a schedule -- so draining only inside poll() would stall
-/// exactly the chatty servers this tool exists for. The thread lives here,
-/// in the host, which is the layer allowed to have one.
+/// exactly the chatty servers this tool exists for. It is a jaal worker
+/// (util::WorkerGroup): stop_token to wind it up, joined on destruction.
 class JaalSession final : public mt::Session {
   public:
     JaalSession(pf::posix_process p, std::size_t cap)
         : proc_(std::move(p)), cap_(cap) {
-        drain_ = std::thread([this] { pump(); });
+        drain_.post([this](std::stop_token st) { pump(st); });
     }
     ~JaalSession() override {
         stop();
-        st_.with([](Shared& s) { s.done = true; });
-        if (drain_.joinable()) drain_.join();
+        drain_.stop();   // requests stop on the pump's token, then joins
     }
 
     [[nodiscard]] Update poll(std::chrono::milliseconds wait) override {
@@ -191,7 +191,7 @@ class JaalSession final : public mt::Session {
     }
 
   private:
-    void pump() {
+    void pump(std::stop_token st) {
         auto reactor = pf::poll_reactor::create();
         if (!reactor) return;
         auto exit_reg = reactor->watch(proc_.exit_handle().get(),
@@ -202,7 +202,7 @@ class JaalSession final : public mt::Session {
                 out_reg = std::move(*r);
 
         bool exited = false;
-        while (!st_.read([](const Shared& s) { return s.done; })) {
+        while (!st.stop_requested()) {
             auto res = reactor->wait(std::chrono::milliseconds{100});
             if (!res) break;
             for (std::uint8_t i = 0; i < res->count; ++i) {
@@ -262,7 +262,6 @@ class JaalSession final : public mt::Session {
         bool            truncated = false;
         bool            reported  = false;
         bool            alive     = true;
-        bool            done      = false;   // the pump should wind up
         bool            stopping  = false;
         mt::ExecOutcome outcome   = mt::Exited{0};
     };
@@ -270,8 +269,9 @@ class JaalSession final : public mt::Session {
     pf::posix_process    proc_;
     std::size_t          cap_;
     jaal::guarded<Shared> st_;
-    std::thread          drain_;
     clock_t_::time_point stop_at_{};
+    // Last member: destroyed (joined) first, before anything the pump uses.
+    ::agentty::util::WorkerGroup drain_{"exec.session.drain"};
 };
 
 class JaalExec final : public mt::Exec {

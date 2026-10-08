@@ -4,6 +4,7 @@
 #include "agentty/runtime/settings_registry.hpp"
 
 #include "agentty/util/logx.hpp"
+#include "agentty/util/background.hpp"   // util::WorkerGroup
 
 #include <atomic>
 #include <condition_variable>
@@ -2098,7 +2099,10 @@ struct AsyncWriter {
     // save. Dropped on delete, and on any failure.
     std::unordered_map<std::string, LogState> known;
     bool                                     stopping = false;
-    std::thread                              worker;
+    bool                                     started  = false;
+    // The drain worker: a jaal-backed group, joined with no deadline on
+    // stop so every queued save lands. Recreated if saves arrive again.
+    std::unique_ptr<util::WorkerGroup>       worker;
 
     // Build the job on the CALLER's thread, copying only what changed.
     // Fingerprinting is one pass of hashing with no allocation or I/O —
@@ -2151,7 +2155,7 @@ struct AsyncWriter {
             }
         }
         pending.insert_or_assign(key, std::move(job));
-        if (!worker.joinable()) start_locked();
+        if (!started) start_locked();
         cv.notify_one();
     }
 
@@ -2161,26 +2165,28 @@ struct AsyncWriter {
     }
 
     void flush_and_stop() {
-        std::thread to_join;
+        std::unique_ptr<util::WorkerGroup> to_join;
         {
             std::lock_guard<std::mutex> lk(mu);
             stopping = true;
-            // Hand the worker handle out under the lock so a concurrent
-            // enqueue() can't observe a half-stopped state, and join
-            // outside the lock. run() drains every queued save before it
-            // sees `stopping` and exits, so nothing enqueued before this
-            // call is dropped.
-            if (worker.joinable()) to_join = std::move(worker);
+            // Hand the worker out under the lock so a concurrent enqueue()
+            // can't observe a half-stopped state, and join outside the lock.
+            // run() drains every queued save before it sees `stopping` and
+            // exits, so nothing enqueued before this call is dropped.
+            started = false;
+            to_join = std::move(worker);
         }
         cv.notify_one();
-        if (to_join.joinable()) to_join.join();
+        if (to_join) to_join->stop();
     }
 
     ~AsyncWriter() { flush_and_stop(); }
 
 private:
     void start_locked() {
-        worker = std::thread([this] { run(); });
+        started = true;
+        worker = std::make_unique<util::WorkerGroup>("persistence.async_writer");
+        worker->post([this] { run(); });
     }
 
     void run() {

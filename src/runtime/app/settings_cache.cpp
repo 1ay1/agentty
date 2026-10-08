@@ -5,10 +5,10 @@
 #include <condition_variable>
 #include <mutex>
 #include <optional>
-#include <thread>
 #include <utility>
 
 #include "agentty/io/persistence.hpp"
+#include "agentty/util/background.hpp"   // util::WorkerGroup
 #include "agentty/util/teardown.hpp"
 
 namespace agentty::app::settings_cache {
@@ -32,7 +32,10 @@ struct State {
 
     bool        writing  = false;   // a write is in flight right now
     bool        stopping = false;
-    std::thread worker;
+    bool        started  = false;   // the drain worker has been posted
+    // The drain worker. A jaal-backed group (one isolated job, joined
+    // without a deadline on stop) so queued saves always land.
+    std::optional<util::WorkerGroup> worker;
 
     std::function<store::Settings()>            load_from_disk;
     std::function<void(const store::Settings&)> save_to_disk;
@@ -87,7 +90,7 @@ void run(State& s) {
 }
 
 void ensure_worker(State& s) {
-    if (s.worker.joinable() || s.stopping) return;
+    if (s.started || s.stopping) return;
 
     // THE fix for the abort-on-exit.
     //
@@ -108,7 +111,9 @@ void ensure_worker(State& s) {
         util::teardown::on_shutdown("settings_cache", [] { shutdown(); });
     }
 
-    s.worker = std::thread([&s] { run(s); });
+    s.started = true;
+    if (!s.worker) s.worker.emplace("settings_cache.drain");
+    s.worker->post([&s] { run(s); });
 }
 
 } // namespace
@@ -124,6 +129,9 @@ Seam wrap(std::function<store::Settings()> load_from_disk,
         // stale cache from the previous store.
         s.cached.reset();
         s.stopping = false;
+        // A stopped group is single-use; a re-install after shutdown gets a
+        // fresh one on the next save.
+        if (!s.started) s.worker.reset();
     }
 
     // Anyone writing settings.json directly — the credential helpers, the
@@ -175,7 +183,7 @@ Seam wrap(std::function<store::Settings()> load_from_disk,
 void flush() noexcept {
     auto& s = state();
     std::unique_lock lock(s.mu);
-    if (!s.worker.joinable()) {
+    if (!s.started) {
         // No worker ever started, but a value may have been published before
         // one existed. Write it here — this path is only reached at exit.
         if (s.pending && s.save_to_disk) {
@@ -211,17 +219,16 @@ void shutdown() noexcept {
     flush();
 
     auto& s = state();
-    std::thread worker;
     {
         std::lock_guard lock(s.mu);
         s.stopping = true;
-        if (!s.worker.joinable()) return;
-        worker = std::move(s.worker);
+        if (!s.started) return;
+        s.started = false;
     }
     s.cv.notify_all();
-    // The worker only ever holds the lock briefly or does one write, so this
-    // join is bounded by a single settings save.
-    if (worker.joinable()) worker.join();
+    // run() exits on `stopping`; the group joins it. Bounded by a single
+    // settings save, since the worker only holds the lock briefly.
+    if (s.worker) s.worker->stop();
 }
 
 } // namespace agentty::app::settings_cache

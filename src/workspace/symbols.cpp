@@ -1,3 +1,4 @@
+#include <jaal/kernel/scope.hpp>
 #include "agentty/workspace/symbols.hpp"
 #include "agentty/workspace/files.hpp"   // prewarm_cancelled (shared shutdown flag)
 
@@ -239,11 +240,11 @@ std::vector<SymbolEntry> build_symbol_list(std::size_t cap) {
 
     std::atomic<std::size_t> next{0};
     std::vector<std::vector<SymbolEntry>> partials(nthreads);
-    {
-        std::vector<std::jthread> pool;
-        pool.reserve(nthreads);
+    // jaal::scope joins every helper before it returns (and on a throw),
+    // which is what makes the [&] captures of `partials` and `next` safe.
+    jaal::scope([&](jaal::nursery& n) {
         for (unsigned t = 0; t < nthreads; ++t) {
-            pool.emplace_back([&, t] {
+            n.spawn([&, t] {
                 // Lowest priority: this is a speculative cache for a picker
                 // that may never open, so it must only use cores nothing
                 // else wants.
@@ -264,7 +265,7 @@ std::vector<SymbolEntry> build_symbol_list(std::size_t cap) {
                 }
             });
         }
-    }
+    });
     for (auto& p : partials) {
         for (auto& e : p) {
             out.push_back(std::move(e));
