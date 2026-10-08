@@ -43,11 +43,11 @@ the argument demands* — with a lock a reviewer can see.
 
 ## 2 & 3. The two structural gaps (now beat Rust)
 
-**Lock ordering** was enforced by four identical comments. Now it's a **type**:
-`RankedMutex<N>` carries a compile-time rank, `RankedLock` checks order, and a
-violation is a `static_assert` (compile) or a debug `std::abort` tripwire
-(runtime, cross-function). Rust doesn't check lock ordering out of the box —
-this is strictly more.
+**Lock ordering** was enforced by four identical comments. Now there is one
+lock: all sessions live in a `maya::guarded`, reached only through a
+captureless body that can't take a second lock or leak a reference into a
+session. The turn loop works on snapshots and writes results back by id, so
+no lock is held across a stream or a tool run.
 
 **Detached worker threads** meant an escaping exception → `std::terminate` →
 every session dies. Now both spawn sites go through a primitive whose body

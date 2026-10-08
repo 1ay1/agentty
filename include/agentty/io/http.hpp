@@ -29,6 +29,8 @@
 #include <string_view>
 #include <vector>
 
+#include <maya/runtime.hpp>
+
 namespace agentty::http {
 
 // ---------------------------------------------------------------------------
@@ -426,3 +428,9 @@ is_chunked(const Headers& headers);
 } // namespace test
 
 } // namespace agentty::http
+
+// CancelToken is a shared mutable object, and Sendable refuses shared_ptr by
+// default for that reason. Sharing is the point here: one side trips it (Esc,
+// a new turn, session/cancel) while a worker watches it. It holds only a
+// std::stop_source, which is built for exactly that, so the pointer may cross.
+MAYA_SENDABLE(agentty::http::CancelTokenPtr);

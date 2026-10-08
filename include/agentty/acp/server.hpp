@@ -26,7 +26,7 @@
 #include <atomic>
 #include <functional>
 #include <memory>
-#include <mutex>
+#include <optional>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -34,30 +34,15 @@
 
 #include <acp/acp.hpp>
 
+#include <maya/runtime.hpp>
+
 #include "agentty/auth/auth.hpp"
 #include "agentty/domain/conversation.hpp"
 #include "agentty/domain/profile.hpp"
 #include "agentty/io/http.hpp"
 #include "agentty/provider/provider.hpp"
-#include "agentty/util/ranked_lock.hpp"
 
 namespace agentty::acp {
-
-// ── Lock hierarchy ────────────────────────────────────────────────────────
-// The two mutexes below form a STRICT ordering enforced by the type system
-// (util::ranked_lock): the outer lock has the LOWER rank and is always taken
-// first. Nesting them in the wrong order is a compile error (assert_lock_order)
-// or a debug abort (the thread-local held-rank tripwire) — never a silent
-// production deadlock. See RUST-CRITIQUE.md #2.
-//   SessionRank (10)  session map + per-session config (profile/model/cwd)
-//   ThreadRank  (20)  per-session thread.messages
-// The on-disk session index (acp_sessions.json) is not in this hierarchy: it
-// goes through persistence::with_shared_file, whose body is captureless and
-// reaches no session state, so it is always innermost.
-constexpr unsigned kSessionRank = 10;
-constexpr unsigned kThreadRank  = 20;
-using SessionMutex = util::RankedMutex<kSessionRank>;
-using ThreadMutex  = util::RankedMutex<kThreadRank>;
 
 // The provider call, type-erased: (Request, EventSink) → void. Matches
 // provider::Provider::stream.
@@ -76,20 +61,19 @@ struct Session {
     std::string model;   // empty = use server default
     std::shared_ptr<http::CancelToken> cancel;
     std::set<std::string> grants;   // session-scoped "always allow", by tool
-    // Guards ALL access to `thread.messages` (and the tool_calls / status
-    // fields nested in its elements). The turn loop runs on an OWNED,
-    // exception-isolated worker (util::isolated_thread) that appends assistant
-    // messages and mutates tool-call statuses, while the reader thread can
-    // concurrently snapshot the thread for session/load|resume (replay) or
-    // persist. session_mtx_ only protects the session MAP + config, not the
-    // thread contents, so without this a load-during-turn is a data race on
-    // the messages vector (a read racing a push_back). Held briefly around
-    // each mutation / snapshot — NEVER across network streaming or tool
-    // execution. shared_ptr so it stays valid for a worker that captured the
-    // Session by shared_ptr even after a concurrent session/close erases the
-    // map entry. RANK 20 (kThreadRank): the INNER lock — only ever taken while
-    // holding, or not holding, session_mtx_ (rank 10), never the reverse.
-    std::shared_ptr<ThreadMutex> thread_mtx = std::make_shared<ThreadMutex>();
+};
+
+// Every live session plus the in-flight prompt map, behind ONE lock. The turn
+// loop runs on a worker while the reader thread serves load/list/set_mode/
+// cancel, so all of it is shared. Nothing holds the lock across a network
+// stream or a tool run: the turn works on snapshots and writes results back
+// by id, so a session closed mid-turn just makes the write-back a no-op.
+struct Sessions {
+    std::unordered_map<std::string, Session> by_id;
+    // JSON-RPC id (id.dump()) of an in-flight session/prompt → its session,
+    // so a generic $/cancel_request can cancel the right turn. Set in
+    // on_prompt, erased when the turn settles.
+    std::unordered_map<std::string, std::string> reqid_to_session;
 };
 
 class AgentServer {
@@ -135,10 +119,10 @@ private:
     // ── The headless turn loop ───────────────────────────────────────────
     void run_turn(std::string session_id, std::string req_id_dump, Responder resp);
 
-    StopReason stream_completion(Session& sess, bool& out_cancelled,
+    StopReason stream_completion(const std::string& session_id, bool& out_cancelled,
                                  std::string& out_error,
                                  bool suppress_tools = false);
-    bool       run_tools(Session& sess, bool& out_cancelled);
+    bool       run_tools(const std::string& session_id, bool& out_cancelled);
 
     // ── Helpers ──────────────────────────────────────────────────────────
     void send_update(const std::string& session_id, ::acp::SessionUpdate update);
@@ -167,14 +151,34 @@ private:
     // honour cancellation; std::nullopt means "not eligible — fall back to
     // internal execution".
     struct TerminalRun { bool ok; bool cancelled; std::string output; };
-    std::optional<TerminalRun> run_bash_via_terminal(Session& sess, ToolUse& tc);
+    // What a tool run needs from its session, copied out once per batch.
+    struct TurnCtx {
+        std::string id, cwd, msg_id;
+        std::shared_ptr<http::CancelToken> cancel;
+        [[nodiscard]] bool cancelled() const { return cancel && cancel->is_cancelled(); }
+    };
+    std::optional<TerminalRun> run_bash_via_terminal(const TurnCtx& ctx, ToolUse& tc);
 
-    // Returns a shared_ptr so a worker thread that captured the session can
-    // keep it alive even if the reader thread erases the map entry
-    // (session/close|delete) mid-turn. Returning a raw Session* here was a
-    // use-after-free: the pointer escaped session_mtx_ and a concurrent
-    // erase() destroyed the node under it.
-    std::shared_ptr<Session> find_session(const std::string& id);
+    // Settle a tool call: set it on the local copy AND write it back into
+    // the live session (matched by message id + tool id), in one step.
+    void settle_tool(const TurnCtx& ctx, ToolUse& tc, ToolUse::Status st,
+                     std::chrono::steady_clock::time_point executing_since = {});
+
+    // Run f(Session&, args...) on the live session `id` under the sessions
+    // lock; nullopt if there is no such session. f is captureless and its
+    // args/result are copied in and out, the same rules as guarded<T>::with,
+    // because that is what this is. Nothing escapes that points into a
+    // session, so a concurrent close can never free one under a reader.
+    template <class F, class... Args>
+    auto with_session(const std::string& id, F f, Args... args) {
+        (void)f;
+        using R = std::invoke_result_t<F&, Session&, Args&&...>;
+        return sessions_.with([](Sessions& ss, std::string k, Args... a) -> std::optional<R> {
+            auto it = ss.by_id.find(k);
+            if (it == ss.by_id.end()) return std::nullopt;
+            return F{}(it->second, std::move(a)...);
+        }, id, std::move(args)...);
+    }
 
     // ── Session modes ────────────────────────────────────────────────────
     static ::acp::SessionModeState mode_state(Profile current);
@@ -183,11 +187,11 @@ private:
     static const char*    mode_id_for(Profile p);
 
     // ── Persisted session index (cwd + title sidecar) ────────────────────
-    void                  index_session(const Session& sess);
+    void                  index_session(const std::string& id);
     void                  unindex_session(const std::string& id);
     nlohmann::json        load_session_index();
 
-    void                  persist(const Session& sess);
+    void                  persist(const std::string& id);
     void                  replay_history(const std::string& session_id,
                                          const Thread& thread);
 
@@ -217,15 +221,7 @@ private:
     }
 
 
-    // Rank 10 (kSessionRank): the OUTER lock of the session/thread hierarchy.
-    SessionMutex                                           session_mtx_;
-    std::unordered_map<std::string, std::shared_ptr<Session>> sessions_;
-
-    // Maps the JSON-RPC id (id.dump()) of an in-flight session/prompt request
-    // to its session id, so a generic $/cancel_request targeting that request
-    // id can cancel the right turn. Populated in on_prompt, erased when the
-    // turn settles. Guarded by session_mtx_ (same lock as sessions_).
-    std::unordered_map<std::string, std::string>           prompt_reqid_to_session_;
+    maya::guarded<Sessions>   sessions_;
 };
 
 } // namespace agentty::acp

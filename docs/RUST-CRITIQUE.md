@@ -18,7 +18,8 @@ something and should say so out loud.
 **This was the strongest Rust point in the codebase, and it was a genuine
 bug. Now fixed** (write sites take `session_mtx_`; read sites snapshot
 `model`/`profile` once under `session_mtx_` at turn start). Kept here as the
-canonical worked example of the Rust thesis.
+canonical worked example of the Rust thesis. (Since superseded: the two
+mutexes are gone and all session state is one `maya::guarded`; see §2.)
 
 `Session` has two mutexes' worth of *documented* discipline:
 - `session_mtx_` guards the session **map** + the `cancel` handle.
@@ -56,27 +57,25 @@ tearing a live read. Lock order (`session_mtx_` before `thread_mtx`) is
 preserved — the snapshots release `session_mtx_` before any `thread_mtx`
 acquisition, so no new nesting is introduced.
 
-## 2. ~~TRADE-OFF~~ BEATS RUST — lock ordering is now a TYPE, not a comment
+## 2. ~~TRADE-OFF~~ BEATS RUST — lock ordering can't be written wrong
 
 `server.cpp` used to repeat the convention *"Lock order: session_mtx_ then
 thread_mtx"* in four comments. Correct today, unenforced tomorrow — a future
 edit taking `thread_mtx` then `session_mtx_` would compile and could deadlock.
 
-**Now:** the two mutexes are `util::RankedMutex<10>` (session) and
-`util::RankedMutex<20>` (thread), and every acquisition goes through
-`util::RankedLock`. The ordering is enforced two ways:
-- **Compile time** — `assert_lock_order<Outer, Inner>()` is a `static_assert`
-  that fails to build if `Inner <= Outer` for two guards taken in one scope.
-- **Run time (debug)** — a thread-local held-rank stack `std::abort()`s with a
-  `dbglog` marker the instant any code acquires a rank ≤ one already held on
-  the thread, anywhere, across function boundaries.
+That was first fixed with ranked mutexes (`RankedMutex<10>` / `<20>` and a
+debug tripwire). **Now** there is only one lock: every session and the
+in-flight prompt map live in one `maya::guarded<Sessions>`, reached through
+`with_session(id, f, args...)`. `f` is captureless and its arguments and
+result are copied in and out, so it cannot reach a second lock, and nothing
+that points into a session can escape. The turn loop works on snapshots and
+writes each tool result back by (message id, tool id), so no lock is held
+across a stream or a tool run, and a session closed mid-turn just makes the
+write-back a no-op.
 
-**Why this beats idiomatic Rust:** Rust's type system does *not* check lock
-ordering — deadlocks are memory-safe there; you reach for `parking_lot`
-lockdep at runtime or collapse to one `Mutex<T>`. Our lock hierarchy is a
-**compile-time-checked type property** *plus* a runtime tripwire, tuned to
-agentty's exact two-tier hierarchy. The ranked-lock header carries its own
-`static_assert` proofs. This is strictly more than stock Rust gives you.
+**Why this beats idiomatic Rust:** a `Mutex<T>` guard is a reference that can
+be held while taking another lock; ordering is still on you. Here the shape of
+the API rules out holding two at all.
 
 ## 3. ~~TRADE-OFF~~ BEATS RUST — worker panics are STRUCTURALLY isolated
 
@@ -189,7 +188,6 @@ failure mode:
 
 | Feature | Site | What it now guarantees |
 |---------|------|------------------------|
-| `constinit` | `util/ranked_lock.hpp` TLS | The deadlock-tripwire's held-rank slots are **compile-guaranteed** zero-initialized before first use. A dynamic-init regression is now a build error, not a garbage-depth mis-fire. |
 | `std::source_location` | `util/isolated_thread.hpp` | Worker-panic breadcrumbs auto-capture `file:line function` at the spawn site — the "where" tag can no longer drift from the actual code, at zero call-site cost. |
 | `std::span` | `rag/simd.hpp` + hnsw/bm25 callers | The SIMD dot/L2 hot path's `(ptr, ptr, n)` triple — which silently trusts both buffers are ≥ n — is replaced by a length-carrying `span` overload; a mismatched embedding dim returns 0 instead of reading past the end. |
 | `std::to_underlying` + `static_assert` | `io/persistence.cpp` `render()` | The error-kind string table is pinned to the enum: adding a `DeserializeErrorKind` arm without a matching row is a **compile error**, not a silent out-of-bounds read. |

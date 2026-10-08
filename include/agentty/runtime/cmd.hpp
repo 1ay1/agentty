@@ -45,28 +45,7 @@
 // (domain/conversation.hpp), so the io layer can queue them too.
 
 
-// http::CancelToken is a shared mutable object, and Sendable refuses
-// shared_ptr by default for exactly that reason. This is the case the rule
-// is measured against rather than a hole in it: CancelToken is ONE
-// std::atomic<bool> with a release store and an acquire load, and nothing
-// else. Sharing it is the point — a reducer trips it (Esc in meta.cpp, a new
-// turn in stream.cpp) while the tool worker polls it, and an atomic flag is
-// how that conversation is supposed to happen.
-//
-// Not to be confused with the login flows, which used to carry their own
-// shared_ptr<atomic_bool>. Those are gone: a login worker is a keyed
-// Sub::stream now, so not asking for the subscription IS the cancel and
-// there is no flag to pass (see cmd_factory's device_login_sub).
-//
-// The difference that made them different in the first place, and still
-// makes THIS one an app concern: a stop_token is tripped by the RUNTIME
-// when the work is no longer subscribed. A streaming turn is a Cmd::task,
-// not a subscription, and the reducer needs to cancel that specific
-// in-flight HTTP request from a later step. jaal has no effect for that,
-// so the token stays the app's own.
-//
-// Opting in the pointer, not the token: the shared_ptr is what crosses.
-MAYA_SENDABLE(agentty::http::CancelTokenPtr);
+// http::CancelTokenPtr is opted in next to the type (io/http.hpp).
 
 // provider::Selection is opted in next to its definition (selection.hpp).
 

@@ -948,22 +948,10 @@ int AgentServer::serve() {
     return 0;
 }
 
-std::shared_ptr<Session> AgentServer::find_session(const std::string& id) {
-    util::RankedLock lk(session_mtx_);
-    auto it = sessions_.find(id);
-    return it == sessions_.end() ? nullptr : it->second;
-}
-
-void AgentServer::persist(const Session& sess) {
-    // Snapshot the thread under the per-session mutex so a worker turn
-    // mutating messages concurrently can't race save_thread's read. Copy
-    // then write outside the lock to keep the hold short.
-    Thread snapshot;
-    {
-        util::RankedLock lk(*sess.thread_mtx);
-        snapshot = sess.thread;
-    }
-    persistence::save_thread(snapshot);
+void AgentServer::persist(const std::string& id) {
+    // Copy the thread out under the lock, write it outside.
+    if (auto snapshot = with_session(id, [](Session& s) { return s.thread; }))
+        persistence::save_thread(*snapshot);
 }
 
 void AgentServer::send_update(const std::string& session_id, a::SessionUpdate update) {
@@ -1003,10 +991,11 @@ void AgentServer::emit_config_state(const std::string& session_id,
                                     const std::string& fallback_model) {
     Profile prof = profile_;
     std::string model = fallback_model;
-    if (auto s = find_session(session_id)) {
-        util::RankedLock lk(session_mtx_);
-        prof  = s->profile;
-        if (!s->model.empty()) model = s->model;
+    if (auto cfg = with_session(session_id, [](Session& s) {
+            return std::pair{s.profile, s.model};
+        })) {
+        prof = cfg->first;
+        if (!cfg->second.empty()) model = cfg->second;
     }
     a::SU_ConfigOptions co;
     // Clean cut: the permission MODE is a config option ONLY when the client
@@ -1025,8 +1014,8 @@ void AgentServer::emit_config_state(const std::string& session_id,
 void AgentServer::replay_history(const std::string& session_id, const Thread& thread) {
     // Project-relative display paths in replayed tool cards, matching a live
     // turn. The session cwd is already set by the time replay runs.
-    std::string scwd;
-    if (auto s = find_session(session_id)) scwd = s->cwd;
+    const std::string scwd =
+        with_session(session_id, [](Session& s) { return s.cwd; }).value_or(std::string{});
 
     // Coalesce the whole replay fan-out into ONE writev + one flush: replay
     // emits many session/update notifications back-to-back, and flushing each
@@ -1153,12 +1142,10 @@ a::InitializeResult AgentServer::on_initialize(const a::InitializeParams& p) {
 }
 
 a::NewSessionResult AgentServer::on_new_session(const a::NewSessionParams& p) {
-    std::string sid;
-    Profile session_profile = profile_;
+    ThreadId tid = persistence::new_id();
+    const std::string sid = tid.value;
+    const Profile session_profile = profile_;
     {
-        util::RankedLock lk(session_mtx_);
-        ThreadId tid = persistence::new_id();
-        sid = tid.value;
         Session s;
         s.id  = sid;
         s.cwd = p.cwd;
@@ -1166,13 +1153,13 @@ a::NewSessionResult AgentServer::on_new_session(const a::NewSessionParams& p) {
         s.thread.id = tid;
         s.thread.title = p.cwd.empty() ? std::string{"ACP session"}
                                        : std::string{"ACP "} + p.cwd;
-        auto ptr = std::make_shared<Session>(std::move(s));
-        sessions_.emplace(sid, ptr);
-        const Session& stored = *ptr;
-        session_profile = stored.profile;
-        persist(stored);
-        index_session(stored);
+        sessions_.with([](Sessions& ss, Session v) {
+            std::string k = v.id;
+            ss.by_id.emplace(std::move(k), std::move(v));
+        }, std::move(s));
     }
+    persist(sid);
+    index_session(sid);
 
     a::NewSessionResult r;
     r.sessionId = a::SessionId{sid};
@@ -1205,34 +1192,33 @@ void AgentServer::on_load_session(const a::LoadSessionParams& p) {
     bool   from_memory = false;
     Profile profile = profile_;
 
-    {
-        util::RankedLock lk(session_mtx_);
-        if (auto it = sessions_.find(sid); it != sessions_.end()) {
-            if (!cwd.empty()) it->second->cwd = cwd;   // guarded by session_mtx_ (held)
-            // Snapshot the thread under the per-session thread mutex so a
-            // worker turn appending an assistant message concurrently can't
-            // race this copy (a read racing a push_back on the same vector).
-            // Lock order: session_mtx_ then thread_mtx, as in on_prompt.
-            util::RankedLock tlk(*it->second->thread_mtx);
-            thread      = it->second->thread;
-            profile     = it->second->profile;
-            from_memory = true;
-        }
+    // Live session: adopt the new cwd and copy the thread out.
+    if (auto live = with_session(sid, [](Session& s, std::string new_cwd) {
+            if (!new_cwd.empty()) s.cwd = std::move(new_cwd);
+            return std::pair{s.thread, s.profile};
+        }, cwd)) {
+        thread      = std::move(live->first);
+        profile     = live->second;
+        from_memory = true;
     }
 
     if (!from_memory) {
-        auto path = persistence::threads_dir() / (sid + ".json");
-        auto loaded = persistence::load_thread_file(path);
+        // load_thread_by_id reads either on-disk format (the append log or
+        // the legacy single document); a bare <id>.json read misses a thread
+        // saved as a log.
+        auto loaded = persistence::load_thread_by_id(ThreadId{sid});
         if (!loaded)
             throw a::RpcError(a::errc::InvalidParams,
                               "session/load: no such session: " + sid,
                               json{{"sessionId", sid}});
         thread = std::move(*loaded);
 
-        util::RankedLock lk(session_mtx_);
         Session s;
         s.id = sid; s.cwd = cwd; s.profile = profile; s.thread = thread;
-        sessions_.insert_or_assign(sid, std::make_shared<Session>(std::move(s)));
+        sessions_.with([](Sessions& ss, Session v) {
+            std::string k = v.id;
+            ss.by_id.insert_or_assign(std::move(k), std::move(v));
+        }, std::move(s));
     }
 
     replay_history(sid, thread);
@@ -1246,16 +1232,10 @@ void AgentServer::on_load_session(const a::LoadSessionParams& p) {
 }
 
 void AgentServer::on_cancel(const a::CancelParams& p) {
-    // Snapshot the cancel handle under the same lock find_session uses, then
-    // act on the local copy — run_turn resets s->cancel concurrently, and a
-    // bare read/reset of the same shared_ptr instance across threads is a
-    // data race.
-    std::shared_ptr<http::CancelToken> tok;
-    if (auto s = find_session(p.sessionId.value); s) {
-        util::RankedLock lk(session_mtx_);
-        tok = s->cancel;
-    }
-    if (tok) tok->cancel();
+    // Copy the cancel handle out, then trip it unlocked: run_turn resets
+    // s.cancel concurrently.
+    auto tok = with_session(p.sessionId.value, [](Session& s) { return s.cancel; });
+    if (tok && *tok) (*tok)->cancel();
 }
 
 void AgentServer::on_cancel_request(const a::RpcId& id) {
@@ -1265,14 +1245,12 @@ void AgentServer::on_cancel_request(const a::RpcId& id) {
     // cancel that turn — identical effect to a session/cancel, just addressed
     // by request id instead of sessionId. Unknown ids (already-settled turns,
     // or non-prompt requests) are a no-op, which is spec-legal.
-    std::shared_ptr<http::CancelToken> tok;
-    {
-        util::RankedLock lk(session_mtx_);
-        auto mit = prompt_reqid_to_session_.find(id.dump());
-        if (mit == prompt_reqid_to_session_.end()) return;
-        auto sit = sessions_.find(mit->second);
-        if (sit != sessions_.end()) tok = sit->second->cancel;
-    }
+    auto tok = sessions_.with([](Sessions& ss, std::string rid) -> http::CancelTokenPtr {
+        auto mit = ss.reqid_to_session.find(rid);
+        if (mit == ss.reqid_to_session.end()) return nullptr;
+        auto sit = ss.by_id.find(mit->second);
+        return sit == ss.by_id.end() ? nullptr : sit->second.cancel;
+    }, id.dump());
     if (tok) tok->cancel();
 }
 
@@ -1308,39 +1286,32 @@ a::SessionModeState AgentServer::mode_state(Profile current) {
 }
 
 void AgentServer::on_set_mode(const a::SetModeParams& p) {
-    auto s = find_session(p.sessionId.value);
-    if (!s)
+    const auto applied = with_session(p.sessionId.value, [](Session& s, std::string mode) {
+        s.profile = profile_from_mode_id(mode, s.profile);
+        return s.profile;
+    }, p.modeId.value);
+    if (!applied)
         throw a::RpcError(a::errc::InvalidParams,
                           "session/set_mode: unknown sessionId: " + p.sessionId.value,
                           json{{"sessionId", p.sessionId.value}});
-    Profile applied;
-    {
-        // Guard the write: a detached worker turn reads sess.profile
-        // (run_tools) with the same lock. Without this the enum write races
-        // a concurrent read. Lock is session_mtx_ (the config guard); never
-        // held across I/O.
-        util::RankedLock lk(session_mtx_);
-        s->profile = profile_from_mode_id(p.modeId.value, s->profile);
-        applied = s->profile;
-    }
     send_update(p.sessionId.value,
-        a::SU_CurrentMode{a::SessionModeId{mode_id_for(applied)}, json::object()});
+        a::SU_CurrentMode{a::SessionModeId{mode_id_for(*applied)}, json::object()});
 }
 
 a::SetConfigOptionResult AgentServer::on_set_config_option(const a::SetConfigOptionParams& p) {
-    auto s = find_session(p.sessionId.value);
-    if (!s)
-        throw a::RpcError(a::errc::InvalidParams,
-                          "session/set_config_option: unknown sessionId: "
-                              + p.sessionId.value,
-                          json{{"sessionId", p.sessionId.value}});
+    const auto unknown = [&p] {
+        return a::RpcError(a::errc::InvalidParams,
+                           "session/set_config_option: unknown sessionId: "
+                               + p.sessionId.value,
+                           json{{"sessionId", p.sessionId.value}});
+    };
+    if (!with_session(p.sessionId.value, [](Session&) { return true; })) throw unknown();
 
     if (p.configId == "model") {
-        // Guard the write: a detached worker turn reads sess.model
-        // (stream_completion) under the same lock. Without this the
-        // std::string write races a concurrent read — a torn read / UAF.
-        util::RankedLock lk(session_mtx_);
-        s->model = p.value;
+        if (!with_session(p.sessionId.value,
+                          [](Session& s, std::string m) { s.model = std::move(m); return true; },
+                          p.value))
+            throw unknown();
     } else if (p.configId == "mode") {
         // Permission profile, shared with the legacy session/set_mode path.
         // Validate against the known ids so a bad value is an error, not a
@@ -1351,12 +1322,12 @@ a::SetConfigOptionResult AgentServer::on_set_config_option(const a::SetConfigOpt
                     + p.value + "'",
                 json{{"configId", "mode"}, {"value", p.value},
                      {"supported", json::array({"ask", "write", "minimal"})}});
-        Profile applied;
-        {
-            util::RankedLock lk(session_mtx_);
-            s->profile = profile_from_mode_id(p.value, s->profile);
-            applied = s->profile;
-        }
+        const auto got = with_session(p.sessionId.value, [](Session& s, std::string mode) {
+            s.profile = profile_from_mode_id(mode, s.profile);
+            return s.profile;
+        }, p.value);
+        if (!got) throw unknown();
+        const Profile applied = *got;
         // Feedback goes on the ONE surface this connection uses: v2 clients
         // get it via the emit_config_state() echo below (the `mode` config
         // option); a v1 client that reached this path anyway still gets its
@@ -1420,15 +1391,17 @@ json AgentServer::load_session_index() {
         [](persistence::Held) { return read_session_index("acp.load_session_index"); });
 }
 
-void AgentServer::index_session(const Session& sess) {
+void AgentServer::index_session(const std::string& id) {
+    auto meta = with_session(id, [](Session& s) { return std::pair{s.cwd, s.thread.title}; });
+    if (!meta) return;
     persistence::with_shared_file(session_index_lane(), session_index_path(),
-        [](persistence::Held, std::string id, json entry) {
+        [](persistence::Held, std::string key, json entry) {
             json j = read_session_index("acp.index_session");
-            j[id] = std::move(entry);
+            j[key] = std::move(entry);
             write_session_index(j);
-        }, sess.id, json{
-            {"cwd", sess.cwd},
-            {"title", sess.thread.title},
+        }, id, json{
+            {"cwd", meta->first},
+            {"title", meta->second},
             {"updatedAt", std::chrono::duration_cast<std::chrono::seconds>(
                 std::chrono::system_clock::now().time_since_epoch()).count()},
         });
@@ -1448,12 +1421,14 @@ a::ListSessionsResult AgentServer::on_list_sessions(const a::ListSessionsParams&
     std::string filter_cwd = p.cwd.value_or("");
     json index = load_session_index();
 
-    {
-        util::RankedLock lk(session_mtx_);
-        for (const auto& [id, s] : sessions_)
-            if (!index.contains(id))
-                index[id] = json{{"cwd", s->cwd}, {"title", s->thread.title}};
-    }
+    // Live sessions not yet in the on-disk index (cwd, title).
+    const auto live = sessions_.read([](const Sessions& ss) {
+        std::vector<std::array<std::string, 3>> out;
+        for (const auto& [id, s] : ss.by_id) out.push_back({id, s.cwd, s.thread.title});
+        return out;
+    });
+    for (const auto& [id, cwd, title] : live)
+        if (!index.contains(id)) index[id] = json{{"cwd", cwd}, {"title", title}};
 
     a::ListSessionsResult result;
     for (auto it = index.begin(); it != index.end(); ++it) {
@@ -1474,8 +1449,8 @@ a::ListSessionsResult AgentServer::on_list_sessions(const a::ListSessionsParams&
 
 a::ResumeSessionResult AgentServer::on_resume_session(const a::ResumeSessionParams& p) {
     on_load_session(p);   // restore + replay
-    Profile profile = profile_;
-    if (auto s = find_session(p.sessionId.value)) profile = s->profile;
+    const Profile profile =
+        with_session(p.sessionId.value, [](Session& s) { return s.profile; }).value_or(profile_);
 
     a::ResumeSessionResult r;
     if (!v2_config())
@@ -1484,12 +1459,11 @@ a::ResumeSessionResult AgentServer::on_resume_session(const a::ResumeSessionPara
 }
 
 void AgentServer::on_close_session(const a::CloseSessionParams& p) {
-    util::RankedLock lk(session_mtx_);
-    sessions_.erase(p.sessionId.value);
+    sessions_.with([](Sessions& ss, std::string id) { ss.by_id.erase(id); }, p.sessionId.value);
 }
 
 void AgentServer::on_delete_session(const a::DeleteSessionParams& p) {
-    { util::RankedLock lk(session_mtx_); sessions_.erase(p.sessionId.value); }
+    sessions_.with([](Sessions& ss, std::string id) { ss.by_id.erase(id); }, p.sessionId.value);
     persistence::delete_thread(ThreadId{p.sessionId.value});
     unindex_session(p.sessionId.value);
 }
@@ -1501,51 +1475,51 @@ void AgentServer::on_prompt(const a::PromptParams& p, Responder resp) {
     std::string text = std::move(parts.text);
     std::string pending_title;   // title to push to Zed's sidebar (first msg only)
 
+    // Local OpenAI-compatible backends (Ollama, llama.cpp) need no key, so
+    // an empty auth is legitimate for them. Only demand credentials for a
+    // hosted (TLS) endpoint or the Anthropic path.
     {
-        util::RankedLock lk(session_mtx_);
-        auto it = sessions_.find(sid);
-        if (it == sessions_.end()) {
-            resp.error(a::errc::InvalidParams, "unknown sessionId: " + sid);
-            return;
-        }
-        // Local OpenAI-compatible backends (Ollama, llama.cpp) need no key,
-        // so an empty auth is legitimate for them. Only demand credentials
-        // for a hosted (TLS) endpoint or the Anthropic path.
         const auto& sel = provider::active();
         const bool keyless_local =
             sel.kind == provider::Kind::OpenAI && !sel.openai_endpoint.use_tls;
+        const bool known = with_session(sid, [](Session&) { return true; }).has_value();
+        if (!known) {
+            resp.error(a::errc::InvalidParams, "unknown sessionId: " + sid);
+            return;
+        }
         if (auth::is_empty(auth_) && !keyless_local) {
             resp.error(a::errc::AuthRequired,
                 "agentty has no credentials — run `agentty login` first");
             return;
         }
-        Message um;
-        um.role   = Role::User;
-        um.text   = std::move(text);
-        um.images = std::move(parts.images);
-        bool first_message = it->second->thread.messages.empty();
-        if (first_message && !um.text.empty())
-            it->second->thread.title = persistence::title_from_first_message(um.text);
-        std::string new_title = first_message ? it->second->thread.title : std::string{};
-        {
-            // Structural mutation — also take the per-session thread mutex so
-            // the worker's snapshot/read sites (which do NOT hold
-            // session_mtx_) are excluded. Lock order: session_mtx_ then
-            // thread_mtx, consistently everywhere.
-            util::RankedLock tlk(*it->second->thread_mtx);
-            it->second->thread.messages.push_back(std::move(um));
-        }
-        it->second->cancel = std::make_shared<http::CancelToken>();
-        // Record this prompt's JSON-RPC id so a generic $/cancel_request
-        // targeting it can find and cancel the right session's turn. Same
-        // lock as sessions_; erased when the turn settles (run_turn).
-        prompt_reqid_to_session_[resp.id().dump()] = sid;
-        // Push the derived title so Zed's thread sidebar shows a meaningful
-        // name the moment the first message lands, matching the native agent
-        // (which titles a thread from its opening turn). Emitted after the
-        // lock scope below.
-        if (!new_title.empty()) pending_title = std::move(new_title);
     }
+    Message um;
+    um.role   = Role::User;
+    um.text   = std::move(text);
+    um.images = std::move(parts.images);
+    // Append the user message, arm a fresh cancel handle, and record this
+    // prompt's JSON-RPC id (so a generic $/cancel_request can find the turn),
+    // in one step. Returns the derived title on the first message, so Zed's
+    // thread sidebar is named the moment it lands, like the native agent.
+    const auto title = sessions_.with(
+        [](Sessions& ss, std::string id, Message m, std::string rid)
+            -> std::optional<std::string> {
+            auto it = ss.by_id.find(id);
+            if (it == ss.by_id.end()) return std::nullopt;
+            Session& s = it->second;
+            const bool first_message = s.thread.messages.empty();
+            if (first_message && !m.text.empty())
+                s.thread.title = persistence::title_from_first_message(m.text);
+            s.thread.messages.push_back(std::move(m));
+            s.cancel = std::make_shared<http::CancelToken>();
+            ss.reqid_to_session[std::move(rid)] = id;
+            return first_message ? s.thread.title : std::string{};
+        }, sid, std::move(um), resp.id().dump());
+    if (!title) {   // closed between the check above and here
+        resp.error(a::errc::InvalidParams, "unknown sessionId: " + sid);
+        return;
+    }
+    pending_title = *title;
 
     if (!pending_title.empty())
         send_update(sid, a::SU_SessionInfo{
@@ -1572,6 +1546,14 @@ void AgentServer::on_prompt(const a::PromptParams& p, Responder resp) {
         });
 }
 
+namespace {
+// A call a weak local model leaked as text, salvaged into a tool call.
+bool is_salvaged_id(const std::string& id) {
+    return std::string_view{id}.starts_with("call_salvaged_");
+}
+constexpr std::string_view kMemoryToolNames[] = {"remember", "forget", "wipe_memory"};
+}  // namespace
+
 void AgentServer::run_turn(std::string session_id, std::string req_id_dump,
                            Responder resp) {
   // This runs on a DETACHED worker thread, entirely outside acp-cpp's
@@ -1596,19 +1578,14 @@ void AgentServer::run_turn(std::string session_id, std::string req_id_dump,
     int salvaged_rounds = 0;
     bool force_text_retry = false;   // next sub-turn: re-prompt with NO tools
     bool budget_done = false;        // the one final tool-free retry has fired
-    auto is_salvaged = [](const std::string& id) {
-        return std::string_view{id}.starts_with("call_salvaged_");
-    };
-    static constexpr std::string_view kMemoryTools[] = {
-        "remember", "forget", "wipe_memory"};
 
     for (int turn = 0; turn < 64; ++turn) {
-        // shared_ptr keeps the Session alive for the whole iteration even if
-        // a concurrent session/close|delete erases the map entry mid-turn.
-        auto s = find_session(session_id);
-        if (!s) { errored = true; error_msg = "session vanished"; break; }
+        // A concurrent session/close|delete ends the turn at the next step.
+        if (!with_session(session_id, [](Session&) { return true; })) {
+            errored = true; error_msg = "session vanished"; break;
+        }
 
-        StopReason stop = stream_completion(*s, cancelled, error_msg,
+        StopReason stop = stream_completion(session_id, cancelled, error_msg,
                                             force_text_retry);
         last_stop = stop;
         force_text_retry = false;
@@ -1624,44 +1601,45 @@ void AgentServer::run_turn(std::string session_id, std::string req_id_dump,
         // back as a tool result (so the wire tool_use↔result pairing stays
         // valid), and let the model take ONE more sub-turn to answer in plain
         // text — instead of returning a blank bubble.
-        if (auto cs = find_session(session_id);
-            cs && !cs->thread.messages.empty()) {
-            // The worker mutates tc.status below; take the per-session thread
-            // mutex for the whole inspect+fail block so a concurrent reader
-            // snapshot (session/load, persist) sees a consistent tool-call
-            // state. send_update does I/O but not on thread.messages, so
-            // holding the lock across it is safe (no lock-order cycle: the
-            // reader takes session_mtx_ then thread_mtx; we hold only
-            // thread_mtx here).
-            util::RankedLock tlk(*cs->thread_mtx);
-            Message& back = cs->thread.messages.back();
-            if (back.role == Role::Assistant) {
-                bool any_salvaged = false, mem_leak = false;
-                for (auto& tc : back.tool_calls) {
-                    if (!is_salvaged(tc.id.value)) continue;
-                    any_salvaged = true;
-                    for (auto t : kMemoryTools)
-                        if (t == tc.name.value) mem_leak = true;
-                }
-                if (any_salvaged) ++salvaged_rounds;
-                const bool budget_blown = salvaged_rounds > kMaxSalvaged;
-                if (mem_leak || budget_blown) {
-                    bool failed_any = false;
+        {
+            // Fail leaked calls in the live session under the lock, and
+            // report which ones so the client cards follow, unlocked.
+            struct Salvage { bool any = false, mem_leak = false;
+                             std::vector<std::string> failed; };
+            const auto sv = with_session(session_id,
+                [](Session& cs, bool fail_now) -> Salvage {
+                    Salvage out;
+                    if (cs.thread.messages.empty()) return out;
+                    Message& back = cs.thread.messages.back();
+                    if (back.role != Role::Assistant) return out;
+                    for (const auto& tc : back.tool_calls) {
+                        if (!is_salvaged_id(tc.id.value)) continue;
+                        out.any = true;
+                        for (auto t : kMemoryToolNames)
+                            if (t == tc.name.value) out.mem_leak = true;
+                    }
+                    if (!(fail_now || out.mem_leak)) return out;
                     for (auto& tc : back.tool_calls) {
-                        if (!is_salvaged(tc.id.value) || tc.is_terminal())
-                            continue;
+                        if (!is_salvaged_id(tc.id.value) || tc.is_terminal()) continue;
                         tc.status = ToolUse::Failed{
                             {}, {}, "this call was not run — do NOT call tools, "
                             "answer the user in plain text now"};
+                        out.failed.push_back(tc.id.value);
+                    }
+                    return out;
+                }, salvaged_rounds + 1 > kMaxSalvaged);
+            if (sv && sv->any) {
+                ++salvaged_rounds;
+                const bool budget_blown = salvaged_rounds > kMaxSalvaged;
+                if (sv->mem_leak || budget_blown) {
+                    for (const auto& id : sv->failed) {
                         a::ToolCallUpdate u;
-                        u.toolCallId = a::ToolCallId{tc.id.value};
+                        u.toolCallId = a::ToolCallId{id};
                         u.status     = a::Just(a::ToolCallStatus::Failed);
                         send_update(session_id, a::SU_ToolCallUpdate{std::move(u)});
-                        failed_any = true;
                     }
-                    // Budget fully blown: one FINAL tool-free retry forces a
-                    // plain-text answer (summarising any results already
-                    // gathered) instead of returning an empty bubble. The
+                    // Over budget: one final tool-free retry so the model
+                    // answers in plain text instead of an empty bubble. The
                     // budget_done latch makes it fire exactly once.
                     if (budget_blown) {
                         if (budget_done) { last_stop = StopReason::EndTurn; break; }
@@ -1669,31 +1647,28 @@ void AgentServer::run_turn(std::string session_id, std::string req_id_dump,
                         force_text_retry = true;
                         continue;
                     }
-                    if (failed_any) { force_text_retry = true; continue; }
+                    if (!sv->failed.empty()) { force_text_retry = true; continue; }
                 }
             }
         }
 
-        bool ran = run_tools(*s, cancelled);
+        bool ran = run_tools(session_id, cancelled);
         if (cancelled || !ran) break;
     }
 
-    if (auto s = find_session(session_id)) {
-        {
-            // Reset the cancel handle under session_mtx_ so it doesn't race
-            // an on_cancel reading the same shared_ptr instance. Drop the
-            // reqid→session mapping in the same critical section — the turn
-            // is settling, so a later $/cancel_request for this id is a no-op.
-            util::RankedLock lk(session_mtx_);
-            s->cancel.reset();
-            prompt_reqid_to_session_.erase(req_id_dump);
-        }
-        persist(*s);
-        index_session(*s);
-    } else {
-        // Session vanished mid-turn (close/delete): still drop the mapping.
-        util::RankedLock lk(session_mtx_);
-        prompt_reqid_to_session_.erase(req_id_dump);
+    // Disarm the cancel handle and drop the reqid mapping in one step (the
+    // turn is settling, so a later $/cancel_request for this id is a no-op),
+    // then persist if the session still exists.
+    const bool alive = sessions_.with([](Sessions& ss, std::string id, std::string rid) {
+        ss.reqid_to_session.erase(rid);
+        auto it = ss.by_id.find(id);
+        if (it == ss.by_id.end()) return false;
+        it->second.cancel.reset();
+        return true;
+    }, session_id, req_id_dump);
+    if (alive) {
+        persist(session_id);
+        index_session(session_id);
     }
 
     a::PromptResult result;
@@ -1710,18 +1685,23 @@ void AgentServer::run_turn(std::string session_id, std::string req_id_dump,
   }
 }
 
-StopReason AgentServer::stream_completion(Session& sess, bool& out_cancelled,
+StopReason AgentServer::stream_completion(const std::string& session_id,
+                                          bool& out_cancelled,
                                           std::string& out_error,
                                           bool suppress_tools) {
     provider::Request req;
-    // Snapshot the mutable per-session model ONCE under session_mtx_ so a
-    // concurrent session/set_config_option (engine thread) can't tear this
-    // std::string read. A model change mid-turn applies to the NEXT turn.
-    std::string sess_model;
-    {
-        util::RankedLock lk(session_mtx_);
-        sess_model = sess.model;
-    }
+    // Snapshot what the request needs ONCE. A model change mid-turn applies
+    // to the NEXT turn; the stream itself runs with no lock held.
+    struct Snap {
+        std::string model, cwd;
+        http::CancelTokenPtr cancel;
+        std::vector<Message> messages;
+    };
+    auto snap = with_session(session_id, [](Session& s) {
+        return Snap{s.model, s.cwd, s.cancel, s.thread.messages};
+    });
+    if (!snap) { out_error = "session vanished"; return StopReason::Unspecified; }
+    const std::string sess_model = snap->model;
     req.model         = sess_model.empty() ? model_id_ : sess_model;
     // Per-model output-token ceiling (mirrors cmd_factory::launch_stream).
     // Without this the default 16384 is shared across reasoning + tool JSON
@@ -1744,9 +1724,9 @@ StopReason AgentServer::stream_completion(Session& sess, bool& out_cancelled,
             && sel.kind == provider::Kind::OpenAI
             && sel.openai_endpoint.native_api;
     }
-    req.cancel        = sess.cancel;
+    req.cancel        = snap->cancel;
     req.auth          = auth_;
-    req.messages      = sess.thread.messages;
+    req.messages      = std::move(snap->messages);
     // suppress_tools: a weak local model that just leaked a junk tool call
     // gets a tool-free retry. With no tools advertised it cannot leak another
     // and answers the user in plain text (proven: qwen2.5-coder:7b greets
@@ -1782,8 +1762,8 @@ StopReason AgentServer::stream_completion(Session& sess, bool& out_cancelled,
     std::string cur_tool_json;
     StreamUsage last_usage;
     bool have_usage = false;
-    const std::string sid = sess.id;
-    const std::string scwd = sess.cwd;
+    const std::string sid = session_id;
+    const std::string scwd = snap->cwd;
     const std::string msg_id = assistant.id.value;
 
     auto sink = [&](agentty::Msg m) {
@@ -1884,7 +1864,7 @@ StopReason AgentServer::stream_completion(Session& sess, bool& out_cancelled,
         out_error = std::string{"stream backend: "} + e.what();
     }
 
-    if (sess.cancel && sess.cancel->is_cancelled()) out_cancelled = true;
+    if (snap->cancel && snap->cancel->is_cancelled()) out_cancelled = true;
 
     if (have_usage) {
         const std::string model = sess_model.empty() ? model_id_ : sess_model;
@@ -1903,83 +1883,68 @@ StopReason AgentServer::stream_completion(Session& sess, bool& out_cancelled,
     // (session/load|resume replay, persist) can't observe a half-grown
     // vector or race the reallocation. Held only for the push, not the
     // stream above.
-    {
-        util::RankedLock lk(*sess.thread_mtx);
-        sess.thread.messages.push_back(std::move(assistant));
-    }
+    with_session(session_id,
+                 [](Session& s, Message m) { s.thread.messages.push_back(std::move(m)); return true; },
+                 std::move(assistant));
     return stop;
 }
 
-bool AgentServer::run_tools(Session& sess, bool& out_cancelled) {
-    if (sess.thread.messages.empty()) return false;
-    Message& last = sess.thread.messages.back();
-    if (last.role != Role::Assistant || last.tool_calls.empty()) return false;
-
-    // Snapshot the mutable per-session profile ONCE under session_mtx_ so a
-    // concurrent session/set_mode (engine thread) can't race this read. The
-    // gate uses one stable profile for the whole tool batch; a mode change
-    // mid-turn takes effect next turn.
-    Profile profile;
-    {
-        util::RankedLock lk(session_mtx_);
-        profile = sess.profile;
+void AgentServer::settle_tool(const TurnCtx& ctx, ToolUse& tc, ToolUse::Status st,
+                              std::chrono::steady_clock::time_point executing_since) {
+    if (executing_since != std::chrono::steady_clock::time_point{}) {
+        if (auto* d = std::get_if<ToolUse::Done>(&st))   d->executing_since = executing_since;
+        if (auto* f = std::get_if<ToolUse::Failed>(&st)) f->executing_since = executing_since;
     }
+    tc.status = st;
+    // Write it back by (message id, tool id): a session closed mid-turn, or a
+    // message that moved, just means nothing to update.
+    with_session(ctx.id, [](Session& s, std::string mid, std::string tid, ToolUse::Status v) {
+        for (auto it = s.thread.messages.rbegin(); it != s.thread.messages.rend(); ++it) {
+            if (it->id.value != mid) continue;
+            for (auto& t : it->tool_calls)
+                if (t.id.value == tid) { t.status = std::move(v); return true; }
+            return false;
+        }
+        return false;
+    }, ctx.msg_id, tc.id.value, std::move(st));
+}
+
+bool AgentServer::run_tools(const std::string& session_id, bool& out_cancelled) {
+    // Copy out the batch and what the gate needs, once. The profile is one
+    // stable value for the whole batch; a mode change mid-turn takes effect
+    // next turn. Tools run on the copies with no lock held, and each settled
+    // status is written back through settle_tool.
+    struct Batch {
+        TurnCtx ctx;
+        Profile profile = Profile::Ask;
+        std::vector<ToolUse> calls;
+        std::set<std::string> grants;
+    };
+    auto batch = with_session(session_id, [](Session& s) -> std::optional<Batch> {
+        if (s.thread.messages.empty()) return std::nullopt;
+        const Message& last = s.thread.messages.back();
+        if (last.role != Role::Assistant || last.tool_calls.empty()) return std::nullopt;
+        return Batch{TurnCtx{s.id, s.cwd, last.id.value, s.cancel},
+                     s.profile, last.tool_calls, s.grants};
+    });
+    if (!batch || !*batch) return false;
+    const TurnCtx ctx = (*batch)->ctx;
+    const Profile profile = (*batch)->profile;
+    auto& grants = (*batch)->grants;
 
     // Tool-scheduling note: unlike the TUI path (cmd_factory), which uses
     // effects::is_parallel_safe(active, want) to fan out compose-safe tools
     // (Pure/ReadFs/Net) and serialise exclusive ones (WriteFs/Exec), the ACP
     // path runs every tool call STRICTLY SERIALLY in emission order. Serial
-    // execution is a subset of the parallel-safety rule — it never starts a
-    // second tool while another is in flight — so it can never violate the
-    // exclusivity the effect set demands; it just forgoes the latency win of
-    // overlapping independent reads. Kept serial deliberately: the ACP turn
-    // loop is already off the reader thread, tool results must be appended to
-    // `last.tool_calls` in a stable order for the wire tool_use↔result
-    // pairing, and Zed renders the cards sequentially anyway.
-    // The worker mutates each tc.status in place as tools resolve. Those
-    // writes must be exclusive with a concurrent reader snapshot
-    // (session/load, persist), which copies the whole messages vector under
-    // thread_mtx. We CAN'T hold thread_mtx across a tool's execution (minutes
-    // for a slow bash/web_fetch would stall load/persist), so each status
-    // assignment is guarded individually via this helper. The reference
-    // `last` (and every `tc` iterator into last.tool_calls) stays valid
-    // across the loop ONLY because the worker never push_backs to
-    // `messages` during run_tools (no reallocation) and the reader only
-    // reads.
-    //
-    // A Rust borrow checker would ENFORCE that invariant at compile time
-    // (you can't hold `&mut messages.back()` and also mutate `messages`).
-    // We can't, so we make the invariant LOUD instead of silent: capture the
-    // vector's storage identity up front and assert it every mutation. If a
-    // future edit ever appends to `messages` inside this loop, `last`/`tc`
-    // would dangle — this turns that latent use-after-realloc (silent UB)
-    // into an immediate, debuggable abort. Same "abort-not-corrupt"
-    // discipline as domain/session.hpp's .value() sites.
-    const Message* const   msgs_data0 = sess.thread.messages.data();
-    const std::size_t      msgs_size0 = sess.thread.messages.size();
-    const ToolUse* const   tcs_data0  = last.tool_calls.data();
-    const std::size_t      tcs_size0  = last.tool_calls.size();
-    auto assert_no_realloc = [&] {
-        // If either vector reallocated or shrank, `last`/`tc` dangle. Fail
-        // loudly rather than corrupt.
-        if (sess.thread.messages.data() != msgs_data0 ||
-            sess.thread.messages.size() <  msgs_size0 ||
-            last.tool_calls.data()      != tcs_data0  ||
-            last.tool_calls.size()      <  tcs_size0) {
-            util::dbglog("acp.run_tools.INVARIANT",
-                         "messages/tool_calls reallocated mid-turn — "
-                         "held reference would dangle");
-            std::abort();
-        }
-    };
-    auto set_status = [&](ToolUse& tc, ToolUse::Status st) {
-        util::RankedLock tlk(*sess.thread_mtx);
-        assert_no_realloc();
-        tc.status = std::move(st);
-    };
+    // execution is a subset of the parallel-safety rule, so it can never
+    // violate the exclusivity the effect set demands; it just forgoes the
+    // latency win of overlapping independent reads. Results land in emission
+    // order for the wire tool_use/result pairing, and Zed renders the cards
+    // sequentially anyway.
+    auto set_status = [&](ToolUse& tc, ToolUse::Status st) { settle_tool(ctx, tc, std::move(st)); };
 
-    for (auto& tc : last.tool_calls) {
-        if (sess.cancel && sess.cancel->is_cancelled()) { out_cancelled = true; return false; }
+    for (auto& tc : (*batch)->calls) {
+        if (ctx.cancelled()) { out_cancelled = true; return false; }
 
         // Resolve the tool ONCE so the permission gate and the execution run
         // against the same definition (an mcp/tools/list_changed mid-turn can
@@ -1989,22 +1954,26 @@ bool AgentServer::run_tools(Session& sess, bool& out_cancelled) {
 
         bool needs_perm =
             tool::DynamicDispatch::needs_permission_with(td, profile)
-            && !sess.grants.contains(tc.name.value);
+            && !grants.contains(tc.name.value);
         if (needs_perm) {
             a::ToolCallUpdate u;
             u.toolCallId = a::ToolCallId{tc.id.value};
             u.status     = a::Just(a::ToolCallStatus::Pending);
-            send_update(sess.id, a::SU_ToolCallUpdate{std::move(u)});
+            send_update(ctx.id, a::SU_ToolCallUpdate{std::move(u)});
 
-            auto outcome = ask_permission(sess.id, tc);
-            if (sess.cancel && sess.cancel->is_cancelled()) { out_cancelled = true; return false; }
-            if (outcome == PermissionOutcome::AllowAlways) sess.grants.insert(tc.name.value);
+            auto outcome = ask_permission(ctx.id, tc);
+            if (ctx.cancelled()) { out_cancelled = true; return false; }
+            if (outcome == PermissionOutcome::AllowAlways) {
+                grants.insert(tc.name.value);
+                with_session(ctx.id, [](Session& s, std::string n) { s.grants.insert(std::move(n)); return true; },
+                             tc.name.value);
+            }
             if (outcome == PermissionOutcome::Deny) {
                 set_status(tc, ToolUse::Rejected{});
                 a::ToolCallUpdate r;
                 r.toolCallId = a::ToolCallId{tc.id.value};
                 r.status     = a::Just(a::ToolCallStatus::Failed);
-                send_update(sess.id, a::SU_ToolCallUpdate{std::move(r)});
+                send_update(ctx.id, a::SU_ToolCallUpdate{std::move(r)});
                 continue;
             }
         }
@@ -2012,7 +1981,7 @@ bool AgentServer::run_tools(Session& sess, bool& out_cancelled) {
         a::ToolCallUpdate running;
         running.toolCallId = a::ToolCallId{tc.id.value};
         running.status     = a::Just(a::ToolCallStatus::InProgress);
-        send_update(sess.id, a::SU_ToolCallUpdate{std::move(running)});
+        send_update(ctx.id, a::SU_ToolCallUpdate{std::move(running)});
 
         // Live-terminal fast path: when the client hosts terminals and our
         // sandbox isn't wrapping commands, run `bash` through the client's ACP
@@ -2020,7 +1989,7 @@ bool AgentServer::run_tools(Session& sess, bool& out_cancelled) {
         // claude-code-acp UX) instead of us capturing static text. Emits its
         // own completion update + sets tc.status; nullopt means "not eligible,
         // use internal execution below".
-        if (auto tr = run_bash_via_terminal(sess, tc)) {
+        if (auto tr = run_bash_via_terminal(ctx, tc)) {
             if (tr->cancelled) { out_cancelled = true; return false; }
             continue;
         }
@@ -2046,14 +2015,14 @@ bool AgentServer::run_tools(Session& sess, bool& out_cancelled) {
         // the future every 50 ms.
         std::stop_source wake;
         // The skills the model can already see, derived from this session's
-        // visible transcript under thread_mtx (the worker mutates messages),
+        // visible transcript (copied out under the sessions lock),
         // then handed to the job — the `skill` tool runs there and has no
         // Thread. Only the skill tool reads it, so only it pays to derive.
         std::vector<std::string> active_skills;
         if (tc.name.value == "skill") {
-            util::RankedLock tlk(*sess.thread_mtx);
-            active_skills = tools::skills::active_in(
-                ::agentty::visible_text(sess.thread));
+            active_skills = with_session(ctx.id, [](Session& s) {
+                return tools::skills::active_in(::agentty::visible_text(s.thread));
+            }).value_or(std::vector<std::string>{});
         }
         auto fut = util::background_pool().submit_isolated(
             [td, name = tc.name.value, args = tc.args, wake,
@@ -2066,8 +2035,8 @@ bool AgentServer::run_tools(Session& sess, bool& out_cancelled) {
                 return tool::DynamicDispatch::execute_with(td, name, args);
             });
         std::optional<std::stop_callback<std::function<void()>>> on_cancel;
-        if (sess.cancel)
-            on_cancel.emplace(sess.cancel->token(),
+        if (ctx.cancel)
+            on_cancel.emplace(ctx.cancel->token(),
                               std::function<void()>{[wake]() mutable {
                                   wake.request_stop();
                               }});
@@ -2087,7 +2056,7 @@ bool AgentServer::run_tools(Session& sess, bool& out_cancelled) {
         const bool finished =
             fut.wait_for(std::chrono::seconds{0}) == std::future_status::ready;
         const bool tool_cancelled =
-            !finished && woke && sess.cancel && sess.cancel->is_cancelled();
+            !finished && woke && ctx.cancelled();
         const bool tool_timed_out = !finished && !woke;
 
         if (tool_cancelled || tool_timed_out) {
@@ -2095,13 +2064,11 @@ bool AgentServer::run_tools(Session& sess, bool& out_cancelled) {
             // waited for at teardown; its late result is discarded.
             const char* why = tool_timed_out ? "timed out" : "cancelled";
             if (tool_timed_out) util::dbglog("acp.run_tools.timeout", tc.name.value);
-            set_status(tc, ToolUse::Failed{{}, {}, why});
-            if (auto* fp = std::get_if<ToolUse::Failed>(&tc.status))
-                fp->executing_since = tool_start;
+            settle_tool(ctx, tc, ToolUse::Failed{{}, {}, why}, tool_start);
             a::ToolCallUpdate c;
             c.toolCallId = a::ToolCallId{tc.id.value};
             c.status     = a::Just(a::ToolCallStatus::Failed);
-            send_update(sess.id, a::SU_ToolCallUpdate{std::move(c)});
+            send_update(ctx.id, a::SU_ToolCallUpdate{std::move(c)});
             if (tool_cancelled) { out_cancelled = true; return false; }
             // A timeout fails just this tool; continue the turn so the model
             // can react to the failure result.
@@ -2119,7 +2086,7 @@ bool AgentServer::run_tools(Session& sess, bool& out_cancelled) {
             a::ToolCallUpdate f;
             f.toolCallId = a::ToolCallId{tc.id.value};
             f.status     = a::Just(a::ToolCallStatus::Failed);
-            send_update(sess.id, a::SU_ToolCallUpdate{std::move(f)});
+            send_update(ctx.id, a::SU_ToolCallUpdate{std::move(f)});
             continue;
         }
         auto result = std::move(*got);
@@ -2176,9 +2143,7 @@ bool AgentServer::run_tools(Session& sess, bool& out_cancelled) {
             // client. tool_start is stamped above at the pool submit that is
             // this path's actual dispatch, and the timeout branch already
             // uses it. The two terminal paths now agree.
-            set_status(tc, ToolUse::Done{{}, {}, result->text});
-            if (auto* d = std::get_if<ToolUse::Done>(&tc.status))
-                d->executing_since = tool_start;
+            settle_tool(ctx, tc, ToolUse::Done{{}, {}, result->text}, tool_start);
         } else {
             std::string detail = result.error().render();
             a::List<a::ToolCallContent> content;
@@ -2194,12 +2159,10 @@ bool AgentServer::run_tools(Session& sess, bool& out_cancelled) {
             upd.content   = a::Just(std::move(content));
             upd.rawOutput = a::Just<json>(json{{"text", detail}, {"error", true}});
             // Same as the Done branch: tool_start is the dispatch stamp.
-            set_status(tc, ToolUse::Failed{{}, {}, detail});
-            if (auto* fp = std::get_if<ToolUse::Failed>(&tc.status))
-                fp->executing_since = tool_start;
+            settle_tool(ctx, tc, ToolUse::Failed{{}, {}, detail}, tool_start);
         }
 
-        send_update(sess.id, a::SU_ToolCallUpdate{std::move(upd)});
+        send_update(ctx.id, a::SU_ToolCallUpdate{std::move(upd)});
     }
 
     return true;
@@ -2207,7 +2170,7 @@ bool AgentServer::run_tools(Session& sess, bool& out_cancelled) {
 
 // Live-terminal execution of a `bash` call. See header for the contract.
 std::optional<AgentServer::TerminalRun>
-AgentServer::run_bash_via_terminal(Session& sess, ToolUse& tc) {
+AgentServer::run_bash_via_terminal(const TurnCtx& ctx, ToolUse& tc) {
     namespace sp = tools::spec;
 
     // Eligibility: the `bash` tool only; the client must host terminals; and
@@ -2235,34 +2198,32 @@ AgentServer::run_bash_via_terminal(Session& sess, ToolUse& tc) {
     std::string cd = str("cd");
     if (cd.empty()) cd = str("cwd");
     if (cd.empty()) cd = str("workdir");
-    const std::string& run_cwd = cd.empty() ? sess.cwd : cd;
+    const std::string& run_cwd = cd.empty() ? ctx.cwd : cd;
 
-    auto is_cancelled = [&] { return sess.cancel && sess.cancel->is_cancelled(); };
-    auto set_status = [&](ToolUse::Status st) {
-        util::RankedLock tlk(*sess.thread_mtx);
-        tc.status = std::move(st);
+    auto is_cancelled = [&] { return ctx.cancelled(); };
+    auto set_status = [&](ToolUse::Status st,
+                          std::chrono::steady_clock::time_point since = {}) {
+        settle_tool(ctx, tc, std::move(st), since);
     };
     // Execution starts HERE (the terminal create is the dispatch), not at
     // the card's birth — mirror the local bash tool's convention so the
     // stats panel's tool-time slice measures running, not queueing.
     const auto exec_started = std::chrono::steady_clock::now();
     auto fail = [&](const std::string& detail) -> TerminalRun {
-        set_status(ToolUse::Failed{{}, {}, detail});
-        if (auto* fp = std::get_if<ToolUse::Failed>(&tc.status))
-            fp->executing_since = exec_started;
+        set_status(ToolUse::Failed{{}, {}, detail}, exec_started);
         a::ToolCallUpdate f;
         f.toolCallId = a::ToolCallId{tc.id.value};
         f.status     = a::Just(a::ToolCallStatus::Failed);
         a::List<a::ToolCallContent> c;
         c.push_back(a::ToolCallContent{a::TCC_Content{text_block(detail), json::object()}});
         f.content = a::Just(std::move(c));
-        send_update(sess.id, a::SU_ToolCallUpdate{std::move(f)});
+        send_update(ctx.id, a::SU_ToolCallUpdate{std::move(f)});
         return TerminalRun{false, false, detail};
     };
 
     // 1) Ask the client to spawn the process in its own terminal.
     a::CreateTerminalParams cp;
-    cp.sessionId = a::SessionId{sess.id};
+    cp.sessionId = a::SessionId{ctx.id};
     // Run through a shell so pipes/redirects/globs behave like the bash tool.
 #ifdef _WIN32
     cp.command = "cmd.exe";
@@ -2298,9 +2259,9 @@ AgentServer::run_bash_via_terminal(Session& sess, ToolUse& tc) {
                 self->conn_.terminal_release(r).get();
             } catch (...) { /* client gone; nothing to clean up */ }
         }
-    } releaser{this, sess.id, terminal_id};
+    } releaser{this, ctx.id, terminal_id};
 
-    a::TerminalRef ref; ref.sessionId = a::SessionId{sess.id}; ref.terminalId = terminal_id;
+    a::TerminalRef ref; ref.sessionId = a::SessionId{ctx.id}; ref.terminalId = terminal_id;
 
     // 2) Show the live terminal in the tool card. Zed renders the streaming
     //    output itself from this content block keyed to the terminal id.
@@ -2310,7 +2271,7 @@ AgentServer::run_bash_via_terminal(Session& sess, ToolUse& tc) {
         a::List<a::ToolCallContent> c;
         c.push_back(a::ToolCallContent{a::TCC_Terminal{terminal_id, json::object()}});
         u.content = a::Just(std::move(c));
-        send_update(sess.id, a::SU_ToolCallUpdate{std::move(u)});
+        send_update(ctx.id, a::SU_ToolCallUpdate{std::move(u)});
     }
 
     // 3) Wait for the process to exit, honouring cancellation. terminal/kill
@@ -2350,7 +2311,7 @@ AgentServer::run_bash_via_terminal(Session& sess, ToolUse& tc) {
                 cc.push_back(a::ToolCallContent{
                     a::TCC_Content{text_block("(cancelled)"), json::object()}});
                 c.content = a::Just(std::move(cc));
-                send_update(sess.id, a::SU_ToolCallUpdate{std::move(c)});
+                send_update(ctx.id, a::SU_ToolCallUpdate{std::move(c)});
                 return TerminalRun{false, true, {}};
             }
         }
@@ -2406,25 +2367,21 @@ AgentServer::run_bash_via_terminal(Session& sess, ToolUse& tc) {
     upd.rawOutput = a::Just<json>(json{{"text", model_text},
                                        {"exitCode", code},
                                        {"truncated", truncated}});
-    send_update(sess.id, a::SU_ToolCallUpdate{std::move(upd)});
+    send_update(ctx.id, a::SU_ToolCallUpdate{std::move(upd)});
 
-    if (ok) set_status(ToolUse::Done{{}, {}, model_text});
-    else    set_status(ToolUse::Failed{{}, {}, model_text});
     // Execution began at the terminal create (the dispatch), not the card's
-    // birth — stamp the window onto the just-settled state so the stats
-    // fold measures running time, not queueing.
-    if (auto* d = std::get_if<ToolUse::Done>(&tc.status))
-        d->executing_since = exec_started;
-    else if (auto* fp = std::get_if<ToolUse::Failed>(&tc.status))
-        fp->executing_since = exec_started;
+    // birth — stamp that onto the settled state so the stats fold measures
+    // running time, not queueing.
+    if (ok) set_status(ToolUse::Done{{}, {}, model_text}, exec_started);
+    else    set_status(ToolUse::Failed{{}, {}, model_text}, exec_started);
 
     return TerminalRun{ok, false, std::move(model_text)};
 }
 
 AgentServer::PermissionOutcome
 AgentServer::ask_permission(const std::string& session_id, const ToolUse& tc) {
-    std::string cwd;
-    if (auto s = find_session(session_id)) cwd = s->cwd;
+    const std::string cwd =
+        with_session(session_id, [](Session& s) { return s.cwd; }).value_or(std::string{});
     a::RequestPermissionParams req;
     req.sessionId = a::SessionId{session_id};
     // ToolCallUpdate carries the tool card for the permission dialog.

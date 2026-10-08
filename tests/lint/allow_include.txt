@@ -10,9 +10,6 @@
 # jaal loop and therefore no task machinery. That premise was wrong:
 # maya::pool is standalone and needs no loop, so background.hpp now
 # posts to it and spawns no thread of its own.
-# ranked_lock: lock-ordering enforcement. The mutex IS the subject, and the
-# thread_local is the per-thread rank stack it checks against.
-agentty/util/ranked_lock.hpp: mutex thread_local
 agentty/util/logx.hpp: atomic
 
 # ── The turn's cancel token ──────────────────────────────────────────────
