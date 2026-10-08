@@ -12,12 +12,13 @@
 #include "agentty/domain/bundled_catalog.hpp"
 
 #include <chrono>
-#include <mutex>
 #include <optional>
 #include <utility>
 #include <vector>
 
 #include <nlohmann/json.hpp>
+
+#include <maya/runtime.hpp>
 
 #include "agentty/provider/kimi/kimi_oauth.hpp"
 #include "agentty/provider/openai/transport.hpp"
@@ -32,8 +33,8 @@ namespace {
 constexpr const char* kApiHost   = "api.kimi.com";
 constexpr const char* kBasePath  = "/coding/v1";
 
-std::mutex& models_mu() { static std::mutex m; return m; }
-std::vector<ModelInfo>& models_cache() { static std::vector<ModelInfo> c; return c; }
+using Models = std::vector<ModelInfo>;
+maya::guarded<Models>& models_cache() { static maya::guarded<Models> c; return c; }
 
 // Query /coding/v1/usages. Returns a human message when the account is out of
 // credits (Kimi reports 429 resource_exhausted here even though /chat 500s),
@@ -145,10 +146,8 @@ static std::vector<ModelInfo> bundled_models() {
 }
 
 std::vector<ModelInfo> list_models() {
-    {
-        std::lock_guard<std::mutex> lk(models_mu());
-        if (!models_cache().empty()) return models_cache();
-    }
+    if (auto hit = models_cache().read([](const Models& c) { return c; }); !hit.empty())
+        return hit;
     auto tok = fresh_token();
     if (!tok) return bundled_models();
 
@@ -166,8 +165,7 @@ std::vector<ModelInfo> list_models() {
             if (b.id.value == m.id.value) { m.context_window = b.context_window; break; }
     }
 
-    std::lock_guard<std::mutex> lk(models_mu());
-    models_cache() = models;
+    models_cache().with([](Models& c, Models fresh) { c = std::move(fresh); }, models);
     return models;
 }
 
@@ -177,8 +175,7 @@ std::string default_model() {
 }
 
 void invalidate_model_cache() {
-    std::lock_guard<std::mutex> lk(models_mu());
-    models_cache().clear();
+    models_cache().with([](Models& c) { c.clear(); });
 }
 
 } // namespace agentty::provider::kimi

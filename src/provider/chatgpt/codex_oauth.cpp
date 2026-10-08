@@ -7,7 +7,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
-#include <mutex>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -35,6 +34,8 @@
 #include "agentty/io/http.hpp"
 #include "agentty/util/base64.hpp"
 #include "agentty/util/dbglog.hpp"
+
+#include <maya/runtime.hpp>
 
 namespace agentty::provider::chatgpt {
 namespace {
@@ -519,15 +520,12 @@ CodexCredentials from_json(const json& j) {
     return c;
 }
 
-std::mutex& store_mutex() {
-    static std::mutex m;
-    return m;
-}
+// The creds file. Every read and write runs inside store().with; the
+// generation bumps on each save or clear, so a refresh can tell whether the
+// file changed under it while the network call was out.
+struct Store { std::uint64_t generation = 0; };
+maya::guarded<Store>& store() { static maya::guarded<Store> s; return s; }
 
-std::uint64_t& store_generation() {
-    static std::uint64_t generation = 0; // guarded by store_mutex()
-    return generation;
-}
 
 std::optional<CodexCredentials> load_codex_credentials_unlocked() {
     std::ifstream ifs(auth::config_dir() / "codex_credentials.json",
@@ -574,6 +572,13 @@ bool save_codex_credentials_unlocked(const CodexCredentials& c) {
     return true;
 }
 
+struct Loaded { std::optional<CodexCredentials> creds; std::uint64_t generation = 0; };
+Loaded load_with_generation() {
+    return store().with([](Store& st) {
+        return Loaded{load_codex_credentials_unlocked(), st.generation};
+    });
+}
+
 } // namespace
 
 bool CodexCredentials::expired(std::int64_t skew_ms) const noexcept {
@@ -585,23 +590,24 @@ fs::path codex_credentials_path() {
 }
 
 std::optional<CodexCredentials> load_codex_credentials() {
-    std::scoped_lock lock{store_mutex()};
-    return load_codex_credentials_unlocked();
+    return store().with([](Store&) { return load_codex_credentials_unlocked(); });
 }
 
 bool save_codex_credentials(const CodexCredentials& c) {
-    std::scoped_lock lock{store_mutex()};
-    if (!save_codex_credentials_unlocked(c)) return false;
-    ++store_generation();
-    return true;
+    return store().with([](Store& st, CodexCredentials creds) {
+        if (!save_codex_credentials_unlocked(creds)) return false;
+        ++st.generation;
+        return true;
+    }, c);
 }
 
 bool clear_codex_credentials() {
-    std::scoped_lock lock{store_mutex()};
-    std::error_code ec;
-    const bool ok = fs::remove(codex_credentials_path(), ec) || !ec;
-    if (ok) ++store_generation();
-    return ok;
+    return store().with([](Store& st) {
+        std::error_code ec;
+        const bool ok = fs::remove(codex_credentials_path(), ec) || !ec;
+        if (ok) ++st.generation;
+        return ok;
+    });
 }
 
 std::string codex_authorize_url(const auth::PkceVerifier& verifier,
@@ -756,19 +762,22 @@ codex_login(int timeout_s, CodexDeviceCodeSink on_device_code,
     return c;
 }
 
-std::optional<CodexCredentials> codex_fresh_credentials() {
-    // Serialize refresh network calls, but do not hold store_mutex while the
-    // network is in flight: sign-out and a new login must remain responsive.
-    static std::mutex refresh_mu;
-    std::scoped_lock refresh_lock{refresh_mu};
+namespace {
+std::optional<CodexCredentials> codex_fresh_credentials_locked();
+}
 
-    std::optional<CodexCredentials> loaded;
-    std::uint64_t source_generation = 0;
-    {
-        std::scoped_lock store_lock{store_mutex()};
-        loaded = load_codex_credentials_unlocked();
-        source_generation = store_generation();
-    }
+std::optional<CodexCredentials> codex_fresh_credentials() {
+    // One refresh at a time. The store is only held for file IO, never
+    // across the network call, so sign-out and a new login stay responsive.
+    // Lock order: refresh lane, then store.
+    struct RefreshLane {};
+    static maya::guarded<RefreshLane> one_at_a_time;
+    return one_at_a_time.with([](RefreshLane&) { return codex_fresh_credentials_locked(); });
+}
+
+namespace {
+std::optional<CodexCredentials> codex_fresh_credentials_locked() {
+    auto [loaded, source_generation] = load_with_generation();
     if (!loaded) return std::nullopt;
     if (!loaded->expired(/*skew_ms=*/60'000)) return loaded;
     if (loaded->refresh_token.empty()) return loaded;
@@ -780,12 +789,8 @@ std::optional<CodexCredentials> codex_fresh_credentials() {
     // concurrent refreshes mutually invalidate and spin the refresh loop).
     auth::CrossProcessFileLock xlock(codex_credentials_path());
     if (xlock.held()) {
-        std::optional<CodexCredentials> disk;
-        {
-            std::scoped_lock store_lock{store_mutex()};
-            disk = load_codex_credentials_unlocked();
-            source_generation = store_generation();
-        }
+        auto [disk, gen] = load_with_generation();
+        source_generation = gen;
         if (!disk) return loaded;
         if (!disk->expired(/*skew_ms=*/60'000)) return disk;  // a peer refreshed
         if (disk->refresh_token.empty()) return disk;
@@ -795,20 +800,23 @@ std::optional<CodexCredentials> codex_fresh_credentials() {
     auto refreshed = codex_refresh(*loaded);
     if (!refreshed) return loaded;
 
-    std::scoped_lock store_lock{store_mutex()};
-    auto current = load_codex_credentials_unlocked();
-    const bool source_unchanged = current
-        && current->access_token == loaded->access_token
-        && current->refresh_token == loaded->refresh_token
-        && current->account_id == loaded->account_id;
-    if (store_generation() != source_generation || !source_unchanged) {
-        // Sign-out, account activation, another process, or a new login won
-        // the race. Never resurrect/overwrite it from the stale snapshot.
-        return current;
-    }
-    if (!save_codex_credentials_unlocked(*refreshed)) return loaded;
-    ++store_generation();
-    return *refreshed;
+    return store().with([](Store& st, std::uint64_t source_gen, CodexCredentials source,
+                           CodexCredentials fresh) -> std::optional<CodexCredentials> {
+        auto current = load_codex_credentials_unlocked();
+        const bool source_unchanged = current
+            && current->access_token == source.access_token
+            && current->refresh_token == source.refresh_token
+            && current->account_id == source.account_id;
+        if (st.generation != source_gen || !source_unchanged) {
+            // Sign-out, account activation, another process, or a new login
+            // won the race. Never resurrect/overwrite it from the stale snapshot.
+            return current;
+        }
+        if (!save_codex_credentials_unlocked(fresh)) return source;
+        ++st.generation;
+        return fresh;
+    }, source_generation, *loaded, *refreshed);
 }
+} // namespace
 
 } // namespace agentty::provider::chatgpt

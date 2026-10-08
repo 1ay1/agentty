@@ -4,12 +4,13 @@
 #include "agentty/provider/stream_epilogue.hpp"
 
 #include <algorithm>
-#include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "agentty/provider/wire.hpp"
+
+#include <maya/runtime.hpp>
 
 namespace agentty::provider::chatgpt {
 
@@ -53,21 +54,18 @@ std::vector<ModelInfo> bundled_models() {
     return catalog::bundled("chatgpt");
 }
 
-std::mutex           g_models_mu;
-std::vector<ModelInfo> g_models_cache;   // empty until first successful fetch
+// Empty until the first successful live fetch.
+using Models = std::vector<ModelInfo>;
+maya::guarded<Models>& models_cache() { static maya::guarded<Models> c; return c; }
 
 } // namespace
 
 std::vector<ModelInfo> list_models_cached() {
-    std::lock_guard<std::mutex> lk(g_models_mu);
-    return g_models_cache;   // empty until a live fetch has succeeded
+    return models_cache().read([](const Models& c) { return c; });
 }
 
 std::vector<ModelInfo> list_models() {
-    {
-        std::lock_guard<std::mutex> lk(g_models_mu);
-        if (!g_models_cache.empty()) return g_models_cache;
-    }
+    if (auto hit = list_models_cached(); !hit.empty()) return hit;
 
     // Ask the account for its real catalog (blocking, short timeout; empty on
     // any failure). Only attempted when we actually have a credential.
@@ -88,10 +86,8 @@ std::vector<ModelInfo> list_models() {
     }
 
     if (resolved.empty()) resolved = bundled_models();
-    else {
-        std::lock_guard<std::mutex> lk(g_models_mu);
-        g_models_cache = resolved;   // cache only real, server-confirmed lists
-    }
+    else   // cache only real, server-confirmed lists
+        models_cache().with([](Models& c, Models fresh) { c = std::move(fresh); }, resolved);
     return resolved;
 }
 

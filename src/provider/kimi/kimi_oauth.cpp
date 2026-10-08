@@ -14,7 +14,6 @@
 #include <cstdint>
 #include <fstream>
 #include <iterator>
-#include <mutex>
 #include <random>
 #include <thread>
 #include <utility>
@@ -33,6 +32,8 @@
 #include "agentty/auth/auth.hpp"
 #include "agentty/auth/cred_crypt.hpp"
 #include "agentty/io/http.hpp"
+
+#include <maya/runtime.hpp>
 
 namespace agentty::provider::kimi {
 namespace {
@@ -207,7 +208,14 @@ HttpResult post_form(std::string_view path, std::string body) {
 }
 
 // ── Credential store ────────────────────────────────────────────────────────
-std::mutex& store_mutex() { static std::mutex m; return m; }
+// The creds file. Every read and write runs inside store().with; it also
+// holds the signed_in() cache, keyed on the file's (mtime, size).
+struct CredsFile {
+    bool           signed_in = false;
+    std::int64_t   mtime     = -1;
+    std::uintmax_t size      = 0;
+};
+maya::guarded<CredsFile>& store() { static maya::guarded<CredsFile> f; return f; }
 
 fs::path creds_path() { return auth::config_dir() / "kimi_credentials.json"; }
 
@@ -416,41 +424,36 @@ std::vector<std::pair<std::string, std::string>> device_headers() {
 fs::path credentials_path() { return creds_path(); }
 
 std::optional<KimiToken> load_token() {
-    std::scoped_lock lk(store_mutex());
-    return load_unlocked();
+    return store().with([](CredsFile&) { return load_unlocked(); });
 }
 
 bool save_token(const KimiToken& tok) {
-    std::scoped_lock lk(store_mutex());
-    return save_unlocked(tok);
+    return store().with([](CredsFile&, KimiToken t) { return save_unlocked(t); }, tok);
 }
 
 bool clear_credentials() {
-    std::scoped_lock lk(store_mutex());
-    std::error_code ec;
-    return fs::remove(creds_path(), ec) || !ec;
+    return store().with([](CredsFile&) {
+        std::error_code ec;
+        return fs::remove(creds_path(), ec) || !ec;
+    });
 }
 
 bool signed_in() {
     // Called by the picker VIEW once per rendered frame — cache the boolean
     // keyed on the file's (mtime, size) so a fresh stat (~1µs) invalidates on
     // sign-in / sign-out / cross-process change without unseal+parse per frame.
-    std::scoped_lock lk(store_mutex());
-    static std::mutex cache_mu;
-    static bool cached = false;
-    static std::int64_t cached_mtime = -1;
-    static std::uintmax_t cached_size = 0;
-    std::scoped_lock clk(cache_mu);
-    std::error_code ec;
-    auto st = fs::last_write_time(creds_path(), ec);
-    if (ec) { cached = false; cached_mtime = -1; cached_size = 0; return false; }
-    auto sz = fs::file_size(creds_path(), ec);
-    auto mt = st.time_since_epoch().count();
-    if (mt == cached_mtime && sz == cached_size) return cached;
-    cached = load_unlocked().has_value();
-    cached_mtime = mt;
-    cached_size = sz;
-    return cached;
+    return store().with([](CredsFile& c) {
+        std::error_code ec;
+        auto st = fs::last_write_time(creds_path(), ec);
+        if (ec) { c = {}; return false; }
+        auto sz = fs::file_size(creds_path(), ec);
+        auto mt = static_cast<std::int64_t>(st.time_since_epoch().count());
+        if (mt == c.mtime && sz == c.size) return c.signed_in;
+        c.signed_in = load_unlocked().has_value();
+        c.mtime = mt;
+        c.size  = sz;
+        return c.signed_in;
+    });
 }
 
 void invalidate_cached_token() { g_force_refresh.store(true); }
@@ -478,11 +481,19 @@ login(int timeout_s, DeviceCodeSink on_device_code, CancelProbe cancelled) {
     return *tok;
 }
 
-std::optional<KimiToken> fresh_token() {
-    // Serialize refreshes without holding store_mutex across the network call.
-    static std::mutex refresh_mu;
-    std::scoped_lock lk(refresh_mu);
+namespace {
+std::optional<KimiToken> fresh_token_locked();
+}
 
+std::optional<KimiToken> fresh_token() {
+    // One refresh at a time; the store is never held across the network call.
+    struct RefreshLane {};
+    static maya::guarded<RefreshLane> one_at_a_time;
+    return one_at_a_time.with([](RefreshLane&) { return fresh_token_locked(); });
+}
+
+namespace {
+std::optional<KimiToken> fresh_token_locked() {
     auto cur = load_token();
     if (!cur) return std::nullopt;
 
@@ -499,5 +510,6 @@ std::optional<KimiToken> fresh_token() {
     save_token(*refreshed);
     return *refreshed;
 }
+} // namespace
 
 } // namespace agentty::provider::kimi
