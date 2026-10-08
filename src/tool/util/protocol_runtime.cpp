@@ -8,7 +8,8 @@
 //     pool's state is co-owned by the task, so an abandoned body that wakes
 //     later touches only memory it still owns, and the process can exit.
 // parallel_for is a maya::scope (every share joined before it returns), and
-// sleep_for is maya::delay_for (woken by stop).
+// sleep_for is maya::delay_for (woken by stop). rag-cpp's parallel regions
+// get the same maya::scope through its Executor.
 
 #include "agentty/tool/util/protocol_runtime.hpp"
 
@@ -17,11 +18,15 @@
 #include <functional>
 #include <memory>
 #include <stop_token>
+#include <thread>   // hardware_concurrency
 #include <utility>
 
 #include <maya/runtime.hpp>
 #include <mcp/runtime.hpp>
 #include <acp/runtime.hpp>
+#if AGENTTY_HAS_RAGCPP
+#include <rag/util/parallel.hpp>
+#endif
 
 namespace agentty::tools::util {
 
@@ -98,11 +103,31 @@ class MayaRuntime final : public Runtime {
     }
 };
 
+#if AGENTTY_HAS_RAGCPP
+// rag-cpp's parallel regions (index build, embedding batches, search) on
+// maya::scope. A scope never queues behind a busy pool, so a region nested
+// inside another (a query inside a parallel batch) can't deadlock.
+class RagExecutor final : public ::rag::util::Executor {
+  public:
+    void parallel_for(std::size_t n,
+                      const std::function<void(std::size_t)>& fn) override {
+        scope_for(n, fn);
+    }
+    [[nodiscard]] std::size_t width() const noexcept override {
+        const unsigned hc = std::thread::hardware_concurrency();
+        return hc ? hc : 1;
+    }
+};
+#endif
+
 }  // namespace
 
 void install_protocol_runtimes() {
     ::mcp::set_runtime(std::make_shared<MayaRuntime<::mcp::Runtime>>());
     ::acp::set_runtime(std::make_shared<MayaRuntime<::acp::Runtime>>());
+#if AGENTTY_HAS_RAGCPP
+    ::rag::util::set_executor(std::make_shared<RagExecutor>());
+#endif
 }
 
 }  // namespace agentty::tools::util
