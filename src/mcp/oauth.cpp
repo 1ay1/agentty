@@ -10,6 +10,7 @@
 #include "agentty/util/home_dir.hpp"
 #include "agentty/util/user_root.hpp"
 
+#include <maya/runtime.hpp>
 #include <atomic>
 #include <cctype>
 #include <cerrno>
@@ -553,9 +554,9 @@ LoginResult login(const std::string& server_name, const std::string& endpoint_ur
     return r;
 }
 
-std::optional<std::string> bearer_for(const std::string& server_name) {
-    static std::mutex mu;
-    std::scoped_lock lk(mu);
+namespace {
+// The refresh itself; bearer_for serialises it.
+std::optional<std::string> bearer_for_locked(const std::string& server_name) {
     auto tok = load_token(server_name);
     if (!tok) return std::nullopt;
     if (tok->expired()) {
@@ -566,6 +567,20 @@ std::optional<std::string> bearer_for(const std::string& server_name) {
     if (tok->access_token.empty()) return std::nullopt;
     return tok->authorization_header();
 }
+}  // namespace
+
+std::optional<std::string> bearer_for(const std::string& server_name) {
+    // One refresh at a time: two callers seeing the same expired token would
+    // both refresh, and a server that rotates refresh tokens rejects the
+    // second. A guarded<bool> is just the lock; the work runs inside it.
+    static maya::guarded<bool> one_at_a_time;
+    return one_at_a_time.with(
+        [](bool&, std::string name) -> std::optional<std::string> {
+            return bearer_for_locked(name);
+        },
+        server_name);
+}
+
 
 bool logout(const std::string& server_name) {
     std::error_code ec;

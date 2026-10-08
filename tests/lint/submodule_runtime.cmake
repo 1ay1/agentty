@@ -6,7 +6,8 @@
 #
 # Runs jaal's concurrency ban-list over each library's src/ and include/
 # against the library's own tests/lint/concurrency_allowlist.txt (paths
-# relative to the library root), TIGHT, so a grant nobody needs fails too.
+# relative to the library root), and prune_allowlist.cmake over the same, so
+# a grant nobody needs fails too.
 #
 # Run with: cmake -DROOT=<agentty source dir> -P submodule_runtime.cmake
 
@@ -45,6 +46,14 @@ foreach(lib mcp-cpp acp-cpp rag-cpp claybin)
             RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE out)
         if(NOT rc EQUAL 0)
             list(APPEND failed "${lib}/${sub}:\n${out}")
+        endif()
+        # And no grant outlives the code that needed it.
+        execute_process(
+            COMMAND ${CMAKE_COMMAND} -DROOT=${libdir}/${sub} -DALLOW=${tmp}
+                    -P ${ROOT}/tests/lint/prune_allowlist.cmake
+            RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE out)
+        if(NOT rc EQUAL 0)
+            list(APPEND failed "${lib}/${sub} (stale grants):\n${out}")
         endif()
     endforeach()
 endforeach()

@@ -4,12 +4,12 @@
 #include "agentty/provider/acp_agents.hpp"
 #include "agentty/util/user_root.hpp"
 
+#include <maya/runtime.hpp>
 #include <cstdio>
 #include <cstdlib>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
-#include <mutex>
 #include <string_view>
 
 #include <nlohmann/json.hpp>
@@ -115,18 +115,24 @@ bool load_config_uncached(std::vector<AcpAgentSpec>& out) {
 // path — re-reading + JSON-parsing acp-agents.json each time is disk work
 // per frame. Key the parsed vector on (resolved path, mtime, size): a stat
 // is ~1µs and picks up edits, deletion, and env-var retargeting alike.
-bool load_config(std::vector<AcpAgentSpec>& out) {
-    static std::mutex mu;
-    static std::vector<AcpAgentSpec> cached;
-    static bool cached_ok = false;
-    static fs::path cached_path;
-    static fs::file_time_type cached_mtime{};
-    static std::uintmax_t cached_size = 0;
+// Keyed on plain values (path string, mtime ticks) so they can cross into
+// guarded<T>::read as Sendable arguments.
+struct ConfigCache {
+    std::vector<AcpAgentSpec> agents;
+    bool                      ok = false;
+    std::string               path;
+    std::int64_t              mtime = 0;
+    std::uintmax_t            size = 0;
+};
+maya::guarded<ConfigCache>& config_cache() {
+    static maya::guarded<ConfigCache> c;
+    return c;
+}
 
+bool load_config(std::vector<AcpAgentSpec>& out) {
     bool project_local = false;
     fs::path cfg = resolve_config(project_local);
 
-    std::scoped_lock lk(mu);
     std::error_code ec;
     fs::file_time_type mtime{};
     std::uintmax_t size = 0;
@@ -134,15 +140,29 @@ bool load_config(std::vector<AcpAgentSpec>& out) {
         mtime = fs::last_write_time(cfg, ec);
         size  = ec ? 0 : fs::file_size(cfg, ec);
     }
-    if (cfg != cached_path || mtime != cached_mtime || size != cached_size) {
-        cached.clear();
-        cached_ok    = load_config_uncached(cached);
-        cached_path  = cfg;
-        cached_mtime = mtime;
-        cached_size  = size;
+    // Hit: copy the cached list out under the lock.
+    const std::string  key_path  = cfg.string();
+    const std::int64_t key_mtime = mtime.time_since_epoch().count();
+    auto hit = config_cache().read(
+        [](const ConfigCache& c, std::string p, std::int64_t m, std::uintmax_t s)
+            -> std::optional<std::pair<bool, std::vector<AcpAgentSpec>>> {
+            if (c.path != p || c.mtime != m || c.size != s) return std::nullopt;
+            return std::pair{c.ok, c.agents};
+        },
+        key_path, key_mtime, size);
+    if (!hit) {
+        // Miss: parse outside the lock (disk + JSON), then publish.
+        ConfigCache fresh;
+        fresh.ok    = load_config_uncached(fresh.agents);
+        fresh.path  = key_path;
+        fresh.mtime = key_mtime;
+        fresh.size  = size;
+        hit = std::pair{fresh.ok, fresh.agents};
+        config_cache().with([](ConfigCache& c, ConfigCache f) { c = std::move(f); },
+                            std::move(fresh));
     }
-    if (!cached_ok) return false;
-    out.insert(out.end(), cached.begin(), cached.end());
+    if (!hit->first) return false;
+    out.insert(out.end(), hit->second.begin(), hit->second.end());
     return true;
 }
 

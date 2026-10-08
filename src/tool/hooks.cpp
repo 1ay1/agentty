@@ -32,7 +32,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
-#include <mutex>
+#include <initializer_list>
 #include <regex>
 #include <sstream>
 #include <string>
@@ -217,6 +217,41 @@ void store_approval(const HooksFile& hf) {
     return p.string();
 }
 
+// Prefix `cmd` with variable assignments the shell applies to that command
+// only. POSIX: `export A='v' B='v'; <cmd>` (exported so a hook that is a
+// script sees them, and single-quoted so nothing in a value is interpreted).
+// Windows cmd.exe: `set "A=v" && set "B=v" && <cmd>`; the values here are an
+// event name, a tool name and a temp path, none of which carry `"` or `%`.
+[[nodiscard]] std::string with_hook_env(
+    const std::string& cmd,
+    std::initializer_list<std::pair<const char*, std::string>> vars) {
+    std::string out;
+#ifndef _WIN32
+    out = "export";
+    for (const auto& [k, v] : vars) {
+        out += ' ';
+        out += k;
+        out += "='";
+        for (char c : v) {
+            if (c == '\'') out += "'\\''";
+            else out += c;
+        }
+        out += '\'';
+    }
+    out += "; ";
+#else
+    for (const auto& [k, v] : vars) {
+        out += "set \"";
+        out += k;
+        out += '=';
+        out += v;
+        out += "\" && ";
+    }
+#endif
+    out += cmd;
+    return out;
+}
+
 // Run one hook command with the payload plumbed via env + file. Returns
 // {exit_code, captured output}.
 struct HookRun { int exit_code = 0; std::string output; };
@@ -224,37 +259,16 @@ struct HookRun { int exit_code = 0; std::string output; };
                                std::string_view tool,
                                const std::string& payload) {
     const std::string pf = write_payload(payload);
-    // Env is inherited by the child; set + restore around the call. Tool
-    // calls are serialised per-thread (run_hook fires on the tool's own
-    // isolated thread) but env is process-global — guard with a mutex so
-    // two concurrent tools can't interleave setenv windows.
-    static std::mutex env_mu;
-    std::lock_guard lk(env_mu);
-#ifndef _WIN32
-    ::setenv("AGENTTY_HOOK_EVENT", std::string{event}.c_str(), 1);
-    ::setenv("AGENTTY_HOOK_TOOL",  std::string{tool}.c_str(), 1);
-    if (!pf.empty()) ::setenv("AGENTTY_HOOK_PAYLOAD_FILE", pf.c_str(), 1);
-#else
-    // Windows has no setenv/unsetenv — _putenv_s is the CRT equivalent and,
-    // like setenv, mutates the process environment the child inherits.
-    // Without this the hook script on Windows would run with NO context
-    // ($AGENTTY_HOOK_EVENT/TOOL/PAYLOAD_FILE all empty), unable to tell which
-    // event fired or find its payload. Clear with an empty value on unset.
-    ::_putenv_s("AGENTTY_HOOK_EVENT", std::string{event}.c_str());
-    ::_putenv_s("AGENTTY_HOOK_TOOL",  std::string{tool}.c_str());
-    if (!pf.empty()) ::_putenv_s("AGENTTY_HOOK_PAYLOAD_FILE", pf.c_str());
-#endif
-    auto res = util::sandbox::run_shell_command(h.run, kMaxPayloadBytes,
+    // The hook's context goes in ITS command line, not the process env:
+    // setenv/unsetenv mutate state every thread shares, so concurrent tools
+    // needed a global lock around the whole run. A prefix is per-process.
+    const std::string cmd = with_hook_env(h.run, {
+        {"AGENTTY_HOOK_EVENT",        std::string{event}},
+        {"AGENTTY_HOOK_TOOL",         std::string{tool}},
+        {"AGENTTY_HOOK_PAYLOAD_FILE", pf},
+    });
+    auto res = util::sandbox::run_shell_command(cmd, kMaxPayloadBytes,
                                                 kHookTimeout);
-#ifndef _WIN32
-    ::unsetenv("AGENTTY_HOOK_EVENT");
-    ::unsetenv("AGENTTY_HOOK_TOOL");
-    ::unsetenv("AGENTTY_HOOK_PAYLOAD_FILE");
-#else
-    ::_putenv_s("AGENTTY_HOOK_EVENT", "");
-    ::_putenv_s("AGENTTY_HOOK_TOOL",  "");
-    ::_putenv_s("AGENTTY_HOOK_PAYLOAD_FILE", "");
-#endif
     if (!pf.empty()) {
         std::error_code ec;
         fs::remove(pf, ec);

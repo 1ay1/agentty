@@ -19,6 +19,7 @@
 #include "agentty/provider/chatgpt/responses.hpp"
 #include "agentty/provider/responses/responses.hpp"
 
+#include <maya/runtime.hpp>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -246,28 +247,32 @@ bool responses_available() {
     // on the file's (mtime, size): a stat is ~1µs and invalidates correctly
     // on sign-in, sign-out, and cross-process refreshes alike.
     namespace fs = std::filesystem;
-    static std::mutex mu;
-    static bool cached = false;
-    static fs::file_time_type cached_mtime{};
-    static std::uintmax_t cached_size = static_cast<std::uintmax_t>(-1);
-    std::scoped_lock lk(mu);
+    struct Cache {
+        bool           ok = false;
+        std::int64_t   mtime = 0;   // file_time_type ticks: a Sendable key
+        std::uintmax_t size = static_cast<std::uintmax_t>(-1);
+    };
+    static maya::guarded<Cache> cache;
     std::error_code ec;
     const auto p = codex_credentials_path();
-    const auto mtime = fs::last_write_time(p, ec);
+    const std::int64_t mtime = fs::last_write_time(p, ec).time_since_epoch().count();
     const auto size  = ec ? 0 : fs::file_size(p, ec);
     if (ec) {   // missing/unreadable → signed out; remember that cheaply
-        cached = false;
-        cached_mtime = {};
-        cached_size = static_cast<std::uintmax_t>(-1);
+        cache.with([](Cache& c) { c = Cache{}; });
         return false;
     }
-    if (mtime != cached_mtime || size != cached_size) {
-        auto c = load_codex_credentials();
-        cached = c && !c->access_token.empty();
-        cached_mtime = mtime;
-        cached_size  = size;
-    }
-    return cached;
+    if (auto hit = cache.read(
+            [](const Cache& c, std::int64_t m, std::uintmax_t s) -> std::optional<bool> {
+                if (c.mtime != m || c.size != s) return std::nullopt;
+                return c.ok;
+            },
+            mtime, size))
+        return *hit;
+    // Changed: unseal + parse outside the lock, then publish.
+    auto c = load_codex_credentials();
+    const bool ok = c && !c->access_token.empty();
+    cache.with([](Cache& k, Cache v) { k = v; }, Cache{ok, mtime, size});
+    return ok;
 }
 
 // ── Live model catalog ────────────────────────────────────────────────────

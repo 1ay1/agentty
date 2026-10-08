@@ -10,6 +10,7 @@
 // the measured table of what actually varies between hosts.
 #include "agentty/provider/responses/responses.hpp"
 
+#include <maya/runtime.hpp>
 #include <array>
 #include <algorithm>
 #include <atomic>
@@ -873,10 +874,10 @@ void dispatch(StreamCtx& ctx, std::string_view data) {
         && !type.starts_with("response.content_part")
         && !type.starts_with("response.output_text.done")
         && !type.contains("_summary_part")) {
-        static std::mutex           seen_mu;
-        static std::set<std::string> seen;
-        std::lock_guard lk(seen_mu);
-        if (seen.insert(type).second) {
+        static maya::guarded<std::set<std::string>> seen;
+        if (seen.with([](std::set<std::string>& s, std::string t) {
+                return s.insert(std::move(t)).second;
+            }, std::string{type})) {
             // On the WIRE channel, not dbglog. An unknown event is the
             // single most useful line in a bug report about this dialect —
             // and under `AGENTTY_LOG=wire=debug`, the filter someone

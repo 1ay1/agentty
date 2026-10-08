@@ -109,7 +109,6 @@ tool/plugin.cpp: mutex atomic
 # activation set, which drifted from the transcript (wrong after /compact).
 tool/skills.cpp: mutex atomic thread_local
 tool/memory_store.cpp: mutex
-tool/hooks.cpp: mutex
 tool/progress.cpp: thread_local
 # The subagent run registry. A subagent runs on a Cmd::task_isolated thread
 # and holds provider objects by reference off main's stack, so teardown has to
@@ -172,12 +171,10 @@ provider/selection.cpp: mutex
 # connection map.
 provider/external_acp_backend.cpp: mutex
 provider/acp_provider_adapter.cpp: mutex
-provider/acp_agents.cpp: mutex
 provider/dialect.cpp: mutex
-provider/responses/codec.cpp: mutex
 provider/chatgpt/codex_oauth.cpp: mutex
 provider/chatgpt/provider.cpp: mutex
-provider/chatgpt/responses.cpp: mutex thread_local
+provider/chatgpt/responses.cpp: thread_local
 provider/copilot/copilot_oauth.cpp: mutex atomic
 provider/copilot/provider.cpp: mutex thread_local
 provider/kimi/kimi_oauth.cpp: mutex atomic
@@ -197,7 +194,7 @@ mcp/bridge.cpp: mutex atomic
 # mutex guards the session id / protocol version / cancel token; the atomic
 # is the liveness flag the provider reads.
 mcp/http_server.cpp: mutex atomic
-mcp/oauth.cpp: mutex atomic
+mcp/oauth.cpp: atomic
 # rag/adapter: the warm worker moved to a util::WorkerGroup, so the jthread
 # (and its join/reseat dance under mu) is gone. mutex guards the corpus;
 # atomic is the warming gate and the stop flag the index passes poll.
