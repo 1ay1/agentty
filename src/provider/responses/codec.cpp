@@ -899,15 +899,36 @@ void dispatch(StreamCtx& ctx, std::string_view data) {
 // framing, error-body capping, retry-after capture, watchdog timeouts and
 // the shared epilogue — is identical for every Responses backend, which is
 // the whole reason this module exists.
+namespace {
+provider::StreamResult stream_started(const Site& site,
+                                      std::expected<Target, std::string> target,
+                                      provider::Request req,
+                                      provider::EventSink sink);
+}
+
 provider::StreamResult stream(const Site& site, provider::Request req,
                               provider::EventSink sink) {
     sink(StreamStarted{});
-
     // Host resolves credentials + destination (may block on a token refresh,
-    // and may rewrite req.model — e.g. Copilot's Auto session picking a
-    // server-blessed slug). Auth prose is the host's: this layer never
+    // and may rewrite req.model). Auth prose is the host's: this layer never
     // invents remediation text it can't be sure of.
     auto target = site.authorize(req);
+    return stream_started(site, std::move(target), std::move(req), std::move(sink));
+}
+
+provider::StreamResult stream(const Site& site,
+                              std::expected<Target, std::string> target,
+                              provider::Request req,
+                              provider::EventSink sink) {
+    sink(StreamStarted{});
+    return stream_started(site, std::move(target), std::move(req), std::move(sink));
+}
+
+namespace {
+provider::StreamResult stream_started(const Site& site,
+                                      std::expected<Target, std::string> target,
+                                      provider::Request req,
+                                      provider::EventSink sink) {
     if (!target) {
         sink(StreamError{target.error()});
         return provider::StreamResult::failed(
@@ -1017,6 +1038,7 @@ provider::StreamResult stream(const Site& site, provider::Request req,
         },
     });
 }
+} // namespace
 
 // ── Codec accessors (shared by hosts and tests) ───────────────────────────
 std::vector<Msg> parse_sse_for_test(const std::vector<std::string>& sse_data_lines,

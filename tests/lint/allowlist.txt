@@ -166,9 +166,7 @@ workspace/checkpoint.cpp: atomic
 # ── Providers: transports and their shared state ─────────────────────────
 provider/chatgpt/responses.cpp: thread_local
 provider/copilot/copilot_oauth.cpp: atomic
-provider/copilot/provider.cpp: thread_local
 provider/kimi/kimi_oauth.cpp: atomic
-provider/openai/responses_site.cpp: thread_local
 
 # ── MCP and RAG: their own servers and index workers ─────────────────────
 # bridge: the MCP connects moved to pool.submit_isolated, whose future does

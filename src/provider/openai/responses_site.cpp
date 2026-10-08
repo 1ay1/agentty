@@ -43,30 +43,20 @@ namespace {
 
 using json = nlohmann::json;
 
-// The endpoint the CURRENT turn should be dialled on. Set by
-// stream_responses() immediately before responses::stream() runs, because
-// Site::authorize is a plain function pointer with no user-data slot and the
-// destination depends on the active provider row (openai vs openrouter vs a
-// custom host that advertises /responses).
-//
-// thread_local, not global: agentty can run a subagent turn concurrently with
-// the foreground turn, and those may sit on different providers. A shared
-// global here would let one turn retarget the other's host mid-flight.
+// The endpoint this turn should be dialled on. It depends on the active
+// provider row (openai vs openrouter vs a custom host that advertises
+// /responses), so stream_responses() builds the Target from it and hands it
+// to the codec directly.
 struct PendingTarget {
     std::string host;
     std::uint16_t port = 443;
     std::string path;
     bool use_tls = true;
     std::string provider_id;
-    auth::AuthHeader auth;
     std::vector<std::pair<std::string, std::string>> extra_headers;
 };
-thread_local PendingTarget t_pending;
-
 std::expected<responses::Target, std::string>
-openai_authorize(provider::Request& req) {
-    const auto& p = t_pending;
-
+openai_target(const PendingTarget& p, const provider::Request& req) {
     // A TLS host must carry a credential. Local/plaintext hosts (a self-run
     // vLLM or llama.cpp that speaks Responses) legitimately have none, which
     // mirrors the chat transport's rule rather than inventing a second one.
@@ -99,6 +89,12 @@ openai_authorize(provider::Request& req) {
     // session, no server blesses a substitute slug on this path.
     t.model = req.model;
     return t;
+}
+
+// No turn context here; stream_responses() never routes through it.
+std::expected<responses::Target, std::string>
+openai_authorize(provider::Request&) {
+    return std::unexpected(std::string{"openai responses: no endpoint for this turn"});
 }
 
 void openai_decorate_body(json& body, const provider::Request&) {
@@ -193,18 +189,20 @@ bool responses_endpoint_for(std::string_view provider_id,
 provider::StreamResult stream_responses(const ResponsesEndpoint& ep,
                                         provider::Request req,
                                         EventSink sink) {
-    t_pending = PendingTarget{
+    const PendingTarget pending{
         .host = ep.host, .port = ep.port, .path = ep.path,
         .use_tls = ep.use_tls, .provider_id = ep.provider_id,
-        .auth = req.auth, .extra_headers = ep.extra_headers,
+        .extra_headers = ep.extra_headers,
     };
+    auto target = openai_target(pending, req);
     const std::string provider_id = ep.provider_id;
     const std::string model = req.model;
 
     AGT_LOG(Wire, Info, "openai.responses",
             "dialling {}{} for {}", ep.host, ep.path, model);
 
-    auto result = responses::stream(kOpenAiSite, std::move(req), std::move(sink));
+    auto result = responses::stream(kOpenAiSite, std::move(target), std::move(req),
+                                    std::move(sink));
 
     // ── Teach the router from what the wire actually said ────────────────
     // The family tables in dialect.cpp are a prior about model NAMES, and

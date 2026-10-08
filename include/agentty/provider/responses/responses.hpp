@@ -107,6 +107,14 @@ struct Site {
                                             provider::Request req,
                                             provider::EventSink sink);
 
+// Same, for a host that already resolved its Target for this turn: the codec
+// skips site.authorize and uses `target` as given. This is how a host passes
+// per-turn context in without a side channel.
+[[nodiscard]] provider::StreamResult stream(const Site& site,
+                                            std::expected<Target, std::string> target,
+                                            provider::Request req,
+                                            provider::EventSink sink);
+
 // ── Codec pieces (exposed for tests and for hosts that need them) ────────
 
 // Conversation → Responses `input[]`.

@@ -175,25 +175,17 @@ bool auto_chat_compatible(const std::string& id) {
 // ── The Copilot Responses site ──────────────────────────────────
 //
 // Copilot's /responses needs credentials that are resolved ONCE per turn
-// (proxy token + Auto session, both refreshable). Site::authorize is a plain
-// function pointer by design — the descriptor stays data — so the resolved
-// turn context is handed over in this thread-local, set by stream() right
-// before it calls into the shared codec. Per-thread because a turn runs on
-// one worker and subagents stream concurrently on their own.
+// (proxy token + Auto session, both refreshable). stream() resolves them and
+// hands the built Target straight to the codec.
 struct ResponsesTurn {
     std::string host;          // inference host for this session
     std::string token;         // proxy token (Bearer)
     std::string session_token; // copilot-session-token — REQUIRED, measured
     std::string model;         // server-blessed slug
 };
-ResponsesTurn& responses_turn() {
-    static thread_local ResponsesTurn t;
-    return t;
-}
 
 std::expected<provider::responses::Target, std::string>
-copilot_authorize(provider::Request&) {
-    const auto& t = responses_turn();
+copilot_target(const ResponsesTurn& t) {
     if (t.token.empty() || t.session_token.empty())
         return std::unexpected(std::string{
             "copilot: no Auto session for the Responses API — sign in again "
@@ -214,6 +206,15 @@ copilot_authorize(provider::Request&) {
     };
     for (auto& h : copilot_headers()) target.headers.push_back({h.first, h.second});
     return target;
+}
+
+// The Site's own authorize has no turn context; stream() never routes
+// through it (it passes copilot_target's result instead).
+std::expected<provider::responses::Target, std::string>
+copilot_authorize(provider::Request&) {
+    return std::unexpected(std::string{
+        "copilot: no Auto session for the Responses API — sign in again "
+        "with `agentty login` and choose GitHub Copilot"});
 }
 
 void copilot_decorate_body(nlohmann::json& body, const provider::Request&) {
@@ -340,15 +341,16 @@ provider::StreamResult CopilotProvider::stream(provider::Request req,
                 !picked.empty() && session_lists_model(*as, picked)
                 && prefers_responses_dialect(picked);
             if (responses_capable) {
-                auto& rt = responses_turn();
-                rt.host          = parse_api_base(as->endpoint_api).host;
-                rt.token         = t.token;
-                rt.session_token = as->session_token;
-                rt.model         = picked;
+                const ResponsesTurn rt{
+                    .host          = parse_api_base(as->endpoint_api).host,
+                    .token         = t.token,
+                    .session_token = as->session_token,
+                    .model         = picked,
+                };
                 provider::Request rr = req;   // still INTACT here
                 rr.model = picked;
-                return provider::responses::stream(kCopilotSite, std::move(rr),
-                                                   sink);
+                return provider::responses::stream(kCopilotSite, copilot_target(rt),
+                                                   std::move(rr), sink);
             }
         }
 
