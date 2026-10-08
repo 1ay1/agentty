@@ -798,9 +798,26 @@ int main() {
               "Q: the run actually left the provider stream, not just "
               "got marked cancelled");
         // The whole point is that it RETURNS rather than racing main's
-        // unwind — and returns promptly, since the bridge polls at 20 ms.
+        // unwind — and returns promptly: the run's stop now reaches the
+        // stream through a stop_callback, not a 20 ms poll.
         check(waited < 2000,
               "Q: the wait is bounded, not an indefinite join");
+    }
+
+    // R. A run that starts AFTER shutdown has begun is refused, not missed.
+    //
+    // The old registry snapshotted its run list and then waited on that
+    // snapshot, so a run registering a moment later was never asked to stop
+    // and never waited for — it ran on into teardown with nobody tracking
+    // it. stop_group closes admission under the same lock as the count.
+    {
+        // Shutdown was already called by Q above, so the group is closed.
+        tools::subagent::RunRegistration late;
+        check(late.cancelled(),
+              "R: a run registering after shutdown starts already cancelled");
+        check(late.token().stop_requested(),
+              "R: and its stop_token is already stopped, so no branch is "
+              "needed at the call site");
     }
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);

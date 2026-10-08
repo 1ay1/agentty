@@ -15,6 +15,7 @@
 
 #include "agentty/rag/rag_adapter.hpp"
 
+#include "agentty/util/background.hpp"
 #include "agentty/util/logx.hpp"
 
 // agentty's retrieval engine is rag-cpp. On platforms where rag-cpp isn't
@@ -809,12 +810,16 @@ struct Retriever::Impl {
     std::string code_root;
     std::unordered_map<std::string, std::uint64_t> code_files;
 
-    // LAST data member ON PURPOSE: members destroy in reverse declaration
-    // order, so the jthread's destructor (which JOINS the warm worker) runs
-    // FIRST in ~Impl — the worker can never observe a partially-destroyed
-    // Impl. Declaring it any earlier means everything below it dies while
-    // the worker may still be running. Keep it last.
-    std::jthread warmer;
+    // LAST data member ON PURPOSE: members destroy in reverse order, so the
+    // group's destructor (a barrier) runs FIRST in ~Impl and the warm worker
+    // can never see a half-destroyed Impl. Keep it last.
+    //
+    // A WorkerGroup and not a jthread because warm_async() and shutdown()
+    // reach the handle from different threads under different locking rules
+    // (shutdown cannot take mu, the worker holds it). The group's post and
+    // stop both go through the pool's own lock, so that race is gone, and a
+    // post after stop is dropped instead of starting a warm during teardown.
+    util::WorkerGroup warmer{"rag.warm"};
 
     Impl() : engine(make_engine_config()) {
         probe_embedder();
@@ -824,7 +829,12 @@ struct Retriever::Impl {
     }
 
     ~Impl() {
-        if (warmer.joinable()) warmer.join();
+        // Explicit, though the member would do it anyway: stop() requests
+        // stop through the token, which trips warm_stop, so a warm in flight
+        // bails at its next batch. The old jthread code called join() here
+        // WITHOUT a stop request first, which waited out the whole embed
+        // pass on destruction.
+        warmer.stop();
     }
 
     // Install a ZERO-COST local generator for HyDE / multi-query: a tiny model
@@ -2058,35 +2068,31 @@ bool Retriever::code_warm() const {
 void Retriever::warm_async() {
     bool expected = false;
     if (!impl_->warming.compare_exchange_strong(expected, true)) return;
-    // Reap a finished previous warmer + seat the new one under mu: even
-    // though today's callers are all on the UI thread, the join/assign of
-    // `warmer` must never race a concurrent warm_async — the atomic gate
-    // above only guarantees one LOGICAL warm at a time, not that the
-    // handle handoff itself is synchronized. mu makes it airtight from
-    // any thread, at the cost of a lock the warm path pays anyway.
+    // The CAS allows one LOGICAL warm at a time. There is no handle handoff
+    // to synchronize any more: the old jthread had to be joined and reseated
+    // under mu, and the group's post() is safe from any thread on its own.
     Impl* state = impl_.get();
-    {
-        std::lock_guard<std::mutex> lk(impl_->mu);
-        if (impl_->warmer.joinable()) impl_->warmer.join();
-        // Fresh warm pass: clear any stale cancellation from a prior worker.
-        impl_->warm_stop.store(false, std::memory_order_relaxed);
-        impl_->warmer = std::jthread([state](std::stop_token st) {
-            // Bridge the jthread's stop_token to the atomic flag the deep
-            // index functions poll. request_stop() (on re-seat or ~Impl) now
-            // actually interrupts the embed pass instead of being ignored.
-            std::stop_callback on_stop(st, [state] {
-                state->warm_stop.store(true, std::memory_order_relaxed);
-            });
-            try {
-                std::lock_guard<std::mutex> lock(state->mu);
-                auto root = resolve_docs_root(state->cfg.docs_root);
-                if (state->engine.corpus().chunk_count() == 0)
-                    (void)state->try_load_persisted(root);
-                state->refresh_docs(root);
-            } catch (...) { /* best-effort */ }
-            state->warming.store(false);
+    // Fresh warm pass: clear any stale cancellation from a prior worker. The
+    // CAS above means no other warm is running, so nothing reads this yet.
+    impl_->warm_stop.store(false, std::memory_order_relaxed);
+    impl_->warmer.post([state](std::stop_token st) {
+        // Bridge the group's stop_token to the flag the deep index functions
+        // poll, so a shutdown interrupts the embed pass.
+        std::stop_callback on_stop(st, [state] {
+            state->warm_stop.store(true, std::memory_order_relaxed);
         });
-    }
+        // Clear the gate however this exits; the group's wrapper catches a
+        // throw, but only after this frame unwinds.
+        struct ClearWarming {
+            Impl* s;
+            ~ClearWarming() { s->warming.store(false); }
+        } clear{state};
+        std::lock_guard<std::mutex> lock(state->mu);
+        auto root = resolve_docs_root(state->cfg.docs_root);
+        if (state->engine.corpus().chunk_count() == 0)
+            (void)state->try_load_persisted(root);
+        state->refresh_docs(root);
+    });
 }
 
 // Stop any in-flight warm promptly and reclaim the worker. Called early in
@@ -2097,15 +2103,11 @@ void Retriever::shutdown() {
     // 1. Trip the cooperative flag so refresh_docs()/reindex() bail at their
     //    next loop boundary (and before the expensive engine.build()).
     impl_->warm_stop.store(true, std::memory_order_relaxed);
-    // 2. Ask the jthread to stop (fires the stop_callback too) and reclaim it.
-    //    request_stop() + join is bounded now that the worker observes the
-    //    flag; a wedged blocking embed can't stall teardown because the flag
-    //    is checked between network batches, and the worst case is one
-    //    in-flight batch — far short of the old full-corpus 4–10 s hang.
-    if (impl_->warmer.joinable()) {
-        impl_->warmer.request_stop();
-        impl_->warmer.join();
-    }
+    // 2. Stop the group: requests stop (fires the stop_callback too) and
+    //    waits. Bounded in practice because the worker checks the flag
+    //    between network batches, so the worst case is one in-flight batch.
+    //    Safe from any thread, and idempotent with ~Impl's own stop.
+    impl_->warmer.stop();
 }
 
 // Replace the live configuration. Anything that changes the CORPUS shape

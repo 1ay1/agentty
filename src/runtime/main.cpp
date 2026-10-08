@@ -2273,8 +2273,8 @@ int main(int argc, char** argv) {
     // against.
     //
     // rag_shutdown() stays here, and BEFORE the guard fires: its warm worker
-    // is a jthread on a function-local static that would otherwise only be
-    // joined after main() returns, blocking ^C for 4-10 s on a large corpus.
+    // lives on a function-local static that would otherwise only be stopped
+    // after main() returns, blocking ^C for 4-10 s on a large corpus.
     // Tripping it now keeps exit instant.
     tools::rag_shutdown();
 

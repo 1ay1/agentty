@@ -107,19 +107,19 @@ tool/skills.cpp: mutex atomic
 tool/memory_store.cpp: mutex
 tool/hooks.cpp: mutex
 tool/progress.cpp: thread_local
-# The subagent run registry. A subagent runs on a Cmd::task_isolated thread,
-# which jaal DETACHES — see jaal's kernel/pool.hpp, which says isolated
-# threads are "asked to stop but never waited for". So the app can return
-# from main() while a subagent is still inside its provider stream, and that
-# stream holds the provider objects by reference off main's stack.
+# The subagent run registry. A subagent runs on a Cmd::task_isolated thread
+# and holds provider objects by reference off main's stack, so teardown has to
+# stop each live run and wait a bounded moment for it to leave the stream.
 #
-# The fix mirrors Zed's `running_subagents`: each live run publishes a cancel
-# flag + a done latch, teardown trips them all and waits a bounded moment.
-# That wait is the point, and it cannot be expressed as a jaal task — the
-# threads being waited on are ones jaal has already disowned. atomic for the
-# two flags (read from the run's thread, written from teardown's),
-# condition_variable so a clean exit costs no fixed sleep.
-tool/subagent.cpp: mutex thread_local atomic condition_variable
+# This used to be hand-rolled here (a cancel flag + done latch per run, a
+# condition variable, a rescan on every wakeup) on the grounds that the wait
+# "cannot be expressed as a jaal task — the threads are ones jaal disowned".
+# True of a task, and exactly the gap jaal::kernel::stop_group now fills:
+# cancel + wait for work on threads you don't own, with admission closing
+# at shutdown (which the old snapshot-then-wait missed). What is left here:
+# mutex for the installed Config; thread_local for the per-chain nesting depth
+# and deadline, since each run is synchronous on its own worker thread.
+tool/subagent.cpp: mutex thread_local
 tool/commands.cpp: mutex
 # Windows: run_command_s tees child output while polling for exit. It used to
 # be a bare reader std::thread plus `std::mutex buf_mu` guarding four loose
@@ -196,7 +196,10 @@ mcp/bridge.cpp: mutex atomic
 # is the liveness flag the provider reads.
 mcp/http_server.cpp: mutex atomic
 mcp/oauth.cpp: mutex atomic
-rag/adapter.cpp: thread mutex atomic
+# rag/adapter: the warm worker moved to a util::WorkerGroup, so the jthread
+# (and its join/reseat dance under mu) is gone. mutex guards the corpus;
+# atomic is the warming gate and the stop flag the index passes poll.
+rag/adapter.cpp: mutex atomic
 
 # ── Process-wide plumbing ────────────────────────────────────────────────
 # The teardown registry IS what joins the workers above.

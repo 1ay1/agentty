@@ -1,10 +1,12 @@
 #include "agentty/tool/subagent.hpp"
 #include "agentty/util/teardown.hpp"
 
+#include <jaal/kernel/stop_group.hpp>
+
 #include <algorithm>
-#include <atomic>
-#include <condition_variable>
 #include <mutex>
+#include <optional>
+#include <stop_token>
 #include <vector>
 
 namespace agentty::tools::subagent {
@@ -78,33 +80,28 @@ DeadlineScope::DeadlineScope(RunDeadline d) noexcept : prev_{g_deadline} {
 }
 DeadlineScope::~DeadlineScope() { g_deadline = prev_; }
 
-// ── Running-run registry ───────────────────────────────────────
-// See the header for why this exists. Shape notes:
+// ── Running-run registry ─────────────────────────────────────────
+// See the header for why this exists. It is a jaal::kernel::stop_group:
+// that is the registry this file used to hand-roll (a mutex, a condition
+// variable, a vector of {cancelled, done} pairs and a wait that rescanned
+// every entry on each wakeup), written once in jaal.
 //
-//   * State is shared_ptr so shutdown_running() can hold a live reference
-//     while the run's own thread is finishing — the registration may be
-//     destroyed at any moment by a thread we are not waiting on.
-//   * `done` is a latch the run sets on its way out; shutdown waits on the
-//     condvar rather than sleeping, so a clean exit costs no fixed delay.
-//   * The mutex is never held across the wait for an individual run, only
-//     around the registry vector.
+// What the jaal type adds beyond deleting code:
+//   * ADMISSION CLOSES with shutdown. A run starting mid-teardown used to
+//     register after shutdown_running took its snapshot, so it was never
+//     asked to stop and never waited for. join() now refuses it.
+//   * the cancel is a real std::stop_token, so the stream's cancel can be a
+//     stop_callback instead of a thread polling a flag every 20 ms.
 
 struct RunRegistration::State {
-    std::atomic<bool> cancelled{false};
-    std::atomic<bool> done{false};
+    std::optional<jaal::kernel::stop_group::member> member;
 };
 
 namespace {
 
-struct Registry {
-    std::mutex mu;
-    std::condition_variable cv;
-    std::vector<std::shared_ptr<RunRegistration::State>> runs;
-};
-
-Registry& registry() {
-    static Registry r;
-    return r;
+jaal::kernel::stop_group& runs() {
+    static jaal::kernel::stop_group g;
+    return g;
 }
 
 // Register the teardown hook exactly once, from the first run that starts.
@@ -123,51 +120,35 @@ void ensure_teardown_registered() {
 RunRegistration::RunRegistration()
     : state_{std::make_shared<State>()} {
     ensure_teardown_registered();
-    auto& r = registry();
-    std::lock_guard lk(r.mu);
-    r.runs.push_back(state_);
+    state_->member = runs().join();
 }
 
-RunRegistration::~RunRegistration() {
-    state_->done.store(true, std::memory_order_release);
-    auto& r = registry();
-    {
-        std::lock_guard lk(r.mu);
-        std::erase(r.runs, state_);
-    }
-    // Wake a shutdown that may be waiting on the last run to leave.
-    r.cv.notify_all();
-}
+// The member leaves on destruction, which wakes a waiting shutdown.
+RunRegistration::~RunRegistration() = default;
 
 bool RunRegistration::cancelled() const noexcept {
-    return state_->cancelled.load(std::memory_order_acquire);
+    // A run refused admission (shutdown already running) reads as cancelled,
+    // so it stops at its first check instead of doing work nobody waits for.
+    return !state_->member || state_->member->stop_requested();
+}
+
+std::stop_token RunRegistration::token() const noexcept {
+    if (state_->member) return state_->member->token();
+    // Refused: hand back an already-stopped token so callers need no branch.
+    std::stop_source dead;
+    dead.request_stop();
+    return dead.get_token();
 }
 
 std::size_t shutdown_running(std::chrono::milliseconds grace) noexcept {
-    auto& r = registry();
-    std::vector<std::shared_ptr<RunRegistration::State>> live;
-    {
-        std::lock_guard lk(r.mu);
-        live = r.runs;                      // copy: keeps each alive below
+    // Bounded, not a barrier: a wedged syscall must not hold the process
+    // open. The runs touch provider objects that main() keeps alive past
+    // this call, so the abandoned case is a slow exit, not a dangling write.
+    try {
+        return runs().stop_and_wait(grace);
+    } catch (...) {
+        return 0;   // a mutex failure at teardown is not worth a terminate
     }
-    if (live.empty()) return 0;
-    for (auto& s : live) s->cancelled.store(true, std::memory_order_release);
-
-    // Wait for them to leave, bounded. A run that is mid-stream notices via
-    // the cancel bridge (tens of ms); one wedged in a syscall never will, and
-    // holding the process open for it is exactly the hang jaal's detach was
-    // designed to avoid.
-    const auto deadline = std::chrono::steady_clock::now() + grace;
-    std::unique_lock lk(r.mu);
-    r.cv.wait_until(lk, deadline, [&] {
-        for (const auto& s : live)
-            if (!s->done.load(std::memory_order_acquire)) return false;
-        return true;
-    });
-    std::size_t still_running = 0;
-    for (const auto& s : live)
-        if (!s->done.load(std::memory_order_acquire)) ++still_running;
-    return still_running;
 }
 
 } // namespace agentty::tools::subagent

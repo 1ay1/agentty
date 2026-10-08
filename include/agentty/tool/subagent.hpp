@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <functional>
 #include <memory>
+#include <stop_token>
 #include <optional>
 #include <string>
 
@@ -235,9 +236,13 @@ public:
     RunRegistration(const RunRegistration&)            = delete;
     RunRegistration& operator=(const RunRegistration&) = delete;
 
-    // Has shutdown asked this run to stop? The loop polls it between turns,
-    // and the cancel bridge folds it into the stream's cancel token.
+    // Has shutdown asked this run to stop? The loop polls it between turns.
     [[nodiscard]] bool cancelled() const noexcept;
+
+    // The same signal as a real std::stop_token, so the stream's cancel can
+    // ride a stop_callback instead of a polling thread. Already stopped if
+    // the run was refused admission because shutdown had begun.
+    [[nodiscard]] std::stop_token token() const noexcept;
 
     // Per-run flags. Public because the registry that trips them lives in
     // the .cpp and must name the type; nothing outside constructs one.

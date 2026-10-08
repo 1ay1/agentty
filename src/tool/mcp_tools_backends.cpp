@@ -481,7 +481,7 @@ RagProbeOutcome rag_probe_embedder(const store::RagConfig& s, const std::string&
 }
 
 // Prompt teardown of the retriever's background warm. Without this the warm
-// jthread is only joined when the function-local `static Retriever` is
+// worker is only stopped when the function-local `static Retriever` is
 // destroyed at process exit (after main returns), which blocked ^C for 4–10 s
 // while an in-flight embed pass finished. Called early in main()'s teardown.
 void rag_shutdown() {
@@ -1380,25 +1380,32 @@ provider::StreamResult run_one_completion(Thread& thread,
     provider::StreamResult result;
     auto cancel = req.cancel;
     auto parent_cancel = cancellation::current();
-    std::jthread cancel_bridge;
-    // The bridge watches TWO sources and trips the stream's token on either:
+    // Two sources can stop this stream:
     //
-    //   parent_cancel  the user pressed escape, or (since run_tool started
-    //                  reading its stop_token) the app is shutting down.
     //   run_reg        this specific run was asked to stop by
     //                  subagent::shutdown_running(), which then WAITS for it.
+    //                  That is what closes the crash window rather than just
+    //                  narrowing it: without something that waits, main() can
+    //                  unwind while this thread is still inside cfg.stream(),
+    //                  which holds the provider objects by reference.
+    //   parent_cancel  the user pressed escape, or the app is shutting down.
     //
-    // The second is what closes the crash window rather than just narrowing
-    // it: without something that waits, main() can unwind while this thread
-    // is still inside cfg.stream(), which holds the provider objects by
-    // reference off main's stack.
-    const bool watch_run = run_reg != nullptr;
-    if (parent_cancel || watch_run) {
-        cancel_bridge = std::jthread([parent_cancel, cancel, run_reg](
-                                         std::stop_token st) {
+    // run_reg is a real std::stop_token now (jaal::kernel::stop_group), so
+    // its half is a stop_callback: zero threads, zero wakeups, and it fires
+    // the instant shutdown asks rather than at the next 20 ms poll.
+    std::optional<std::stop_callback<std::function<void()>>> on_run_stop;
+    if (run_reg)
+        on_run_stop.emplace(run_reg->token(),
+                            std::function<void()>{[cancel] { cancel->cancel(); }});
+    // parent_cancel is a predicate (cancellation::current() returns a
+    // callable over the turn's state, not a token), so it still needs a
+    // watcher. It is the ONLY reason this thread exists now, and it exits the
+    // moment the stream is cancelled from either side.
+    std::jthread cancel_bridge;
+    if (parent_cancel) {
+        cancel_bridge = std::jthread([parent_cancel, cancel](std::stop_token st) {
             while (!st.stop_requested() && !cancel->is_cancelled()) {
-                if (parent_cancel && parent_cancel()) { cancel->cancel(); return; }
-                if (run_reg && run_reg->cancelled()) { cancel->cancel(); return; }
+                if (parent_cancel()) { cancel->cancel(); return; }
                 std::this_thread::sleep_for(std::chrono::milliseconds(20));
             }
         });
