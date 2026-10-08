@@ -29,6 +29,7 @@
 
 #if AGENTTY_HAS_RAGCPP
 
+#include <maya/runtime.hpp>
 #include <atomic>
 #include <algorithm>
 #include <cctype>
@@ -531,6 +532,17 @@ std::string compress_passage(std::string_view query, std::string_view text,
 //   scaled by how far the smoothed win-rate sits from the neutral prior and by
 //   a confidence term that grows with sample count. Paths with no history are
 //   untouched, so the loop can only help once it has evidence.
+// The tallies and the session's surfaced set, as one guarded value. The
+// operations below are free functions over it, so nothing in the locked
+// region reaches anything but the data it was handed.
+struct FeedbackState {
+    struct Tally { double uses = 0.0; double wins = 0.0; };
+    bool loaded = false;
+    std::string loaded_for;                    // anchor the TSV was loaded for
+    std::unordered_map<std::string, Tally> counts;
+    std::unordered_set<std::string> recent;    // surfaced this session
+};
+
 class FeedbackStore {
 public:
     static FeedbackStore& instance() {
@@ -541,38 +553,44 @@ public:
     // Ranking nudge for `path`, in roughly [0.85, 1.15]. 1.0 (neutral) when
     // learning is off, the path is unseen, or it has too little evidence.
     float boost(const std::string& path) {
-        std::lock_guard<std::mutex> lk(mu_);
-        ensure_loaded_();
-        auto it = counts_.find(path);
-        if (it == counts_.end()) return 1.0f;
-        const double uses = it->second.uses;
-        const double wins = it->second.wins;
-        if (uses <= 0.0) return 1.0f;
-        // Beta(1,1) smoothing: (wins+1)/(uses+2) — a bounded win-rate that
-        // starts at the 0.5 prior and moves only as evidence accrues.
-        const double rate = (wins + 1.0) / (uses + 2.0);
-        // Confidence in the estimate grows with sample count (saturating).
-        const double conf = uses / (uses + kPriorN);
-        const double delta = (rate - 0.5) * 2.0;         // → [-1, 1]
-        double factor = 1.0 + kMax * delta * conf;
-        if (factor < 1.0 - kMax) factor = 1.0 - kMax;
-        if (factor > 1.0 + kMax) factor = 1.0 + kMax;
-        return static_cast<float>(factor);
+        return st_.with([](FeedbackState& st, std::string p, std::string tsv) {
+            ensure_loaded(st, tsv);
+            auto it = st.counts.find(p);
+            if (it == st.counts.end()) return 1.0f;
+            const double uses = it->second.uses;
+            const double wins = it->second.wins;
+            if (uses <= 0.0) return 1.0f;
+            // Beta(1,1) smoothing: (wins+1)/(uses+2) — a bounded win-rate
+            // that starts at the 0.5 prior and moves only as evidence accrues.
+            const double rate = (wins + 1.0) / (uses + 2.0);
+            // Confidence in the estimate grows with sample count (saturating).
+            const double conf = uses / (uses + kPriorN);
+            const double delta = (rate - 0.5) * 2.0;         // → [-1, 1]
+            double factor = 1.0 + kMax * delta * conf;
+            if (factor < 1.0 - kMax) factor = 1.0 - kMax;
+            if (factor > 1.0 + kMax) factor = 1.0 + kMax;
+            return static_cast<float>(factor);
+        }, path, tsv_path().string());
     }
 
     // Record that these paths were surfaced by a retrieval (each a "use"), and
     // remember them as recently-surfaced so a following read can be a win.
     void note_surfaced(const std::vector<std::string>& paths) {
-        std::lock_guard<std::mutex> lk(mu_);
-        ensure_loaded_();
-        std::vector<std::string> to_write;
-        for (const auto& p : paths) {
-            if (p.empty()) continue;
-            counts_[p].uses += 1.0;
-            recent_.insert(p);
-            to_write.push_back(p);
-        }
-        append_("use", to_write);
+        const std::string tsv = tsv_path().string();
+        auto to_write = st_.with(
+            [](FeedbackState& st, std::vector<std::string> ps, std::string t) {
+                ensure_loaded(st, t);
+                std::vector<std::string> out;
+                for (auto& p : ps) {
+                    if (p.empty()) continue;
+                    st.counts[p].uses += 1.0;
+                    st.recent.insert(p);
+                    out.push_back(std::move(p));
+                }
+                return out;
+            },
+            paths, tsv);
+        append(tsv, "use", to_write);
     }
 
     // Record that `path` was opened. It is a WIN only if it (or its basename)
@@ -580,27 +598,25 @@ public:
     // retrieval quality and is ignored (no denominator inflation either).
     void note_opened(const std::string& path) {
         if (path.empty()) return;
-        std::lock_guard<std::mutex> lk(mu_);
-        ensure_loaded_();
-        std::string matched = match_recent_(path);
-        if (matched.empty()) return;               // not surfaced ⇒ not a signal
-        counts_[matched].wins += 1.0;
-        append_("win", {matched});
+        const std::string tsv = tsv_path().string();
+        auto matched = st_.with(
+            [](FeedbackState& st, std::string opened, std::string t) {
+                ensure_loaded(st, t);
+                std::string m = match_recent(st, opened);
+                if (!m.empty()) st.counts[m].wins += 1.0;
+                return m;
+            },
+            path, tsv);
+        if (!matched.empty()) append(tsv, "win", {matched});
     }
 
 private:
-    struct Tally { double uses = 0.0; double wins = 0.0; };
-
     static constexpr double kMax    = 0.15;   // max ±15% ranking nudge
     static constexpr double kPriorN = 4.0;    // uses needed for ~half confidence
 
-    std::mutex mu_;
-    bool loaded_ = false;
-    std::string loaded_for_;                   // anchor the TSV was loaded for
-    std::unordered_map<std::string, Tally> counts_;
-    std::unordered_set<std::string> recent_;   // surfaced this session
+    maya::guarded<FeedbackState> st_;
 
-    fs::path tsv_path_() const {
+    static fs::path tsv_path() {
         auto dir = rag_store_dir(kFeedbackSpec);
         if (dir.empty()) return {};
         return dir / "rag_feedback.tsv";
@@ -611,16 +627,16 @@ private:
     // Keyed on the resolved directory, not the cwd. Keying on cwd was correct
     // only while the path was cwd-derived; now that storage is anchored to the
     // project marker, `cd src/` resolves to the SAME file, and a cwd key would
-    // reload it on every chdir — discarding the in-memory `recent_` set and
+    // reload it on every chdir — discarding the in-memory `recent` set and
     // with it this session's win signal.
-    void ensure_loaded_() {
-        auto p = tsv_path_();
-        const std::string key = p.empty() ? std::string{} : p.parent_path().string();
-        if (loaded_ && loaded_for_ == key) return;
-        counts_.clear();
-        loaded_ = true;
-        loaded_for_ = key;
-        if (p.empty()) return;
+    static void ensure_loaded(FeedbackState& st, const std::string& tsv) {
+        const fs::path p{tsv};
+        const std::string key = tsv.empty() ? std::string{} : p.parent_path().string();
+        if (st.loaded && st.loaded_for == key) return;
+        st.counts.clear();
+        st.loaded = true;
+        st.loaded_for = key;
+        if (tsv.empty()) return;
         std::ifstream f(p);
         if (!f) return;
         std::string line;
@@ -633,15 +649,16 @@ private:
             std::string kind = line.substr(t1 + 1, t2 - t1 - 1);
             std::string path = line.substr(t2 + 1);
             if (path.empty()) continue;
-            if (kind == "use") counts_[path].uses += 1.0;
-            else if (kind == "win") counts_[path].wins += 1.0;
+            if (kind == "use") st.counts[path].uses += 1.0;
+            else if (kind == "win") st.counts[path].wins += 1.0;
         }
     }
 
-    void append_(const char* kind, const std::vector<std::string>& paths) {
-        if (paths.empty()) return;
-        auto p = tsv_path_();
-        if (p.empty()) return;
+    // Appends run outside the lock; O_APPEND keeps concurrent lines whole.
+    static void append(const std::string& tsv, const char* kind,
+                       const std::vector<std::string>& paths) {
+        if (paths.empty() || tsv.empty()) return;
+        const fs::path p{tsv};
         std::error_code ec;
         fs::create_directories(p.parent_path(), ec);
         std::ofstream f(p, std::ios::app);
@@ -655,13 +672,13 @@ private:
     // A read matches a surfaced passage if the exact path is recent, or if a
     // recent path ends with the same basename (docs://foo/bar.md surfaced,
     // agent reads foo/bar.md or an absolute .../foo/bar.md).
-    std::string match_recent_(const std::string& opened) {
-        if (auto it = recent_.find(opened); it != recent_.end()) return opened;
+    static std::string match_recent(const FeedbackState& st, const std::string& opened) {
+        if (st.recent.contains(opened)) return opened;
         auto slash = opened.find_last_of("/\\");
         std::string base = slash == std::string::npos ? opened
                                                        : opened.substr(slash + 1);
         if (base.empty()) return {};
-        for (const auto& r : recent_) {
+        for (const auto& r : st.recent) {
             if (r.size() >= base.size() &&
                 r.compare(r.size() - base.size(), base.size(), base) == 0) {
                 // Guard against a bare-basename false match on a longer name.
