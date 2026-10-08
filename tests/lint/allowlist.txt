@@ -46,12 +46,11 @@
 # per-subscription. Each registers its own join with util::teardown, so
 # main() cannot forget one — that registration is the safety property here.
 #
-# settings_cache: the write-behind settings worker. The mutex guards the
-# pending value; the thread is the single writer. This is what keeps a disk
-# round-trip out of the input path (see its header). thread_local: a
+# settings_cache: the write-behind settings worker; its state is
+# maya::guarded and the worker sleeps in wait_with. thread_local: a
 # re-entrancy guard so the worker's own write doesn't invalidate the cache
 # it just filled.
-runtime/app/settings_cache.cpp: mutex thread_local
+runtime/app/settings_cache.cpp: thread_local
 # blob_gc: the sweep moved to its own maya::pool, so the thread, the
 # mutex, the condition variable and the detach are all gone. What is left is
 # two atomics: the walk's cancel flag (read deep inside the walk) and the

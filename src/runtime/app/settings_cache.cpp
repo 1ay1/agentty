@@ -2,10 +2,11 @@
 
 #include "agentty/runtime/app/settings_cache.hpp"
 
-#include <condition_variable>
-#include <mutex>
+#include <memory>
 #include <optional>
 #include <utility>
+
+#include "agentty/util/sendable.hpp"   // Id<Tag> inside Settings
 
 #include "agentty/io/persistence.hpp"
 #include "agentty/util/background.hpp"   // util::WorkerGroup
@@ -15,10 +16,9 @@ namespace agentty::app::settings_cache {
 
 namespace {
 
+// Everything the drain worker and its callers share. Plain data, so it lives
+// in a guarded; flush() and the worker wait on it with wait_with.
 struct State {
-    std::mutex              mu;
-    std::condition_variable cv;
-
     // The authoritative in-memory value. Once seeded, `load` never touches
     // disk again — which is what gives read-your-writes and also removes a
     // disk read from every reducer that does load-modify-save.
@@ -30,109 +30,115 @@ struct State {
     // the UI produces writes.
     std::optional<store::Settings> pending;
 
-    bool        writing  = false;   // a write is in flight right now
-    bool        stopping = false;
-    bool        started  = false;   // the drain worker has been posted
-    // The drain worker. A jaal-backed group (one isolated job, joined
-    // without a deadline on stop) so queued saves always land.
-    std::optional<util::WorkerGroup> worker;
-
-    std::function<store::Settings()>            load_from_disk;
-    std::function<void(const store::Settings&)> save_to_disk;
+    bool writing  = false;   // a write is in flight right now
+    bool stopping = false;
+    bool started  = false;   // the drain worker has been posted
 };
 
-State& state() {
-    static State s;
+maya::guarded<State>& state() {
+    static maya::guarded<State> s;
     return s;
 }
 
-// Set while THIS cache's worker is inside save_to_disk.
+// The disk functions, installed by wrap() and read by the worker. Closures
+// are not values to pass through a lock, so they are published as one whole.
+struct Disk {
+    std::function<store::Settings()>            load;
+    std::function<void(const store::Settings&)> save;
+};
+maya::published<const Disk>& disk() {
+    static maya::published<const Disk> d;
+    return d;
+}
+
+// The drain worker: a jaal-backed group (one isolated job, joined without a
+// deadline on stop) so queued saves always land. Its own lock, taken BEFORE
+// state() when both are needed and never inside it, so stop() can wait for
+// run() (which only takes state()) without a cycle.
+struct Worker {
+    std::optional<util::WorkerGroup> group;
+    bool registered = false;   // teardown hook installed
+};
+maya::guarded<Worker>& worker() {
+    static maya::guarded<Worker> w;
+    return w;
+}
+
+// Set while THIS cache is inside a disk save.
 //
-// The worker's write goes through persistence::save_settings like any other,
-// so it fires the same "settings were written" observer we register below.
-// Acting on our own write would be wrong twice over: the cached value is
-// already correct, and invalidate() drains — from the worker thread, waiting
-// on `writing` that only the worker clears. That is a self-deadlock. Thread-
-// local rather than a plain bool because only the writing thread should skip.
+// The save goes through persistence::save_settings like any other, so it
+// fires the same "settings were written" observer we register below. Acting
+// on our own write would be wrong twice over: the cached value is already
+// correct, and invalidate() drains — from the worker thread, waiting on
+// `writing` that only the worker clears. That is a self-deadlock. Per thread
+// because only the writing thread should skip.
 thread_local bool in_our_own_write = false;
 
-// Drain loop. Runs on its own thread; the ONLY place settings IO happens.
-void run(State& s) {
-    std::unique_lock lock(s.mu);
-    for (;;) {
-        s.cv.wait(lock, [&] { return s.pending.has_value() || s.stopping; });
-        if (!s.pending) {
-            if (s.stopping) return;
-            continue;
-        }
+void save_now(const Disk& d, const store::Settings& value) noexcept {
+    in_our_own_write = true;
+    try {
+        if (d.save) d.save(value);
+    } catch (...) { /* best-effort: a failed save must not kill the app */ }
+    in_our_own_write = false;
+}
 
-        auto value = std::move(*s.pending);
-        s.pending.reset();
-        s.writing = true;
+// Drain loop. Runs on its own thread; the ONLY place settings IO happens.
+void run() {
+    for (;;) {
+        // Sleep until there is something to write or we are told to stop.
+        // Take the value and mark the write in flight in the same step.
+        auto value = state().wait_with(
+            [](const State& s) { return s.pending.has_value() || s.stopping; },
+            [](State& s) -> std::optional<store::Settings> {
+                if (!s.pending) return std::nullopt;   // stopping, queue empty
+                auto v = std::move(*s.pending);
+                s.pending.reset();
+                s.writing = true;
+                return v;
+            });
+        if (!value) return;
 
         // IO with the lock RELEASED: a reader must never wait on a disk write,
         // which is the entire point of this file.
-        lock.unlock();
-        try {
-            in_our_own_write = true;
-            if (s.save_to_disk) s.save_to_disk(value);
-            in_our_own_write = false;
-        } catch (...) {
-            in_our_own_write = false;
-            /* best-effort: a failed save must not kill the app */
-        }
-        lock.lock();
+        if (auto d = disk().current()) save_now(*d, *value);
 
-        s.writing = false;
         // flush() waits on this: "queue empty AND nothing in flight".
-        s.cv.notify_all();
+        state().with([](State& s) { s.writing = false; });
     }
 }
 
-void ensure_worker(State& s) {
-    if (s.started || s.stopping) return;
-
-    // THE fix for the abort-on-exit.
-    //
-    // This worker lives in a function-local static. `shutdown()` was written
-    // to join it and documented as "called during teardown" — and no call was
-    // ever added, in any of the ~8 reducers that write settings or in main().
-    // So the thread stayed joinable inside the static, and ~std::thread on a
-    // joinable handle calls std::terminate. (Verified: a probe linking this
-    // TU aborts with 134.)
-    //
-    // Relying on main() to know about every threaded subsystem is the flaw.
-    // The subsystem knows; main() cannot. So it registers itself, once, at
-    // the exact moment it first acquires a thread to be responsible for.
-    // There is now no way to start this worker without arranging its join.
-    static bool registered = false;
-    if (!registered) {
-        registered = true;
-        util::teardown::on_shutdown("settings_cache", [] { shutdown(); });
-    }
-
-    s.started = true;
-    if (!s.worker) s.worker.emplace("settings_cache.drain");
-    s.worker->post([&s] { run(s); });
+// Called by the one caller that claimed `started`.
+void start_worker() {
+    worker().with([](Worker& w) {
+        // THE fix for the abort-on-exit: the subsystem registers its own join
+        // the moment it first owns a thread, instead of relying on main().
+        if (!w.registered) {
+            w.registered = true;
+            util::teardown::on_shutdown("settings_cache", [] { shutdown(); });
+        }
+        if (!w.group) w.group.emplace("settings_cache.drain");
+        w.group->post([] { run(); });
+    });
 }
 
 } // namespace
 
 Seam wrap(std::function<store::Settings()> load_from_disk,
           std::function<void(const store::Settings&)> save_to_disk) {
-    auto& s = state();
-    {
-        std::lock_guard lock(s.mu);
-        s.load_from_disk = std::move(load_from_disk);
-        s.save_to_disk   = std::move(save_to_disk);
-        // A re-install (provider switch rebuilds Deps) must not resurrect a
-        // stale cache from the previous store.
-        s.cached.reset();
-        s.stopping = false;
+    disk().publish(std::make_shared<const Disk>(
+        Disk{std::move(load_from_disk), std::move(save_to_disk)}));
+    worker().with([](Worker& w) {
+        const bool running = state().with([](State& s) {
+            // A re-install (provider switch rebuilds Deps) must not resurrect
+            // a stale cache from the previous store.
+            s.cached.reset();
+            s.stopping = false;
+            return s.started;
+        });
         // A stopped group is single-use; a re-install after shutdown gets a
         // fresh one on the next save.
-        if (!s.started) s.worker.reset();
-    }
+        if (!running) w.group.reset();
+    });
 
     // Anyone writing settings.json directly — the credential helpers, the
     // --model/--provider CLI paths — invalidates us, or their write would be
@@ -145,61 +151,54 @@ Seam wrap(std::function<store::Settings()> load_from_disk,
     Seam out;
 
     out.load = [] {
-        auto& st = state();
-        std::unique_lock lock(st.mu);
-        if (st.cached) return *st.cached;
+        if (auto hit = state().read([](const State& s) { return s.cached; })) return *hit;
 
         // First read: fault in from disk with the lock released, then publish.
-        auto loader = st.load_from_disk;
-        lock.unlock();
         store::Settings fresh;
         try {
-            if (loader) fresh = loader();
+            if (auto d = disk().current(); d && d->load) fresh = d->load();
         } catch (...) { /* defaults stand */ }
-        lock.lock();
         // Another thread may have seeded (or a save may have published a
-        // newer value) while we were off the lock — theirs wins, because it
-        // is at least as new as what we just read.
-        if (!st.cached) st.cached = std::move(fresh);
-        return *st.cached;
+        // newer value) meanwhile — theirs wins, being at least as new.
+        return state().with([](State& s, store::Settings f) {
+            if (!s.cached) s.cached = std::move(f);
+            return *s.cached;
+        }, std::move(fresh));
     };
 
     out.save = [](const store::Settings& value) {
-        auto& st = state();
-        {
-            std::lock_guard lock(st.mu);
-            // Publish to readers FIRST. A reducer that saves then loads must
-            // see its own write, and it must see it without waiting for disk.
-            st.cached  = value;
-            st.pending = value;
-            ensure_worker(st);
-        }
-        st.cv.notify_one();
+        // Publish to readers FIRST. A reducer that saves then loads must see
+        // its own write, and it must see it without waiting for disk.
+        const bool start = state().with([](State& s, store::Settings v) {
+            s.cached  = v;
+            s.pending = std::move(v);
+            if (s.started || s.stopping) return false;
+            s.started = true;
+            return true;
+        }, value);
+        if (start) start_worker();
     };
 
     return out;
 }
 
 void flush() noexcept {
-    auto& s = state();
-    std::unique_lock lock(s.mu);
-    if (!s.started) {
-        // No worker ever started, but a value may have been published before
-        // one existed. Write it here — this path is only reached at exit.
-        if (s.pending && s.save_to_disk) {
-            auto value = std::move(*s.pending);
-            s.pending.reset();
-            lock.unlock();
-            // Same self-write guard as the worker: this save fires the
-            // write observer, and letting that re-enter invalidate()/flush()
-            // from inside flush() would recurse.
-            in_our_own_write = true;
-            try { s.save_to_disk(value); } catch (...) {}
-            in_our_own_write = false;
-        }
+    // No worker ever started, but a value may have been published before one
+    // existed: write it here (only reached at exit). Otherwise wait for the
+    // queue to empty with nothing in flight.
+    auto unstarted = state().with([](State& s) -> std::optional<store::Settings> {
+        if (s.started || !s.pending) return std::nullopt;
+        auto v = std::move(*s.pending);
+        s.pending.reset();
+        return v;
+    });
+    if (unstarted) {
+        if (auto d = disk().current()) save_now(*d, *unstarted);
         return;
     }
-    s.cv.wait(lock, [&] { return !s.pending && !s.writing; });
+    state().wait_with(
+        [](const State& s) { return !s.started || (!s.pending && !s.writing); },
+        [](State&) {});
 }
 
 void invalidate() noexcept {
@@ -207,9 +206,7 @@ void invalidate() noexcept {
     // write we are being told about; letting it land afterwards would undo
     // that write on disk, which is the exact failure this exists to stop.
     flush();
-    auto& s = state();
-    std::lock_guard lock(s.mu);
-    s.cached.reset();
+    state().with([](State& s) { s.cached.reset(); });
 }
 
 void shutdown() noexcept {
@@ -218,17 +215,15 @@ void shutdown() noexcept {
     // one thing that does not persist.
     flush();
 
-    auto& s = state();
-    {
-        std::lock_guard lock(s.mu);
+    const bool was_started = state().with([](State& s) {
         s.stopping = true;
-        if (!s.started) return;
+        const bool was = s.started;
         s.started = false;
-    }
-    s.cv.notify_all();
-    // run() exits on `stopping`; the group joins it. Bounded by a single
-    // settings save, since the worker only holds the lock briefly.
-    if (s.worker) s.worker->stop();
+        return was;
+    });
+    if (!was_started) return;
+    // run() exits on `stopping` (the with() above woke it); the group joins it.
+    worker().with([](Worker& w) { if (w.group) w.group->stop(); });
 }
 
 } // namespace agentty::app::settings_cache
